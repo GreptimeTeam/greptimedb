@@ -35,16 +35,16 @@ pub const FLOW: &str = "FLOW";
 #[derive(Clone, Debug, Default)]
 pub struct ParseOptions {
     /// If set, TQL parameter expressions containing `now()` will be evaluated
-    /// against this timestamp instead of wall-clock time.
-    pub scheduled_runtime: Option<DateTime<Utc>>,
+    /// against this scheduled time instead of wall-clock time.
+    pub scheduled_time: Option<DateTime<Utc>>,
 }
 
 /// GrepTime SQL parser context, a simple wrapper for Datafusion SQL parser.
 pub struct ParserContext<'a> {
     pub(crate) parser: Parser<'a>,
     pub(crate) sql: &'a str,
-    /// Optional scheduled runtime for `now()` evaluation in TQL parameters.
-    pub(crate) scheduled_runtime: Option<DateTime<Utc>>,
+    /// Optional scheduled time for `now()` evaluation in TQL parameters.
+    pub(crate) scheduled_time: Option<DateTime<Utc>>,
 }
 
 impl ParserContext<'_> {
@@ -58,7 +58,7 @@ impl ParserContext<'_> {
         Ok(ParserContext {
             parser,
             sql,
-            scheduled_runtime: None,
+            scheduled_time: None,
         })
     }
 
@@ -76,7 +76,7 @@ impl ParserContext<'_> {
         let mut stmts: Vec<Statement> = Vec::new();
 
         let mut parser_ctx = ParserContext::new(dialect, sql)?;
-        parser_ctx.scheduled_runtime = opts.scheduled_runtime;
+        parser_ctx.scheduled_time = opts.scheduled_time;
 
         let mut expecting_statement_delimiter = false;
         loop {
@@ -110,7 +110,7 @@ impl ParserContext<'_> {
         ParserContext {
             parser,
             sql,
-            scheduled_runtime: None,
+            scheduled_time: None,
         }
         .intern_parse_table_name()
     }

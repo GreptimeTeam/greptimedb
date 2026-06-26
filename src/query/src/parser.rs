@@ -127,12 +127,12 @@ impl QueryLanguageParser {
     /// Try to parse SQL with GreptimeDB dialect, return the statement when success.
     pub fn parse_sql(sql: &str, query_ctx: &QueryContextRef) -> Result<QueryStatement> {
         let _timer = PARSE_SQL_ELAPSED.start_timer();
-        let scheduled_runtime =
-            crate::options::parse_scheduled_runtime_datetime(&query_ctx.extensions())?;
+        let scheduled_time =
+            crate::options::parse_scheduled_time_datetime(&query_ctx.extensions())?;
         let mut statement = ParserContext::create_with_dialect(
             sql,
             &GreptimeDbDialect {},
-            ParseOptions { scheduled_runtime },
+            ParseOptions { scheduled_time },
         )
         .map_err(BoxedError::new)
         .context(QueryParseSnafu { query: sql })?;
@@ -344,11 +344,11 @@ mod test {
     }
 
     #[test]
-    fn parse_sql_tql_uses_scheduled_runtime_extension() {
+    fn parse_sql_tql_uses_scheduled_time_extension() {
         let ctx = Arc::new(
             QueryContextBuilder::default()
                 .set_extension(
-                    crate::options::FLOW_SCHEDULED_RUNTIME_MILLIS.to_string(),
+                    crate::options::FLOW_SCHEDULED_TIME_MILLIS.to_string(),
                     "1700000000000".to_string(),
                 )
                 .build(),

@@ -141,42 +141,68 @@ pub struct FlowScheduleConfig {
     #[serde(default)]
     pub missed_tick_policy: FlowMissedTickPolicy,
     /// Maximum number of catch-up runs when using bounded catch-up.
-    #[serde(default = "default_max_runs")]
+    ///
+    /// A catch-up run is an evaluation for a scheduled timestamp that is
+    /// already due but was missed because the flownode was stopped or busy.
+    #[serde(default = "FlowScheduleConfig::default_catchup_max_runs")]
     pub catchup_max_runs: u32,
-    /// Maximum age (in seconds) of a due runtime to still include in catch-up.
-    #[serde(default = "default_max_lag_secs")]
+    /// Maximum age (in seconds) of a due scheduled time to still include in catch-up.
+    #[serde(default = "FlowScheduleConfig::default_catchup_max_lag_secs")]
     pub catchup_max_lag_secs: i64,
 }
 
-fn default_max_runs() -> u32 {
-    3
-}
+impl FlowScheduleConfig {
+    pub const DEFAULT_ANCHOR_SECS: i64 = 0;
+    pub const DEFAULT_CATCHUP_MAX_RUNS: u32 = 3;
+    pub const DEFAULT_CATCHUP_MAX_LAG_SECS: i64 = 300;
 
-fn default_max_lag_secs() -> i64 {
-    300
+    pub fn default_catchup_max_runs() -> u32 {
+        Self::DEFAULT_CATCHUP_MAX_RUNS
+    }
+
+    pub fn default_catchup_max_lag_secs() -> i64 {
+        Self::DEFAULT_CATCHUP_MAX_LAG_SECS
+    }
+
+    pub fn catchup_max_lag_secs_for_interval(eval_interval_secs: i64) -> i64 {
+        std::cmp::max(
+            Self::DEFAULT_CATCHUP_MAX_LAG_SECS,
+            3_i64.saturating_mul(eval_interval_secs),
+        )
+    }
+
+    pub fn default_with_start(start_secs: i64, eval_interval_secs: i64) -> Self {
+        Self {
+            anchor_secs: Self::DEFAULT_ANCHOR_SECS,
+            start_secs,
+            missed_tick_policy: FlowMissedTickPolicy::BoundedCatchUp,
+            catchup_max_runs: Self::DEFAULT_CATCHUP_MAX_RUNS,
+            catchup_max_lag_secs: Self::catchup_max_lag_secs_for_interval(eval_interval_secs),
+        }
+    }
 }
 
 impl Default for FlowScheduleConfig {
     fn default() -> Self {
         Self {
-            anchor_secs: 0,
+            anchor_secs: Self::DEFAULT_ANCHOR_SECS,
             start_secs: 0,
             missed_tick_policy: FlowMissedTickPolicy::default(),
-            catchup_max_runs: default_max_runs(),
-            catchup_max_lag_secs: default_max_lag_secs(),
+            catchup_max_runs: Self::default_catchup_max_runs(),
+            catchup_max_lag_secs: Self::default_catchup_max_lag_secs(),
         }
     }
 }
 
-/// Policy for handling flow evaluation runtimes that were missed.
+/// Policy for handling flow evaluation scheduled times that were missed.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub enum FlowMissedTickPolicy {
-    /// Keep the most recent `catchup_max_runs` due runtimes within
+    /// Keep the most recent `catchup_max_runs` due scheduled times within
     /// `catchup_max_lag_secs`, drop older ones.
     #[default]
     #[serde(rename = "bounded_catch_up")]
     BoundedCatchUp,
-    /// Skip all missed runtimes; only execute the single most recent one.
+    /// Skip all missed scheduled times; only execute the single most recent one.
     #[serde(rename = "skip")]
     Skip,
 }

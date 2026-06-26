@@ -45,7 +45,7 @@ use tokio::time::Instant;
 
 use crate::batching_mode::BatchingModeOptions;
 use crate::batching_mode::checkpoint::checkpoint_mode_label;
-use crate::batching_mode::eval_schedule::{EvalSchedule, select_due_runtimes};
+use crate::batching_mode::eval_schedule::{EvalSchedule, select_due_scheduled_times};
 use crate::batching_mode::frontend_client::{FrontendClient, PeerDesc};
 use crate::batching_mode::state::{
     CheckpointMode, DirtyTimeWindows, FilterExprInfo, TaskState, to_df_literal,
@@ -291,16 +291,16 @@ impl BatchingTask {
     }
 
     /// Collect flow-related extensions from the task's query context that should be
-    /// forwarded to the frontend (e.g. scheduled runtime).
+    /// forwarded to the frontend (e.g. scheduled time).
     fn frontend_extensions(&self) -> HashMap<String, String> {
         let ctx = self.state.read().unwrap();
         let all = ctx.query_ctx.extensions();
         let mut flow_exts = HashMap::new();
-        // Propagate the scheduled runtime extension if present so that frontend
+        // Propagate the scheduled time extension if present so that frontend
         // execution can use the same logical time.
-        if let Some(v) = all.get(query::options::FLOW_SCHEDULED_RUNTIME_MILLIS) {
+        if let Some(v) = all.get(query::options::FLOW_SCHEDULED_TIME_MILLIS) {
             flow_exts.insert(
-                query::options::FLOW_SCHEDULED_RUNTIME_MILLIS.to_string(),
+                query::options::FLOW_SCHEDULED_TIME_MILLIS.to_string(),
                 v.clone(),
             );
         }
@@ -361,7 +361,7 @@ impl BatchingTask {
 
     /// Validates that the sink table schema can accept this flow's output.
     ///
-    /// This is a dry-run of the same schema matching logic used by runtime insert-plan
+    /// This is a dry-run of the same schema matching logic used by insert-plan
     /// generation, but without adding dirty-window filters or executing the query. It is used
     /// during CREATE FLOW to catch existing sink table mismatches early.
     pub async fn validate_sink_table_schema(&self, engine: &QueryEngineRef) -> Result<(), Error> {
@@ -966,10 +966,11 @@ impl BatchingTask {
 
     /// Scheduled batching loop for flows with `EVAL INTERVAL`.
     ///
-    /// Uses the pre-parsed `EvalSchedule` from `TaskConfig`, selects due
-    /// scheduled runtimes using bounded catch-up semantics. Each attempt
-    /// temporarily sets `flow.scheduled_runtime_millis` on the task's
-    /// `QueryContext` and executes under the existing `execution_lock`.
+    /// Uses the pre-parsed `EvalSchedule` from `TaskConfig` and selects due
+    /// scheduled times using bounded catch-up semantics. Each scheduled time is the
+    /// scheduled evaluation time used as logical `now()` for that attempt.
+    /// Each attempt temporarily sets `flow.scheduled_time_millis` on the
+    /// task's `QueryContext` and executes under the existing `execution_lock`.
     /// After every attempt (success, no-op, or failure) the in-memory
     /// cursor advances.
     async fn start_scheduled_loop(
@@ -1011,7 +1012,7 @@ impl BatchingTask {
         };
 
         // Initial cursor is one interval before start so the first due
-        // runtime is `start_secs`.
+        // scheduled time is `start_secs`.
         let mut cursor_secs = schedule.start_secs.saturating_sub(schedule.interval_secs);
 
         info!(
@@ -1032,7 +1033,7 @@ impl BatchingTask {
 
             let wall_now_secs = wall_clock_unix_secs();
 
-            let due = match select_due_runtimes(&schedule, cursor_secs, wall_now_secs) {
+            let due = match select_due_scheduled_times(&schedule, cursor_secs, wall_now_secs) {
                 Some(d) => d,
                 None => {
                     warn!(
@@ -1043,20 +1044,20 @@ impl BatchingTask {
                 }
             };
 
-            if due.runtimes.is_empty() {
+            if due.scheduled_times_secs.is_empty() {
                 if due.skipped > 0 {
                     warn!(
-                        "Flow {}: all {} due runtimes skipped by max-lag, advancing cursor to wall-clock ({wall_now_secs}) to avoid re-skipping",
+                        "Flow {}: all {} due scheduled times skipped by max-lag, advancing cursor to wall-clock ({wall_now_secs}) to avoid re-skipping",
                         flow_id_str, due.skipped
                     );
                     cursor_secs = wall_now_secs;
                     continue;
                 }
 
-                // No due yet — sleep until the next runtime instant.
-                let next = schedule.next_runtime_after(cursor_secs);
+                // No due yet — sleep until the next scheduled time.
+                let next = schedule.next_scheduled_time_after(cursor_secs);
                 if next <= wall_now_secs {
-                    // Shouldn't happen given select_due_runtimes returned empty,
+                    // Shouldn't happen given select_due_scheduled_times returned empty,
                     // but guard against clock skew / logic error.
                     cursor_secs = wall_now_secs;
                     continue;
@@ -1064,7 +1065,7 @@ impl BatchingTask {
                 let wait_secs = (next - wall_now_secs) as u64;
                 let wait_dur = Duration::from_secs(wait_secs);
                 debug!(
-                    "Flow {}: no due runtimes, sleeping for {}s until next runtime at {}",
+                    "Flow {}: no due scheduled times, sleeping for {}s until next scheduled time at {}",
                     flow_id_str, wait_secs, next
                 );
                 tokio::time::sleep(wait_dur).await;
@@ -1073,15 +1074,15 @@ impl BatchingTask {
 
             if due.skipped > 0 {
                 info!(
-                    "Flow {}: {} due runtimes, {} skipped (catch-up)",
+                    "Flow {}: {} due scheduled times, {} skipped (catch-up)",
                     flow_id_str,
-                    due.runtimes.len(),
+                    due.scheduled_times_secs.len(),
                     due.skipped
                 );
             }
 
-            // Execute runtimes oldest → newest.
-            for runtime_secs in &due.runtimes {
+            // Execute scheduled times oldest → newest.
+            for scheduled_time_secs in &due.scheduled_times_secs {
                 if self.is_shutdown_signaled() {
                     break;
                 }
@@ -1091,33 +1092,33 @@ impl BatchingTask {
                     .inc();
 
                 let outcome = self
-                    .execute_once_serialized_at_scheduled_runtime(
+                    .execute_once_serialized_at_scheduled_time(
                         &engine,
                         &frontend_client,
-                        *runtime_secs,
+                        *scheduled_time_secs,
                     )
                     .await;
 
                 // Advance cursor regardless of outcome.
-                cursor_secs = *runtime_secs;
+                cursor_secs = *scheduled_time_secs;
 
                 match outcome.result {
-                    Ok(Some((rows, _elapsed))) => {
+                    Ok(Some((rows, elapsed))) => {
                         debug!(
-                            "Flow {}: scheduled runtime {} completed, rows={}",
-                            flow_id_str, runtime_secs, rows
+                            "Flow {}: scheduled time {} completed, rows={}, elapsed={:?}",
+                            flow_id_str, scheduled_time_secs, rows, elapsed
                         );
                     }
                     Ok(None) => {
                         debug!(
-                            "Flow {}: scheduled runtime {} produced no query (no dirty signal or no-op)",
-                            flow_id_str, runtime_secs
+                            "Flow {}: scheduled time {} produced no query (no dirty signal or no-op)",
+                            flow_id_str, scheduled_time_secs
                         );
                     }
                     Err(err) => {
                         warn!(
-                            "Flow {}: scheduled runtime {} failed: {:?}",
-                            flow_id_str, runtime_secs, err
+                            "Flow {}: scheduled time {} failed: {:?}",
+                            flow_id_str, scheduled_time_secs, err
                         );
                         METRIC_FLOW_BATCHING_ENGINE_ERROR_CNT
                             .with_label_values(&[&flow_id_str])
@@ -1221,16 +1222,16 @@ impl BatchingTask {
     }
 
     /// Execute one scheduled attempt, temporarily setting
-    /// `flow.scheduled_runtime_millis` on the task's QueryContext so
+    /// `flow.scheduled_time_millis` on the task's QueryContext so
     /// SQL/TQL `now()` resolves to the logical scheduled time.
     ///
     /// The extension is removed after the attempt so a later manual
-    /// `flush_flow` does not reuse a stale scheduled runtime.
-    async fn execute_once_serialized_at_scheduled_runtime(
+    /// `flush_flow` does not reuse a stale scheduled time.
+    async fn execute_once_serialized_at_scheduled_time(
         &self,
         engine: &QueryEngineRef,
         frontend_client: &Arc<FrontendClient>,
-        runtime_secs: i64,
+        scheduled_time_secs: i64,
     ) -> ExecuteOnceOutcome {
         let _execution_guard = self.execution_lock.lock().await;
 
@@ -1250,15 +1251,15 @@ impl BatchingTask {
             }
         }
 
-        // Clone the current QueryContext and add the scheduled runtime
+        // Clone the current QueryContext and add the scheduled time
         // extension, then swap it into the task state for this attempt.
         let old_ctx = {
             let mut state = self.state.write().unwrap();
             let old = state.query_ctx.clone();
             let mut new_ctx = (*old).clone();
             new_ctx.set_extension(
-                query::options::FLOW_SCHEDULED_RUNTIME_MILLIS,
-                (runtime_secs.saturating_mul(1000)).to_string(),
+                query::options::FLOW_SCHEDULED_TIME_MILLIS,
+                (scheduled_time_secs.saturating_mul(1000)).to_string(),
             );
             state.query_ctx = Arc::new(new_ctx);
             old
@@ -1273,7 +1274,7 @@ impl BatchingTask {
             .await;
 
         // Restore while still holding `execution_lock` so no future manual
-        // flush can observe the temporary scheduled runtime. The guard also
+        // flush can observe the temporary scheduled time. The guard also
         // restores during unwind/cancellation.
         drop(restore_guard);
 
@@ -1343,7 +1344,7 @@ impl BatchingTask {
             (None, QueryType::Sql) if self.config.flow_eval_interval.is_none() => {
                 return UnexpectedSnafu {
                     reason: format!(
-                        "Flow id={} reached runtime without a time-window expression or EVAL INTERVAL; create-flow validation should have rejected it",
+                        "Flow id={} reached execution without a time-window expression or EVAL INTERVAL; create-flow validation should have rejected it",
                         self.config.flow_id
                     ),
                 }

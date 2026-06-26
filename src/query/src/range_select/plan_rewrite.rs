@@ -143,7 +143,7 @@ fn evaluate_expr_to_millisecond(
     args: &[Expr],
     i: usize,
     interval_only: bool,
-    scheduled_runtime: Option<DateTime<Utc>>,
+    scheduled_time: Option<DateTime<Utc>>,
 ) -> DFResult<i64> {
     let Some(expr) = args.get(i) else {
         return Err(dispose_parse_error(None));
@@ -151,7 +151,7 @@ fn evaluate_expr_to_millisecond(
     if interval_only && !interval_only_in_expr(expr) {
         return Err(dispose_parse_error(Some(expr)));
     }
-    let info = match scheduled_runtime {
+    let info = match scheduled_time {
         Some(dt) => SimplifyContext::default().with_query_execution_start_time(Some(dt)),
         None => SimplifyContext::default().with_current_time(),
     };
@@ -220,15 +220,15 @@ fn parse_align_to(
     args: &[Expr],
     i: usize,
     timezone: Option<&Timezone>,
-    scheduled_runtime: Option<DateTime<Utc>>,
+    scheduled_time: Option<DateTime<Utc>>,
 ) -> DFResult<i64> {
     let Ok(s) = parse_str_expr(args, i) else {
-        return evaluate_expr_to_millisecond(args, i, false, scheduled_runtime);
+        return evaluate_expr_to_millisecond(args, i, false, scheduled_time);
     };
     let upper = s.to_uppercase();
     match upper.as_str() {
         "NOW" => {
-            return Ok(scheduled_runtime
+            return Ok(scheduled_time
                 .map(|dt| dt.timestamp_millis())
                 .unwrap_or_else(|| Timestamp::current_millis().value()));
         }
@@ -303,14 +303,14 @@ impl TreeNodeRewriter for RangeExprRewriter<'_> {
                 .map_err(|e| DataFusionError::Plan(e.to_string()))?;
             let by = parse_expr_list(&func.args, 4, byc)?;
             let align = parse_duration_expr(&func.args, byc + 4)?;
-            let scheduled_runtime =
-                crate::options::parse_scheduled_runtime_datetime(&self.query_ctx.extensions())
+            let scheduled_time =
+                crate::options::parse_scheduled_time_datetime(&self.query_ctx.extensions())
                     .map_err(|err| DataFusionError::Plan(err.to_string()))?;
             let align_to = parse_align_to(
                 &func.args,
                 byc + 5,
                 Some(&self.query_ctx.timezone()),
-                scheduled_runtime,
+                scheduled_time,
             )?;
             let mut data_type = range_expr.get_type(self.input_plan.schema())?;
             let mut need_cast = false;
@@ -815,11 +815,11 @@ mod test {
     }
 
     #[tokio::test]
-    async fn range_align_to_now_uses_scheduled_runtime_extension() {
+    async fn range_align_to_now_uses_scheduled_time_extension() {
         let query_ctx = Arc::new(
             QueryContextBuilder::default()
                 .set_extension(
-                    crate::options::FLOW_SCHEDULED_RUNTIME_MILLIS.to_string(),
+                    crate::options::FLOW_SCHEDULED_TIME_MILLIS.to_string(),
                     "1700000000123".to_string(),
                 )
                 .build(),
@@ -1132,10 +1132,10 @@ mod test {
         let epsinon =
             parse_align_to(&args, 0, None, None).unwrap() - Timestamp::current_millis().value();
         assert!(epsinon.abs() < 100);
-        let scheduled_runtime = DateTime::from_timestamp(1_700_000_000, 123_000_000).unwrap();
+        let scheduled_time = DateTime::from_timestamp(1_700_000_000, 123_000_000).unwrap();
         assert_eq!(
-            scheduled_runtime.timestamp_millis(),
-            parse_align_to(&args, 0, None, Some(scheduled_runtime)).unwrap()
+            scheduled_time.timestamp_millis(),
+            parse_align_to(&args, 0, None, Some(scheduled_time)).unwrap()
         );
         // test default
         let args = vec!["".lit()];

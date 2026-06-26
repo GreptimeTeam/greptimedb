@@ -12,36 +12,25 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Helpers for stable `EVAL INTERVAL` scheduled runtimes.
+//! Helpers for stable `EVAL INTERVAL` scheduled times.
 
 pub use common_meta::key::flow::flow_info::{FlowMissedTickPolicy, FlowScheduleConfig};
 
-const DEFAULT_MAX_RUNS: u32 = 3;
-const MIN_LAG_SECONDS: i64 = 300;
-
-/// Runtime schedule for an `EVAL INTERVAL` flow.
+/// Schedule for an `EVAL INTERVAL` flow.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EvalSchedule {
-    /// Interval between scheduled runtimes in seconds.
+    /// Interval between scheduled times in seconds.
     pub interval_secs: i64,
     /// Anchor timestamp as seconds since Unix epoch.
     pub anchor_secs: i64,
-    /// First scheduled runtime as seconds since Unix epoch.
+    /// First scheduled time as seconds since Unix epoch.
     pub start_secs: i64,
-    /// Policy for handling missed runtimes.
-    pub missed_tick_policy: MissedTickPolicy,
-    /// Maximum number of due runtimes to catch up.
+    /// Policy for handling missed scheduled times.
+    pub missed_tick_policy: FlowMissedTickPolicy,
+    /// Maximum number of due scheduled times to catch up.
     pub max_runs: u32,
-    /// Maximum due-runtime lag to keep for catch-up.
+    /// Maximum age of a due scheduled time to keep for catch-up.
     pub max_lag_secs: i64,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MissedTickPolicy {
-    /// Keep recent due runtimes within `max_lag_secs`, capped by `max_runs`.
-    BoundedCatchUp,
-    /// Execute only the latest due runtime.
-    Skip,
 }
 
 impl EvalSchedule {
@@ -78,27 +67,27 @@ impl EvalSchedule {
                     interval_secs,
                     anchor_secs: c.anchor_secs,
                     start_secs: c.start_secs,
-                    missed_tick_policy: match c.missed_tick_policy {
-                        FlowMissedTickPolicy::BoundedCatchUp => MissedTickPolicy::BoundedCatchUp,
-                        FlowMissedTickPolicy::Skip => MissedTickPolicy::Skip,
-                    },
+                    missed_tick_policy: c.missed_tick_policy,
                     max_runs: c.catchup_max_runs,
                     max_lag_secs: c.catchup_max_lag_secs,
                 }
             }
-            None => Self {
-                interval_secs,
-                anchor_secs: 0,
-                start_secs: 0,
-                missed_tick_policy: MissedTickPolicy::BoundedCatchUp,
-                max_runs: DEFAULT_MAX_RUNS,
-                max_lag_secs: std::cmp::max(MIN_LAG_SECONDS, 3_i64.saturating_mul(interval_secs)),
-            },
+            None => {
+                let c = FlowScheduleConfig::default_with_start(0, interval_secs);
+                Self {
+                    interval_secs,
+                    anchor_secs: c.anchor_secs,
+                    start_secs: c.start_secs,
+                    missed_tick_policy: c.missed_tick_policy,
+                    max_runs: c.catchup_max_runs,
+                    max_lag_secs: c.catchup_max_lag_secs,
+                }
+            }
         }))
     }
 
-    /// Returns the next scheduled runtime strictly after `cursor_secs`.
-    pub fn next_runtime_after(&self, cursor_secs: i64) -> i64 {
+    /// Returns the next scheduled time strictly after `cursor_secs`.
+    pub fn next_scheduled_time_after(&self, cursor_secs: i64) -> i64 {
         next_in_sequence(cursor_secs, self.start_secs, self.interval_secs)
     }
 }
@@ -126,42 +115,47 @@ fn first_due_in_sequence(cursor: i64, start: i64, interval: i64) -> i64 {
     }
 }
 
+/// Scheduled times selected for execution in one scheduler pass.
+///
+/// A scheduled time is the logical evaluation timestamp for one flow run. When
+/// executing a timestamp from `scheduled_times_secs`, SQL/TQL `now()` is bound
+/// to that timestamp instead of the wall-clock execution time.
 #[derive(Debug, Clone, PartialEq)]
-pub struct DueRuntimes {
-    /// Runtimes to execute, ordered oldest to newest.
-    pub runtimes: Vec<i64>,
-    /// Number of due runtimes skipped by lag or max-runs limits.
+pub struct DueScheduledTimes {
+    /// Scheduled times to execute, ordered oldest to newest.
+    pub scheduled_times_secs: Vec<i64>,
+    /// Number of due scheduled times skipped by lag or max-runs limits.
     pub skipped: u64,
 }
 
-/// Select due runtimes `<= wall_now_secs` without materializing all missed ticks.
-pub fn select_due_runtimes(
+/// Select due scheduled times `<= wall_now_secs` without materializing all missed ticks.
+pub fn select_due_scheduled_times(
     schedule: &EvalSchedule,
     cursor_secs: i64,
     wall_now_secs: i64,
-) -> Option<DueRuntimes> {
+) -> Option<DueScheduledTimes> {
     if schedule.interval_secs <= 0 {
         return None;
     }
 
     let first_due = first_due_in_sequence(cursor_secs, schedule.start_secs, schedule.interval_secs);
     if first_due > wall_now_secs {
-        return Some(DueRuntimes {
-            runtimes: vec![],
+        return Some(DueScheduledTimes {
+            scheduled_times_secs: vec![],
             skipped: 0,
         });
     }
 
     let total_count = ((wall_now_secs - first_due) / schedule.interval_secs) as u64 + 1;
     match schedule.missed_tick_policy {
-        MissedTickPolicy::Skip => {
+        FlowMissedTickPolicy::Skip => {
             let last = first_due + (total_count as i64 - 1) * schedule.interval_secs;
-            Some(DueRuntimes {
-                runtimes: vec![last],
+            Some(DueScheduledTimes {
+                scheduled_times_secs: vec![last],
                 skipped: total_count.saturating_sub(1),
             })
         }
-        MissedTickPolicy::BoundedCatchUp => {
+        FlowMissedTickPolicy::BoundedCatchUp => {
             let cutoff = wall_now_secs.saturating_sub(schedule.max_lag_secs);
             let skipped_by_cutoff = if first_due >= cutoff {
                 0
@@ -172,20 +166,23 @@ pub fn select_due_runtimes(
 
             let remaining = total_count.saturating_sub(skipped_by_cutoff);
             if remaining == 0 {
-                return Some(DueRuntimes {
-                    runtimes: vec![],
+                return Some(DueScheduledTimes {
+                    scheduled_times_secs: vec![],
                     skipped: total_count,
                 });
             }
 
+            // max_lag_secs decides which missed scheduled times are recent enough to
+            // run; max_runs caps how many of those times we execute
+            // back-to-back in one scheduler pass.
             let keep_count = remaining.min(schedule.max_runs as u64);
             let keep_start = skipped_by_cutoff + remaining.saturating_sub(keep_count);
-            let runtimes = (0..keep_count)
+            let scheduled_times_secs = (0..keep_count)
                 .map(|i| first_due + (keep_start as i64 + i as i64) * schedule.interval_secs)
                 .collect::<Vec<_>>();
 
-            Some(DueRuntimes {
-                runtimes,
+            Some(DueScheduledTimes {
+                scheduled_times_secs,
                 skipped: total_count - keep_count,
             })
         }
@@ -215,7 +212,7 @@ mod test {
 
     fn schedule(
         start: i64,
-        policy: MissedTickPolicy,
+        policy: FlowMissedTickPolicy,
         max_runs: u32,
         max_lag_secs: i64,
     ) -> EvalSchedule {
@@ -263,7 +260,7 @@ mod test {
         assert_eq!(from_typed.interval_secs, 300);
         assert_eq!(from_typed.anchor_secs, 10);
         assert_eq!(from_typed.start_secs, 70);
-        assert_eq!(from_typed.missed_tick_policy, MissedTickPolicy::Skip);
+        assert_eq!(from_typed.missed_tick_policy, FlowMissedTickPolicy::Skip);
         assert_eq!(from_typed.max_runs, 4);
         assert_eq!(from_typed.max_lag_secs, 600);
 
@@ -285,55 +282,62 @@ mod test {
     }
 
     #[test]
-    fn next_runtime_after_respects_start_sequence() {
-        let s = schedule(50, MissedTickPolicy::BoundedCatchUp, 3, 300);
-        assert_eq!(s.next_runtime_after(0), 50);
-        assert_eq!(s.next_runtime_after(50), 110);
-        assert_eq!(s.next_runtime_after(100), 110);
+    fn next_scheduled_time_after_respects_start_sequence() {
+        let s = schedule(50, FlowMissedTickPolicy::BoundedCatchUp, 3, 300);
+        assert_eq!(s.next_scheduled_time_after(0), 50);
+        assert_eq!(s.next_scheduled_time_after(50), 110);
+        assert_eq!(s.next_scheduled_time_after(100), 110);
     }
 
     #[test]
-    fn due_runtime_selection_handles_empty_and_start_boundary() {
-        let s = schedule(120, MissedTickPolicy::BoundedCatchUp, 10, 3600);
+    fn due_scheduled_time_selection_handles_empty_and_start_boundary() {
+        let s = schedule(120, FlowMissedTickPolicy::BoundedCatchUp, 10, 3600);
         assert_eq!(
-            select_due_runtimes(&s, 0, 100).unwrap().runtimes,
+            select_due_scheduled_times(&s, 0, 100)
+                .unwrap()
+                .scheduled_times_secs,
             Vec::<i64>::new()
         );
         assert_eq!(
-            select_due_runtimes(&s, 0, 300).unwrap().runtimes,
+            select_due_scheduled_times(&s, 0, 300)
+                .unwrap()
+                .scheduled_times_secs,
             vec![120, 180, 240, 300]
         );
     }
 
     #[test]
     fn bounded_catch_up_applies_lag_and_max_runs() {
-        let s = schedule(0, MissedTickPolicy::BoundedCatchUp, 2, 180);
-        let due = select_due_runtimes(&s, 0, 600).unwrap();
-        assert_eq!(due.runtimes, vec![540, 600]);
+        let s = schedule(0, FlowMissedTickPolicy::BoundedCatchUp, 2, 180);
+        let due = select_due_scheduled_times(&s, 0, 600).unwrap();
+        assert_eq!(due.scheduled_times_secs, vec![540, 600]);
         assert_eq!(due.skipped, 8);
     }
 
     #[test]
-    fn bounded_catch_up_can_skip_all_due_runtimes() {
-        let s = schedule(0, MissedTickPolicy::BoundedCatchUp, 3, 30);
-        let due = select_due_runtimes(&s, 0, 100).unwrap();
-        assert!(due.runtimes.is_empty());
+    fn bounded_catch_up_can_skip_all_due_scheduled_times() {
+        let s = schedule(0, FlowMissedTickPolicy::BoundedCatchUp, 3, 30);
+        let due = select_due_scheduled_times(&s, 0, 100).unwrap();
+        assert!(due.scheduled_times_secs.is_empty());
         assert_eq!(due.skipped, 1);
     }
 
     #[test]
-    fn skip_policy_keeps_only_latest_due_runtime() {
-        let s = schedule(0, MissedTickPolicy::Skip, 5, 3600);
-        let due = select_due_runtimes(&s, 0, 300).unwrap();
-        assert_eq!(due.runtimes, vec![300]);
+    fn skip_policy_keeps_only_latest_due_scheduled_time() {
+        let s = schedule(0, FlowMissedTickPolicy::Skip, 5, 3600);
+        let due = select_due_scheduled_times(&s, 0, 300).unwrap();
+        assert_eq!(due.scheduled_times_secs, vec![300]);
         assert_eq!(due.skipped, 4);
     }
 
     #[test]
-    fn huge_missed_gap_allocates_only_kept_runtimes() {
-        let s = schedule(0, MissedTickPolicy::BoundedCatchUp, 5, 3600);
-        let due = select_due_runtimes(&s, 0, 86400).unwrap();
-        assert_eq!(due.runtimes, vec![86160, 86220, 86280, 86340, 86400]);
+    fn huge_missed_gap_allocates_only_kept_scheduled_times() {
+        let s = schedule(0, FlowMissedTickPolicy::BoundedCatchUp, 5, 3600);
+        let due = select_due_scheduled_times(&s, 0, 86400).unwrap();
+        assert_eq!(
+            due.scheduled_times_secs,
+            vec![86160, 86220, 86280, 86340, 86400]
+        );
         assert_eq!(due.skipped, 1435);
     }
 }

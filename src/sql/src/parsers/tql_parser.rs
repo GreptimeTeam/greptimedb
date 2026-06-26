@@ -173,7 +173,7 @@ impl ParserContext<'_> {
         let raw_query = tql_sql.trim_end_matches(';');
 
         let mut parser_ctx = ParserContext::new(&crate::dialect::GreptimeDbDialect {}, tql_sql)?;
-        parser_ctx.scheduled_runtime = self.scheduled_runtime;
+        parser_ctx.scheduled_time = self.scheduled_time;
         let statement = parser_ctx.parse_tql(require_now_expr)?;
 
         match statement {
@@ -197,7 +197,7 @@ impl ParserContext<'_> {
         &mut self,
         require_now_expr: bool,
     ) -> std::result::Result<TqlParameters, TQLError> {
-        let scheduled_runtime = self.scheduled_runtime;
+        let scheduled_time = self.scheduled_time;
         let parser = &mut self.parser;
         let (start, end, step, lookback) = match parser.peek_token().token {
             Token::LParen => {
@@ -220,22 +220,22 @@ impl ParserContext<'_> {
                 let start = Self::parse_expr_to_literal_or_ts(
                     exprs_iter.next().unwrap(),
                     require_now_expr,
-                    scheduled_runtime,
+                    scheduled_time,
                 )?;
                 let end = Self::parse_expr_to_literal_or_ts(
                     exprs_iter.next().unwrap(),
                     require_now_expr,
-                    scheduled_runtime,
+                    scheduled_time,
                 )?;
                 let step = Self::parse_expr_to_literal_or_ts(
                     exprs_iter.next().unwrap(),
                     false,
-                    scheduled_runtime,
+                    scheduled_time,
                 )?;
 
                 let lookback = exprs_iter
                     .next()
-                    .map(|expr| Self::parse_expr_to_literal_or_ts(expr, false, scheduled_runtime))
+                    .map(|expr| Self::parse_expr_to_literal_or_ts(expr, false, scheduled_time))
                     .transpose()?;
 
                 if !parser.consume_token(&Token::RParen) {
@@ -298,7 +298,7 @@ impl ParserContext<'_> {
     fn parse_expr_to_literal_or_ts(
         parser_expr: sqlparser::ast::Expr,
         require_now_expr: bool,
-        scheduled_runtime: Option<DateTime<Utc>>,
+        scheduled_time: Option<DateTime<Utc>>,
     ) -> std::result::Result<String, TQLError> {
         match parser_expr {
             sqlparser::ast::Expr::Value(v) => match v.value {
@@ -323,7 +323,7 @@ impl ParserContext<'_> {
                     }
                 }
             },
-            _ => Self::parse_expr_to_ts(parser_expr, require_now_expr, scheduled_runtime),
+            _ => Self::parse_expr_to_ts(parser_expr, require_now_expr, scheduled_time),
         }
     }
 
@@ -331,12 +331,12 @@ impl ParserContext<'_> {
     fn parse_expr_to_ts(
         parser_expr: sqlparser::ast::Expr,
         require_now_expr: bool,
-        scheduled_runtime: Option<DateTime<Utc>>,
+        scheduled_time: Option<DateTime<Utc>>,
     ) -> std::result::Result<String, TQLError> {
         let lit = utils::parser_expr_to_scalar_value_literal_at(
             parser_expr,
             require_now_expr,
-            scheduled_runtime,
+            scheduled_time,
         )
         .map_err(Box::new)
         .context(ConvertToLogicalExpressionSnafu)?;
@@ -431,12 +431,12 @@ mod tests {
         result.remove(0)
     }
 
-    fn parse_into_statement_at(sql: &str, scheduled_runtime: DateTime<Utc>) -> Statement {
+    fn parse_into_statement_at(sql: &str, scheduled_time: DateTime<Utc>) -> Statement {
         let mut result = ParserContext::create_with_dialect(
             sql,
             &GreptimeDbDialect {},
             ParseOptions {
-                scheduled_runtime: Some(scheduled_runtime),
+                scheduled_time: Some(scheduled_time),
             },
         )
         .unwrap();
@@ -445,11 +445,11 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_tql_eval_with_scheduled_runtime() {
-        let scheduled_runtime = DateTime::from_timestamp(1_700_000_000, 0).unwrap();
+    fn test_parse_tql_eval_with_scheduled_time() {
+        let scheduled_time = DateTime::from_timestamp(1_700_000_000, 0).unwrap();
         let sql = "TQL EVAL (now() - '10 minutes'::interval, now(), '1m') http_requests_total";
 
-        match parse_into_statement_at(sql, scheduled_runtime) {
+        match parse_into_statement_at(sql, scheduled_time) {
             Statement::Tql(Tql::Eval(eval)) => {
                 assert_eq!(eval.start, "1699999400");
                 assert_eq!(eval.end, "1700000000");

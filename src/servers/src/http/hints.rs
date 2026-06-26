@@ -46,16 +46,16 @@ fn apply_hints(query_ctx: &mut QueryContext, hints: Vec<(String, String)>) {
 #[cfg(test)]
 mod tests {
     use common_query::request::INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY as COMMON_INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY;
+    use query::options::FLOW_SCHEDULED_TIME_MILLIS;
     use session::context::{QueryContextBuilder, generate_remote_query_id};
     use session::hints::{
-        FLOW_SCHEDULED_RUNTIME_MILLIS_EXTENSION_KEY,
         INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY, REMOTE_QUERY_ID_EXTENSION_KEY,
     };
 
     use super::apply_hints;
 
     #[test]
-    fn test_apply_hints_ignores_reserved_extension_keys() {
+    fn test_apply_hints_ignores_reserved_extension_keys_only() {
         let original_query_id = generate_remote_query_id();
         let mut query_ctx = QueryContextBuilder::default()
             .set_extension(
@@ -76,7 +76,7 @@ mod tests {
                     "spoofed-regs".to_string(),
                 ),
                 (
-                    FLOW_SCHEDULED_RUNTIME_MILLIS_EXTENSION_KEY.to_string(),
+                    FLOW_SCHEDULED_TIME_MILLIS.to_string(),
                     "1700000000000".to_string(),
                 ),
                 ("ttl".to_string(), "7d".to_string()),
@@ -92,10 +92,9 @@ mod tests {
                 .extension(INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY)
                 .is_none()
         );
-        assert!(
-            query_ctx
-                .extension(FLOW_SCHEDULED_RUNTIME_MILLIS_EXTENSION_KEY)
-                .is_none()
+        assert_eq!(
+            query_ctx.extension(FLOW_SCHEDULED_TIME_MILLIS),
+            Some("1700000000000")
         );
         assert_eq!(query_ctx.extension("ttl"), Some("7d"));
     }

@@ -207,13 +207,13 @@ pub fn parser_expr_to_scalar_value_literal(
 }
 
 /// Same as [`parser_expr_to_scalar_value_literal`] but uses the provided
-/// `scheduled_runtime` for evaluating `now()`. If `scheduled_runtime` is
+/// `scheduled_time` for evaluating `now()`. If `scheduled_time` is
 /// `Some`, `now()` will be simplified to the given timestamp instead of
 /// the current wall-clock time.
 pub fn parser_expr_to_scalar_value_literal_at(
     expr: sqlparser::ast::Expr,
     require_now_expr: bool,
-    scheduled_runtime: Option<DateTime<Utc>>,
+    scheduled_time: Option<DateTime<Utc>>,
 ) -> Result<ScalarValue> {
     // 1. convert parser expr to logical expr
     let empty_df_schema = DFSchema::empty();
@@ -263,8 +263,8 @@ pub fn parser_expr_to_scalar_value_literal_at(
         }
     }
 
-    // 2. simplify logical expr — use scheduled runtime if provided, else wall-clock
-    let info = match scheduled_runtime {
+    // 2. simplify logical expr — use scheduled time if provided, else wall-clock
+    let info = match scheduled_time {
         Some(dt) => SimplifyContext::default().with_query_execution_start_time(Some(dt)),
         None => SimplifyContext::default().with_current_time(),
     };
