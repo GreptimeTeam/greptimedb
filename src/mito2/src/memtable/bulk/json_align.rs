@@ -75,6 +75,10 @@ impl Json2Aligner {
 
         // Merge JSON2 types from remaining schemas.
         for schema in input_schemas {
+            // Input schemas should only differ in JSON2 concrete types.
+            #[cfg(debug_assertions)]
+            assert_columns_match_except_json2(&base_schema, &schema);
+
             for (idx, merged) in &mut merged_types {
                 if *idx >= schema.fields().len() {
                     continue;
@@ -151,6 +155,29 @@ impl Json2Aligner {
     pub(crate) fn wrap_iter(&self, iter: BoxedRecordBatchIterator) -> BoxedRecordBatchIterator {
         let aligner = self.clone();
         Box::new(iter.map(move |batch| aligner.align_batch(batch?)))
+    }
+}
+
+#[cfg(debug_assertions)]
+fn assert_columns_match_except_json2(base_schema: &Schema, schema: &Schema) {
+    debug_assert_eq!(
+        base_schema.fields().len(),
+        schema.fields().len(),
+        "input schemas for Json2Aligner must have the same column count"
+    );
+    for (idx, (base_field, field)) in base_schema.fields().iter().zip(schema.fields()).enumerate() {
+        let base_is_json2 = is_structured_json_field(base_field);
+        let is_json2 = is_structured_json_field(field);
+        debug_assert_eq!(
+            base_is_json2, is_json2,
+            "column {idx} must be JSON2 in all input schemas or none"
+        );
+        if !base_is_json2 && !is_json2 {
+            debug_assert_eq!(
+                base_field, field,
+                "non-JSON2 column {idx} must be identical across input schemas"
+            );
+        }
     }
 }
 
