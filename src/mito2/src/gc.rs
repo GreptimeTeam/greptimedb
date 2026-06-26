@@ -59,24 +59,41 @@ mod worker_test;
 
 /// Helper function to determine if a file should be deleted based on common logic
 /// shared between Parquet and Puffin file types.
-fn should_delete_file(
+pub(crate) fn should_delete_file(
     is_in_manifest: bool,
     is_in_tmp_ref: bool,
     is_linger: bool,
     is_eligible_for_delete: bool,
     is_region_dropped: bool,
-    _entry: &Entry,
-    _unknown_file_may_linger_until: chrono::DateTime<chrono::Utc>,
+    entry: &Entry,
+    unknown_file_may_linger_until: chrono::DateTime<chrono::Utc>,
 ) -> bool {
     let is_known = is_linger || is_eligible_for_delete;
 
-    !is_in_manifest
-        && !is_in_tmp_ref
-        && if is_known {
-            is_eligible_for_delete
-        } else {
-            !is_in_tmp_ref && is_region_dropped
-        }
+    if is_in_manifest || is_in_tmp_ref {
+        return false;
+    }
+
+    if is_known {
+        return is_eligible_for_delete;
+    }
+
+    // Unknown file: not in manifest, tmp_ref, or known removed records.
+    // For dropped regions, we can safely delete unknown files immediately.
+    // For active/open regions, only delete if the object's last-modified time
+    // exceeds the unknown_file_lingering_time TTL.
+    if is_region_dropped {
+        true
+    } else {
+        entry
+            .metadata()
+            .last_modified()
+            .map(|ts| {
+                // opendal's Timestamp wraps jiff::Timestamp; compare via milliseconds
+                ts.into_inner().as_millisecond() < unknown_file_may_linger_until.timestamp_millis()
+            })
+            .unwrap_or(false)
+    }
 }
 
 /// Limit the amount of concurrent GC jobs on the datanode
@@ -156,8 +173,10 @@ impl Default for GcConfig {
             enable: false,
             // expect long running queries to be finished(or at least be able to notify it's using a deleted file) within a reasonable time
             lingering_time: Some(Duration::from_secs(60)),
-            // 1 hours, for unknown expel time, which is when this file get removed from manifest, it should rarely happen, can keep it longer
-            unknown_file_lingering_time: Duration::from_secs(60 * 60),
+            // 1 day, for unknown expel time, which is when this file get removed from manifest.
+            // Only applies to full-listing GC for active/open regions. A long default avoids
+            // accidentally deleting pre-manifest files (e.g. compaction/flush still in progress).
+            unknown_file_lingering_time: Duration::from_secs(24 * 60 * 60),
             max_concurrent_lister_per_gc_job: 32,
             max_concurrent_gc_job: 4,
         }
@@ -813,124 +832,6 @@ impl LocalGcWorker {
         Ok(all_entries)
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn filter_deletable_files(
-        &self,
-        is_region_dropped: bool,
-        entries: Vec<Entry>,
-        in_manifest: &HashMap<FileId, Option<IndexVersion>>,
-        in_tmp_ref: &HashSet<(FileId, Option<IndexVersion>)>,
-        may_linger_files: &HashSet<&RemovedFile>,
-        eligible_for_delete: &HashSet<&RemovedFile>,
-        unknown_file_may_linger_until: chrono::DateTime<chrono::Utc>,
-    ) -> Vec<RemovedFile> {
-        let mut ready_for_delete = vec![];
-        // all group by file id for easier checking
-        let in_tmp_ref: HashMap<FileId, HashSet<IndexVersion>> =
-            in_tmp_ref
-                .iter()
-                .fold(HashMap::new(), |mut acc, (file, version)| {
-                    let indices = acc.entry(*file).or_default();
-                    if let Some(version) = version {
-                        indices.insert(*version);
-                    }
-                    acc
-                });
-
-        let may_linger_files: HashMap<FileId, HashSet<&RemovedFile>> = may_linger_files
-            .iter()
-            .fold(HashMap::new(), |mut acc, file| {
-                let indices = acc.entry(file.file_id()).or_default();
-                indices.insert(file);
-                acc
-            });
-
-        let eligible_for_delete: HashMap<FileId, HashSet<&RemovedFile>> = eligible_for_delete
-            .iter()
-            .fold(HashMap::new(), |mut acc, file| {
-                let indices = acc.entry(file.file_id()).or_default();
-                indices.insert(file);
-                acc
-            });
-
-        for entry in entries {
-            let (file_id, file_type) = match location::parse_file_id_type_from_path(entry.name()) {
-                Ok((file_id, file_type)) => (file_id, file_type),
-                Err(err) => {
-                    error!(err; "Failed to parse file id from path: {}", entry.name());
-                    // if we can't parse the file id, it means it's not a sst or index file
-                    // shouldn't delete it because we don't know what it is
-                    GC_SKIPPED_UNPARSABLE_FILES.inc();
-                    continue;
-                }
-            };
-
-            let should_delete = match file_type {
-                FileType::Parquet => {
-                    let is_in_manifest = in_manifest.contains_key(&file_id);
-                    let is_in_tmp_ref = in_tmp_ref.contains_key(&file_id);
-                    let is_linger = may_linger_files.contains_key(&file_id);
-                    let is_eligible_for_delete = eligible_for_delete.contains_key(&file_id);
-
-                    should_delete_file(
-                        is_in_manifest,
-                        is_in_tmp_ref,
-                        is_linger,
-                        is_eligible_for_delete,
-                        is_region_dropped,
-                        &entry,
-                        unknown_file_may_linger_until,
-                    )
-                }
-                FileType::Puffin(version) => {
-                    // notice need to check both file id and version
-                    let is_in_manifest = in_manifest
-                        .get(&file_id)
-                        .map(|opt_ver| *opt_ver == Some(version))
-                        .unwrap_or(false);
-                    let is_in_tmp_ref = in_tmp_ref
-                        .get(&file_id)
-                        .map(|versions| versions.contains(&version))
-                        .unwrap_or(false);
-                    let is_linger = may_linger_files
-                        .get(&file_id)
-                        .map(|files| files.contains(&&RemovedFile::Index(file_id, version)))
-                        .unwrap_or(false);
-                    let is_eligible_for_delete = eligible_for_delete
-                        .get(&file_id)
-                        .map(|files| files.contains(&&RemovedFile::Index(file_id, version)))
-                        .unwrap_or(false);
-
-                    should_delete_file(
-                        is_in_manifest,
-                        is_in_tmp_ref,
-                        is_linger,
-                        is_eligible_for_delete,
-                        is_region_dropped,
-                        &entry,
-                        unknown_file_may_linger_until,
-                    )
-                }
-            };
-
-            if should_delete {
-                let removed_file = match file_type {
-                    FileType::Parquet => {
-                        // notice this cause we don't track index version for parquet files
-                        // since entries comes from listing, we can't get index version from path
-                        RemovedFile::File(file_id, None)
-                    }
-                    FileType::Puffin(version) => {
-                        GC_ORPHANED_INDEX_FILES.inc();
-                        RemovedFile::Index(file_id, version)
-                    }
-                };
-                ready_for_delete.push(removed_file);
-            }
-        }
-        ready_for_delete
-    }
-
     /// List files to be deleted based on their presence in the manifest, temporary references, and recently removed files.
     /// Returns a vector of `RemovedFile` that are eligible for deletion.
     ///
@@ -948,96 +849,235 @@ impl LocalGcWorker {
         recently_removed_files: BTreeMap<Timestamp, HashSet<RemovedFile>>,
         all_entries: Vec<Entry>,
     ) -> Result<Vec<RemovedFile>> {
-        let now = chrono::Utc::now();
-        let may_linger_until = self
-            .opt
-            .lingering_time
-            .map(|lingering_time| {
-                chrono::Duration::from_std(lingering_time)
-                    .with_context(|_| DurationOutOfRangeSnafu {
-                        input: lingering_time,
-                    })
-                    .map(|t| now - t)
-            })
-            .transpose()?;
-
-        let unknown_file_may_linger_until = now
-            - chrono::Duration::from_std(self.opt.unknown_file_lingering_time).with_context(
-                |_| DurationOutOfRangeSnafu {
-                    input: self.opt.unknown_file_lingering_time,
-                },
-            )?;
-
-        // files that may linger, which means they are not in use but may still be kept for a while
-        let threshold =
-            may_linger_until.map(|until| Timestamp::new_millisecond(until.timestamp_millis()));
-        // TODO(discord9): if region is already closed, maybe handle threshold differently?
-        // is consider all files to be recently removed acceptable?
-        let mut recently_removed_files = recently_removed_files;
-        let may_linger_files = match threshold {
-            Some(threshold) => recently_removed_files.split_off(&threshold),
-            None => BTreeMap::new(),
-        };
-        debug!("may_linger_files: {:?}", may_linger_files);
-
-        let all_may_linger_files = may_linger_files.values().flatten().collect::<HashSet<_>>();
-
-        // known files(tracked in removed files field) that are eligible for removal
-        // (passed lingering time)
-        let eligible_for_removal = recently_removed_files
-            .values()
-            .flatten()
-            .collect::<HashSet<_>>();
-
-        // When full_file_listing is false, skip expensive list operations and only delete
-        // files that are tracked in recently_removed_files
-        if !self.full_file_listing {
-            // Only delete files that:
-            // 1. Are in recently_removed_files (tracked in manifest)
-            // 2. Are not in use(in manifest or tmp ref)
-            // 3. Have passed the lingering time
-            let files_to_delete: Vec<RemovedFile> = eligible_for_removal
-                .iter()
-                .filter(|file_id| {
-                    let in_use = match file_id {
-                        RemovedFile::File(file_id, index_version) => {
-                            in_manifest.get(file_id) == Some(index_version)
-                                || in_tmp_ref.contains(&(*file_id, *index_version))
-                        }
-                        RemovedFile::Index(file_id, index_version) => {
-                            in_manifest.get(file_id) == Some(&Some(*index_version))
-                                || in_tmp_ref.contains(&(*file_id, Some(*index_version)))
-                        }
-                    };
-                    !in_use
-                })
-                .map(|&f| f.clone())
-                .collect();
-
-            info!(
-                "gc: fast mode (no full listing) for region {}, found {} files to delete from manifest",
-                region_id,
-                files_to_delete.len()
-            );
-
-            return Ok(files_to_delete);
-        }
-
-        // Full file listing mode: get the full list of files from object store
-
-        // Step 3: Filter files to determine which ones can be deleted
-        let all_unused_files_ready_for_delete = self.filter_deletable_files(
+        list_to_be_deleted_files_impl(
+            &self.opt,
+            self.full_file_listing,
+            region_id,
             is_region_dropped,
-            all_entries,
             in_manifest,
             in_tmp_ref,
-            &all_may_linger_files,
-            &eligible_for_removal,
-            unknown_file_may_linger_until,
+            recently_removed_files,
+            all_entries,
+        )
+        .await
+    }
+}
+
+/// Determine which entries should be deleted based on their presence in the manifest,
+/// temporary references, and recently removed files.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn filter_deletable_files(
+    is_region_dropped: bool,
+    entries: Vec<Entry>,
+    in_manifest: &HashMap<FileId, Option<IndexVersion>>,
+    in_tmp_ref: &HashSet<(FileId, Option<IndexVersion>)>,
+    may_linger_files: &HashSet<&RemovedFile>,
+    eligible_for_delete: &HashSet<&RemovedFile>,
+    unknown_file_may_linger_until: chrono::DateTime<chrono::Utc>,
+) -> Vec<RemovedFile> {
+    let mut ready_for_delete = vec![];
+    // all group by file id for easier checking
+    let in_tmp_ref: HashMap<FileId, HashSet<IndexVersion>> =
+        in_tmp_ref
+            .iter()
+            .fold(HashMap::new(), |mut acc, (file, version)| {
+                let indices = acc.entry(*file).or_default();
+                if let Some(version) = version {
+                    indices.insert(*version);
+                }
+                acc
+            });
+
+    let may_linger_files: HashMap<FileId, HashSet<&RemovedFile>> =
+        may_linger_files
+            .iter()
+            .fold(HashMap::new(), |mut acc, file| {
+                let indices = acc.entry(file.file_id()).or_default();
+                indices.insert(file);
+                acc
+            });
+
+    let eligible_for_delete: HashMap<FileId, HashSet<&RemovedFile>> = eligible_for_delete
+        .iter()
+        .fold(HashMap::new(), |mut acc, file| {
+            let indices = acc.entry(file.file_id()).or_default();
+            indices.insert(file);
+            acc
+        });
+
+    for entry in entries {
+        let (file_id, file_type) = match location::parse_file_id_type_from_path(entry.name()) {
+            Ok((file_id, file_type)) => (file_id, file_type),
+            Err(err) => {
+                error!(err; "Failed to parse file id from path: {}", entry.name());
+                // if we can't parse the file id, it means it's not a sst or index file
+                // shouldn't delete it because we don't know what it is
+                GC_SKIPPED_UNPARSABLE_FILES.inc();
+                continue;
+            }
+        };
+
+        let should_delete = match file_type {
+            FileType::Parquet => {
+                let is_in_manifest = in_manifest.contains_key(&file_id);
+                let is_in_tmp_ref = in_tmp_ref.contains_key(&file_id);
+                let is_linger = may_linger_files.contains_key(&file_id);
+                let is_eligible_for_delete = eligible_for_delete.contains_key(&file_id);
+
+                should_delete_file(
+                    is_in_manifest,
+                    is_in_tmp_ref,
+                    is_linger,
+                    is_eligible_for_delete,
+                    is_region_dropped,
+                    &entry,
+                    unknown_file_may_linger_until,
+                )
+            }
+            FileType::Puffin(version) => {
+                // notice need to check both file id and version
+                let is_in_manifest = in_manifest
+                    .get(&file_id)
+                    .map(|opt_ver| *opt_ver == Some(version))
+                    .unwrap_or(false);
+                let is_in_tmp_ref = in_tmp_ref
+                    .get(&file_id)
+                    .map(|versions| versions.contains(&version))
+                    .unwrap_or(false);
+                let is_linger = may_linger_files
+                    .get(&file_id)
+                    .map(|files| files.contains(&&RemovedFile::Index(file_id, version)))
+                    .unwrap_or(false);
+                let is_eligible_for_delete = eligible_for_delete
+                    .get(&file_id)
+                    .map(|files| files.contains(&&RemovedFile::Index(file_id, version)))
+                    .unwrap_or(false);
+
+                should_delete_file(
+                    is_in_manifest,
+                    is_in_tmp_ref,
+                    is_linger,
+                    is_eligible_for_delete,
+                    is_region_dropped,
+                    &entry,
+                    unknown_file_may_linger_until,
+                )
+            }
+        };
+
+        if should_delete {
+            let removed_file = match file_type {
+                FileType::Parquet => {
+                    // notice this cause we don't track index version for parquet files
+                    // since entries comes from listing, we can't get index version from path
+                    RemovedFile::File(file_id, None)
+                }
+                FileType::Puffin(version) => {
+                    GC_ORPHANED_INDEX_FILES.inc();
+                    RemovedFile::Index(file_id, version)
+                }
+            };
+            ready_for_delete.push(removed_file);
+        }
+    }
+    ready_for_delete
+}
+
+// --- Public helpers for testing ---
+
+/// Pure implementation of `list_to_be_deleted_files` exposed for unit testing.
+/// This is the same logic as [`LocalGcWorker::list_to_be_deleted_files`] but
+/// takes configuration fields directly instead of `&self`.
+pub(crate) async fn list_to_be_deleted_files_impl(
+    opt: &GcConfig,
+    full_file_listing: bool,
+    region_id: RegionId,
+    is_region_dropped: bool,
+    in_manifest: &HashMap<FileId, Option<IndexVersion>>,
+    in_tmp_ref: &HashSet<(FileId, Option<IndexVersion>)>,
+    recently_removed_files: BTreeMap<Timestamp, HashSet<RemovedFile>>,
+    all_entries: Vec<Entry>,
+) -> Result<Vec<RemovedFile>> {
+    let now = chrono::Utc::now();
+    let may_linger_until = opt
+        .lingering_time
+        .map(|lingering_time| {
+            chrono::Duration::from_std(lingering_time)
+                .with_context(|_| DurationOutOfRangeSnafu {
+                    input: lingering_time,
+                })
+                .map(|t| now - t)
+        })
+        .transpose()?;
+
+    let unknown_file_may_linger_until = now
+        - chrono::Duration::from_std(opt.unknown_file_lingering_time).with_context(|_| {
+            DurationOutOfRangeSnafu {
+                input: opt.unknown_file_lingering_time,
+            }
+        })?;
+
+    // files that may linger, which means they are not in use but may still be kept for a while
+    let threshold =
+        may_linger_until.map(|until| Timestamp::new_millisecond(until.timestamp_millis()));
+    let mut recently_removed_files = recently_removed_files;
+    let may_linger_files = match threshold {
+        Some(threshold) => recently_removed_files.split_off(&threshold),
+        None => BTreeMap::new(),
+    };
+    debug!("may_linger_files: {:?}", may_linger_files);
+
+    let all_may_linger_files = may_linger_files.values().flatten().collect::<HashSet<_>>();
+
+    // known files(tracked in removed files field) that are eligible for removal
+    // (passed lingering time)
+    let eligible_for_removal = recently_removed_files
+        .values()
+        .flatten()
+        .collect::<HashSet<_>>();
+
+    // When full_file_listing is false, skip expensive list operations and only delete
+    // files that are tracked in recently_removed_files
+    if !full_file_listing {
+        let files_to_delete: Vec<RemovedFile> = eligible_for_removal
+            .iter()
+            .filter(|file_id| {
+                let in_use = match file_id {
+                    RemovedFile::File(file_id, index_version) => {
+                        in_manifest.get(file_id) == Some(index_version)
+                            || in_tmp_ref.contains(&(*file_id, *index_version))
+                    }
+                    RemovedFile::Index(file_id, index_version) => {
+                        in_manifest.get(file_id) == Some(&Some(*index_version))
+                            || in_tmp_ref.contains(&(*file_id, Some(*index_version)))
+                    }
+                };
+                !in_use
+            })
+            .map(|&f| f.clone())
+            .collect();
+
+        info!(
+            "gc: fast mode (no full listing) for region {}, found {} files to delete from manifest",
+            region_id,
+            files_to_delete.len()
         );
 
-        Ok(all_unused_files_ready_for_delete)
+        return Ok(files_to_delete);
     }
+
+    // Full file listing mode
+    let all_unused_files_ready_for_delete = filter_deletable_files(
+        is_region_dropped,
+        all_entries,
+        in_manifest,
+        in_tmp_ref,
+        &all_may_linger_files,
+        &eligible_for_removal,
+        unknown_file_may_linger_until,
+    );
+
+    Ok(all_unused_files_ready_for_delete)
 }
 
 /// Generate partition prefixes based on concurrency and

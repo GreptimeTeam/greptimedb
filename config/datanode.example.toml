@@ -680,11 +680,13 @@ enable = false
 ## If set to None, then unused files will be deleted immediately.
 lingering_time = "1m"
 
-## Lingering time before deleting unknown files(files with undetermine expel time).
-## expel time is the time when the file is considered as removed, as in removed from the manifest.
-## This should only occur rarely, as manifest keep tracks in `removed_files` field
-## unless something goes wrong.
-unknown_file_lingering_time = "1h"
+## Lingering time before deleting unknown files (files with undetermined expel time).
+## Only applies during full file listing GC.
+## For active/open regions, an unknown file is deleted only if its object last-modified time exceeds this TTL.
+## If the object store does not provide a last-modified timestamp, the file is conservatively kept.
+## For dropped regions, unknown files are deleted immediately.
+## The default of 1 day avoids accidentally deleting pre-manifest files from in-progress compaction or flush.
+unknown_file_lingering_time = "1d"
 
 [[region_engine]]
 ## Enable the file engine.
