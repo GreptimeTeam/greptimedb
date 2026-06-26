@@ -53,6 +53,7 @@ use crate::test_util::scheduler_util::SchedulerEnv;
 /// ```
 #[tokio::test]
 #[ignore]
+#[allow(clippy::print_stderr)]
 async fn bench_unordered_scan_empty_pruned_file_ranges() {
     let num_files: usize = std::env::var("MITO_EMPTY_PRUNE_FILES")
         .ok()
