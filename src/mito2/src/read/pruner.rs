@@ -403,12 +403,7 @@ impl Pruner {
         // `skip_file_range` may have already consumed all ranges for this file.
         {
             let mut entry = self.inner.file_entries[file_index].lock().unwrap();
-            if entry.builder.is_none() && entry.remaining_ranges > 0 {
-                reader_metrics.metadata_mem_size += arc_builder.memory_size() as isize;
-                reader_metrics.num_range_builders += 1;
-                entry.builder = Some(arc_builder.clone());
-                PRUNER_ACTIVE_BUILDERS.inc();
-            }
+            cache_builder_if_needed(&mut entry, &arc_builder, reader_metrics);
         }
 
         Ok(arc_builder)
@@ -488,11 +483,7 @@ impl Pruner {
                     // If remaining_ranges == 0, a concurrent `skip_file_range` (e.g. from a
                     // dynamic filter tightening via manifest-prune fast-skip) already consumed
                     // all ranges and may have cleared a previously cached builder.
-                    let should_cache = entry.remaining_ranges > 0;
-                    if should_cache {
-                        entry.builder = Some(arc_builder.clone());
-                        PRUNER_ACTIVE_BUILDERS.inc();
-                    }
+                    let did_cache = cache_builder_if_needed(&mut entry, &arc_builder, &mut metrics);
 
                     // Notify all waiters
                     for waiter in entry.waiters.drain(..) {
@@ -512,10 +503,10 @@ impl Pruner {
                     );
 
                     // Merge metrics if this is a foreground request, or if the builder
-                    // was cached (i.e. remaining_ranges > 0). Skip stale per-file metrics
+                    // was cached. Skip stale per-file metrics
                     // for background requests that completed after the file was already
                     // fully skipped.
-                    if (!is_background || should_cache)
+                    if (!is_background || did_cache)
                         && let Some(part_metrics) = &partition_metrics
                     {
                         let per_file_metrics = if part_metrics.explain_verbose() {
@@ -586,11 +577,27 @@ impl Pruner {
     }
 }
 
-/// Extracted caching guard used by the worker loop so it can be unit-tested
-/// directly without relying on async worker timing.
-#[cfg(test)]
+/// Returns true if a freshly pruned builder should be cached for this file.
 fn should_cache_builder(entry: &FileBuilderEntry) -> bool {
-    entry.remaining_ranges > 0
+    entry.builder.is_none() && entry.remaining_ranges > 0
+}
+
+/// Caches a freshly pruned builder if the file still has remaining ranges, and
+/// records the corresponding builder memory/count deltas for verbose metrics.
+fn cache_builder_if_needed(
+    entry: &mut FileBuilderEntry,
+    builder: &Arc<FileRangeBuilder>,
+    reader_metrics: &mut ReaderMetrics,
+) -> bool {
+    if should_cache_builder(entry) {
+        reader_metrics.metadata_mem_size += builder.memory_size() as isize;
+        reader_metrics.num_range_builders += 1;
+        entry.builder = Some(builder.clone());
+        PRUNER_ACTIVE_BUILDERS.inc();
+        true
+    } else {
+        false
+    }
 }
 
 #[cfg(test)]
@@ -672,6 +679,43 @@ mod tests {
             waiters: Vec::new(),
         };
         assert!(!should_cache_builder(&entry));
+    }
+
+    #[test]
+    fn should_not_cache_builder_when_already_cached() {
+        let entry = FileBuilderEntry {
+            builder: Some(Arc::new(FileRangeBuilder::default())),
+            remaining_ranges: 1,
+            waiters: Vec::new(),
+        };
+        assert!(!should_cache_builder(&entry));
+    }
+
+    #[test]
+    fn cache_builder_records_metrics() {
+        let mut entry = FileBuilderEntry {
+            builder: None,
+            remaining_ranges: 1,
+            waiters: Vec::new(),
+        };
+        let builder = Arc::new(FileRangeBuilder::default());
+        let mut reader_metrics = ReaderMetrics::default();
+
+        assert!(cache_builder_if_needed(
+            &mut entry,
+            &builder,
+            &mut reader_metrics
+        ));
+        assert!(entry.builder.is_some());
+        assert_eq!(
+            reader_metrics.metadata_mem_size,
+            builder.memory_size() as isize
+        );
+        assert_eq!(reader_metrics.num_range_builders, 1);
+
+        if entry.builder.take().is_some() {
+            PRUNER_ACTIVE_BUILDERS.dec();
+        }
     }
 
     #[tokio::test]
