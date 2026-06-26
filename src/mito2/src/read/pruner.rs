@@ -515,24 +515,24 @@ impl Pruner {
                     // was cached (i.e. remaining_ranges > 0). Skip stale per-file metrics
                     // for background requests that completed after the file was already
                     // fully skipped.
-                    if !is_background || should_cache {
-                        if let Some(part_metrics) = &partition_metrics {
-                            let per_file_metrics = if part_metrics.explain_verbose() {
-                                let file_id = file.file_id();
-                                let mut map = HashMap::new();
-                                map.insert(
-                                    file_id,
-                                    FileScanMetrics {
-                                        build_part_cost: metrics.build_cost,
-                                        ..Default::default()
-                                    },
-                                );
-                                Some(map)
-                            } else {
-                                None
-                            };
-                            part_metrics.merge_reader_metrics(&metrics, per_file_metrics.as_ref());
-                        }
+                    if (!is_background || should_cache)
+                        && let Some(part_metrics) = &partition_metrics
+                    {
+                        let per_file_metrics = if part_metrics.explain_verbose() {
+                            let file_id = file.file_id();
+                            let mut map = HashMap::new();
+                            map.insert(
+                                file_id,
+                                FileScanMetrics {
+                                    build_part_cost: metrics.build_cost,
+                                    ..Default::default()
+                                },
+                            );
+                            Some(map)
+                        } else {
+                            None
+                        };
+                        part_metrics.merge_reader_metrics(&metrics, per_file_metrics.as_ref());
                     }
                 }
                 Err(e) => {
