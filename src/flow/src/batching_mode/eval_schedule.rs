@@ -92,7 +92,7 @@ impl EvalSchedule {
                 start_secs: 0,
                 missed_tick_policy: MissedTickPolicy::BoundedCatchUp,
                 max_runs: DEFAULT_MAX_RUNS,
-                max_lag_secs: std::cmp::max(MIN_LAG_SECONDS, 3 * interval_secs),
+                max_lag_secs: std::cmp::max(MIN_LAG_SECONDS, 3_i64.saturating_mul(interval_secs)),
             },
         }))
     }
@@ -201,8 +201,12 @@ pub fn ceil_to_boundary(time: i64, anchor: i64, interval: i64) -> i64 {
         return anchor;
     }
 
-    let k = (time - anchor + interval - 1) / interval;
-    anchor.saturating_add(k.saturating_mul(interval))
+    let diff = i128::from(time) - i128::from(anchor);
+    let interval = i128::from(interval);
+    let k = (diff + interval - 1) / interval;
+    let boundary = i128::from(anchor) + k * interval;
+
+    boundary.clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64
 }
 
 #[cfg(test)]
@@ -243,6 +247,8 @@ mod test {
         assert_eq!(ceil_to_boundary(60, 0, 60), 60);
         assert_eq!(ceil_to_boundary(101, 100, 60), 160);
         assert_eq!(ceil_to_boundary(50, 0, 0), 50);
+        assert_eq!(ceil_to_boundary(i64::MAX, 0, 60), i64::MAX);
+        assert_eq!(ceil_to_boundary(i64::MAX - 1, i64::MIN, 60), i64::MAX);
     }
 
     #[test]

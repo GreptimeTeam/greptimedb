@@ -1234,6 +1234,22 @@ impl BatchingTask {
     ) -> ExecuteOnceOutcome {
         let _execution_guard = self.execution_lock.lock().await;
 
+        struct QueryContextRestoreGuard {
+            state: Arc<RwLock<TaskState>>,
+            old_ctx: Option<QueryContextRef>,
+        }
+
+        impl Drop for QueryContextRestoreGuard {
+            fn drop(&mut self) {
+                let Some(old_ctx) = self.old_ctx.take() else {
+                    return;
+                };
+                if let Ok(mut state) = self.state.write() {
+                    state.query_ctx = old_ctx;
+                }
+            }
+        }
+
         // Clone the current QueryContext and add the scheduled runtime
         // extension, then swap it into the task state for this attempt.
         let old_ctx = {
@@ -1247,17 +1263,19 @@ impl BatchingTask {
             state.query_ctx = Arc::new(new_ctx);
             old
         };
+        let restore_guard = QueryContextRestoreGuard {
+            state: self.state.clone(),
+            old_ctx: Some(old_ctx),
+        };
 
         let outcome = self
             .execute_once_unlocked(engine, frontend_client, None)
             .await;
 
-        // Restore the original QueryContext so no stale scheduled runtime
-        // leaks into future manual flushes.
-        {
-            let mut state = self.state.write().unwrap();
-            state.query_ctx = old_ctx;
-        }
+        // Restore while still holding `execution_lock` so no future manual
+        // flush can observe the temporary scheduled runtime. The guard also
+        // restores during unwind/cancellation.
+        drop(restore_guard);
 
         outcome
     }
