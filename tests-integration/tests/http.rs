@@ -2482,7 +2482,7 @@ pub async fn test_prometheus_remote_special_labels(store_type: StorageType) {
         expected,
     )
     .await;
-    let expected = "[[\"idc3_lo_table\",\"CREATE TABLE IF NOT EXISTS \\\"idc3_lo_table\\\" (\\n  \\\"greptime_timestamp\\\" TIMESTAMP(3) NOT NULL,\\n  \\\"greptime_value\\\" DOUBLE NULL,\\n  TIME INDEX (\\\"greptime_timestamp\\\")\\n)\\n\\nENGINE=metric\\nWITH(\\n  \'comment\' = 'Created on insertion',\\n  'greptime.semantic.metric.metadata_quality' = 'inferred',\\n  'greptime.semantic.signal_type' = 'metric',\\n  'greptime.semantic.source' = 'prometheus',\\n  on_physical_table = 'f1'\\n)\"]]";
+    let expected = "[[\"idc3_lo_table\",\"CREATE TABLE IF NOT EXISTS \\\"idc3_lo_table\\\" (\\n  \\\"greptime_timestamp\\\" TIMESTAMP(3) NOT NULL,\\n  \\\"greptime_value\\\" DOUBLE NULL,\\n  TIME INDEX (\\\"greptime_timestamp\\\")\\n)\\n\\nENGINE=metric\\nWITH(\\n  \'comment\' = 'Created on insertion',\\n  'greptime.semantic.metric.metadata_quality' = 'inferred',\\n  'greptime.semantic.signal_type' = 'metric',\\n  'greptime.semantic.source' = 'prometheus',\\n  'greptime.semantic.source_version' = '1.0',\\n  on_physical_table = 'f1'\\n)\"]]";
     validate_data(
         "test_prometheus_remote_special_labels_idc3_show_create_table",
         &client,
@@ -2508,7 +2508,7 @@ pub async fn test_prometheus_remote_special_labels(store_type: StorageType) {
         expected,
     )
     .await;
-    let expected = "[[\"idc4_local_table\",\"CREATE TABLE IF NOT EXISTS \\\"idc4_local_table\\\" (\\n  \\\"greptime_timestamp\\\" TIMESTAMP(3) NOT NULL,\\n  \\\"greptime_value\\\" DOUBLE NULL,\\n  TIME INDEX (\\\"greptime_timestamp\\\")\\n)\\n\\nENGINE=metric\\nWITH(\\n  \'comment\' = 'Created on insertion',\\n  'greptime.semantic.metric.metadata_quality' = 'inferred',\\n  'greptime.semantic.signal_type' = 'metric',\\n  'greptime.semantic.source' = 'prometheus',\\n  on_physical_table = 'f2'\\n)\"]]";
+    let expected = "[[\"idc4_local_table\",\"CREATE TABLE IF NOT EXISTS \\\"idc4_local_table\\\" (\\n  \\\"greptime_timestamp\\\" TIMESTAMP(3) NOT NULL,\\n  \\\"greptime_value\\\" DOUBLE NULL,\\n  TIME INDEX (\\\"greptime_timestamp\\\")\\n)\\n\\nENGINE=metric\\nWITH(\\n  \'comment\' = 'Created on insertion',\\n  'greptime.semantic.metric.metadata_quality' = 'inferred',\\n  'greptime.semantic.signal_type' = 'metric',\\n  'greptime.semantic.source' = 'prometheus',\\n  'greptime.semantic.source_version' = '1.0',\\n  on_physical_table = 'f2'\\n)\"]]";
     validate_data(
         "test_prometheus_remote_special_labels_idc4_show_create_table",
         &client,
