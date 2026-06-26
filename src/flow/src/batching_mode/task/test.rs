@@ -29,8 +29,8 @@ use datatypes::schema::ColumnSchema;
 use datatypes::vectors::{TimestampMillisecondVector, UInt32Vector, VectorRef};
 use pretty_assertions::assert_eq;
 use query::options::{
-    FLOW_INCREMENTAL_AFTER_SEQS, FLOW_INCREMENTAL_MODE_MEMTABLE_ONLY,
-    FLOW_SCHEDULED_RUNTIME_MILLIS, QueryOptions,
+    FLOW_INCREMENTAL_AFTER_SEQS, FLOW_INCREMENTAL_MODE_MEMTABLE_ONLY, FLOW_SCHEDULED_TIME_MILLIS,
+    QueryOptions,
 };
 use session::context::QueryContext;
 use snafu::ResultExt;
@@ -372,7 +372,7 @@ async fn assert_unscoped_failure_restore(
     );
 }
 
-// --- scheduled-runtime QueryContext restore regression tests ---
+// --- scheduled-time QueryContext restore regression tests ---
 
 /// Register a sink table whose schema matches the output of a `date_bin`
 /// time-window-expression query (columns: `number` uint32, `time_window` timestamp).
@@ -403,11 +403,11 @@ fn register_twe_sink(query_engine: &QueryEngineRef, table_name: &str, table_id: 
     memory_catalog.register_table_sync(request).unwrap();
 }
 
-/// After a scheduled-runtime attempt fails (missing sink), the
-/// `FLOW_SCHEDULED_RUNTIME_MILLIS` extension must not leak into
+/// After a scheduled-time attempt fails (missing sink), the
+/// `FLOW_SCHEDULED_TIME_MILLIS` extension must not leak into
 /// `TaskState.query_ctx` or `frontend_extensions()`.
 #[tokio::test]
-async fn test_scheduled_runtime_ctx_restored_on_error() {
+async fn test_scheduled_time_ctx_restored_on_error() {
     let TestTaskParts {
         task, query_engine, ..
     } = new_test_task_engine_and_plan_with_query(
@@ -419,24 +419,28 @@ async fn test_scheduled_runtime_ctx_restored_on_error() {
         FrontendClient::from_empty_grpc_handler(QueryOptions::default());
     let frontend_client = Arc::new(frontend_client);
 
-    // Before: no scheduled runtime extension
+    // Before: no scheduled time extension
     assert_eq!(
         task.state
             .read()
             .unwrap()
             .query_ctx
-            .extension(FLOW_SCHEDULED_RUNTIME_MILLIS),
+            .extension(FLOW_SCHEDULED_TIME_MILLIS),
         None
     );
     assert!(
         !task
             .frontend_extensions()
-            .contains_key(FLOW_SCHEDULED_RUNTIME_MILLIS)
+            .contains_key(FLOW_SCHEDULED_TIME_MILLIS)
     );
 
-    let runtime_secs = 1700000000i64;
+    let scheduled_time_secs = 1700000000i64;
     let outcome = task
-        .execute_once_serialized_at_scheduled_runtime(&query_engine, &frontend_client, runtime_secs)
+        .execute_once_serialized_at_scheduled_time(
+            &query_engine,
+            &frontend_client,
+            scheduled_time_secs,
+        )
         .await;
 
     // Missing sink table → gen_insert_plan_unlocked should fail.
@@ -452,23 +456,23 @@ async fn test_scheduled_runtime_ctx_restored_on_error() {
             .read()
             .unwrap()
             .query_ctx
-            .extension(FLOW_SCHEDULED_RUNTIME_MILLIS),
+            .extension(FLOW_SCHEDULED_TIME_MILLIS),
         None,
-        "FLOW_SCHEDULED_RUNTIME_MILLIS leaked into query_ctx after error"
+        "FLOW_SCHEDULED_TIME_MILLIS leaked into query_ctx after error"
     );
     assert!(
         !task
             .frontend_extensions()
-            .contains_key(FLOW_SCHEDULED_RUNTIME_MILLIS),
-        "FLOW_SCHEDULED_RUNTIME_MILLIS leaked into frontend_extensions after error"
+            .contains_key(FLOW_SCHEDULED_TIME_MILLIS),
+        "FLOW_SCHEDULED_TIME_MILLIS leaked into frontend_extensions after error"
     );
 }
 
-/// After a scheduled-runtime attempt returns `Ok(None)` (no dirty windows),
-/// the `FLOW_SCHEDULED_RUNTIME_MILLIS` extension must not leak into
+/// After a scheduled-time attempt returns `Ok(None)` (no dirty windows),
+/// the `FLOW_SCHEDULED_TIME_MILLIS` extension must not leak into
 /// `TaskState.query_ctx`.
 #[tokio::test]
-async fn test_scheduled_runtime_ctx_restored_on_no_dirty_windows() {
+async fn test_scheduled_time_ctx_restored_on_no_dirty_windows() {
     let query_engine = create_test_query_engine();
     let ctx = QueryContext::arc();
     let plan_query = "SELECT number, date_bin(INTERVAL '5 second', ts) AS time_window \
@@ -528,19 +532,23 @@ async fn test_scheduled_runtime_ctx_restored_on_no_dirty_windows() {
         FrontendClient::from_empty_grpc_handler(QueryOptions::default());
     let frontend_client = Arc::new(frontend_client);
 
-    // Before: no scheduled runtime extension
+    // Before: no scheduled time extension
     assert_eq!(
         task.state
             .read()
             .unwrap()
             .query_ctx
-            .extension(FLOW_SCHEDULED_RUNTIME_MILLIS),
+            .extension(FLOW_SCHEDULED_TIME_MILLIS),
         None
     );
 
-    let runtime_secs = 1700000000i64;
+    let scheduled_time_secs = 1700000000i64;
     let outcome = task
-        .execute_once_serialized_at_scheduled_runtime(&query_engine, &frontend_client, runtime_secs)
+        .execute_once_serialized_at_scheduled_time(
+            &query_engine,
+            &frontend_client,
+            scheduled_time_secs,
+        )
         .await;
 
     // No dirty windows → scoped repair returns None → outcome is Ok(None).
@@ -556,9 +564,9 @@ async fn test_scheduled_runtime_ctx_restored_on_no_dirty_windows() {
             .read()
             .unwrap()
             .query_ctx
-            .extension(FLOW_SCHEDULED_RUNTIME_MILLIS),
+            .extension(FLOW_SCHEDULED_TIME_MILLIS),
         None,
-        "FLOW_SCHEDULED_RUNTIME_MILLIS leaked into query_ctx after Ok(None)"
+        "FLOW_SCHEDULED_TIME_MILLIS leaked into query_ctx after Ok(None)"
     );
 }
 
@@ -2112,7 +2120,7 @@ async fn test_unscoped_failure_restores_consumed_dirty_signal() {
 }
 
 #[tokio::test]
-async fn test_unscoped_runtime_invariant_error_preserves_dirty_signal() {
+async fn test_unscoped_execution_invariant_error_preserves_dirty_signal() {
     let TestTaskParts {
         task, query_engine, ..
     } = new_test_task_engine_and_plan_with_query(
@@ -2132,7 +2140,7 @@ async fn test_unscoped_runtime_invariant_error_preserves_dirty_signal() {
 
     let err = match result {
         Err(err) => err,
-        Ok(_) => panic!("runtime should reject SQL without TWE or EVAL INTERVAL"),
+        Ok(_) => panic!("execution should reject SQL without TWE or EVAL INTERVAL"),
     };
     assert!(matches!(err, Error::Unexpected { .. }), "{err}");
     assert!(

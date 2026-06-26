@@ -87,14 +87,14 @@ impl DfLogicalPlanner {
     }
 
     /// Derive a [`SessionState`] whose [`ExecutionProps`] includes
-    /// `query_execution_start_time` if a scheduled runtime extension is present
+    /// `query_execution_start_time` if a scheduled time extension is present
     /// in the query context.
-    fn derive_session_state_with_scheduled_runtime(
+    fn derive_session_state_with_scheduled_time(
         &self,
         query_ctx: &QueryContextRef,
     ) -> Result<SessionState> {
         let extensions = query_ctx.extensions();
-        match crate::options::parse_scheduled_runtime_datetime(&extensions)? {
+        match crate::options::parse_scheduled_time_datetime(&extensions)? {
             Some(dt) => {
                 let execution_props = self
                     .session_state
@@ -204,7 +204,7 @@ impl DfLogicalPlanner {
             .fail()?;
         }
 
-        let scheduled_state = self.derive_session_state_with_scheduled_runtime(&query_ctx)?;
+        let scheduled_state = self.derive_session_state_with_scheduled_time(&query_ctx)?;
         let table_provider = DfTableSourceProvider::new(
             self.engine_state.catalog_manager().clone(),
             self.engine_state.disallow_cross_catalog_query(),
@@ -275,7 +275,7 @@ impl DfLogicalPlanner {
         normalize_ident: bool,
         query_ctx: QueryContextRef,
     ) -> Result<DfExpr> {
-        let scheduled_state = self.derive_session_state_with_scheduled_runtime(&query_ctx)?;
+        let scheduled_state = self.derive_session_state_with_scheduled_time(&query_ctx)?;
         let context_provider = DfContextProviderAdapter::try_new(
             self.engine_state.clone(),
             scheduled_state,
@@ -299,7 +299,7 @@ impl DfLogicalPlanner {
 
     #[tracing::instrument(skip_all)]
     async fn plan_pql(&self, stmt: &EvalStmt, query_ctx: QueryContextRef) -> Result<LogicalPlan> {
-        let scheduled_state = self.derive_session_state_with_scheduled_runtime(&query_ctx)?;
+        let scheduled_state = self.derive_session_state_with_scheduled_time(&query_ctx)?;
         let plan_decoder = Arc::new(DefaultPlanDecoder::new(
             scheduled_state.clone(),
             &query_ctx,

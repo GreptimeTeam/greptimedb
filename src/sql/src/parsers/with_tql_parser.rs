@@ -275,7 +275,7 @@ impl ParserContext<'_> {
         let tql_string = tql_string.trim();
 
         let mut parser_ctx = ParserContext::new(&GreptimeDbDialect {}, tql_string)?;
-        parser_ctx.scheduled_runtime = self.scheduled_runtime;
+        parser_ctx.scheduled_time = self.scheduled_time;
         let statement = parser_ctx.parse_tql(require_now_expr)?;
 
         match statement {

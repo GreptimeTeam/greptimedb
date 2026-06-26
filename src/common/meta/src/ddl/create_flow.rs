@@ -41,9 +41,7 @@ use crate::ddl::DdlContext;
 use crate::ddl::utils::{add_peer_context_if_needed, map_to_procedure_error};
 use crate::error::{self, Result, UnexpectedSnafu};
 use crate::instruction::{CacheIdent, CreateFlow, DropFlow};
-use crate::key::flow::flow_info::{
-    FlowInfoValue, FlowMissedTickPolicy, FlowScheduleConfig, FlowStatus,
-};
+use crate::key::flow::flow_info::{FlowInfoValue, FlowScheduleConfig, FlowStatus};
 use crate::key::flow::flow_route::FlowRouteValue;
 use crate::key::table_name::TableNameKey;
 use crate::key::{DeserializedValueWithBytes, FlowId, FlowPartitionId};
@@ -425,10 +423,6 @@ pub const DEFER_ON_MISSING_SOURCE_KEY: &str = "defer_on_missing_source";
 /// `FlowInfoValue.options`.
 pub const INTERNAL_EVAL_SCHEDULE_KEY: &str = "__greptime_internal_eval_schedule";
 
-const DEFAULT_SCHEDULE_ANCHOR_SECS: i64 = 0;
-const DEFAULT_SCHEDULE_MAX_RUNS: u32 = 3;
-const DEFAULT_SCHEDULE_MIN_LAG_SECS: i64 = 300;
-
 pub fn defer_on_missing_source(flow_task: &CreateFlowTask) -> Result<bool> {
     flow_task
         .flow_options
@@ -507,13 +501,6 @@ fn ceil_to_boundary(time: i64, anchor: i64, interval: i64) -> i64 {
     boundary.clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64
 }
 
-fn default_catchup_max_lag_secs(eval_interval_secs: i64) -> i64 {
-    std::cmp::max(
-        DEFAULT_SCHEDULE_MIN_LAG_SECS,
-        3_i64.saturating_mul(eval_interval_secs),
-    )
-}
-
 /// Returns the effective typed schedule config for flow metadata.
 ///
 /// New metadata should carry `FlowInfoValue.eval_schedule`. For older metadata
@@ -531,17 +518,16 @@ pub fn effective_eval_schedule_from_flow_info(
         return None;
     }
 
-    Some(FlowScheduleConfig {
-        anchor_secs: DEFAULT_SCHEDULE_ANCHOR_SECS,
-        start_secs: ceil_to_boundary(
-            flow_info.created_time.timestamp(),
-            DEFAULT_SCHEDULE_ANCHOR_SECS,
-            eval_interval_secs,
-        ),
-        missed_tick_policy: FlowMissedTickPolicy::BoundedCatchUp,
-        catchup_max_runs: DEFAULT_SCHEDULE_MAX_RUNS,
-        catchup_max_lag_secs: default_catchup_max_lag_secs(eval_interval_secs),
-    })
+    let start_secs = ceil_to_boundary(
+        flow_info.created_time.timestamp(),
+        FlowScheduleConfig::DEFAULT_ANCHOR_SECS,
+        eval_interval_secs,
+    );
+
+    Some(FlowScheduleConfig::default_with_start(
+        start_secs,
+        eval_interval_secs,
+    ))
 }
 
 /// Resolve `FlowScheduleConfig` into `task.eval_schedule`.
@@ -572,7 +558,7 @@ pub(crate) fn resolve_schedule_defaults_into_task(
         return;
     }
 
-    let anchor_secs: i64 = DEFAULT_SCHEDULE_ANCHOR_SECS;
+    let anchor_secs = FlowScheduleConfig::DEFAULT_ANCHOR_SECS;
 
     // For OR REPLACE: if interval+anchor unchanged, preserve the entire
     // existing typed config so start / policy / limits are stable.
@@ -594,17 +580,10 @@ pub(crate) fn resolve_schedule_defaults_into_task(
         // task.eval_schedule once so procedure retry does not recompute it.
         ceil_to_boundary(chrono::Utc::now().timestamp(), anchor_secs, eval_interval_secs);
 
-    let missed_tick_policy = FlowMissedTickPolicy::BoundedCatchUp;
-    let catchup_max_runs: u32 = DEFAULT_SCHEDULE_MAX_RUNS;
-    let catchup_max_lag_secs: i64 = default_catchup_max_lag_secs(eval_interval_secs);
-
-    task.eval_schedule = Some(FlowScheduleConfig {
-        anchor_secs,
+    task.eval_schedule = Some(FlowScheduleConfig::default_with_start(
         start_secs,
-        missed_tick_policy,
-        catchup_max_runs,
-        catchup_max_lag_secs,
-    });
+        eval_interval_secs,
+    ));
 }
 
 fn user_runtime_flow_options(options: &HashMap<String, String>) -> HashMap<String, String> {
@@ -774,6 +753,10 @@ impl From<&CreateFlowData> for (FlowInfoValue, Vec<(FlowPartitionId, FlowRouteVa
             create_time = prev_flow_value.get_inner_ref().created_time;
         }
 
+        // This conversion borrows the procedure data: the procedure keeps using
+        // `self.data` after metadata creation (for cache invalidation, retry and
+        // procedure dump/restore), while `FlowInfoValue` owns the persisted
+        // metadata. Cloning these owned fields is therefore intentional.
         let flow_info: FlowInfoValue = FlowInfoValue {
             source_table_ids: value.source_table_ids.clone(),
             all_source_table_names: value.task.source_table_names.clone(),
