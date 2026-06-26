@@ -1297,7 +1297,9 @@ impl CacheManagerBuilder {
 
 fn meta_cache_weight(k: &SstMetaKey, v: &Arc<CachedSstMeta>) -> u32 {
     // We ignore the size of `Arc`.
-    (k.estimated_size() + parquet_meta_size(&v.parquet_metadata) + v.region_metadata_weight) as u32
+    let size =
+        k.estimated_size() + parquet_meta_size(&v.parquet_metadata) + v.region_metadata_weight;
+    u32::try_from(size).unwrap_or(u32::MAX)
 }
 
 fn vector_cache_weight(_k: &(ConcreteDataType, Value), v: &VectorRef) -> u32 {
@@ -1882,6 +1884,19 @@ mod tests {
                 + parquet_meta_size(&cached.parquet_metadata)
                 + cached.region_metadata_weight
         );
+    }
+
+    #[test]
+    fn test_meta_cache_weight_saturates_on_overflow() {
+        let region_metadata = Arc::new(wide_region_metadata(1));
+        let metadata = sst_parquet_meta_with_region_metadata(region_metadata.clone());
+        let mut cached =
+            CachedSstMeta::try_new("test.parquet", Arc::unwrap_or_clone(metadata)).unwrap();
+        cached.region_metadata_weight = u32::MAX as usize + 1;
+        let cached = Arc::new(cached);
+        let key = SstMetaKey(region_metadata.region_id, FileId::random());
+
+        assert_eq!(u32::MAX, meta_cache_weight(&key, &cached));
     }
 
     #[test]
