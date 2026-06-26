@@ -14,119 +14,52 @@
 
 //! Cache size of different cache value.
 
-use std::mem;
-
-use parquet::basic::ColumnOrder;
-use parquet::file::metadata::{
-    FileMetaData, KeyValue, ParquetColumnIndex, ParquetMetaData, ParquetOffsetIndex,
-    RowGroupMetaData,
-};
-use parquet::file::page_index::column_index::ColumnIndexMetaData as Index;
-use parquet::file::page_index::offset_index::PageLocation;
-use parquet::schema::types::{ColumnDescriptor, SchemaDescriptor, Type};
+use parquet::file::metadata::ParquetMetaData;
 
 /// Returns estimated size of [ParquetMetaData].
 pub fn parquet_meta_size(meta: &ParquetMetaData) -> usize {
-    // struct size
-    let mut size = mem::size_of::<ParquetMetaData>();
-    // file_metadata
-    size += file_meta_heap_size(meta.file_metadata());
-    // row_groups
-    size += meta
-        .row_groups()
-        .iter()
-        .map(row_group_meta_heap_size)
-        .sum::<usize>();
-    // column_index
-    size += meta
-        .column_index()
-        .map(parquet_column_index_heap_size)
-        .unwrap_or(0);
-    // offset_index
-    size += meta
-        .offset_index()
-        .map(parquet_offset_index_heap_size)
-        .unwrap_or(0);
-
-    size
+    meta.memory_size()
 }
 
-/// Returns estimated size of [FileMetaData] allocated from heap.
-fn file_meta_heap_size(meta: &FileMetaData) -> usize {
-    // created_by
-    let mut size = meta.created_by().map(|s| s.len()).unwrap_or(0);
-    // key_value_metadata
-    size += meta
-        .key_value_metadata()
-        .map(|kvs| {
-            kvs.iter()
-                .map(|kv| {
-                    kv.key.len()
-                        + kv.value.as_ref().map(|v| v.len()).unwrap_or(0)
-                        + mem::size_of::<KeyValue>()
-                })
-                .sum()
-        })
-        .unwrap_or(0);
-    // schema_descr (It's a ptr so we also add size of SchemaDescriptor).
-    size += mem::size_of::<SchemaDescriptor>();
-    size += schema_descr_heap_size(meta.schema_descr());
-    // column_orders
-    size += meta
-        .column_orders()
-        .map(|orders| orders.len() * mem::size_of::<ColumnOrder>())
-        .unwrap_or(0);
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
 
-    size
-}
+    use parquet::basic::{Repetition, Type as PhysicalType};
+    use parquet::file::metadata::{ColumnIndexBuilder, FileMetaData, ParquetMetaDataBuilder};
+    use parquet::schema::types::{SchemaDescriptor, Type as SchemaType};
 
-/// Returns estimated size of [SchemaDescriptor] allocated from heap.
-fn schema_descr_heap_size(descr: &SchemaDescriptor) -> usize {
-    // schema
-    let mut size = mem::size_of::<Type>();
-    // leaves
-    size += descr
-        .columns()
-        .iter()
-        .map(|descr| mem::size_of::<ColumnDescriptor>() + column_descr_heap_size(descr))
-        .sum::<usize>();
-    // leaf_to_base
-    size += descr.num_columns() * mem::size_of::<usize>();
+    use super::*;
 
-    size
-}
+    #[test]
+    fn parquet_meta_size_counts_byte_array_column_index_buffers() {
+        let field = Arc::new(
+            SchemaType::primitive_type_builder("tag", PhysicalType::BYTE_ARRAY)
+                .with_repetition(Repetition::OPTIONAL)
+                .build()
+                .unwrap(),
+        );
+        let schema = Arc::new(
+            SchemaType::group_type_builder("schema")
+                .with_fields(vec![field])
+                .build()
+                .unwrap(),
+        );
+        let schema_descr = Arc::new(SchemaDescriptor::new(schema));
+        let file_metadata = FileMetaData::new(2, 3, None, None, schema_descr, None);
 
-/// Returns estimated size of [ColumnDescriptor] allocated from heap.
-fn column_descr_heap_size(descr: &ColumnDescriptor) -> usize {
-    descr.path().parts().iter().map(|s| s.len()).sum()
-}
+        let mut column_index = ColumnIndexBuilder::new(PhysicalType::BYTE_ARRAY);
+        for page in 0..3u8 {
+            column_index.append(false, vec![page; 4096], vec![page + 1; 4096], 0);
+        }
+        let metadata = ParquetMetaDataBuilder::new(file_metadata)
+            .set_column_index(Some(vec![vec![column_index.build().unwrap()]]))
+            .build();
 
-/// Returns estimated size of [ColumnDescriptor] allocated from heap.
-fn row_group_meta_heap_size(meta: &RowGroupMetaData) -> usize {
-    mem::size_of_val(meta.columns())
-}
-
-/// Returns estimated size of [ParquetColumnIndex] allocated from heap.
-fn parquet_column_index_heap_size(column_index: &ParquetColumnIndex) -> usize {
-    column_index
-        .iter()
-        .map(|row_group| row_group.len() * mem::size_of::<Index>() + mem::size_of_val(row_group))
-        .sum()
-}
-
-/// Returns estimated size of [ParquetOffsetIndex] allocated from heap.
-fn parquet_offset_index_heap_size(offset_index: &ParquetOffsetIndex) -> usize {
-    offset_index
-        .iter()
-        .map(|row_group| {
-            row_group
-                .iter()
-                .map(|column| {
-                    column.page_locations.len() * mem::size_of::<PageLocation>()
-                        + mem::size_of_val(column)
-                })
-                .sum::<usize>()
-                + mem::size_of_val(row_group)
-        })
-        .sum()
+        let min_max_bytes = 3 * 4096 * 2;
+        assert!(
+            parquet_meta_size(&metadata) >= min_max_bytes,
+            "metadata size should include the byte-array page-index min/max buffers"
+        );
+    }
 }
