@@ -46,6 +46,10 @@ jobs:
         with:
           persist-credentials: false
       - uses: korandoru/hawkeye@v5
+      - name: Check enterprise license header
+        uses: korandoru/hawkeye@v5
+        with:
+          config: licenserc-enterprise.toml
 
   check:
     if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
