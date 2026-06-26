@@ -97,7 +97,7 @@ fn parse_hec_time(value: &VrlValue) -> Option<DateTime<Utc>> {
 }
 
 /// `event` missing -> 12, `event` blank -> 13.
-/// present, non-null but unparseable `time` -> 6.
+/// present, non-null but unparsable `time` -> 6.
 fn validate_event(event: &VrlValue) -> Option<(u32, &'static str)> {
     let VrlValue::Object(obj) = event else {
         return None;
@@ -321,7 +321,7 @@ pub async fn handle_event(
     let mut tag_columns: HashMap<String, HashSet<String>> = HashMap::new();
     for event in events {
         // Reject the batch on an invalid event: missing/blank `event` (12/13) or an
-        // unparseable `time` (6).
+        // unparsable `time` (6).
         if let Some((code, text)) = validate_event(&event) {
             return hec_response(StatusCode::BAD_REQUEST, code, text);
         }
@@ -364,7 +364,7 @@ pub async fn handle_event(
         // identity path so a user pipeline's own key order is left untouched.
         query_ctx.set_extension(SPLUNK_PK_METADATA_ORDER_KEY, "true");
     }
-    // custom_time_index so timestamp doesn't get overriden by identity pipeline.
+    // custom_time_index so timestamp doesn't get overridden by identity pipeline.
     let custom_time_index = Some((format!("{};epoch;ns", greptime_timestamp()), false));
     let pipeline = match PipelineDefinition::from_name(&pipeline_name, None, custom_time_index) {
         Ok(pipeline) => pipeline,
@@ -656,7 +656,7 @@ mod tests {
         // non-object events aren't validated here (handled by `hec_event_to_map`).
         assert_eq!(check(json!("just a string")), None);
 
-        // present but unparseable `time` -> code 6 (number string / numeric are fine).
+        // present but unparsable `time` -> code 6 (number string / numeric are fine).
         let bad_time = Some((6, "invalid data format"));
         assert_eq!(
             check(json!({ "event": "x", "time": "not-a-time" })),
