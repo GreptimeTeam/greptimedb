@@ -48,6 +48,7 @@ mod tests {
     use common_query::request::INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY as COMMON_INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY;
     use session::context::{QueryContextBuilder, generate_remote_query_id};
     use session::hints::{
+        FLOW_SCHEDULED_RUNTIME_MILLIS_EXTENSION_KEY,
         INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY, REMOTE_QUERY_ID_EXTENSION_KEY,
     };
 
@@ -74,6 +75,10 @@ mod tests {
                     INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY.to_string(),
                     "spoofed-regs".to_string(),
                 ),
+                (
+                    FLOW_SCHEDULED_RUNTIME_MILLIS_EXTENSION_KEY.to_string(),
+                    "1700000000000".to_string(),
+                ),
                 ("ttl".to_string(), "7d".to_string()),
             ],
         );
@@ -85,6 +90,11 @@ mod tests {
         assert!(
             query_ctx
                 .extension(INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY)
+                .is_none()
+        );
+        assert!(
+            query_ctx
+                .extension(FLOW_SCHEDULED_RUNTIME_MILLIS_EXTENSION_KEY)
                 .is_none()
         );
         assert_eq!(query_ctx.extension("ttl"), Some("7d"));

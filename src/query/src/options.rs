@@ -18,6 +18,7 @@ use chrono::{DateTime, Utc};
 use common_base::memory_limit::MemoryLimit;
 use serde::{Deserialize, Serialize};
 use session::context::QueryContextRef;
+pub use session::hints::FLOW_SCHEDULED_RUNTIME_MILLIS_EXTENSION_KEY as FLOW_SCHEDULED_RUNTIME_MILLIS;
 use store_api::storage::RegionId;
 use table::metadata::TableId;
 
@@ -27,7 +28,6 @@ pub const FLOW_INCREMENTAL_AFTER_SEQS: &str = "flow.incremental_after_seqs";
 pub const FLOW_INCREMENTAL_MODE: &str = "flow.incremental_mode";
 pub const FLOW_RETURN_REGION_SEQ: &str = "flow.return_region_seq";
 pub const FLOW_SINK_TABLE_ID: &str = "flow.sink_table_id";
-pub const FLOW_SCHEDULED_RUNTIME_MILLIS: &str = "flow.scheduled_runtime_millis";
 /// Enable by default, set to false to explicitly disable.
 pub const QUERY_ENABLE_REMOTE_DYNAMIC_FILTER_PUSHDOWN: &str =
     "query.enable_remote_dynamic_filter_pushdown";
