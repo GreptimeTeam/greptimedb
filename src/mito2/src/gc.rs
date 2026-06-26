@@ -988,6 +988,7 @@ pub(crate) fn filter_deletable_files(
 /// Pure implementation of `list_to_be_deleted_files` exposed for unit testing.
 /// This is the same logic as [`LocalGcWorker::list_to_be_deleted_files`] but
 /// takes configuration fields directly instead of `&self`.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn list_to_be_deleted_files_impl(
     opt: &GcConfig,
     full_file_listing: bool,
