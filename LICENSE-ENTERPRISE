@@ -21,11 +21,12 @@ Copyright (c) 2023-2026 GrepTime Inc.
 With regard to the GreptimeDB Enterprise Software:
 
 This software and associated documentation files (the "Software") may only be
-used if you (and any entity that you represent) have agreed to, and are in
-compliance with, the applicable GreptimeDB Enterprise Terms, available at
-https://greptime.com/legal/enterprise-terms (the "Enterprise Terms"), or other
-agreement governing the use of the Software, as agreed by you and GrepTime, and
-otherwise have a valid GreptimeDB Enterprise License.
+used if you (and any entity that you represent) have entered into, and are in
+compliance with, a separate written commercial agreement with GrepTime Inc.
+governing the use of the Software (the "Enterprise Agreement"), and otherwise
+have a valid GreptimeDB Enterprise License. The terms of each Enterprise
+Agreement are negotiated and executed individually; to obtain one, contact
+GrepTime Inc. at https://greptime.com/contactus.
 
 Subject to the foregoing sentence, you are free to modify this Software and
 publish patches to the Software. You agree that GrepTime and/or its licensors
