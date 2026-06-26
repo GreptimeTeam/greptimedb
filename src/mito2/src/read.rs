@@ -37,6 +37,9 @@ pub mod series_scan;
 pub mod stream;
 pub(crate) mod unordered_scan;
 
+#[cfg(test)]
+mod bench_unordered_scan_empty;
+
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;

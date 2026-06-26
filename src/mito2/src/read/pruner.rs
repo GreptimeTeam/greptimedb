@@ -117,6 +117,11 @@ impl PartitionPruner {
         Ok(ranges)
     }
 
+    /// Skips a file range that was pruned before entering [`Pruner::build_file_ranges`].
+    pub fn skip_file_range(&self, index: RowGroupIndex, reader_metrics: &mut ReaderMetrics) {
+        self.pruner.skip_file_range(index, reader_metrics);
+    }
+
     /// Pre-fetches upcoming files starting from the given position.
     fn prefetch_upcoming_files(&self, current_pos: usize, partition_metrics: &PartitionMetrics) {
         let start = current_pos + 1;
@@ -275,6 +280,16 @@ impl Pruner {
         self.decrement_and_maybe_clear(file_index, reader_metrics);
 
         Ok(ranges)
+    }
+
+    /// Skips a file range that has been pruned before entering the file pruner.
+    ///
+    /// This keeps the pruner's per-file reference counts balanced with
+    /// `add_partition_ranges()`. It may also clear a cached builder when this was the
+    /// last remaining range for the file.
+    pub fn skip_file_range(&self, index: RowGroupIndex, reader_metrics: &mut ReaderMetrics) {
+        let file_index = index.index - self.inner.stream_ctx.input.num_memtables();
+        self.decrement_and_maybe_clear(file_index, reader_metrics);
     }
 
     /// Gets or creates the FileRangeBuilder for a file.

@@ -1095,6 +1095,31 @@ impl ScanInput {
         })
     }
 
+    /// Checks whether a file can be definitively pruned using only its manifest-level
+    /// time range and the current predicate, without reading any parquet metadata.
+    ///
+    /// Returns `true` if [PruningStatistics] proves the file cannot contain matching rows.
+    #[inline]
+    pub(crate) fn can_manifest_prune_file(&self, file: &FileHandle) -> bool {
+        let predicate = self.predicate_for_file(file);
+        self.manifest_prunes_file(file, predicate.as_ref())
+    }
+
+    fn manifest_prunes_file(&self, file: &FileHandle, predicate: Option<&Predicate>) -> bool {
+        if let Some(pred) = predicate
+            && !pred.is_empty()
+            && let Some(file_level_stats) = self.try_file_level_pruning_stats(file)
+        {
+            let pruning_results = pred.prune_with_stats(
+                &file_level_stats,
+                self.mapper.metadata().schema.arrow_schema(),
+            );
+            pruning_results.first() == Some(&false)
+        } else {
+            false
+        }
+    }
+
     /// Prunes a file to scan and returns the builder to build readers.
     #[tracing::instrument(
         skip_all,
@@ -1114,18 +1139,9 @@ impl ScanInput {
         // Early file-level pruning using manifest time range before any parquet metadata access.
         // This avoids I/O for files that definitely can't match the current predicate snapshot,
         // especially after TopK dynamic filters have established a timestamp threshold.
-        if let Some(ref pred) = predicate
-            && !pred.is_empty()
-            && let Some(file_level_stats) = self.try_file_level_pruning_stats(file)
-        {
-            let pruning_results = pred.prune_with_stats(
-                &file_level_stats,
-                self.mapper.metadata().schema.arrow_schema(),
-            );
-            if pruning_results.first() == Some(&false) {
-                reader_metrics.filter_metrics.files_time_range_pruned += 1;
-                return Ok(FileRangeBuilder::default());
-            }
+        if self.manifest_prunes_file(file, predicate.as_ref()) {
+            reader_metrics.filter_metrics.files_time_range_pruned += 1;
+            return Ok(FileRangeBuilder::default());
         }
 
         let may_build_selective_row_selection = predicate.is_some();
@@ -1955,9 +1971,11 @@ mod tests {
     use std::sync::Arc;
 
     use common_time::timestamp::{TimeUnit, Timestamp};
-    use datafusion::physical_plan::expressions::lit as physical_lit;
+    use datafusion::physical_plan::expressions::{
+        binary as physical_binary, col as physical_col, lit as physical_lit,
+    };
     use datafusion_common::ScalarValue;
-    use datafusion_expr::{col, lit};
+    use datafusion_expr::{Operator, col, lit};
     use datatypes::arrow::datatypes::{
         DataType as ArrowDataType, Field, Schema as ArrowSchema, TimeUnit as ArrowTimeUnit,
     };
@@ -2417,6 +2435,39 @@ mod tests {
         let mut ranges = SmallVec::new();
         builder.build_ranges(-1, &mut ranges);
         assert!(ranges.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_manifest_pruning_observes_dynamic_filter_update() {
+        let metadata = Arc::new(metadata_with_primary_key(vec![0, 1], false));
+        let mapper = FlatProjectionMapper::new(&metadata, [0, 2, 3]).unwrap();
+        let predicate_group = PredicateGroup::new(metadata.as_ref(), &[]).unwrap();
+        let arrow_schema = metadata.schema.arrow_schema();
+        let ts_expr = physical_col("ts", arrow_schema.as_ref()).unwrap();
+        let dyn_filter = Arc::new(DynamicFilterPhysicalExpr::new(
+            vec![ts_expr.clone()],
+            physical_lit(true),
+        ));
+        predicate_group.add_dyn_filters(vec![dyn_filter.clone()]);
+        let input = ScanInput::new(SchedulerEnv::new().await.access_layer.clone(), mapper)
+            .with_predicate(predicate_group);
+        let file = file_handle_with_time_range(
+            Timestamp::new_millisecond(0),
+            Timestamp::new_millisecond(1000),
+        );
+
+        assert!(!input.can_manifest_prune_file(&file));
+
+        let updated = physical_binary(
+            ts_expr,
+            Operator::Gt,
+            physical_lit(ScalarValue::TimestampMillisecond(Some(1000), None)),
+            arrow_schema.as_ref(),
+        )
+        .unwrap();
+        dyn_filter.update(updated).unwrap();
+
+        assert!(input.can_manifest_prune_file(&file));
     }
 
     #[tokio::test]
