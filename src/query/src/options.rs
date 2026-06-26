@@ -18,6 +18,13 @@ use chrono::{DateTime, Utc};
 use common_base::memory_limit::MemoryLimit;
 use serde::{Deserialize, Serialize};
 use session::context::QueryContextRef;
+/// Internal Flow scheduler binding for the logical runtime of one scheduled
+/// attempt. Query planning, SQL/TQL parsing, range-select rewrite and
+/// DataFusion execution read this extension so `now()` is stable for the whole
+/// attempt.
+///
+/// This key is reserved in `session::hints`; external HTTP/gRPC hints must not
+/// be allowed to set it.
 pub use session::hints::FLOW_SCHEDULED_RUNTIME_MILLIS_EXTENSION_KEY as FLOW_SCHEDULED_RUNTIME_MILLIS;
 use store_api::storage::RegionId;
 use table::metadata::TableId;

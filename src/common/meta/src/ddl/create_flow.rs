@@ -495,13 +495,16 @@ fn ceil_to_boundary(time: i64, anchor: i64, interval: i64) -> i64 {
     if interval <= 0 {
         return time;
     }
-    let diff = time - anchor;
-    if diff <= 0 {
+    if time <= anchor {
         return anchor;
     }
-    // ceil division: (diff + interval - 1) / interval
+
+    let diff = i128::from(time) - i128::from(anchor);
+    let interval = i128::from(interval);
     let k = (diff + interval - 1) / interval;
-    anchor + k * interval
+    let boundary = i128::from(anchor) + k * interval;
+
+    boundary.clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64
 }
 
 fn default_catchup_max_lag_secs(eval_interval_secs: i64) -> i64 {
