@@ -12,13 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 
 #[cfg(test)]
-use api::greptime_proto::io::prometheus::write::v2::{
-    Exemplar, Histogram, Metadata, Sample, metadata,
-};
-use api::greptime_proto::io::prometheus::write::v2::{Request, TimeSeries};
+use api::greptime_proto::io::prometheus::write::v2::{Exemplar, Histogram, Metadata, metadata};
+use api::greptime_proto::io::prometheus::write::v2::{Request, Sample, TimeSeries};
 use api::v1::{RowInsertRequest, Rows, Value};
 use bytes::Bytes;
 use common_grpc::precision::Precision;
@@ -61,9 +60,13 @@ pub(crate) trait RemoteWriteV2RequestExt {
 impl RemoteWriteV2RequestExt for Request {
     fn into_context_req(self) -> Result<ContextReq> {
         let _timer = crate::metrics::METRIC_HTTP_PROM_STORE_CONVERT_ELAPSED.start_timer();
+        let Request {
+            symbols,
+            timeseries,
+        } = self;
 
         ensure!(
-            self.symbols.first().map(|s| s.as_str()) == Some(""),
+            symbols.first().map(|s| s.as_str()) == Some(""),
             error::InvalidPromRemoteRequestSnafu {
                 msg: "remote write v2 symbols must start with an empty string".to_string(),
             }
@@ -71,37 +74,65 @@ impl RemoteWriteV2RequestExt for Request {
 
         let mut tables = HashMap::<PromCtx, HashMap<String, TableData>>::new();
 
-        for series in &self.timeseries {
+        for series in timeseries {
             // Native histograms and exemplars are intentionally ignored for now.
             // They will be converted into Greptime rows once their ingestion path is implemented.
-            if series.samples.is_empty() {
+            let sample_count = series.samples.len();
+            if sample_count == 0 {
                 continue;
             }
 
-            let (prom_ctx, table_name, tags) = resolve_series_labels(&self.symbols, series)?;
-            let table_data = tables
-                .entry(prom_ctx)
-                .or_default()
-                .entry(table_name)
-                .or_insert_with(|| TableData::new(tags.len() + 2, series.samples.len()));
+            let (prom_ctx, table_name, tags) = resolve_series_labels(&symbols, &series)?;
+            let table_data = match tables.entry(prom_ctx).or_default().entry(table_name) {
+                Entry::Occupied(entry) => {
+                    let table_data = entry.into_mut();
+                    table_data.reserve_rows(sample_count);
+                    table_data
+                }
+                Entry::Vacant(entry) => entry.insert(TableData::new(tags.len() + 2, sample_count)),
+            };
 
-            for sample in &series.samples {
-                let mut row = table_data.alloc_one_row();
-                row_writer::write_ts_to_millis(
-                    table_data,
-                    greptime_timestamp(),
-                    Some(sample.timestamp),
-                    Precision::Millisecond,
-                    &mut row,
-                )?;
-                row_writer::write_f64(table_data, greptime_value(), sample.value, &mut row)?;
-                row_writer::write_tags(table_data, tags.iter().cloned(), &mut row)?;
-                table_data.add_row(row);
-            }
+            write_samples(table_data, series.samples, tags)?;
         }
 
         Ok(into_context_req(tables))
     }
+}
+
+fn write_samples(
+    table_data: &mut TableData,
+    mut samples: Vec<Sample>,
+    tags: PromTags,
+) -> Result<()> {
+    let Some(last_sample) = samples.pop() else {
+        return Ok(());
+    };
+
+    for sample in &samples {
+        write_sample(table_data, sample, tags.iter().cloned())?;
+    }
+
+    write_sample(table_data, &last_sample, tags.into_iter())
+}
+
+fn write_sample(
+    table_data: &mut TableData,
+    sample: &Sample,
+    tags: impl Iterator<Item = (String, String)>,
+) -> Result<()> {
+    let mut row = table_data.alloc_one_row();
+    row_writer::write_ts_to_millis(
+        table_data,
+        greptime_timestamp(),
+        Some(sample.timestamp),
+        Precision::Millisecond,
+        &mut row,
+    )?;
+    row_writer::write_f64(table_data, greptime_value(), sample.value, &mut row)?;
+    row_writer::write_tags(table_data, tags, &mut row)?;
+    table_data.add_row(row);
+
+    Ok(())
 }
 
 fn resolve_series_labels(symbols: &[String], series: &TimeSeries) -> Result<ResolvedSeriesLabels> {

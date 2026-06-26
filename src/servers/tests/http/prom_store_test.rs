@@ -198,10 +198,19 @@ async fn post_remote_write_with_content_type(
     content_type: &str,
     body: Vec<u8>,
 ) -> TestResponse {
+    post_remote_write_with_content_type_and_encoding(client, content_type, "snappy", body).await
+}
+
+async fn post_remote_write_with_content_type_and_encoding(
+    client: &TestClient,
+    content_type: &str,
+    content_encoding: &str,
+    body: Vec<u8>,
+) -> TestResponse {
     client
         .post("/v1/prometheus/write")
         .header("content-type", content_type)
-        .header("content-encoding", "snappy")
+        .header("content-encoding", content_encoding)
         .body(body)
         .send()
         .await
@@ -561,6 +570,33 @@ async fn test_prometheus_remote_write_rejects_unsupported_proto() {
             .text()
             .await
             .contains("unsupported prometheus remote write content type")
+    );
+    assert!(write_rx.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn test_prometheus_remote_write_v2_rejects_unsupported_content_encoding() {
+    common_telemetry::init_default_ut_logging();
+    let (read_tx, _read_rx) = mpsc::channel(100);
+    let (write_tx, mut write_rx) = mpsc::channel(100);
+
+    let app = make_test_app_with_write_capture(read_tx, write_tx);
+    let client = TestClient::new(app).await;
+
+    let result = post_remote_write_with_content_type_and_encoding(
+        &client,
+        REMOTE_WRITE_V2_CONTENT_TYPE,
+        "gzip",
+        Vec::new(),
+    )
+    .await;
+
+    assert_eq!(result.status(), 415);
+    assert!(
+        result
+            .text()
+            .await
+            .contains("unsupported prometheus remote write content encoding")
     );
     assert!(write_rx.try_recv().is_err());
 }

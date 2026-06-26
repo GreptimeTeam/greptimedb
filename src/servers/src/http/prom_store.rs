@@ -115,6 +115,10 @@ pub async fn remote_write(
             remote_write_v1(state, params, query_ctx, pipeline_info, is_zstd, body).await
         }
         RemoteWriteProto::V2 => {
+            if let Some(response) = unsupported_remote_write_v2_encoding_response(&content_encoding)
+            {
+                return Ok(response);
+            }
             remote_write_v2(state, params, query_ctx, pipeline_info, is_zstd, body).await
         }
         RemoteWriteProto::Unsupported(content_type) => Ok((
@@ -446,6 +450,22 @@ fn remote_write_proto(content_type: Option<TypedHeader<headers::ContentType>>) -
     }
 
     RemoteWriteProto::V1
+}
+
+fn unsupported_remote_write_v2_encoding_response(
+    content_encoding: &headers::ContentEncoding,
+) -> Option<axum::response::Response> {
+    if content_encoding.contains(DEFAULT_ENCODING) || content_encoding.contains(VM_ENCODING) {
+        return None;
+    }
+
+    Some((
+        StatusCode::UNSUPPORTED_MEDIA_TYPE,
+        format!(
+            "unsupported prometheus remote write content encoding: only {DEFAULT_ENCODING} and {VM_ENCODING} are supported"
+        ),
+    )
+        .into_response())
 }
 
 impl IntoResponse for PromStoreResponse {
