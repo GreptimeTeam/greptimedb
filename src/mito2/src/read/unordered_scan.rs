@@ -144,10 +144,22 @@ impl UnorderedScan {
                 } else if stream_ctx.is_file_range_index(*index) {
                     // Short-circuit: skip files that can be definitively pruned at
                     // manifest level before entering scan_flat_file_ranges /
-                    // PartitionPruner::build_file_ranges. We only cache positive prune
-                    // decisions: a later dynamic filter may make an unpruned file prunable, but
-                    // once a file is pruned, later updates are expected to stay at least as
-                    // selective.
+                    // PartitionPruner::build_file_ranges.
+                    //
+                    // SAFETY: we only cache **positive** manifest-prune decisions
+                    // (file → pruned). A later dynamic filter may make an unpruned
+                    // file prunable, but once a file is pruned, further updates
+                    // (TopK tightening, etc.) are expected to stay at least as
+                    // selective — i.e. dynamic filters only tighten, they do not
+                    // relax. Therefore a cached `true` is monotonic: re-evaluating
+                    // the same manifest-level pruning with a stricter predicate
+                    // would also conclude "pruned".
+                    //
+                    // Negative decisions are **never** cached; every un-pruned file
+                    // is rechecked each time it is encountered (including subsequent
+                    // partition ranges that reference the same file). This ensures
+                    // that dynamic filter tightening can turn a previously unpruned
+                    // file into a pruned one mid-scan.
                     let file_index = index.index - num_memtables;
                     if file_index < manifest_pruned_cache.len() {
                         let mut reader_metrics = ReaderMetrics::default();
