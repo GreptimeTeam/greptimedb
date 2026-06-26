@@ -540,6 +540,33 @@ fn test_effective_eval_schedule_deterministic_on_old_metadata() {
     assert_eq!(first.catchup_max_lag_secs, 300); // max(300, 3*60) = 300
 }
 
+#[test]
+fn test_old_flow_info_json_without_eval_schedule_deserializes() {
+    let typed = FlowScheduleConfig {
+        anchor_secs: 0,
+        start_secs: 999,
+        missed_tick_policy: FlowMissedTickPolicy::BoundedCatchUp,
+        catchup_max_runs: 9,
+        catchup_max_lag_secs: 900,
+    };
+    let flow_info = flow_info_for_schedule_test(Some(typed), Some(60), HashMap::new(), 61);
+    let mut json = serde_json::to_value(&flow_info).unwrap();
+    json.as_object_mut().unwrap().remove("eval_schedule");
+
+    let decoded: FlowInfoValue = serde_json::from_value(json).unwrap();
+    assert!(decoded.eval_schedule.is_none());
+
+    let effective = effective_eval_schedule_from_flow_info(&decoded).unwrap();
+    assert_eq!(effective.anchor_secs, 0);
+    assert_eq!(effective.start_secs, 120);
+    assert_eq!(
+        effective.missed_tick_policy,
+        FlowMissedTickPolicy::BoundedCatchUp
+    );
+    assert_eq!(effective.catchup_max_runs, 3);
+    assert_eq!(effective.catchup_max_lag_secs, 300);
+}
+
 #[tokio::test]
 async fn test_create_flow_rejects_unknown_option_in_meta_task() {
     let mut task = test_create_flow_task(

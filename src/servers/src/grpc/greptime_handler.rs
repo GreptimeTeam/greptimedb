@@ -301,6 +301,7 @@ mod tests {
     use common_error::{GREPTIME_DB_HEADER_ERROR_CODE, GREPTIME_DB_HEADER_ERROR_RETRY_HINT};
     use common_time::Timezone;
     use session::hints::{
+        FLOW_SCHEDULED_RUNTIME_MILLIS_EXTENSION_KEY,
         INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY, REMOTE_QUERY_ID_EXTENSION_KEY,
     };
     use snafu::ResultExt;
@@ -329,6 +330,10 @@ mod tests {
                 (
                     INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY.to_string(),
                     "spoofed-regs".to_string(),
+                ),
+                (
+                    FLOW_SCHEDULED_RUNTIME_MILLIS_EXTENSION_KEY.to_string(),
+                    "1700000000000".to_string(),
                 ),
             ],
             HashMap::from([(7, 88)]),
@@ -360,6 +365,11 @@ mod tests {
         assert!(
             query_context
                 .extension(INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY)
+                .is_none()
+        );
+        assert!(
+            query_context
+                .extension(FLOW_SCHEDULED_RUNTIME_MILLIS_EXTENSION_KEY)
                 .is_none()
         );
     }
