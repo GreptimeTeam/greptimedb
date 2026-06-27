@@ -54,7 +54,10 @@ use crate::error::{
     status_code_to_http_status,
 };
 use crate::http::HttpResponse;
-use crate::http::header::constants::GREPTIME_PIPELINE_PARAMS_HEADER;
+use crate::http::header::constants::{
+    GREPTIME_LOG_PIPELINE_NAME_HEADER_NAME, GREPTIME_PIPELINE_NAME_HEADER_NAME,
+    GREPTIME_PIPELINE_PARAMS_HEADER,
+};
 use crate::http::header::{
     CONTENT_TYPE_NDJSON_STR, CONTENT_TYPE_NDJSON_SUBTYPE_STR, CONTENT_TYPE_PROTOBUF_STR,
 };
@@ -693,6 +696,28 @@ pub(crate) fn extract_pipeline_params_map_from_headers(
     )
 }
 
+/// Extracts the pipeline name from the request headers.
+///
+/// Both `x-greptime-pipeline-name` and the deprecated `x-greptime-log-pipeline-name`
+/// are accepted, matching the headers already honored by the OTLP/Elasticsearch/Splunk
+/// log ingestion endpoints. Empty header values are ignored so that they fall back to
+/// the `pipeline_name` query parameter.
+fn pipeline_name_from_headers(headers: &HeaderMap) -> Option<String> {
+    [
+        GREPTIME_LOG_PIPELINE_NAME_HEADER_NAME,
+        GREPTIME_PIPELINE_NAME_HEADER_NAME,
+    ]
+    .iter()
+    .find_map(|name| {
+        headers
+            .get(*name)
+            .and_then(|value| value.to_str().ok())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string)
+    })
+}
+
 #[axum_macros::debug_handler]
 pub async fn log_ingester(
     State(log_state): State<LogState>,
@@ -720,9 +745,14 @@ pub async fn log_ingester(
 
     let ignore_errors = query_params.ignore_errors.unwrap_or(false);
 
-    let pipeline_name = query_params.pipeline_name.context(InvalidParameterSnafu {
-        reason: "pipeline_name is required",
-    })?;
+    // A pipeline name supplied via header takes precedence over the query parameter,
+    // consistent with how other pipeline options (e.g. `x-greptime-pipeline-params`)
+    // outrank their query-parameter counterparts.
+    let pipeline_name = pipeline_name_from_headers(&headers)
+        .or(query_params.pipeline_name)
+        .context(InvalidParameterSnafu {
+            reason: "pipeline_name is required",
+        })?;
     let skip_error = query_params.skip_error.unwrap_or(false);
     let version = to_pipeline_version(query_params.version.as_deref()).context(PipelineSnafu)?;
     let pipeline = PipelineDefinition::from_name(
