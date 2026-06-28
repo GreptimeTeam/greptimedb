@@ -15,6 +15,9 @@
 //! Helpers for stable `EVAL INTERVAL` scheduled times.
 
 pub use common_meta::key::flow::flow_info::{FlowMissedTickPolicy, FlowScheduleConfig};
+use snafu::ensure;
+
+use crate::error::{InvalidQuerySnafu, Result};
 
 /// Schedule for an `EVAL INTERVAL` flow.
 #[derive(Debug, Clone, PartialEq)]
@@ -37,31 +40,38 @@ impl EvalSchedule {
     pub fn from_config(
         eval_interval_secs: Option<i64>,
         config: Option<&FlowScheduleConfig>,
-    ) -> Result<Option<Self>, String> {
-        let interval_secs = match eval_interval_secs {
-            None => return Ok(None),
-            Some(s) if s <= 0 => {
-                return Err(format!(
-                    "Invalid eval_interval_secs: must be positive, got {s}"
-                ));
-            }
-            Some(s) => s,
+    ) -> Result<Option<Self>> {
+        let Some(interval_secs) = eval_interval_secs else {
+            return Ok(None);
         };
+        ensure!(
+            interval_secs > 0,
+            InvalidQuerySnafu {
+                reason: format!(
+                    "Invalid eval_interval_secs: must be positive, got {interval_secs}"
+                )
+            }
+        );
 
         Ok(Some(match config {
             Some(c) => {
-                if c.catchup_max_runs == 0 {
-                    return Err(
-                        "Invalid FlowScheduleConfig.catchup_max_runs: must be positive, got 0"
-                            .to_string(),
-                    );
-                }
-                if c.catchup_max_lag_secs <= 0 {
-                    return Err(format!(
-                        "Invalid FlowScheduleConfig.catchup_max_lag_secs: must be positive, got {}",
-                        c.catchup_max_lag_secs
-                    ));
-                }
+                ensure!(
+                    c.catchup_max_runs > 0,
+                    InvalidQuerySnafu {
+                        reason:
+                            "Invalid FlowScheduleConfig.catchup_max_runs: must be positive, got 0"
+                                .to_string()
+                    }
+                );
+                ensure!(
+                    c.catchup_max_lag_secs > 0,
+                    InvalidQuerySnafu {
+                        reason: format!(
+                            "Invalid FlowScheduleConfig.catchup_max_lag_secs: must be positive, got {}",
+                            c.catchup_max_lag_secs
+                        )
+                    }
+                );
 
                 Self {
                     interval_secs,
