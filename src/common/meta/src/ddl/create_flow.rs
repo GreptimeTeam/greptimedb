@@ -421,6 +421,8 @@ pub const DEFER_ON_MISSING_SOURCE_KEY: &str = "defer_on_missing_source";
 /// meta to flownode through `CreateRequest.flow_options`. This key must never
 /// be accepted as a user-provided option and must never be persisted into
 /// `FlowInfoValue.options`.
+/// TODO(discord9): Replace this transient flow_options transport with a typed
+/// field in the flow create request.
 pub const INTERNAL_EVAL_SCHEDULE_KEY: &str = "__greptime_internal_eval_schedule";
 
 pub fn defer_on_missing_source(flow_task: &CreateFlowTask) -> Result<bool> {
@@ -460,13 +462,7 @@ pub fn validate_flow_options(flow_task: &CreateFlowTask) -> Result<()> {
         match key.as_str() {
             DEFER_ON_MISSING_SOURCE_KEY
             | FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY
-            | FlowType::FLOW_TYPE_KEY => {
-                // flow_type is internal-only; allow it through as the
-                // operator inserts it. Schedule keys and
-                // __greptime_internal_eval_schedule fall through to the
-                // unknown branch naturally since they are not in the
-                // allowlist.
-            }
+            | FlowType::FLOW_TYPE_KEY => {}
             unknown => {
                 return UnexpectedSnafu {
                     err_msg: format!(
