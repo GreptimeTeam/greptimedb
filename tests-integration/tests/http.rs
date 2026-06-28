@@ -3018,9 +3018,29 @@ transform:
     )
     .await;
 
-    // 4. missing pipeline name in both header and query param is rejected.
+    // 4. when both headers are present, the non-deprecated
+    //    `x-greptime-pipeline-name` wins over the deprecated
+    //    `x-greptime-log-pipeline-name`.
     let res = client
         .post("/v1/events/logs?db=public&table=logs4")
+        .header("Content-Type", "application/json")
+        .header("x-greptime-pipeline-name", "test")
+        .header("x-greptime-log-pipeline-name", "does_not_exist")
+        .body(data_body)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    validate_data(
+        "pipeline_name_header_non_deprecated_priority",
+        &client,
+        "select message from logs4",
+        "[[\"hello header\"]]",
+    )
+    .await;
+
+    // 5. missing pipeline name in both header and query param is rejected.
+    let res = client
+        .post("/v1/events/logs?db=public&table=logs5")
         .header("Content-Type", "application/json")
         .body(data_body)
         .send()

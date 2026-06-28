@@ -700,12 +700,13 @@ pub(crate) fn extract_pipeline_params_map_from_headers(
 ///
 /// Both `x-greptime-pipeline-name` and the deprecated `x-greptime-log-pipeline-name`
 /// are accepted, matching the headers already honored by the OTLP/Elasticsearch/Splunk
-/// log ingestion endpoints. Empty header values are ignored so that they fall back to
-/// the `pipeline_name` query parameter.
+/// log ingestion endpoints. If both are present, the non-deprecated
+/// `x-greptime-pipeline-name` takes precedence. Empty header values are ignored so that
+/// they fall back to the `pipeline_name` query parameter.
 fn pipeline_name_from_headers(headers: &HeaderMap) -> Option<String> {
     [
-        GREPTIME_LOG_PIPELINE_NAME_HEADER_NAME,
         GREPTIME_PIPELINE_NAME_HEADER_NAME,
+        GREPTIME_LOG_PIPELINE_NAME_HEADER_NAME,
     ]
     .iter()
     .find_map(|name| {
