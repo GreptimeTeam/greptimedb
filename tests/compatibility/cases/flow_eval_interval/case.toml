@@ -1,0 +1,8 @@
+name = "flow_eval_interval"
+reason = "Verify EVAL INTERVAL SQL and TQL flow metadata created before upgrade can be read and executed after upgrade."
+introduced_by = "PR #8360"
+topologies = ["distributed"]
+from_range = ["<=v1.1.1"]
+to_range = [">v1.1.1"]
+features = ["flow", "tql", "table"]
+owner = "flow"
