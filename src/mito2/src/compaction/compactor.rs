@@ -39,7 +39,7 @@ use crate::cache::{CacheManager, CacheManagerRef};
 use crate::compaction::picker::PickerOutput;
 use crate::compaction::{CompactionOutput, CompactionSstReaderBuilder, find_dynamic_options};
 use crate::config::MitoConfig;
-use crate::engine::region_hook::RegionHookRef;
+use crate::engine::region_hook::{RegionHookRef, SstFileInfo};
 use crate::error;
 use crate::error::{
     EmptyRegionDirSnafu, InvalidPartitionExprSnafu, ObjectStoreNotFoundSnafu, Result,
@@ -256,6 +256,42 @@ impl CompactionRegion {
         } else {
             Ok(())
         }
+    }
+
+    /// Fires [`RegionHook::on_sst_files_written`] for the freshly-merged SST
+    /// files in `merge_output`. Shared by both compaction paths, it must run
+    /// before [`Compactor::update_manifest`], whose `on_manifest_updated`
+    /// drains the per-region state this hook populates.
+    pub async fn invoke_sst_hook(&self, merge_output: &MergeOutput) {
+        let Some(hook) = self.plugins.get::<RegionHookRef>() else {
+            return;
+        };
+
+        // Local compaction fills `sst_infos` 1:1 with `files_to_add`. Remote
+        // compaction deserializes `MergeOutput` over gRPC, where `sst_infos`
+        // is `#[serde(skip)]`; substitute empty defaults — the hook still reads
+        // `record_count` from [`FileMeta::num_rows`].
+        let defaults: Vec<SstInfo>;
+        let infos: &[SstInfo] = if merge_output.sst_infos.is_empty() {
+            defaults = (0..merge_output.files_to_add.len())
+                .map(|_| SstInfo::default())
+                .collect();
+            &defaults
+        } else {
+            &merge_output.sst_infos
+        };
+
+        let files: Vec<SstFileInfo<'_>> = merge_output
+            .files_to_add
+            .iter()
+            .zip(infos)
+            .map(|(meta, info)| SstFileInfo {
+                sst_info_ref: info,
+                file_meta: meta,
+            })
+            .collect();
+        hook.on_sst_files_written(self.region_id, &self.region_metadata, &files)
+            .await;
     }
 }
 
