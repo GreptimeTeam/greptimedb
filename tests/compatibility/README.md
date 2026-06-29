@@ -89,6 +89,27 @@ to_range = [">=v1.1.1"]
 ```
 This case only runs when the old binary is <= v1.1.0 and the new binary is >= v1.1.1.
 
+### CI Version Window
+
+The CI job uses `tests/compatibility/ci.toml` to choose the small sliding
+window of recent released `from` versions to test against the PR-built `to`
+binary:
+
+```toml
+from_versions = ["v1.0.0", "v1.1.0"]
+```
+
+Keep this window small for PR and merge-queue latency: the goal is to catch
+upgrade compatibility issues from recent releases to the latest build, not to
+retest every historical version on every PR. Case-level `from_range`/`to_range`
+still decides which cases run for each version pair; the CI window only decides
+which old binaries are sampled. Broader historical windows belong in nightly or
+release-validation workflows.
+
+The GitHub Actions workflow delegates the window loading and compat invocation
+to `.github/scripts/run-compat.py`; the workflow YAML should stay as a thin
+wrapper around artifact download/extraction and this script.
+
 ### `setup.sql` — Setup Phase (Old Version)
 
 SQL statements executed on the **old** version cluster. These must succeed (any error fails the case). Setup output is NOT compared against any result file.

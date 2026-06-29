@@ -1019,22 +1019,29 @@ jobs:
     with:
       artifact-name: bins
 
-
-  # compat:
-  #   if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
-  #   name: Compatibility Test
-  #   needs: build
-  #   runs-on: ubuntu-22.04
-  #   timeout-minutes: 60
-  #   steps:
-  #     - uses: actions/checkout@v4
-  #     - name: Download pre-built binaries
-  #       uses: actions/download-artifact@v4
-  #       with:
-  #         name: bins
-  #         path: .
-  #     - name: Unzip binaries
-  #       run: |
-  #         mkdir -p ./bins/current
-  #         tar -xvf ./bins.tar.gz --strip-components=1 -C ./bins/current
-  #     - run: ./tests/compat/test-compat.sh 0.6.0
+  compat:
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' || (github.event_name == 'pull_request' && github.event.action == 'ready_for_review')) }}
+    name: Compatibility Test (recent releases)
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Download pre-built binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: bins
+          path: .
+      - name: Unzip binaries
+        run: tar -xvf ./bins.tar.gz
+      - name: Run compatibility test
+        run: python3 .github/scripts/run-compat.py --preserve-state
+      - name: Upload compatibility logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: compatibility-logs
+          path: /tmp/sqlness-compat*
+          retention-days: 3

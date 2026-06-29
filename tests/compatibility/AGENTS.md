@@ -51,3 +51,16 @@ The dry-run performs full discovery and filtering (name, topology, metadata
 validation, namespace dedup, version-range matching) but starts no services,
 creates no temp dirs, and mutates no files. Use it to check which cases
 would be selected before a real run.
+
+## CI Version Window
+
+- `tests/compatibility/ci.toml` controls the small sliding window of recent
+  released versions used by the CI job. Do not hard-code old versions
+  directly in workflow YAML.
+- Keep the PR/merge-queue window short; wider compatibility coverage belongs in
+  nightly or release-validation workflows.
+- Case `from_range` / `to_range` metadata still controls whether each case runs
+  for a sampled version pair.
+- `.github/scripts/run-compat.py` owns the CI-side window parsing and compat
+  invocation. Keep workflow YAML thin; update the script instead of embedding
+  parsing or loops in `.github/workflows/develop.yml`.
