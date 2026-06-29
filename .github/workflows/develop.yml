@@ -1037,48 +1037,8 @@ jobs:
           path: .
       - name: Unzip binaries
         run: tar -xvf ./bins.tar.gz
-      - name: Load compatibility version window
-        run: |
-          python3 - <<'PY' > "${RUNNER_TEMP}/compat-from-versions.txt"
-          import ast
-          import re
-          from pathlib import Path
-
-          config = Path("tests/compatibility/ci.toml").read_text()
-          # Parse the simple TOML string array without depending on Python 3.11+
-          # tomllib. This intentionally supports only the checked-in
-          # `from_versions = ["vX.Y.Z", ...]` shape used by the CI smoke job.
-          config = "\n".join(line.split("#", 1)[0] for line in config.splitlines())
-          match = re.search(r"(?ms)^\s*from_versions\s*=\s*(\[[^\]]*\])", config)
-          if match is None:
-              raise SystemExit("tests/compatibility/ci.toml must define from_versions")
-          versions = ast.literal_eval(match.group(1))
-          if not isinstance(versions, list) or not versions:
-              raise SystemExit("tests/compatibility/ci.toml must define a non-empty from_versions list")
-          for version in versions:
-              if not isinstance(version, str) or not re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", version):
-                  raise SystemExit(f"Invalid compat from version: {version!r}")
-              print(version)
-          PY
-
-          echo "Compatibility from-version window:"
-          while IFS= read -r from_version; do
-            echo "  - ${from_version}"
-          done < "${RUNNER_TEMP}/compat-from-versions.txt"
-      - name: Preview compatibility cases
-        run: |
-          while IFS= read -r from_version; do
-            echo "::group::Preview ${from_version} -> current"
-            ./bins/sqlness-runner compat --dry-run --from-version "${from_version}" --to-bins-dir ./bins
-            echo "::endgroup::"
-          done < "${RUNNER_TEMP}/compat-from-versions.txt"
       - name: Run compatibility smoke test
-        run: |
-          while IFS= read -r from_version; do
-            echo "::group::Compatibility ${from_version} -> current"
-            RUST_BACKTRACE=1 ./bins/sqlness-runner compat --from-version "${from_version}" --to-bins-dir ./bins --preserve-state
-            echo "::endgroup::"
-          done < "${RUNNER_TEMP}/compat-from-versions.txt"
+        run: python3 .github/scripts/run-compat.py --preserve-state
       - name: Upload compatibility logs
         if: failure()
         uses: actions/upload-artifact@v4

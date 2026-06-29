@@ -106,6 +106,10 @@ still decides which cases run for each version pair; the CI window only decides
 which old binaries are sampled. Broader historical windows belong in nightly or
 release-validation workflows.
 
+The GitHub Actions workflow delegates the window loading and compat invocation
+to `.github/scripts/run-compat.py`; the workflow YAML should stay as a thin
+wrapper around artifact download/extraction and this script.
+
 ### `setup.sql` — Setup Phase (Old Version)
 
 SQL statements executed on the **old** version cluster. These must succeed (any error fails the case). Setup output is NOT compared against any result file.

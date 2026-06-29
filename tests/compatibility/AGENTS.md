@@ -61,3 +61,6 @@ would be selected before a real run.
   nightly or release-validation workflows.
 - Case `from_range` / `to_range` metadata still controls whether each case runs
   for a sampled version pair.
+- `.github/scripts/run-compat.py` owns the CI-side window parsing and compat
+  invocation. Keep workflow YAML thin; update the script instead of embedding
+  parsing or loops in `.github/workflows/develop.yml`.
