@@ -278,6 +278,17 @@ impl CompactionRegion {
                 .collect();
             &defaults
         } else {
+            // `sst_infos` and `files_to_add` are documented as 1:1. If they
+            // ever diverge, `zip` below would silently truncate; warn so the
+            // mismatch is observable rather than dropping files from the hook.
+            if merge_output.sst_infos.len() != merge_output.files_to_add.len() {
+                warn!(
+                    "sst_infos length ({}) does not match files_to_add length ({}) for region {}",
+                    merge_output.sst_infos.len(),
+                    merge_output.files_to_add.len(),
+                    self.region_id
+                );
+            }
             &merge_output.sst_infos
         };
 
