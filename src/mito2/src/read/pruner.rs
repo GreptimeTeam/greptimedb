@@ -15,7 +15,7 @@
 //! Pruner for parallel file pruning across scanner partitions.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -45,6 +45,20 @@ pub struct PartitionPruner {
     file_indices: Vec<usize>,
     /// Per-file pre-filter mode lookup indexed by file_index.
     pre_filter_modes: Vec<PreFilterMode>,
+    /// Positive manifest-prune cache indexed by file_index.
+    ///
+    /// This is scoped to a scan partition. We only cache positive decisions
+    /// (file => manifest-pruned) and never cache negative decisions, so a later
+    /// dynamic-filter tightening can still make a previously unpruned file
+    /// prunable.
+    ///
+    /// SAFETY: dynamic-filter based pruning relies on filters being monotonic
+    /// within one scan: updates may keep or tighten the filter, but must not
+    /// relax it after consumers have already pruned data. Under that invariant,
+    /// a file once proven empty by manifest-level pruning remains empty for
+    /// later, stricter predicate snapshots. If a future dynamic filter can relax,
+    /// this cache must be invalidated or disabled for that filter.
+    manifest_pruned_files: Vec<AtomicBool>,
     /// Current position for tracking pre-fetch progress.
     current_position: AtomicUsize,
 }
@@ -83,6 +97,7 @@ impl PartitionPruner {
             pruner,
             file_indices,
             pre_filter_modes,
+            manifest_pruned_files: (0..num_files).map(|_| AtomicBool::new(false)).collect(),
             current_position: AtomicUsize::new(0),
         }
     }
@@ -122,6 +137,33 @@ impl PartitionPruner {
         self.pruner.skip_file_range(index, reader_metrics);
     }
 
+    /// Returns true if this file range was already proven manifest-pruned in
+    /// this scan partition.
+    pub fn is_manifest_pruned_file_range(&self, index: RowGroupIndex) -> bool {
+        self.file_index(index)
+            .and_then(|file_index| self.manifest_pruned_files.get(file_index))
+            .is_some_and(|pruned| pruned.load(Ordering::Relaxed))
+    }
+
+    /// Skips a file range that was proven definitively pruned by manifest-level
+    /// time-range pruning. Records `files_time_range_pruned` in `reader_metrics`
+    /// and balances the pruner's per-file reference count.
+    pub fn skip_manifest_pruned_file_range(
+        &self,
+        index: RowGroupIndex,
+        reader_metrics: &mut ReaderMetrics,
+    ) {
+        if let Some(file_index) = self.file_index(index)
+            && let Some(pruned) = self.manifest_pruned_files.get(file_index)
+            && pruned
+                .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+        {
+            reader_metrics.filter_metrics.files_time_range_pruned += 1;
+        }
+        self.skip_file_range(index, reader_metrics);
+    }
+
     /// Pre-fetches upcoming files starting from the given position.
     fn prefetch_upcoming_files(&self, current_pos: usize, partition_metrics: &PartitionMetrics) {
         let start = current_pos + 1;
@@ -143,6 +185,14 @@ impl PartitionPruner {
             .get(file_index)
             .copied()
             .unwrap_or(PreFilterMode::SkipFields)
+    }
+
+    fn file_index(&self, index: RowGroupIndex) -> Option<usize> {
+        self.pruner
+            .inner
+            .stream_ctx
+            .is_file_range_index(index)
+            .then(|| index.index - self.pruner.inner.stream_ctx.input.num_memtables())
     }
 }
 

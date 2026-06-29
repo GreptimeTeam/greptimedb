@@ -1448,6 +1448,41 @@ pub(crate) fn new_filter_metrics(explain_verbose: bool) -> ReaderFilterMetrics {
     }
 }
 
+/// Checks whether the file range at `index` can be skipped because the current
+/// predicate definitively prunes it at manifest level (no parquet metadata I/O).
+///
+/// Returns `true` if the range was skipped. When skipped, this helper balances
+/// the pruner's per-file reference count and records `files_time_range_pruned`
+/// in reader metrics, which are merged into `part_metrics`.
+pub(crate) fn try_skip_manifest_pruned_file_range(
+    stream_ctx: &StreamContext,
+    index: RowGroupIndex,
+    part_metrics: &PartitionMetrics,
+    partition_pruner: &PartitionPruner,
+) -> bool {
+    if !stream_ctx.is_file_range_index(index) {
+        return false;
+    }
+    let file_index = index.index - stream_ctx.input.num_memtables();
+    if file_index >= stream_ctx.input.num_files() {
+        return false;
+    }
+    if partition_pruner.is_manifest_pruned_file_range(index) {
+        let mut reader_metrics = ReaderMetrics::default();
+        partition_pruner.skip_manifest_pruned_file_range(index, &mut reader_metrics);
+        part_metrics.merge_reader_metrics(&reader_metrics, None);
+        return true;
+    }
+    let file = &stream_ctx.input.files[file_index];
+    if !stream_ctx.input.can_manifest_prune_file(file) {
+        return false;
+    }
+    let mut reader_metrics = ReaderMetrics::default();
+    partition_pruner.skip_manifest_pruned_file_range(index, &mut reader_metrics);
+    part_metrics.merge_reader_metrics(&reader_metrics, None);
+    true
+}
+
 /// Scans file ranges at `index` using flat reader that returns RecordBatch.
 #[tracing::instrument(
     skip_all,

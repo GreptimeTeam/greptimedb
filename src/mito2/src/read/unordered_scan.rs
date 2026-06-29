@@ -16,7 +16,6 @@
 
 use std::fmt;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use async_stream::{stream, try_stream};
@@ -42,7 +41,6 @@ use crate::read::scan_util::{
 };
 use crate::read::stream::{ConvertBatchStream, ScanBatch, ScanBatchStream};
 use crate::read::{ScannerMetrics, scan_util};
-use crate::sst::parquet::reader::ReaderMetrics;
 
 /// Scans a region without providing any output ordering guarantee.
 ///
@@ -105,11 +103,6 @@ impl UnorderedScan {
     }
 
     /// Scans a [PartitionRange] by its `identifier` and returns a flat stream of RecordBatch.
-    ///
-    /// `manifest_pruned_cache` tracks files already proven empty by manifest-level pruning in
-    /// this scan partition. Once a file is proven prunable, later dynamic-filter updates are
-    /// expected to be at least as selective, so the remaining row groups for that file can skip
-    /// `scan_flat_file_ranges` directly.
     #[tracing::instrument(
         skip_all,
         fields(
@@ -122,12 +115,10 @@ impl UnorderedScan {
         part_range_id: usize,
         part_metrics: PartitionMetrics,
         partition_pruner: Arc<PartitionPruner>,
-        manifest_pruned_cache: Arc<Vec<AtomicBool>>,
     ) -> impl Stream<Item = Result<RecordBatch>> {
         try_stream! {
             // Gets range meta.
             let range_meta = &stream_ctx.ranges[part_range_id];
-            let num_memtables = stream_ctx.input.num_memtables();
             let part_range = range_meta.new_partition_range(part_range_id);
             let pre_filter_mode = stream_ctx.range_pre_filter_mode(&part_range);
             for index in &range_meta.row_group_indices {
@@ -142,50 +133,14 @@ impl UnorderedScan {
                         yield record_batch?;
                     }
                 } else if stream_ctx.is_file_range_index(*index) {
-                    // Short-circuit: skip files that can be definitively pruned at
-                    // manifest level before entering scan_flat_file_ranges /
-                    // PartitionPruner::build_file_ranges.
-                    //
-                    // SAFETY: we only cache **positive** manifest-prune decisions
-                    // (file → pruned). A later dynamic filter may make an unpruned
-                    // file prunable, but once a file is pruned, further updates
-                    // (TopK tightening, etc.) are expected to stay at least as
-                    // selective — i.e. dynamic filters only tighten, they do not
-                    // relax. Therefore a cached `true` is monotonic: re-evaluating
-                    // the same manifest-level pruning with a stricter predicate
-                    // would also conclude "pruned".
-                    //
-                    // Negative decisions are **never** cached; every un-pruned file
-                    // is rechecked each time it is encountered (including subsequent
-                    // partition ranges that reference the same file). This ensures
-                    // that dynamic filter tightening can turn a previously unpruned
-                    // file into a pruned one mid-scan.
-                    let file_index = index.index - num_memtables;
-                    if file_index < manifest_pruned_cache.len() {
-                        let mut reader_metrics = ReaderMetrics::default();
-                        if manifest_pruned_cache[file_index].load(Ordering::Relaxed) {
-                            partition_pruner.skip_file_range(*index, &mut reader_metrics);
-                            part_metrics.merge_reader_metrics(&reader_metrics, None);
-                            continue;
-                        }
-
-                        let file = &stream_ctx.input.files[file_index];
-                        if stream_ctx.input.can_manifest_prune_file(file) {
-                            if manifest_pruned_cache[file_index]
-                                    .compare_exchange(
-                                        false,
-                                        true,
-                                        Ordering::Relaxed,
-                                        Ordering::Relaxed,
-                                    )
-                                    .is_ok()
-                            {
-                                reader_metrics.filter_metrics.files_time_range_pruned += 1;
-                            }
-                            partition_pruner.skip_file_range(*index, &mut reader_metrics);
-                            part_metrics.merge_reader_metrics(&reader_metrics, None);
-                            continue;
-                        }
+                    // Common manifest-level fast-skip shared by UnorderedScan and SeqScan.
+                    if scan_util::try_skip_manifest_pruned_file_range(
+                        &stream_ctx,
+                        *index,
+                        &part_metrics,
+                        &partition_pruner,
+                    ) {
+                        continue;
                     }
                     let stream = scan_flat_file_ranges(
                         stream_ctx.clone(),
@@ -313,12 +268,6 @@ impl UnorderedScan {
         pruner.add_partition_ranges(&part_ranges);
         let partition_pruner = Arc::new(PartitionPruner::new(pruner, &part_ranges));
 
-        // Cache positive manifest-prune decisions per file in this scan partition.
-        // Negative decisions are not cached: dynamic filters may become stricter while scanning.
-        let num_files = stream_ctx.input.num_files();
-        let manifest_pruned_cache: Arc<Vec<AtomicBool>> =
-            Arc::new((0..num_files).map(|_| AtomicBool::new(false)).collect());
-
         let stream = try_stream! {
             part_metrics.on_first_poll();
 
@@ -332,7 +281,6 @@ impl UnorderedScan {
                     part_range.identifier,
                     part_metrics.clone(),
                     partition_pruner.clone(),
-                    manifest_pruned_cache.clone(),
                 );
                 for await record_batch in stream {
                     let record_batch = record_batch?;
