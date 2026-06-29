@@ -121,44 +121,6 @@ impl Display for InstructionError {
 
 pub type InstructionResult<T> = std::result::Result<T, InstructionError>;
 
-#[derive(Debug, PartialEq, Eq)]
-pub enum HandleInstructionResults<'a> {
-    AllSuccessful,
-    AllRetryable(Vec<(usize, &'a InstructionError)>),
-    PartialRetryable {
-        retryable_errors: Vec<(usize, &'a InstructionError)>,
-        non_retryable_errors: Vec<(usize, &'a InstructionError)>,
-    },
-    AllNonRetryable(Vec<(usize, &'a InstructionError)>),
-}
-
-pub fn handle_instruction_results<T>(
-    results: &[InstructionResult<T>],
-) -> HandleInstructionResults<'_> {
-    let mut retryable_errors = Vec::new();
-    let mut non_retryable_errors = Vec::new();
-
-    for (index, result) in results.iter().enumerate() {
-        if let Err(error) = result {
-            if error.retry_hint.is_retryable() {
-                retryable_errors.push((index, error));
-            } else {
-                non_retryable_errors.push((index, error));
-            }
-        }
-    }
-
-    match (retryable_errors.is_empty(), non_retryable_errors.is_empty()) {
-        (true, true) => HandleInstructionResults::AllSuccessful,
-        (false, true) => HandleInstructionResults::AllRetryable(retryable_errors),
-        (true, false) => HandleInstructionResults::AllNonRetryable(non_retryable_errors),
-        (false, false) => HandleInstructionResults::PartialRetryable {
-            retryable_errors,
-            non_retryable_errors,
-        },
-    }
-}
-
 #[derive(Eq, Hash, PartialEq, Clone, Debug, Serialize, Deserialize)]
 pub struct RegionIdent {
     pub datanode_id: DatanodeId,
@@ -1328,59 +1290,6 @@ mod tests {
         );
         let deserialized: InstructionResult<bool> = serde_json::from_str(&serialized).unwrap();
         assert_eq!(failure, deserialized);
-    }
-
-    #[test]
-    fn test_handle_instruction_results() {
-        let retryable =
-            InstructionError::new(StatusCode::RegionBusy, "region busy", RetryHint::Retryable);
-        let non_retryable = InstructionError::new(
-            StatusCode::InvalidArguments,
-            "invalid arguments",
-            RetryHint::NonRetryable,
-        );
-
-        let all_successful: Vec<InstructionResult<()>> = vec![Ok(()), Ok(())];
-        assert_eq!(
-            HandleInstructionResults::AllSuccessful,
-            handle_instruction_results(&all_successful)
-        );
-
-        let all_retryable = vec![Err(retryable.clone())];
-        match handle_instruction_results::<()>(&all_retryable) {
-            HandleInstructionResults::AllRetryable(errors) => {
-                assert_eq!(1, errors.len());
-                assert_eq!(0, errors[0].0);
-                assert_eq!(&retryable, errors[0].1);
-            }
-            result => panic!("expect all retryable, got {result:?}"),
-        }
-
-        let all_non_retryable = vec![Err(non_retryable.clone())];
-        match handle_instruction_results::<()>(&all_non_retryable) {
-            HandleInstructionResults::AllNonRetryable(errors) => {
-                assert_eq!(1, errors.len());
-                assert_eq!(0, errors[0].0);
-                assert_eq!(&non_retryable, errors[0].1);
-            }
-            result => panic!("expect all non-retryable, got {result:?}"),
-        }
-
-        let mixed = vec![Ok(()), Err(retryable.clone()), Err(non_retryable.clone())];
-        match handle_instruction_results(&mixed) {
-            HandleInstructionResults::PartialRetryable {
-                retryable_errors,
-                non_retryable_errors,
-            } => {
-                assert_eq!(1, retryable_errors.len());
-                assert_eq!(1, retryable_errors[0].0);
-                assert_eq!(&retryable, retryable_errors[0].1);
-                assert_eq!(1, non_retryable_errors.len());
-                assert_eq!(2, non_retryable_errors[0].0);
-                assert_eq!(&non_retryable, non_retryable_errors[0].1);
-            }
-            result => panic!("expect partial retryable, got {result:?}"),
-        }
     }
 
     #[test]

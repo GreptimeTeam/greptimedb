@@ -44,7 +44,7 @@ use crate::gc::util::table_route_to_region;
 use crate::gc::{Peer2Regions, Region2Peers};
 use crate::handler::HeartbeatMailbox;
 use crate::metrics::{METRIC_META_GC_DATANODE_CALLS_TOTAL, METRIC_META_GC_FAILED_REGIONS_TOTAL};
-use crate::procedure::utils::instruction_error_result;
+use crate::procedure::utils::{instruction_error_result, instruction_to_error};
 use crate::service::mailbox::{Channel, MailboxReceiver, MailboxRef};
 
 async fn send_get_file_refs_inner(
@@ -672,14 +672,13 @@ impl BatchGcProcedure {
                     .with_label_values(&["get_file_refs", "error"])
                     .inc();
                 let err = if let Some(error) = &reply.error {
-                    instruction_error_result::<()>(
+                    instruction_to_error(
                         error,
                         format!(
                             "Failed to get file references from datanode {}: {:?}",
                             peer, error
                         ),
                     )
-                    .unwrap_err()
                 } else {
                     error::UnexpectedSnafu {
                         violated: format!(

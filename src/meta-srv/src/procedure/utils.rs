@@ -60,12 +60,16 @@ impl FlushRegionErrors {
     }
 }
 
-pub(crate) fn instruction_error_result<T>(error: &InstructionError, reason: String) -> Result<T> {
+pub(crate) fn instruction_to_error(error: &InstructionError, reason: String) -> Error {
     if error.retry_hint.is_retryable() {
-        error::RetryLaterSnafu { reason }.fail()
+        error::RetryLaterSnafu { reason }.build()
     } else {
-        error::UnexpectedSnafu { violated: reason }.fail()
+        error::UnexpectedSnafu { violated: reason }.build()
     }
+}
+
+pub(crate) fn instruction_error_result<T>(error: &InstructionError, reason: String) -> Result<T> {
+    Err(instruction_to_error(error, reason))
 }
 
 fn handle_flush_region_reply(
