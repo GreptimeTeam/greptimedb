@@ -10,6 +10,28 @@ ORDER BY flow_name;
 | compat_tql_eval_flow | greptime.flow_eval_interval.compat_tql_input |
 +----------------------+----------------------------------------------+
 
+SHOW CREATE FLOW compat_sql_eval_flow;
+
++----------------------+---------------------------------------------------------------------------------------------------------------------------------+
+| Flow                 | Create Flow                                                                                                                     |
++----------------------+---------------------------------------------------------------------------------------------------------------------------------+
+| compat_sql_eval_flow | CREATE FLOW IF NOT EXISTS compat_sql_eval_flow                                                                                  |
+|                      | SINK TO flow_eval_interval.compat_sql_eval_sink                                                                                 |
+|                      | EVAL INTERVAL '1 s'                                                                                                             |
+|                      | AS SELECT date_trunc('second', now()) AS ts, count(v) AS value_count FROM compat_sql_input GROUP BY date_trunc('second', now()) |
++----------------------+---------------------------------------------------------------------------------------------------------------------------------+
+
+SHOW CREATE FLOW compat_tql_eval_flow;
+
++----------------------+-------------------------------------------------------------------------------------------------+
+| Flow                 | Create Flow                                                                                     |
++----------------------+-------------------------------------------------------------------------------------------------+
+| compat_tql_eval_flow | CREATE FLOW IF NOT EXISTS compat_tql_eval_flow                                                  |
+|                      | SINK TO flow_eval_interval.compat_tql_eval_sink                                                 |
+|                      | EVAL INTERVAL '1 s'                                                                             |
+|                      | AS TQL EVAL (now() - '1m'::interval, now(), '5s') count_values("status_code", compat_tql_input) |
++----------------------+-------------------------------------------------------------------------------------------------+
+
 SHOW CREATE TABLE compat_sql_eval_sink;
 
 +----------------------+-----------------------------------------------------+

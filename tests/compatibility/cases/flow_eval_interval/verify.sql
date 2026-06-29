@@ -3,6 +3,10 @@ FROM information_schema.flows
 WHERE flow_name IN ('compat_sql_eval_flow', 'compat_tql_eval_flow')
 ORDER BY flow_name;
 
+SHOW CREATE FLOW compat_sql_eval_flow;
+
+SHOW CREATE FLOW compat_tql_eval_flow;
+
 SHOW CREATE TABLE compat_sql_eval_sink;
 
 SHOW CREATE TABLE compat_tql_eval_sink;
