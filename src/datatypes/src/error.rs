@@ -288,6 +288,12 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Non-object json is not supported currently"))]
+    UnsupportedJsonType {
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 impl ErrorExt for Error {
@@ -296,6 +302,7 @@ impl ErrorExt for Error {
         match self {
             UnsupportedOperation { .. }
             | UnsupportedArrowType { .. }
+            | UnsupportedJsonType { .. }
             | UnsupportedDefaultExpr { .. } => StatusCode::Unsupported,
 
             DuplicateColumn { .. }

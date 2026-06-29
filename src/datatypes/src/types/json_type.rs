@@ -33,15 +33,13 @@ use crate::error::{
 use crate::prelude::ConcreteDataType;
 use crate::scalars::ScalarVectorBuilder;
 use crate::type_id::LogicalTypeId;
-use crate::types::{StructField, StructType};
+use crate::types::StructType;
 use crate::value::Value;
 use crate::vectors::json::builder::JsonVectorBuilder;
 use crate::vectors::{BinaryVectorBuilder, MutableVector};
 
 pub const JSON_TYPE_NAME: &str = "Json";
 const JSON2_TYPE_NAME: &str = "Json2";
-const JSON_PLAIN_FIELD_NAME: &str = "__json_plain__";
-const JSON_PLAIN_FIELD_METADATA_KEY: &str = "is_plain_json";
 
 pub type JsonObjectType = BTreeMap<String, JsonNativeType>;
 
@@ -302,18 +300,14 @@ impl JsonType {
         }
     }
 
-    /// Make json type a struct type, by:
-    /// - if the json is an object, its entries are mapped to struct fields, obviously;
-    /// - if not, the json is one of bool, number, string or array, make it a special field
-    ///   (see [plain_json_struct_type]).
     pub(crate) fn as_struct_type(&self) -> StructType {
         match &self.format {
-            JsonFormat::Jsonb => StructType::default(),
             JsonFormat::Json2(native_type) => match native_type.as_arrow_type() {
                 // TODO(LFC): Direct use Arrow's Struct datatype here.
                 ArrowDataType::Struct(fields) => StructType::from(&fields),
-                data_type => plain_json_struct_type(&data_type),
+                _ => StructType::default(),
             },
+            JsonFormat::Jsonb => StructType::default(),
         }
     }
 
@@ -368,18 +362,6 @@ fn is_include(this: &JsonNativeType, that: &JsonNativeType) -> bool {
         (_, JsonNativeType::Null) => true,
         _ => false,
     }
-}
-
-/// A special struct type for denoting "plain"(not object) json value. It has only one field, with
-/// fixed name [JSON_PLAIN_FIELD_NAME] and with metadata [JSON_PLAIN_FIELD_METADATA_KEY] = `"true"`.
-fn plain_json_struct_type(data_type: &ArrowDataType) -> StructType {
-    let mut field = StructField::new(
-        JSON_PLAIN_FIELD_NAME.to_string(),
-        ConcreteDataType::from_arrow_type(data_type),
-        true,
-    );
-    field.insert_metadata(JSON_PLAIN_FIELD_METADATA_KEY, true);
-    StructType::new(Arc::new(vec![field]))
 }
 
 impl From<&ArrowDataType> for JsonType {

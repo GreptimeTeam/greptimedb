@@ -43,14 +43,11 @@ impl JsonVectorBuilder {
         );
         for value in self.values.iter_mut() {
             value.try_align(&self.merged_type)?;
-
             if value.is_null() {
                 builder.push_null();
                 continue;
             }
-
-            let value = value.as_ref();
-            builder.try_push_value_ref(&value.as_struct_value())?;
+            builder.try_push_value_ref(&value.as_ref().as_value_ref())?;
         }
         Ok(builder.to_vector())
     }

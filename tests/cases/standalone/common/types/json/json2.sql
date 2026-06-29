@@ -6,6 +6,16 @@ create table json2_table (
     'sst_format' = 'flat',
 );
 
+insert into json2_table (ts, j) values (101, '[1, 2, 3]');
+
+insert into json2_table (ts, j) values (102, '"hello"');
+
+insert into json2_table (ts, j) values (103, '42');
+
+insert into json2_table (ts, j) values (104, 'true');
+
+insert into json2_table (ts, j) values (105, 'null');
+
 insert into json2_table (ts, j)
 values (1, '{"a": {"b": 1}, "c": "s1", "d": [{"e": {"f": 0.1}}]}'),
        (2, '{"a": {"b": -2}, "c": "s2", "d": [{"e": {"f": 0.2}}]}');
