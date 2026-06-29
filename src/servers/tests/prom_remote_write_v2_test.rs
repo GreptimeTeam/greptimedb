@@ -14,6 +14,8 @@
 
 use api::greptime_proto::io::prometheus::write::v2::histogram::{Count, ZeroCount};
 use api::greptime_proto::io::prometheus::write::v2::{BucketSpan, Histogram, Metadata};
+use api::v1::value::ValueData;
+use api::v1::{ColumnSchema, Row};
 use bytes::Bytes;
 use servers::prom_remote_write::v2::native_histogram::{
     PrometheusFloatHistogram, PrometheusHistogram, PrometheusHistogramSpan,
@@ -114,6 +116,50 @@ fn test_decode_remote_write_v2_native_histogram_dump() {
             2.0, 1.0, 4.0, 1.0, 4.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 2.0, 1.0, 1.0
         ]
     );
+
+    let (sample_inserts, histogram_inserts, sample_count, histogram_count) =
+        remote_write_v2::write_requests(decoded).unwrap();
+    assert!(sample_inserts.is_empty());
+    assert_eq!(sample_count, 0);
+    assert_eq!(histogram_count, 1);
+    assert_eq!(histogram_inserts.len(), 1);
+
+    let insert = &histogram_inserts[0];
+    assert_eq!(
+        insert.table_name,
+        "received_from_a_http_request_duration_seconds_native_histogram"
+    );
+    let rows = insert.rows.as_ref().unwrap();
+    assert_eq!(rows.rows.len(), 1);
+    let row = &rows.rows[0];
+    assert_eq!(
+        row.values[column_index(&rows.schema, "greptime_timestamp")].value_data,
+        Some(ValueData::TimestampMillisecondValue(1782358160412))
+    );
+    assert_eq!(
+        row.values[column_index(&rows.schema, "schema")].value_data,
+        Some(ValueData::I32Value(3))
+    );
+    assert_eq!(
+        row.values[column_index(&rows.schema, "count_u64")].value_data,
+        Some(ValueData::U64Value(24))
+    );
+    assert_eq!(
+        row.values[column_index(&rows.schema, "greptime_histogram_type")].value_data,
+        Some(ValueData::StringValue("int".to_string()))
+    );
+    assert_eq!(
+        list_i32_values(row, column_index(&rows.schema, "positive_span_offsets")),
+        vec![-63, 1, 5]
+    );
+    assert_eq!(
+        list_i64_values(row, column_index(&rows.schema, "positive_buckets_i64")),
+        vec![2, -1, 3, -3, 3, -3, 0, 0, 0, 0, 0, 0, 0, 1, -1, 0]
+    );
+    assert_eq!(
+        row.values[column_index(&rows.schema, "positive_buckets_f64")].value_data,
+        None
+    );
 }
 
 #[test]
@@ -182,4 +228,41 @@ fn assert_text_dump_shape(
 
 fn count_textproto_block(text: &str, block: &str) -> usize {
     text.lines().filter(|line| line.trim() == block).count()
+}
+
+fn column_index(schema: &[ColumnSchema], column_name: &str) -> usize {
+    schema
+        .iter()
+        .position(|column| column.column_name == column_name)
+        .unwrap()
+}
+
+fn list_i32_values(row: &Row, column_idx: usize) -> Vec<i32> {
+    let Some(ValueData::ListValue(list)) = &row.values[column_idx].value_data else {
+        panic!("expected list value");
+    };
+    list.items
+        .iter()
+        .map(|value| {
+            let Some(ValueData::I32Value(value)) = value.value_data.as_ref() else {
+                panic!("expected i32 list item");
+            };
+            *value
+        })
+        .collect()
+}
+
+fn list_i64_values(row: &Row, column_idx: usize) -> Vec<i64> {
+    let Some(ValueData::ListValue(list)) = &row.values[column_idx].value_data else {
+        panic!("expected list value");
+    };
+    list.items
+        .iter()
+        .map(|value| {
+            let Some(ValueData::I64Value(value)) = value.value_data.as_ref() else {
+                panic!("expected i64 list item");
+            };
+            *value
+        })
+        .collect()
 }
