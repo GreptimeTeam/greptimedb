@@ -3,4 +3,4 @@
 # The CI smoke job tests this small sliding window of recent released `from`
 # versions against the PR-built `to` binary. Broader historical windows should
 # run in nightly or release-validation workflows.
-from_versions = ["v1.1.0"]
+from_versions = ["v1.0.0", "v1.1.0"]

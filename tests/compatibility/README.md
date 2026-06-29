@@ -96,7 +96,7 @@ window of recent released `from` versions to test against the PR-built `to`
 binary:
 
 ```toml
-from_versions = ["v1.1.0"]
+from_versions = ["v1.0.0", "v1.1.0"]
 ```
 
 Keep this window small for PR and merge-queue latency: the goal is to catch
