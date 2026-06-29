@@ -26,7 +26,9 @@ use common_recordbatch::RecordBatch;
 use common_recordbatch::adapter::{RecordBatchMetrics, RegionWatermarkEntry};
 use datatypes::data_type::ConcreteDataType as CDT;
 use datatypes::schema::ColumnSchema;
-use datatypes::vectors::{TimestampMillisecondVector, UInt32Vector, VectorRef};
+use datatypes::vectors::{
+    TimestampMillisecondVector, TimestampNanosecondVector, UInt32Vector, VectorRef,
+};
 use pretty_assertions::assert_eq;
 use query::options::{
     FLOW_INCREMENTAL_AFTER_SEQS, FLOW_INCREMENTAL_MODE_MEMTABLE_ONLY, FLOW_SCHEDULED_TIME_MILLIS,
@@ -403,6 +405,83 @@ fn register_twe_sink(query_engine: &QueryEngineRef, table_name: &str, table_id: 
     memory_catalog.register_table_sync(request).unwrap();
 }
 
+fn register_scheduled_now_sink(query_engine: &QueryEngineRef, table_name: &str, table_id: u32) {
+    let schema = Arc::new(Schema::new(vec![
+        ColumnSchema::new("ts", CDT::timestamp_nanosecond_datatype(), false).with_time_index(true),
+        ColumnSchema::new("number", CDT::uint32_datatype(), false),
+    ]));
+    let columns: Vec<VectorRef> = vec![
+        Arc::new(TimestampNanosecondVector::from_slice([0_i64])),
+        Arc::new(UInt32Vector::from_slice([1_u32])),
+    ];
+    let recordbatch = RecordBatch::new(schema, columns).unwrap();
+    let table = MemTable::table(table_name, recordbatch);
+    let request = RegisterTableRequest {
+        catalog: DEFAULT_CATALOG_NAME.to_string(),
+        schema: DEFAULT_SCHEMA_NAME.to_string(),
+        table_name: table_name.to_string(),
+        table_id,
+        table,
+    };
+    let catalog_manager = query_engine.engine_state().catalog_manager();
+    let memory_catalog = catalog_manager
+        .as_any()
+        .downcast_ref::<MemoryCatalogManager>()
+        .unwrap();
+    memory_catalog.register_table_sync(request).unwrap();
+}
+
+struct CaptureScheduledNowHandler {
+    expected_extension: String,
+    captured_sql: Arc<std::sync::Mutex<Option<String>>>,
+    query_engine: QueryEngineRef,
+}
+
+#[async_trait::async_trait]
+impl crate::batching_mode::frontend_client::GrpcQueryHandlerWithBoxedError
+    for CaptureScheduledNowHandler
+{
+    async fn do_query(
+        &self,
+        query: api::v1::greptime_request::Request,
+        ctx: QueryContextRef,
+    ) -> std::result::Result<Output, BoxedError> {
+        assert_eq!(
+            ctx.extension(FLOW_SCHEDULED_TIME_MILLIS),
+            Some(self.expected_extension.as_str())
+        );
+
+        let api::v1::greptime_request::Request::Query(api::v1::QueryRequest {
+            query: Some(api::v1::query_request::Query::Sql(sql)),
+            ..
+        }) = query
+        else {
+            panic!("expected scheduled SQL flow to send a SQL query, got {query:?}");
+        };
+
+        let planned = sql_to_df_plan(ctx, self.query_engine.clone(), &sql, true)
+            .await
+            .unwrap();
+        assert_sql_uses_scheduled_time(&planned.to_string());
+
+        *self.captured_sql.lock().unwrap() = Some(sql);
+        Ok(Output::new_with_affected_rows(1))
+    }
+}
+
+fn assert_sql_uses_scheduled_time(sql: &str) {
+    let lower = sql.to_ascii_lowercase();
+    assert!(!lower.contains("now()"), "SQL still contains now(): {sql}");
+    assert!(
+        sql.contains("2023-11-14") || sql.contains("1700000000"),
+        "SQL does not contain the scheduled date or epoch value: {sql}"
+    );
+    assert!(
+        sql.contains("22:13:20") || sql.contains("1700000000"),
+        "SQL does not contain the scheduled time or epoch value: {sql}"
+    );
+}
+
 /// After a scheduled-time attempt fails (missing sink), the
 /// `FLOW_SCHEDULED_TIME_MILLIS` extension must not leak into
 /// `TaskState.query_ctx` or `frontend_extensions()`.
@@ -568,6 +647,77 @@ async fn test_scheduled_time_ctx_restored_on_no_dirty_windows() {
         None,
         "FLOW_SCHEDULED_TIME_MILLIS leaked into query_ctx after Ok(None)"
     );
+}
+
+#[tokio::test]
+async fn test_scheduled_time_now_is_bound_to_selected_attempt() {
+    let query_engine = create_test_query_engine();
+    let ctx = QueryContext::arc();
+    let query = "SELECT date_trunc('second', now()) AS ts, number FROM numbers_with_ts";
+    let plan = sql_to_df_plan(ctx.clone(), query_engine.clone(), query, true)
+        .await
+        .unwrap();
+    let sink_table_name = "scheduled_now_sink";
+    register_scheduled_now_sink(&query_engine, sink_table_name, 9102);
+    let (_tx, rx) = tokio::sync::oneshot::channel();
+    let task = BatchingTask::try_new(TaskArgs {
+        flow_id: 1,
+        query,
+        plan,
+        time_window_expr: None,
+        expire_after: None,
+        sink_table_name: [
+            "greptime".to_string(),
+            "public".to_string(),
+            sink_table_name.to_string(),
+        ],
+        source_table_names: vec![[
+            "greptime".to_string(),
+            "public".to_string(),
+            "numbers_with_ts".to_string(),
+        ]],
+        query_ctx: ctx,
+        catalog_manager: query_engine.engine_state().catalog_manager().clone(),
+        shutdown_rx: rx,
+        batch_opts: incremental_batch_opts(),
+        flow_eval_interval: Some(Duration::from_secs(1)),
+        eval_schedule: None,
+    })
+    .unwrap();
+
+    let scheduled_time_secs = 1_700_000_000_i64;
+    let expected_extension = (scheduled_time_secs * 1000).to_string();
+    let captured_sql = Arc::new(std::sync::Mutex::new(None));
+    let handler: Arc<dyn crate::batching_mode::frontend_client::GrpcQueryHandlerWithBoxedError> =
+        Arc::new(CaptureScheduledNowHandler {
+            expected_extension,
+            captured_sql: captured_sql.clone(),
+            query_engine: query_engine.clone(),
+        });
+    let frontend_client = Arc::new(FrontendClient::from_grpc_handler(
+        Arc::downgrade(&handler),
+        QueryOptions::default(),
+    ));
+
+    let outcome = task
+        .execute_once_serialized_at_scheduled_time(
+            &query_engine,
+            &frontend_client,
+            scheduled_time_secs,
+        )
+        .await;
+
+    assert!(
+        matches!(outcome.result, Ok(Some((1, _)))),
+        "scheduled attempt should execute once, got {:?}",
+        outcome.result
+    );
+    let sent_sql = captured_sql
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("frontend handler should capture generated SQL");
+    assert!(!sent_sql.is_empty());
 }
 
 fn output_with_region_watermarks(
