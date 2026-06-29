@@ -627,6 +627,7 @@ fn to_flight_data_stream(
 
 #[cfg(test)]
 mod tests {
+    use query::options::FLOW_SCHEDULED_TIME_MILLIS;
     use tonic::metadata::{AsciiMetadataValue, MetadataMap};
 
     use super::*;
@@ -652,6 +653,25 @@ mod tests {
                     r#"{"1":10,"2":20}"#.to_string()
                 ),
             ]
+        );
+    }
+
+    #[test]
+    fn test_flow_extensions_can_carry_scheduled_time() {
+        let mut metadata = MetadataMap::new();
+        metadata.insert(
+            FLOW_EXTENSIONS_METADATA_KEY,
+            AsciiMetadataValue::try_from(r#"[["flow.scheduled_time_millis","1700000000000"]]"#)
+                .unwrap(),
+        );
+
+        let flow_extensions = extract_flow_extensions(&metadata).unwrap();
+        let query_ctx =
+            create_query_context(Channel::Grpc, None, flow_extensions, HashMap::new()).unwrap();
+
+        assert_eq!(
+            query_ctx.extension(FLOW_SCHEDULED_TIME_MILLIS),
+            Some("1700000000000")
         );
     }
 

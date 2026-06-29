@@ -14,8 +14,10 @@
 
 use std::collections::HashMap;
 
+use chrono::{DateTime, Utc};
 use common_base::memory_limit::MemoryLimit;
 use serde::{Deserialize, Serialize};
+use session::context::QueryContextRef;
 use store_api::storage::RegionId;
 use table::metadata::TableId;
 
@@ -25,6 +27,10 @@ pub const FLOW_INCREMENTAL_AFTER_SEQS: &str = "flow.incremental_after_seqs";
 pub const FLOW_INCREMENTAL_MODE: &str = "flow.incremental_mode";
 pub const FLOW_RETURN_REGION_SEQ: &str = "flow.return_region_seq";
 pub const FLOW_SINK_TABLE_ID: &str = "flow.sink_table_id";
+/// Flow scheduler binding for the logical time of one scheduled attempt.
+/// Query planning, SQL/TQL parsing, range-select rewrite and DataFusion
+/// execution read this extension so `now()` is stable for the whole attempt.
+pub const FLOW_SCHEDULED_TIME_MILLIS: &str = "flow.scheduled_time_millis";
 /// Enable by default, set to false to explicitly disable.
 pub const QUERY_ENABLE_REMOTE_DYNAMIC_FILTER_PUSHDOWN: &str =
     "query.enable_remote_dynamic_filter_pushdown";
@@ -281,6 +287,52 @@ fn parse_bool(option_name: &str, value: &str) -> Result<bool> {
             option_name, value
         ))),
     }
+}
+
+/// Parse the scheduled time (in milliseconds since Unix epoch) from extensions.
+///
+/// Returns `Ok(None)` if the extension key is absent, `Ok(Some(millis))` on success,
+/// or `Err` if the value is malformed.
+pub fn parse_scheduled_time_millis(extensions: &HashMap<String, String>) -> Result<Option<i64>> {
+    match extensions.get(FLOW_SCHEDULED_TIME_MILLIS) {
+        Some(val) => val.parse::<i64>().map(Some).map_err(|_| {
+            invalid_query_context_extension(format!(
+                "Invalid value for {}: {}",
+                FLOW_SCHEDULED_TIME_MILLIS, val
+            ))
+        }),
+        None => Ok(None),
+    }
+}
+
+/// Parse the scheduled time from extensions into a [`DateTime<Utc>`].
+///
+/// Returns `Ok(None)` if the extension key is absent, `Ok(Some(datetime))` on success,
+/// or `Err` if the value is malformed.  Millis that produce an out-of-range timestamp are
+/// also rejected.
+pub fn parse_scheduled_time_datetime(
+    extensions: &HashMap<String, String>,
+) -> Result<Option<DateTime<Utc>>> {
+    match parse_scheduled_time_millis(extensions)? {
+        Some(millis) => DateTime::from_timestamp_millis(millis)
+            .map(Some)
+            .ok_or_else(|| {
+                invalid_query_context_extension(format!(
+                    "Out-of-range timestamp for {}: {} ms",
+                    FLOW_SCHEDULED_TIME_MILLIS, millis
+                ))
+            }),
+        None => Ok(None),
+    }
+}
+
+/// Convenience helper: extract scheduled time from a [`QueryContextRef`] as a [`DateTime<Utc>`].
+///
+/// Errors are silently swallowed, returning `None`.
+/// Use [`parse_scheduled_time_datetime`] when a `Result` is needed.
+pub fn scheduled_time_from_ctx(query_ctx: &QueryContextRef) -> Option<DateTime<Utc>> {
+    let extensions = query_ctx.extensions();
+    parse_scheduled_time_datetime(&extensions).ok().flatten()
 }
 
 fn invalid_query_context_extension(reason: String) -> Error {
@@ -554,5 +606,60 @@ mod flow_extension_tests {
             parsed.incremental_after_seqs,
             Some(HashMap::from([(1, 10)]))
         );
+    }
+
+    // --- scheduled time helper tests ---
+
+    #[test]
+    fn test_parse_scheduled_time_millis_absent() {
+        let exts = HashMap::new();
+        assert_eq!(parse_scheduled_time_millis(&exts).unwrap(), None);
+    }
+
+    #[test]
+    fn test_parse_scheduled_time_millis_valid() {
+        let exts = HashMap::from([(
+            FLOW_SCHEDULED_TIME_MILLIS.to_string(),
+            "1700000000000".to_string(),
+        )]);
+        assert_eq!(
+            parse_scheduled_time_millis(&exts).unwrap(),
+            Some(1700000000000)
+        );
+    }
+
+    #[test]
+    fn test_parse_scheduled_time_millis_malformed() {
+        let exts = HashMap::from([(
+            FLOW_SCHEDULED_TIME_MILLIS.to_string(),
+            "not-a-number".to_string(),
+        )]);
+        let err = parse_scheduled_time_millis(&exts).unwrap_err();
+        assert!(format!("{err}").contains(FLOW_SCHEDULED_TIME_MILLIS));
+    }
+
+    #[test]
+    fn test_parse_scheduled_time_datetime_valid() {
+        let exts = HashMap::from([(
+            FLOW_SCHEDULED_TIME_MILLIS.to_string(),
+            "1700000000000".to_string(),
+        )]);
+        let dt = parse_scheduled_time_datetime(&exts).unwrap().unwrap();
+        assert_eq!(dt.timestamp_millis(), 1700000000000);
+    }
+
+    #[test]
+    fn test_parse_scheduled_time_datetime_negative_millis() {
+        let exts = HashMap::from([(FLOW_SCHEDULED_TIME_MILLIS.to_string(), "-1".to_string())]);
+        let dt = parse_scheduled_time_datetime(&exts).unwrap().unwrap();
+        assert_eq!(dt.timestamp_millis(), -1);
+    }
+
+    #[test]
+    fn test_parse_scheduled_time_datetime_out_of_range() {
+        // i64::MAX millis is well beyond representable chrono::DateTime range
+        let exts = HashMap::from([(FLOW_SCHEDULED_TIME_MILLIS.to_string(), i64::MAX.to_string())]);
+        let err = parse_scheduled_time_datetime(&exts).unwrap_err();
+        assert!(format!("{err}").contains("Out-of-range"));
     }
 }
