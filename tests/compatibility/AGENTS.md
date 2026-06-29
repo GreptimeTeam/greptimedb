@@ -55,7 +55,7 @@ would be selected before a real run.
 ## CI Version Window
 
 - `tests/compatibility/ci.toml` controls the small sliding window of recent
-  released versions used by the CI smoke job. Do not hard-code old versions
+  released versions used by the CI job. Do not hard-code old versions
   directly in workflow YAML.
 - Keep the PR/merge-queue window short; wider compatibility coverage belongs in
   nightly or release-validation workflows.

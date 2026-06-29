@@ -91,7 +91,7 @@ This case only runs when the old binary is <= v1.1.0 and the new binary is >= v1
 
 ### CI Version Window
 
-The CI smoke job uses `tests/compatibility/ci.toml` to choose the small sliding
+The CI job uses `tests/compatibility/ci.toml` to choose the small sliding
 window of recent released `from` versions to test against the PR-built `to`
 binary:
 

@@ -1021,7 +1021,7 @@ jobs:
 
   compat:
     if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' || (github.event_name == 'pull_request' && github.event.action == 'ready_for_review')) }}
-    name: Compatibility Test (smoke)
+    name: Compatibility Test (recent releases)
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -1037,7 +1037,7 @@ jobs:
           path: .
       - name: Unzip binaries
         run: tar -xvf ./bins.tar.gz
-      - name: Run compatibility smoke test
+      - name: Run compatibility test
         run: python3 .github/scripts/run-compat.py --preserve-state
       - name: Upload compatibility logs
         if: failure()
