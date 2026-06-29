@@ -12,9 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use api::greptime_proto::io::prometheus::write::v2::Metadata;
 use api::greptime_proto::io::prometheus::write::v2::histogram::{Count, ZeroCount};
+use api::greptime_proto::io::prometheus::write::v2::{BucketSpan, Histogram, Metadata};
 use bytes::Bytes;
+use servers::prom_remote_write::v2::native_histogram::{
+    PrometheusFloatHistogram, PrometheusHistogram, PrometheusHistogramSpan,
+    PrometheusNativeHistogram, convert_native_histogram, to_float_histogram, to_int_histogram,
+};
 use servers::prom_remote_write::v2::test_util as remote_write_v2;
 
 #[test]
@@ -74,6 +78,91 @@ fn test_decode_remote_write_v2_native_histogram_dump() {
         vec![2, -1, 3, -3, 3, -3, 0, 0, 0, 0, 0, 0, 0, 1, -1, 0]
     );
     assert_eq!(histogram.timestamp, 1782358160412);
+
+    assert_eq!(
+        convert_native_histogram(histogram),
+        PrometheusNativeHistogram::Int(PrometheusHistogram {
+            reset_hint: 0,
+            schema: 3,
+            zero_threshold: 2.938735877055719e-39,
+            zero_count: 0,
+            count: 24,
+            sum: 0.205418879,
+            positive_spans: vec![
+                PrometheusHistogramSpan {
+                    offset: -63,
+                    length: 1,
+                },
+                PrometheusHistogramSpan {
+                    offset: 1,
+                    length: 14,
+                },
+                PrometheusHistogramSpan {
+                    offset: 5,
+                    length: 1,
+                },
+            ],
+            positive_buckets: vec![2, -1, 3, -3, 3, -3, 0, 0, 0, 0, 0, 0, 0, 1, -1, 0],
+            negative_spans: Vec::new(),
+            negative_buckets: Vec::new(),
+            custom_values: Vec::new(),
+        })
+    );
+    assert_eq!(
+        to_float_histogram(histogram).positive_buckets,
+        vec![
+            2.0, 1.0, 4.0, 1.0, 4.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 2.0, 1.0, 1.0
+        ]
+    );
+}
+
+#[test]
+fn test_convert_remote_write_v2_float_native_histogram() {
+    let histogram = Histogram {
+        count: Some(Count::CountFloat(3.5)),
+        sum: 10.0,
+        schema: 2,
+        zero_threshold: 1e-128,
+        zero_count: Some(ZeroCount::ZeroCountFloat(0.5)),
+        negative_spans: vec![BucketSpan {
+            offset: -2,
+            length: 1,
+        }],
+        negative_counts: vec![1.25],
+        positive_spans: vec![BucketSpan {
+            offset: 3,
+            length: 2,
+        }],
+        positive_counts: vec![2.0, 3.5],
+        reset_hint: 3,
+        timestamp: 1234,
+        custom_values: vec![0.5, 1.5],
+        ..Default::default()
+    };
+
+    assert!(to_int_histogram(&histogram).is_none());
+    assert_eq!(
+        convert_native_histogram(&histogram),
+        PrometheusNativeHistogram::Float(PrometheusFloatHistogram {
+            reset_hint: 3,
+            schema: 2,
+            zero_threshold: 1e-128,
+            zero_count: 0.5,
+            count: 3.5,
+            sum: 10.0,
+            positive_spans: vec![PrometheusHistogramSpan {
+                offset: 3,
+                length: 2,
+            }],
+            positive_buckets: vec![2.0, 3.5],
+            negative_spans: vec![PrometheusHistogramSpan {
+                offset: -2,
+                length: 1,
+            }],
+            negative_buckets: vec![1.25],
+            custom_values: vec![0.5, 1.5],
+        })
+    );
 }
 
 fn assert_text_dump_shape(
