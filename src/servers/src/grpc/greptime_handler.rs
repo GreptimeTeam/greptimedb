@@ -299,6 +299,7 @@ impl Drop for RequestTimer {
 mod tests {
     use chrono::FixedOffset;
     use common_time::Timezone;
+    use query::options::FLOW_SCHEDULED_TIME_MILLIS;
     use session::hints::{
         INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY, REMOTE_QUERY_ID_EXTENSION_KEY,
     };
@@ -326,6 +327,10 @@ mod tests {
                     INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY.to_string(),
                     "spoofed-regs".to_string(),
                 ),
+                (
+                    FLOW_SCHEDULED_TIME_MILLIS.to_string(),
+                    "1700000000000".to_string(),
+                ),
             ],
             HashMap::from([(7, 88)]),
         )
@@ -341,22 +346,16 @@ mod tests {
             query_context.read_preference(),
             ReadPreference::Leader
         ));
-        let mut extensions = query_context.extensions().into_iter().collect::<Vec<_>>();
-        extensions.sort_unstable_by(|a, b| a.0.cmp(&b.0));
-        assert_eq!(
-            extensions[0],
-            ("auto_create_table".to_string(), "true".to_string())
-        );
-        assert_eq!(extensions[1].0, REMOTE_QUERY_ID_EXTENSION_KEY.to_string());
-        assert_eq!(
-            query_context.remote_query_id(),
-            Some(extensions[1].1.as_str())
-        );
+        assert_eq!(query_context.extension("auto_create_table"), Some("true"));
         assert_ne!(query_context.remote_query_id(), Some("spoofed"));
         assert!(
             query_context
                 .extension(INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY)
                 .is_none()
+        );
+        assert_eq!(
+            query_context.extension(FLOW_SCHEDULED_TIME_MILLIS),
+            Some("1700000000000")
         );
     }
 

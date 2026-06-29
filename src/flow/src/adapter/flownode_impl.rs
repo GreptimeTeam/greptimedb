@@ -25,9 +25,12 @@ use api::v1::region::InsertRequests;
 use catalog::CatalogManager;
 use common_base::Plugins;
 use common_error::ext::BoxedError;
-use common_meta::ddl::create_flow::FlowType;
+use common_meta::ddl::create_flow::{
+    FlowType, INTERNAL_EVAL_SCHEDULE_KEY, effective_eval_schedule_from_flow_info,
+};
 use common_meta::error::Result as MetaResult;
 use common_meta::key::flow::FlowMetadataManager;
+use common_meta::key::flow::flow_info::FlowScheduleConfig;
 use common_meta::key::flow::flow_state::FlowStat;
 use common_runtime::JoinHandle;
 use common_telemetry::{error, info, trace, warn};
@@ -380,6 +383,7 @@ impl FlowDualEngine {
                         comment: Some(info.comment().clone()),
                         sql: info.raw_sql().clone(),
                         flow_options: info.options().clone(),
+                        eval_schedule: effective_eval_schedule_from_flow_info(&info),
                         query_ctx: info
                             .query_context()
                             .clone()
@@ -839,7 +843,7 @@ impl common_meta::node_manager::Flownode for FlowDualEngine {
                 eval_interval,
                 comment,
                 sql,
-                flow_options,
+                mut flow_options,
                 or_replace,
             })) => {
                 let source_table_ids = source_table_ids.into_iter().map(|id| id.id).collect_vec();
@@ -849,6 +853,10 @@ impl common_meta::node_manager::Flownode for FlowDualEngine {
                     sink_table_name.table_name,
                 ];
                 let expire_after = expire_after.map(|e| e.value);
+
+                let eval_schedule = decode_internal_eval_schedule(&mut flow_options)
+                    .map_err(to_meta_err(snafu::location!()))?;
+
                 let args = CreateFlowArgs {
                     flow_id: task_id.id as u64,
                     sink_table_name,
@@ -861,6 +869,7 @@ impl common_meta::node_manager::Flownode for FlowDualEngine {
                     sql: sql.clone(),
                     flow_options,
                     query_ctx,
+                    eval_schedule,
                 };
                 let ret = self
                     .create_flow(args)
@@ -916,6 +925,24 @@ impl common_meta::node_manager::Flownode for FlowDualEngine {
             .await
             .map(|_| FlowResponse::default())
             .map_err(to_meta_err(snafu::location!()))
+    }
+}
+
+/// Decode typed schedule config from the internal transient key emitted by metasrv.
+/// Malformed JSON is an internal error rather than a reason to silently fall back.
+fn decode_internal_eval_schedule(
+    flow_options: &mut HashMap<String, String>,
+) -> Result<Option<FlowScheduleConfig>, Error> {
+    match flow_options.remove(INTERNAL_EVAL_SCHEDULE_KEY) {
+        Some(json) => serde_json::from_str::<FlowScheduleConfig>(&json)
+            .map(Some)
+            .map_err(|err| {
+                InternalSnafu {
+                    reason: format!("Invalid internal eval schedule payload: {err}"),
+                }
+                .build()
+            }),
+        None => Ok(None),
     }
 }
 
@@ -1126,5 +1153,32 @@ impl StreamingEngine {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use common_meta::ddl::create_flow::INTERNAL_EVAL_SCHEDULE_KEY;
+
+    use super::decode_internal_eval_schedule;
+    use crate::error::Error;
+
+    #[test]
+    fn test_malformed_internal_eval_schedule_json_is_error() {
+        let mut flow_options = HashMap::new();
+        flow_options.insert(
+            INTERNAL_EVAL_SCHEDULE_KEY.to_string(),
+            "not-json".to_string(),
+        );
+
+        let err = decode_internal_eval_schedule(&mut flow_options).unwrap_err();
+        assert!(matches!(
+            err,
+            Error::Internal { reason, .. }
+                if reason.contains("Invalid internal eval schedule payload")
+        ));
+        assert!(!flow_options.contains_key(INTERNAL_EVAL_SCHEDULE_KEY));
     }
 }

@@ -19,6 +19,7 @@ use std::time::Duration;
 use arrow_schema::DataType;
 use async_recursion::async_recursion;
 use catalog::table_source::DfTableSourceProvider;
+use chrono::{DateTime, Utc};
 use common_time::interval::{MS_PER_DAY, NANOS_PER_MILLI};
 use common_time::timestamp::TimeUnit;
 use common_time::{IntervalDayTime, IntervalMonthDayNano, IntervalYearMonth, Timestamp, Timezone};
@@ -121,7 +122,7 @@ fn parse_duration_expr(args: &[Expr], i: usize) -> DFResult<Duration> {
             parse_duration(str).map_err(DataFusionError::Plan)
         }
         Some(expr) => {
-            let ms = evaluate_expr_to_millisecond(args, i, true)?;
+            let ms = evaluate_expr_to_millisecond(args, i, true, None)?;
             if ms <= 0 {
                 return Err(dispose_parse_error(Some(expr)));
             }
@@ -138,14 +139,22 @@ fn parse_duration_expr(args: &[Expr], i: usize) -> DFResult<Duration> {
 /// Output a millisecond timestamp
 ///
 /// if `interval_only==true`, only accept expr with all interval type (case 2 will return a error)
-fn evaluate_expr_to_millisecond(args: &[Expr], i: usize, interval_only: bool) -> DFResult<i64> {
+fn evaluate_expr_to_millisecond(
+    args: &[Expr],
+    i: usize,
+    interval_only: bool,
+    scheduled_time: Option<DateTime<Utc>>,
+) -> DFResult<i64> {
     let Some(expr) = args.get(i) else {
         return Err(dispose_parse_error(None));
     };
     if interval_only && !interval_only_in_expr(expr) {
         return Err(dispose_parse_error(Some(expr)));
     }
-    let info = SimplifyContext::default().with_current_time();
+    let info = match scheduled_time {
+        Some(dt) => SimplifyContext::default().with_query_execution_start_time(Some(dt)),
+        None => SimplifyContext::default().with_current_time(),
+    };
     let simplify_expr = ExprSimplifier::new(info).simplify(expr.clone())?;
     match simplify_expr {
         Expr::Literal(ScalarValue::TimestampNanosecond(ts_nanos, _), _)
@@ -207,13 +216,22 @@ fn evaluate_expr_to_millisecond(args: &[Expr], i: usize, interval_only: bool) ->
 /// 2. Timestamp string: align to specific timestamp
 /// 3. An expr can be evaluated at the logical plan stage (e.g. `now() - INTERVAL '1' day`)
 /// 4. leave empty (as Default Option): align to unix epoch 0 (timezone aware)
-fn parse_align_to(args: &[Expr], i: usize, timezone: Option<&Timezone>) -> DFResult<i64> {
+fn parse_align_to(
+    args: &[Expr],
+    i: usize,
+    timezone: Option<&Timezone>,
+    scheduled_time: Option<DateTime<Utc>>,
+) -> DFResult<i64> {
     let Ok(s) = parse_str_expr(args, i) else {
-        return evaluate_expr_to_millisecond(args, i, false);
+        return evaluate_expr_to_millisecond(args, i, false, scheduled_time);
     };
     let upper = s.to_uppercase();
     match upper.as_str() {
-        "NOW" => return Ok(Timestamp::current_millis().value()),
+        "NOW" => {
+            return Ok(scheduled_time
+                .map(|dt| dt.timestamp_millis())
+                .unwrap_or_else(|| Timestamp::current_millis().value()));
+        }
         // default align to unix epoch 0 (timezone aware)
         "" => return Ok(timezone.map(|tz| tz.local_minus_utc() * 1000).unwrap_or(0)),
         _ => (),
@@ -285,7 +303,15 @@ impl TreeNodeRewriter for RangeExprRewriter<'_> {
                 .map_err(|e| DataFusionError::Plan(e.to_string()))?;
             let by = parse_expr_list(&func.args, 4, byc)?;
             let align = parse_duration_expr(&func.args, byc + 4)?;
-            let align_to = parse_align_to(&func.args, byc + 5, Some(&self.query_ctx.timezone()))?;
+            let scheduled_time =
+                crate::options::parse_scheduled_time_datetime(&self.query_ctx.extensions())
+                    .map_err(|err| DataFusionError::Plan(err.to_string()))?;
+            let align_to = parse_align_to(
+                &func.args,
+                byc + 5,
+                Some(&self.query_ctx.timezone()),
+                scheduled_time,
+            )?;
             let mut data_type = range_expr.get_type(self.input_plan.schema())?;
             let mut need_cast = false;
             let fill = Fill::try_from_str(parse_str_expr(&func.args, 2)?, &data_type)?;
@@ -665,7 +691,7 @@ mod test {
     use datafusion_expr::{BinaryExpr, Literal, Operator};
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, Schema};
-    use session::context::QueryContext;
+    use session::context::{QueryContext, QueryContextBuilder};
     use table::metadata::{TableInfoBuilder, TableMetaBuilder};
     use table::table::TableRef;
     use table::test_util::EmptyTable;
@@ -771,6 +797,12 @@ mod test {
         engine.planner().plan(&stmt, QueryContext::arc()).await
     }
 
+    async fn do_query_with_ctx(sql: &str, query_ctx: QueryContextRef) -> Result<LogicalPlan> {
+        let stmt = QueryLanguageParser::parse_sql(sql, &query_ctx).unwrap();
+        let engine = create_test_engine().await;
+        engine.planner().plan(&stmt, query_ctx).await
+    }
+
     async fn do_union_query(sql: &str) -> Result<LogicalPlan> {
         let stmt = QueryLanguageParser::parse_sql(sql, &QueryContext::arc()).unwrap();
         let engine = create_union_test_engine().await;
@@ -780,6 +812,26 @@ mod test {
     async fn query_plan_compare(sql: &str, expected: String) {
         let plan = do_query(sql).await.unwrap();
         assert_eq!(plan.display_indent_schema().to_string(), expected);
+    }
+
+    #[tokio::test]
+    async fn range_align_to_now_uses_scheduled_time_extension() {
+        let query_ctx = Arc::new(
+            QueryContextBuilder::default()
+                .set_extension(
+                    crate::options::FLOW_SCHEDULED_TIME_MILLIS.to_string(),
+                    "1700000000123".to_string(),
+                )
+                .build(),
+        );
+        let query = r#"SELECT timestamp, tag_0, tag_1, avg(field_0) RANGE '5m' FROM test ALIGN '1h' TO NOW by (tag_0,tag_1);"#;
+        let plan = do_query_with_ctx(query, query_ctx).await.unwrap();
+
+        assert!(
+            plan.display_indent_schema()
+                .to_string()
+                .contains("align_to=1700000000123ms")
+        );
     }
 
     #[tokio::test]
@@ -1077,37 +1129,54 @@ mod test {
     fn test_parse_align_to() {
         // test NOW
         let args = vec!["NOW".lit()];
-        let epsinon = parse_align_to(&args, 0, None).unwrap() - Timestamp::current_millis().value();
+        let epsinon =
+            parse_align_to(&args, 0, None, None).unwrap() - Timestamp::current_millis().value();
         assert!(epsinon.abs() < 100);
+        let scheduled_time = DateTime::from_timestamp(1_700_000_000, 123_000_000).unwrap();
+        assert_eq!(
+            scheduled_time.timestamp_millis(),
+            parse_align_to(&args, 0, None, Some(scheduled_time)).unwrap()
+        );
         // test default
         let args = vec!["".lit()];
-        assert_eq!(0, parse_align_to(&args, 0, None).unwrap());
+        assert_eq!(0, parse_align_to(&args, 0, None, None).unwrap());
         // test default with timezone
         let args = vec!["".lit()];
         assert_eq!(
             -36000 * 1000,
-            parse_align_to(&args, 0, Some(&Timezone::from_tz_string("HST").unwrap())).unwrap()
+            parse_align_to(
+                &args,
+                0,
+                Some(&Timezone::from_tz_string("HST").unwrap()),
+                None
+            )
+            .unwrap()
         );
         assert_eq!(
             28800 * 1000,
             parse_align_to(
                 &args,
                 0,
-                Some(&Timezone::from_tz_string("Asia/Shanghai").unwrap())
+                Some(&Timezone::from_tz_string("Asia/Shanghai").unwrap()),
+                None
             )
             .unwrap()
         );
 
         // test Timestamp
         let args = vec!["1970-01-01T00:00:00+08:00".lit()];
-        assert_eq!(parse_align_to(&args, 0, None).unwrap(), -8 * 60 * 60 * 1000);
+        assert_eq!(
+            parse_align_to(&args, 0, None, None).unwrap(),
+            -8 * 60 * 60 * 1000
+        );
         // timezone
         let args = vec!["1970-01-01T00:00:00".lit()];
         assert_eq!(
             parse_align_to(
                 &args,
                 0,
-                Some(&Timezone::from_tz_string("Asia/Shanghai").unwrap())
+                Some(&Timezone::from_tz_string("Asia/Shanghai").unwrap()),
+                None
             )
             .unwrap(),
             -8 * 60 * 60 * 1000
@@ -1122,7 +1191,7 @@ mod test {
                 ScalarValue::IntervalDayTime(Some(IntervalDayTime::new(0, 10).into())).lit(),
             ),
         })];
-        assert_eq!(parse_align_to(&args, 0, None).unwrap(), 20);
+        assert_eq!(parse_align_to(&args, 0, None, None).unwrap(), 20);
     }
 
     #[test]

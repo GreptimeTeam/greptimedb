@@ -40,6 +40,8 @@ pub struct CreateFlowArgs {
     pub sql: String,
     pub flow_options: HashMap<String, String>,
     pub query_ctx: Option<QueryContext>,
+    /// Typed schedule configuration for `EVAL INTERVAL` flows.
+    pub eval_schedule: Option<common_meta::key::flow::flow_info::FlowScheduleConfig>,
 }
 
 pub trait FlowEngine {

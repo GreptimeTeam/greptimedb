@@ -882,10 +882,16 @@ pub async fn sql_to_df_plan(
     sql: &str,
     optimize: bool,
 ) -> Result<LogicalPlan, Error> {
-    let stmts =
-        ParserContext::create_with_dialect(sql, query_ctx.sql_dialect(), ParseOptions::default())
-            .map_err(BoxedError::new)
-            .context(ExternalSnafu)?;
+    let scheduled_time = query::options::parse_scheduled_time_datetime(&query_ctx.extensions())
+        .map_err(BoxedError::new)
+        .context(ExternalSnafu)?;
+    let stmts = ParserContext::create_with_dialect(
+        sql,
+        query_ctx.sql_dialect(),
+        ParseOptions { scheduled_time },
+    )
+    .map_err(BoxedError::new)
+    .context(ExternalSnafu)?;
 
     ensure!(
         stmts.len() == 1,
