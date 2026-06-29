@@ -69,7 +69,7 @@ impl CreateFlowProcedure {
                 peers: vec![],
                 source_table_ids: vec![],
                 unresolved_source_table_names: vec![],
-                flow_context: query_context.into(), // Convert to FlowQueryContext
+                flow_context: without_scheduled_time_extension(query_context).into(),
                 state: CreateFlowState::Prepare,
                 prev_flow_info_value: None,
                 did_replace: false,
@@ -261,7 +261,12 @@ impl CreateFlowProcedure {
                 header: Some(FlowRequestHeader {
                     tracing_context: TracingContext::from_current_span().to_w3c(),
                     // Convert FlowQueryContext to QueryContext
-                    query_context: Some(QueryContext::from(self.data.flow_context.clone()).into()),
+                    query_context: Some(
+                        without_scheduled_time_extension(QueryContext::from(
+                            self.data.flow_context.clone(),
+                        ))
+                        .into(),
+                    ),
                 }),
                 body: Some(PbFlowRequest::Create((&self.data).into())),
             };
@@ -424,6 +429,15 @@ pub const DEFER_ON_MISSING_SOURCE_KEY: &str = "defer_on_missing_source";
 /// TODO(discord9): Replace this transient flow_options transport with a typed
 /// field in the flow create request.
 pub const INTERNAL_EVAL_SCHEDULE_KEY: &str = "__greptime_internal_eval_schedule";
+
+const FLOW_SCHEDULED_TIME_MILLIS_EXTENSION_KEY: &str = "flow.scheduled_time_millis";
+
+fn without_scheduled_time_extension(mut query_context: QueryContext) -> QueryContext {
+    query_context
+        .extensions
+        .remove(FLOW_SCHEDULED_TIME_MILLIS_EXTENSION_KEY);
+    query_context
+}
 
 pub fn defer_on_missing_source(flow_task: &CreateFlowTask) -> Result<bool> {
     flow_task
@@ -760,8 +774,9 @@ impl From<&CreateFlowData> for (FlowInfoValue, Vec<(FlowPartitionId, FlowRouteVa
             sink_table_name: sink_table_name.clone(),
             flownode_ids,
             catalog_name: catalog_name.clone(),
-            // Convert FlowQueryContext back to QueryContext for storage
-            query_context: Some(QueryContext::from(value.flow_context.clone())),
+            query_context: Some(without_scheduled_time_extension(QueryContext::from(
+                value.flow_context.clone(),
+            ))),
             flow_name: flow_name.clone(),
             raw_sql: sql.clone(),
             expire_after,

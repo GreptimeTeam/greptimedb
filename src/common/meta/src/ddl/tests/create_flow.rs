@@ -1112,6 +1112,44 @@ fn test_flow_query_context_conversion_from_query_context() {
 }
 
 #[test]
+fn test_create_flow_procedure_strips_scheduled_time_extension() {
+    let task = test_create_flow_task(
+        "my_flow",
+        vec![],
+        TableName::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "my_sink_table"),
+        false,
+    );
+    let ddl_context = new_ddl_context(Arc::new(MockFlownodeManager::new(NaiveFlownodeHandler)));
+    let mut query_ctx = test_query_context();
+    query_ctx.extensions.insert(
+        "flow.scheduled_time_millis".to_string(),
+        "1700000000000".to_string(),
+    );
+    query_ctx
+        .extensions
+        .insert("flow.other".to_string(), "kept".to_string());
+
+    let procedure = CreateFlowProcedure::new(task, query_ctx, ddl_context);
+
+    assert!(
+        !procedure
+            .data
+            .flow_context
+            .extensions
+            .contains_key("flow.scheduled_time_millis")
+    );
+    assert_eq!(
+        procedure
+            .data
+            .flow_context
+            .extensions
+            .get("flow.other")
+            .map(String::as_str),
+        Some("kept")
+    );
+}
+
+#[test]
 fn test_flow_info_conversion_with_flow_context() {
     let flow_context = FlowQueryContext {
         catalog: "info_catalog".to_string(),
@@ -1145,6 +1183,53 @@ fn test_flow_info_conversion_with_flow_context() {
     assert_eq!(query_context.timezone(), "Europe/Berlin");
     assert_eq!(query_context.channel(), 0);
     assert!(query_context.extensions().is_empty());
+}
+
+#[test]
+fn test_flow_info_conversion_strips_scheduled_time_extension() {
+    let flow_context = FlowQueryContext {
+        catalog: "info_catalog".to_string(),
+        schema: "info_schema".to_string(),
+        timezone: "UTC".to_string(),
+        extensions: HashMap::from([
+            (
+                "flow.scheduled_time_millis".to_string(),
+                "1700000000000".to_string(),
+            ),
+            ("flow.other".to_string(), "kept".to_string()),
+        ]),
+        channel: 0,
+        snapshot_seqs: HashMap::new(),
+        sst_min_sequences: HashMap::new(),
+    };
+
+    let data = CreateFlowData {
+        state: CreateFlowState::CreateMetadata,
+        task: create_test_flow_task_for_serialization(),
+        flow_id: Some(123),
+        peers: vec![],
+        source_table_ids: vec![],
+        unresolved_source_table_names: vec![],
+        flow_context,
+        prev_flow_info_value: None,
+        did_replace: false,
+        flow_type: Some(FlowType::Batching),
+    };
+
+    let (flow_info, _routes) = (&data).into();
+    let query_context = flow_info.query_context.unwrap();
+    assert!(
+        !query_context
+            .extensions()
+            .contains_key("flow.scheduled_time_millis")
+    );
+    assert_eq!(
+        query_context
+            .extensions()
+            .get("flow.other")
+            .map(String::as_str),
+        Some("kept")
+    );
 }
 
 #[test]
