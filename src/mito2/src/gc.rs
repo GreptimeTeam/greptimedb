@@ -82,6 +82,12 @@ pub(crate) fn should_delete_file(
     // For dropped regions, we can safely delete unknown files immediately.
     // For active/open regions, only delete if the object's last-modified time
     // exceeds the unknown_file_lingering_time TTL.
+    //
+    // Both timestamps are compared as milliseconds-since-epoch (i64).
+    // OpenDAL's `Timestamp` wraps `jiff::Timestamp`, whose `as_millisecond()`
+    // returns the same epoch-millisecond value as `chrono::DateTime::timestamp_millis()`.
+    // The comparison uses strict less-than (`<`): a file whose mtime equals
+    // the cutoff (`unknown_file_may_linger_until`) is kept (not deleted).
     if is_region_dropped {
         true
     } else {
@@ -89,7 +95,6 @@ pub(crate) fn should_delete_file(
             .metadata()
             .last_modified()
             .map(|ts| {
-                // opendal's Timestamp wraps jiff::Timestamp; compare via milliseconds
                 ts.into_inner().as_millisecond() < unknown_file_may_linger_until.timestamp_millis()
             })
             .unwrap_or(false)
