@@ -25,11 +25,48 @@ use crate::util;
 
 const DEFAULT_LOG_LEVEL: &str = "--log-level=debug,hyper=warn,tower=warn,datafusion=warn,reqwest=warn,sqlparser=warn,h2=info,opendal=info";
 
-// Use the legacy `rpc-*` aliases when spawning GreptimeDB so the same runner can
-// start older release binaries that predate the `grpc-*` CLI rename. Current
-// binaries keep these aliases for compatibility.
-const RPC_BIND_ADDR_ARG: &str = "--rpc-bind-addr";
-const RPC_SERVER_ADDR_ARG: &str = "--rpc-server-addr";
+/// Which set of gRPC CLI argument names to use when spawning a GreptimeDB binary.
+///
+/// Newer binaries (≥ current development) accept `--grpc-bind-addr` and
+/// `--grpc-server-addr`.  Older release binaries (e.g. v1.0.0) only recognise
+/// `--rpc-bind-addr` and `--rpc-server-addr`.  The runner auto-detects the
+/// correct style by inspecting `<binary> <mode> start --help` output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum GrpcArgStyle {
+    /// Current-style: `--grpc-bind-addr` / `--grpc-server-addr`
+    Grpc,
+    /// Legacy-style: `--rpc-bind-addr` / `--rpc-server-addr`
+    Rpc,
+}
+
+impl GrpcArgStyle {
+    /// Detects the preferred argument style from command help output.
+    pub fn detect_from_help(help: &str) -> Option<Self> {
+        if help.contains("--grpc-bind-addr") {
+            Some(GrpcArgStyle::Grpc)
+        } else if help.contains("--rpc-bind-addr") {
+            Some(GrpcArgStyle::Rpc)
+        } else {
+            None
+        }
+    }
+
+    /// Returns the CLI flag name for the gRPC bind address.
+    pub fn bind_addr_arg(self) -> &'static str {
+        match self {
+            GrpcArgStyle::Grpc => "--grpc-bind-addr",
+            GrpcArgStyle::Rpc => "--rpc-bind-addr",
+        }
+    }
+
+    /// Returns the CLI flag name for the gRPC server (advertised) address.
+    pub fn server_addr_arg(self) -> &'static str {
+        match self {
+            GrpcArgStyle::Grpc => "--grpc-server-addr",
+            GrpcArgStyle::Rpc => "--rpc-server-addr",
+        }
+    }
+}
 
 static USED_PORTS: OnceLock<Mutex<HashSet<u16>>> = OnceLock::new();
 
@@ -336,6 +373,7 @@ impl ServerMode {
         env: &Env,
         db_ctx: &GreptimeDBContext,
         id: usize,
+        arg_style: GrpcArgStyle,
     ) -> Vec<String> {
         let mut args = env
             .extra_args()
@@ -361,7 +399,7 @@ impl ServerMode {
                     "-c".to_string(),
                     self.generate_config_file(sqlness_home, db_ctx, id),
                     format!("--http-addr={http_addr}"),
-                    format!("{RPC_BIND_ADDR_ARG}={rpc_bind_addr}"),
+                    format!("{}={rpc_bind_addr}", arg_style.bind_addr_arg()),
                     format!("--mysql-addr={mysql_addr}"),
                     format!("--postgres-addr={postgres_addr}"),
                 ]);
@@ -376,10 +414,10 @@ impl ServerMode {
                 args.extend([
                     format!("--metasrv-addrs={metasrv_addr}"),
                     format!("--http-addr={http_addr}"),
-                    format!("{RPC_BIND_ADDR_ARG}={rpc_bind_addr}"),
+                    format!("{}={rpc_bind_addr}", arg_style.bind_addr_arg()),
                     // since sqlness run on local, bind addr is the same as server addr
                     // this is needed so that `cluster_info`'s server addr column can be correct
-                    format!("{RPC_SERVER_ADDR_ARG}={rpc_bind_addr}"),
+                    format!("{}={rpc_bind_addr}", arg_style.server_addr_arg()),
                     format!("--mysql-addr={mysql_addr}"),
                     format!("--postgres-addr={postgres_addr}"),
                     format!(
@@ -397,9 +435,9 @@ impl ServerMode {
                 http_addr,
             } => {
                 args.extend([
-                    RPC_BIND_ADDR_ARG.to_string(),
+                    arg_style.bind_addr_arg().to_string(),
                     rpc_bind_addr.clone(),
-                    RPC_SERVER_ADDR_ARG.to_string(),
+                    arg_style.server_addr_arg().to_string(),
                     rpc_server_addr.clone(),
                     "--enable-region-failover".to_string(),
                     "false".to_string(),
@@ -482,8 +520,8 @@ impl ServerMode {
                     db_ctx.time()
                 ));
                 args.extend([
-                    format!("{RPC_BIND_ADDR_ARG}={rpc_bind_addr}"),
-                    format!("{RPC_SERVER_ADDR_ARG}={rpc_server_addr}"),
+                    format!("{}={rpc_bind_addr}", arg_style.bind_addr_arg()),
+                    format!("{}={rpc_server_addr}", arg_style.server_addr_arg()),
                     format!("--http-addr={http_addr}"),
                     format!("--data-home={}", data_home.display()),
                     format!("--log-dir={}/logs", data_home.display()),
@@ -501,8 +539,8 @@ impl ServerMode {
                 node_id,
             } => {
                 args.extend([
-                    format!("{RPC_BIND_ADDR_ARG}={rpc_bind_addr}"),
-                    format!("{RPC_SERVER_ADDR_ARG}={rpc_server_addr}"),
+                    format!("{}={rpc_bind_addr}", arg_style.bind_addr_arg()),
+                    format!("{}={rpc_server_addr}", arg_style.server_addr_arg()),
                     format!("--node-id={node_id}"),
                     format!(
                         "--log-dir={}/greptimedb-{}-flownode/logs",
@@ -553,35 +591,43 @@ mod tests {
             .any(|arg| arg == name || arg.starts_with(&format!("{name}=")))
     }
 
-    fn assert_uses_rpc_cli_aliases(args: &[String], expect_server_addr: bool) {
-        assert!(has_arg(args, RPC_BIND_ADDR_ARG), "args: {args:?}");
+    fn assert_uses_style(args: &[String], style: GrpcArgStyle, expect_server_addr: bool) {
+        let bind = style.bind_addr_arg();
+        let server = style.server_addr_arg();
+        let other_bind = match style {
+            GrpcArgStyle::Grpc => "--rpc-bind-addr",
+            GrpcArgStyle::Rpc => "--grpc-bind-addr",
+        };
+        let other_server = match style {
+            GrpcArgStyle::Grpc => "--rpc-server-addr",
+            GrpcArgStyle::Rpc => "--grpc-server-addr",
+        };
+
+        assert!(has_arg(args, bind), "missing {bind} in args: {args:?}");
         assert!(
-            !args.iter().any(|arg| arg.contains("--grpc-bind-addr")),
-            "args: {args:?}"
+            !args.iter().any(|arg| arg.contains(other_bind)),
+            "unexpected {other_bind} in args: {args:?}"
         );
 
         if expect_server_addr {
-            assert!(has_arg(args, RPC_SERVER_ADDR_ARG), "args: {args:?}");
+            assert!(has_arg(args, server), "missing {server} in args: {args:?}");
             assert!(
-                !args.iter().any(|arg| arg.contains("--grpc-server-addr")),
-                "args: {args:?}"
+                !args.iter().any(|arg| arg.contains(other_server)),
+                "unexpected {other_server} in args: {args:?}"
             );
         }
     }
 
-    #[test]
-    fn test_get_args_uses_legacy_rpc_cli_aliases() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let (env, db_ctx) = test_env(temp_dir.path());
-
+    fn test_all_modes(env: &Env, db_ctx: &GreptimeDBContext, temp_dir: &Path, style: GrpcArgStyle) {
         let standalone = ServerMode::Standalone {
             http_addr: "127.0.0.1:4000".to_string(),
             rpc_bind_addr: "127.0.0.1:4001".to_string(),
             mysql_addr: "127.0.0.1:4002".to_string(),
             postgres_addr: "127.0.0.1:4003".to_string(),
         };
-        assert_uses_rpc_cli_aliases(
-            &standalone.get_args(temp_dir.path(), &env, &db_ctx, 0),
+        assert_uses_style(
+            &standalone.get_args(temp_dir, env, db_ctx, 0, style),
+            style,
             false,
         );
 
@@ -592,14 +638,22 @@ mod tests {
             postgres_addr: "127.0.0.1:4103".to_string(),
             metasrv_addr: "127.0.0.1:4001".to_string(),
         };
-        assert_uses_rpc_cli_aliases(&frontend.get_args(temp_dir.path(), &env, &db_ctx, 0), true);
+        assert_uses_style(
+            &frontend.get_args(temp_dir, env, db_ctx, 0, style),
+            style,
+            true,
+        );
 
         let metasrv = ServerMode::Metasrv {
             rpc_bind_addr: "127.0.0.1:4201".to_string(),
             rpc_server_addr: "127.0.0.1:4201".to_string(),
             http_addr: "127.0.0.1:4200".to_string(),
         };
-        assert_uses_rpc_cli_aliases(&metasrv.get_args(temp_dir.path(), &env, &db_ctx, 0), true);
+        assert_uses_style(
+            &metasrv.get_args(temp_dir, env, db_ctx, 0, style),
+            style,
+            true,
+        );
 
         let datanode = ServerMode::Datanode {
             rpc_bind_addr: "127.0.0.1:4301".to_string(),
@@ -608,7 +662,11 @@ mod tests {
             metasrv_addr: "127.0.0.1:4001".to_string(),
             node_id: 0,
         };
-        assert_uses_rpc_cli_aliases(&datanode.get_args(temp_dir.path(), &env, &db_ctx, 0), true);
+        assert_uses_style(
+            &datanode.get_args(temp_dir, env, db_ctx, 0, style),
+            style,
+            true,
+        );
 
         let flownode = ServerMode::Flownode {
             rpc_bind_addr: "127.0.0.1:4401".to_string(),
@@ -617,6 +675,51 @@ mod tests {
             metasrv_addr: "127.0.0.1:4001".to_string(),
             node_id: 0,
         };
-        assert_uses_rpc_cli_aliases(&flownode.get_args(temp_dir.path(), &env, &db_ctx, 0), true);
+        assert_uses_style(
+            &flownode.get_args(temp_dir, env, db_ctx, 0, style),
+            style,
+            true,
+        );
+    }
+
+    #[test]
+    fn test_get_args_with_grpc_style() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let (env, db_ctx) = test_env(temp_dir.path());
+        test_all_modes(&env, &db_ctx, temp_dir.path(), GrpcArgStyle::Grpc);
+    }
+
+    #[test]
+    fn test_get_args_with_rpc_style() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let (env, db_ctx) = test_env(temp_dir.path());
+        test_all_modes(&env, &db_ctx, temp_dir.path(), GrpcArgStyle::Rpc);
+    }
+
+    #[test]
+    fn test_detect_arg_style_from_help_prefers_grpc() {
+        let help = "Usage: greptime metasrv start --grpc-bind-addr <ADDR> --rpc-bind-addr <ADDR>";
+
+        assert_eq!(
+            GrpcArgStyle::detect_from_help(help),
+            Some(GrpcArgStyle::Grpc)
+        );
+    }
+
+    #[test]
+    fn test_detect_arg_style_from_help_falls_back_to_rpc() {
+        let help = "Usage: greptime metasrv start --rpc-bind-addr <ADDR>";
+
+        assert_eq!(
+            GrpcArgStyle::detect_from_help(help),
+            Some(GrpcArgStyle::Rpc)
+        );
+    }
+
+    #[test]
+    fn test_detect_arg_style_from_help_rejects_unknown() {
+        let help = "Usage: greptime metasrv start --http-addr <ADDR>";
+
+        assert_eq!(GrpcArgStyle::detect_from_help(help), None);
     }
 }

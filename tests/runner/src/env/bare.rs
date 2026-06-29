@@ -32,7 +32,7 @@ use crate::client::MultiProtocolClient;
 use crate::cmd::bare::ServerAddr;
 use crate::formatter::{ErrorFormatter, MysqlFormatter, OutputFormatter, PostgresqlFormatter};
 use crate::protocol_interceptor::{MYSQL, PROTOCOL_KEY};
-use crate::server_mode::ServerMode;
+use crate::server_mode::{GrpcArgStyle, ServerMode};
 use crate::util;
 use crate::util::{PROGRAM, get_workspace_root, maybe_pull_binary};
 
@@ -100,6 +100,9 @@ pub struct Env {
     store_config: StoreConfig,
     /// Extra command line arguments when starting GreptimeDB binaries.
     extra_args: Vec<String>,
+    /// Cache for the detected gRPC argument style per (bins_dir, mode_name).
+    /// Avoids running `--help` on every server start.
+    grpc_arg_style_cache: Arc<Mutex<HashMap<(PathBuf, String), GrpcArgStyle>>>,
 }
 
 #[async_trait]
@@ -149,6 +152,7 @@ impl Env {
             )]))),
             store_config,
             extra_args,
+            grpc_arg_style_cache: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -272,6 +276,60 @@ impl Env {
         let _ = process.wait();
     }
 
+    /// Detect which gRPC argument style the binary at `bins_dir` supports for
+    /// the given server mode.  Caches the result keyed by `(bins_dir, mode_name)`.
+    fn detect_grpc_arg_style(&self, bins_dir: &Path, mode_name: &str) -> GrpcArgStyle {
+        let cache_key = (bins_dir.to_path_buf(), mode_name.to_string());
+
+        // Fast path: already cached.
+        {
+            let cache = self.grpc_arg_style_cache.lock().unwrap();
+            if let Some(style) = cache.get(&cache_key) {
+                return *style;
+            }
+        }
+
+        let binary_path = bins_dir.join(PROGRAM);
+        let output = Command::new(&binary_path)
+            .args([mode_name, "start", "--help"])
+            .output()
+            .unwrap_or_else(|e| {
+                panic!(
+                    "Failed to run '{} {} start --help': {e}",
+                    binary_path.display(),
+                    mode_name,
+                );
+            });
+
+        let help_text = format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let style = if let Some(style) = GrpcArgStyle::detect_from_help(&help_text) {
+            style
+        } else {
+            let help_preview = help_text.chars().take(1000).collect::<String>();
+            panic!(
+                "Could not detect gRPC argument style from '{} {} start --help'.\n\
+                 Help output (first 1000 chars):\n{}",
+                binary_path.display(),
+                mode_name,
+                help_preview
+            );
+        };
+
+        // Insert into cache (may race with another thread, but both detect
+        // the same value, so it's harmless).
+        {
+            let mut cache = self.grpc_arg_style_cache.lock().unwrap();
+            cache.entry(cache_key).or_insert(style);
+        }
+
+        style
+    }
+
     async fn start_server(
         &self,
         mode: ServerMode,
@@ -317,7 +375,9 @@ impl Env {
             .open(&stdout_file_name)
             .unwrap();
 
-        let args = mode.get_args(&self.sqlness_home, self, db_ctx, id);
+        let mode_name = mode.name();
+        let arg_style = self.detect_grpc_arg_style(&bins_dir, mode_name);
+        let args = mode.get_args(&self.sqlness_home, self, db_ctx, id, arg_style);
         let check_ip_addrs = mode.check_addrs();
 
         for check_ip_addr in &check_ip_addrs {
