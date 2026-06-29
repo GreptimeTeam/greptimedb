@@ -247,7 +247,7 @@ fn write_native_histogram(
         &mut row,
     )?;
 
-    match native_histogram {
+    let histogram_type = match native_histogram {
         native_histogram::PrometheusNativeHistogram::Int(histogram) => {
             write_common_native_histogram_fields(
                 table_data,
@@ -267,7 +267,7 @@ fn write_native_histogram(
                 &mut row,
             )?;
             write_float_native_histogram_fields(table_data, None, None, &mut row)?;
-            row_writer::write_tag(table_data, HISTOGRAM_TYPE_TAG, HISTOGRAM_TYPE_INT, &mut row)?;
+            HISTOGRAM_TYPE_INT
         }
         native_histogram::PrometheusNativeHistogram::Float(histogram) => {
             write_common_native_histogram_fields(
@@ -288,16 +288,15 @@ fn write_native_histogram(
                 Some((histogram.count, histogram.zero_count)),
                 &mut row,
             )?;
-            row_writer::write_tag(
-                table_data,
-                HISTOGRAM_TYPE_TAG,
-                HISTOGRAM_TYPE_FLOAT,
-                &mut row,
-            )?;
+            HISTOGRAM_TYPE_FLOAT
         }
-    }
+    };
 
+    row_writer::write_tag(table_data, HISTOGRAM_TYPE_TAG, histogram_type, &mut row)?;
     row_writer::write_tags(table_data, tags, &mut row)?;
+    // User labels are written after histogram fields and may contain the same
+    // name as our internal discriminator, so write it again to keep it reserved.
+    row_writer::write_tag(table_data, HISTOGRAM_TYPE_TAG, histogram_type, &mut row)?;
     table_data.add_row(row);
 
     Ok(())
@@ -1137,6 +1136,29 @@ mod tests {
         assert_eq!(rows.rows[0].values[14].value_data, None);
         assert_eq!(
             rows.rows[0].values[18].value_data,
+            Some(ValueData::StringValue(HISTOGRAM_TYPE_INT.to_string()))
+        );
+    }
+
+    #[test]
+    fn test_into_context_req_preserves_internal_histogram_type_tag() {
+        let mut request = test_util::request_with_labels_and_samples(
+            vec![
+                (METRIC_NAME_LABEL, "metric"),
+                (HISTOGRAM_TYPE_TAG, "user_value"),
+            ],
+            vec![],
+        );
+        request.timeseries[0].histograms.push(Histogram::default());
+
+        let ctx_req = request.into_write_requests().unwrap();
+
+        let mut inserts = ctx_req.histograms.all_req().collect::<Vec<_>>();
+        assert_eq!(inserts.len(), 1);
+        let rows = inserts.pop().unwrap().rows.unwrap();
+        let histogram_type_idx = column_index(&rows.schema, HISTOGRAM_TYPE_TAG);
+        assert_eq!(
+            rows.rows[0].values[histogram_type_idx].value_data,
             Some(ValueData::StringValue(HISTOGRAM_TYPE_INT.to_string()))
         );
     }
