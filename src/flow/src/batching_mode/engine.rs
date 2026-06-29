@@ -44,6 +44,7 @@ use table::table_reference::TableReference;
 use tokio::sync::{RwLock, oneshot};
 
 use crate::batching_mode::BatchingModeOptions;
+use crate::batching_mode::eval_schedule::EvalSchedule;
 use crate::batching_mode::frontend_client::FrontendClient;
 use crate::batching_mode::task::{BatchingTask, TaskArgs};
 use crate::batching_mode::time_window::{TimeWindowExpr, find_time_window_expr};
@@ -507,6 +508,7 @@ impl BatchingEngine {
             sql,
             flow_options,
             query_ctx,
+            eval_schedule: eval_schedule_config,
         } = args;
 
         // or replace logic
@@ -629,6 +631,24 @@ impl BatchingEngine {
             Self::ensure_sql_flow_has_twe_or_eval_interval(eval_interval, phy_expr.is_some())?;
         }
 
+        // Compute typed EvalSchedule from FlowScheduleConfig.
+        let eval_schedule = {
+            let interval = eval_interval;
+            let config = eval_schedule_config.as_ref();
+            match EvalSchedule::from_config(interval, config) {
+                Ok(s) => s,
+                Err(e) => {
+                    return UnexpectedSnafu {
+                        reason: format!(
+                            "Failed to build eval schedule for flow {}: {}",
+                            flow_id, e
+                        ),
+                    }
+                    .fail();
+                }
+            }
+        };
+
         let task_args = TaskArgs {
             flow_id,
             query: &sql,
@@ -642,6 +662,7 @@ impl BatchingEngine {
             shutdown_rx: rx,
             batch_opts,
             flow_eval_interval: eval_interval.map(|secs| Duration::from_secs(secs as u64)),
+            eval_schedule,
         };
 
         let task = BatchingTask::try_new(task_args)?;
@@ -1186,6 +1207,7 @@ GROUP BY l.number, time_window
             shutdown_rx: rx,
             batch_opts: Arc::new(BatchingModeOptions::default()),
             flow_eval_interval: None,
+            eval_schedule: None,
         })
         .unwrap();
 

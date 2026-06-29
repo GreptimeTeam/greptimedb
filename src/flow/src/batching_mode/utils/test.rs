@@ -827,6 +827,7 @@ async fn test_validate_sink_table_schema_rejects_existing_sink_missing_flow_colu
         shutdown_rx,
         batch_opts: Arc::new(BatchingModeOptions::default()),
         flow_eval_interval: None,
+        eval_schedule: None,
     })
     .unwrap();
 
