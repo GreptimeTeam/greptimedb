@@ -266,6 +266,9 @@ fn table_data_to_row_insert_request(table_name: String, table_data: TableData) -
 #[cfg(any(test, feature = "testing"))]
 pub mod test_util {
     use api::greptime_proto::io::prometheus::write::v2::{Histogram, Request, Sample, TimeSeries};
+    use bytes::Bytes;
+
+    use crate::error::Result;
 
     pub fn request_with_labels_and_samples(
         labels: Vec<(&str, &str)>,
@@ -279,6 +282,10 @@ pub mod test_util {
         histograms: Vec<Histogram>,
     ) -> Request {
         request_with_labels(labels, Vec::new(), histograms)
+    }
+
+    pub fn decode_request(is_zstd: bool, body: Bytes) -> Result<Request> {
+        super::decode_remote_write_v2_request(is_zstd, body)
     }
 
     pub fn histogram(timestamp: i64) -> Histogram {
