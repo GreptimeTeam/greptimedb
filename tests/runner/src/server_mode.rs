@@ -25,6 +25,12 @@ use crate::util;
 
 const DEFAULT_LOG_LEVEL: &str = "--log-level=debug,hyper=warn,tower=warn,datafusion=warn,reqwest=warn,sqlparser=warn,h2=info,opendal=info";
 
+// Use the legacy `rpc-*` aliases when spawning GreptimeDB so the same runner can
+// start older release binaries that predate the `grpc-*` CLI rename. Current
+// binaries keep these aliases for compatibility.
+const RPC_BIND_ADDR_ARG: &str = "--rpc-bind-addr";
+const RPC_SERVER_ADDR_ARG: &str = "--rpc-server-addr";
+
 static USED_PORTS: OnceLock<Mutex<HashSet<u16>>> = OnceLock::new();
 
 fn get_used_ports() -> &'static Mutex<HashSet<u16>> {
@@ -355,7 +361,7 @@ impl ServerMode {
                     "-c".to_string(),
                     self.generate_config_file(sqlness_home, db_ctx, id),
                     format!("--http-addr={http_addr}"),
-                    format!("--grpc-bind-addr={rpc_bind_addr}"),
+                    format!("{RPC_BIND_ADDR_ARG}={rpc_bind_addr}"),
                     format!("--mysql-addr={mysql_addr}"),
                     format!("--postgres-addr={postgres_addr}"),
                 ]);
@@ -370,10 +376,10 @@ impl ServerMode {
                 args.extend([
                     format!("--metasrv-addrs={metasrv_addr}"),
                     format!("--http-addr={http_addr}"),
-                    format!("--grpc-bind-addr={rpc_bind_addr}"),
+                    format!("{RPC_BIND_ADDR_ARG}={rpc_bind_addr}"),
                     // since sqlness run on local, bind addr is the same as server addr
                     // this is needed so that `cluster_info`'s server addr column can be correct
-                    format!("--grpc-server-addr={rpc_bind_addr}"),
+                    format!("{RPC_SERVER_ADDR_ARG}={rpc_bind_addr}"),
                     format!("--mysql-addr={mysql_addr}"),
                     format!("--postgres-addr={postgres_addr}"),
                     format!(
@@ -391,9 +397,9 @@ impl ServerMode {
                 http_addr,
             } => {
                 args.extend([
-                    "--grpc-bind-addr".to_string(),
+                    RPC_BIND_ADDR_ARG.to_string(),
                     rpc_bind_addr.clone(),
-                    "--grpc-server-addr".to_string(),
+                    RPC_SERVER_ADDR_ARG.to_string(),
                     rpc_server_addr.clone(),
                     "--enable-region-failover".to_string(),
                     "false".to_string(),
@@ -476,8 +482,8 @@ impl ServerMode {
                     db_ctx.time()
                 ));
                 args.extend([
-                    format!("--grpc-bind-addr={rpc_bind_addr}"),
-                    format!("--grpc-server-addr={rpc_server_addr}"),
+                    format!("{RPC_BIND_ADDR_ARG}={rpc_bind_addr}"),
+                    format!("{RPC_SERVER_ADDR_ARG}={rpc_server_addr}"),
                     format!("--http-addr={http_addr}"),
                     format!("--data-home={}", data_home.display()),
                     format!("--log-dir={}/logs", data_home.display()),
@@ -495,8 +501,8 @@ impl ServerMode {
                 node_id,
             } => {
                 args.extend([
-                    format!("--grpc-bind-addr={rpc_bind_addr}"),
-                    format!("--grpc-server-addr={rpc_server_addr}"),
+                    format!("{RPC_BIND_ADDR_ARG}={rpc_bind_addr}"),
+                    format!("{RPC_SERVER_ADDR_ARG}={rpc_server_addr}"),
                     format!("--node-id={node_id}"),
                     format!(
                         "--log-dir={}/greptimedb-{}-flownode/logs",
@@ -510,5 +516,107 @@ impl ServerMode {
         }
 
         args
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::*;
+    use crate::env::bare::{StoreConfig, WalConfig};
+
+    fn test_env(sqlness_home: &Path) -> (Env, GreptimeDBContext) {
+        let store_config = StoreConfig {
+            store_addrs: vec!["127.0.0.1:2379".to_string()],
+            setup_etcd: true,
+            setup_pg: None,
+            setup_mysql: None,
+            enable_flat_format: false,
+        };
+        let env = Env::new(
+            sqlness_home.to_path_buf(),
+            ServerAddr::default(),
+            WalConfig::RaftEngine,
+            false,
+            Some(PathBuf::from(".")),
+            store_config.clone(),
+            vec![],
+        );
+        let db_ctx = GreptimeDBContext::new(WalConfig::RaftEngine, store_config);
+
+        (env, db_ctx)
+    }
+
+    fn has_arg(args: &[String], name: &str) -> bool {
+        args.iter()
+            .any(|arg| arg == name || arg.starts_with(&format!("{name}=")))
+    }
+
+    fn assert_uses_rpc_cli_aliases(args: &[String], expect_server_addr: bool) {
+        assert!(has_arg(args, RPC_BIND_ADDR_ARG), "args: {args:?}");
+        assert!(
+            !args.iter().any(|arg| arg.contains("--grpc-bind-addr")),
+            "args: {args:?}"
+        );
+
+        if expect_server_addr {
+            assert!(has_arg(args, RPC_SERVER_ADDR_ARG), "args: {args:?}");
+            assert!(
+                !args.iter().any(|arg| arg.contains("--grpc-server-addr")),
+                "args: {args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_get_args_uses_legacy_rpc_cli_aliases() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let (env, db_ctx) = test_env(temp_dir.path());
+
+        let standalone = ServerMode::Standalone {
+            http_addr: "127.0.0.1:4000".to_string(),
+            rpc_bind_addr: "127.0.0.1:4001".to_string(),
+            mysql_addr: "127.0.0.1:4002".to_string(),
+            postgres_addr: "127.0.0.1:4003".to_string(),
+        };
+        assert_uses_rpc_cli_aliases(
+            &standalone.get_args(temp_dir.path(), &env, &db_ctx, 0),
+            false,
+        );
+
+        let frontend = ServerMode::Frontend {
+            http_addr: "127.0.0.1:4100".to_string(),
+            rpc_bind_addr: "127.0.0.1:4101".to_string(),
+            mysql_addr: "127.0.0.1:4102".to_string(),
+            postgres_addr: "127.0.0.1:4103".to_string(),
+            metasrv_addr: "127.0.0.1:4001".to_string(),
+        };
+        assert_uses_rpc_cli_aliases(&frontend.get_args(temp_dir.path(), &env, &db_ctx, 0), true);
+
+        let metasrv = ServerMode::Metasrv {
+            rpc_bind_addr: "127.0.0.1:4201".to_string(),
+            rpc_server_addr: "127.0.0.1:4201".to_string(),
+            http_addr: "127.0.0.1:4200".to_string(),
+        };
+        assert_uses_rpc_cli_aliases(&metasrv.get_args(temp_dir.path(), &env, &db_ctx, 0), true);
+
+        let datanode = ServerMode::Datanode {
+            rpc_bind_addr: "127.0.0.1:4301".to_string(),
+            rpc_server_addr: "127.0.0.1:4301".to_string(),
+            http_addr: "127.0.0.1:4300".to_string(),
+            metasrv_addr: "127.0.0.1:4001".to_string(),
+            node_id: 0,
+        };
+        assert_uses_rpc_cli_aliases(&datanode.get_args(temp_dir.path(), &env, &db_ctx, 0), true);
+
+        let flownode = ServerMode::Flownode {
+            rpc_bind_addr: "127.0.0.1:4401".to_string(),
+            rpc_server_addr: "127.0.0.1:4401".to_string(),
+            http_addr: "127.0.0.1:4400".to_string(),
+            metasrv_addr: "127.0.0.1:4001".to_string(),
+            node_id: 0,
+        };
+        assert_uses_rpc_cli_aliases(&flownode.get_args(temp_dir.path(), &env, &db_ctx, 0), true);
     }
 }
