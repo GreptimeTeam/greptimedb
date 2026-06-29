@@ -24,8 +24,6 @@ use crate::json::JsonSettings;
 pub struct JsonMetadata {
     /// JSON2 settings stored in column schema metadata and represented through
     /// Arrow extension metadata.
-    ///
-    /// This field can be `None` when data is converted to complete structured in-memory form.
     pub json_settings: Option<JsonSettings>,
 }
 

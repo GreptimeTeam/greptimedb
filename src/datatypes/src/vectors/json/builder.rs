@@ -29,9 +29,9 @@ pub(crate) struct JsonVectorBuilder {
 }
 
 impl JsonVectorBuilder {
-    pub(crate) fn new(json_type: JsonNativeType, capacity: usize) -> Self {
+    pub(crate) fn new(initial_native_type: JsonNativeType, capacity: usize) -> Self {
         Self {
-            merged_type: JsonType::new_json2(json_type),
+            merged_type: JsonType::new_json2(initial_native_type),
             values: Vec::with_capacity(capacity),
         }
     }
