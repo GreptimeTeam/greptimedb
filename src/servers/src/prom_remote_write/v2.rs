@@ -18,7 +18,12 @@ use std::collections::{HashMap, HashSet};
 #[cfg(test)]
 use api::greptime_proto::io::prometheus::write::v2::{Exemplar, Histogram, Metadata, metadata};
 use api::greptime_proto::io::prometheus::write::v2::{Request, Sample, TimeSeries};
-use api::v1::{RowInsertRequest, Rows, Value};
+use api::v1::column_data_type_extension::TypeExt;
+use api::v1::value::ValueData;
+use api::v1::{
+    ColumnDataType, ColumnDataTypeExtension, ColumnSchema, ListTypeExtension, ListValue,
+    RowInsertRequest, Rows, SemanticType, Value,
+};
 use bytes::Bytes;
 use common_grpc::precision::Precision;
 use common_query::prelude::{greptime_timestamp, greptime_value};
@@ -39,7 +44,30 @@ use crate::row_writer::{self, TableData};
 type PromTags = Vec<(String, String)>;
 type ResolvedSeriesLabels = (PromCtx, String, PromTags);
 
-#[allow(dead_code)]
+const NATIVE_HISTOGRAM_TABLE_SUFFIX: &str = "_native_histogram";
+const HISTOGRAM_TYPE_TAG: &str = "greptime_histogram_type";
+const HISTOGRAM_TYPE_INT: &str = "int";
+const HISTOGRAM_TYPE_FLOAT: &str = "float";
+const NATIVE_HISTOGRAM_COLUMN_COUNT: usize = 19;
+
+const SCHEMA_FIELD: &str = "schema";
+const ZERO_THRESHOLD_FIELD: &str = "zero_threshold";
+const SUM_FIELD: &str = "sum";
+const RESET_HINT_FIELD: &str = "reset_hint";
+const CUSTOM_VALUES_FIELD: &str = "custom_values";
+const POSITIVE_SPAN_OFFSETS_FIELD: &str = "positive_span_offsets";
+const POSITIVE_SPAN_LENGTHS_FIELD: &str = "positive_span_lengths";
+const NEGATIVE_SPAN_OFFSETS_FIELD: &str = "negative_span_offsets";
+const NEGATIVE_SPAN_LENGTHS_FIELD: &str = "negative_span_lengths";
+const COUNT_U64_FIELD: &str = "count_u64";
+const ZERO_COUNT_U64_FIELD: &str = "zero_count_u64";
+const POSITIVE_BUCKETS_I64_FIELD: &str = "positive_buckets_i64";
+const NEGATIVE_BUCKETS_I64_FIELD: &str = "negative_buckets_i64";
+const COUNT_F64_FIELD: &str = "count_f64";
+const ZERO_COUNT_F64_FIELD: &str = "zero_count_f64";
+const POSITIVE_BUCKETS_F64_FIELD: &str = "positive_buckets_f64";
+const NEGATIVE_BUCKETS_F64_FIELD: &str = "negative_buckets_f64";
+
 pub mod native_histogram;
 
 pub(crate) fn decode_remote_write_v2_request(is_zstd: bool, body: Bytes) -> Result<Request> {
@@ -57,11 +85,18 @@ pub(crate) fn decode_remote_write_v2_request(is_zstd: bool, body: Bytes) -> Resu
 }
 
 pub(crate) trait RemoteWriteV2RequestExt {
-    fn into_context_req(self) -> Result<ContextReq>;
+    fn into_write_requests(self) -> Result<RemoteWriteV2WriteRequests>;
+}
+
+pub(crate) struct RemoteWriteV2WriteRequests {
+    pub samples: ContextReq,
+    pub histograms: ContextReq,
+    pub sample_count: u64,
+    pub histogram_count: u64,
 }
 
 impl RemoteWriteV2RequestExt for Request {
-    fn into_context_req(self) -> Result<ContextReq> {
+    fn into_write_requests(self) -> Result<RemoteWriteV2WriteRequests> {
         let _timer = crate::metrics::METRIC_HTTP_PROM_STORE_CONVERT_ELAPSED.start_timer();
         let Request {
             symbols,
@@ -75,30 +110,73 @@ impl RemoteWriteV2RequestExt for Request {
             }
         );
 
-        let mut tables = HashMap::<PromCtx, HashMap<String, TableData>>::new();
+        let mut sample_tables = HashMap::<PromCtx, HashMap<String, TableData>>::new();
+        let mut histogram_tables = HashMap::<PromCtx, HashMap<String, TableData>>::new();
+        let mut sample_count_total = 0;
+        let mut histogram_count_total = 0;
 
         for series in timeseries {
-            // Native histograms and exemplars are intentionally ignored for now.
-            // They will be converted into Greptime rows once their ingestion path is implemented.
+            // Exemplars are intentionally ignored for now.
             let sample_count = series.samples.len();
-            if sample_count == 0 {
+            let histogram_count = series.histograms.len();
+            if sample_count == 0 && histogram_count == 0 {
                 continue;
             }
 
             let (prom_ctx, table_name, tags) = resolve_series_labels(&symbols, &series)?;
-            let table_data = match tables.entry(prom_ctx).or_default().entry(table_name) {
-                Entry::Occupied(entry) => {
-                    let table_data = entry.into_mut();
-                    table_data.reserve_rows(sample_count);
-                    table_data
-                }
-                Entry::Vacant(entry) => entry.insert(TableData::new(tags.len() + 2, sample_count)),
-            };
+            if sample_count > 0 {
+                let table_data = match sample_tables
+                    .entry(prom_ctx.clone())
+                    .or_default()
+                    .entry(table_name.clone())
+                {
+                    Entry::Occupied(entry) => {
+                        let table_data = entry.into_mut();
+                        table_data.reserve_rows(sample_count);
+                        table_data
+                    }
+                    Entry::Vacant(entry) => {
+                        entry.insert(TableData::new(tags.len() + 2, sample_count))
+                    }
+                };
 
-            write_samples(table_data, series.samples, tags)?;
+                write_samples(table_data, series.samples, tags.clone())?;
+                sample_count_total += sample_count as u64;
+            }
+
+            if histogram_count > 0 {
+                let histogram_ctx = PromCtx {
+                    schema: prom_ctx.schema,
+                    physical_table: None,
+                };
+                let histogram_table_name = format!("{table_name}{NATIVE_HISTOGRAM_TABLE_SUFFIX}");
+                let table_data = match histogram_tables
+                    .entry(histogram_ctx)
+                    .or_default()
+                    .entry(histogram_table_name)
+                {
+                    Entry::Occupied(entry) => {
+                        let table_data = entry.into_mut();
+                        table_data.reserve_rows(histogram_count);
+                        table_data
+                    }
+                    Entry::Vacant(entry) => entry.insert(TableData::new(
+                        tags.len() + NATIVE_HISTOGRAM_COLUMN_COUNT,
+                        histogram_count,
+                    )),
+                };
+
+                write_native_histograms(table_data, series.histograms, tags)?;
+                histogram_count_total += histogram_count as u64;
+            }
         }
 
-        Ok(into_context_req(tables))
+        Ok(RemoteWriteV2WriteRequests {
+            samples: into_context_req(sample_tables),
+            histograms: into_context_req(histogram_tables),
+            sample_count: sample_count_total,
+            histogram_count: histogram_count_total,
+        })
     }
 }
 
@@ -136,6 +214,377 @@ fn write_sample(
     table_data.add_row(row);
 
     Ok(())
+}
+
+fn write_native_histograms(
+    table_data: &mut TableData,
+    mut histograms: Vec<api::greptime_proto::io::prometheus::write::v2::Histogram>,
+    tags: PromTags,
+) -> Result<()> {
+    let Some(last_histogram) = histograms.pop() else {
+        return Ok(());
+    };
+
+    for histogram in &histograms {
+        write_native_histogram(table_data, histogram, tags.iter().cloned())?;
+    }
+
+    write_native_histogram(table_data, &last_histogram, tags.into_iter())
+}
+
+fn write_native_histogram(
+    table_data: &mut TableData,
+    histogram: &api::greptime_proto::io::prometheus::write::v2::Histogram,
+    tags: impl Iterator<Item = (String, String)>,
+) -> Result<()> {
+    let native_histogram = native_histogram::convert_native_histogram(histogram);
+    let mut row = table_data.alloc_one_row();
+    row_writer::write_ts_to_millis(
+        table_data,
+        greptime_timestamp(),
+        Some(histogram.timestamp),
+        Precision::Millisecond,
+        &mut row,
+    )?;
+
+    match native_histogram {
+        native_histogram::PrometheusNativeHistogram::Int(histogram) => {
+            write_common_native_histogram_fields(
+                table_data,
+                histogram.reset_hint,
+                histogram.schema,
+                histogram.zero_threshold,
+                histogram.sum,
+                &histogram.custom_values,
+                &histogram.positive_spans,
+                &histogram.negative_spans,
+                &mut row,
+            )?;
+            write_int_native_histogram_fields(
+                table_data,
+                Some((&histogram.positive_buckets, &histogram.negative_buckets)),
+                Some((histogram.count, histogram.zero_count)),
+                &mut row,
+            )?;
+            write_float_native_histogram_fields(table_data, None, None, &mut row)?;
+            row_writer::write_tag(table_data, HISTOGRAM_TYPE_TAG, HISTOGRAM_TYPE_INT, &mut row)?;
+        }
+        native_histogram::PrometheusNativeHistogram::Float(histogram) => {
+            write_common_native_histogram_fields(
+                table_data,
+                histogram.reset_hint,
+                histogram.schema,
+                histogram.zero_threshold,
+                histogram.sum,
+                &histogram.custom_values,
+                &histogram.positive_spans,
+                &histogram.negative_spans,
+                &mut row,
+            )?;
+            write_int_native_histogram_fields(table_data, None, None, &mut row)?;
+            write_float_native_histogram_fields(
+                table_data,
+                Some((&histogram.positive_buckets, &histogram.negative_buckets)),
+                Some((histogram.count, histogram.zero_count)),
+                &mut row,
+            )?;
+            row_writer::write_tag(
+                table_data,
+                HISTOGRAM_TYPE_TAG,
+                HISTOGRAM_TYPE_FLOAT,
+                &mut row,
+            )?;
+        }
+    }
+
+    row_writer::write_tags(table_data, tags, &mut row)?;
+    table_data.add_row(row);
+
+    Ok(())
+}
+
+fn write_common_native_histogram_fields(
+    table_data: &mut TableData,
+    reset_hint: i32,
+    schema: i32,
+    zero_threshold: f64,
+    sum: f64,
+    custom_values: &[f64],
+    positive_spans: &[native_histogram::PrometheusHistogramSpan],
+    negative_spans: &[native_histogram::PrometheusHistogramSpan],
+    row: &mut Vec<Value>,
+) -> Result<()> {
+    row_writer::write_fields(
+        table_data,
+        [
+            (
+                SCHEMA_FIELD.to_string(),
+                ColumnDataType::Int32,
+                Some(ValueData::I32Value(schema)),
+            ),
+            (
+                ZERO_THRESHOLD_FIELD.to_string(),
+                ColumnDataType::Float64,
+                Some(ValueData::F64Value(zero_threshold)),
+            ),
+            (
+                SUM_FIELD.to_string(),
+                ColumnDataType::Float64,
+                Some(ValueData::F64Value(sum)),
+            ),
+            (
+                RESET_HINT_FIELD.to_string(),
+                ColumnDataType::Int32,
+                Some(ValueData::I32Value(reset_hint)),
+            ),
+        ]
+        .into_iter(),
+        row,
+    )?;
+    write_f64_list_field(table_data, CUSTOM_VALUES_FIELD, Some(custom_values), row)?;
+    let positive_span_offsets = span_offsets(positive_spans);
+    let positive_span_lengths = span_lengths(positive_spans);
+    let negative_span_offsets = span_offsets(negative_spans);
+    let negative_span_lengths = span_lengths(negative_spans);
+    write_i32_list_field(
+        table_data,
+        POSITIVE_SPAN_OFFSETS_FIELD,
+        Some(&positive_span_offsets),
+        row,
+    )?;
+    write_u32_list_field(
+        table_data,
+        POSITIVE_SPAN_LENGTHS_FIELD,
+        Some(&positive_span_lengths),
+        row,
+    )?;
+    write_i32_list_field(
+        table_data,
+        NEGATIVE_SPAN_OFFSETS_FIELD,
+        Some(&negative_span_offsets),
+        row,
+    )?;
+    write_u32_list_field(
+        table_data,
+        NEGATIVE_SPAN_LENGTHS_FIELD,
+        Some(&negative_span_lengths),
+        row,
+    )
+}
+
+fn write_int_native_histogram_fields(
+    table_data: &mut TableData,
+    buckets: Option<(&[i64], &[i64])>,
+    counts: Option<(u64, u64)>,
+    row: &mut Vec<Value>,
+) -> Result<()> {
+    let (count, zero_count) = counts
+        .map(|(count, zero_count)| {
+            (
+                Some(ValueData::U64Value(count)),
+                Some(ValueData::U64Value(zero_count)),
+            )
+        })
+        .unwrap_or((None, None));
+    row_writer::write_fields(
+        table_data,
+        [
+            (COUNT_U64_FIELD.to_string(), ColumnDataType::Uint64, count),
+            (
+                ZERO_COUNT_U64_FIELD.to_string(),
+                ColumnDataType::Uint64,
+                zero_count,
+            ),
+        ]
+        .into_iter(),
+        row,
+    )?;
+
+    let positive_buckets = buckets.map(|(positive, _)| positive);
+    let negative_buckets = buckets.map(|(_, negative)| negative);
+    write_i64_list_field(
+        table_data,
+        POSITIVE_BUCKETS_I64_FIELD,
+        positive_buckets,
+        row,
+    )?;
+    write_i64_list_field(
+        table_data,
+        NEGATIVE_BUCKETS_I64_FIELD,
+        negative_buckets,
+        row,
+    )
+}
+
+fn write_float_native_histogram_fields(
+    table_data: &mut TableData,
+    buckets: Option<(&[f64], &[f64])>,
+    counts: Option<(f64, f64)>,
+    row: &mut Vec<Value>,
+) -> Result<()> {
+    let (count, zero_count) = counts
+        .map(|(count, zero_count)| {
+            (
+                Some(ValueData::F64Value(count)),
+                Some(ValueData::F64Value(zero_count)),
+            )
+        })
+        .unwrap_or((None, None));
+    row_writer::write_fields(
+        table_data,
+        [
+            (COUNT_F64_FIELD.to_string(), ColumnDataType::Float64, count),
+            (
+                ZERO_COUNT_F64_FIELD.to_string(),
+                ColumnDataType::Float64,
+                zero_count,
+            ),
+        ]
+        .into_iter(),
+        row,
+    )?;
+
+    let positive_buckets = buckets.map(|(positive, _)| positive);
+    let negative_buckets = buckets.map(|(_, negative)| negative);
+    write_f64_list_field(
+        table_data,
+        POSITIVE_BUCKETS_F64_FIELD,
+        positive_buckets,
+        row,
+    )?;
+    write_f64_list_field(
+        table_data,
+        NEGATIVE_BUCKETS_F64_FIELD,
+        negative_buckets,
+        row,
+    )
+}
+
+fn span_offsets(spans: &[native_histogram::PrometheusHistogramSpan]) -> Vec<i32> {
+    spans.iter().map(|span| span.offset).collect()
+}
+
+fn span_lengths(spans: &[native_histogram::PrometheusHistogramSpan]) -> Vec<u32> {
+    spans.iter().map(|span| span.length).collect()
+}
+
+fn write_i32_list_field(
+    table_data: &mut TableData,
+    name: &'static str,
+    values: Option<&[i32]>,
+    row: &mut Vec<Value>,
+) -> Result<()> {
+    write_list_field(
+        table_data,
+        name,
+        ColumnDataType::Int32,
+        values.map(|values| {
+            values
+                .iter()
+                .map(|value| ValueData::I32Value(*value))
+                .collect()
+        }),
+        row,
+    )
+}
+
+fn write_u32_list_field(
+    table_data: &mut TableData,
+    name: &'static str,
+    values: Option<&[u32]>,
+    row: &mut Vec<Value>,
+) -> Result<()> {
+    write_list_field(
+        table_data,
+        name,
+        ColumnDataType::Uint32,
+        values.map(|values| {
+            values
+                .iter()
+                .map(|value| ValueData::U32Value(*value))
+                .collect()
+        }),
+        row,
+    )
+}
+
+fn write_i64_list_field(
+    table_data: &mut TableData,
+    name: &'static str,
+    values: Option<&[i64]>,
+    row: &mut Vec<Value>,
+) -> Result<()> {
+    write_list_field(
+        table_data,
+        name,
+        ColumnDataType::Int64,
+        values.map(|values| {
+            values
+                .iter()
+                .map(|value| ValueData::I64Value(*value))
+                .collect()
+        }),
+        row,
+    )
+}
+
+fn write_f64_list_field(
+    table_data: &mut TableData,
+    name: &'static str,
+    values: Option<&[f64]>,
+    row: &mut Vec<Value>,
+) -> Result<()> {
+    write_list_field(
+        table_data,
+        name,
+        ColumnDataType::Float64,
+        values.map(|values| {
+            values
+                .iter()
+                .map(|value| ValueData::F64Value(*value))
+                .collect()
+        }),
+        row,
+    )
+}
+
+fn write_list_field(
+    table_data: &mut TableData,
+    name: &'static str,
+    item_type: ColumnDataType,
+    values: Option<Vec<ValueData>>,
+    row: &mut Vec<Value>,
+) -> Result<()> {
+    let value = values.map(|values| {
+        ValueData::ListValue(ListValue {
+            items: values
+                .into_iter()
+                .map(|value_data| Value {
+                    value_data: Some(value_data),
+                })
+                .collect(),
+        })
+    });
+    row_writer::write_by_schema(
+        table_data,
+        std::iter::once((list_column_schema(name, item_type), value)),
+        row,
+    )
+}
+
+fn list_column_schema(name: &'static str, item_type: ColumnDataType) -> ColumnSchema {
+    ColumnSchema {
+        column_name: name.to_string(),
+        datatype: ColumnDataType::List as i32,
+        semantic_type: SemanticType::Field as i32,
+        datatype_extension: Some(ColumnDataTypeExtension {
+            type_ext: Some(TypeExt::ListType(Box::new(ListTypeExtension {
+                datatype: item_type as i32,
+                datatype_extension: None,
+            }))),
+        }),
+        ..Default::default()
+    }
 }
 
 fn resolve_series_labels(symbols: &[String], series: &TimeSeries) -> Result<ResolvedSeriesLabels> {
@@ -269,6 +718,7 @@ fn table_data_to_row_insert_request(table_name: String, table_data: TableData) -
 #[cfg(any(test, feature = "testing"))]
 pub mod test_util {
     use api::greptime_proto::io::prometheus::write::v2::{Histogram, Request, Sample, TimeSeries};
+    use api::v1::RowInsertRequest;
     use bytes::Bytes;
 
     use crate::error::Result;
@@ -289,6 +739,18 @@ pub mod test_util {
 
     pub fn decode_request(is_zstd: bool, body: Bytes) -> Result<Request> {
         super::decode_remote_write_v2_request(is_zstd, body)
+    }
+
+    pub fn write_requests(
+        request: Request,
+    ) -> Result<(Vec<RowInsertRequest>, Vec<RowInsertRequest>, u64, u64)> {
+        let requests = super::RemoteWriteV2RequestExt::into_write_requests(request)?;
+        Ok((
+            requests.samples.all_req().collect(),
+            requests.histograms.all_req().collect(),
+            requests.sample_count,
+            requests.histogram_count,
+        ))
     }
 
     pub fn histogram(timestamp: i64) -> Histogram {
@@ -404,10 +866,13 @@ mod tests {
                 },
             ],
         )
-        .into_context_req()
+        .into_write_requests()
         .unwrap();
 
-        let mut inserts = ctx_req.all_req().collect::<Vec<_>>();
+        assert_eq!(ctx_req.sample_count, 2);
+        assert_eq!(ctx_req.histogram_count, 0);
+        assert_eq!(ctx_req.histograms.all_req().count(), 0);
+        let mut inserts = ctx_req.samples.all_req().collect::<Vec<_>>();
         assert_eq!(inserts.len(), 1);
 
         let request = inserts.pop().unwrap();
@@ -461,10 +926,10 @@ mod tests {
                 start_timestamp: 0,
             }],
         )
-        .into_context_req()
+        .into_write_requests()
         .unwrap();
 
-        let mut inserts = ctx_req.all_req().collect::<Vec<_>>();
+        let mut inserts = ctx_req.samples.all_req().collect::<Vec<_>>();
         assert_eq!(inserts.len(), 1);
         let rows = inserts.pop().unwrap().rows.unwrap();
         assert_eq!(
@@ -504,10 +969,12 @@ mod tests {
                 start_timestamp: 0,
             }],
         )
-        .into_context_req()
+        .into_write_requests()
         .unwrap();
 
-        let mut iter = ctx_req.as_req_iter(Arc::new(QueryContext::with("greptime", "public")));
+        let mut iter = ctx_req
+            .samples
+            .as_req_iter(Arc::new(QueryContext::with("greptime", "public")));
         let (ctx, reqs) = iter.next().unwrap();
         assert!(iter.next().is_none());
 
@@ -590,7 +1057,7 @@ mod tests {
     }
 
     #[test]
-    fn test_into_context_req_ignores_histograms_and_exemplars() {
+    fn test_into_context_req_converts_histograms_and_ignores_exemplars() {
         let mut request = test_util::request_with_labels_and_samples(
             vec![(METRIC_NAME_LABEL, "metric")],
             vec![Sample {
@@ -602,20 +1069,191 @@ mod tests {
         request.timeseries[0].histograms.push(Histogram::default());
         request.timeseries[0].exemplars.push(Exemplar::default());
 
-        let ctx_req = request.into_context_req().unwrap();
+        let ctx_req = request.into_write_requests().unwrap();
 
-        assert_eq!(ctx_req.all_req().count(), 1);
+        assert_eq!(ctx_req.sample_count, 1);
+        assert_eq!(ctx_req.histogram_count, 1);
+        assert_eq!(ctx_req.samples.all_req().count(), 1);
+        assert_eq!(ctx_req.histograms.all_req().count(), 1);
     }
 
     #[test]
-    fn test_into_context_req_skips_histogram_only_series() {
+    fn test_into_context_req_converts_histogram_only_series() {
         let mut request =
             test_util::request_with_labels_and_samples(vec![(METRIC_NAME_LABEL, "metric")], vec![]);
         request.timeseries[0].histograms.push(Histogram::default());
 
-        let ctx_req = request.into_context_req().unwrap();
+        let ctx_req = request.into_write_requests().unwrap();
 
-        assert_eq!(ctx_req.all_req().count(), 0);
+        assert_eq!(ctx_req.sample_count, 0);
+        assert_eq!(ctx_req.histogram_count, 1);
+        assert_eq!(ctx_req.samples.all_req().count(), 0);
+        let mut inserts = ctx_req.histograms.all_req().collect::<Vec<_>>();
+        assert_eq!(inserts.len(), 1);
+
+        let request = inserts.pop().unwrap();
+        assert_eq!(request.table_name, "metric_native_histogram");
+        let rows = request.rows.unwrap();
+        assert_eq!(rows.rows.len(), 1);
+        assert_eq!(
+            rows.schema
+                .iter()
+                .map(|col| col.column_name.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                greptime_timestamp(),
+                SCHEMA_FIELD,
+                ZERO_THRESHOLD_FIELD,
+                SUM_FIELD,
+                RESET_HINT_FIELD,
+                CUSTOM_VALUES_FIELD,
+                POSITIVE_SPAN_OFFSETS_FIELD,
+                POSITIVE_SPAN_LENGTHS_FIELD,
+                NEGATIVE_SPAN_OFFSETS_FIELD,
+                NEGATIVE_SPAN_LENGTHS_FIELD,
+                COUNT_U64_FIELD,
+                ZERO_COUNT_U64_FIELD,
+                POSITIVE_BUCKETS_I64_FIELD,
+                NEGATIVE_BUCKETS_I64_FIELD,
+                COUNT_F64_FIELD,
+                ZERO_COUNT_F64_FIELD,
+                POSITIVE_BUCKETS_F64_FIELD,
+                NEGATIVE_BUCKETS_F64_FIELD,
+                HISTOGRAM_TYPE_TAG,
+            ]
+        );
+        assert_eq!(
+            rows.rows[0].values[0].value_data,
+            Some(ValueData::TimestampMillisecondValue(0))
+        );
+        assert_eq!(
+            rows.rows[0].values[1].value_data,
+            Some(ValueData::I32Value(0))
+        );
+        assert_eq!(
+            rows.rows[0].values[10].value_data,
+            Some(ValueData::U64Value(0))
+        );
+        assert_eq!(rows.rows[0].values[14].value_data, None);
+        assert_eq!(
+            rows.rows[0].values[18].value_data,
+            Some(ValueData::StringValue(HISTOGRAM_TYPE_INT.to_string()))
+        );
+    }
+
+    #[test]
+    fn test_into_context_req_converts_int_and_float_histograms_to_one_schema() {
+        let float_histogram = Histogram {
+            count: Some(api::greptime_proto::io::prometheus::write::v2::histogram::Count::CountFloat(3.5)),
+            zero_count: Some(
+                api::greptime_proto::io::prometheus::write::v2::histogram::ZeroCount::ZeroCountFloat(
+                    0.5,
+                ),
+            ),
+            positive_counts: vec![2.0, 3.5],
+            positive_spans: vec![api::greptime_proto::io::prometheus::write::v2::BucketSpan {
+                offset: 3,
+                length: 2,
+            }],
+            timestamp: 2000,
+            ..Default::default()
+        };
+        let request = Request {
+            symbols: vec![
+                "".to_string(),
+                METRIC_NAME_LABEL.to_string(),
+                "metric".to_string(),
+            ],
+            timeseries: vec![
+                TimeSeries {
+                    labels_refs: vec![1, 2],
+                    histograms: vec![test_util::histogram(1000)],
+                    ..Default::default()
+                },
+                TimeSeries {
+                    labels_refs: vec![1, 2],
+                    histograms: vec![float_histogram],
+                    ..Default::default()
+                },
+            ],
+        };
+
+        let ctx_req = request.into_write_requests().unwrap();
+
+        assert_eq!(ctx_req.histogram_count, 2);
+        let mut inserts = ctx_req.histograms.all_req().collect::<Vec<_>>();
+        assert_eq!(inserts.len(), 1);
+        let rows = inserts.pop().unwrap().rows.unwrap();
+        assert_eq!(rows.rows.len(), 2);
+        assert_eq!(
+            rows.schema
+                .iter()
+                .map(|col| col.column_name.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                greptime_timestamp(),
+                SCHEMA_FIELD,
+                ZERO_THRESHOLD_FIELD,
+                SUM_FIELD,
+                RESET_HINT_FIELD,
+                CUSTOM_VALUES_FIELD,
+                POSITIVE_SPAN_OFFSETS_FIELD,
+                POSITIVE_SPAN_LENGTHS_FIELD,
+                NEGATIVE_SPAN_OFFSETS_FIELD,
+                NEGATIVE_SPAN_LENGTHS_FIELD,
+                COUNT_U64_FIELD,
+                ZERO_COUNT_U64_FIELD,
+                POSITIVE_BUCKETS_I64_FIELD,
+                NEGATIVE_BUCKETS_I64_FIELD,
+                COUNT_F64_FIELD,
+                ZERO_COUNT_F64_FIELD,
+                POSITIVE_BUCKETS_F64_FIELD,
+                NEGATIVE_BUCKETS_F64_FIELD,
+                HISTOGRAM_TYPE_TAG,
+            ]
+        );
+
+        let histogram_type_idx = column_index(&rows.schema, HISTOGRAM_TYPE_TAG);
+        let count_u64_idx = column_index(&rows.schema, COUNT_U64_FIELD);
+        let count_f64_idx = column_index(&rows.schema, COUNT_F64_FIELD);
+        let positive_buckets_i64_idx = column_index(&rows.schema, POSITIVE_BUCKETS_I64_FIELD);
+        let positive_buckets_f64_idx = column_index(&rows.schema, POSITIVE_BUCKETS_F64_FIELD);
+
+        assert_eq!(
+            rows.rows[0].values[histogram_type_idx].value_data,
+            Some(ValueData::StringValue(HISTOGRAM_TYPE_INT.to_string()))
+        );
+        assert_eq!(
+            rows.rows[0].values[count_u64_idx].value_data,
+            Some(ValueData::U64Value(0))
+        );
+        assert_eq!(rows.rows[0].values[count_f64_idx].value_data, None);
+        assert!(matches!(
+            rows.rows[0].values[positive_buckets_i64_idx].value_data,
+            Some(ValueData::ListValue(_))
+        ));
+        assert_eq!(
+            rows.rows[0].values[positive_buckets_f64_idx].value_data,
+            None
+        );
+
+        assert_eq!(
+            rows.rows[1].values[histogram_type_idx].value_data,
+            Some(ValueData::StringValue(HISTOGRAM_TYPE_FLOAT.to_string()))
+        );
+        assert_eq!(rows.rows[1].values[count_u64_idx].value_data, None);
+        assert_eq!(
+            rows.rows[1].values[count_f64_idx].value_data,
+            Some(ValueData::F64Value(3.5))
+        );
+        assert_eq!(
+            rows.rows[1].values[positive_buckets_i64_idx].value_data,
+            None
+        );
+        assert!(matches!(
+            rows.rows[1].values[positive_buckets_f64_idx].value_data,
+            Some(ValueData::ListValue(_))
+        ));
     }
 
     fn request_with_sample(labels: Vec<(&str, &str)>) -> Request {
@@ -630,7 +1268,10 @@ mod tests {
     }
 
     fn assert_invalid(name: &str, request: Request, expected: &str) {
-        let err = request.into_context_req().unwrap_err();
+        let err = match request.into_write_requests() {
+            Ok(_) => panic!("{name}: expected invalid request error"),
+            Err(err) => err,
+        };
         assert!(
             matches!(err, error::Error::InvalidPromRemoteRequest { .. }),
             "{name}: expected invalid request error, got {err}"
@@ -639,5 +1280,12 @@ mod tests {
             err.to_string().contains(expected),
             "{name}: expected error containing {expected:?}, got {err}"
         );
+    }
+
+    fn column_index(schema: &[ColumnSchema], column_name: &str) -> usize {
+        schema
+            .iter()
+            .position(|column| column.column_name == column_name)
+            .unwrap()
     }
 }

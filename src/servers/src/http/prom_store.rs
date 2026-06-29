@@ -177,15 +177,16 @@ async fn remote_write_v1(
         req.as_insert_requests()
     };
 
-    let outcome = write_prometheus_rows(
+    let outcome = write_prometheus_rows_with_progress(
         prom_store_handler,
         pending_rows_batcher,
         prom_store_with_metric_engine,
-        &db,
+        Some(&db),
         query_ctx,
         req,
     )
-    .await?;
+    .await
+    .map_err(|error| error.error)?;
 
     Ok((
         StatusCode::NO_CONTENT,
@@ -225,34 +226,73 @@ async fn remote_write_v2(
         Ok(request) => request,
         Err(error) => return Ok(remote_write_v2_error_response(error, 0, 0, 0)),
     };
-    let req = match request.into_context_req() {
+    let req = match request.into_write_requests() {
         Ok(req) => req,
         Err(error) => return Ok(remote_write_v2_error_response(error, 0, 0, 0)),
     };
 
-    let outcome = match write_prometheus_rows_with_progress(
-        prom_store_handler,
-        pending_rows_batcher,
-        prom_store_with_metric_engine,
-        &db,
-        query_ctx,
-        req,
-    )
-    .await
-    {
-        Ok(outcome) => outcome,
-        Err(error) => {
-            return Ok(remote_write_v2_error_response(
-                error.error,
-                error.rows_written,
-                0,
-                0,
-            ));
+    let outcome = if req.sample_count > 0 {
+        match write_prometheus_rows_with_progress(
+            prom_store_handler.clone(),
+            pending_rows_batcher.clone(),
+            prom_store_with_metric_engine,
+            Some(&db),
+            query_ctx.clone(),
+            req.samples,
+        )
+        .await
+        {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                return Ok(remote_write_v2_error_response(
+                    error.error,
+                    error.rows_written,
+                    0,
+                    0,
+                ));
+            }
+        }
+    } else {
+        PromWriteOutcome {
+            write_cost: 0,
+            rows_written: 0,
         }
     };
+    let samples_written = outcome.rows_written;
+    let mut histograms_written = 0;
+    let mut write_cost = outcome.write_cost;
 
-    let mut headers = write_cost_header_map(outcome.write_cost);
-    append_remote_write_v2_written_headers(&mut headers, outcome.rows_written, 0, 0);
+    if req.histogram_count > 0 {
+        // Native histograms are stored in dedicated normal tables, not metric-engine
+        // physical tables, so remove the metric-engine physical-table hint here.
+        let mut histogram_query_ctx = query_ctx.as_ref().clone();
+        histogram_query_ctx.remove_extension(PHYSICAL_TABLE_PARAM);
+        let outcome = match write_prometheus_rows_with_progress(
+            prom_store_handler,
+            None,
+            false,
+            None,
+            Arc::new(histogram_query_ctx),
+            req.histograms,
+        )
+        .await
+        {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                return Ok(remote_write_v2_error_response(
+                    error.error,
+                    samples_written,
+                    error.rows_written,
+                    0,
+                ));
+            }
+        };
+        histograms_written = outcome.rows_written;
+        write_cost += outcome.write_cost;
+    }
+
+    let mut headers = write_cost_header_map(write_cost);
+    append_remote_write_v2_written_headers(&mut headers, samples_written, histograms_written, 0);
 
     Ok((StatusCode::NO_CONTENT, headers).into_response())
 }
@@ -302,31 +342,11 @@ struct PromWriteError {
     rows_written: u64,
 }
 
-async fn write_prometheus_rows(
-    prom_store_handler: PromStoreProtocolHandlerRef,
-    pending_rows_batcher: Option<Arc<PendingRowsBatcher>>,
-    prom_store_with_metric_engine: bool,
-    db: &str,
-    query_ctx: Arc<QueryContext>,
-    req: ContextReq,
-) -> Result<PromWriteOutcome> {
-    write_prometheus_rows_with_progress(
-        prom_store_handler,
-        pending_rows_batcher,
-        prom_store_with_metric_engine,
-        db,
-        query_ctx,
-        req,
-    )
-    .await
-    .map_err(|error| error.error)
-}
-
 async fn write_prometheus_rows_with_progress(
     prom_store_handler: PromStoreProtocolHandlerRef,
     pending_rows_batcher: Option<Arc<PendingRowsBatcher>>,
     prom_store_with_metric_engine: bool,
-    db: &str,
+    db: Option<&str>,
     query_ctx: Arc<QueryContext>,
     req: ContextReq,
 ) -> std::result::Result<PromWriteOutcome, PromWriteError> {
@@ -347,9 +367,11 @@ async fn write_prometheus_rows_with_progress(
                     error,
                     rows_written,
                 })?;
-            crate::metrics::PROM_STORE_REMOTE_WRITE_SAMPLES
-                .with_label_values(&[db])
-                .inc_by(rows);
+            if let Some(db) = db {
+                crate::metrics::PROM_STORE_REMOTE_WRITE_SAMPLES
+                    .with_label_values(&[db])
+                    .inc_by(rows);
+            }
             rows_written += rows;
         }
         return Ok(PromWriteOutcome {
@@ -373,9 +395,11 @@ async fn write_prometheus_rows_with_progress(
                 error,
                 rows_written,
             })?;
-        crate::metrics::PROM_STORE_REMOTE_WRITE_SAMPLES
-            .with_label_values(&[db])
-            .inc_by(cnt);
+        if let Some(db) = db {
+            crate::metrics::PROM_STORE_REMOTE_WRITE_SAMPLES
+                .with_label_values(&[db])
+                .inc_by(cnt);
+        }
         write_cost += output.meta.cost;
         rows_written += cnt;
     }
