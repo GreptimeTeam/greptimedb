@@ -130,6 +130,7 @@ macro_rules! http_tests {
 
                 test_pipeline_api,
                 test_test_pipeline_api,
+                test_pipeline_name_in_header,
                 test_plain_text_ingestion,
                 test_pipeline_auto_transform,
                 test_pipeline_auto_transform_with_select,
@@ -3044,6 +3045,131 @@ transform:
         .await;
     // todo(shuiyisong): refactor http error handling
     assert_ne!(res.status(), StatusCode::OK);
+
+    guard.remove_all().await;
+}
+
+pub async fn test_pipeline_name_in_header(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) =
+        setup_test_http_app_with_frontend(store_type, "test_pipeline_name_in_header").await;
+
+    let client = TestClient::new(app).await;
+
+    let pipeline_body = r#"
+processors:
+  - date:
+      field: time
+      formats:
+        - "%Y-%m-%d %H:%M:%S%.3f"
+      ignore_missing: true
+transform:
+  - field: message
+    type: string
+  - field: time
+    type: time
+    index: timestamp
+"#;
+
+    // create pipeline named `test`
+    let res = client
+        .post("/v1/events/pipelines/test")
+        .header("Content-Type", "application/x-yaml")
+        .body(pipeline_body)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let data_body = r#"
+[
+  {
+    "time": "2024-05-25 20:16:37.217",
+    "message": "hello header"
+  }
+]
+"#;
+
+    // 1. pipeline name provided via the `x-greptime-pipeline-name` header,
+    //    without the `pipeline_name` query parameter.
+    let res = client
+        .post("/v1/events/logs?db=public&table=logs1")
+        .header("Content-Type", "application/json")
+        .header("x-greptime-pipeline-name", "test")
+        .body(data_body)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    validate_data(
+        "pipeline_name_header",
+        &client,
+        "select message from logs1",
+        "[[\"hello header\"]]",
+    )
+    .await;
+
+    // 2. the deprecated `x-greptime-log-pipeline-name` header is also accepted.
+    let res = client
+        .post("/v1/events/logs?db=public&table=logs2")
+        .header("Content-Type", "application/json")
+        .header("x-greptime-log-pipeline-name", "test")
+        .body(data_body)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    validate_data(
+        "pipeline_name_log_header",
+        &client,
+        "select message from logs2",
+        "[[\"hello header\"]]",
+    )
+    .await;
+
+    // 3. the header takes precedence over the query parameter. A bogus
+    //    `pipeline_name` query param is overridden by the valid header.
+    let res = client
+        .post("/v1/events/logs?db=public&table=logs3&pipeline_name=does_not_exist")
+        .header("Content-Type", "application/json")
+        .header("x-greptime-pipeline-name", "test")
+        .body(data_body)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    validate_data(
+        "pipeline_name_header_priority",
+        &client,
+        "select message from logs3",
+        "[[\"hello header\"]]",
+    )
+    .await;
+
+    // 4. when both headers are present, the non-deprecated
+    //    `x-greptime-pipeline-name` wins over the deprecated
+    //    `x-greptime-log-pipeline-name`.
+    let res = client
+        .post("/v1/events/logs?db=public&table=logs4")
+        .header("Content-Type", "application/json")
+        .header("x-greptime-pipeline-name", "test")
+        .header("x-greptime-log-pipeline-name", "does_not_exist")
+        .body(data_body)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    validate_data(
+        "pipeline_name_header_non_deprecated_priority",
+        &client,
+        "select message from logs4",
+        "[[\"hello header\"]]",
+    )
+    .await;
+
+    // 5. missing pipeline name in both header and query param is rejected.
+    let res = client
+        .post("/v1/events/logs?db=public&table=logs5")
+        .header("Content-Type", "application/json")
+        .body(data_body)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
 
     guard.remove_all().await;
 }
