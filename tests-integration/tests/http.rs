@@ -17,12 +17,13 @@ use std::io::Write;
 use std::str::FromStr;
 use std::time::Duration;
 
+use api::greptime_proto::io::prometheus::write::v2::Sample as RemoteWriteV2Sample;
 use api::prom_store::remote::label_matcher::Type as MatcherType;
 use api::prom_store::remote::{
     Label, LabelMatcher, Query, ReadRequest, ReadResponse, Sample, TimeSeries, WriteRequest,
 };
 use auth::{UserProviderRef, user_provider_from_option};
-use axum::http::{HeaderName, HeaderValue, StatusCode};
+use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use base64::prelude::{BASE64_STANDARD, Engine as _};
 use chrono::Utc;
 use cmd::options::GreptimeOptions;
@@ -64,6 +65,7 @@ use servers::http::result::error_result::ErrorResponse;
 use servers::http::result::greptime_result_v1::GreptimedbV1Response;
 use servers::http::result::influxdb_result_v1::{InfluxdbOutput, InfluxdbV1Response};
 use servers::http::test_helpers::{TestClient, TestResponse};
+use servers::prom_remote_write::v2::test_util as remote_write_v2;
 use servers::prom_store::{self, mock_timeseries_new_label};
 use servers::request_memory_limiter::ServerMemoryLimiter;
 use standalone::options::StandaloneOptions;
@@ -119,6 +121,7 @@ macro_rules! http_tests {
                 test_dashboard_path,
                 test_dashboard_api,
                 test_prometheus_remote_write,
+                test_prometheus_remote_write_v2,
                 test_prometheus_remote_write_batched,
                 test_prometheus_remote_special_labels,
                 test_prometheus_remote_schema_labels,
@@ -272,6 +275,27 @@ fn basic_auth(username: &str, password: &str) -> String {
         "basic {}",
         BASE64_STANDARD.encode(format!("{username}:{password}"))
     )
+}
+
+fn assert_remote_write_v2_written_headers(headers: &HeaderMap, samples: &str) {
+    assert_eq!(
+        Some(samples),
+        headers
+            .get("X-Prometheus-Remote-Write-Samples-Written")
+            .map(|x| x.to_str().unwrap())
+    );
+    assert_eq!(
+        Some("0"),
+        headers
+            .get("X-Prometheus-Remote-Write-Histograms-Written")
+            .map(|x| x.to_str().unwrap())
+    );
+    assert_eq!(
+        Some("0"),
+        headers
+            .get("X-Prometheus-Remote-Write-Exemplars-Written")
+            .map(|x| x.to_str().unwrap())
+    );
 }
 
 pub async fn test_http_auth_from_standalone_user_provider_config() {
@@ -2268,6 +2292,106 @@ pub async fn test_prometheus_remote_write(store_type: StorageType) {
     guard.remove_all().await;
 }
 
+pub async fn test_prometheus_remote_write_v2(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) =
+        setup_test_prom_app_with_frontend(store_type, "prometheus_remote_write_v2").await;
+    let client = TestClient::new(app).await;
+
+    let write_request = remote_write_v2::request_with_labels_and_samples(
+        vec![
+            (prom_store::METRIC_NAME_LABEL, "remote_write_v2_total"),
+            ("job", "api"),
+            ("instance", "localhost:9090"),
+        ],
+        vec![
+            RemoteWriteV2Sample {
+                value: 42.0,
+                timestamp: 1000,
+                start_timestamp: 0,
+            },
+            RemoteWriteV2Sample {
+                value: 43.0,
+                timestamp: 2000,
+                start_timestamp: 0,
+            },
+        ],
+    );
+    let serialized_request = write_request.encode_to_vec();
+    let compressed_request =
+        prom_store::snappy_compress(&serialized_request).expect("failed to encode snappy");
+
+    let res = client
+        .post("/v1/prometheus/write")
+        .header("Content-Encoding", "snappy")
+        .header(
+            "Content-Type",
+            "application/x-protobuf;proto=io.prometheus.write.v2.Request",
+        )
+        .body(compressed_request)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+    let headers = res.headers();
+    assert_remote_write_v2_written_headers(&headers, "2");
+    assert!(res.text().await.is_empty());
+
+    validate_data(
+        "prometheus_remote_write_v2_rows",
+        &client,
+        "select greptime_timestamp, greptime_value, job, instance from remote_write_v2_total order by greptime_timestamp;",
+        "[[1000,42.0,\"api\",\"localhost:9090\"],[2000,43.0,\"api\",\"localhost:9090\"]]",
+    )
+    .await;
+
+    validate_data(
+        "prometheus_remote_write_v2_semantic_identity",
+        &client,
+        "select count(*) from information_schema.tables where table_name = 'remote_write_v2_total' \
+         and create_options like '%greptime.semantic.signal_type=metric%' \
+         and create_options like '%greptime.semantic.source=prometheus%' \
+         and create_options like '%greptime.semantic.metric.metadata_quality=inferred%';",
+        "[[1]]",
+    )
+    .await;
+
+    let write_request = remote_write_v2::request_with_labels_and_histograms(
+        vec![(
+            prom_store::METRIC_NAME_LABEL,
+            "remote_write_v2_histogram_only",
+        )],
+        vec![remote_write_v2::histogram(3000)],
+    );
+    let serialized_request = write_request.encode_to_vec();
+    let compressed_request =
+        prom_store::snappy_compress(&serialized_request).expect("failed to encode snappy");
+
+    let res = client
+        .post("/v1/prometheus/write")
+        .header("Content-Encoding", "snappy")
+        .header(
+            "Content-Type",
+            "application/x-protobuf;proto=io.prometheus.write.v2.Request",
+        )
+        .body(compressed_request)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+    let headers = res.headers();
+    assert_remote_write_v2_written_headers(&headers, "0");
+    assert!(res.text().await.is_empty());
+
+    validate_data(
+        "prometheus_remote_write_v2_histogram_only",
+        &client,
+        "select count(*) from information_schema.tables where table_name = 'remote_write_v2_histogram_only';",
+        "[[0]]",
+    )
+    .await;
+
+    guard.remove_all().await;
+}
+
 /// Covers the batched (pending-rows-batcher) Prometheus remote write path, which
 /// bypasses `PromStoreProtocolHandler::write`. Verifies the metric table is created
 /// asynchronously and still carries the Prometheus semantic identity stamped on the
@@ -2358,7 +2482,7 @@ pub async fn test_prometheus_remote_special_labels(store_type: StorageType) {
         expected,
     )
     .await;
-    let expected = "[[\"idc3_lo_table\",\"CREATE TABLE IF NOT EXISTS \\\"idc3_lo_table\\\" (\\n  \\\"greptime_timestamp\\\" TIMESTAMP(3) NOT NULL,\\n  \\\"greptime_value\\\" DOUBLE NULL,\\n  TIME INDEX (\\\"greptime_timestamp\\\")\\n)\\n\\nENGINE=metric\\nWITH(\\n  \'comment\' = 'Created on insertion',\\n  'greptime.semantic.metric.metadata_quality' = 'inferred',\\n  'greptime.semantic.signal_type' = 'metric',\\n  'greptime.semantic.source' = 'prometheus',\\n  on_physical_table = 'f1'\\n)\"]]";
+    let expected = "[[\"idc3_lo_table\",\"CREATE TABLE IF NOT EXISTS \\\"idc3_lo_table\\\" (\\n  \\\"greptime_timestamp\\\" TIMESTAMP(3) NOT NULL,\\n  \\\"greptime_value\\\" DOUBLE NULL,\\n  TIME INDEX (\\\"greptime_timestamp\\\")\\n)\\n\\nENGINE=metric\\nWITH(\\n  \'comment\' = 'Created on insertion',\\n  'greptime.semantic.metric.metadata_quality' = 'inferred',\\n  'greptime.semantic.signal_type' = 'metric',\\n  'greptime.semantic.source' = 'prometheus',\\n  'greptime.semantic.source_version' = '1.0',\\n  on_physical_table = 'f1'\\n)\"]]";
     validate_data(
         "test_prometheus_remote_special_labels_idc3_show_create_table",
         &client,
@@ -2384,7 +2508,7 @@ pub async fn test_prometheus_remote_special_labels(store_type: StorageType) {
         expected,
     )
     .await;
-    let expected = "[[\"idc4_local_table\",\"CREATE TABLE IF NOT EXISTS \\\"idc4_local_table\\\" (\\n  \\\"greptime_timestamp\\\" TIMESTAMP(3) NOT NULL,\\n  \\\"greptime_value\\\" DOUBLE NULL,\\n  TIME INDEX (\\\"greptime_timestamp\\\")\\n)\\n\\nENGINE=metric\\nWITH(\\n  \'comment\' = 'Created on insertion',\\n  'greptime.semantic.metric.metadata_quality' = 'inferred',\\n  'greptime.semantic.signal_type' = 'metric',\\n  'greptime.semantic.source' = 'prometheus',\\n  on_physical_table = 'f2'\\n)\"]]";
+    let expected = "[[\"idc4_local_table\",\"CREATE TABLE IF NOT EXISTS \\\"idc4_local_table\\\" (\\n  \\\"greptime_timestamp\\\" TIMESTAMP(3) NOT NULL,\\n  \\\"greptime_value\\\" DOUBLE NULL,\\n  TIME INDEX (\\\"greptime_timestamp\\\")\\n)\\n\\nENGINE=metric\\nWITH(\\n  \'comment\' = 'Created on insertion',\\n  'greptime.semantic.metric.metadata_quality' = 'inferred',\\n  'greptime.semantic.signal_type' = 'metric',\\n  'greptime.semantic.source' = 'prometheus',\\n  'greptime.semantic.source_version' = '1.0',\\n  on_physical_table = 'f2'\\n)\"]]";
     validate_data(
         "test_prometheus_remote_special_labels_idc4_show_create_table",
         &client,
