@@ -20,21 +20,29 @@ use datafusion::execution::runtime_env::{RuntimeEnv, RuntimeEnvBuilder};
 use crate::options::QueryOptions;
 use crate::query_engine::state::MetricsMemoryPool;
 
+/// Reference-counted query runtime provider.
 pub type QueryRuntimeProviderRef = Arc<dyn QueryRuntimeProvider>;
 
+/// Context for building query runtime components.
 #[non_exhaustive]
 pub struct QueryRuntimeContext<'a> {
+    /// Query options used by the query engine.
     pub query_options: &'a QueryOptions,
+    /// Resolved memory pool size in bytes.
     pub resolved_memory_pool_size: usize,
 }
 
+/// Provides DataFusion session and runtime setup for the query engine.
 pub trait QueryRuntimeProvider: Send + Sync + 'static {
+    /// Configures the DataFusion session config before building the session state.
     fn configure_session_config(&self, _ctx: QueryRuntimeContext<'_>, _config: &mut SessionConfig) {
     }
 
+    /// Builds the DataFusion runtime environment.
     fn build_runtime_env(&self, ctx: QueryRuntimeContext<'_>) -> Arc<RuntimeEnv>;
 }
 
+/// Default query runtime provider.
 #[derive(Debug, Default)]
 pub struct DefaultQueryRuntimeProvider;
 
