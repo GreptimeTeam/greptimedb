@@ -134,8 +134,8 @@ impl Event for SlowQueryEvent {
                 ValueData::U64Value(self.promql_step.unwrap_or(0)).into(),
                 ValueData::TimestampMillisecondValue(self.promql_start.unwrap_or(0)).into(),
                 ValueData::TimestampMillisecondValue(self.promql_end.unwrap_or(0)).into(),
-                ValueData::StringValue(self.catalog_name.to_string()).into(),
-                ValueData::StringValue(self.schema_name.to_string()).into(),
+                ValueData::StringValue(self.catalog_name.clone()).into(),
+                ValueData::StringValue(self.schema_name.clone()).into(),
             ],
         }])
     }
