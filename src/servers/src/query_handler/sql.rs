@@ -30,6 +30,12 @@ pub type ServerSqlQueryHandlerRef = Arc<dyn SqlQueryHandler + Send + Sync>;
 pub trait SqlQueryHandler {
     async fn do_query(&self, query: &str, query_ctx: QueryContextRef) -> Vec<Result<Output>>;
 
+    async fn do_analyze_stream_query(
+        &self,
+        query: &str,
+        query_ctx: QueryContextRef,
+    ) -> Result<Output>;
+
     async fn do_exec_plan(
         &self,
         plan: LogicalPlan,

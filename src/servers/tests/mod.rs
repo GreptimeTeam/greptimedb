@@ -80,6 +80,44 @@ impl SqlQueryHandler for DummyInstance {
         results
     }
 
+    async fn do_analyze_stream_query(
+        &self,
+        query: &str,
+        query_ctx: QueryContextRef,
+    ) -> Result<Output> {
+        let mut statements = ParserContext::create_with_dialect(
+            query,
+            query_ctx.sql_dialect(),
+            ParseOptions::default(),
+        )
+        .unwrap();
+        ensure!(
+            statements.len() == 1,
+            NotSupportedSnafu {
+                feat: "execute multiple statements in analyze stream query"
+            }
+        );
+
+        let mut statement = statements.remove(0);
+        if let Statement::Explain(explain) = &mut statement
+            && explain
+                .format
+                .as_ref()
+                .is_some_and(|format| format.to_string().eq_ignore_ascii_case("json"))
+        {
+            explain.format = None;
+        }
+        query_ctx.set_explain_format("JSON".to_string());
+
+        self.query_engine
+            .planner()
+            .plan(&QueryStatement::Sql(statement), query_ctx.clone())
+            .and_then(|plan| self.query_engine.execute(plan, query_ctx.clone()))
+            .await
+            .map_err(BoxedError::new)
+            .context(ExecuteQuerySnafu)
+    }
+
     async fn do_exec_plan(
         &self,
         plan: LogicalPlan,

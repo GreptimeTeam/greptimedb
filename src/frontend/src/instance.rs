@@ -89,7 +89,7 @@ use sql::statements::comment::CommentObject;
 use sql::statements::copy::{CopyDatabase, CopyTable};
 use sql::statements::statement::Statement;
 use sql::statements::tql::Tql;
-use sqlparser::ast::ObjectName;
+use sqlparser::ast::{AnalyzeFormat, ObjectName};
 pub use standalone::StandaloneDatanodeManager;
 use table::requests::{OTLP_METRIC_COMPAT_KEY, OTLP_METRIC_COMPAT_PROM};
 use tracing::Span;
@@ -193,6 +193,31 @@ impl Instance {
 
 fn parse_stmt(sql: &str, dialect: &(dyn Dialect + Send + Sync)) -> Result<Vec<Statement>> {
     ParserContext::create_with_dialect(sql, dialect, ParseOptions::default()).context(ParseSqlSnafu)
+}
+
+fn validate_analyze_stream_statement(stmt: &mut Statement) -> Result<()> {
+    let Statement::Explain(explain) = stmt else {
+        return InvalidSqlSnafu {
+            err_msg: "only EXPLAIN ANALYZE VERBOSE statement is supported",
+        }
+        .fail();
+    };
+    ensure!(
+        explain.analyze && explain.verbose,
+        InvalidSqlSnafu {
+            err_msg: "statement must be EXPLAIN ANALYZE VERBOSE"
+        }
+    );
+    match explain.format {
+        None | Some(AnalyzeFormat::JSON) => {
+            explain.format = None;
+            Ok(())
+        }
+        Some(_) => InvalidSqlSnafu {
+            err_msg: "only FORMAT JSON is supported for analyze stream",
+        }
+        .fail(),
+    }
 }
 
 impl Instance {
@@ -552,6 +577,59 @@ fn attach_timeout(output: Output, mut timeout: Duration) -> Result<Output> {
 }
 
 impl Instance {
+    #[tracing::instrument(skip_all, name = "SqlQueryHandler::do_analyze_stream_query")]
+    async fn do_analyze_stream_query_inner(
+        &self,
+        query: &str,
+        query_ctx: QueryContextRef,
+    ) -> Result<Output> {
+        ensure!(!self.is_suspended(), error::SuspendedSnafu);
+
+        let query_interceptor_opt = self.plugins.get::<SqlQueryInterceptorRef<Error>>();
+        let query_interceptor = query_interceptor_opt.as_ref();
+        let query = query_interceptor.pre_parsing(query, query_ctx.clone())?;
+        let mut stmts = parse_stmt(query.as_ref(), query_ctx.sql_dialect())
+            .and_then(|stmts| query_interceptor.post_parsing(stmts, query_ctx.clone()))?;
+
+        ensure!(
+            stmts.len() == 1,
+            InvalidSqlSnafu {
+                err_msg: "only single EXPLAIN ANALYZE VERBOSE statement is supported"
+            }
+        );
+        let mut stmt = stmts.remove(0);
+        validate_analyze_stream_statement(&mut stmt)?;
+        query_ctx.set_explain_format(AnalyzeFormat::JSON.to_string());
+
+        let checker_ref = self.plugins.get::<PermissionCheckerRef>();
+        checker_ref
+            .as_ref()
+            .check_permission(query_ctx.current_user(), PermissionReq::SqlStatement(&stmt))
+            .context(PermissionSnafu)?;
+        check_permission(self.plugins.clone(), &stmt, &query_ctx)?;
+        let ticket = self.process_manager.register_query(
+            query_ctx.current_catalog().to_string(),
+            vec![query_ctx.current_schema()],
+            stmt.to_string(),
+            query_ctx.conn_info().to_string(),
+            Some(query_ctx.process_id()),
+            None,
+        );
+        let query_fut =
+            self.exec_statement_with_timeout(stmt, query_ctx.clone(), query_interceptor);
+        let output = CancellableFuture::new(query_fut, ticket.cancellation_handle.clone())
+            .await
+            .map_err(|_| error::CancelledSnafu.build())??;
+        let Output { meta, data } = output;
+        let data = match data {
+            OutputData::Stream(stream) => OutputData::Stream(Box::pin(
+                CancellableStreamWrapper::new_cancel_on_drop(stream, ticket),
+            )),
+            other => other,
+        };
+        query_interceptor.post_execute(Output { data, meta }, query_ctx)
+    }
+
     #[tracing::instrument(skip_all, name = "SqlQueryHandler::do_query")]
     async fn do_query_inner(&self, query: &str, query_ctx: QueryContextRef) -> Vec<Result<Output>> {
         if self.is_suspended() {
@@ -799,6 +877,17 @@ impl SqlQueryHandler for Instance {
             .into_iter()
             .map(|result| result.map_err(BoxedError::new).context(ExecuteQuerySnafu))
             .collect()
+    }
+
+    async fn do_analyze_stream_query(
+        &self,
+        query: &str,
+        query_ctx: QueryContextRef,
+    ) -> server_error::Result<Output> {
+        self.do_analyze_stream_query_inner(query, query_ctx)
+            .await
+            .map_err(BoxedError::new)
+            .context(ExecuteQuerySnafu)
     }
 
     async fn do_exec_plan(
@@ -1261,6 +1350,46 @@ mod tests {
     use super::*;
     use crate::frontend::FrontendOptions;
     use crate::instance::builder::FrontendBuilder;
+
+    fn parse_test_sql(sql: &str) -> Vec<Statement> {
+        parse_stmt(sql, &GreptimeDbDialect {}).unwrap()
+    }
+
+    #[test]
+    fn test_validate_analyze_stream_statement_strictness() {
+        for sql in [
+            "select 1",
+            "explain analyze select 1",
+            "explain analyze verbose format text select 1",
+            "explain analyze verbose format graphviz select 1",
+        ] {
+            let mut stmts = parse_test_sql(sql);
+            assert!(
+                validate_analyze_stream_statement(&mut stmts[0]).is_err(),
+                "{sql}"
+            );
+        }
+
+        for sql in [
+            "explain analyze verbose select 1",
+            "explain analyze verbose format json select 1",
+        ] {
+            let mut stmts = parse_test_sql(sql);
+            assert!(
+                validate_analyze_stream_statement(&mut stmts[0]).is_ok(),
+                "{sql}"
+            );
+            let Statement::Explain(explain) = &stmts[0] else {
+                unreachable!();
+            };
+            assert!(explain.format.is_none());
+        }
+
+        assert_eq!(
+            parse_test_sql("explain analyze verbose select 1; select 2").len(),
+            2
+        );
+    }
 
     #[derive(Debug, Snafu)]
     enum TestError {

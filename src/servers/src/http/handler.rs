@@ -14,9 +14,11 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
+use axum::extract::rejection::FormRejection;
 use axum::extract::{Json, Query, State};
+use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::{Extension, Form};
 use common_catalog::parse_catalog_and_schema_from_db_string;
@@ -24,8 +26,9 @@ use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_plugins::GREPTIME_EXEC_WRITE_COST;
 use common_query::{Output, OutputData};
-use common_recordbatch::util;
+use common_recordbatch::{RecordBatch, util};
 use common_telemetry::tracing;
+use futures::StreamExt;
 use query::parser::{DEFAULT_LOOKBACK_STRING, PromQuery};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -72,6 +75,27 @@ pub struct SqlQuery {
     pub limit: Option<usize>,
     // For arrow output
     pub compression: Option<String>,
+    pub snapshot_interval_ms: Option<u64>,
+}
+
+const DEFAULT_ANALYZE_SNAPSHOT_INTERVAL_MS: u64 = 5000;
+const MIN_ANALYZE_SNAPSHOT_INTERVAL_MS: u64 = 1000;
+const MAX_ANALYZE_SNAPSHOT_INTERVAL_MS: u64 = 60000;
+
+#[derive(Serialize)]
+struct AnalyzeStreamPayload {
+    seq: u64,
+    state: &'static str,
+    partial: bool,
+    elapsed_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    metrics: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    output: Option<GreptimeQueryOutput>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    code: Option<u32>,
 }
 
 /// Handler to execute sql
@@ -153,6 +177,268 @@ pub async fn sql(
         resp = resp.with_limit(limit);
     }
     resp.with_execution_time(start.elapsed().as_millis() as u64)
+}
+
+/// Handler to stream partial `EXPLAIN ANALYZE VERBOSE` metrics as SSE.
+#[axum_macros::debug_handler]
+#[tracing::instrument(
+    skip_all,
+    fields(protocol = "http", request_type = "sql_analyze_stream")
+)]
+pub async fn sql_analyze_stream(
+    State(state): State<ApiState>,
+    Query(query_params): Query<SqlQuery>,
+    Extension(mut query_ctx): Extension<QueryContext>,
+    form_params: std::result::Result<Form<SqlQuery>, FormRejection>,
+) -> Response {
+    let start = Instant::now();
+    let form_params = match form_params {
+        Ok(Form(params)) => params,
+        Err(err) => {
+            if err.status() != axum::http::StatusCode::UNSUPPORTED_MEDIA_TYPE {
+                return ErrorResponse::from_error_message(
+                    StatusCode::InvalidArguments,
+                    err.body_text(),
+                )
+                .with_execution_time(start.elapsed().as_millis() as u64)
+                .into_response();
+            }
+            SqlQuery::default()
+        }
+    };
+    let sql_handler = &state.sql_handler;
+    if let Some(db) = &query_params.db.or(form_params.db) {
+        let (catalog, schema) = parse_catalog_and_schema_from_db_string(db);
+        query_ctx.set_current_catalog(&catalog);
+        query_ctx.set_current_schema(&schema);
+    }
+    query_ctx.set_channel(Channel::HttpSql);
+    let query_ctx = Arc::new(query_ctx);
+
+    let Some(sql) = query_params.sql.or(form_params.sql) else {
+        return ErrorResponse::from_error_message(
+            StatusCode::InvalidArguments,
+            "sql parameter is required.".to_string(),
+        )
+        .with_execution_time(start.elapsed().as_millis() as u64)
+        .into_response();
+    };
+    if let Some((status, msg)) = validate_schema(sql_handler.clone(), query_ctx.clone()).await {
+        return ErrorResponse::from_error_message(status, msg)
+            .with_execution_time(start.elapsed().as_millis() as u64)
+            .into_response();
+    }
+
+    let interval_ms = query_params
+        .snapshot_interval_ms
+        .or(form_params.snapshot_interval_ms)
+        .unwrap_or(DEFAULT_ANALYZE_SNAPSHOT_INTERVAL_MS)
+        .clamp(
+            MIN_ANALYZE_SNAPSHOT_INTERVAL_MS,
+            MAX_ANALYZE_SNAPSHOT_INTERVAL_MS,
+        );
+
+    let output = match state
+        .sql_handler
+        .do_analyze_stream_query(&sql, query_ctx.clone())
+        .await
+    {
+        Ok(output) => output,
+        Err(err) => {
+            return ErrorResponse::from_error(err)
+                .with_execution_time(start.elapsed().as_millis() as u64)
+                .into_response();
+        }
+    };
+
+    let plan = output.meta.plan.clone();
+    let OutputData::Stream(stream) = output.data else {
+        return ErrorResponse::from_error_message(
+            StatusCode::InvalidArguments,
+            "analyze stream query must return a stream".to_string(),
+        )
+        .with_execution_time(start.elapsed().as_millis() as u64)
+        .into_response();
+    };
+    let schema = stream.schema();
+
+    let sse_stream = futures::stream::unfold(
+        (
+            stream,
+            schema,
+            plan,
+            Vec::<RecordBatch>::new(),
+            0u64,
+            start,
+            interval_ms,
+            interval_ms,
+            false,
+        ),
+        |(
+            mut stream,
+            schema,
+            plan,
+            mut batches,
+            mut seq,
+            start,
+            requested_interval_ms,
+            current_interval_ms,
+            done,
+        )| async move {
+            if done {
+                return None;
+            }
+            let tick = tokio::time::sleep(Duration::from_millis(current_interval_ms));
+            tokio::pin!(tick);
+            loop {
+                tokio::select! {
+                    item = stream.next() => {
+                        match item {
+                            Some(Ok(batch)) => batches.push(batch),
+                            Some(Err(err)) => {
+                                let status = err.status_code();
+                                let event_name = if status == StatusCode::Cancelled { "canceled" } else { "error" };
+                                let (payload, _) = make_analyze_payload(AnalyzePayloadArgs {
+                                    seq,
+                                    state: event_name,
+                                    partial: false,
+                                    start,
+                                    plan: plan.as_ref(),
+                                    output: None,
+                                    reason: Some(err.output_msg()),
+                                    code: Some(status as u32),
+                                });
+                                seq += 1;
+                                return Some((Ok::<Event, std::convert::Infallible>(Event::default().event(event_name).data(payload)), (stream, schema, plan, batches, seq, start, requested_interval_ms, current_interval_ms, true)));
+                            }
+                            None => {
+                                let output = HttpRecordsOutput::try_new(schema.clone(), batches)
+                                    .map(GreptimeQueryOutput::Records);
+                                let (event_name, payload) = make_final_analyze_event(
+                                    output.map_err(|err| (err.output_msg(), err.status_code() as u32)),
+                                    seq,
+                                    start,
+                                    plan.as_ref(),
+                                );
+                                seq += 1;
+                                return Some((Ok::<Event, std::convert::Infallible>(Event::default().event(event_name).data(payload)), (stream, schema, plan, Vec::new(), seq, start, requested_interval_ms, current_interval_ms, true)));
+                            }
+                        }
+                    }
+                    _ = &mut tick => {
+                        if plan.is_some() {
+                            let (payload, payload_bytes) = make_analyze_payload(AnalyzePayloadArgs {
+                                seq,
+                                state: "metrics",
+                                partial: true,
+                                start,
+                                plan: plan.as_ref(),
+                                output: None,
+                                reason: None,
+                                code: None,
+                            });
+                            let adaptive = adaptive_interval_ms(payload_bytes, requested_interval_ms);
+                            seq += 1;
+                            return Some((Ok::<Event, std::convert::Infallible>(Event::default().event("metrics").data(payload)), (stream, schema, plan, batches, seq, start, requested_interval_ms, adaptive, false)));
+                        }
+                        tick.as_mut().reset(tokio::time::Instant::now() + Duration::from_millis(current_interval_ms));
+                    }
+                }
+            }
+        },
+    );
+
+    Sse::new(sse_stream)
+        .keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
+        .into_response()
+}
+
+fn adaptive_interval_ms(payload_bytes: usize, requested_ms: u64) -> u64 {
+    if payload_bytes >= 10 * 1024 * 1024 {
+        requested_ms.max(30_000)
+    } else if payload_bytes >= 1024 * 1024 {
+        requested_ms.max(10_000)
+    } else {
+        requested_ms
+    }
+}
+
+fn make_final_analyze_event(
+    output: std::result::Result<GreptimeQueryOutput, (String, u32)>,
+    seq: u64,
+    start: Instant,
+    plan: Option<&Arc<dyn datafusion::physical_plan::ExecutionPlan>>,
+) -> (&'static str, String) {
+    match output {
+        Ok(output) => (
+            "final",
+            make_analyze_payload(AnalyzePayloadArgs {
+                seq,
+                state: "final",
+                partial: false,
+                start,
+                plan,
+                output: Some(output),
+                reason: None,
+                code: None,
+            })
+            .0,
+        ),
+        Err((reason, code)) => (
+            "error",
+            make_analyze_payload(AnalyzePayloadArgs {
+                seq,
+                state: "error",
+                partial: false,
+                start,
+                plan,
+                output: None,
+                reason: Some(reason),
+                code: Some(code),
+            })
+            .0,
+        ),
+    }
+}
+
+struct AnalyzePayloadArgs<'a> {
+    seq: u64,
+    state: &'static str,
+    partial: bool,
+    start: Instant,
+    plan: Option<&'a Arc<dyn datafusion::physical_plan::ExecutionPlan>>,
+    output: Option<GreptimeQueryOutput>,
+    reason: Option<String>,
+    code: Option<u32>,
+}
+
+fn make_analyze_payload(args: AnalyzePayloadArgs<'_>) -> (String, usize) {
+    let AnalyzePayloadArgs {
+        seq,
+        state,
+        partial,
+        start,
+        plan,
+        output,
+        reason,
+        code,
+    } = args;
+    let metrics = plan.and_then(|plan| query::analyze_plan_metrics_to_json_value(plan, true).ok());
+    let payload = AnalyzeStreamPayload {
+        seq,
+        state,
+        partial,
+        elapsed_ms: start.elapsed().as_millis() as u64,
+        metrics,
+        output,
+        reason,
+        code,
+    };
+    let payload_string = serde_json::to_string(&payload).unwrap_or_else(|e| {
+        format!(r#"{{"seq":{seq},"state":"error","partial":false,"reason":"{e}"}}"#)
+    });
+    let payload_bytes = payload_string.len();
+    (payload_string, payload_bytes)
 }
 
 /// Handler to parse sql
@@ -499,4 +785,27 @@ pub async fn index() -> axum::response::Html<String> {
 </body>
 </html>"#,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_final_analyze_event_uses_error_event_for_conversion_error() {
+        let (event_name, payload) = make_final_analyze_event(
+            Err((
+                "conversion failed".to_string(),
+                StatusCode::InvalidArguments as u32,
+            )),
+            7,
+            Instant::now(),
+            None,
+        );
+
+        assert_eq!(event_name, "error");
+        let value: Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(value["state"], "error");
+        assert_eq!(value["reason"], "conversion failed");
+    }
 }
