@@ -305,6 +305,8 @@ impl JsonType {
             JsonFormat::Json2(native_type) => match native_type.as_arrow_type() {
                 // TODO(LFC): Direct use Arrow's Struct datatype here.
                 ArrowDataType::Struct(fields) => StructType::from(&fields),
+                // FIXME(fys): Since writing with a non-object root is currently
+                // not supported, this temporarily returns default.
                 _ => StructType::default(),
             },
             JsonFormat::Jsonb => StructType::default(),
