@@ -90,7 +90,8 @@ impl SqlQueryHandler for DummyInstance {
             query_ctx.sql_dialect(),
             ParseOptions::default(),
         )
-        .unwrap();
+        .map_err(BoxedError::new)
+        .context(ExecuteQuerySnafu)?;
         ensure!(
             statements.len() == 1,
             NotSupportedSnafu {
@@ -99,13 +100,29 @@ impl SqlQueryHandler for DummyInstance {
         );
 
         let mut statement = statements.remove(0);
-        if let Statement::Explain(explain) = &mut statement
-            && explain
-                .format
-                .as_ref()
-                .is_some_and(|format| format.to_string().eq_ignore_ascii_case("json"))
-        {
-            explain.format = None;
+        let Statement::Explain(explain) = &mut statement else {
+            return NotSupportedSnafu {
+                feat: "non EXPLAIN ANALYZE VERBOSE analyze stream query",
+            }
+            .fail();
+        };
+        ensure!(
+            explain.analyze && explain.verbose,
+            NotSupportedSnafu {
+                feat: "non EXPLAIN ANALYZE VERBOSE analyze stream query"
+            }
+        );
+        match &explain.format {
+            None => {}
+            Some(format) if format.to_string().eq_ignore_ascii_case("json") => {
+                explain.format = None;
+            }
+            Some(_) => {
+                return NotSupportedSnafu {
+                    feat: "non-JSON analyze stream format",
+                }
+                .fail();
+            }
         }
         query_ctx.set_explain_format("JSON".to_string());
 

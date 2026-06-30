@@ -26,8 +26,10 @@ use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_plugins::GREPTIME_EXEC_WRITE_COST;
 use common_query::{Output, OutputData};
-use common_recordbatch::{RecordBatch, util};
+use common_recordbatch::{RecordBatch, SendableRecordBatchStream, util};
 use common_telemetry::tracing;
+use datafusion::physical_plan::ExecutionPlan;
+use datatypes::schema::SchemaRef;
 use futures::StreamExt;
 use query::parser::{DEFAULT_LOOKBACK_STRING, PromQuery};
 use serde::{Deserialize, Serialize};
@@ -96,6 +98,18 @@ struct AnalyzeStreamPayload {
     reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     code: Option<u32>,
+}
+
+struct AnalyzeStreamState {
+    stream: SendableRecordBatchStream,
+    schema: SchemaRef,
+    plan: Option<Arc<dyn ExecutionPlan>>,
+    batches: Vec<RecordBatch>,
+    seq: u64,
+    start: Instant,
+    requested_interval_ms: u64,
+    current_interval_ms: u64,
+    done: bool,
 }
 
 /// Handler to execute sql
@@ -263,85 +277,78 @@ pub async fn sql_analyze_stream(
     let schema = stream.schema();
 
     let sse_stream = futures::stream::unfold(
-        (
+        AnalyzeStreamState {
             stream,
             schema,
             plan,
-            Vec::<RecordBatch>::new(),
-            0u64,
+            batches: Vec::new(),
+            seq: 0,
             start,
-            interval_ms,
-            interval_ms,
-            false,
-        ),
-        |(
-            mut stream,
-            schema,
-            plan,
-            mut batches,
-            mut seq,
-            start,
-            requested_interval_ms,
-            current_interval_ms,
-            done,
-        )| async move {
-            if done {
+            requested_interval_ms: interval_ms,
+            current_interval_ms: interval_ms,
+            done: false,
+        },
+        |mut state| async move {
+            if state.done {
                 return None;
             }
-            let tick = tokio::time::sleep(Duration::from_millis(current_interval_ms));
+            let tick = tokio::time::sleep(Duration::from_millis(state.current_interval_ms));
             tokio::pin!(tick);
             loop {
                 tokio::select! {
-                    item = stream.next() => {
+                    item = state.stream.next() => {
                         match item {
-                            Some(Ok(batch)) => batches.push(batch),
+                            Some(Ok(batch)) => state.batches.push(batch),
                             Some(Err(err)) => {
                                 let status = err.status_code();
                                 let event_name = if status == StatusCode::Cancelled { "canceled" } else { "error" };
                                 let (payload, _) = make_analyze_payload(AnalyzePayloadArgs {
-                                    seq,
+                                    seq: state.seq,
                                     state: event_name,
                                     partial: false,
-                                    start,
-                                    plan: plan.as_ref(),
+                                    start: state.start,
+                                    plan: state.plan.as_ref(),
                                     output: None,
                                     reason: Some(err.output_msg()),
                                     code: Some(status as u32),
                                 });
-                                seq += 1;
-                                return Some((Ok::<Event, std::convert::Infallible>(Event::default().event(event_name).data(payload)), (stream, schema, plan, batches, seq, start, requested_interval_ms, current_interval_ms, true)));
+                                state.seq += 1;
+                                state.done = true;
+                                return Some((Ok::<Event, std::convert::Infallible>(Event::default().event(event_name).data(payload)), state));
                             }
                             None => {
-                                let output = HttpRecordsOutput::try_new(schema.clone(), batches)
+                                let batches = std::mem::take(&mut state.batches);
+                                let output = HttpRecordsOutput::try_new(state.schema.clone(), batches)
                                     .map(GreptimeQueryOutput::Records);
                                 let (event_name, payload) = make_final_analyze_event(
                                     output.map_err(|err| (err.output_msg(), err.status_code() as u32)),
-                                    seq,
-                                    start,
-                                    plan.as_ref(),
+                                    state.seq,
+                                    state.start,
+                                    state.plan.as_ref(),
                                 );
-                                seq += 1;
-                                return Some((Ok::<Event, std::convert::Infallible>(Event::default().event(event_name).data(payload)), (stream, schema, plan, Vec::new(), seq, start, requested_interval_ms, current_interval_ms, true)));
+                                state.seq += 1;
+                                state.done = true;
+                                return Some((Ok::<Event, std::convert::Infallible>(Event::default().event(event_name).data(payload)), state));
                             }
                         }
                     }
                     _ = &mut tick => {
-                        if plan.is_some() {
+                        if state.plan.is_some() {
                             let (payload, payload_bytes) = make_analyze_payload(AnalyzePayloadArgs {
-                                seq,
+                                seq: state.seq,
                                 state: "metrics",
                                 partial: true,
-                                start,
-                                plan: plan.as_ref(),
+                                start: state.start,
+                                plan: state.plan.as_ref(),
                                 output: None,
                                 reason: None,
                                 code: None,
                             });
-                            let adaptive = adaptive_interval_ms(payload_bytes, requested_interval_ms);
-                            seq += 1;
-                            return Some((Ok::<Event, std::convert::Infallible>(Event::default().event("metrics").data(payload)), (stream, schema, plan, batches, seq, start, requested_interval_ms, adaptive, false)));
+                            state.current_interval_ms = adaptive_interval_ms(payload_bytes, state.requested_interval_ms);
+                            state.seq += 1;
+                            return Some((Ok::<Event, std::convert::Infallible>(Event::default().event("metrics").data(payload)), state));
                         }
-                        tick.as_mut().reset(tokio::time::Instant::now() + Duration::from_millis(current_interval_ms));
+                        tick.as_mut().reset(tokio::time::Instant::now() + Duration::from_millis(state.current_interval_ms));
                     }
                 }
             }
@@ -367,7 +374,7 @@ fn make_final_analyze_event(
     output: std::result::Result<GreptimeQueryOutput, (String, u32)>,
     seq: u64,
     start: Instant,
-    plan: Option<&Arc<dyn datafusion::physical_plan::ExecutionPlan>>,
+    plan: Option<&Arc<dyn ExecutionPlan>>,
 ) -> (&'static str, String) {
     match output {
         Ok(output) => (
@@ -406,7 +413,7 @@ struct AnalyzePayloadArgs<'a> {
     state: &'static str,
     partial: bool,
     start: Instant,
-    plan: Option<&'a Arc<dyn datafusion::physical_plan::ExecutionPlan>>,
+    plan: Option<&'a Arc<dyn ExecutionPlan>>,
     output: Option<GreptimeQueryOutput>,
     reason: Option<String>,
     code: Option<u32>,
@@ -435,7 +442,13 @@ fn make_analyze_payload(args: AnalyzePayloadArgs<'_>) -> (String, usize) {
         code,
     };
     let payload_string = serde_json::to_string(&payload).unwrap_or_else(|e| {
-        format!(r#"{{"seq":{seq},"state":"error","partial":false,"reason":"{e}"}}"#)
+        serde_json::json!({
+            "seq": seq,
+            "state": "error",
+            "partial": false,
+            "reason": format!("Failed to serialize SSE payload: {e}"),
+        })
+        .to_string()
     });
     let payload_bytes = payload_string.len();
     (payload_string, payload_bytes)
