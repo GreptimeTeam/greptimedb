@@ -29,9 +29,9 @@ pub(crate) struct JsonVectorBuilder {
 }
 
 impl JsonVectorBuilder {
-    pub(crate) fn new(json_type: JsonNativeType, capacity: usize) -> Self {
+    pub(crate) fn new(initial_native_type: JsonNativeType, capacity: usize) -> Self {
         Self {
-            merged_type: JsonType::new_json2(json_type),
+            merged_type: JsonType::new_json2(initial_native_type),
             values: Vec::with_capacity(capacity),
         }
     }
@@ -170,6 +170,33 @@ mod tests {
                     Value::Binary(Bytes::from(br#""raw""#.to_vec())),
                 ],
                 merged_struct_type,
+            ))
+        );
+
+        // A Null initial type represents an unknown JSON2 runtime type. The first
+        // non-null value should set the concrete type instead of aligning all rows to Null.
+        let mut inferred_builder = JsonVectorBuilder::new(JsonNativeType::Null, 2);
+        let inferred_value = parse_json_value(r#"{"id":3}"#);
+        inferred_builder.push_null();
+        inferred_builder.try_push_value_ref(&inferred_value.as_value_ref())?;
+
+        let inferred_type = JsonType::new_json2(JsonNativeType::Object(JsonObjectType::from([(
+            "id".to_string(),
+            JsonNativeType::i64(),
+        )])));
+        assert_eq!(
+            inferred_builder.data_type(),
+            ConcreteDataType::Json(inferred_type.clone())
+        );
+
+        let inferred_struct_type = inferred_type.as_struct_type();
+        let vector = inferred_builder.to_vector();
+        assert_eq!(vector.get(0), Value::Null);
+        assert_eq!(
+            vector.get(1),
+            Value::Struct(StructValue::new(
+                vec![Value::Int64(3)],
+                inferred_struct_type,
             ))
         );
 

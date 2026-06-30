@@ -40,7 +40,6 @@ use api::v1::SemanticType;
 use common_sql::default_constraint::parse_column_default_constraint;
 use common_time::timezone::Timezone;
 use datatypes::extension::json::{JsonExtensionType, JsonMetadata};
-use datatypes::json::JsonStructureSettings;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{COMMENT_KEY, ColumnDefaultConstraint, ColumnSchema};
 use datatypes::types::json_type::JsonNativeType;
@@ -55,10 +54,10 @@ use crate::ast::{
 };
 use crate::error::{
     self, ConvertToGrpcDataTypeSnafu, ConvertValueSnafu, Result,
-    SerializeColumnDefaultConstraintSnafu, SetFulltextOptionSnafu, SetJsonStructureSettingsSnafu,
+    SerializeColumnDefaultConstraintSnafu, SetFulltextOptionSnafu, SetJsonSettingsSnafu,
     SetSkippingIndexOptionSnafu, SetVectorIndexOptionSnafu, SqlCommonSnafu,
 };
-use crate::statements::create::{Column, ColumnExtensions};
+use crate::statements::create::Column;
 pub use crate::statements::option_map::OptionMap;
 pub(crate) use crate::statements::transform::transform_statements;
 
@@ -110,7 +109,7 @@ pub fn column_to_schema(
         && !is_time_index;
 
     let name = column.name().value.clone();
-    let data_type = sql_data_type_to_concrete_data_type(column.data_type(), &column.extensions)?;
+    let data_type = sql_data_type_to_concrete_data_type(column.data_type())?;
     let default_constraint =
         parse_column_default_constraint(&name, &data_type, column.options(), timezone)
             .context(SqlCommonSnafu)?;
@@ -164,16 +163,13 @@ pub fn column_to_schema(
         false
     };
     if is_json2_column {
-        let settings = column
-            .extensions
-            .build_json_structure_settings()?
-            .unwrap_or_default();
+        let settings = column.extensions.build_json_settings()?.unwrap_or_default();
         let extension = JsonExtensionType::new(Arc::new(JsonMetadata {
-            json_structure_settings: Some(settings.clone()),
+            json_settings: Some(settings.clone()),
         }));
         column_schema
             .with_extension_type(&extension)
-            .with_context(|_| SetJsonStructureSettingsSnafu {
+            .with_context(|_| SetJsonSettingsSnafu {
                 value: format!("{settings:?}"),
             })?;
     }
@@ -187,7 +183,7 @@ pub fn sql_column_def_to_grpc_column_def(
     timezone: Option<&Timezone>,
 ) -> Result<api::v1::ColumnDef> {
     let name = col.name.value.clone();
-    let data_type = sql_data_type_to_concrete_data_type(&col.data_type, &Default::default())?;
+    let data_type = sql_data_type_to_concrete_data_type(&col.data_type)?;
 
     let is_nullable = col
         .options
@@ -228,10 +224,7 @@ pub fn sql_column_def_to_grpc_column_def(
     })
 }
 
-pub fn sql_data_type_to_concrete_data_type(
-    data_type: &SqlDataType,
-    column_extensions: &ColumnExtensions,
-) -> Result<ConcreteDataType> {
+pub fn sql_data_type_to_concrete_data_type(data_type: &SqlDataType) -> Result<ConcreteDataType> {
     match data_type {
         SqlDataType::BigInt(_) | SqlDataType::Int64 => Ok(ConcreteDataType::int64_datatype()),
         SqlDataType::BigIntUnsigned(_) => Ok(ConcreteDataType::uint64_datatype()),
@@ -299,19 +292,9 @@ pub fn sql_data_type_to_concrete_data_type(
                     Ok(ConcreteDataType::vector_datatype(dim))
                 }
                 JSON2_TYPE_NAME if args.is_empty() => {
-                    let native_type = column_extensions
-                        .build_json_structure_settings()?
-                        .and_then(|x| match x {
-                            JsonStructureSettings::Structured(Some(fields))
-                            | JsonStructureSettings::PartialUnstructuredByKey {
-                                fields: Some(fields),
-                                ..
-                            } => Some(JsonNativeType::from(&ConcreteDataType::Struct(fields))),
-                            JsonStructureSettings::UnstructuredRaw => Some(JsonNativeType::Variant),
-                            _ => None,
-                        })
-                        .unwrap_or(JsonNativeType::Object(Default::default()));
-                    let format = JsonFormat::Json2(Box::new(native_type));
+                    // Currently, JSON2 is not inferred as any native type initially.
+                    // TODO(fys): infer it later from type hints.
+                    let format = JsonFormat::Json2(Box::new(JsonNativeType::Null));
                     Ok(ConcreteDataType::Json(JsonType::new(format)))
                 }
                 _ => error::SqlTypeNotSupportedSnafu {
@@ -390,7 +373,7 @@ mod tests {
     fn check_type(sql_type: SqlDataType, data_type: ConcreteDataType) {
         assert_eq!(
             data_type,
-            sql_data_type_to_concrete_data_type(&sql_type, &Default::default()).unwrap()
+            sql_data_type_to_concrete_data_type(&sql_type).unwrap()
         );
     }
 
@@ -744,7 +727,7 @@ mod tests {
                 vector_options: None,
                 skipping_index_options: None,
                 inverted_index_options: None,
-                json_datatype_options: None,
+                json_type_hints: vec![],
                 vector_index_options: None,
             },
         };
@@ -776,7 +759,7 @@ mod tests {
                 vector_options: None,
                 skipping_index_options: None,
                 inverted_index_options: None,
-                json_datatype_options: None,
+                json_type_hints: vec![],
                 vector_index_options: Some(OptionMap::from([
                     ("metric".to_string(), "cosine".to_string()),
                     ("connectivity".to_string(), "32".to_string()),
@@ -817,7 +800,7 @@ mod tests {
                 vector_options: None,
                 skipping_index_options: None,
                 inverted_index_options: None,
-                json_datatype_options: None,
+                json_type_hints: vec![],
                 vector_index_options: Some(OptionMap::default()),
             },
         };

@@ -309,11 +309,11 @@ pub(crate) fn parse_string_to_value(
             JsonFormat::Json2(_) => {
                 let extension_type: Option<JsonExtensionType> =
                     column_schema.extension_type().context(DatatypeSnafu)?;
-                let json_structure_settings = extension_type
-                    .and_then(|x| x.metadata().json_structure_settings.clone())
+                let json_settings = extension_type
+                    .and_then(|x| x.metadata().json_settings.clone())
                     .unwrap_or_default();
                 let v = serde_json::from_str(&s).context(DeserializeSnafu { json: s })?;
-                json_structure_settings.encode(v).context(DatatypeSnafu)
+                json_settings.encode(v).context(DatatypeSnafu)
             }
         },
         ConcreteDataType::Vector(d) => {

@@ -1082,9 +1082,16 @@ fn describe_column_types(columns_schemas: &[ColumnSchema]) -> VectorRef {
     Arc::new(StringVector::from(
         columns_schemas
             .iter()
-            .map(|cs| cs.data_type.name())
+            .map(|cs| describe_column_type_name(&cs.data_type))
             .collect::<Vec<_>>(),
     ))
+}
+
+fn describe_column_type_name(data_type: &ConcreteDataType) -> String {
+    match data_type {
+        ConcreteDataType::Json(json_type) if json_type.is_json2() => "Json2".to_string(),
+        data_type => data_type.name(),
+    }
 }
 
 fn describe_column_keys(
@@ -1340,6 +1347,7 @@ mod test {
     use common_time::timestamp::TimeUnit;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, Schema, SchemaRef};
+    use datatypes::types::json_type::JsonNativeType;
     use datatypes::vectors::{StringVector, TimestampMillisecondVector, UInt32Vector, VectorRef};
     use session::context::QueryContextBuilder;
     use snafu::ResultExt;
@@ -1348,7 +1356,7 @@ mod test {
     use table::TableRef;
     use table::test_util::MemTable;
 
-    use super::show_variable;
+    use super::{describe_column_type_name, show_variable};
     use crate::error;
     use crate::error::Result;
     use crate::sql::{
@@ -1389,6 +1397,18 @@ mod test {
         ];
 
         describe_table_test_by_schema(table_name, schema, data, expected_columns)
+    }
+
+    #[test]
+    fn test_describe_column_type_name_json2() {
+        assert_eq!(
+            describe_column_type_name(&ConcreteDataType::json2(JsonNativeType::Null)),
+            "Json2"
+        );
+        assert_eq!(
+            describe_column_type_name(&ConcreteDataType::uint32_datatype()),
+            "UInt32"
+        );
     }
 
     fn describe_table_test_by_schema(

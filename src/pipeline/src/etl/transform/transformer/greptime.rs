@@ -707,7 +707,7 @@ fn resolve_value(
                         None
                     };
                 let settings = json_extension_type
-                    .and_then(|x| x.metadata().json_structure_settings.clone())
+                    .and_then(|x| x.metadata().json_settings.clone())
                     .unwrap_or_default();
                 let value: serde_json::Value = value.try_into().map_err(|e: StdError| {
                     CoerceIncompatibleTypesSnafu { msg: e.to_string() }.build()
