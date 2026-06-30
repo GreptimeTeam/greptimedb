@@ -45,19 +45,10 @@ pub struct PartitionPruner {
     file_indices: Vec<usize>,
     /// Per-file pre-filter mode lookup indexed by file_index.
     pre_filter_modes: Vec<PreFilterMode>,
-    /// Positive manifest-prune cache indexed by file_index.
+    /// Positive manifest-prune cache scoped to this scan partition.
     ///
-    /// This is scoped to a scan partition. We only cache positive decisions
-    /// (file => manifest-pruned) and never cache negative decisions, so a later
-    /// dynamic-filter tightening can still make a previously unpruned file
-    /// prunable.
-    ///
-    /// SAFETY: dynamic-filter based pruning relies on filters being monotonic
-    /// within one scan: updates may keep or tighten the filter, but must not
-    /// relax it after consumers have already pruned data. Under that invariant,
-    /// a file once proven empty by manifest-level pruning remains empty for
-    /// later, stricter predicate snapshots. If a future dynamic filter can relax,
-    /// this cache must be invalidated or disabled for that filter.
+    /// SAFETY: cached positives are valid because dynamic filters only tighten;
+    /// negative decisions are not cached.
     manifest_pruned_files: Vec<AtomicBool>,
     /// Current position for tracking pre-fetch progress.
     current_position: AtomicUsize,
