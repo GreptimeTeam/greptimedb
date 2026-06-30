@@ -204,6 +204,8 @@ impl Instance {
 
         let is_readonly_stmt = stmt.is_readonly();
         if should_track_statement_process(&stmt) {
+            let catalog_name = query_ctx.current_catalog().to_string();
+            let schema_name = query_ctx.current_schema();
             let slow_query_timer = if is_readonly_stmt {
                 self.slow_query_options
                     .enable
@@ -212,6 +214,8 @@ impl Instance {
                     .map(|event_recorder| {
                         SlowQueryTimer::new(
                             CatalogQueryStatement::Sql(stmt.clone()),
+                            catalog_name.clone(),
+                            schema_name.clone(),
                             self.slow_query_options.threshold,
                             self.slow_query_options.sample_ratio,
                             self.slow_query_options.record_type,
@@ -223,8 +227,8 @@ impl Instance {
             };
 
             let ticket = self.process_manager.register_query(
-                query_ctx.current_catalog().to_string(),
-                vec![query_ctx.current_schema()],
+                catalog_name,
+                vec![schema_name],
                 stmt.to_string(),
                 query_ctx.conn_info().to_string(),
                 Some(query_ctx.process_id()),
@@ -662,6 +666,8 @@ impl Instance {
 
         let plan_is_readonly = is_readonly_plan(&plan);
         let result = if should_track_plan_process(stmt.as_ref(), &plan) {
+            let catalog_name = query_ctx.current_catalog().to_string();
+            let schema_name = query_ctx.current_schema();
             let slow_query_timer = if plan_is_readonly {
                 self.slow_query_options
                     .enable
@@ -670,6 +676,8 @@ impl Instance {
                     .map(|event_recorder| {
                         SlowQueryTimer::new(
                             CatalogQueryStatement::Plan(query.clone()),
+                            catalog_name.clone(),
+                            schema_name.clone(),
                             self.slow_query_options.threshold,
                             self.slow_query_options.sample_ratio,
                             self.slow_query_options.record_type,
@@ -681,8 +689,8 @@ impl Instance {
             };
 
             let ticket = self.process_manager.register_query(
-                query_ctx.current_catalog().to_string(),
-                vec![query_ctx.current_schema()],
+                catalog_name,
+                vec![schema_name],
                 query,
                 query_ctx.conn_info().to_string(),
                 Some(query_ctx.process_id()),
@@ -908,6 +916,8 @@ impl PrometheusHandler for Instance {
             .map(|event_recorder| {
                 SlowQueryTimer::new(
                     query_statement,
+                    query_ctx.current_catalog().to_string(),
+                    query_ctx.current_schema(),
                     self.slow_query_options.threshold,
                     self.slow_query_options.sample_ratio,
                     self.slow_query_options.record_type,

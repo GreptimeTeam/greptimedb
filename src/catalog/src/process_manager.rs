@@ -307,6 +307,8 @@ impl Debug for CancellableProcess {
 pub struct SlowQueryTimer {
     start: Instant,
     stmt: QueryStatement,
+    catalog_name: String,
+    schema_name: String,
     threshold: Duration,
     sample_ratio: f64,
     record_type: SlowQueriesRecordType,
@@ -316,6 +318,8 @@ pub struct SlowQueryTimer {
 impl SlowQueryTimer {
     pub fn new(
         stmt: QueryStatement,
+        catalog_name: String,
+        schema_name: String,
         threshold: Duration,
         sample_ratio: f64,
         record_type: SlowQueriesRecordType,
@@ -324,6 +328,8 @@ impl SlowQueryTimer {
         Self {
             start: Instant::now(),
             stmt,
+            catalog_name,
+            schema_name,
             threshold,
             sample_ratio,
             record_type,
@@ -338,6 +344,8 @@ impl SlowQueryTimer {
             cost: elapsed.as_millis() as u64,
             threshold: self.threshold.as_millis() as u64,
             query: "".to_string(),
+            catalog_name: self.catalog_name.clone(),
+            schema_name: self.schema_name.clone(),
 
             // The following fields are only used for PromQL queries.
             is_promql: false,
@@ -388,6 +396,8 @@ impl SlowQueryTimer {
                     cost = slow_query_event.cost,
                     threshold = slow_query_event.threshold,
                     query = slow_query_event.query,
+                    catalog_name = slow_query_event.catalog_name,
+                    schema_name = slow_query_event.schema_name,
                     is_promql = slow_query_event.is_promql,
                     promql_range = slow_query_event.promql_range,
                     promql_step = slow_query_event.promql_step,

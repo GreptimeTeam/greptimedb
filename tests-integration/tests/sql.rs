@@ -17,10 +17,13 @@ use std::time::Duration;
 
 use auth::user_provider_from_option;
 use chrono::{DateTime, NaiveDate, NaiveDateTime, SecondsFormat, Utc};
-use common_catalog::consts::DEFAULT_PRIVATE_SCHEMA_NAME;
+use common_catalog::consts::{
+    DEFAULT_CATALOG_NAME, DEFAULT_PRIVATE_SCHEMA_NAME, DEFAULT_SCHEMA_NAME,
+};
 use common_frontend::slow_query_event::{
-    SLOW_QUERY_TABLE_COST_COLUMN_NAME, SLOW_QUERY_TABLE_IS_PROMQL_COLUMN_NAME,
-    SLOW_QUERY_TABLE_NAME, SLOW_QUERY_TABLE_QUERY_COLUMN_NAME,
+    SLOW_QUERY_TABLE_CATALOG_NAME_COLUMN_NAME, SLOW_QUERY_TABLE_COST_COLUMN_NAME,
+    SLOW_QUERY_TABLE_IS_PROMQL_COLUMN_NAME, SLOW_QUERY_TABLE_NAME,
+    SLOW_QUERY_TABLE_QUERY_COLUMN_NAME, SLOW_QUERY_TABLE_SCHEMA_NAME_COLUMN_NAME,
     SLOW_QUERY_TABLE_THRESHOLD_COLUMN_NAME,
 };
 use sqlx::mysql::{MySqlConnection, MySqlDatabaseError, MySqlPoolOptions};
@@ -720,10 +723,12 @@ pub async fn test_mysql_slow_query(store_type: StorageType) {
 
     let table = format!("{}.{}", DEFAULT_PRIVATE_SCHEMA_NAME, SLOW_QUERY_TABLE_NAME);
     let query = format!(
-        "SELECT {}, {}, {}, {} FROM {table} WHERE {} = ?",
+        "SELECT {}, {}, {}, {}, {}, {} FROM {table} WHERE {} = ?",
         SLOW_QUERY_TABLE_COST_COLUMN_NAME,
         SLOW_QUERY_TABLE_THRESHOLD_COLUMN_NAME,
         SLOW_QUERY_TABLE_QUERY_COLUMN_NAME,
+        SLOW_QUERY_TABLE_CATALOG_NAME_COLUMN_NAME,
+        SLOW_QUERY_TABLE_SCHEMA_NAME_COLUMN_NAME,
         SLOW_QUERY_TABLE_IS_PROMQL_COLUMN_NAME,
         SLOW_QUERY_TABLE_QUERY_COLUMN_NAME,
     );
@@ -747,10 +752,14 @@ pub async fn test_mysql_slow_query(store_type: StorageType) {
     let cost: u64 = row.get(0);
     let threshold: u64 = row.get(1);
     let query: String = row.get(2);
-    let is_promql: bool = row.get(3);
+    let catalog_name: String = row.get(3);
+    let schema_name: String = row.get(4);
+    let is_promql: bool = row.get(5);
 
     assert!(cost > 0 && threshold > 0 && cost > threshold);
     assert_eq!(query, slow_query);
+    assert_eq!(catalog_name, DEFAULT_CATALOG_NAME);
+    assert_eq!(schema_name, DEFAULT_SCHEMA_NAME);
     assert!(!is_promql);
 
     let _ = fe_mysql_server.shutdown().await;
@@ -847,10 +856,12 @@ pub async fn test_postgres_slow_query(store_type: StorageType) {
 
     let table = format!("{}.{}", DEFAULT_PRIVATE_SCHEMA_NAME, SLOW_QUERY_TABLE_NAME);
     let query = format!(
-        "SELECT {}, {}, {}, {} FROM {table} WHERE {} = $1",
+        "SELECT {}, {}, {}, {}, {}, {} FROM {table} WHERE {} = $1",
         SLOW_QUERY_TABLE_COST_COLUMN_NAME,
         SLOW_QUERY_TABLE_THRESHOLD_COLUMN_NAME,
         SLOW_QUERY_TABLE_QUERY_COLUMN_NAME,
+        SLOW_QUERY_TABLE_CATALOG_NAME_COLUMN_NAME,
+        SLOW_QUERY_TABLE_SCHEMA_NAME_COLUMN_NAME,
         SLOW_QUERY_TABLE_IS_PROMQL_COLUMN_NAME,
         SLOW_QUERY_TABLE_QUERY_COLUMN_NAME,
     );
@@ -873,10 +884,14 @@ pub async fn test_postgres_slow_query(store_type: StorageType) {
     let cost: Decimal = row.get(0);
     let threshold: Decimal = row.get(1);
     let query: String = row.get(2);
-    let is_promql: bool = row.get(3);
+    let catalog_name: String = row.get(3);
+    let schema_name: String = row.get(4);
+    let is_promql: bool = row.get(5);
 
     assert!(cost > 0.into() && threshold > 0.into() && cost > threshold);
     assert_eq!(query, slow_query);
+    assert_eq!(catalog_name, DEFAULT_CATALOG_NAME);
+    assert_eq!(schema_name, DEFAULT_SCHEMA_NAME);
     assert!(!is_promql);
 
     let _ = fe_pg_server.shutdown().await;
