@@ -140,9 +140,25 @@ pub(crate) fn into_write_requests(request: Request) -> Result<RemoteWriteV2Write
             ensure_no_internal_histogram_labels(&tags)?;
         }
 
+        if sample_count > 0 && histogram_count == 0 {
+            // Fast path for regular sample-only series. Move the resolved labels into
+            // the sample writer instead of cloning them for a histogram path we won't use.
+            let table_data = get_or_create_table_data(
+                &mut sample_tables,
+                prom_ctx,
+                table_name,
+                tags.len() + 2,
+                sample_count,
+            );
+
+            write_samples(table_data, series.samples, tags)?;
+            sample_count_total += sample_count as u64;
+            // The owned labels were moved above, so skip the mixed-series path below.
+            continue;
+        }
+
         if sample_count > 0 {
-            // ponytail: mixed sample+histogram series need both branches below; avoid these
-            // clones only if profiles show this conversion loop is hot.
+            // Mixed sample+histogram series need the labels in both branches.
             let table_data = get_or_create_table_data(
                 &mut sample_tables,
                 prom_ctx.clone(),
