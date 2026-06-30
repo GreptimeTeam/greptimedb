@@ -35,9 +35,6 @@ use crate::schema::ColumnDefaultConstraint;
 use crate::types::json_type::JsonNativeType;
 use crate::value::{ListValue, StructValue, Value};
 
-#[allow(dead_code)]
-pub(crate) const GREPTIME_ROOT_FIELD_NAME: &str = "__greptime_root";
-
 /// JSON2 settings stored in column schema metadata and represented through
 /// Arrow extension metadata.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
