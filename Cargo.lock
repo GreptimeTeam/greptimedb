@@ -2209,7 +2209,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "117725a109d387c937a1533ce01b450cbde6b88abceea8473c4d7a85853cda3c"
 dependencies = [
  "lazy_static",
- "windows-sys 0.59.0",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]
@@ -4452,6 +4452,7 @@ dependencies = [
  "num",
  "num-traits",
  "ordered-float 4.6.0",
+ "parquet",
  "paste",
  "regex",
  "serde",
@@ -6484,7 +6485,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.6.4",
+ "socket2 0.5.10",
  "tokio",
  "tower-service",
  "tracing",
@@ -6555,7 +6556,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.61.2",
+ "windows-core 0.57.0",
 ]
 
 [[package]]
@@ -6999,7 +7000,7 @@ checksum = "e04d7f318608d35d4b61ddd75cbdaee86b023ebe2bd5a66ee0915f0bf93095a9"
 dependencies = [
  "hermit-abi",
  "libc",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -8963,7 +8964,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -10098,6 +10099,9 @@ dependencies = [
  "num-integer",
  "num-traits",
  "object_store",
+ "parquet-variant",
+ "parquet-variant-compute",
+ "parquet-variant-json",
  "paste",
  "seq-macro",
  "simdutf8",
@@ -10106,6 +10110,53 @@ dependencies = [
  "tokio",
  "twox-hash",
  "zstd",
+]
+
+[[package]]
+name = "parquet-variant"
+version = "58.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "74c8db065291f088a2aad8ab831853eae1871c0d311c8d0b83bbc3b7e735d0fc"
+dependencies = [
+ "arrow 58.3.0",
+ "arrow-schema 58.3.0",
+ "chrono",
+ "half",
+ "indexmap 2.13.0",
+ "num-traits",
+ "simdutf8",
+ "uuid",
+]
+
+[[package]]
+name = "parquet-variant-compute"
+version = "58.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a530e8d5b5e14efcb39c9a6ec55432ad11f6afb7dc4455a79be0dc615fe3cc31"
+dependencies = [
+ "arrow 58.3.0",
+ "arrow-schema 58.3.0",
+ "chrono",
+ "half",
+ "indexmap 2.13.0",
+ "parquet-variant",
+ "parquet-variant-json",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
+name = "parquet-variant-json"
+version = "58.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "00ed89908289f67caa2ca078f9ff9aacd6229a313ec92b12bf4f48f613dc2b97"
+dependencies = [
+ "arrow-schema 58.3.0",
+ "base64 0.22.1",
+ "chrono",
+ "parquet-variant",
+ "serde_json",
+ "uuid",
 ]
 
 [[package]]
@@ -11135,7 +11186,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ac6c3320f9abac597dcbc668774ef006702672474aad53c6d596b62e487b40b1"
 dependencies = [
  "heck 0.4.1",
- "itertools 0.14.0",
+ "itertools 0.10.5",
  "log",
  "multimap",
  "once_cell",
@@ -11183,7 +11234,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a56d757972c98b346a9b766e3f02746cde6dd1cd1d1d563472929fdd74bec4d"
 dependencies = [
  "anyhow",
- "itertools 0.14.0",
+ "itertools 0.10.5",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
@@ -11196,7 +11247,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9120690fafc389a67ba3803df527d0ec9cbbc9cc45e4cc20b332996dfb672425"
 dependencies = [
  "anyhow",
- "itertools 0.14.0",
+ "itertools 0.10.5",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
@@ -11596,7 +11647,7 @@ dependencies = [
  "once_cell",
  "socket2 0.5.10",
  "tracing",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -12536,7 +12587,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.4.15",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -12549,7 +12600,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.9.4",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -12630,7 +12681,7 @@ dependencies = [
  "security-framework 3.7.0",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -13512,7 +13563,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "52d1cfed4120b4d927bf7c0f86d2087a4a7d6027c906d9f9d525a80573b9be51"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -13898,7 +13949,7 @@ dependencies = [
  "cfg-if",
  "libc",
  "psm",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -14504,7 +14555,7 @@ dependencies = [
  "getrandom 0.3.4",
  "once_cell",
  "rustix 1.0.7",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -16255,7 +16306,7 @@ version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf221c93e13a30d793f7645a0e7762c55d169dbb0a49671918a2319d289b10bb"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]
