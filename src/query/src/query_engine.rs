@@ -15,6 +15,7 @@
 mod context;
 mod default_serializer;
 pub mod options;
+pub mod runtime;
 mod state;
 use std::any::Any;
 use std::sync::Arc;
@@ -41,6 +42,9 @@ use crate::error::Result;
 use crate::options::QueryOptions;
 use crate::planner::LogicalPlanner;
 pub use crate::query_engine::context::QueryEngineContext;
+pub use crate::query_engine::runtime::{
+    DefaultQueryRuntimeProvider, QueryRuntimeContext, QueryRuntimeProvider, QueryRuntimeProviderRef,
+};
 pub use crate::query_engine::state::QueryEngineState;
 use crate::region_query::RegionQueryHandlerRef;
 
