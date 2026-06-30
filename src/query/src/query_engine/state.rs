@@ -144,17 +144,10 @@ impl QueryEngineState {
             .execution
             .skip_physical_aggregate_schema_check = true;
 
-        runtime_provider.configure_session_config(
-            QueryRuntimeContext {
-                query_options: &options,
-                resolved_memory_pool_size: memory_pool_size,
-            },
-            &mut session_config,
-        );
-        let runtime_env = runtime_provider.build_runtime_env(QueryRuntimeContext {
-            query_options: &options,
-            resolved_memory_pool_size: memory_pool_size,
-        });
+        let runtime_context = QueryRuntimeContext::new(&options, memory_pool_size);
+        runtime_provider.configure_session_config(runtime_context, &mut session_config);
+        let runtime_builder = DefaultQueryRuntimeProvider::runtime_env_builder(runtime_context);
+        let runtime_env = runtime_provider.build_runtime_env(runtime_context, runtime_builder);
 
         // Apply extension rules
         let mut extension_rules = Vec::new();
@@ -670,11 +663,15 @@ mod tests {
             *config = config.clone().with_target_partitions(7);
         }
 
-        fn build_runtime_env(&self, ctx: QueryRuntimeContext<'_>) -> Arc<RuntimeEnv> {
+        fn build_runtime_env(
+            &self,
+            ctx: QueryRuntimeContext<'_>,
+            builder: RuntimeEnvBuilder,
+        ) -> Arc<RuntimeEnv> {
             assert_eq!(ctx.resolved_memory_pool_size, 1024);
             self.build_called.store(true, Ordering::SeqCst);
             Arc::new(
-                RuntimeEnvBuilder::new()
+                builder
                     .with_memory_pool(Arc::new(GreedyMemoryPool::new(2048)))
                     .build()
                     .unwrap(),

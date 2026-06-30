@@ -24,12 +24,23 @@ use crate::query_engine::state::MetricsMemoryPool;
 pub type QueryRuntimeProviderRef = Arc<dyn QueryRuntimeProvider>;
 
 /// Context for building query runtime components.
+#[derive(Clone, Copy)]
 #[non_exhaustive]
 pub struct QueryRuntimeContext<'a> {
     /// Query options used by the query engine.
     pub query_options: &'a QueryOptions,
     /// Resolved memory pool size in bytes.
     pub resolved_memory_pool_size: usize,
+}
+
+impl<'a> QueryRuntimeContext<'a> {
+    /// Creates a new query runtime context.
+    pub fn new(query_options: &'a QueryOptions, resolved_memory_pool_size: usize) -> Self {
+        Self {
+            query_options,
+            resolved_memory_pool_size,
+        }
+    }
 }
 
 /// Provides DataFusion session and runtime setup for the query engine.
@@ -39,26 +50,30 @@ pub trait QueryRuntimeProvider: Send + Sync + 'static {
     }
 
     /// Builds the DataFusion runtime environment.
-    fn build_runtime_env(&self, ctx: QueryRuntimeContext<'_>) -> Arc<RuntimeEnv>;
+    fn build_runtime_env(
+        &self,
+        _ctx: QueryRuntimeContext<'_>,
+        builder: RuntimeEnvBuilder,
+    ) -> Arc<RuntimeEnv> {
+        Arc::new(builder.build().expect("Failed to build RuntimeEnv"))
+    }
 }
 
 /// Default query runtime provider.
 #[derive(Debug, Default)]
 pub struct DefaultQueryRuntimeProvider;
 
-impl QueryRuntimeProvider for DefaultQueryRuntimeProvider {
-    fn build_runtime_env(&self, ctx: QueryRuntimeContext<'_>) -> Arc<RuntimeEnv> {
+impl DefaultQueryRuntimeProvider {
+    /// Creates a default DataFusion runtime environment builder.
+    pub fn runtime_env_builder(ctx: QueryRuntimeContext<'_>) -> RuntimeEnvBuilder {
         if ctx.resolved_memory_pool_size > 0 {
-            Arc::new(
-                RuntimeEnvBuilder::new()
-                    .with_memory_pool(Arc::new(MetricsMemoryPool::new(
-                        ctx.resolved_memory_pool_size,
-                    )))
-                    .build()
-                    .expect("Failed to build RuntimeEnv"),
-            )
+            RuntimeEnvBuilder::new().with_memory_pool(Arc::new(MetricsMemoryPool::new(
+                ctx.resolved_memory_pool_size,
+            )))
         } else {
-            Arc::new(RuntimeEnv::default())
+            RuntimeEnvBuilder::new()
         }
     }
 }
+
+impl QueryRuntimeProvider for DefaultQueryRuntimeProvider {}
