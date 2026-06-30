@@ -16,17 +16,13 @@ use std::collections::hash_map::Entry;
 
 use ahash::{HashMap, HashMapExt, HashSet, HashSetExt};
 use api::greptime_proto::io::prometheus::write::v2::histogram::{Count, ZeroCount};
-use api::greptime_proto::io::prometheus::write::v2::{
-    BucketSpan, Histogram, Request, Sample, TimeSeries,
-};
 #[cfg(test)]
 use api::greptime_proto::io::prometheus::write::v2::{Exemplar, Metadata, metadata};
-use api::v1::column_data_type_extension::TypeExt;
+use api::greptime_proto::io::prometheus::write::v2::{Histogram, Request, Sample, TimeSeries};
+#[cfg(test)]
+use api::v1::ColumnSchema;
 use api::v1::value::ValueData;
-use api::v1::{
-    ColumnDataType, ColumnDataTypeExtension, ColumnSchema, ListTypeExtension, ListValue,
-    RowInsertRequest, Rows, SemanticType, Value,
-};
+use api::v1::{ColumnDataType, RowInsertRequest, Rows, Value};
 use bytes::Bytes;
 use common_grpc::precision::Precision;
 use common_query::prelude::{greptime_timestamp, greptime_value};
@@ -263,17 +259,7 @@ fn write_native_histogram(
         &mut row,
     )?;
 
-    write_common_native_histogram_fields(
-        table_data,
-        histogram.reset_hint,
-        histogram.schema,
-        histogram.zero_threshold,
-        histogram.sum,
-        &histogram.custom_values,
-        &histogram.positive_spans,
-        &histogram.negative_spans,
-        &mut row,
-    )?;
+    write_common_native_histogram_fields(table_data, histogram, &mut row)?;
 
     let int_counts = match (&histogram.count, &histogram.zero_count) {
         (Some(Count::CountInt(count)), Some(ZeroCount::ZeroCountInt(zero_count))) => {
@@ -335,13 +321,7 @@ fn ensure_no_internal_histogram_labels(tags: &PromTags) -> Result<()> {
 
 fn write_common_native_histogram_fields(
     table_data: &mut TableData,
-    reset_hint: i32,
-    schema: i32,
-    zero_threshold: f64,
-    sum: f64,
-    custom_values: &[f64],
-    positive_spans: &[BucketSpan],
-    negative_spans: &[BucketSpan],
+    histogram: &Histogram,
     row: &mut Vec<Value>,
 ) -> Result<()> {
     row_writer::write_fields(
@@ -350,54 +330,55 @@ fn write_common_native_histogram_fields(
             (
                 SCHEMA_FIELD.to_string(),
                 ColumnDataType::Int32,
-                Some(ValueData::I32Value(schema)),
+                Some(ValueData::I32Value(histogram.schema)),
             ),
             (
                 ZERO_THRESHOLD_FIELD.to_string(),
                 ColumnDataType::Float64,
-                Some(ValueData::F64Value(zero_threshold)),
+                Some(ValueData::F64Value(histogram.zero_threshold)),
             ),
             (
                 SUM_FIELD.to_string(),
                 ColumnDataType::Float64,
-                Some(ValueData::F64Value(sum)),
+                Some(ValueData::F64Value(histogram.sum)),
             ),
             (
                 RESET_HINT_FIELD.to_string(),
                 ColumnDataType::Int32,
-                Some(ValueData::I32Value(reset_hint)),
+                Some(ValueData::I32Value(histogram.reset_hint)),
             ),
         ]
         .into_iter(),
         row,
     )?;
-    write_f64_list_field(table_data, CUSTOM_VALUES_FIELD, Some(custom_values), row)?;
-    let positive_span_offsets: Vec<i32> = positive_spans.iter().map(|span| span.offset).collect();
-    let positive_span_lengths: Vec<u32> = positive_spans.iter().map(|span| span.length).collect();
-    let negative_span_offsets: Vec<i32> = negative_spans.iter().map(|span| span.offset).collect();
-    let negative_span_lengths: Vec<u32> = negative_spans.iter().map(|span| span.length).collect();
+    write_f64_list_field(
+        table_data,
+        CUSTOM_VALUES_FIELD,
+        Some(histogram.custom_values.iter().copied()),
+        row,
+    )?;
     write_i32_list_field(
         table_data,
         POSITIVE_SPAN_OFFSETS_FIELD,
-        Some(&positive_span_offsets),
+        Some(histogram.positive_spans.iter().map(|span| span.offset)),
         row,
     )?;
     write_u32_list_field(
         table_data,
         POSITIVE_SPAN_LENGTHS_FIELD,
-        Some(&positive_span_lengths),
+        Some(histogram.positive_spans.iter().map(|span| span.length)),
         row,
     )?;
     write_i32_list_field(
         table_data,
         NEGATIVE_SPAN_OFFSETS_FIELD,
-        Some(&negative_span_offsets),
+        Some(histogram.negative_spans.iter().map(|span| span.offset)),
         row,
     )?;
     write_u32_list_field(
         table_data,
         NEGATIVE_SPAN_LENGTHS_FIELD,
-        Some(&negative_span_lengths),
+        Some(histogram.negative_spans.iter().map(|span| span.length)),
         row,
     )
 }
@@ -430,8 +411,8 @@ fn write_int_native_histogram_fields(
         row,
     )?;
 
-    let positive_buckets = buckets.map(|(positive, _)| positive);
-    let negative_buckets = buckets.map(|(_, negative)| negative);
+    let positive_buckets = buckets.map(|(positive, _)| positive.iter().copied());
+    let negative_buckets = buckets.map(|(_, negative)| negative.iter().copied());
     write_i64_list_field(
         table_data,
         POSITIVE_BUCKETS_I64_FIELD,
@@ -474,8 +455,8 @@ fn write_float_native_histogram_fields(
         row,
     )?;
 
-    let positive_buckets = buckets.map(|(positive, _)| positive);
-    let negative_buckets = buckets.map(|(_, negative)| negative);
+    let positive_buckets = buckets.map(|(positive, _)| positive.iter().copied());
+    let negative_buckets = buckets.map(|(_, negative)| negative.iter().copied());
     write_f64_list_field(
         table_data,
         POSITIVE_BUCKETS_F64_FIELD,
@@ -492,121 +473,62 @@ fn write_float_native_histogram_fields(
 
 fn write_i32_list_field(
     table_data: &mut TableData,
-    name: &'static str,
-    values: Option<&[i32]>,
+    name: &str,
+    values: Option<impl IntoIterator<Item = i32>>,
     row: &mut Vec<Value>,
 ) -> Result<()> {
-    write_list_field(
+    row_writer::write_list(
         table_data,
         name,
         ColumnDataType::Int32,
-        values.map(|values| {
-            values
-                .iter()
-                .map(|value| ValueData::I32Value(*value))
-                .collect()
-        }),
+        values.map(|values| values.into_iter().map(ValueData::I32Value)),
         row,
     )
 }
 
 fn write_u32_list_field(
     table_data: &mut TableData,
-    name: &'static str,
-    values: Option<&[u32]>,
+    name: &str,
+    values: Option<impl IntoIterator<Item = u32>>,
     row: &mut Vec<Value>,
 ) -> Result<()> {
-    write_list_field(
+    row_writer::write_list(
         table_data,
         name,
         ColumnDataType::Uint32,
-        values.map(|values| {
-            values
-                .iter()
-                .map(|value| ValueData::U32Value(*value))
-                .collect()
-        }),
+        values.map(|values| values.into_iter().map(ValueData::U32Value)),
         row,
     )
 }
 
 fn write_i64_list_field(
     table_data: &mut TableData,
-    name: &'static str,
-    values: Option<&[i64]>,
+    name: &str,
+    values: Option<impl IntoIterator<Item = i64>>,
     row: &mut Vec<Value>,
 ) -> Result<()> {
-    write_list_field(
+    row_writer::write_list(
         table_data,
         name,
         ColumnDataType::Int64,
-        values.map(|values| {
-            values
-                .iter()
-                .map(|value| ValueData::I64Value(*value))
-                .collect()
-        }),
+        values.map(|values| values.into_iter().map(ValueData::I64Value)),
         row,
     )
 }
 
 fn write_f64_list_field(
     table_data: &mut TableData,
-    name: &'static str,
-    values: Option<&[f64]>,
+    name: &str,
+    values: Option<impl IntoIterator<Item = f64>>,
     row: &mut Vec<Value>,
 ) -> Result<()> {
-    write_list_field(
+    row_writer::write_list(
         table_data,
         name,
         ColumnDataType::Float64,
-        values.map(|values| {
-            values
-                .iter()
-                .map(|value| ValueData::F64Value(*value))
-                .collect()
-        }),
+        values.map(|values| values.into_iter().map(ValueData::F64Value)),
         row,
     )
-}
-
-fn write_list_field(
-    table_data: &mut TableData,
-    name: &'static str,
-    item_type: ColumnDataType,
-    values: Option<Vec<ValueData>>,
-    row: &mut Vec<Value>,
-) -> Result<()> {
-    let value = values.map(|values| {
-        ValueData::ListValue(ListValue {
-            items: values
-                .into_iter()
-                .map(|value_data| Value {
-                    value_data: Some(value_data),
-                })
-                .collect(),
-        })
-    });
-    row_writer::write_by_schema(
-        table_data,
-        std::iter::once((list_column_schema(name, item_type), value)),
-        row,
-    )
-}
-
-fn list_column_schema(name: &'static str, item_type: ColumnDataType) -> ColumnSchema {
-    ColumnSchema {
-        column_name: name.to_string(),
-        datatype: ColumnDataType::List as i32,
-        semantic_type: SemanticType::Field as i32,
-        datatype_extension: Some(ColumnDataTypeExtension {
-            type_ext: Some(TypeExt::ListType(Box::new(ListTypeExtension {
-                datatype: item_type as i32,
-                datatype_extension: None,
-            }))),
-        }),
-        ..Default::default()
-    }
 }
 
 fn resolve_series_labels(symbols: &[String], series: &TimeSeries) -> Result<ResolvedSeriesLabels> {

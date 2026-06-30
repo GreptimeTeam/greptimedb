@@ -18,8 +18,8 @@ use api::v1::column_data_type_extension::TypeExt;
 use api::v1::helper::time_index_column_schema;
 use api::v1::value::ValueData;
 use api::v1::{
-    ColumnDataType, ColumnDataTypeExtension, ColumnSchema, JsonTypeExtension, Row,
-    RowInsertRequest, RowInsertRequests, Rows, SemanticType, Value,
+    ColumnDataType, ColumnDataTypeExtension, ColumnSchema, JsonTypeExtension, ListTypeExtension,
+    ListValue, Row, RowInsertRequest, RowInsertRequests, Rows, SemanticType, Value,
 };
 use common_grpc::precision::Precision;
 use common_time::Timestamp;
@@ -264,6 +264,45 @@ pub fn write_json(
     )
 }
 
+pub(crate) fn write_list(
+    table_data: &mut TableData,
+    name: &str,
+    item_type: ColumnDataType,
+    values: Option<impl IntoIterator<Item = ValueData>>,
+    one_row: &mut Vec<Value>,
+) -> Result<()> {
+    let value = values.map(|values| {
+        ValueData::ListValue(ListValue {
+            items: values
+                .into_iter()
+                .map(|value_data| Value {
+                    value_data: Some(value_data),
+                })
+                .collect(),
+        })
+    });
+
+    let TableData {
+        schema,
+        column_indexes,
+        ..
+    } = table_data;
+
+    if let Some(index) = column_indexes.get(name) {
+        check_list_schema(item_type, &schema[*index])?;
+        one_row[*index].value_data = value;
+    } else {
+        let index = schema.len();
+        let column_schema = build_list_column_schema(name, item_type);
+        let key = column_schema.column_name.clone();
+        schema.push(column_schema);
+        column_indexes.insert(key, index);
+        one_row.push(Value { value_data: value });
+    }
+
+    Ok(())
+}
+
 pub(crate) fn write_by_schema(
     table_data: &mut TableData,
     kv_iter: impl Iterator<Item = (ColumnSchema, Option<ValueData>)>,
@@ -290,6 +329,25 @@ pub(crate) fn write_by_schema(
     }
 
     Ok(())
+}
+
+fn build_list_column_schema(name: impl ToString, item_type: ColumnDataType) -> ColumnSchema {
+    ColumnSchema {
+        column_name: name.to_string(),
+        datatype: ColumnDataType::List as i32,
+        semantic_type: SemanticType::Field as i32,
+        datatype_extension: Some(list_datatype_extension(item_type)),
+        ..Default::default()
+    }
+}
+
+fn list_datatype_extension(item_type: ColumnDataType) -> ColumnDataTypeExtension {
+    ColumnDataTypeExtension {
+        type_ext: Some(TypeExt::ListType(Box::new(ListTypeExtension {
+            datatype: item_type as i32,
+            datatype_extension: None,
+        }))),
+    }
 }
 
 fn write_by_semantic_type(
@@ -445,6 +503,29 @@ fn check_schema(
     schema: &ColumnSchema,
 ) -> Result<()> {
     check_schema_number(datatype as i32, semantic_type as i32, schema)
+}
+
+fn check_list_schema(item_type: ColumnDataType, schema: &ColumnSchema) -> Result<()> {
+    check_schema(ColumnDataType::List, SemanticType::Field, schema)?;
+
+    let is_expected_list = matches!(
+        schema
+            .datatype_extension
+            .as_ref()
+            .and_then(|extension| extension.type_ext.as_ref()),
+        Some(TypeExt::ListType(list_type))
+            if list_type.datatype == item_type as i32 && list_type.datatype_extension.is_none()
+    );
+    ensure!(
+        is_expected_list,
+        IncompatibleSchemaExtensionSnafu {
+            column_name: &schema.column_name,
+            expected: format!("{:?}", Some(list_datatype_extension(item_type))),
+            actual: format!("{:?}", schema.datatype_extension),
+        }
+    );
+
+    Ok(())
 }
 
 fn check_schema_number(datatype: i32, semantic_type: i32, schema: &ColumnSchema) -> Result<()> {
