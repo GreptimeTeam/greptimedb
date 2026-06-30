@@ -471,16 +471,10 @@ async fn test_sql_form() {
 async fn test_analyze_stream_sse_e2e() {
     common_telemetry::init_default_ut_logging();
 
-    let sql_handler = create_testing_sql_query_handler(MemTable::default_numbers_table());
-    let options = HttpOptions {
-        experimental_enable_explain_analyze_stream: true,
-        ..Default::default()
-    };
-    let server = HttpServerBuilder::new(options)
-        .with_sql_handler(sql_handler)
-        .build();
-    let app = server.build(server.make_app()).unwrap();
-    let client = TestClient::new(app).await;
+    let client = analyze_stream_test_client(create_testing_sql_query_handler(
+        MemTable::default_numbers_table(),
+    ))
+    .await;
 
     let response = client
         .post("/v1/sql/analyze/stream?snapshot_interval_ms=1000")
@@ -516,6 +510,62 @@ async fn test_analyze_stream_sse_e2e() {
             .as_array()
             .is_some_and(|v| !v.is_empty())
     );
+}
+
+#[tokio::test]
+async fn test_analyze_stream_route_rejects_invalid_sql() {
+    common_telemetry::init_default_ut_logging();
+
+    let client = analyze_stream_test_client(create_testing_sql_query_handler(
+        MemTable::default_numbers_table(),
+    ))
+    .await;
+
+    for sql in [
+        "SELECT 1",
+        "EXPLAIN ANALYZE SELECT 1",
+        "EXPLAIN ANALYZE VERBOSE FORMAT TEXT SELECT 1",
+        "EXPLAIN ANALYZE VERBOSE SELECT 1; SELECT 2",
+    ] {
+        let response = client
+            .post("/v1/sql/analyze/stream")
+            .form(&http_handler::SqlQuery {
+                sql: Some(sql.to_string()),
+                ..Default::default()
+            })
+            .send()
+            .await;
+
+        assert_ne!(response.status(), StatusCode::OK, "{sql}");
+        let body: Value = response.json().await;
+        assert!(body.get("error").is_some(), "{sql}: {body}");
+    }
+}
+
+#[tokio::test]
+async fn test_analyze_stream_route_accepts_explicit_format_json() {
+    common_telemetry::init_default_ut_logging();
+
+    let client = analyze_stream_test_client(create_testing_sql_query_handler(
+        MemTable::default_numbers_table(),
+    ))
+    .await;
+
+    let response = client
+        .post("/v1/sql/analyze/stream")
+        .header(header::ACCEPT, "text/event-stream")
+        .form(&http_handler::SqlQuery {
+            sql: Some(
+                "EXPLAIN ANALYZE VERBOSE FORMAT JSON SELECT sum(uint32s) FROM numbers".to_string(),
+            ),
+            ..Default::default()
+        })
+        .send()
+        .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.text().await;
+    assert!(sse_event_payload(&body, "final").is_some(), "{body}");
 }
 
 #[tokio::test]
@@ -580,6 +630,18 @@ fn sse_event_payload(body: &str, event_name: &str) -> Option<String> {
         }
         found.then(|| data.join("\n"))
     })
+}
+
+async fn analyze_stream_test_client(sql_handler: ServerSqlQueryHandlerRef) -> TestClient {
+    let options = HttpOptions {
+        experimental_enable_explain_analyze_stream: true,
+        ..Default::default()
+    };
+    let server = HttpServerBuilder::new(options)
+        .with_sql_handler(sql_handler)
+        .build();
+    let app = server.build(server.make_app()).unwrap();
+    TestClient::new(app).await
 }
 
 lazy_static::lazy_static! {

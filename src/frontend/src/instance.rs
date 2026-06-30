@@ -210,6 +210,9 @@ fn validate_analyze_stream_statement(stmt: &mut Statement) -> Result<()> {
     );
     match explain.format {
         None | Some(AnalyzeFormat::JSON) => {
+            // Keep explicit FORMAT JSON accepted, but pass JSON through
+            // QueryContext.explain_format instead of the statement to avoid the
+            // planner's current `EXPLAIN VERBOSE with FORMAT` limitation.
             explain.format = None;
             Ok(())
         }

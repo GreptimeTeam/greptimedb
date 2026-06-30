@@ -30,6 +30,15 @@ pub type ServerSqlQueryHandlerRef = Arc<dyn SqlQueryHandler + Send + Sync>;
 pub trait SqlQueryHandler {
     async fn do_query(&self, query: &str, query_ctx: QueryContextRef) -> Vec<Result<Output>>;
 
+    /// Executes the experimental HTTP analyze-stream query path.
+    ///
+    /// Implementations must validate that `query` is exactly one explicit
+    /// `EXPLAIN ANALYZE VERBOSE` statement and must return a streaming output.
+    /// `OutputMeta.plan` is used by the HTTP layer to emit metrics snapshots;
+    /// when it is absent, partial metrics may not be available. The returned
+    /// stream should support cancel-on-drop semantics (as the production
+    /// frontend implementation does) so client disconnect can best-effort cancel
+    /// the underlying query.
     async fn do_analyze_stream_query(
         &self,
         query: &str,

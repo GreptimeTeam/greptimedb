@@ -194,6 +194,13 @@ pub async fn sql(
 }
 
 /// Handler to stream partial `EXPLAIN ANALYZE VERBOSE` metrics as SSE.
+///
+/// This experimental endpoint is POST-only SSE, so browser `EventSource` does
+/// not apply. Each `metrics` event carries a complete snapshot (not a delta);
+/// large snapshots are throttled but never truncated. `final`, `canceled`, and
+/// `error` are terminal events. If the client disconnects it won't receive a
+/// `canceled` event, but the production frontend stream is dropped and
+/// best-effort cancels the underlying query.
 #[axum_macros::debug_handler]
 #[tracing::instrument(
     skip_all,

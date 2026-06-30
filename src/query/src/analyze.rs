@@ -93,6 +93,11 @@ impl DistAnalyzeExec {
 
 /// Returns verbose analyze metrics as JSON values using the same `JsonMetrics` shape
 /// as `EXPLAIN ANALYZE VERBOSE FORMAT JSON`.
+///
+/// This reads metrics directly from a running physical plan for the experimental
+/// HTTP analyze stream. It is a best-effort diagnostic live snapshot, not a
+/// transactionally consistent snapshot; metric values may change while this
+/// function traverses the plan.
 pub fn analyze_plan_metrics_to_json_value(
     plan: &Arc<dyn ExecutionPlan>,
     verbose: bool,
