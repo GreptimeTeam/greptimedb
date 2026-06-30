@@ -99,6 +99,7 @@ pub struct QueryOptions {
     /// Experimental: memory pool allocation policy.
     /// - `greedy` (default): preserves current behavior.
     /// - `fair`: share memory evenly among spillable operators.
+    ///
     /// Only effective when `memory_pool_size` is bounded (>0).
     pub experimental_memory_pool_policy: QueryMemoryPoolPolicy,
 }

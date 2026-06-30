@@ -795,10 +795,12 @@ mod tests {
     /// remains default.
     #[test]
     fn test_build_runtime_env_default_mode_bounded() {
-        let mut opts = QueryOptions::default();
-        opts.memory_pool_size = common_base::memory_limit::MemoryLimit::Size(
-            common_base::readable_size::ReadableSize::mb(128),
-        );
+        let opts = QueryOptions {
+            memory_pool_size: common_base::memory_limit::MemoryLimit::Size(
+                common_base::readable_size::ReadableSize::mb(128),
+            ),
+            ..Default::default()
+        };
         let env = build_runtime_env(&opts, 128 * 1024 * 1024);
         // Bounded pool is attached
         assert!(env.memory_pool.reserved() == 0);
@@ -814,11 +816,13 @@ mod tests {
         let spill_dir = std::env::temp_dir().join(format!("df_spill_test_{}", std::process::id()));
         // Clean up if exists from a previous run
         let _ = std::fs::remove_dir_all(&spill_dir);
-        let mut opts = QueryOptions::default();
-        opts.experimental_spill_mode = QuerySpillMode::Custom;
-        opts.experimental_spill_path = Some(spill_dir.clone());
-        opts.experimental_spill_max_temp_directory_size =
-            common_base::readable_size::ReadableSize::gb(1);
+        let opts = QueryOptions {
+            experimental_spill_mode: QuerySpillMode::Custom,
+            experimental_spill_path: Some(spill_dir.clone()),
+            experimental_spill_max_temp_directory_size:
+                common_base::readable_size::ReadableSize::gb(1),
+            ..Default::default()
+        };
         let env = build_runtime_env(&opts, 0);
 
         assert!(env.disk_manager.tmp_files_enabled());
@@ -835,8 +839,10 @@ mod tests {
     /// Disabled mode: tmp files are disabled; creating a temp file returns an error.
     #[test]
     fn test_build_runtime_env_disabled_mode() {
-        let mut opts = QueryOptions::default();
-        opts.experimental_spill_mode = QuerySpillMode::Disabled;
+        let opts = QueryOptions {
+            experimental_spill_mode: QuerySpillMode::Disabled,
+            ..Default::default()
+        };
         let env = build_runtime_env(&opts, 0);
 
         assert!(!env.disk_manager.tmp_files_enabled());
@@ -920,12 +926,14 @@ mod tests {
         let _ = std::fs::remove_dir_all(&spill_dir);
 
         // ---- shared options ----
-        let mut opts = QueryOptions::default();
-        opts.experimental_spill_mode = QuerySpillMode::Custom;
-        opts.experimental_spill_path = Some(spill_dir.clone());
-        opts.experimental_spill_max_temp_directory_size =
-            common_base::readable_size::ReadableSize::gb(1);
-        opts.experimental_memory_pool_policy = QueryMemoryPoolPolicy::Greedy;
+        let opts = QueryOptions {
+            experimental_spill_mode: QuerySpillMode::Custom,
+            experimental_spill_path: Some(spill_dir.clone()),
+            experimental_spill_max_temp_directory_size:
+                common_base::readable_size::ReadableSize::gb(1),
+            experimental_memory_pool_policy: QueryMemoryPoolPolicy::Greedy,
+            ..Default::default()
+        };
 
         // ---- shared session config ----
         let session_config = SessionConfig::new()
@@ -1105,6 +1113,7 @@ mod tests {
     /// ```
     #[tokio::test]
     #[ignore]
+    #[allow(clippy::print_stdout)]
     async fn bench_sort_spill_local() {
         use std::time::Instant;
 
@@ -1387,13 +1396,15 @@ mod tests {
                 let _ = std::fs::remove_dir_all(&spill_dir);
                 std::fs::create_dir_all(&spill_dir).unwrap();
 
-                let mut opts = QueryOptions::default();
-                opts.experimental_spill_mode = case.mode;
-                opts.experimental_spill_path = Some(spill_dir.clone());
-                opts.experimental_spill_max_temp_directory_size =
-                    common_base::readable_size::ReadableSize::gb(8);
-                opts.experimental_spill_compression = case.compression;
-                opts.experimental_memory_pool_policy = case.policy;
+                let opts = QueryOptions {
+                    experimental_spill_mode: case.mode,
+                    experimental_spill_path: Some(spill_dir.clone()),
+                    experimental_spill_max_temp_directory_size:
+                        common_base::readable_size::ReadableSize::gb(8),
+                    experimental_spill_compression: case.compression,
+                    experimental_memory_pool_policy: case.policy,
+                    ..Default::default()
+                };
 
                 let runtime = build_runtime_env(&opts, case.mem_limit);
                 let session_config = SessionConfig::new()
@@ -1469,13 +1480,13 @@ mod tests {
             elapsed: &mut usize,
         ) {
             let name = plan.name();
-            if name.starts_with("SortExec") {
-                if let Some(m) = plan.metrics() {
-                    *sc += m.spill_count().unwrap_or(0);
-                    *sr += m.spilled_rows().unwrap_or(0);
-                    *sb += m.spilled_bytes().unwrap_or(0);
-                    *elapsed += m.elapsed_compute().unwrap_or(0);
-                }
+            if name.starts_with("SortExec")
+                && let Some(m) = plan.metrics()
+            {
+                *sc += m.spill_count().unwrap_or(0);
+                *sr += m.spilled_rows().unwrap_or(0);
+                *sb += m.spilled_bytes().unwrap_or(0);
+                *elapsed += m.elapsed_compute().unwrap_or(0);
             }
             for child in plan.children() {
                 walk(child, sc, sr, sb, elapsed);
