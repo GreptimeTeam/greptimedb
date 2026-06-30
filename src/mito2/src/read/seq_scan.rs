@@ -48,7 +48,6 @@ use crate::read::scan_region::{ScanInput, StreamContext};
 use crate::read::scan_util::{
     PartitionMetrics, PartitionMetricsList, SplitRecordBatchStream, compute_parallel_channel_size,
     scan_flat_file_ranges, scan_flat_mem_ranges, should_split_flat_batches_for_merge,
-    try_skip_manifest_pruned_file_range,
 };
 use crate::read::stream::{ConvertBatchStream, ScanBatch, ScanBatchStream};
 use crate::read::{BoxedRecordBatchStream, ScannerMetrics, scan_util};
@@ -669,12 +668,7 @@ pub(crate) async fn build_flat_sources(
             // Common manifest-level fast-skip shared by SeqScan and UnorderedScan.
             // Compaction should keep reading its selected input ranges completely.
             if !compaction
-                && try_skip_manifest_pruned_file_range(
-                    stream_ctx,
-                    *index,
-                    part_metrics,
-                    &partition_pruner,
-                )
+                && partition_pruner.try_skip_manifest_pruned_file_range(*index, part_metrics)
             {
                 continue;
             }

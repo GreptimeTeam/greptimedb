@@ -45,11 +45,6 @@ pub struct PartitionPruner {
     file_indices: Vec<usize>,
     /// Per-file pre-filter mode lookup indexed by file_index.
     pre_filter_modes: Vec<PreFilterMode>,
-    /// Positive manifest-prune cache scoped to this scan partition.
-    ///
-    /// SAFETY: cached positives are valid because dynamic filters only tighten;
-    /// negative decisions are not cached.
-    manifest_pruned_files: Vec<AtomicBool>,
     /// Current position for tracking pre-fetch progress.
     current_position: AtomicUsize,
 }
@@ -88,7 +83,6 @@ impl PartitionPruner {
             pruner,
             file_indices,
             pre_filter_modes,
-            manifest_pruned_files: (0..num_files).map(|_| AtomicBool::new(false)).collect(),
             current_position: AtomicUsize::new(0),
         }
     }
@@ -124,35 +118,39 @@ impl PartitionPruner {
     }
 
     /// Skips a file range that was pruned before entering [`Pruner::build_file_ranges`].
+    #[allow(dead_code)]
     pub fn skip_file_range(&self, index: RowGroupIndex, reader_metrics: &mut ReaderMetrics) {
         self.pruner.skip_file_range(index, reader_metrics);
     }
 
-    /// Returns true if this file range was already proven manifest-pruned in
-    /// this scan partition.
-    pub fn is_manifest_pruned_file_range(&self, index: RowGroupIndex) -> bool {
-        self.file_index(index)
-            .and_then(|file_index| self.manifest_pruned_files.get(file_index))
-            .is_some_and(|pruned| pruned.load(Ordering::Relaxed))
-    }
-
-    /// Skips a file range that was proven definitively pruned by manifest-level
-    /// time-range pruning. Records `files_time_range_pruned` in `reader_metrics`
-    /// and balances the pruner's per-file reference count.
-    pub fn skip_manifest_pruned_file_range(
+    /// Checks whether the file range at `index` can be skipped because the
+    /// current predicate definitively prunes it at manifest level (no I/O).
+    ///
+    /// Returns `true` if the range was skipped. When skipped, this method
+    /// balances the pruner's per-file reference count and merges the resulting
+    /// reader metrics into `part_metrics`.
+    ///
+    /// Uses the shared `PrunerInner::manifest_pruned_files` cache so that a
+    /// single CAS-per-file costs one predicate evaluation regardless of how many
+    /// row groups the file has.
+    pub fn try_skip_manifest_pruned_file_range(
         &self,
         index: RowGroupIndex,
-        reader_metrics: &mut ReaderMetrics,
-    ) {
-        if let Some(file_index) = self.file_index(index)
-            && let Some(pruned) = self.manifest_pruned_files.get(file_index)
-            && pruned
-                .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
-                .is_ok()
-        {
-            reader_metrics.filter_metrics.files_time_range_pruned += 1;
+        part_metrics: &PartitionMetrics,
+    ) -> bool {
+        let Some(file_index) = self.file_index(index) else {
+            return false;
+        };
+        let mut reader_metrics = ReaderMetrics::default();
+        let pruned = self
+            .pruner
+            .inner
+            .try_mark_manifest_pruned(file_index, &mut reader_metrics);
+        if pruned {
+            self.pruner.skip_file_range(index, &mut reader_metrics);
+            part_metrics.merge_reader_metrics(&reader_metrics, None);
         }
-        self.skip_file_range(index, reader_metrics);
+        pruned
     }
 
     /// Pre-fetches upcoming files starting from the given position.
@@ -201,6 +199,40 @@ struct PrunerInner {
     file_entries: Vec<Mutex<FileBuilderEntry>>,
     /// StreamContext containing all context needed for pruning.
     stream_ctx: Arc<StreamContext>,
+    /// Positive manifest-prune cache shared across all scan partitions.
+    ///
+    /// SAFETY: cached positives are valid because dynamic filters only tighten;
+    /// negative decisions are not cached.  Reset by `add_partition_ranges()` for
+    /// each file referenced by the incoming partition ranges.
+    manifest_pruned_files: Vec<AtomicBool>,
+}
+
+impl PrunerInner {
+    /// Checks whether manifest-level pruning proves this file is empty given the
+    /// current predicate. If true, CAS the shared cache from false→true and
+    /// record `files_time_range_pruned` in `reader_metrics`.
+    ///
+    /// Returns `true` if already cached or newly proven pruned.
+    fn try_mark_manifest_pruned(
+        &self,
+        file_index: usize,
+        reader_metrics: &mut ReaderMetrics,
+    ) -> bool {
+        if self.manifest_pruned_files[file_index].load(Ordering::Relaxed) {
+            return true;
+        }
+        let file = &self.stream_ctx.input.files[file_index];
+        if !self.stream_ctx.input.can_manifest_prune_file(file) {
+            return false;
+        }
+        if self.manifest_pruned_files[file_index]
+            .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
+            reader_metrics.filter_metrics.files_time_range_pruned += 1;
+        }
+        true
+    }
 }
 
 /// Per-file state tracking.
@@ -242,6 +274,8 @@ impl Pruner {
                 })
             })
             .collect();
+        let manifest_pruned_files: Vec<AtomicBool> =
+            (0..num_files).map(|_| AtomicBool::new(false)).collect();
         // Create channels and collect senders
         let mut worker_senders = Vec::with_capacity(num_workers);
         let mut receivers = Vec::with_capacity(num_workers);
@@ -255,6 +289,7 @@ impl Pruner {
             num_workers,
             file_entries,
             stream_ctx,
+            manifest_pruned_files,
         });
 
         // Spawn worker tasks with their receivers
@@ -271,8 +306,14 @@ impl Pruner {
         }
     }
 
-    /// Adds reference counts for all partitions' ranges.
+    /// Adds reference counts for all partitions' ranges and resets the
+    /// manifest-prune cache so that dynamic-filter updates are visible to the
+    /// fresh scan.
     pub fn add_partition_ranges(&self, partition_ranges: &[PartitionRange]) {
+        for pruned in &self.inner.manifest_pruned_files {
+            pruned.store(false, Ordering::Relaxed);
+        }
+
         // Add reference counts for each partition range
         let num_memtables = self.inner.stream_ctx.input.num_memtables();
         for part_range in partition_ranges {
@@ -430,12 +471,24 @@ impl Pruner {
         pre_filter_mode: PreFilterMode,
         reader_metrics: &mut ReaderMetrics,
     ) -> Result<Arc<FileRangeBuilder>> {
+        // Check manifest-level prune first (shared cache, no I/O).
+        if self
+            .inner
+            .try_mark_manifest_pruned(file_index, reader_metrics)
+        {
+            let arc_builder = Arc::new(FileRangeBuilder::default());
+            // Do NOT cache an empty manifest-pruned builder; the cache flag
+            // already records the decision.
+            return Ok(arc_builder);
+        }
+
         let file = &self.inner.stream_ctx.input.files[file_index];
+        let predicate = self.inner.stream_ctx.input.predicate_for_file(file);
         let builder = self
             .inner
             .stream_ctx
             .input
-            .prune_file(file, pre_filter_mode, reader_metrics)
+            .prune_file_after_manifest_check(file, pre_filter_mode, predicate, reader_metrics)
             .await?;
 
         let arc_builder = Arc::new(builder);
@@ -496,7 +549,6 @@ impl Pruner {
             }
             worker_cache_miss += 1;
 
-            // Do the actual pruning (outside lock)
             let file = &inner.stream_ctx.input.files[file_index];
             pruned_files.push(file.file_id().file_id());
             let explain_verbose = partition_metrics
@@ -507,11 +559,20 @@ impl Pruner {
                 filter_metrics: new_filter_metrics(explain_verbose),
                 ..Default::default()
             };
-            let result = inner
-                .stream_ctx
-                .input
-                .prune_file(file, pre_filter_mode, &mut metrics)
-                .await;
+
+            // Check manifest-level prune first (shared cache, no I/O).
+            let result = if inner.try_mark_manifest_pruned(file_index, &mut metrics) {
+                // Manifest-level pruning proved the file empty — produce a
+                // default builder without reading any parquet metadata.
+                Ok(FileRangeBuilder::default())
+            } else {
+                let predicate = inner.stream_ctx.input.predicate_for_file(file);
+                inner
+                    .stream_ctx
+                    .input
+                    .prune_file_after_manifest_check(file, pre_filter_mode, predicate, &mut metrics)
+                    .await
+            };
 
             // Update state and notify waiters
             let mut entry = inner.file_entries[file_index].lock().unwrap();
@@ -524,7 +585,13 @@ impl Pruner {
                     // If remaining_ranges == 0, a concurrent `skip_file_range` (e.g. from a
                     // dynamic filter tightening via manifest-prune fast-skip) already consumed
                     // all ranges and may have cleared a previously cached builder.
-                    let did_cache = cache_builder_if_needed(&mut entry, &arc_builder, &mut metrics);
+                    // Skip caching manifest-pruned empty builders; the cache flag is enough.
+                    let did_cache =
+                        if inner.manifest_pruned_files[file_index].load(Ordering::Relaxed) {
+                            false
+                        } else {
+                            cache_builder_if_needed(&mut entry, &arc_builder, &mut metrics)
+                        };
 
                     // Notify all waiters
                     for waiter in entry.waiters.drain(..) {

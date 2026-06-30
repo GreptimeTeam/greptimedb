@@ -1056,7 +1056,7 @@ impl ScanInput {
         ranges
     }
 
-    fn predicate_for_file(&self, file: &FileHandle) -> Option<Predicate> {
+    pub(crate) fn predicate_for_file(&self, file: &FileHandle) -> Option<Predicate> {
         if self.should_skip_region_partition(file) {
             self.predicate.predicate_without_region().cloned()
         } else {
@@ -1121,6 +1121,9 @@ impl ScanInput {
     }
 
     /// Prunes a file to scan and returns the builder to build readers.
+    ///
+    /// This is the public entry point used by direct tests and non-pruner callers.
+    /// It performs its own manifest-level pruning check internally.
     #[tracing::instrument(
         skip_all,
         fields(
@@ -1137,13 +1140,29 @@ impl ScanInput {
         let predicate = self.predicate_for_file(file);
 
         // Early file-level pruning using manifest time range before any parquet metadata access.
-        // This avoids I/O for files that definitely can't match the current predicate snapshot,
-        // especially after TopK dynamic filters have established a timestamp threshold.
         if self.manifest_prunes_file(file, predicate.as_ref()) {
             reader_metrics.filter_metrics.files_time_range_pruned += 1;
             return Ok(FileRangeBuilder::default());
         }
 
+        self.prune_file_after_manifest_check(file, pre_filter_mode, predicate, reader_metrics)
+            .await
+    }
+
+    /// Second half of `prune_file` — performs the actual parquet metadata /
+    /// reader setup. Callers that already performed manifest-level pruning
+    /// (e.g. the `Pruner` via its shared `manifest_pruned_files` cache) should
+    /// call this directly to avoid a redundant manifest check.
+    ///
+    /// `predicate` is the result of `self.predicate_for_file(file)` computed
+    /// externally so the caller can reuse it if needed.
+    pub(crate) async fn prune_file_after_manifest_check(
+        &self,
+        file: &FileHandle,
+        pre_filter_mode: PreFilterMode,
+        predicate: Option<Predicate>,
+        reader_metrics: &mut ReaderMetrics,
+    ) -> Result<FileRangeBuilder> {
         let may_build_selective_row_selection = predicate.is_some();
         let decode_pk_values = !self.compaction
             && self
