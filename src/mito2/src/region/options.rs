@@ -82,6 +82,10 @@ pub enum MergeMode {
 pub struct RegionOptions {
     /// Region SST files TTL.
     pub ttl: Option<TimeToLive>,
+    /// Per-region auto flush interval override. Falls back to the global
+    /// `auto_flush_interval` engine config when unset.
+    #[serde(with = "humantime_serde")]
+    pub auto_flush_interval: Option<Duration>,
     /// Compaction options.
     pub compaction: CompactionOptions,
     pub compaction_override: bool,
@@ -117,6 +121,14 @@ impl RegionOptions {
                 }
             );
         }
+        if let Some(auto_flush_interval) = self.auto_flush_interval {
+            ensure!(
+                auto_flush_interval > Duration::ZERO,
+                InvalidRegionOptionsSnafu {
+                    reason: "auto_flush_interval must be greater than 0",
+                }
+            );
+        }
         Ok(())
     }
 
@@ -128,6 +140,11 @@ impl RegionOptions {
     /// Returns the `merge_mode` if it is set, otherwise returns the default [`MergeMode`].
     pub fn merge_mode(&self) -> MergeMode {
         self.merge_mode.unwrap_or_default()
+    }
+
+    /// Returns the `auto_flush_interval` if it is set, otherwise returns `default`.
+    pub fn auto_flush_interval_or(&self, default: Duration) -> Duration {
+        self.auto_flush_interval.unwrap_or(default)
     }
 
     /// Returns the `primary_key_encoding` if it is set, otherwise returns the default [`PrimaryKeyEncoding`].
@@ -228,6 +245,7 @@ impl RegionOptions {
 
         let opts = RegionOptions {
             ttl: options.ttl,
+            auto_flush_interval: options.auto_flush_interval,
             compaction,
             compaction_override,
             storage: options.storage,
@@ -338,6 +356,8 @@ impl Default for TwcsOptions {
 struct RegionOptionsWithoutEnum {
     /// Region SST files TTL.
     ttl: Option<TimeToLive>,
+    #[serde(with = "humantime_serde")]
+    auto_flush_interval: Option<Duration>,
     storage: Option<String>,
     #[serde_as(as = "DisplayFromStr")]
     append_mode: bool,
@@ -352,6 +372,7 @@ impl Default for RegionOptionsWithoutEnum {
         let options = RegionOptions::default();
         RegionOptionsWithoutEnum {
             ttl: options.ttl,
+            auto_flush_interval: options.auto_flush_interval,
             storage: options.storage,
             append_mode: options.append_mode,
             merge_mode: options.merge_mode,
@@ -525,6 +546,27 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(expect, options);
+    }
+
+    #[test]
+    fn test_with_auto_flush_interval() {
+        let map = make_map(&[("auto_flush_interval", "5m")]);
+        let options = RegionOptions::try_from_options(RegionId::new(0, 0), &map).unwrap();
+        let expect = RegionOptions {
+            auto_flush_interval: Some(Duration::from_secs(5 * 60)),
+            ..Default::default()
+        };
+        assert_eq!(expect, options);
+    }
+
+    #[test]
+    fn test_with_zero_auto_flush_interval() {
+        let map = make_map(&[("auto_flush_interval", "0s")]);
+        let err = RegionOptions::try_from_options(RegionId::new(0, 0), &map).unwrap_err();
+        assert!(
+            err.to_string().contains("auto_flush_interval"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -829,6 +871,7 @@ mod tests {
         let options = RegionOptions::try_from_options(RegionId::new(0, 0), &map).unwrap();
         let expect = RegionOptions {
             ttl: Some(Duration::from_secs(3600 * 24 * 7).into()),
+            auto_flush_interval: None,
             compaction: CompactionOptions::Twcs(TwcsOptions {
                 trigger_file_num: 8,
                 time_window: Some(Duration::from_secs(3600 * 2)),
@@ -863,6 +906,7 @@ mod tests {
     fn test_region_options_serde() {
         let options = RegionOptions {
             ttl: Some(Duration::from_secs(3600 * 24 * 7).into()),
+            auto_flush_interval: None,
             compaction: CompactionOptions::Twcs(TwcsOptions {
                 trigger_file_num: 8,
                 time_window: Some(Duration::from_secs(3600 * 2)),
@@ -919,6 +963,7 @@ mod tests {
         let got: RegionOptions = serde_json::from_str(region_options_json_str).unwrap();
         let options = RegionOptions {
             ttl: Some(Duration::from_secs(3600 * 24 * 7).into()),
+            auto_flush_interval: None,
             compaction: CompactionOptions::Twcs(TwcsOptions {
                 trigger_file_num: 8,
                 time_window: Some(Duration::from_secs(3600 * 2)),
