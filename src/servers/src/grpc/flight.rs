@@ -196,6 +196,9 @@ impl FlightCraft for GreptimeRequestHandler {
         request: Request<Ticket>,
     ) -> TonicResult<Response<TonicStream<FlightData>>> {
         let mut hints = hint_headers::extract_hints(request.metadata());
+        // Flow extensions are carried in a dedicated internal Flight metadata key.
+        // Generic external hints filter out the reserved `flow.*` namespace, while
+        // this internal channel is still allowed to pass scheduled Flow context.
         hints.extend(extract_flow_extensions(request.metadata())?);
         let snapshot_seqs = extract_snapshot_seqs(request.metadata())?;
 

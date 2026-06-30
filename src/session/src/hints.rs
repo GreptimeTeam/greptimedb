@@ -19,6 +19,7 @@ pub const HINTS_KEY_PREFIX: &str = "x-greptime-hint-";
 pub const REMOTE_QUERY_ID_EXTENSION_KEY: &str = "remote_query_id";
 pub const INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY: &str =
     "initial_remote_dyn_filter_registrations";
+pub const FLOW_EXTENSION_KEY_PREFIX: &str = "flow.";
 
 pub const READ_PREFERENCE_HINT: &str = "read_preference";
 pub const RESERVED_EXTENSION_KEYS: [&str; 2] = [

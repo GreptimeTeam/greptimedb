@@ -2135,3 +2135,137 @@ fn test_table_scan_projection() {
     .join("\n");
     assert_eq!(expected, result.to_string());
 }
+
+/// When `ScheduledTimeExtension` is injected into `ConfigOptions`, the
+/// `SimplifyExpressions` pass (driven by `PatchOptimizerContext`) uses the
+/// scheduled time instead of wall-clock time. The remote sub-plan must contain
+/// the scheduled literal — not a variable wall-clock value.
+#[test]
+fn scheduled_now_yields_stable_literal_in_remote_plan() {
+    init_default_ut_logging();
+    let scheduled_time =
+        chrono::DateTime::<chrono::Utc>::from_timestamp_millis(1700000000000).unwrap();
+    let scheduled_ns = 1700000000000000000i64;
+
+    let test_table = TestTable::table_with_name(0, "t".to_string());
+    let table_source = Arc::new(DefaultTableSource::new(Arc::new(
+        DfTableProviderAdapter::new(test_table),
+    )));
+
+    // Build a plan with `now()` in filter and both `now()` and its
+    // `current_timestamp()` alias in projection.
+    let plan = LogicalPlanBuilder::scan_with_filters("t", table_source.clone(), None, vec![])
+        .unwrap()
+        .filter(binary_expr(now(), Operator::LtEq, col("ts")))
+        .unwrap()
+        .project(vec![now(), now().alias("current_timestamp()")])
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let mut config = ConfigOptions::default();
+    config.extensions.insert(ScheduledTimeExtension {
+        scheduled_time: Some(scheduled_time),
+    });
+
+    let result = DistPlannerAnalyzer {}
+        .analyze(plan.clone(), &config)
+        .unwrap();
+    let result_str = result.to_string();
+    common_telemetry::info!("Analyzed plan with scheduled time: {}", result_str);
+
+    // The top-level should still say `Projection: now()` (schema recovery).
+    assert!(
+        result_str.contains("Projection: now()"),
+        "Expected top-level Projection: now(), got:\n{result_str}"
+    );
+    assert!(
+        result_str.contains("current_timestamp()"),
+        "Expected top-level current_timestamp() alias, got:\n{result_str}"
+    );
+
+    // The remote sub-plan must contain the scheduled-time literal, i.e.
+    // `TimestampNanosecond(1700000000000000000, None)`.
+    let expected_literal = format!("TimestampNanosecond({scheduled_ns}, None)");
+    assert!(
+        result_str.contains(&expected_literal),
+        "Expected remote plan literal '{expected_literal}', got:\n{result_str}"
+    );
+
+    // The remote sub-plan must contain the simplified literal (TimestampNanosecond).
+    let remote_section = if let Some(idx) = result_str.find("remote_input=[") {
+        &result_str[idx..]
+    } else {
+        ""
+    };
+    assert!(
+        remote_section.contains("TimestampNanosecond("),
+        "Remote plan should contain TimestampNanosecond literal:\n{result_str}"
+    );
+
+    // Absent the extension (default config), the same plan simplifies to a
+    // wall-clock literal — the remote_input contains a variable timestamp.
+    let default_config = ConfigOptions::default();
+    let wall_result = DistPlannerAnalyzer {}
+        .analyze(plan, &default_config)
+        .unwrap();
+    let wall_str = wall_result.to_string();
+    // The wall-clock result must NOT contain the scheduled literal.
+    assert!(
+        !wall_str.contains(&expected_literal),
+        "Wall-clock result should not contain scheduled literal {expected_literal}:\n{wall_str}"
+    );
+    // It should still simplify to a literal (TimestampNanosecond present in remote).
+    let wall_remote = if let Some(idx) = wall_str.find("remote_input=[") {
+        &wall_str[idx..]
+    } else {
+        ""
+    };
+    assert!(
+        wall_remote.contains("TimestampNanosecond("),
+        "Wall-clock remote plan should contain TimestampNanosecond:\n{wall_str}"
+    );
+}
+
+/// When `ScheduledTimeExtension.scheduled_time` is `None`, the analyzer
+/// must fall back to wall-clock behavior (same as no extension at all).
+#[test]
+fn scheduled_none_falls_back_to_wall_clock() {
+    init_default_ut_logging();
+
+    let test_table = TestTable::table_with_name(0, "t".to_string());
+    let table_source = Arc::new(DefaultTableSource::new(Arc::new(
+        DfTableProviderAdapter::new(test_table),
+    )));
+
+    let plan = LogicalPlanBuilder::scan_with_filters("t", table_source, None, vec![])
+        .unwrap()
+        .project(vec![now()])
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let mut config = ConfigOptions::default();
+    config.extensions.insert(ScheduledTimeExtension {
+        scheduled_time: None,
+    });
+
+    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+    let result_str = result.to_string();
+
+    // Must still simplify now() — remotely a literal, top is now().
+    assert!(
+        result_str.contains("Projection: now()"),
+        "Top-level projection: {result_str}"
+    );
+    let remote_section = if let Some(idx) = result_str.find("remote_input=[") {
+        &result_str[idx..]
+    } else {
+        ""
+    };
+    // The literal must be TimestampNanosecond (since fallback uses wall clock).
+    assert!(
+        remote_section.contains("TimestampNanosecond("),
+        "Remote should contain TimestampNanosecond:\n{result_str}"
+    );
+}

@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use http::HeaderMap;
-use session::hints::{HINT_KEYS, HINTS_KEY, HINTS_KEY_PREFIX};
+use session::hints::{FLOW_EXTENSION_KEY_PREFIX, HINT_KEYS, HINTS_KEY, HINTS_KEY_PREFIX};
 use tonic::metadata::MetadataMap;
 
 pub(crate) fn extract_hints<T: ToHeaderMap>(headers: &T) -> Vec<(String, String)> {
@@ -22,7 +22,7 @@ pub(crate) fn extract_hints<T: ToHeaderMap>(headers: &T) -> Vec<(String, String)
         value_str.split(',').for_each(|hint| {
             let mut parts = hint.splitn(2, '=');
             if let (Some(key), Some(value)) = (parts.next(), parts.next()) {
-                hints.push((key.trim().to_string(), value.trim().to_string()));
+                push_external_hint(&mut hints, key.trim(), value.trim());
             }
         });
         // If hints are provided in the `x-greptime-hints` header, ignore the rest of the headers
@@ -31,10 +31,17 @@ pub(crate) fn extract_hints<T: ToHeaderMap>(headers: &T) -> Vec<(String, String)
     for key in HINT_KEYS.iter() {
         if let Some(value) = headers.get(key) {
             let new_key = key.replace(HINTS_KEY_PREFIX, "");
-            hints.push((new_key, value.trim().to_string()));
+            push_external_hint(&mut hints, &new_key, value.trim());
         }
     }
     hints
+}
+
+fn push_external_hint(hints: &mut Vec<(String, String)>, key: &str, value: &str) {
+    if key.starts_with(FLOW_EXTENSION_KEY_PREFIX) {
+        return;
+    }
+    hints.push((key.to_string(), value.to_string()));
 }
 
 pub(crate) trait ToHeaderMap {
@@ -128,7 +135,7 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(
             "x-greptime-hints",
-            HeaderValue::from_static(" auto_create_table=true, ttl =3600d, append_mode=true , merge_mode=false , physical_table= table1,\
+            HeaderValue::from_static(" auto_create_table=true, flow.scheduled_time_millis=1700000000000, ttl =3600d, append_mode=true , merge_mode=false , physical_table= table1,\
             read_preference=leader"),
         );
 

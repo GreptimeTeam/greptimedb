@@ -18,7 +18,7 @@ use axum::middleware::Next;
 use axum::response::Response;
 use common_telemetry::debug;
 use session::context::QueryContext;
-use session::hints::is_reserved_extension_key;
+use session::hints::{FLOW_EXTENSION_KEY_PREFIX, is_reserved_extension_key};
 
 use crate::hint_headers;
 
@@ -32,7 +32,7 @@ pub async fn extract_hints(mut request: Request<Body>, next: Next) -> Response {
 
 fn apply_hints(query_ctx: &mut QueryContext, hints: Vec<(String, String)>) {
     for (key, value) in hints {
-        if is_reserved_extension_key(&key) {
+        if is_reserved_extension_key(&key) || key.starts_with(FLOW_EXTENSION_KEY_PREFIX) {
             debug!(
                 key = key.as_str(),
                 "Ignoring reserved external query context extension key"
@@ -55,7 +55,7 @@ mod tests {
     use super::apply_hints;
 
     #[test]
-    fn test_apply_hints_ignores_reserved_extension_keys_only() {
+    fn test_apply_hints_ignores_reserved_extension_keys() {
         let original_query_id = generate_remote_query_id();
         let mut query_ctx = QueryContextBuilder::default()
             .set_extension(
@@ -92,10 +92,7 @@ mod tests {
                 .extension(INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY)
                 .is_none()
         );
-        assert_eq!(
-            query_ctx.extension(FLOW_SCHEDULED_TIME_MILLIS),
-            Some("1700000000000")
-        );
+        assert_eq!(query_ctx.extension(FLOW_SCHEDULED_TIME_MILLIS), None);
         assert_eq!(query_ctx.extension("ttl"), Some("7d"));
     }
 

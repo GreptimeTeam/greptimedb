@@ -1,0 +1,81 @@
+CREATE TABLE now_boundary_input (
+  ts TIMESTAMP(3) TIME INDEX,
+  v DOUBLE,
+  PRIMARY KEY(v)
+);
+
+Affected Rows: 0
+
+CREATE FLOW now_boundary_flow
+SINK TO now_boundary_sink
+EVAL INTERVAL '1s'
+AS
+SELECT
+  date_bin(INTERVAL '1 second', ts) AS window_start,
+  count(v) AS value_count,
+  now() AS create_time,
+  current_timestamp() AS cur_ts
+FROM now_boundary_input
+WHERE ts >= date_trunc('second', now()) - INTERVAL '1 second'
+  AND ts <  date_trunc('second', now())
+GROUP BY date_bin(INTERVAL '1 second', ts);
+
+Affected Rows: 0
+
+INSERT INTO now_boundary_input VALUES
+  (date_trunc('second', now()) - INTERVAL '1 second', 0.0),
+  (date_trunc('second', now()), 1.0),
+  (date_trunc('second', now()) + INTERVAL '1 second', 2.0),
+  (date_trunc('second', now()) + INTERVAL '2 seconds', 3.0),
+  (date_trunc('second', now()) + INTERVAL '3 seconds', 4.0),
+  (date_trunc('second', now()) + INTERVAL '4 seconds', 5.0),
+  (date_trunc('second', now()) + INTERVAL '5 seconds', 6.0),
+  (date_trunc('second', now()) + INTERVAL '6 seconds', 7.0),
+  (date_trunc('second', now()) + INTERVAL '7 seconds', 8.0);
+
+Affected Rows: 9
+
+-- SQLNESS SLEEP 4s
+SELECT
+  count(DISTINCT window_start) >= 1 AS has_selected_window,
+  min(value_count) AS min_value_count,
+  max(value_count) AS max_value_count,
+  bool_and(create_time = date_trunc('second', create_time)) AS all_create_time_at_second_boundary,
+  bool_and(cur_ts = create_time) AS cur_ts_equals_create_time,
+  bool_and(window_start = create_time - INTERVAL '1 second') AS all_windows_match_scheduled_previous_second
+FROM now_boundary_sink
+WHERE value_count > 0;
+
++---------------------+-----------------+-----------------+------------------------------------+---------------------------+---------------------------------------------+
+| has_selected_window | min_value_count | max_value_count | all_create_time_at_second_boundary | cur_ts_equals_create_time | all_windows_match_scheduled_previous_second |
++---------------------+-----------------+-----------------+------------------------------------+---------------------------+---------------------------------------------+
+| true                | 1               | 1               | true                               | true                      | true                                        |
++---------------------+-----------------+-----------------+------------------------------------+---------------------------+---------------------------------------------+
+
+-- The WHERE clause should select exactly the previous scheduled second.
+-- If the distributed analyzer folds now() with wall-clock time, the remote
+-- filter shifts forward and this invariant fails: window_start becomes equal
+-- to create_time instead of create_time - 1s.
+SELECT
+  bool_and(value_count = 1) AS all_value_count_equals_one
+FROM now_boundary_sink
+WHERE value_count > 0;
+
++----------------------------+
+| all_value_count_equals_one |
++----------------------------+
+| true                       |
++----------------------------+
+
+DROP FLOW now_boundary_flow;
+
+Affected Rows: 0
+
+DROP TABLE now_boundary_sink;
+
+Affected Rows: 0
+
+DROP TABLE now_boundary_input;
+
+Affected Rows: 0
+

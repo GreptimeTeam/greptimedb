@@ -16,6 +16,7 @@ use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
 use common_base::memory_limit::MemoryLimit;
+use datafusion::config::{ConfigEntry, ConfigExtension, ExtensionOptions};
 use serde::{Deserialize, Serialize};
 use session::context::QueryContextRef;
 use store_api::storage::RegionId;
@@ -89,7 +90,8 @@ impl FlowQueryExtensions {
         let has_flow_context = extensions.contains_key(FLOW_INCREMENTAL_AFTER_SEQS)
             || extensions.contains_key(FLOW_INCREMENTAL_MODE)
             || extensions.contains_key(FLOW_RETURN_REGION_SEQ)
-            || extensions.contains_key(FLOW_SINK_TABLE_ID);
+            || extensions.contains_key(FLOW_SINK_TABLE_ID)
+            || extensions.contains_key(FLOW_SCHEDULED_TIME_MILLIS);
 
         if !has_flow_context {
             return Ok(None);
@@ -130,6 +132,11 @@ impl FlowQueryExtensions {
                 })
             })
             .transpose()?;
+
+        // Validate scheduled time together with the rest of flow extensions so
+        // malformed values fail at the boundary instead of silently falling back
+        // to wall-clock `now()` later in the query engine.
+        let _ = parse_scheduled_time_datetime(extensions)?;
 
         if matches!(incremental_mode, Some(FlowIncrementalMode::MemtableOnly)) {
             let after_seqs = incremental_after_seqs.as_ref().ok_or_else(|| {
@@ -322,13 +329,50 @@ pub fn parse_scheduled_time_datetime(
     }
 }
 
-/// Convenience helper: extract scheduled time from a [`QueryContextRef`] as a [`DateTime<Utc>`].
+/// Best-effort helper: extract scheduled time from a [`QueryContextRef`] as a [`DateTime<Utc>`].
 ///
-/// Errors are silently swallowed, returning `None`.
+/// Errors are silently swallowed, returning `None`; use this only after the
+/// flow extension boundary has already validated malformed scheduled time.
 /// Use [`parse_scheduled_time_datetime`] when a `Result` is needed.
 pub fn scheduled_time_from_ctx(query_ctx: &QueryContextRef) -> Option<DateTime<Utc>> {
     let extensions = query_ctx.extensions();
     parse_scheduled_time_datetime(&extensions).ok().flatten()
+}
+
+/// Carries the scheduled logical "now" through [`ConfigOptions::extensions`] so
+/// that the distributed plan analyzer can apply it during expression
+/// simplification (preventing wall-clock constant-folding of `now()`).
+#[derive(Debug, Clone)]
+pub(crate) struct ScheduledTimeExtension {
+    pub(crate) scheduled_time: Option<DateTime<Utc>>,
+}
+
+impl ConfigExtension for ScheduledTimeExtension {
+    const PREFIX: &'static str = "flow_scheduled_time";
+}
+
+impl ExtensionOptions for ScheduledTimeExtension {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+
+    fn cloned(&self) -> Box<dyn ExtensionOptions> {
+        Box::new(self.clone())
+    }
+
+    fn set(&mut self, key: &str, value: &str) -> datafusion::error::Result<()> {
+        Err(datafusion_common::DataFusionError::NotImplemented(format!(
+            "ScheduledTimeExtension does not support set key: {key} with value: {value}"
+        )))
+    }
+
+    fn entries(&self) -> Vec<ConfigEntry> {
+        vec![]
+    }
 }
 
 fn invalid_query_context_extension(reason: String) -> Error {
@@ -602,6 +646,31 @@ mod flow_extension_tests {
             parsed.incremental_after_seqs,
             Some(HashMap::from([(1, 10)]))
         );
+    }
+
+    #[test]
+    fn test_parse_flow_extensions_scheduled_time_only_returns_some() {
+        let exts = HashMap::from([(
+            FLOW_SCHEDULED_TIME_MILLIS.to_string(),
+            "1700000000000".to_string(),
+        )]);
+
+        let parsed = FlowQueryExtensions::parse_flow_extensions(&exts)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(parsed, FlowQueryExtensions::default());
+    }
+
+    #[test]
+    fn test_parse_flow_extensions_invalid_scheduled_time_errors() {
+        let exts = HashMap::from([(
+            FLOW_SCHEDULED_TIME_MILLIS.to_string(),
+            "not-a-number".to_string(),
+        )]);
+
+        let err = FlowQueryExtensions::parse_flow_extensions(&exts).unwrap_err();
+        assert!(format!("{err}").contains(FLOW_SCHEDULED_TIME_MILLIS));
     }
 
     // --- scheduled time helper tests ---
