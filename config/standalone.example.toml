@@ -405,6 +405,30 @@ parallelism = 0
 ## NOTE: This does NOT limit memory used by table scans.
 memory_pool_size = "50%"
 
+## Experimental memory pool allocation policy:
+## - "greedy" (default): preserves current greedy allocation behavior.
+## - "fair": shares memory evenly among spillable operators.
+## Only effective when `memory_pool_size` is bounded (>0).
+#+ experimental_memory_pool_policy = "greedy"
+
+# --- Experimental: DataFusion spill-to-disk controls ---
+## Spill mode:
+## - "default": preserve DataFusion built-in OS temp directory (default).
+## - "custom": explicitly configure spill path, quota, and compression.
+## - "disabled": explicitly disable disk spilling.
+## Set this to "custom" before using the path/quota/compression keys below.
+#+ experimental_spill_mode = "default"
+## Spill directory path. Ignored unless mode is "custom".
+## @toml2docs:none-default
+#+ experimental_spill_path = "/path/to/spill"
+## Maximum total size of spill directory (default: "100GiB").
+## Ignored unless mode is "custom".
+#+ experimental_spill_max_temp_directory_size = "100GiB"
+## Compression for spilled data files: "uncompressed" (default), "lz4_frame", "zstd".
+## Ignored unless mode is "custom".
+#+ experimental_spill_compression = "uncompressed"
+# --- End spill-to-disk ---
+
 ## The data storage options.
 [storage]
 ## The working home directory.

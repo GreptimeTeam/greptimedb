@@ -97,3 +97,4 @@ session = { workspace = true, features = ["testing"] }
 store-api.workspace = true
 table = { workspace = true, features = ["testing"] }
 tokio-stream.workspace = true
+toml.workspace = true

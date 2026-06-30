@@ -13,8 +13,10 @@
 // limitations under the License.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 use common_base::memory_limit::MemoryLimit;
+use common_base::readable_size::ReadableSize;
 use serde::{Deserialize, Serialize};
 use store_api::storage::RegionId;
 use table::metadata::TableId;
@@ -31,6 +33,40 @@ pub const QUERY_ENABLE_REMOTE_DYNAMIC_FILTER_PUSHDOWN: &str =
 
 pub const FLOW_INCREMENTAL_MODE_MEMTABLE_ONLY: &str = "memtable_only";
 
+/// Query spill mode controlling disk manager behavior.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum QuerySpillMode {
+    /// Preserve DataFusion default disk manager behavior (OS temp directory).
+    Default,
+    /// Explicitly configure spill path, quota, and compression.
+    Custom,
+    /// Explicitly disable disk spilling; temporary file creation will error.
+    Disabled,
+}
+
+/// Compression for spilled data files.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum QuerySpillCompression {
+    /// No compression (default, matches DataFusion default).
+    Uncompressed,
+    /// LZ4 frame compression.
+    Lz4Frame,
+    /// Zstandard compression.
+    Zstd,
+}
+
+/// Memory pool allocation policy.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum QueryMemoryPoolPolicy {
+    /// Greedy memory allocation (default, preserves current behavior).
+    Greedy,
+    /// Fair memory allocation: share available memory evenly among operators.
+    Fair,
+}
+
 /// Query engine config
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
@@ -46,6 +82,25 @@ pub struct QueryOptions {
     /// Whether to expose per-region query load metrics.
     #[serde(skip)]
     pub enable_per_region_metrics: bool,
+    /// Experimental: spill-to-disk mode.
+    /// - `default`: preserve DataFusion built-in OS temp directory behavior.
+    /// - `custom`: explicitly configure spill path, max directory size, and compression.
+    /// - `disabled`: explicitly disable disk spilling.
+    pub experimental_spill_mode: QuerySpillMode,
+    /// Experimental: spill directory path. Ignored unless `experimental_spill_mode` is
+    /// `"custom"`. When set, spill files are written into this directory.
+    pub experimental_spill_path: Option<PathBuf>,
+    /// Experimental: maximum total size of the spill directory (data written to spill files).
+    /// Ignored unless `experimental_spill_mode` is `"custom"`. Default: `100GiB`.
+    pub experimental_spill_max_temp_directory_size: ReadableSize,
+    /// Experimental: compression algorithm applied to spilled data.
+    /// Ignored unless `experimental_spill_mode` is `"custom"`. Default: `uncompressed`.
+    pub experimental_spill_compression: QuerySpillCompression,
+    /// Experimental: memory pool allocation policy.
+    /// - `greedy` (default): preserves current behavior.
+    /// - `fair`: share memory evenly among spillable operators.
+    /// Only effective when `memory_pool_size` is bounded (>0).
+    pub experimental_memory_pool_policy: QueryMemoryPoolPolicy,
 }
 
 #[allow(clippy::derivable_impls)]
@@ -56,6 +111,11 @@ impl Default for QueryOptions {
             allow_query_fallback: false,
             memory_pool_size: MemoryLimit::default(),
             enable_per_region_metrics: false,
+            experimental_spill_mode: QuerySpillMode::Default,
+            experimental_spill_path: None,
+            experimental_spill_max_temp_directory_size: ReadableSize::gb(100),
+            experimental_spill_compression: QuerySpillCompression::Uncompressed,
+            experimental_memory_pool_policy: QueryMemoryPoolPolicy::Greedy,
         }
     }
 }
@@ -554,5 +614,207 @@ mod flow_extension_tests {
             parsed.incremental_after_seqs,
             Some(HashMap::from([(1, 10)]))
         );
+    }
+}
+
+#[cfg(test)]
+mod query_options_tests {
+    use super::*;
+
+    #[test]
+    fn test_query_options_defaults() {
+        let opts = QueryOptions::default();
+        assert_eq!(opts.parallelism, 0);
+        assert!(!opts.allow_query_fallback);
+        assert!(opts.memory_pool_size.is_unlimited());
+        assert!(!opts.enable_per_region_metrics);
+        assert_eq!(opts.experimental_spill_mode, QuerySpillMode::Default);
+        assert_eq!(opts.experimental_spill_path, None);
+        assert_eq!(
+            opts.experimental_spill_max_temp_directory_size,
+            ReadableSize::gb(100)
+        );
+        assert_eq!(
+            opts.experimental_spill_compression,
+            QuerySpillCompression::Uncompressed
+        );
+        assert_eq!(
+            opts.experimental_memory_pool_policy,
+            QueryMemoryPoolPolicy::Greedy
+        );
+    }
+
+    #[test]
+    fn test_selected_defaults_parse() {
+        let toml_str = "";
+        let opts: QueryOptions = toml::from_str(toml_str).unwrap();
+        let def = QueryOptions::default();
+        assert_eq!(opts, def);
+    }
+
+    #[test]
+    fn test_parse_experimental_spill_mode() {
+        let toml_str = r#"experimental_spill_mode = "custom""#;
+        let opts: QueryOptions = toml::from_str(toml_str).unwrap();
+        assert_eq!(opts.experimental_spill_mode, QuerySpillMode::Custom);
+
+        let toml_str = r#"experimental_spill_mode = "disabled""#;
+        let opts: QueryOptions = toml::from_str(toml_str).unwrap();
+        assert_eq!(opts.experimental_spill_mode, QuerySpillMode::Disabled);
+
+        let toml_str = r#"experimental_spill_mode = "default""#;
+        let opts: QueryOptions = toml::from_str(toml_str).unwrap();
+        assert_eq!(opts.experimental_spill_mode, QuerySpillMode::Default);
+    }
+
+    #[test]
+    fn test_parse_invalid_spill_mode() {
+        let toml_str = r#"experimental_spill_mode = "invalid""#;
+        assert!(toml::from_str::<QueryOptions>(toml_str).is_err());
+    }
+
+    #[test]
+    fn test_parse_experimental_spill_compression() {
+        let toml_str = r#"experimental_spill_compression = "zstd""#;
+        let opts: QueryOptions = toml::from_str(toml_str).unwrap();
+        assert_eq!(
+            opts.experimental_spill_compression,
+            QuerySpillCompression::Zstd
+        );
+
+        let toml_str = r#"experimental_spill_compression = "lz4_frame""#;
+        let opts: QueryOptions = toml::from_str(toml_str).unwrap();
+        assert_eq!(
+            opts.experimental_spill_compression,
+            QuerySpillCompression::Lz4Frame
+        );
+    }
+
+    #[test]
+    fn test_parse_invalid_spill_compression() {
+        let toml_str = r#"experimental_spill_compression = "gzip""#;
+        assert!(toml::from_str::<QueryOptions>(toml_str).is_err());
+    }
+
+    #[test]
+    fn test_parse_experimental_memory_pool_policy() {
+        let toml_str = r#"experimental_memory_pool_policy = "fair""#;
+        let opts: QueryOptions = toml::from_str(toml_str).unwrap();
+        assert_eq!(
+            opts.experimental_memory_pool_policy,
+            QueryMemoryPoolPolicy::Fair
+        );
+
+        let toml_str = r#"experimental_memory_pool_policy = "greedy""#;
+        let opts: QueryOptions = toml::from_str(toml_str).unwrap();
+        assert_eq!(
+            opts.experimental_memory_pool_policy,
+            QueryMemoryPoolPolicy::Greedy
+        );
+    }
+
+    #[test]
+    fn test_parse_invalid_memory_pool_policy() {
+        let toml_str = r#"experimental_memory_pool_policy = "none""#;
+        assert!(toml::from_str::<QueryOptions>(toml_str).is_err());
+    }
+
+    #[test]
+    fn test_parse_experimental_spill_path_and_quota() {
+        let toml_str = r#"
+experimental_spill_path = "/tmp/spill"
+experimental_spill_max_temp_directory_size = "50GiB"
+"#;
+        let opts: QueryOptions = toml::from_str(toml_str).unwrap();
+        assert_eq!(
+            opts.experimental_spill_path,
+            Some(PathBuf::from("/tmp/spill"))
+        );
+        assert_eq!(
+            opts.experimental_spill_max_temp_directory_size,
+            ReadableSize::gb(50)
+        );
+    }
+
+    #[test]
+    fn test_parse_experimental_spill_path_none_when_absent() {
+        let toml_str = r#"experimental_spill_mode = "custom""#;
+        let opts: QueryOptions = toml::from_str(toml_str).unwrap();
+        assert_eq!(opts.experimental_spill_path, None);
+    }
+
+    /// Verify that `experimental_spill_compression` only takes effect
+    /// when paired with `experimental_spill_mode = "custom"`. This test
+    /// asserts the config can be parsed regardless, but the semantics
+    /// in `state.rs` enforce that compression is only applied in Custom mode.
+    #[test]
+    fn test_parse_experimental_spill_compression_without_custom_mode() {
+        let toml_str = r#"experimental_spill_compression = "zstd""#;
+        // Should parse fine, even though semantically compression
+        // is ignored unless mode is "custom".
+        let opts: QueryOptions = toml::from_str(toml_str).unwrap();
+        assert_eq!(
+            opts.experimental_spill_compression,
+            QuerySpillCompression::Zstd
+        );
+        assert_eq!(opts.experimental_spill_mode, QuerySpillMode::Default);
+    }
+
+    #[test]
+    fn test_parse_experimental_spill_max_temp_directory_size_default() {
+        let toml_str = "";
+        let opts: QueryOptions = toml::from_str(toml_str).unwrap();
+        assert_eq!(
+            opts.experimental_spill_max_temp_directory_size,
+            ReadableSize::gb(100)
+        );
+    }
+
+    #[test]
+    fn test_parse_experimental_spill_max_temp_directory_size_human_readable() {
+        let toml_str = r#"experimental_spill_max_temp_directory_size = "2GB""#;
+        let opts: QueryOptions = toml::from_str(toml_str).unwrap();
+        assert_eq!(
+            opts.experimental_spill_max_temp_directory_size,
+            ReadableSize::gb(2)
+        );
+    }
+
+    #[test]
+    fn test_query_spill_mode_serde_roundtrip() {
+        let modes = [
+            QuerySpillMode::Default,
+            QuerySpillMode::Custom,
+            QuerySpillMode::Disabled,
+        ];
+        for mode in modes {
+            let json = serde_json::to_string(&mode).unwrap();
+            let roundtripped: QuerySpillMode = serde_json::from_str(&json).unwrap();
+            assert_eq!(mode, roundtripped);
+        }
+    }
+
+    #[test]
+    fn test_query_spill_compression_serde_roundtrip() {
+        let compressions = [
+            QuerySpillCompression::Uncompressed,
+            QuerySpillCompression::Lz4Frame,
+            QuerySpillCompression::Zstd,
+        ];
+        for comp in compressions {
+            let json = serde_json::to_string(&comp).unwrap();
+            let roundtripped: QuerySpillCompression = serde_json::from_str(&json).unwrap();
+            assert_eq!(comp, roundtripped);
+        }
+    }
+
+    #[test]
+    fn test_query_memory_pool_policy_serde_roundtrip() {
+        let policies = [QueryMemoryPoolPolicy::Greedy, QueryMemoryPoolPolicy::Fair];
+        for policy in policies {
+            let json = serde_json::to_string(&policy).unwrap();
+            let roundtripped: QueryMemoryPoolPolicy = serde_json::from_str(&json).unwrap();
+            assert_eq!(policy, roundtripped);
+        }
     }
 }
