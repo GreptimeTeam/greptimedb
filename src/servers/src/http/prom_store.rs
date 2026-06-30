@@ -45,7 +45,7 @@ use crate::http::header::{
 use crate::pending_rows_batcher::PendingRowsBatcher;
 use crate::prom_remote_write::decode::PromSeriesProcessor;
 use crate::prom_remote_write::decode_remote_write_request;
-use crate::prom_remote_write::v2::{RemoteWriteV2RequestExt, decode_remote_write_v2_request};
+use crate::prom_remote_write::v2::{decode_remote_write_v2_request, into_write_requests};
 use crate::prom_remote_write::validation::PromValidationMode;
 use crate::prom_store::{extract_schema_from_read_request, snappy_decompress};
 use crate::query_handler::{PipelineHandlerRef, PromStoreProtocolHandlerRef, PromStoreResponse};
@@ -177,16 +177,22 @@ async fn remote_write_v1(
         req.as_insert_requests()
     };
 
-    let outcome = write_prometheus_rows_with_progress(
+    let outcome = match write_prometheus_rows_with_progress(
         prom_store_handler,
         pending_rows_batcher,
         prom_store_with_metric_engine,
-        Some(&db),
         query_ctx,
         req,
     )
     .await
-    .map_err(|error| error.error)?;
+    {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            record_remote_write_samples(&db, error.rows_written);
+            return Err(error.error);
+        }
+    };
+    record_remote_write_samples(&db, outcome.rows_written);
 
     Ok((
         StatusCode::NO_CONTENT,
@@ -226,7 +232,7 @@ async fn remote_write_v2(
         Ok(request) => request,
         Err(error) => return Ok(remote_write_v2_error_response(error, 0, 0, 0)),
     };
-    let req = match request.into_write_requests() {
+    let req = match into_write_requests(request) {
         Ok(req) => req,
         Err(error) => return Ok(remote_write_v2_error_response(error, 0, 0, 0)),
     };
@@ -236,7 +242,6 @@ async fn remote_write_v2(
             prom_store_handler.clone(),
             pending_rows_batcher.clone(),
             prom_store_with_metric_engine,
-            Some(&db),
             query_ctx.clone(),
             req.samples,
         )
@@ -244,6 +249,7 @@ async fn remote_write_v2(
         {
             Ok(outcome) => outcome,
             Err(error) => {
+                record_remote_write_samples(&db, error.rows_written);
                 return Ok(remote_write_v2_error_response(
                     error.error,
                     error.rows_written,
@@ -259,26 +265,25 @@ async fn remote_write_v2(
         }
     };
     let samples_written = outcome.rows_written;
+    record_remote_write_samples(&db, samples_written);
     let mut histograms_written = 0;
     let mut write_cost = outcome.write_cost;
 
     if req.histogram_count > 0 {
-        // Native histograms are stored in dedicated normal tables, not metric-engine
-        // physical tables, so remove the metric-engine physical-table hint here.
-        let mut histogram_query_ctx = query_ctx.as_ref().clone();
-        histogram_query_ctx.remove_extension(PHYSICAL_TABLE_PARAM);
+        // Native histograms are persisted as ordinary tables because metric-engine
+        // physical tables cannot store the native histogram list schema.
         let outcome = match write_prometheus_rows_with_progress(
             prom_store_handler,
             None,
             false,
-            None,
-            Arc::new(histogram_query_ctx),
+            query_ctx,
             req.histograms,
         )
         .await
         {
             Ok(outcome) => outcome,
             Err(error) => {
+                record_remote_write_histograms(&db, error.rows_written);
                 return Ok(remote_write_v2_error_response(
                     error.error,
                     samples_written,
@@ -288,6 +293,7 @@ async fn remote_write_v2(
             }
         };
         histograms_written = outcome.rows_written;
+        record_remote_write_histograms(&db, histograms_written);
         write_cost += outcome.write_cost;
     }
 
@@ -346,7 +352,6 @@ async fn write_prometheus_rows_with_progress(
     prom_store_handler: PromStoreProtocolHandlerRef,
     pending_rows_batcher: Option<Arc<PendingRowsBatcher>>,
     prom_store_with_metric_engine: bool,
-    db: Option<&str>,
     query_ctx: Arc<QueryContext>,
     req: ContextReq,
 ) -> std::result::Result<PromWriteOutcome, PromWriteError> {
@@ -367,11 +372,6 @@ async fn write_prometheus_rows_with_progress(
                     error,
                     rows_written,
                 })?;
-            if let Some(db) = db {
-                crate::metrics::PROM_STORE_REMOTE_WRITE_SAMPLES
-                    .with_label_values(&[db])
-                    .inc_by(rows);
-            }
             rows_written += rows;
         }
         return Ok(PromWriteOutcome {
@@ -395,11 +395,6 @@ async fn write_prometheus_rows_with_progress(
                 error,
                 rows_written,
             })?;
-        if let Some(db) = db {
-            crate::metrics::PROM_STORE_REMOTE_WRITE_SAMPLES
-                .with_label_values(&[db])
-                .inc_by(cnt);
-        }
         write_cost += output.meta.cost;
         rows_written += cnt;
     }
@@ -408,6 +403,24 @@ async fn write_prometheus_rows_with_progress(
         write_cost,
         rows_written,
     })
+}
+
+fn record_remote_write_samples(db: &str, rows: u64) {
+    if rows == 0 {
+        return;
+    }
+    crate::metrics::PROM_STORE_REMOTE_WRITE_SAMPLES
+        .with_label_values(&[db])
+        .inc_by(rows);
+}
+
+fn record_remote_write_histograms(db: &str, rows: u64) {
+    if rows == 0 {
+        return;
+    }
+    crate::metrics::PROM_STORE_REMOTE_WRITE_HISTOGRAMS
+        .with_label_values(&[db])
+        .inc_by(rows);
 }
 
 fn remote_write_v2_error_response(

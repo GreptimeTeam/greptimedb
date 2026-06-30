@@ -350,10 +350,6 @@ impl QueryContext {
         self.extensions.insert(key.into(), value.into());
     }
 
-    pub fn remove_extension<S: AsRef<str>>(&mut self, key: S) -> Option<String> {
-        self.extensions.remove(key.as_ref())
-    }
-
     pub fn extension<S: AsRef<str>>(&self, key: S) -> Option<&str> {
         self.extensions.get(key.as_ref()).map(|v| v.as_str())
     }
