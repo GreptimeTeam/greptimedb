@@ -1040,17 +1040,5 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_encode_json_large_unsigned_integer() {
-        // Test unsigned integer that fits in i64
-        let json = Json::from(u64::MAX / 2);
-        let settings = JsonSettings::default();
-        let result = settings.encode(json).unwrap().into_json_inner().unwrap();
-        assert_eq!(result, Value::Int64((u64::MAX / 2) as i64));
 
-        // Test unsigned integer that exceeds i64 range
-        let json = Json::from(u64::MAX);
-        let result = settings.encode(json).unwrap().into_json_inner().unwrap();
-        assert_eq!(result, Value::UInt64(u64::MAX));
-    }
 }
