@@ -177,18 +177,10 @@ impl FlowDualEngine {
         let mut start_time_map = streaming.start_time_map;
         start_time_map.extend(batching.start_time_map);
 
-        let mut processed_rows_map = streaming.processed_rows_map;
-        processed_rows_map.extend(batching.processed_rows_map);
-
-        let mut error_map = streaming.error_map;
-        error_map.extend(batching.error_map);
-
         FlowStat {
             state_size,
             last_exec_time_map,
             start_time_map,
-            processed_rows_map,
-            error_map,
         }
     }
 

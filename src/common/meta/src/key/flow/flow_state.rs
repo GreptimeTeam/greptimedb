@@ -100,14 +100,9 @@ pub struct FlowStateValue {
     /// For each key, the last execution time of flow in unix timestamp milliseconds.
     pub last_exec_time_map: BTreeMap<FlowId, i64>,
     /// For each flow, the time the flow first executed, in unix timestamp milliseconds.
+    /// TODO(#7987-followup): not yet propagated via the heartbeat wire format in distributed mode.
     #[serde(default)]
     pub start_time_map: BTreeMap<FlowId, i64>,
-    /// For each flow, the total number of rows processed since startup.
-    #[serde(default)]
-    pub processed_rows_map: BTreeMap<FlowId, u64>,
-    /// For each flow, the most recent error messages (capped at the last 3).
-    #[serde(default)]
-    pub error_map: BTreeMap<FlowId, Vec<String>>,
 }
 
 impl FlowStateValue {
@@ -115,15 +110,11 @@ impl FlowStateValue {
         state_size: BTreeMap<FlowId, usize>,
         last_exec_time_map: BTreeMap<FlowId, i64>,
         start_time_map: BTreeMap<FlowId, i64>,
-        processed_rows_map: BTreeMap<FlowId, u64>,
-        error_map: BTreeMap<FlowId, Vec<String>>,
     ) -> Self {
         Self {
             state_size,
             last_exec_time_map,
             start_time_map,
-            processed_rows_map,
-            error_map,
         }
     }
 }
@@ -169,11 +160,8 @@ pub struct FlowStat {
     /// For each key, the last execution time of flow in unix timestamp milliseconds.
     pub last_exec_time_map: BTreeMap<FlowId, i64>,
     /// For each flow, the time the flow first executed, in unix timestamp milliseconds.
+    /// TODO(#7987-followup): not yet propagated via the heartbeat wire format in distributed mode.
     pub start_time_map: BTreeMap<FlowId, i64>,
-    /// For each flow, the total number of rows processed since startup.
-    pub processed_rows_map: BTreeMap<FlowId, u64>,
-    /// For each flow, the most recent error messages (capped at the last 3).
-    pub error_map: BTreeMap<FlowId, Vec<String>>,
 }
 
 impl From<FlowStateValue> for FlowStat {
@@ -182,8 +170,6 @@ impl From<FlowStateValue> for FlowStat {
             state_size: value.state_size,
             last_exec_time_map: value.last_exec_time_map,
             start_time_map: value.start_time_map,
-            processed_rows_map: value.processed_rows_map,
-            error_map: value.error_map,
         }
     }
 }
@@ -194,8 +180,6 @@ impl From<FlowStat> for FlowStateValue {
             state_size: value.state_size,
             last_exec_time_map: value.last_exec_time_map,
             start_time_map: value.start_time_map,
-            processed_rows_map: value.processed_rows_map,
-            error_map: value.error_map,
         }
     }
 }

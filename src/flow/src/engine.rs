@@ -26,10 +26,6 @@ use crate::Error;
 pub type FlowId = u64;
 pub type TableName = [String; 3];
 
-/// Maximum number of recent error messages retained per flow for runtime observability
-/// (exposed via `information_schema.flow_statistics` / `SHOW FLOW STATUS`).
-pub const MAX_RECENT_ERRORS: usize = 3;
-
 /// The arguments to create a flow
 #[derive(Debug, Clone)]
 pub struct CreateFlowArgs {

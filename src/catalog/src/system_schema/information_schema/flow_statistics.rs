@@ -53,8 +53,6 @@ pub const START_TIME: &str = "start_time";
 pub const LAST_EXECUTION_TIME: &str = "last_execution_time";
 pub const UPTIME_SECONDS: &str = "uptime_seconds";
 pub const STATE_SIZE: &str = "state_size";
-pub const PROCESSED_ROWS: &str = "processed_rows";
-pub const LAST_ERRORS: &str = "last_errors";
 
 /// The `information_schema.flow_statistics` provides runtime statistics about flows.
 #[derive(Debug)]
@@ -92,8 +90,6 @@ impl InformationSchemaFlowStatistics {
                 ),
                 (UPTIME_SECONDS, CDT::int64_datatype(), true),
                 (STATE_SIZE, CDT::uint64_datatype(), true),
-                (PROCESSED_ROWS, CDT::uint64_datatype(), true),
-                (LAST_ERRORS, CDT::string_datatype(), true),
             ]
             .into_iter()
             .map(|(name, ty, nullable)| ColumnSchema::new(name, ty, nullable))
@@ -158,8 +154,6 @@ struct InformationSchemaFlowStatisticsBuilder {
     last_execution_times: TimestampMillisecondVectorBuilder,
     uptime_seconds: Int64VectorBuilder,
     state_sizes: UInt64VectorBuilder,
-    processed_rows: UInt64VectorBuilder,
-    last_errors: StringVectorBuilder,
 }
 
 impl InformationSchemaFlowStatisticsBuilder {
@@ -181,8 +175,6 @@ impl InformationSchemaFlowStatisticsBuilder {
             last_execution_times: TimestampMillisecondVectorBuilder::with_capacity(INIT_CAPACITY),
             uptime_seconds: Int64VectorBuilder::with_capacity(INIT_CAPACITY),
             state_sizes: UInt64VectorBuilder::with_capacity(INIT_CAPACITY),
-            processed_rows: UInt64VectorBuilder::with_capacity(INIT_CAPACITY),
-            last_errors: StringVectorBuilder::with_capacity(INIT_CAPACITY),
         }
     }
 
@@ -253,19 +245,6 @@ impl InformationSchemaFlowStatisticsBuilder {
                 .as_ref()
                 .and_then(|stat| stat.state_size.get(&flow_id).map(|v| *v as u64)),
         );
-        self.processed_rows.push(
-            flow_stat
-                .as_ref()
-                .and_then(|stat| stat.processed_rows_map.get(&flow_id).copied()),
-        );
-        self.last_errors.push(
-            flow_stat
-                .as_ref()
-                .and_then(|stat| stat.error_map.get(&flow_id))
-                .filter(|errors| !errors.is_empty())
-                .map(|errors| errors.join(", "))
-                .as_deref(),
-        );
     }
 
     fn finish(&mut self) -> Result<RecordBatch> {
@@ -276,8 +255,6 @@ impl InformationSchemaFlowStatisticsBuilder {
             Arc::new(self.last_execution_times.finish()),
             Arc::new(self.uptime_seconds.finish()),
             Arc::new(self.state_sizes.finish()),
-            Arc::new(self.processed_rows.finish()),
-            Arc::new(self.last_errors.finish()),
         ];
         RecordBatch::new(self.schema.clone(), columns).context(CreateRecordBatchSnafu)
     }

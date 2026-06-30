@@ -186,20 +186,6 @@ impl ErrCollector {
         self.inner.blocking_lock().is_empty()
     }
 
-    /// Returns the most recent `n` error messages without draining the buffer.
-    ///
-    /// Used for runtime observability (`information_schema.flow_statistics`).
-    pub fn recent_errors(&self, n: usize) -> Vec<String> {
-        let guard = self.inner.blocking_lock();
-        let len = guard.len();
-        let start = len.saturating_sub(n);
-        guard
-            .iter()
-            .skip(start)
-            .map(|err| err.to_string())
-            .collect()
-    }
-
     pub fn push_err(&self, err: EvalError) {
         METRIC_FLOW_ERRORS
             .with_label_values(&[err.status_code().as_ref()])

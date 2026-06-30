@@ -232,7 +232,7 @@ impl WorkerHandle {
         })
     }
 
-    /// Query per-flow runtime statistics (start time and recent errors) from the worker.
+    /// Query per-flow runtime statistics (start time) from the worker.
     pub async fn get_flow_exec_stats(&self) -> Result<FlowExecStats, Error> {
         let ret = self
             .itc_client
@@ -442,22 +442,14 @@ impl<'s> Worker<'s> {
             }
             Request::QueryFlowExecStats => {
                 let mut start_time_map = BTreeMap::new();
-                let mut error_map = BTreeMap::new();
                 for (flow_id, task_state) in self.task_states.iter() {
                     if let Some(start_time) = task_state.state.start_time() {
                         start_time_map.insert(*flow_id, start_time);
-                    }
-                    let errors = task_state
-                        .err_collector
-                        .recent_errors(crate::engine::MAX_RECENT_ERRORS);
-                    if !errors.is_empty() {
-                        error_map.insert(*flow_id, errors);
                     }
                 }
                 Some(Response::QueryFlowExecStats {
                     result: FlowExecStats {
                         start_time_map,
-                        error_map,
                     },
                 })
             }
@@ -498,16 +490,10 @@ pub enum Request {
 }
 
 /// Per-flow runtime statistics gathered from a streaming worker.
-///
-/// Note: `processed_rows` is intentionally not tracked by the streaming engine for now
-/// (input is keyed by source table and fanned out to multiple flows, so there is no clean
-/// per-flow row counter). It is populated by the batching engine instead. See issue #7987.
 #[derive(Debug, Default)]
 pub struct FlowExecStats {
     /// each flow's first execution time, in unix timestamp milliseconds
     pub start_time_map: BTreeMap<FlowId, i64>,
-    /// each flow's most recent error messages (at most `MAX_RECENT_ERRORS`)
-    pub error_map: BTreeMap<FlowId, Vec<String>>,
 }
 
 #[derive(Debug, EnumAsInner)]

@@ -55,14 +55,12 @@ impl HeartbeatHandler for FlowStateHandler {
                 .iter()
                 .map(|(k, v)| (*k, *v))
                 .collect();
-            // NOTE: `start_time_map`, `processed_rows_map` and `error_map` are not yet
-            // propagated through the heartbeat wire format (`api::v1::meta::FlowStat`),
-            // so they are left empty here. See issue #7987 follow-ups.
+            // TODO(#7987-followup): start_time_map is not yet propagated through the heartbeat
+            // wire format (`api::v1::meta::FlowStat`); it will always be empty in distributed
+            // mode until a follow-up PR adds heartbeat propagation.
             let value: FlowStateValue = FlowStateValue::new(
                 state_size,
                 last_exec_time_map,
-                Default::default(),
-                Default::default(),
                 Default::default(),
             );
             self.flow_state_manager

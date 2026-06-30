@@ -15,7 +15,7 @@
 //! Batching mode task state, which changes frequently
 //!
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::time::Duration;
 
 use common_telemetry::debug;
@@ -34,7 +34,6 @@ use crate::metrics::{
     METRIC_FLOW_BATCHING_ENGINE_QUERY_WINDOW_CNT, METRIC_FLOW_BATCHING_ENGINE_QUERY_WINDOW_SIZE,
     METRIC_FLOW_BATCHING_ENGINE_STALLED_WINDOW_SIZE,
 };
-use crate::engine::MAX_RECENT_ERRORS;
 use crate::{Error, FlowId};
 
 /// The state of the [`BatchingTask`].
@@ -50,10 +49,6 @@ pub struct TaskState {
     last_exec_time_millis: Option<i64>,
     /// First execution time in unix timestamp milliseconds, set once.
     start_time_millis: Option<i64>,
-    /// Total number of rows produced by this task's successful executions.
-    processed_rows: u64,
-    /// The most recent error messages, capped at [`MAX_RECENT_ERRORS`].
-    recent_errors: VecDeque<String>,
     /// Dirty Time windows need to be updated
     /// mapping of `start -> end` and non-overlapping
     pub(crate) dirty_time_windows: DirtyTimeWindows,
@@ -88,8 +83,6 @@ impl TaskState {
             last_query_duration: Duration::from_secs(0),
             last_exec_time_millis: None,
             start_time_millis: None,
-            processed_rows: 0,
-            recent_errors: VecDeque::new(),
             dirty_time_windows,
             checkpoint_mode: CheckpointMode::FullSnapshot,
             pending_fenced_repair: None,
@@ -122,29 +115,6 @@ impl TaskState {
     /// First execution time in unix timestamp milliseconds, set once.
     pub fn start_time_millis(&self) -> Option<i64> {
         self.start_time_millis
-    }
-
-    /// Total number of rows produced by this task's successful executions.
-    pub fn processed_rows(&self) -> u64 {
-        self.processed_rows
-    }
-
-    /// Accumulate the number of rows produced by a successful execution.
-    pub fn add_processed_rows(&mut self, rows: u64) {
-        self.processed_rows = self.processed_rows.saturating_add(rows);
-    }
-
-    /// The most recent error messages, oldest first.
-    pub fn recent_errors(&self) -> Vec<String> {
-        self.recent_errors.iter().cloned().collect()
-    }
-
-    /// Record an error message, keeping only the latest [`MAX_RECENT_ERRORS`].
-    pub fn push_error(&mut self, err: String) {
-        if self.recent_errors.len() >= MAX_RECENT_ERRORS {
-            self.recent_errors.pop_front();
-        }
-        self.recent_errors.push_back(err);
     }
 
     pub fn checkpoint_mode(&self) -> CheckpointMode {

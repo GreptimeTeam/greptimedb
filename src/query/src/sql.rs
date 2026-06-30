@@ -993,11 +993,6 @@ pub async fn show_flow_status(
             flow_statistics::UPTIME_SECONDS,
         ),
         (flow_statistics::STATE_SIZE, flow_statistics::STATE_SIZE),
-        (
-            flow_statistics::PROCESSED_ROWS,
-            flow_statistics::PROCESSED_ROWS,
-        ),
-        (flow_statistics::LAST_ERRORS, flow_statistics::LAST_ERRORS),
     ];
     let like_field = Some(flow_statistics::FLOW_NAME);
     let sort = vec![col(flow_statistics::FLOW_NAME).sort(true, true)];
