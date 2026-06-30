@@ -20,6 +20,7 @@ use serde::Serialize;
 use tinytemplate::TinyTemplate;
 
 use crate::cmd::bare::ServerAddr;
+use crate::cmd::compat_case::Version;
 use crate::env::bare::{Env, GreptimeDBContext, ServiceProvider};
 use crate::util;
 
@@ -27,10 +28,10 @@ const DEFAULT_LOG_LEVEL: &str = "--log-level=debug,hyper=warn,tower=warn,datafus
 
 /// Which set of gRPC CLI argument names to use when spawning a GreptimeDB binary.
 ///
-/// Newer binaries (≥ current development) accept `--grpc-bind-addr` and
-/// `--grpc-server-addr`.  Older release binaries (e.g. v1.0.0) only recognise
-/// `--rpc-bind-addr` and `--rpc-server-addr`.  The runner auto-detects the
-/// correct style by inspecting `<binary> <mode> start --help` output.
+/// The CLI rename from `rpc-*` to `grpc-*` landed before v1.1.0.  Older release
+/// binaries (e.g. v1.0.0) only recognise `--rpc-bind-addr` and
+/// `--rpc-server-addr`; v1.1.0+ and current binaries use `--grpc-*` names while
+/// keeping the old names as hidden aliases.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum GrpcArgStyle {
     /// Current-style: `--grpc-bind-addr` / `--grpc-server-addr`
@@ -40,14 +41,21 @@ pub enum GrpcArgStyle {
 }
 
 impl GrpcArgStyle {
-    /// Detects the preferred argument style from command help output.
-    pub fn detect_from_help(help: &str) -> Option<Self> {
-        if help.contains("--grpc-bind-addr") {
-            Some(GrpcArgStyle::Grpc)
-        } else if help.contains("--rpc-bind-addr") {
-            Some(GrpcArgStyle::Rpc)
+    /// Chooses the argument style from an inferred GreptimeDB binary version.
+    ///
+    /// Unknown versions are treated as current/development binaries and use the
+    /// official `grpc-*` names.
+    pub(crate) fn for_version(version: Option<&Version>) -> Self {
+        const GRPC_ARG_RENAME_VERSION: Version = Version {
+            major: 1,
+            minor: 1,
+            patch: 0,
+        };
+
+        if version.is_some_and(|version| version < &GRPC_ARG_RENAME_VERSION) {
+            GrpcArgStyle::Rpc
         } else {
-            None
+            GrpcArgStyle::Grpc
         }
     }
 
@@ -697,29 +705,25 @@ mod tests {
     }
 
     #[test]
-    fn test_detect_arg_style_from_help_prefers_grpc() {
-        let help = "Usage: greptime metasrv start --grpc-bind-addr <ADDR> --rpc-bind-addr <ADDR>";
-
-        assert_eq!(
-            GrpcArgStyle::detect_from_help(help),
-            Some(GrpcArgStyle::Grpc)
-        );
+    fn test_arg_style_for_unknown_version_defaults_to_grpc() {
+        assert_eq!(GrpcArgStyle::for_version(None), GrpcArgStyle::Grpc);
     }
 
     #[test]
-    fn test_detect_arg_style_from_help_falls_back_to_rpc() {
-        let help = "Usage: greptime metasrv start --rpc-bind-addr <ADDR>";
+    fn test_arg_style_for_legacy_versions_uses_rpc() {
+        let v1_0_0 = Version::parse("v1.0.0").unwrap();
+        let v1_0_9 = Version::parse("v1.0.9").unwrap();
 
-        assert_eq!(
-            GrpcArgStyle::detect_from_help(help),
-            Some(GrpcArgStyle::Rpc)
-        );
+        assert_eq!(GrpcArgStyle::for_version(Some(&v1_0_0)), GrpcArgStyle::Rpc);
+        assert_eq!(GrpcArgStyle::for_version(Some(&v1_0_9)), GrpcArgStyle::Rpc);
     }
 
     #[test]
-    fn test_detect_arg_style_from_help_rejects_unknown() {
-        let help = "Usage: greptime metasrv start --http-addr <ADDR>";
+    fn test_arg_style_for_current_versions_uses_grpc() {
+        let v1_1_0 = Version::parse("v1.1.0").unwrap();
+        let v1_2_0 = Version::parse("v1.2.0").unwrap();
 
-        assert_eq!(GrpcArgStyle::detect_from_help(help), None);
+        assert_eq!(GrpcArgStyle::for_version(Some(&v1_1_0)), GrpcArgStyle::Grpc);
+        assert_eq!(GrpcArgStyle::for_version(Some(&v1_2_0)), GrpcArgStyle::Grpc);
     }
 }
