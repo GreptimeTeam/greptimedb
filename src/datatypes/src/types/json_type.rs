@@ -501,7 +501,6 @@ pub fn parse_string_to_jsonb(s: &str) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::json::JsonSettings;
 
     #[test]
     fn test_fix_unicode_point() -> Result<()> {
@@ -755,20 +754,11 @@ mod tests {
     #[test]
     fn test_merge_json_type() -> Result<()> {
         fn test(
-            json: &str,
+            other: JsonType,
             json_type: &mut JsonType,
             expected: std::result::Result<&str, &str>,
         ) -> Result<()> {
-            let json: serde_json::Value = serde_json::from_str(json).unwrap();
-
-            let settings = JsonSettings::default();
-            let value = settings.encode(json)?;
-            let value_type = value.data_type();
-            let Some(other) = value_type.as_json() else {
-                unreachable!()
-            };
-
-            let result = json_type.merge(other);
+            let result = json_type.merge(&other);
             match (result, expected) {
                 (Ok(()), Ok(expected)) => {
                     assert_eq!(json_type.native_type().to_string(), expected);
@@ -782,32 +772,39 @@ mod tests {
         }
 
         // Null should be absorbed by a concrete scalar type.
-        test("true", &mut JsonType::null(), Ok(r#""<Bool>""#))?;
+        test(
+            JsonType::new_json2(JsonNativeType::Bool),
+            &mut JsonType::null(),
+            Ok(r#""<Bool>""#),
+        )?;
 
         // Merging a null value into an existing concrete type should keep the type unchanged.
         test(
-            "null",
+            JsonType::null(),
             &mut JsonType::new_json2(JsonNativeType::Bool),
             Ok(r#""<Bool>""#),
         )?;
 
         // Identical number categories should stay as Number.
         test(
-            "1",
+            JsonType::new_json2(JsonNativeType::i64()),
             &mut JsonType::new_json2(JsonNativeType::i64()),
             Ok(r#""<Number>""#),
         )?;
 
         // Conflicting number categories should be lifted to Variant.
         test(
-            "1.5",
+            JsonType::new_json2(JsonNativeType::f64()),
             &mut JsonType::new_json2(JsonNativeType::i64()),
             Ok(r#""<Number>""#),
         )?;
 
         // Object merge should preserve existing fields and append missing fields.
         test(
-            r#"{"foo":"x"}"#,
+            JsonType::new_json2(JsonNativeType::Object(JsonObjectType::from([(
+                "foo".to_string(),
+                JsonNativeType::String,
+            )]))),
             &mut JsonType::new_json2(JsonNativeType::Object(JsonObjectType::from([(
                 "bar".to_string(),
                 JsonNativeType::i64(),
@@ -817,7 +814,10 @@ mod tests {
 
         // Conflicting object field types should only lift that field to Variant.
         test(
-            r#"{"foo":1}"#,
+            JsonType::new_json2(JsonNativeType::Object(JsonObjectType::from([(
+                "foo".to_string(),
+                JsonNativeType::i64(),
+            )]))),
             &mut JsonType::new_json2(JsonNativeType::Object(JsonObjectType::from([(
                 "foo".to_string(),
                 JsonNativeType::Bool,
@@ -827,7 +827,13 @@ mod tests {
 
         // Nested objects should merge recursively.
         test(
-            r#"{"nested":{"foo":"bar"}}"#,
+            JsonType::new_json2(JsonNativeType::Object(JsonObjectType::from([(
+                "nested".to_string(),
+                JsonNativeType::Object(JsonObjectType::from([(
+                    "foo".to_string(),
+                    JsonNativeType::String,
+                )])),
+            )]))),
             &mut JsonType::new_json2(JsonNativeType::Object(JsonObjectType::from([(
                 "nested".to_string(),
                 JsonNativeType::Object(JsonObjectType::from([(
@@ -840,21 +846,24 @@ mod tests {
 
         // Arrays should merge their element types recursively.
         test(
-            r#"["foo"]"#,
+            JsonType::new_json2(JsonNativeType::Array(Box::new(JsonNativeType::String))),
             &mut JsonType::new_json2(JsonNativeType::Array(Box::new(JsonNativeType::u64()))),
             Ok(r#"["<Variant>"]"#),
         )?;
 
         // Root-level incompatible types should be lifted to Variant.
         test(
-            r#"{"foo":"bar"}"#,
+            JsonType::new_json2(JsonNativeType::Object(JsonObjectType::from([(
+                "foo".to_string(),
+                JsonNativeType::String,
+            )]))),
             &mut JsonType::new_json2(JsonNativeType::Bool),
             Ok(r#""<Variant>""#),
         )?;
 
         // Jsonb and Json2 should not be mergeable.
         test(
-            "true",
+            JsonType::new_json2(JsonNativeType::Bool),
             &mut JsonType::new(JsonFormat::Jsonb),
             Err("Failed to merge JSON datatype: json format not match"),
         )?;
