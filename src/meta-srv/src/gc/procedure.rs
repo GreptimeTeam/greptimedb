@@ -44,6 +44,7 @@ use crate::gc::util::table_route_to_region;
 use crate::gc::{Peer2Regions, Region2Peers};
 use crate::handler::HeartbeatMailbox;
 use crate::metrics::{METRIC_META_GC_DATANODE_CALLS_TOTAL, METRIC_META_GC_FAILED_REGIONS_TOTAL};
+use crate::procedure::utils::{instruction_error_result, instruction_to_error};
 use crate::service::mailbox::{Channel, MailboxReceiver, MailboxRef};
 
 async fn send_get_file_refs_inner(
@@ -158,13 +159,13 @@ async fn recv_gc_regions_reply(
                 e; "Datanode {} reported error during GC for regions {:?}",
                 peer, gc_regions
             );
-            error::UnexpectedSnafu {
-                violated: format!(
+            instruction_error_result(
+                &e,
+                format!(
                     "Datanode {} reported error during GC for regions {:?}: {}",
                     peer, gc_regions, e
                 ),
-            }
-            .fail()
+            )
         }
     }
 }
@@ -670,13 +671,23 @@ impl BatchGcProcedure {
                 METRIC_META_GC_DATANODE_CALLS_TOTAL
                     .with_label_values(&["get_file_refs", "error"])
                     .inc();
-                let err = error::UnexpectedSnafu {
-                    violated: format!(
-                        "Failed to get file references from datanode {}: {:?}",
-                        peer, reply.error
-                    ),
-                }
-                .build();
+                let err = if let Some(error) = &reply.error {
+                    instruction_to_error(
+                        error,
+                        format!(
+                            "Failed to get file references from datanode {}: {:?}",
+                            peer, error
+                        ),
+                    )
+                } else {
+                    error::UnexpectedSnafu {
+                        violated: format!(
+                            "Failed to get file references from datanode {}: {:?}",
+                            peer, reply.error
+                        ),
+                    }
+                    .build()
+                };
                 record_get_file_refs_error(err);
                 continue;
             }

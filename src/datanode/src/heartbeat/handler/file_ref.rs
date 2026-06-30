@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use common_error::ext::ErrorExt;
-use common_meta::instruction::{GetFileRefs, GetFileRefsReply, InstructionReply};
+use common_meta::instruction::{GetFileRefs, GetFileRefsReply, InstructionError, InstructionReply};
 use store_api::storage::FileRefsManifest;
 
 use crate::heartbeat::handler::{HandlerContext, InstructionHandler};
@@ -36,7 +36,9 @@ impl InstructionHandler for GetFileRefsHandler {
             return Some(InstructionReply::GetFileRefs(GetFileRefsReply {
                 file_refs_manifest: FileRefsManifest::default(),
                 success: false,
-                error: Some("MitoEngine not found".to_string()),
+                error: Some(InstructionError::legacy_internal_retryable(
+                    "MitoEngine not found",
+                )),
             }));
         };
         match mito_engine
@@ -54,7 +56,11 @@ impl InstructionHandler for GetFileRefsHandler {
             Err(e) => Some(InstructionReply::GetFileRefs(GetFileRefsReply {
                 file_refs_manifest: FileRefsManifest::default(),
                 success: false,
-                error: Some(format!("Failed to get file refs: {}", e.output_msg())),
+                error: Some(InstructionError::new(
+                    e.status_code(),
+                    format!("Failed to get file refs: {}", e.output_msg()),
+                    e.retry_hint(),
+                )),
             })),
         }
     }

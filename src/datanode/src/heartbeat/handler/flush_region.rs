@@ -15,7 +15,8 @@
 use std::time::Instant;
 
 use common_meta::instruction::{
-    FlushErrorStrategy, FlushRegionReply, FlushRegions, FlushStrategy, InstructionReply,
+    FlushErrorStrategy, FlushRegionReply, FlushRegions, FlushStrategy, InstructionError,
+    InstructionReply,
 };
 use common_telemetry::{debug, warn};
 use store_api::region_request::{RegionFlushReason, RegionFlushRequest, RegionRequest};
@@ -124,9 +125,7 @@ impl HandlerContext {
             match &result {
                 Ok(_) => results.push((region_id, Ok(()))),
                 Err(err) => {
-                    // Convert error::Error to String for FlushRegionReply compatibility
-                    let error_string = err.to_string();
-                    results.push((region_id, Err(error_string)));
+                    results.push((region_id, Err(InstructionError::from_error(err))));
 
                     // For fail-fast strategy, abort on first error
                     if matches!(error_strategy, FlushErrorStrategy::FailFast) {

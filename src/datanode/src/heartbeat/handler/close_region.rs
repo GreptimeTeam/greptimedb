@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use common_meta::RegionIdent;
-use common_meta::instruction::{InstructionReply, SimpleReply};
+use common_meta::instruction::{InstructionError, InstructionReply, SimpleReply};
 use common_telemetry::warn;
 use futures::future::join_all;
 use store_api::region_request::{RegionCloseRequest, RegionRequest};
@@ -69,7 +69,9 @@ impl InstructionHandler for CloseRegionsHandler {
 
         Some(InstructionReply::CloseRegions(SimpleReply {
             result: false,
-            error: Some(errors.join("; ")),
+            error: Some(InstructionError::legacy_internal_retryable(
+                errors.join("; "),
+            )),
         }))
     }
 }

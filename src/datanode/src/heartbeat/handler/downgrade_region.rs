@@ -13,7 +13,8 @@
 // limitations under the License.
 
 use common_meta::instruction::{
-    DowngradeRegion, DowngradeRegionReply, DowngradeRegionsReply, InstructionReply,
+    DowngradeRegion, DowngradeRegionReply, DowngradeRegionsReply, InstructionError,
+    InstructionReply,
 };
 use common_telemetry::tracing::info;
 use common_telemetry::{error, warn};
@@ -89,7 +90,7 @@ impl DowngradeRegionsHandler {
                     last_entry_id: None,
                     metadata_last_entry_id: None,
                     exists: true,
-                    error: Some(format!("{err:?}")),
+                    error: Some(InstructionError::from_error(&err)),
                 };
             }
             Err(err) => {
@@ -99,7 +100,7 @@ impl DowngradeRegionsHandler {
                     last_entry_id: None,
                     metadata_last_entry_id: None,
                     exists: true,
-                    error: Some(format!("{err:?}")),
+                    error: Some(InstructionError::from_error(&err)),
                 };
             }
         }
@@ -135,10 +136,10 @@ impl DowngradeRegionsHandler {
                 last_entry_id: None,
                 metadata_last_entry_id: None,
                 exists: true,
-                error: Some(format!(
+                error: Some(InstructionError::legacy_internal_retryable(format!(
                     "Flush region timeout, region: {region_id}, timeout: {:?}",
                     flush_timeout
-                )),
+                ))),
             },
             WaitResult::Finish(Ok(_)) => ctx.downgrade_to_follower_gracefully(region_id).await,
             WaitResult::Finish(Err(err)) => DowngradeRegionReply {
@@ -146,7 +147,7 @@ impl DowngradeRegionsHandler {
                 last_entry_id: None,
                 metadata_last_entry_id: None,
                 exists: true,
-                error: Some(format!("{err:?}")),
+                error: Some(InstructionError::from_error(&err)),
             },
         }
     }
@@ -204,7 +205,7 @@ impl HandlerContext {
                     last_entry_id: None,
                     metadata_last_entry_id: None,
                     exists: true,
-                    error: Some(format!("{err:?}")),
+                    error: Some(InstructionError::from_error(&err)),
                 }
             }
             Err(err) => {
@@ -214,7 +215,7 @@ impl HandlerContext {
                     last_entry_id: None,
                     metadata_last_entry_id: None,
                     exists: true,
-                    error: Some(format!("{err:?}")),
+                    error: Some(InstructionError::from_error(&err)),
                 }
             }
         }
@@ -352,7 +353,7 @@ mod tests {
 
         let reply = &reply.unwrap().expect_downgrade_regions_reply()[0];
         assert!(reply.exists);
-        assert!(reply.error.as_ref().unwrap().contains("timeout"));
+        assert!(reply.error.as_ref().unwrap().message.contains("timeout"));
         assert!(reply.last_entry_id.is_none());
     }
 
@@ -392,7 +393,7 @@ mod tests {
 
             let reply = &reply.unwrap().expect_downgrade_regions_reply()[0];
             assert!(reply.exists);
-            assert!(reply.error.as_ref().unwrap().contains("timeout"));
+            assert!(reply.error.as_ref().unwrap().message.contains("timeout"));
             assert!(reply.last_entry_id.is_none());
         }
         let timer = Instant::now();
@@ -455,7 +456,7 @@ mod tests {
                 .await;
             let reply = &reply.unwrap().expect_downgrade_regions_reply()[0];
             assert!(reply.exists);
-            assert!(reply.error.as_ref().unwrap().contains("timeout"));
+            assert!(reply.error.as_ref().unwrap().message.contains("timeout"));
             assert!(reply.last_entry_id.is_none());
         }
         let timer = Instant::now();
@@ -472,7 +473,14 @@ mod tests {
         assert!(timer.elapsed().as_millis() < 300);
         let reply = &reply.unwrap().expect_downgrade_regions_reply()[0];
         assert!(reply.exists);
-        assert!(reply.error.as_ref().unwrap().contains("flush failed"));
+        assert!(
+            reply
+                .error
+                .as_ref()
+                .unwrap()
+                .message
+                .contains("flush failed")
+        );
         assert!(reply.last_entry_id.is_none());
     }
 
@@ -537,6 +545,7 @@ mod tests {
                 .error
                 .as_ref()
                 .unwrap()
+                .message
                 .contains("Failed to set region to readonly")
         );
         assert!(reply.last_entry_id.is_none());

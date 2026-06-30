@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use common_meta::instruction::{InstructionReply, OpenRegion, SimpleReply};
+use common_meta::instruction::{InstructionError, InstructionReply, OpenRegion, SimpleReply};
 use common_meta::wal_provider::serialize_wal_options;
 use common_telemetry::info;
 use store_api::path_utils::table_dir;
@@ -73,7 +73,7 @@ impl InstructionHandler for OpenRegionsHandler {
             Err(error) => {
                 return Some(InstructionReply::OpenRegions(SimpleReply {
                     result: false,
-                    error: Some(error),
+                    error: Some(InstructionError::legacy_internal_retryable(error)),
                 }));
             }
         };
@@ -83,7 +83,7 @@ impl InstructionHandler for OpenRegionsHandler {
             .handle_batch_open_requests(self.open_region_parallelism, requests, false)
             .await;
         let success = result.is_ok();
-        let error = result.as_ref().map_err(|e| format!("{e:?}")).err();
+        let error = result.as_ref().map_err(InstructionError::from_error).err();
 
         Some(InstructionReply::OpenRegions(SimpleReply {
             result: success,
