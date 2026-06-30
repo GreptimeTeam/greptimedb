@@ -120,22 +120,14 @@ impl<'a> JsonContext<'a> {
 
 /// Main encoding function with key path tracking
 pub fn encode_json_with_context<'a>(json: Json, context: &JsonContext<'a>) -> Result<JsonValue> {
+    if context.path.is_empty() && !matches!(json, Json::Object(_)) {
+        return UnsupportedJsonTypeSnafu.fail();
+    }
+
     match json {
         Json::Object(json_object) => encode_json_object_with_context(json_object, context),
-        Json::Array(json_array) => {
-            if context.path.is_empty() {
-                UnsupportedJsonTypeSnafu.fail()
-            } else {
-                encode_json_array_with_context(json_array, context)
-            }
-        }
-        _ => {
-            if context.path.is_empty() {
-                UnsupportedJsonTypeSnafu.fail()
-            } else {
-                encode_json_value_with_context(json, context)
-            }
-        }
+        Json::Array(json_array) => encode_json_array_with_context(json_array, context),
+        _ => encode_json_value_with_context(json, context),
     }
 }
 
