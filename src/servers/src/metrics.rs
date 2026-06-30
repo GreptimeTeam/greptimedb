@@ -128,6 +128,13 @@ lazy_static! {
         &[METRIC_DB_LABEL]
     )
     .unwrap();
+    /// The native histograms count of Prometheus remote write.
+    pub static ref PROM_STORE_REMOTE_WRITE_HISTOGRAMS: IntCounterVec = register_int_counter_vec!(
+        "greptime_servers_prometheus_remote_write_histograms",
+        "frontend prometheus remote write native histograms",
+        &[METRIC_DB_LABEL]
+    )
+    .unwrap();
     pub static ref PENDING_BATCHES: IntGauge = register_int_gauge!(
         "greptime_prom_store_pending_batches",
         "Number of pending batches waiting to be flushed"

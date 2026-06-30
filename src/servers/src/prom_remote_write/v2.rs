@@ -13,11 +13,14 @@
 // limitations under the License.
 
 use std::collections::hash_map::Entry;
-use std::collections::{HashMap, HashSet};
 
+use ahash::{HashMap, HashMapExt, HashSet, HashSetExt};
+use api::greptime_proto::io::prometheus::write::v2::histogram::{Count, ZeroCount};
+use api::greptime_proto::io::prometheus::write::v2::{
+    BucketSpan, Histogram, Request, Sample, TimeSeries,
+};
 #[cfg(test)]
-use api::greptime_proto::io::prometheus::write::v2::{Exemplar, Histogram, Metadata, metadata};
-use api::greptime_proto::io::prometheus::write::v2::{Request, Sample, TimeSeries};
+use api::greptime_proto::io::prometheus::write::v2::{Exemplar, Metadata, metadata};
 use api::v1::column_data_type_extension::TypeExt;
 use api::v1::value::ValueData;
 use api::v1::{
@@ -48,7 +51,6 @@ const NATIVE_HISTOGRAM_TABLE_SUFFIX: &str = "_native_histogram";
 const HISTOGRAM_TYPE_TAG: &str = "greptime_histogram_type";
 const HISTOGRAM_TYPE_INT: &str = "int";
 const HISTOGRAM_TYPE_FLOAT: &str = "float";
-const NATIVE_HISTOGRAM_COLUMN_COUNT: usize = 19;
 
 const SCHEMA_FIELD: &str = "schema";
 const ZERO_THRESHOLD_FIELD: &str = "zero_threshold";
@@ -68,7 +70,26 @@ const ZERO_COUNT_F64_FIELD: &str = "zero_count_f64";
 const POSITIVE_BUCKETS_F64_FIELD: &str = "positive_buckets_f64";
 const NEGATIVE_BUCKETS_F64_FIELD: &str = "negative_buckets_f64";
 
-pub mod native_histogram;
+const INTERNAL_HISTOGRAM_LABELS: &[&str] = &[
+    HISTOGRAM_TYPE_TAG,
+    SCHEMA_FIELD,
+    ZERO_THRESHOLD_FIELD,
+    SUM_FIELD,
+    RESET_HINT_FIELD,
+    CUSTOM_VALUES_FIELD,
+    POSITIVE_SPAN_OFFSETS_FIELD,
+    POSITIVE_SPAN_LENGTHS_FIELD,
+    NEGATIVE_SPAN_OFFSETS_FIELD,
+    NEGATIVE_SPAN_LENGTHS_FIELD,
+    COUNT_U64_FIELD,
+    ZERO_COUNT_U64_FIELD,
+    POSITIVE_BUCKETS_I64_FIELD,
+    NEGATIVE_BUCKETS_I64_FIELD,
+    COUNT_F64_FIELD,
+    ZERO_COUNT_F64_FIELD,
+    POSITIVE_BUCKETS_F64_FIELD,
+    NEGATIVE_BUCKETS_F64_FIELD,
+];
 
 pub(crate) fn decode_remote_write_v2_request(is_zstd: bool, body: Bytes) -> Result<Request> {
     let _timer = crate::metrics::METRIC_HTTP_PROM_STORE_DECODE_ELAPSED.start_timer();
@@ -84,10 +105,6 @@ pub(crate) fn decode_remote_write_v2_request(is_zstd: bool, body: Bytes) -> Resu
     Request::decode(&buf[..]).context(error::DecodePromRemoteRequestSnafu)
 }
 
-pub(crate) trait RemoteWriteV2RequestExt {
-    fn into_write_requests(self) -> Result<RemoteWriteV2WriteRequests>;
-}
-
 pub(crate) struct RemoteWriteV2WriteRequests {
     pub samples: ContextReq,
     pub histograms: ContextReq,
@@ -95,88 +112,104 @@ pub(crate) struct RemoteWriteV2WriteRequests {
     pub histogram_count: u64,
 }
 
-impl RemoteWriteV2RequestExt for Request {
-    fn into_write_requests(self) -> Result<RemoteWriteV2WriteRequests> {
-        let _timer = crate::metrics::METRIC_HTTP_PROM_STORE_CONVERT_ELAPSED.start_timer();
-        let Request {
-            symbols,
-            timeseries,
-        } = self;
+pub(crate) fn into_write_requests(request: Request) -> Result<RemoteWriteV2WriteRequests> {
+    let _timer = crate::metrics::METRIC_HTTP_PROM_STORE_CONVERT_ELAPSED.start_timer();
+    let Request {
+        symbols,
+        timeseries,
+    } = request;
 
-        ensure!(
-            symbols.first().map(|s| s.as_str()) == Some(""),
-            error::InvalidPromRemoteRequestSnafu {
-                msg: "remote write v2 symbols must start with an empty string".to_string(),
-            }
-        );
+    ensure!(
+        symbols.first().map(|s| s.as_str()) == Some(""),
+        error::InvalidPromRemoteRequestSnafu {
+            msg: "remote write v2 symbols must start with an empty string".to_string(),
+        }
+    );
 
-        let mut sample_tables = HashMap::<PromCtx, HashMap<String, TableData>>::new();
-        let mut histogram_tables = HashMap::<PromCtx, HashMap<String, TableData>>::new();
-        let mut sample_count_total = 0;
-        let mut histogram_count_total = 0;
+    let mut sample_tables = HashMap::<PromCtx, HashMap<String, TableData>>::new();
+    let mut histogram_tables = HashMap::<PromCtx, HashMap<String, TableData>>::new();
+    let mut sample_count_total = 0;
+    let mut histogram_count_total = 0;
 
-        for series in timeseries {
-            // Exemplars are intentionally ignored for now.
-            let sample_count = series.samples.len();
-            let histogram_count = series.histograms.len();
-            if sample_count == 0 && histogram_count == 0 {
-                continue;
-            }
-
-            let (prom_ctx, table_name, tags) = resolve_series_labels(&symbols, &series)?;
-            if sample_count > 0 {
-                let table_data = match sample_tables
-                    .entry(prom_ctx.clone())
-                    .or_default()
-                    .entry(table_name.clone())
-                {
-                    Entry::Occupied(entry) => {
-                        let table_data = entry.into_mut();
-                        table_data.reserve_rows(sample_count);
-                        table_data
-                    }
-                    Entry::Vacant(entry) => {
-                        entry.insert(TableData::new(tags.len() + 2, sample_count))
-                    }
-                };
-
-                write_samples(table_data, series.samples, tags.clone())?;
-                sample_count_total += sample_count as u64;
-            }
-
-            if histogram_count > 0 {
-                let histogram_ctx = PromCtx {
-                    schema: prom_ctx.schema,
-                    physical_table: None,
-                };
-                let histogram_table_name = format!("{table_name}{NATIVE_HISTOGRAM_TABLE_SUFFIX}");
-                let table_data = match histogram_tables
-                    .entry(histogram_ctx)
-                    .or_default()
-                    .entry(histogram_table_name)
-                {
-                    Entry::Occupied(entry) => {
-                        let table_data = entry.into_mut();
-                        table_data.reserve_rows(histogram_count);
-                        table_data
-                    }
-                    Entry::Vacant(entry) => entry.insert(TableData::new(
-                        tags.len() + NATIVE_HISTOGRAM_COLUMN_COUNT,
-                        histogram_count,
-                    )),
-                };
-
-                write_native_histograms(table_data, series.histograms, tags)?;
-                histogram_count_total += histogram_count as u64;
-            }
+    for series in timeseries {
+        // Exemplars are intentionally ignored for now.
+        let sample_count = series.samples.len();
+        let histogram_count = series.histograms.len();
+        if sample_count == 0 && histogram_count == 0 {
+            continue;
         }
 
-        Ok(RemoteWriteV2WriteRequests {
-            samples: into_context_req(sample_tables),
-            histograms: into_context_req(histogram_tables),
-            sample_count: sample_count_total,
-            histogram_count: histogram_count_total,
-        })
+        let (prom_ctx, table_name, tags) = resolve_series_labels(&symbols, &series)?;
+        if histogram_count > 0 {
+            ensure_no_internal_histogram_labels(&tags)?;
+        }
+
+        if sample_count > 0 {
+            // ponytail: mixed sample+histogram series need both branches below; avoid these
+            // clones only if profiles show this conversion loop is hot.
+            let table_data = get_or_create_table_data(
+                &mut sample_tables,
+                prom_ctx.clone(),
+                table_name.clone(),
+                tags.len() + 2,
+                sample_count,
+            );
+
+            write_samples(table_data, series.samples, tags.clone())?;
+            sample_count_total += sample_count as u64;
+        }
+
+        if histogram_count > 0 {
+            // Native histograms use a standalone ordinary table. Metric-engine physical
+            // tables cannot store the native histogram list schema, so drop physical-table
+            // routing labels for histogram rows.
+            let histogram_ctx = PromCtx {
+                schema: prom_ctx.schema,
+                physical_table: None,
+            };
+            let histogram_table_name = format!("{table_name}{NATIVE_HISTOGRAM_TABLE_SUFFIX}");
+            let table_data = get_or_create_table_data(
+                &mut histogram_tables,
+                histogram_ctx,
+                histogram_table_name,
+                tags.len() + 1 + INTERNAL_HISTOGRAM_LABELS.len(),
+                histogram_count,
+            );
+
+            let mut histograms = series.histograms;
+            let Some(last_histogram) = histograms.pop() else {
+                continue;
+            };
+            for histogram in &histograms {
+                write_native_histogram(table_data, histogram, tags.iter().cloned())?;
+            }
+            write_native_histogram(table_data, &last_histogram, tags.into_iter())?;
+            histogram_count_total += histogram_count as u64;
+        }
+    }
+
+    Ok(RemoteWriteV2WriteRequests {
+        samples: into_context_req(sample_tables),
+        histograms: into_context_req(histogram_tables),
+        sample_count: sample_count_total,
+        histogram_count: histogram_count_total,
+    })
+}
+
+fn get_or_create_table_data(
+    tables: &mut HashMap<PromCtx, HashMap<String, TableData>>,
+    prom_ctx: PromCtx,
+    table_name: String,
+    column_count: usize,
+    row_count: usize,
+) -> &mut TableData {
+    match tables.entry(prom_ctx).or_default().entry(table_name) {
+        Entry::Occupied(entry) => {
+            let table_data = entry.into_mut();
+            table_data.reserve_rows(row_count);
+            table_data
+        }
+        Entry::Vacant(entry) => entry.insert(TableData::new(column_count, row_count)),
     }
 }
 
@@ -216,28 +249,11 @@ fn write_sample(
     Ok(())
 }
 
-fn write_native_histograms(
-    table_data: &mut TableData,
-    mut histograms: Vec<api::greptime_proto::io::prometheus::write::v2::Histogram>,
-    tags: PromTags,
-) -> Result<()> {
-    let Some(last_histogram) = histograms.pop() else {
-        return Ok(());
-    };
-
-    for histogram in &histograms {
-        write_native_histogram(table_data, histogram, tags.iter().cloned())?;
-    }
-
-    write_native_histogram(table_data, &last_histogram, tags.into_iter())
-}
-
 fn write_native_histogram(
     table_data: &mut TableData,
-    histogram: &api::greptime_proto::io::prometheus::write::v2::Histogram,
+    histogram: &Histogram,
     tags: impl Iterator<Item = (String, String)>,
 ) -> Result<()> {
-    let native_histogram = native_histogram::convert_native_histogram(histogram);
     let mut row = table_data.alloc_one_row();
     row_writer::write_ts_to_millis(
         table_data,
@@ -247,57 +263,72 @@ fn write_native_histogram(
         &mut row,
     )?;
 
-    let histogram_type = match native_histogram {
-        native_histogram::PrometheusNativeHistogram::Int(histogram) => {
-            write_common_native_histogram_fields(
-                table_data,
-                histogram.reset_hint,
-                histogram.schema,
-                histogram.zero_threshold,
-                histogram.sum,
-                &histogram.custom_values,
-                &histogram.positive_spans,
-                &histogram.negative_spans,
-                &mut row,
-            )?;
-            write_int_native_histogram_fields(
-                table_data,
-                Some((&histogram.positive_buckets, &histogram.negative_buckets)),
-                Some((histogram.count, histogram.zero_count)),
-                &mut row,
-            )?;
-            write_float_native_histogram_fields(table_data, None, None, &mut row)?;
-            HISTOGRAM_TYPE_INT
+    write_common_native_histogram_fields(
+        table_data,
+        histogram.reset_hint,
+        histogram.schema,
+        histogram.zero_threshold,
+        histogram.sum,
+        &histogram.custom_values,
+        &histogram.positive_spans,
+        &histogram.negative_spans,
+        &mut row,
+    )?;
+
+    let int_counts = match (&histogram.count, &histogram.zero_count) {
+        (Some(Count::CountInt(count)), Some(ZeroCount::ZeroCountInt(zero_count))) => {
+            (*count, *zero_count)
         }
-        native_histogram::PrometheusNativeHistogram::Float(histogram) => {
-            write_common_native_histogram_fields(
-                table_data,
-                histogram.reset_hint,
-                histogram.schema,
-                histogram.zero_threshold,
-                histogram.sum,
-                &histogram.custom_values,
-                &histogram.positive_spans,
-                &histogram.negative_spans,
-                &mut row,
-            )?;
-            write_int_native_histogram_fields(table_data, None, None, &mut row)?;
-            write_float_native_histogram_fields(
-                table_data,
-                Some((&histogram.positive_buckets, &histogram.negative_buckets)),
-                Some((histogram.count, histogram.zero_count)),
-                &mut row,
-            )?;
-            HISTOGRAM_TYPE_FLOAT
+        (Some(Count::CountInt(count)), _) => (*count, 0),
+        (_, Some(ZeroCount::ZeroCountInt(zero_count))) => (0, *zero_count),
+        _ => (0, 0),
+    };
+    let float_counts = match (&histogram.count, &histogram.zero_count) {
+        (Some(Count::CountFloat(count)), Some(ZeroCount::ZeroCountFloat(zero_count))) => {
+            Some((*count, *zero_count))
         }
+        (Some(Count::CountFloat(count)), _) => Some((*count, 0.0)),
+        _ => None,
+    };
+
+    let histogram_type = if let Some(counts) = float_counts {
+        write_int_native_histogram_fields(table_data, None, None, &mut row)?;
+        write_float_native_histogram_fields(
+            table_data,
+            Some((&histogram.positive_counts, &histogram.negative_counts)),
+            Some(counts),
+            &mut row,
+        )?;
+        HISTOGRAM_TYPE_FLOAT
+    } else {
+        write_int_native_histogram_fields(
+            table_data,
+            Some((&histogram.positive_deltas, &histogram.negative_deltas)),
+            Some(int_counts),
+            &mut row,
+        )?;
+        write_float_native_histogram_fields(table_data, None, None, &mut row)?;
+        HISTOGRAM_TYPE_INT
     };
 
     row_writer::write_tag(table_data, HISTOGRAM_TYPE_TAG, histogram_type, &mut row)?;
     row_writer::write_tags(table_data, tags, &mut row)?;
-    // User labels are written after histogram fields and may contain the same
-    // name as our internal discriminator, so write it again to keep it reserved.
-    row_writer::write_tag(table_data, HISTOGRAM_TYPE_TAG, histogram_type, &mut row)?;
     table_data.add_row(row);
+
+    Ok(())
+}
+
+fn ensure_no_internal_histogram_labels(tags: &PromTags) -> Result<()> {
+    for (name, _) in tags {
+        ensure!(
+            !INTERNAL_HISTOGRAM_LABELS.contains(&name.as_str()),
+            error::InvalidPromRemoteRequestSnafu {
+                msg: format!(
+                    "remote write v2 label `{name}` conflicts with an internal native histogram label"
+                ),
+            }
+        );
+    }
 
     Ok(())
 }
@@ -309,8 +340,8 @@ fn write_common_native_histogram_fields(
     zero_threshold: f64,
     sum: f64,
     custom_values: &[f64],
-    positive_spans: &[native_histogram::PrometheusHistogramSpan],
-    negative_spans: &[native_histogram::PrometheusHistogramSpan],
+    positive_spans: &[BucketSpan],
+    negative_spans: &[BucketSpan],
     row: &mut Vec<Value>,
 ) -> Result<()> {
     row_writer::write_fields(
@@ -341,10 +372,10 @@ fn write_common_native_histogram_fields(
         row,
     )?;
     write_f64_list_field(table_data, CUSTOM_VALUES_FIELD, Some(custom_values), row)?;
-    let positive_span_offsets = span_offsets(positive_spans);
-    let positive_span_lengths = span_lengths(positive_spans);
-    let negative_span_offsets = span_offsets(negative_spans);
-    let negative_span_lengths = span_lengths(negative_spans);
+    let positive_span_offsets: Vec<i32> = positive_spans.iter().map(|span| span.offset).collect();
+    let positive_span_lengths: Vec<u32> = positive_spans.iter().map(|span| span.length).collect();
+    let negative_span_offsets: Vec<i32> = negative_spans.iter().map(|span| span.offset).collect();
+    let negative_span_lengths: Vec<u32> = negative_spans.iter().map(|span| span.length).collect();
     write_i32_list_field(
         table_data,
         POSITIVE_SPAN_OFFSETS_FIELD,
@@ -457,14 +488,6 @@ fn write_float_native_histogram_fields(
         negative_buckets,
         row,
     )
-}
-
-fn span_offsets(spans: &[native_histogram::PrometheusHistogramSpan]) -> Vec<i32> {
-    spans.iter().map(|span| span.offset).collect()
-}
-
-fn span_lengths(spans: &[native_histogram::PrometheusHistogramSpan]) -> Vec<u32> {
-    spans.iter().map(|span| span.length).collect()
 }
 
 fn write_i32_list_field(
@@ -743,7 +766,7 @@ pub mod test_util {
     pub fn write_requests(
         request: Request,
     ) -> Result<(Vec<RowInsertRequest>, Vec<RowInsertRequest>, u64, u64)> {
-        let requests = super::RemoteWriteV2RequestExt::into_write_requests(request)?;
+        let requests = super::into_write_requests(request)?;
         Ok((
             requests.samples.all_req().collect(),
             requests.histograms.all_req().collect(),
@@ -846,7 +869,7 @@ mod tests {
 
     #[test]
     fn test_into_context_req_samples() {
-        let ctx_req = test_util::request_with_labels_and_samples(
+        let ctx_req = into_write_requests(test_util::request_with_labels_and_samples(
             vec![
                 (METRIC_NAME_LABEL, "http_requests_total"),
                 ("job", "api"),
@@ -864,8 +887,7 @@ mod tests {
                     start_timestamp: 0,
                 },
             ],
-        )
-        .into_write_requests()
+        ))
         .unwrap();
 
         assert_eq!(ctx_req.sample_count, 2);
@@ -913,7 +935,7 @@ mod tests {
 
     #[test]
     fn test_into_context_req_accepts_utf8_label_names() {
-        let ctx_req = test_util::request_with_labels_and_samples(
+        let ctx_req = into_write_requests(test_util::request_with_labels_and_samples(
             vec![
                 (METRIC_NAME_LABEL, "http_requests_total"),
                 ("service.name", "api"),
@@ -924,8 +946,7 @@ mod tests {
                 timestamp: 1000,
                 start_timestamp: 0,
             }],
-        )
-        .into_write_requests()
+        ))
         .unwrap();
 
         let mut inserts = ctx_req.samples.all_req().collect::<Vec<_>>();
@@ -955,7 +976,7 @@ mod tests {
 
     #[test]
     fn test_into_context_req_special_labels() {
-        let ctx_req = test_util::request_with_labels_and_samples(
+        let ctx_req = into_write_requests(test_util::request_with_labels_and_samples(
             vec![
                 (METRIC_NAME_LABEL, "cpu_usage"),
                 (DATABASE_LABEL, "tenant_a"),
@@ -967,8 +988,7 @@ mod tests {
                 timestamp: 1000,
                 start_timestamp: 0,
             }],
-        )
-        .into_write_requests()
+        ))
         .unwrap();
 
         let mut iter = ctx_req
@@ -1068,7 +1088,7 @@ mod tests {
         request.timeseries[0].histograms.push(Histogram::default());
         request.timeseries[0].exemplars.push(Exemplar::default());
 
-        let ctx_req = request.into_write_requests().unwrap();
+        let ctx_req = into_write_requests(request).unwrap();
 
         assert_eq!(ctx_req.sample_count, 1);
         assert_eq!(ctx_req.histogram_count, 1);
@@ -1082,7 +1102,7 @@ mod tests {
             test_util::request_with_labels_and_samples(vec![(METRIC_NAME_LABEL, "metric")], vec![]);
         request.timeseries[0].histograms.push(Histogram::default());
 
-        let ctx_req = request.into_write_requests().unwrap();
+        let ctx_req = into_write_requests(request).unwrap();
 
         assert_eq!(ctx_req.sample_count, 0);
         assert_eq!(ctx_req.histogram_count, 1);
@@ -1141,25 +1161,20 @@ mod tests {
     }
 
     #[test]
-    fn test_into_context_req_preserves_internal_histogram_type_tag() {
+    fn test_into_context_req_rejects_internal_histogram_labels() {
         let mut request = test_util::request_with_labels_and_samples(
-            vec![
-                (METRIC_NAME_LABEL, "metric"),
-                (HISTOGRAM_TYPE_TAG, "user_value"),
-            ],
+            vec![(METRIC_NAME_LABEL, "metric"), (SUM_FIELD, "user_value")],
             vec![],
         );
         request.timeseries[0].histograms.push(Histogram::default());
 
-        let ctx_req = request.into_write_requests().unwrap();
-
-        let mut inserts = ctx_req.histograms.all_req().collect::<Vec<_>>();
-        assert_eq!(inserts.len(), 1);
-        let rows = inserts.pop().unwrap().rows.unwrap();
-        let histogram_type_idx = column_index(&rows.schema, HISTOGRAM_TYPE_TAG);
+        let err = match into_write_requests(request) {
+            Ok(_) => panic!("expected invalid request error"),
+            Err(err) => err,
+        };
         assert_eq!(
-            rows.rows[0].values[histogram_type_idx].value_data,
-            Some(ValueData::StringValue(HISTOGRAM_TYPE_INT.to_string()))
+            err.to_string(),
+            "Invalid prometheus remote request, msg: remote write v2 label `sum` conflicts with an internal native histogram label"
         );
     }
 
@@ -1200,7 +1215,7 @@ mod tests {
             ],
         };
 
-        let ctx_req = request.into_write_requests().unwrap();
+        let ctx_req = into_write_requests(request).unwrap();
 
         assert_eq!(ctx_req.histogram_count, 2);
         let mut inserts = ctx_req.histograms.all_req().collect::<Vec<_>>();
@@ -1290,7 +1305,7 @@ mod tests {
     }
 
     fn assert_invalid(name: &str, request: Request, expected: &str) {
-        let err = match request.into_write_requests() {
+        let err = match into_write_requests(request) {
             Ok(_) => panic!("{name}: expected invalid request error"),
             Err(err) => err,
         };

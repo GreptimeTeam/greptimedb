@@ -28,7 +28,7 @@ use async_trait::async_trait;
 use axum::Router;
 use axum::http::HeaderMap;
 use common_query::Output;
-use common_query::prelude::{greptime_timestamp, greptime_value};
+use common_query::prelude::{GREPTIME_PHYSICAL_TABLE, greptime_timestamp, greptime_value};
 use common_test_util::ports;
 use datafusion_expr::LogicalPlan;
 use prost::Message;
@@ -595,7 +595,10 @@ async fn test_prometheus_remote_write_v2_writes_histogram_only_series() {
 
     let captured = write_rx.recv().await.unwrap();
     assert!(!captured.with_metric_engine);
-    assert_eq!(None, captured.physical_table);
+    assert_eq!(
+        Some(GREPTIME_PHYSICAL_TABLE.to_string()),
+        captured.physical_table
+    );
     assert_eq!(1, captured.request.inserts.len());
     let insert = &captured.request.inserts[0];
     assert_eq!(
