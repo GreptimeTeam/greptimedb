@@ -315,8 +315,7 @@ fn encode_json_array_with_context<'a>(
     } else {
         None
     };
-    let unified_item_type = merged_item_type;
-    if let Some(unified_item_type) = unified_item_type {
+    if let Some(unified_item_type) = merged_item_type {
         for item in &mut items {
             item.try_align(&unified_item_type)?;
         }
@@ -456,6 +455,59 @@ mod tests {
             .position(|field| field.name() == field_name)
             .expect("field exists");
         &struct_value.items()[index]
+    }
+
+    #[test]
+    fn test_json_settings_forward_compatibility() {
+        let json_str = r#"{
+            "type_hints": [
+                {
+                    "path": ["user", "age"],
+                    "type": {
+                        "Int64": {}
+                    },
+                    "nullable": false,
+                    "default_constraint": {
+                        "Value": {
+                            "Int64": 18
+                        }
+                    },
+                    "inverted_index": true
+                },
+                {
+                    "path": ["user", "name"],
+                    "type": {
+                        "String": {
+                            "size_type": "Utf8"
+                        }
+                    },
+                    "nullable": true,
+                    "inverted_index": false
+                }
+            ]
+        }"#;
+
+        let deserialized = serde_json::from_str::<JsonSettings>(json_str).unwrap();
+
+        assert_eq!(
+            deserialized,
+            JsonSettings::new(vec![
+                JsonTypeHint {
+                    path: vec!["user".to_string(), "age".to_string()],
+                    data_type: ConcreteDataType::int64_datatype(),
+                    nullable: false,
+                    default_constraint: Some(ColumnDefaultConstraint::Value(Value::Int64(18))),
+                    inverted_index: true,
+                },
+                JsonTypeHint {
+                    path: vec!["user".to_string(), "name".to_string()],
+                    data_type: ConcreteDataType::string_datatype(),
+                    nullable: true,
+                    default_constraint: None,
+                    inverted_index: false,
+                },
+            ])
+        );
     }
 
     #[test]

@@ -46,6 +46,10 @@ select j.a, j.a.x from json2_table order by ts;
 
 select j.c, j.y from json2_table order by ts;
 
+select j from json2_table order by ts;
+
+select * from json2_table order by ts;
+
 select j.a.b + 1 from json2_table order by ts;
 
 select abs(j.a.b) from json2_table order by ts;
