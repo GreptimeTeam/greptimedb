@@ -23,6 +23,8 @@ impl FlowStatProvider for StreamingEngine {
     async fn flow_stat(&self) -> FlowStat {
         let mut full_report = BTreeMap::new();
         let mut last_exec_time_map = BTreeMap::new();
+        let mut start_time_map = BTreeMap::new();
+        let mut error_map = BTreeMap::new();
 
         for worker in self.worker_handles.iter() {
             match worker.get_state_size().await {
@@ -43,11 +45,26 @@ impl FlowStatProvider for StreamingEngine {
                     common_telemetry::error!(err; "Get last exec time error");
                 }
             }
+
+            match worker.get_flow_exec_stats().await {
+                Ok(stats) => {
+                    start_time_map
+                        .extend(stats.start_time_map.into_iter().map(|(k, v)| (k as u32, v)));
+                    error_map.extend(stats.error_map.into_iter().map(|(k, v)| (k as u32, v)));
+                }
+                Err(err) => {
+                    common_telemetry::error!(err; "Get flow exec stats error");
+                }
+            }
         }
 
         FlowStat {
             state_size: full_report,
             last_exec_time_map,
+            start_time_map,
+            // The streaming engine does not track per-flow processed rows yet; see issue #7987.
+            processed_rows_map: BTreeMap::new(),
+            error_map,
         }
     }
 }

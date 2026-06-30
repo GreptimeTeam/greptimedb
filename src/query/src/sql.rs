@@ -20,8 +20,9 @@ use std::sync::Arc;
 
 use catalog::CatalogManagerRef;
 use catalog::information_schema::{
-    CHARACTER_SETS, COLLATIONS, COLUMNS, FLOWS, REGION_PEERS, SCHEMATA, STATISTICS, TABLES, VIEWS,
-    columns, flows, process_list, region_peers, schemata, statistics, tables,
+    CHARACTER_SETS, COLLATIONS, COLUMNS, FLOW_STATISTICS, FLOWS, REGION_PEERS, SCHEMATA, STATISTICS,
+    TABLES, VIEWS, columns, flow_statistics, flows, process_list, region_peers, schemata,
+    statistics, tables,
 };
 use common_catalog::consts::{
     INFORMATION_SCHEMA_NAME, SEMANTIC_TYPE_FIELD, SEMANTIC_TYPE_PRIMARY_KEY,
@@ -58,8 +59,8 @@ use sql::parser::ParserContext;
 use sql::statements::OptionMap;
 use sql::statements::create::{CreateDatabase, CreateFlow, CreateView, Partitions, SqlOrTql};
 use sql::statements::show::{
-    ShowColumns, ShowDatabases, ShowFlows, ShowIndex, ShowKind, ShowProcessList, ShowRegion,
-    ShowTableStatus, ShowTables, ShowVariables, ShowViews,
+    ShowColumns, ShowDatabases, ShowFlowStatus, ShowFlows, ShowIndex, ShowKind, ShowProcessList,
+    ShowRegion, ShowTableStatus, ShowTables, ShowVariables, ShowViews,
 };
 use sql::statements::statement::Statement;
 use sqlparser::ast::ObjectName;
@@ -965,6 +966,50 @@ pub async fn show_flows(
         vec![],
         projects,
         filters,
+        like_field,
+        sort,
+        stmt.kind,
+    )
+    .await
+}
+
+/// Execute [`ShowFlowStatus`] statement and return the [`Output`] if success.
+pub async fn show_flow_status(
+    stmt: ShowFlowStatus,
+    query_engine: &QueryEngineRef,
+    catalog_manager: &CatalogManagerRef,
+    query_ctx: QueryContextRef,
+) -> Result<Output> {
+    let projects = vec![
+        (flow_statistics::FLOW_ID, flow_statistics::FLOW_ID),
+        (flow_statistics::FLOW_NAME, flow_statistics::FLOW_NAME),
+        (flow_statistics::START_TIME, flow_statistics::START_TIME),
+        (
+            flow_statistics::LAST_EXECUTION_TIME,
+            flow_statistics::LAST_EXECUTION_TIME,
+        ),
+        (
+            flow_statistics::UPTIME_SECONDS,
+            flow_statistics::UPTIME_SECONDS,
+        ),
+        (flow_statistics::STATE_SIZE, flow_statistics::STATE_SIZE),
+        (
+            flow_statistics::PROCESSED_ROWS,
+            flow_statistics::PROCESSED_ROWS,
+        ),
+        (flow_statistics::LAST_ERRORS, flow_statistics::LAST_ERRORS),
+    ];
+    let like_field = Some(flow_statistics::FLOW_NAME);
+    let sort = vec![col(flow_statistics::FLOW_NAME).sort(true, true)];
+
+    query_from_information_schema_table(
+        query_engine,
+        catalog_manager,
+        query_ctx,
+        FLOW_STATISTICS,
+        vec![],
+        projects,
+        vec![],
         like_field,
         sort,
         stmt.kind,

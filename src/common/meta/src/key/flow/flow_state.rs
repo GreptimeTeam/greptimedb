@@ -93,22 +93,37 @@ impl<'a> MetadataKey<'a, FlowStateKey> for FlowStateKey {
 }
 
 /// The value of flow state size
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct FlowStateValue {
     /// For each key, the bytes of the state in memory
     pub state_size: BTreeMap<FlowId, usize>,
     /// For each key, the last execution time of flow in unix timestamp milliseconds.
     pub last_exec_time_map: BTreeMap<FlowId, i64>,
+    /// For each flow, the time the flow first executed, in unix timestamp milliseconds.
+    #[serde(default)]
+    pub start_time_map: BTreeMap<FlowId, i64>,
+    /// For each flow, the total number of rows processed since startup.
+    #[serde(default)]
+    pub processed_rows_map: BTreeMap<FlowId, u64>,
+    /// For each flow, the most recent error messages (capped at the last 3).
+    #[serde(default)]
+    pub error_map: BTreeMap<FlowId, Vec<String>>,
 }
 
 impl FlowStateValue {
     pub fn new(
         state_size: BTreeMap<FlowId, usize>,
         last_exec_time_map: BTreeMap<FlowId, i64>,
+        start_time_map: BTreeMap<FlowId, i64>,
+        processed_rows_map: BTreeMap<FlowId, u64>,
+        error_map: BTreeMap<FlowId, Vec<String>>,
     ) -> Self {
         Self {
             state_size,
             last_exec_time_map,
+            start_time_map,
+            processed_rows_map,
+            error_map,
         }
     }
 }
@@ -147,12 +162,18 @@ impl FlowStateManager {
 }
 
 /// Flow's state report, send regularly through heartbeat message
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct FlowStat {
     /// For each key, the bytes of the state in memory
     pub state_size: BTreeMap<u32, usize>,
     /// For each key, the last execution time of flow in unix timestamp milliseconds.
     pub last_exec_time_map: BTreeMap<FlowId, i64>,
+    /// For each flow, the time the flow first executed, in unix timestamp milliseconds.
+    pub start_time_map: BTreeMap<FlowId, i64>,
+    /// For each flow, the total number of rows processed since startup.
+    pub processed_rows_map: BTreeMap<FlowId, u64>,
+    /// For each flow, the most recent error messages (capped at the last 3).
+    pub error_map: BTreeMap<FlowId, Vec<String>>,
 }
 
 impl From<FlowStateValue> for FlowStat {
@@ -160,6 +181,9 @@ impl From<FlowStateValue> for FlowStat {
         Self {
             state_size: value.state_size,
             last_exec_time_map: value.last_exec_time_map,
+            start_time_map: value.start_time_map,
+            processed_rows_map: value.processed_rows_map,
+            error_map: value.error_map,
         }
     }
 }
@@ -169,6 +193,9 @@ impl From<FlowStat> for FlowStateValue {
         Self {
             state_size: value.state_size,
             last_exec_time_map: value.last_exec_time_map,
+            start_time_map: value.start_time_map,
+            processed_rows_map: value.processed_rows_map,
+            error_map: value.error_map,
         }
     }
 }

@@ -392,14 +392,33 @@ impl BatchingEngine {
 
 impl FlowStatProvider for BatchingEngine {
     async fn flow_stat(&self) -> FlowStat {
+        let runtime = self.runtime.read().await;
+        let mut last_exec_time_map = BTreeMap::new();
+        let mut start_time_map = BTreeMap::new();
+        let mut processed_rows_map = BTreeMap::new();
+        let mut error_map = BTreeMap::new();
+
+        for (flow_id, task) in runtime.tasks.iter() {
+            let id = *flow_id as u32;
+            if let Some(ts) = task.last_execution_time_millis() {
+                last_exec_time_map.insert(id, ts);
+            }
+            if let Some(ts) = task.start_time_millis() {
+                start_time_map.insert(id, ts);
+            }
+            processed_rows_map.insert(id, task.processed_rows());
+            let errors = task.recent_errors();
+            if !errors.is_empty() {
+                error_map.insert(id, errors);
+            }
+        }
+
         FlowStat {
             state_size: BTreeMap::new(),
-            last_exec_time_map: self
-                .get_last_exec_time_map()
-                .await
-                .into_iter()
-                .map(|(flow_id, timestamp)| (flow_id as u32, timestamp))
-                .collect(),
+            last_exec_time_map,
+            start_time_map,
+            processed_rows_map,
+            error_map,
         }
     }
 }

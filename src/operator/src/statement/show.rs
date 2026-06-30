@@ -26,8 +26,9 @@ use sql::ast::ObjectNamePartExt;
 use sql::statements::OptionMap;
 use sql::statements::create::Partitions;
 use sql::statements::show::{
-    ShowColumns, ShowCreateFlow, ShowCreateView, ShowDatabases, ShowFlows, ShowIndex, ShowKind,
-    ShowProcessList, ShowRegion, ShowTableStatus, ShowTables, ShowVariables, ShowViews,
+    ShowColumns, ShowCreateFlow, ShowCreateView, ShowDatabases, ShowFlowStatus, ShowFlows,
+    ShowIndex, ShowKind, ShowProcessList, ShowRegion, ShowTableStatus, ShowTables, ShowVariables,
+    ShowViews,
 };
 use table::TableRef;
 use table::metadata::{TableInfo, TableType};
@@ -246,6 +247,17 @@ impl StatementExecutor {
         query_ctx: QueryContextRef,
     ) -> Result<Output> {
         query::sql::show_flows(stmt, &self.query_engine, &self.catalog_manager, query_ctx)
+            .await
+            .context(ExecuteStatementSnafu)
+    }
+
+    #[tracing::instrument(skip_all)]
+    pub(super) async fn show_flow_status(
+        &self,
+        stmt: ShowFlowStatus,
+        query_ctx: QueryContextRef,
+    ) -> Result<Output> {
+        query::sql::show_flow_status(stmt, &self.query_engine, &self.catalog_manager, query_ctx)
             .await
             .context(ExecuteStatementSnafu)
     }

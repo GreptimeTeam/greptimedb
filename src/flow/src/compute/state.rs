@@ -47,6 +47,8 @@ pub struct DataflowState {
     expire_after: Option<Timestamp>,
     /// the last time each subgraph executed
     last_exec_time: Option<Timestamp>,
+    /// the time the flow first executed, in unix timestamp milliseconds
+    start_time: Option<Timestamp>,
 }
 
 impl DataflowState {
@@ -120,10 +122,18 @@ impl DataflowState {
 
     pub fn set_last_exec_time(&mut self, time: Timestamp) {
         self.last_exec_time = Some(time);
+        if self.start_time.is_none() {
+            self.start_time = Some(time);
+        }
     }
 
     pub fn last_exec_time(&self) -> Option<Timestamp> {
         self.last_exec_time
+    }
+
+    /// Returns the time the flow first executed, in unix timestamp milliseconds.
+    pub fn start_time(&self) -> Option<Timestamp> {
+        self.start_time
     }
 }
 

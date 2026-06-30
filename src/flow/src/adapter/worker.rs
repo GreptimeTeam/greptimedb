@@ -231,6 +231,22 @@ impl WorkerHandle {
             .build()
         })
     }
+
+    /// Query per-flow runtime statistics (start time and recent errors) from the worker.
+    pub async fn get_flow_exec_stats(&self) -> Result<FlowExecStats, Error> {
+        let ret = self
+            .itc_client
+            .call_with_resp(Request::QueryFlowExecStats)
+            .await?;
+        ret.into_query_flow_exec_stats().map_err(|ret| {
+            InternalSnafu {
+                reason: format!(
+                    "Flow Node/Worker get_flow_exec_stats failed, expect Response::QueryFlowExecStats, found {ret:?}"
+                ),
+            }
+            .build()
+        })
+    }
 }
 
 impl Drop for WorkerHandle {
@@ -424,6 +440,27 @@ impl<'s> Worker<'s> {
                 }
                 Some(Response::QueryLastExecTimeMap { result: ret })
             }
+            Request::QueryFlowExecStats => {
+                let mut start_time_map = BTreeMap::new();
+                let mut error_map = BTreeMap::new();
+                for (flow_id, task_state) in self.task_states.iter() {
+                    if let Some(start_time) = task_state.state.start_time() {
+                        start_time_map.insert(*flow_id, start_time);
+                    }
+                    let errors = task_state
+                        .err_collector
+                        .recent_errors(crate::engine::MAX_RECENT_ERRORS);
+                    if !errors.is_empty() {
+                        error_map.insert(*flow_id, errors);
+                    }
+                }
+                Some(Response::QueryFlowExecStats {
+                    result: FlowExecStats {
+                        start_time_map,
+                        error_map,
+                    },
+                })
+            }
         };
         Ok(ret)
     }
@@ -457,6 +494,20 @@ pub enum Request {
     Shutdown,
     QueryStateSize,
     QueryLastExecTimeMap,
+    QueryFlowExecStats,
+}
+
+/// Per-flow runtime statistics gathered from a streaming worker.
+///
+/// Note: `processed_rows` is intentionally not tracked by the streaming engine for now
+/// (input is keyed by source table and fanned out to multiple flows, so there is no clean
+/// per-flow row counter). It is populated by the batching engine instead. See issue #7987.
+#[derive(Debug, Default)]
+pub struct FlowExecStats {
+    /// each flow's first execution time, in unix timestamp milliseconds
+    pub start_time_map: BTreeMap<FlowId, i64>,
+    /// each flow's most recent error messages (at most `MAX_RECENT_ERRORS`)
+    pub error_map: BTreeMap<FlowId, Vec<String>>,
 }
 
 #[derive(Debug, EnumAsInner)]
@@ -479,6 +530,10 @@ enum Response {
     QueryLastExecTimeMap {
         /// each flow tasks' last execution time
         result: BTreeMap<FlowId, i64>,
+    },
+    QueryFlowExecStats {
+        /// each flow tasks' start time and recent errors
+        result: FlowExecStats,
     },
 }
 

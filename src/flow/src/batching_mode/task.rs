@@ -290,6 +290,18 @@ impl BatchingTask {
         self.state.read().unwrap().last_execution_time_millis()
     }
 
+    pub fn start_time_millis(&self) -> Option<i64> {
+        self.state.read().unwrap().start_time_millis()
+    }
+
+    pub fn processed_rows(&self) -> u64 {
+        self.state.read().unwrap().processed_rows()
+    }
+
+    pub fn recent_errors(&self) -> Vec<String> {
+        self.state.read().unwrap().recent_errors()
+    }
+
     /// Collect flow-related extensions from the task's query context that should be
     /// forwarded to the frontend (e.g. scheduled time).
     fn frontend_extensions(&self) -> HashMap<String, String> {
@@ -742,6 +754,7 @@ impl BatchingTask {
             let decision = {
                 let mut state = self.state.write().unwrap();
                 let reason = Self::query_failure_reason(err, coverage);
+                state.push_error(err.to_string());
                 Self::apply_query_failure_to_state(&mut state, elapsed, coverage, reason)
             };
             if let Some(decision) = decision {
@@ -773,6 +786,7 @@ impl BatchingTask {
             .inc_by(affected_rows as _);
         let decision = {
             let mut state = self.state.write().unwrap();
+            state.add_processed_rows(affected_rows as u64);
             Self::apply_query_result_to_state(&mut state, &res, elapsed, coverage)
         };
         Self::record_checkpoint_decision(flow_id, decision);

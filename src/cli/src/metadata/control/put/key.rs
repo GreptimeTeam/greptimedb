@@ -345,7 +345,7 @@ mod tests {
 
     #[test]
     fn test_validate_exact_flow_state_key() {
-        let value = FlowStateValue::new(BTreeMap::new(), BTreeMap::new())
+        let value = FlowStateValue::default()
             .try_as_raw_value()
             .unwrap();
 
