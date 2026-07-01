@@ -346,6 +346,10 @@ struct PromWriteError {
     rows_written: u64,
 }
 
+/// Writes one decoded PRW batch and keeps the number of persisted rows on error.
+///
+/// The v2 handler uses that partial progress to return Prometheus' written
+/// sample/histogram headers even when a later table write fails.
 async fn write_prometheus_rows_with_progress(
     prom_store_handler: PromStoreProtocolHandlerRef,
     pending_rows_batcher: Option<Arc<PendingRowsBatcher>>,

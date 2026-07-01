@@ -632,6 +632,9 @@ impl MetricEngineInner {
         }
 
         if check_fields {
+            // Sparse logical writes may omit nullable field columns. Fill them
+            // from the logical schema before the rows are rewritten for the
+            // shared physical table.
             for (field_name, field_meta) in logical_fields {
                 if !rows.schema.iter().any(|col| col.column_name == field_name) {
                     Self::fill_missing_field_column(
@@ -653,6 +656,8 @@ impl MetricEngineInner {
         field_meta: &ColumnMetadata,
         rows: &mut Rows,
     ) -> Result<()> {
+        // This is only for schema columns with a concrete default, usually NULL
+        // for native histogram families that are not populated in this row.
         ensure!(
             !field_meta.column_schema.is_default_impure(),
             UnexpectedRequestSnafu {

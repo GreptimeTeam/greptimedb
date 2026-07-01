@@ -12,6 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! Shared native histogram field contract.
+//!
+//! Prom remote-write v2 builds rows with these names, while metric-engine and
+//! operator code use the same contract to recognize native histogram tables.
+
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -36,6 +41,8 @@ pub const ZERO_COUNT_F64_FIELD: &str = "zero_count_f64";
 pub const POSITIVE_BUCKETS_F64_FIELD: &str = "positive_buckets_f64";
 pub const NEGATIVE_BUCKETS_F64_FIELD: &str = "negative_buckets_f64";
 
+// Keep int and float payloads in separate columns. The populated family is the
+// type signal, so we don't need to persist an extra histogram-type tag.
 pub const NATIVE_HISTOGRAM_FIELD_NAMES: &[&str] = &[
     SCHEMA_FIELD,
     ZERO_THRESHOLD_FIELD,
@@ -57,6 +64,7 @@ pub const NATIVE_HISTOGRAM_FIELD_NAMES: &[&str] = &[
     NEGATIVE_BUCKETS_F64_FIELD,
 ];
 
+/// Returns the exact Greptime type for a persisted native histogram field.
 pub fn native_histogram_field_type(name: &str) -> Option<ConcreteDataType> {
     match name {
         SCHEMA_FIELD | RESET_HINT_FIELD => Some(ConcreteDataType::int32_datatype()),
@@ -81,14 +89,11 @@ pub fn native_histogram_field_type(name: &str) -> Option<ConcreteDataType> {
     }
 }
 
-pub fn is_native_histogram_field(name: &str) -> bool {
-    native_histogram_field_type(name).is_some()
-}
-
 pub fn is_native_histogram_field_schema(name: &str, data_type: &ConcreteDataType) -> bool {
     native_histogram_field_type(name).is_some_and(|expected| expected == *data_type)
 }
 
+/// Checks for the complete native histogram field set with no extras or duplicates.
 pub fn is_native_histogram_field_set<'a>(
     fields: impl IntoIterator<Item = (&'a str, &'a ConcreteDataType)>,
 ) -> bool {

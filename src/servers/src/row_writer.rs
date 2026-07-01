@@ -264,6 +264,10 @@ pub fn write_json(
     )
 }
 
+/// Writes a list field and records the list item type in the column extension.
+///
+/// `None` values still create the column in the row schema; the row value is
+/// NULL. Native histograms use this for the unpopulated int/float bucket family.
 pub(crate) fn write_list(
     table_data: &mut TableData,
     name: &str,
@@ -509,6 +513,8 @@ fn check_schema(
     check_schema_number(datatype as i32, semantic_type as i32, schema)
 }
 
+// List columns all use `ColumnDataType::List`, so the extension is the part that
+// prevents an i64 bucket column from being reused as an f64 bucket column.
 fn check_list_schema(item_type: ColumnDataType, schema: &ColumnSchema) -> Result<()> {
     check_schema(ColumnDataType::List, SemanticType::Field, schema)?;
 
