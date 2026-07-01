@@ -675,6 +675,11 @@ impl Pruner {
             .is_some()
     }
 
+    /// Returns the manifest-pruned flag for a file (test-only).
+    fn test_is_manifest_pruned(&self, file_index: usize) -> bool {
+        self.inner.manifest_pruned_files[file_index].load(Ordering::Relaxed)
+    }
+
     /// Clears a cached builder for a file, simulating stale cleanup (test-only).
     #[allow(dead_code)]
     fn test_clear_builder(&self, file_index: usize) {
@@ -711,13 +716,17 @@ fn cache_builder_if_needed(
 #[cfg(test)]
 mod tests {
     use common_time::Timestamp;
+    use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
+    use datafusion_common::ScalarValue;
+    use datafusion_expr::{Expr, col, lit};
     use store_api::region_engine::PartitionRange;
     use store_api::storage::{FileId, RegionId};
 
     use super::*;
     use crate::read::flat_projection::FlatProjectionMapper;
     use crate::read::range::RowGroupIndex;
-    use crate::read::scan_region::ScanInput;
+    use crate::read::scan_region::{PredicateGroup, ScanInput};
+    use crate::read::scan_util::PartitionMetrics;
     use crate::sst::file::{FileHandle, FileMeta};
     use crate::sst::parquet::reader::ReaderMetrics;
     use crate::test_util::memtable_util::metadata_with_primary_key;
@@ -767,6 +776,55 @@ mod tests {
             num_rows: 1024,
             identifier: file_index,
         }
+    }
+
+    async fn make_test_pruner_with_predicate(
+        num_files: usize,
+        row_groups_per_file: u64,
+        predicate_exprs: &[Expr],
+    ) -> (SchedulerEnv, Arc<Pruner>) {
+        let env = SchedulerEnv::new().await;
+        let metadata = Arc::new(metadata_with_primary_key(vec![0, 1], false));
+        let mapper = FlatProjectionMapper::new(&metadata, [0, 2, 3]).unwrap();
+        let predicate = PredicateGroup::new(&metadata, predicate_exprs).unwrap();
+
+        let files: Vec<FileHandle> = (0..num_files)
+            .map(|_| {
+                let meta = FileMeta {
+                    region_id: RegionId::new(123, 456),
+                    file_id: FileId::random(),
+                    time_range: (
+                        Timestamp::new_millisecond(0),
+                        Timestamp::new_millisecond(1000),
+                    ),
+                    num_row_groups: row_groups_per_file,
+                    num_rows: row_groups_per_file * 1024,
+                    level: 0,
+                    ..Default::default()
+                };
+                FileHandle::new(meta, new_noop_file_purger())
+            })
+            .collect();
+
+        let input = ScanInput::new(env.access_layer.clone(), mapper)
+            .with_files(files)
+            .with_predicate(predicate)
+            .with_append_mode(true);
+        let stream_ctx = Arc::new(StreamContext::unordered_scan_ctx(input));
+        let pruner = Arc::new(Pruner::new(stream_ctx, 1));
+        (env, pruner)
+    }
+
+    fn make_partition_metrics() -> PartitionMetrics {
+        let metrics_set = ExecutionPlanMetricsSet::new();
+        PartitionMetrics::new(
+            RegionId::new(123, 456),
+            0,
+            "test",
+            Instant::now(),
+            false,
+            &metrics_set,
+        )
     }
 
     #[test]
@@ -911,5 +969,146 @@ mod tests {
         // The worker should still cache because remaining_ranges > 0.
         let entry = pruner.inner.file_entries[0].lock().unwrap();
         assert!(should_cache_builder(&entry));
+    }
+
+    // ── Corner case: fast-skip across multiple row groups ─────────────
+
+    /// 1 file × 3 row groups, predicate `ts > 10000ms` prunes the file at
+    /// manifest level. Fast-skipping each of the 3 row groups must return true
+    /// and decrement remaining_ranges to 0.
+    #[tokio::test]
+    async fn try_skip_manifest_pruned_file_range_multi_row_groups() {
+        let predicate_exprs: Vec<Expr> =
+            vec![col("ts").gt(lit(ScalarValue::TimestampMillisecond(Some(10_000), None)))];
+        let (_env, pruner) = make_test_pruner_with_predicate(1, 3, &predicate_exprs).await;
+
+        let ranges = pruner.inner.stream_ctx.partition_ranges();
+        assert_eq!(ranges.len(), 3);
+        pruner.add_partition_ranges(&ranges);
+        assert_eq!(pruner.test_remaining_ranges(0), 3);
+
+        let partition_pruner = Arc::new(PartitionPruner::new(pruner.clone(), &ranges));
+        let partition_metrics = make_partition_metrics();
+
+        // Fast-skip each of the 3 row groups.
+        for rg in 0..3 {
+            let index = RowGroupIndex {
+                index: 0, // file_index == 0, no memtables
+                row_group_index: rg,
+            };
+            let skipped =
+                partition_pruner.try_skip_manifest_pruned_file_range(index, &partition_metrics);
+            assert!(skipped, "row group {} should be skipped", rg);
+        }
+
+        // All refs consumed.
+        assert_eq!(pruner.test_remaining_ranges(0), 0);
+        // manifest_pruned_files is CAS'd exactly once (first call).
+        assert!(pruner.test_is_manifest_pruned(0));
+    }
+
+    /// A file whose manifest time range may contain matching rows must not be
+    /// fast-skipped. This protects query correctness over metrics precision.
+    #[tokio::test]
+    async fn try_skip_manifest_pruned_file_range_keeps_overlapping_file() {
+        let predicate_exprs: Vec<Expr> =
+            vec![col("ts").gt(lit(ScalarValue::TimestampMillisecond(Some(500), None)))];
+        let (_env, pruner) = make_test_pruner_with_predicate(1, 2, &predicate_exprs).await;
+
+        let ranges = pruner.inner.stream_ctx.partition_ranges();
+        assert_eq!(ranges.len(), 2);
+        pruner.add_partition_ranges(&ranges);
+        assert_eq!(pruner.test_remaining_ranges(0), 2);
+
+        let partition_pruner = Arc::new(PartitionPruner::new(pruner.clone(), &ranges));
+        let partition_metrics = make_partition_metrics();
+        let range_meta = &pruner.inner.stream_ctx.ranges[ranges[0].identifier];
+        let index = range_meta.row_group_indices[0];
+
+        let skipped =
+            partition_pruner.try_skip_manifest_pruned_file_range(index, &partition_metrics);
+
+        assert!(!skipped);
+        assert_eq!(pruner.test_remaining_ranges(0), 2);
+        assert!(!pruner.test_is_manifest_pruned(0));
+    }
+
+    // ── Corner case: add_partition_ranges resets the manifest-pruned flag ──
+
+    #[tokio::test]
+    async fn add_partition_ranges_resets_manifest_pruned_flag() {
+        let predicate_exprs: Vec<Expr> =
+            vec![col("ts").gt(lit(ScalarValue::TimestampMillisecond(Some(10_000), None)))];
+        let (_env, pruner) = make_test_pruner_with_predicate(1, 1, &predicate_exprs).await;
+
+        // Mark file 0 as manifest-pruned.
+        let mut reader_metrics = ReaderMetrics::default();
+        let marked = pruner
+            .inner
+            .try_mark_manifest_pruned(0, &mut reader_metrics);
+        assert!(marked);
+        assert!(pruner.test_is_manifest_pruned(0));
+        assert_eq!(reader_metrics.filter_metrics.files_time_range_pruned, 1);
+
+        // Calling add_partition_ranges must reset the flag.
+        let ranges = vec![file_partition_range(0)];
+        pruner.add_partition_ranges(&ranges);
+        assert!(!pruner.test_is_manifest_pruned(0));
+        // remaining_ranges was also incremented.
+        assert_eq!(pruner.test_remaining_ranges(0), 1);
+    }
+
+    // ── Corner case: prune_file_directly short-circuits via manifest prune ──
+
+    #[tokio::test]
+    async fn prune_file_directly_manifest_pruned_returns_empty_builder() {
+        let predicate_exprs: Vec<Expr> =
+            vec![col("ts").gt(lit(ScalarValue::TimestampMillisecond(Some(10_000), None)))];
+        let (_env, pruner) = make_test_pruner_with_predicate(1, 1, &predicate_exprs).await;
+
+        // Ensure there is no cached builder yet.
+        assert!(!pruner.test_has_builder(0));
+
+        let mut reader_metrics = ReaderMetrics::default();
+        let builder = pruner
+            .prune_file_directly(0, PreFilterMode::SkipFields, &mut reader_metrics)
+            .await
+            .unwrap();
+
+        // Should be the default (empty) builder.
+        assert_eq!(
+            builder.memory_size(),
+            FileRangeBuilder::default().memory_size()
+        );
+        // builder must NOT be cached — the manifest-pruned flag is enough.
+        assert!(!pruner.test_has_builder(0));
+        // files_time_range_pruned was recorded.
+        assert_eq!(reader_metrics.filter_metrics.files_time_range_pruned, 1);
+    }
+
+    // ── Corner case: try_mark_manifest_pruned does not double-count ───
+
+    #[tokio::test]
+    async fn try_mark_manifest_pruned_only_counts_first_cas() {
+        let predicate_exprs: Vec<Expr> =
+            vec![col("ts").gt(lit(ScalarValue::TimestampMillisecond(Some(10_000), None)))];
+        let (_env, pruner) = make_test_pruner_with_predicate(1, 1, &predicate_exprs).await;
+
+        // First call: CAS succeeds, metric incremented.
+        let mut reader_metrics = ReaderMetrics::default();
+        let marked = pruner
+            .inner
+            .try_mark_manifest_pruned(0, &mut reader_metrics);
+        assert!(marked);
+        assert_eq!(reader_metrics.filter_metrics.files_time_range_pruned, 1);
+        assert!(pruner.test_is_manifest_pruned(0));
+
+        // Second call: already true, no metric delta.
+        let mut reader_metrics2 = ReaderMetrics::default();
+        let marked2 = pruner
+            .inner
+            .try_mark_manifest_pruned(0, &mut reader_metrics2);
+        assert!(marked2);
+        assert_eq!(reader_metrics2.filter_metrics.files_time_range_pruned, 0);
     }
 }
