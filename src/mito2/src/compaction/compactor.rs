@@ -39,7 +39,7 @@ use crate::cache::{CacheManager, CacheManagerRef};
 use crate::compaction::picker::PickerOutput;
 use crate::compaction::{CompactionOutput, CompactionSstReaderBuilder, find_dynamic_options};
 use crate::config::MitoConfig;
-use crate::engine::region_hook::RegionHookRef;
+use crate::engine::region_hook::{RegionHookRef, SstFileInfo};
 use crate::error;
 use crate::error::{
     EmptyRegionDirSnafu, InvalidPartitionExprSnafu, ObjectStoreNotFoundSnafu, Result,
@@ -256,6 +256,90 @@ impl CompactionRegion {
         } else {
             Ok(())
         }
+    }
+
+    /// Fires [`RegionHook::on_sst_files_written`] for the freshly-merged SST
+    /// files in `merge_output`. Shared by both compaction paths, it must run
+    /// before [`Compactor::update_manifest`], whose `on_manifest_updated`
+    /// drains the per-region state this hook populates.
+    pub async fn invoke_sst_hook(&self, merge_output: &MergeOutput) {
+        let Some(hook) = self.plugins.get::<RegionHookRef>() else {
+            return;
+        };
+
+        // Remote compaction deserializes `MergeOutput` over gRPC, where
+        // `sst_infos` is `#[serde(skip)]`. Rebuild each `SstInfo` from the
+        // matching `FileMeta` so the hook observes real ids/rows/sizes rather
+        // than zeros — see [`sst_info_from_file_meta`] for what stays default.
+        let synthesized: Vec<SstInfo>;
+        let infos: &[SstInfo] = if merge_output.sst_infos.is_empty() {
+            synthesized = merge_output
+                .files_to_add
+                .iter()
+                .map(sst_info_from_file_meta)
+                .collect();
+            &synthesized
+        } else {
+            // `sst_infos` and `files_to_add` are documented as 1:1. If they
+            // ever diverge, `zip` below would silently truncate; warn so the
+            // mismatch is observable rather than dropping files from the hook.
+            if merge_output.sst_infos.len() != merge_output.files_to_add.len() {
+                warn!(
+                    "sst_infos length ({}) does not match files_to_add length ({}) for region {}",
+                    merge_output.sst_infos.len(),
+                    merge_output.files_to_add.len(),
+                    self.region_id
+                );
+            }
+            &merge_output.sst_infos
+        };
+
+        let files: Vec<SstFileInfo<'_>> = merge_output
+            .files_to_add
+            .iter()
+            .zip(infos)
+            .map(|(meta, info)| SstFileInfo {
+                sst_info_ref: info,
+                file_meta: meta,
+            })
+            .collect();
+        hook.on_sst_files_written(self.region_id, &self.region_metadata, &files)
+            .await;
+    }
+}
+
+/// Builds an [`SstInfo`] for the remote-compaction path by copying the scalar
+/// fields that [`FileMeta`] also carries.
+///
+/// Remote compaction runs off-process and ships `MergeOutput` over the wire;
+/// [`MergeOutput::sst_infos`] is `#[serde(skip)]` because the parquet footer
+/// (`ParquetMetaData`) is not serde-serializable. To avoid feeding the hook
+/// default (zero) values for real SSTs, this rebuilds the seven fields `FileMeta`
+/// and `SstInfo` share: `file_id`, `time_range`, `file_size`,
+/// `max_row_group_uncompressed_size`, `num_rows`, `num_row_groups`, `num_series`.
+///
+/// Two fields stay default and **cannot be recovered on the datanode**:
+/// - `file_metadata` — the parquet footer, whose column min/max/null-count
+///   statistics are required by hooks building richer artifacts (e.g. an Iceberg
+///   manifest). That data is produced by the compactor's writer and exists only
+///   in the freshly-written SST on object storage.
+/// - `index_metadata` — `FileMeta` tracks indexes via `available_indexes` /
+///   `indexes`, not as an [`IndexOutput`].
+///
+/// A hook that needs column stats must fetch the footer from object storage
+/// (the [`CompactionRegion`]'s `access_layer` reaches the store), or the footer
+/// must be shipped over the wire (revisit the `#[serde(skip)]` on `sst_infos`).
+/// `num_rows` may read `0` for legacy `FileMeta`s where the count is unknown.
+fn sst_info_from_file_meta(meta: &FileMeta) -> SstInfo {
+    SstInfo {
+        file_id: meta.file_id,
+        time_range: meta.time_range,
+        file_size: meta.file_size,
+        max_row_group_uncompressed_size: meta.max_row_group_uncompressed_size,
+        num_rows: meta.num_rows as usize,
+        num_row_groups: meta.num_row_groups,
+        num_series: meta.num_series,
+        ..Default::default()
     }
 }
 
