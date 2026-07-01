@@ -52,6 +52,7 @@ use crate::dist_plan::commutativity::{
 use crate::dist_plan::merge_scan::MergeScanLogicalPlan;
 use crate::dist_plan::merge_sort::MergeSortLogicalPlan;
 use crate::metrics::PUSH_DOWN_FALLBACK_ERRORS_TOTAL;
+use crate::options::ScheduledTimeExtension;
 use crate::plan::ExtractExpr;
 use crate::query_engine::DefaultSerializer;
 
@@ -123,9 +124,18 @@ impl AnalyzerRule for DistPlannerAnalyzer {
         let opt = config.extensions.get::<DistPlannerOptions>();
         let allow_fallback = opt.map(|o| o.allow_query_fallback).unwrap_or(false);
 
+        // When the query is running under a scheduled Flow context, carry the
+        // logical "now" so that `SimplifyExpressions` does not constant-fold
+        // `now()` into wall-clock literals on the remote sub-plans.
+        let scheduled_time = config
+            .extensions
+            .get::<ScheduledTimeExtension>()
+            .and_then(|ext| ext.scheduled_time);
+
         let optimizer_context = PatchOptimizerContext {
             inner: datafusion_optimizer::OptimizerContext::new(),
             config: config.clone(),
+            scheduled_time,
         };
 
         let plan = plan
@@ -142,6 +152,7 @@ impl AnalyzerRule for DistPlannerAnalyzer {
         let optimizer_context = PatchOptimizerContext {
             inner: datafusion_optimizer::OptimizerContext::new(),
             config: config.clone(),
+            scheduled_time,
         };
         let plan = match pre_merge_scan_optimizer().optimize(plan, &optimizer_context, |_, _| {}) {
             Ok(plan) => plan,
