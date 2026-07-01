@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::time::Duration;
-
 use common_error::ext::BoxedError;
 use common_macro::admin_fn;
 use common_meta::rpc::procedure::{GcRegionsRequest, GcTableRequest};
@@ -30,7 +28,6 @@ use snafu::{ResultExt, ensure};
 use crate::handlers::ProcedureServiceHandlerRef;
 use crate::helper::cast_u64;
 
-const DEFAULT_GC_TIMEOUT: Duration = Duration::from_secs(60);
 const DEFAULT_FULL_FILE_LISTING: bool = false;
 
 #[admin_fn(
@@ -50,7 +47,7 @@ pub(crate) async fn gc_regions(
         .gc_regions(GcRegionsRequest {
             region_ids,
             full_file_listing,
-            timeout: DEFAULT_GC_TIMEOUT,
+            timeout: None,
         })
         .await?;
 
@@ -77,7 +74,7 @@ pub(crate) async fn gc_table(
             schema_name,
             table_name,
             full_file_listing,
-            timeout: DEFAULT_GC_TIMEOUT,
+            timeout: None,
         })
         .await?;
 
@@ -180,9 +177,18 @@ fn gc_table_signature() -> Signature {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use api::v1::meta::ReconcileRequest;
+    use async_trait::async_trait;
+    use catalog::CatalogManagerRef;
+    use common_meta::rpc::procedure::{
+        GcResponse, ManageRegionFollowerRequest, MigrateRegionRequest, ProcedureStateResponse,
+    };
     use session::context::QueryContext;
 
     use super::*;
+    use crate::handlers::ProcedureServiceHandler;
 
     #[test]
     fn test_parse_gc_regions_params_with_full_file_listing() {
@@ -216,5 +222,81 @@ mod tests {
         assert_eq!(schema, "public");
         assert_eq!(table, "t");
         assert!(full_file_listing);
+    }
+
+    #[tokio::test]
+    async fn test_gc_regions_uses_meta_gc_timeout_config() {
+        let handler = Arc::new(MockProcedureServiceHandler::default());
+        let handler_ref: ProcedureServiceHandlerRef = handler.clone();
+        let params = vec![ValueRef::UInt64(1), ValueRef::Boolean(true)];
+
+        super::gc_regions(&handler_ref, &QueryContext::arc(), &params)
+            .await
+            .unwrap();
+
+        let request = handler.gc_regions_request.lock().unwrap().clone().unwrap();
+        assert_eq!(request.region_ids, vec![1]);
+        assert!(request.full_file_listing);
+        assert_eq!(request.timeout, None);
+    }
+
+    #[tokio::test]
+    async fn test_gc_table_uses_meta_gc_timeout_config() {
+        let handler = Arc::new(MockProcedureServiceHandler::default());
+        let handler_ref: ProcedureServiceHandlerRef = handler.clone();
+        let params = vec![ValueRef::String("public.t"), ValueRef::Boolean(true)];
+
+        super::gc_table(&handler_ref, &QueryContext::arc(), &params)
+            .await
+            .unwrap();
+
+        let request = handler.gc_table_request.lock().unwrap().clone().unwrap();
+        assert_eq!(request.catalog_name, "greptime");
+        assert_eq!(request.schema_name, "public");
+        assert_eq!(request.table_name, "t");
+        assert!(request.full_file_listing);
+        assert_eq!(request.timeout, None);
+    }
+
+    #[derive(Default)]
+    struct MockProcedureServiceHandler {
+        gc_regions_request: Mutex<Option<GcRegionsRequest>>,
+        gc_table_request: Mutex<Option<GcTableRequest>>,
+    }
+
+    #[async_trait]
+    impl ProcedureServiceHandler for MockProcedureServiceHandler {
+        async fn migrate_region(&self, _request: MigrateRegionRequest) -> Result<Option<String>> {
+            unreachable!()
+        }
+
+        async fn reconcile(&self, _request: ReconcileRequest) -> Result<Option<String>> {
+            unreachable!()
+        }
+
+        async fn query_procedure_state(&self, _pid: &str) -> Result<ProcedureStateResponse> {
+            unreachable!()
+        }
+
+        async fn manage_region_follower(
+            &self,
+            _request: ManageRegionFollowerRequest,
+        ) -> Result<()> {
+            unreachable!()
+        }
+
+        fn catalog_manager(&self) -> &CatalogManagerRef {
+            unreachable!()
+        }
+
+        async fn gc_regions(&self, request: GcRegionsRequest) -> Result<GcResponse> {
+            *self.gc_regions_request.lock().unwrap() = Some(request);
+            Ok(GcResponse::default())
+        }
+
+        async fn gc_table(&self, request: GcTableRequest) -> Result<GcResponse> {
+            *self.gc_table_request.lock().unwrap() = Some(request);
+            Ok(GcResponse::default())
+        }
     }
 }
