@@ -224,34 +224,37 @@ fn validate_analyze_stream_statement(stmt: &mut Statement) -> Result<()> {
 }
 
 impl Instance {
+    fn statement_slow_query_timer(
+        &self,
+        stmt: &Statement,
+        schema_name: String,
+    ) -> Option<SlowQueryTimer> {
+        if !stmt.is_readonly() || !self.slow_query_options.enable {
+            return None;
+        }
+
+        self.event_recorder.clone().map(|event_recorder| {
+            SlowQueryTimer::new(
+                CatalogQueryStatement::Sql(stmt.clone()),
+                schema_name,
+                self.slow_query_options.threshold,
+                self.slow_query_options.sample_ratio,
+                self.slow_query_options.record_type,
+                event_recorder,
+            )
+        })
+    }
+
     async fn query_statement(&self, stmt: Statement, query_ctx: QueryContextRef) -> Result<Output> {
         check_permission(self.plugins.clone(), &stmt, &query_ctx)?;
 
         let query_interceptor = self.plugins.get::<SqlQueryInterceptorRef<Error>>();
         let query_interceptor = query_interceptor.as_ref();
 
-        let is_readonly_stmt = stmt.is_readonly();
         if should_track_statement_process(&stmt) {
             let catalog_name = query_ctx.current_catalog().to_string();
             let schema_name = query_ctx.current_schema();
-            let slow_query_timer = if is_readonly_stmt {
-                self.slow_query_options
-                    .enable
-                    .then(|| self.event_recorder.clone())
-                    .flatten()
-                    .map(|event_recorder| {
-                        SlowQueryTimer::new(
-                            CatalogQueryStatement::Sql(stmt.clone()),
-                            schema_name.clone(),
-                            self.slow_query_options.threshold,
-                            self.slow_query_options.sample_ratio,
-                            self.slow_query_options.record_type,
-                            event_recorder,
-                        )
-                    })
-            } else {
-                None
-            };
+            let slow_query_timer = self.statement_slow_query_timer(&stmt, schema_name.clone());
 
             let ticket = self.process_manager.register_query(
                 catalog_name,
@@ -610,13 +613,16 @@ impl Instance {
             .check_permission(query_ctx.current_user(), PermissionReq::SqlStatement(&stmt))
             .context(PermissionSnafu)?;
         check_permission(self.plugins.clone(), &stmt, &query_ctx)?;
+        let catalog_name = query_ctx.current_catalog().to_string();
+        let schema_name = query_ctx.current_schema();
+        let slow_query_timer = self.statement_slow_query_timer(&stmt, schema_name.clone());
         let ticket = self.process_manager.register_query(
-            query_ctx.current_catalog().to_string(),
-            vec![query_ctx.current_schema()],
+            catalog_name,
+            vec![schema_name],
             stmt.to_string(),
             query_ctx.conn_info().to_string(),
             Some(query_ctx.process_id()),
-            None,
+            slow_query_timer,
         );
         let query_fut =
             self.exec_statement_with_timeout(stmt, query_ctx.clone(), query_interceptor);
