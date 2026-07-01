@@ -58,13 +58,13 @@ pub struct AlterLogicalTablesProcedure {
 fn build_validator_from_alter_table_data<'a>(
     data: &'a AlterTablesData,
 ) -> AlterLogicalTableValidator<'a> {
-    let phsycial_table_id = data.physical_table_id;
+    let physical_table_id = data.physical_table_id;
     let alters = data
         .tasks
         .iter()
         .map(|task| &task.alter_table)
         .collect::<Vec<_>>();
-    AlterLogicalTableValidator::new(phsycial_table_id, alters)
+    AlterLogicalTableValidator::new(physical_table_id, alters)
 }
 
 /// Builds the executor from the [`AlterTablesData`].
