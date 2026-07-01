@@ -1,0 +1,8 @@
+name = "last_row_append_mode"
+reason = "Verify a table created with merge_mode='last_row' by old binaries can switch to append_mode after upgrade."
+introduced_by = "PR #8065"
+topologies = ["distributed"]
+from_range = ["*"]
+to_range = ["*"]
+features = ["table", "merge", "append_mode"]
+owner = "storage"

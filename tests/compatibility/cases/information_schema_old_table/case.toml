@@ -1,0 +1,8 @@
+name = "information_schema_old_table"
+reason = "Verify current information_schema views expose table and column metadata for tables created by old binaries."
+introduced_by = "PR #8210"
+topologies = ["distributed"]
+from_range = ["*"]
+to_range = ["*"]
+features = ["information_schema", "table"]
+owner = "query"
