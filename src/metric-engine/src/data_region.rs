@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use api::v1::SemanticType;
+use common_query::native_histogram::is_native_histogram_field_schema;
 use common_telemetry::{debug, info};
 use datatypes::schema::{SkippingIndexOptions, SkippingIndexType};
 use mito2::engine::MitoEngine;
@@ -123,42 +124,52 @@ impl DataRegion {
             .into_iter()
             .enumerate()
             .map(|(delta, mut c)| {
-                if c.semantic_type == SemanticType::Tag {
-                    if !c.column_schema.data_type.is_string() {
-                        return ColumnTypeMismatchSnafu {
-                            expect: ConcreteDataType::string_datatype(),
-                            actual: c.column_schema.data_type.clone(),
+                match c.semantic_type {
+                    SemanticType::Tag => {
+                        if !c.column_schema.data_type.is_string() {
+                            return ColumnTypeMismatchSnafu {
+                                expect: ConcreteDataType::string_datatype(),
+                                actual: c.column_schema.data_type.clone(),
+                            }
+                            .fail();
+                        }
+                    }
+                    SemanticType::Field
+                        if is_native_histogram_field_schema(
+                            &c.column_schema.name,
+                            &c.column_schema.data_type,
+                        ) => {}
+                    _ => {
+                        return AddingFieldColumnSnafu {
+                            name: &c.column_schema.name,
                         }
                         .fail();
                     }
-                } else {
-                    return AddingFieldColumnSnafu {
-                        name: &c.column_schema.name,
-                    }
-                    .fail();
-                };
+                }
 
                 c.column_id = new_column_id_start + delta as u32;
                 c.column_schema.set_nullable();
-                match index_options {
-                    IndexOptions::None => {}
-                    IndexOptions::Inverted => {
-                        c.column_schema.set_inverted_index(true);
-                    }
-                    IndexOptions::Skipping {
-                        granularity,
-                        false_positive_rate,
-                    } => {
-                        c.column_schema
-                            .set_skipping_options(
-                                &SkippingIndexOptions::new(
-                                    granularity,
-                                    false_positive_rate,
-                                    SkippingIndexType::BloomFilter,
+                if c.semantic_type == SemanticType::Tag {
+                    match index_options {
+                        IndexOptions::None => {}
+                        IndexOptions::Inverted => {
+                            c.column_schema.set_inverted_index(true);
+                        }
+                        IndexOptions::Skipping {
+                            granularity,
+                            false_positive_rate,
+                        } => {
+                            c.column_schema
+                                .set_skipping_options(
+                                    &SkippingIndexOptions::new(
+                                        granularity,
+                                        false_positive_rate,
+                                        SkippingIndexType::BloomFilter,
+                                    )
+                                    .context(SetSkippingIndexOptionSnafu)?,
                                 )
-                                .context(SetSkippingIndexOptionSnafu)?,
-                            )
-                            .context(SetSkippingIndexOptionSnafu)?;
+                                .context(SetSkippingIndexOptionSnafu)?;
+                        }
                     }
                 }
 

@@ -20,15 +20,13 @@ flowchart TD
     E --> G["write_prometheus_rows_with_progress"]
     G --> H["metric engine / pending batcher when enabled"]
 
-    F --> I["histogram ContextOpt without physical table"]
+    F --> I["histogram ContextOpt"]
     I --> J["write_prometheus_rows_with_progress"]
-    J --> K["with_metric_engine = false, no batcher"]
-    K --> L["ordinary table: <metric>_native_histogram"]
+    J --> K["same metric-engine flag as samples, no batcher"]
+    K --> L["table: <metric>"]
 
     L --> M["list fields: spans, buckets, custom_values"]
     L --> N["scalar fields: count, zero_count, sum, schema, reset_hint, start_timestamp"]
-    L --> O["tag: greptime_histogram_type"]
-
     H --> P["written headers and counters"]
     K --> P
 ```
@@ -37,13 +35,11 @@ The conversion step splits one v2 request into two `ContextReq`s:
 
 - samples keep the existing sample table name and can use the metric-engine
   physical table path and pending rows batcher;
-- native histograms are written to ordinary `<metric>_native_histogram` tables.
+- native histograms keep the existing metric table name.
 
-Native histogram rows intentionally do not use metric-engine physical-table
-routing. Metric-engine physical tables cannot store the native histogram list
-schema, so histogram conversion drops physical-table routing from the histogram
-`ContextOpt`, and the HTTP write path calls the shared writer with
-`with_metric_engine = false` and no batcher.
+Native histogram rows follow the same metric-engine switch as samples. They do
+not use the pending rows batcher yet because the batcher assumes the classic
+timestamp + Float64 value + string tags shape.
 
 Each histogram row stores:
 
@@ -51,7 +47,6 @@ Each histogram row stores:
   `start_timestamp`;
 - count fields: `count_u64` / `zero_count_u64` or `count_f64` / `zero_count_f64`;
 - list fields for custom values, spans, and positive/negative buckets;
-- `greptime_histogram_type`, either `int` or `float`;
 - original Prometheus labels as Greptime tags.
 
 The v2 response always reports written sample, histogram, and exemplar counts in

@@ -594,17 +594,14 @@ async fn test_prometheus_remote_write_v2_writes_histogram_only_series() {
     assert!(result.text().await.is_empty());
 
     let captured = write_rx.recv().await.unwrap();
-    assert!(!captured.with_metric_engine);
+    assert!(captured.with_metric_engine);
     assert_eq!(
         Some(GREPTIME_PHYSICAL_TABLE.to_string()),
         captured.physical_table
     );
     assert_eq!(1, captured.request.inserts.len());
     let insert = &captured.request.inserts[0];
-    assert_eq!(
-        "http_request_duration_seconds_native_histogram",
-        insert.table_name
-    );
+    assert_eq!("http_request_duration_seconds", insert.table_name);
     let rows = insert.rows.as_ref().unwrap();
     assert_eq!(1, rows.rows.len());
     assert!(

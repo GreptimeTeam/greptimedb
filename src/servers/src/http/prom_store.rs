@@ -270,12 +270,10 @@ async fn remote_write_v2(
     let mut write_cost = outcome.write_cost;
 
     if req.histogram_count > 0 {
-        // Native histograms are persisted as ordinary tables because metric-engine
-        // physical tables cannot store the native histogram list schema.
         let outcome = match write_prometheus_rows_with_progress(
             prom_store_handler,
             None,
-            false,
+            prom_store_with_metric_engine,
             query_ctx,
             req.histograms,
         )

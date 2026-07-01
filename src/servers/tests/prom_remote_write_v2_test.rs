@@ -81,7 +81,7 @@ fn test_decode_remote_write_v2_native_histogram_dump() {
     let insert = &histogram_inserts[0];
     assert_eq!(
         insert.table_name,
-        "received_from_a_http_request_duration_seconds_native_histogram"
+        "received_from_a_http_request_duration_seconds"
     );
     let rows = insert.rows.as_ref().unwrap();
     assert_eq!(rows.rows.len(), 1);
@@ -97,10 +97,6 @@ fn test_decode_remote_write_v2_native_histogram_dump() {
     assert_eq!(
         row.values[column_index(&rows.schema, "count_u64")].value_data,
         Some(ValueData::U64Value(24))
-    );
-    assert_eq!(
-        row.values[column_index(&rows.schema, "greptime_histogram_type")].value_data,
-        Some(ValueData::StringValue("int".to_string()))
     );
     assert_eq!(
         list_i32_values(row, column_index(&rows.schema, "positive_span_offsets")),
