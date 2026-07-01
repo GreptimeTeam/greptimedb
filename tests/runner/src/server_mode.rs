@@ -595,8 +595,9 @@ mod tests {
     }
 
     fn has_arg(args: &[String], name: &str) -> bool {
+        let prefix = format!("{name}=");
         args.iter()
-            .any(|arg| arg == name || arg.starts_with(&format!("{name}=")))
+            .any(|arg| arg == name || arg.starts_with(&prefix))
     }
 
     fn assert_uses_style(args: &[String], style: GrpcArgStyle, expect_server_addr: bool) {
