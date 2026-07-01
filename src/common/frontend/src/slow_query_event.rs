@@ -109,7 +109,7 @@ impl Event for SlowQueryEvent {
             ColumnSchema {
                 column_name: SLOW_QUERY_TABLE_SCHEMA_NAME_COLUMN_NAME.to_string(),
                 datatype: ColumnDataType::String.into(),
-                semantic_type: SemanticType::Tag.into(),
+                semantic_type: SemanticType::Field.into(),
                 ..Default::default()
             },
         ]
@@ -176,7 +176,7 @@ mod tests {
                 SLOW_QUERY_TABLE_SCHEMA_NAME_COLUMN_NAME,
             ]
         );
-        assert_eq!(schema[8].semantic_type, SemanticType::Tag as i32);
+        assert_eq!(schema[8].semantic_type, SemanticType::Field as i32);
 
         let rows = event.extra_rows().unwrap();
         assert_eq!(rows.len(), 1);
