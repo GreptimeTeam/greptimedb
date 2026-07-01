@@ -38,8 +38,8 @@ use crate::key::flow::flow_info::{FlowInfoKey, FlowInfoValue};
 use crate::key::table_info::{TableInfoKey, TableInfoValue};
 use crate::key::table_name::TableNameKey;
 use crate::key::{DeserializedValueWithBytes, FlowId, MetadataKey, MetadataValue};
-use crate::lock_key::{CatalogLock, FlowNameLock, SchemaLock, TableNameLock};
-use crate::rpc::ddl::{CommentObjectType, CommentOnTask};
+use crate::lock_key::{CatalogLock, FlowLock, FlowNameLock, SchemaLock, TableLock, TableNameLock};
+use crate::rpc::ddl::{CommentObjectId, CommentObjectType, CommentOnTask};
 use crate::rpc::store::PutRequest;
 
 pub struct CommentOnProcedure {
@@ -106,26 +106,29 @@ impl CommentOnProcedure {
     }
 
     async fn prepare_table_or_column(&mut self) -> Result<()> {
-        let table_name_key = TableNameKey::new(
-            &self.data.catalog_name,
-            &self.data.schema_name,
-            &self.data.object_name,
-        );
+        let table_id = if let Some(table_id) = self.data.table_id {
+            table_id
+        } else {
+            let table_name_key = TableNameKey::new(
+                &self.data.catalog_name,
+                &self.data.schema_name,
+                &self.data.object_name,
+            );
 
-        let table_id = self
-            .context
-            .table_metadata_manager
-            .table_name_manager()
-            .get(table_name_key)
-            .await?
-            .with_context(|| TableNotFoundSnafu {
-                table_name: format_full_table_name(
-                    &self.data.catalog_name,
-                    &self.data.schema_name,
-                    &self.data.object_name,
-                ),
-            })?
-            .table_id();
+            self.context
+                .table_metadata_manager
+                .table_name_manager()
+                .get(table_name_key)
+                .await?
+                .with_context(|| TableNotFoundSnafu {
+                    table_name: format_full_table_name(
+                        &self.data.catalog_name,
+                        &self.data.schema_name,
+                        &self.data.object_name,
+                    ),
+                })?
+                .table_id()
+        };
 
         let table_info = self
             .context
@@ -198,17 +201,19 @@ impl CommentOnProcedure {
     }
 
     async fn prepare_flow(&mut self) -> Result<()> {
-        let flow_name_value = self
-            .context
-            .flow_metadata_manager
-            .flow_name_manager()
-            .get(&self.data.catalog_name, &self.data.object_name)
-            .await?
-            .with_context(|| FlowNotFoundSnafu {
-                flow_name: &self.data.object_name,
-            })?;
-
-        let flow_id = flow_name_value.flow_id();
+        let flow_id = if let Some(flow_id) = self.data.flow_id {
+            flow_id
+        } else {
+            self.context
+                .flow_metadata_manager
+                .flow_name_manager()
+                .get(&self.data.catalog_name, &self.data.object_name)
+                .await?
+                .with_context(|| FlowNotFoundSnafu {
+                    flow_name: &self.data.object_name,
+                })?
+                .flow_id()
+        };
         let flow_info = self
             .context
             .flow_metadata_manager
@@ -411,17 +416,23 @@ impl Procedure for CommentOnProcedure {
 
         let lock_key = match self.data.object_type {
             CommentObjectType::Table | CommentObjectType::Column => {
-                vec![
+                let mut lock_key = vec![
                     CatalogLock::Read(catalog).into(),
                     SchemaLock::read(catalog, schema).into(),
-                    TableNameLock::new(catalog, schema, &self.data.object_name).into(),
-                ]
+                ];
+                if let Some(table_id) = self.data.table_id {
+                    lock_key.push(TableLock::Write(table_id).into());
+                }
+                lock_key.push(TableNameLock::new(catalog, schema, &self.data.object_name).into());
+                lock_key
             }
             CommentObjectType::Flow => {
-                vec![
-                    CatalogLock::Read(catalog).into(),
-                    FlowNameLock::new(catalog, &self.data.object_name).into(),
-                ]
+                let mut lock_key = vec![CatalogLock::Read(catalog).into()];
+                if let Some(flow_id) = self.data.flow_id {
+                    lock_key.push(FlowLock::Write(flow_id).into());
+                }
+                lock_key.push(FlowNameLock::new(catalog, &self.data.object_name).into());
+                lock_key
             }
         };
 
@@ -466,6 +477,12 @@ pub struct CommentOnData {
 
 impl CommentOnData {
     pub fn new(task: CommentOnTask) -> Self {
+        let (table_id, flow_id) = match task.object_id {
+            Some(CommentObjectId::Table(table_id)) => (Some(table_id), None),
+            Some(CommentObjectId::Flow(flow_id)) => (None, Some(flow_id)),
+            None => (None, None),
+        };
+
         Self {
             state: CommentOnState::Prepare,
             catalog_name: task.catalog_name,
@@ -474,9 +491,9 @@ impl CommentOnData {
             object_name: task.object_name,
             column_name: task.column_name,
             comment: task.comment,
-            table_id: None,
+            table_id,
             table_info: None,
-            flow_id: None,
+            flow_id,
             flow_info: None,
             is_unchanged: false,
         }
