@@ -2415,6 +2415,7 @@ pub async fn test_prometheus_remote_write_v2_native_histogram(store_type: Storag
             positive_deltas: vec![1, 2, -1],
             reset_hint: 2,
             timestamp: 3000,
+            start_timestamp: 1500,
             custom_values: vec![0.5, 1.5],
             ..Default::default()
         },
@@ -2431,6 +2432,7 @@ pub async fn test_prometheus_remote_write_v2_native_histogram(store_type: Storag
             positive_counts: vec![2.0, 3.5],
             reset_hint: 3,
             timestamp: 4000,
+            start_timestamp: 2500,
             ..Default::default()
         },
     ];
@@ -2465,7 +2467,7 @@ pub async fn test_prometheus_remote_write_v2_native_histogram(store_type: Storag
         "prometheus_remote_write_v2_native_histogram_rows",
         &client,
         "select * from remote_write_v2_latency_seconds_native_histogram order by greptime_timestamp;",
-        "[[3000,1,0.001,10.0,2,[0.5,1.5],[0],[3],[-2],[1],4,1,[1,2,-1],[1],null,null,null,null,\"int\",\"api\",\"localhost:9090\"],[4000,2,0.002,20.0,3,[],[3],[2],[],[],null,null,null,null,3.5,0.5,[2.0,3.5],[],\"float\",\"api\",\"localhost:9090\"]]",
+        "[[3000,1,0.001,10.0,2,1500,[0.5,1.5],[0],[3],[-2],[1],4,1,[1,2,-1],[1],null,null,null,null,\"int\",\"api\",\"localhost:9090\"],[4000,2,0.002,20.0,3,2500,[],[3],[2],[],[],null,null,null,null,3.5,0.5,[2.0,3.5],[],\"float\",\"api\",\"localhost:9090\"]]",
     )
     .await;
 

@@ -303,7 +303,7 @@ pub(crate) fn write_attributes(
 mod tests {
     use api::v1::value::ValueData;
     use opentelemetry_proto::tonic::common::v1::any_value::Value as OtlpValue;
-    use opentelemetry_proto::tonic::common::v1::{AnyValue, KeyValue};
+    use opentelemetry_proto::tonic::common::v1::{AnyValue, ArrayValue, KeyValue};
 
     use super::*;
     use crate::otlp::trace::TraceAuxData;
@@ -531,6 +531,42 @@ mod tests {
             rows[1].values[col_idx].value_data,
             Some(ValueData::StringValue("false".to_string()))
         );
+    }
+
+    #[test]
+    fn test_keep_mixed_binary_and_json_values_until_frontend_reconciliation() {
+        let mut writer = TableData::new(4, 2);
+
+        let attrs1 = Attributes::from(vec![make_kv(
+            "val",
+            OtlpValue::BytesValue(vec![1_u8, 2, 3]),
+        )]);
+        let mut row1 = writer.alloc_one_row();
+        write_attributes(&mut writer, "attr", attrs1, &mut row1).unwrap();
+        writer.add_row(row1);
+
+        let attrs2 = Attributes::from(vec![make_kv(
+            "val",
+            OtlpValue::ArrayValue(ArrayValue {
+                values: vec![AnyValue {
+                    value: Some(OtlpValue::IntValue(1)),
+                }],
+            }),
+        )]);
+        let mut row2 = writer.alloc_one_row();
+        write_attributes(&mut writer, "attr", attrs2, &mut row2).unwrap();
+        writer.add_row(row2);
+
+        let (schema, rows) = writer.into_schema_and_rows();
+        let col_idx = schema
+            .iter()
+            .position(|c| c.column_name == "attr.val")
+            .unwrap();
+        assert_eq!(schema[col_idx].datatype, ColumnDataType::Binary as i32);
+        assert!(matches!(
+            rows[1].values[col_idx].value_data.as_ref(),
+            Some(ValueData::BinaryValue(_))
+        ));
     }
 
     #[test]
