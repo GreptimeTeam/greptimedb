@@ -574,9 +574,15 @@ impl DdlManager {
     #[tracing::instrument(skip_all)]
     pub async fn submit_comment_on_task(
         &self,
-        comment_on_task: CommentOnTask,
+        mut comment_on_task: CommentOnTask,
     ) -> Result<(ProcedureId, Option<Output>)> {
         let context = self.create_context();
+        comment_on_task
+            .enrich_object_id(
+                context.table_metadata_manager.table_name_manager(),
+                context.flow_metadata_manager.flow_name_manager(),
+            )
+            .await?;
         let procedure = CommentOnProcedure::new(comment_on_task, context);
         let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
 
