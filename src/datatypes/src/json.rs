@@ -29,7 +29,7 @@ use serde_json::{Map, Value as Json};
 use snafu::ResultExt;
 
 use crate::data_type::ConcreteDataType;
-use crate::error::{self, Result};
+use crate::error::{self, Result, UnsupportedJsonTypeSnafu};
 use crate::json::value::{JsonValue, JsonVariant};
 use crate::schema::ColumnDefaultConstraint;
 use crate::types::json_type::JsonNativeType;
@@ -120,6 +120,10 @@ impl<'a> JsonContext<'a> {
 
 /// Main encoding function with key path tracking
 pub fn encode_json_with_context<'a>(json: Json, context: &JsonContext<'a>) -> Result<JsonValue> {
+    if context.path.is_empty() && !matches!(json, Json::Object(_)) {
+        return UnsupportedJsonTypeSnafu.fail();
+    }
+
     match json {
         Json::Object(json_object) => encode_json_object_with_context(json_object, context),
         Json::Array(json_array) => encode_json_array_with_context(json_array, context),
@@ -536,61 +540,25 @@ mod tests {
     }
 
     #[test]
-    fn test_encode_json_null() {
-        let json = Json::Null;
+    fn test_encode_root_non_object_json() {
         let settings = JsonSettings::default();
-        let result = settings.encode(json).unwrap().into_json_inner().unwrap();
-        assert_eq!(result, Value::Null);
-    }
+        let cases = [
+            ("null", Json::Null),
+            ("boolean", Json::Bool(true)),
+            ("integer", Json::from(42)),
+            ("float", Json::from(3.15)),
+            ("string", Json::String("hello".to_string())),
+            ("array", json!([1, 2, 3])),
+            ("mixed array", json!([1, "hello", true, 3.15])),
+            ("empty array", json!([])),
+        ];
 
-    #[test]
-    fn test_encode_json_boolean() {
-        let json = Json::Bool(true);
-        let settings = JsonSettings::default();
-        let result = settings.encode(json).unwrap().into_json_inner().unwrap();
-        assert_eq!(result, Value::Boolean(true));
-    }
-
-    #[test]
-    fn test_encode_json_number_integer() {
-        let json = Json::from(42);
-        let settings = JsonSettings::default();
-        let result = settings.encode(json).unwrap().into_json_inner().unwrap();
-        assert_eq!(result, Value::Int64(42));
-    }
-
-    #[test]
-    fn test_encode_json_number_float() {
-        let json = Json::from(3.15);
-        let settings = JsonSettings::default();
-        let result = settings.encode(json).unwrap().into_json_inner().unwrap();
-        match result {
-            Value::Float64(f) => assert_eq!(f.0, 3.15),
-            _ => panic!("Expected Float64"),
-        }
-    }
-
-    #[test]
-    fn test_encode_json_string() {
-        let json = Json::String("hello".to_string());
-        let settings = JsonSettings::default();
-        let result = settings.encode(json).unwrap().into_json_inner().unwrap();
-        assert_eq!(result, Value::String("hello".into()));
-    }
-
-    #[test]
-    fn test_encode_json_array() {
-        let json = json!([1, 2, 3]);
-        let settings = JsonSettings::default();
-        let result = settings.encode(json).unwrap().into_json_inner().unwrap();
-
-        if let Value::List(list_value) = result {
-            assert_eq!(list_value.items().len(), 3);
-            assert_eq!(list_value.items()[0], Value::Int64(1));
-            assert_eq!(list_value.items()[1], Value::Int64(2));
-            assert_eq!(list_value.items()[2], Value::Int64(3));
-        } else {
-            panic!("Expected List value");
+        for (name, json) in cases {
+            let err = settings.encode(json).unwrap_err();
+            assert!(
+                matches!(err, crate::error::Error::UnsupportedJsonType { .. }),
+                "{name}: {err:?}"
+            );
         }
     }
 
@@ -688,32 +656,6 @@ mod tests {
             assert_eq!(scores_list.items()[2], Value::Int64(92));
         } else {
             panic!("Expected List value for scores field");
-        }
-    }
-
-    #[test]
-    fn test_encode_json_array_mixed_types() {
-        let json = json!([1, "hello", true, 3.15]);
-        let settings = JsonSettings::default();
-        let value = settings.encode(json).unwrap();
-        assert_eq!(value.data_type().to_string(), r#"Json2["<Variant>"]"#);
-    }
-
-    #[test]
-    fn test_encode_json_empty_array() {
-        let json = json!([]);
-        let settings = JsonSettings::default();
-        let result = settings.encode(json).unwrap().into_json_inner().unwrap();
-
-        if let Value::List(list_value) = result {
-            assert_eq!(list_value.items().len(), 0);
-            // Empty arrays default to string type
-            assert_eq!(
-                list_value.datatype(),
-                Arc::new(ConcreteDataType::null_datatype())
-            );
-        } else {
-            panic!("Expected List value");
         }
     }
 
@@ -1096,19 +1038,5 @@ mod tests {
             });
             assert_eq!(result, expected);
         }
-    }
-
-    #[test]
-    fn test_encode_json_large_unsigned_integer() {
-        // Test unsigned integer that fits in i64
-        let json = Json::from(u64::MAX / 2);
-        let settings = JsonSettings::default();
-        let result = settings.encode(json).unwrap().into_json_inner().unwrap();
-        assert_eq!(result, Value::Int64((u64::MAX / 2) as i64));
-
-        // Test unsigned integer that exceeds i64 range
-        let json = Json::from(u64::MAX);
-        let result = settings.encode(json).unwrap().into_json_inner().unwrap();
-        assert_eq!(result, Value::UInt64(u64::MAX));
     }
 }

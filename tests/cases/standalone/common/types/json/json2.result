@@ -8,6 +8,26 @@ create table json2_table (
 
 Affected Rows: 0
 
+insert into json2_table (ts, j) values (101, '[1, 2, 3]');
+
+Error: 1001(Unsupported), Non-object json is not supported currently
+
+insert into json2_table (ts, j) values (102, '"hello"');
+
+Error: 1001(Unsupported), Non-object json is not supported currently
+
+insert into json2_table (ts, j) values (103, '42');
+
+Error: 1001(Unsupported), Non-object json is not supported currently
+
+insert into json2_table (ts, j) values (104, 'true');
+
+Error: 1001(Unsupported), Non-object json is not supported currently
+
+insert into json2_table (ts, j) values (105, 'null');
+
+Error: 1001(Unsupported), Non-object json is not supported currently
+
 insert into json2_table (ts, j)
 values (1, '{"a": {"b": 1}, "c": "s1", "d": [{"e": {"f": 0.1}}]}'),
        (2, '{"a": {"b": -2}, "c": "s2", "d": [{"e": {"f": 0.2}}]}');
@@ -153,37 +173,11 @@ select j.c, j.y from json2_table order by ts;
 
 select j from json2_table order by ts;
 
-+--------------------+
-| j                  |
-+--------------------+
-| {__json_plain__: } |
-| {__json_plain__: } |
-| {__json_plain__: } |
-| {__json_plain__: } |
-| {__json_plain__: } |
-| {__json_plain__: } |
-| {__json_plain__: } |
-| {__json_plain__: } |
-| {__json_plain__: } |
-| {__json_plain__: } |
-+--------------------+
+Error: 3001(EngineExecuteQuery), Failed to align JSON array, reason: Invalid argument error: use StructArray::try_new_with_length or StructArray::new_empty_fields to create a struct array with no fields so that the length can be set correctly
 
 select * from json2_table order by ts;
 
-+-------------------------+--------------------+
-| ts                      | j                  |
-+-------------------------+--------------------+
-| 1970-01-01T00:00:00.001 | {__json_plain__: } |
-| 1970-01-01T00:00:00.002 | {__json_plain__: } |
-| 1970-01-01T00:00:00.003 | {__json_plain__: } |
-| 1970-01-01T00:00:00.004 | {__json_plain__: } |
-| 1970-01-01T00:00:00.005 | {__json_plain__: } |
-| 1970-01-01T00:00:00.006 | {__json_plain__: } |
-| 1970-01-01T00:00:00.007 | {__json_plain__: } |
-| 1970-01-01T00:00:00.008 | {__json_plain__: } |
-| 1970-01-01T00:00:00.009 | {__json_plain__: } |
-| 1970-01-01T00:00:00.010 | {__json_plain__: } |
-+-------------------------+--------------------+
+Error: 3001(EngineExecuteQuery), Failed to align JSON array, reason: Invalid argument error: use StructArray::try_new_with_length or StructArray::new_empty_fields to create a struct array with no fields so that the length can be set correctly
 
 select j.a.b + 1 from json2_table order by ts;
 

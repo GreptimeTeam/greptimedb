@@ -791,7 +791,7 @@ impl<'a> JsonValueRef<'a> {
         }
     }
 
-    fn as_value_ref(&self) -> ValueRef<'_> {
+    pub fn as_value_ref(&self) -> ValueRef<'_> {
         fn helper<'a>(v: &'a JsonVariantRef) -> ValueRef<'a> {
             match v {
                 JsonVariantRef::Null => ValueRef::Null,
@@ -839,17 +839,6 @@ impl<'a> JsonValueRef<'a> {
 
     pub(crate) fn variant(&self) -> &JsonVariantRef<'a> {
         &self.json_variant
-    }
-
-    pub(crate) fn as_struct_value(&self) -> ValueRef<'_> {
-        if self.is_object() {
-            return self.as_value_ref();
-        }
-
-        ValueRef::Struct(StructValueRef::RefList {
-            val: vec![self.as_value_ref()],
-            fields: self.json_type().as_struct_type(),
-        })
     }
 }
 

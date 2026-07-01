@@ -146,10 +146,6 @@ impl StructField {
         self.nullable
     }
 
-    pub(crate) fn insert_metadata(&mut self, key: impl ToString, value: impl ToString) {
-        self.metadata.insert(key.to_string(), value.to_string());
-    }
-
     #[expect(unused)]
     pub(crate) fn metadata(&self, key: &str) -> Option<&str> {
         self.metadata.get(key).map(String::as_str)
