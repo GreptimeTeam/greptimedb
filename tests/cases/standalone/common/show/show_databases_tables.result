@@ -39,6 +39,7 @@ SHOW TABLES;
 | engines                               |
 | events                                |
 | files                                 |
+| flow_statistics                       |
 | flows                                 |
 | global_status                         |
 | key_column_usage                      |
@@ -92,6 +93,7 @@ SHOW FULL TABLES;
 | engines                               | LOCAL TEMPORARY |
 | events                                | LOCAL TEMPORARY |
 | files                                 | LOCAL TEMPORARY |
+| flow_statistics                       | LOCAL TEMPORARY |
 | flows                                 | LOCAL TEMPORARY |
 | global_status                         | LOCAL TEMPORARY |
 | key_column_usage                      | LOCAL TEMPORARY |
@@ -139,6 +141,7 @@ SHOW TABLE STATUS;
 |engines||11|Fixed|0|0|0|0|0|0|0|DATETIME|DATETIME||utf8_bin|0|||
 |events||11|Fixed|0|0|0|0|0|0|0|DATETIME|DATETIME||utf8_bin|0|||
 |files||11|Fixed|0|0|0|0|0|0|0|DATETIME|DATETIME||utf8_bin|0|||
+|flow_statistics||11|Fixed|0|0|0|0|0|0|0|DATETIME|DATETIME||utf8_bin|0|||
 |flows||11|Fixed|0|0|0|0|0|0|0|DATETIME|DATETIME||utf8_bin|0|||
 |global_status||11|Fixed|0|0|0|0|0|0|0|DATETIME|DATETIME||utf8_bin|0|||
 |key_column_usage||11|Fixed|0|0|0|0|0|0|0|DATETIME|DATETIME||utf8_bin|0|||
