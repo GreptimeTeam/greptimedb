@@ -29,7 +29,7 @@ const DEFAULT_LOG_LEVEL: &str = "--log-level=debug,hyper=warn,tower=warn,datafus
 /// Which set of gRPC CLI argument names to use when spawning a GreptimeDB binary.
 ///
 /// The CLI rename from `rpc-*` to `grpc-*` landed before v1.1.0.  Older release
-/// binaries (e.g. v1.0.0) only recognise `--rpc-bind-addr` and
+/// binaries (e.g. v1.0.0) only recognize `--rpc-bind-addr` and
 /// `--rpc-server-addr`; v1.1.0+ and current binaries use `--grpc-*` names while
 /// keeping the old names as hidden aliases.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
