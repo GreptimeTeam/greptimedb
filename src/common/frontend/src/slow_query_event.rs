@@ -24,7 +24,6 @@ pub const SLOW_QUERY_TABLE_NAME: &str = "slow_queries";
 pub const SLOW_QUERY_TABLE_COST_COLUMN_NAME: &str = "cost";
 pub const SLOW_QUERY_TABLE_THRESHOLD_COLUMN_NAME: &str = "threshold";
 pub const SLOW_QUERY_TABLE_QUERY_COLUMN_NAME: &str = "query";
-pub const SLOW_QUERY_TABLE_CATALOG_NAME_COLUMN_NAME: &str = "catalog_name";
 pub const SLOW_QUERY_TABLE_SCHEMA_NAME_COLUMN_NAME: &str = "schema_name";
 pub const SLOW_QUERY_TABLE_TIMESTAMP_COLUMN_NAME: &str = "timestamp";
 pub const SLOW_QUERY_TABLE_IS_PROMQL_COLUMN_NAME: &str = "is_promql";
@@ -40,7 +39,6 @@ pub struct SlowQueryEvent {
     pub cost: u64,
     pub threshold: u64,
     pub query: String,
-    pub catalog_name: String,
     pub schema_name: String,
     pub is_promql: bool,
     pub promql_range: Option<u64>,
@@ -109,15 +107,9 @@ impl Event for SlowQueryEvent {
                 ..Default::default()
             },
             ColumnSchema {
-                column_name: SLOW_QUERY_TABLE_CATALOG_NAME_COLUMN_NAME.to_string(),
-                datatype: ColumnDataType::String.into(),
-                semantic_type: SemanticType::Field.into(),
-                ..Default::default()
-            },
-            ColumnSchema {
                 column_name: SLOW_QUERY_TABLE_SCHEMA_NAME_COLUMN_NAME.to_string(),
                 datatype: ColumnDataType::String.into(),
-                semantic_type: SemanticType::Field.into(),
+                semantic_type: SemanticType::Tag.into(),
                 ..Default::default()
             },
         ]
@@ -134,7 +126,6 @@ impl Event for SlowQueryEvent {
                 ValueData::U64Value(self.promql_step.unwrap_or(0)).into(),
                 ValueData::TimestampMillisecondValue(self.promql_start.unwrap_or(0)).into(),
                 ValueData::TimestampMillisecondValue(self.promql_end.unwrap_or(0)).into(),
-                ValueData::StringValue(self.catalog_name.clone()).into(),
                 ValueData::StringValue(self.schema_name.clone()).into(),
             ],
         }])
@@ -153,12 +144,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn slow_query_event_includes_catalog_and_schema() {
+    fn slow_query_event_includes_schema() {
         let event = SlowQueryEvent {
             cost: 100,
             threshold: 10,
             query: "SELECT * FROM numbers".to_string(),
-            catalog_name: "greptime".to_string(),
             schema_name: "public".to_string(),
             is_promql: false,
             promql_range: None,
@@ -183,19 +173,15 @@ mod tests {
                 SLOW_QUERY_TABLE_PROMQL_STEP_COLUMN_NAME,
                 SLOW_QUERY_TABLE_PROMQL_START_COLUMN_NAME,
                 SLOW_QUERY_TABLE_PROMQL_END_COLUMN_NAME,
-                SLOW_QUERY_TABLE_CATALOG_NAME_COLUMN_NAME,
                 SLOW_QUERY_TABLE_SCHEMA_NAME_COLUMN_NAME,
             ]
         );
+        assert_eq!(schema[8].semantic_type, SemanticType::Tag as i32);
 
         let rows = event.extra_rows().unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(
             rows[0].values[8].value_data,
-            Some(ValueData::StringValue("greptime".to_string()))
-        );
-        assert_eq!(
-            rows[0].values[9].value_data,
             Some(ValueData::StringValue("public".to_string()))
         );
     }

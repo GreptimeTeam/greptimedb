@@ -214,7 +214,6 @@ impl Instance {
                     .map(|event_recorder| {
                         SlowQueryTimer::new(
                             CatalogQueryStatement::Sql(stmt.clone()),
-                            catalog_name.clone(),
                             schema_name.clone(),
                             self.slow_query_options.threshold,
                             self.slow_query_options.sample_ratio,
@@ -676,7 +675,6 @@ impl Instance {
                     .map(|event_recorder| {
                         SlowQueryTimer::new(
                             CatalogQueryStatement::Plan(query.clone()),
-                            catalog_name.clone(),
                             schema_name.clone(),
                             self.slow_query_options.threshold,
                             self.slow_query_options.sample_ratio,
@@ -916,7 +914,6 @@ impl PrometheusHandler for Instance {
             .map(|event_recorder| {
                 SlowQueryTimer::new(
                     query_statement,
-                    query_ctx.current_catalog().to_string(),
                     query_ctx.current_schema(),
                     self.slow_query_options.threshold,
                     self.slow_query_options.sample_ratio,
