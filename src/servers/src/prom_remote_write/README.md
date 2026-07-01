@@ -26,7 +26,7 @@ flowchart TD
     K --> L["ordinary table: <metric>_native_histogram"]
 
     L --> M["list fields: spans, buckets, custom_values"]
-    L --> N["scalar fields: count, zero_count, sum, schema, reset_hint"]
+    L --> N["scalar fields: count, zero_count, sum, schema, reset_hint, start_timestamp"]
     L --> O["tag: greptime_histogram_type"]
 
     H --> P["written headers and counters"]
@@ -47,7 +47,8 @@ schema, so histogram conversion drops physical-table routing from the histogram
 
 Each histogram row stores:
 
-- common scalar fields: `schema`, `zero_threshold`, `sum`, `reset_hint`;
+- common scalar fields: `schema`, `zero_threshold`, `sum`, `reset_hint`,
+  `start_timestamp`;
 - count fields: `count_u64` / `zero_count_u64` or `count_f64` / `zero_count_f64`;
 - list fields for custom values, spans, and positive/negative buckets;
 - `greptime_histogram_type`, either `int` or `float`;

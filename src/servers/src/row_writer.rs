@@ -317,7 +317,11 @@ pub(crate) fn write_by_schema(
     for (column_schema, value) in kv_iter {
         let index = column_indexes.get(&column_schema.column_name);
         if let Some(index) = index {
-            check_schema_number_and_data_ext(&column_schema, &schema[*index])?;
+            check_schema_number(
+                column_schema.datatype,
+                column_schema.semantic_type,
+                &schema[*index],
+            )?;
             one_row[*index].value_data = value;
         } else {
             let index = schema.len();
@@ -546,21 +550,6 @@ fn check_schema_number(datatype: i32, semantic_type: i32, schema: &ColumnSchema)
             datatype: "semantic_type",
             expected: schema.semantic_type,
             actual: semantic_type,
-        }
-    );
-
-    Ok(())
-}
-
-fn check_schema_number_and_data_ext(actual: &ColumnSchema, expected: &ColumnSchema) -> Result<()> {
-    check_schema_number(actual.datatype, actual.semantic_type, expected)?;
-
-    ensure!(
-        expected.datatype_extension == actual.datatype_extension,
-        IncompatibleSchemaExtensionSnafu {
-            column_name: &expected.column_name,
-            expected: format!("{:?}", expected.datatype_extension),
-            actual: format!("{:?}", actual.datatype_extension),
         }
     );
 

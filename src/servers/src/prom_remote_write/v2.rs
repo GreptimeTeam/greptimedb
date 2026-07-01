@@ -52,6 +52,7 @@ const SCHEMA_FIELD: &str = "schema";
 const ZERO_THRESHOLD_FIELD: &str = "zero_threshold";
 const SUM_FIELD: &str = "sum";
 const RESET_HINT_FIELD: &str = "reset_hint";
+const START_TIMESTAMP_FIELD: &str = "start_timestamp";
 const CUSTOM_VALUES_FIELD: &str = "custom_values";
 const POSITIVE_SPAN_OFFSETS_FIELD: &str = "positive_span_offsets";
 const POSITIVE_SPAN_LENGTHS_FIELD: &str = "positive_span_lengths";
@@ -72,6 +73,7 @@ const INTERNAL_HISTOGRAM_LABELS: &[&str] = &[
     ZERO_THRESHOLD_FIELD,
     SUM_FIELD,
     RESET_HINT_FIELD,
+    START_TIMESTAMP_FIELD,
     CUSTOM_VALUES_FIELD,
     POSITIVE_SPAN_OFFSETS_FIELD,
     POSITIVE_SPAN_LENGTHS_FIELD,
@@ -362,6 +364,13 @@ fn write_common_native_histogram_fields(
                 RESET_HINT_FIELD.to_string(),
                 ColumnDataType::Int32,
                 Some(ValueData::I32Value(histogram.reset_hint)),
+            ),
+            (
+                START_TIMESTAMP_FIELD.to_string(),
+                ColumnDataType::TimestampMillisecond,
+                (histogram.start_timestamp != 0).then_some(ValueData::TimestampMillisecondValue(
+                    histogram.start_timestamp,
+                )),
             ),
         ]
         .into_iter(),
@@ -1063,6 +1072,7 @@ mod tests {
                 ZERO_THRESHOLD_FIELD,
                 SUM_FIELD,
                 RESET_HINT_FIELD,
+                START_TIMESTAMP_FIELD,
                 CUSTOM_VALUES_FIELD,
                 POSITIVE_SPAN_OFFSETS_FIELD,
                 POSITIVE_SPAN_LENGTHS_FIELD,
@@ -1088,13 +1098,35 @@ mod tests {
             Some(ValueData::I32Value(0))
         );
         assert_eq!(
-            rows.rows[0].values[10].value_data,
+            rows.rows[0].values[11].value_data,
             Some(ValueData::U64Value(0))
         );
-        assert_eq!(rows.rows[0].values[14].value_data, None);
+        assert_eq!(rows.rows[0].values[15].value_data, None);
         assert_eq!(
-            rows.rows[0].values[18].value_data,
+            rows.rows[0].values[19].value_data,
             Some(ValueData::StringValue(HISTOGRAM_TYPE_INT.to_string()))
+        );
+    }
+
+    #[test]
+    fn test_into_context_req_preserves_histogram_start_timestamp() {
+        let ctx_req = into_write_requests(test_util::request_with_labels_and_histograms(
+            vec![(METRIC_NAME_LABEL, "metric")],
+            vec![Histogram {
+                timestamp: 2000,
+                start_timestamp: 1000,
+                ..Default::default()
+            }],
+        ))
+        .unwrap();
+
+        let mut inserts = ctx_req.histograms.all_req().collect::<Vec<_>>();
+        let rows = inserts.pop().unwrap().rows.unwrap();
+        let start_timestamp_idx = column_index(&rows.schema, START_TIMESTAMP_FIELD);
+
+        assert_eq!(
+            rows.rows[0].values[start_timestamp_idx].value_data,
+            Some(ValueData::TimestampMillisecondValue(1000))
         );
     }
 
@@ -1171,6 +1203,7 @@ mod tests {
                 ZERO_THRESHOLD_FIELD,
                 SUM_FIELD,
                 RESET_HINT_FIELD,
+                START_TIMESTAMP_FIELD,
                 CUSTOM_VALUES_FIELD,
                 POSITIVE_SPAN_OFFSETS_FIELD,
                 POSITIVE_SPAN_LENGTHS_FIELD,
