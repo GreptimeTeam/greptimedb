@@ -1949,6 +1949,36 @@ mod tests {
     }
 
     #[test]
+    fn test_undrop_table_task_json_roundtrip() {
+        let task = UndropTableTask {
+            catalog: "greptime".to_string(),
+            schema: "public".to_string(),
+            table: "foo".to_string(),
+            table_id: 1024,
+        };
+
+        let output = serde_json::to_vec(&task).unwrap();
+
+        let de = serde_json::from_slice(&output).unwrap();
+        assert_eq!(task, de);
+    }
+
+    #[test]
+    fn test_purge_dropped_table_task_json_roundtrip() {
+        let task = PurgeDroppedTableTask {
+            catalog: "greptime".to_string(),
+            schema: "public".to_string(),
+            table: "foo".to_string(),
+            table_id: Some(1024),
+        };
+
+        let output = serde_json::to_vec(&task).unwrap();
+
+        let de = serde_json::from_slice(&output).unwrap();
+        assert_eq!(task, de);
+    }
+
+    #[test]
     fn test_sort_columns() {
         // construct RawSchema
         let schema = Arc::new(Schema::new(vec![

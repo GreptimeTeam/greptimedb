@@ -1041,6 +1041,10 @@ impl RegionFailureDetectorController for RecordingRegionFailureDetectorControlle
         self.registered.lock().await.extend(detecting_regions);
     }
 
+    async fn reset_failure_detectors(&self, detecting_regions: Vec<DetectingRegion>) {
+        self.registered.lock().await.extend(detecting_regions);
+    }
+
     async fn deregister_failure_detectors(&self, detecting_regions: Vec<DetectingRegion>) {
         self.deregistered.lock().await.extend(detecting_regions);
     }

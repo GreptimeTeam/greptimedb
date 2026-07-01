@@ -1812,15 +1812,11 @@ mod tests {
         let table_metadata_manager = TableMetadataManager::new(mem_kv.clone());
         let task = test_create_table_task(table_name, table_id);
         let table_info = task.table_info.clone();
-        let serialized_options = region_wal_options
-            .iter()
-            .map(|(k, v)| (*k, serde_json::to_string(v).unwrap()))
-            .collect::<HashMap<_, _>>();
         table_metadata_manager
             .create_table_metadata(
                 table_info.clone(),
                 TableRouteValue::physical(region_routes),
-                serialized_options,
+                region_wal_options.clone(),
             )
             .await
             .unwrap();

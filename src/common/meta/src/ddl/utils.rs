@@ -37,7 +37,7 @@ use snafu::{OptionExt, ResultExt, ensure};
 use store_api::metadata::ColumnMetadata;
 use store_api::metric_engine_consts::{LOGICAL_TABLE_METADATA_KEY, MANIFEST_INFO_EXTENSION_KEY};
 use store_api::region_engine::RegionManifestInfo;
-use store_api::storage::{RegionId, RegionNumber};
+use store_api::storage::RegionId;
 use table::metadata::{TableId, TableInfo};
 use table::table_reference::TableReference;
 

@@ -213,14 +213,6 @@ pub(crate) async fn open_regions(
     let template = build_template_from_raw_table_info(table_info)?;
     let builder = CreateRequestBuilder::new(template, None);
     let storage_path = region_storage_path(&table_name.catalog_name, &table_name.schema_name);
-    let wal_options = region_wal_options
-        .iter()
-        .map(|(region_number, wal_options)| {
-            serde_json::to_string(wal_options)
-                .map(|wal_options| (*region_number, wal_options))
-                .context(error::SerdeJsonSnafu)
-        })
-        .collect::<Result<HashMap<_, _>>>()?;
     let mut seen_peer_ids = HashSet::new();
     let peers = find_leaders(region_routes)
         .into_iter()
@@ -237,9 +229,9 @@ pub(crate) async fn open_regions(
             let create_request = builder.build_one(
                 region_id,
                 storage_path.clone(),
-                &wal_options,
+                region_wal_options,
                 &HashMap::new(),
-            );
+            )?;
             let request = RegionRequest {
                 header: Some(RegionRequestHeader {
                     tracing_context: TracingContext::from_current_span().to_w3c(),
