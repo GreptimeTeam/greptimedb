@@ -518,7 +518,7 @@ enum Response {
         result: BTreeMap<FlowId, i64>,
     },
     QueryFlowExecStats {
-        /// each flow tasks' start time and recent errors
+        /// each flow tasks' start time
         result: FlowExecStats,
     },
 }
