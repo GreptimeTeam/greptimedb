@@ -20,8 +20,8 @@ use arrow_schema::{DataType as ArrowDataType, Field, FieldRef, Fields};
 use parquet::variant::json_to_variant;
 
 use crate::arrow::array::{
-    ArrayRef, BooleanArray, Float64Array, Int64Array, ListArray, StringArray, StructArray,
-    UInt64Array,
+    ArrayRef, BooleanArray, Float64Array, Int64Array, ListArray, StringArray, StringViewArray,
+    StructArray, UInt64Array, new_null_array,
 };
 use crate::arrow::buffer::{NullBuffer, OffsetBuffer, ScalarBuffer};
 use crate::data_type::ConcreteDataType;
@@ -30,8 +30,7 @@ use crate::json::value::{JsonNumber, JsonValue, JsonVariant, JsonVariantRef};
 use crate::prelude::{ValueRef, Vector, VectorRef};
 use crate::types::json_type::{JsonFormat, JsonNativeType, JsonNumberType, JsonObjectType};
 use crate::types::{JsonType, StructType};
-use crate::value::Value;
-use crate::vectors::{Helper, MutableVector, StructVector};
+use crate::vectors::{MutableVector, StructVector};
 
 #[derive(Clone)]
 pub(crate) struct JsonVectorBuilder {
@@ -53,264 +52,6 @@ impl JsonVectorBuilder {
 
     fn try_build(&mut self) -> Result<VectorRef> {
         build_json2_struct_vector(&mut self.values, self.merged_type.native_type())
-    }
-}
-
-fn build_json2_struct_vector(
-    vals: &mut [JsonValue],
-    native_type: &JsonNativeType,
-) -> Result<VectorRef> {
-    let json_type = JsonType::new_json2(native_type.clone());
-    for val in vals.iter_mut() {
-        val.try_align(&json_type)?;
-    }
-
-    let variants = vals
-        .iter()
-        .map(|val| val.as_ref().into_variant())
-        .collect::<Vec<_>>();
-
-    let JsonNativeType::Object(_) = native_type else {
-        return InvalidVectorSnafu {
-            msg: format!("expected json object type, got {native_type}"),
-        }
-        .fail();
-    };
-
-    let (_, array) = build_json_array("", &variants, native_type)?;
-    let json_struct_array = array
-        .as_any()
-        .downcast_ref::<StructArray>()
-        .ok_or_else(|| {
-            InvalidVectorSnafu {
-                msg: format!(
-                    "expected JSON2 to be a StructArray, actual array type: {}",
-                    array.data_type()
-                ),
-            }
-            .build()
-        })?
-        .clone();
-
-    let fields = StructType::from(json_struct_array.fields());
-    Ok(Arc::new(StructVector::try_new(fields, json_struct_array)?))
-}
-
-fn build_json_array(
-    name: &str,
-    vals: &[JsonVariantRef<'_>],
-    native_type: &JsonNativeType,
-) -> Result<(FieldRef, ArrayRef)> {
-    match native_type {
-        JsonNativeType::Variant => build_parquet_variant_array(name, vals),
-        JsonNativeType::Object(object_type) => build_json_object_array(name, vals, object_type),
-        JsonNativeType::Array(item_type) => build_json_list_array(name, vals, item_type),
-        _ => build_plain_json_variant_array(name, vals, native_type),
-    }
-}
-
-fn build_parquet_variant_array(
-    name: &str,
-    vals: &[JsonVariantRef<'_>],
-) -> Result<(FieldRef, ArrayRef)> {
-    let json_vals = vals
-        .iter()
-        .map(|val| match val {
-            JsonVariantRef::Null => Ok(None),
-            JsonVariantRef::Variant(val) => Ok(Some(from_utf8(val).map_err(|e| {
-                InvalidVectorSnafu {
-                    msg: format!("invalid UTF-8 in JSON variant payload: {e}"),
-                }
-                .build()
-            })?)),
-            _ => InvalidVectorSnafu {
-                msg: format!("expected JSON variant payload, got {val:?}"),
-            }
-            .fail(),
-        })
-        .collect::<Result<Vec<_>>>()?;
-    let input: ArrayRef = Arc::new(StringArray::from(json_vals));
-    let array = json_to_variant(&input).map_err(|e| {
-        InvalidVectorSnafu {
-            msg: format!("failed to encode JSON payload as parquet variant: {e}"),
-        }
-        .build()
-    })?;
-    let field = Arc::new(array.field(name));
-    Ok((field, ArrayRef::from(array)))
-}
-
-fn build_json_object_array(
-    name: &str,
-    vals: &[JsonVariantRef<'_>],
-    object_type: &JsonObjectType,
-) -> Result<(FieldRef, ArrayRef)> {
-    let mut fields = Vec::with_capacity(object_type.len());
-    let mut arrays = Vec::with_capacity(object_type.len());
-    let mut field_vals = Vec::with_capacity(vals.len());
-    for (field_name, field_type) in object_type {
-        field_vals.clear();
-        for value in vals {
-            let val = match value {
-                JsonVariantRef::Object(object) => object
-                    .get(field_name.as_str())
-                    .cloned()
-                    .unwrap_or(JsonVariantRef::Null),
-                _ => JsonVariantRef::Null,
-            };
-            field_vals.push(val);
-        }
-        let (field, array) = build_json_array(field_name, &field_vals, field_type)?;
-        fields.push(field);
-        arrays.push(array);
-    }
-
-    let fields = Fields::from(fields);
-    let nulls = null_buffer(
-        vals.iter()
-            .map(|value| matches!(value, JsonVariantRef::Object(_))),
-    );
-    let array = StructArray::new(fields.clone(), arrays, nulls);
-    let field = Arc::new(Field::new(name, ArrowDataType::Struct(fields), true));
-    Ok((field, Arc::new(array)))
-}
-
-fn build_plain_json_variant_array(
-    name: &str,
-    vals: &[JsonVariantRef<'_>],
-    native_type: &JsonNativeType,
-) -> Result<(FieldRef, ArrayRef)> {
-    let data_type = native_type.as_arrow_type();
-    let field = Arc::new(Field::new(name, data_type.clone(), true));
-    let array = match native_type {
-        JsonNativeType::Null => crate::arrow::array::new_null_array(&data_type, vals.len()),
-        JsonNativeType::Bool => Arc::new(BooleanArray::from_iter(vals.iter().map(
-            |value| match value {
-                JsonVariantRef::Null => None,
-                JsonVariantRef::Bool(value) => Some(*value),
-                _ => None,
-            },
-        ))) as ArrayRef,
-        JsonNativeType::Number(JsonNumberType::U64) => Arc::new(UInt64Array::from_iter(
-            vals.iter().map(|value| match value {
-                JsonVariantRef::Null => None,
-                JsonVariantRef::Number(value) => json_number_as_u64(value),
-                _ => None,
-            }),
-        )) as ArrayRef,
-        JsonNativeType::Number(JsonNumberType::I64) => Arc::new(Int64Array::from_iter(
-            vals.iter().map(|value| match value {
-                JsonVariantRef::Null => None,
-                JsonVariantRef::Number(value) => json_number_as_i64(value),
-                _ => None,
-            }),
-        )) as ArrayRef,
-        JsonNativeType::Number(JsonNumberType::F64) => Arc::new(Float64Array::from_iter(
-            vals.iter().map(|value| match value {
-                JsonVariantRef::Null => None,
-                JsonVariantRef::Number(value) => Some(json_number_as_f64(value)),
-                _ => None,
-            }),
-        )) as ArrayRef,
-        JsonNativeType::String => {
-            let row_vals = vals
-                .iter()
-                .map(|value| match value {
-                    JsonVariantRef::Null => Value::Null,
-                    JsonVariantRef::String(value) => Value::String((*value).into()),
-                    _ => Value::Null,
-                })
-                .collect::<Vec<_>>();
-            Helper::try_from_row_into_vector(
-                &row_vals,
-                &ConcreteDataType::from_arrow_type(&ArrowDataType::Utf8View),
-            )?
-            .to_arrow_array()
-        }
-        JsonNativeType::Array(_) | JsonNativeType::Object(_) | JsonNativeType::Variant => {
-            unreachable!("complex JSON native types are built by recursive builders")
-        }
-    };
-    Ok((field, array))
-}
-
-fn build_json_list_array(
-    name: &str,
-    vals: &[JsonVariantRef<'_>],
-    item_type: &JsonNativeType,
-) -> Result<(FieldRef, ArrayRef)> {
-    let mut offsets = Vec::with_capacity(vals.len() + 1);
-    let mut valid = Vec::with_capacity(vals.len());
-    let mut flattened = Vec::new();
-    offsets.push(0_i32);
-    for value in vals {
-        match value {
-            JsonVariantRef::Array(items) => {
-                flattened.extend(items.iter().cloned());
-                valid.push(true);
-            }
-            JsonVariantRef::Null => valid.push(false),
-            _ => {
-                return InvalidVectorSnafu {
-                    msg: format!("expected JSON array payload, got {value:?}"),
-                }
-                .fail();
-            }
-        }
-        let offset: i32 = flattened.len().try_into().map_err(|_| {
-            InvalidVectorSnafu {
-                msg: "flattened list length exceeds i32::MAX",
-            }
-            .build()
-        })?;
-        offsets.push(offset);
-    }
-
-    let (item_field, item_array) = build_json_array("item", &flattened, item_type)?;
-    let nulls = null_buffer(valid);
-    let array = ListArray::new(
-        item_field.clone(),
-        OffsetBuffer::new(ScalarBuffer::from(offsets)),
-        item_array,
-        nulls,
-    );
-    let field = Arc::new(Field::new(
-        name,
-        ArrowDataType::List(item_field.clone()),
-        true,
-    ));
-    Ok((field, Arc::new(array)))
-}
-
-fn null_buffer(valid: impl IntoIterator<Item = bool>) -> Option<NullBuffer> {
-    let valid = valid.into_iter().collect::<Vec<_>>();
-    valid
-        .iter()
-        .any(|valid| !*valid)
-        .then(|| NullBuffer::from(valid))
-}
-
-fn json_number_as_u64(value: &JsonNumber) -> Option<u64> {
-    match value {
-        JsonNumber::PosInt(value) => Some(*value),
-        JsonNumber::NegInt(value) => (*value >= 0).then_some(*value as u64),
-        JsonNumber::Float(_) => None,
-    }
-}
-
-fn json_number_as_i64(value: &JsonNumber) -> Option<i64> {
-    match value {
-        JsonNumber::PosInt(value) => (*value <= i64::MAX as u64).then_some(*value as i64),
-        JsonNumber::NegInt(value) => Some(*value),
-        JsonNumber::Float(_) => None,
-    }
-}
-
-fn json_number_as_f64(value: &JsonNumber) -> f64 {
-    match value {
-        JsonNumber::PosInt(value) => *value as f64,
-        JsonNumber::NegInt(value) => *value as f64,
-        JsonNumber::Float(value) => value.0,
     }
 }
 
@@ -376,6 +117,254 @@ impl MutableVector for JsonVectorBuilder {
             vector_type: "JsonVector",
         }
         .fail()
+    }
+}
+
+fn build_json2_struct_vector(
+    vals: &mut [JsonValue],
+    native_type: &JsonNativeType,
+) -> Result<VectorRef> {
+    let json_type = JsonType::new_json2(native_type.clone());
+    for val in vals.iter_mut() {
+        val.try_align(&json_type)?;
+    }
+
+    let variants = vals
+        .iter()
+        .map(|val| val.as_ref().into_variant())
+        .collect::<Vec<_>>();
+
+    let JsonNativeType::Object(_) = native_type else {
+        return InvalidVectorSnafu {
+            msg: format!("expected json object type, got {native_type}"),
+        }
+        .fail();
+    };
+
+    let (_, array) = build_json_array("", &variants, native_type)?;
+    let json_struct_array = array
+        .as_any()
+        .downcast_ref::<StructArray>()
+        .ok_or_else(|| {
+            InvalidVectorSnafu {
+                msg: format!(
+                    "expected JSON2 to be a StructArray, actual array type: {}",
+                    array.data_type()
+                ),
+            }
+            .build()
+        })?
+        .clone();
+
+    let fields = StructType::from(json_struct_array.fields());
+    Ok(Arc::new(StructVector::try_new(fields, json_struct_array)?))
+}
+
+fn build_json_array(
+    name: &str,
+    vals: &[JsonVariantRef<'_>],
+    native_type: &JsonNativeType,
+) -> Result<(FieldRef, ArrayRef)> {
+    match native_type {
+        JsonNativeType::Variant => build_parquet_variant_array(name, vals),
+        JsonNativeType::Object(object_type) => build_json_object_array(name, vals, object_type),
+        JsonNativeType::Array(item_type) => build_json_list_array(name, vals, item_type),
+        _ => build_json_scalar_array(name, vals, native_type),
+    }
+}
+
+fn build_parquet_variant_array(
+    name: &str,
+    vals: &[JsonVariantRef<'_>],
+) -> Result<(FieldRef, ArrayRef)> {
+    let json_vals = vals
+        .iter()
+        .map(|val| match val {
+            JsonVariantRef::Null => Ok(None),
+            JsonVariantRef::Variant(val) => Ok(Some(from_utf8(val).map_err(|e| {
+                InvalidVectorSnafu {
+                    msg: format!("invalid UTF-8 in JSON variant payload: {e}"),
+                }
+                .build()
+            })?)),
+            _ => InvalidVectorSnafu {
+                msg: format!("expected JSON variant payload, got {val:?}"),
+            }
+            .fail(),
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let input: ArrayRef = Arc::new(StringArray::from(json_vals));
+    let array = json_to_variant(&input).map_err(|e| {
+        InvalidVectorSnafu {
+            msg: format!("failed to encode JSON payload as parquet variant: {e}"),
+        }
+        .build()
+    })?;
+    let field = Arc::new(array.field(name));
+    Ok((field, ArrayRef::from(array)))
+}
+
+fn build_json_object_array(
+    name: &str,
+    vals: &[JsonVariantRef<'_>],
+    object_type: &JsonObjectType,
+) -> Result<(FieldRef, ArrayRef)> {
+    let mut fields = Vec::with_capacity(object_type.len());
+    let mut arrays = Vec::with_capacity(object_type.len());
+    let mut field_vals = Vec::with_capacity(vals.len());
+    for (field_name, field_type) in object_type {
+        field_vals.clear();
+        for value in vals {
+            let val = match value {
+                JsonVariantRef::Object(object) => object
+                    .get(field_name.as_str())
+                    .cloned()
+                    .unwrap_or(JsonVariantRef::Null),
+                _ => JsonVariantRef::Null,
+            };
+            field_vals.push(val);
+        }
+        let (field, array) = build_json_array(field_name, &field_vals, field_type)?;
+        fields.push(field);
+        arrays.push(array);
+    }
+
+    let fields = Fields::from(fields);
+    let nulls = null_buffer(
+        vals.iter()
+            .map(|val| matches!(val, JsonVariantRef::Object(_))),
+    );
+    let array = StructArray::new(fields.clone(), arrays, nulls);
+    let field = Arc::new(Field::new(name, ArrowDataType::Struct(fields), true));
+    Ok((field, Arc::new(array)))
+}
+
+fn build_json_list_array(
+    name: &str,
+    vals: &[JsonVariantRef<'_>],
+    item_type: &JsonNativeType,
+) -> Result<(FieldRef, ArrayRef)> {
+    let mut offsets = Vec::with_capacity(vals.len() + 1);
+    let mut valid = Vec::with_capacity(vals.len());
+    let mut flattened = Vec::new();
+    offsets.push(0_i32);
+    for val in vals {
+        match val {
+            JsonVariantRef::Array(items) => {
+                flattened.extend(items.iter().cloned());
+                valid.push(true);
+            }
+            JsonVariantRef::Null => valid.push(false),
+            _ => {
+                return InvalidVectorSnafu {
+                    msg: format!("expected JSON array payload, got {val:?}"),
+                }
+                .fail();
+            }
+        }
+        let offset: i32 = flattened.len().try_into().map_err(|_| {
+            InvalidVectorSnafu {
+                msg: "flattened list length exceeds i32::MAX",
+            }
+            .build()
+        })?;
+        offsets.push(offset);
+    }
+
+    let (item_field, item_array) = build_json_array("item", &flattened, item_type)?;
+    let nulls = null_buffer(valid);
+    let offsets = OffsetBuffer::new(ScalarBuffer::from(offsets));
+    let array = ListArray::new(item_field.clone(), offsets, item_array, nulls);
+    let field = Arc::new(Field::new(
+        name,
+        ArrowDataType::List(item_field.clone()),
+        true,
+    ));
+    Ok((field, Arc::new(array)))
+}
+
+fn build_json_scalar_array(
+    name: &str,
+    vals: &[JsonVariantRef<'_>],
+    native_type: &JsonNativeType,
+) -> Result<(FieldRef, ArrayRef)> {
+    let data_type = native_type.as_arrow_type();
+    let field = Arc::new(Field::new(name, data_type.clone(), true));
+    let array = match native_type {
+        JsonNativeType::Null => new_null_array(&data_type, vals.len()),
+        JsonNativeType::Bool => {
+            Arc::new(BooleanArray::from_iter(vals.iter().map(|val| match val {
+                JsonVariantRef::Null => None,
+                JsonVariantRef::Bool(val) => Some(*val),
+                _ => None,
+            }))) as ArrayRef
+        }
+        JsonNativeType::Number(JsonNumberType::U64) => {
+            Arc::new(UInt64Array::from_iter(vals.iter().map(|val| match val {
+                JsonVariantRef::Null => None,
+                JsonVariantRef::Number(val) => json_number_as_u64(val),
+                _ => None,
+            }))) as ArrayRef
+        }
+        JsonNativeType::Number(JsonNumberType::I64) => {
+            Arc::new(Int64Array::from_iter(vals.iter().map(|val| match val {
+                JsonVariantRef::Null => None,
+                JsonVariantRef::Number(val) => json_number_as_i64(val),
+                _ => None,
+            }))) as ArrayRef
+        }
+        JsonNativeType::Number(JsonNumberType::F64) => {
+            Arc::new(Float64Array::from_iter(vals.iter().map(|val| match val {
+                JsonVariantRef::Null => None,
+                JsonVariantRef::Number(val) => Some(json_number_as_f64(val)),
+                _ => None,
+            }))) as ArrayRef
+        }
+        JsonNativeType::String => {
+            Arc::new(StringViewArray::from_iter(vals.iter().map(
+                |val| match val {
+                    JsonVariantRef::Null => None,
+                    JsonVariantRef::String(val) => Some(*val),
+                    _ => None,
+                },
+            ))) as ArrayRef
+        }
+        JsonNativeType::Array(_) | JsonNativeType::Object(_) | JsonNativeType::Variant => {
+            unreachable!("complex JSON native types are built by recursive builders")
+        }
+    };
+    Ok((field, array))
+}
+
+fn null_buffer(valid: impl IntoIterator<Item = bool>) -> Option<NullBuffer> {
+    let valid = valid.into_iter().collect::<Vec<_>>();
+    valid
+        .iter()
+        .any(|valid| !*valid)
+        .then(|| NullBuffer::from(valid))
+}
+
+fn json_number_as_u64(val: &JsonNumber) -> Option<u64> {
+    match val {
+        JsonNumber::PosInt(val) => Some(*val),
+        JsonNumber::NegInt(val) => (*val >= 0).then_some(*val as u64),
+        JsonNumber::Float(_) => None,
+    }
+}
+
+fn json_number_as_i64(val: &JsonNumber) -> Option<i64> {
+    match val {
+        JsonNumber::PosInt(val) => (*val <= i64::MAX as u64).then_some(*val as i64),
+        JsonNumber::NegInt(val) => Some(*val),
+        JsonNumber::Float(_) => None,
+    }
+}
+
+fn json_number_as_f64(val: &JsonNumber) -> f64 {
+    match val {
+        JsonNumber::PosInt(val) => *val as f64,
+        JsonNumber::NegInt(val) => *val as f64,
+        JsonNumber::Float(val) => val.0,
     }
 }
 
