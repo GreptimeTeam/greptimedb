@@ -345,9 +345,7 @@ mod tests {
 
     #[test]
     fn test_validate_exact_flow_state_key() {
-        let value = FlowStateValue::default()
-            .try_as_raw_value()
-            .unwrap();
+        let value = FlowStateValue::default().try_as_raw_value().unwrap();
 
         validate_metadata_value(&flow_state_full_key(), &value).unwrap();
     }

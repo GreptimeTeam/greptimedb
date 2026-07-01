@@ -448,9 +448,7 @@ impl<'s> Worker<'s> {
                     }
                 }
                 Some(Response::QueryFlowExecStats {
-                    result: FlowExecStats {
-                        start_time_map,
-                    },
+                    result: FlowExecStats { start_time_map },
                 })
             }
         };

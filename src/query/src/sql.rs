@@ -20,9 +20,9 @@ use std::sync::Arc;
 
 use catalog::CatalogManagerRef;
 use catalog::information_schema::{
-    CHARACTER_SETS, COLLATIONS, COLUMNS, FLOW_STATISTICS, FLOWS, REGION_PEERS, SCHEMATA, STATISTICS,
-    TABLES, VIEWS, columns, flow_statistics, flows, process_list, region_peers, schemata,
-    statistics, tables,
+    CHARACTER_SETS, COLLATIONS, COLUMNS, FLOW_STATISTICS, FLOWS, REGION_PEERS, SCHEMATA,
+    STATISTICS, TABLES, VIEWS, columns, flow_statistics, flows, process_list, region_peers,
+    schemata, statistics, tables,
 };
 use common_catalog::consts::{
     INFORMATION_SCHEMA_NAME, SEMANTIC_TYPE_FIELD, SEMANTIC_TYPE_PRIMARY_KEY,

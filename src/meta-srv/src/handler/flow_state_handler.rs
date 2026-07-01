@@ -58,11 +58,8 @@ impl HeartbeatHandler for FlowStateHandler {
             // TODO(#7987-followup): start_time_map is not yet propagated through the heartbeat
             // wire format (`api::v1::meta::FlowStat`); it will always be empty in distributed
             // mode until a follow-up PR adds heartbeat propagation.
-            let value: FlowStateValue = FlowStateValue::new(
-                state_size,
-                last_exec_time_map,
-                Default::default(),
-            );
+            let value: FlowStateValue =
+                FlowStateValue::new(state_size, last_exec_time_map, Default::default());
             self.flow_state_manager
                 .put(value)
                 .await
