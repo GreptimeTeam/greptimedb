@@ -82,34 +82,24 @@ impl JsonSettings {
 
     /// Decode an encoded StructValue back into a serde_json::Value.
     pub fn decode(&self, value: Value) -> Result<Json> {
-        let context = JsonContext {
+        let mut context = JsonContext {
             path: Vec::new(),
             settings: self,
         };
-        decode_value_with_context(value, &context)
+        decode_value_with_context(value, &mut context)
     }
 
     /// Encode a serde_json::Value into a Value::Json using current settings.
     pub fn encode(&self, json: Json) -> Result<Value> {
-        let context = JsonContext {
+        let mut context = JsonContext {
             path: Vec::new(),
             settings: self,
         };
-        encode_json_with_context(json, &context).map(|v| Value::Json(Box::new(v)))
+        encode_json_with_context(json, &mut context).map(|v| Value::Json(Box::new(v)))
     }
 }
 
 impl<'a> JsonContext<'a> {
-    /// Create a new context with an updated key path
-    pub fn with_key(&self, key: &str) -> JsonContext<'a> {
-        let mut path = self.path.clone();
-        path.push(key.to_string());
-        JsonContext {
-            path,
-            settings: self.settings,
-        }
-    }
-
     fn type_hint(&self) -> Option<&'a JsonTypeHint> {
         self.settings
             .type_hints
@@ -118,8 +108,19 @@ impl<'a> JsonContext<'a> {
     }
 }
 
+fn with_key_context<T>(
+    context: &mut JsonContext,
+    key: &str,
+    f: impl FnOnce(&mut JsonContext) -> Result<T>,
+) -> Result<T> {
+    context.path.push(key.to_string());
+    let result = f(context);
+    context.path.pop();
+    result
+}
+
 /// Main encoding function with key path tracking
-pub fn encode_json_with_context<'a>(json: Json, context: &JsonContext<'a>) -> Result<JsonValue> {
+fn encode_json_with_context(json: Json, context: &mut JsonContext) -> Result<JsonValue> {
     if context.path.is_empty() && !matches!(json, Json::Object(_)) {
         return UnsupportedJsonTypeSnafu.fail();
     }
@@ -133,17 +134,17 @@ pub fn encode_json_with_context<'a>(json: Json, context: &JsonContext<'a>) -> Re
 
 fn encode_json_object_with_context<'a>(
     json_object: Map<String, Json>,
-    context: &JsonContext<'a>,
+    context: &mut JsonContext<'a>,
 ) -> Result<JsonValue> {
     let mut object = BTreeMap::new();
     for (key, value) in json_object {
-        let field_context = context.with_key(&key);
-
-        let value = if let Some(hint) = field_context.type_hint() {
-            encode_json_value_with_hint(value, hint, &field_context)?
-        } else {
-            encode_json_value_with_context(value, &field_context)?
-        };
+        let value = with_key_context(context, &key, |context| {
+            if let Some(hint) = context.type_hint() {
+                encode_json_value_with_hint(value, hint, context)
+            } else {
+                encode_json_value_with_context(value, context)
+            }
+        })?;
 
         object.insert(key, value.into_variant());
     }
@@ -155,11 +156,15 @@ fn encode_json_object_with_context<'a>(
 
 fn apply_missing_type_hints(
     object: &mut BTreeMap<String, JsonVariant>,
-    context: &JsonContext,
+    context: &mut JsonContext,
 ) -> Result<()> {
     for hint in &context.settings.type_hints {
         if hint.path.len() > context.path.len() && hint.path.starts_with(&context.path) {
-            insert_missing_type_hint(object, context, hint, context.path.len())?;
+            let depth = context.path.len();
+            let key = &hint.path[depth];
+            with_key_context(context, key, |context| {
+                insert_missing_type_hint(object, context, hint, depth)
+            })?;
         }
     }
     Ok(())
@@ -167,17 +172,16 @@ fn apply_missing_type_hints(
 
 fn insert_missing_type_hint(
     object: &mut BTreeMap<String, JsonVariant>,
-    context: &JsonContext,
+    field_context: &mut JsonContext,
     hint: &JsonTypeHint,
     depth: usize,
 ) -> Result<()> {
     let key = &hint.path[depth];
-    let field_context = context.with_key(key);
     let is_leaf = depth + 1 == hint.path.len();
 
     if is_leaf {
         if !object.contains_key(key) {
-            let value = encode_missing_type_hint_value(hint, &field_context)?;
+            let value = encode_missing_type_hint_value(hint, field_context)?;
             object.insert(key.clone(), value.into_variant());
         }
         return Ok(());
@@ -186,7 +190,7 @@ fn insert_missing_type_hint(
     match object.entry(key.clone()) {
         Entry::Occupied(mut entry) => match entry.get_mut() {
             JsonVariant::Object(child) => {
-                insert_missing_type_hint(child, &field_context, hint, depth + 1)
+                insert_missing_type_hint(child, field_context, hint, depth + 1)
             }
             _ => error::InvalidJsonSnafu {
                 value: format!(
@@ -199,14 +203,17 @@ fn insert_missing_type_hint(
         },
         Entry::Vacant(entry) => {
             let mut child = BTreeMap::new();
-            insert_missing_type_hint(&mut child, &field_context, hint, depth + 1)?;
+            insert_missing_type_hint(&mut child, field_context, hint, depth + 1)?;
             entry.insert(JsonVariant::Object(child));
             Ok(())
         }
     }
 }
 
-fn encode_missing_type_hint_value(hint: &JsonTypeHint, context: &JsonContext) -> Result<JsonValue> {
+fn encode_missing_type_hint_value(
+    hint: &JsonTypeHint,
+    context: &mut JsonContext,
+) -> Result<JsonValue> {
     if let Some(default_constraint) = &hint.default_constraint {
         let value = default_constraint.create_default(&hint.data_type, hint.nullable)?;
         let json = decode_primitive_value(value)?;
@@ -229,7 +236,7 @@ fn encode_missing_type_hint_value(hint: &JsonTypeHint, context: &JsonContext) ->
 fn encode_json_value_with_hint(
     json: Json,
     hint: &JsonTypeHint,
-    context: &JsonContext,
+    context: &mut JsonContext,
 ) -> Result<JsonValue> {
     if json.is_null() {
         return if hint.nullable {
@@ -291,14 +298,15 @@ fn encode_json_value_with_hint(
 
 fn encode_json_array_with_context<'a>(
     json_array: Vec<Json>,
-    context: &JsonContext<'a>,
+    context: &mut JsonContext<'a>,
 ) -> Result<JsonValue> {
     let json_array_len = json_array.len();
     let mut items = Vec::with_capacity(json_array_len);
 
     for (index, value) in json_array.into_iter().enumerate() {
-        let array_context = context.with_key(&index.to_string());
-        let item_value = encode_json_value_with_context(value, &array_context)?;
+        let item_value = with_key_context(context, &index.to_string(), |context| {
+            encode_json_value_with_context(value, context)
+        })?;
         items.push(item_value);
     }
 
@@ -310,10 +318,10 @@ fn encode_json_array_with_context<'a>(
     let merged_item_type = if let Some((first, rests)) = items.split_first() {
         let mut merged = first.json_type().clone();
         for rest in rests.iter().map(|x| x.json_type()) {
-            if matches!(merged.native_type(), JsonNativeType::Variant) {
+            if matches!(merged, JsonNativeType::Variant) {
                 break;
             }
-            merged.merge(rest)?;
+            merged.merge(rest);
         }
         Some(merged)
     } else {
@@ -332,7 +340,7 @@ fn encode_json_array_with_context<'a>(
 }
 
 /// Helper function to encode a JSON value to a Value and determine its ConcreteDataType with context
-fn encode_json_value_with_context<'a>(json: Json, context: &JsonContext<'a>) -> Result<JsonValue> {
+fn encode_json_value_with_context(json: Json, context: &mut JsonContext) -> Result<JsonValue> {
     match json {
         Json::Null => Ok(JsonValue::null()),
         Json::Bool(b) => Ok(b.into()),
@@ -359,7 +367,7 @@ fn encode_json_value_with_context<'a>(json: Json, context: &JsonContext<'a>) -> 
 }
 
 /// Main decoding function with key path tracking
-pub fn decode_value_with_context(value: Value, context: &JsonContext) -> Result<Json> {
+fn decode_value_with_context(value: Value, context: &mut JsonContext) -> Result<Json> {
     match value {
         Value::Struct(struct_value) => decode_struct_with_context(struct_value, context),
         Value::List(list_value) => decode_list_with_context(list_value, context),
@@ -370,15 +378,16 @@ pub fn decode_value_with_context(value: Value, context: &JsonContext) -> Result<
 /// Decode a structured value to JSON object
 fn decode_struct_with_context<'a>(
     struct_value: StructValue,
-    context: &JsonContext<'a>,
+    context: &mut JsonContext<'a>,
 ) -> Result<Json> {
     let mut json_object = Map::with_capacity(struct_value.len());
 
     let (items, fields) = struct_value.into_parts();
 
     for (field, field_value) in fields.fields().iter().zip(items) {
-        let field_context = context.with_key(field.name());
-        let json_value = decode_value_with_context(field_value, &field_context)?;
+        let json_value = with_key_context(context, field.name(), |context| {
+            decode_value_with_context(field_value, context)
+        })?;
         json_object.insert(field.name().to_string(), json_value);
     }
 
@@ -386,14 +395,15 @@ fn decode_struct_with_context<'a>(
 }
 
 /// Decode a list value to JSON array
-fn decode_list_with_context(list_value: ListValue, context: &JsonContext) -> Result<Json> {
+fn decode_list_with_context(list_value: ListValue, context: &mut JsonContext) -> Result<Json> {
     let mut json_array = Vec::with_capacity(list_value.len());
 
     let data_items = list_value.take_items();
 
     for (index, item) in data_items.into_iter().enumerate() {
-        let array_context = context.with_key(&index.to_string());
-        let json_value = decode_value_with_context(item, &array_context)?;
+        let json_value = with_key_context(context, &index.to_string(), |context| {
+            decode_value_with_context(item, context)
+        })?;
         json_array.push(json_value);
     }
 

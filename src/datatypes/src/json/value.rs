@@ -26,9 +26,9 @@ use snafu::{OptionExt, ensure};
 use crate::Result;
 use crate::data_type::ConcreteDataType;
 use crate::error::{AlignJsonValueSnafu, InvalidJsonSnafu, InvalidJsonbSnafu};
-use crate::types::json_type::{JsonNativeType, JsonNumberType};
-use crate::types::{JsonType, StructField, StructType};
-use crate::value::{ListValue, ListValueRef, StructValue, StructValueRef, Value, ValueRef};
+use crate::types::json_type::{JsonNativeType, JsonNumberType, is_include};
+use crate::types::{StructField, StructType};
+use crate::value::{ListValue, StructValue, Value};
 
 /// Number in json, can be a positive integer, a negative integer, or a floating number.
 /// Each of which is represented as `u64`, `i64` and `f64`.
@@ -160,8 +160,14 @@ impl JsonVariant {
         }
     }
 
-    fn json_type(&self) -> JsonType {
-        JsonType::new_json2(self.native_type())
+    fn contains_empty_object(&self) -> bool {
+        match self {
+            JsonVariant::Array(array) => array.iter().any(JsonVariant::contains_empty_object),
+            JsonVariant::Object(object) => {
+                object.is_empty() || object.values().any(JsonVariant::contains_empty_object)
+            }
+            _ => false,
+        }
     }
 
     fn as_ref(&self) -> JsonVariantRef<'_> {
@@ -295,7 +301,7 @@ impl Display for JsonVariant {
 #[derive(Debug, Eq, Serialize, Deserialize)]
 pub struct JsonValue {
     #[serde(skip)]
-    json_type: OnceLock<JsonType>,
+    json_type: OnceLock<Arc<JsonNativeType>>,
     json_variant: JsonVariant,
 }
 
@@ -311,12 +317,21 @@ impl JsonValue {
         }
     }
 
-    pub(crate) fn data_type(&self) -> ConcreteDataType {
-        ConcreteDataType::Json(self.json_type().clone())
+    pub(crate) fn new_with(json_variant: JsonVariant, json_type: Arc<JsonNativeType>) -> Self {
+        Self {
+            json_type: OnceLock::from(json_type),
+            json_variant,
+        }
     }
 
-    pub fn json_type(&self) -> &JsonType {
-        self.json_type.get_or_init(|| self.json_variant.json_type())
+    pub(crate) fn data_type(&self) -> ConcreteDataType {
+        ConcreteDataType::json2(self.json_type().clone())
+    }
+
+    pub(crate) fn json_type(&self) -> &JsonNativeType {
+        self.json_type
+            .get_or_init(|| Arc::new(self.json_variant.native_type()))
+            .as_ref()
     }
 
     pub(crate) fn is_null(&self) -> bool {
@@ -368,6 +383,10 @@ impl JsonValue {
         self.json_variant
     }
 
+    pub(crate) fn variant(&self) -> &JsonVariant {
+        &self.json_variant
+    }
+
     pub(crate) fn into_value(self) -> Value {
         fn helper(v: JsonVariant) -> Value {
             match v {
@@ -415,14 +434,13 @@ impl JsonValue {
     /// - `Null` aligns to any type, and any value aligns to `Null` as `Null`.
     /// - Numbers are converted only within compatible number categories.
     /// - Arrays align each element recursively to the expected item type.
-    /// - Objects require `expected` to contain all fields from the current value. Missing expected
-    ///   fields are filled with `Null`.
+    /// - Objects require `expected` to have all fields from the current value.
     /// - `Variant` preserves the original JSON payload as serialized bytes.
     ///
     /// Returns an error if the value cannot be aligned without losing existing object fields or
     /// when a scalar type conversion is incompatible.
-    pub(crate) fn try_align(&mut self, expected: &JsonType) -> Result<()> {
-        if self.json_type() == expected {
+    pub(crate) fn try_align(&mut self, expected: &JsonNativeType) -> Result<()> {
+        if is_include(expected, self.json_type()) && !self.json_variant.contains_empty_object() {
             return Ok(());
         }
 
@@ -455,7 +473,6 @@ impl JsonValue {
                         .collect::<Result<_>>()?,
                 ),
 
-                (JsonVariant::Object(kvs), _) if kvs.is_empty() => JsonVariant::Null,
                 (JsonVariant::Object(mut kvs), JsonNativeType::Object(expected)) => {
                     ensure!(
                         expected.keys().len() >= kvs.keys().len()
@@ -469,15 +486,12 @@ impl JsonValue {
                         }
                     );
 
-                    let mut object = BTreeMap::new();
                     for (field, field_type) in expected {
                         if let Some((k, v)) = kvs.remove_entry(field) {
-                            object.insert(k, helper(v, field_type)?);
-                        } else {
-                            object.insert(field.clone(), JsonVariant::Null);
+                            kvs.insert(k, helper(v, field_type)?);
                         }
                     }
-                    JsonVariant::Object(object)
+                    JsonVariant::Object(kvs)
                 }
 
                 (v, JsonNativeType::Variant) => JsonVariant::Variant(encode_json_variant(v)?),
@@ -498,7 +512,7 @@ impl JsonValue {
 
         let x = std::mem::take(&mut self.json_variant);
 
-        self.json_variant = helper(x, expected.native_type())?;
+        self.json_variant = helper(x, expected)?;
         self.json_type = OnceLock::new();
         Ok(())
     }
@@ -692,10 +706,6 @@ impl JsonVariantRef<'_> {
             JsonVariantRef::Variant(_) => JsonNativeType::Variant,
         }
     }
-
-    fn json_type(&self) -> JsonType {
-        JsonType::new_json2(self.native_type())
-    }
 }
 
 fn json_array_native_type<I>(items: I) -> JsonNativeType
@@ -780,19 +790,17 @@ impl<'a> From<BTreeMap<&'a str, JsonVariantRef<'a>>> for JsonVariantRef<'a> {
     }
 }
 
-impl From<JsonVariantRef<'_>> for JsonVariant {
-    fn from(v: JsonVariantRef) -> Self {
+impl From<&JsonVariantRef<'_>> for JsonVariant {
+    fn from(v: &JsonVariantRef) -> Self {
         match v {
             JsonVariantRef::Null => Self::Null,
-            JsonVariantRef::Bool(x) => Self::Bool(x),
-            JsonVariantRef::Number(x) => Self::Number(x),
+            JsonVariantRef::Bool(x) => Self::Bool(*x),
+            JsonVariantRef::Number(x) => Self::Number(*x),
             JsonVariantRef::String(x) => Self::String(x.to_string()),
-            JsonVariantRef::Array(array) => {
-                Self::Array(array.into_iter().map(Into::into).collect())
-            }
+            JsonVariantRef::Array(array) => Self::Array(array.iter().map(Into::into).collect()),
             JsonVariantRef::Object(object) => Self::Object(
                 object
-                    .into_iter()
+                    .iter()
                     .map(|(k, v)| (k.to_string(), v.into()))
                     .collect(),
             ),
@@ -811,7 +819,7 @@ impl<'a> From<&'a [u8]> for JsonVariantRef<'a> {
 #[derive(Debug, Serialize)]
 pub struct JsonValueRef<'a> {
     #[serde(skip)]
-    json_type: OnceLock<JsonType>,
+    json_type: OnceLock<Arc<JsonNativeType>>,
     json_variant: JsonVariantRef<'a>,
 }
 
@@ -821,11 +829,13 @@ impl<'a> JsonValueRef<'a> {
     }
 
     pub(crate) fn data_type(&self) -> ConcreteDataType {
-        ConcreteDataType::Json(self.json_type().clone())
+        ConcreteDataType::json2(self.json_type().as_ref().clone())
     }
 
-    pub(crate) fn json_type(&self) -> &JsonType {
-        self.json_type.get_or_init(|| self.json_variant.json_type())
+    pub(crate) fn json_type(&self) -> Arc<JsonNativeType> {
+        self.json_type
+            .get_or_init(|| Arc::new(self.json_variant.native_type()))
+            .clone()
     }
 
     pub fn into_variant(self) -> JsonVariantRef<'a> {
@@ -854,48 +864,6 @@ impl<'a> JsonValueRef<'a> {
         }
     }
 
-    pub fn as_value_ref(&self) -> ValueRef<'_> {
-        fn helper<'a>(v: &'a JsonVariantRef) -> ValueRef<'a> {
-            match v {
-                JsonVariantRef::Null => ValueRef::Null,
-                JsonVariantRef::Bool(x) => ValueRef::Boolean(*x),
-                JsonVariantRef::Number(x) => match x {
-                    JsonNumber::PosInt(i) => ValueRef::UInt64(*i),
-                    JsonNumber::NegInt(i) => ValueRef::Int64(*i),
-                    JsonNumber::Float(f) => ValueRef::Float64(*f),
-                },
-                JsonVariantRef::String(x) => ValueRef::String(x),
-                JsonVariantRef::Array(array) => {
-                    let val = array.iter().map(helper).collect::<Vec<_>>();
-                    let item_datatype = if let Some(first) = val.first() {
-                        first.data_type()
-                    } else {
-                        ConcreteDataType::null_datatype()
-                    };
-                    ValueRef::List(ListValueRef::RefList {
-                        val,
-                        item_datatype: Arc::new(item_datatype),
-                    })
-                }
-                JsonVariantRef::Object(object) => {
-                    let mut fields = Vec::with_capacity(object.len());
-                    let mut val = Vec::with_capacity(object.len());
-                    for (k, v) in object.iter() {
-                        let v = helper(v);
-                        fields.push(StructField::new(k.to_string(), v.data_type(), true));
-                        val.push(v);
-                    }
-                    ValueRef::Struct(StructValueRef::RefList {
-                        val,
-                        fields: StructType::new(Arc::new(fields)),
-                    })
-                }
-                JsonVariantRef::Variant(x) => ValueRef::Binary(x),
-            }
-        }
-        helper(&self.json_variant)
-    }
-
     pub(crate) fn data_size(&self) -> usize {
         size_of_val(self)
     }
@@ -918,7 +886,7 @@ impl From<JsonValueRef<'_>> for JsonValue {
     fn from(v: JsonValueRef<'_>) -> Self {
         Self {
             json_type: OnceLock::new(),
-            json_variant: v.json_variant.into(),
+            json_variant: JsonVariant::from(&v.json_variant),
         }
     }
 }
@@ -967,17 +935,14 @@ mod tests {
 
         // Root type can be aligned to Null, and the cached json_type must be refreshed.
         let mut value = JsonValue::from(true);
-        assert_eq!(
-            value.json_type(),
-            &JsonType::new_json2(JsonNativeType::Bool)
-        );
-        value.try_align(&JsonType::null())?;
+        assert_eq!(value.json_type(), &JsonNativeType::Bool);
+        value.try_align(&JsonNativeType::Null)?;
         assert_eq!(value, JsonValue::null());
-        assert_eq!(value.json_type(), &JsonType::null());
+        assert_eq!(value.json_type(), &JsonNativeType::Null);
 
         // Object alignment now requires the expected type to be a superset of the
         // value fields, while still filling missing expected fields with null.
-        let expected = JsonType::new_json2(JsonNativeType::Object(JsonObjectType::from([
+        let expected = JsonNativeType::Object(JsonObjectType::from([
             ("extra".to_string(), JsonNativeType::u64()),
             (
                 "items".to_string(),
@@ -988,7 +953,7 @@ mod tests {
                 ])))),
             ),
             ("name".to_string(), JsonNativeType::String),
-        ])));
+        ]));
         let mut value = parse_json_value(r#"{"items":[{"id":1,"payload":{"k":"v"}}],"extra":1}"#);
         assert_ne!(value.json_type(), &expected);
         value.try_align(&expected)?;
@@ -1000,25 +965,40 @@ mod tests {
                     "items".to_string(),
                     JsonVariant::Array(vec![JsonVariant::Object(BTreeMap::from([
                         ("id".to_string(), JsonVariant::from(1_u64)),
-                        ("note".to_string(), JsonVariant::Null),
                         (
                             "payload".to_string(),
                             JsonVariant::Variant(jsonb_bytes(r#"{"k":"v"}"#)),
                         ),
                     ]))]),
                 ),
-                ("name".to_string(), JsonVariant::Null),
             ])))
         );
 
+        // Empty objects have native type Null, but the value still needs alignment
+        // before converting into a typed struct value.
+        let expected = JsonNativeType::Object(JsonObjectType::from([(
+            "empty".to_string(),
+            JsonNativeType::Null,
+        )]));
+        let mut value = parse_json_value(r#"{"empty":{}}"#);
+        assert_eq!(value.json_type(), &expected);
+        value.try_align(&expected)?;
+        assert_eq!(
+            value,
+            JsonValue::from(JsonVariant::Object(BTreeMap::from([(
+                "empty".to_string(),
+                JsonVariant::Null,
+            )])))
+        );
+
         // Object alignment should fail if the expected type misses any field from the value.
-        let expected = JsonType::new_json2(JsonNativeType::Object(JsonObjectType::from([(
+        let expected = JsonNativeType::Object(JsonObjectType::from([(
             "items".to_string(),
             JsonNativeType::Array(Box::new(JsonNativeType::Object(JsonObjectType::from([
                 ("id".to_string(), JsonNativeType::u64()),
                 ("payload".to_string(), JsonNativeType::Variant),
             ])))),
-        )])));
+        )]));
         let mut value =
             parse_json_value(r#"{"items":[{"id":1,"payload":{"k":"v"},"extra":true}]}"#);
         let err = value.try_align(&expected).unwrap_err();
@@ -1029,7 +1009,7 @@ mod tests {
 
         // Root-level Variant alignment should preserve the original JSON payload.
         let mut value = parse_json_value(r#"{"foo":[1,true,null]}"#);
-        value.try_align(&JsonType::new_json2(JsonNativeType::Variant))?;
+        value.try_align(&JsonNativeType::Variant)?;
         assert_eq!(
             value,
             JsonValue::from(JsonVariant::Variant(jsonb_bytes(
@@ -1039,18 +1019,14 @@ mod tests {
 
         // Incompatible scalar alignment should fail instead of coercing the value.
         let mut value = JsonValue::from("hello");
-        let err = value
-            .try_align(&JsonType::new_json2(JsonNativeType::Bool))
-            .unwrap_err();
+        let err = value.try_align(&JsonNativeType::Bool).unwrap_err();
         assert_eq!(
             err.to_string(),
             r#"Failed to align JSON value, reason: unable to align 'hello' of type "<String>" to type "<Bool>""#
         );
 
         let mut value = JsonValue::from(f64::NAN);
-        let err = value
-            .try_align(&JsonType::new_json2(JsonNativeType::Variant))
-            .unwrap_err();
+        let err = value.try_align(&JsonNativeType::Variant).unwrap_err();
         assert_eq!(
             err.to_string(),
             "Invalid JSON: NaN is not a valid JSON number"

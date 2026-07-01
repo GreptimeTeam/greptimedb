@@ -294,7 +294,7 @@ pub fn sql_data_type_to_concrete_data_type(data_type: &SqlDataType) -> Result<Co
                 JSON2_TYPE_NAME if args.is_empty() => {
                     // Currently, JSON2 is not inferred as any native type initially.
                     // TODO(fys): infer it later from type hints.
-                    let format = JsonFormat::Json2(Box::new(JsonNativeType::Null));
+                    let format = JsonFormat::Json2(Arc::new(JsonNativeType::Null));
                     Ok(ConcreteDataType::Json(JsonType::new(format)))
                 }
                 _ => error::SqlTypeNotSupportedSnafu {

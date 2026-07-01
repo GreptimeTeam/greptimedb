@@ -28,6 +28,10 @@ insert into json2_table (ts, j) values (105, 'null');
 
 Error: 1001(Unsupported), Non-object json is not supported currently
 
+insert into json2_table (ts, j) values (1, '{}');
+
+Error: 1004(InvalidArguments), Invalid InsertRequest, reason: empty json object is not supported, consider adding a dummy field
+
 insert into json2_table (ts, j)
 values (1, '{"a": {"b": 1}, "c": "s1", "d": [{"e": {"f": 0.1}}]}'),
        (2, '{"a": {"b": -2}, "c": "s2", "d": [{"e": {"f": 0.2}}]}');
@@ -146,7 +150,7 @@ select j.a, j.a.x from json2_table order by ts;
 | {"b":-2}                          |                                     |
 | {"b":3}                           |                                     |
 | {"b":-4}                          |                                     |
-|                                   |                                     |
+| {"b":null}                        |                                     |
 |                                   |                                     |
 | {"b":"s7"}                        |                                     |
 | {"b":8}                           |                                     |
