@@ -546,10 +546,8 @@ async fn test_undrop_table_restores_metadata_and_reopens_regions() {
 
     while rx.try_recv().is_ok() {}
 
-    let mut procedure = UndropTableProcedure::new(
-        new_undrop_table_task(table_name, table_id),
-        ddl_context.clone(),
-    );
+    let mut procedure =
+        UndropTableProcedure::new(new_undrop_table_task(table_id), ddl_context.clone());
     execute_procedure_until_done(&mut procedure).await;
 
     let live_table = ddl_context
@@ -641,10 +639,8 @@ async fn test_undrop_logical_table_skips_datanode_open() {
 
     while rx.try_recv().is_ok() {}
 
-    let mut procedure = UndropTableProcedure::new(
-        new_undrop_table_task(table_name, logical_table_id),
-        ddl_context.clone(),
-    );
+    let mut procedure =
+        UndropTableProcedure::new(new_undrop_table_task(logical_table_id), ddl_context.clone());
     execute_procedure_until_done(&mut procedure).await;
 
     let live_table = ddl_context
@@ -689,7 +685,7 @@ async fn test_undrop_metric_logical_table_fails() {
         create_metric_logical_table_tombstone(&ddl_context, physical_table_id, "foo").await;
 
     let mut procedure =
-        UndropTableProcedure::new(new_undrop_table_task("foo", logical_table_id), ddl_context);
+        UndropTableProcedure::new(new_undrop_table_task(logical_table_id), ddl_context);
     let err = procedure.on_prepare().await.unwrap_err();
 
     assert_eq!(err.status_code(), StatusCode::Unsupported);
@@ -748,44 +744,11 @@ async fn test_undrop_table_fails_when_live_name_exists() {
         .await
         .unwrap();
 
-    let mut procedure = UndropTableProcedure::new(
-        new_undrop_table_task(table_name, dropped_table_id),
-        ddl_context,
-    );
+    let mut procedure =
+        UndropTableProcedure::new(new_undrop_table_task(dropped_table_id), ddl_context);
     let err = procedure.on_prepare().await.unwrap_err();
 
     assert_matches!(err, Error::TableAlreadyExists { .. });
-}
-
-#[tokio::test]
-async fn test_undrop_table_fails_when_task_name_mismatches_table_id() {
-    let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
-    let mut ddl_context = new_ddl_context(node_manager);
-    ddl_context.soft_drop_enabled = true;
-    let table_id = 1024;
-    let task = test_create_table_task("foo", table_id);
-    ddl_context
-        .table_metadata_manager
-        .create_table_metadata(
-            task.table_info.clone(),
-            TableRouteValue::physical(vec![]),
-            HashMap::new(),
-        )
-        .await
-        .unwrap();
-    let mut drop_procedure = DropTableProcedure::new(
-        new_drop_table_task("foo", table_id, false),
-        ddl_context.clone(),
-    );
-    execute_procedure_until_done(&mut drop_procedure).await;
-
-    let mut procedure = UndropTableProcedure::new(
-        new_undrop_table_task("bar", table_id),
-        ddl_context,
-    );
-    let err = procedure.on_prepare().await.unwrap_err();
-
-    assert_eq!(err.status_code(), StatusCode::TableNotFound);
 }
 
 #[tokio::test]
@@ -1002,13 +965,8 @@ fn new_drop_table_task(table_name: &str, table_id: TableId, drop_if_exists: bool
     }
 }
 
-fn new_undrop_table_task(table_name: &str, table_id: TableId) -> UndropTableTask {
-    UndropTableTask {
-        catalog: DEFAULT_CATALOG_NAME.to_string(),
-        schema: DEFAULT_SCHEMA_NAME.to_string(),
-        table: table_name.to_string(),
-        table_id,
-    }
+fn new_undrop_table_task(table_id: TableId) -> UndropTableTask {
+    UndropTableTask { table_id }
 }
 
 fn new_purge_dropped_table_task(

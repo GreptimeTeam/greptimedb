@@ -156,18 +156,8 @@ impl DdlTask {
     }
 
     /// Creates a [`DdlTask`] to undrop a table.
-    pub fn new_undrop_table(
-        catalog: String,
-        schema: String,
-        table: String,
-        table_id: TableId,
-    ) -> Self {
-        DdlTask::UndropTable(UndropTableTask {
-            catalog,
-            schema,
-            table,
-            table_id,
-        })
+    pub fn new_undrop_table(table_id: TableId) -> Self {
+        DdlTask::UndropTable(UndropTableTask { table_id })
     }
 
     /// Creates a [`DdlTask`] to purge a dropped table.
@@ -639,28 +629,7 @@ pub struct DropTableTask {
 
 #[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
 pub struct UndropTableTask {
-    pub catalog: String,
-    pub schema: String,
-    pub table: String,
     pub table_id: TableId,
-}
-
-impl UndropTableTask {
-    pub fn table_ref(&self) -> TableReference<'_> {
-        TableReference {
-            catalog: &self.catalog,
-            schema: &self.schema,
-            table: &self.table,
-        }
-    }
-
-    pub fn table_name(&self) -> TableName {
-        TableName {
-            catalog_name: self.catalog.clone(),
-            schema_name: self.schema.clone(),
-            table_name: self.table.clone(),
-        }
-    }
 }
 
 #[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
@@ -694,9 +663,6 @@ impl TryFrom<PbUndropTableTask> for UndropTableTask {
 
     fn try_from(pb: PbUndropTableTask) -> Result<Self> {
         Ok(Self {
-            catalog: pb.catalog_name,
-            schema: pb.schema_name,
-            table: pb.table_name,
             table_id: pb
                 .table_id
                 .context(error::InvalidProtoMsgSnafu {
@@ -710,9 +676,6 @@ impl TryFrom<PbUndropTableTask> for UndropTableTask {
 impl From<UndropTableTask> for PbUndropTableTask {
     fn from(task: UndropTableTask) -> Self {
         Self {
-            catalog_name: task.catalog,
-            schema_name: task.schema,
-            table_name: task.table,
             table_id: Some(api::v1::TableId { id: task.table_id }),
         }
     }
@@ -1910,12 +1873,7 @@ mod tests {
 
     #[test]
     fn test_undrop_table_task_pb_roundtrip() {
-        let expected = UndropTableTask {
-            catalog: "greptime".to_string(),
-            schema: "public".to_string(),
-            table: "foo".to_string(),
-            table_id: 1024,
-        };
+        let expected = UndropTableTask { table_id: 1024 };
         let request = SubmitDdlTaskRequest::new(
             QueryContext::default(),
             DdlTask::UndropTable(expected.clone()),
@@ -1950,12 +1908,7 @@ mod tests {
 
     #[test]
     fn test_undrop_table_task_json_roundtrip() {
-        let task = UndropTableTask {
-            catalog: "greptime".to_string(),
-            schema: "public".to_string(),
-            table: "foo".to_string(),
-            table_id: 1024,
-        };
+        let task = UndropTableTask { table_id: 1024 };
 
         let output = serde_json::to_vec(&task).unwrap();
 

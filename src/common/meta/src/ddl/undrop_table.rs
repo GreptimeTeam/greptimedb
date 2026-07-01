@@ -31,7 +31,6 @@ use store_api::storage::{RegionId, RegionNumber};
 use strum::AsRefStr;
 use table::metadata::TableId;
 use table::table_name::TableName;
-use table::table_reference::TableReference;
 
 use crate::ddl::utils::{
     add_peer_context_if_needed, convert_region_routes_to_detecting_regions,
@@ -42,7 +41,7 @@ use crate::error::{self, Result};
 use crate::instruction::CacheIdent;
 use crate::key::table_name::TableNameKey;
 use crate::key::table_route::TableRouteValue;
-use crate::lock_key::{CatalogLock, SchemaLock, TableLock, TableNameLock};
+use crate::lock_key::TableLock;
 use crate::rpc::ddl::UndropTableTask;
 use crate::rpc::router::{
     RegionRoute, find_follower_regions, find_followers, find_leader_regions, find_leaders,
@@ -69,35 +68,24 @@ impl UndropTableProcedure {
     }
 
     pub(crate) async fn on_prepare(&mut self) -> Result<Status> {
-        let table_ref = self.data.table_ref();
-        ensure!(
-            !self
-                .context
-                .table_metadata_manager
-                .table_name_manager()
-                .exists(TableNameKey::new(
-                    table_ref.catalog,
-                    table_ref.schema,
-                    table_ref.table
-                ))
-                .await?,
-            error::TableAlreadyExistsSnafu {
-                table_name: table_ref.to_string()
-            }
-        );
-
         let dropped_table = self
             .context
             .table_metadata_manager
             .get_dropped_table_by_id(self.data.task.table_id)
             .await?
             .with_context(|| error::TableNotFoundSnafu {
-                table_name: table_ref.to_string(),
+                table_name: self.data.task.table_id.to_string(),
             })?;
+        let table_name = &dropped_table.table_name;
         ensure!(
-            dropped_table.table_name == self.data.task.table_name(),
-            error::TableNotFoundSnafu {
-                table_name: table_ref.to_string()
+            !self
+                .context
+                .table_metadata_manager
+                .table_name_manager()
+                .exists(TableNameKey::from(table_name))
+                .await?,
+            error::TableAlreadyExistsSnafu {
+                table_name: table_name.to_string()
             }
         );
         self.data.table_name = Some(dropped_table.table_name.clone());
@@ -198,13 +186,7 @@ impl Procedure for UndropTableProcedure {
     }
 
     fn lock_key(&self) -> LockKey {
-        let table_ref = self.data.table_ref();
-        LockKey::new(vec![
-            CatalogLock::Read(table_ref.catalog).into(),
-            SchemaLock::read(table_ref.catalog, table_ref.schema).into(),
-            TableNameLock::new(table_ref.catalog, table_ref.schema, table_ref.table).into(),
-            TableLock::Write(self.data.task.table_id).into(),
-        ])
+        LockKey::new(vec![TableLock::Write(self.data.task.table_id).into()])
     }
 }
 
@@ -292,10 +274,6 @@ impl UndropTableData {
             table_route_value: None,
             region_wal_options: HashMap::new(),
         }
-    }
-
-    fn table_ref(&self) -> TableReference<'_> {
-        self.task.table_ref()
     }
 
     fn table_name(&self) -> &TableName {
