@@ -35,7 +35,7 @@ use datatypes::vectors::{
     UInt32VectorBuilder, UInt64VectorBuilder, VectorRef,
 };
 use futures::TryStreamExt;
-use snafu::{OptionExt, ResultExt};
+use snafu::ResultExt;
 use store_api::storage::{ScanRequest, TableId};
 
 use crate::CatalogManager;
