@@ -155,23 +155,40 @@ impl TombstoneManager {
         src_key: Vec<u8>,
         value: Vec<u8>,
         dest_key: Vec<u8>,
-    ) -> (Txn, impl FnMut(&mut TxnOpGetResponseSet) -> Option<Vec<u8>>) {
-        let txn = Txn::new()
-            .when(vec![Compare::with_value(
-                src_key.clone(),
+        require_dest_not_exists: bool,
+    ) -> Txn {
+        let mut compares = vec![Compare::with_value(
+            src_key.clone(),
+            CompareOp::Equal,
+            value.clone(),
+        )];
+        if require_dest_not_exists {
+            compares.push(Compare::with_value_not_exists(
+                dest_key.clone(),
                 CompareOp::Equal,
-                value.clone(),
-            )])
+            ));
+        }
+
+        let mut failure = vec![TxnOp::Get(src_key.clone())];
+        if require_dest_not_exists {
+            failure.push(TxnOp::Get(dest_key.clone()));
+        }
+
+        Txn::new()
+            .when(compares)
             .and_then(vec![
                 TxnOp::Put(dest_key.clone(), value.clone()),
                 TxnOp::Delete(src_key.clone()),
             ])
-            .or_else(vec![TxnOp::Get(src_key.clone())]);
-
-        (txn, TxnOpGetResponseSet::filter(src_key))
+            .or_else(failure)
     }
 
-    async fn move_values_inner(&self, keys: &[Vec<u8>], dest_keys: &[Vec<u8>]) -> Result<usize> {
+    async fn move_values_inner(
+        &self,
+        keys: &[Vec<u8>],
+        dest_keys: &[Vec<u8>],
+        require_dest_not_exists: bool,
+    ) -> Result<usize> {
         ensure!(
             keys.len() == dest_keys.len(),
             error::UnexpectedSnafu {
@@ -197,15 +214,16 @@ impl TombstoneManager {
 
         const MAX_RETRIES: usize = 8;
         for _ in 0..MAX_RETRIES {
-            let (txns, (keys, filters)): (Vec<_>, (Vec<_>, Vec<_>)) = results
+            let (txns, keys): (Vec<_>, Vec<_>) = results
                 .iter()
                 .map(|(key, value)| {
-                    let (txn, filter) = self.build_move_value_txn(
+                    let txn = self.build_move_value_txn(
                         key.clone(),
                         value.clone(),
                         lookup_table[&key].clone(),
+                        require_dest_not_exists,
                     );
-                    (txn, (key.clone(), filter))
+                    (txn, key.clone())
                 })
                 .unzip();
             let mut resp = self.kv_backend.txn(Txn::merge_all(txns)).await?;
@@ -214,11 +232,23 @@ impl TombstoneManager {
             }
             let mut set = TxnOpGetResponseSet::from(&mut resp.responses);
             // Updates results.
-            for (idx, mut filter) in filters.into_iter().enumerate() {
+            for key in &keys {
+                let dest_key = lookup_table[&key].clone();
+                if require_dest_not_exists {
+                    let mut filter = TxnOpGetResponseSet::filter(dest_key.clone());
+                    if filter(&mut set).is_some() {
+                        return error::TombstoneTargetAlreadyExistsSnafu {
+                            key: String::from_utf8_lossy(&dest_key).to_string(),
+                        }
+                        .fail();
+                    }
+                }
+
+                let mut filter = TxnOpGetResponseSet::filter(key.clone());
                 if let Some(value) = filter(&mut set) {
-                    results.insert(keys[idx].clone(), value);
+                    results.insert(key.clone(), value);
                 } else {
-                    results.remove(&keys[idx]);
+                    results.remove(key);
                 }
             }
         }
@@ -243,7 +273,12 @@ impl TombstoneManager {
     /// Moves values to `dest_key`.
     ///
     /// Returns the number of keys that were moved.
-    async fn move_values(&self, keys: Vec<Vec<u8>>, dest_keys: Vec<Vec<u8>>) -> Result<usize> {
+    async fn move_values(
+        &self,
+        keys: Vec<Vec<u8>>,
+        dest_keys: Vec<Vec<u8>>,
+        require_dest_not_exists: bool,
+    ) -> Result<usize> {
         ensure!(
             keys.len() == dest_keys.len(),
             error::UnexpectedSnafu {
@@ -268,11 +303,14 @@ impl TombstoneManager {
             let keys_chunks = keys.chunks(chunk_size).collect::<Vec<_>>();
             let dest_keys_chunks = dest_keys.chunks(chunk_size).collect::<Vec<_>>();
             for (keys, dest_keys) in keys_chunks.into_iter().zip(dest_keys_chunks) {
-                moved_keys += self.move_values_inner(keys, dest_keys).await?;
+                moved_keys += self
+                    .move_values_inner(keys, dest_keys, require_dest_not_exists)
+                    .await?;
             }
             Ok(moved_keys)
         } else {
-            self.move_values_inner(&keys, &dest_keys).await
+            self.move_values_inner(&keys, &dest_keys, require_dest_not_exists)
+                .await
         }
     }
 
@@ -292,7 +330,7 @@ impl TombstoneManager {
             })
             .unzip();
 
-        self.move_values(keys, dest_keys).await
+        self.move_values(keys, dest_keys, false).await
     }
 
     /// Restores tombstones for keys.
@@ -311,7 +349,7 @@ impl TombstoneManager {
             })
             .unzip();
 
-        self.move_values(keys, dest_keys).await
+        self.move_values(keys, dest_keys, true).await
     }
 
     /// Deletes tombstones values for the specified `keys`.
@@ -547,14 +585,14 @@ mod tests {
             .map(|kv| (kv.key, kv.dest_key))
             .unzip();
         let moved_keys = tombstone_manager
-            .move_values(keys.clone(), dest_keys.clone())
+            .move_values(keys.clone(), dest_keys.clone(), false)
             .await
             .unwrap();
         assert_eq!(kvs.len(), moved_keys);
         check_moved_values(kv_backend.clone(), &move_values).await;
         // Moves again
         let moved_keys = tombstone_manager
-            .move_values(keys.clone(), dest_keys.clone())
+            .move_values(keys.clone(), dest_keys.clone(), false)
             .await
             .unwrap();
         assert_eq!(0, moved_keys);
@@ -602,14 +640,14 @@ mod tests {
             .map(|kv| (kv.key, kv.dest_key))
             .unzip();
         let moved_keys = tombstone_manager
-            .move_values(keys.clone(), dest_keys.clone())
+            .move_values(keys.clone(), dest_keys.clone(), false)
             .await
             .unwrap();
         assert_eq!(kvs.len(), moved_keys);
         check_moved_values(kv_backend.clone(), &move_values).await;
         // Moves again
         let moved_keys = tombstone_manager
-            .move_values(keys.clone(), dest_keys.clone())
+            .move_values(keys.clone(), dest_keys.clone(), false)
             .await
             .unwrap();
         assert_eq!(0, moved_keys);
@@ -651,14 +689,14 @@ mod tests {
         keys.push(b"non-exists".to_vec());
         dest_keys.push(b"hi/non-exists".to_vec());
         let moved_keys = tombstone_manager
-            .move_values(keys.clone(), dest_keys.clone())
+            .move_values(keys.clone(), dest_keys.clone(), false)
             .await
             .unwrap();
         check_moved_values(kv_backend.clone(), &move_values).await;
         assert_eq!(3, moved_keys);
         // Moves again
         let moved_keys = tombstone_manager
-            .move_values(keys.clone(), dest_keys.clone())
+            .move_values(keys.clone(), dest_keys.clone(), false)
             .await
             .unwrap();
         check_moved_values(kv_backend.clone(), &move_values).await;
@@ -704,7 +742,7 @@ mod tests {
             .map(|kv| (kv.key, kv.dest_key))
             .unzip();
         let moved_keys = tombstone_manager
-            .move_values(keys, dest_keys)
+            .move_values(keys, dest_keys, false)
             .await
             .unwrap();
         assert_eq!(kvs.len(), moved_keys);
@@ -745,7 +783,7 @@ mod tests {
             .map(|kv| (kv.key, kv.dest_key))
             .unzip();
         tombstone_manager
-            .move_values(keys, dest_keys)
+            .move_values(keys, dest_keys, false)
             .await
             .unwrap();
         check_moved_values(kv_backend.clone(), &move_values).await;
@@ -780,7 +818,7 @@ mod tests {
             .map(|kv| (kv.key, kv.dest_key))
             .unzip();
         tombstone_manager
-            .move_values(keys, dest_keys)
+            .move_values(keys, dest_keys, false)
             .await
             .unwrap();
         check_moved_values(kv_backend.clone(), &move_values).await;
@@ -795,7 +833,7 @@ mod tests {
         let dest_keys = vec![b"bar".to_vec(), b"foo".to_vec(), b"baz".to_vec()];
 
         let err = tombstone_manager
-            .move_values(keys, dest_keys)
+            .move_values(keys, dest_keys, false)
             .await
             .unwrap_err();
         assert!(
@@ -803,7 +841,10 @@ mod tests {
                 .contains("The length of keys(2) does not match the length of dest_keys(3)."),
         );
 
-        let moved_keys = tombstone_manager.move_values(vec![], vec![]).await.unwrap();
+        let moved_keys = tombstone_manager
+            .move_values(vec![], vec![], false)
+            .await
+            .unwrap();
         assert_eq!(0, moved_keys);
     }
 }

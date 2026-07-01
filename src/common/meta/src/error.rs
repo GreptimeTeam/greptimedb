@@ -741,6 +741,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to restore tombstone, target key already exists: {key}"))]
+    TombstoneTargetAlreadyExists {
+        key: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to parse {} from utf8", name))]
     FromUtf8 {
         name: String,
@@ -1144,6 +1151,7 @@ impl ErrorExt for Error {
             | EtcdTxnFailed { .. }
             | ConnectEtcd { .. }
             | MoveValues { .. }
+            | TombstoneTargetAlreadyExists { .. }
             | GetCache { .. }
             | GetLatestCacheRetryExceeded { .. }
             | SerializeToJson { .. }

@@ -115,7 +115,16 @@ impl UndropTableProcedure {
                 table_route_value,
                 &self.data.region_wal_options,
             )
-            .await?;
+            .await
+            .map_err(|err| match err {
+                error::Error::TombstoneTargetAlreadyExists { .. } => {
+                    error::TableAlreadyExistsSnafu {
+                        table_name: self.data.table_name().to_string(),
+                    }
+                    .build()
+                }
+                err => err,
+            })?;
         self.data.state = UndropTableState::OpenRegions;
         Ok(Status::executing(true))
     }
