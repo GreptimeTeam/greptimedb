@@ -1807,6 +1807,7 @@ body_limit = "64MiB"
 prom_validation_mode = "strict"
 cors_allowed_origins = []
 enable_cors = true
+experimental_enable_explain_analyze_stream = false
 
 [grpc]
 bind_addr = "127.0.0.1:4001"
