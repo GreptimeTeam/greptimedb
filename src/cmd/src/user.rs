@@ -19,6 +19,7 @@ use std::io;
 use auth::{
     DEFAULT_PBKDF2_SHA256_ITERATIONS, MAX_PBKDF2_SHA256_SALT_LEN,
     format_mysql_native_password_verifier, format_pbkdf2_sha256_password_verifier,
+    format_pg_scram_sha256_password_verifier,
 };
 use clap::{ArgGroup, Parser, Subcommand, ValueEnum};
 use rand::RngCore;
@@ -65,15 +66,15 @@ pub struct HashPasswordCommand {
     #[clap(long)]
     password_stdin: bool,
 
-    /// PBKDF2-SHA256 iteration count.
+    /// PBKDF2-SHA256 / SCRAM-SHA-256 iteration count.
     #[clap(long, default_value_t = DEFAULT_PBKDF2_SHA256_ITERATIONS)]
     iterations: u32,
 
-    /// PBKDF2-SHA256 random salt length in bytes.
+    /// PBKDF2-SHA256 / SCRAM-SHA-256 random salt length in bytes.
     #[clap(long, default_value_t = 16)]
     salt_len: usize,
 
-    /// PBKDF2-SHA256 salt as hex. Mainly useful for deterministic automation.
+    /// PBKDF2-SHA256 / SCRAM-SHA-256 salt as hex. Mainly useful for deterministic automation.
     #[clap(long)]
     salt_hex: Option<String>,
 }
@@ -83,6 +84,7 @@ pub struct HashPasswordCommand {
 enum PasswordFormat {
     Pbkdf2Sha256,
     MysqlNativePassword,
+    PgScramSha256,
 }
 
 impl HashPasswordCommand {
@@ -97,6 +99,16 @@ impl HashPasswordCommand {
             }
             PasswordFormat::MysqlNativePassword => {
                 format_mysql_native_password_verifier(password.as_bytes())
+            }
+            PasswordFormat::PgScramSha256 => {
+                let salt = self.pbkdf2_salt()?;
+                format_pg_scram_sha256_password_verifier(
+                    password.as_bytes(),
+                    &salt,
+                    self.iterations,
+                )
+                .map_err(common_error::ext::BoxedError::new)
+                .context(error::OtherSnafu)?
             }
         };
 
@@ -182,6 +194,29 @@ mod tests {
 
         assert_eq!(
             "pbkdf2_sha256:4096:73616c74:c5e478d59288c841aa530db6845c4c8d962893a001ce4e11a4963873aa98134a",
+            verifier
+        );
+    }
+
+    #[test]
+    fn test_hash_password_command_with_pg_scram_sha256() {
+        let cmd = HashPasswordCommand {
+            format: PasswordFormat::PgScramSha256,
+            password: Some("password".to_string()),
+            password_stdin: false,
+            iterations: 4096,
+            salt_len: 16,
+            salt_hex: Some("73616c74".to_string()),
+        };
+
+        let password = cmd.read_password().unwrap();
+        let salt = cmd.pbkdf2_salt().unwrap();
+        let verifier =
+            format_pg_scram_sha256_password_verifier(password.as_bytes(), &salt, cmd.iterations)
+                .unwrap();
+
+        assert_eq!(
+            "pg_scram_sha256:4096:73616c74:945e1c466fc9932efadc23781edc5d1e78d5e10f005933652af1a6105154f084:b9bf0e811b1fb6793671c0cc3adedf7c75cd72291191092ad65878c5a02aad2c",
             verifier
         );
     }
