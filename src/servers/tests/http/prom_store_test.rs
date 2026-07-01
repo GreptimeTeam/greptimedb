@@ -335,19 +335,27 @@ async fn test_prometheus_remote_write_v2_histogram_write_error_has_partial_writt
     let client = TestClient::new(app).await;
 
     let mut write_request = remote_write_v2::request_with_labels_and_samples(
-        vec![(
-            prom_store::METRIC_NAME_LABEL,
-            "http_request_duration_seconds",
-        )],
+        vec![(prom_store::METRIC_NAME_LABEL, "http_requests_total")],
         vec![RemoteWriteV2Sample {
             value: 42.0,
             timestamp: 1000,
             start_timestamp: 0,
         }],
     );
-    write_request.timeseries[0]
-        .histograms
-        .push(remote_write_v2::histogram(1000));
+    let metric_name_ref = write_request
+        .symbols
+        .iter()
+        .position(|symbol| symbol == prom_store::METRIC_NAME_LABEL)
+        .unwrap() as u32;
+    let histogram_metric_ref = write_request.symbols.len() as u32;
+    write_request
+        .symbols
+        .push("http_request_duration_seconds".to_string());
+    write_request.timeseries.push(RemoteWriteV2TimeSeries {
+        labels_refs: vec![metric_name_ref, histogram_metric_ref],
+        histograms: vec![remote_write_v2::histogram(1000)],
+        ..Default::default()
+    });
 
     let result = post_remote_write_v2(&client, &write_request).await;
 
@@ -364,7 +372,7 @@ async fn test_prometheus_remote_write_v2_histogram_write_error_has_partial_writt
     assert!(captured.with_metric_engine);
     assert_eq!(1, captured.request.inserts.len());
     assert_eq!(
-        "http_request_duration_seconds",
+        "http_requests_total",
         captured.request.inserts[0].table_name
     );
     assert!(write_rx.try_recv().is_err());
