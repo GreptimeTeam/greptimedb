@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::Utc;
-use common_catalog::format_full_table_name;
+use common_catalog::{format_full_flow_name, format_full_table_name};
 use common_procedure::error::{FromJsonSnafu, Result as ProcedureResult, ToJsonSnafu};
 use common_procedure::{Context as ProcedureContext, LockKey, Procedure, Status};
 use common_telemetry::tracing::info;
@@ -210,7 +210,10 @@ impl CommentOnProcedure {
                 .get(&self.data.catalog_name, &self.data.object_name)
                 .await?
                 .with_context(|| FlowNotFoundSnafu {
-                    flow_name: &self.data.object_name,
+                    flow_name: format_full_flow_name(
+                        &self.data.catalog_name,
+                        &self.data.object_name,
+                    ),
                 })?
                 .flow_id()
         };
@@ -221,7 +224,7 @@ impl CommentOnProcedure {
             .get_raw(flow_id)
             .await?
             .with_context(|| FlowNotFoundSnafu {
-                flow_name: &self.data.object_name,
+                flow_name: format_full_flow_name(&self.data.catalog_name, &self.data.object_name),
             })?;
 
         self.data.flow_id = Some(flow_id);

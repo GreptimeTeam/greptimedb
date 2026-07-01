@@ -41,7 +41,7 @@ use api::v1::{
 };
 use base64::Engine as _;
 use base64::engine::general_purpose;
-use common_catalog::format_full_table_name;
+use common_catalog::{format_full_flow_name, format_full_table_name};
 use common_error::ext::BoxedError;
 use common_time::{DatabaseTimeToLive, Timestamp};
 use prost::Message;
@@ -1432,7 +1432,7 @@ impl CommentOnTask {
                     .get(&self.catalog_name, &self.object_name)
                     .await?
                     .with_context(|| error::FlowNotFoundSnafu {
-                        flow_name: &self.object_name,
+                        flow_name: format_full_flow_name(&self.catalog_name, &self.object_name),
                     })?
                     .flow_id();
 
