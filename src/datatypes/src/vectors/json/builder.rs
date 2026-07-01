@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::any::Any;
+use std::str::from_utf8;
 use std::sync::Arc;
 
 use arrow_schema::{DataType as ArrowDataType, Field, FieldRef, Fields};
