@@ -692,6 +692,7 @@ fn resolve_value(
         VrlValue::Array(_) | VrlValue::Object(_) => {
             let is_json2 = schema_info
                 .find_column_schema_in_table(&column_name)
+                // TODO(LFC): Default to JSON2 for auto-created tables.
                 .is_some_and(|x| {
                     matches!(
                         &x.column_schema.data_type,
@@ -714,7 +715,13 @@ fn resolve_value(
                 })?;
                 let value = settings.encode(value)?;
 
-                resolve_schema(index, p_ctx, &column_name, &value.data_type(), schema_info)?;
+                resolve_schema(
+                    index,
+                    p_ctx,
+                    &column_name,
+                    &ConcreteDataType::json2(Default::default()),
+                    schema_info,
+                )?;
 
                 let Value::Json(value) = value else {
                     unreachable!()

@@ -28,7 +28,7 @@ use crate::data_type::ConcreteDataType;
 use crate::error::{AlignJsonValueSnafu, SerializeSnafu};
 use crate::types::json_type::{JsonNativeType, JsonNumberType};
 use crate::types::{JsonType, StructField, StructType};
-use crate::value::{ListValue, ListValueRef, StructValue, StructValueRef, Value, ValueRef};
+use crate::value::{ListValue, StructValue, Value};
 
 /// Number in json, can be a positive integer, a negative integer, or a floating number.
 /// Each of which is represented as `u64`, `i64` and `f64`.
@@ -314,6 +314,13 @@ impl JsonValue {
         }
     }
 
+    pub(crate) fn new_with(json_variant: JsonVariant, json_type: JsonType) -> Self {
+        Self {
+            json_type: OnceLock::from(json_type),
+            json_variant,
+        }
+    }
+
     pub(crate) fn data_type(&self) -> ConcreteDataType {
         ConcreteDataType::Json(self.json_type().clone())
     }
@@ -369,6 +376,10 @@ impl JsonValue {
 
     pub fn into_variant(self) -> JsonVariant {
         self.json_variant
+    }
+
+    pub(crate) fn variant(&self) -> &JsonVariant {
+        &self.json_variant
     }
 
     pub(crate) fn into_value(self) -> Value {
@@ -789,48 +800,6 @@ impl<'a> JsonValueRef<'a> {
             JsonVariantRef::Number(JsonNumber::Float(f)) => Some(f.0),
             _ => None,
         }
-    }
-
-    pub fn as_value_ref(&self) -> ValueRef<'_> {
-        fn helper<'a>(v: &'a JsonVariantRef) -> ValueRef<'a> {
-            match v {
-                JsonVariantRef::Null => ValueRef::Null,
-                JsonVariantRef::Bool(x) => ValueRef::Boolean(*x),
-                JsonVariantRef::Number(x) => match x {
-                    JsonNumber::PosInt(i) => ValueRef::UInt64(*i),
-                    JsonNumber::NegInt(i) => ValueRef::Int64(*i),
-                    JsonNumber::Float(f) => ValueRef::Float64(*f),
-                },
-                JsonVariantRef::String(x) => ValueRef::String(x),
-                JsonVariantRef::Array(array) => {
-                    let val = array.iter().map(helper).collect::<Vec<_>>();
-                    let item_datatype = if let Some(first) = val.first() {
-                        first.data_type()
-                    } else {
-                        ConcreteDataType::null_datatype()
-                    };
-                    ValueRef::List(ListValueRef::RefList {
-                        val,
-                        item_datatype: Arc::new(item_datatype),
-                    })
-                }
-                JsonVariantRef::Object(object) => {
-                    let mut fields = Vec::with_capacity(object.len());
-                    let mut val = Vec::with_capacity(object.len());
-                    for (k, v) in object.iter() {
-                        let v = helper(v);
-                        fields.push(StructField::new(k.to_string(), v.data_type(), true));
-                        val.push(v);
-                    }
-                    ValueRef::Struct(StructValueRef::RefList {
-                        val,
-                        fields: StructType::new(Arc::new(fields)),
-                    })
-                }
-                JsonVariantRef::Variant(x) => ValueRef::Binary(x),
-            }
-        }
-        helper(&self.json_variant)
     }
 
     pub(crate) fn data_size(&self) -> usize {
