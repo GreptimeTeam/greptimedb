@@ -15,6 +15,7 @@
 use std::collections::{HashMap, HashSet};
 
 use api::v1::SemanticType;
+use common_query::native_histogram::is_native_histogram_field_schema;
 use snafu::ensure;
 use store_api::metadata::ColumnMetadata;
 use store_api::region_request::{AlterKind, RegionAlterRequest};
@@ -43,7 +44,11 @@ pub fn extract_new_columns<'a>(
                 && !new_column_names.contains(column_name)
             {
                 ensure!(
-                    col.column_metadata.semantic_type != SemanticType::Field,
+                    col.column_metadata.semantic_type != SemanticType::Field
+                        || is_native_histogram_field_schema(
+                            &col.column_metadata.column_schema.name,
+                            &col.column_metadata.column_schema.data_type
+                        ),
                     AddingFieldColumnSnafu {
                         name: column_name.to_string(),
                     }

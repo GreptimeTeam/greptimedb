@@ -25,6 +25,7 @@ use api::v1::value::ValueData;
 use api::v1::{ColumnDataType, RowInsertRequest, Rows, Value};
 use bytes::Bytes;
 use common_grpc::precision::Precision;
+use common_query::native_histogram::*;
 use common_query::prelude::{greptime_timestamp, greptime_value};
 use pipeline::{ContextOpt, ContextReq};
 use prost::Message;
@@ -42,52 +43,6 @@ use crate::row_writer::{self, TableData};
 
 type PromTags = Vec<(String, String)>;
 type ResolvedSeriesLabels = (PromCtx, String, PromTags);
-
-const NATIVE_HISTOGRAM_TABLE_SUFFIX: &str = "_native_histogram";
-const HISTOGRAM_TYPE_TAG: &str = "greptime_histogram_type";
-const HISTOGRAM_TYPE_INT: &str = "int";
-const HISTOGRAM_TYPE_FLOAT: &str = "float";
-
-const SCHEMA_FIELD: &str = "schema";
-const ZERO_THRESHOLD_FIELD: &str = "zero_threshold";
-const SUM_FIELD: &str = "sum";
-const RESET_HINT_FIELD: &str = "reset_hint";
-const START_TIMESTAMP_FIELD: &str = "start_timestamp";
-const CUSTOM_VALUES_FIELD: &str = "custom_values";
-const POSITIVE_SPAN_OFFSETS_FIELD: &str = "positive_span_offsets";
-const POSITIVE_SPAN_LENGTHS_FIELD: &str = "positive_span_lengths";
-const NEGATIVE_SPAN_OFFSETS_FIELD: &str = "negative_span_offsets";
-const NEGATIVE_SPAN_LENGTHS_FIELD: &str = "negative_span_lengths";
-const COUNT_U64_FIELD: &str = "count_u64";
-const ZERO_COUNT_U64_FIELD: &str = "zero_count_u64";
-const POSITIVE_BUCKETS_I64_FIELD: &str = "positive_buckets_i64";
-const NEGATIVE_BUCKETS_I64_FIELD: &str = "negative_buckets_i64";
-const COUNT_F64_FIELD: &str = "count_f64";
-const ZERO_COUNT_F64_FIELD: &str = "zero_count_f64";
-const POSITIVE_BUCKETS_F64_FIELD: &str = "positive_buckets_f64";
-const NEGATIVE_BUCKETS_F64_FIELD: &str = "negative_buckets_f64";
-
-const INTERNAL_HISTOGRAM_LABELS: &[&str] = &[
-    HISTOGRAM_TYPE_TAG,
-    SCHEMA_FIELD,
-    ZERO_THRESHOLD_FIELD,
-    SUM_FIELD,
-    RESET_HINT_FIELD,
-    START_TIMESTAMP_FIELD,
-    CUSTOM_VALUES_FIELD,
-    POSITIVE_SPAN_OFFSETS_FIELD,
-    POSITIVE_SPAN_LENGTHS_FIELD,
-    NEGATIVE_SPAN_OFFSETS_FIELD,
-    NEGATIVE_SPAN_LENGTHS_FIELD,
-    COUNT_U64_FIELD,
-    ZERO_COUNT_U64_FIELD,
-    POSITIVE_BUCKETS_I64_FIELD,
-    NEGATIVE_BUCKETS_I64_FIELD,
-    COUNT_F64_FIELD,
-    ZERO_COUNT_F64_FIELD,
-    POSITIVE_BUCKETS_F64_FIELD,
-    NEGATIVE_BUCKETS_F64_FIELD,
-];
 
 pub(crate) fn decode_remote_write_v2_request(is_zstd: bool, body: Bytes) -> Result<Request> {
     let _timer = crate::metrics::METRIC_HTTP_PROM_STORE_DECODE_ELAPSED.start_timer();
@@ -126,6 +81,8 @@ pub(crate) fn into_write_requests(request: Request) -> Result<RemoteWriteV2Write
 
     let mut sample_tables = HashMap::<PromCtx, HashMap<String, TableData>>::new();
     let mut histogram_tables = HashMap::<PromCtx, HashMap<String, TableData>>::new();
+    let mut sample_metrics = HashSet::<(PromCtx, String)>::new();
+    let mut histogram_metrics = HashSet::<(PromCtx, String)>::new();
     let mut sample_count_total = 0;
     let mut histogram_count_total = 0;
 
@@ -140,6 +97,29 @@ pub(crate) fn into_write_requests(request: Request) -> Result<RemoteWriteV2Write
         let (prom_ctx, table_name, tags) = resolve_series_labels(&symbols, &series)?;
         if histogram_count > 0 {
             ensure_no_internal_histogram_labels(&tags)?;
+        }
+        let metric_key = (prom_ctx.clone(), table_name.clone());
+        if sample_count > 0 {
+            ensure!(
+                !histogram_metrics.contains(&metric_key),
+                error::InvalidPromRemoteRequestSnafu {
+                    msg: format!(
+                        "remote write v2 metric `{table_name}` contains both samples and native histograms"
+                    ),
+                }
+            );
+            sample_metrics.insert(metric_key.clone());
+        }
+        if histogram_count > 0 {
+            ensure!(
+                !sample_metrics.contains(&metric_key),
+                error::InvalidPromRemoteRequestSnafu {
+                    msg: format!(
+                        "remote write v2 metric `{table_name}` contains both samples and native histograms"
+                    ),
+                }
+            );
+            histogram_metrics.insert(metric_key);
         }
 
         if sample_count > 0 && histogram_count == 0 {
@@ -159,34 +139,12 @@ pub(crate) fn into_write_requests(request: Request) -> Result<RemoteWriteV2Write
             continue;
         }
 
-        if sample_count > 0 {
-            // Mixed sample+histogram series need the labels in both branches.
-            let table_data = get_or_create_table_data(
-                &mut sample_tables,
-                prom_ctx.clone(),
-                table_name.clone(),
-                tags.len() + 2,
-                sample_count,
-            );
-
-            write_samples(table_data, series.samples, tags.clone())?;
-            sample_count_total += sample_count as u64;
-        }
-
         if histogram_count > 0 {
-            // Native histograms use a standalone ordinary table. Metric-engine physical
-            // tables cannot store the native histogram list schema, so drop physical-table
-            // routing labels for histogram rows.
-            let histogram_ctx = PromCtx {
-                schema: prom_ctx.schema,
-                physical_table: None,
-            };
-            let histogram_table_name = format!("{table_name}{NATIVE_HISTOGRAM_TABLE_SUFFIX}");
             let table_data = get_or_create_table_data(
                 &mut histogram_tables,
-                histogram_ctx,
-                histogram_table_name,
-                tags.len() + 1 + INTERNAL_HISTOGRAM_LABELS.len(),
+                prom_ctx,
+                table_name,
+                tags.len() + 1 + NATIVE_HISTOGRAM_FIELD_NAMES.len(),
                 histogram_count,
             );
 
@@ -295,7 +253,7 @@ fn write_native_histogram(
         _ => None,
     };
 
-    let histogram_type = if let Some(counts) = float_counts {
+    if let Some(counts) = float_counts {
         write_int_native_histogram_fields(table_data, None, None, &mut row)?;
         write_float_native_histogram_fields(
             table_data,
@@ -303,7 +261,6 @@ fn write_native_histogram(
             Some(counts),
             &mut row,
         )?;
-        HISTOGRAM_TYPE_FLOAT
     } else {
         write_int_native_histogram_fields(
             table_data,
@@ -312,10 +269,8 @@ fn write_native_histogram(
             &mut row,
         )?;
         write_float_native_histogram_fields(table_data, None, None, &mut row)?;
-        HISTOGRAM_TYPE_INT
-    };
+    }
 
-    row_writer::write_tag(table_data, HISTOGRAM_TYPE_TAG, histogram_type, &mut row)?;
     row_writer::write_tags(table_data, tags, &mut row)?;
     table_data.add_row(row);
 
@@ -325,7 +280,7 @@ fn write_native_histogram(
 fn ensure_no_internal_histogram_labels(tags: &PromTags) -> Result<()> {
     for (name, _) in tags {
         ensure!(
-            !INTERNAL_HISTOGRAM_LABELS.contains(&name.as_str()),
+            !NATIVE_HISTOGRAM_FIELD_NAMES.contains(&name.as_str()),
             error::InvalidPromRemoteRequestSnafu {
                 msg: format!(
                     "remote write v2 label `{name}` conflicts with an internal native histogram label"
@@ -1023,7 +978,7 @@ mod tests {
     }
 
     #[test]
-    fn test_into_context_req_converts_histograms_and_ignores_exemplars() {
+    fn test_into_context_req_rejects_same_metric_samples_and_histograms() {
         let mut request = test_util::request_with_labels_and_samples(
             vec![(METRIC_NAME_LABEL, "metric")],
             vec![Sample {
@@ -1033,7 +988,41 @@ mod tests {
             }],
         );
         request.timeseries[0].histograms.push(Histogram::default());
-        request.timeseries[0].exemplars.push(Exemplar::default());
+
+        assert_invalid(
+            "same metric samples and histograms",
+            request,
+            "contains both samples and native histograms",
+        );
+    }
+
+    #[test]
+    fn test_into_context_req_converts_histograms_and_ignores_exemplars() {
+        let request = Request {
+            symbols: vec![
+                "".to_string(),
+                METRIC_NAME_LABEL.to_string(),
+                "sample_metric".to_string(),
+                "histogram_metric".to_string(),
+            ],
+            timeseries: vec![
+                TimeSeries {
+                    labels_refs: vec![1, 2],
+                    samples: vec![Sample {
+                        value: 1.0,
+                        timestamp: 1000,
+                        start_timestamp: 0,
+                    }],
+                    ..Default::default()
+                },
+                TimeSeries {
+                    labels_refs: vec![1, 3],
+                    histograms: vec![Histogram::default()],
+                    exemplars: vec![Exemplar::default()],
+                    ..Default::default()
+                },
+            ],
+        };
 
         let ctx_req = into_write_requests(request).unwrap();
 
@@ -1058,7 +1047,7 @@ mod tests {
         assert_eq!(inserts.len(), 1);
 
         let request = inserts.pop().unwrap();
-        assert_eq!(request.table_name, "metric_native_histogram");
+        assert_eq!(request.table_name, "metric");
         let rows = request.rows.unwrap();
         assert_eq!(rows.rows.len(), 1);
         assert_eq!(
@@ -1086,7 +1075,6 @@ mod tests {
                 ZERO_COUNT_F64_FIELD,
                 POSITIVE_BUCKETS_F64_FIELD,
                 NEGATIVE_BUCKETS_F64_FIELD,
-                HISTOGRAM_TYPE_TAG,
             ]
         );
         assert_eq!(
@@ -1102,10 +1090,6 @@ mod tests {
             Some(ValueData::U64Value(0))
         );
         assert_eq!(rows.rows[0].values[15].value_data, None);
-        assert_eq!(
-            rows.rows[0].values[19].value_data,
-            Some(ValueData::StringValue(HISTOGRAM_TYPE_INT.to_string()))
-        );
     }
 
     #[test]
@@ -1217,20 +1201,14 @@ mod tests {
                 ZERO_COUNT_F64_FIELD,
                 POSITIVE_BUCKETS_F64_FIELD,
                 NEGATIVE_BUCKETS_F64_FIELD,
-                HISTOGRAM_TYPE_TAG,
             ]
         );
 
-        let histogram_type_idx = column_index(&rows.schema, HISTOGRAM_TYPE_TAG);
         let count_u64_idx = column_index(&rows.schema, COUNT_U64_FIELD);
         let count_f64_idx = column_index(&rows.schema, COUNT_F64_FIELD);
         let positive_buckets_i64_idx = column_index(&rows.schema, POSITIVE_BUCKETS_I64_FIELD);
         let positive_buckets_f64_idx = column_index(&rows.schema, POSITIVE_BUCKETS_F64_FIELD);
 
-        assert_eq!(
-            rows.rows[0].values[histogram_type_idx].value_data,
-            Some(ValueData::StringValue(HISTOGRAM_TYPE_INT.to_string()))
-        );
         assert_eq!(
             rows.rows[0].values[count_u64_idx].value_data,
             Some(ValueData::U64Value(0))
@@ -1245,10 +1223,6 @@ mod tests {
             None
         );
 
-        assert_eq!(
-            rows.rows[1].values[histogram_type_idx].value_data,
-            Some(ValueData::StringValue(HISTOGRAM_TYPE_FLOAT.to_string()))
-        );
         assert_eq!(rows.rows[1].values[count_u64_idx].value_data, None);
         assert_eq!(
             rows.rows[1].values[count_f64_idx].value_data,

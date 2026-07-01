@@ -519,7 +519,7 @@ impl MetricEngineInner {
     /// - Check if every column in the request exists in the physical region
     /// - Check each column's datatype and semantic type match the physical region's schema
     /// - Check the time index column is present
-    /// - When `check_fields` is true, check every physical field column is present.
+    /// - When `check_fields` is true, check every logical field column is present.
     ///   Set this to `false` for delete requests, which legitimately carry only
     ///   the primary key + timestamp.
     async fn verify_rows(
@@ -531,23 +531,29 @@ impl MetricEngineInner {
     ) -> Result<()> {
         // Check if the region exists
         let data_region_id = to_data_region_id(physical_region_id);
-        let state = self.state.read().unwrap();
-        if !state.is_logical_region_exist(logical_region_id) {
-            error!("Trying to write to an nonexistent region {logical_region_id}");
-            return LogicalRegionNotFoundSnafu {
-                region_id: logical_region_id,
+        let (physical_columns, ts_name) = {
+            let state = self.state.read().unwrap();
+            if !state.is_logical_region_exist(logical_region_id) {
+                error!("Trying to write to an nonexistent region {logical_region_id}");
+                return LogicalRegionNotFoundSnafu {
+                    region_id: logical_region_id,
+                }
+                .fail();
             }
-            .fail();
-        }
+
+            let physical_state = state
+                .physical_region_states()
+                .get(&data_region_id)
+                .context(PhysicalRegionNotFoundSnafu {
+                    region_id: data_region_id,
+                })?;
+            (
+                physical_state.physical_columns().clone(),
+                physical_state.time_index_column_name().to_string(),
+            )
+        };
 
         // Type + semantic check on every column in the request schema.
-        let physical_state = state
-            .physical_region_states()
-            .get(&data_region_id)
-            .context(PhysicalRegionNotFoundSnafu {
-                region_id: data_region_id,
-            })?;
-        let physical_columns = physical_state.physical_columns();
         for col in &rows.schema {
             let info = physical_columns
                 .get(&col.column_name)
@@ -593,7 +599,6 @@ impl MetricEngineInner {
             );
         }
 
-        let ts_name = physical_state.time_index_column_name();
         ensure!(
             rows.schema.iter().any(|col| col.column_name == ts_name),
             InvalidRequestSnafu {
@@ -602,17 +607,40 @@ impl MetricEngineInner {
             }
         );
 
+        let logical_columns = self
+            .load_logical_columns(physical_region_id, logical_region_id)
+            .await?;
+        let logical_fields = logical_columns
+            .iter()
+            .filter(|col| col.semantic_type == SemanticType::Field)
+            .map(|col| (col.column_schema.name.as_str(), col))
+            .collect::<HashMap<_, _>>();
+
+        for col in &rows.schema {
+            if api::helper::is_semantic_type_eq(col.semantic_type, SemanticType::Field) {
+                ensure!(
+                    logical_fields.contains_key(col.column_name.as_str()),
+                    InvalidRequestSnafu {
+                        region_id: logical_region_id,
+                        reason: format!(
+                            "field column {} does not belong to logical region {logical_region_id}",
+                            col.column_name,
+                        ),
+                    }
+                );
+            }
+        }
+
         if check_fields {
-            let field_name = physical_state.field_column_name();
-            if !rows.schema.iter().any(|col| col.column_name == field_name) {
-                let field_meta =
-                    physical_columns
-                        .get(field_name)
-                        .with_context(|| ColumnNotFoundSnafu {
-                            name: field_name,
-                            region_id: logical_region_id,
-                        })?;
-                Self::fill_missing_field_column(logical_region_id, field_name, field_meta, rows)?;
+            for (field_name, field_meta) in logical_fields {
+                if !rows.schema.iter().any(|col| col.column_name == field_name) {
+                    Self::fill_missing_field_column(
+                        logical_region_id,
+                        field_name,
+                        field_meta,
+                        rows,
+                    )?;
+                }
             }
         }
 
