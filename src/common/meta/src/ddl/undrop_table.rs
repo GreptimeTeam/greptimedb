@@ -94,6 +94,12 @@ impl UndropTableProcedure {
             .with_context(|| error::TableNotFoundSnafu {
                 table_name: table_ref.to_string(),
             })?;
+        ensure!(
+            dropped_table.table_name == self.data.task.table_name(),
+            error::TableNotFoundSnafu {
+                table_name: table_ref.to_string()
+            }
+        );
         self.data.table_name = Some(dropped_table.table_name.clone());
         self.data.table_route_value = Some(dropped_table.table_route_value.clone());
         self.data.region_wal_options = dropped_table.region_wal_options;

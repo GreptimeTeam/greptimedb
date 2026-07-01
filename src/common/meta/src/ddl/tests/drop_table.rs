@@ -758,6 +758,37 @@ async fn test_undrop_table_fails_when_live_name_exists() {
 }
 
 #[tokio::test]
+async fn test_undrop_table_fails_when_task_name_mismatches_table_id() {
+    let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
+    let mut ddl_context = new_ddl_context(node_manager);
+    ddl_context.soft_drop_enabled = true;
+    let table_id = 1024;
+    let task = test_create_table_task("foo", table_id);
+    ddl_context
+        .table_metadata_manager
+        .create_table_metadata(
+            task.table_info.clone(),
+            TableRouteValue::physical(vec![]),
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+    let mut drop_procedure = DropTableProcedure::new(
+        new_drop_table_task("foo", table_id, false),
+        ddl_context.clone(),
+    );
+    execute_procedure_until_done(&mut drop_procedure).await;
+
+    let mut procedure = UndropTableProcedure::new(
+        new_undrop_table_task("bar", table_id),
+        ddl_context,
+    );
+    let err = procedure.on_prepare().await.unwrap_err();
+
+    assert_eq!(err.status_code(), StatusCode::TableNotFound);
+}
+
+#[tokio::test]
 async fn test_purge_dropped_table_drops_regions_and_deletes_tombstone() {
     let (tx, mut rx) = mpsc::channel(8);
     let datanode_handler = DatanodeWatcher::new(tx);
