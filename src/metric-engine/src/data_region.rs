@@ -134,6 +134,9 @@ impl DataRegion {
                             .fail();
                         }
                     }
+                    // Field columns can only be added to the shared physical
+                    // table for native histograms; ordinary metric fields are
+                    // created with the logical table.
                     SemanticType::Field
                         if is_native_histogram_field_schema(
                             &c.column_schema.name,

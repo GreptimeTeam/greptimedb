@@ -218,6 +218,9 @@ impl MetricEngineInner {
         physical_region_id: RegionId,
         requests: &[(RegionId, RegionAlterRequest)],
     ) -> Result<()> {
+        // Logical metric tables normally have one field column. Native histograms
+        // are the only supported multi-field logical table, so any field alter
+        // must leave the whole logical field set matching that schema exactly.
         for (region_id, request) in requests {
             let AlterKind::AddColumns { columns } = &request.kind else {
                 unreachable!()

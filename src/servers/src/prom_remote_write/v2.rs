@@ -65,6 +65,10 @@ pub(crate) struct RemoteWriteV2WriteRequests {
     pub histogram_count: u64,
 }
 
+/// Converts a PRW v2 request into normal sample writes and native histogram writes.
+///
+/// A metric name may appear in only one payload kind per request because the
+/// metric-engine logical table is either a float metric or a native histogram.
 pub(crate) fn into_write_requests(request: Request) -> Result<RemoteWriteV2WriteRequests> {
     let _timer = crate::metrics::METRIC_HTTP_PROM_STORE_CONVERT_ELAPSED.start_timer();
     let Request {
@@ -226,6 +230,9 @@ fn write_native_histogram(
     histogram: &Histogram,
     tags: impl Iterator<Item = (String, String)>,
 ) -> Result<()> {
+    // Persist both int and float families into the logical table schema. Only one
+    // family is populated per row; the other is written as NULL so PromQL can
+    // infer the original histogram flavor without a separate type column.
     let mut row = table_data.alloc_one_row();
     row_writer::write_ts_to_millis(
         table_data,
@@ -278,6 +285,8 @@ fn write_native_histogram(
 }
 
 fn ensure_no_internal_histogram_labels(tags: &PromTags) -> Result<()> {
+    // Histogram field columns are generated from the protobuf payload. Allowing
+    // user labels with the same names would make tag/field semantics ambiguous.
     for (name, _) in tags {
         ensure!(
             !NATIVE_HISTOGRAM_FIELD_NAMES.contains(&name.as_str()),
