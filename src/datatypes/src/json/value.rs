@@ -314,6 +314,13 @@ impl JsonValue {
         }
     }
 
+    pub(crate) fn new_with(json_variant: JsonVariant, json_type: JsonType) -> Self {
+        Self {
+            json_type: OnceLock::from(json_type),
+            json_variant,
+        }
+    }
+
     pub(crate) fn data_type(&self) -> ConcreteDataType {
         ConcreteDataType::Json(self.json_type().clone())
     }

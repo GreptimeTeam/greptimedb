@@ -46,11 +46,11 @@ impl JsonVectorBuilder {
             self.values.len(),
         );
         for value in self.values.iter_mut() {
-            value.try_align(&self.merged_type)?;
             if value.is_null() {
                 builder.push_null();
                 continue;
             }
+            value.try_align(&self.merged_type)?;
             builder.try_push_value_ref(&value.as_ref().as_value_ref())?;
         }
         Ok(builder.to_vector())
@@ -104,7 +104,10 @@ impl MutableVector for JsonVectorBuilder {
             self.merged_type.merge(json_type)?;
         }
 
-        let value = JsonValue::new(JsonVariant::from(value.variant().clone()));
+        let value = JsonValue::new_with(
+            JsonVariant::from(value.variant().clone()),
+            json_type.clone(),
+        );
         self.values.push(value);
         Ok(())
     }
