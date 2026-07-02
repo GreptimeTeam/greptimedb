@@ -252,6 +252,10 @@ TQL EVAL (0, 5, '5s') (tsid_binary_join_left or tsid_binary_join_right) / tsid_b
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 5, '5s') rate(tsid_binary_join_left[5s]) / tsid_binary_join_left;
 
+-- Regression for aggregating a binary expression over `time()` and a TSID-backed metric.
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (0, 5, '5s') sum by (host, job) (time() - tsid_binary_join_left);
+
 DROP TABLE tsid_binary_join_third;
 DROP TABLE tsid_binary_join_right_by_job;
 DROP TABLE tsid_binary_join_right;
