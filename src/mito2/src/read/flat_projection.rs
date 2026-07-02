@@ -34,7 +34,7 @@ use datatypes::vectors::Helper;
 use datatypes::vectors::json::array::JsonArray;
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::{RegionMetadata, RegionMetadataRef};
-use store_api::storage::ColumnId;
+use store_api::storage::{ColumnId, JsonReadHint};
 
 use crate::cache::CacheStrategy;
 use crate::error::{InvalidRequestSnafu, RecordBatchSnafu, Result};
@@ -94,7 +94,7 @@ impl FlatProjectionMapper {
         metadata: &RegionMetadataRef,
         projection: Vec<usize>,
         read_cols: ReadColumns,
-        json_type_hint: Option<&HashMap<String, JsonNativeType>>,
+        json_type_hint: Option<&HashMap<String, JsonReadHint>>,
     ) -> Result<Self> {
         // If the original projection is empty.
         let is_empty_projection = projection.is_empty();
@@ -116,8 +116,7 @@ impl FlatProjectionMapper {
             let mut schema = col.column_schema.clone();
             if let Some(concretized) = json_type_hint
                 .and_then(|x| x.get(&schema.name))
-                .cloned()
-                .map(ConcreteDataType::json2)
+                .map(json_read_hint_to_data_type)
                 && schema
                     .data_type
                     .as_json()
@@ -150,8 +149,8 @@ impl FlatProjectionMapper {
                     .is_some_and(|json_type| json_type.is_json2())
                     && let Some(concretized) = metadata
                         .column_by_id(*column_id)
-                        .and_then(|x| json_type_hint.get(&x.column_schema.name).cloned())
-                        .map(ConcreteDataType::json2)
+                        .and_then(|x| json_type_hint.get(&x.column_schema.name))
+                        .map(json_read_hint_to_data_type)
                 {
                     *data_type = concretized;
                 }
@@ -371,6 +370,13 @@ impl FlatProjectionMapper {
             columns.push(vector);
         }
         Ok(columns)
+    }
+}
+
+fn json_read_hint_to_data_type(hint: &JsonReadHint) -> ConcreteDataType {
+    match hint {
+        JsonReadHint::Root => ConcreteDataType::json2(JsonNativeType::Variant),
+        JsonReadHint::Paths(json_type) => ConcreteDataType::json2(json_type.clone()),
     }
 }
 
@@ -600,10 +606,10 @@ mod tests {
         let metadata = metadata_with_legacy_json();
         let hint = HashMap::from([(
             "j".to_string(),
-            JsonNativeType::Object(JsonObjectType::from([(
+            JsonReadHint::Paths(JsonNativeType::Object(JsonObjectType::from([(
                 "a".to_string(),
                 JsonNativeType::i64(),
-            )])),
+            )]))),
         )]);
         let mapper = FlatProjectionMapper::new_with_read_columns(
             &metadata,
@@ -620,7 +626,7 @@ mod tests {
     }
 
     #[test]
-    fn test_json_type_hint_variant_converts_struct_to_binary() {
+    fn test_json_type_hint_root_converts_struct_to_binary() {
         let mut builder = RegionMetadataBuilder::new(RegionId::new(1024, 0));
         builder
             .push_column_metadata(ColumnMetadata {
@@ -642,7 +648,7 @@ mod tests {
                 column_id: 1,
             });
         let metadata = Arc::new(builder.build().unwrap());
-        let hint = HashMap::from([("j".to_string(), JsonNativeType::Variant)]);
+        let hint = HashMap::from([("j".to_string(), JsonReadHint::Root)]);
         let mapper = FlatProjectionMapper::new_with_read_columns(
             &metadata,
             vec![0],

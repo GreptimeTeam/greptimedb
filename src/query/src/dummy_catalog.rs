@@ -31,14 +31,14 @@ use datafusion::physical_plan::ExecutionPlan;
 use datafusion_common::DataFusionError;
 use datafusion_expr::{Expr, TableProviderFilterPushDown, TableType};
 use datatypes::arrow::datatypes::SchemaRef;
-use datatypes::types::json_type::JsonNativeType;
 use futures::stream::BoxStream;
 use session::context::{QueryContext, QueryContextRef};
 use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::RegionEngineRef;
 use store_api::storage::{
-    RegionId, ScanRequest, TimeSeriesDistribution, TimeSeriesRowSelector, VectorSearchRequest,
+    JsonReadHint, RegionId, ScanRequest, TimeSeriesDistribution, TimeSeriesRowSelector,
+    VectorSearchRequest,
 };
 use table::TableRef;
 use table::metadata::{TableId, TableInfoRef};
@@ -287,7 +287,7 @@ impl DummyTableProvider {
         self.scan_request.lock().unwrap().memtable_max_sequence = Some(sequence);
     }
 
-    pub(crate) fn with_json_type_hint(&self, hint: HashMap<String, JsonNativeType>) {
+    pub(crate) fn with_json_type_hint(&self, hint: HashMap<String, JsonReadHint>) {
         self.scan_request.lock().unwrap().json_type_hint = hint;
     }
 

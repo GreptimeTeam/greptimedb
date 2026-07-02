@@ -96,6 +96,24 @@ pub enum TimeSeriesDistribution {
     PerSeries,
 }
 
+/// Query-driven hint for reading JSON2 columns.
+#[derive(Debug, Clone, PartialEq)]
+pub enum JsonReadHint {
+    /// Read the whole JSON2 root value.
+    Root,
+    /// Read and align the specified JSON2 subpaths.
+    Paths(JsonNativeType),
+}
+
+impl Display for JsonReadHint {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            JsonReadHint::Root => write!(f, "root"),
+            JsonReadHint::Paths(json_type) => write!(f, "{json_type}"),
+        }
+    }
+}
+
 #[derive(Default, Clone, Debug, PartialEq)]
 pub struct ScanRequest {
     /// Optional projection information for the scan. `None` reads all root
@@ -134,8 +152,8 @@ pub struct ScanRequest {
     /// Optional hint for KNN vector search. When set, the scan should use
     /// vector index to find the k nearest neighbors.
     pub vector_search: Option<VectorSearchRequest>,
-    /// Optional hint from query-driven JSON type concretization.
-    pub json_type_hint: HashMap<String, JsonNativeType>,
+    /// Optional hint from query-driven JSON2 root or subpath reads.
+    pub json_type_hint: HashMap<String, JsonReadHint>,
 }
 
 impl ScanRequest {
@@ -261,6 +279,7 @@ impl Display for ScanRequest {
 #[cfg(test)]
 mod tests {
     use datafusion_expr::{Operator, binary_expr, col, lit};
+    use datatypes::types::json_type::{JsonNativeType, JsonObjectType};
 
     use super::*;
 
@@ -338,5 +357,22 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(request.to_string(), "ScanRequest { skip_sst_files: true }");
+
+        let request = ScanRequest {
+            json_type_hint: HashMap::from([
+                ("j".to_string(), JsonReadHint::Root),
+                (
+                    "k".to_string(),
+                    JsonReadHint::Paths(JsonNativeType::Object(JsonObjectType::from([(
+                        "a".to_string(),
+                        JsonNativeType::String,
+                    )]))),
+                ),
+            ]),
+            ..Default::default()
+        };
+        let display = request.to_string();
+        assert!(display.contains("(j: root)"));
+        assert!(display.contains(r#"(k: {"a":"<String>"})"#));
     }
 }

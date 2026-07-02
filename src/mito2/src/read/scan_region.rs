@@ -44,8 +44,8 @@ use snafu::ResultExt;
 use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 use store_api::region_engine::{PartitionRange, RegionScannerRef};
 use store_api::storage::{
-    NestedPath, RegionId, ScanRequest, SequenceNumber, SequenceRange, TimeSeriesDistribution,
-    TimeSeriesRowSelector,
+    JsonReadHint, NestedPath, RegionId, ScanRequest, SequenceNumber, SequenceRange,
+    TimeSeriesDistribution, TimeSeriesRowSelector,
 };
 use table::predicate::{Predicate, build_time_range_predicate, extract_time_range_from_expr};
 use tokio::sync::{Semaphore, mpsc};
@@ -1423,7 +1423,7 @@ fn pre_filter_mode(append_mode: bool, merge_mode: MergeMode) -> PreFilterMode {
 
 fn narrow_read_columns_by_json_type_hint(
     read_columns: &mut ReadColumns,
-    json_type_hint: &HashMap<String, JsonNativeType>,
+    json_type_hint: &HashMap<String, JsonReadHint>,
     metadata: &RegionMetadata,
 ) {
     if json_type_hint.is_empty() {
@@ -1439,12 +1439,14 @@ fn narrow_read_columns_by_json_type_hint(
             continue;
         };
 
+        let JsonReadHint::Paths(json_type) = json_type else {
+            read_column.nested_paths.clear();
+            continue;
+        };
+
         let mut paths = Vec::new();
         let mut current = vec![column_name.clone()];
         collect_json_nested_paths(json_type, &mut current, &mut paths);
-        if matches!(json_type, JsonNativeType::Variant) {
-            paths.clear();
-        }
         merge_nested_paths(&mut read_column.nested_paths, paths)
     }
 }
@@ -2098,7 +2100,7 @@ mod tests {
         let metadata = json_projection_test_metadata()?;
         let hint = HashMap::from([(
             "j".to_string(),
-            JsonNativeType::Object(JsonObjectType::from([
+            JsonReadHint::Paths(JsonNativeType::Object(JsonObjectType::from([
                 ("a".to_string(), JsonNativeType::i64()),
                 (
                     "b".to_string(),
@@ -2107,7 +2109,7 @@ mod tests {
                         JsonNativeType::String,
                     )])),
                 ),
-            ])),
+            ]))),
         )]);
 
         fn nested_path(parts: &[&str]) -> NestedPath {
@@ -2142,7 +2144,7 @@ mod tests {
             }
         );
 
-        let hint = HashMap::from([("j".to_string(), JsonNativeType::Variant)]);
+        let hint = HashMap::from([("j".to_string(), JsonReadHint::Root)]);
         let mut read_columns = ReadColumns {
             cols: vec![ReadColumn::new(1, vec![])],
         };
