@@ -195,6 +195,8 @@ impl InformationSchemaFlowStatisticsBuilder {
             information_extension.flow_stats().await?
         };
 
+        let now = current_time_millis();
+
         while let Some((flow_name, flow_id)) = stream
             .try_next()
             .await
@@ -203,7 +205,7 @@ impl InformationSchemaFlowStatisticsBuilder {
                 catalog: &catalog_name,
             })?
         {
-            self.add_flow_statistic(&predicates, flow_id.flow_id(), &flow_name, &flow_stat);
+            self.add_flow_statistic(&predicates, flow_id.flow_id(), &flow_name, &flow_stat, now);
         }
 
         self.finish()
@@ -215,6 +217,7 @@ impl InformationSchemaFlowStatisticsBuilder {
         flow_id: FlowId,
         flow_name: &str,
         flow_stat: &Option<FlowStat>,
+        now: i64,
     ) {
         let row = [
             (FLOW_ID, &Value::from(flow_id)),
@@ -239,7 +242,7 @@ impl InformationSchemaFlowStatisticsBuilder {
                     .map(|v| TimestampMillisecond::new(*v))
             }));
         self.uptime_seconds
-            .push(start_time.map(|start| (current_time_millis() - start) / 1000));
+            .push(start_time.map(|start| ((now - start) / 1000).max(0)));
         self.state_sizes.push(
             flow_stat
                 .as_ref()
