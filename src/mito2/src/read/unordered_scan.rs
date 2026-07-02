@@ -133,6 +133,12 @@ impl UnorderedScan {
                         yield record_batch?;
                     }
                 } else if stream_ctx.is_file_range_index(*index) {
+                    // Common manifest-level fast-skip shared by UnorderedScan and SeqScan.
+                    if partition_pruner
+                        .try_skip_manifest_pruned_file_range(*index, &part_metrics)
+                    {
+                        continue;
+                    }
                     let stream = scan_flat_file_ranges(
                         stream_ctx.clone(),
                         part_metrics.clone(),
