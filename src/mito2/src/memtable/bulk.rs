@@ -20,6 +20,7 @@ pub(crate) mod json_align;
 pub mod part;
 pub mod part_reader;
 mod row_group_reader;
+mod stats;
 
 use std::collections::{BTreeMap, HashSet};
 use std::sync::atomic::{AtomicI64, AtomicU64, AtomicUsize, Ordering};
@@ -53,6 +54,7 @@ use crate::memtable::bulk::part::{
     should_prune_bulk_part,
 };
 use crate::memtable::bulk::part_reader::BulkPartBatchIter;
+use crate::memtable::bulk::stats::BatchStats;
 use crate::memtable::stats::WriteMetrics;
 use crate::memtable::{
     AllocTracker, BoxedBatchIterator, BoxedRecordBatchIterator, EncodedBulkPart, EncodedRange,
@@ -447,20 +449,26 @@ impl Memtable for BulkMemtable {
                 if bulk_parts.should_compact_unordered_part()
                     && let Some(bulk_part) = bulk_parts.unordered_part.to_bulk_part()?
                 {
+                    let batch_stats =
+                        BatchStats::compute(std::slice::from_ref(&bulk_part.batch), &self.metadata);
                     bulk_parts.parts.push(BulkPartWrapper {
                         part: PartToMerge::Bulk {
                             part: bulk_part,
                             file_id: FileId::random(),
+                            batch_stats,
                         },
                         merging: false,
                     });
                     bulk_parts.unordered_part.clear();
                 }
             } else {
+                let batch_stats =
+                    BatchStats::compute(std::slice::from_ref(&fragment.batch), &self.metadata);
                 bulk_parts.parts.push(BulkPartWrapper {
                     part: PartToMerge::Bulk {
                         part: fragment,
                         file_id: FileId::random(),
+                        batch_stats,
                     },
                     merging: false,
                 });
@@ -507,12 +515,17 @@ impl Memtable for BulkMemtable {
             if !bulk_parts.unordered_part.is_empty()
                 && let Some(unordered_bulk_part) = bulk_parts.unordered_part.to_bulk_part()?
             {
+                let batch_stats = BatchStats::compute(
+                    std::slice::from_ref(&unordered_bulk_part.batch),
+                    &self.metadata,
+                );
                 let part_stats = unordered_bulk_part.to_memtable_stats(&self.metadata);
                 let range = MemtableRange::new(
                     Arc::new(MemtableRangeContext::new(
                         self.id,
                         Box::new(BulkRangeIterBuilder {
                             part: unordered_bulk_part,
+                            batch_stats,
                             context: context.clone(),
                             sequence,
                         }),
@@ -533,8 +546,11 @@ impl Memtable for BulkMemtable {
 
                 let part_stats = part_wrapper.part.to_memtable_stats(&self.metadata);
                 let iter_builder: Box<dyn IterBuilder> = match &part_wrapper.part {
-                    PartToMerge::Bulk { part, .. } => Box::new(BulkRangeIterBuilder {
+                    PartToMerge::Bulk {
+                        part, batch_stats, ..
+                    } => Box::new(BulkRangeIterBuilder {
                         part: part.clone(),
+                        batch_stats: batch_stats.clone(),
                         context: context.clone(),
                         sequence,
                     }),
@@ -771,6 +787,7 @@ impl BulkMemtable {
 /// Iterator builder for bulk range
 pub struct BulkRangeIterBuilder {
     pub part: BulkPart,
+    pub(crate) batch_stats: BatchStats,
     pub context: Arc<BulkIterContext>,
     pub sequence: Option<SequenceRange>,
 }
@@ -799,8 +816,7 @@ impl IterBuilder for BulkRangeIterBuilder {
         _time_range: Option<(Timestamp, Timestamp)>,
         metrics: Option<MemScanMetrics>,
     ) -> Result<BoxedRecordBatchIterator> {
-        let metadata = self.context.read_format().metadata();
-        if should_prune_bulk_part(&self.part.batch, &self.context, metadata) {
+        if should_prune_bulk_part(&self.batch_stats, &self.context) {
             return Ok(Box::new(std::iter::empty()));
         }
 
@@ -927,7 +943,11 @@ impl BulkPartWrapper {
 #[derive(Clone)]
 enum PartToMerge {
     /// Raw bulk part.
-    Bulk { part: BulkPart, file_id: FileId },
+    Bulk {
+        part: BulkPart,
+        file_id: FileId,
+        batch_stats: BatchStats,
+    },
     /// Multiple bulk parts.
     Multi {
         part: MultiBulkPart,
@@ -2222,10 +2242,13 @@ mod tests {
 
     /// Helper to create a BulkPartWrapper from a BulkPart.
     fn create_bulk_part_wrapper(part: BulkPart) -> BulkPartWrapper {
+        let metadata = metadata_for_test();
+        let batch_stats = BatchStats::compute(std::slice::from_ref(&part.batch), &metadata);
         BulkPartWrapper {
             part: PartToMerge::Bulk {
                 part,
                 file_id: FileId::random(),
+                batch_stats,
             },
             merging: false,
         }
