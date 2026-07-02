@@ -19,10 +19,9 @@ use api::greptime_proto::io::prometheus::write::v2::histogram::{Count, ZeroCount
 #[cfg(test)]
 use api::greptime_proto::io::prometheus::write::v2::{Exemplar, Metadata, metadata};
 use api::greptime_proto::io::prometheus::write::v2::{Histogram, Request, Sample, TimeSeries};
-#[cfg(test)]
-use api::v1::ColumnSchema;
+use api::helper::ColumnDataTypeWrapper;
 use api::v1::value::ValueData;
-use api::v1::{ColumnDataType, RowInsertRequest, Rows, Value};
+use api::v1::{ColumnSchema, ListValue, RowInsertRequest, Rows, SemanticType, Value};
 use bytes::Bytes;
 use common_grpc::precision::Precision;
 use common_query::native_histogram::*;
@@ -148,7 +147,7 @@ pub(crate) fn into_write_requests(request: Request) -> Result<RemoteWriteV2Write
                 &mut histogram_tables,
                 prom_ctx,
                 table_name,
-                tags.len() + 1 + NATIVE_HISTOGRAM_FIELD_NAMES.len(),
+                tags.len() + 2,
                 histogram_count,
             );
 
@@ -242,7 +241,134 @@ fn write_native_histogram(
         &mut row,
     )?;
 
-    write_common_native_histogram_fields(table_data, histogram, &mut row)?;
+    write_native_histogram_value(table_data, histogram, &mut row)?;
+
+    row_writer::write_tags(table_data, tags, &mut row)?;
+    table_data.add_row(row);
+
+    Ok(())
+}
+
+fn write_native_histogram_value(
+    table_data: &mut TableData,
+    histogram: &Histogram,
+    row: &mut Vec<Value>,
+) -> Result<()> {
+    let column_schema = native_histogram_column_schema();
+    let value = native_histogram_struct_value(histogram)?;
+
+    row_writer::write_by_schema(
+        table_data,
+        std::iter::once((column_schema, Some(value))),
+        row,
+    )
+}
+
+fn native_histogram_column_schema() -> ColumnSchema {
+    let (datatype, datatype_extension) = native_histogram_column_type().into_parts();
+
+    ColumnSchema {
+        column_name: NATIVE_HISTOGRAM_FIELD.to_string(),
+        datatype: datatype as i32,
+        semantic_type: SemanticType::Field as i32,
+        datatype_extension,
+        options: None,
+    }
+}
+
+fn native_histogram_column_type() -> ColumnDataTypeWrapper {
+    ColumnDataTypeWrapper::struct_datatype(vec![
+        (
+            SCHEMA_FIELD.to_string(),
+            ColumnDataTypeWrapper::int32_datatype(),
+        ),
+        (
+            ZERO_THRESHOLD_FIELD.to_string(),
+            ColumnDataTypeWrapper::float64_datatype(),
+        ),
+        (
+            SUM_FIELD.to_string(),
+            ColumnDataTypeWrapper::float64_datatype(),
+        ),
+        (
+            RESET_HINT_FIELD.to_string(),
+            ColumnDataTypeWrapper::int32_datatype(),
+        ),
+        (
+            START_TIMESTAMP_FIELD.to_string(),
+            ColumnDataTypeWrapper::timestamp_millisecond_datatype(),
+        ),
+        (
+            CUSTOM_VALUES_FIELD.to_string(),
+            ColumnDataTypeWrapper::list_datatype(ColumnDataTypeWrapper::float64_datatype()),
+        ),
+        (
+            POSITIVE_SPAN_OFFSETS_FIELD.to_string(),
+            ColumnDataTypeWrapper::list_datatype(ColumnDataTypeWrapper::int32_datatype()),
+        ),
+        (
+            POSITIVE_SPAN_LENGTHS_FIELD.to_string(),
+            ColumnDataTypeWrapper::list_datatype(ColumnDataTypeWrapper::uint32_datatype()),
+        ),
+        (
+            NEGATIVE_SPAN_OFFSETS_FIELD.to_string(),
+            ColumnDataTypeWrapper::list_datatype(ColumnDataTypeWrapper::int32_datatype()),
+        ),
+        (
+            NEGATIVE_SPAN_LENGTHS_FIELD.to_string(),
+            ColumnDataTypeWrapper::list_datatype(ColumnDataTypeWrapper::uint32_datatype()),
+        ),
+        (
+            COUNT_U64_FIELD.to_string(),
+            ColumnDataTypeWrapper::uint64_datatype(),
+        ),
+        (
+            ZERO_COUNT_U64_FIELD.to_string(),
+            ColumnDataTypeWrapper::uint64_datatype(),
+        ),
+        (
+            POSITIVE_BUCKETS_I64_FIELD.to_string(),
+            ColumnDataTypeWrapper::list_datatype(ColumnDataTypeWrapper::int64_datatype()),
+        ),
+        (
+            NEGATIVE_BUCKETS_I64_FIELD.to_string(),
+            ColumnDataTypeWrapper::list_datatype(ColumnDataTypeWrapper::int64_datatype()),
+        ),
+        (
+            COUNT_F64_FIELD.to_string(),
+            ColumnDataTypeWrapper::float64_datatype(),
+        ),
+        (
+            ZERO_COUNT_F64_FIELD.to_string(),
+            ColumnDataTypeWrapper::float64_datatype(),
+        ),
+        (
+            POSITIVE_BUCKETS_F64_FIELD.to_string(),
+            ColumnDataTypeWrapper::list_datatype(ColumnDataTypeWrapper::float64_datatype()),
+        ),
+        (
+            NEGATIVE_BUCKETS_F64_FIELD.to_string(),
+            ColumnDataTypeWrapper::list_datatype(ColumnDataTypeWrapper::float64_datatype()),
+        ),
+    ])
+}
+
+fn native_histogram_struct_value(histogram: &Histogram) -> Result<ValueData> {
+    let mut items = Vec::with_capacity(NATIVE_HISTOGRAM_FIELD_NAMES.len());
+    items.extend([
+        pb_value(ValueData::I32Value(histogram.schema)),
+        pb_value(ValueData::F64Value(histogram.zero_threshold)),
+        pb_value(ValueData::F64Value(histogram.sum)),
+        pb_value(ValueData::I32Value(histogram.reset_hint)),
+        optional_pb_value((histogram.start_timestamp != 0).then_some(
+            ValueData::TimestampMillisecondValue(histogram.start_timestamp),
+        )),
+        f64_list_value(histogram.custom_values.iter().copied()),
+        i32_list_value(histogram.positive_spans.iter().map(|span| span.offset)),
+        u32_list_value(histogram.positive_spans.iter().map(|span| span.length)),
+        i32_list_value(histogram.negative_spans.iter().map(|span| span.offset)),
+        u32_list_value(histogram.negative_spans.iter().map(|span| span.length)),
+    ]);
 
     let int_counts = match (&histogram.count, &histogram.zero_count) {
         (Some(Count::CountInt(count)), Some(ZeroCount::ZeroCountInt(zero_count))) => {
@@ -261,35 +387,95 @@ fn write_native_histogram(
     };
 
     if let Some(counts) = float_counts {
-        write_int_native_histogram_fields(table_data, None, None, &mut row)?;
-        write_float_native_histogram_fields(
-            table_data,
-            Some((&histogram.positive_counts, &histogram.negative_counts)),
-            Some(counts),
-            &mut row,
-        )?;
+        items.extend([
+            null_pb_value(),
+            null_pb_value(),
+            i64_list_value(std::iter::empty()),
+            i64_list_value(std::iter::empty()),
+            pb_value(ValueData::F64Value(counts.0)),
+            pb_value(ValueData::F64Value(counts.1)),
+            f64_list_value(histogram.positive_counts.iter().copied()),
+            f64_list_value(histogram.negative_counts.iter().copied()),
+        ]);
     } else {
-        write_int_native_histogram_fields(
-            table_data,
-            Some((&histogram.positive_deltas, &histogram.negative_deltas)),
-            Some(int_counts),
-            &mut row,
-        )?;
-        write_float_native_histogram_fields(table_data, None, None, &mut row)?;
+        let positive_buckets = bucket_counts_from_deltas(&histogram.positive_deltas)?;
+        let negative_buckets = bucket_counts_from_deltas(&histogram.negative_deltas)?;
+        items.extend([
+            pb_value(ValueData::U64Value(int_counts.0)),
+            pb_value(ValueData::U64Value(int_counts.1)),
+            i64_list_value(positive_buckets.iter().copied()),
+            i64_list_value(negative_buckets.iter().copied()),
+            null_pb_value(),
+            null_pb_value(),
+            f64_list_value(std::iter::empty()),
+            f64_list_value(std::iter::empty()),
+        ]);
     }
 
-    row_writer::write_tags(table_data, tags, &mut row)?;
-    table_data.add_row(row);
+    Ok(ValueData::StructValue(api::v1::StructValue { items }))
+}
 
-    Ok(())
+fn pb_value(value_data: ValueData) -> Value {
+    optional_pb_value(Some(value_data))
+}
+
+fn null_pb_value() -> Value {
+    optional_pb_value(None)
+}
+
+fn optional_pb_value(value_data: Option<ValueData>) -> Value {
+    Value { value_data }
+}
+
+fn list_value(values: impl IntoIterator<Item = ValueData>) -> Value {
+    pb_value(ValueData::ListValue(ListValue {
+        items: values.into_iter().map(pb_value).collect(),
+    }))
+}
+
+fn i32_list_value(values: impl IntoIterator<Item = i32>) -> Value {
+    list_value(values.into_iter().map(ValueData::I32Value))
+}
+
+fn u32_list_value(values: impl IntoIterator<Item = u32>) -> Value {
+    list_value(values.into_iter().map(ValueData::U32Value))
+}
+
+fn i64_list_value(values: impl IntoIterator<Item = i64>) -> Value {
+    list_value(values.into_iter().map(ValueData::I64Value))
+}
+
+fn f64_list_value(values: impl IntoIterator<Item = f64>) -> Value {
+    list_value(values.into_iter().map(ValueData::F64Value))
+}
+
+fn bucket_counts_from_deltas(deltas: &[i64]) -> Result<Vec<i64>> {
+    let mut count = 0_i64;
+    let mut buckets = Vec::with_capacity(deltas.len());
+
+    for delta in deltas {
+        count = count
+            .checked_add(*delta)
+            .context(error::InvalidPromRemoteRequestSnafu {
+                msg: "remote write v2 native histogram bucket count overflows i64".to_string(),
+            })?;
+        ensure!(
+            count >= 0,
+            error::InvalidPromRemoteRequestSnafu {
+                msg: "remote write v2 native histogram bucket count is negative".to_string(),
+            }
+        );
+        buckets.push(count);
+    }
+
+    Ok(buckets)
 }
 
 fn ensure_no_internal_histogram_labels(tags: &PromTags) -> Result<()> {
-    // Histogram field columns are generated from the protobuf payload. Allowing
-    // user labels with the same names would make tag/field semantics ambiguous.
+    // The histogram field column is generated from the protobuf payload.
     for (name, _) in tags {
         ensure!(
-            !NATIVE_HISTOGRAM_FIELD_NAMES.contains(&name.as_str()),
+            name != NATIVE_HISTOGRAM_FIELD,
             error::InvalidPromRemoteRequestSnafu {
                 msg: format!(
                     "remote write v2 label `{name}` conflicts with an internal native histogram label"
@@ -299,225 +485,6 @@ fn ensure_no_internal_histogram_labels(tags: &PromTags) -> Result<()> {
     }
 
     Ok(())
-}
-
-fn write_common_native_histogram_fields(
-    table_data: &mut TableData,
-    histogram: &Histogram,
-    row: &mut Vec<Value>,
-) -> Result<()> {
-    row_writer::write_fields(
-        table_data,
-        [
-            (
-                SCHEMA_FIELD.to_string(),
-                ColumnDataType::Int32,
-                Some(ValueData::I32Value(histogram.schema)),
-            ),
-            (
-                ZERO_THRESHOLD_FIELD.to_string(),
-                ColumnDataType::Float64,
-                Some(ValueData::F64Value(histogram.zero_threshold)),
-            ),
-            (
-                SUM_FIELD.to_string(),
-                ColumnDataType::Float64,
-                Some(ValueData::F64Value(histogram.sum)),
-            ),
-            (
-                RESET_HINT_FIELD.to_string(),
-                ColumnDataType::Int32,
-                Some(ValueData::I32Value(histogram.reset_hint)),
-            ),
-            (
-                START_TIMESTAMP_FIELD.to_string(),
-                ColumnDataType::TimestampMillisecond,
-                (histogram.start_timestamp != 0).then_some(ValueData::TimestampMillisecondValue(
-                    histogram.start_timestamp,
-                )),
-            ),
-        ]
-        .into_iter(),
-        row,
-    )?;
-    write_f64_list_field(
-        table_data,
-        CUSTOM_VALUES_FIELD,
-        Some(histogram.custom_values.iter().copied()),
-        row,
-    )?;
-    write_i32_list_field(
-        table_data,
-        POSITIVE_SPAN_OFFSETS_FIELD,
-        Some(histogram.positive_spans.iter().map(|span| span.offset)),
-        row,
-    )?;
-    write_u32_list_field(
-        table_data,
-        POSITIVE_SPAN_LENGTHS_FIELD,
-        Some(histogram.positive_spans.iter().map(|span| span.length)),
-        row,
-    )?;
-    write_i32_list_field(
-        table_data,
-        NEGATIVE_SPAN_OFFSETS_FIELD,
-        Some(histogram.negative_spans.iter().map(|span| span.offset)),
-        row,
-    )?;
-    write_u32_list_field(
-        table_data,
-        NEGATIVE_SPAN_LENGTHS_FIELD,
-        Some(histogram.negative_spans.iter().map(|span| span.length)),
-        row,
-    )
-}
-
-fn write_int_native_histogram_fields(
-    table_data: &mut TableData,
-    buckets: Option<(&[i64], &[i64])>,
-    counts: Option<(u64, u64)>,
-    row: &mut Vec<Value>,
-) -> Result<()> {
-    let (count, zero_count) = counts
-        .map(|(count, zero_count)| {
-            (
-                Some(ValueData::U64Value(count)),
-                Some(ValueData::U64Value(zero_count)),
-            )
-        })
-        .unwrap_or((None, None));
-    row_writer::write_fields(
-        table_data,
-        [
-            (COUNT_U64_FIELD.to_string(), ColumnDataType::Uint64, count),
-            (
-                ZERO_COUNT_U64_FIELD.to_string(),
-                ColumnDataType::Uint64,
-                zero_count,
-            ),
-        ]
-        .into_iter(),
-        row,
-    )?;
-
-    let positive_buckets = buckets.map(|(positive, _)| positive.iter().copied());
-    let negative_buckets = buckets.map(|(_, negative)| negative.iter().copied());
-    write_i64_list_field(
-        table_data,
-        POSITIVE_BUCKETS_I64_FIELD,
-        positive_buckets,
-        row,
-    )?;
-    write_i64_list_field(
-        table_data,
-        NEGATIVE_BUCKETS_I64_FIELD,
-        negative_buckets,
-        row,
-    )
-}
-
-fn write_float_native_histogram_fields(
-    table_data: &mut TableData,
-    buckets: Option<(&[f64], &[f64])>,
-    counts: Option<(f64, f64)>,
-    row: &mut Vec<Value>,
-) -> Result<()> {
-    let (count, zero_count) = counts
-        .map(|(count, zero_count)| {
-            (
-                Some(ValueData::F64Value(count)),
-                Some(ValueData::F64Value(zero_count)),
-            )
-        })
-        .unwrap_or((None, None));
-    row_writer::write_fields(
-        table_data,
-        [
-            (COUNT_F64_FIELD.to_string(), ColumnDataType::Float64, count),
-            (
-                ZERO_COUNT_F64_FIELD.to_string(),
-                ColumnDataType::Float64,
-                zero_count,
-            ),
-        ]
-        .into_iter(),
-        row,
-    )?;
-
-    let positive_buckets = buckets.map(|(positive, _)| positive.iter().copied());
-    let negative_buckets = buckets.map(|(_, negative)| negative.iter().copied());
-    write_f64_list_field(
-        table_data,
-        POSITIVE_BUCKETS_F64_FIELD,
-        positive_buckets,
-        row,
-    )?;
-    write_f64_list_field(
-        table_data,
-        NEGATIVE_BUCKETS_F64_FIELD,
-        negative_buckets,
-        row,
-    )
-}
-
-fn write_i32_list_field(
-    table_data: &mut TableData,
-    name: &str,
-    values: Option<impl IntoIterator<Item = i32>>,
-    row: &mut Vec<Value>,
-) -> Result<()> {
-    row_writer::write_list(
-        table_data,
-        name,
-        ColumnDataType::Int32,
-        values.map(|values| values.into_iter().map(ValueData::I32Value)),
-        row,
-    )
-}
-
-fn write_u32_list_field(
-    table_data: &mut TableData,
-    name: &str,
-    values: Option<impl IntoIterator<Item = u32>>,
-    row: &mut Vec<Value>,
-) -> Result<()> {
-    row_writer::write_list(
-        table_data,
-        name,
-        ColumnDataType::Uint32,
-        values.map(|values| values.into_iter().map(ValueData::U32Value)),
-        row,
-    )
-}
-
-fn write_i64_list_field(
-    table_data: &mut TableData,
-    name: &str,
-    values: Option<impl IntoIterator<Item = i64>>,
-    row: &mut Vec<Value>,
-) -> Result<()> {
-    row_writer::write_list(
-        table_data,
-        name,
-        ColumnDataType::Int64,
-        values.map(|values| values.into_iter().map(ValueData::I64Value)),
-        row,
-    )
-}
-
-fn write_f64_list_field(
-    table_data: &mut TableData,
-    name: &str,
-    values: Option<impl IntoIterator<Item = f64>>,
-    row: &mut Vec<Value>,
-) -> Result<()> {
-    row_writer::write_list(
-        table_data,
-        name,
-        ColumnDataType::Float64,
-        values.map(|values| values.into_iter().map(ValueData::F64Value)),
-        row,
-    )
 }
 
 fn resolve_series_labels(symbols: &[String], series: &TimeSeries) -> Result<ResolvedSeriesLabels> {
@@ -1064,41 +1031,21 @@ mod tests {
                 .iter()
                 .map(|col| col.column_name.as_str())
                 .collect::<Vec<_>>(),
-            vec![
-                greptime_timestamp(),
-                SCHEMA_FIELD,
-                ZERO_THRESHOLD_FIELD,
-                SUM_FIELD,
-                RESET_HINT_FIELD,
-                START_TIMESTAMP_FIELD,
-                CUSTOM_VALUES_FIELD,
-                POSITIVE_SPAN_OFFSETS_FIELD,
-                POSITIVE_SPAN_LENGTHS_FIELD,
-                NEGATIVE_SPAN_OFFSETS_FIELD,
-                NEGATIVE_SPAN_LENGTHS_FIELD,
-                COUNT_U64_FIELD,
-                ZERO_COUNT_U64_FIELD,
-                POSITIVE_BUCKETS_I64_FIELD,
-                NEGATIVE_BUCKETS_I64_FIELD,
-                COUNT_F64_FIELD,
-                ZERO_COUNT_F64_FIELD,
-                POSITIVE_BUCKETS_F64_FIELD,
-                NEGATIVE_BUCKETS_F64_FIELD,
-            ]
+            vec![greptime_timestamp(), NATIVE_HISTOGRAM_FIELD]
         );
         assert_eq!(
             rows.rows[0].values[0].value_data,
             Some(ValueData::TimestampMillisecondValue(0))
         );
         assert_eq!(
-            rows.rows[0].values[1].value_data,
+            histogram_field_value(&rows, 0, SCHEMA_FIELD),
             Some(ValueData::I32Value(0))
         );
         assert_eq!(
-            rows.rows[0].values[11].value_data,
+            histogram_field_value(&rows, 0, COUNT_U64_FIELD),
             Some(ValueData::U64Value(0))
         );
-        assert_eq!(rows.rows[0].values[15].value_data, None);
+        assert_eq!(histogram_field_value(&rows, 0, COUNT_F64_FIELD), None);
     }
 
     #[test]
@@ -1115,10 +1062,9 @@ mod tests {
 
         let mut inserts = ctx_req.histograms.all_req().collect::<Vec<_>>();
         let rows = inserts.pop().unwrap().rows.unwrap();
-        let start_timestamp_idx = column_index(&rows.schema, START_TIMESTAMP_FIELD);
 
         assert_eq!(
-            rows.rows[0].values[start_timestamp_idx].value_data,
+            histogram_field_value(&rows, 0, START_TIMESTAMP_FIELD),
             Some(ValueData::TimestampMillisecondValue(1000))
         );
     }
@@ -1126,7 +1072,10 @@ mod tests {
     #[test]
     fn test_into_context_req_rejects_internal_histogram_labels() {
         let mut request = test_util::request_with_labels_and_samples(
-            vec![(METRIC_NAME_LABEL, "metric"), (SUM_FIELD, "user_value")],
+            vec![
+                (METRIC_NAME_LABEL, "metric"),
+                (NATIVE_HISTOGRAM_FIELD, "user_value"),
+            ],
             vec![],
         );
         request.timeseries[0].histograms.push(Histogram::default());
@@ -1137,7 +1086,7 @@ mod tests {
         };
         assert_eq!(
             err.to_string(),
-            "Invalid prometheus remote request, msg: remote write v2 label `sum` conflicts with an internal native histogram label"
+            "Invalid prometheus remote request, msg: remote write v2 label `greptime_native_histogram` conflicts with an internal native histogram label"
         );
     }
 
@@ -1190,59 +1139,36 @@ mod tests {
                 .iter()
                 .map(|col| col.column_name.as_str())
                 .collect::<Vec<_>>(),
-            vec![
-                greptime_timestamp(),
-                SCHEMA_FIELD,
-                ZERO_THRESHOLD_FIELD,
-                SUM_FIELD,
-                RESET_HINT_FIELD,
-                START_TIMESTAMP_FIELD,
-                CUSTOM_VALUES_FIELD,
-                POSITIVE_SPAN_OFFSETS_FIELD,
-                POSITIVE_SPAN_LENGTHS_FIELD,
-                NEGATIVE_SPAN_OFFSETS_FIELD,
-                NEGATIVE_SPAN_LENGTHS_FIELD,
-                COUNT_U64_FIELD,
-                ZERO_COUNT_U64_FIELD,
-                POSITIVE_BUCKETS_I64_FIELD,
-                NEGATIVE_BUCKETS_I64_FIELD,
-                COUNT_F64_FIELD,
-                ZERO_COUNT_F64_FIELD,
-                POSITIVE_BUCKETS_F64_FIELD,
-                NEGATIVE_BUCKETS_F64_FIELD,
-            ]
+            vec![greptime_timestamp(), NATIVE_HISTOGRAM_FIELD]
         );
 
-        let count_u64_idx = column_index(&rows.schema, COUNT_U64_FIELD);
-        let count_f64_idx = column_index(&rows.schema, COUNT_F64_FIELD);
-        let positive_buckets_i64_idx = column_index(&rows.schema, POSITIVE_BUCKETS_I64_FIELD);
-        let positive_buckets_f64_idx = column_index(&rows.schema, POSITIVE_BUCKETS_F64_FIELD);
-
         assert_eq!(
-            rows.rows[0].values[count_u64_idx].value_data,
+            histogram_field_value(&rows, 0, COUNT_U64_FIELD),
             Some(ValueData::U64Value(0))
         );
-        assert_eq!(rows.rows[0].values[count_f64_idx].value_data, None);
+        assert_eq!(histogram_field_value(&rows, 0, COUNT_F64_FIELD), None);
         assert!(matches!(
-            rows.rows[0].values[positive_buckets_i64_idx].value_data,
+            histogram_field_value(&rows, 0, POSITIVE_BUCKETS_I64_FIELD),
             Some(ValueData::ListValue(_))
         ));
-        assert_eq!(
-            rows.rows[0].values[positive_buckets_f64_idx].value_data,
-            None
-        );
+        assert!(is_empty_list(histogram_field_value(
+            &rows,
+            0,
+            POSITIVE_BUCKETS_F64_FIELD
+        )));
 
-        assert_eq!(rows.rows[1].values[count_u64_idx].value_data, None);
+        assert_eq!(histogram_field_value(&rows, 1, COUNT_U64_FIELD), None);
         assert_eq!(
-            rows.rows[1].values[count_f64_idx].value_data,
+            histogram_field_value(&rows, 1, COUNT_F64_FIELD),
             Some(ValueData::F64Value(3.5))
         );
-        assert_eq!(
-            rows.rows[1].values[positive_buckets_i64_idx].value_data,
-            None
-        );
+        assert!(is_empty_list(histogram_field_value(
+            &rows,
+            1,
+            POSITIVE_BUCKETS_I64_FIELD
+        )));
         assert!(matches!(
-            rows.rows[1].values[positive_buckets_f64_idx].value_data,
+            histogram_field_value(&rows, 1, POSITIVE_BUCKETS_F64_FIELD),
             Some(ValueData::ListValue(_))
         ));
     }
@@ -1278,5 +1204,23 @@ mod tests {
             .iter()
             .position(|column| column.column_name == column_name)
             .unwrap()
+    }
+
+    fn histogram_field_value(rows: &Rows, row_idx: usize, field_name: &str) -> Option<ValueData> {
+        let histogram_idx = column_index(&rows.schema, NATIVE_HISTOGRAM_FIELD);
+        let Some(ValueData::StructValue(histogram)) =
+            &rows.rows[row_idx].values[histogram_idx].value_data
+        else {
+            panic!("expected native histogram struct value");
+        };
+        let field_idx = NATIVE_HISTOGRAM_FIELD_NAMES
+            .iter()
+            .position(|name| *name == field_name)
+            .unwrap();
+        histogram.items[field_idx].value_data.clone()
+    }
+
+    fn is_empty_list(value: Option<ValueData>) -> bool {
+        matches!(value, Some(ValueData::ListValue(list)) if list.items.is_empty())
     }
 }

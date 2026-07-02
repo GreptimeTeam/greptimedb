@@ -28,6 +28,7 @@ use async_trait::async_trait;
 use axum::Router;
 use axum::http::HeaderMap;
 use common_query::Output;
+use common_query::native_histogram::NATIVE_HISTOGRAM_FIELD;
 use common_query::prelude::{GREPTIME_PHYSICAL_TABLE, greptime_timestamp, greptime_value};
 use common_test_util::ports;
 use datafusion_expr::LogicalPlan;
@@ -615,8 +616,8 @@ async fn test_prometheus_remote_write_v2_writes_histogram_only_series() {
     assert!(
         rows.schema
             .iter()
-            .any(|column| column.column_name == "positive_buckets_i64"
-                && column.datatype == ColumnDataType::List as i32)
+            .any(|column| column.column_name == NATIVE_HISTOGRAM_FIELD
+                && column.datatype == ColumnDataType::Struct as i32)
     );
     assert!(write_rx.try_recv().is_err());
 }

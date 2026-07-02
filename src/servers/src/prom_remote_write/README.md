@@ -25,8 +25,8 @@ flowchart TD
     J --> K["same metric-engine flag as samples, no batcher"]
     K --> L["table: <metric>"]
 
-    L --> M["list fields: spans, buckets, custom_values"]
-    L --> N["scalar fields: count, zero_count, sum, schema, reset_hint, start_timestamp"]
+    L --> M["field: greptime_native_histogram Struct"]
+    M --> N["struct children: counts, spans, buckets, sum, schema"]
     H --> P["written headers and counters"]
     K --> P
 ```
@@ -41,12 +41,12 @@ Native histogram rows follow the same metric-engine switch as samples. They do
 not use the pending rows batcher yet because the batcher assumes the classic
 timestamp + Float64 value + string tags shape.
 
-Each histogram row stores:
+Each histogram row stores `greptime_native_histogram` as one Struct field:
 
-- common scalar fields: `schema`, `zero_threshold`, `sum`, `reset_hint`,
+- common scalar children: `schema`, `zero_threshold`, `sum`, `reset_hint`,
   `start_timestamp`;
-- count fields: `count_u64` / `zero_count_u64` or `count_f64` / `zero_count_f64`;
-- list fields for custom values, spans, and positive/negative buckets;
+- count children: `count_u64` / `zero_count_u64` or `count_f64` / `zero_count_f64`;
+- list children for custom values, spans, and positive/negative buckets;
 - original Prometheus labels as Greptime tags.
 
 The v2 response always reports written sample, histogram, and exemplar counts in

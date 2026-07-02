@@ -14,14 +14,15 @@
 
 //! Shared native histogram field contract.
 //!
-//! Prom remote-write v2 builds rows with these names, while metric-engine and
-//! operator code use the same contract to recognize native histogram tables.
+//! Prom remote-write v2 stores these names as children of one Struct field, while
+//! metric-engine uses the same contract to recognize native histogram tables.
 
-use std::collections::HashSet;
 use std::sync::Arc;
 
 use datatypes::data_type::ConcreteDataType;
+use datatypes::types::{StructField, StructType};
 
+pub const NATIVE_HISTOGRAM_FIELD: &str = "greptime_native_histogram";
 pub const SCHEMA_FIELD: &str = "schema";
 pub const ZERO_THRESHOLD_FIELD: &str = "zero_threshold";
 pub const SUM_FIELD: &str = "sum";
@@ -89,20 +90,17 @@ pub fn native_histogram_field_type(name: &str) -> Option<ConcreteDataType> {
     }
 }
 
-pub fn is_native_histogram_field_schema(name: &str, data_type: &ConcreteDataType) -> bool {
-    native_histogram_field_type(name).is_some_and(|expected| expected == *data_type)
+pub fn native_histogram_value_type() -> ConcreteDataType {
+    let fields = NATIVE_HISTOGRAM_FIELD_NAMES
+        .iter()
+        .filter_map(|name| {
+            let data_type = native_histogram_field_type(name)?;
+            Some(StructField::new((*name).to_string(), data_type, true))
+        })
+        .collect();
+    ConcreteDataType::struct_datatype(StructType::new(Arc::new(fields)))
 }
 
-/// Checks for the complete native histogram field set with no extras or duplicates.
-pub fn is_native_histogram_field_set<'a>(
-    fields: impl IntoIterator<Item = (&'a str, &'a ConcreteDataType)>,
-) -> bool {
-    let mut seen = HashSet::with_capacity(NATIVE_HISTOGRAM_FIELD_NAMES.len());
-    for (name, data_type) in fields {
-        if !is_native_histogram_field_schema(name, data_type) || !seen.insert(name) {
-            return false;
-        }
-    }
-
-    seen.len() == NATIVE_HISTOGRAM_FIELD_NAMES.len()
+pub fn is_native_histogram_value_schema(name: &str, data_type: &ConcreteDataType) -> bool {
+    name == NATIVE_HISTOGRAM_FIELD && *data_type == native_histogram_value_type()
 }
