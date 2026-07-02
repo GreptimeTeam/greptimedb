@@ -299,7 +299,16 @@ impl TombstoneManager {
         } else {
             MOVE_VALUE_TXN_OPS_PER_KEY
         };
-        let chunk_size = (self.max_txn_ops() / txn_ops_per_key).max(1);
+        let max_txn_ops = self.max_txn_ops();
+        ensure!(
+            max_txn_ops >= txn_ops_per_key,
+            error::UnexpectedSnafu {
+                err_msg: format!(
+                    "max_txn_ops {max_txn_ops} is smaller than required txn ops per key {txn_ops_per_key}"
+                )
+            }
+        );
+        let chunk_size = max_txn_ops / txn_ops_per_key;
         if keys.len() > chunk_size {
             debug!(
                 "Moving values with multiple chunks, keys len: {}, chunk_size: {}",
@@ -761,6 +770,33 @@ mod tests {
             .unwrap();
 
         assert_eq!(kvs.len(), restored);
+    }
+
+    #[tokio::test]
+    async fn test_restore_fails_fast_when_txn_op_limit_too_small() {
+        let inner = Arc::new(MemoryKvBackend::default());
+        let kv_backend = Arc::new(TxnOpLimitKvBackend {
+            inner: inner.clone(),
+            max_txn_ops: 5,
+        });
+        let tombstone_manager = TombstoneManager::new(kv_backend);
+        let key = b"foo".to_vec();
+        inner
+            .put(
+                PutRequest::new()
+                    .with_key(tombstone_manager.to_tombstone(&key))
+                    .with_value(b"hi".to_vec()),
+            )
+            .await
+            .unwrap();
+
+        let err = tombstone_manager.restore(vec![key]).await.unwrap_err();
+
+        assert!(matches!(err, Error::Unexpected { .. }));
+        assert!(
+            err.to_string()
+                .contains("max_txn_ops 5 is smaller than required txn ops per key 6")
+        );
     }
 
     #[tokio::test]
