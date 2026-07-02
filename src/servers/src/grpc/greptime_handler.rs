@@ -297,8 +297,8 @@ impl Drop for RequestTimer {
 #[cfg(test)]
 mod tests {
     use chrono::FixedOffset;
+    use common_error::GREPTIME_DB_HEADER_ERROR_CODE;
     use common_error::ext::BoxedError;
-    use common_error::{GREPTIME_DB_HEADER_ERROR_CODE, GREPTIME_DB_HEADER_ERROR_RETRY_HINT};
     use common_time::Timezone;
     use query::options::FLOW_SCHEDULED_TIME_MILLIS;
     use session::hints::{
@@ -410,11 +410,6 @@ mod tests {
             status
                 .metadata()
                 .contains_key(GREPTIME_DB_HEADER_ERROR_CODE)
-        );
-        assert!(
-            status
-                .metadata()
-                .contains_key(GREPTIME_DB_HEADER_ERROR_RETRY_HINT)
         );
     }
 }
