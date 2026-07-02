@@ -280,6 +280,24 @@ impl RecordBatchStreamAdapter {
         self.metrics_2 = Metrics::Unresolved(plan)
     }
 
+    fn record_query_stats_on_drop(&self) {
+        let Some(counters) = &self.query_stat_counters else {
+            return;
+        };
+
+        match &self.metrics_2 {
+            Metrics::Unresolved(df_plan) | Metrics::PartialResolved(df_plan, _) => {
+                let mut metric_collector = MetricCollector::new(self.explain_verbose);
+                accept(df_plan.as_ref(), &mut metric_collector).unwrap();
+                metric_collector.record_batch_metrics.query_load_region_id =
+                    self.query_load_region_id;
+                record_query_stats(counters, &metric_collector.record_batch_metrics);
+            }
+            Metrics::Resolved(metrics) => record_query_stats(counters, metrics),
+            Metrics::Unavailable => {}
+        }
+    }
+
     pub fn set_query_load_region_id(&mut self, region_id: Option<u64>) {
         self.query_load_region_id = region_id;
     }
@@ -379,9 +397,6 @@ impl Stream for RecordBatchStreamAdapter {
                     accept(df_plan.as_ref(), &mut metric_collector).unwrap();
                     metric_collector.record_batch_metrics.query_load_region_id =
                         self.query_load_region_id;
-                    if let Some(counters) = &self.query_stat_counters {
-                        record_query_stats(counters, &metric_collector.record_batch_metrics);
-                    }
                     self.metrics_2 = Metrics::Resolved(metric_collector.record_batch_metrics);
                 }
                 Poll::Ready(None)
@@ -392,6 +407,12 @@ impl Stream for RecordBatchStreamAdapter {
     #[inline]
     fn size_hint(&self) -> (usize, Option<usize>) {
         self.stream.size_hint()
+    }
+}
+
+impl Drop for RecordBatchStreamAdapter {
+    fn drop(&mut self) {
+        self.record_query_stats_on_drop();
     }
 }
 
@@ -982,6 +1003,50 @@ mod test {
         };
 
         record_query_stats(&counters, &metrics);
+
+        assert_eq!(counters.query_cpu_time_millis.load(Ordering::Relaxed), 12);
+        assert_eq!(counters.query_scanned_bytes.load(Ordering::Relaxed), 62);
+    }
+
+    #[test]
+    fn test_record_batch_stream_adapter_records_query_stats_on_drop() {
+        let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
+            "a",
+            ConcreteDataType::int32_datatype(),
+            false,
+        )]));
+        let df_stream = Box::pin(
+            datafusion::physical_plan::stream::RecordBatchStreamAdapter::new(
+                schema.arrow_schema().clone(),
+                futures::stream::empty::<datafusion::error::Result<DfRecordBatch>>(),
+            ),
+        );
+        let counters = RegionQueryStatCounters {
+            query_cpu_time_millis: Arc::new(AtomicU64::new(10)),
+            query_scanned_bytes: Arc::new(AtomicU64::new(20)),
+        };
+        let metrics = RecordBatchMetrics {
+            elapsed_compute: 2_000_000,
+            plan_metrics: vec![PlanMetrics {
+                plan: "RegionScanExec: region=1".to_string(),
+                plan_name: REGION_SCAN_EXEC_NAME.to_string(),
+                level: 0,
+                metrics: vec![("output_bytes".to_string(), 42)],
+            }],
+            ..Default::default()
+        };
+        let adapter = RecordBatchStreamAdapter {
+            schema,
+            stream: df_stream,
+            metrics: None,
+            metrics_2: Metrics::Resolved(metrics),
+            query_load_region_id: None,
+            query_stat_counters: Some(counters.clone()),
+            explain_verbose: false,
+            span: Span::current(),
+        };
+
+        drop(adapter);
 
         assert_eq!(counters.query_cpu_time_millis.load(Ordering::Relaxed), 12);
         assert_eq!(counters.query_scanned_bytes.load(Ordering::Relaxed), 62);
