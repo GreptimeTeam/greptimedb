@@ -5,9 +5,9 @@ src/meta-srv/src/procedure/region_migration/update_metadata/upgrade_candidate_re
 src/meta-srv/src/handler/region_lease_handler.rs
   766f83437f082beb 284
 src/common/meta/src/region_keeper.rs
-  766f83437f082beb 15,18,28,54,63-67,85,100-103,105-106,118-119,142,144,161-163,176-177,179-182,184-190
+  766f83437f082beb 15,18,28,54,63-67,85,100-103,105-106,118-119,142,144,153-160,161-163,176-177,179-182,184-190
 src/meta-srv/src/region/lease_keeper.rs
-  766f83437f082beb 379,384-388,488
+  766f83437f082beb 379,384-388,488,690
 ---
 {
   "schema_version": "authorship/3.0.0",

@@ -6,5 +6,18 @@ src/common/meta/src/rpc/router.rs
   "schema_version": "authorship/3.0.0",
   "git_ai_version": "1.4.8",
   "base_commit_sha": "02c2c817370c953dc393f31881ffe6108c2c4453",
-  "prompts": {}
+  "prompts": {
+    "766f83437f082beb": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_26fda9c9affez3errKHJkwOiJK",
+        "model": "openai/gpt-5.4"
+      },
+      "human_author": "WenyXu",
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 188,
+      "overriden_lines": 0
+    }
+  }
 }

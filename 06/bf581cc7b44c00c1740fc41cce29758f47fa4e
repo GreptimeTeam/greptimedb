@@ -5,7 +5,7 @@ src/common/meta/src/ddl/create_table.rs
 src/common/meta/src/ddl/drop_database/executor.rs
   766f83437f082beb 32,72,74,77
 src/common/meta/src/rpc/router.rs
-  766f83437f082beb 26,103-109,362-372
+  766f83437f082beb 26,103-109,103-114,362-372
   cd18af3a85d37a1a 609
 src/meta-srv/src/procedure/region_migration/open_candidate_region.rs
   766f83437f082beb 28,133
