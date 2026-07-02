@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 
 use arrow_schema::DataType;
 use common_function::scalars::json::json_get::JsonGetWithType;
@@ -95,8 +96,6 @@ fn merge_json_read_hint(
     column: String,
     hint: JsonReadHint,
 ) {
-    use std::collections::hash_map::Entry;
-
     match json_types.entry(column) {
         Entry::Vacant(entry) => {
             entry.insert(hint);

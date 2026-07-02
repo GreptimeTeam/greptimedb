@@ -1242,12 +1242,8 @@ mod tests {
                     .collect(),
             ),
         )]);
-        let nested_paths = [vec![["j"].iter().map(|x| x.to_string()).collect()]];
-
-        prune_schema_by_nested_paths(
-            &mut schema,
-            nested_paths.iter().map(|paths| paths.as_slice()),
-        );
+        let nested_paths: [&[Vec<String>]; 1] = [&[vec!["j".to_string()]]];
+        prune_schema_by_nested_paths(&mut schema, nested_paths);
 
         let expected = Schema::new([new_field(
             "j",

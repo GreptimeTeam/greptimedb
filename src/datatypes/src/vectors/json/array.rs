@@ -66,8 +66,8 @@ impl JsonArray<'_> {
             DataType::Struct(_) => {
                 let structs = array.as_struct();
                 let mut object = serde_json::Map::new();
-                for (field, column) in structs.fields().iter().zip(structs.columns()) {
-                    let value = JsonArray::from(column).try_get_value(i)?;
+                for (field, col) in structs.fields().iter().zip(structs.columns()) {
+                    let value = JsonArray::from(col).try_get_value(i)?;
                     if !value.is_null() {
                         object.insert(field.name().clone(), value);
                     }
@@ -167,12 +167,7 @@ impl JsonArray<'_> {
                 }
             }
         }
-        if expect_fields.is_empty() {
-            return Ok(Arc::new(StructArray::new_empty_fields(
-                struct_array.len(),
-                struct_array.nulls().cloned(),
-            )));
-        }
+
         if i < expect_fields.len() {
             for field in &expect_fields[i..] {
                 aligned.push(new_null_array(field.data_type(), struct_array.len()));

@@ -99,6 +99,11 @@ impl FlatCompatBatch {
         let actual = read_format.metadata();
         let format_projection = read_format.format_projection();
         let mut actual_schema = flat_projected_columns(actual, format_projection);
+
+        // The region manifest does not store the concrete types for json2 columns,
+        // so we recover them from the SST file's arrow schema, where the concrete
+        // types were known at write time. This patching allows the compat layer to
+        // properly align columns on the read path.
         if read_format
             .arrow_schema()
             .fields()
@@ -107,9 +112,8 @@ impl FlatCompatBatch {
         {
             for field in read_format.arrow_schema().fields() {
                 if is_structured_json_field(field)
-                    && let Some(column_id) =
-                        actual.column_by_name(field.name()).map(|x| x.column_id)
-                    && let Some(i) = actual_schema.iter().position(|x| x.0 == column_id)
+                    && let Some(col_id) = actual.column_by_name(field.name()).map(|x| x.column_id)
+                    && let Some(i) = actual_schema.iter().position(|x| x.0 == col_id)
                 {
                     actual_schema[i].1 = ConcreteDataType::from_arrow_type(field.data_type());
                 }
@@ -117,7 +121,11 @@ impl FlatCompatBatch {
         }
 
         let expect_schema = mapper.batch_schema();
-        let expect_schema = Self::resolve_json_root_schema(expect_schema, &actual_schema);
+        // When a query only involves a json2 root column, no json type hint is
+        // propagated from the optimizer, so the expect schema carries an empty
+        // struct for that column. Patch it with the concrete type from the SST.
+        let expect_schema = Self::concretize_json2_root_types(expect_schema, &actual_schema);
+
         if expect_schema == actual_schema {
             // Although the SST has a different schema, but the schema after projection is the same
             // as expected schema.
@@ -141,7 +149,9 @@ impl FlatCompatBatch {
         }))
     }
 
-    fn resolve_json_root_schema(
+    /// Concretizes the types of json2 root columns in the expect schema using the
+    /// actual schema from the SST file.
+    fn concretize_json2_root_types(
         expect_schema: &[(ColumnId, ConcreteDataType)],
         actual_schema: &[(ColumnId, ConcreteDataType)],
     ) -> Vec<(ColumnId, ConcreteDataType)> {
