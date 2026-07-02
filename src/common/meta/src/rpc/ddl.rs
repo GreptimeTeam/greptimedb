@@ -669,7 +669,6 @@ impl From<PurgeDroppedTableTask> for PbPurgeDroppedTableTask {
     fn from(task: PurgeDroppedTableTask) -> Self {
         Self {
             table_id: Some(api::v1::TableId { id: task.table_id }),
-            ..Default::default()
         }
     }
 }
