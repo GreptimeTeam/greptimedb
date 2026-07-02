@@ -741,7 +741,6 @@ async fn test_fast_mode_does_not_process_unknown() {
         recently_removed,
         vec![entry],
     )
-    .await
     .unwrap();
 
     assert!(
