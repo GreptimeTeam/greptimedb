@@ -1,0 +1,52 @@
+SELECT host, json_to_string(j)
+FROM t_json2_compat
+ORDER BY host;
+
++--------+------------------------------------------+
+| host   | json_to_string(t_json2_compat.j)         |
++--------+------------------------------------------+
+| host_a | {"a":10,"flag":true,"nested":{"b":"x"}}  |
+| host_b | {"a":20,"flag":false,"nested":{"b":"y"}} |
+| host_c | {"a":30,"flag":true,"nested":{"b":"z"}}  |
++--------+------------------------------------------+
+
+SELECT host, json_get_int(j, 'a') AS a
+FROM t_json2_compat
+WHERE json_get_int(j, 'a') >= 20
+ORDER BY host;
+
++--------+----+
+| host   | a  |
++--------+----+
+| host_b | 20 |
+| host_c | 30 |
++--------+----+
+
+SELECT host, json_get_string(j, 'nested.b') AS nested_b
+FROM t_json2_compat
+WHERE json_get_bool(j, 'flag') = true
+ORDER BY host;
+
++--------+----------+
+| host   | nested_b |
++--------+----------+
+| host_a | x        |
+| host_c | z        |
++--------+----------+
+
+SHOW CREATE TABLE t_json2_compat;
+
++----------------+-----------------------------------------------+
+| Table          | Create Table                                  |
++----------------+-----------------------------------------------+
+| t_json2_compat | CREATE TABLE IF NOT EXISTS "t_json2_compat" ( |
+|                |   "ts" TIMESTAMP(3) NOT NULL,                 |
+|                |   "host" STRING NULL,                         |
+|                |   "j" JSON NULL,                              |
+|                |   TIME INDEX ("ts"),                          |
+|                |   PRIMARY KEY ("host")                        |
+|                | )                                             |
+|                |                                               |
+|                | ENGINE=mito                                   |
+|                |                                               |
++----------------+-----------------------------------------------+

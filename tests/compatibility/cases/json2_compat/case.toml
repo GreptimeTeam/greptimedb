@@ -1,0 +1,8 @@
+name = "json2_compat"
+reason = "Verify JSON data written by v1.1.x JSON2 binaries remains readable after later JSON2 read/flush/compaction changes."
+introduced_by = "PR #7965"
+topologies = ["distributed"]
+from_range = [">=v1.1.0"]
+to_range = ["*"]
+features = ["json", "table"]
+owner = "query"

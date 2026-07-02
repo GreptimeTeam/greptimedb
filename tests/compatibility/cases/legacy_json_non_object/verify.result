@@ -1,0 +1,60 @@
+SELECT kind, json_to_string(j) FROM t_legacy_json_non_object ORDER BY kind;
+
++--------+--------------------------------------------+
+| kind   | json_to_string(t_legacy_json_non_object.j) |
++--------+--------------------------------------------+
+| array  | [1,2,3]                                    |
+| bool   | true                                       |
+| int    | 42                                         |
+| null   | null                                       |
+| object | {"a":10,"msg":"object"}                    |
+| string | "hello"                                    |
++--------+--------------------------------------------+
+
+SELECT kind FROM t_legacy_json_non_object WHERE json_is_array(j) ORDER BY kind;
+
++-------+
+| kind  |
++-------+
+| array |
++-------+
+
+SELECT kind FROM t_legacy_json_non_object WHERE json_is_string(j) ORDER BY kind;
+
++--------+
+| kind   |
++--------+
+| string |
++--------+
+
+SELECT kind FROM t_legacy_json_non_object WHERE json_is_int(j) ORDER BY kind;
+
++------+
+| kind |
++------+
+| int  |
++------+
+
+SELECT kind FROM t_legacy_json_non_object WHERE json_is_bool(j) ORDER BY kind;
+
++------+
+| kind |
++------+
+| bool |
++------+
+
+SELECT kind FROM t_legacy_json_non_object WHERE json_is_null(j) ORDER BY kind;
+
++------+
+| kind |
++------+
+| null |
++------+
+
+SELECT kind FROM t_legacy_json_non_object WHERE json_is_object(j) ORDER BY kind;
+
++--------+
+| kind   |
++--------+
+| object |
++--------+
