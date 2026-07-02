@@ -1786,7 +1786,6 @@ pub fn parse_partition_expr(partition_expr_str: Option<&str>) -> Result<Option<P
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
-    use std::sync::atomic::AtomicU64;
 
     use common_datasource::compression::CompressionType;
     use common_test_util::temp_dir::create_temp_dir;
@@ -1805,7 +1804,7 @@ mod tests {
     };
     use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
     use crate::region::{
-        ManifestContext, ManifestStats, MitoRegion, RegionLeaderState, RegionRoleState,
+        ManifestContext, ManifestStats, MitoRegion, RegionLeaderState, RegionRoleState, RegionStats,
     };
     use crate::sst::FormatType;
     use crate::sst::index::intermediate::IntermediateManager;
