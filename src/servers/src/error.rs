@@ -543,20 +543,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display(
-        "Column: {}, datatype_extension incompatible, expected: {}, actual: {}",
-        column_name,
-        expected,
-        actual
-    ))]
-    IncompatibleSchemaExtension {
-        column_name: String,
-        expected: String,
-        actual: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Failed to convert to json"))]
     ToJson {
         #[snafu(source)]
@@ -789,7 +775,6 @@ impl ErrorExt for Error {
             | TimePrecision { .. }
             | UrlDecode { .. }
             | IncompatibleSchema { .. }
-            | IncompatibleSchemaExtension { .. }
             | MysqlValueConversion { .. }
             | ParseJson { .. }
             | InvalidLokiLabels { .. }
