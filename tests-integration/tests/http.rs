@@ -2506,8 +2506,8 @@ pub async fn test_prometheus_remote_write_v2_native_histogram(store_type: Storag
     validate_data(
         "prometheus_remote_write_v2_native_histogram_rows",
         &client,
-        "select greptime_timestamp, schema, zero_threshold, sum, reset_hint, start_timestamp, custom_values, positive_span_offsets, positive_span_lengths, negative_span_offsets, negative_span_lengths, count_u64, zero_count_u64, positive_buckets_i64, negative_buckets_i64, count_f64, zero_count_f64, positive_buckets_f64, negative_buckets_f64, job, instance from remote_write_v2_latency_seconds order by greptime_timestamp;",
-        "[[3000,1,0.001,10.0,2,1500,[0.5,1.5],[0],[3],[-2],[1],4,1,[1,2,-1],[1],null,null,null,null,\"api\",\"localhost:9090\"],[4000,2,0.002,20.0,3,2500,[],[3],[2],[],[],null,null,null,null,3.5,0.5,[2.0,3.5],[],\"api\",\"localhost:9090\"]]",
+        "select greptime_timestamp, greptime_native_histogram, job, instance from remote_write_v2_latency_seconds order by greptime_timestamp;",
+        "[[3000,{\"count_f64\":null,\"count_u64\":4,\"custom_values\":[0.5,1.5],\"negative_buckets_f64\":[],\"negative_buckets_i64\":[1],\"negative_span_lengths\":[1],\"negative_span_offsets\":[-2],\"positive_buckets_f64\":[],\"positive_buckets_i64\":[1,3,2],\"positive_span_lengths\":[3],\"positive_span_offsets\":[0],\"reset_hint\":2,\"schema\":1,\"start_timestamp\":1500,\"sum\":10.0,\"zero_count_f64\":null,\"zero_count_u64\":1,\"zero_threshold\":0.001},\"api\",\"localhost:9090\"],[4000,{\"count_f64\":3.5,\"count_u64\":null,\"custom_values\":[],\"negative_buckets_f64\":[],\"negative_buckets_i64\":[],\"negative_span_lengths\":[],\"negative_span_offsets\":[],\"positive_buckets_f64\":[2.0,3.5],\"positive_buckets_i64\":[],\"positive_span_lengths\":[2],\"positive_span_offsets\":[3],\"reset_hint\":3,\"schema\":2,\"start_timestamp\":2500,\"sum\":20.0,\"zero_count_f64\":0.5,\"zero_count_u64\":null,\"zero_threshold\":0.002},\"api\",\"localhost:9090\"]]",
     )
     .await;
 

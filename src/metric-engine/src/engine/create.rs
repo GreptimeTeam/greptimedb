@@ -17,7 +17,7 @@ mod extract_new_columns;
 use std::collections::{HashMap, HashSet};
 
 use api::v1::SemanticType;
-use common_query::native_histogram::is_native_histogram_field_set;
+use common_query::native_histogram::is_native_histogram_value_schema;
 use common_telemetry::info;
 use common_time::{FOREVER, Timestamp};
 use datatypes::data_type::ConcreteDataType;
@@ -416,19 +416,19 @@ impl MetricEngineInner {
             if field_cols.is_empty() {
                 NoFieldColumnSnafu.fail()?;
             }
-            ensure!(
-                !request.is_physical_table()
-                    && is_native_histogram_field_set(field_cols.iter().map(|col| (
-                        col.column_schema.name.as_str(),
-                        &col.column_schema.data_type
-                    ))),
-                MultipleFieldColumnSnafu {
-                    previous: field_cols[0].column_schema.name.clone(),
-                    current: field_cols[1].column_schema.name.clone(),
-                }
-            );
-            return Ok(());
+            return MultipleFieldColumnSnafu {
+                previous: field_cols[0].column_schema.name.clone(),
+                current: field_cols[1].column_schema.name.clone(),
+            }
+            .fail();
         };
+
+        if is_native_histogram_value_schema(
+            &field_col.column_schema.name,
+            &field_col.column_schema.data_type,
+        ) {
+            return Ok(());
+        }
 
         // make sure the normal field column is float64 type
         ensure!(
@@ -663,9 +663,7 @@ pub(crate) fn region_options_for_metadata_region(
 mod test {
     use common_meta::ddl::test_util::assert_column_name_and_id;
     use common_meta::ddl::utils::{parse_column_metadatas, parse_manifest_infos_from_extensions};
-    use common_query::native_histogram::{
-        NATIVE_HISTOGRAM_FIELD_NAMES, native_histogram_field_type,
-    };
+    use common_query::native_histogram::{NATIVE_HISTOGRAM_FIELD, native_histogram_value_type};
     use common_query::prelude::{greptime_timestamp, greptime_value};
     use store_api::metric_engine_consts::{METRIC_ENGINE_NAME, PHYSICAL_TABLE_METADATA_KEY};
     use store_api::region_request::{BatchRegionDdlRequest, RegionRequirements};
@@ -860,7 +858,7 @@ mod test {
 
     #[test]
     fn test_verify_region_create_request_native_histogram_fields() {
-        let mut native_histogram_columns = vec![
+        let native_histogram_columns = vec![
             ColumnMetadata {
                 column_id: 0,
                 semantic_type: SemanticType::Timestamp,
@@ -875,18 +873,16 @@ mod test {
                 semantic_type: SemanticType::Tag,
                 column_schema: ColumnSchema::new("job", ConcreteDataType::string_datatype(), true),
             },
-        ];
-        native_histogram_columns.extend(NATIVE_HISTOGRAM_FIELD_NAMES.iter().enumerate().map(
-            |(index, name)| ColumnMetadata {
-                column_id: (index + 2) as u32,
+            ColumnMetadata {
+                column_id: 2,
                 semantic_type: SemanticType::Field,
                 column_schema: ColumnSchema::new(
-                    *name,
-                    native_histogram_field_type(name).unwrap(),
+                    NATIVE_HISTOGRAM_FIELD,
+                    native_histogram_value_type(),
                     true,
                 ),
             },
-        ));
+        ];
         let request = RegionCreateRequest {
             column_metadatas: native_histogram_columns,
             table_dir: "test_dir".to_string(),

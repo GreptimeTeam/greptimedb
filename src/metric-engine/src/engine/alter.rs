@@ -18,7 +18,7 @@ mod validate;
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use api::v1::SemanticType;
-use common_query::native_histogram::is_native_histogram_field_set;
+use common_query::native_histogram::is_native_histogram_value_schema;
 use extract_new_columns::extract_new_columns;
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::metadata::ColumnMetadata;
@@ -218,9 +218,8 @@ impl MetricEngineInner {
         physical_region_id: RegionId,
         requests: &[(RegionId, RegionAlterRequest)],
     ) -> Result<()> {
-        // Logical metric tables normally have one field column. Native histograms
-        // are the only supported multi-field logical table, so any field alter
-        // must leave the whole logical field set matching that schema exactly.
+        // Logical metric tables have one field column. Native histograms are a
+        // special struct field, so field alters must leave exactly that field.
         for (region_id, request) in requests {
             let AlterKind::AddColumns { columns } = &request.kind else {
                 unreachable!()
@@ -248,10 +247,11 @@ impl MetricEngineInner {
             );
 
             ensure!(
-                is_native_histogram_field_set(fields.iter().map(|col| (
-                    col.column_schema.name.as_str(),
-                    &col.column_schema.data_type
-                ))),
+                fields.len() == 1
+                    && is_native_histogram_value_schema(
+                        &fields[0].column_schema.name,
+                        &fields[0].column_schema.data_type
+                    ),
                 AddingFieldColumnSnafu {
                     name: first_added_field_name,
                 }

@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use api::v1::SemanticType;
-use common_query::native_histogram::is_native_histogram_field_schema;
+use common_query::native_histogram::is_native_histogram_value_schema;
 use common_telemetry::{debug, info};
 use datatypes::schema::{SkippingIndexOptions, SkippingIndexType};
 use mito2::engine::MitoEngine;
@@ -138,7 +138,7 @@ impl DataRegion {
                     // table for native histograms; ordinary metric fields are
                     // created with the logical table.
                     SemanticType::Field
-                        if is_native_histogram_field_schema(
+                        if is_native_histogram_value_schema(
                             &c.column_schema.name,
                             &c.column_schema.data_type,
                         ) => {}

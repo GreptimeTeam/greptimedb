@@ -38,7 +38,7 @@ use common_meta::node_manager::{AffectedRows, NodeManagerRef};
 use common_meta::peer::Peer;
 use common_query::Output;
 use common_query::native_histogram::{
-    NATIVE_HISTOGRAM_FIELD_NAMES, is_native_histogram_field_set, native_histogram_field_type,
+    NATIVE_HISTOGRAM_FIELD, is_native_histogram_value_schema, native_histogram_value_type,
 };
 use common_query::prelude::{greptime_timestamp, greptime_value};
 use common_telemetry::tracing_context::TracingContext;
@@ -1081,30 +1081,29 @@ impl Inserter {
 }
 
 fn request_is_native_histogram(request_schema: &[ColumnSchema]) -> bool {
-    let mut seen = HashSet::with_capacity(NATIVE_HISTOGRAM_FIELD_NAMES.len());
-    for col in request_schema
+    let mut fields = request_schema
         .iter()
-        .filter(|col| col.semantic_type == SemanticType::Field as i32)
-    {
-        let Some(expected_type) = native_histogram_field_type(&col.column_name) else {
-            return false;
-        };
-        if !api::helper::is_column_type_value_eq(
+        .filter(|col| col.semantic_type == SemanticType::Field as i32);
+    let Some(col) = fields.next() else {
+        return false;
+    };
+
+    fields.next().is_none()
+        && col.column_name == NATIVE_HISTOGRAM_FIELD
+        && api::helper::is_column_type_value_eq(
             col.datatype,
             col.datatype_extension.clone(),
-            &expected_type,
-        ) || !seen.insert(col.column_name.as_str())
-        {
-            return false;
-        }
-    }
-
-    seen.len() == NATIVE_HISTOGRAM_FIELD_NAMES.len()
+            &native_histogram_value_type(),
+        )
 }
 
 fn table_is_native_histogram(table: &TableRef) -> bool {
-    let fields = table.field_columns().collect::<Vec<_>>();
-    is_native_histogram_field_set(fields.iter().map(|col| (col.name.as_str(), &col.data_type)))
+    let mut fields = table.field_columns();
+    let Some(col) = fields.next() else {
+        return false;
+    };
+
+    fields.next().is_none() && is_native_histogram_value_schema(&col.name, &col.data_type)
 }
 
 fn validate_column_count_match(requests: &RowInsertRequests) -> Result<()> {

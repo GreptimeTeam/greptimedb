@@ -15,8 +15,13 @@
 use api::greptime_proto::io::prometheus::write::v2::Metadata;
 use api::greptime_proto::io::prometheus::write::v2::histogram::{Count, ZeroCount};
 use api::v1::value::ValueData;
-use api::v1::{ColumnSchema, Row};
+use api::v1::{ColumnSchema, Rows};
 use bytes::Bytes;
+use common_query::native_histogram::{
+    COUNT_U64_FIELD, NATIVE_HISTOGRAM_FIELD, NATIVE_HISTOGRAM_FIELD_NAMES,
+    POSITIVE_BUCKETS_F64_FIELD, POSITIVE_BUCKETS_I64_FIELD, POSITIVE_SPAN_OFFSETS_FIELD,
+    SCHEMA_FIELD,
+};
 use servers::prom_remote_write::v2::test_util as remote_write_v2;
 
 #[test]
@@ -91,25 +96,26 @@ fn test_decode_remote_write_v2_native_histogram_dump() {
         Some(ValueData::TimestampMillisecondValue(1782358160412))
     );
     assert_eq!(
-        row.values[column_index(&rows.schema, "schema")].value_data,
+        histogram_field_value(rows, 0, SCHEMA_FIELD),
         Some(ValueData::I32Value(3))
     );
     assert_eq!(
-        row.values[column_index(&rows.schema, "count_u64")].value_data,
+        histogram_field_value(rows, 0, COUNT_U64_FIELD),
         Some(ValueData::U64Value(24))
     );
     assert_eq!(
-        list_i32_values(row, column_index(&rows.schema, "positive_span_offsets")),
+        list_i32_values(histogram_field_value(rows, 0, POSITIVE_SPAN_OFFSETS_FIELD)),
         vec![-63, 1, 5]
     );
     assert_eq!(
-        list_i64_values(row, column_index(&rows.schema, "positive_buckets_i64")),
-        vec![2, -1, 3, -3, 3, -3, 0, 0, 0, 0, 0, 0, 0, 1, -1, 0]
+        list_i64_values(histogram_field_value(rows, 0, POSITIVE_BUCKETS_I64_FIELD)),
+        vec![2, 1, 4, 1, 4, 1, 1, 1, 1, 1, 1, 1, 1, 2, 1, 1]
     );
-    assert_eq!(
-        row.values[column_index(&rows.schema, "positive_buckets_f64")].value_data,
-        None
-    );
+    assert!(is_empty_list(histogram_field_value(
+        rows,
+        0,
+        POSITIVE_BUCKETS_F64_FIELD
+    )));
 }
 
 fn column_index(schema: &[ColumnSchema], column_name: &str) -> usize {
@@ -119,8 +125,22 @@ fn column_index(schema: &[ColumnSchema], column_name: &str) -> usize {
         .unwrap()
 }
 
-fn list_i32_values(row: &Row, column_idx: usize) -> Vec<i32> {
-    let Some(ValueData::ListValue(list)) = &row.values[column_idx].value_data else {
+fn histogram_field_value(rows: &Rows, row_idx: usize, field_name: &str) -> Option<ValueData> {
+    let histogram_idx = column_index(&rows.schema, NATIVE_HISTOGRAM_FIELD);
+    let Some(ValueData::StructValue(histogram)) =
+        &rows.rows[row_idx].values[histogram_idx].value_data
+    else {
+        panic!("expected native histogram struct value");
+    };
+    let field_idx = NATIVE_HISTOGRAM_FIELD_NAMES
+        .iter()
+        .position(|name| *name == field_name)
+        .unwrap();
+    histogram.items[field_idx].value_data.clone()
+}
+
+fn list_i32_values(value: Option<ValueData>) -> Vec<i32> {
+    let Some(ValueData::ListValue(list)) = value else {
         panic!("expected list value");
     };
     list.items
@@ -134,8 +154,8 @@ fn list_i32_values(row: &Row, column_idx: usize) -> Vec<i32> {
         .collect()
 }
 
-fn list_i64_values(row: &Row, column_idx: usize) -> Vec<i64> {
-    let Some(ValueData::ListValue(list)) = &row.values[column_idx].value_data else {
+fn list_i64_values(value: Option<ValueData>) -> Vec<i64> {
+    let Some(ValueData::ListValue(list)) = value else {
         panic!("expected list value");
     };
     list.items
@@ -147,4 +167,8 @@ fn list_i64_values(row: &Row, column_idx: usize) -> Vec<i64> {
             *value
         })
         .collect()
+}
+
+fn is_empty_list(value: Option<ValueData>) -> bool {
+    matches!(value, Some(ValueData::ListValue(list)) if list.items.is_empty())
 }
