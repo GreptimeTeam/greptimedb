@@ -234,6 +234,18 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                         all_options_altered = false;
                     }
                 }
+                SetRegionOption::AutoFlushInterval(new_interval) => {
+                    // The flush logic reads the effective interval from the region's
+                    // current version each cycle, so the change takes effect on the
+                    // next flush without a memtable flush.
+                    if new_interval != current_options.auto_flush_interval {
+                        info!(
+                            "Update region auto_flush_interval: {}, previous: {:?} new: {:?}",
+                            region.region_id, current_options.auto_flush_interval, new_interval
+                        );
+                        current_options.auto_flush_interval = new_interval;
+                    }
+                }
             }
         }
         region.version_control.alter_options(current_options);
@@ -261,7 +273,9 @@ fn new_region_options_on_empty_memtable(
     let mut current_options = current_options.clone();
     for option in options {
         match option {
-            SetRegionOption::Ttl(_) | SetRegionOption::Twsc(_, _) => (),
+            SetRegionOption::Ttl(_)
+            | SetRegionOption::Twsc(_, _)
+            | SetRegionOption::AutoFlushInterval(_) => (),
             SetRegionOption::Format(format_str) => {
                 // Safety: handle_alter_region_options_fast() has validated this.
                 let new_format = format_str.parse::<FormatType>().unwrap();
