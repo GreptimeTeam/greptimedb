@@ -161,18 +161,8 @@ impl DdlTask {
     }
 
     /// Creates a [`DdlTask`] to purge a dropped table.
-    pub fn new_purge_dropped_table(
-        catalog: String,
-        schema: String,
-        table: String,
-        table_id: Option<TableId>,
-    ) -> Self {
-        DdlTask::PurgeDroppedTable(PurgeDroppedTableTask {
-            catalog,
-            schema,
-            table,
-            table_id,
-        })
+    pub fn new_purge_dropped_table(table_id: TableId) -> Self {
+        DdlTask::PurgeDroppedTable(PurgeDroppedTableTask { table_id })
     }
 
     /// Creates a [`DdlTask`] to create a database.
@@ -252,7 +242,7 @@ impl TryFrom<Task> for DdlTask {
                 Ok(DdlTask::UndropTable(undrop_table.try_into()?))
             }
             Task::PurgeDroppedTableTask(purge_dropped_table) => {
-                Ok(DdlTask::PurgeDroppedTable(purge_dropped_table.into()))
+                Ok(DdlTask::PurgeDroppedTable(purge_dropped_table.try_into()?))
             }
             Task::AlterTableTask(alter_table) => Ok(DdlTask::AlterTable(alter_table.try_into()?)),
             Task::TruncateTableTask(truncate_table) => {
@@ -634,28 +624,7 @@ pub struct UndropTableTask {
 
 #[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
 pub struct PurgeDroppedTableTask {
-    pub catalog: String,
-    pub schema: String,
-    pub table: String,
-    pub table_id: Option<TableId>,
-}
-
-impl PurgeDroppedTableTask {
-    pub fn table_ref(&self) -> TableReference<'_> {
-        TableReference {
-            catalog: &self.catalog,
-            schema: &self.schema,
-            table: &self.table,
-        }
-    }
-
-    pub fn table_name(&self) -> TableName {
-        TableName {
-            catalog_name: self.catalog.clone(),
-            schema_name: self.schema.clone(),
-            table_name: self.table.clone(),
-        }
-    }
+    pub table_id: TableId,
 }
 
 impl TryFrom<PbUndropTableTask> for UndropTableTask {
@@ -681,24 +650,26 @@ impl From<UndropTableTask> for PbUndropTableTask {
     }
 }
 
-impl From<PbPurgeDroppedTableTask> for PurgeDroppedTableTask {
-    fn from(pb: PbPurgeDroppedTableTask) -> Self {
-        Self {
-            catalog: pb.catalog_name,
-            schema: pb.schema_name,
-            table: pb.table_name,
-            table_id: pb.table_id.map(|table_id| table_id.id),
-        }
+impl TryFrom<PbPurgeDroppedTableTask> for PurgeDroppedTableTask {
+    type Error = error::Error;
+
+    fn try_from(pb: PbPurgeDroppedTableTask) -> Result<Self> {
+        Ok(Self {
+            table_id: pb
+                .table_id
+                .context(error::InvalidProtoMsgSnafu {
+                    err_msg: "expected table_id",
+                })?
+                .id,
+        })
     }
 }
 
 impl From<PurgeDroppedTableTask> for PbPurgeDroppedTableTask {
     fn from(task: PurgeDroppedTableTask) -> Self {
         Self {
-            catalog_name: task.catalog,
-            schema_name: task.schema,
-            table_name: task.table,
-            table_id: task.table_id.map(|id| api::v1::TableId { id }),
+            table_id: Some(api::v1::TableId { id: task.table_id }),
+            ..Default::default()
         }
     }
 }
@@ -1888,12 +1859,7 @@ mod tests {
 
     #[test]
     fn test_purge_dropped_table_task_pb_roundtrip() {
-        let expected = PurgeDroppedTableTask {
-            catalog: "greptime".to_string(),
-            schema: "public".to_string(),
-            table: "foo".to_string(),
-            table_id: Some(1024),
-        };
+        let expected = PurgeDroppedTableTask { table_id: 1024 };
         let request = SubmitDdlTaskRequest::new(
             QueryContext::default(),
             DdlTask::PurgeDroppedTable(expected.clone()),
@@ -1918,12 +1884,7 @@ mod tests {
 
     #[test]
     fn test_purge_dropped_table_task_json_roundtrip() {
-        let task = PurgeDroppedTableTask {
-            catalog: "greptime".to_string(),
-            schema: "public".to_string(),
-            table: "foo".to_string(),
-            table_id: Some(1024),
-        };
+        let task = PurgeDroppedTableTask { table_id: 1024 };
 
         let output = serde_json::to_vec(&task).unwrap();
 

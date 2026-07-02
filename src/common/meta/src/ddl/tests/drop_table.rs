@@ -700,7 +700,7 @@ async fn test_purge_metric_logical_table_fails() {
         create_metric_logical_table_tombstone(&ddl_context, physical_table_id, "foo").await;
 
     let mut procedure = PurgeDroppedTableProcedure::new(
-        new_purge_dropped_table_task("foo", Some(logical_table_id)),
+        new_purge_dropped_table_task(logical_table_id),
         ddl_context,
     );
     let err = procedure
@@ -844,7 +844,7 @@ async fn test_purge_dropped_table_drops_regions_and_deletes_tombstone() {
     detector_controller.clear().await;
 
     let mut procedure = PurgeDroppedTableProcedure::new(
-        new_purge_dropped_table_task(table_name, Some(table_id)),
+        new_purge_dropped_table_task(table_id),
         ddl_context.clone(),
     );
     execute_procedure_until_done(&mut procedure).await;
@@ -876,7 +876,7 @@ async fn test_purge_dropped_table_drops_regions_and_deletes_tombstone() {
 }
 
 #[tokio::test]
-async fn test_purge_dropped_table_by_name_selects_tombstone_when_live_table_exists() {
+async fn test_purge_dropped_table_by_id_selects_tombstone_when_live_table_exists() {
     let (tx, mut rx) = mpsc::channel(8);
     let datanode_handler = DatanodeWatcher::new(tx);
     let node_manager = Arc::new(MockDatanodeManager::new(datanode_handler));
@@ -918,7 +918,7 @@ async fn test_purge_dropped_table_by_name_selects_tombstone_when_live_table_exis
     while rx.try_recv().is_ok() {}
 
     let mut procedure = PurgeDroppedTableProcedure::new(
-        new_purge_dropped_table_task(table_name, None),
+        new_purge_dropped_table_task(dropped_table_id),
         ddl_context.clone(),
     );
     execute_procedure_until_done(&mut procedure).await;
@@ -1025,16 +1025,8 @@ fn new_undrop_table_task(table_id: TableId) -> UndropTableTask {
     UndropTableTask { table_id }
 }
 
-fn new_purge_dropped_table_task(
-    table_name: &str,
-    table_id: Option<TableId>,
-) -> PurgeDroppedTableTask {
-    PurgeDroppedTableTask {
-        catalog: DEFAULT_CATALOG_NAME.to_string(),
-        schema: DEFAULT_SCHEMA_NAME.to_string(),
-        table: table_name.to_string(),
-        table_id,
-    }
+fn new_purge_dropped_table_task(table_id: TableId) -> PurgeDroppedTableTask {
+    PurgeDroppedTableTask { table_id }
 }
 
 async fn create_metric_logical_table_tombstone(

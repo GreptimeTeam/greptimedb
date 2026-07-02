@@ -36,7 +36,7 @@ use crate::ddl::utils::{
 };
 use crate::error::{self, Result};
 use crate::key::table_route::TableRouteValue;
-use crate::lock_key::{CatalogLock, SchemaLock, TableLock, TableNameLock};
+use crate::lock_key::TableLock;
 use crate::rpc::ddl::PurgeDroppedTableTask;
 use crate::rpc::router::RegionRoute;
 
@@ -61,17 +61,11 @@ impl PurgeDroppedTableProcedure {
     }
 
     async fn on_prepare(&mut self) -> Result<Status> {
-        let dropped_table = if let Some(table_id) = self.data.task.table_id {
-            self.context
-                .table_metadata_manager
-                .get_dropped_table_by_id(table_id)
-                .await?
-        } else {
-            self.context
-                .table_metadata_manager
-                .get_dropped_table(&self.data.task.table_name())
-                .await?
-        };
+        let dropped_table = self
+            .context
+            .table_metadata_manager
+            .get_dropped_table_by_id(self.data.task.table_id)
+            .await?;
 
         let Some(dropped_table) = dropped_table else {
             return Ok(Status::done());
@@ -175,16 +169,7 @@ impl Procedure for PurgeDroppedTableProcedure {
     }
 
     fn lock_key(&self) -> LockKey {
-        let table_ref = self.data.task.table_ref();
-        let mut keys = vec![
-            CatalogLock::Read(table_ref.catalog).into(),
-            SchemaLock::read(table_ref.catalog, table_ref.schema).into(),
-            TableNameLock::new(table_ref.catalog, table_ref.schema, table_ref.table).into(),
-        ];
-        if let Some(table_id) = self.data.task.table_id {
-            keys.push(TableLock::Write(table_id).into());
-        }
-        LockKey::new(keys)
+        LockKey::new(vec![TableLock::Write(self.data.task.table_id).into()])
     }
 }
 
