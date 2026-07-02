@@ -103,7 +103,7 @@ impl UndropTableProcedure {
             }
         );
         self.data.table_info = Some(dropped_table.table_info_value.table_info);
-        self.data.state = UndropTableState::RestoreMetadata;
+        self.data.state = UndropTableState::OpenRegions;
         Ok(Status::executing(true))
     }
 
@@ -127,13 +127,14 @@ impl UndropTableProcedure {
                 }
                 err => err,
             })?;
-        self.data.state = UndropTableState::OpenRegions;
+        self.data.state = UndropTableState::InvalidateTableCache;
         Ok(Status::executing(true))
     }
 
     async fn on_open_regions(&mut self) -> Result<Status> {
+        self.ensure_live_table_not_exists().await?;
         let TableRouteValue::Physical(route) = self.data.table_route_value() else {
-            self.data.state = UndropTableState::InvalidateTableCache;
+            self.data.state = UndropTableState::RestoreMetadata;
             return Ok(Status::executing(true));
         };
 
@@ -146,8 +147,23 @@ impl UndropTableProcedure {
             &self.data.region_wal_options,
         )
         .await?;
-        self.data.state = UndropTableState::InvalidateTableCache;
+        self.data.state = UndropTableState::RestoreMetadata;
         Ok(Status::executing(true))
+    }
+
+    async fn ensure_live_table_not_exists(&self) -> Result<()> {
+        ensure!(
+            !self
+                .context
+                .table_metadata_manager
+                .table_name_manager()
+                .exists(TableNameKey::from(self.data.table_name()))
+                .await?,
+            error::TableAlreadyExistsSnafu {
+                table_name: self.data.table_name().to_string()
+            }
+        );
+        Ok(())
     }
 
     async fn on_broadcast(&mut self) -> Result<Status> {
