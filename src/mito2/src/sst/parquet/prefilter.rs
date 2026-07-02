@@ -57,13 +57,49 @@ pub(crate) fn matching_row_ranges_by_primary_key(
     pk_column_index: usize,
     pk_filter: &mut dyn PrimaryKeyFilter,
 ) -> Result<Vec<Range<usize>>> {
-    let pk_dict_array = input
-        .column(pk_column_index)
-        .as_any()
-        .downcast_ref::<PrimaryKeyArray>()
-        .context(UnexpectedSnafu {
-            reason: "Primary key column is not a dictionary array",
-        })?;
+    let pk_column = input.column(pk_column_index);
+    if let Some(pk_dict_array) = pk_column.as_any().downcast_ref::<PrimaryKeyArray>() {
+        matching_row_ranges_from_dict(pk_dict_array, input.num_rows(), pk_filter)
+    } else if let Some(pk_binary_array) = pk_column.as_any().downcast_ref::<BinaryArray>() {
+        matching_row_ranges_from_binary(pk_binary_array, input.num_rows(), pk_filter)
+    } else {
+        UnexpectedSnafu {
+            reason: format!(
+                "Primary key column is neither a dictionary nor a binary array, got {:?}",
+                pk_column.data_type()
+            ),
+        }
+        .fail()
+    }
+}
+
+/// If `pk_filter` matches `pk`, records the row range `start..end`, coalescing
+/// it with the previous range when adjacent.
+fn push_matched_range(
+    matched_row_ranges: &mut Vec<Range<usize>>,
+    pk_filter: &mut dyn PrimaryKeyFilter,
+    pk: &[u8],
+    start: usize,
+    end: usize,
+) -> Result<()> {
+    if pk_filter.matches(pk).context(DecodeSnafu)? {
+        if let Some(last) = matched_row_ranges.last_mut()
+            && last.end == start
+        {
+            last.end = end;
+        } else {
+            matched_row_ranges.push(start..end);
+        }
+    }
+    Ok(())
+}
+
+/// Computes matched row ranges from a dictionary-encoded `__primary_key` column.
+fn matching_row_ranges_from_dict(
+    pk_dict_array: &PrimaryKeyArray,
+    num_rows: usize,
+    pk_filter: &mut dyn PrimaryKeyFilter,
+) -> Result<Vec<Range<usize>>> {
     let pk_values = pk_dict_array
         .values()
         .as_any()
@@ -75,7 +111,7 @@ pub(crate) fn matching_row_ranges_by_primary_key(
     let key_values = keys.values();
 
     if key_values.is_empty() {
-        return Ok(std::iter::once(0..input.num_rows()).collect());
+        return Ok(std::iter::once(0..num_rows).collect());
     }
 
     let mut matched_row_ranges: Vec<Range<usize>> = Vec::new();
@@ -87,18 +123,44 @@ pub(crate) fn matching_row_ranges_by_primary_key(
             end += 1;
         }
 
-        if pk_filter
-            .matches(pk_values.value(key as usize))
-            .context(DecodeSnafu)?
-        {
-            if let Some(last) = matched_row_ranges.last_mut()
-                && last.end == start
-            {
-                last.end = end;
-            } else {
-                matched_row_ranges.push(start..end);
-            }
+        push_matched_range(
+            &mut matched_row_ranges,
+            pk_filter,
+            pk_values.value(key as usize),
+            start,
+            end,
+        )?;
+
+        start = end;
+    }
+
+    Ok(matched_row_ranges)
+}
+
+/// Computes matched row ranges from a plain binary `__primary_key` column.
+///
+/// The writer falls back to plain binary encoding when the `__primary_key`
+/// chunk exceeds the dictionary page size limit (see `should_read_pk_as_binary`
+/// in the parquet reader), so the prefilter pass must handle this form too.
+fn matching_row_ranges_from_binary(
+    pk_array: &BinaryArray,
+    num_rows: usize,
+    pk_filter: &mut dyn PrimaryKeyFilter,
+) -> Result<Vec<Range<usize>>> {
+    if pk_array.is_empty() {
+        return Ok(std::iter::once(0..num_rows).collect());
+    }
+
+    let mut matched_row_ranges: Vec<Range<usize>> = Vec::new();
+    let mut start = 0;
+    while start < pk_array.len() {
+        let value = pk_array.value(start);
+        let mut end = start + 1;
+        while end < pk_array.len() && pk_array.value(end) == value {
+            end += 1;
         }
+
+        push_matched_range(&mut matched_row_ranges, pk_filter, value, start, end)?;
 
         start = end;
     }
@@ -1059,7 +1121,7 @@ mod tests {
     use datatypes::arrow::array::{
         ArrayRef, DictionaryArray, TimestampMillisecondArray, UInt8Array, UInt32Array, UInt64Array,
     };
-    use datatypes::arrow::datatypes::{Schema, UInt32Type};
+    use datatypes::arrow::datatypes::{DataType, Field, Schema, UInt32Type};
     use mito_codec::row_converter::{PrimaryKeyFilter, build_primary_key_codec};
     use store_api::codec::PrimaryKeyEncoding;
 
@@ -1216,6 +1278,39 @@ mod tests {
             UInt32Array::from(keys),
             Arc::new(BinaryArray::from_iter_values(dict_values.iter().copied())),
         ));
+
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(UInt64Array::from(field_values.to_vec())),
+                Arc::new(TimestampMillisecondArray::from_iter_values(
+                    0..primary_keys.len() as i64,
+                )),
+                pk_array,
+            ],
+        )
+        .unwrap()
+    }
+
+    fn new_prefilter_batch_binary_pk(primary_keys: &[&[u8]], field_values: &[u64]) -> RecordBatch {
+        assert_eq!(primary_keys.len(), field_values.len());
+
+        let metadata = Arc::new(sst_region_metadata());
+        let arrow_schema = metadata.schema.arrow_schema();
+        let field_column = arrow_schema
+            .field(arrow_schema.index_of("field_0").unwrap())
+            .clone();
+        let time_index_column = arrow_schema
+            .field(arrow_schema.index_of("ts").unwrap())
+            .clone();
+        let schema = Arc::new(Schema::new(vec![
+            field_column,
+            time_index_column,
+            Field::new(PRIMARY_KEY_COLUMN_NAME, DataType::Binary, false),
+        ]));
+
+        let pk_array: ArrayRef =
+            Arc::new(BinaryArray::from_iter_values(primary_keys.iter().copied()));
 
         RecordBatch::try_new(
             schema,
@@ -1576,6 +1671,30 @@ mod tests {
         let pk_a = new_primary_key(&["a", "x"]);
         let pk_b = new_primary_key(&["b", "x"]);
         let batch = new_prefilter_batch(
+            &[
+                pk_a.as_slice(),
+                pk_a.as_slice(),
+                pk_b.as_slice(),
+                pk_b.as_slice(),
+            ],
+            &[10, 11, 12, 13],
+        );
+
+        let mask = eval_pk_group_mask(&batch, pk_filter.as_mut().unwrap().as_mut()).unwrap();
+
+        assert_eq!(mask.count_set_bits(), 2);
+    }
+
+    #[test]
+    fn test_eval_pk_group_mask_handles_binary_pk_column() {
+        let metadata = Arc::new(sst_region_metadata());
+        let filters = Arc::new(new_test_filters(&[col("tag_0").eq(lit("a"))]));
+        let mut pk_filter = Some(Box::new(CachedPrimaryKeyFilter::new(
+            build_primary_key_codec(metadata.as_ref()).primary_key_filter(&metadata, filters),
+        )) as Box<dyn PrimaryKeyFilter>);
+        let pk_a = new_primary_key(&["a", "x"]);
+        let pk_b = new_primary_key(&["b", "x"]);
+        let batch = new_prefilter_batch_binary_pk(
             &[
                 pk_a.as_slice(),
                 pk_a.as_slice(),

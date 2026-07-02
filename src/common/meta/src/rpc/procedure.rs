@@ -82,7 +82,7 @@ pub struct RemoveRegionFollowerRequest {
 pub struct GcRegionsRequest {
     pub region_ids: Vec<u64>,
     pub full_file_listing: bool,
-    pub timeout: Duration,
+    pub timeout: Option<Duration>,
 }
 
 #[derive(Debug, Clone)]
@@ -91,7 +91,7 @@ pub struct GcTableRequest {
     pub schema_name: String,
     pub table_name: String,
     pub full_file_listing: bool,
-    pub timeout: Duration,
+    pub timeout: Option<Duration>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

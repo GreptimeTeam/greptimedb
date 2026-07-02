@@ -69,6 +69,11 @@ impl TableData {
         self.rows.push(Row { values })
     }
 
+    #[inline]
+    pub fn reserve_rows(&mut self, additional: usize) {
+        self.rows.reserve(additional);
+    }
+
     #[allow(dead_code)]
     pub fn columns(&self) -> &Vec<ColumnSchema> {
         &self.schema

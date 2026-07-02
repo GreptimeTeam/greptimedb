@@ -73,6 +73,19 @@ impl RegionFailureDetector {
         })
     }
 
+    /// Resets the [`PhiAccrualFailureDetector`] for the specified [`DetectingRegion`] with the provided timestamp.
+    /// If a detector already exists for the region, it is reset. Otherwise, a new
+    /// detector is created and initialized with the provided timestamp.
+    pub(crate) fn reset_region_failure_detector(
+        &self,
+        detecting_region: DetectingRegion,
+        ts_millis: i64,
+    ) {
+        let mut detector = PhiAccrualFailureDetector::from_options(self.options);
+        detector.heartbeat(ts_millis);
+        self.detectors.insert(detecting_region, detector);
+    }
+
     /// Returns a [FailureDetectorEntry] iterator.
     pub(crate) fn iter(&self) -> impl Iterator<Item = FailureDetectorEntry<'_>> + '_ {
         self.detectors
@@ -141,5 +154,37 @@ mod tests {
 
         container.clear();
         assert!(container.is_empty());
+    }
+
+    #[test]
+    fn test_reset_region_failure_detector() {
+        let container = RegionFailureDetector::new(Default::default());
+        let detecting_region = (2, RegionId::new(1, 1));
+        let first_heartbeat = 1_000;
+
+        {
+            let mut detector = container.region_failure_detector(detecting_region);
+            detector.heartbeat(first_heartbeat);
+            assert_eq!(Some(first_heartbeat), detector.last_heartbeat_millis());
+        }
+
+        let reset_at = 30_000;
+        container.reset_region_failure_detector(detecting_region, reset_at);
+
+        {
+            let detector = container.region_failure_detector(detecting_region);
+            assert_eq!(Some(reset_at), detector.last_heartbeat_millis());
+        }
+
+        let new_detecting_region = (3, RegionId::new(1, 1));
+        assert!(!container.contains(&new_detecting_region));
+
+        container.reset_region_failure_detector(new_detecting_region, reset_at);
+
+        assert!(container.contains(&new_detecting_region));
+        {
+            let detector = container.region_failure_detector(new_detecting_region);
+            assert_eq!(Some(reset_at), detector.last_heartbeat_millis());
+        }
     }
 }

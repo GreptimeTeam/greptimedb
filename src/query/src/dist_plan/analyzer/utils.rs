@@ -43,11 +43,16 @@ use crate::plan::ExtractExpr as _;
 pub(crate) struct PatchOptimizerContext {
     pub(crate) inner: datafusion_optimizer::OptimizerContext,
     pub(crate) config: Arc<ConfigOptions>,
+    /// Override for `query_execution_start_time()` — used during scheduled Flow
+    /// evaluation so that `SimplifyExpressions` does not constant-fold `now()`
+    /// into wall-clock literals.  When `None`, falls back to the inner context.
+    pub(crate) scheduled_time: Option<DateTime<Utc>>,
 }
 
 impl OptimizerConfig for PatchOptimizerContext {
     fn query_execution_start_time(&self) -> Option<DateTime<Utc>> {
-        self.inner.query_execution_start_time()
+        self.scheduled_time
+            .or_else(|| self.inner.query_execution_start_time())
     }
 
     fn alias_generator(&self) -> &Arc<AliasGenerator> {

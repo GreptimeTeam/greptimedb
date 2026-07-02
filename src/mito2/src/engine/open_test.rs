@@ -18,6 +18,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use api::v1::Rows;
+use common_base::Plugins;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_recordbatch::RecordBatches;
@@ -619,6 +620,7 @@ async fn test_open_compaction_region_with_format(flat_format: bool) {
         path_type: PathType::Bare,
         region_options: RegionOptions::default(),
         max_parallelism: 1,
+        plugins: Plugins::new(),
     };
 
     let compaction_region = open_compaction_region(

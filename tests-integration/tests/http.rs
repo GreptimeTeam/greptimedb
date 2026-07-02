@@ -17,12 +17,13 @@ use std::io::Write;
 use std::str::FromStr;
 use std::time::Duration;
 
+use api::greptime_proto::io::prometheus::write::v2::Sample as RemoteWriteV2Sample;
 use api::prom_store::remote::label_matcher::Type as MatcherType;
 use api::prom_store::remote::{
     Label, LabelMatcher, Query, ReadRequest, ReadResponse, Sample, TimeSeries, WriteRequest,
 };
 use auth::{UserProviderRef, user_provider_from_option};
-use axum::http::{HeaderName, HeaderValue, StatusCode};
+use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use base64::prelude::{BASE64_STANDARD, Engine as _};
 use chrono::Utc;
 use cmd::options::GreptimeOptions;
@@ -54,7 +55,8 @@ use serde_json::{Value, json};
 use servers::http::GreptimeQueryOutput;
 use servers::http::handler::HealthResponse;
 use servers::http::header::constants::{
-    GREPTIME_LOG_TABLE_NAME_HEADER_NAME, GREPTIME_PIPELINE_NAME_HEADER_NAME,
+    GREPTIME_LOG_EXTRACT_KEYS_HEADER_NAME, GREPTIME_LOG_TABLE_NAME_HEADER_NAME,
+    GREPTIME_PIPELINE_NAME_HEADER_NAME,
 };
 use servers::http::header::{GREPTIME_DB_HEADER_NAME, GREPTIME_TIMEZONE_HEADER_NAME};
 use servers::http::otlp::GoogleRpcStatus;
@@ -63,6 +65,7 @@ use servers::http::result::error_result::ErrorResponse;
 use servers::http::result::greptime_result_v1::GreptimedbV1Response;
 use servers::http::result::influxdb_result_v1::{InfluxdbOutput, InfluxdbV1Response};
 use servers::http::test_helpers::{TestClient, TestResponse};
+use servers::prom_remote_write::v2::test_util as remote_write_v2;
 use servers::prom_store::{self, mock_timeseries_new_label};
 use servers::request_memory_limiter::ServerMemoryLimiter;
 use standalone::options::StandaloneOptions;
@@ -118,6 +121,7 @@ macro_rules! http_tests {
                 test_dashboard_path,
                 test_dashboard_api,
                 test_prometheus_remote_write,
+                test_prometheus_remote_write_v2,
                 test_prometheus_remote_write_batched,
                 test_prometheus_remote_special_labels,
                 test_prometheus_remote_schema_labels,
@@ -126,6 +130,7 @@ macro_rules! http_tests {
 
                 test_pipeline_api,
                 test_test_pipeline_api,
+                test_pipeline_name_in_header,
                 test_plain_text_ingestion,
                 test_pipeline_auto_transform,
                 test_pipeline_auto_transform_with_select,
@@ -156,6 +161,9 @@ macro_rules! http_tests {
                 test_loki_json_logs_with_pipeline,
                 test_elasticsearch_logs,
                 test_elasticsearch_logs_with_index,
+                test_splunk_health,
+                test_splunk_health_is_public,
+                test_splunk_logs,
                 test_log_query,
                 test_jaeger_query_api,
                 test_jaeger_query_api_for_trace_v1,
@@ -270,6 +278,27 @@ fn basic_auth(username: &str, password: &str) -> String {
     )
 }
 
+fn assert_remote_write_v2_written_headers(headers: &HeaderMap, samples: &str) {
+    assert_eq!(
+        Some(samples),
+        headers
+            .get("X-Prometheus-Remote-Write-Samples-Written")
+            .map(|x| x.to_str().unwrap())
+    );
+    assert_eq!(
+        Some("0"),
+        headers
+            .get("X-Prometheus-Remote-Write-Histograms-Written")
+            .map(|x| x.to_str().unwrap())
+    );
+    assert_eq!(
+        Some("0"),
+        headers
+            .get("X-Prometheus-Remote-Write-Exemplars-Written")
+            .map(|x| x.to_str().unwrap())
+    );
+}
+
 pub async fn test_http_auth_from_standalone_user_provider_config() {
     common_telemetry::init_default_ut_logging();
 
@@ -288,7 +317,7 @@ pub async fn test_http_auth_from_standalone_user_provider_config() {
 
     let mut plugins = Plugins::new();
     plugins.insert(StandaloneFlag);
-    plugins::setup_frontend_plugins(&mut plugins, &[], &fe_opts)
+    plugins::setup_frontend_plugins_pre_build(&mut plugins, &[], &fe_opts, None)
         .await
         .unwrap();
     let user_provider = plugins.get::<UserProviderRef>();
@@ -1403,6 +1432,277 @@ pub async fn test_metrics_api(store_type: StorageType) {
     guard.remove_all().await;
 }
 
+pub async fn test_splunk_health(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) =
+        setup_test_http_app_with_frontend(store_type, "test_splunk_health").await;
+    let client = TestClient::new(app).await;
+
+    // The HEC health endpoint returns 200 with the HEC health body.
+    let res = client
+        .get("/v1/splunk/services/collector/health")
+        .send()
+        .await;
+    assert_eq!(StatusCode::OK, res.status());
+    let json: serde_json::Value = serde_json::from_str(&res.text().await).unwrap();
+    assert_eq!(json["text"], "HEC is healthy");
+    assert_eq!(json["code"], 17);
+
+    // The versioned alias `/health/1.0` serves the same handler.
+    let res = client
+        .get("/v1/splunk/services/collector/health/1.0")
+        .send()
+        .await;
+    assert_eq!(StatusCode::OK, res.status());
+    let json: serde_json::Value = serde_json::from_str(&res.text().await).unwrap();
+    assert_eq!(json["text"], "HEC is healthy");
+    assert_eq!(json["code"], 17);
+
+    // Query parameters (e.g. `ack`, `token`) are tolerated and ignored rather
+    // than rejected
+    for path in [
+        "/v1/splunk/services/collector/health?ack=true&token=xyz",
+        "/v1/splunk/services/collector/health/1.0?ack=true&token=xyz",
+    ] {
+        let res = client.get(path).send().await;
+        assert_eq!(StatusCode::OK, res.status());
+    }
+
+    guard.remove_all().await;
+}
+
+pub async fn test_splunk_health_is_public(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+
+    let user_provider =
+        user_provider_from_option("static_user_provider:cmd:greptime_user=greptime_pwd").unwrap();
+    let (app, _guard) = setup_test_http_app_with_frontend_and_user_provider(
+        store_type,
+        "test_splunk_health_is_public",
+        Some(user_provider),
+    )
+    .await;
+    let client = TestClient::new(app).await;
+
+    // The health endpoint is registered in `PUBLIC_API_PREFIX`, so it must
+    // succeed without credentials even when a user provider is configured.
+    let res = client
+        .get("/v1/splunk/services/collector/health")
+        .send()
+        .await;
+    assert_eq!(StatusCode::OK, res.status());
+}
+
+pub async fn test_splunk_logs(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+
+    let user_provider =
+        user_provider_from_option("static_user_provider:cmd:greptime_user=greptime_pwd").unwrap();
+    let (app, mut guard) = setup_test_http_app_with_frontend_and_user_provider(
+        store_type,
+        "test_splunk_logs",
+        Some(user_provider),
+    )
+    .await;
+    let client = TestClient::new(app).await;
+
+    // Authenticated SQL query (the user-provider harness requires auth on /v1/sql).
+    async fn query(client: &TestClient, sql: &str) -> String {
+        let res = client
+            .get(format!("/v1/sql?sql={sql}").as_str())
+            .header("Authorization", basic_auth("greptime_user", "greptime_pwd"))
+            .send()
+            .await;
+        assert_eq!(res.status(), StatusCode::OK, "query failed: {sql}");
+        res.text().await
+    }
+
+    // HEC `Authorization: Splunk <user:pass>` + JSON content type.
+    let splunk_headers = || {
+        vec![
+            (
+                HeaderName::from_static("authorization"),
+                HeaderValue::from_static("Splunk greptime_user:greptime_pwd"),
+            ),
+            (
+                HeaderName::from_static("content-type"),
+                HeaderValue::from_static("application/json"),
+            ),
+        ]
+    };
+    let event_path = "/v1/splunk/services/collector/event";
+
+    // 1. Ingest a HEC batch (no `index` -> default `splunk_logs` table).
+    let body = concat!(
+        r#"{"event":"login ok","time":1700000000,"host":"web-01","source":"auth.log","sourcetype":"syslog","fields":{"region":"us-east"}}"#,
+        "\n",
+        r#"{"event":"login fail","time":1700000001,"host":"web-02","source":"auth.log","sourcetype":"syslog","fields":{"region":"us-west"}}"#,
+    );
+    let res = send_req(
+        &client,
+        splunk_headers(),
+        event_path,
+        body.as_bytes().to_vec(),
+        false,
+    )
+    .await;
+    assert_eq!(StatusCode::OK, res.status());
+    assert!(res.text().await.contains("\"code\":0"));
+
+    // 2. Rows landed with the right values (proves route + auth + parse + insert,
+    //    and that the default table name is `splunk_logs`).
+    let rows = get_rows_from_output(
+        &query(
+            &client,
+            "select host, region, event, greptime_timestamp from splunk_logs order by host",
+        )
+        .await,
+    );
+    // `time` (epoch seconds) maps to the nanosecond timestamp column.
+    assert_eq!(
+        rows,
+        r#"[["web-01","us-east","login ok",1700000000000000000],["web-02","us-west","login fail",1700000001000000000]]"#
+    );
+
+    // 3. host/source/sourcetype + `fields` keys are tags (i.e. primary key).
+    let create = query(&client, "show create table splunk_logs").await;
+    let pk = create
+        .split("PRIMARY KEY")
+        .nth(1)
+        .expect("splunk_logs should have a PRIMARY KEY");
+    for col in ["host", "source", "sourcetype", "region"] {
+        assert!(
+            pk.contains(col),
+            "expected `{col}` in primary key: {create}"
+        );
+    }
+    // host/source/sourcetype lead the primary key (ahead of the `fields` tag `region`),
+    let pos = |col: &str| pk.find(col).expect("column missing from primary key");
+    assert!(
+        pos("host") < pos("source")
+            && pos("source") < pos("sourcetype")
+            && pos("sourcetype") < pos("region"),
+        "expected host/source/sourcetype to lead the primary key: {create}"
+    );
+
+    // 4. A brand-new `fields` key on a later write also becomes a tag (dynamic
+    //    tag column added to the existing table's primary key).
+    let body2 = r#"{"event":"deploy","time":1700000002,"host":"web-03","source":"deploy.log","sourcetype":"syslog","fields":{"datacenter":"dc1"}}"#;
+    let res = send_req(
+        &client,
+        splunk_headers(),
+        event_path,
+        body2.as_bytes().to_vec(),
+        false,
+    )
+    .await;
+    assert_eq!(StatusCode::OK, res.status());
+
+    let create = query(&client, "show create table splunk_logs").await;
+    let pk = create.split("PRIMARY KEY").nth(1).unwrap();
+    assert!(
+        pk.contains("datacenter"),
+        "expected dynamically-added `datacenter` in primary key: {create}"
+    );
+
+    // 5. An invalid `?table=` override returns HEC code 7 ("incorrect index").
+    let res = send_req(
+        &client,
+        splunk_headers(),
+        "/v1/splunk/services/collector/event?table=bad%20name",
+        br#"{"event":"x","time":1700000003}"#.to_vec(),
+        false,
+    )
+    .await;
+    assert_eq!(StatusCode::BAD_REQUEST, res.status());
+    assert!(res.text().await.contains("\"code\":7"));
+
+    // 6. A custom pipeline (via `x-greptime-pipeline-name`) overrides identity and
+    //    owns the schema: this one keeps host/event/timestamp and drops source/sourcetype.
+    let pipeline_yaml = r#"
+transform:
+  - field: host
+    type: string
+    index: tag
+  - field: event
+    type: string
+  - field: greptime_timestamp
+    type: time
+    index: timestamp
+"#;
+    let res = client
+        .post("/v1/pipelines/splunk_custom")
+        .header("Content-Type", "application/x-yaml")
+        .header("Authorization", basic_auth("greptime_user", "greptime_pwd"))
+        .body(pipeline_yaml)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK, "create pipeline failed");
+
+    let mut headers = splunk_headers();
+    headers.push((
+        HeaderName::from_static("x-greptime-pipeline-name"),
+        HeaderValue::from_static("splunk_custom"),
+    ));
+    let res = send_req(
+        &client,
+        headers,
+        "/v1/splunk/services/collector/event?table=splunk_custom_tbl",
+        br#"{"event":"hi","time":1700000010,"host":"web-09","source":"s","sourcetype":"st"}"#
+            .to_vec(),
+        false,
+    )
+    .await;
+    assert_eq!(StatusCode::OK, res.status());
+
+    let create = query(&client, "show create table splunk_custom_tbl").await;
+    assert!(
+        create.contains("host"),
+        "custom pipeline kept host: {create}"
+    );
+    assert!(
+        !create.contains("sourcetype"),
+        "custom pipeline should have dropped sourcetype (identity would keep it): {create}"
+    );
+
+    // 7. Auth failures return HEC codes: missing token -> 2 (401), bad token -> 4 (403).
+    let res = send_req(
+        &client,
+        vec![(
+            HeaderName::from_static("content-type"),
+            HeaderValue::from_static("application/json"),
+        )],
+        event_path,
+        br#"{"event":"x","time":1700000020}"#.to_vec(),
+        false,
+    )
+    .await;
+    assert_eq!(StatusCode::UNAUTHORIZED, res.status());
+    assert!(res.text().await.contains("\"code\":2"));
+
+    let res = send_req(
+        &client,
+        vec![
+            (
+                HeaderName::from_static("authorization"),
+                HeaderValue::from_static("Splunk baduser:badpass"),
+            ),
+            (
+                HeaderName::from_static("content-type"),
+                HeaderValue::from_static("application/json"),
+            ),
+        ],
+        event_path,
+        br#"{"event":"x","time":1700000021}"#.to_vec(),
+        false,
+    )
+    .await;
+    assert_eq!(StatusCode::FORBIDDEN, res.status());
+    assert!(res.text().await.contains("\"code\":4"));
+
+    guard.remove_all().await;
+}
+
 pub async fn test_health_api(store_type: StorageType) {
     common_telemetry::init_default_ut_logging();
     let (app, _guard) = setup_test_http_app_with_frontend(store_type, "health_api").await;
@@ -1507,6 +1807,7 @@ body_limit = "64MiB"
 prom_validation_mode = "strict"
 cors_allowed_origins = []
 enable_cors = true
+experimental_enable_explain_analyze_stream = false
 
 [grpc]
 bind_addr = "127.0.0.1:4001"
@@ -1611,6 +1912,7 @@ read_preference = "Leader"
 max_log_files = 720
 append_stdout = true
 enable_otlp_tracing = false
+enable_per_region_metrics = false
 
 [[region_engine]]
 
@@ -1636,6 +1938,7 @@ max_concurrent_scan_files = 384
 allow_stale_entries = false
 scan_memory_on_exhausted = "fail"
 min_compaction_interval = "0s"
+schedule_compaction_after_edit = true
 default_flat_format = true
 
 [region_engine.mito.index]
@@ -1991,6 +2294,106 @@ pub async fn test_prometheus_remote_write(store_type: StorageType) {
     guard.remove_all().await;
 }
 
+pub async fn test_prometheus_remote_write_v2(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) =
+        setup_test_prom_app_with_frontend(store_type, "prometheus_remote_write_v2").await;
+    let client = TestClient::new(app).await;
+
+    let write_request = remote_write_v2::request_with_labels_and_samples(
+        vec![
+            (prom_store::METRIC_NAME_LABEL, "remote_write_v2_total"),
+            ("job", "api"),
+            ("instance", "localhost:9090"),
+        ],
+        vec![
+            RemoteWriteV2Sample {
+                value: 42.0,
+                timestamp: 1000,
+                start_timestamp: 0,
+            },
+            RemoteWriteV2Sample {
+                value: 43.0,
+                timestamp: 2000,
+                start_timestamp: 0,
+            },
+        ],
+    );
+    let serialized_request = write_request.encode_to_vec();
+    let compressed_request =
+        prom_store::snappy_compress(&serialized_request).expect("failed to encode snappy");
+
+    let res = client
+        .post("/v1/prometheus/write")
+        .header("Content-Encoding", "snappy")
+        .header(
+            "Content-Type",
+            "application/x-protobuf;proto=io.prometheus.write.v2.Request",
+        )
+        .body(compressed_request)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+    let headers = res.headers();
+    assert_remote_write_v2_written_headers(&headers, "2");
+    assert!(res.text().await.is_empty());
+
+    validate_data(
+        "prometheus_remote_write_v2_rows",
+        &client,
+        "select greptime_timestamp, greptime_value, job, instance from remote_write_v2_total order by greptime_timestamp;",
+        "[[1000,42.0,\"api\",\"localhost:9090\"],[2000,43.0,\"api\",\"localhost:9090\"]]",
+    )
+    .await;
+
+    validate_data(
+        "prometheus_remote_write_v2_semantic_identity",
+        &client,
+        "select count(*) from information_schema.tables where table_name = 'remote_write_v2_total' \
+         and create_options like '%greptime.semantic.signal_type=metric%' \
+         and create_options like '%greptime.semantic.source=prometheus%' \
+         and create_options like '%greptime.semantic.metric.metadata_quality=inferred%';",
+        "[[1]]",
+    )
+    .await;
+
+    let write_request = remote_write_v2::request_with_labels_and_histograms(
+        vec![(
+            prom_store::METRIC_NAME_LABEL,
+            "remote_write_v2_histogram_only",
+        )],
+        vec![remote_write_v2::histogram(3000)],
+    );
+    let serialized_request = write_request.encode_to_vec();
+    let compressed_request =
+        prom_store::snappy_compress(&serialized_request).expect("failed to encode snappy");
+
+    let res = client
+        .post("/v1/prometheus/write")
+        .header("Content-Encoding", "snappy")
+        .header(
+            "Content-Type",
+            "application/x-protobuf;proto=io.prometheus.write.v2.Request",
+        )
+        .body(compressed_request)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+    let headers = res.headers();
+    assert_remote_write_v2_written_headers(&headers, "0");
+    assert!(res.text().await.is_empty());
+
+    validate_data(
+        "prometheus_remote_write_v2_histogram_only",
+        &client,
+        "select count(*) from information_schema.tables where table_name = 'remote_write_v2_histogram_only';",
+        "[[0]]",
+    )
+    .await;
+
+    guard.remove_all().await;
+}
+
 /// Covers the batched (pending-rows-batcher) Prometheus remote write path, which
 /// bypasses `PromStoreProtocolHandler::write`. Verifies the metric table is created
 /// asynchronously and still carries the Prometheus semantic identity stamped on the
@@ -2081,7 +2484,7 @@ pub async fn test_prometheus_remote_special_labels(store_type: StorageType) {
         expected,
     )
     .await;
-    let expected = "[[\"idc3_lo_table\",\"CREATE TABLE IF NOT EXISTS \\\"idc3_lo_table\\\" (\\n  \\\"greptime_timestamp\\\" TIMESTAMP(3) NOT NULL,\\n  \\\"greptime_value\\\" DOUBLE NULL,\\n  TIME INDEX (\\\"greptime_timestamp\\\")\\n)\\n\\nENGINE=metric\\nWITH(\\n  \'comment\' = 'Created on insertion',\\n  'greptime.semantic.metric.metadata_quality' = 'inferred',\\n  'greptime.semantic.signal_type' = 'metric',\\n  'greptime.semantic.source' = 'prometheus',\\n  on_physical_table = 'f1'\\n)\"]]";
+    let expected = "[[\"idc3_lo_table\",\"CREATE TABLE IF NOT EXISTS \\\"idc3_lo_table\\\" (\\n  \\\"greptime_timestamp\\\" TIMESTAMP(3) NOT NULL,\\n  \\\"greptime_value\\\" DOUBLE NULL,\\n  TIME INDEX (\\\"greptime_timestamp\\\")\\n)\\n\\nENGINE=metric\\nWITH(\\n  \'comment\' = 'Created on insertion',\\n  'greptime.semantic.metric.metadata_quality' = 'inferred',\\n  'greptime.semantic.signal_type' = 'metric',\\n  'greptime.semantic.source' = 'prometheus',\\n  'greptime.semantic.source_version' = '1.0',\\n  on_physical_table = 'f1'\\n)\"]]";
     validate_data(
         "test_prometheus_remote_special_labels_idc3_show_create_table",
         &client,
@@ -2107,7 +2510,7 @@ pub async fn test_prometheus_remote_special_labels(store_type: StorageType) {
         expected,
     )
     .await;
-    let expected = "[[\"idc4_local_table\",\"CREATE TABLE IF NOT EXISTS \\\"idc4_local_table\\\" (\\n  \\\"greptime_timestamp\\\" TIMESTAMP(3) NOT NULL,\\n  \\\"greptime_value\\\" DOUBLE NULL,\\n  TIME INDEX (\\\"greptime_timestamp\\\")\\n)\\n\\nENGINE=metric\\nWITH(\\n  \'comment\' = 'Created on insertion',\\n  'greptime.semantic.metric.metadata_quality' = 'inferred',\\n  'greptime.semantic.signal_type' = 'metric',\\n  'greptime.semantic.source' = 'prometheus',\\n  on_physical_table = 'f2'\\n)\"]]";
+    let expected = "[[\"idc4_local_table\",\"CREATE TABLE IF NOT EXISTS \\\"idc4_local_table\\\" (\\n  \\\"greptime_timestamp\\\" TIMESTAMP(3) NOT NULL,\\n  \\\"greptime_value\\\" DOUBLE NULL,\\n  TIME INDEX (\\\"greptime_timestamp\\\")\\n)\\n\\nENGINE=metric\\nWITH(\\n  \'comment\' = 'Created on insertion',\\n  'greptime.semantic.metric.metadata_quality' = 'inferred',\\n  'greptime.semantic.signal_type' = 'metric',\\n  'greptime.semantic.source' = 'prometheus',\\n  'greptime.semantic.source_version' = '1.0',\\n  on_physical_table = 'f2'\\n)\"]]";
     validate_data(
         "test_prometheus_remote_special_labels_idc4_show_create_table",
         &client,
@@ -2643,6 +3046,131 @@ transform:
         .await;
     // todo(shuiyisong): refactor http error handling
     assert_ne!(res.status(), StatusCode::OK);
+
+    guard.remove_all().await;
+}
+
+pub async fn test_pipeline_name_in_header(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) =
+        setup_test_http_app_with_frontend(store_type, "test_pipeline_name_in_header").await;
+
+    let client = TestClient::new(app).await;
+
+    let pipeline_body = r#"
+processors:
+  - date:
+      field: time
+      formats:
+        - "%Y-%m-%d %H:%M:%S%.3f"
+      ignore_missing: true
+transform:
+  - field: message
+    type: string
+  - field: time
+    type: time
+    index: timestamp
+"#;
+
+    // create pipeline named `test`
+    let res = client
+        .post("/v1/events/pipelines/test")
+        .header("Content-Type", "application/x-yaml")
+        .body(pipeline_body)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let data_body = r#"
+[
+  {
+    "time": "2024-05-25 20:16:37.217",
+    "message": "hello header"
+  }
+]
+"#;
+
+    // 1. pipeline name provided via the `x-greptime-pipeline-name` header,
+    //    without the `pipeline_name` query parameter.
+    let res = client
+        .post("/v1/events/logs?db=public&table=logs1")
+        .header("Content-Type", "application/json")
+        .header("x-greptime-pipeline-name", "test")
+        .body(data_body)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    validate_data(
+        "pipeline_name_header",
+        &client,
+        "select message from logs1",
+        "[[\"hello header\"]]",
+    )
+    .await;
+
+    // 2. the deprecated `x-greptime-log-pipeline-name` header is also accepted.
+    let res = client
+        .post("/v1/events/logs?db=public&table=logs2")
+        .header("Content-Type", "application/json")
+        .header("x-greptime-log-pipeline-name", "test")
+        .body(data_body)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    validate_data(
+        "pipeline_name_log_header",
+        &client,
+        "select message from logs2",
+        "[[\"hello header\"]]",
+    )
+    .await;
+
+    // 3. the header takes precedence over the query parameter. A bogus
+    //    `pipeline_name` query param is overridden by the valid header.
+    let res = client
+        .post("/v1/events/logs?db=public&table=logs3&pipeline_name=does_not_exist")
+        .header("Content-Type", "application/json")
+        .header("x-greptime-pipeline-name", "test")
+        .body(data_body)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    validate_data(
+        "pipeline_name_header_priority",
+        &client,
+        "select message from logs3",
+        "[[\"hello header\"]]",
+    )
+    .await;
+
+    // 4. when both headers are present, the non-deprecated
+    //    `x-greptime-pipeline-name` wins over the deprecated
+    //    `x-greptime-log-pipeline-name`.
+    let res = client
+        .post("/v1/events/logs?db=public&table=logs4")
+        .header("Content-Type", "application/json")
+        .header("x-greptime-pipeline-name", "test")
+        .header("x-greptime-log-pipeline-name", "does_not_exist")
+        .body(data_body)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    validate_data(
+        "pipeline_name_header_non_deprecated_priority",
+        &client,
+        "select message from logs4",
+        "[[\"hello header\"]]",
+    )
+    .await;
+
+    // 5. missing pipeline name in both header and query param is rejected.
+    let res = client
+        .post("/v1/events/logs?db=public&table=logs5")
+        .header("Content-Type", "application/json")
+        .body(data_body)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
 
     guard.remove_all().await;
 }
@@ -5094,14 +5622,13 @@ pub async fn test_otlp_metrics_new(store_type: StorageType) {
         "[[1]]",
     )
     .await;
-    // OTLP metric type is declared, so Phase 1 must not stamp `metadata_quality`
-    // here (Phase 2 adds it as `declared`).
+    // OTLP metric type is declared, so Phase 2 stamps `metadata_quality=declared`.
     validate_data(
-        "otlp_metrics_no_metadata_quality",
+        "otlp_metrics_metadata_quality_declared",
         &client,
         "select count(*) from information_schema.tables where table_name = 'claude_code_cost_usage_USD_total' \
-         and create_options like '%metadata_quality%';",
-        "[[0]]",
+         and create_options like '%greptime.semantic.metric.metadata_quality=declared%';",
+        "[[1]]",
     )
     .await;
 
@@ -5129,7 +5656,7 @@ pub async fn test_otlp_metrics_new(store_type: StorageType) {
     //   on_physical_table = 'greptime_physical_table',
     //   otlp_metric_compat = 'prom'
     // )
-    let expected = "[[\"claude_code_cost_usage_USD_total\",\"CREATE TABLE IF NOT EXISTS \\\"claude_code_cost_usage_USD_total\\\" (\\n  \\\"greptime_timestamp\\\" TIMESTAMP(3) NOT NULL,\\n  \\\"greptime_value\\\" DOUBLE NULL,\\n  \\\"host_arch\\\" STRING NULL,\\n  \\\"job\\\" STRING NULL,\\n  \\\"model\\\" STRING NULL,\\n  \\\"os_version\\\" STRING NULL,\\n  \\\"otel_scope_name\\\" STRING NULL,\\n  \\\"otel_scope_schema_url\\\" STRING NULL,\\n  \\\"otel_scope_version\\\" STRING NULL,\\n  \\\"service_name\\\" STRING NULL,\\n  \\\"service_version\\\" STRING NULL,\\n  \\\"session_id\\\" STRING NULL,\\n  \\\"terminal_type\\\" STRING NULL,\\n  \\\"user_id\\\" STRING NULL,\\n  TIME INDEX (\\\"greptime_timestamp\\\"),\\n  PRIMARY KEY (\\\"host_arch\\\", \\\"job\\\", \\\"model\\\", \\\"os_version\\\", \\\"otel_scope_name\\\", \\\"otel_scope_schema_url\\\", \\\"otel_scope_version\\\", \\\"service_name\\\", \\\"service_version\\\", \\\"session_id\\\", \\\"terminal_type\\\", \\\"user_id\\\")\\n)\\n\\nENGINE=metric\\nWITH(\\n  \'comment\' = 'Created on insertion',\\n  'greptime.semantic.signal_type' = 'metric',\\n  'greptime.semantic.source' = 'opentelemetry',\\n  on_physical_table = 'greptime_physical_table',\\n  otlp_metric_compat = 'prom'\\n)\"]]";
+    let expected = "[[\"claude_code_cost_usage_USD_total\",\"CREATE TABLE IF NOT EXISTS \\\"claude_code_cost_usage_USD_total\\\" (\\n  \\\"greptime_timestamp\\\" TIMESTAMP(3) NOT NULL,\\n  \\\"greptime_value\\\" DOUBLE NULL,\\n  \\\"host_arch\\\" STRING NULL,\\n  \\\"job\\\" STRING NULL,\\n  \\\"model\\\" STRING NULL,\\n  \\\"os_version\\\" STRING NULL,\\n  \\\"otel_scope_name\\\" STRING NULL,\\n  \\\"otel_scope_schema_url\\\" STRING NULL,\\n  \\\"otel_scope_version\\\" STRING NULL,\\n  \\\"service_name\\\" STRING NULL,\\n  \\\"service_version\\\" STRING NULL,\\n  \\\"session_id\\\" STRING NULL,\\n  \\\"terminal_type\\\" STRING NULL,\\n  \\\"user_id\\\" STRING NULL,\\n  TIME INDEX (\\\"greptime_timestamp\\\"),\\n  PRIMARY KEY (\\\"host_arch\\\", \\\"job\\\", \\\"model\\\", \\\"os_version\\\", \\\"otel_scope_name\\\", \\\"otel_scope_schema_url\\\", \\\"otel_scope_version\\\", \\\"service_name\\\", \\\"service_version\\\", \\\"session_id\\\", \\\"terminal_type\\\", \\\"user_id\\\")\\n)\\n\\nENGINE=metric\\nWITH(\\n  'comment' = 'Created on insertion',\\n  'greptime.semantic.metric.metadata_quality' = 'declared',\\n  'greptime.semantic.metric.original_name' = 'claude_code.cost.usage',\\n  'greptime.semantic.metric.temporality' = 'delta',\\n  'greptime.semantic.metric.type' = 'counter',\\n  'greptime.semantic.metric.unit' = 'USD',\\n  'greptime.semantic.signal_type' = 'metric',\\n  'greptime.semantic.source' = 'opentelemetry',\\n  on_physical_table = 'greptime_physical_table',\\n  otlp_metric_compat = 'prom'\\n)\"]]";
     validate_data(
         "otlp_metrics_all_show_create_table",
         &client,
@@ -5202,7 +5729,7 @@ pub async fn test_otlp_metrics_new(store_type: StorageType) {
     //     on_physical_table = 'greptime_physical_table',
     //     otlp_metric_compat = 'prom'
     //   )
-    let expected = "[[\"claude_code_cost_usage_USD_total\",\"CREATE TABLE IF NOT EXISTS \\\"claude_code_cost_usage_USD_total\\\" (\\n  \\\"greptime_timestamp\\\" TIMESTAMP(3) NOT NULL,\\n  \\\"greptime_value\\\" DOUBLE NULL,\\n  \\\"job\\\" STRING NULL,\\n  \\\"model\\\" STRING NULL,\\n  \\\"os_type\\\" STRING NULL,\\n  \\\"os_version\\\" STRING NULL,\\n  \\\"service_name\\\" STRING NULL,\\n  \\\"service_version\\\" STRING NULL,\\n  \\\"session_id\\\" STRING NULL,\\n  \\\"terminal_type\\\" STRING NULL,\\n  \\\"user_id\\\" STRING NULL,\\n  TIME INDEX (\\\"greptime_timestamp\\\"),\\n  PRIMARY KEY (\\\"job\\\", \\\"model\\\", \\\"os_type\\\", \\\"os_version\\\", \\\"service_name\\\", \\\"service_version\\\", \\\"session_id\\\", \\\"terminal_type\\\", \\\"user_id\\\")\\n)\\n\\nENGINE=metric\\nWITH(\\n  'comment' = 'Created on insertion',\\n  'greptime.semantic.signal_type' = 'metric',\\n  'greptime.semantic.source' = 'opentelemetry',\\n  on_physical_table = 'greptime_physical_table',\\n  otlp_metric_compat = 'prom'\\n)\"]]";
+    let expected = "[[\"claude_code_cost_usage_USD_total\",\"CREATE TABLE IF NOT EXISTS \\\"claude_code_cost_usage_USD_total\\\" (\\n  \\\"greptime_timestamp\\\" TIMESTAMP(3) NOT NULL,\\n  \\\"greptime_value\\\" DOUBLE NULL,\\n  \\\"job\\\" STRING NULL,\\n  \\\"model\\\" STRING NULL,\\n  \\\"os_type\\\" STRING NULL,\\n  \\\"os_version\\\" STRING NULL,\\n  \\\"service_name\\\" STRING NULL,\\n  \\\"service_version\\\" STRING NULL,\\n  \\\"session_id\\\" STRING NULL,\\n  \\\"terminal_type\\\" STRING NULL,\\n  \\\"user_id\\\" STRING NULL,\\n  TIME INDEX (\\\"greptime_timestamp\\\"),\\n  PRIMARY KEY (\\\"job\\\", \\\"model\\\", \\\"os_type\\\", \\\"os_version\\\", \\\"service_name\\\", \\\"service_version\\\", \\\"session_id\\\", \\\"terminal_type\\\", \\\"user_id\\\")\\n)\\n\\nENGINE=metric\\nWITH(\\n  'comment' = 'Created on insertion',\\n  'greptime.semantic.metric.metadata_quality' = 'declared',\\n  'greptime.semantic.metric.original_name' = 'claude_code.cost.usage',\\n  'greptime.semantic.metric.temporality' = 'delta',\\n  'greptime.semantic.metric.type' = 'counter',\\n  'greptime.semantic.metric.unit' = 'USD',\\n  'greptime.semantic.signal_type' = 'metric',\\n  'greptime.semantic.source' = 'opentelemetry',\\n  on_physical_table = 'greptime_physical_table',\\n  otlp_metric_compat = 'prom'\\n)\"]]";
     validate_data(
         "otlp_metrics_show_create_table",
         &client,
@@ -5266,7 +5793,7 @@ pub async fn test_otlp_metrics_new(store_type: StorageType) {
     //     on_physical_table = 'greptime_physical_table',
     //     otlp_metric_compat = 'prom'
     //   )
-    let expected = "[[\"claude_code_cost_usage_USD_total\",\"CREATE TABLE IF NOT EXISTS \\\"claude_code_cost_usage_USD_total\\\" (\\n  \\\"greptime_timestamp\\\" TIMESTAMP(3) NOT NULL,\\n  \\\"greptime_value\\\" DOUBLE NULL,\\n  \\\"job\\\" STRING NULL,\\n  \\\"model\\\" STRING NULL,\\n  \\\"service_name\\\" STRING NULL,\\n  \\\"service_version\\\" STRING NULL,\\n  \\\"session_id\\\" STRING NULL,\\n  \\\"terminal_type\\\" STRING NULL,\\n  \\\"user_id\\\" STRING NULL,\\n  TIME INDEX (\\\"greptime_timestamp\\\"),\\n  PRIMARY KEY (\\\"job\\\", \\\"model\\\", \\\"service_name\\\", \\\"service_version\\\", \\\"session_id\\\", \\\"terminal_type\\\", \\\"user_id\\\")\\n)\\n\\nENGINE=metric\\nWITH(\\n  'comment' = 'Created on insertion',\\n  'greptime.semantic.signal_type' = 'metric',\\n  'greptime.semantic.source' = 'opentelemetry',\\n  on_physical_table = 'greptime_physical_table',\\n  otlp_metric_compat = 'prom'\\n)\"]]";
+    let expected = "[[\"claude_code_cost_usage_USD_total\",\"CREATE TABLE IF NOT EXISTS \\\"claude_code_cost_usage_USD_total\\\" (\\n  \\\"greptime_timestamp\\\" TIMESTAMP(3) NOT NULL,\\n  \\\"greptime_value\\\" DOUBLE NULL,\\n  \\\"job\\\" STRING NULL,\\n  \\\"model\\\" STRING NULL,\\n  \\\"service_name\\\" STRING NULL,\\n  \\\"service_version\\\" STRING NULL,\\n  \\\"session_id\\\" STRING NULL,\\n  \\\"terminal_type\\\" STRING NULL,\\n  \\\"user_id\\\" STRING NULL,\\n  TIME INDEX (\\\"greptime_timestamp\\\"),\\n  PRIMARY KEY (\\\"job\\\", \\\"model\\\", \\\"service_name\\\", \\\"service_version\\\", \\\"session_id\\\", \\\"terminal_type\\\", \\\"user_id\\\")\\n)\\n\\nENGINE=metric\\nWITH(\\n  'comment' = 'Created on insertion',\\n  'greptime.semantic.metric.metadata_quality' = 'declared',\\n  'greptime.semantic.metric.original_name' = 'claude_code.cost.usage',\\n  'greptime.semantic.metric.temporality' = 'delta',\\n  'greptime.semantic.metric.type' = 'counter',\\n  'greptime.semantic.metric.unit' = 'USD',\\n  'greptime.semantic.signal_type' = 'metric',\\n  'greptime.semantic.source' = 'opentelemetry',\\n  on_physical_table = 'greptime_physical_table',\\n  otlp_metric_compat = 'prom'\\n)\"]]";
     validate_data(
         "otlp_metrics_show_create_table_none",
         &client,
@@ -5581,14 +6108,12 @@ pub async fn test_otlp_traces_v1(store_type: StorageType) {
         "select count(*) from information_schema.tables where table_name = 'mytable' \
          and create_options like '%greptime.semantic.signal_type=trace%' \
          and create_options like '%greptime.semantic.source=opentelemetry%' \
-         and create_options like '%greptime.semantic.pipeline=greptime_trace_v1%' \
-         and create_options like '%greptime.semantic.trace.has_events=true%' \
-         and create_options like '%greptime.semantic.trace.has_links=true%';",
+         and create_options like '%greptime.semantic.pipeline=greptime_trace_v1%';",
         "[[1]]",
     )
     .await;
 
-    let expected_ddl = r#"[["mytable","CREATE TABLE IF NOT EXISTS \"mytable\" (\n  \"timestamp\" TIMESTAMP(9) NOT NULL,\n  \"timestamp_end\" TIMESTAMP(9) NULL,\n  \"duration_nano\" BIGINT UNSIGNED NULL,\n  \"parent_span_id\" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),\n  \"trace_id\" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),\n  \"span_id\" STRING NULL,\n  \"span_kind\" STRING NULL,\n  \"span_name\" STRING NULL,\n  \"span_status_code\" STRING NULL,\n  \"span_status_message\" STRING NULL,\n  \"trace_state\" STRING NULL,\n  \"scope_name\" STRING NULL,\n  \"scope_version\" STRING NULL,\n  \"service_name\" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),\n  \"span_attributes.net.peer.ip\" STRING NULL,\n  \"span_attributes.peer.service\" STRING NULL,\n  \"span_events\" JSON NULL,\n  \"span_links\" JSON NULL,\n  TIME INDEX (\"timestamp\"),\n  PRIMARY KEY (\"service_name\")\n)\nPARTITION ON COLUMNS (\"trace_id\") (\n  trace_id < '1',\n  trace_id >= '1' AND trace_id < '2',\n  trace_id >= '2' AND trace_id < '3',\n  trace_id >= '3' AND trace_id < '4',\n  trace_id >= '4' AND trace_id < '5',\n  trace_id >= '5' AND trace_id < '6',\n  trace_id >= '6' AND trace_id < '7',\n  trace_id >= '7' AND trace_id < '8',\n  trace_id >= '8' AND trace_id < '9',\n  trace_id >= '9' AND trace_id < 'a',\n  trace_id >= 'a' AND trace_id < 'b',\n  trace_id >= 'b' AND trace_id < 'c',\n  trace_id >= 'c' AND trace_id < 'd',\n  trace_id >= 'd' AND trace_id < 'e',\n  trace_id >= 'e' AND trace_id < 'f',\n  trace_id >= 'f'\n)\nENGINE=mito\nWITH(\n  'comment' = 'Created on insertion',\n  append_mode = 'true',\n  'greptime.semantic.pipeline' = 'greptime_trace_v1',\n  'greptime.semantic.signal_type' = 'trace',\n  'greptime.semantic.source' = 'opentelemetry',\n  'greptime.semantic.trace.conventions' = 'unknown',\n  'greptime.semantic.trace.has_events' = 'true',\n  'greptime.semantic.trace.has_links' = 'true',\n  table_data_model = 'greptime_trace_v1'\n)"]]"#;
+    let expected_ddl = r#"[["mytable","CREATE TABLE IF NOT EXISTS \"mytable\" (\n  \"timestamp\" TIMESTAMP(9) NOT NULL,\n  \"timestamp_end\" TIMESTAMP(9) NULL,\n  \"duration_nano\" BIGINT UNSIGNED NULL,\n  \"parent_span_id\" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),\n  \"trace_id\" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),\n  \"span_id\" STRING NULL,\n  \"span_kind\" STRING NULL,\n  \"span_name\" STRING NULL,\n  \"span_status_code\" STRING NULL,\n  \"span_status_message\" STRING NULL,\n  \"trace_state\" STRING NULL,\n  \"scope_name\" STRING NULL,\n  \"scope_version\" STRING NULL,\n  \"service_name\" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),\n  \"span_attributes.net.peer.ip\" STRING NULL,\n  \"span_attributes.peer.service\" STRING NULL,\n  \"span_events\" JSON NULL,\n  \"span_links\" JSON NULL,\n  TIME INDEX (\"timestamp\"),\n  PRIMARY KEY (\"service_name\")\n)\nPARTITION ON COLUMNS (\"trace_id\") (\n  trace_id < '1',\n  trace_id >= '1' AND trace_id < '2',\n  trace_id >= '2' AND trace_id < '3',\n  trace_id >= '3' AND trace_id < '4',\n  trace_id >= '4' AND trace_id < '5',\n  trace_id >= '5' AND trace_id < '6',\n  trace_id >= '6' AND trace_id < '7',\n  trace_id >= '7' AND trace_id < '8',\n  trace_id >= '8' AND trace_id < '9',\n  trace_id >= '9' AND trace_id < 'a',\n  trace_id >= 'a' AND trace_id < 'b',\n  trace_id >= 'b' AND trace_id < 'c',\n  trace_id >= 'c' AND trace_id < 'd',\n  trace_id >= 'd' AND trace_id < 'e',\n  trace_id >= 'e' AND trace_id < 'f',\n  trace_id >= 'f'\n)\nENGINE=mito\nWITH(\n  'comment' = 'Created on insertion',\n  append_mode = 'true',\n  'greptime.semantic.pipeline' = 'greptime_trace_v1',\n  'greptime.semantic.signal_type' = 'trace',\n  'greptime.semantic.source' = 'opentelemetry',\n  'greptime.semantic.trace.conventions' = 'https://opentelemetry.io/schemas/1.4.0',\n  table_data_model = 'greptime_trace_v1'\n)"]]"#;
     validate_data(
         "otlp_traces",
         &client,
@@ -5641,7 +6166,7 @@ pub async fn test_otlp_traces_v1(store_type: StorageType) {
     )
     .await;
     assert_eq!(StatusCode::OK, res.status());
-    let expected_ddl = r#"[["trace_table_part1","CREATE TABLE IF NOT EXISTS \"trace_table_part1\" (\n  \"timestamp\" TIMESTAMP(9) NOT NULL,\n  \"timestamp_end\" TIMESTAMP(9) NULL,\n  \"duration_nano\" BIGINT UNSIGNED NULL,\n  \"parent_span_id\" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),\n  \"trace_id\" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),\n  \"span_id\" STRING NULL,\n  \"span_kind\" STRING NULL,\n  \"span_name\" STRING NULL,\n  \"span_status_code\" STRING NULL,\n  \"span_status_message\" STRING NULL,\n  \"trace_state\" STRING NULL,\n  \"scope_name\" STRING NULL,\n  \"scope_version\" STRING NULL,\n  \"service_name\" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),\n  \"span_attributes.net.peer.ip\" STRING NULL,\n  \"span_attributes.peer.service\" STRING NULL,\n  \"span_events\" JSON NULL,\n  \"span_links\" JSON NULL,\n  TIME INDEX (\"timestamp\"),\n  PRIMARY KEY (\"service_name\")\n)\n\nENGINE=mito\nWITH(\n  'comment' = 'Created on insertion',\n  append_mode = 'true',\n  'greptime.semantic.pipeline' = 'greptime_trace_v1',\n  'greptime.semantic.signal_type' = 'trace',\n  'greptime.semantic.source' = 'opentelemetry',\n  'greptime.semantic.trace.conventions' = 'unknown',\n  'greptime.semantic.trace.has_events' = 'true',\n  'greptime.semantic.trace.has_links' = 'true',\n  table_data_model = 'greptime_trace_v1'\n)"]]"#;
+    let expected_ddl = r#"[["trace_table_part1","CREATE TABLE IF NOT EXISTS \"trace_table_part1\" (\n  \"timestamp\" TIMESTAMP(9) NOT NULL,\n  \"timestamp_end\" TIMESTAMP(9) NULL,\n  \"duration_nano\" BIGINT UNSIGNED NULL,\n  \"parent_span_id\" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),\n  \"trace_id\" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),\n  \"span_id\" STRING NULL,\n  \"span_kind\" STRING NULL,\n  \"span_name\" STRING NULL,\n  \"span_status_code\" STRING NULL,\n  \"span_status_message\" STRING NULL,\n  \"trace_state\" STRING NULL,\n  \"scope_name\" STRING NULL,\n  \"scope_version\" STRING NULL,\n  \"service_name\" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),\n  \"span_attributes.net.peer.ip\" STRING NULL,\n  \"span_attributes.peer.service\" STRING NULL,\n  \"span_events\" JSON NULL,\n  \"span_links\" JSON NULL,\n  TIME INDEX (\"timestamp\"),\n  PRIMARY KEY (\"service_name\")\n)\n\nENGINE=mito\nWITH(\n  'comment' = 'Created on insertion',\n  append_mode = 'true',\n  'greptime.semantic.pipeline' = 'greptime_trace_v1',\n  'greptime.semantic.signal_type' = 'trace',\n  'greptime.semantic.source' = 'opentelemetry',\n  'greptime.semantic.trace.conventions' = 'https://opentelemetry.io/schemas/1.4.0',\n  table_data_model = 'greptime_trace_v1'\n)"]]"#;
     validate_data(
         "otlp_traces",
         &client,
@@ -5678,7 +6203,7 @@ pub async fn test_otlp_traces_v1(store_type: StorageType) {
     )
     .await;
     assert_eq!(StatusCode::OK, res.status());
-    let expected_ddl = r#"[["trace_table_part4","CREATE TABLE IF NOT EXISTS \"trace_table_part4\" (\n  \"timestamp\" TIMESTAMP(9) NOT NULL,\n  \"timestamp_end\" TIMESTAMP(9) NULL,\n  \"duration_nano\" BIGINT UNSIGNED NULL,\n  \"parent_span_id\" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),\n  \"trace_id\" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),\n  \"span_id\" STRING NULL,\n  \"span_kind\" STRING NULL,\n  \"span_name\" STRING NULL,\n  \"span_status_code\" STRING NULL,\n  \"span_status_message\" STRING NULL,\n  \"trace_state\" STRING NULL,\n  \"scope_name\" STRING NULL,\n  \"scope_version\" STRING NULL,\n  \"service_name\" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),\n  \"span_attributes.net.peer.ip\" STRING NULL,\n  \"span_attributes.peer.service\" STRING NULL,\n  \"span_events\" JSON NULL,\n  \"span_links\" JSON NULL,\n  TIME INDEX (\"timestamp\"),\n  PRIMARY KEY (\"service_name\")\n)\nPARTITION ON COLUMNS (\"trace_id\") (\n  trace_id < '4',\n  trace_id >= '4' AND trace_id < '8',\n  trace_id >= '8' AND trace_id < 'c',\n  trace_id >= 'c'\n)\nENGINE=mito\nWITH(\n  'comment' = 'Created on insertion',\n  append_mode = 'true',\n  'greptime.semantic.pipeline' = 'greptime_trace_v1',\n  'greptime.semantic.signal_type' = 'trace',\n  'greptime.semantic.source' = 'opentelemetry',\n  'greptime.semantic.trace.conventions' = 'unknown',\n  'greptime.semantic.trace.has_events' = 'true',\n  'greptime.semantic.trace.has_links' = 'true',\n  table_data_model = 'greptime_trace_v1'\n)"]]"#;
+    let expected_ddl = r#"[["trace_table_part4","CREATE TABLE IF NOT EXISTS \"trace_table_part4\" (\n  \"timestamp\" TIMESTAMP(9) NOT NULL,\n  \"timestamp_end\" TIMESTAMP(9) NULL,\n  \"duration_nano\" BIGINT UNSIGNED NULL,\n  \"parent_span_id\" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),\n  \"trace_id\" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),\n  \"span_id\" STRING NULL,\n  \"span_kind\" STRING NULL,\n  \"span_name\" STRING NULL,\n  \"span_status_code\" STRING NULL,\n  \"span_status_message\" STRING NULL,\n  \"trace_state\" STRING NULL,\n  \"scope_name\" STRING NULL,\n  \"scope_version\" STRING NULL,\n  \"service_name\" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),\n  \"span_attributes.net.peer.ip\" STRING NULL,\n  \"span_attributes.peer.service\" STRING NULL,\n  \"span_events\" JSON NULL,\n  \"span_links\" JSON NULL,\n  TIME INDEX (\"timestamp\"),\n  PRIMARY KEY (\"service_name\")\n)\nPARTITION ON COLUMNS (\"trace_id\") (\n  trace_id < '4',\n  trace_id >= '4' AND trace_id < '8',\n  trace_id >= '8' AND trace_id < 'c',\n  trace_id >= 'c'\n)\nENGINE=mito\nWITH(\n  'comment' = 'Created on insertion',\n  append_mode = 'true',\n  'greptime.semantic.pipeline' = 'greptime_trace_v1',\n  'greptime.semantic.signal_type' = 'trace',\n  'greptime.semantic.source' = 'opentelemetry',\n  'greptime.semantic.trace.conventions' = 'https://opentelemetry.io/schemas/1.4.0',\n  table_data_model = 'greptime_trace_v1'\n)"]]"#;
     validate_data(
         "otlp_traces",
         &client,
@@ -5715,7 +6240,7 @@ pub async fn test_otlp_traces_v1(store_type: StorageType) {
     )
     .await;
     assert_eq!(StatusCode::OK, res.status());
-    let expected_ddl = r#"[["trace_table_part32","CREATE TABLE IF NOT EXISTS \"trace_table_part32\" (\n  \"timestamp\" TIMESTAMP(9) NOT NULL,\n  \"timestamp_end\" TIMESTAMP(9) NULL,\n  \"duration_nano\" BIGINT UNSIGNED NULL,\n  \"parent_span_id\" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),\n  \"trace_id\" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),\n  \"span_id\" STRING NULL,\n  \"span_kind\" STRING NULL,\n  \"span_name\" STRING NULL,\n  \"span_status_code\" STRING NULL,\n  \"span_status_message\" STRING NULL,\n  \"trace_state\" STRING NULL,\n  \"scope_name\" STRING NULL,\n  \"scope_version\" STRING NULL,\n  \"service_name\" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),\n  \"span_attributes.net.peer.ip\" STRING NULL,\n  \"span_attributes.peer.service\" STRING NULL,\n  \"span_events\" JSON NULL,\n  \"span_links\" JSON NULL,\n  TIME INDEX (\"timestamp\"),\n  PRIMARY KEY (\"service_name\")\n)\nPARTITION ON COLUMNS (\"trace_id\") (\n  trace_id < '08',\n  trace_id >= '08' AND trace_id < '10',\n  trace_id >= '10' AND trace_id < '18',\n  trace_id >= '18' AND trace_id < '20',\n  trace_id >= '20' AND trace_id < '28',\n  trace_id >= '28' AND trace_id < '30',\n  trace_id >= '30' AND trace_id < '38',\n  trace_id >= '38' AND trace_id < '40',\n  trace_id >= '40' AND trace_id < '48',\n  trace_id >= '48' AND trace_id < '50',\n  trace_id >= '50' AND trace_id < '58',\n  trace_id >= '58' AND trace_id < '60',\n  trace_id >= '60' AND trace_id < '68',\n  trace_id >= '68' AND trace_id < '70',\n  trace_id >= '70' AND trace_id < '78',\n  trace_id >= '78' AND trace_id < '80',\n  trace_id >= '80' AND trace_id < '88',\n  trace_id >= '88' AND trace_id < '90',\n  trace_id >= '90' AND trace_id < '98',\n  trace_id >= '98' AND trace_id < 'a0',\n  trace_id >= 'a0' AND trace_id < 'a8',\n  trace_id >= 'a8' AND trace_id < 'b0',\n  trace_id >= 'b0' AND trace_id < 'b8',\n  trace_id >= 'b8' AND trace_id < 'c0',\n  trace_id >= 'c0' AND trace_id < 'c8',\n  trace_id >= 'c8' AND trace_id < 'd0',\n  trace_id >= 'd0' AND trace_id < 'd8',\n  trace_id >= 'd8' AND trace_id < 'e0',\n  trace_id >= 'e0' AND trace_id < 'e8',\n  trace_id >= 'e8' AND trace_id < 'f0',\n  trace_id >= 'f0' AND trace_id < 'f8',\n  trace_id >= 'f8'\n)\nENGINE=mito\nWITH(\n  'comment' = 'Created on insertion',\n  append_mode = 'true',\n  'greptime.semantic.pipeline' = 'greptime_trace_v1',\n  'greptime.semantic.signal_type' = 'trace',\n  'greptime.semantic.source' = 'opentelemetry',\n  'greptime.semantic.trace.conventions' = 'unknown',\n  'greptime.semantic.trace.has_events' = 'true',\n  'greptime.semantic.trace.has_links' = 'true',\n  table_data_model = 'greptime_trace_v1'\n)"]]"#;
+    let expected_ddl = r#"[["trace_table_part32","CREATE TABLE IF NOT EXISTS \"trace_table_part32\" (\n  \"timestamp\" TIMESTAMP(9) NOT NULL,\n  \"timestamp_end\" TIMESTAMP(9) NULL,\n  \"duration_nano\" BIGINT UNSIGNED NULL,\n  \"parent_span_id\" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),\n  \"trace_id\" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),\n  \"span_id\" STRING NULL,\n  \"span_kind\" STRING NULL,\n  \"span_name\" STRING NULL,\n  \"span_status_code\" STRING NULL,\n  \"span_status_message\" STRING NULL,\n  \"trace_state\" STRING NULL,\n  \"scope_name\" STRING NULL,\n  \"scope_version\" STRING NULL,\n  \"service_name\" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),\n  \"span_attributes.net.peer.ip\" STRING NULL,\n  \"span_attributes.peer.service\" STRING NULL,\n  \"span_events\" JSON NULL,\n  \"span_links\" JSON NULL,\n  TIME INDEX (\"timestamp\"),\n  PRIMARY KEY (\"service_name\")\n)\nPARTITION ON COLUMNS (\"trace_id\") (\n  trace_id < '08',\n  trace_id >= '08' AND trace_id < '10',\n  trace_id >= '10' AND trace_id < '18',\n  trace_id >= '18' AND trace_id < '20',\n  trace_id >= '20' AND trace_id < '28',\n  trace_id >= '28' AND trace_id < '30',\n  trace_id >= '30' AND trace_id < '38',\n  trace_id >= '38' AND trace_id < '40',\n  trace_id >= '40' AND trace_id < '48',\n  trace_id >= '48' AND trace_id < '50',\n  trace_id >= '50' AND trace_id < '58',\n  trace_id >= '58' AND trace_id < '60',\n  trace_id >= '60' AND trace_id < '68',\n  trace_id >= '68' AND trace_id < '70',\n  trace_id >= '70' AND trace_id < '78',\n  trace_id >= '78' AND trace_id < '80',\n  trace_id >= '80' AND trace_id < '88',\n  trace_id >= '88' AND trace_id < '90',\n  trace_id >= '90' AND trace_id < '98',\n  trace_id >= '98' AND trace_id < 'a0',\n  trace_id >= 'a0' AND trace_id < 'a8',\n  trace_id >= 'a8' AND trace_id < 'b0',\n  trace_id >= 'b0' AND trace_id < 'b8',\n  trace_id >= 'b8' AND trace_id < 'c0',\n  trace_id >= 'c0' AND trace_id < 'c8',\n  trace_id >= 'c8' AND trace_id < 'd0',\n  trace_id >= 'd0' AND trace_id < 'd8',\n  trace_id >= 'd8' AND trace_id < 'e0',\n  trace_id >= 'e0' AND trace_id < 'e8',\n  trace_id >= 'e8' AND trace_id < 'f0',\n  trace_id >= 'f0' AND trace_id < 'f8',\n  trace_id >= 'f8'\n)\nENGINE=mito\nWITH(\n  'comment' = 'Created on insertion',\n  append_mode = 'true',\n  'greptime.semantic.pipeline' = 'greptime_trace_v1',\n  'greptime.semantic.signal_type' = 'trace',\n  'greptime.semantic.source' = 'opentelemetry',\n  'greptime.semantic.trace.conventions' = 'https://opentelemetry.io/schemas/1.4.0',\n  table_data_model = 'greptime_trace_v1'\n)"]]"#;
     validate_data(
         "otlp_traces",
         &client,
@@ -6389,6 +6914,28 @@ pub async fn test_otlp_logs(store_type: StorageType) {
             "[[1]]",
         )
         .await;
+
+        // Write another batch after the table exists. This verifies existing-schema
+        // alignment accepts the built-in JSONB columns in direct OTLP logs.
+        let res = send_req(
+            &client,
+            vec![(
+                HeaderName::from_static("content-type"),
+                HeaderValue::from_static("application/x-protobuf"),
+            )],
+            "/v1/otlp/v1/logs?db=public",
+            body.clone(),
+            false,
+        )
+        .await;
+        assert_eq!(StatusCode::OK, res.status());
+        validate_data(
+            "otlp_logs_multiple_batches",
+            &client,
+            "select count(*) from opentelemetry_logs;",
+            "[[4]]",
+        )
+        .await;
     }
 
     {
@@ -6462,6 +7009,149 @@ pub async fn test_otlp_logs(store_type: StorageType) {
             &client,
             "select * from logs2;",
             expected,
+        )
+        .await;
+    }
+
+    {
+        let existing_table_name = "otlp_logs_existing_schema";
+        let res = execute_sql(
+            &client,
+            &format!(
+                "create table {existing_table_name} (\"timestamp\" timestamp(3) time index, trace_id string, host string, body string, primary key(trace_id, host))"
+            ),
+        )
+        .await;
+        assert_eq!(res.status(), StatusCode::OK, "{:?}", res.text().await);
+
+        let req = make_log_request(vec![make_log_record(
+            "00000000000000000000000000000001",
+            "0000000000000001",
+            1_736_413_568_497_632_000,
+            "existing schema",
+            vec![make_int_attr("host", 42)],
+        )]);
+        let res = send_log_req(&client, existing_table_name, Some("host"), req, false).await;
+        assert_eq!(res.status(), StatusCode::OK, "{:?}", res.text().await);
+
+        validate_data(
+            "otlp_logs_existing_schema_rows",
+            &client,
+            &format!(
+                "select trace_id, host, body, \"timestamp\" from {existing_table_name} order by trace_id;"
+            ),
+            r#"[["00000000000000000000000000000001","42","existing schema",1736413568497]]"#,
+        )
+        .await;
+        validate_data(
+            "otlp_logs_existing_schema_semantic_types",
+            &client,
+            "select column_name, semantic_type from information_schema.columns where table_name = 'otlp_logs_existing_schema' and column_name in ('timestamp', 'trace_id', 'host', 'scope_name') order by column_name;",
+            r#"[["host","TAG"],["scope_name","FIELD"],["timestamp","TIMESTAMP"],["trace_id","TAG"]]"#,
+        )
+        .await;
+    }
+
+    {
+        let existing_field_table_name = "otlp_logs_existing_string_field";
+        let res = execute_sql(
+            &client,
+            &format!(
+                "create table {existing_field_table_name} (\"timestamp\" timestamp(3) time index, host string, body string)"
+            ),
+        )
+        .await;
+        assert_eq!(res.status(), StatusCode::OK, "{:?}", res.text().await);
+
+        let req = make_log_request(vec![make_log_record(
+            "00000000000000000000000000000004",
+            "0000000000000004",
+            1_736_413_568_497_700_000,
+            "existing string field",
+            vec![make_int_attr("host", 42)],
+        )]);
+        let res = send_log_req(&client, existing_field_table_name, Some("host"), req, false).await;
+        assert_eq!(res.status(), StatusCode::OK, "{:?}", res.text().await);
+
+        validate_data(
+            "otlp_logs_existing_string_field_rows",
+            &client,
+            &format!(
+                "select host, body, \"timestamp\" from {existing_field_table_name} order by body;"
+            ),
+            r#"[["42","existing string field",1736413568497]]"#,
+        )
+        .await;
+        validate_data(
+            "otlp_logs_existing_string_field_semantic_type",
+            &client,
+            "select column_name, semantic_type from information_schema.columns where table_name = 'otlp_logs_existing_string_field' and column_name = 'host';",
+            r#"[["host","FIELD"]]"#,
+        )
+        .await;
+    }
+
+    {
+        let missing_pk_table_name = "otlp_logs_missing_pk";
+        let res = execute_sql(
+            &client,
+            &format!(
+                "create table {missing_pk_table_name} (\"timestamp\" timestamp(9) time index, host string, body string, primary key(host))"
+            ),
+        )
+        .await;
+        assert_eq!(res.status(), StatusCode::OK, "{:?}", res.text().await);
+
+        let req = make_log_request(vec![make_log_record(
+            "00000000000000000000000000000002",
+            "0000000000000002",
+            1_736_413_568_498_000_000,
+            "missing host",
+            vec![make_string_attr("not_host", "node-a")],
+        )]);
+        let res = send_log_req(&client, missing_pk_table_name, None, req, false).await;
+        assert_eq!(res.status(), StatusCode::OK, "{:?}", res.text().await);
+
+        validate_data(
+            "otlp_logs_missing_pk_rows",
+            &client,
+            &format!("select host, body from {missing_pk_table_name};"),
+            r#"[[null,"missing host"]]"#,
+        )
+        .await;
+    }
+
+    {
+        let incompatible_table_name = "otlp_logs_incompatible_schema";
+        let res = execute_sql(
+            &client,
+            &format!(
+                "create table {incompatible_table_name} (\"timestamp\" timestamp(9) time index, host bigint, primary key(host))"
+            ),
+        )
+        .await;
+        assert_eq!(res.status(), StatusCode::OK, "{:?}", res.text().await);
+
+        let req = make_log_request(vec![make_log_record(
+            "00000000000000000000000000000003",
+            "0000000000000003",
+            1_736_413_568_499_000_000,
+            "bad host",
+            vec![make_string_attr("host", "node-a")],
+        )]);
+        let res = send_log_req(&client, incompatible_table_name, Some("host"), req, false).await;
+        let status = res.status();
+        let body = res.text().await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(
+            body.contains("failed to align log column 'host'"),
+            "unexpected error body: {body}"
+        );
+        validate_data(
+            "otlp_logs_incompatible_schema_rows",
+            &client,
+            &format!("select count(*) from {incompatible_table_name};"),
+            "[[0]]",
         )
         .await;
     }
@@ -6546,7 +7236,7 @@ pub async fn test_loki_pb_logs(store_type: StorageType) {
     assert_eq!(StatusCode::OK, res.status());
 
     // test schema
-    let expected = "[[\"loki_table_name\",\"CREATE TABLE IF NOT EXISTS \\\"loki_table_name\\\" (\\n  \\\"greptime_timestamp\\\" TIMESTAMP(9) NOT NULL,\\n  \\\"line\\\" STRING NULL,\\n  \\\"structured_metadata\\\" JSON NULL,\\n  \\\"service\\\" STRING NULL,\\n  \\\"source\\\" STRING NULL,\\n  \\\"wadaxi\\\" STRING NULL,\\n  TIME INDEX (\\\"greptime_timestamp\\\"),\\n  PRIMARY KEY (\\\"service\\\", \\\"source\\\", \\\"wadaxi\\\")\\n)\\n\\nENGINE=mito\\nWITH(\\n  \'comment\' = 'Created on insertion',\\n  append_mode = 'true'\\n)\"]]";
+    let expected = "[[\"loki_table_name\",\"CREATE TABLE IF NOT EXISTS \\\"loki_table_name\\\" (\\n  \\\"greptime_timestamp\\\" TIMESTAMP(9) NOT NULL,\\n  \\\"line\\\" STRING NULL,\\n  \\\"structured_metadata\\\" JSON NULL,\\n  \\\"service\\\" STRING NULL,\\n  \\\"source\\\" STRING NULL,\\n  \\\"wadaxi\\\" STRING NULL,\\n  TIME INDEX (\\\"greptime_timestamp\\\"),\\n  PRIMARY KEY (\\\"service\\\", \\\"source\\\", \\\"wadaxi\\\")\\n)\\n\\nENGINE=mito\\nWITH(\\n  'comment' = 'Created on insertion',\\n  append_mode = 'true',\\n  'greptime.semantic.signal_type' = 'log',\\n  'greptime.semantic.source' = 'loki'\\n)\"]]";
     validate_data(
         "loki_pb_schema",
         &client,
@@ -6681,7 +7371,7 @@ processors:
     //     'comment' = 'Created on insertion',
     //     append_mode = 'true'
     //   )
-    let expected = "[[\"loki_table_name\",\"CREATE TABLE IF NOT EXISTS \\\"loki_table_name\\\" (\\n  \\\"greptime_timestamp\\\" TIMESTAMP(3) NOT NULL,\\n  \\\"loki_label_service\\\" STRING NULL,\\n  \\\"loki_label_source\\\" STRING NULL,\\n  \\\"loki_label_wadaxi\\\" STRING NULL,\\n  \\\"loki_line\\\" STRING NULL,\\n  \\\"loki_metadata_key1\\\" STRING NULL,\\n  \\\"loki_metadata_key2\\\" STRING NULL,\\n  \\\"loki_metadata_key3\\\" STRING NULL,\\n  TIME INDEX (\\\"greptime_timestamp\\\")\\n)\\n\\nENGINE=mito\\nWITH(\\n  'comment' = 'Created on insertion',\\n  append_mode = 'true'\\n)\"]]";
+    let expected = "[[\"loki_table_name\",\"CREATE TABLE IF NOT EXISTS \\\"loki_table_name\\\" (\\n  \\\"greptime_timestamp\\\" TIMESTAMP(3) NOT NULL,\\n  \\\"loki_label_service\\\" STRING NULL,\\n  \\\"loki_label_source\\\" STRING NULL,\\n  \\\"loki_label_wadaxi\\\" STRING NULL,\\n  \\\"loki_line\\\" STRING NULL,\\n  \\\"loki_metadata_key1\\\" STRING NULL,\\n  \\\"loki_metadata_key2\\\" STRING NULL,\\n  \\\"loki_metadata_key3\\\" STRING NULL,\\n  TIME INDEX (\\\"greptime_timestamp\\\")\\n)\\n\\nENGINE=mito\\nWITH(\\n  'comment' = 'Created on insertion',\\n  append_mode = 'true',\\n  'greptime.semantic.signal_type' = 'log',\\n  'greptime.semantic.source' = 'loki'\\n)\"]]";
     validate_data(
         "loki_pb_schema",
         &client,
@@ -6751,7 +7441,7 @@ pub async fn test_loki_json_logs(store_type: StorageType) {
     assert_eq!(StatusCode::OK, res.status());
 
     // test schema
-    let expected = "[[\"loki_table_name\",\"CREATE TABLE IF NOT EXISTS \\\"loki_table_name\\\" (\\n  \\\"greptime_timestamp\\\" TIMESTAMP(9) NOT NULL,\\n  \\\"line\\\" STRING NULL,\\n  \\\"structured_metadata\\\" JSON NULL,\\n  \\\"sender\\\" STRING NULL,\\n  \\\"source\\\" STRING NULL,\\n  TIME INDEX (\\\"greptime_timestamp\\\"),\\n  PRIMARY KEY (\\\"sender\\\", \\\"source\\\")\\n)\\n\\nENGINE=mito\\nWITH(\\n  \'comment\' = 'Created on insertion',\\n  append_mode = 'true'\\n)\"]]";
+    let expected = "[[\"loki_table_name\",\"CREATE TABLE IF NOT EXISTS \\\"loki_table_name\\\" (\\n  \\\"greptime_timestamp\\\" TIMESTAMP(9) NOT NULL,\\n  \\\"line\\\" STRING NULL,\\n  \\\"structured_metadata\\\" JSON NULL,\\n  \\\"sender\\\" STRING NULL,\\n  \\\"source\\\" STRING NULL,\\n  TIME INDEX (\\\"greptime_timestamp\\\"),\\n  PRIMARY KEY (\\\"sender\\\", \\\"source\\\")\\n)\\n\\nENGINE=mito\\nWITH(\\n  'comment' = 'Created on insertion',\\n  append_mode = 'true',\\n  'greptime.semantic.signal_type' = 'log',\\n  'greptime.semantic.source' = 'loki'\\n)\"]]";
     validate_data(
         "loki_json_schema",
         &client,
@@ -6855,7 +7545,7 @@ processors:
     //     'comment' = 'Created on insertion',
     //     append_mode = 'true'
     //   )
-    let expected = "[[\"loki_table_name\",\"CREATE TABLE IF NOT EXISTS \\\"loki_table_name\\\" (\\n  \\\"greptime_timestamp\\\" TIMESTAMP(3) NOT NULL,\\n  \\\"loki_label_sender\\\" STRING NULL,\\n  \\\"loki_label_source\\\" STRING NULL,\\n  \\\"loki_line\\\" STRING NULL,\\n  \\\"loki_metadata_key1\\\" STRING NULL,\\n  \\\"loki_metadata_key2\\\" STRING NULL,\\n  \\\"loki_metadata_key3\\\" STRING NULL,\\n  TIME INDEX (\\\"greptime_timestamp\\\")\\n)\\n\\nENGINE=mito\\nWITH(\\n  'comment' = 'Created on insertion',\\n  append_mode = 'true'\\n)\"]]";
+    let expected = "[[\"loki_table_name\",\"CREATE TABLE IF NOT EXISTS \\\"loki_table_name\\\" (\\n  \\\"greptime_timestamp\\\" TIMESTAMP(3) NOT NULL,\\n  \\\"loki_label_sender\\\" STRING NULL,\\n  \\\"loki_label_source\\\" STRING NULL,\\n  \\\"loki_line\\\" STRING NULL,\\n  \\\"loki_metadata_key1\\\" STRING NULL,\\n  \\\"loki_metadata_key2\\\" STRING NULL,\\n  \\\"loki_metadata_key3\\\" STRING NULL,\\n  TIME INDEX (\\\"greptime_timestamp\\\")\\n)\\n\\nENGINE=mito\\nWITH(\\n  'comment' = 'Created on insertion',\\n  append_mode = 'true',\\n  'greptime.semantic.signal_type' = 'log',\\n  'greptime.semantic.source' = 'loki'\\n)\"]]";
     validate_data(
         "loki_json_schema",
         &client,
@@ -7824,7 +8514,7 @@ pub async fn test_jaeger_query_api_for_trace_v1(store_type: StorageType) {
     .await;
     assert_eq!(StatusCode::OK, res.status());
 
-    let trace_table_sql = "[[\"mytable\",\"CREATE TABLE IF NOT EXISTS \\\"mytable\\\" (\\n  \\\"timestamp\\\" TIMESTAMP(9) NOT NULL,\\n  \\\"timestamp_end\\\" TIMESTAMP(9) NULL,\\n  \\\"duration_nano\\\" BIGINT UNSIGNED NULL,\\n  \\\"parent_span_id\\\" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),\\n  \\\"trace_id\\\" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),\\n  \\\"span_id\\\" STRING NULL,\\n  \\\"span_kind\\\" STRING NULL,\\n  \\\"span_name\\\" STRING NULL,\\n  \\\"span_status_code\\\" STRING NULL,\\n  \\\"span_status_message\\\" STRING NULL,\\n  \\\"trace_state\\\" STRING NULL,\\n  \\\"scope_name\\\" STRING NULL,\\n  \\\"scope_version\\\" STRING NULL,\\n  \\\"service_name\\\" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),\\n  \\\"span_attributes.operation.type\\\" STRING NULL,\\n  \\\"span_attributes.net.peer.ip\\\" STRING NULL,\\n  \\\"span_attributes.peer.service\\\" STRING NULL,\\n  \\\"span_events\\\" JSON NULL,\\n  \\\"span_links\\\" JSON NULL,\\n  TIME INDEX (\\\"timestamp\\\"),\\n  PRIMARY KEY (\\\"service_name\\\")\\n)\\nPARTITION ON COLUMNS (\\\"trace_id\\\") (\\n  trace_id < '1',\\n  trace_id >= '1' AND trace_id < '2',\\n  trace_id >= '2' AND trace_id < '3',\\n  trace_id >= '3' AND trace_id < '4',\\n  trace_id >= '4' AND trace_id < '5',\\n  trace_id >= '5' AND trace_id < '6',\\n  trace_id >= '6' AND trace_id < '7',\\n  trace_id >= '7' AND trace_id < '8',\\n  trace_id >= '8' AND trace_id < '9',\\n  trace_id >= '9' AND trace_id < 'a',\\n  trace_id >= 'a' AND trace_id < 'b',\\n  trace_id >= 'b' AND trace_id < 'c',\\n  trace_id >= 'c' AND trace_id < 'd',\\n  trace_id >= 'd' AND trace_id < 'e',\\n  trace_id >= 'e' AND trace_id < 'f',\\n  trace_id >= 'f'\\n)\\nENGINE=mito\\nWITH(\\n  'comment' = 'Created on insertion',\\n  append_mode = 'true',\\n  'greptime.semantic.pipeline' = 'greptime_trace_v1',\\n  'greptime.semantic.signal_type' = 'trace',\\n  'greptime.semantic.source' = 'opentelemetry',\\n  'greptime.semantic.trace.conventions' = 'unknown',\\n  'greptime.semantic.trace.has_events' = 'true',\\n  'greptime.semantic.trace.has_links' = 'true',\\n  table_data_model = 'greptime_trace_v1',\\n  ttl = '7days'\\n)\"]]";
+    let trace_table_sql = "[[\"mytable\",\"CREATE TABLE IF NOT EXISTS \\\"mytable\\\" (\\n  \\\"timestamp\\\" TIMESTAMP(9) NOT NULL,\\n  \\\"timestamp_end\\\" TIMESTAMP(9) NULL,\\n  \\\"duration_nano\\\" BIGINT UNSIGNED NULL,\\n  \\\"parent_span_id\\\" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),\\n  \\\"trace_id\\\" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),\\n  \\\"span_id\\\" STRING NULL,\\n  \\\"span_kind\\\" STRING NULL,\\n  \\\"span_name\\\" STRING NULL,\\n  \\\"span_status_code\\\" STRING NULL,\\n  \\\"span_status_message\\\" STRING NULL,\\n  \\\"trace_state\\\" STRING NULL,\\n  \\\"scope_name\\\" STRING NULL,\\n  \\\"scope_version\\\" STRING NULL,\\n  \\\"service_name\\\" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),\\n  \\\"span_attributes.operation.type\\\" STRING NULL,\\n  \\\"span_attributes.net.peer.ip\\\" STRING NULL,\\n  \\\"span_attributes.peer.service\\\" STRING NULL,\\n  \\\"span_events\\\" JSON NULL,\\n  \\\"span_links\\\" JSON NULL,\\n  TIME INDEX (\\\"timestamp\\\"),\\n  PRIMARY KEY (\\\"service_name\\\")\\n)\\nPARTITION ON COLUMNS (\\\"trace_id\\\") (\\n  trace_id < '1',\\n  trace_id >= '1' AND trace_id < '2',\\n  trace_id >= '2' AND trace_id < '3',\\n  trace_id >= '3' AND trace_id < '4',\\n  trace_id >= '4' AND trace_id < '5',\\n  trace_id >= '5' AND trace_id < '6',\\n  trace_id >= '6' AND trace_id < '7',\\n  trace_id >= '7' AND trace_id < '8',\\n  trace_id >= '8' AND trace_id < '9',\\n  trace_id >= '9' AND trace_id < 'a',\\n  trace_id >= 'a' AND trace_id < 'b',\\n  trace_id >= 'b' AND trace_id < 'c',\\n  trace_id >= 'c' AND trace_id < 'd',\\n  trace_id >= 'd' AND trace_id < 'e',\\n  trace_id >= 'e' AND trace_id < 'f',\\n  trace_id >= 'f'\\n)\\nENGINE=mito\\nWITH(\\n  'comment' = 'Created on insertion',\\n  append_mode = 'true',\\n  'greptime.semantic.pipeline' = 'greptime_trace_v1',\\n  'greptime.semantic.signal_type' = 'trace',\\n  'greptime.semantic.source' = 'opentelemetry',\\n  'greptime.semantic.trace.conventions' = 'https://opentelemetry.io/schemas/1.4.0',\\n  table_data_model = 'greptime_trace_v1',\\n  ttl = '7days'\\n)\"]]";
     validate_data(
         "trace_v1_create_table",
         &client,
@@ -8558,6 +9248,14 @@ async fn wait_for_data(client: &TestClient, sql: &str, expected: &str) {
     .unwrap();
 }
 
+async fn execute_sql(client: &TestClient, sql: &str) -> TestResponse {
+    let encoded_sql = encode(sql);
+    client
+        .get(format!("/v1/sql?sql={encoded_sql}").as_str())
+        .send()
+        .await
+}
+
 async fn send_req(
     client: &TestClient,
     headers: Vec<(HeaderName, HeaderValue)>,
@@ -8582,6 +9280,40 @@ async fn send_req(
     }
 
     req.header("content-length", len).send().await
+}
+
+async fn send_log_req(
+    client: &TestClient,
+    table_name: &str,
+    extract_keys: Option<&str>,
+    req: ExportLogsServiceRequest,
+    with_gzip: bool,
+) -> TestResponse {
+    let mut headers = vec![
+        (
+            HeaderName::from_static("content-type"),
+            HeaderValue::from_static("application/x-protobuf"),
+        ),
+        (
+            HeaderName::from_static(GREPTIME_LOG_TABLE_NAME_HEADER_NAME),
+            HeaderValue::from_str(table_name).unwrap(),
+        ),
+    ];
+    if let Some(extract_keys) = extract_keys {
+        headers.push((
+            HeaderName::from_static(GREPTIME_LOG_EXTRACT_KEYS_HEADER_NAME),
+            HeaderValue::from_str(extract_keys).unwrap(),
+        ));
+    }
+
+    send_req(
+        client,
+        headers,
+        "/v1/otlp/v1/logs?db=public",
+        req.encode_to_vec(),
+        with_gzip,
+    )
+    .await
 }
 
 async fn send_trace_v1_req(
@@ -8625,6 +9357,50 @@ async fn send_trace_v1_req_with_db(
         with_gzip,
     )
     .await
+}
+
+fn make_log_request(records: Vec<Value>) -> ExportLogsServiceRequest {
+    serde_json::from_value(json!({
+        "resourceLogs": [{
+            "resource": {
+                "attributes": []
+            },
+            "scopeLogs": [{
+                "scope": {
+                    "name": "",
+                    "version": "",
+                    "attributes": []
+                },
+                "logRecords": records,
+                "schemaUrl": ""
+            }],
+            "schemaUrl": "https://opentelemetry.io/schemas/1.4.0"
+        }]
+    }))
+    .unwrap()
+}
+
+fn make_log_record(
+    trace_id: &str,
+    span_id: &str,
+    time_unix_nano: i64,
+    body: &str,
+    attributes: Vec<Value>,
+) -> Value {
+    json!({
+        "timeUnixNano": time_unix_nano.to_string(),
+        "observedTimeUnixNano": "0",
+        "severityNumber": 9,
+        "severityText": "Info",
+        "body": {
+            "stringValue": body
+        },
+        "attributes": attributes,
+        "droppedAttributesCount": 0,
+        "flags": 0,
+        "traceId": trace_id,
+        "spanId": span_id
+    })
 }
 
 fn make_trace_v1_request(service_name: &str, spans: Vec<Value>) -> ExportTraceServiceRequest {

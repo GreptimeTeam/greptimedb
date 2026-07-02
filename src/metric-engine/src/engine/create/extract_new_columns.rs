@@ -97,6 +97,7 @@ mod tests {
                     table_dir: "test".to_string(),
                     path_type: PathType::Bare,
                     partition_expr_json: Some("".to_string()),
+                    requirements: Default::default(),
                 },
             ),
             (
@@ -118,6 +119,7 @@ mod tests {
                     table_dir: "test".to_string(),
                     path_type: PathType::Bare,
                     partition_expr_json: Some("".to_string()),
+                    requirements: Default::default(),
                 },
             ),
         ];
@@ -171,6 +173,7 @@ mod tests {
                 table_dir: "test".to_string(),
                 path_type: PathType::Bare,
                 partition_expr_json: Some("".to_string()),
+                requirements: Default::default(),
             },
         )];
 

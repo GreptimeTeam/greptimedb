@@ -30,7 +30,7 @@ pub trait PluginOptionsDeserializer<T: DeserializeOwned>: Send + Sync {
 
 /// A flag for stating the standalone mode in the plugins.
 ///
-/// The standalone build and start process calls `setup_frontend_plugins` and `setup_datanode_plugins`,
+/// The standalone build and start process calls `setup_frontend_plugins_pre_build` and `setup_datanode_plugins_pre_build`,
 /// so we add a flag to the plugins to indicate that the plugins are running in the standalone mode.
 #[derive(Clone, Copy, Debug)]
 pub struct StandaloneFlag;

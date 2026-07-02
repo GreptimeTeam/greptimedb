@@ -12,6 +12,9 @@ default_column_prefix = "greptime"
 
 ## The user provider for authentication.
 ## Examples: "static_user_provider:file:/path/to/users", "static_user_provider:cmd:greptime_user=greptime_pwd"
+## Password verifier formats: "plain:<password>", "pbkdf2_sha256:<iterations>:<hex_salt>:<hex_hash>",
+## "mysql_native_password:<hex_sha1_sha1_password>"
+## "pbkdf2_sha256" protects passwords at rest but is not compatible with mysql_native_password.
 ## @toml2docs:none-default
 #+ user_provider = "static_user_provider:file:/path/to/users"
 
@@ -68,6 +71,8 @@ cors_allowed_origins = ["https://example.com"]
 ## - lossy: allow invalid UTF-8 strings, replace invalid characters with REPLACEMENT_CHARACTER(U+FFFD).
 ## - unchecked: do not valid strings.
 prom_validation_mode = "strict"
+## Experimental: enable POST /v1/sql/analyze/stream for streaming EXPLAIN ANALYZE VERBOSE metrics.
+experimental_enable_explain_analyze_stream = false
 
 ## The gRPC server options.
 [grpc]
@@ -655,8 +660,8 @@ allow_stale_entries = false
 
 ## Memory limit for table scans across all queries.
 ## Supports absolute size (e.g., "2GB") or percentage of system memory (e.g., "20%").
-## Setting it to 0 disables the limit.
-scan_memory_limit = "50%"
+## Setting it to 0 or "unlimited" disables the limit.
+scan_memory_limit = "unlimited"
 ## Controls what happens when a scan cannot get memory immediately.
 ## "fail" (default) fails fast and is the recommended option for most users.
 ## "wait" / "wait(<duration>)" waits for memory to become available. This is mainly
@@ -668,6 +673,13 @@ scan_memory_on_exhausted = "fail"
 ## Minimum time interval between two compactions.
 ## To align with the old behavior, the default value is 0 (no restrictions).
 min_compaction_interval = "0m"
+
+## Whether to allow to schedule a compaction after a successful region edit.
+##
+## Setting this to "true" is a necessary but not sufficient condition for scheduling compaction after a region edit.
+## Other constraints, such as "min_compaction_interval", may still prevent compaction from being scheduled.
+## Setting this to "false", however, guarantees that compaction will not be scheduled after a region edit.
+schedule_compaction_after_edit = true
 
 ## Whether to enable flat format as the default SST format.
 default_flat_format = true
@@ -812,6 +824,10 @@ log_format = "text"
 
 ## The maximum amount of log files.
 max_log_files = 720
+
+## Whether to enable per-region metrics.
+## Default to false.
+enable_per_region_metrics = false
 
 ## The OTLP tracing export protocol. Can be `grpc`/`http`.
 otlp_export_protocol = "http"

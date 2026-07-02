@@ -40,7 +40,9 @@ use datafusion::physical_plan::{
 use datafusion_common::stats::Precision;
 use datafusion_common::{ColumnStatistics, DataFusionError, Statistics};
 use datafusion_physical_expr::expressions::Column;
-use datafusion_physical_expr::{EquivalenceProperties, Partitioning, PhysicalSortExpr};
+use datafusion_physical_expr::{
+    EquivalenceProperties, Partitioning, PhysicalExpr, PhysicalSortExpr,
+};
 use datatypes::arrow::datatypes::SchemaRef as ArrowSchemaRef;
 use datatypes::compute::SortOptions;
 use futures::{Stream, StreamExt};
@@ -51,6 +53,9 @@ use store_api::region_engine::{
 use store_api::storage::{ScanRequest, TimeSeriesDistribution};
 
 use crate::table::metrics::StreamMetrics;
+
+/// The name of [`RegionScanExec`] plan node.
+pub const REGION_SCAN_EXEC_NAME: &str = "RegionScanExec";
 
 /// A plan to read multiple partitions from a region of a table.
 #[derive(Clone)]
@@ -215,6 +220,7 @@ impl RegionScanExec {
         ));
         let append_mode = scanner_props.append_mode();
         let total_rows = scanner_props.total_rows();
+
         Ok(Self {
             scanner: Arc::new(Mutex::new(scanner)),
             arrow_schema,
@@ -339,6 +345,30 @@ impl RegionScanExec {
     pub fn set_explain_verbose(&mut self, explain_verbose: bool) {
         self.explain_verbose = explain_verbose;
     }
+
+    /// Adds dynamic filters directly to the underlying region scanner predicate.
+    ///
+    /// This is the same mutation path used by DataFusion child-filter pushdown. Remote dynamic
+    /// filter updates install their shared runtime wrapper through this method at scan build time
+    /// and later update the wrapper state out-of-band.
+    pub fn add_dyn_filters_to_predicate(
+        &self,
+        filter_exprs: Vec<Arc<dyn PhysicalExpr>>,
+    ) -> Vec<bool> {
+        self.scanner
+            .lock()
+            .unwrap()
+            .add_dyn_filter_to_predicate(filter_exprs)
+    }
+
+    pub fn query_load_region_id(&self) -> Option<u64> {
+        self.scanner
+            .lock()
+            .unwrap()
+            .properties()
+            .query_load_region_id()
+            .map(|region_id| region_id.as_u64())
+    }
 }
 
 impl ExecutionPlan for RegionScanExec {
@@ -436,7 +466,7 @@ impl ExecutionPlan for RegionScanExec {
     }
 
     fn name(&self) -> &str {
-        "RegionScanExec"
+        REGION_SCAN_EXEC_NAME
     }
 
     fn handle_child_pushdown_result(
@@ -451,11 +481,7 @@ impl ExecutionPlan for RegionScanExec {
             .map(|f| f.filter)
             .collect::<Vec<_>>();
 
-        let supported = self
-            .scanner
-            .lock()
-            .unwrap()
-            .add_dyn_filter_to_predicate(parent_filters);
+        let supported = self.add_dyn_filters_to_predicate(parent_filters);
         // datafusion api require to clone self after mutate, even though we are only mutate inside mutex
         let new_self = Arc::new(self.clone());
 
@@ -506,8 +532,8 @@ impl Stream for StreamWithMetricWrapper {
                     Ok(record_batch) => {
                         // we don't record elapsed time here
                         // since it's calling storage api involving I/O ops
-                        this.metric
-                            .record_mem_usage(record_batch.buffer_memory_size());
+                        let batch_bytes = record_batch.buffer_memory_size();
+                        this.metric.record_output_bytes(batch_bytes);
                         this.metric.record_output(record_batch.num_rows());
                         Poll::Ready(Some(Ok(record_batch.into_df_record_batch())))
                     }

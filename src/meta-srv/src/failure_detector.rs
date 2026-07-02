@@ -160,6 +160,11 @@ impl PhiAccrualFailureDetector {
     pub(crate) fn acceptable_heartbeat_pause_millis(&self) -> u32 {
         self.acceptable_heartbeat_pause_millis
     }
+
+    #[cfg(test)]
+    pub(crate) fn last_heartbeat_millis(&self) -> Option<i64> {
+        self.last_heartbeat_millis
+    }
 }
 
 /// Calculation of phi, derived from the Cumulative distribution function for

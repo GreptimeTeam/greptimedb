@@ -87,9 +87,26 @@ impl TryFrom<&HashMap<String, String>> for CsvFormat {
                     .build()
                 })?);
         };
-        if let Some(has_header) = value.get(file_format::FORMAT_HAS_HEADER) {
-            format.has_header = parse_bool(file_format::FORMAT_HAS_HEADER, has_header)?;
-        };
+        let headers = value
+            .get(file_format::FORMAT_HEADERS)
+            .map(|headers| parse_bool(file_format::FORMAT_HEADERS, headers))
+            .transpose()?;
+        let has_header = value
+            .get(file_format::FORMAT_HAS_HEADER)
+            .map(|has_header| parse_bool(file_format::FORMAT_HAS_HEADER, has_header))
+            .transpose()?;
+        match (headers, has_header) {
+            (Some(headers), Some(has_header)) if headers != has_header => {
+                return error::ParseFormatSnafu {
+                    key: file_format::FORMAT_HEADERS,
+                    value: format!("headers={headers}, has_header={has_header}"),
+                }
+                .fail();
+            }
+            (Some(headers), _) => format.has_header = headers,
+            (_, Some(has_header)) => format.has_header = has_header,
+            _ => {}
+        }
         if let Some(skip_bad_records) = value.get(file_format::FORMAT_SKIP_BAD_RECORDS) {
             format.skip_bad_records =
                 parse_bool(file_format::FORMAT_SKIP_BAD_RECORDS, skip_bad_records)?;
@@ -347,7 +364,7 @@ mod tests {
 
     use super::*;
     use crate::file_format::{
-        FORMAT_COMPRESSION_TYPE, FORMAT_DELIMITER, FORMAT_HAS_HEADER,
+        FORMAT_COMPRESSION_TYPE, FORMAT_DELIMITER, FORMAT_HAS_HEADER, FORMAT_HEADERS,
         FORMAT_SCHEMA_INFER_MAX_RECORD, FORMAT_SKIP_BAD_RECORDS, FileFormat, file_to_stream,
     };
     use crate::test_util::{format_schema, test_store};
@@ -491,11 +508,50 @@ mod tests {
                 ..CsvFormat::default()
             }
         );
+
+        let map = HashMap::from([(FORMAT_HEADERS.to_string(), "true".to_string())]);
+        let format = CsvFormat::try_from(&map).unwrap();
+        assert_eq!(format, CsvFormat::default());
+
+        let map = HashMap::from([(FORMAT_HEADERS.to_string(), "false".to_string())]);
+        let format = CsvFormat::try_from(&map).unwrap();
+        assert_eq!(
+            format,
+            CsvFormat {
+                has_header: false,
+                ..CsvFormat::default()
+            }
+        );
+
+        let map = HashMap::from([
+            (FORMAT_HEADERS.to_string(), "false".to_string()),
+            (FORMAT_HAS_HEADER.to_string(), "false".to_string()),
+        ]);
+        let format = CsvFormat::try_from(&map).unwrap();
+        assert_eq!(
+            format,
+            CsvFormat {
+                has_header: false,
+                ..CsvFormat::default()
+            }
+        );
     }
 
     #[test]
     fn test_try_from_rejects_invalid_bool_options() {
         let map = HashMap::from([(FORMAT_SKIP_BAD_RECORDS.to_string(), "yes".to_string())]);
+        assert!(CsvFormat::try_from(&map).is_err());
+
+        let map = HashMap::from([(FORMAT_HEADERS.to_string(), "yes".to_string())]);
+        assert!(CsvFormat::try_from(&map).is_err());
+    }
+
+    #[test]
+    fn test_try_from_rejects_conflicting_header_options() {
+        let map = HashMap::from([
+            (FORMAT_HEADERS.to_string(), "false".to_string()),
+            (FORMAT_HAS_HEADER.to_string(), "true".to_string()),
+        ]);
         assert!(CsvFormat::try_from(&map).is_err());
     }
 

@@ -16,6 +16,7 @@ use crate::batching_mode::state::CheckpointMode;
 
 pub(super) const CHECKPOINT_DECISION_ADVANCE: &str = "advance";
 pub(super) const CHECKPOINT_DECISION_FALLBACK: &str = "fallback";
+pub(super) const CHECKPOINT_DECISION_CONTINUE_REPAIR: &str = "continue_repair";
 pub(super) const CHECKPOINT_REASON_NONE: &str = "none";
 
 /// Why the task fell back to full snapshot mode.
@@ -34,9 +35,16 @@ pub(super) enum FlowQueryFallbackReason {
     /// The datanode detected a stale incremental cursor and the Flow
     /// must recompute from scratch.
     StaleCursor,
+    /// A fenced repair chunk tried to use a snapshot upper bound that the
+    /// storage engine can no longer enforce, so the current repair high must
+    /// be abandoned and rebound by a fresh scoped full snapshot repair.
+    SnapshotFenceExpired,
     /// A non-stale-cursor query failure; the Flow resets to full snapshot
     /// to avoid cascading errors.
     IncrementalQueryFailure,
+    /// A non-incremental query failed while the task was already in full
+    /// snapshot or scoped repair mode.
+    QueryFailure,
     /// Incremental mode has been permanently disabled for this Flow
     /// (e.g. because the query shape is not incrementally safe).
     IncrementalDisabled,
@@ -49,7 +57,9 @@ impl FlowQueryFallbackReason {
             Self::IncompleteRegionWatermark => "incomplete_region_watermark",
             Self::DirtyBacklogPending => "dirty_backlog_pending",
             Self::StaleCursor => "stale_cursor",
+            Self::SnapshotFenceExpired => "snapshot_fence_expired",
             Self::IncrementalQueryFailure => "incremental_query_failure",
+            Self::QueryFailure => "query_failure",
             Self::IncrementalDisabled => "incremental_disabled",
         }
     }
@@ -77,6 +87,14 @@ pub(super) enum FlowCheckpointDecision {
         participating_regions: usize,
         watermarks: usize,
     },
+    /// FullSnapshot stayed in full snapshot mode because a scoped base repair
+    /// found additional dirty windows that may be concurrent with the returned
+    /// high watermark. These windows must be repaired under the fixed high
+    /// before checkpoints can advance.
+    ContinuedFencedRepair {
+        pending_windows: usize,
+        watermarks: usize,
+    },
     /// Any mode → FullSnapshot.
     ///
     /// Watermark information was incomplete, a participating region was
@@ -96,6 +114,13 @@ impl FlowCheckpointDecision {
                 checkpoint_mode_label(CheckpointMode::FullSnapshot)
             }
             Self::AdvancedIncremental { .. } => checkpoint_mode_label(CheckpointMode::Incremental),
+            // Fenced repair is intentionally a FullSnapshot sub-state, not a
+            // third top-level checkpoint mode, so metrics keep the
+            // `full_snapshot` mode label while the decision label carries
+            // `continue_repair`.
+            Self::ContinuedFencedRepair { .. } => {
+                checkpoint_mode_label(CheckpointMode::FullSnapshot)
+            }
             Self::FallbackToFullSnapshot { previous_mode, .. } => {
                 checkpoint_mode_label(previous_mode)
             }
@@ -107,6 +132,7 @@ impl FlowCheckpointDecision {
             Self::AdvancedFromFullSnapshot { .. } | Self::AdvancedIncremental { .. } => {
                 CHECKPOINT_DECISION_ADVANCE
             }
+            Self::ContinuedFencedRepair { .. } => CHECKPOINT_DECISION_CONTINUE_REPAIR,
             Self::FallbackToFullSnapshot { .. } => CHECKPOINT_DECISION_FALLBACK,
         }
     }

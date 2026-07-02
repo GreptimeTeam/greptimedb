@@ -26,7 +26,9 @@ excludes = [
     "src/common/base/src/secrets.rs",
     "src/servers/src/repeated_field.rs",
     "src/servers/src/http/test_helpers.rs",
-    # enterprise
+    # enterprise: Apache-2.0 header is NOT applied to these. They are governed by
+    # the GreptimeDB Enterprise License and checked via `licenserc-enterprise.toml`.
+    # Keep this list in sync with that file's `includes`.
     "src/common/meta/src/rpc/ddl/trigger.rs",
     "src/operator/src/expr_helper/trigger.rs",
     "src/sql/src/statements/alter/trigger.rs",

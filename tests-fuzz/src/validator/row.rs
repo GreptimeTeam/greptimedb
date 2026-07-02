@@ -161,6 +161,13 @@ pub async fn count_values(db: &MySqlPool, sql: &str) -> Result<ValueCount> {
         .context(error::ExecuteQuerySnafu { sql })
 }
 
+pub async fn count_values_all(db: &MySqlPool, sql: &str) -> Result<Vec<ValueCount>> {
+    sqlx::query_as::<_, ValueCount>(sql)
+        .fetch_all(db)
+        .await
+        .context(error::ExecuteQuerySnafu { sql })
+}
+
 /// Returns all [RowEntry] of the `table_name`.
 pub async fn fetch_values(db: &MySqlPool, sql: &str) -> Result<Vec<MySqlRow>> {
     sqlx::query(sql)

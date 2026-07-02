@@ -243,6 +243,7 @@ mod tests {
             ssts: Arc::new(ssts),
             options: RegionOptions {
                 ttl: ttl.map(|t| t.into()),
+                auto_flush_interval: None,
                 compaction: Default::default(),
                 compaction_override: false,
                 storage: None,

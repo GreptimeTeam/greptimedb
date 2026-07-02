@@ -227,7 +227,13 @@ We invite you to engage and contribute!
 
 ## License
 
-GreptimeDB is licensed under the [Apache License 2.0](https://apache.org/licenses/LICENSE-2.0.txt).
+GreptimeDB is an open-core project. Its core is licensed under the
+[Apache License 2.0](https://apache.org/licenses/LICENSE-2.0.txt).
+
+A small set of peripheral, enterprise-only features are gated behind the
+`enterprise` Cargo feature (not built by default) and are governed by the
+separate [GreptimeDB Enterprise License](LICENSE-ENTERPRISE). Source files under
+that license carry an explicit Enterprise License header.
 
 ## Commercial Support
 

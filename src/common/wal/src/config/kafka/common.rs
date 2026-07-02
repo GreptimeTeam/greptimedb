@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::fmt;
 use std::io::Cursor;
 use std::sync::Arc;
 use std::time::Duration;
@@ -38,12 +39,20 @@ pub const DEFAULT_BACKOFF_CONFIG: BackoffConfig = BackoffConfig {
 
 /// Default interval for auto WAL pruning.
 pub const DEFAULT_AUTO_PRUNE_INTERVAL: Duration = Duration::from_mins(30);
+/// Default mode for auto WAL pruning.
+pub const DEFAULT_AUTO_PRUNE_LOGICAL_DELETE: bool = false;
 /// Default limit for concurrent auto pruning tasks.
 pub const DEFAULT_AUTO_PRUNE_PARALLELISM: usize = 10;
 /// Default size of WAL to trigger flush.
 pub const DEFAULT_FLUSH_TRIGGER_SIZE: ReadableSize = ReadableSize::mb(512);
 /// Default checkpoint trigger size.
 pub const DEFAULT_CHECKPOINT_TRIGGER_SIZE: ReadableSize = ReadableSize::mb(128);
+/// Default interval for remote WAL region flush trigger.
+pub const DEFAULT_REGION_FLUSH_TRIGGER_INTERVAL: Duration = Duration::from_secs(60);
+/// Default interval to periodically persist remote WAL checkpoints.
+pub const DEFAULT_PERIODIC_CHECKPOINT_PERSIST_INTERVAL: Duration = Duration::from_secs(60 * 60);
+/// Default interval for fetching latest Kafka topic offsets.
+pub const DEFAULT_TOPIC_LATEST_OFFSET_FETCH_INTERVAL: Duration = Duration::from_secs(60);
 
 use crate::error::{self, Result};
 use crate::{BROKER_ENDPOINT, TOPIC_NAME_PREFIX, TopicSelectorType};
@@ -55,7 +64,7 @@ pub struct KafkaClientSasl {
     pub config: KafkaClientSaslConfig,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "SCREAMING-KEBAB-CASE")]
 pub enum KafkaClientSaslConfig {
     Plain {
@@ -72,6 +81,28 @@ pub enum KafkaClientSaslConfig {
         username: String,
         password: String,
     },
+}
+
+impl fmt::Debug for KafkaClientSaslConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            KafkaClientSaslConfig::Plain { username, .. } => f
+                .debug_struct("Plain")
+                .field("username", username)
+                .field("password", &"<REDACTED>")
+                .finish(),
+            KafkaClientSaslConfig::ScramSha256 { username, .. } => f
+                .debug_struct("ScramSha256")
+                .field("username", username)
+                .field("password", &"<REDACTED>")
+                .finish(),
+            KafkaClientSaslConfig::ScramSha512 { username, .. } => f
+                .debug_struct("ScramSha512")
+                .field("username", username)
+                .field("password", &"<REDACTED>")
+                .finish(),
+        }
+    }
 }
 
 impl KafkaClientSaslConfig {

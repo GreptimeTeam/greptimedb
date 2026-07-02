@@ -238,7 +238,7 @@ impl SeriesScan {
         };
         let region_id = distributor.stream_ctx.input.mapper.metadata().region_id;
         let span = tracing::info_span!("SeriesScan::distributor", region_id = %region_id);
-        common_runtime::spawn_global(
+        common_runtime::spawn_query(
             async move {
                 distributor.execute().await;
             }
@@ -381,6 +381,10 @@ impl RegionScanner for SeriesScan {
         self.properties.set_logical_region(logical_region);
     }
 
+    fn set_query_load_region_id(&mut self, region_id: store_api::storage::RegionId) {
+        self.properties.set_query_load_region_id(region_id);
+    }
+
     fn snapshot_sequence(&self) -> Option<u64> {
         self.stream_ctx.input.snapshot_sequence
     }
@@ -504,7 +508,7 @@ impl SeriesDistributor {
                 let partition_pruner = partition_pruner.clone();
                 let file_scan_semaphore = self.range_semaphore.clone();
                 let merge_semaphore = self.range_semaphore.clone();
-                tasks.push(common_runtime::spawn_global(async move {
+                tasks.push(common_runtime::spawn_query(async move {
                     SeqScan::build_flat_partition_range_read(
                         &stream_ctx,
                         &part_range,

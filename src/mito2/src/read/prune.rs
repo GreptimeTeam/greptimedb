@@ -190,7 +190,7 @@ impl FlatPruneReader {
         self.metrics.clone()
     }
 
-    pub(crate) async fn next_batch(&mut self) -> Result<Option<RecordBatch>> {
+    pub async fn next_batch(&mut self) -> Result<Option<RecordBatch>> {
         loop {
             let start = std::time::Instant::now();
             let batch = self.source.next_batch().await?;

@@ -27,7 +27,7 @@ use snafu::{OptionExt, ResultExt};
 
 use crate::Tool;
 use crate::common::ObjectStoreConfig;
-use crate::data::export_v2::coordinator::export_data;
+use crate::data::export_v2::coordinator::{ExportDataOptions, export_data};
 use crate::data::export_v2::error::{
     ChunkTimeWindowRequiresBoundsSnafu, DatabaseSnafu, EmptyResultSnafu, IoSnafu,
     ManifestVersionMismatchSnafu, Result, ResumeConfigMismatchSnafu, SchemaOnlyArgsNotAllowedSnafu,
@@ -39,6 +39,7 @@ use crate::data::export_v2::manifest::{
 };
 use crate::data::export_v2::schema::{DDL_DIR, SCHEMA_DIR, SCHEMAS_FILE};
 use crate::data::path::{data_dir_for_schema_chunk, ddl_path_for_schema};
+use crate::data::progress::{ProgressMode, build_progress_reporter};
 use crate::data::snapshot_storage::{
     OpenDalStorage, SnapshotStorage, validate_snapshot_uri, validate_uri,
 };
@@ -296,6 +297,10 @@ pub struct ExportCreateCommand {
     #[clap(long, default_value = "1")]
     parallelism: usize,
 
+    /// Number of export chunks to run concurrently on the client (1..=64).
+    #[clap(long, default_value = "1", value_parser = parse_chunk_parallelism)]
+    chunk_parallelism: usize,
+
     /// Basic authentication (user:password).
     #[clap(long)]
     auth_basic: Option<String>,
@@ -316,6 +321,10 @@ pub struct ExportCreateCommand {
     /// When set and `--proxy` is not provided, this explicitly disables system proxy.
     #[clap(long)]
     no_proxy: bool,
+
+    /// Progress reporting mode.
+    #[clap(long, value_enum, default_value_t = ProgressMode::Auto)]
+    progress: ProgressMode,
 
     /// Object store configuration for remote storage backends.
     #[clap(flatten)]
@@ -350,6 +359,9 @@ impl ExportCreateCommand {
             }
             if self.parallelism != 1 {
                 invalid_args.push("--parallelism");
+            }
+            if self.chunk_parallelism != 1 {
+                invalid_args.push("--chunk-parallelism");
             }
             if !invalid_args.is_empty() {
                 return SchemaOnlyArgsNotAllowedSnafu {
@@ -391,6 +403,8 @@ impl ExportCreateCommand {
                 time_range,
                 chunk_time_window: self.chunk_time_window,
                 parallelism: self.parallelism,
+                chunk_parallelism: self.chunk_parallelism,
+                progress: self.progress,
                 snapshot_uri: self.to.clone(),
                 storage_config: self.storage.clone(),
             },
@@ -416,8 +430,21 @@ struct ExportConfig {
     time_range: TimeRange,
     chunk_time_window: Option<Duration>,
     parallelism: usize,
+    chunk_parallelism: usize,
+    progress: ProgressMode,
     snapshot_uri: String,
     storage_config: ObjectStoreConfig,
+}
+
+fn parse_chunk_parallelism(value: &str) -> std::result::Result<usize, String> {
+    let parallelism = value
+        .parse::<usize>()
+        .map_err(|_| "chunk parallelism must be an integer between 1 and 64".to_string())?;
+    if (1..=64).contains(&parallelism) {
+        Ok(parallelism)
+    } else {
+        Err("chunk parallelism must be between 1 and 64".to_string())
+    }
 }
 
 #[async_trait]
@@ -467,13 +494,18 @@ impl ExportCreate {
                     return Ok(());
                 }
 
+                let progress = build_progress_reporter(self.config.progress);
                 export_data(
                     self.storage.as_ref(),
                     &self.database_client,
-                    &self.config.snapshot_uri,
-                    &self.config.storage_config,
                     &mut manifest,
-                    self.config.parallelism,
+                    ExportDataOptions {
+                        snapshot_uri: &self.config.snapshot_uri,
+                        storage_config: &self.config.storage_config,
+                        parallelism: self.config.parallelism,
+                        chunk_parallelism: self.config.chunk_parallelism,
+                    },
+                    progress.as_ref(),
                 )
                 .await?;
                 return Ok(());
@@ -524,13 +556,18 @@ impl ExportCreate {
         info!("Snapshot created: {}", manifest.snapshot_id);
 
         if !self.config.schema_only {
+            let progress = build_progress_reporter(self.config.progress);
             export_data(
                 self.storage.as_ref(),
                 &self.database_client,
-                &self.config.snapshot_uri,
-                &self.config.storage_config,
                 &mut manifest,
-                self.config.parallelism,
+                ExportDataOptions {
+                    snapshot_uri: &self.config.snapshot_uri,
+                    storage_config: &self.config.storage_config,
+                    parallelism: self.config.parallelism,
+                    chunk_parallelism: self.config.chunk_parallelism,
+                },
+                progress.as_ref(),
             )
             .await?;
         }
@@ -1076,10 +1113,20 @@ async fn verify_snapshot(storage: &OpenDalStorage) -> Result<VerifyReport> {
                 chunk_count
             ));
         }
-        let data_files = storage.list_files_recursive("data/").await?;
-        // Report the lexicographically smallest path so the message is stable
-        // regardless of listing order across backends.
-        if let Some(path) = data_files.iter().min() {
+        let mut first_data_file: Option<String> = None;
+        storage
+            .for_each_file_recursive("data/", |path| {
+                let should_update = match &first_data_file {
+                    Some(current) => path.as_str() < current.as_str(),
+                    None => true,
+                };
+                if should_update {
+                    first_data_file = Some(path);
+                }
+                Ok(())
+            })
+            .await?;
+        if let Some(path) = first_data_file {
             report.push_error(format!(
                 "Schema-only snapshot should not contain data files (found '{}')",
                 path
@@ -1130,11 +1177,12 @@ struct VerifyPlan {
     problems: Vec<VerifyProblem>,
 }
 
-/// Actual data files discovered under `data/` (the only object-store IO in
-/// chunk/data-file verification).
+/// Data-file scan result. Claimed files are kept only when they are relevant to
+/// manifest verification; unexpected files are kept separately for reporting.
 #[derive(Debug)]
 struct VerifyDataScan {
-    existing_data_files: HashSet<String>,
+    existing_claimed_data_files: HashSet<String>,
+    unexpected_data_files: Vec<String>,
 }
 
 /// Result of reconciling the manifest plan against the storage scan.
@@ -1150,8 +1198,8 @@ async fn verify_chunks_and_data_files(
     report: &mut VerifyReport,
 ) -> Result<()> {
     let plan = build_verify_plan(&report.manifest);
-    let scan = scan_data_files(storage).await?;
-    let outcome = reconcile_plan_with_scan(plan, &scan);
+    let scan = scan_data_files(storage, &plan).await?;
+    let outcome = reconcile_plan_with_scan(plan, scan);
 
     report.data_files_total = outcome.data_files_total;
     report.data_files_verified = outcome.data_files_verified;
@@ -1245,17 +1293,25 @@ fn build_verify_plan(manifest: &Manifest) -> VerifyPlan {
     plan
 }
 
-/// Lists all data files under `data/`. This is the only object-store IO in
-/// chunk/data-file verification.
-async fn scan_data_files(storage: &OpenDalStorage) -> Result<VerifyDataScan> {
-    let existing_data_files = storage
-        .list_files_recursive("data/")
-        .await?
-        .into_iter()
-        .collect();
-    Ok(VerifyDataScan {
-        existing_data_files,
-    })
+/// Streams data files under `data/` and classifies each path against the plan.
+async fn scan_data_files(storage: &OpenDalStorage, plan: &VerifyPlan) -> Result<VerifyDataScan> {
+    let mut scan = VerifyDataScan {
+        existing_claimed_data_files: HashSet::new(),
+        unexpected_data_files: Vec::new(),
+    };
+
+    storage
+        .for_each_file_recursive("data/", |path| {
+            if plan.claimed_data_files.contains(&path) {
+                scan.existing_claimed_data_files.insert(path);
+            } else {
+                scan.unexpected_data_files.push(path);
+            }
+            Ok(())
+        })
+        .await?;
+
+    Ok(scan)
 }
 
 /// Reconciles the manifest plan against the storage scan. Pure; performs no IO.
@@ -1263,12 +1319,12 @@ async fn scan_data_files(storage: &OpenDalStorage) -> Result<VerifyDataScan> {
 /// Emits missing-file problems for expected files absent from storage and
 /// unexpected-file problems for storage files no chunk claims. Unexpected files
 /// are sorted by path so output is deterministic regardless of listing order.
-fn reconcile_plan_with_scan(plan: VerifyPlan, scan: &VerifyDataScan) -> VerifyOutcome {
+fn reconcile_plan_with_scan(plan: VerifyPlan, mut scan: VerifyDataScan) -> VerifyOutcome {
     let mut problems = plan.problems;
     let mut data_files_verified = 0;
 
     for file in &plan.files_to_check {
-        if scan.existing_data_files.contains(&file.path) {
+        if scan.existing_claimed_data_files.contains(&file.path) {
             data_files_verified += 1;
         } else {
             problems.push(VerifyProblem {
@@ -1278,13 +1334,8 @@ fn reconcile_plan_with_scan(plan: VerifyPlan, scan: &VerifyDataScan) -> VerifyOu
         }
     }
 
-    let mut orphans: Vec<&String> = scan
-        .existing_data_files
-        .iter()
-        .filter(|path| !plan.claimed_data_files.contains(*path))
-        .collect();
-    orphans.sort();
-    for path in orphans {
+    scan.unexpected_data_files.sort();
+    for path in scan.unexpected_data_files {
         problems.push(VerifyProblem {
             severity: VerifySeverity::Error,
             message: format!("Unexpected data file '{}' is not listed in manifest", path),
@@ -1543,6 +1594,8 @@ mod tests {
             "csv",
             "--parallelism",
             "2",
+            "--chunk-parallelism",
+            "2",
         ]);
 
         let error = cmd.build().await.err().unwrap().to_string();
@@ -1553,6 +1606,113 @@ mod tests {
         assert!(error.contains("--chunk-time-window"));
         assert!(error.contains("--format"));
         assert!(error.contains("--parallelism"));
+        assert!(error.contains("--chunk-parallelism"));
+    }
+
+    #[test]
+    fn test_chunk_parallelism_defaults_to_one() {
+        let cmd = ExportCreateCommand::parse_from([
+            "export-v2-create",
+            "--addr",
+            "127.0.0.1:4000",
+            "--to",
+            "file:///tmp/export-v2-test",
+        ]);
+
+        assert_eq!(1, cmd.chunk_parallelism);
+    }
+
+    #[test]
+    fn test_progress_mode_defaults_to_auto() {
+        let cmd = ExportCreateCommand::parse_from([
+            "export-v2-create",
+            "--addr",
+            "127.0.0.1:4000",
+            "--to",
+            "file:///tmp/export-v2-test",
+        ]);
+
+        assert_eq!(ProgressMode::Auto, cmd.progress);
+    }
+
+    #[test]
+    fn test_progress_mode_parses_explicit_values() {
+        for (value, expected) in [
+            ("auto", ProgressMode::Auto),
+            ("always", ProgressMode::Always),
+            ("never", ProgressMode::Never),
+        ] {
+            let cmd = ExportCreateCommand::parse_from([
+                "export-v2-create",
+                "--addr",
+                "127.0.0.1:4000",
+                "--to",
+                "file:///tmp/export-v2-test",
+                "--progress",
+                value,
+            ]);
+
+            assert_eq!(expected, cmd.progress);
+        }
+    }
+
+    #[test]
+    fn test_progress_mode_rejects_unknown_value() {
+        assert!(
+            ExportCreateCommand::try_parse_from([
+                "export-v2-create",
+                "--addr",
+                "127.0.0.1:4000",
+                "--to",
+                "file:///tmp/export-v2-test",
+                "--progress",
+                "bogus",
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn test_chunk_parallelism_parses_valid_value() {
+        let cmd = ExportCreateCommand::parse_from([
+            "export-v2-create",
+            "--addr",
+            "127.0.0.1:4000",
+            "--to",
+            "file:///tmp/export-v2-test",
+            "--chunk-parallelism",
+            "64",
+        ]);
+
+        assert_eq!(64, cmd.chunk_parallelism);
+    }
+
+    #[test]
+    fn test_chunk_parallelism_rejects_out_of_range_values() {
+        assert!(
+            ExportCreateCommand::try_parse_from([
+                "export-v2-create",
+                "--addr",
+                "127.0.0.1:4000",
+                "--to",
+                "file:///tmp/export-v2-test",
+                "--chunk-parallelism",
+                "0",
+            ])
+            .is_err()
+        );
+        assert!(
+            ExportCreateCommand::try_parse_from([
+                "export-v2-create",
+                "--addr",
+                "127.0.0.1:4000",
+                "--to",
+                "file:///tmp/export-v2-test",
+                "--chunk-parallelism",
+                "65",
+            ])
+            .is_err()
+        );
     }
 
     #[test]
@@ -1588,6 +1748,8 @@ mod tests {
             time_range: TimeRange::unbounded(),
             chunk_time_window: None,
             parallelism: 1,
+            chunk_parallelism: 1,
+            progress: ProgressMode::Auto,
             snapshot_uri: "file:///tmp/snapshot".to_string(),
             storage_config: ObjectStoreConfig::default(),
         };
@@ -1623,6 +1785,8 @@ mod tests {
             time_range: TimeRange::unbounded(),
             chunk_time_window: None,
             parallelism: 1,
+            chunk_parallelism: 1,
+            progress: ProgressMode::Auto,
             snapshot_uri: "file:///tmp/snapshot".to_string(),
             storage_config: ObjectStoreConfig::default(),
         };
@@ -1653,6 +1817,8 @@ mod tests {
             time_range,
             chunk_time_window: Some(Duration::from_secs(3600)),
             parallelism: 1,
+            chunk_parallelism: 1,
+            progress: ProgressMode::Auto,
             snapshot_uri: "file:///tmp/snapshot".to_string(),
             storage_config: ObjectStoreConfig::default(),
         };
@@ -1684,6 +1850,8 @@ mod tests {
             time_range: TimeRange::unbounded(),
             chunk_time_window: None,
             parallelism: 1,
+            chunk_parallelism: 1,
+            progress: ProgressMode::Auto,
             snapshot_uri: "file:///tmp/snapshot".to_string(),
             storage_config: ObjectStoreConfig::default(),
         };
@@ -1717,6 +1885,8 @@ mod tests {
             time_range: TimeRange::new(Some(start), Some(start)),
             chunk_time_window: None,
             parallelism: 1,
+            chunk_parallelism: 1,
+            progress: ProgressMode::Auto,
             snapshot_uri: "file:///tmp/snapshot".to_string(),
             storage_config: ObjectStoreConfig::default(),
         };

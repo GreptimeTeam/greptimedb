@@ -27,6 +27,7 @@ use common_meta::peer::Peer;
 use common_meta::rpc::router::{Region, RegionRoute};
 use common_meta::sequence::SequenceBuilder;
 use common_meta::test_util::new_ddl_context_with_kv_backend;
+use common_meta::wal_provider::RegionWalOptions;
 use common_procedure::{
     Context as ProcedureContext, ContextProvider, ProcedureId, ProcedureState, Status,
 };
@@ -121,7 +122,7 @@ impl TestingEnv {
         &self,
         table_id: TableId,
         region_routes: Vec<RegionRoute>,
-        region_wal_options: HashMap<RegionNumber, String>,
+        region_wal_options: RegionWalOptions,
     ) {
         self.table_metadata_manager
             .create_table_metadata(
@@ -137,7 +138,7 @@ impl TestingEnv {
         &self,
         table_id: TableId,
         region_routes: Vec<RegionRoute>,
-        region_wal_options: HashMap<RegionNumber, String>,
+        region_wal_options: RegionWalOptions,
     ) {
         let mut table_info = new_test_table_info_with_name(table_id, "test_table");
         table_info.meta.column_ids = vec![0, 1, 2];
@@ -163,11 +164,8 @@ pub fn range_expr(col_name: &str, start: i64, end: i64) -> PartitionExpr {
         .and(col(col_name).lt(Value::Int64(end)))
 }
 
-pub fn test_region_wal_options(region_numbers: &[RegionNumber]) -> HashMap<RegionNumber, String> {
-    let wal_options = serde_json::to_string(&WalOptions::Kafka(KafkaWalOptions {
-        topic: "test_topic".to_string(),
-    }))
-    .unwrap();
+pub fn test_region_wal_options(region_numbers: &[RegionNumber]) -> RegionWalOptions {
+    let wal_options = WalOptions::Kafka(KafkaWalOptions::new("test_topic".to_string()));
 
     region_numbers
         .iter()

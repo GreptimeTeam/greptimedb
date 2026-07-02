@@ -313,6 +313,9 @@ pub struct ScannerProperties {
 
     /// Whether the scanner is scanning a logical region.
     logical_region: bool,
+
+    /// Region id that should receive query-load metrics for this scanner.
+    query_load_region_id: Option<RegionId>,
 }
 
 impl ScannerProperties {
@@ -337,6 +340,7 @@ impl ScannerProperties {
             distinguish_partition_range: false,
             target_partitions: 0,
             logical_region: false,
+            query_load_region_id: None,
         }
     }
 
@@ -383,6 +387,16 @@ impl ScannerProperties {
     /// Sets whether the scanner is reading a logical region.
     pub fn set_logical_region(&mut self, logical_region: bool) {
         self.logical_region = logical_region;
+    }
+
+    /// Returns the region id that should receive query-load metrics.
+    pub fn query_load_region_id(&self) -> Option<RegionId> {
+        self.query_load_region_id
+    }
+
+    /// Sets the region id that should receive query-load metrics.
+    pub fn set_query_load_region_id(&mut self, region_id: RegionId) {
+        self.query_load_region_id = Some(region_id);
     }
 }
 
@@ -470,6 +484,9 @@ pub trait RegionScanner: Debug + DisplayAs + Send {
 
     /// Sets whether the scanner is reading a logical region.
     fn set_logical_region(&mut self, logical_region: bool);
+
+    /// Sets the region id that should receive query-load metrics.
+    fn set_query_load_region_id(&mut self, region_id: RegionId);
 
     fn snapshot_sequence(&self) -> Option<SequenceNumber> {
         None
@@ -1042,6 +1059,10 @@ impl RegionScanner for SinglePartitionScanner {
 
     fn set_logical_region(&mut self, logical_region: bool) {
         self.properties.set_logical_region(logical_region);
+    }
+
+    fn set_query_load_region_id(&mut self, region_id: RegionId) {
+        self.properties.set_query_load_region_id(region_id);
     }
 
     fn snapshot_sequence(&self) -> Option<SequenceNumber> {

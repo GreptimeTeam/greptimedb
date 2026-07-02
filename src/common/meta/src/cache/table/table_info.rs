@@ -20,7 +20,7 @@ use snafu::OptionExt;
 use store_api::storage::TableId;
 use table::metadata::TableInfo;
 
-use crate::cache::{CacheContainer, Initializer};
+use crate::cache::{CacheContainer, InitStrategy, Initializer};
 use crate::error;
 use crate::error::Result;
 use crate::instruction::CacheIdent;
@@ -41,7 +41,14 @@ pub fn new_table_info_cache(
     let table_info_manager = Arc::new(TableInfoManager::new(kv_backend));
     let init = init_factory(table_info_manager);
 
-    CacheContainer::new(name, cache, Box::new(invalidator), init, filter)
+    CacheContainer::with_strategy(
+        name,
+        cache,
+        Box::new(invalidator),
+        init,
+        filter,
+        InitStrategy::VersionChecked,
+    )
 }
 
 fn init_factory(table_info_manager: TableInfoManagerRef) -> Initializer<TableId, Arc<TableInfo>> {

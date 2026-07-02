@@ -497,6 +497,7 @@ impl MetricEngineInner {
             table_dir: request.table_dir.clone(),
             path_type: PathType::Metadata,
             partition_expr_json: Some("".to_string()),
+            requirements: request.requirements,
         }
     }
 
@@ -654,7 +655,7 @@ mod test {
     use common_meta::ddl::utils::{parse_column_metadatas, parse_manifest_infos_from_extensions};
     use common_query::prelude::{greptime_timestamp, greptime_value};
     use store_api::metric_engine_consts::{METRIC_ENGINE_NAME, PHYSICAL_TABLE_METADATA_KEY};
-    use store_api::region_request::BatchRegionDdlRequest;
+    use store_api::region_request::{BatchRegionDdlRequest, RegionRequirements};
 
     use super::*;
     use crate::config::EngineConfig;
@@ -699,6 +700,7 @@ mod test {
             primary_key: vec![],
             options: HashMap::new(),
             partition_expr_json: Some("".to_string()),
+            requirements: RegionRequirements::object_storage(),
         };
         let result = MetricEngineInner::verify_region_create_request(&request);
         assert!(result.is_err());
@@ -748,6 +750,7 @@ mod test {
                 .into_iter()
                 .collect(),
             partition_expr_json: Some("".to_string()),
+            requirements: Default::default(),
         };
         MetricEngineInner::verify_region_create_request(&request).unwrap();
 
@@ -790,6 +793,7 @@ mod test {
                 .into_iter()
                 .collect(),
             partition_expr_json: Some("".to_string()),
+            requirements: Default::default(),
         };
         MetricEngineInner::verify_region_create_request(&request).unwrap();
     }
@@ -823,6 +827,7 @@ mod test {
             primary_key: vec![],
             options: HashMap::new(),
             partition_expr_json: Some("".to_string()),
+            requirements: Default::default(),
         };
         MetricEngineInner::verify_region_create_request(&request).unwrap_err();
 
@@ -876,6 +881,7 @@ mod test {
             table_dir: "/test_dir".to_string(),
             path_type: PathType::Bare,
             partition_expr_json: Some("".to_string()),
+            requirements: RegionRequirements::object_storage(),
         };
 
         // set up
@@ -893,6 +899,10 @@ mod test {
             vec![ReservedColumnId::table_id(), ReservedColumnId::tsid(), 1]
         );
         assert!(data_region_request.options.contains_key("ttl"));
+        assert_eq!(
+            data_region_request.requirements,
+            RegionRequirements::object_storage()
+        );
 
         // check create metadata region request
         let metadata_region_request = engine_inner.create_request_for_metadata_region(&request);
@@ -903,6 +913,10 @@ mod test {
             "forever"
         );
         assert!(!metadata_region_request.options.contains_key("skip_wal"));
+        assert_eq!(
+            metadata_region_request.requirements,
+            RegionRequirements::object_storage()
+        );
     }
 
     #[tokio::test]
@@ -951,6 +965,7 @@ mod test {
             table_dir: "/test_dir".to_string(),
             path_type: PathType::Bare,
             partition_expr_json: Some("".to_string()),
+            requirements: Default::default(),
         };
 
         let env = TestEnv::new().await;

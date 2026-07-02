@@ -948,6 +948,10 @@ mod tests {
             unimplemented!()
         }
 
+        async fn do_analyze_stream_query(&self, _: &str, _: QueryContextRef) -> Result<Output> {
+            unimplemented!()
+        }
+
         async fn do_promql_query(&self, _: &PromQuery, _: QueryContextRef) -> Vec<Result<Output>> {
             unimplemented!()
         }

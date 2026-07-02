@@ -14,7 +14,7 @@
 
 //! Scans a region according to the scan request.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::num::NonZeroU64;
 use std::sync::Arc;
@@ -28,10 +28,14 @@ use common_telemetry::tracing::Instrument;
 use common_telemetry::{debug, error, tracing, warn};
 use common_time::range::TimestampRange;
 use datafusion::physical_plan::expressions::DynamicFilterPhysicalExpr;
-use datafusion_common::Column;
+use datafusion_common::pruning::PruningStatistics;
+use datafusion_common::{Column, ScalarValue};
 use datafusion_expr::Expr;
 use datafusion_expr::utils::expr_to_columns;
-use datatypes::schema::ext::ArrowSchemaExt;
+use datatypes::arrow::array::{ArrayRef, BooleanArray, UInt64Array};
+use datatypes::extension::json::is_structured_json_field;
+use datatypes::types::json_type::JsonNativeType;
+use datatypes::value::timestamp_to_scalar_value;
 use futures::StreamExt;
 use itertools::Itertools;
 use partition::expr::PartitionExpr;
@@ -40,7 +44,7 @@ use snafu::ResultExt;
 use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 use store_api::region_engine::{PartitionRange, RegionScannerRef};
 use store_api::storage::{
-    RegionId, ScanRequest, SequenceNumber, SequenceRange, TimeSeriesDistribution,
+    NestedPath, RegionId, ScanRequest, SequenceNumber, SequenceRange, TimeSeriesDistribution,
     TimeSeriesRowSelector,
 };
 use table::predicate::{Predicate, build_time_range_predicate, extract_time_range_from_expr};
@@ -60,7 +64,8 @@ use crate::read::flat_projection::FlatProjectionMapper;
 use crate::read::range::{FileRangeBuilder, MemRangeBuilder, RangeMeta, RowGroupIndex};
 use crate::read::range_cache::{ScanRequestFingerprint, implied_time_range_from_exprs};
 use crate::read::read_columns::{
-    ReadColumns, merge, read_columns_from_predicate, read_columns_from_projection,
+    ReadColumns, merge, merge_nested_paths, read_columns_from_predicate,
+    read_columns_from_projection,
 };
 use crate::read::seq_scan::SeqScan;
 use crate::read::series_scan::SeriesScan;
@@ -404,7 +409,7 @@ impl ScanRegion {
         let time_range = self.build_time_range_predicate();
         let predicate = PredicateGroup::new(&self.version.metadata, &self.request.filters)?;
 
-        let read_cols = match &self.request.projection_input {
+        let mut read_cols = match &self.request.projection_input {
             Some(p) => {
                 // Read columns include the pushed-down projection and columns
                 // resolved from the predicate.
@@ -423,6 +428,24 @@ impl ScanRegion {
                 ReadColumns::from_deduped_column_ids(read_col_ids)
             }
         };
+        // Only narrow read columns and pass JSON type hints for structured JSON (JSON2)
+        // columns. Legacy JSONB columns have JSON extension metadata but their physical
+        // Arrow type is Binary, not Struct, so they must not enter structured JSON paths.
+        let has_structured_json = self
+            .version
+            .metadata
+            .schema
+            .arrow_schema()
+            .fields()
+            .iter()
+            .any(is_structured_json_field);
+        if has_structured_json {
+            narrow_read_columns_by_json_type_hint(
+                &mut read_cols,
+                &self.request.json_type_hint,
+                &self.version.metadata,
+            );
+        }
         let read_col_ids = read_cols.column_ids();
 
         // The mapper always computes projected column ids as the schema of SSTs may change.
@@ -431,12 +454,7 @@ impl ScanRegion {
             .projection_indices()
             .map(|x| x.to_vec())
             .unwrap_or_else(|| (0..self.version.metadata.column_metadatas.len()).collect());
-        let json_type_hint = self
-            .version
-            .metadata
-            .schema
-            .arrow_schema()
-            .has_json_extension_field()
+        let json_type_hint = has_structured_json
             .then_some(&self.request.json_type_hint)
             .inspect(|json_type_hint| {
                 debug!(
@@ -1038,7 +1056,7 @@ impl ScanInput {
         ranges
     }
 
-    fn predicate_for_file(&self, file: &FileHandle) -> Option<Predicate> {
+    pub(crate) fn predicate_for_file(&self, file: &FileHandle) -> Option<Predicate> {
         if self.should_skip_region_partition(file) {
             self.predicate.predicate_without_region().cloned()
         } else {
@@ -1056,7 +1074,56 @@ impl ScanInput {
         }
     }
 
+    /// Tries to build file-level pruning statistics using only the [FileHandle]'s manifest-level
+    /// time range, without reading any parquet metadata.
+    ///
+    /// Returns `None` if timestamp unit conversion overflows (conservative: keep the file).
+    fn try_file_level_pruning_stats(&self, file: &FileHandle) -> Option<FileLevelPruningStats> {
+        let (ts_min, ts_max) = file.time_range();
+        let time_index = self.mapper.metadata().time_index_column();
+        let time_index_unit = time_index.column_schema.data_type.as_timestamp()?.unit();
+
+        // Convert file timestamps to the time index column's unit. Use `convert_to_ceil` for
+        // the upper bound to avoid accidentally shrinking the manifest range.
+        let min_ts = ts_min.convert_to(time_index_unit)?;
+        let max_ts = ts_max.convert_to_ceil(time_index_unit)?;
+
+        Some(FileLevelPruningStats {
+            min_scalar: timestamp_to_scalar_value(time_index_unit, Some(min_ts.value())),
+            max_scalar: timestamp_to_scalar_value(time_index_unit, Some(max_ts.value())),
+            time_index_col_name: time_index.column_schema.name.clone(),
+        })
+    }
+
+    /// Checks whether a file can be definitively pruned using only its manifest-level
+    /// time range and the current predicate, without reading any parquet metadata.
+    ///
+    /// Returns `true` if [PruningStatistics] proves the file cannot contain matching rows.
+    #[inline]
+    pub(crate) fn can_manifest_prune_file(&self, file: &FileHandle) -> bool {
+        let predicate = self.predicate_for_file(file);
+        self.manifest_prunes_file(file, predicate.as_ref())
+    }
+
+    fn manifest_prunes_file(&self, file: &FileHandle, predicate: Option<&Predicate>) -> bool {
+        if let Some(pred) = predicate
+            && !pred.is_empty()
+            && let Some(file_level_stats) = self.try_file_level_pruning_stats(file)
+        {
+            let pruning_results = pred.prune_with_stats(
+                &file_level_stats,
+                self.mapper.metadata().schema.arrow_schema(),
+            );
+            pruning_results.first() == Some(&false)
+        } else {
+            false
+        }
+    }
+
     /// Prunes a file to scan and returns the builder to build readers.
+    ///
+    /// This is the public entry point used by direct tests and non-pruner callers.
+    /// It performs its own manifest-level pruning check internally.
     #[tracing::instrument(
         skip_all,
         fields(
@@ -1071,6 +1138,31 @@ impl ScanInput {
         reader_metrics: &mut ReaderMetrics,
     ) -> Result<FileRangeBuilder> {
         let predicate = self.predicate_for_file(file);
+
+        // Early file-level pruning using manifest time range before any parquet metadata access.
+        if self.manifest_prunes_file(file, predicate.as_ref()) {
+            reader_metrics.filter_metrics.files_time_range_pruned += 1;
+            return Ok(FileRangeBuilder::default());
+        }
+
+        self.prune_file_after_manifest_check(file, pre_filter_mode, predicate, reader_metrics)
+            .await
+    }
+
+    /// Second half of `prune_file` — performs the actual parquet metadata /
+    /// reader setup. Callers that already performed manifest-level pruning
+    /// (e.g. the `Pruner` via its shared `manifest_pruned_files` cache) should
+    /// call this directly to avoid a redundant manifest check.
+    ///
+    /// `predicate` is the result of `self.predicate_for_file(file)` computed
+    /// externally so the caller can reuse it if needed.
+    pub(crate) async fn prune_file_after_manifest_check(
+        &self,
+        file: &FileHandle,
+        pre_filter_mode: PreFilterMode,
+        predicate: Option<Predicate>,
+        reader_metrics: &mut ReaderMetrics,
+    ) -> Result<FileRangeBuilder> {
         let may_build_selective_row_selection = predicate.is_some();
         let decode_pk_values = !self.compaction
             && self
@@ -1190,7 +1282,7 @@ impl ScanInput {
             region_id = %region_id,
             stream_kind = "flat"
         );
-        common_runtime::spawn_global(
+        common_runtime::spawn_query(
             async move {
                 loop {
                     // We release the permit before sending result to avoid the task waiting on
@@ -1290,6 +1382,57 @@ impl ScanInput {
     }
 }
 
+/// Lightweight [PruningStatistics] that only uses the file-level time range from manifest
+/// metadata, avoiding any parquet metadata reads. Used for early file-level pruning before
+/// accessing row-group-level statistics.
+pub(crate) struct FileLevelPruningStats {
+    /// Scalar value for the file's minimum timestamp in the time index column's unit.
+    pub(crate) min_scalar: ScalarValue,
+    /// Scalar value for the file's maximum timestamp in the time index column's unit.
+    pub(crate) max_scalar: ScalarValue,
+    /// Name of the time index column.
+    pub(crate) time_index_col_name: String,
+}
+
+impl PruningStatistics for FileLevelPruningStats {
+    fn min_values(&self, column: &Column) -> Option<ArrayRef> {
+        if column.name == self.time_index_col_name {
+            ScalarValue::iter_to_array(std::iter::once(self.min_scalar.clone())).ok()
+        } else {
+            None
+        }
+    }
+
+    fn max_values(&self, column: &Column) -> Option<ArrayRef> {
+        if column.name == self.time_index_col_name {
+            ScalarValue::iter_to_array(std::iter::once(self.max_scalar.clone())).ok()
+        } else {
+            None
+        }
+    }
+
+    fn num_containers(&self) -> usize {
+        1
+    }
+
+    fn null_counts(&self, column: &Column) -> Option<ArrayRef> {
+        if column.name == self.time_index_col_name {
+            // The time index column is NOT NULL.
+            Some(Arc::new(UInt64Array::from(vec![0u64])))
+        } else {
+            None
+        }
+    }
+
+    fn row_counts(&self, _column: &Column) -> Option<ArrayRef> {
+        None
+    }
+
+    fn contained(&self, _column: &Column, _values: &HashSet<ScalarValue>) -> Option<BooleanArray> {
+        None
+    }
+}
+
 #[cfg(test)]
 impl ScanInput {
     /// Returns SST file ids to scan.
@@ -1310,6 +1453,48 @@ fn pre_filter_mode(append_mode: bool, merge_mode: MergeMode) -> PreFilterMode {
     match merge_mode {
         MergeMode::LastRow => PreFilterMode::SkipFields,
         MergeMode::LastNonNull => PreFilterMode::SkipFields,
+    }
+}
+
+fn narrow_read_columns_by_json_type_hint(
+    read_columns: &mut ReadColumns,
+    json_type_hint: &HashMap<String, JsonNativeType>,
+    metadata: &RegionMetadata,
+) {
+    if json_type_hint.is_empty() {
+        return;
+    }
+
+    for read_column in &mut read_columns.cols {
+        let Some(column) = metadata.column_by_id(read_column.column_id) else {
+            continue;
+        };
+        let column_name = &column.column_schema.name;
+        let Some(json_type) = json_type_hint.get(column_name) else {
+            continue;
+        };
+
+        let mut paths = Vec::new();
+        let mut current = vec![column_name.clone()];
+        collect_json_nested_paths(json_type, &mut current, &mut paths);
+        merge_nested_paths(&mut read_column.nested_paths, paths)
+    }
+}
+
+fn collect_json_nested_paths(
+    json_type: &JsonNativeType,
+    current: &mut NestedPath,
+    paths: &mut Vec<NestedPath>,
+) {
+    match json_type {
+        JsonNativeType::Object(fields) if !fields.is_empty() => {
+            for (field, child) in fields {
+                current.push(field.clone());
+                collect_json_nested_paths(child, current, paths);
+                current.pop();
+            }
+        }
+        _ => paths.push(current.clone()),
     }
 }
 
@@ -1804,17 +1989,29 @@ impl PredicateGroup {
 mod tests {
     use std::sync::Arc;
 
-    use datafusion::physical_plan::expressions::lit as physical_lit;
+    use common_time::timestamp::{TimeUnit, Timestamp};
+    use datafusion::physical_plan::expressions::{
+        binary as physical_binary, col as physical_col, lit as physical_lit,
+    };
     use datafusion_common::ScalarValue;
-    use datafusion_expr::{col, lit};
+    use datafusion_expr::{Operator, col, lit};
+    use datatypes::arrow::datatypes::{
+        DataType as ArrowDataType, Field, Schema as ArrowSchema, TimeUnit as ArrowTimeUnit,
+    };
+    use datatypes::prelude::ConcreteDataType;
+    use datatypes::schema::ColumnSchema;
+    use datatypes::types::json_type::JsonObjectType;
     use datatypes::value::Value;
     use partition::expr::col as partition_col;
-    use store_api::metadata::RegionMetadataBuilder;
-    use store_api::storage::{TimeSeriesDistribution, TimeSeriesRowSelector};
+    use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
+    use store_api::storage::{RegionId, TimeSeriesDistribution, TimeSeriesRowSelector};
 
     use super::*;
     use crate::cache::CacheManager;
+    use crate::error::InvalidMetadataSnafu;
     use crate::read::range_cache::ScanRequestFingerprintBuilder;
+    use crate::read::read_columns::ReadColumn;
+    use crate::sst::file::FileMeta;
     use crate::test_util::memtable_util::metadata_with_primary_key;
     use crate::test_util::scheduler_util::SchedulerEnv;
 
@@ -1840,6 +2037,145 @@ mod tests {
     /// Helper to create a timestamp millisecond literal.
     fn ts_lit(val: i64) -> datafusion_expr::Expr {
         lit(ScalarValue::TimestampMillisecond(Some(val), None))
+    }
+
+    fn metadata_with_time_index_unit(unit: TimeUnit) -> RegionMetadataRef {
+        let mut builder = RegionMetadataBuilder::new(RegionId::new(123, 456));
+        builder
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "k0".to_string(),
+                    ConcreteDataType::string_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Tag,
+                column_id: 0,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "k1".to_string(),
+                    ConcreteDataType::uint32_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Tag,
+                column_id: 1,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "ts".to_string(),
+                    ConcreteDataType::timestamp_datatype(unit),
+                    false,
+                ),
+                semantic_type: SemanticType::Timestamp,
+                column_id: 2,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "v0".to_string(),
+                    ConcreteDataType::int64_datatype(),
+                    true,
+                ),
+                semantic_type: SemanticType::Field,
+                column_id: 3,
+            })
+            .primary_key(vec![0, 1]);
+
+        Arc::new(builder.build().unwrap())
+    }
+
+    fn file_handle_with_time_range(start: Timestamp, end: Timestamp) -> FileHandle {
+        FileHandle::new(
+            FileMeta {
+                time_range: (start, end),
+                ..Default::default()
+            },
+            Arc::new(crate::sst::file_purger::NoopFilePurger),
+        )
+    }
+
+    #[test]
+    fn test_fill_json_nested_paths_from_hint() -> Result<()> {
+        fn json_projection_test_metadata() -> Result<RegionMetadataRef> {
+            let mut builder = RegionMetadataBuilder::new(RegionId::new(1024, 0));
+            builder
+                .push_column_metadata(ColumnMetadata {
+                    column_schema: ColumnSchema::new(
+                        "tag".to_string(),
+                        ConcreteDataType::string_datatype(),
+                        true,
+                    ),
+                    semantic_type: SemanticType::Tag,
+                    column_id: 0,
+                })
+                .push_column_metadata(ColumnMetadata {
+                    column_schema: ColumnSchema::new(
+                        "j".to_string(),
+                        ConcreteDataType::json2(JsonNativeType::Object(JsonObjectType::new())),
+                        true,
+                    ),
+                    semantic_type: SemanticType::Field,
+                    column_id: 1,
+                })
+                .push_column_metadata(ColumnMetadata {
+                    column_schema: ColumnSchema::new(
+                        "ts".to_string(),
+                        ConcreteDataType::timestamp_millisecond_datatype(),
+                        false,
+                    ),
+                    semantic_type: SemanticType::Timestamp,
+                    column_id: 2,
+                });
+            builder.primary_key(vec![0]);
+            builder.build().context(InvalidMetadataSnafu).map(Arc::new)
+        }
+
+        let metadata = json_projection_test_metadata()?;
+        let hint = HashMap::from([(
+            "j".to_string(),
+            JsonNativeType::Object(JsonObjectType::from([
+                ("a".to_string(), JsonNativeType::i64()),
+                (
+                    "b".to_string(),
+                    JsonNativeType::Object(JsonObjectType::from([(
+                        "c".to_string(),
+                        JsonNativeType::String,
+                    )])),
+                ),
+            ])),
+        )]);
+
+        fn nested_path(parts: &[&str]) -> NestedPath {
+            parts.iter().map(|part| part.to_string()).collect()
+        }
+
+        let mut read_columns = ReadColumns {
+            cols: vec![ReadColumn::new(1, vec![]), ReadColumn::new(0, vec![])],
+        };
+        narrow_read_columns_by_json_type_hint(&mut read_columns, &hint, metadata.as_ref());
+        assert_eq!(
+            read_columns,
+            ReadColumns {
+                cols: vec![
+                    ReadColumn::new(
+                        1,
+                        vec![nested_path(&["j", "a"]), nested_path(&["j", "b", "c"])]
+                    ),
+                    ReadColumn::new(0, vec![])
+                ]
+            }
+        );
+
+        let mut read_columns = ReadColumns {
+            cols: vec![ReadColumn::new(0, vec![])],
+        };
+        narrow_read_columns_by_json_type_hint(&mut read_columns, &hint, metadata.as_ref());
+        assert_eq!(
+            read_columns,
+            ReadColumns {
+                cols: vec![ReadColumn::new(0, vec![])]
+            }
+        );
+        Ok(())
     }
 
     #[tokio::test]
@@ -1980,6 +2316,177 @@ mod tests {
         let predicate_without_region = predicate_group.predicate_without_region().unwrap();
         assert!(predicate_without_region.exprs().is_empty());
         assert_eq!(1, predicate_without_region.dyn_filters().len());
+    }
+
+    #[test]
+    fn test_file_level_pruning_stats_prunes_old_file() {
+        let ts_col_name = "ts";
+        let predicate = Predicate::new(vec![col(ts_col_name).gt(ts_lit(1000))]);
+        let arrow_schema = Arc::new(ArrowSchema::new(vec![Field::new(
+            ts_col_name,
+            ArrowDataType::Timestamp(ArrowTimeUnit::Millisecond, None),
+            false,
+        )]));
+
+        // File with time range [0ms, 500ms] is completely before `ts > 1000ms`.
+        let stats = FileLevelPruningStats {
+            min_scalar: ScalarValue::TimestampMillisecond(Some(0), None),
+            max_scalar: ScalarValue::TimestampMillisecond(Some(500), None),
+            time_index_col_name: ts_col_name.to_string(),
+        };
+        assert_eq!(
+            vec![false],
+            predicate.prune_with_stats(&stats, &arrow_schema)
+        );
+
+        // File with time range [0ms, 2000ms] overlaps `ts > 1000ms`, so keep it.
+        let stats = FileLevelPruningStats {
+            min_scalar: ScalarValue::TimestampMillisecond(Some(0), None),
+            max_scalar: ScalarValue::TimestampMillisecond(Some(2000), None),
+            time_index_col_name: ts_col_name.to_string(),
+        };
+        assert_eq!(
+            vec![true],
+            predicate.prune_with_stats(&stats, &arrow_schema)
+        );
+    }
+
+    #[test]
+    fn test_file_level_pruning_stats_no_predicate_keeps_all() {
+        let predicate = Predicate::new(vec![]);
+        assert!(predicate.is_empty());
+
+        let stats = FileLevelPruningStats {
+            min_scalar: ScalarValue::TimestampMillisecond(Some(0), None),
+            max_scalar: ScalarValue::TimestampMillisecond(Some(500), None),
+            time_index_col_name: "ts".to_string(),
+        };
+        let arrow_schema = Arc::new(ArrowSchema::new(Vec::<Field>::new()));
+        assert_eq!(
+            vec![true],
+            predicate.prune_with_stats(&stats, &arrow_schema)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_file_level_pruning_stats_ceil_max_unit_conversion() {
+        let metadata = metadata_with_time_index_unit(TimeUnit::Millisecond);
+        let input = new_scan_input(metadata, vec![]).await;
+        let file = file_handle_with_time_range(
+            Timestamp::new(1_000_001, TimeUnit::Nanosecond),
+            Timestamp::new(1_000_001, TimeUnit::Nanosecond),
+        );
+
+        let stats = input.try_file_level_pruning_stats(&file).unwrap();
+        assert_eq!(
+            ScalarValue::TimestampMillisecond(Some(1), None),
+            stats.min_scalar
+        );
+        assert_eq!(
+            ScalarValue::TimestampMillisecond(Some(2), None),
+            stats.max_scalar
+        );
+
+        // The actual max timestamp is slightly greater than 1ms. It must be kept for `ts > 1ms`.
+        let predicate = Predicate::new(vec![col("ts").gt(ts_lit(1))]);
+        assert_eq!(
+            vec![true],
+            predicate.prune_with_stats(&stats, input.mapper.metadata().schema.arrow_schema())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_file_level_pruning_stats_overflow_keeps_file() {
+        let metadata = metadata_with_time_index_unit(TimeUnit::Nanosecond);
+        let input = new_scan_input(metadata, vec![]).await;
+        let file = file_handle_with_time_range(
+            Timestamp::new(0, TimeUnit::Second),
+            Timestamp::new(i64::MAX, TimeUnit::Second),
+        );
+
+        assert!(input.try_file_level_pruning_stats(&file).is_none());
+    }
+
+    #[test]
+    fn test_file_level_pruning_stats_keeps_inclusive_boundary() {
+        let ts_col_name = "ts";
+        let predicate = Predicate::new(vec![col(ts_col_name).gt_eq(ts_lit(1000))]);
+        let arrow_schema = Arc::new(ArrowSchema::new(vec![Field::new(
+            ts_col_name,
+            ArrowDataType::Timestamp(ArrowTimeUnit::Millisecond, None),
+            false,
+        )]));
+        let stats = FileLevelPruningStats {
+            min_scalar: ScalarValue::TimestampMillisecond(Some(0), None),
+            max_scalar: ScalarValue::TimestampMillisecond(Some(1000), None),
+            time_index_col_name: ts_col_name.to_string(),
+        };
+
+        assert_eq!(
+            vec![true],
+            predicate.prune_with_stats(&stats, &arrow_schema)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_file_level_pruning_with_dyn_filter_only_predicate() {
+        let metadata = Arc::new(metadata_with_primary_key(vec![0, 1], false));
+        let mapper = FlatProjectionMapper::new(&metadata, [0, 2, 3]).unwrap();
+        let predicate_group = PredicateGroup::new(metadata.as_ref(), &[]).unwrap();
+        predicate_group.add_dyn_filters(vec![Arc::new(DynamicFilterPhysicalExpr::new(
+            vec![],
+            physical_lit(false),
+        ))]);
+        let input = ScanInput::new(SchedulerEnv::new().await.access_layer.clone(), mapper)
+            .with_predicate(predicate_group);
+        let file = file_handle_with_time_range(
+            Timestamp::new_millisecond(0),
+            Timestamp::new_millisecond(1000),
+        );
+        let mut reader_metrics = ReaderMetrics::default();
+
+        let builder = input
+            .prune_file(&file, PreFilterMode::SkipFields, &mut reader_metrics)
+            .await
+            .unwrap();
+
+        assert_eq!(1, reader_metrics.filter_metrics.files_time_range_pruned);
+        let mut ranges = SmallVec::new();
+        builder.build_ranges(-1, &mut ranges);
+        assert!(ranges.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_manifest_pruning_observes_dynamic_filter_update() {
+        let metadata = Arc::new(metadata_with_primary_key(vec![0, 1], false));
+        let mapper = FlatProjectionMapper::new(&metadata, [0, 2, 3]).unwrap();
+        let predicate_group = PredicateGroup::new(metadata.as_ref(), &[]).unwrap();
+        let arrow_schema = metadata.schema.arrow_schema();
+        let ts_expr = physical_col("ts", arrow_schema.as_ref()).unwrap();
+        let dyn_filter = Arc::new(DynamicFilterPhysicalExpr::new(
+            vec![ts_expr.clone()],
+            physical_lit(true),
+        ));
+        predicate_group.add_dyn_filters(vec![dyn_filter.clone()]);
+        let input = ScanInput::new(SchedulerEnv::new().await.access_layer.clone(), mapper)
+            .with_predicate(predicate_group);
+        let file = file_handle_with_time_range(
+            Timestamp::new_millisecond(0),
+            Timestamp::new_millisecond(1000),
+        );
+
+        assert!(!input.can_manifest_prune_file(&file));
+
+        let updated = physical_binary(
+            ts_expr,
+            Operator::Gt,
+            physical_lit(ScalarValue::TimestampMillisecond(Some(1000), None)),
+            arrow_schema.as_ref(),
+        )
+        .unwrap();
+        dyn_filter.update(updated).unwrap();
+
+        assert!(input.can_manifest_prune_file(&file));
     }
 
     #[tokio::test]

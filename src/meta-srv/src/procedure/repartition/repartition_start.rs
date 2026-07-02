@@ -36,8 +36,18 @@ use crate::procedure::repartition::{Context, State};
 
 #[derive(Debug, Clone, Serialize)]
 pub enum RepartitionFrom {
-    Partitioned { exprs: Vec<PartitionExpr> },
-    Unpartitioned { partition_columns: Vec<String> },
+    Partitioned {
+        exprs: Vec<PartitionExpr>,
+        /// Full target partition columns to overwrite table metadata.
+        ///
+        /// `None` means the repartition keeps using the current table
+        /// partition columns, so the procedure won't update
+        /// `partition_key_indices`.
+        target_partition_columns: Option<Vec<String>>,
+    },
+    Unpartitioned {
+        partition_columns: Vec<String>,
+    },
 }
 
 impl<'de> Deserialize<'de> for RepartitionFrom {
@@ -47,8 +57,14 @@ impl<'de> Deserialize<'de> for RepartitionFrom {
     {
         #[derive(Deserialize)]
         enum CurrentRepartitionFrom {
-            Partitioned { exprs: Vec<PartitionExpr> },
-            Unpartitioned { partition_columns: Vec<String> },
+            Partitioned {
+                exprs: Vec<PartitionExpr>,
+                #[serde(default)]
+                target_partition_columns: Option<Vec<String>>,
+            },
+            Unpartitioned {
+                partition_columns: Vec<String>,
+            },
         }
 
         #[derive(Deserialize)]
@@ -59,13 +75,20 @@ impl<'de> Deserialize<'de> for RepartitionFrom {
         }
 
         match RepartitionFromRepr::deserialize(deserializer)? {
-            RepartitionFromRepr::Current(CurrentRepartitionFrom::Partitioned { exprs }) => {
-                Ok(Self::Partitioned { exprs })
-            }
+            RepartitionFromRepr::Current(CurrentRepartitionFrom::Partitioned {
+                exprs,
+                target_partition_columns,
+            }) => Ok(Self::Partitioned {
+                exprs,
+                target_partition_columns,
+            }),
             RepartitionFromRepr::Current(CurrentRepartitionFrom::Unpartitioned {
                 partition_columns,
             }) => Ok(Self::Unpartitioned { partition_columns }),
-            RepartitionFromRepr::Legacy(exprs) => Ok(Self::Partitioned { exprs }),
+            RepartitionFromRepr::Legacy(exprs) => Ok(Self::Partitioned {
+                exprs,
+                target_partition_columns: None,
+            }),
         }
     }
 }
@@ -157,7 +180,13 @@ impl State for RepartitionStart {
 impl RepartitionStart {
     async fn prepare_from<'a>(&'a self, ctx: &mut Context) -> Result<&'a [PartitionExpr]> {
         match &self.from {
-            RepartitionFrom::Partitioned { exprs } => Ok(exprs),
+            RepartitionFrom::Partitioned {
+                exprs,
+                target_partition_columns,
+            } => {
+                Self::prepare_partitioned(ctx, target_partition_columns.as_deref()).await?;
+                Ok(exprs)
+            }
             RepartitionFrom::Unpartitioned { partition_columns } => {
                 Self::prepare_unpartitioned(ctx, partition_columns).await?;
                 Ok(&[])
@@ -208,8 +237,52 @@ impl RepartitionStart {
                 })
             })
             .collect::<Result<Vec<_>>>()?;
+        ctx.persistent_ctx.partition_metadata_update = Some(
+            PartitionMetadataUpdate::from_unpartitioned(partition_key_indices),
+        );
+
+        Ok(())
+    }
+
+    async fn prepare_partitioned(
+        ctx: &mut Context,
+        target_partition_columns: Option<&[String]>,
+    ) -> Result<()> {
+        let Some(target_partition_columns) = target_partition_columns else {
+            return Ok(());
+        };
+        if ctx.persistent_ctx.partition_metadata_update.is_some() {
+            return Ok(());
+        }
+
+        ensure!(
+            !target_partition_columns.is_empty(),
+            error::InvalidArgumentsSnafu {
+                err_msg: "Partitioned source expects non-empty target partition columns"
+                    .to_string(),
+            }
+        );
+
+        let table_info_value = ctx.get_table_info_value().await?;
+        let schema = &table_info_value.table_info.meta.schema;
+        let target_partition_key_indices = target_partition_columns
+            .iter()
+            .map(|column_name| {
+                schema.column_index_by_name(column_name).with_context(|| {
+                    error::InvalidArgumentsSnafu {
+                        err_msg: format!(
+                            "Target partition column {} not found in table {}",
+                            column_name, ctx.persistent_ctx.table_id
+                        ),
+                    }
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
         ctx.persistent_ctx.partition_metadata_update =
-            Some(PartitionMetadataUpdate::new(partition_key_indices));
+            Some(PartitionMetadataUpdate::from_partitioned(
+                table_info_value.table_info.meta.partition_key_indices,
+                target_partition_key_indices,
+            ));
 
         Ok(())
     }
@@ -507,10 +580,15 @@ mod tests {
 
         let state: RepartitionStart = serde_json::from_str(&json).unwrap();
 
-        let RepartitionFrom::Partitioned { exprs } = state.from else {
+        let RepartitionFrom::Partitioned {
+            exprs,
+            target_partition_columns,
+        } = state.from
+        else {
             panic!("expected partition source");
         };
         assert_eq!(exprs, vec![range_expr("x", 0, 100)]);
+        assert!(target_partition_columns.is_none());
     }
 
     #[test]
@@ -549,6 +627,7 @@ mod tests {
         let mut state = RepartitionStart::new(
             RepartitionFrom::Partitioned {
                 exprs: vec![range_expr("x", 0, 100)],
+                target_partition_columns: None,
             },
             vec![range_expr("x", 0, 50), range_expr("x", 50, 100)],
         );
@@ -561,6 +640,52 @@ mod tests {
         assert!(!status.need_persist());
         assert!(next.as_any().is::<AllocateRegion>());
         assert!(ctx.persistent_ctx.partition_metadata_update.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_partitioned_source_initializes_target_partition_metadata_update() {
+        let env = TestingEnv::new();
+        let table_id = 1024;
+        env.create_physical_table_metadata_for_repartition(
+            table_id,
+            vec![test_region_route(
+                RegionId::new(table_id, 1),
+                &range_expr("x", 0, 100).as_json_str().unwrap(),
+            )],
+            test_region_wal_options(&[1]),
+        )
+        .await;
+        let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
+        let mut ctx = new_parent_context(&env, node_manager, table_id);
+        let current = ctx.get_raw_table_info_value().await.unwrap();
+        let mut table_info = current.table_info.clone();
+        table_info.meta.partition_key_indices = vec![0];
+        ctx.update_table_info(&current, current.update(table_info))
+            .await
+            .unwrap();
+        let mut state = RepartitionStart::new(
+            RepartitionFrom::Partitioned {
+                exprs: vec![range_expr("x", 0, 100)],
+                target_partition_columns: Some(vec!["col2".to_string(), "col1".to_string()]),
+            },
+            vec![range_expr("x", 0, 50), range_expr("x", 50, 100)],
+        );
+
+        let (next, status) = state
+            .next(&mut ctx, &TestingEnv::procedure_context())
+            .await
+            .unwrap();
+
+        assert!(status.need_persist());
+        assert!(next.as_any().is::<UpdatePartitionMetadata>());
+        let update = ctx
+            .persistent_ctx
+            .partition_metadata_update
+            .as_ref()
+            .unwrap();
+        assert_eq!(update.original_partition_key_indices, vec![0]);
+        assert_eq!(update.target_partition_key_indices, vec![2, 0]);
+        assert!(!update.expect_empty_partition_key_indices);
     }
 
     #[tokio::test]
@@ -587,7 +712,7 @@ mod tests {
                 .partition_metadata_update
                 .as_ref()
                 .unwrap()
-                .partition_key_indices,
+                .target_partition_key_indices,
             vec![2, 0]
         );
     }
@@ -624,8 +749,13 @@ mod tests {
         let env = TestingEnv::new();
         let table_id = 1024;
         let mut ctx = new_test_context(&env, table_id).await;
-        let mut state =
-            RepartitionStart::new(RepartitionFrom::Partitioned { exprs: vec![] }, vec![]);
+        let mut state = RepartitionStart::new(
+            RepartitionFrom::Partitioned {
+                exprs: vec![],
+                target_partition_columns: None,
+            },
+            vec![],
+        );
 
         let err = state
             .next(&mut ctx, &TestingEnv::procedure_context())

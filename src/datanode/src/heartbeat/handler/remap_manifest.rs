@@ -12,7 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use common_meta::instruction::{InstructionReply, RemapManifest, RemapManifestReply};
+use common_meta::instruction::{
+    InstructionError, InstructionReply, RemapManifest, RemapManifestReply,
+};
 use common_telemetry::{error, info, warn};
 use store_api::region_engine::RemapManifestsRequest;
 
@@ -54,7 +56,9 @@ impl InstructionHandler for RemapManifestHandler {
             return Some(InstructionReply::RemapManifest(RemapManifestReply {
                 exists: true,
                 manifest_paths: Default::default(),
-                error: Some("Region is not leader".into()),
+                error: Some(InstructionError::legacy_internal_retryable(
+                    "Region is not leader",
+                )),
             }));
         }
 
@@ -82,7 +86,7 @@ impl InstructionHandler for RemapManifestHandler {
                 InstructionReply::RemapManifest(RemapManifestReply {
                     exists: true,
                     manifest_paths: Default::default(),
-                    error: Some(format!("{e:?}")),
+                    error: Some(InstructionError::from_error(&e)),
                 })
             }
         };

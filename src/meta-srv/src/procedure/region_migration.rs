@@ -52,7 +52,7 @@ use common_procedure::error::{
 use common_procedure::{
     Context as ProcedureContext, LockKey, Procedure, Status, StringKey, UserMetadata,
 };
-use common_telemetry::{error, info};
+use common_telemetry::{debug, error, info};
 use manager::RegionMigrationProcedureGuard;
 pub use manager::{
     RegionMigrationManagerRef, RegionMigrationProcedureTask, RegionMigrationProcedureTracker,
@@ -628,6 +628,23 @@ impl Context {
         );
     }
 
+    /// Notifies the RegionSupervisor to reset failure detectors of candidate regions.
+    pub async fn reset_failure_detectors_for_candidate_regions(&self) {
+        let datanode_id = self.persistent_ctx.to_peer.id;
+        let region_ids = &self.persistent_ctx.region_ids;
+        let detecting_regions = region_ids
+            .iter()
+            .map(|region_id| (datanode_id, *region_id))
+            .collect::<Vec<_>>();
+        self.region_failure_detector_controller
+            .reset_failure_detectors(detecting_regions)
+            .await;
+        info!(
+            "Reset failure detectors after migration success for datanode {}, regions {:?}",
+            datanode_id, region_ids
+        );
+    }
+
     /// Notifies the RegionSupervisor to deregister failure detectors.
     ///
     /// The original failure detectors won't be removed once the procedure was triggered.
@@ -645,11 +662,11 @@ impl Context {
             .await;
     }
 
-    /// Notifies the RegionSupervisor to deregister failure detectors for the candidate region on the destination peer.
+    /// Notifies the RegionSupervisor to deregister failure detectors for the candidate regions on the destination peer.
     ///
-    /// The candidate region may be created on the destination peer,
-    /// so we need to deregister the failure detectors for the candidate region if the procedure is aborted.
-    pub async fn deregister_failure_detectors_for_candidate_region(&self) {
+    /// The candidate regions may be created on the destination peer,
+    /// so we need to deregister the failure detectors for the candidate regions if the procedure is aborted.
+    pub async fn deregister_failure_detectors_for_candidate_regions(&self) {
         let to_peer_id = self.persistent_ctx.to_peer.id;
         let region_ids = &self.persistent_ctx.region_ids;
         let detecting_regions = region_ids
@@ -691,6 +708,10 @@ impl Context {
             .batch_get(topic_name_keys)
             .await
             .context(error::TableMetadataManagerSnafu)?;
+        debug!(
+            "Fetched topic region values: {:?}, topic name values: {:?}",
+            topic_region_values, topic_name_values
+        );
 
         let replay_checkpoints = region_topics
             .iter()
@@ -867,7 +888,7 @@ impl RegionMigrationProcedure {
             }
         }
         self.context
-            .deregister_failure_detectors_for_candidate_region()
+            .deregister_failure_detectors_for_candidate_regions()
             .await;
         self.context.register_failure_detectors().await;
 
@@ -919,7 +940,7 @@ impl Procedure for RegionMigrationProcedure {
                     // Consumes the opening region guard before deregistering the failure detectors.
                     self.context.volatile_ctx.opening_region_guards.clear();
                     self.context
-                        .deregister_failure_detectors_for_candidate_region()
+                        .deregister_failure_detectors_for_candidate_regions()
                         .await;
                     error!(
                         e;
@@ -1481,7 +1502,13 @@ mod tests {
                 "Should be throwing a retryable error",
                 Some(mock_datanode_reply(
                     to_peer_id,
-                    Arc::new(|id| Ok(new_open_region_reply(id, false, None))),
+                    Arc::new(|id| {
+                        Ok(new_open_region_reply(
+                            id,
+                            false,
+                            Some("mock retryable open region error".to_string()),
+                        ))
+                    }),
                 )),
                 Assertion::error(|error| assert!(error.is_retryable(), "err: {error:?}")),
             ),

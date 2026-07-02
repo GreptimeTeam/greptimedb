@@ -24,6 +24,8 @@ use futures::Stream;
 pub struct CancellableStreamWrapper {
     inner: SendableRecordBatchStream,
     ticket: Ticket,
+    cancel_on_drop: bool,
+    finished: bool,
 }
 
 impl Unpin for CancellableStreamWrapper {}
@@ -33,6 +35,17 @@ impl CancellableStreamWrapper {
         Self {
             inner: stream,
             ticket,
+            cancel_on_drop: false,
+            finished: false,
+        }
+    }
+
+    pub fn new_cancel_on_drop(stream: SendableRecordBatchStream, ticket: Ticket) -> Self {
+        Self {
+            inner: stream,
+            ticket,
+            cancel_on_drop: true,
+            finished: false,
         }
     }
 }
@@ -47,6 +60,9 @@ impl Stream for CancellableStreamWrapper {
         }
 
         if let Poll::Ready(res) = Pin::new(&mut this.inner).poll_next(cx) {
+            if res.is_none() {
+                this.finished = true;
+            }
             return Poll::Ready(res);
         }
 
@@ -57,6 +73,14 @@ impl Stream for CancellableStreamWrapper {
             return Poll::Ready(Some(common_recordbatch::error::StreamCancelledSnafu.fail()));
         }
         Poll::Pending
+    }
+}
+
+impl Drop for CancellableStreamWrapper {
+    fn drop(&mut self) {
+        if self.cancel_on_drop && !self.finished {
+            self.ticket.cancellation_handle.cancel();
+        }
     }
 }
 
@@ -370,5 +394,51 @@ mod tests {
         let stream_result = result.unwrap();
         assert!(stream_result.is_some());
         assert!(stream_result.unwrap().is_err());
+    }
+
+    #[tokio::test]
+    async fn test_cancel_on_drop_cancels_unfinished_stream() {
+        let batch = create_test_batch();
+        let mock_stream = MockRecordBatchStream::new(vec![Ok(batch)]);
+        let process_manager = Arc::new(ProcessManager::new("".to_string(), None));
+        let ticket = process_manager.register_query(
+            "catalog".to_string(),
+            vec![],
+            "query".to_string(),
+            "client".to_string(),
+            None,
+            None,
+        );
+        let cancellation_handle = ticket.cancellation_handle.clone();
+
+        let cancellable_stream =
+            CancellableStreamWrapper::new_cancel_on_drop(Box::pin(mock_stream), ticket);
+        drop(cancellable_stream);
+
+        assert!(cancellation_handle.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn test_cancel_on_drop_does_not_cancel_finished_stream() {
+        let batch = create_test_batch();
+        let mock_stream = MockRecordBatchStream::new(vec![Ok(batch)]);
+        let process_manager = Arc::new(ProcessManager::new("".to_string(), None));
+        let ticket = process_manager.register_query(
+            "catalog".to_string(),
+            vec![],
+            "query".to_string(),
+            "client".to_string(),
+            None,
+            None,
+        );
+        let cancellation_handle = ticket.cancellation_handle.clone();
+
+        let mut cancellable_stream =
+            CancellableStreamWrapper::new_cancel_on_drop(Box::pin(mock_stream), ticket);
+        assert!(cancellable_stream.next().await.unwrap().is_ok());
+        assert!(cancellable_stream.next().await.is_none());
+        drop(cancellable_stream);
+
+        assert!(!cancellation_handle.is_cancelled());
     }
 }

@@ -160,6 +160,7 @@ fn test_region_request_builder() {
         path: String::new(),
         options: HashMap::new(),
         partition: None,
+        requirements: None,
     };
     assert_eq!(template.template(), &expected);
 }

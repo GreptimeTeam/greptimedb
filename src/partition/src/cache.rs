@@ -16,7 +16,9 @@ use std::sync::Arc;
 
 use common_base::hash::partition_expr_version;
 use common_error::ext::BoxedError;
-use common_meta::cache::{CacheContainer, Initializer, TableRoute, TableRouteCacheRef};
+use common_meta::cache::{
+    CacheContainer, InitStrategy, Initializer, TableRoute, TableRouteCacheRef,
+};
 use common_meta::instruction::CacheIdent;
 use common_meta::rpc::router::RegionRoute;
 use moka::future::Cache;
@@ -118,7 +120,7 @@ pub fn new_partition_info_cache(
     cache: Cache<TableId, CachedPartitionInfo>,
     table_route_cache: TableRouteCacheRef,
 ) -> PartitionInfoCache {
-    CacheContainer::new(
+    CacheContainer::with_strategy(
         name,
         cache,
         Box::new(|cache, idents| {
@@ -133,6 +135,7 @@ pub fn new_partition_info_cache(
         }),
         init_factory(table_route_cache),
         |ident| matches!(ident, CacheIdent::TableId(_)),
+        InitStrategy::VersionChecked,
     )
 }
 

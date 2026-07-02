@@ -99,6 +99,33 @@ lazy_static! {
         "total number of query memory allocations rejected"
     )
     .unwrap();
+
+    /// Remote dynamic filter fanout RPC results, labeled with status.
+    pub static ref REMOTE_DYN_FILTER_UPDATE_RPC_TOTAL: IntCounterVec = register_int_counter_vec!(
+        "greptime_query_remote_dyn_filter_update_rpc_total",
+        "remote dynamic filter fanout RPC results",
+        &["status"]
+    )
+    .unwrap();
+
+    /// Remote dynamic filter fanout payload bytes.
+    pub static ref REMOTE_DYN_FILTER_PAYLOAD_BYTES: Histogram = register_histogram!(
+        "greptime_query_remote_dyn_filter_payload_bytes",
+        "remote dynamic filter fanout payload bytes",
+        vec![
+            128.0, 256.0, 512.0, 1024.0, 2048.0, 4096.0, 8192.0, 16384.0, 32768.0,
+            65536.0, 131072.0, 262144.0, 524288.0,
+        ]
+    )
+    .unwrap();
+
+    /// Remote dynamic filter encode results, labeled with result.
+    pub static ref REMOTE_DYN_FILTER_ENCODE_TOTAL: IntCounterVec = register_int_counter_vec!(
+        "greptime_query_remote_dyn_filter_encode_total",
+        "remote dynamic filter encode results",
+        &["result"]
+    )
+    .unwrap();
 }
 
 /// A stream to call the callback once a RecordBatch stream is done.
@@ -383,6 +410,7 @@ mod tests {
     use std::collections::{BTreeMap, BTreeSet};
     use std::sync::Arc;
 
+    use api::v1::region::{RemoteDynFilterUnregister, RemoteDynFilterUpdate};
     use async_trait::async_trait;
     use datafusion::arrow::datatypes::Schema as ArrowSchema;
     use datafusion::execution::SessionStateBuilder;
@@ -394,6 +422,7 @@ mod tests {
     use table::table_name::TableName;
 
     use super::*;
+    use crate::dist_plan::RemoteDynFilterProducerId;
     use crate::options::{FLOW_RETURN_REGION_SEQ, FLOW_SINK_TABLE_ID};
     use crate::region_query::RegionQueryHandler;
 
@@ -407,6 +436,24 @@ mod tests {
             _request: common_query::request::QueryRequest,
         ) -> Result<SendableRecordBatchStream> {
             unreachable!("metrics tests should not execute remote queries")
+        }
+
+        async fn handle_remote_dyn_filter_update(
+            &self,
+            _region_id: RegionId,
+            _query_id: String,
+            _update: RemoteDynFilterUpdate,
+        ) -> Result<()> {
+            unreachable!("metrics tests should not send remote dyn filter updates")
+        }
+
+        async fn handle_remote_dyn_filter_unregister(
+            &self,
+            _region_id: RegionId,
+            _query_id: String,
+            _unregister: RemoteDynFilterUnregister,
+        ) -> Result<()> {
+            unreachable!("metrics tests should not send remote dyn filter unregisters")
         }
     }
 
@@ -439,6 +486,8 @@ mod tests {
                 query_ctx,
                 1,
                 BTreeMap::<String, BTreeSet<datafusion_common::Column>>::new(),
+                Some(RemoteDynFilterProducerId::new(0)),
+                false,
             )
             .unwrap(),
         )

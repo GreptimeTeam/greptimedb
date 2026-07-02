@@ -392,24 +392,23 @@ impl StatementExecutor {
                 .collect_metadata(&object_store, format.clone(), path.to_string())
                 .await?;
 
-            let file_schema = file_metadata.schema();
-            let (file_schema_projection, table_schema_projection, compat_schema) =
-                generated_schema_projection_and_compatible_file_schema(file_schema, &table_schema);
+            let schema_mapping = copy_from_schema_mapping(&file_metadata, &table_schema);
             let projected_file_schema = Arc::new(
-                file_schema
-                    .project(&file_schema_projection)
+                file_metadata
+                    .schema()
+                    .project(&schema_mapping.file_projection)
                     .context(error::ProjectSchemaSnafu)?,
             );
             let projected_table_schema = Arc::new(
                 table_schema
-                    .project(&table_schema_projection)
+                    .project(&schema_mapping.table_projection)
                     .context(error::ProjectSchemaSnafu)?,
             );
             ensure_schema_compatible(&projected_file_schema, &projected_table_schema)?;
 
             files.push((
-                Arc::new(compat_schema),
-                file_schema_projection,
+                Arc::new(schema_mapping.compat_file_schema),
+                schema_mapping.file_projection,
                 projected_table_schema,
                 file_metadata,
             ))
@@ -581,18 +580,11 @@ fn csv_reader_schema_for_skip_bad_records(file: &SchemaRef, compat: &SchemaRef) 
         .fields()
         .iter()
         .enumerate()
-        .map(|(idx, file_field)| {
-            let compat_field = compat
-                .fields()
-                .find(file_field.name())
-                .map(|(_, field)| field);
-
-            match compat_field {
-                Some(compat_field) if can_csv_reader_parse_type(compat_field.data_type()) => {
-                    compat_field.clone()
-                }
-                _ => file.fields()[idx].clone(),
+        .map(|(idx, file_field)| match compat.fields().get(idx) {
+            Some(compat_field) if can_csv_reader_parse_type(compat_field.data_type()) => {
+                compat_field.clone()
             }
+            _ => file_field.clone(),
         })
         .collect::<Vec<_>>();
 
@@ -676,6 +668,62 @@ fn generated_schema_projection_and_compatible_file_schema(
         table_projection,
         Schema::new(compatible_fields),
     )
+}
+
+struct CopyFromSchemaMapping {
+    file_projection: Vec<usize>,
+    table_projection: Vec<usize>,
+    compat_file_schema: Schema,
+}
+
+fn copy_from_schema_mapping(
+    file_metadata: &FileMetadata,
+    table: &SchemaRef,
+) -> CopyFromSchemaMapping {
+    match file_metadata {
+        FileMetadata::Csv { schema, format, .. } if !format.has_header => {
+            generated_positional_schema_projection_and_compatible_file_schema(schema, table)
+        }
+        _ => {
+            let (file_projection, table_projection, compat_file_schema) =
+                generated_schema_projection_and_compatible_file_schema(
+                    file_metadata.schema(),
+                    table,
+                );
+            CopyFromSchemaMapping {
+                file_projection,
+                table_projection,
+                compat_file_schema,
+            }
+        }
+    }
+}
+
+fn generated_positional_schema_projection_and_compatible_file_schema(
+    file: &SchemaRef,
+    table: &SchemaRef,
+) -> CopyFromSchemaMapping {
+    let len = file.fields.len().min(table.fields.len());
+    let file_projection = (0..len).collect::<Vec<_>>();
+    let table_projection = (0..len).collect::<Vec<_>>();
+    let compatible_fields = file
+        .fields
+        .iter()
+        .enumerate()
+        .map(|(idx, file_field)| {
+            if idx < len {
+                table.fields[idx].clone()
+            } else {
+                file_field.clone()
+            }
+        })
+        .collect::<Vec<_>>();
+
+    CopyFromSchemaMapping {
+        file_projection,
+        table_projection,
+        compat_file_schema: Schema::new(compatible_fields),
+    }
 }
 
 #[cfg(test)]
@@ -936,6 +984,163 @@ mod tests {
         assert_eq!(
             reader_schema.field(2).data_type(),
             compat_schema.field(2).data_type()
+        );
+    }
+
+    fn make_csv_metadata(schema: Arc<Schema>, has_header: bool) -> FileMetadata {
+        FileMetadata::Csv {
+            schema,
+            format: CsvFormat {
+                has_header,
+                ..CsvFormat::default()
+            },
+            path: "test.csv".to_string(),
+        }
+    }
+
+    fn assert_field(schema: &Schema, idx: usize, name: &str, data_type: &DataType) {
+        let field = schema.field(idx);
+        assert_eq!(field.name(), name);
+        assert_eq!(field.data_type(), data_type);
+    }
+
+    #[test]
+    fn test_headerless_csv_schema_projection_is_positional() {
+        let file_schema = make_test_schema(&[
+            Field::new("column_1", DataType::UInt8, true),
+            Field::new("column_2", DataType::Float64, true),
+            Field::new("column_3", DataType::Utf8, true),
+        ]);
+        let table_schema = make_test_schema(&[
+            Field::new("host_id", DataType::UInt32, true),
+            Field::new("reading_value", DataType::Float64, true),
+            Field::new(
+                "ts",
+                DataType::Timestamp(datatypes::arrow::datatypes::TimeUnit::Millisecond, None),
+                true,
+            ),
+        ]);
+
+        let mapping =
+            copy_from_schema_mapping(&make_csv_metadata(file_schema, false), &table_schema);
+
+        assert_eq!(mapping.file_projection, vec![0, 1, 2]);
+        assert_eq!(mapping.table_projection, vec![0, 1, 2]);
+        assert_field(&mapping.compat_file_schema, 0, "host_id", &DataType::UInt32);
+        assert_field(
+            &mapping.compat_file_schema,
+            1,
+            "reading_value",
+            &DataType::Float64,
+        );
+        assert_field(
+            &mapping.compat_file_schema,
+            2,
+            "ts",
+            table_schema.field(2).data_type(),
+        );
+        assert_eq!(
+            mapping
+                .compat_file_schema
+                .project(&mapping.file_projection)
+                .unwrap(),
+            table_schema.project(&mapping.table_projection).unwrap()
+        );
+    }
+
+    #[test]
+    fn test_headerless_csv_schema_projection_ignores_extra_file_columns() {
+        let file_schema = make_test_schema(&[
+            Field::new("column_1", DataType::UInt8, true),
+            Field::new("column_2", DataType::Float64, true),
+            Field::new("column_3", DataType::Utf8, true),
+            Field::new("column_4", DataType::Utf8, true),
+        ]);
+        let table_schema = make_test_schema(&[
+            Field::new("host_id", DataType::UInt32, true),
+            Field::new("reading_value", DataType::Float64, true),
+            Field::new("ts", DataType::Utf8, true),
+        ]);
+
+        let mapping =
+            copy_from_schema_mapping(&make_csv_metadata(file_schema, false), &table_schema);
+
+        assert_eq!(mapping.file_projection, vec![0, 1, 2]);
+        assert_eq!(mapping.table_projection, vec![0, 1, 2]);
+        assert_eq!(mapping.compat_file_schema.fields().len(), 4);
+        assert_field(&mapping.compat_file_schema, 0, "host_id", &DataType::UInt32);
+        assert_field(
+            &mapping.compat_file_schema,
+            1,
+            "reading_value",
+            &DataType::Float64,
+        );
+        assert_field(&mapping.compat_file_schema, 2, "ts", &DataType::Utf8);
+        assert_field(&mapping.compat_file_schema, 3, "column_4", &DataType::Utf8);
+    }
+
+    #[test]
+    fn test_headerless_csv_schema_projection_supports_prefix_import() {
+        let file_schema = make_test_schema(&[
+            Field::new("column_1", DataType::UInt8, true),
+            Field::new("column_2", DataType::Float64, true),
+        ]);
+        let table_schema = make_test_schema(&[
+            Field::new("host_id", DataType::UInt32, true),
+            Field::new("reading_value", DataType::Float64, true),
+            Field::new("ts", DataType::Utf8, true),
+        ]);
+
+        let mapping =
+            copy_from_schema_mapping(&make_csv_metadata(file_schema, false), &table_schema);
+
+        assert_eq!(mapping.file_projection, vec![0, 1]);
+        assert_eq!(mapping.table_projection, vec![0, 1]);
+        assert_field(&mapping.compat_file_schema, 0, "host_id", &DataType::UInt32);
+        assert_field(
+            &mapping.compat_file_schema,
+            1,
+            "reading_value",
+            &DataType::Float64,
+        );
+        assert_eq!(
+            mapping
+                .compat_file_schema
+                .project(&mapping.file_projection)
+                .unwrap(),
+            table_schema.project(&mapping.table_projection).unwrap()
+        );
+    }
+
+    #[test]
+    fn test_csv_reader_schema_for_skip_bad_records_uses_positional_mapping() {
+        let file_schema = make_test_schema(&[
+            Field::new("column_1", DataType::Utf8, true),
+            Field::new("column_2", DataType::Utf8, true),
+            Field::new("column_3", DataType::Utf8, true),
+        ]);
+        let table_schema = make_test_schema(&[
+            Field::new("host_id", DataType::UInt32, true),
+            Field::new("jsons", DataType::Binary, true),
+            Field::new(
+                "ts",
+                DataType::Timestamp(datatypes::arrow::datatypes::TimeUnit::Millisecond, None),
+                true,
+            ),
+        ]);
+        let mapping = copy_from_schema_mapping(
+            &make_csv_metadata(file_schema.clone(), false),
+            &table_schema,
+        );
+        let compat_schema = Arc::new(mapping.compat_file_schema);
+
+        let reader_schema = csv_reader_schema_for_skip_bad_records(&file_schema, &compat_schema);
+
+        assert_eq!(reader_schema.field(0).data_type(), &DataType::UInt32);
+        assert_eq!(reader_schema.field(1).data_type(), &DataType::Utf8);
+        assert_eq!(
+            reader_schema.field(2).data_type(),
+            table_schema.field(2).data_type()
         );
     }
 }

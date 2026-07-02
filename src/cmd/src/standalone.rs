@@ -380,11 +380,11 @@ impl StartCommand {
         let node_id = dn_opts.node_id;
         let init_regions_parallelism = dn_opts.init_regions_parallelism;
 
-        plugins::setup_frontend_plugins(&mut plugins, &plugin_opts, &fe_opts)
+        plugins::setup_frontend_plugins_pre_build(&mut plugins, &plugin_opts, &fe_opts, None)
             .await
             .context(error::StartFrontendSnafu)?;
 
-        plugins::setup_datanode_plugins(&mut plugins, &plugin_opts, &dn_opts)
+        plugins::setup_datanode_plugins_pre_build(&mut plugins, &plugin_opts, &dn_opts)
             .await
             .context(error::StartDatanodeSnafu)?;
 
@@ -429,6 +429,12 @@ impl StartCommand {
         if let Some(writable) = creator.open_regions_writable_override {
             builder.with_open_regions_writable_override(writable);
         }
+
+        plugins::setup_datanode_plugins_post_build(&mut plugins, &plugin_opts, &builder)
+            .await
+            .context(error::StartDatanodeSnafu)?;
+        builder.set_plugins(plugins.clone());
+
         let datanode = builder.build().await.context(error::StartDatanodeSnafu)?;
 
         let information_extension = Arc::new(StandaloneInformationExtension::new(
@@ -478,7 +484,7 @@ impl StartCommand {
             ..Default::default()
         };
 
-        let flow_builder = FlownodeBuilder::new(
+        let mut flow_builder = FlownodeBuilder::new(
             flownode_options,
             plugins.clone(),
             table_metadata_manager.clone(),
@@ -486,6 +492,12 @@ impl StartCommand {
             flow_metadata_manager.clone(),
             frontend_client.clone(),
         );
+
+        plugins::setup_flownode_plugins_post_build(&mut plugins, &plugin_opts, &flow_builder)
+            .await
+            .context(error::StartFlownodeSnafu)?;
+        flow_builder.set_plugins(plugins.clone());
+
         let flownode = flow_builder
             .build()
             .await
@@ -578,11 +590,17 @@ impl StartCommand {
             node_manager.clone(),
             procedure_executor.clone(),
             process_manager,
-        )
-        .with_plugin(plugins.clone())
-        .try_build()
-        .await
-        .context(error::StartFrontendSnafu)?;
+        );
+
+        plugins::setup_frontend_plugins_post_build(&mut plugins, &plugin_opts, &fe_instance)
+            .await
+            .context(error::StartFrontendSnafu)?;
+
+        let fe_instance = fe_instance
+            .with_plugin(plugins.clone())
+            .try_build()
+            .await
+            .context(error::StartFrontendSnafu)?;
         let fe_instance = Arc::new(fe_instance);
 
         // set the frontend client for flownode
@@ -959,7 +977,7 @@ mod tests {
 
         let mut plugins = Plugins::new();
         plugins.insert(StandaloneFlag);
-        plugins::setup_frontend_plugins(&mut plugins, &[], &fe_opts)
+        plugins::setup_frontend_plugins_pre_build(&mut plugins, &[], &fe_opts, None)
             .await
             .unwrap();
 

@@ -6,7 +6,11 @@ DAC_IMAGE=ghcr.io/zyy17/dac:20250423-522bd35
 
 remove_instance_filters() {
   # Remove the instance filters for the standalone dashboards.
-  sed -E 's/instance=~\\"(\$datanode|\$frontend|\$metasrv|\$flownode)\\",?//g' "$CLUSTER_DASHBOARD_DIR/dashboard.json" > "$STANDALONE_DASHBOARD_DIR/dashboard.json"
+  sed -E 's/instance=~\\"(\$datanode|\$frontend|\$metasrv|\$flownode)\\"[[:space:]]*,?[[:space:]]*//g' "$CLUSTER_DASHBOARD_DIR/dashboard.json" \
+    | sed -E 's/\{[[:space:]]*,[[:space:]]*/{/g' \
+    | sed -E 's/,[[:space:]]*\}/}/g' \
+    | sed -E 's/([A-Za-z_:][A-Za-z0-9_:]*)\{[[:space:]]*\}/\1/g' \
+    > "$STANDALONE_DASHBOARD_DIR/dashboard.json"
 }
 
 generate_intermediate_dashboards_and_docs() {

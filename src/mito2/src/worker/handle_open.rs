@@ -107,6 +107,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         )
         .skip_wal_replay(request.skip_wal_replay)
         .cache(Some(self.cache_manager.clone()))
+        .hook(self.plugins.get())
         .wal_entry_reader(wal_entry_receiver.map(|receiver| Box::new(receiver) as _))
         .replay_checkpoint(request.checkpoint.map(|checkpoint| checkpoint.entry_id))
         .parse_options(request.options.clone())
@@ -118,7 +119,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             }
         };
 
-        if let Err(err) = opener.ensure_open_requirements(requirements) {
+        if let Err(err) = opener.ensure_region_requirements(requirements) {
             sender.send(Err(err));
             return;
         }
@@ -140,8 +141,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             match opener.open(&config, &wal).await {
                 Ok(region) => {
                     info!(
-                        "Region {} is opened, worker: {}, elapsed: {:?}",
+                        "Region {} is opened with requirements {:?}, worker: {}, elapsed: {:?}",
                         region_id,
+                        requirements,
                         worker_id,
                         now.elapsed()
                     );

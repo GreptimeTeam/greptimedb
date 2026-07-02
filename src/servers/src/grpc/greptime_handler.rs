@@ -14,7 +14,9 @@
 
 //! Handler for Greptime Database service. It's implemented by frontend.
 
+use std::collections::HashMap;
 use std::str::FromStr;
+use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
 use api::helper::request_type;
@@ -75,12 +77,21 @@ impl GreptimeRequestHandler {
         request: GreptimeRequest,
         hints: Vec<(String, String)>,
     ) -> Result<Output> {
+        let header = request.header.as_ref();
+        let query_ctx = create_query_context(Channel::Grpc, header, hints, HashMap::new())?;
+        self.handle_request_with_query_ctx(request, query_ctx).await
+    }
+
+    pub(crate) async fn handle_request_with_query_ctx(
+        &self,
+        request: GreptimeRequest,
+        query_ctx: QueryContextRef,
+    ) -> Result<Output> {
         let query = request.request.context(InvalidQuerySnafu {
             reason: "Expecting non-empty GreptimeRequest.",
         })?;
 
         let header = request.header.as_ref();
-        let query_ctx = create_query_context(Channel::Grpc, header, hints)?;
         let user_info = context_auth::auth(self.user_provider.clone(), header, &query_ctx).await?;
         query_ctx.set_current_user(user_info);
 
@@ -155,8 +166,7 @@ impl GreptimeRequestHandler {
                     }
                 }
 
-                if let Err(e) =
-                    result_sender.try_send(result.map_err(|e| Status::from_error(Box::new(e))))
+                if let Err(e) = result_sender.try_send(result.map_err(Status::from))
                     && let TrySendError::Closed(_) = e
                 {
                     warn!(r#""DoPut" client maybe unreachable, abort handling its message"#);
@@ -181,6 +191,7 @@ pub(crate) fn create_query_context(
     channel: Channel,
     header: Option<&RequestHeader>,
     mut extensions: Vec<(String, String)>,
+    snapshot_seqs: HashMap<u64, u64>,
 ) -> Result<QueryContextRef> {
     let (catalog, schema) = header
         .map(|header| {
@@ -214,7 +225,8 @@ pub(crate) fn create_query_context(
         .current_catalog(catalog)
         .current_schema(schema)
         .timezone(timezone)
-        .channel(channel);
+        .channel(channel)
+        .snapshot_seqs(Arc::new(RwLock::new(snapshot_seqs)));
 
     if let Some(x) = extensions
         .iter()
@@ -285,10 +297,18 @@ impl Drop for RequestTimer {
 #[cfg(test)]
 mod tests {
     use chrono::FixedOffset;
+    use common_error::ext::BoxedError;
+    use common_error::{GREPTIME_DB_HEADER_ERROR_CODE, GREPTIME_DB_HEADER_ERROR_RETRY_HINT};
     use common_time::Timezone;
-    use session::hints::REMOTE_QUERY_ID_EXTENSION_KEY;
+    use query::options::FLOW_SCHEDULED_TIME_MILLIS;
+    use session::hints::{
+        INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY, REMOTE_QUERY_ID_EXTENSION_KEY,
+    };
+    use snafu::ResultExt;
+    use tonic::Code;
 
     use super::*;
+    use crate::error::{ExecuteGrpcRequestSnafu, InvalidParameterSnafu};
 
     #[test]
     fn test_create_query_context() {
@@ -303,9 +323,23 @@ mod tests {
             vec![
                 ("auto_create_table".to_string(), "true".to_string()),
                 ("read_preference".to_string(), "leader".to_string()),
+                (
+                    REMOTE_QUERY_ID_EXTENSION_KEY.to_string(),
+                    "spoofed".to_string(),
+                ),
+                (
+                    INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY.to_string(),
+                    "spoofed-regs".to_string(),
+                ),
+                (
+                    FLOW_SCHEDULED_TIME_MILLIS.to_string(),
+                    "1700000000000".to_string(),
+                ),
             ],
+            HashMap::from([(7, 88)]),
         )
         .unwrap();
+        assert_eq!(query_context.get_snapshot(7), Some(88));
         assert_eq!(query_context.current_catalog(), "cat-a-log");
         assert_eq!(query_context.current_schema(), DEFAULT_SCHEMA_NAME);
         assert_eq!(
@@ -316,16 +350,16 @@ mod tests {
             query_context.read_preference(),
             ReadPreference::Leader
         ));
-        let mut extensions = query_context.extensions().into_iter().collect::<Vec<_>>();
-        extensions.sort_unstable_by(|a, b| a.0.cmp(&b.0));
-        assert_eq!(
-            extensions[0],
-            ("auto_create_table".to_string(), "true".to_string())
+        assert_eq!(query_context.extension("auto_create_table"), Some("true"));
+        assert_ne!(query_context.remote_query_id(), Some("spoofed"));
+        assert!(
+            query_context
+                .extension(INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY)
+                .is_none()
         );
-        assert_eq!(extensions[1].0, REMOTE_QUERY_ID_EXTENSION_KEY.to_string());
         assert_eq!(
-            query_context.remote_query_id(),
-            Some(extensions[1].1.as_str())
+            query_context.extension(FLOW_SCHEDULED_TIME_MILLIS),
+            Some("1700000000000")
         );
     }
 
@@ -338,6 +372,7 @@ mod tests {
                 REMOTE_QUERY_ID_EXTENSION_KEY.to_string(),
                 "spoofed-query-id".to_string(),
             )],
+            HashMap::new(),
         )
         .unwrap();
 
@@ -345,6 +380,41 @@ mod tests {
         assert_eq!(
             query_context.extension(REMOTE_QUERY_ID_EXTENSION_KEY),
             query_context.remote_query_id()
+        );
+    }
+
+    #[test]
+    fn test_record_batch_error_to_status_preserves_error_details() {
+        let inner = InvalidParameterSnafu {
+            reason: "Column not found, column: new_col",
+        }
+        .build();
+        let err = Err::<(), _>(BoxedError::new(inner))
+            .context(ExecuteGrpcRequestSnafu)
+            .unwrap_err();
+
+        let status = Status::from(err);
+
+        assert_eq!(status.code(), Code::InvalidArgument);
+        assert!(
+            status
+                .message()
+                .contains("Column not found, column: new_col")
+        );
+        assert!(
+            status
+                .message()
+                .contains("Invalid request parameter: Column not found")
+        );
+        assert!(
+            status
+                .metadata()
+                .contains_key(GREPTIME_DB_HEADER_ERROR_CODE)
+        );
+        assert!(
+            status
+                .metadata()
+                .contains_key(GREPTIME_DB_HEADER_ERROR_RETRY_HINT)
         );
     }
 }

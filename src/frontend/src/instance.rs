@@ -89,7 +89,7 @@ use sql::statements::comment::CommentObject;
 use sql::statements::copy::{CopyDatabase, CopyTable};
 use sql::statements::statement::Statement;
 use sql::statements::tql::Tql;
-use sqlparser::ast::ObjectName;
+use sqlparser::ast::{AnalyzeFormat, ObjectName};
 pub use standalone::StandaloneDatanodeManager;
 use table::requests::{OTLP_METRIC_COMPAT_KEY, OTLP_METRIC_COMPAT_PROM};
 use tracing::Span;
@@ -195,36 +195,70 @@ fn parse_stmt(sql: &str, dialect: &(dyn Dialect + Send + Sync)) -> Result<Vec<St
     ParserContext::create_with_dialect(sql, dialect, ParseOptions::default()).context(ParseSqlSnafu)
 }
 
+fn validate_analyze_stream_statement(stmt: &mut Statement) -> Result<()> {
+    let Statement::Explain(explain) = stmt else {
+        return InvalidSqlSnafu {
+            err_msg: "only EXPLAIN ANALYZE VERBOSE statement is supported",
+        }
+        .fail();
+    };
+    ensure!(
+        explain.analyze && explain.verbose,
+        InvalidSqlSnafu {
+            err_msg: "statement must be EXPLAIN ANALYZE VERBOSE"
+        }
+    );
+    match explain.format {
+        None | Some(AnalyzeFormat::JSON) => {
+            // Keep explicit FORMAT JSON accepted, but pass JSON through
+            // QueryContext.explain_format instead of the statement to avoid the
+            // planner's current `EXPLAIN VERBOSE with FORMAT` limitation.
+            explain.format = None;
+            Ok(())
+        }
+        Some(_) => InvalidSqlSnafu {
+            err_msg: "only FORMAT JSON is supported for analyze stream",
+        }
+        .fail(),
+    }
+}
+
 impl Instance {
+    fn statement_slow_query_timer(
+        &self,
+        stmt: &Statement,
+        schema_name: String,
+    ) -> Option<SlowQueryTimer> {
+        if !stmt.is_readonly() || !self.slow_query_options.enable {
+            return None;
+        }
+
+        self.event_recorder.clone().map(|event_recorder| {
+            SlowQueryTimer::new(
+                CatalogQueryStatement::Sql(stmt.clone()),
+                schema_name,
+                self.slow_query_options.threshold,
+                self.slow_query_options.sample_ratio,
+                self.slow_query_options.record_type,
+                event_recorder,
+            )
+        })
+    }
+
     async fn query_statement(&self, stmt: Statement, query_ctx: QueryContextRef) -> Result<Output> {
         check_permission(self.plugins.clone(), &stmt, &query_ctx)?;
 
         let query_interceptor = self.plugins.get::<SqlQueryInterceptorRef<Error>>();
         let query_interceptor = query_interceptor.as_ref();
 
-        let is_readonly_stmt = stmt.is_readonly();
         if should_track_statement_process(&stmt) {
-            let slow_query_timer = if is_readonly_stmt {
-                self.slow_query_options
-                    .enable
-                    .then(|| self.event_recorder.clone())
-                    .flatten()
-                    .map(|event_recorder| {
-                        SlowQueryTimer::new(
-                            CatalogQueryStatement::Sql(stmt.clone()),
-                            self.slow_query_options.threshold,
-                            self.slow_query_options.sample_ratio,
-                            self.slow_query_options.record_type,
-                            event_recorder,
-                        )
-                    })
-            } else {
-                None
-            };
+            let catalog_name = query_ctx.current_catalog().to_string();
+            let schema_name = query_ctx.current_schema();
+            let slow_query_timer = self.statement_slow_query_timer(&stmt, schema_name.clone());
 
             let ticket = self.process_manager.register_query(
-                query_ctx.current_catalog().to_string(),
-                vec![query_ctx.current_schema()],
+                catalog_name,
+                vec![schema_name],
                 stmt.to_string(),
                 query_ctx.conn_info().to_string(),
                 Some(query_ctx.process_id()),
@@ -549,6 +583,62 @@ fn attach_timeout(output: Output, mut timeout: Duration) -> Result<Output> {
 }
 
 impl Instance {
+    #[tracing::instrument(skip_all, name = "SqlQueryHandler::do_analyze_stream_query")]
+    async fn do_analyze_stream_query_inner(
+        &self,
+        query: &str,
+        query_ctx: QueryContextRef,
+    ) -> Result<Output> {
+        ensure!(!self.is_suspended(), error::SuspendedSnafu);
+
+        let query_interceptor_opt = self.plugins.get::<SqlQueryInterceptorRef<Error>>();
+        let query_interceptor = query_interceptor_opt.as_ref();
+        let query = query_interceptor.pre_parsing(query, query_ctx.clone())?;
+        let mut stmts = parse_stmt(query.as_ref(), query_ctx.sql_dialect())
+            .and_then(|stmts| query_interceptor.post_parsing(stmts, query_ctx.clone()))?;
+
+        ensure!(
+            stmts.len() == 1,
+            InvalidSqlSnafu {
+                err_msg: "only single EXPLAIN ANALYZE VERBOSE statement is supported"
+            }
+        );
+        let mut stmt = stmts.remove(0);
+        validate_analyze_stream_statement(&mut stmt)?;
+        query_ctx.set_explain_format(AnalyzeFormat::JSON.to_string());
+
+        let checker_ref = self.plugins.get::<PermissionCheckerRef>();
+        checker_ref
+            .as_ref()
+            .check_permission(query_ctx.current_user(), PermissionReq::SqlStatement(&stmt))
+            .context(PermissionSnafu)?;
+        check_permission(self.plugins.clone(), &stmt, &query_ctx)?;
+        let catalog_name = query_ctx.current_catalog().to_string();
+        let schema_name = query_ctx.current_schema();
+        let slow_query_timer = self.statement_slow_query_timer(&stmt, schema_name.clone());
+        let ticket = self.process_manager.register_query(
+            catalog_name,
+            vec![schema_name],
+            stmt.to_string(),
+            query_ctx.conn_info().to_string(),
+            Some(query_ctx.process_id()),
+            slow_query_timer,
+        );
+        let query_fut =
+            self.exec_statement_with_timeout(stmt, query_ctx.clone(), query_interceptor);
+        let output = CancellableFuture::new(query_fut, ticket.cancellation_handle.clone())
+            .await
+            .map_err(|_| error::CancelledSnafu.build())??;
+        let Output { meta, data } = output;
+        let data = match data {
+            OutputData::Stream(stream) => OutputData::Stream(Box::pin(
+                CancellableStreamWrapper::new_cancel_on_drop(stream, ticket),
+            )),
+            other => other,
+        };
+        query_interceptor.post_execute(Output { data, meta }, query_ctx)
+    }
+
     #[tracing::instrument(skip_all, name = "SqlQueryHandler::do_query")]
     async fn do_query_inner(&self, query: &str, query_ctx: QueryContextRef) -> Vec<Result<Output>> {
         if self.is_suspended() {
@@ -662,6 +752,8 @@ impl Instance {
 
         let plan_is_readonly = is_readonly_plan(&plan);
         let result = if should_track_plan_process(stmt.as_ref(), &plan) {
+            let catalog_name = query_ctx.current_catalog().to_string();
+            let schema_name = query_ctx.current_schema();
             let slow_query_timer = if plan_is_readonly {
                 self.slow_query_options
                     .enable
@@ -670,6 +762,7 @@ impl Instance {
                     .map(|event_recorder| {
                         SlowQueryTimer::new(
                             CatalogQueryStatement::Plan(query.clone()),
+                            schema_name.clone(),
                             self.slow_query_options.threshold,
                             self.slow_query_options.sample_ratio,
                             self.slow_query_options.record_type,
@@ -681,8 +774,8 @@ impl Instance {
             };
 
             let ticket = self.process_manager.register_query(
-                query_ctx.current_catalog().to_string(),
-                vec![query_ctx.current_schema()],
+                catalog_name,
+                vec![schema_name],
                 query,
                 query_ctx.conn_info().to_string(),
                 Some(query_ctx.process_id()),
@@ -793,6 +886,17 @@ impl SqlQueryHandler for Instance {
             .into_iter()
             .map(|result| result.map_err(BoxedError::new).context(ExecuteQuerySnafu))
             .collect()
+    }
+
+    async fn do_analyze_stream_query(
+        &self,
+        query: &str,
+        query_ctx: QueryContextRef,
+    ) -> server_error::Result<Output> {
+        self.do_analyze_stream_query_inner(query, query_ctx)
+            .await
+            .map_err(BoxedError::new)
+            .context(ExecuteQuerySnafu)
     }
 
     async fn do_exec_plan(
@@ -908,6 +1012,7 @@ impl PrometheusHandler for Instance {
             .map(|event_recorder| {
                 SlowQueryTimer::new(
                     query_statement,
+                    query_ctx.current_schema(),
                     self.slow_query_options.threshold,
                     self.slow_query_options.sample_ratio,
                     self.slow_query_options.record_type,
@@ -1254,6 +1359,46 @@ mod tests {
     use super::*;
     use crate::frontend::FrontendOptions;
     use crate::instance::builder::FrontendBuilder;
+
+    fn parse_test_sql(sql: &str) -> Vec<Statement> {
+        parse_stmt(sql, &GreptimeDbDialect {}).unwrap()
+    }
+
+    #[test]
+    fn test_validate_analyze_stream_statement_strictness() {
+        for sql in [
+            "select 1",
+            "explain analyze select 1",
+            "explain analyze verbose format text select 1",
+            "explain analyze verbose format graphviz select 1",
+        ] {
+            let mut stmts = parse_test_sql(sql);
+            assert!(
+                validate_analyze_stream_statement(&mut stmts[0]).is_err(),
+                "{sql}"
+            );
+        }
+
+        for sql in [
+            "explain analyze verbose select 1",
+            "explain analyze verbose format json select 1",
+        ] {
+            let mut stmts = parse_test_sql(sql);
+            assert!(
+                validate_analyze_stream_statement(&mut stmts[0]).is_ok(),
+                "{sql}"
+            );
+            let Statement::Explain(explain) = &stmts[0] else {
+                unreachable!();
+            };
+            assert!(explain.format.is_none());
+        }
+
+        assert_eq!(
+            parse_test_sql("explain analyze verbose select 1; select 2").len(),
+            2
+        );
+    }
 
     #[derive(Debug, Snafu)]
     enum TestError {

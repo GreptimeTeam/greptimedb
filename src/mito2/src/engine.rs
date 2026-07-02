@@ -56,6 +56,7 @@ mod parallel_test;
 mod projection_test;
 #[cfg(test)]
 mod prune_test;
+pub mod region_hook;
 #[cfg(test)]
 mod row_selector_test;
 #[cfg(test)]
@@ -132,6 +133,7 @@ use crate::engine::puffin_index::{IndexEntryContext, collect_index_entries_from_
 use crate::error::{
     IncrementalQueryStaleSnafu, InvalidRequestSnafu, JoinSnafu, MitoManifestInfoSnafu, RecvSnafu,
     RegionNotFoundSnafu, Result, SerdeJsonSnafu, SerializeColumnMetadataSnafu,
+    SnapshotFenceStaleSnafu,
 };
 #[cfg(feature = "enterprise")]
 use crate::extension::BoxedExtensionRangeProviderFactory;
@@ -1041,6 +1043,26 @@ impl EngineInner {
                     region_id,
                     given_seq,
                     min_readable_seq,
+                }
+            );
+        }
+
+        if let Some(given_seq) = request.memtable_max_sequence
+            && !request.skip_sst_files
+        {
+            // Explicit snapshot fences that include SST reads are enforceable
+            // only while the requested upper bound is not older than the
+            // region's flushed frontier. If H has already been flushed into SST,
+            // mito cannot apply a memtable-only sequence upper bound to that
+            // SST scan, so fail and let Flow rebind the fenced repair instead
+            // of reading rows beyond H.
+            let min_enforceable_seq = version.flushed_sequence;
+            ensure!(
+                given_seq >= min_enforceable_seq,
+                SnapshotFenceStaleSnafu {
+                    region_id,
+                    given_seq,
+                    min_enforceable_seq,
                 }
             );
         }

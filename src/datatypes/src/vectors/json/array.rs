@@ -25,7 +25,6 @@ use arrow_array::cast::AsArray;
 use arrow_array::types::{Float64Type, Int64Type, UInt64Type};
 use arrow_array::{Array, ArrayRef, GenericListArray, ListArray, StructArray, new_null_array};
 use arrow_schema::{DataType, FieldRef};
-use common_telemetry::debug;
 use serde_json::Value;
 use snafu::{OptionExt, ResultExt};
 
@@ -109,7 +108,7 @@ impl JsonArray<'_> {
             return Ok(self.inner.clone());
         }
 
-        debug!(
+        common_telemetry::trace!(
             "Try aligning JSON array {} to data type {}",
             self.inner.data_type(),
             expect

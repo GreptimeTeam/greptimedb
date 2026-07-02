@@ -21,13 +21,19 @@ use otel_arrow_rust::proto::opentelemetry::collector::metrics::v1::ExportMetrics
 use otel_arrow_rust::proto::opentelemetry::common::v1::{AnyValue, KeyValue, any_value};
 use otel_arrow_rust::proto::opentelemetry::metrics::v1::{metric, number_data_point, *};
 use session::protocol_ctx::{MetricType, OtlpMetricCtx};
+use table::requests::{
+    METADATA_QUALITY_DECLARED, SEMANTIC_METRIC_METADATA_QUALITY, SEMANTIC_METRIC_ORIGINAL_NAME,
+    SEMANTIC_METRIC_TEMPORALITY, SEMANTIC_METRIC_TYPE, SEMANTIC_METRIC_UNIT,
+};
 
 use crate::error::Result;
 use crate::otlp::trace::{KEY_SERVICE_INSTANCE_ID, KEY_SERVICE_NAME};
 use crate::row_writer::{self, MultiTableData, TableData};
 
+mod semantic;
 mod translator;
 
+pub use semantic::SemanticIndex;
 pub use translator::legacy_normalize_otlp_name;
 use translator::{translate_label_name, translate_metric_name};
 
@@ -36,6 +42,16 @@ const APPROXIMATE_COLUMN_COUNT: usize = 8;
 
 const COUNT_TABLE_SUFFIX: &str = "_count";
 const SUM_TABLE_SUFFIX: &str = "_sum";
+const BUCKET_TABLE_SUFFIX: &str = "_bucket";
+
+// `greptime.semantic.metric.type` values stamped per emitted table. Must stay
+// within the domain accepted by `validate_semantic_option`; the drift-guard test
+// asserts this.
+const METRIC_TYPE_COUNTER: &str = "counter";
+const METRIC_TYPE_UPDOWN_COUNTER: &str = "updown_counter";
+const METRIC_TYPE_GAUGE: &str = "gauge";
+const METRIC_TYPE_HISTOGRAM: &str = "histogram";
+const METRIC_TYPE_SUMMARY: &str = "summary";
 
 const JOB_KEY: &str = "job";
 const INSTANCE_KEY: &str = "instance";
@@ -78,12 +94,14 @@ const OTEL_SCOPE_SCHEMA_URL: &str = "schema_url";
 /// <https://github.com/open-telemetry/opentelemetry-proto/blob/main/opentelemetry/proto/metrics/v1/metrics.proto>
 /// for data structure of OTLP metrics.
 ///
-/// Returns `InsertRequests` and total number of rows to ingest
+/// Returns `InsertRequests`, total number of rows to ingest, and the per-table
+/// semantic index for the auto-create path to stamp as table options.
 pub fn to_grpc_insert_requests(
     request: ExportMetricsServiceRequest,
     metric_ctx: &mut OtlpMetricCtx,
-) -> Result<(RowInsertRequests, usize)> {
+) -> Result<(RowInsertRequests, usize, SemanticIndex)> {
     let mut table_writer = MultiTableData::default();
+    let mut semantic_index = SemanticIndex::default();
 
     for resource in &request.resource_metrics {
         let resource_attrs = resource.resource.as_ref().map(|r| {
@@ -109,12 +127,98 @@ pub fn to_grpc_insert_requests(
                     resource_attrs.as_ref(),
                     scope_attrs.as_ref(),
                     metric_ctx,
+                    &mut semantic_index,
                 )?;
             }
         }
     }
 
-    Ok(table_writer.into_row_insert_requests())
+    let (requests, rows) = table_writer.into_row_insert_requests();
+    Ok((requests, rows, semantic_index))
+}
+
+/// The tables a metric emits and their per-table `metric.type`. Histogram fans
+/// out into `_bucket` (the histogram) plus `_sum`/`_count` counters; summary
+/// fans out into the quantile table plus `_count`/`_sum` counters (legacy
+/// summary stays a single table).
+fn emitted_semantic_tables(
+    metric_type: &MetricType,
+    is_legacy: bool,
+    base: &str,
+) -> Vec<(String, &'static str)> {
+    match metric_type {
+        MetricType::Gauge => vec![(base.to_string(), METRIC_TYPE_GAUGE)],
+        MetricType::MonotonicSum => vec![(base.to_string(), METRIC_TYPE_COUNTER)],
+        MetricType::NonMonotonicSum => vec![(base.to_string(), METRIC_TYPE_UPDOWN_COUNTER)],
+        MetricType::Histogram => vec![
+            (
+                format!("{base}{BUCKET_TABLE_SUFFIX}"),
+                METRIC_TYPE_HISTOGRAM,
+            ),
+            (format!("{base}{SUM_TABLE_SUFFIX}"), METRIC_TYPE_COUNTER),
+            (format!("{base}{COUNT_TABLE_SUFFIX}"), METRIC_TYPE_COUNTER),
+        ],
+        MetricType::Summary if is_legacy => vec![(base.to_string(), METRIC_TYPE_SUMMARY)],
+        MetricType::Summary => vec![
+            (base.to_string(), METRIC_TYPE_SUMMARY),
+            (format!("{base}{COUNT_TABLE_SUFFIX}"), METRIC_TYPE_COUNTER),
+            (format!("{base}{SUM_TABLE_SUFFIX}"), METRIC_TYPE_COUNTER),
+        ],
+        // ExponentialHistogram is a no-op today; Init never reaches encoding.
+        MetricType::ExponentialHistogram | MetricType::Init => vec![],
+    }
+}
+
+/// Maps OTLP `aggregation_temporality` to the semantic value, or `None` when the
+/// instrument has no temporality (gauge/summary) or it is unspecified.
+fn temporality_value(data: &metric::Data) -> Option<&'static str> {
+    let raw = match data {
+        metric::Data::Sum(sum) => sum.aggregation_temporality,
+        metric::Data::Histogram(hist) => hist.aggregation_temporality,
+        _ => return None,
+    };
+    match AggregationTemporality::try_from(raw) {
+        Ok(AggregationTemporality::Delta) => Some("delta"),
+        Ok(AggregationTemporality::Cumulative) => Some("cumulative"),
+        _ => None,
+    }
+}
+
+/// Records the declared metric-level semantic keys for every table this metric
+/// emits.
+fn record_metric_semantics(
+    index: &mut SemanticIndex,
+    metric: &Metric,
+    name: &str,
+    metric_ctx: &OtlpMetricCtx,
+) {
+    let emitted = emitted_semantic_tables(&metric_ctx.metric_type, metric_ctx.is_legacy, name);
+    if emitted.is_empty() {
+        return;
+    }
+
+    let temporality = metric.data.as_ref().and_then(temporality_value);
+    let unit = metric.unit.trim();
+    // `original_name` is meaningful only when translation renamed the metric.
+    let original_name = (name != metric.name.as_str()).then_some(metric.name.as_str());
+
+    for (table, metric_type) in &emitted {
+        index.record_scalar(table, SEMANTIC_METRIC_TYPE, metric_type);
+        index.record_scalar(
+            table,
+            SEMANTIC_METRIC_METADATA_QUALITY,
+            METADATA_QUALITY_DECLARED,
+        );
+        if let Some(temporality) = temporality {
+            index.record_scalar(table, SEMANTIC_METRIC_TEMPORALITY, temporality);
+        }
+        if !unit.is_empty() {
+            index.record_scalar(table, SEMANTIC_METRIC_UNIT, unit);
+        }
+        if let Some(original_name) = original_name {
+            index.record_scalar(table, SEMANTIC_METRIC_ORIGINAL_NAME, original_name);
+        }
+    }
 }
 
 fn from_metric_type(data: &metric::Data) -> MetricType {
@@ -211,6 +315,7 @@ fn encode_metrics(
     resource_attrs: Option<&Vec<KeyValue>>,
     scope_attrs: Option<&Vec<KeyValue>>,
     metric_ctx: &OtlpMetricCtx,
+    semantic_index: &mut SemanticIndex,
 ) -> Result<()> {
     let name = if metric_ctx.is_legacy {
         legacy_normalize_otlp_name(&metric.name)
@@ -222,8 +327,11 @@ fn encode_metrics(
         )
     };
 
-    // note that we don't store description or unit, we might want to deal with
-    // these fields in the future.
+    // Stamp semantic metadata against the same table name(s) the data is written
+    // to below. `unit` is captured here (it is otherwise discarded by the row
+    // encoders) along with the declared type/temporality.
+    record_metric_semantics(semantic_index, metric, &name, metric_ctx);
+
     if let Some(data) = &metric.data {
         match data {
             metric::Data::Gauge(gauge) => {
@@ -511,9 +619,9 @@ fn encode_histogram(
 ) -> Result<()> {
     let normalized_name = name;
 
-    let bucket_table_name = format!("{}_bucket", normalized_name);
-    let sum_table_name = format!("{}_sum", normalized_name);
-    let count_table_name = format!("{}_count", normalized_name);
+    let bucket_table_name = format!("{}{}", normalized_name, BUCKET_TABLE_SUFFIX);
+    let sum_table_name = format!("{}{}", normalized_name, SUM_TABLE_SUFFIX);
+    let count_table_name = format!("{}{}", normalized_name, COUNT_TABLE_SUFFIX);
 
     let data_points_len = hist.data_points.len();
     // Note that the row and columns number here is approximate
@@ -1031,5 +1139,192 @@ mod tests {
                 greptime_value()
             ]
         );
+    }
+
+    use std::collections::BTreeMap;
+
+    use table::requests::validate_semantic_option;
+
+    fn decode(index: &SemanticIndex) -> BTreeMap<String, BTreeMap<String, String>> {
+        serde_json::from_str(&index.encode().expect("non-empty index")).unwrap()
+    }
+
+    fn record(metric: &Metric, metric_type: MetricType, name: &str) -> SemanticIndex {
+        let ctx = OtlpMetricCtx {
+            metric_type,
+            ..Default::default()
+        };
+        let mut index = SemanticIndex::default();
+        record_metric_semantics(&mut index, metric, name, &ctx);
+        index
+    }
+
+    #[test]
+    fn test_metric_type_constants_validate() {
+        for value in [
+            METRIC_TYPE_COUNTER,
+            METRIC_TYPE_UPDOWN_COUNTER,
+            METRIC_TYPE_GAUGE,
+            METRIC_TYPE_HISTOGRAM,
+            METRIC_TYPE_SUMMARY,
+        ] {
+            assert!(
+                validate_semantic_option(SEMANTIC_METRIC_TYPE, value),
+                "metric.type value `{value}` must be in the vocabulary domain"
+            );
+        }
+        for value in ["delta", "cumulative"] {
+            assert!(validate_semantic_option(SEMANTIC_METRIC_TEMPORALITY, value));
+        }
+    }
+
+    #[test]
+    fn test_record_monotonic_sum() {
+        let metric = Metric {
+            name: "claude_code.cost.usage".to_string(),
+            unit: "USD".to_string(),
+            data: Some(metric::Data::Sum(Sum {
+                aggregation_temporality: AggregationTemporality::Delta as i32,
+                is_monotonic: true,
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        let index = record(
+            &metric,
+            MetricType::MonotonicSum,
+            "claude_code_cost_usage_USD_total",
+        );
+        let decoded = decode(&index);
+        let t = &decoded["claude_code_cost_usage_USD_total"];
+
+        assert_eq!(
+            t.get(SEMANTIC_METRIC_TYPE).map(String::as_str),
+            Some("counter")
+        );
+        assert_eq!(
+            t.get(SEMANTIC_METRIC_TEMPORALITY).map(String::as_str),
+            Some("delta")
+        );
+        assert_eq!(t.get(SEMANTIC_METRIC_UNIT).map(String::as_str), Some("USD"));
+        assert_eq!(
+            t.get(SEMANTIC_METRIC_ORIGINAL_NAME).map(String::as_str),
+            Some("claude_code.cost.usage")
+        );
+        assert_eq!(
+            t.get(SEMANTIC_METRIC_METADATA_QUALITY).map(String::as_str),
+            Some("declared")
+        );
+    }
+
+    #[test]
+    fn test_record_non_monotonic_sum() {
+        let metric = Metric {
+            name: "queue_size".to_string(),
+            data: Some(metric::Data::Sum(Sum {
+                aggregation_temporality: AggregationTemporality::Cumulative as i32,
+                is_monotonic: false,
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        let index = record(&metric, MetricType::NonMonotonicSum, "queue_size");
+        let decoded = decode(&index);
+        let t = &decoded["queue_size"];
+        assert_eq!(
+            t.get(SEMANTIC_METRIC_TYPE).map(String::as_str),
+            Some("updown_counter")
+        );
+        assert_eq!(
+            t.get(SEMANTIC_METRIC_TEMPORALITY).map(String::as_str),
+            Some("cumulative")
+        );
+        // Name unchanged by translation -> no original_name.
+        assert_eq!(t.get(SEMANTIC_METRIC_ORIGINAL_NAME), None);
+    }
+
+    #[test]
+    fn test_record_gauge_has_no_temporality() {
+        let metric = Metric {
+            name: "temperature".to_string(),
+            data: Some(metric::Data::Gauge(Gauge::default())),
+            ..Default::default()
+        };
+        let index = record(&metric, MetricType::Gauge, "temperature");
+        let decoded = decode(&index);
+        let t = &decoded["temperature"];
+        assert_eq!(
+            t.get(SEMANTIC_METRIC_TYPE).map(String::as_str),
+            Some("gauge")
+        );
+        assert_eq!(t.get(SEMANTIC_METRIC_TEMPORALITY), None);
+    }
+
+    #[test]
+    fn test_record_histogram_fans_out_with_distinct_types() {
+        let metric = Metric {
+            name: "request.duration".to_string(),
+            unit: "s".to_string(),
+            data: Some(metric::Data::Histogram(Histogram {
+                aggregation_temporality: AggregationTemporality::Cumulative as i32,
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        let index = record(&metric, MetricType::Histogram, "request_duration");
+        let decoded = decode(&index);
+
+        let bucket = &decoded["request_duration_bucket"];
+        assert_eq!(
+            bucket.get(SEMANTIC_METRIC_TYPE).map(String::as_str),
+            Some("histogram")
+        );
+        assert_eq!(
+            bucket.get(SEMANTIC_METRIC_UNIT).map(String::as_str),
+            Some("s")
+        );
+
+        for companion in ["request_duration_sum", "request_duration_count"] {
+            let t = &decoded[companion];
+            assert_eq!(
+                t.get(SEMANTIC_METRIC_TYPE).map(String::as_str),
+                Some("counter")
+            );
+            assert_eq!(
+                t.get(SEMANTIC_METRIC_TEMPORALITY).map(String::as_str),
+                Some("cumulative")
+            );
+        }
+    }
+
+    #[test]
+    fn test_record_summary_fans_out() {
+        let metric = Metric {
+            name: "rpc.latency".to_string(),
+            data: Some(metric::Data::Summary(Summary::default())),
+            ..Default::default()
+        };
+        let index = record(&metric, MetricType::Summary, "rpc_latency");
+        let decoded = decode(&index);
+
+        assert_eq!(
+            decoded["rpc_latency"]
+                .get(SEMANTIC_METRIC_TYPE)
+                .map(String::as_str),
+            Some("summary")
+        );
+        // Summary has no temporality.
+        assert_eq!(
+            decoded["rpc_latency"].get(SEMANTIC_METRIC_TEMPORALITY),
+            None
+        );
+        for companion in ["rpc_latency_count", "rpc_latency_sum"] {
+            assert_eq!(
+                decoded[companion]
+                    .get(SEMANTIC_METRIC_TYPE)
+                    .map(String::as_str),
+                Some("counter")
+            );
+        }
     }
 }

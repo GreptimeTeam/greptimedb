@@ -108,5 +108,11 @@ mod test {
                 .to_string(),
             "WITH tql_cte AS (TQL EVAL (0, 100, '5s') up) SELECT * FROM tql_cte"
         );
+        assert_eq!(
+            create_query("WITH sql_cte AS (SELECT 1) SELECT * FROM sql_cte")
+                .unwrap()
+                .to_string(),
+            "WITH sql_cte AS (SELECT 1) SELECT * FROM sql_cte"
+        );
     }
 }

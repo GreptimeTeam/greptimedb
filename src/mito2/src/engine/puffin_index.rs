@@ -25,7 +25,10 @@ use index::target::IndexTarget;
 use puffin::blob_metadata::BlobMetadata;
 use puffin::puffin_manager::{PuffinManager, PuffinReader};
 use serde_json::{Map, Value, json};
-use store_api::sst_entry::PuffinIndexMetaEntry;
+use store_api::sst_entry::{
+    PUFFIN_INDEX_TYPE_BLOOM_FILTER, PUFFIN_INDEX_TYPE_FULLTEXT_BLOOM,
+    PUFFIN_INDEX_TYPE_FULLTEXT_TANTIVY, PUFFIN_INDEX_TYPE_INVERTED, PuffinIndexMetaEntry,
+};
 use store_api::storage::{ColumnId, RegionGroup, RegionId, RegionNumber, RegionSeq, TableId};
 
 use crate::cache::index::bloom_filter_index::{
@@ -40,11 +43,6 @@ use crate::sst::index::fulltext_index::{
 };
 use crate::sst::index::inverted_index::INDEX_BLOB_TYPE as INVERTED_BLOB_TYPE;
 use crate::sst::index::puffin_manager::{SstPuffinManager, SstPuffinReader};
-
-const INDEX_TYPE_BLOOM: &str = "bloom_filter";
-const INDEX_TYPE_FULLTEXT_BLOOM: &str = "fulltext_bloom";
-const INDEX_TYPE_FULLTEXT_TANTIVY: &str = "fulltext_tantivy";
-const INDEX_TYPE_INVERTED: &str = "inverted";
 
 const TARGET_TYPE_UNKNOWN: &str = "unknown";
 
@@ -118,7 +116,7 @@ pub(crate) async fn collect_index_entries_from_puffin(
                 let meta_json = build_meta_json(bloom_value, None, None);
                 let entry = build_index_entry(
                     &context,
-                    INDEX_TYPE_BLOOM,
+                    PUFFIN_INDEX_TYPE_BLOOM_FILTER,
                     target_type,
                     target_key.to_string(),
                     target_json,
@@ -145,7 +143,7 @@ pub(crate) async fn collect_index_entries_from_puffin(
                 let meta_json = build_meta_json(bloom_value, fulltext_value, None);
                 let entry = build_index_entry(
                     &context,
-                    INDEX_TYPE_FULLTEXT_BLOOM,
+                    PUFFIN_INDEX_TYPE_FULLTEXT_BLOOM,
                     target_type,
                     target_key.to_string(),
                     target_json,
@@ -160,7 +158,7 @@ pub(crate) async fn collect_index_entries_from_puffin(
                 let meta_json = build_meta_json(None, fulltext_value, None);
                 let entry = build_index_entry(
                     &context,
-                    INDEX_TYPE_FULLTEXT_TANTIVY,
+                    PUFFIN_INDEX_TYPE_FULLTEXT_TANTIVY,
                     target_type,
                     target_key.to_string(),
                     target_json,
@@ -276,7 +274,7 @@ fn build_inverted_entries(
         let meta_json = build_meta_json(None, None, Some(inverted_value));
         let entry = build_index_entry(
             context,
-            INDEX_TYPE_INVERTED,
+            PUFFIN_INDEX_TYPE_INVERTED,
             target_type,
             name.clone(),
             target_json,

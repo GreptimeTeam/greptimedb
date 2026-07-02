@@ -50,12 +50,15 @@ use datafusion_optimizer::analyzer::function_rewrite::ApplyFunctionRewrites;
 use datafusion_optimizer::optimizer::Optimizer;
 use partition::manager::PartitionRuleManagerRef;
 use promql::extension_plan::PromExtensionPlanner;
+use session::context::QueryContextRef;
 use table::TableRef;
 use table::table::adapter::DfTableProviderAdapter;
 
 use crate::QueryEngineContext;
 use crate::dist_plan::{
-    DistExtensionPlanner, DistPlannerAnalyzer, DistPlannerOptions, MergeSortExtensionPlanner,
+    DistExtensionPlanner, DistPlannerAnalyzer, DistPlannerOptions, DynFilterRegistryManager,
+    MergeSortExtensionPlanner, RemoteDynFilterReceiverExtensionPlanner,
+    RemoteDynFilterRegistryLease,
 };
 use crate::metrics::{QUERY_MEMORY_POOL_REJECTED_TOTAL, QUERY_MEMORY_POOL_USAGE_BYTES};
 use crate::optimizer::ExtensionAnalyzerRule;
@@ -84,6 +87,7 @@ use crate::region_query::RegionQueryHandlerRef;
 pub struct QueryEngineState {
     df_context: SessionContext,
     catalog_manager: CatalogManagerRef,
+    dyn_filter_registry_manager: Arc<DynFilterRegistryManager>,
     function_state: Arc<FunctionState>,
     scalar_functions: Arc<RwLock<HashMap<String, ScalarFunctionFactory>>>,
     aggr_functions: Arc<RwLock<HashMap<String, AggregateUDF>>>,
@@ -228,7 +232,8 @@ impl QueryEngineState {
             .with_query_planner(Arc::new(DfQueryPlanner::new(
                 catalog_list.clone(),
                 partition_rule_manager,
-                region_query_handler,
+                region_query_handler.clone(),
+                options.enable_per_region_metrics,
             )))
             .with_optimizer_rules(optimizer.rules)
             .with_physical_optimizer_rules(physical_optimizer.rules)
@@ -240,6 +245,7 @@ impl QueryEngineState {
         Self {
             df_context,
             catalog_manager: catalog_list,
+            dyn_filter_registry_manager: Arc::new(DynFilterRegistryManager::default()),
             function_state: Arc::new(FunctionState {
                 table_mutation_handler,
                 procedure_service_handler,
@@ -396,6 +402,22 @@ impl QueryEngineState {
         &self.catalog_manager
     }
 
+    pub fn dyn_filter_registry_manager(&self) -> Arc<DynFilterRegistryManager> {
+        self.dyn_filter_registry_manager.clone()
+    }
+
+    pub fn acquire_remote_dyn_filter_registry_lease(
+        &self,
+        query_ctx: &QueryContextRef,
+    ) -> Option<RemoteDynFilterRegistryLease> {
+        let query_id = query_ctx.remote_query_id_value()?;
+        Some(
+            self.dyn_filter_registry_manager
+                .clone()
+                .acquire_lease(query_id),
+        )
+    }
+
     pub fn function_state(&self) -> Arc<FunctionState> {
         self.function_state.clone()
     }
@@ -490,9 +512,13 @@ impl DfQueryPlanner {
         catalog_manager: CatalogManagerRef,
         partition_rule_manager: Option<PartitionRuleManagerRef>,
         region_query_handler: Option<RegionQueryHandlerRef>,
+        enable_per_region_metrics: bool,
     ) -> Self {
-        let mut planners: Vec<Arc<dyn ExtensionPlanner + Send + Sync>> =
-            vec![Arc::new(PromExtensionPlanner), Arc::new(RangeSelectPlanner)];
+        let mut planners: Vec<Arc<dyn ExtensionPlanner + Send + Sync>> = vec![
+            Arc::new(PromExtensionPlanner),
+            Arc::new(RangeSelectPlanner),
+            Arc::new(RemoteDynFilterReceiverExtensionPlanner),
+        ];
         if let (Some(region_query_handler), Some(partition_rule_manager)) =
             (region_query_handler, partition_rule_manager)
         {
@@ -500,6 +526,7 @@ impl DfQueryPlanner {
                 catalog_manager,
                 partition_rule_manager,
                 region_query_handler,
+                enable_per_region_metrics,
             )));
             planners.push(Arc::new(MergeSortExtensionPlanner {}));
         }
@@ -575,5 +602,91 @@ impl MemoryPool for MetricsMemoryPool {
 
     fn memory_limit(&self) -> MemoryLimit {
         self.inner.memory_limit()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use common_base::Plugins;
+    use session::context::QueryContext;
+
+    use super::*;
+    use crate::options::QueryOptions;
+
+    fn new_query_engine_state() -> QueryEngineState {
+        QueryEngineState::new(
+            catalog::memory::new_memory_catalog_manager().unwrap(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+            Plugins::default(),
+            QueryOptions::default(),
+        )
+    }
+
+    #[test]
+    fn query_engine_state_reuses_query_scoped_dyn_filter_registry_lease() {
+        let state = new_query_engine_state();
+        let query_ctx = QueryContext::arc();
+
+        let first = state
+            .acquire_remote_dyn_filter_registry_lease(&query_ctx)
+            .unwrap();
+        let second = state
+            .acquire_remote_dyn_filter_registry_lease(&query_ctx)
+            .unwrap();
+
+        assert!(first.ptr_eq(&second));
+        assert_eq!(state.dyn_filter_registry_manager().registry_count(), 1);
+        assert_eq!(
+            first.registry().query_id(),
+            query_ctx.remote_query_id_value().unwrap()
+        );
+    }
+
+    #[test]
+    fn query_engine_state_relies_on_query_context_remote_query_id_contract() {
+        let state = new_query_engine_state();
+        let query_ctx = QueryContext::arc();
+
+        assert!(query_ctx.remote_query_id_value().is_some());
+
+        let lease = state
+            .acquire_remote_dyn_filter_registry_lease(&query_ctx)
+            .unwrap();
+
+        assert_eq!(
+            lease.registry().query_id(),
+            query_ctx.remote_query_id_value().unwrap()
+        );
+        assert_eq!(state.dyn_filter_registry_manager().registry_count(), 1);
+    }
+
+    #[test]
+    fn query_engine_state_separates_registries_for_different_query_contexts() {
+        let state = new_query_engine_state();
+        let first_query_ctx = QueryContext::arc();
+        let second_query_ctx = QueryContext::arc();
+
+        let first = state
+            .acquire_remote_dyn_filter_registry_lease(&first_query_ctx)
+            .unwrap();
+        let second = state
+            .acquire_remote_dyn_filter_registry_lease(&second_query_ctx)
+            .unwrap();
+
+        assert!(!first.ptr_eq(&second));
+        assert_eq!(state.dyn_filter_registry_manager().registry_count(), 2);
+        assert_eq!(
+            first.registry().query_id(),
+            first_query_ctx.remote_query_id_value().unwrap()
+        );
+        assert_eq!(
+            second.registry().query_id(),
+            second_query_ctx.remote_query_id_value().unwrap()
+        );
     }
 }

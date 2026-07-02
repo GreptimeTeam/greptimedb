@@ -121,6 +121,7 @@ impl AlterTableExecutor {
         region_distribution: Option<&RegionDistribution>,
         mut raw_table_info: TableInfo,
         column_metadatas: &[ColumnMetadata],
+        metadata_only_alter: bool,
     ) -> Result<()> {
         let table_ref = self.table.table_ref();
         let table_id = self.table_id;
@@ -141,7 +142,7 @@ impl AlterTableExecutor {
             );
 
             ensure!(
-                region_distribution.is_some(),
+                metadata_only_alter || region_distribution.is_some(),
                 UnexpectedSnafu {
                     err_msg: "region distribution is not set when updating table metadata",
                 }
@@ -298,6 +299,8 @@ fn build_new_table_info(
         | AlterKind::ModifyColumnTypes { .. }
         | AlterKind::SetTableOptions { .. }
         | AlterKind::UnsetTableOptions { .. }
+        | AlterKind::SetRepartitionColumnHint { .. }
+        | AlterKind::UnsetRepartitionColumnHint
         | AlterKind::SetIndexes { .. }
         | AlterKind::UnsetIndexes { .. }
         | AlterKind::DropDefaults { .. }

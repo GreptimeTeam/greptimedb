@@ -217,6 +217,7 @@ pub struct RecordBatchStreamAdapter {
     metrics: Option<BaselineMetrics>,
     /// Aggregated plan-level metrics. Resolved after an [ExecutionPlan] is finished.
     metrics_2: Metrics,
+    query_load_region_id: Option<u64>,
     /// Display plan and metrics in verbose mode.
     explain_verbose: bool,
     span: Span,
@@ -239,6 +240,7 @@ impl RecordBatchStreamAdapter {
             stream,
             metrics: None,
             metrics_2: Metrics::Unavailable,
+            query_load_region_id: None,
             explain_verbose: false,
             span: Span::current(),
         })
@@ -253,6 +255,7 @@ impl RecordBatchStreamAdapter {
             stream,
             metrics: None,
             metrics_2: Metrics::Unavailable,
+            query_load_region_id: None,
             explain_verbose: false,
             span: subspan,
         })
@@ -260,6 +263,10 @@ impl RecordBatchStreamAdapter {
 
     pub fn set_metrics2(&mut self, plan: Arc<dyn ExecutionPlan>) {
         self.metrics_2 = Metrics::Unresolved(plan)
+    }
+
+    pub fn set_query_load_region_id(&mut self, region_id: Option<u64>) {
+        self.query_load_region_id = region_id;
     }
 
     /// Set the verbose mode for displaying plan and metrics.
@@ -312,6 +319,8 @@ impl Stream for RecordBatchStreamAdapter {
                 {
                     let mut metric_collector = MetricCollector::new(self.explain_verbose);
                     accept(df_plan.as_ref(), &mut metric_collector).unwrap();
+                    metric_collector.record_batch_metrics.query_load_region_id =
+                        self.query_load_region_id;
                     self.metrics_2 = Metrics::PartialResolved(
                         df_plan.clone(),
                         metric_collector.record_batch_metrics,
@@ -328,6 +337,8 @@ impl Stream for RecordBatchStreamAdapter {
                 {
                     let mut metric_collector = MetricCollector::new(self.explain_verbose);
                     accept(df_plan.as_ref(), &mut metric_collector).unwrap();
+                    metric_collector.record_batch_metrics.query_load_region_id =
+                        self.query_load_region_id;
                     self.metrics_2 = Metrics::Resolved(metric_collector.record_batch_metrics);
                 }
                 Poll::Ready(None)
@@ -366,6 +377,7 @@ impl ExecutionPlanVisitor for MetricCollector {
         let Some(metric) = plan.metrics() else {
             self.record_batch_metrics.plan_metrics.push(PlanMetrics {
                 plan: plan.name().to_string(),
+                plan_name: plan.name().to_string(),
                 level: self.current_level,
                 metrics: vec![],
             });
@@ -380,6 +392,7 @@ impl ExecutionPlanVisitor for MetricCollector {
             .timestamps_removed();
         let mut plan_metric = PlanMetrics {
             plan: one_line(plan, self.verbose).to_string(),
+            plan_name: plan.name().to_string(),
             level: self.current_level,
             metrics: Vec::with_capacity(metric.iter().size_hint().0),
         };
@@ -446,6 +459,9 @@ pub struct RecordBatchMetrics {
     // Detailed per-plan metrics
     /// An ordered list of plan metrics, from top to bottom in post-order.
     pub plan_metrics: Vec<PlanMetrics>,
+    /// Region id that should receive query-load metrics for this scan.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query_load_region_id: Option<u64>,
     /// Per-region watermark for incremental-read checkpoint advancement.
     ///
     /// The watermark is the latest sequence (`seq`) this query round safely read
@@ -519,6 +535,9 @@ impl Display for RecordBatchMetrics {
 pub struct PlanMetrics {
     /// The plan name
     pub plan: String,
+    /// The stable execution plan name.
+    #[serde(default)]
+    pub plan_name: String,
     /// The level of the plan, starts from 0
     pub level: usize,
     /// An ordered key-value list of metrics.
@@ -914,6 +933,22 @@ mod test {
         assert!(metrics.region_watermarks.is_empty());
         assert_eq!(metrics.elapsed_compute, 12);
         assert_eq!(metrics.memory_usage, 34);
+    }
+
+    #[test]
+    fn test_plan_metrics_deserializes_without_plan_name() {
+        let metrics: RecordBatchMetrics = serde_json::from_value(json!({
+            "elapsed_compute": 12,
+            "memory_usage": 34,
+            "plan_metrics": [{
+                "plan": "SeqScan: region=1",
+                "level": 0,
+                "metrics": []
+            }]
+        }))
+        .unwrap();
+
+        assert_eq!(metrics.plan_metrics[0].plan_name, "");
     }
 
     #[test]

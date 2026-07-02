@@ -15,11 +15,12 @@
 use std::str::Utf8Error;
 use std::sync::Arc;
 
-use common_error::ext::{BoxedError, ErrorExt};
+use common_error::ext::{BoxedError, ErrorExt, RetryHint};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use common_procedure::ProcedureId;
-use common_wal::options::WalOptions;
+use common_wal::kafka::rskafka_client_error_to_retry_hint;
+use object_store::error::retry_hint_from_opendal_error;
 use serde_json::error::Error as JsonError;
 use snafu::{Location, Snafu};
 use store_api::storage::RegionId;
@@ -27,6 +28,14 @@ use table::metadata::TableId;
 
 use crate::DatanodeId;
 use crate::peer::Peer;
+
+mod retry_hint;
+
+pub use retry_hint::retry_hint_from_etcd_error;
+#[cfg(feature = "mysql_kvbackend")]
+pub use retry_hint::retry_hint_from_sqlx_error;
+#[cfg(feature = "pg_kvbackend")]
+pub use retry_hint::{retry_hint_from_postgres_error, retry_hint_from_postgres_pool_error};
 
 #[derive(Snafu)]
 #[snafu(visibility(pub))]
@@ -529,12 +538,9 @@ pub enum Error {
         clean_poisons: bool,
     },
 
-    #[snafu(display(
-        "Failed to encode a wal options to json string, wal_options: {:?}",
-        wal_options
-    ))]
-    EncodeWalOptions {
-        wal_options: WalOptions,
+    #[snafu(display("Failed to serialize WAL options for region: {region_id}"))]
+    SerializeWalOptions {
+        region_id: RegionId,
         #[snafu(source)]
         error: serde_json::Error,
         #[snafu(implicit)]
@@ -902,15 +908,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to parse wal options: {}", wal_options))]
-    ParseWalOptions {
-        wal_options: String,
-        #[snafu(implicit)]
-        location: Location,
-        #[snafu(source)]
-        error: serde_json::Error,
-    },
-
     #[snafu(display("No leader found for table_id: {}", table_id))]
     NoLeader {
         table_id: TableId,
@@ -1175,7 +1172,7 @@ impl ErrorExt for Error {
             | TableRouteNotFound { .. }
             | TableRepartNotFound { .. }
             | RegionOperatingRace { .. }
-            | EncodeWalOptions { .. }
+            | SerializeWalOptions { .. }
             | BuildKafkaClient { .. }
             | BuildKafkaCtrlClient { .. }
             | KafkaPartitionClient { .. }
@@ -1186,7 +1183,6 @@ impl ErrorExt for Error {
             | ProcedureOutput { .. }
             | FromUtf8 { .. }
             | MetadataCorruption { .. }
-            | ParseWalOptions { .. }
             | KafkaGetOffset { .. }
             | ReadFlexbuffers { .. }
             | SerializeFlexbuffers { .. }
@@ -1281,6 +1277,63 @@ impl ErrorExt for Error {
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
+
+    fn retry_hint(&self) -> RetryHint {
+        use Error::*;
+
+        match self {
+            RetryLater { .. }
+            | GetLatestCacheRetryExceeded { .. }
+            | NoLeader { .. }
+            | ElectionNoLeader { .. }
+            | ElectionLeaderLeaseExpired { .. }
+            | ElectionLeaderLeaseChanged { .. } => RetryHint::Retryable,
+            ConnectEtcd { error, .. } | EtcdFailed { error, .. } | EtcdTxnFailed { error, .. } => {
+                retry_hint_from_etcd_error(error)
+            }
+            WriteObject { error, .. } | ReadObject { error, .. } => {
+                retry_hint_from_opendal_error(error)
+            }
+            BuildKafkaClient { error, .. }
+            | BuildKafkaCtrlClient { error, .. }
+            | KafkaPartitionClient { error, .. }
+            | KafkaGetOffset { error, .. }
+            | ProduceRecord { error, .. }
+            | CreateKafkaWalTopic { error, .. } => rskafka_client_error_to_retry_hint(error),
+            SubmitProcedure { source, .. }
+            | QueryProcedure { source, .. }
+            | WaitProcedure { source, .. }
+            | StartProcedureManager { source, .. }
+            | StopProcedureManager { source, .. }
+            | RegisterProcedureLoader { source, .. }
+            | PutPoison { source, .. }
+            | ProcedureStateReceiver { source, .. } => source.retry_hint(),
+            External { source, .. }
+            | ResponseExceededSizeLimit { source, .. }
+            | OperateDatanode { source, .. }
+            | AbortProcedure { source, .. }
+            | RegisterRepartitionProcedureLoader { source, .. }
+            | CreateRepartitionProcedure { source, .. } => source.retry_hint(),
+            Table { source, .. } => source.retry_hint(),
+            ConvertAlterTableRequest { source, .. } => source.retry_hint(),
+            ConvertColumnDef { source, .. } => source.retry_hint(),
+            GetCache { source, .. } => source.retry_hint(),
+            #[cfg(feature = "pg_kvbackend")]
+            PostgresExecution { error, .. } | PostgresTransaction { error, .. } => {
+                retry_hint_from_postgres_error(error)
+            }
+            #[cfg(feature = "pg_kvbackend")]
+            GetPostgresClient { error, .. } => retry_hint_from_postgres_pool_error(error),
+            #[cfg(feature = "mysql_kvbackend")]
+            MySqlExecution { error, .. }
+            | CreateMySqlPool { error, .. }
+            | AcquireMySqlClient { error, .. }
+            | MySqlTransaction { error, .. } => retry_hint_from_sqlx_error(error),
+            #[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
+            SqlExecutionTimeout { .. } => RetryHint::Retryable,
+            _ => RetryHint::NonRetryable,
+        }
+    }
 }
 
 impl Error {
@@ -1289,23 +1342,12 @@ impl Error {
     pub fn is_serialization_error(&self) -> bool {
         match self {
             #[cfg(feature = "pg_kvbackend")]
-            Error::PostgresTransaction { error, .. } => {
-                error.code() == Some(&tokio_postgres::error::SqlState::T_R_SERIALIZATION_FAILURE)
-            }
-            #[cfg(feature = "pg_kvbackend")]
-            Error::PostgresExecution { error, .. } => {
-                error.code() == Some(&tokio_postgres::error::SqlState::T_R_SERIALIZATION_FAILURE)
+            Error::PostgresExecution { error, .. } | Error::PostgresTransaction { error, .. } => {
+                retry_hint::is_postgres_serialization_error(error)
             }
             #[cfg(feature = "mysql_kvbackend")]
-            Error::MySqlExecution {
-                error: sqlx::Error::Database(database_error),
-                ..
-            } => {
-                matches!(
-                    database_error.message(),
-                    "Deadlock found when trying to get lock; try restarting transaction"
-                        | "can't serialize access for this transaction"
-                )
+            Error::MySqlExecution { error, .. } | Error::MySqlTransaction { error, .. } => {
+                retry_hint::is_mysql_serialization_error(error)
             }
             _ => false,
         }
@@ -1348,5 +1390,58 @@ impl Error {
             Error::ResponseExceededSizeLimit { .. } => true,
             _ => false,
         }
+    }
+}
+
+#[cfg(test)]
+mod retry_hint_tests {
+    use std::sync::Arc;
+
+    use common_error::mock::MockError;
+
+    use super::*;
+
+    #[test]
+    fn test_retry_later_hint_is_retryable() {
+        let err = Error::retry_later(MockError::new(StatusCode::Internal));
+
+        assert_eq!(err.retry_hint(), RetryHint::Retryable);
+    }
+
+    #[test]
+    fn test_latest_cache_retry_exceeded_hint_is_retryable() {
+        let err = GetLatestCacheRetryExceededSnafu { attempts: 3_usize }.build();
+
+        assert_eq!(err.retry_hint(), RetryHint::Retryable);
+    }
+
+    #[test]
+    fn test_get_cache_forwards_retry_hint() {
+        let source = Arc::new(Error::retry_later(MockError::new(StatusCode::Internal)));
+        let err = Error::GetCache { source };
+
+        assert_eq!(err.retry_hint(), RetryHint::Retryable);
+    }
+
+    #[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
+    #[test]
+    fn test_sql_execution_timeout_hint_is_retryable() {
+        let err = SqlExecutionTimeoutSnafu {
+            sql: "SELECT 1".to_string(),
+            duration: std::time::Duration::from_secs(1),
+        }
+        .build();
+
+        assert_eq!(err.retry_hint(), RetryHint::Retryable);
+    }
+
+    #[test]
+    fn test_default_hint_is_non_retryable() {
+        let err = UnexpectedSnafu {
+            err_msg: "mock error",
+        }
+        .build();
+
+        assert_eq!(err.retry_hint(), RetryHint::NonRetryable);
     }
 }

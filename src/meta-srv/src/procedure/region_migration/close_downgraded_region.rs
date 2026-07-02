@@ -28,6 +28,7 @@ use crate::error::{self, Result};
 use crate::handler::HeartbeatMailbox;
 use crate::procedure::region_migration::migration_end::RegionMigrationEnd;
 use crate::procedure::region_migration::{Context, State};
+use crate::procedure::utils::instruction_error_result;
 use crate::service::mailbox::Channel;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -131,10 +132,18 @@ impl CloseDowngradedRegion {
 
                 if result {
                     Ok(())
+                } else if let Some(error) = error {
+                    instruction_error_result(
+                        &error,
+                        format!(
+                            "Failed to close downgraded leader region: {region_ids:?} on datanode {:?}, error: {error:?}",
+                            downgrade_leader_datanode,
+                        ),
+                    )
                 } else {
                     error::UnexpectedSnafu {
                         violated: format!(
-                            "Failed to close downgraded leader region: {region_ids:?} on datanode {:?}, error: {error:?}",
+                            "Failed to close downgraded leader region: {region_ids:?} on datanode {:?}",
                             downgrade_leader_datanode,
                         ),
                     }

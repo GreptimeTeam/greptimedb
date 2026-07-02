@@ -1,0 +1,65 @@
+SELECT ts, host, val FROM t_table_ttl ORDER BY ts, host;
+
++---------------------+--------+-----+
+| ts                  | host   | val |
++---------------------+--------+-----+
+| 2099-02-08T00:00:00 | host_a | 1   |
+| 2099-02-08T00:01:00 | host_b | 2   |
++---------------------+--------+-----+
+
+SHOW CREATE TABLE t_table_ttl;
+
++-------------+--------------------------------------------+
+| Table       | Create Table                               |
++-------------+--------------------------------------------+
+| t_table_ttl | CREATE TABLE IF NOT EXISTS "t_table_ttl" ( |
+|             |   "ts" TIMESTAMP(3) NOT NULL,              |
+|             |   "host" STRING NULL,                      |
+|             |   "val" INT NULL,                          |
+|             |   TIME INDEX ("ts"),                       |
+|             |   PRIMARY KEY ("host")                     |
+|             | )                                          |
+|             |                                            |
+|             | ENGINE=mito                                |
+|             | WITH(                                      |
+|             |   ttl = '7days'                            |
+|             | )                                          |
++-------------+--------------------------------------------+
+
+ALTER TABLE t_table_ttl SET 'ttl' = '30d';
+
+Affected Rows: 0
+
+SHOW CREATE TABLE t_table_ttl;
+
++-------------+--------------------------------------------+
+| Table       | Create Table                               |
++-------------+--------------------------------------------+
+| t_table_ttl | CREATE TABLE IF NOT EXISTS "t_table_ttl" ( |
+|             |   "ts" TIMESTAMP(3) NOT NULL,              |
+|             |   "host" STRING NULL,                      |
+|             |   "val" INT NULL,                          |
+|             |   TIME INDEX ("ts"),                       |
+|             |   PRIMARY KEY ("host")                     |
+|             | )                                          |
+|             |                                            |
+|             | ENGINE=mito                                |
+|             | WITH(                                      |
+|             |   ttl = '30days'                           |
+|             | )                                          |
++-------------+--------------------------------------------+
+
+INSERT INTO t_table_ttl VALUES
+('2099-02-08 00:02:00+0000', 'host_c', 3);
+
+Affected Rows: 1
+
+SELECT ts, host, val FROM t_table_ttl ORDER BY ts, host;
+
++---------------------+--------+-----+
+| ts                  | host   | val |
++---------------------+--------+-----+
+| 2099-02-08T00:00:00 | host_a | 1   |
+| 2099-02-08T00:01:00 | host_b | 2   |
+| 2099-02-08T00:02:00 | host_c | 3   |
++---------------------+--------+-----+

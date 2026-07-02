@@ -152,12 +152,18 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     return;
                 };
                 let mut manager = region.manifest_ctx.manifest_manager.write().await;
-                match region.exit_staging_on_success(&mut manager).await {
-                    Ok(()) => {
-                        sender.send(Ok(0));
+                let hook_payload = match region.exit_staging_on_success(&mut manager).await {
+                    Ok(payload) => payload,
+                    Err(e) => {
+                        sender.send(Err(e));
+                        return;
                     }
-                    Err(e) => sender.send(Err(e)),
+                };
+                drop(manager);
+                if let Some(pending) = hook_payload {
+                    pending.fire().await;
                 }
+                sender.send(Ok(0));
             } else {
                 sender.send(
                     UnexpectedSnafu {

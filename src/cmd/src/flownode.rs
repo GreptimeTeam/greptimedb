@@ -39,7 +39,6 @@ use common_telemetry::logging::{DEFAULT_LOGGING_DIR, TracingOptions};
 use common_version::{short_version, verbose_version};
 use flow::{
     FlownodeBuilder, FlownodeInstance, FlownodeServiceBuilder, FrontendClient, FrontendInvoker,
-    get_flow_auth_options,
 };
 use meta_client::{MetaClientOptions, MetaClientType};
 use plugins::flownode::context::GrpcConfigureContext;
@@ -167,9 +166,6 @@ struct StartCommand {
     /// HTTP request timeout in seconds.
     #[clap(long)]
     http_timeout: Option<u64>,
-    /// User Provider cfg, for auth, currently only support static user provider
-    #[clap(long)]
-    user_provider: Option<String>,
 }
 
 impl StartCommand {
@@ -241,10 +237,6 @@ impl StartCommand {
             opts.http.timeout = Duration::from_secs(http_timeout);
         }
 
-        if let Some(user_provider) = &self.user_provider {
-            opts.user_provider = Some(user_provider.clone());
-        }
-
         ensure!(
             opts.node_id.is_some(),
             MissingConfigSnafu {
@@ -278,7 +270,7 @@ impl StartCommand {
         opts.grpc.detect_server_addr();
 
         let mut plugins = Plugins::new();
-        plugins::setup_flownode_plugins(&mut plugins, &plugin_opts, &opts)
+        plugins::setup_flownode_plugins_pre_build(&mut plugins, &plugin_opts, &opts)
             .await
             .context(StartFlownodeSnafu)?;
 
@@ -367,16 +359,14 @@ impl StartCommand {
         );
 
         let flow_metadata_manager = Arc::new(FlowMetadataManager::new(cached_meta_backend.clone()));
-        let flow_auth_header = get_flow_auth_options(&opts).context(StartFlownodeSnafu)?;
         let frontend_client = FrontendClient::from_meta_client(
             meta_client.clone(),
-            flow_auth_header,
             opts.query.clone(),
             opts.flow.batching_mode.clone(),
         )
         .context(StartFlownodeSnafu)?;
         let frontend_client = Arc::new(frontend_client);
-        let flownode_builder = FlownodeBuilder::new(
+        let mut flownode_builder = FlownodeBuilder::new(
             opts.clone(),
             plugins.clone(),
             table_metadata_manager,
@@ -385,6 +375,11 @@ impl StartCommand {
             frontend_client.clone(),
         )
         .with_heartbeat_task(heartbeat_task);
+
+        plugins::setup_flownode_plugins_post_build(&mut plugins, &plugin_opts, &flownode_builder)
+            .await
+            .context(StartFlownodeSnafu)?;
+        flownode_builder.set_plugins(plugins.clone());
 
         let mut flownode = flownode_builder.build().await.context(StartFlownodeSnafu)?;
 
@@ -493,5 +488,18 @@ mod tests {
         assert!(!help.contains("--rpc-server-addr"));
         assert!(!help.contains("--rpc-addr"));
         assert!(!help.contains("--rpc-hostname"));
+        assert!(!help.contains("--user-provider"));
+    }
+
+    #[test]
+    fn test_user_provider_cli_option_is_removed() {
+        let command = StartCommand::try_parse_from([
+            "flownode",
+            "--node-id",
+            "14",
+            "--user-provider",
+            "static_user_provider:cmd:test=test",
+        ]);
+        assert!(command.is_err());
     }
 }

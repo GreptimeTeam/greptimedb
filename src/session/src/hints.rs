@@ -17,9 +17,14 @@ pub const HINTS_KEY: &str = "x-greptime-hints";
 /// Deprecated, use `HINTS_KEY` instead. Notes if "x-greptime-hints" is set, keys with this prefix will be ignored.
 pub const HINTS_KEY_PREFIX: &str = "x-greptime-hint-";
 pub const REMOTE_QUERY_ID_EXTENSION_KEY: &str = "remote_query_id";
+pub const INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY: &str =
+    "initial_remote_dyn_filter_registrations";
 
 pub const READ_PREFERENCE_HINT: &str = "read_preference";
-pub const RESERVED_EXTENSION_KEYS: [&str; 1] = [REMOTE_QUERY_ID_EXTENSION_KEY];
+pub const RESERVED_EXTENSION_KEYS: [&str; 2] = [
+    REMOTE_QUERY_ID_EXTENSION_KEY,
+    INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY,
+];
 
 /// Deprecated, use `HINTS_KEY` instead.
 pub const HINT_KEYS: [&str; 7] = [
@@ -43,6 +48,9 @@ mod tests {
     #[test]
     fn test_is_reserved_extension_key() {
         assert!(is_reserved_extension_key(REMOTE_QUERY_ID_EXTENSION_KEY));
+        assert!(is_reserved_extension_key(
+            INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY
+        ));
         assert!(!is_reserved_extension_key(READ_PREFERENCE_HINT));
     }
 }

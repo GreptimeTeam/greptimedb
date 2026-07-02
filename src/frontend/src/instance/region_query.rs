@@ -14,7 +14,11 @@
 
 use std::sync::Arc;
 
+use api::v1::region::{RemoteDynFilterUnregister, RemoteDynFilterUpdate};
 use async_trait::async_trait;
+use client::region::{
+    build_remote_dyn_filter_unregister_request, build_remote_dyn_filter_update_request,
+};
 use common_error::ext::BoxedError;
 use common_meta::node_manager::NodeManagerRef;
 use common_query::request::QueryRequest;
@@ -24,6 +28,7 @@ use query::error::{RegionQuerySnafu, Result as QueryResult};
 use query::region_query::RegionQueryHandler;
 use session::ReadPreference;
 use snafu::ResultExt;
+use store_api::storage::RegionId;
 
 use crate::error::{FindRegionPeerSnafu, RequestQuerySnafu, Result};
 
@@ -56,6 +61,30 @@ impl RegionQueryHandler for FrontendRegionQueryHandler {
             .map_err(BoxedError::new)
             .context(RegionQuerySnafu)
     }
+
+    async fn handle_remote_dyn_filter_update(
+        &self,
+        region_id: RegionId,
+        query_id: String,
+        update: RemoteDynFilterUpdate,
+    ) -> QueryResult<()> {
+        self.handle_remote_dyn_filter_update_inner(region_id, query_id, update)
+            .await
+            .map_err(BoxedError::new)
+            .context(RegionQuerySnafu)
+    }
+
+    async fn handle_remote_dyn_filter_unregister(
+        &self,
+        region_id: RegionId,
+        query_id: String,
+        unregister: RemoteDynFilterUnregister,
+    ) -> QueryResult<()> {
+        self.handle_remote_dyn_filter_unregister_inner(region_id, query_id, unregister)
+            .await
+            .map_err(BoxedError::new)
+            .context(RegionQuerySnafu)
+    }
 }
 
 impl FrontendRegionQueryHandler {
@@ -81,5 +110,51 @@ impl FrontendRegionQueryHandler {
             .handle_query(request)
             .await
             .context(RequestQuerySnafu)
+    }
+
+    async fn handle_remote_dyn_filter_update_inner(
+        &self,
+        region_id: RegionId,
+        query_id: String,
+        update: RemoteDynFilterUpdate,
+    ) -> Result<()> {
+        let peer = &self
+            .partition_manager
+            .find_region_leader(region_id)
+            .await
+            .context(FindRegionPeerSnafu {
+                region_id,
+                read_preference: ReadPreference::Leader,
+            })?;
+        let client = self.node_manager.datanode(peer).await;
+        client
+            .handle(build_remote_dyn_filter_update_request(query_id, update))
+            .await
+            .context(RequestQuerySnafu)?;
+        Ok(())
+    }
+
+    async fn handle_remote_dyn_filter_unregister_inner(
+        &self,
+        region_id: RegionId,
+        query_id: String,
+        unregister: RemoteDynFilterUnregister,
+    ) -> Result<()> {
+        let peer = &self
+            .partition_manager
+            .find_region_leader(region_id)
+            .await
+            .context(FindRegionPeerSnafu {
+                region_id,
+                read_preference: ReadPreference::Leader,
+            })?;
+        let client = self.node_manager.datanode(peer).await;
+        client
+            .handle(build_remote_dyn_filter_unregister_request(
+                query_id, unregister,
+            ))
+            .await
+            .context(RequestQuerySnafu)?;
+        Ok(())
     }
 }

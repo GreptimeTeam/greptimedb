@@ -17,7 +17,9 @@ unstable = ["nix"]
 [dependencies]
 arbitrary = { version = "1.3.0", features = ["derive"] }
 async-trait = { workspace = true }
+axum.workspace = true
 chrono = { workspace = true }
+clap.workspace = true
 common-base = { workspace = true }
 common-error = { workspace = true }
 common-macro = { workspace = true }
@@ -46,6 +48,7 @@ paste.workspace = true
 rand = { workspace = true }
 rand_chacha = "0.9"
 reqwest = { workspace = true }
+rskafka.workspace = true
 rustls = { workspace = true, default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
 schemars = "0.8"
 serde = { workspace = true }
@@ -168,6 +171,20 @@ doc = false
 [[bin]]
 name = "fuzz_migrate_metric_regions"
 path = "targets/migration/fuzz_migrate_metric_regions.rs"
+test = false
+bench = false
+doc = false
+
+[[bin]]
+name = "fuzz_remote_wal_logical_prune"
+path = "targets/wal/fuzz_remote_wal_logical_prune.rs"
+test = false
+bench = false
+doc = false
+
+[[bin]]
+name = "kafka_wal_helper"
+path = "utils/kafka_wal_helper.rs"
 test = false
 bench = false
 doc = false

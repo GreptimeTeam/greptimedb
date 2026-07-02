@@ -14,17 +14,33 @@
 
 use common_base::Plugins;
 use datanode::config::DatanodeOptions;
-use datanode::datanode::Datanode;
+use datanode::datanode::{Datanode, DatanodeBuilder};
 use datanode::error::Result;
 
 use crate::options::PluginOptions;
 
+/// Sets up datanode plugins before the [`DatanodeBuilder`] is constructed.
 #[allow(unused_variables)]
 #[allow(unused_mut)]
-pub async fn setup_datanode_plugins(
+pub async fn setup_datanode_plugins_pre_build(
     plugins: &mut Plugins,
     plugin_options: &[PluginOptions],
     dn_opts: &DatanodeOptions,
+) -> Result<()> {
+    Ok(())
+}
+
+/// Sets up datanode plugins after the [`DatanodeBuilder`] is constructed
+/// but before [`DatanodeBuilder::build()`].
+///
+/// Plugins can read context from the builder (e.g., kv_backend, options)
+/// and insert additional plugins. After this call, [`DatanodeBuilder::set_plugins()`]
+/// should be called to sync plugins into the builder.
+#[allow(unused_variables)]
+pub async fn setup_datanode_plugins_post_build(
+    plugins: &mut Plugins,
+    plugin_options: &[PluginOptions],
+    builder: &DatanodeBuilder,
 ) -> Result<()> {
     Ok(())
 }

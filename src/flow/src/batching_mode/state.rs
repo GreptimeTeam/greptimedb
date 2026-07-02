@@ -51,6 +51,7 @@ pub struct TaskState {
     /// mapping of `start -> end` and non-overlapping
     pub(crate) dirty_time_windows: DirtyTimeWindows,
     checkpoint_mode: CheckpointMode,
+    pending_fenced_repair: Option<FencedRepair>,
     /// Region id -> last consumed watermark sequence. Incremental scans use
     /// this as the next lower sequence bound for each source region.
     checkpoints: BTreeMap<u64, u64>,
@@ -81,6 +82,7 @@ impl TaskState {
             last_exec_time_millis: None,
             dirty_time_windows,
             checkpoint_mode: CheckpointMode::FullSnapshot,
+            pending_fenced_repair: None,
             checkpoints: Default::default(),
             incremental_disabled: false,
             exec_state: ExecState::Idle,
@@ -112,6 +114,12 @@ impl TaskState {
         &self.checkpoints
     }
 
+    /// Returns the in-progress fenced repair, if the task is repairing dirty
+    /// windows under a frozen full-snapshot high watermark.
+    pub fn pending_fenced_repair(&self) -> Option<&FencedRepair> {
+        self.pending_fenced_repair.as_ref()
+    }
+
     pub fn is_incremental_disabled(&self) -> bool {
         self.incremental_disabled
     }
@@ -123,17 +131,25 @@ impl TaskState {
         self.mark_full_snapshot();
     }
 
+    /// Move back to top-level FullSnapshot mode. If a fenced repair is active,
+    /// restore its not-yet-in-flight pending windows to the live dirty queue so
+    /// the moved backlog is not lost.
     pub fn mark_full_snapshot(&mut self) {
-        self.checkpoint_mode = CheckpointMode::FullSnapshot;
+        self.abandon_fenced_repair();
     }
 
+    /// Replace full-snapshot checkpoints with a complete watermark proof.
+    /// Clears fenced repair state and enters Incremental unless disabled.
     pub fn advance_checkpoints(&mut self, watermark_map: HashMap<u64, u64>) {
         self.checkpoints = watermark_map.into_iter().collect();
+        self.pending_fenced_repair = None;
         if !self.incremental_disabled {
             self.checkpoint_mode = CheckpointMode::Incremental;
         }
     }
 
+    /// Advance only the participating regions for an incremental delta query.
+    /// This also clears any stale fenced repair sub-state.
     pub fn advance_incremental_checkpoints_with_participation(
         &mut self,
         participating_regions: &BTreeSet<u64>,
@@ -147,8 +163,140 @@ impl TaskState {
         if !self.incremental_disabled {
             self.checkpoint_mode = CheckpointMode::Incremental;
         }
+        self.pending_fenced_repair = None;
     }
 
+    /// Start repairing the current live dirty windows under a frozen high `H`.
+    /// The current live backlog is moved into the fenced repair so successful
+    /// chunks are consumed from that backlog. New post-`H` dirty signals can
+    /// still arrive in the live queue while the fenced repair is active.
+    pub fn start_fenced_repair(&mut self, high: BTreeMap<u64, u64>) -> Option<&FencedRepair> {
+        if self.dirty_time_windows.is_empty() {
+            self.pending_fenced_repair = None;
+            return None;
+        }
+
+        let pending_windows = self.dirty_time_windows.clone();
+        self.dirty_time_windows.clean();
+        self.pending_fenced_repair = Some(FencedRepair {
+            high,
+            pending_windows,
+        });
+        self.checkpoint_mode = CheckpointMode::FullSnapshot;
+        self.pending_fenced_repair.as_ref()
+    }
+
+    /// Finish the fenced repair and promote the frozen high watermark to the
+    /// checkpoint map. Incremental-disabled flows stay in FullSnapshot mode.
+    pub fn finish_fenced_repair(&mut self) -> Option<BTreeMap<u64, u64>> {
+        let repair = self.pending_fenced_repair.take()?;
+        self.checkpoints = repair.high;
+        if !self.incremental_disabled {
+            self.checkpoint_mode = CheckpointMode::Incremental;
+        }
+        Some(self.checkpoints.clone())
+    }
+
+    /// Abandon the current fenced repair and restore all not-yet-in-flight
+    /// pending windows to the live dirty queue for a fresh scoped repair.
+    pub fn abandon_fenced_repair(&mut self) -> bool {
+        self.checkpoint_mode = CheckpointMode::FullSnapshot;
+        let Some(repair) = self.pending_fenced_repair.take() else {
+            return false;
+        };
+
+        self.dirty_time_windows
+            .add_dirty_windows(&repair.pending_windows);
+        true
+    }
+
+    /// Restore a scoped query's windows after a failed or unproven run. During
+    /// an active fenced repair this requeues into `pending_windows`; otherwise
+    /// it restores to the live dirty queue.
+    pub fn restore_scoped_windows(&mut self, filter: &FilterExprInfo) {
+        if let Some(repair) = self.pending_fenced_repair.as_mut() {
+            repair
+                .pending_windows
+                .add_windows(filter.time_ranges.clone());
+            return;
+        }
+
+        self.dirty_time_windows
+            .add_windows(filter.time_ranges.clone());
+    }
+
+    /// Generate the next scoped filter from the fenced-repair queue when active;
+    /// otherwise consume windows from the live dirty queue.
+    pub fn gen_scoped_filter_exprs(
+        &mut self,
+        col_name: &str,
+        expire_lower_bound: Option<Timestamp>,
+        window_size: chrono::Duration,
+        window_cnt: usize,
+        flow_id: FlowId,
+        task_ctx: Option<&BatchingTask>,
+    ) -> Result<Option<FilterExprInfo>, Error> {
+        if let Some(repair) = self.pending_fenced_repair.as_mut() {
+            let expr = repair.pending_windows.gen_filter_exprs(
+                col_name,
+                expire_lower_bound,
+                window_size,
+                window_cnt,
+                flow_id,
+                task_ctx,
+            )?;
+            if expr.is_some() || !repair.pending_windows.is_empty() {
+                return Ok(expr);
+            }
+
+            // All pending repair windows may have expired during merge. Clear
+            // the empty repair so this call can fall back to live dirty windows
+            // instead of routing future executions to an empty queue forever.
+            self.pending_fenced_repair = None;
+        }
+
+        self.dirty_time_windows.gen_filter_exprs(
+            col_name,
+            expire_lower_bound,
+            window_size,
+            window_cnt,
+            flow_id,
+            task_ctx,
+        )
+    }
+
+    /// Returns true only when the query result's participating regions and
+    /// terminal watermarks exactly match the fenced repair's frozen high `H`.
+    pub fn fenced_repair_watermarks_match_high(
+        &self,
+        participating_regions: &BTreeSet<u64>,
+        watermark_map: &HashMap<u64, u64>,
+    ) -> bool {
+        let Some(repair) = self.pending_fenced_repair.as_ref() else {
+            return false;
+        };
+
+        !participating_regions.is_empty()
+            && participating_regions.len() == repair.high.len()
+            && watermark_map.len() == repair.high.len()
+            && participating_regions.iter().all(|region_id| {
+                repair
+                    .high
+                    .get(region_id)
+                    .zip(watermark_map.get(region_id))
+                    .is_some_and(|(high, watermark)| high == watermark)
+            })
+    }
+
+    /// Whether the active fenced repair has drained all pending windows.
+    pub fn fenced_repair_pending_is_empty(&self) -> bool {
+        self.pending_fenced_repair
+            .as_ref()
+            .is_some_and(|repair| repair.pending_windows.is_empty())
+    }
+
+    /// Full-snapshot checkpoint advances require a watermark for every region
+    /// that participated in the query.
     pub fn can_advance_full_snapshot_checkpoints(
         &self,
         participating_regions: &BTreeSet<u64>,
@@ -161,6 +309,8 @@ impl TaskState {
                 .all(|region_id| watermark_map.contains_key(region_id))
     }
 
+    /// Incremental advances are limited to participating regions whose returned
+    /// watermark is not older than the stored checkpoint.
     pub fn can_advance_incremental_checkpoints_with_participation(
         &self,
         participating_regions: &BTreeSet<u64>,
@@ -191,6 +341,9 @@ impl TaskState {
     ///
     /// if current the dirty time range is longer than one query can handle,
     /// execute immediately to faster clean up dirty time windows.
+    /// Active fenced repairs also execute immediately while pending windows
+    /// remain: the current backlog has moved out of live dirty windows and into
+    /// `pending_fenced_repair.pending_windows`.
     ///
     /// If `prefer_short_incremental_cadence` is true, run incremental queries
     /// more often when there is no large dirty backlog. This only reduces the
@@ -213,6 +366,18 @@ impl TaskState {
         } else {
             next_duration
         };
+
+        if self
+            .pending_fenced_repair
+            .as_ref()
+            .is_some_and(|repair| !repair.pending_windows().is_empty())
+        {
+            debug!(
+                "Flow id = {}, active fenced repair still has pending windows, execute immediately",
+                flow_id,
+            );
+            return Instant::now();
+        }
 
         let cur_dirty_window_size = self.dirty_time_windows.window_size();
         // compute how much time range can be handled in one query
@@ -721,6 +886,26 @@ pub enum CheckpointMode {
     Incremental,
 }
 
+/// Dirty windows that must be repaired under a frozen full-snapshot watermark.
+/// This is a FullSnapshot sub-state, not a separate checkpoint mode.
+#[derive(Debug, Clone)]
+pub struct FencedRepair {
+    high: BTreeMap<u64, u64>,
+    pending_windows: DirtyTimeWindows,
+}
+
+impl FencedRepair {
+    /// Frozen high watermark `H` used as the snapshot upper bound for chunks.
+    pub fn high(&self) -> &BTreeMap<u64, u64> {
+        &self.high
+    }
+
+    /// Dirty windows still waiting to be repaired under `high`.
+    pub fn pending_windows(&self) -> &DirtyTimeWindows {
+        &self.pending_windows
+    }
+}
+
 /// Filter Expression's information
 #[derive(Debug, Clone)]
 pub struct FilterExprInfo {
@@ -1030,6 +1215,38 @@ mod test {
     }
 
     #[test]
+    fn test_mark_full_snapshot_restores_pending_fenced_repair_windows() {
+        let query_ctx = QueryContext::arc();
+        let (_tx, rx) = tokio::sync::oneshot::channel();
+        let mut state = TaskState::new(query_ctx, rx);
+        state
+            .dirty_time_windows
+            .add_window(Timestamp::new_second(10), Some(Timestamp::new_second(15)));
+        state
+            .dirty_time_windows
+            .add_window(Timestamp::new_second(100), Some(Timestamp::new_second(105)));
+
+        state
+            .start_fenced_repair(BTreeMap::from([(1_u64, 10_u64)]))
+            .unwrap();
+        assert!(state.dirty_time_windows.is_empty());
+        assert_eq!(
+            state
+                .pending_fenced_repair()
+                .unwrap()
+                .pending_windows()
+                .len(),
+            2
+        );
+
+        state.mark_full_snapshot();
+
+        assert_eq!(state.checkpoint_mode(), CheckpointMode::FullSnapshot);
+        assert!(state.pending_fenced_repair().is_none());
+        assert_eq!(state.dirty_time_windows.len(), 2);
+    }
+
+    #[test]
     fn test_disable_incremental_persists_full_snapshot_mode() {
         let query_ctx = QueryContext::arc();
         let (_tx, rx) = tokio::sync::oneshot::channel();
@@ -1336,6 +1553,33 @@ mod test {
         assert!(
             result2 <= Instant::now(),
             "dirty overflow should schedule immediately"
+        );
+    }
+
+    #[test]
+    fn test_pending_fenced_repair_schedules_immediately() {
+        let mut state = state_with_past_update(Duration::from_secs(10));
+        state
+            .dirty_time_windows
+            .add_window(Timestamp::new_second(0), Some(Timestamp::new_second(5)));
+        state
+            .start_fenced_repair(BTreeMap::from([(1_u64, 10_u64)]))
+            .unwrap();
+        assert!(state.dirty_time_windows.is_empty());
+        assert!(!state.fenced_repair_pending_is_empty());
+
+        let result = state.get_next_start_query_time(
+            1,
+            &Some(Duration::from_secs(60)),
+            Duration::from_secs(5),
+            None,
+            20,
+            false,
+        );
+
+        assert!(
+            result <= Instant::now(),
+            "pending fenced repair backlog should schedule immediately"
         );
     }
 

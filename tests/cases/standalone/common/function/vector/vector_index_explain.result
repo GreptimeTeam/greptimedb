@@ -147,10 +147,12 @@ LIMIT 1;
 |_|_|_ProjectionExec: expr=[vec_id@0 as vec_id] metrics=REDACTED_|
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
-| 1_| 0_|_CooperativeExec metrics=REDACTED_|
+| 1_| 0_|_FilterExec: vec_id@0 IS NOT NULL metrics=REDACTED_|
+|_|_|_CooperativeExec metrics=REDACTED_|
 |_|_|_SeqScan: REDACTED
 |_|_|_|
-| 1_| 0_|_CooperativeExec metrics=REDACTED_|
+| 1_| 0_|_FilterExec: vec_id@0 IS NOT NULL metrics=REDACTED_|
+|_|_|_CooperativeExec metrics=REDACTED_|
 |_|_|_SeqScan: REDACTED
 |_|_|_|
 |_|_| Total rows: REDACTED_|

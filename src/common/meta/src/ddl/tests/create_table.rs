@@ -26,6 +26,7 @@ use common_procedure::{Context as ProcedureContext, Procedure, ProcedureId, Stat
 use common_procedure_test::{
     MockContextProvider, execute_procedure_until, execute_procedure_until_done,
 };
+use common_wal::options::{KafkaWalOptions, WalOptions};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::ColumnSchema;
 use store_api::metadata::ColumnMetadata;
@@ -34,7 +35,7 @@ use store_api::region_engine::RegionRole;
 use store_api::storage::RegionId;
 use tokio::sync::mpsc;
 
-use crate::ddl::create_table::{CreateTableProcedure, CreateTableState};
+use crate::ddl::create_table::{CreateTableData, CreateTableProcedure, CreateTableState};
 use crate::ddl::test_util::columns::TestColumnDefBuilder;
 use crate::ddl::test_util::create_table::{
     TestCreateTableExprBuilder, build_raw_table_info_from_expr,
@@ -105,6 +106,31 @@ fn assert_create_request(
         unreachable!();
     };
     assert_eq!(req.region_id, expected_region_id);
+}
+
+#[test]
+fn test_deserialize_legacy_create_table_data_region_wal_options() {
+    let mut json = serde_json::to_value(CreateTableData::new(
+        test_create_table_task("foo"),
+        Default::default(),
+    ))
+    .unwrap();
+    json["region_wal_options"] = serde_json::json!({
+        "0": serde_json::to_string(&WalOptions::Kafka(KafkaWalOptions::new(
+            "topic_a".to_string(),
+        )))
+        .unwrap(),
+    });
+
+    let data: CreateTableData = serde_json::from_value(json).unwrap();
+
+    assert_eq!(
+        data.region_wal_options.unwrap(),
+        HashMap::from([(
+            0,
+            WalOptions::Kafka(KafkaWalOptions::new("topic_a".to_string())),
+        )])
+    );
 }
 
 pub(crate) fn test_create_table_task(name: &str) -> CreateTableTask {

@@ -26,11 +26,22 @@ use datafusion_expr::expr::{Exists, InSubquery};
 use datafusion_expr::utils::expr_to_columns;
 use datafusion_expr::{Expr, LogicalPlan, LogicalPlanBuilder, Subquery, col as col_fn};
 use datafusion_optimizer::analyzer::AnalyzerRule;
+use datafusion_optimizer::decorrelate_lateral_join::DecorrelateLateralJoin;
+use datafusion_optimizer::decorrelate_predicate_subquery::DecorrelatePredicateSubquery;
+use datafusion_optimizer::eliminate_filter::EliminateFilter;
+use datafusion_optimizer::extract_equijoin_predicate::ExtractEquijoinPredicate;
+use datafusion_optimizer::filter_null_join_keys::FilterNullJoinKeys;
+use datafusion_optimizer::optimizer::Optimizer;
+use datafusion_optimizer::propagate_empty_relation::PropagateEmptyRelation;
+use datafusion_optimizer::push_down_filter::PushDownFilter;
+use datafusion_optimizer::rewrite_set_comparison::RewriteSetComparison;
+use datafusion_optimizer::scalar_subquery_to_join::ScalarSubqueryToJoin;
 use promql::extension_plan::SeriesDivide;
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use table::metadata::TableType;
 use table::table::adapter::DfTableProviderAdapter;
 
+use crate::dist_plan::RemoteDynFilterProducerId;
 use crate::dist_plan::analyzer::utils::{
     PatchOptimizerContext, PlanTreeExpressionSimplifier, aliased_columns_for,
     rewrite_merge_sort_exprs,
@@ -41,6 +52,7 @@ use crate::dist_plan::commutativity::{
 use crate::dist_plan::merge_scan::MergeScanLogicalPlan;
 use crate::dist_plan::merge_sort::MergeSortLogicalPlan;
 use crate::metrics::PUSH_DOWN_FALLBACK_ERRORS_TOTAL;
+use crate::options::ScheduledTimeExtension;
 use crate::plan::ExtractExpr;
 use crate::query_engine::DefaultSerializer;
 
@@ -109,18 +121,51 @@ impl AnalyzerRule for DistPlannerAnalyzer {
         // Aligned with the behavior in `datafusion_optimizer::OptimizerContext::new()`.
         config.optimizer.filter_null_join_keys = true;
         let config = Arc::new(config);
+        let opt = config.extensions.get::<DistPlannerOptions>();
+        let allow_fallback = opt.map(|o| o.allow_query_fallback).unwrap_or(false);
+
+        // When the query is running under a scheduled Flow context, carry the
+        // logical "now" so that `SimplifyExpressions` does not constant-fold
+        // `now()` into wall-clock literals on the remote sub-plans.
+        let scheduled_time = config
+            .extensions
+            .get::<ScheduledTimeExtension>()
+            .and_then(|ext| ext.scheduled_time);
 
         let optimizer_context = PatchOptimizerContext {
             inner: datafusion_optimizer::OptimizerContext::new(),
             config: config.clone(),
+            scheduled_time,
         };
 
         let plan = plan
             .rewrite_with_subqueries(&mut PlanTreeExpressionSimplifier::new(optimizer_context))?
             .data;
+        let fallback_plan = plan.clone();
 
-        let opt = config.extensions.get::<DistPlannerOptions>();
-        let allow_fallback = opt.map(|o| o.allow_query_fallback).unwrap_or(false);
+        // Run a filter-focused optimizer subset before MergeScan wraps remote
+        // inputs. MergeScan intentionally hides its remote_input from later
+        // optimizer passes; this pass only normalizes/decorrelates enough for
+        // DataFusion's PushDownFilter to put side-local predicates into scans.
+        // Keep this narrow: rules like PushDownLimit, OptimizeProjections, and
+        // DISTINCT rewrites can change global distributed-planning boundaries.
+        let optimizer_context = PatchOptimizerContext {
+            inner: datafusion_optimizer::OptimizerContext::new(),
+            config: config.clone(),
+            scheduled_time,
+        };
+        let plan = match pre_merge_scan_optimizer().optimize(plan, &optimizer_context, |_, _| {}) {
+            Ok(plan) => plan,
+            Err(err) => {
+                if allow_fallback {
+                    common_telemetry::warn!(err; "Failed to pre-optimize plan, using fallback plan rewriter for plan: {fallback_plan}");
+                    PUSH_DOWN_FALLBACK_ERRORS_TOTAL.inc();
+                    return self.use_fallback(fallback_plan);
+                } else {
+                    return Err(err);
+                }
+            }
+        };
 
         let result = match self.try_push_down(plan.clone()) {
             Ok(plan) => plan,
@@ -129,7 +174,7 @@ impl AnalyzerRule for DistPlannerAnalyzer {
                     common_telemetry::warn!(err; "Failed to push down plan, using fallback plan rewriter for plan: {plan}");
                     // if push down failed, use fallback plan rewriter
                     PUSH_DOWN_FALLBACK_ERRORS_TOTAL.inc();
-                    self.use_fallback(plan)?
+                    self.use_fallback(fallback_plan)?
                 } else {
                     return Err(err);
                 }
@@ -140,20 +185,57 @@ impl AnalyzerRule for DistPlannerAnalyzer {
     }
 }
 
+/// Builds the small optimizer pre-pass that runs before `MergeScan` wrapping.
+///
+/// This is intentionally not DataFusion's full optimizer. After
+/// `PlanRewriter` wraps remote table scans in `MergeScan`,
+/// `MergeScanLogicalPlan::inputs()` hides `remote_input`, so ordinary optimizer
+/// rules can no longer see into the remote side. The main rule we need here is
+/// `PushDownFilter`: it moves side-local join/filter predicates into
+/// `TableScan.filters`, where region pruning and scan-level pruning can use
+/// them.
+///
+/// The rules before `PushDownFilter` are only the minimum cleanup/rewrite steps
+/// needed to make that filter pushdown safe around subqueries and set
+/// comparisons. For example, `RewriteSetComparison` handles ANY/ALL before they
+/// can become scan filters, and the decorrelation/subquery rules expose
+/// supported predicates as joins/filters instead of leaving raw subquery
+/// expressions under a scan.
+///
+/// Keep this list narrow. Do not add broad plan-shaping rules such as
+/// `PushDownLimit`, projection optimization, DISTINCT rewrites, or join-type
+/// rewrites here: those can change the local/remote distributed boundary or
+/// degrade unrelated planning diagnostics. Such rules belong either before this
+/// analyzer or after distributed planning, not in this pre-MergeScan,
+/// filter-focused pass.
+fn pre_merge_scan_optimizer() -> Optimizer {
+    Optimizer::with_rules(vec![
+        Arc::new(RewriteSetComparison::new()),
+        Arc::new(DecorrelatePredicateSubquery::new()),
+        Arc::new(ScalarSubqueryToJoin::new()),
+        Arc::new(DecorrelateLateralJoin::new()),
+        Arc::new(ExtractEquijoinPredicate::new()),
+        Arc::new(EliminateFilter::new()),
+        Arc::new(PropagateEmptyRelation::new()),
+        Arc::new(FilterNullJoinKeys::default()),
+        Arc::new(PushDownFilter::new()),
+    ])
+}
+
 impl DistPlannerAnalyzer {
     /// Try push down as many nodes as possible
     fn try_push_down(&self, plan: LogicalPlan) -> DfResult<LogicalPlan> {
         let plan = plan.transform(&Self::inspect_plan_with_subquery)?;
         let mut rewriter = PlanRewriter::default();
         let result = plan.data.rewrite(&mut rewriter)?.data;
-        Ok(result)
+        Self::assign_merge_scan_remote_dyn_filter_producer_ids(result)
     }
 
     /// Use fallback plan rewriter to rewrite the plan and only push down table scan nodes
     fn use_fallback(&self, plan: LogicalPlan) -> DfResult<LogicalPlan> {
         let mut rewriter = fallback::FallbackPlanRewriter;
         let result = plan.rewrite(&mut rewriter)?.data;
-        Ok(result)
+        Self::assign_merge_scan_remote_dyn_filter_producer_ids(result)
     }
 
     fn inspect_plan_with_subquery(plan: LogicalPlan) -> DfResult<Transformed<LogicalPlan>> {
@@ -223,6 +305,57 @@ impl DistPlannerAnalyzer {
             outer_ref_columns: subquery.outer_ref_columns,
             spans: Default::default(),
         })
+    }
+
+    fn assign_merge_scan_remote_dyn_filter_producer_ids(
+        plan: LogicalPlan,
+    ) -> DfResult<LogicalPlan> {
+        let mut assigner = MergeScanRemoteDynFilterProducerIdAssigner::default();
+        Ok(plan.rewrite_with_subqueries(&mut assigner)?.data)
+    }
+}
+
+#[derive(Debug, Default)]
+struct RemoteDynFilterProducerIdAllocator {
+    next_remote_dyn_filter_producer_id: u64,
+}
+
+impl RemoteDynFilterProducerIdAllocator {
+    fn allocate(&mut self) -> RemoteDynFilterProducerId {
+        self.next_remote_dyn_filter_producer_id += 1;
+        RemoteDynFilterProducerId::new(self.next_remote_dyn_filter_producer_id)
+    }
+}
+
+/// Assigns query-local RDF producer ids to visible `MergeScan` nodes after plan rewriting.
+#[derive(Debug, Default)]
+struct MergeScanRemoteDynFilterProducerIdAssigner {
+    remote_dyn_filter_producer_id_allocator: RemoteDynFilterProducerIdAllocator,
+}
+
+impl TreeNodeRewriter for MergeScanRemoteDynFilterProducerIdAssigner {
+    type Node = LogicalPlan;
+
+    fn f_up(&mut self, node: Self::Node) -> DfResult<Transformed<Self::Node>> {
+        let LogicalPlan::Extension(extension) = &node else {
+            return Ok(Transformed::no(node));
+        };
+        let Some(merge_scan) = extension
+            .node
+            .as_any()
+            .downcast_ref::<MergeScanLogicalPlan>()
+        else {
+            return Ok(Transformed::no(node));
+        };
+
+        Ok(Transformed::yes(
+            merge_scan
+                .clone()
+                .with_remote_dyn_filter_producer_id(
+                    self.remote_dyn_filter_producer_id_allocator.allocate(),
+                )
+                .into_logical_plan(),
+        ))
     }
 }
 
@@ -505,9 +638,13 @@ impl PlanRewriter {
                 let partition_key_indices = info.meta.partition_key_indices.clone();
                 let schema = info.meta.schema.clone();
                 let mut partition_cols = partition_key_indices
-                    .into_iter()
-                    .map(|index| schema.column_name_by_index(index).to_string())
+                    .iter()
+                    .map(|index| schema.column_name_by_index(*index).to_string())
                     .collect::<Vec<String>>();
+                debug!(
+                    "PlanRewriter: loaded table partition metadata, table: {}, table_id: {}, partition_key_indices: {:?}, partition_columns: {:?}",
+                    info.name, info.ident.table_id, info.meta.partition_key_indices, partition_cols,
+                );
 
                 let partition_rules = table.partition_rules();
                 let exist_phy_part_cols_not_in_logical_table = partition_rules

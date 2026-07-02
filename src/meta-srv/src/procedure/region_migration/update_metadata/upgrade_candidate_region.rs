@@ -215,6 +215,7 @@ impl UpdateMetadata {
         }
 
         ctx.deregister_failure_detectors().await;
+        ctx.reset_failure_detectors_for_candidate_regions().await;
         // Consumes the guard.
         ctx.volatile_ctx.opening_region_guards.clear();
 

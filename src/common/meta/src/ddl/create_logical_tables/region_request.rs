@@ -66,7 +66,7 @@ impl CreateLogicalTablesProcedure {
                     storage_path.clone(),
                     &HashMap::new(),
                     &partition_exprs,
-                );
+                )?;
                 requests.push(one_region_request);
             }
         }

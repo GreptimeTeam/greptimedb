@@ -80,6 +80,61 @@ impl SqlQueryHandler for DummyInstance {
         results
     }
 
+    async fn do_analyze_stream_query(
+        &self,
+        query: &str,
+        query_ctx: QueryContextRef,
+    ) -> Result<Output> {
+        let mut statements = ParserContext::create_with_dialect(
+            query,
+            query_ctx.sql_dialect(),
+            ParseOptions::default(),
+        )
+        .map_err(BoxedError::new)
+        .context(ExecuteQuerySnafu)?;
+        ensure!(
+            statements.len() == 1,
+            NotSupportedSnafu {
+                feat: "execute multiple statements in analyze stream query"
+            }
+        );
+
+        let mut statement = statements.remove(0);
+        let Statement::Explain(explain) = &mut statement else {
+            return NotSupportedSnafu {
+                feat: "non EXPLAIN ANALYZE VERBOSE analyze stream query",
+            }
+            .fail();
+        };
+        ensure!(
+            explain.analyze && explain.verbose,
+            NotSupportedSnafu {
+                feat: "non EXPLAIN ANALYZE VERBOSE analyze stream query"
+            }
+        );
+        match &explain.format {
+            None => {}
+            Some(format) if format.to_string().eq_ignore_ascii_case("json") => {
+                explain.format = None;
+            }
+            Some(_) => {
+                return NotSupportedSnafu {
+                    feat: "non-JSON analyze stream format",
+                }
+                .fail();
+            }
+        }
+        query_ctx.set_explain_format("JSON".to_string());
+
+        self.query_engine
+            .planner()
+            .plan(&QueryStatement::Sql(statement), query_ctx.clone())
+            .and_then(|plan| self.query_engine.execute(plan, query_ctx.clone()))
+            .await
+            .map_err(BoxedError::new)
+            .context(ExecuteQuerySnafu)
+    }
+
     async fn do_exec_plan(
         &self,
         plan: LogicalPlan,

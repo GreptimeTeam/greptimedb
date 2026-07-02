@@ -9,7 +9,7 @@ CREATE TABLE input_basic (
 
 Affected Rows: 0
 
-CREATE FLOW test_wildcard_basic sink TO out_basic AS
+CREATE FLOW test_wildcard_basic sink TO out_basic EVAL INTERVAL '1m' AS
 SELECT
     COUNT(*) as wildcard
 FROM
@@ -64,7 +64,7 @@ CREATE TABLE input_basic (
 
 Affected Rows: 0
 
-CREATE FLOW test_wildcard_basic sink TO out_basic AS
+CREATE FLOW test_wildcard_basic sink TO out_basic EVAL INTERVAL '1m' AS
 SELECT
     COUNT(*) as wildcard
 FROM
@@ -142,7 +142,7 @@ DROP FLOW test_wildcard_basic;
 Affected Rows: 0
 
 -- recreate flow so that it use new table id
-CREATE FLOW test_wildcard_basic sink TO out_basic AS
+CREATE FLOW test_wildcard_basic sink TO out_basic EVAL INTERVAL '1m' AS
 SELECT
     COUNT(*) as wildcard
 FROM
@@ -206,7 +206,7 @@ CREATE TABLE input_basic (
 
 Affected Rows: 0
 
-CREATE FLOW test_wildcard_basic sink TO out_basic AS
+CREATE FLOW test_wildcard_basic sink TO out_basic EVAL INTERVAL '1m' AS
 SELECT
     COUNT(*) as wildcard
 FROM
@@ -247,7 +247,7 @@ DROP TABLE out_basic;
 
 Affected Rows: 0
 
-CREATE FLOW test_wildcard_basic sink TO out_basic AS
+CREATE FLOW test_wildcard_basic sink TO out_basic EVAL INTERVAL '1m' AS
 SELECT
     COUNT(*) as wildcard
 FROM
@@ -304,7 +304,7 @@ CREATE TABLE input_basic (
 
 Affected Rows: 0
 
-CREATE FLOW test_wildcard_basic sink TO out_basic AS
+CREATE FLOW test_wildcard_basic sink TO out_basic EVAL INTERVAL '1m' AS
 SELECT
     COUNT(*) as wildcard
 FROM
@@ -371,7 +371,7 @@ CREATE TABLE input_basic (
 
 Affected Rows: 0
 
-CREATE FLOW test_wildcard_basic sink TO out_basic AS
+CREATE FLOW test_wildcard_basic sink TO out_basic EVAL INTERVAL '1m' AS
 SELECT
     COUNT(*) as wildcard
 FROM
@@ -474,7 +474,7 @@ DROP FLOW test_wildcard_basic;
 Affected Rows: 0
 
 -- recreate flow so that it use new table id
-CREATE FLOW test_wildcard_basic sink TO out_basic AS
+CREATE FLOW test_wildcard_basic sink TO out_basic EVAL INTERVAL '1m' AS
 SELECT
     COUNT(*) as wildcard
 FROM
@@ -549,7 +549,7 @@ CREATE TABLE input_basic (
 
 Affected Rows: 0
 
-CREATE FLOW test_wildcard_basic sink TO out_basic AS
+CREATE FLOW test_wildcard_basic sink TO out_basic EVAL INTERVAL '1m' AS
 SELECT
     COUNT(*) as wildcard
 FROM
@@ -602,7 +602,7 @@ DROP TABLE out_basic;
 
 Affected Rows: 0
 
-CREATE FLOW test_wildcard_basic sink TO out_basic AS
+CREATE FLOW test_wildcard_basic sink TO out_basic EVAL INTERVAL '1m' AS
 SELECT
     COUNT(*) as wildcard
 FROM

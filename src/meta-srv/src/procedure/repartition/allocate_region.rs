@@ -23,10 +23,14 @@ use common_meta::lock_key::TableLock;
 use common_meta::node_manager::NodeManagerRef;
 use common_meta::peer::PeerAllocContext;
 use common_meta::rpc::router::RegionRoute;
+use common_meta::wal_provider::{
+    RegionWalOptions, acquire_remote_wal_read_locks, refresh_initial_pruned_entry_ids,
+};
 use common_procedure::{Context as ProcedureContext, Status};
 use common_telemetry::{debug, info};
 use serde::{Deserialize, Deserializer, Serialize};
 use snafu::{OptionExt, ResultExt};
+use store_api::region_request::RegionRequirements;
 use store_api::storage::{RegionId, RegionNumber, TableId};
 use table::metadata::TableInfo;
 use table::table_reference::TableReference;
@@ -161,7 +165,7 @@ impl ExecutePlan {
             )
             .await
             .context(error::AllocateRegionRoutesSnafu { table_id })?;
-        let wal_options = ctx
+        let mut wal_options = ctx
             .wal_options_allocator
             .allocate(
                 &allocate_regions
@@ -170,6 +174,11 @@ impl ExecutePlan {
                     .collect::<Vec<_>>(),
                 table_info_value.table_info.meta.options.skip_wal,
             )
+            .await
+            .context(error::AllocateWalOptionsSnafu { table_id })?;
+        let _remote_wal_lock_guards =
+            acquire_remote_wal_read_locks(procedure_ctx, &wal_options).await;
+        refresh_initial_pruned_entry_ids(&ctx.table_metadata_manager, &mut wal_options)
             .await
             .context(error::AllocateWalOptionsSnafu { table_id })?;
 
@@ -365,7 +374,7 @@ impl AllocateRegion {
         node_manager: &NodeManagerRef,
         raw_table_info: &TableInfo,
         region_routes: &[RegionRoute],
-        wal_options: &HashMap<RegionNumber, String>,
+        wal_options: &RegionWalOptions,
     ) -> Result<()> {
         let table_ref = TableReference::full(
             &raw_table_info.catalog_name,
@@ -382,7 +391,8 @@ impl AllocateRegion {
             table_id,
             request
         );
-        let builder = CreateRequestBuilder::new(request, None);
+        let builder = CreateRequestBuilder::new(request, None)
+            .with_requirements(RegionRequirements::object_storage());
         let region_count = region_routes.len();
         let wal_region_count = wal_options.len();
         info!(
@@ -401,9 +411,10 @@ impl AllocateRegion {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
     use std::sync::Arc;
 
+    use api::v1::region::region_request::Body;
+    use common_meta::ddl::test_util::datanode_handler::DatanodeWatcher;
     use common_meta::key::TableMetadataManagerRef;
     use common_meta::key::datanode_table::DatanodeTableKey;
     use common_meta::peer::Peer;
@@ -412,7 +423,7 @@ mod tests {
     use common_procedure::{ContextProvider, ProcedureId, ProcedureState};
     use common_procedure_test::MockContextProvider;
     use store_api::storage::RegionId;
-    use tokio::sync::watch;
+    use tokio::sync::{mpsc, watch};
     use uuid::Uuid;
 
     use super::*;
@@ -496,7 +507,7 @@ mod tests {
         table_metadata_manager: TableMetadataManagerRef,
         table_id: TableId,
         concurrent_region_route: RegionRoute,
-        region_wal_options: HashMap<RegionNumber, String>,
+        region_wal_options: RegionWalOptions,
     }
 
     #[async_trait::async_trait]
@@ -741,7 +752,8 @@ mod tests {
         )
         .await;
 
-        let node_manager = Arc::new(MockDatanodeManager::new(()));
+        let (sender, mut receiver) = mpsc::channel(1);
+        let node_manager = Arc::new(MockDatanodeManager::new(DatanodeWatcher::new(sender)));
         let mut ctx = new_parent_context(&env, node_manager, table_id);
         ctx.persistent_ctx.plans = vec![RepartitionPlanEntry {
             group_id: Uuid::new_v4(),
@@ -769,6 +781,12 @@ mod tests {
         let mut state = ExecutePlan;
 
         state.next(&mut ctx, &procedure_ctx).await.unwrap();
+
+        let (_, request) = receiver.recv().await.unwrap();
+        let Some(Body::Create(create)) = request.body else {
+            unreachable!()
+        };
+        assert!(create.requirements.unwrap().object_storage);
 
         let region_ids = current_parent_region_routes(&ctx)
             .await

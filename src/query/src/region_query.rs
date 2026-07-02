@@ -14,12 +14,14 @@
 
 use std::sync::Arc;
 
+use api::v1::region::{RemoteDynFilterUnregister, RemoteDynFilterUpdate};
 use async_trait::async_trait;
 use common_meta::node_manager::NodeManagerRef;
 use common_query::request::QueryRequest;
 use common_recordbatch::SendableRecordBatchStream;
 use partition::manager::PartitionRuleManagerRef;
 use session::ReadPreference;
+use store_api::storage::RegionId;
 
 use crate::error::Result;
 
@@ -42,6 +44,20 @@ pub trait RegionQueryHandler: Send + Sync {
         read_preference: ReadPreference,
         request: QueryRequest,
     ) -> Result<SendableRecordBatchStream>;
+
+    async fn handle_remote_dyn_filter_update(
+        &self,
+        region_id: RegionId,
+        query_id: String,
+        update: RemoteDynFilterUpdate,
+    ) -> Result<()>;
+
+    async fn handle_remote_dyn_filter_unregister(
+        &self,
+        region_id: RegionId,
+        query_id: String,
+        unregister: RemoteDynFilterUnregister,
+    ) -> Result<()>;
 }
 
 pub type RegionQueryHandlerRef = Arc<dyn RegionQueryHandler>;

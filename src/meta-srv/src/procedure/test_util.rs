@@ -18,8 +18,8 @@ use api::v1::meta::mailbox_message::Payload;
 use api::v1::meta::{HeartbeatResponse, MailboxMessage};
 use common_meta::instruction::{
     DowngradeRegionReply, DowngradeRegionsReply, EnterStagingRegionReply, EnterStagingRegionsReply,
-    FlushRegionReply, InstructionReply, SimpleReply, SyncRegionReply, SyncRegionsReply,
-    UpgradeRegionReply, UpgradeRegionsReply,
+    FlushRegionReply, InstructionError, InstructionReply, SimpleReply, SyncRegionReply,
+    SyncRegionsReply, UpgradeRegionReply, UpgradeRegionsReply,
 };
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::key::table_route::TableRouteValue;
@@ -31,6 +31,7 @@ use common_meta::region_registry::{
 };
 use common_meta::rpc::router::{Region, RegionRoute};
 use common_meta::sequence::Sequence;
+use common_meta::wal_provider::RegionWalOptions;
 use common_time::util::current_time_millis;
 use common_wal::options::{KafkaWalOptions, WalOptions};
 use store_api::logstore::EntryId;
@@ -40,6 +41,10 @@ use tokio::sync::mpsc::{Receiver, Sender};
 use crate::error::Result;
 use crate::handler::{HeartbeatMailbox, Pusher, Pushers};
 use crate::service::mailbox::{Channel, MailboxRef};
+
+fn legacy_instruction_error(error: Option<String>) -> Option<InstructionError> {
+    error.map(InstructionError::legacy_internal_retryable)
+}
 
 pub type MockHeartbeatReceiver = Receiver<std::result::Result<HeartbeatResponse, tonic::Status>>;
 
@@ -90,6 +95,15 @@ pub fn send_mock_reply(
 
 /// Generates a [InstructionReply::OpenRegion] reply.
 pub fn new_open_region_reply(id: u64, result: bool, error: Option<String>) -> MailboxMessage {
+    new_open_region_reply_with_error(id, result, legacy_instruction_error(error))
+}
+
+/// Generates a [InstructionReply::OpenRegion] reply with a structured error.
+pub fn new_open_region_reply_with_error(
+    id: u64,
+    result: bool,
+    error: Option<InstructionError>,
+) -> MailboxMessage {
     MailboxMessage {
         id,
         subject: "mock".to_string(),
@@ -114,7 +128,10 @@ pub fn new_flush_region_reply(id: u64, result: bool, error: Option<String>) -> M
     let flush_reply = if result {
         FlushRegionReply::success_single(region_id)
     } else {
-        FlushRegionReply::error_single(region_id, error.unwrap_or("Test error".to_string()))
+        FlushRegionReply::error_single(
+            region_id,
+            InstructionError::legacy_internal_retryable(error.unwrap_or("Test error".to_string())),
+        )
     };
 
     MailboxMessage {
@@ -140,7 +157,10 @@ pub fn new_flush_region_reply_for_region(
     let flush_reply = if result {
         FlushRegionReply::success_single(region_id)
     } else {
-        FlushRegionReply::error_single(region_id, error.unwrap_or("Test error".to_string()))
+        FlushRegionReply::error_single(
+            region_id,
+            InstructionError::legacy_internal_retryable(error.unwrap_or("Test error".to_string())),
+        )
     };
 
     MailboxMessage {
@@ -195,7 +215,7 @@ pub fn new_downgrade_region_reply(
                     last_entry_id,
                     metadata_last_entry_id: None,
                     exists: exist,
-                    error,
+                    error: legacy_instruction_error(error),
                 }]),
             ))
             .unwrap(),
@@ -223,7 +243,7 @@ pub fn new_upgrade_region_reply(
                     region_id: RegionId::new(0, 0),
                     ready,
                     exists,
-                    error,
+                    error: legacy_instruction_error(error),
                 }),
             ))
             .unwrap(),
@@ -252,7 +272,7 @@ pub fn new_enter_staging_region_reply(
                     region_id,
                     ready,
                     exists,
-                    error,
+                    error: legacy_instruction_error(error),
                 }]),
             ))
             .unwrap(),
@@ -281,7 +301,7 @@ pub fn new_sync_region_reply(
                     region_id,
                     ready,
                     exists,
-                    error,
+                    error: legacy_instruction_error(error),
                 },
             ])))
             .unwrap(),
@@ -317,11 +337,8 @@ pub async fn new_wal_prune_metadata(
                 ..Default::default()
             })
             .collect::<Vec<_>>();
-        let wal_options = WalOptions::Kafka(KafkaWalOptions {
-            topic: topic.clone(),
-        });
-        let wal_options = serde_json::to_string(&wal_options).unwrap();
-        let region_wal_options: HashMap<u32, String> = (0..n_region)
+        let wal_options = WalOptions::Kafka(KafkaWalOptions::new(topic.clone()));
+        let region_wal_options: RegionWalOptions = (0..n_region)
             .map(|region_number| (region_number, wal_options.clone()))
             .collect();
 

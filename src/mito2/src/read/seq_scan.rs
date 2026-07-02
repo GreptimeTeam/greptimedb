@@ -573,6 +573,10 @@ impl RegionScanner for SeqScan {
         self.properties.set_logical_region(logical_region);
     }
 
+    fn set_query_load_region_id(&mut self, region_id: store_api::storage::RegionId) {
+        self.properties.set_query_load_region_id(region_id);
+    }
+
     fn snapshot_sequence(&self) -> Option<u64> {
         self.stream_ctx.input.snapshot_sequence
     }
@@ -661,6 +665,13 @@ pub(crate) async fn build_flat_sources(
             );
             ordered_sources[position] = Some(Box::pin(stream) as _);
         } else if stream_ctx.is_file_range_index(*index) {
+            // Common manifest-level fast-skip shared by SeqScan and UnorderedScan.
+            // Compaction should keep reading its selected input ranges completely.
+            if !compaction
+                && partition_pruner.try_skip_manifest_pruned_file_range(*index, part_metrics)
+            {
+                continue;
+            }
             if let Some(semaphore_ref) = semaphore.as_ref() {
                 // run in parallel, controlled by semaphore
                 let stream_ctx = stream_ctx.clone();

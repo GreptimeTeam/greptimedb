@@ -20,6 +20,10 @@
 pub mod decode;
 pub(crate) mod row_builder;
 pub(crate) mod types;
+#[cfg(any(test, feature = "testing"))]
+pub mod v2;
+#[cfg(not(any(test, feature = "testing")))]
+pub(crate) mod v2;
 pub mod validation;
 
 use bytes::Bytes;

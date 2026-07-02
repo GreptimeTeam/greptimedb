@@ -17,7 +17,6 @@ use std::collections::HashSet;
 use std::time::Duration;
 
 use api::v1::meta::MailboxMessage;
-use common_meta::ddl::utils::parse_region_wal_options;
 use common_meta::instruction::{
     Instruction, InstructionReply, UpgradeRegion, UpgradeRegionReply, UpgradeRegionsReply,
 };
@@ -36,6 +35,7 @@ use crate::error::{self, Result};
 use crate::handler::HeartbeatMailbox;
 use crate::procedure::region_migration::update_metadata::UpdateMetadata;
 use crate::procedure::region_migration::{Context, State};
+use crate::procedure::utils::instruction_error_result;
 use crate::service::mailbox::Channel;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -97,9 +97,7 @@ impl UpgradeCandidateRegion {
                 continue;
             };
 
-            let region_wal_options =
-                parse_region_wal_options(&datanode_table_value.region_info.region_wal_options)
-                    .context(error::ParseWalOptionsSnafu)?;
+            let region_wal_options = &datanode_table_value.region_info.region_wal_options;
 
             for region_id in regions {
                 let Some(WalOptions::Kafka(kafka_wal_options)) =
@@ -182,17 +180,17 @@ impl UpgradeCandidateRegion {
         now: &Instant,
     ) -> Result<()> {
         let candidate = &ctx.persistent_ctx.to_peer;
-        if error.is_some() {
-            return error::RetryLaterSnafu {
-                reason: format!(
+        if let Some(error) = error {
+            return instruction_error_result(
+                error,
+                format!(
                     "Failed to upgrade the region {} on datanode {:?}, error: {:?}, elapsed: {:?}",
                     region_id,
                     candidate,
                     error,
                     now.elapsed()
                 ),
-            }
-            .fail();
+            );
         }
 
         ensure!(
@@ -359,6 +357,7 @@ mod tests {
     use common_meta::key::topic_region::{ReplayCheckpoint, TopicRegionKey, TopicRegionValue};
     use common_meta::peer::Peer;
     use common_meta::rpc::router::{Region, RegionRoute};
+    use common_meta::wal_provider::RegionWalOptions;
     use common_wal::options::KafkaWalOptions;
     use store_api::storage::RegionId;
 
@@ -382,23 +381,20 @@ mod tests {
         )
     }
 
-    fn kafka_wal_options(topic: &str) -> HashMap<u32, String> {
-        HashMap::from([(
+    fn kafka_wal_options(topic: &str) -> RegionWalOptions {
+        RegionWalOptions::from([(
             1,
-            serde_json::to_string(&WalOptions::Kafka(KafkaWalOptions {
-                topic: topic.to_string(),
-            }))
-            .unwrap(),
+            WalOptions::Kafka(KafkaWalOptions::new(topic.to_string())),
         )])
     }
 
-    async fn prepare_table_metadata(ctx: &Context, wal_options: HashMap<u32, String>) {
+    async fn prepare_table_metadata(ctx: &Context, wal_options: RegionWalOptions) {
         prepare_table_metadata_with_engine(ctx, wal_options, "engine").await;
     }
 
     async fn prepare_table_metadata_with_engine(
         ctx: &Context,
-        wal_options: HashMap<u32, String>,
+        wal_options: RegionWalOptions,
         engine: &str,
     ) {
         let region_id = ctx.persistent_ctx.region_ids[0];

@@ -14,10 +14,12 @@
 
 use std::any::Any;
 
-use common_error::ext::ErrorExt;
+use common_error::ext::{ErrorExt, RetryHint, retry_hint_from_io_error};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use common_runtime::error::Error as RuntimeError;
+use common_wal::kafka::rskafka_client_error_to_retry_hint;
+use object_store::error::retry_hint_from_opendal_error;
 use serde_json::error::Error as JsonError;
 use snafu::{Location, Snafu};
 use store_api::storage::RegionId;
@@ -373,6 +375,32 @@ impl ErrorExt for Error {
             | BatchProduce { error, .. }
             | GetOffset { error, .. }
             | ConsumeRecord { error, .. } => rskafka_client_error_to_status_code(error),
+        }
+    }
+
+    fn retry_hint(&self) -> RetryHint {
+        use Error::*;
+
+        match self {
+            CreateWriter { error, .. } | WriteIndex { error, .. } | ReadIndex { error, .. } => {
+                retry_hint_from_opendal_error(error)
+            }
+            Io { error, .. } => retry_hint_from_io_error(error),
+            FetchEntry { .. } | RaftEngine { .. } | AddEntryLogBatch { .. } => RetryHint::Retryable,
+            ProduceRecord { error, .. } => match error {
+                rskafka::client::producer::Error::Client(error) => {
+                    rskafka_client_error_to_retry_hint(error)
+                }
+                rskafka::client::producer::Error::Aggregator(_)
+                | rskafka::client::producer::Error::FlushError(_)
+                | rskafka::client::producer::Error::TooLarge => RetryHint::NonRetryable,
+            },
+            BuildClient { error, .. }
+            | BuildPartitionClient { error, .. }
+            | BatchProduce { error, .. }
+            | GetOffset { error, .. }
+            | ConsumeRecord { error, .. } => rskafka_client_error_to_retry_hint(error),
+            _ => RetryHint::NonRetryable,
         }
     }
 }

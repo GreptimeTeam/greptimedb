@@ -39,6 +39,8 @@ use crate::error::{DecodeFlightDataSnafu, InvalidFlightDataSnafu, Result};
 
 /// Flight metadata key used to carry flow query extensions as JSON pairs.
 pub const FLOW_EXTENSIONS_METADATA_KEY: &str = "x-greptime-flow-extensions";
+/// Flight metadata key used to carry query snapshot read upper bounds as JSON.
+pub const SNAPSHOT_SEQS_METADATA_KEY: &str = "x-greptime-snapshot-seqs";
 
 #[derive(Debug, Clone)]
 pub enum FlightMessage {

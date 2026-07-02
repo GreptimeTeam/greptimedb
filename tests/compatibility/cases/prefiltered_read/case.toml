@@ -1,0 +1,8 @@
+name = "prefiltered_read"
+reason = "Verify newer read-path prefiltering returns correct rows from SSTs written by old binaries."
+introduced_by = "PR #7972"
+topologies = ["distributed"]
+from_range = ["*"]
+to_range = ["*"]
+features = ["table", "read", "prefilter"]
+owner = "storage"

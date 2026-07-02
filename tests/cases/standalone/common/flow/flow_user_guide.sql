@@ -184,7 +184,7 @@ CREATE TABLE ngx_country (
 );
 
 /* create flow task to calculate the distinct country */
-CREATE FLOW calc_ngx_country SINK TO ngx_country AS
+CREATE FLOW calc_ngx_country SINK TO ngx_country EVAL INTERVAL '1m' AS
 SELECT
     DISTINCT country,
 FROM
@@ -236,7 +236,7 @@ CREATE TABLE ngx_country (
     PRIMARY KEY(country)
 );
 
-CREATE FLOW calc_ngx_country SINK TO ngx_country AS
+CREATE FLOW calc_ngx_country SINK TO ngx_country EVAL INTERVAL '1m' AS
 SELECT
     DISTINCT country,
     date_bin(INTERVAL '1 hour', access_time) as time_window,
@@ -295,7 +295,7 @@ CREATE TABLE temp_alerts (
     PRIMARY KEY(sensor_id, loc)
 );
 
-CREATE FLOW temp_monitoring SINK TO temp_alerts AS
+CREATE FLOW temp_monitoring SINK TO temp_alerts EVAL INTERVAL '1m' AS
 SELECT
     sensor_id,
     loc,

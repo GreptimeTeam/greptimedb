@@ -111,6 +111,13 @@ pub enum Error {
         error: MetadataError,
     },
 
+    #[snafu(display("Invalid table option request: {err_msg}"))]
+    InvalidTableOptionRequest {
+        err_msg: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Invalid set fulltext option request"))]
     InvalidSetFulltextOptionRequest {
         #[snafu(implicit)]
@@ -188,6 +195,7 @@ impl ErrorExt for Error {
             }
             Error::InvalidSetTableOptionRequest { .. }
             | Error::InvalidUnsetTableOptionRequest { .. }
+            | Error::InvalidTableOptionRequest { .. }
             | Error::InvalidSetFulltextOptionRequest { .. }
             | Error::InvalidSetSkippingIndexOptionRequest { .. }
             | Error::MissingAlterIndexOption { .. }

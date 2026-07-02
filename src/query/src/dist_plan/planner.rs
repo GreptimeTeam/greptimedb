@@ -20,6 +20,7 @@ use ahash::HashMap;
 use async_trait::async_trait;
 use catalog::CatalogManagerRef;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use common_telemetry::debug;
 use datafusion::common::Result;
 use datafusion::datasource::DefaultTableSource;
 use datafusion::execution::context::SessionState;
@@ -107,6 +108,7 @@ pub struct DistExtensionPlanner {
     catalog_manager: CatalogManagerRef,
     partition_rule_manager: PartitionRuleManagerRef,
     region_query_handler: RegionQueryHandlerRef,
+    enable_per_region_metrics: bool,
 }
 
 impl DistExtensionPlanner {
@@ -114,11 +116,13 @@ impl DistExtensionPlanner {
         catalog_manager: CatalogManagerRef,
         partition_rule_manager: PartitionRuleManagerRef,
         region_query_handler: RegionQueryHandlerRef,
+        enable_per_region_metrics: bool,
     ) -> Self {
         Self {
             catalog_manager,
             partition_rule_manager,
             region_query_handler,
+            enable_per_region_metrics,
         }
     }
 }
@@ -178,6 +182,8 @@ impl ExtensionPlanner for DistExtensionPlanner {
             query_ctx,
             session_state.config().target_partitions(),
             merge_scan.partition_cols().clone(),
+            merge_scan.remote_dyn_filter_producer_id(),
+            self.enable_per_region_metrics,
         )?;
         Ok(Some(Arc::new(merge_scan_plan) as _))
     }
@@ -224,6 +230,14 @@ impl DistExtensionPlanner {
         // Extract partition columns
         let partition_columns: Vec<String> =
             table_info.meta.partition_column_names().cloned().collect();
+        debug!(
+            "DistExtensionPlanner: loaded table partition metadata, table: {}, table_id: {}, partition_key_indices: {:?}, partition_columns: {:?}, all_regions: {:?}",
+            table_name,
+            table_info.table_id(),
+            table_info.meta.partition_key_indices,
+            partition_columns,
+            all_regions,
+        );
         if partition_columns.is_empty() {
             return Ok(all_regions);
         }

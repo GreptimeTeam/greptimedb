@@ -32,7 +32,6 @@ use crate::cache::{CacheStrategy, PageRangePart};
 use crate::error::{OpenDalSnafu, ReadParquetSnafu, Result, UnexpectedSnafu};
 use crate::metrics::{READ_STAGE_ELAPSED, READ_STAGE_FETCH_PAGES};
 use crate::sst::file::RegionFileId;
-use crate::sst::parquet::DEFAULT_READ_BATCH_SIZE;
 use crate::sst::parquet::helper::fetch_byte_ranges;
 use crate::sst::parquet::row_group::{ParquetFetchMetrics, compute_total_range_size};
 
@@ -41,7 +40,7 @@ use crate::sst::parquet::row_group::{ParquetFetchMetrics, compute_total_range_si
 /// The push decoder decides which ranges are required for decoding, while this
 /// fetcher keeps cache lookup, local write-cache reads, and remote I/O explicit
 /// in Greptime code.
-pub(crate) struct SstParquetRangeFetcher {
+pub struct SstParquetRangeFetcher {
     /// Region file ID for cache key.
     region_file_id: RegionFileId,
     /// Path to the parquet file in object storage.
@@ -58,7 +57,7 @@ pub(crate) struct SstParquetRangeFetcher {
 
 impl SstParquetRangeFetcher {
     /// Creates a new [SstParquetRangeFetcher].
-    pub(crate) fn new(
+    pub fn new(
         region_file_id: RegionFileId,
         file_path: String,
         object_store: ObjectStore,
@@ -313,18 +312,19 @@ fn assemble_range(range: &Range<u64>, mut parts: Vec<PageRangePart>) -> Result<B
 }
 
 /// Builds a parquet record batch stream driven directly by [ParquetPushDecoderBuilder].
-pub(crate) fn build_sst_parquet_record_batch_stream(
+pub fn build_sst_parquet_record_batch_stream(
     arrow_metadata: ArrowReaderMetadata,
     row_group_idx: usize,
     row_selection: Option<RowSelection>,
     projection: ProjectionMask,
     fetcher: SstParquetRangeFetcher,
     file_path: String,
+    batch_size: usize,
 ) -> Result<BoxStream<'static, Result<RecordBatch>>> {
     let mut builder = ParquetPushDecoderBuilder::new_with_metadata(arrow_metadata)
         .with_row_groups(vec![row_group_idx])
         .with_projection(projection)
-        .with_batch_size(DEFAULT_READ_BATCH_SIZE);
+        .with_batch_size(batch_size);
 
     if let Some(selection) = row_selection {
         builder = builder.with_row_selection(selection);

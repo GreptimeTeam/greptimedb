@@ -75,7 +75,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "1.1.0"
+version = "1.2.0"
 edition = "2024"
 license = "Apache-2.0"
 
@@ -137,7 +137,7 @@ datafusion-functions-aggregate-common = "=53.1.0"
 datafusion-functions-window-common = "=53.1.0"
 datafusion-optimizer = "=53.1.0"
 datafusion-orc = { git = "https://github.com/datafusion-contrib/datafusion-orc.git", rev = "6c07fa282dc8d62db2aa4ded06ab55485efc811a" }
-datafusion-pg-catalog = "0.16"
+datafusion-pg-catalog = "0.17"
 datafusion-physical-expr = "=53.1.0"
 datafusion-physical-plan = "=53.1.0"
 datafusion-proto = "=53.1.0"
@@ -158,7 +158,7 @@ fs2 = "0.4"
 fst = "0.4.7"
 futures = "0.3"
 futures-util = "0.3"
-greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "912f6c21017d5ab6c529568d36e7b8c30a94d84b" }
+greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "b6b665d8b6fce4f1f0da49c8c79fb150636df4ff" }
 hex = "0.4"
 http = "1"
 humantime = "2.1"
@@ -166,6 +166,7 @@ humantime-serde = "1.1"
 hyper = "1.1"
 hyper-util = "0.1"
 icu_properties = "2.0.1"
+indicatif = "0.17"
 itertools = "0.14"
 jsonb = { version = "0.4.4", default-features = false }
 lazy_static = "1.4"
@@ -250,7 +251,9 @@ tokio-rustls = { version = "0.26.2", default-features = false }
 tokio-stream = "0.1"
 tokio-util = { version = "0.7", features = ["io-util", "compat"] }
 toml = "0.8.8"
-tonic = { version = "0.14", features = ["tls-aws-lc", "gzip", "zstd"] }
+# Pin below 0.14.5 to avoid the `connection_timeout_future` "async fn resumed after
+# completion" panic (greptimedb#8265 / grpc-rust#2522). Remove once tonic ships a fix.
+tonic = { version = "0.14, <0.14.5", features = ["tls-aws-lc", "gzip", "zstd"] }
 tower = "0.5"
 tower-http = "0.6"
 tracing = "0.1"
@@ -338,21 +341,21 @@ git = "https://github.com/GreptimeTeam/greptime-meter.git"
 rev = "5618e779cf2bb4755b499c630fba4c35e91898cb"
 
 [patch.crates-io]
-datafusion = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "9c1ed8d9242408aad0a6d444c7c339bcb62f9be4" }
-datafusion-common = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "9c1ed8d9242408aad0a6d444c7c339bcb62f9be4" }
-datafusion-datasource = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "9c1ed8d9242408aad0a6d444c7c339bcb62f9be4" }
-datafusion-expr = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "9c1ed8d9242408aad0a6d444c7c339bcb62f9be4" }
-datafusion-expr-common = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "9c1ed8d9242408aad0a6d444c7c339bcb62f9be4" }
-datafusion-functions = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "9c1ed8d9242408aad0a6d444c7c339bcb62f9be4" }
-datafusion-functions-aggregate-common = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "9c1ed8d9242408aad0a6d444c7c339bcb62f9be4" }
-datafusion-functions-window-common = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "9c1ed8d9242408aad0a6d444c7c339bcb62f9be4" }
-datafusion-optimizer = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "9c1ed8d9242408aad0a6d444c7c339bcb62f9be4" }
-datafusion-physical-expr = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "9c1ed8d9242408aad0a6d444c7c339bcb62f9be4" }
-datafusion-physical-expr-common = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "9c1ed8d9242408aad0a6d444c7c339bcb62f9be4" }
-datafusion-physical-plan = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "9c1ed8d9242408aad0a6d444c7c339bcb62f9be4" }
-datafusion-proto = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "9c1ed8d9242408aad0a6d444c7c339bcb62f9be4" }
-datafusion-sql = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "9c1ed8d9242408aad0a6d444c7c339bcb62f9be4" }
-datafusion-substrait = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "9c1ed8d9242408aad0a6d444c7c339bcb62f9be4" }
+datafusion = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "e8a127c28e8839964bb6aefdd909810dc11cd2c9" }
+datafusion-common = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "e8a127c28e8839964bb6aefdd909810dc11cd2c9" }
+datafusion-datasource = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "e8a127c28e8839964bb6aefdd909810dc11cd2c9" }
+datafusion-expr = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "e8a127c28e8839964bb6aefdd909810dc11cd2c9" }
+datafusion-expr-common = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "e8a127c28e8839964bb6aefdd909810dc11cd2c9" }
+datafusion-functions = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "e8a127c28e8839964bb6aefdd909810dc11cd2c9" }
+datafusion-functions-aggregate-common = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "e8a127c28e8839964bb6aefdd909810dc11cd2c9" }
+datafusion-functions-window-common = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "e8a127c28e8839964bb6aefdd909810dc11cd2c9" }
+datafusion-optimizer = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "e8a127c28e8839964bb6aefdd909810dc11cd2c9" }
+datafusion-physical-expr = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "e8a127c28e8839964bb6aefdd909810dc11cd2c9" }
+datafusion-physical-expr-common = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "e8a127c28e8839964bb6aefdd909810dc11cd2c9" }
+datafusion-physical-plan = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "e8a127c28e8839964bb6aefdd909810dc11cd2c9" }
+datafusion-proto = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "e8a127c28e8839964bb6aefdd909810dc11cd2c9" }
+datafusion-sql = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "e8a127c28e8839964bb6aefdd909810dc11cd2c9" }
+datafusion-substrait = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "e8a127c28e8839964bb6aefdd909810dc11cd2c9" }
 sqlparser = { git = "https://github.com/GreptimeTeam/sqlparser-rs.git", rev = "2aefa08a8d69c96eec2d6d6703598a009bba6e4c" }                           # on branch v0.61.x
 
 [profile.release]

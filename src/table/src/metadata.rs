@@ -36,8 +36,8 @@ use store_api::storage::{ColumnDescriptor, ColumnDescriptorBuilder, ColumnId};
 
 use crate::error::{self, Result};
 use crate::requests::{
-    AddColumnRequest, AlterKind, ModifyColumnTypeRequest, SetDefaultRequest, SetIndexOption,
-    TableOptions, UnsetIndexOption,
+    AddColumnRequest, AlterKind, ModifyColumnTypeRequest, REPARTITION_COLUMN_HINT_KEY,
+    SetDefaultRequest, SetIndexOption, TableOptions, UnsetIndexOption,
 };
 use crate::table_reference::TableReference;
 
@@ -330,6 +330,10 @@ impl TableMeta {
             AlterKind::RenameTable { .. } => Ok(self.new_meta_builder()),
             AlterKind::SetTableOptions { options } => self.set_table_options(options),
             AlterKind::UnsetTableOptions { keys } => self.unset_table_options(keys),
+            AlterKind::SetRepartitionColumnHint { column_name } => {
+                self.set_repartition_column_hint(table_name, column_name)
+            }
+            AlterKind::UnsetRepartitionColumnHint => self.unset_repartition_column_hint(),
             AlterKind::SetIndexes { options } => self.set_indexes(table_name, options),
             AlterKind::UnsetIndexes { options } => self.unset_indexes(table_name, options),
             AlterKind::DropDefaults { names } => self.drop_defaults(table_name, names),
@@ -385,6 +389,72 @@ impl TableMeta {
     fn unset_table_options(&self, requests: &[UnsetRegionOption]) -> Result<TableMetaBuilder> {
         let requests = requests.iter().map(Into::into).collect::<Vec<_>>();
         self.set_table_options(&requests)
+    }
+
+    fn set_repartition_column_hint(
+        &self,
+        table_name: &str,
+        column_name: &str,
+    ) -> Result<TableMetaBuilder> {
+        let column_name = column_name.trim();
+        ensure!(
+            !column_name.is_empty() && !column_name.contains(','),
+            error::InvalidAlterRequestSnafu {
+                table: table_name,
+                err: format!("{REPARTITION_COLUMN_HINT_KEY} expects exactly one column name"),
+            }
+        );
+
+        ensure!(
+            self.partition_key_indices.is_empty(),
+            error::InvalidAlterRequestSnafu {
+                table: table_name,
+                err: format!(
+                    "cannot set {REPARTITION_COLUMN_HINT_KEY} on a table with partition metadata"
+                ),
+            }
+        );
+
+        let column_index = self
+            .schema
+            .column_index_by_name(column_name)
+            .with_context(|| error::ColumnNotExistsSnafu {
+                column_name,
+                table_name,
+            })?;
+
+        if let Some(time_index) = self.schema.timestamp_index() {
+            ensure!(
+                column_index != time_index,
+                error::InvalidAlterRequestSnafu {
+                    table: table_name,
+                    err: format!(
+                        "cannot set {REPARTITION_COLUMN_HINT_KEY} to the time index column"
+                    ),
+                }
+            );
+        }
+
+        let mut new_options = self.options.clone();
+        new_options.extra_options.insert(
+            REPARTITION_COLUMN_HINT_KEY.to_string(),
+            column_name.to_string(),
+        );
+
+        let mut builder = self.new_meta_builder();
+        builder.options(new_options);
+        Ok(builder)
+    }
+
+    fn unset_repartition_column_hint(&self) -> Result<TableMetaBuilder> {
+        let mut new_options = self.options.clone();
+        new_options
+            .extra_options
+            .remove(REPARTITION_COLUMN_HINT_KEY);
+
+        let mut builder = self.new_meta_builder();
+        builder.options(new_options);
+        Ok(builder)
     }
 
     fn set_indexes(
@@ -1292,7 +1362,9 @@ impl TableInfo {
     ///
     /// All "region options" are actually a copy of table options for redundancy.
     pub fn to_region_options(&self) -> HashMap<String, String> {
-        HashMap::from(&self.meta.options)
+        let mut options = HashMap::from(&self.meta.options);
+        options.remove(REPARTITION_COLUMN_HINT_KEY);
+        options
     }
 
     /// Returns the table reference.
@@ -1589,6 +1661,214 @@ mod tests {
                 .extra_options
                 .get(MERGE_MODE_KEY)
                 .map(String::as_str)
+        );
+    }
+
+    #[test]
+    fn test_set_repartition_column_hint() {
+        let meta = TableMetaBuilder::empty()
+            .schema(Arc::new(new_test_schema()))
+            .primary_key_indices(vec![0])
+            .engine("engine")
+            .next_column_id(3)
+            .build()
+            .unwrap();
+
+        let alter_kind = AlterKind::SetRepartitionColumnHint {
+            column_name: " col1 ".to_string(),
+        };
+        let new_meta = meta
+            .builder_with_alter_kind("my_table", &alter_kind)
+            .unwrap()
+            .build()
+            .unwrap();
+
+        assert_eq!(
+            Some("col1"),
+            new_meta
+                .options
+                .extra_options
+                .get(REPARTITION_COLUMN_HINT_KEY)
+                .map(String::as_str)
+        );
+    }
+
+    #[test]
+    fn test_set_repartition_column_hint_rejects_empty_column() {
+        let meta = TableMetaBuilder::empty()
+            .schema(Arc::new(new_test_schema()))
+            .primary_key_indices(vec![0])
+            .engine("engine")
+            .next_column_id(3)
+            .build()
+            .unwrap();
+
+        let alter_kind = AlterKind::SetRepartitionColumnHint {
+            column_name: " ".to_string(),
+        };
+        let err = meta
+            .builder_with_alter_kind("my_table", &alter_kind)
+            .err()
+            .unwrap();
+
+        assert!(
+            err.to_string()
+                .contains("repartition.column.hint expects exactly one column name")
+        );
+    }
+
+    #[test]
+    fn test_set_repartition_column_hint_rejects_multiple_columns() {
+        let meta = TableMetaBuilder::empty()
+            .schema(Arc::new(new_test_schema()))
+            .primary_key_indices(vec![0])
+            .engine("engine")
+            .next_column_id(3)
+            .build()
+            .unwrap();
+
+        let alter_kind = AlterKind::SetRepartitionColumnHint {
+            column_name: "col1,col2".to_string(),
+        };
+        let err = meta
+            .builder_with_alter_kind("my_table", &alter_kind)
+            .err()
+            .unwrap();
+
+        assert!(
+            err.to_string()
+                .contains("repartition.column.hint expects exactly one column name")
+        );
+    }
+
+    #[test]
+    fn test_set_repartition_column_hint_rejects_missing_column() {
+        let meta = TableMetaBuilder::empty()
+            .schema(Arc::new(new_test_schema()))
+            .primary_key_indices(vec![0])
+            .engine("engine")
+            .next_column_id(3)
+            .build()
+            .unwrap();
+
+        let alter_kind = AlterKind::SetRepartitionColumnHint {
+            column_name: "missing".to_string(),
+        };
+        let err = meta
+            .builder_with_alter_kind("my_table", &alter_kind)
+            .err()
+            .unwrap();
+
+        assert!(err.to_string().contains("Column missing not exists"));
+    }
+
+    #[test]
+    fn test_set_repartition_column_hint_rejects_time_index_column() {
+        let meta = TableMetaBuilder::empty()
+            .schema(Arc::new(new_test_schema()))
+            .primary_key_indices(vec![0])
+            .engine("engine")
+            .next_column_id(3)
+            .build()
+            .unwrap();
+
+        let alter_kind = AlterKind::SetRepartitionColumnHint {
+            column_name: "ts".to_string(),
+        };
+        let err = meta
+            .builder_with_alter_kind("my_table", &alter_kind)
+            .err()
+            .unwrap();
+
+        assert!(
+            err.to_string()
+                .contains("cannot set repartition.column.hint to the time index column")
+        );
+    }
+
+    #[test]
+    fn test_set_repartition_column_hint_rejects_partitioned_table() {
+        let meta = TableMetaBuilder::empty()
+            .schema(Arc::new(new_test_schema()))
+            .primary_key_indices(vec![0])
+            .engine("engine")
+            .next_column_id(3)
+            .partition_key_indices(vec![0])
+            .build()
+            .unwrap();
+
+        let alter_kind = AlterKind::SetRepartitionColumnHint {
+            column_name: "col1".to_string(),
+        };
+        let err = meta
+            .builder_with_alter_kind("my_table", &alter_kind)
+            .err()
+            .unwrap();
+
+        assert!(
+            err.to_string()
+                .contains("cannot set repartition.column.hint on a table with partition metadata")
+        );
+    }
+
+    #[test]
+    fn test_unset_repartition_column_hint() {
+        let mut table_options = TableOptions::default();
+        table_options
+            .extra_options
+            .insert(REPARTITION_COLUMN_HINT_KEY.to_string(), "col1".to_string());
+        let meta = TableMetaBuilder::empty()
+            .schema(Arc::new(new_test_schema()))
+            .primary_key_indices(vec![0])
+            .engine("engine")
+            .next_column_id(3)
+            .options(table_options)
+            .build()
+            .unwrap();
+
+        let new_meta = meta
+            .builder_with_alter_kind("my_table", &AlterKind::UnsetRepartitionColumnHint)
+            .unwrap()
+            .build()
+            .unwrap();
+
+        assert!(
+            !new_meta
+                .options
+                .extra_options
+                .contains_key(REPARTITION_COLUMN_HINT_KEY)
+        );
+    }
+
+    #[test]
+    fn test_repartition_column_hint_is_not_region_option() {
+        let mut table_options = TableOptions::default();
+        table_options
+            .extra_options
+            .insert(REPARTITION_COLUMN_HINT_KEY.to_string(), "col1".to_string());
+        let table_info = TableInfoBuilder::default()
+            .table_id(1)
+            .table_version(0)
+            .name("my_table")
+            .catalog_name(DEFAULT_CATALOG_NAME)
+            .schema_name(DEFAULT_SCHEMA_NAME)
+            .meta(
+                TableMetaBuilder::empty()
+                    .schema(Arc::new(new_test_schema()))
+                    .primary_key_indices(vec![0])
+                    .engine("engine")
+                    .next_column_id(3)
+                    .options(table_options)
+                    .build()
+                    .unwrap(),
+            )
+            .build()
+            .unwrap();
+
+        assert!(
+            !table_info
+                .to_region_options()
+                .contains_key(REPARTITION_COLUMN_HINT_KEY)
         );
     }
 

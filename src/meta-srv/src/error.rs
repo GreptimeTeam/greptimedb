@@ -13,12 +13,13 @@
 // limitations under the License.
 
 use common_error::define_into_tonic_status;
-use common_error::ext::{BoxedError, ErrorExt};
+use common_error::ext::{BoxedError, ErrorExt, RetryHint};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use common_meta::DatanodeId;
 use common_procedure::ProcedureId;
 use common_runtime::JoinError;
+use common_wal::kafka::rskafka_client_error_to_retry_hint;
 use snafu::{Location, Snafu};
 use store_api::storage::RegionId;
 use table::metadata::TableId;
@@ -951,13 +952,6 @@ pub enum Error {
         source: common_meta::error::Error,
     },
 
-    #[snafu(display("Failed to parse wal options"))]
-    ParseWalOptions {
-        #[snafu(implicit)]
-        location: Location,
-        source: common_meta::error::Error,
-    },
-
     #[snafu(display("Failed to build kafka client."))]
     BuildKafkaClient {
         #[snafu(implicit)]
@@ -1131,29 +1125,7 @@ pub enum Error {
 impl Error {
     /// Returns `true` if the error is retryable.
     pub fn is_retryable(&self) -> bool {
-        matches!(
-            self,
-            Error::RetryLater { .. }
-                | Error::RetryLaterWithSource { .. }
-                | Error::MailboxTimeout { .. }
-        ) || matches!(
-            self,
-            Error::AllocateRegions { source, .. } if source.is_retry_later()
-        ) || matches!(
-            self,
-            Error::DeallocateRegions { source, .. } if source.is_retry_later()
-        ) || matches!(
-            self,
-            Error::DeleteRecords { error, .. }
-                | Error::BuildPartitionClient { error, .. }
-                | Error::GetOffset { error, .. }
-                if Self::is_retryable_kafka_client_error(error)
-        )
-    }
-
-    /// Returns `true` if the Kafka client has exhausted its internal retry.
-    fn is_retryable_kafka_client_error(err: &rskafka::client::error::Error) -> bool {
-        matches!(err, rskafka::client::error::Error::RetryFailed(_))
+        self.retry_hint().is_retryable()
     }
 }
 
@@ -1278,8 +1250,7 @@ impl ErrorExt for Error {
             | Error::RuntimeSwitchManager { source, .. }
             | Error::KvBackend { source, .. }
             | Error::UnexpectedLogicalRouteTable { source, .. }
-            | Error::UpdateTopicNameValue { source, .. }
-            | Error::ParseWalOptions { source, .. } => source.status_code(),
+            | Error::UpdateTopicNameValue { source, .. } => source.status_code(),
             Error::ListActiveFrontends { source, .. }
             | Error::ListActiveDatanodes { source, .. }
             | Error::ListActiveFlownodes { source, .. } => source.status_code(),
@@ -1319,6 +1290,105 @@ impl ErrorExt for Error {
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
+
+    fn retry_hint(&self) -> RetryHint {
+        match self {
+            Error::RetryLater { .. }
+            | Error::RetryLaterWithSource { .. }
+            | Error::MailboxTimeout { .. }
+            | Error::NoEnoughAvailableNode { .. }
+            | Error::NoLeader { .. }
+            | Error::LeaderLeaseExpired { .. }
+            | Error::LeaderLeaseChanged { .. }
+            | Error::PeerUnavailable { .. } => RetryHint::Retryable,
+
+            Error::ConnectEtcd { error, .. } | Error::EtcdFailed { error, .. } => {
+                common_meta::error::retry_hint_from_etcd_error(error)
+            }
+
+            #[cfg(feature = "pg_kvbackend")]
+            Error::PostgresExecution { error, .. } => {
+                common_meta::error::retry_hint_from_postgres_error(error)
+            }
+            #[cfg(feature = "pg_kvbackend")]
+            Error::GetPostgresClient { error, .. } => {
+                common_meta::error::retry_hint_from_postgres_pool_error(error)
+            }
+            #[cfg(feature = "mysql_kvbackend")]
+            Error::MySqlExecution { error, .. }
+            | Error::CreateMySqlPool { error, .. }
+            | Error::AcquireMySqlClient { error, .. } => {
+                common_meta::error::retry_hint_from_sqlx_error(error)
+            }
+            #[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
+            Error::SqlExecutionTimeout { .. } => RetryHint::Retryable,
+
+            Error::ListActiveFrontends { source, .. }
+            | Error::ListActiveDatanodes { source, .. }
+            | Error::ListActiveFlownodes { source, .. }
+            | Error::InitDdlManager { source, .. }
+            | Error::InitReconciliationManager { source, .. }
+            | Error::InitMetadata { source, .. }
+            | Error::NextSequence { source, .. }
+            | Error::SetNextSequence { source, .. }
+            | Error::PeekSequence { source, .. }
+            | Error::SubmitDdlTask { source, .. }
+            | Error::SubmitReconcileProcedure { source, .. }
+            | Error::InvalidateTableCache { source, .. }
+            | Error::ConvertProtoData { source, .. }
+            | Error::TableMetadataManager { source, .. }
+            | Error::RuntimeSwitchManager { source, .. }
+            | Error::KvBackend { source, .. }
+            | Error::UnexpectedLogicalRouteTable { source, .. }
+            | Error::SaveClusterInfo { source, .. }
+            | Error::InvalidClusterInfoFormat { source, .. }
+            | Error::InvalidDatanodeStatFormat { source, .. }
+            | Error::InvalidNodeInfoFormat { source, .. }
+            | Error::FlowStateHandler { source, .. }
+            | Error::BuildWalProvider { source, .. }
+            | Error::BuildKafkaClient { error: source, .. }
+            | Error::UpdateTopicNameValue { source, .. }
+            | Error::BuildTlsOptions { source, .. }
+            | Error::AllocateRegions { source, .. }
+            | Error::DeallocateRegions { source, .. }
+            | Error::BuildCreateRequest { source, .. }
+            | Error::AllocateRegionRoutes { source, .. }
+            | Error::AllocateWalOptions { source, .. } => source.retry_hint(),
+
+            Error::Other { source, .. }
+            | Error::ListCatalogs { source, .. }
+            | Error::ListSchemas { source, .. }
+            | Error::ListTables { source, .. }
+            | Error::DowngradeLeader { source, .. } => source.retry_hint(),
+
+            Error::SubmitProcedure { source, .. }
+            | Error::WaitProcedure { source, .. }
+            | Error::QueryProcedure { source, .. }
+            | Error::StartProcedureManager { source, .. }
+            | Error::StopProcedureManager { source, .. }
+            | Error::RegisterProcedureLoader { source, .. }
+            | Error::RepartitionSubprocedureStateReceiver { source, .. } => source.retry_hint(),
+
+            Error::ShutdownServer { source, .. } | Error::StartHttp { source, .. } => {
+                source.retry_hint()
+            }
+            Error::StartTelemetryTask { source, .. } => source.retry_hint(),
+            Error::CreateChannel { source, .. } => source.retry_hint(),
+            Error::RepartitionCreateSubtasks { source, .. } => source.retry_hint(),
+            Error::SerializePartitionExpr { source, .. }
+            | Error::DeserializePartitionExpr { source, .. } => source.retry_hint(),
+
+            Error::DeleteRecords { error, .. }
+            | Error::BuildPartitionClient { error, .. }
+            | Error::GetOffset { error, .. } => rskafka_client_error_to_retry_hint(error),
+
+            Error::PusherNotFound { .. }
+            | Error::PushMessage { .. }
+            | Error::ExceededDeadline { .. } => RetryHint::NonRetryable,
+
+            _ => RetryHint::NonRetryable,
+        }
+    }
 }
 
 // for form tonic
@@ -1346,6 +1416,7 @@ pub(crate) fn match_for_io_error(err_status: &tonic::Status) -> Option<&std::io:
 mod tests {
     use std::time::Duration;
 
+    use common_error::ext::ErrorExt;
     use common_error::mock::MockError;
     use common_error::status_code::StatusCode;
     use rskafka::BackoffError;
@@ -1371,6 +1442,7 @@ mod tests {
             .unwrap_err();
 
         assert!(err.is_retryable());
+        assert!(err.retry_hint().is_retryable());
     }
 
     #[test]
@@ -1384,6 +1456,7 @@ mod tests {
             .unwrap_err();
 
         assert!(!err.is_retryable());
+        assert!(!err.retry_hint().is_retryable());
     }
 
     #[test]
@@ -1410,24 +1483,28 @@ mod tests {
         assert!(delete_records_err.is_retryable());
         assert!(build_partition_client_err.is_retryable());
         assert!(get_offset_err.is_retryable());
+        assert!(delete_records_err.retry_hint().is_retryable());
+        assert!(build_partition_client_err.retry_hint().is_retryable());
+        assert!(get_offset_err.retry_hint().is_retryable());
     }
 
     #[test]
     fn test_kafka_non_retry_failed_errors_are_not_retryable() {
-        let delete_records_err = Err::<(), _>(KafkaClientError::Timeout)
+        let delete_records_err = Err::<(), _>(KafkaClientError::InvalidResponse("invalid".into()))
             .context(DeleteRecordsSnafu {
                 topic: "test_topic",
                 partition: 0,
                 offset: 1024u64,
             })
             .unwrap_err();
-        let build_partition_client_err = Err::<(), _>(KafkaClientError::Timeout)
-            .context(BuildPartitionClientSnafu {
-                topic: "test_topic",
-                partition: 0,
-            })
-            .unwrap_err();
-        let get_offset_err = Err::<(), _>(KafkaClientError::Timeout)
+        let build_partition_client_err =
+            Err::<(), _>(KafkaClientError::InvalidResponse("invalid".into()))
+                .context(BuildPartitionClientSnafu {
+                    topic: "test_topic",
+                    partition: 0,
+                })
+                .unwrap_err();
+        let get_offset_err = Err::<(), _>(KafkaClientError::InvalidResponse("invalid".into()))
             .context(GetOffsetSnafu {
                 topic: "test_topic",
             })
@@ -1436,5 +1513,8 @@ mod tests {
         assert!(!delete_records_err.is_retryable());
         assert!(!build_partition_client_err.is_retryable());
         assert!(!get_offset_err.is_retryable());
+        assert!(!delete_records_err.retry_hint().is_retryable());
+        assert!(!build_partition_client_err.retry_hint().is_retryable());
+        assert!(!get_offset_err.retry_hint().is_retryable());
     }
 }

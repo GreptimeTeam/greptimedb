@@ -18,14 +18,13 @@ use arrow_schema::extension::ExtensionType;
 use arrow_schema::{ArrowError, DataType, FieldRef};
 use serde::{Deserialize, Serialize};
 
-use crate::json::JsonStructureSettings;
+use crate::json::JsonSettings;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct JsonMetadata {
-    /// Indicates how to handle JSON is stored in underlying data type
-    ///
-    /// This field can be `None` for data is converted to complete structured in-memory form.
-    pub json_structure_settings: Option<JsonStructureSettings>,
+    /// JSON2 settings stored in column schema metadata and represented through
+    /// Arrow extension metadata.
+    pub json_settings: Option<JsonSettings>,
 }
 
 #[derive(Debug, Clone)]
@@ -106,4 +105,12 @@ impl ExtensionType for JsonExtensionType {
 /// Check if this field is to be treated as json extension type.
 pub fn is_json_extension_type(field: &FieldRef) -> bool {
     field.extension_type_name() == Some(JsonExtensionType::NAME)
+}
+
+/// Check if this field is a structured JSON field.
+///
+/// Legacy JSONB columns may carry JSON extension metadata due to old metadata versions, but their
+/// physical Arrow type is still Binary. They must not enter structured JSON alignment paths.
+pub fn is_structured_json_field(field: &FieldRef) -> bool {
+    is_json_extension_type(field) && matches!(field.data_type(), DataType::Struct(_))
 }

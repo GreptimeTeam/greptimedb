@@ -44,6 +44,7 @@ use common_meta::node_manager::NodeManagerRef;
 use common_meta::region_keeper::{MemoryRegionKeeperRef, OperatingRegionGuard};
 use common_meta::region_registry::LeaderRegionRegistryRef;
 use common_meta::rpc::router::{RegionRoute, operating_leader_region_roles};
+use common_meta::wal_provider::RegionWalOptions;
 use common_procedure::error::{FromJsonSnafu, ToJsonSnafu};
 use common_procedure::{
     BoxedProcedure, Context as ProcedureContext, Error as ProcedureError, LockKey, Procedure,
@@ -53,7 +54,7 @@ use common_telemetry::{error, info, warn};
 use partition::expr::PartitionExpr;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
-use store_api::storage::{RegionNumber, TableId};
+use store_api::storage::TableId;
 use table::table_name::TableName;
 
 use crate::error::{self, Result};
@@ -96,7 +97,7 @@ pub struct PersistentContext {
     #[serde(with = "humantime_serde", default = "default_timeout")]
     pub timeout: Duration,
     #[serde(default)]
-    /// Records table-level partition metadata added by this repartition.
+    /// Records table-level partition metadata updated by this repartition.
     pub partition_metadata_update: Option<PartitionMetadataUpdate>,
 }
 
@@ -378,7 +379,7 @@ impl Context {
         &self,
         current_table_route_value: &DeserializedValueWithBytes<TableRouteValue>,
         new_region_routes: Vec<RegionRoute>,
-        new_region_wal_options: HashMap<RegionNumber, String>,
+        new_region_wal_options: RegionWalOptions,
     ) -> Result<()> {
         let table_id = self.persistent_ctx.table_id;
         if new_region_routes.is_empty() {
@@ -634,20 +635,15 @@ impl RepartitionProcedure {
         else {
             return Ok(());
         };
-        if update.partition_key_indices.is_empty() {
-            return Ok(());
-        }
-
         let table_info_value = self.context.get_raw_table_info_value().await?;
-        let mut new_partition_key_indices = table_info_value
-            .table_info
-            .meta
-            .partition_key_indices
-            .clone();
-        new_partition_key_indices.retain(|idx| !update.partition_key_indices.contains(idx));
-        if new_partition_key_indices == table_info_value.table_info.meta.partition_key_indices {
+        let current_partition_key_indices = &table_info_value.table_info.meta.partition_key_indices;
+        let Some(new_partition_key_indices) = update.rollback_partition_key_indices(
+            self.context.persistent_ctx.table_id,
+            current_partition_key_indices,
+        )?
+        else {
             return Ok(());
-        }
+        };
 
         let mut new_table_info = table_info_value.table_info.clone();
         new_table_info.meta.partition_key_indices = new_partition_key_indices;
@@ -824,7 +820,10 @@ impl RepartitionProcedureFactory for DefaultRepartitionProcedureFactory {
     ) -> std::result::Result<BoxedProcedure, BoxedError> {
         let persistent_ctx = PersistentContext::new(table_name, table_id, timeout);
         let from = match source {
-            RepartitionSource::Partitioned { exprs } => {
+            RepartitionSource::Partitioned {
+                exprs,
+                target_partition_columns,
+            } => {
                 let exprs = exprs
                     .iter()
                     .map(|e| {
@@ -834,7 +833,10 @@ impl RepartitionProcedureFactory for DefaultRepartitionProcedureFactory {
                     })
                     .collect::<Result<Vec<_>>>()
                     .map_err(BoxedError::new)?;
-                RepartitionFrom::Partitioned { exprs }
+                RepartitionFrom::Partitioned {
+                    exprs,
+                    target_partition_columns,
+                }
             }
             RepartitionSource::Unpartitioned { partition_columns } => {
                 RepartitionFrom::Unpartitioned { partition_columns }
@@ -1071,7 +1073,10 @@ mod tests {
 
         let procedure = test_procedure(
             Box::new(RepartitionStart::new(
-                RepartitionFrom::Partitioned { exprs: vec![] },
+                RepartitionFrom::Partitioned {
+                    exprs: vec![],
+                    target_partition_columns: None,
+                },
                 vec![],
             )),
             test_context(&env, table_id),
@@ -1193,9 +1198,9 @@ mod tests {
             .update_table_info(&current, current.update(table_info))
             .await
             .unwrap();
-        context.persistent_ctx.partition_metadata_update = Some(PartitionMetadataUpdate {
-            partition_key_indices: vec![0],
-        });
+        context.persistent_ctx.partition_metadata_update = Some(
+            PartitionMetadataUpdate::from_partitioned(vec![1], vec![0, 1]),
+        );
         let mut procedure = RepartitionProcedure {
             state: Box::new(UpdatePartitionMetadata::new(vec![])),
             context,
@@ -1881,6 +1886,7 @@ mod tests {
         let mut procedure = RepartitionProcedure::new(
             RepartitionFrom::Partitioned {
                 exprs: vec![range_expr("x", 0, 100)],
+                target_partition_columns: None,
             },
             vec![range_expr("x", 0, 50), range_expr("x", 50, 100)],
             context,
@@ -2019,7 +2025,7 @@ mod tests {
                 .partition_metadata_update
                 .as_ref()
                 .unwrap()
-                .partition_key_indices,
+                .target_partition_key_indices,
             vec![0]
         );
 
@@ -2247,6 +2253,7 @@ mod tests {
         let mut procedure = RepartitionProcedure::new(
             RepartitionFrom::Partitioned {
                 exprs: vec![range_expr("x", 0, 100)],
+                target_partition_columns: None,
             },
             vec![range_expr("x", 0, 50), range_expr("x", 50, 100)],
             context,

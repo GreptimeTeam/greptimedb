@@ -16,6 +16,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use client::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use common_error::root_source;
 use common_meta::key::table_name::TableNameKey;
 use common_procedure::{ProcedureWithId, watcher};
 use common_query::Output;
@@ -61,6 +62,24 @@ macro_rules! repartition_tests {
                         if store_type.test_on() {
                             common_telemetry::init_default_ut_logging();
                             $crate::repartition::test_partition_unpartitioned_mito(store_type).await;
+                        }
+                    }
+
+                    #[tokio::test(flavor = "multi_thread")]
+                    async fn [< test_repartition_on_columns_metadata_mito >]() {
+                        let store_type = tests_integration::test_util::StorageType::$service;
+                        if store_type.test_on() {
+                            common_telemetry::init_default_ut_logging();
+                            $crate::repartition::test_repartition_on_columns_metadata_mito(store_type).await;
+                        }
+                    }
+
+                    #[tokio::test(flavor = "multi_thread")]
+                    async fn [< test_repartition_on_columns_data_correctness_mito >]() {
+                        let store_type = tests_integration::test_util::StorageType::$service;
+                        if store_type.test_on() {
+                            common_telemetry::init_default_ut_logging();
+                            $crate::repartition::test_repartition_on_columns_data_correctness_mito(store_type).await;
                         }
                     }
 
@@ -217,6 +236,146 @@ ORDER BY partition_ordinal_position;",
     run_sql(
         instance,
         "DROP TABLE `partition_unpartitioned_mito_table`",
+        query_ctx.clone(),
+    )
+    .await
+    .unwrap();
+}
+
+pub async fn test_repartition_on_columns_metadata_mito(store_type: StorageType) {
+    info!(
+        "test_repartition_on_columns_metadata_mito: store_type: {:?}",
+        store_type
+    );
+    let cluster_name = "test_repartition_on_columns_metadata_mito";
+    let (store_config, _guard) = get_test_store_config(&store_type);
+    let datanodes = 3u64;
+    let mut builder = GreptimeDbClusterBuilder::new(cluster_name).await;
+    if matches!(store_type, StorageType::File) {
+        let home_dir = create_temp_dir("test_repartition_on_columns_metadata_mito_data_home");
+        builder = builder.with_shared_home_dir(Arc::new(home_dir));
+    }
+
+    let cluster = builder
+        .with_datanodes(datanodes as u32)
+        .with_store_config(store_config)
+        .with_datanode_wal_config(DatanodeWalConfig::Noop)
+        .build(true)
+        .await;
+
+    let query_ctx = QueryContext::arc();
+    let instance = cluster.fe_instance();
+
+    assert_on_columns_metadata_overwrite(
+        instance,
+        "repartition_on_columns_metadata_table",
+        &repartition_on_columns_sql("repartition_on_columns_metadata_table"),
+        query_ctx.clone(),
+    )
+    .await;
+    assert_on_columns_metadata_overwrite(
+        instance,
+        "split_on_columns_metadata_table",
+        &split_on_columns_sql("split_on_columns_metadata_table"),
+        query_ctx.clone(),
+    )
+    .await;
+
+    assert_on_columns_rejects_removed_remaining_column(
+        instance,
+        "repartition_on_columns_error_table",
+        &repartition_on_columns_removed_column_sql("repartition_on_columns_error_table"),
+        query_ctx.clone(),
+    )
+    .await;
+    assert_on_columns_rejects_removed_remaining_column(
+        instance,
+        "split_on_columns_error_table",
+        &split_on_columns_removed_column_sql("split_on_columns_error_table"),
+        query_ctx.clone(),
+    )
+    .await;
+
+    run_sql(
+        instance,
+        "DROP TABLE `repartition_on_columns_metadata_table`",
+        query_ctx.clone(),
+    )
+    .await
+    .unwrap();
+    run_sql(
+        instance,
+        "DROP TABLE `split_on_columns_metadata_table`",
+        query_ctx.clone(),
+    )
+    .await
+    .unwrap();
+    run_sql(
+        instance,
+        "DROP TABLE `repartition_on_columns_error_table`",
+        query_ctx.clone(),
+    )
+    .await
+    .unwrap();
+    run_sql(
+        instance,
+        "DROP TABLE `split_on_columns_error_table`",
+        query_ctx.clone(),
+    )
+    .await
+    .unwrap();
+}
+
+pub async fn test_repartition_on_columns_data_correctness_mito(store_type: StorageType) {
+    info!(
+        "test_repartition_on_columns_data_correctness_mito: store_type: {:?}",
+        store_type
+    );
+    let cluster_name = "test_repartition_on_columns_data_correctness_mito";
+    let (store_config, _guard) = get_test_store_config(&store_type);
+    let datanodes = 3u64;
+    let mut builder = GreptimeDbClusterBuilder::new(cluster_name).await;
+    if matches!(store_type, StorageType::File) {
+        let home_dir =
+            create_temp_dir("test_repartition_on_columns_data_correctness_mito_data_home");
+        builder = builder.with_shared_home_dir(Arc::new(home_dir));
+    }
+
+    let cluster = builder
+        .with_datanodes(datanodes as u32)
+        .with_store_config(store_config)
+        .with_datanode_wal_config(DatanodeWalConfig::Noop)
+        .build(true)
+        .await;
+
+    let query_ctx = QueryContext::arc();
+    let instance = cluster.fe_instance();
+
+    assert_on_columns_data_correctness(
+        instance,
+        "repartition_on_columns_data_table",
+        &repartition_on_columns_sql("repartition_on_columns_data_table"),
+        query_ctx.clone(),
+    )
+    .await;
+    assert_on_columns_data_correctness(
+        instance,
+        "split_on_columns_data_table",
+        &split_on_columns_sql("split_on_columns_data_table"),
+        query_ctx.clone(),
+    )
+    .await;
+
+    run_sql(
+        instance,
+        "DROP TABLE `repartition_on_columns_data_table`",
+        query_ctx.clone(),
+    )
+    .await
+    .unwrap();
+    run_sql(
+        instance,
+        "DROP TABLE `split_on_columns_data_table`",
         query_ctx.clone(),
     )
     .await
@@ -1163,6 +1322,230 @@ pub async fn test_repartition_metric(
     )
     .await
     .unwrap();
+}
+
+async fn create_on_columns_test_table(
+    instance: &Arc<Instance>,
+    table_name: &str,
+    query_ctx: QueryContextRef,
+) {
+    let sql = format!(
+        r#"
+        CREATE TABLE `{table_name}`(
+          `id` INT,
+          `city` STRING,
+          `ts` TIMESTAMP TIME INDEX,
+          PRIMARY KEY(`id`, `city`)
+        ) PARTITION ON COLUMNS (`id`) (
+          `id` < 10,
+          `id` >= 10 AND `id` < 20,
+          `id` >= 20
+        ) ENGINE = mito;
+        "#
+    );
+    run_sql(instance, &sql, query_ctx).await.unwrap();
+}
+
+async fn insert_on_columns_old_rows(
+    instance: &Arc<Instance>,
+    table_name: &str,
+    query_ctx: QueryContextRef,
+) {
+    let sql = format!(
+        r#"
+        INSERT INTO `{table_name}` VALUES
+          (1, 'London', '2022-01-01 00:00:00'),
+          (5, 'New York', '2022-01-01 00:00:00'),
+          (10, 'Paris', '2022-01-01 00:00:00'),
+          (15, 'Tokyo', '2022-01-01 00:00:00'),
+          (20, 'Beijing', '2022-01-01 00:00:00');
+        "#
+    );
+    run_sql(instance, &sql, query_ctx).await.unwrap();
+}
+
+async fn assert_on_columns_metadata_overwrite(
+    instance: &Arc<Instance>,
+    table_name: &str,
+    alter_sql: &str,
+    query_ctx: QueryContextRef,
+) {
+    create_on_columns_test_table(instance, table_name, query_ctx.clone()).await;
+    run_sql(instance, alter_sql, query_ctx.clone())
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_partition_expression(instance, table_name, "id, city", query_ctx).await;
+}
+
+async fn assert_on_columns_rejects_removed_remaining_column(
+    instance: &Arc<Instance>,
+    table_name: &str,
+    alter_sql: &str,
+    query_ctx: QueryContextRef,
+) {
+    create_on_columns_test_table(instance, table_name, query_ctx.clone()).await;
+    assert_sql_err_eq(
+        instance,
+        alter_sql,
+        "Invalid partition rule: partition expression references column 'id' that is not in target partition columns",
+        query_ctx,
+    )
+    .await;
+}
+
+async fn assert_on_columns_data_correctness(
+    instance: &Arc<Instance>,
+    table_name: &str,
+    alter_sql: &str,
+    query_ctx: QueryContextRef,
+) {
+    create_on_columns_test_table(instance, table_name, query_ctx.clone()).await;
+    insert_on_columns_old_rows(instance, table_name, query_ctx.clone()).await;
+    run_sql(instance, alter_sql, query_ctx.clone())
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let result = run_sql(
+        instance,
+        &format!("SELECT * FROM `{table_name}` ORDER BY `id`, `city`"),
+        query_ctx.clone(),
+    )
+    .await
+    .unwrap();
+    let expected = "\
++----+----------+---------------------+
+| id | city     | ts                  |
++----+----------+---------------------+
+| 1  | London   | 2022-01-01T00:00:00 |
+| 5  | New York | 2022-01-01T00:00:00 |
+| 10 | Paris    | 2022-01-01T00:00:00 |
+| 15 | Tokyo    | 2022-01-01T00:00:00 |
+| 20 | Beijing  | 2022-01-01T00:00:00 |
++----+----------+---------------------+";
+    check_output_stream(result.data, expected).await;
+
+    let sql = format!(
+        r#"
+        INSERT INTO `{table_name}` VALUES
+          (2, 'Amsterdam', '2022-01-02 00:00:00'),
+          (7, 'Zurich', '2022-01-02 00:00:00'),
+          (12, 'Berlin', '2022-01-02 00:00:00');
+        "#
+    );
+    run_sql(instance, &sql, query_ctx.clone()).await.unwrap();
+
+    let result = run_sql(
+        instance,
+        &format!("SELECT * FROM `{table_name}` ORDER BY `id`, `city`"),
+        query_ctx,
+    )
+    .await
+    .unwrap();
+    let expected = "\
++----+-----------+---------------------+
+| id | city      | ts                  |
++----+-----------+---------------------+
+| 1  | London    | 2022-01-01T00:00:00 |
+| 2  | Amsterdam | 2022-01-02T00:00:00 |
+| 5  | New York  | 2022-01-01T00:00:00 |
+| 7  | Zurich    | 2022-01-02T00:00:00 |
+| 10 | Paris     | 2022-01-01T00:00:00 |
+| 12 | Berlin    | 2022-01-02T00:00:00 |
+| 15 | Tokyo     | 2022-01-01T00:00:00 |
+| 20 | Beijing   | 2022-01-01T00:00:00 |
++----+-----------+---------------------+";
+    check_output_stream(result.data, expected).await;
+}
+
+fn repartition_on_columns_sql(table_name: &str) -> String {
+    format!(
+        r#"
+        ALTER TABLE `{table_name}` REPARTITION (
+          `id` < 10
+        ) ON COLUMNS (`id`, `city`) INTO (
+          `id` < 10 AND `city` < 'M',
+          `id` < 10 AND `city` >= 'M'
+        );
+        "#
+    )
+}
+
+fn split_on_columns_sql(table_name: &str) -> String {
+    format!(
+        r#"
+        ALTER TABLE `{table_name}` SPLIT PARTITION (
+          `id` < 10
+        ) ON COLUMNS (`id`, `city`) INTO (
+          `id` < 10 AND `city` < 'M',
+          `id` < 10 AND `city` >= 'M'
+        );
+        "#
+    )
+}
+
+fn repartition_on_columns_removed_column_sql(table_name: &str) -> String {
+    format!(
+        r#"
+        ALTER TABLE `{table_name}` REPARTITION (
+          `id` < 10
+        ) ON COLUMNS (`city`) INTO (
+          `city` < 'M',
+          `city` >= 'M'
+        );
+        "#
+    )
+}
+
+fn split_on_columns_removed_column_sql(table_name: &str) -> String {
+    format!(
+        r#"
+        ALTER TABLE `{table_name}` SPLIT PARTITION (
+          `id` < 10
+        ) ON COLUMNS (`city`) INTO (
+          `city` < 'M',
+          `city` >= 'M'
+        );
+        "#
+    )
+}
+
+async fn assert_partition_expression(
+    instance: &Arc<Instance>,
+    table_name: &str,
+    expected_partition_expression: &str,
+    query_ctx: QueryContextRef,
+) {
+    let result = run_sql(
+        instance,
+        &format!(
+            "SELECT DISTINCT partition_expression FROM information_schema.partitions WHERE table_name = '{table_name}' ORDER BY partition_expression"
+        ),
+        query_ctx,
+    )
+    .await
+    .unwrap();
+    let expected = format!(
+        "\
++----------------------+
+| partition_expression |
++----------------------+
+| {expected_partition_expression:<20} |
++----------------------+"
+    );
+    check_output_stream(result.data, &expected).await;
+}
+
+async fn assert_sql_err_eq(
+    instance: &Arc<Instance>,
+    sql: &str,
+    expected: &str,
+    query_ctx: QueryContextRef,
+) {
+    let err = run_sql(instance, sql, query_ctx).await.unwrap_err();
+    let root = root_source(&err).unwrap_or(&err);
+    assert_eq!(root.to_string(), expected);
 }
 
 async fn run_sql(

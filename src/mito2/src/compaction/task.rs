@@ -21,6 +21,7 @@ use common_memory_manager::OnExhaustedPolicy;
 use common_telemetry::{error, info, warn};
 use itertools::Itertools;
 use snafu::ResultExt;
+use store_api::ManifestVersion;
 use tokio::sync::mpsc;
 
 use crate::compaction::LocalCompactionState;
@@ -249,7 +250,7 @@ impl CompactionTaskImpl {
     async fn update_manifest(
         &self,
         compaction_result: crate::compaction::compactor::MergeOutput,
-    ) -> error::Result<RegionEdit> {
+    ) -> error::Result<(RegionEdit, ManifestVersion)> {
         let _manifest_timer = COMPACTION_STAGE_ELAPSED
             .with_label_values(&["write_manifest"])
             .start_timer();
@@ -281,6 +282,10 @@ impl CompactionTaskImpl {
                 self.compaction_region.region_id, e.0
             );
         }
+    }
+
+    async fn invoke_sst_hook(&self, merge_output: &MergeOutput) {
+        self.compaction_region.invoke_sst_hook(merge_output).await;
     }
 }
 
@@ -320,6 +325,7 @@ impl CompactionTask for CompactionTaskImpl {
         .await
         {
             Ok(Ok(merge_output)) => {
+                self.invoke_sst_hook(&merge_output).await;
                 // Stop accepting cancellation once we are about to publish the compaction edit.
                 if !self.state.mark_commit_started() {
                     let senders = std::mem::take(&mut self.waiters);
@@ -329,7 +335,7 @@ impl CompactionTask for CompactionTaskImpl {
                     })
                 } else {
                     match self.update_manifest(merge_output).await {
-                        Ok(edit) => {
+                        Ok((edit, _manifest_version)) => {
                             let senders = std::mem::take(&mut self.waiters);
                             BackgroundNotify::CompactionFinished(CompactionFinished {
                                 region_id: self.compaction_region.region_id,

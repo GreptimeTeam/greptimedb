@@ -410,7 +410,7 @@ impl<'a> ParserContext<'a> {
                 .fail();
             };
 
-            if !utils::is_simple_tql_cte_query(query) {
+            if utils::has_tql_cte(query) && !utils::is_simple_tql_cte_query(query) {
                 return InvalidFlowQuerySnafu {
                     reason: "WITH is only supported for the simplest TQL CTE in CREATE FLOW"
                         .to_string(),
@@ -710,12 +710,13 @@ impl<'a> ParserContext<'a> {
 
         let mut extensions = ColumnExtensions::default();
 
-        let data_type = parser.parse_data_type().context(SyntaxSnafu)?;
-        // Must immediately parse the JSON datatype format because it is closely after the "JSON"
-        // datatype, like this: "JSON(format = ...)".
-        if matches!(data_type, DataType::JSON) {
-            extensions.json_datatype_options = json::parse_json_datatype_options(parser)?;
-        }
+        let data_type =
+            if let Some((data_type, type_hints)) = json::parse_json2_type_and_hints(parser)? {
+                extensions.json_type_hints = type_hints;
+                data_type
+            } else {
+                parser.parse_data_type().context(SyntaxSnafu)?
+            };
 
         let mut options = vec![];
         loop {
@@ -910,7 +911,7 @@ impl<'a> ParserContext<'a> {
             );
 
             let column_type = get_unalias_type(column_type);
-            let data_type = sql_data_type_to_concrete_data_type(&column_type, column_extensions)?;
+            let data_type = sql_data_type_to_concrete_data_type(&column_type)?;
             ensure!(
                 data_type == ConcreteDataType::string_datatype(),
                 InvalidColumnOptionSnafu {
@@ -1007,7 +1008,7 @@ impl<'a> ParserContext<'a> {
 
             // Check that column is a vector type
             let column_type = get_unalias_type(column_type);
-            let data_type = sql_data_type_to_concrete_data_type(&column_type, column_extensions)?;
+            let data_type = sql_data_type_to_concrete_data_type(&column_type)?;
             ensure!(
                 matches!(data_type, ConcreteDataType::Vector(_)),
                 InvalidColumnOptionSnafu {
@@ -1962,7 +1963,7 @@ SELECT * FROM tql;
     }
 
     #[test]
-    fn test_parse_create_flow_with_sql_cte_is_unsupported() {
+    fn test_parse_create_flow_with_sql_cte_is_supported() {
         let sql = r#"
 CREATE FLOW f
 SINK TO s
@@ -1970,11 +1971,17 @@ AS
 WITH cte AS (SELECT 1) SELECT * FROM cte;
 "#;
 
-        let err =
+        let stmts =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
-                .unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.to_uppercase().contains("WITH"), "err: {msg}");
+                .unwrap();
+        assert_eq!(1, stmts.len());
+        let Statement::CreateFlow(create_flow) = &stmts[0] else {
+            panic!("unexpected stmt: {:?}", stmts[0]);
+        };
+        assert_eq!(
+            "WITH cte AS (SELECT 1) SELECT * FROM cte",
+            create_flow.query.to_string()
+        );
     }
 
     #[test]

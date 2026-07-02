@@ -21,6 +21,7 @@ use tokio::net;
 
 pub mod config;
 pub mod error;
+pub mod kafka;
 pub mod options;
 #[cfg(any(test, feature = "testing"))]
 pub mod test_util;

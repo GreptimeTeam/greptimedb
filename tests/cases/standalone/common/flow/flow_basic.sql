@@ -75,7 +75,7 @@ CREATE TABLE input_basic (
     TIME INDEX(ts)
 );
 
-CREATE FLOW test_wildcard_basic SiNk TO out_basic AS
+CREATE FLOW test_wildcard_basic SiNk TO out_basic EVAL INTERVAL '1m' AS
 SELECT
     COUNT(*) as wildcard
 FROM
@@ -85,7 +85,7 @@ SHOW CREATE TABLE out_basic;
 
 DROP FLOW test_wildcard_basic;
 
-CREATE FLOW test_wildcard_basic sink TO out_basic AS
+CREATE FLOW test_wildcard_basic sink TO out_basic EVAL INTERVAL '1m' AS
 SELECT
     COUNT(*) as wildcard
 FROM
@@ -122,7 +122,7 @@ CREATE TABLE distinct_basic (
     TIME INDEX(ts)
 );
 
-CREATE FLOW test_distinct_basic SINK TO out_distinct_basic AS
+CREATE FLOW test_distinct_basic SINK TO out_distinct_basic EVAL INTERVAL '1m' AS
 SELECT
     DISTINCT number as dis
 FROM
@@ -284,7 +284,7 @@ CREATE TABLE ngx_access_log (
 );
 
 -- create flow task to calculate the distinct country
-CREATE FLOW calc_ngx_country SINK TO ngx_country AS
+CREATE FLOW calc_ngx_country SINK TO ngx_country EVAL INTERVAL '1m' AS
 SELECT
     DISTINCT country,
 FROM
@@ -346,7 +346,7 @@ CREATE TABLE ngx_access_log (
     access_time TIMESTAMP TIME INDEX
 );
 
-CREATE FLOW calc_ngx_country SINK TO ngx_country AS
+CREATE FLOW calc_ngx_country SINK TO ngx_country EVAL INTERVAL '1m' AS
 SELECT
     DISTINCT country,
     -- this distinct is not necessary, but it's a good test to see if it works
@@ -427,7 +427,7 @@ CREATE TABLE temp_alerts (
     update_at TIMESTAMP
 );
 
-CREATE FLOW temp_monitoring SINK TO temp_alerts AS
+CREATE FLOW temp_monitoring SINK TO temp_alerts EVAL INTERVAL '1m' AS
 SELECT
     sensor_id,
     loc,
@@ -586,7 +586,7 @@ CREATE TABLE requests_without_ip (
     PRIMARY KEY(service_name)
 );
 
-CREATE FLOW requests_long_term SINK TO requests_without_ip AS
+CREATE FLOW requests_long_term SINK TO requests_without_ip EVAL INTERVAL '1m' AS
 SELECT
     service_name,
     val,
@@ -790,7 +790,7 @@ CREATE TABLE numbers_input_basic (
     TIME INDEX(ts)
 );
 
-CREATE FLOW test_numbers_basic SINK TO out_num_cnt_basic AS
+CREATE FLOW test_numbers_basic SINK TO out_num_cnt_basic EVAL INTERVAL '1m' AS
 SELECT
     sum(case when number > 10 then 1 else 0 end)/count(number) as avg_after_filter_num
 FROM
@@ -908,7 +908,7 @@ SELECT device_model,
   record_time_window FROM live_connection_statistics_detail;
 
 -- Create a flow with same source and sink table
-CREATE FLOW same_source_and_sink_table SINK TO live_connection_log AS
+CREATE FLOW same_source_and_sink_table SINK TO live_connection_log EVAL INTERVAL '1m' AS
 SELECT
     *
 FROM

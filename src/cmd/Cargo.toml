@@ -17,6 +17,9 @@ default = [
     "meta-srv/mysql_kvbackend",
 ]
 enterprise = ["common-meta/enterprise", "frontend/enterprise", "meta-srv/enterprise"]
+# Developer-only tools (benchmarks, diagnostics) gating the `datanode parquetbench` subcommand.
+# Kept out of `default` so normal/release builds don't compile them.
+dev-tools = []
 tokio-console = ["common-telemetry/tokio-console"]
 vector_index = ["mito2/vector_index", "query/vector_index"]
 
@@ -64,6 +67,7 @@ etcd-client.workspace = true
 flow.workspace = true
 frontend = { workspace = true, default-features = false }
 futures.workspace = true
+hex.workspace = true
 human-panic = "2.0"
 humantime.workspace = true
 lazy_static.workspace = true
@@ -86,6 +90,7 @@ serde.workspace = true
 serde_json.workspace = true
 servers.workspace = true
 session.workspace = true
+smallvec.workspace = true
 snafu.workspace = true
 sqlparser.workspace = true
 standalone.workspace = true

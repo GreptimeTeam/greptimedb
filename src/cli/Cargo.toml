@@ -47,6 +47,7 @@ etcd-client.workspace = true
 fs2.workspace = true
 futures.workspace = true
 humantime.workspace = true
+indicatif.workspace = true
 meta-client.workspace = true
 meta-srv.workspace = true
 object-store.workspace = true

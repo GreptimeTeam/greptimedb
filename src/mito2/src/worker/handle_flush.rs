@@ -76,7 +76,6 @@ impl<S: LogStore> RegionWorkerLoop<S> {
     fn flush_regions_on_engine_full(&mut self) -> Result<()> {
         let regions = self.regions.list_regions();
         let now = self.time_provider.current_time_millis();
-        let min_last_flush_time = now - self.config.auto_flush_interval.as_millis() as i64;
         let mut pending_regions = vec![];
 
         for region in &regions {
@@ -88,6 +87,16 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             let version = region.version();
             let region_memtable_size =
                 version.memtables.mutable_usage() + version.memtables.immutables_usage();
+
+            let auto_flush_interval = version
+                .options
+                .auto_flush_interval_or(self.config.auto_flush_interval);
+            let min_last_flush_time = now.saturating_sub(
+                auto_flush_interval
+                    .as_millis()
+                    .try_into()
+                    .unwrap_or(i64::MAX),
+            );
 
             if region.last_flush_millis() < min_last_flush_time {
                 // If flush time of this region is earlier than `min_last_flush_time`, we can flush this region.
@@ -207,7 +216,6 @@ impl<S: LogStore> RegionWorkerLoop<S> {
     pub(crate) fn flush_periodically(&mut self) -> Result<()> {
         let regions = self.regions.list_regions();
         let now = self.time_provider.current_time_millis();
-        let min_last_flush_time = now - self.config.auto_flush_interval.as_millis() as i64;
 
         for region in &regions {
             if self.flush_scheduler.is_flush_requested(region.region_id) || !region.is_writable() {
@@ -215,6 +223,17 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 continue;
             }
             self.update_topic_latest_entry_id(region);
+
+            let auto_flush_interval = region
+                .version()
+                .options
+                .auto_flush_interval_or(self.config.auto_flush_interval);
+            let min_last_flush_time = now.saturating_sub(
+                auto_flush_interval
+                    .as_millis()
+                    .try_into()
+                    .unwrap_or(i64::MAX),
+            );
 
             if region.last_flush_millis() < min_last_flush_time {
                 // If flush time of this region is earlier than `min_last_flush_time`, we can flush this region.
@@ -273,6 +292,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         }
 
         region.update_flush_millis();
+        // Update topic latest entry id as soon as possible after flush to make sure the prunable entry id is updated timely,
+        // which is important for remote WAL pruning.
+        self.update_topic_latest_entry_id(&region);
 
         // Delete wal.
         info!(

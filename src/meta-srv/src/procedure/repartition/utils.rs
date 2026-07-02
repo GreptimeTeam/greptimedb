@@ -18,6 +18,7 @@ use common_error::ext::BoxedError;
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::key::datanode_table::{DatanodeTableKey, DatanodeTableValue};
 use common_meta::rpc::router::RegionRoute;
+use common_meta::wal_provider::RegionWalOptions;
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::storage::{RegionId, RegionNumber, TableId};
 
@@ -75,11 +76,11 @@ pub async fn get_datanode_table_value(
 /// - New WAL options try to overwrite existing ones for the same region
 /// - Any region in `new_region_routes` is missing a WAL option
 pub fn merge_and_validate_region_wal_options(
-    region_wal_options: &HashMap<RegionNumber, String>,
-    mut new_region_wal_options: HashMap<RegionNumber, String>,
+    region_wal_options: &RegionWalOptions,
+    mut new_region_wal_options: RegionWalOptions,
     new_region_routes: &[RegionRoute],
     table_id: TableId,
-) -> Result<HashMap<RegionNumber, String>> {
+) -> Result<RegionWalOptions> {
     // Doesn't allow overwriting existing WAL options.
     for (region_number, _) in new_region_wal_options.iter() {
         if region_wal_options.contains_key(region_number) {
@@ -196,12 +197,9 @@ mod tests {
     use crate::procedure::repartition::plan::{SourceRegionDescriptor, TargetRegionDescriptor};
     use crate::procedure::repartition::test_util::range_expr;
 
-    /// Helper function to create a Kafka WAL option string from a topic name.
-    fn kafka_wal_option(topic: &str) -> String {
-        serde_json::to_string(&WalOptions::Kafka(KafkaWalOptions {
-            topic: topic.to_string(),
-        }))
-        .unwrap()
+    /// Helper function to create a Kafka WAL option from a topic name.
+    fn kafka_wal_option(topic: &str) -> WalOptions {
+        WalOptions::Kafka(KafkaWalOptions::new(topic.to_string()))
     }
 
     fn new_region_route(region_id: u64, datanode_id: u64) -> RegionRoute {
@@ -260,13 +258,13 @@ mod tests {
     #[test]
     fn test_merge_and_validate_region_wal_options_success() {
         let table_id = 1;
-        let existing_wal_options: HashMap<RegionNumber, String> = vec![
+        let existing_wal_options: RegionWalOptions = vec![
             (1, kafka_wal_option("topic_1")),
             (2, kafka_wal_option("topic_2")),
         ]
         .into_iter()
         .collect();
-        let new_wal_options: HashMap<RegionNumber, String> =
+        let new_wal_options: RegionWalOptions =
             vec![(3, kafka_wal_option("topic_3"))].into_iter().collect();
         let new_region_routes = vec![
             new_region_route(1, 1),
@@ -296,14 +294,12 @@ mod tests {
     #[test]
     fn test_merge_and_validate_region_wal_options_new_overrides_existing() {
         let table_id = 1;
-        let existing_wal_options: HashMap<RegionNumber, String> =
-            vec![(1, kafka_wal_option("topic_1_old"))]
-                .into_iter()
-                .collect();
-        let new_wal_options: HashMap<RegionNumber, String> =
-            vec![(1, kafka_wal_option("topic_1_new"))]
-                .into_iter()
-                .collect();
+        let existing_wal_options: RegionWalOptions = vec![(1, kafka_wal_option("topic_1_old"))]
+            .into_iter()
+            .collect();
+        let new_wal_options: RegionWalOptions = vec![(1, kafka_wal_option("topic_1_new"))]
+            .into_iter()
+            .collect();
         let new_region_routes = vec![new_region_route(1, 1)];
         merge_and_validate_region_wal_options(
             &existing_wal_options,
@@ -317,7 +313,7 @@ mod tests {
     #[test]
     fn test_merge_and_validate_region_wal_options_filters_removed_regions() {
         let table_id = 1;
-        let existing_wal_options: HashMap<RegionNumber, String> = vec![
+        let existing_wal_options: RegionWalOptions = vec![
             (1, kafka_wal_option("topic_1")),
             (2, kafka_wal_option("topic_2")),
             (3, kafka_wal_option("topic_3")),
@@ -345,7 +341,7 @@ mod tests {
     #[test]
     fn test_merge_and_validate_region_wal_options_missing_option() {
         let table_id = 1;
-        let existing_wal_options: HashMap<RegionNumber, String> =
+        let existing_wal_options: RegionWalOptions =
             vec![(1, kafka_wal_option("topic_1"))].into_iter().collect();
         let new_wal_options = HashMap::new();
         // Region 2 is in routes but has no WAL option

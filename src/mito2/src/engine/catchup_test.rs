@@ -81,10 +81,7 @@ async fn test_catchup_with_last_entry_id(factory: Option<LogStoreFactory>) {
     if let Some(topic) = &topic {
         options.insert(
             WAL_OPTIONS_KEY.to_string(),
-            serde_json::to_string(&WalOptions::Kafka(KafkaWalOptions {
-                topic: topic.clone(),
-            }))
-            .unwrap(),
+            serde_json::to_string(&WalOptions::Kafka(KafkaWalOptions::new(topic.clone()))).unwrap(),
         );
     };
     follower_engine
@@ -203,10 +200,7 @@ async fn test_catchup_with_incorrect_last_entry_id(factory: Option<LogStoreFacto
     if let Some(topic) = &topic {
         options.insert(
             WAL_OPTIONS_KEY.to_string(),
-            serde_json::to_string(&WalOptions::Kafka(KafkaWalOptions {
-                topic: topic.clone(),
-            }))
-            .unwrap(),
+            serde_json::to_string(&WalOptions::Kafka(KafkaWalOptions::new(topic.clone()))).unwrap(),
         );
     };
     follower_engine
@@ -307,10 +301,7 @@ async fn test_catchup_without_last_entry_id(factory: Option<LogStoreFactory>) {
     if let Some(topic) = &topic {
         options.insert(
             WAL_OPTIONS_KEY.to_string(),
-            serde_json::to_string(&WalOptions::Kafka(KafkaWalOptions {
-                topic: topic.clone(),
-            }))
-            .unwrap(),
+            serde_json::to_string(&WalOptions::Kafka(KafkaWalOptions::new(topic.clone()))).unwrap(),
         );
     };
     follower_engine
@@ -410,10 +401,7 @@ async fn test_catchup_with_manifest_update(factory: Option<LogStoreFactory>) {
     if let Some(topic) = &topic {
         options.insert(
             WAL_OPTIONS_KEY.to_string(),
-            serde_json::to_string(&WalOptions::Kafka(KafkaWalOptions {
-                topic: topic.clone(),
-            }))
-            .unwrap(),
+            serde_json::to_string(&WalOptions::Kafka(KafkaWalOptions::new(topic.clone()))).unwrap(),
         );
     };
     follower_engine

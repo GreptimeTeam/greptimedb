@@ -19,4 +19,20 @@ use serde::{Deserialize, Serialize};
 pub struct KafkaWalOptions {
     /// Kafka wal topic.
     pub topic: String,
+    /// Initial pruned entry id of the topic when this option is allocated.
+    ///
+    /// This is a create-time hint for initializing a new region's flushed entry id,
+    /// not the authoritative latest pruned entry id of the topic.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initial_pruned_entry_id: Option<u64>,
+}
+
+impl KafkaWalOptions {
+    /// Creates kafka WAL options with the topic only.
+    pub fn new(topic: String) -> Self {
+        Self {
+            topic,
+            initial_pruned_entry_id: None,
+        }
+    }
 }

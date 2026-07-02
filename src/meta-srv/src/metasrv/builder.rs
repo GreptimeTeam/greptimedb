@@ -176,6 +176,30 @@ impl MetasrvBuilder {
         self
     }
 
+    pub fn options_ref(&self) -> Option<&MetasrvOptions> {
+        self.options.as_ref()
+    }
+
+    pub fn kv_backend_ref(&self) -> Option<&KvBackendRef> {
+        self.kv_backend.as_ref()
+    }
+
+    pub fn in_memory_ref(&self) -> Option<&ResettableKvBackendRef> {
+        self.in_memory.as_ref()
+    }
+
+    pub fn election_ref(&self) -> Option<&ElectionRef> {
+        self.election.as_ref()
+    }
+
+    pub fn meta_peer_client_ref(&self) -> Option<&MetaPeerClientRef> {
+        self.meta_peer_client.as_ref()
+    }
+
+    pub fn node_manager_ref(&self) -> Option<&NodeManagerRef> {
+        self.node_manager.as_ref()
+    }
+
     pub async fn build(self) -> Result<Metasrv> {
         let MetasrvBuilder {
             election,
@@ -443,6 +467,8 @@ impl MetasrvBuilder {
                 options.grpc.server_addr.clone(),
                 remote_wal_options.flush_trigger_size,
                 remote_wal_options.checkpoint_trigger_size,
+                remote_wal_options.region_flush_trigger_interval,
+                remote_wal_options.periodic_checkpoint_persist_interval,
             );
             region_flush_trigger.try_start()?;
 
@@ -466,6 +492,7 @@ impl MetasrvBuilder {
             };
             let wal_prune_manager = WalPruneManager::new(
                 remote_wal_options.auto_prune_parallelism,
+                remote_wal_options.auto_prune_logical_delete,
                 rx,
                 procedure_manager.clone(),
                 wal_prune_context,

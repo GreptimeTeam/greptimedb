@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use common_telemetry::{debug, info};
@@ -27,6 +26,7 @@ use crate::error::{Result, UnsupportedSnafu};
 use crate::key::table_route::PhysicalTableRouteValue;
 use crate::peer::{NoopPeerAllocator, PeerAllocContext, PeerAllocatorRef};
 use crate::rpc::ddl::CreateTableTask;
+use crate::wal_provider::RegionWalOptions;
 
 pub type TableMetadataAllocatorRef = Arc<TableMetadataAllocator>;
 
@@ -98,7 +98,7 @@ impl TableMetadataAllocator {
         &self,
         region_numbers: &[RegionNumber],
         skip_wal: bool,
-    ) -> Result<HashMap<RegionNumber, String>> {
+    ) -> Result<RegionWalOptions> {
         self.wal_options_allocator
             .allocate(region_numbers, skip_wal)
             .await

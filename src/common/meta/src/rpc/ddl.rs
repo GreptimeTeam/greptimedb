@@ -41,6 +41,7 @@ use api::v1::{
 };
 use base64::Engine as _;
 use base64::engine::general_purpose;
+use common_catalog::{format_full_flow_name, format_full_table_name};
 use common_error::ext::BoxedError;
 use common_time::{DatabaseTimeToLive, Timestamp};
 use prost::Message;
@@ -56,7 +57,11 @@ use crate::error::{
     self, ConvertTimeRangesSnafu, ExternalSnafu, InvalidSetDatabaseOptionSnafu,
     InvalidUnsetDatabaseOptionSnafu, Result,
 };
+use crate::flow_name::FlowName;
+use crate::instruction::CacheIdent;
 use crate::key::FlowId;
+use crate::key::flow::flow_name::FlowNameManager;
+use crate::key::table_name::{TableNameKey, TableNameManager};
 
 /// Reserved query-context extension key for the frontend peer address that submitted a DDL request.
 pub const ORIGIN_FRONTEND_ADDR_EXTENSION_KEY: &str = "__greptime_origin_frontend.addr";
@@ -1184,6 +1189,11 @@ pub struct CreateFlowTask {
     pub comment: String,
     pub sql: String,
     pub flow_options: HashMap<String, String>,
+    /// Typed schedule configuration resolved during `on_prepare`.
+    /// Not populated from proto; set by the procedure layer after
+    /// defaults are resolved.
+    #[serde(default)]
+    pub eval_schedule: Option<crate::key::flow::flow_info::FlowScheduleConfig>,
 }
 
 impl TryFrom<PbCreateFlowTask> for CreateFlowTask {
@@ -1222,6 +1232,7 @@ impl TryFrom<PbCreateFlowTask> for CreateFlowTask {
             comment,
             sql,
             flow_options,
+            eval_schedule: None,
         })
     }
 }
@@ -1240,6 +1251,7 @@ impl From<CreateFlowTask> for PbCreateFlowTask {
             comment,
             sql,
             flow_options,
+            ..
         }: CreateFlowTask,
     ) -> Self {
         PbCreateFlowTask {
@@ -1344,12 +1356,98 @@ pub enum CommentObjectType {
 }
 
 impl CommentOnTask {
-    pub fn table_ref(&self) -> TableReference<'_> {
-        TableReference {
-            catalog: &self.catalog_name,
-            schema: &self.schema_name,
-            table: &self.object_name,
+    pub fn table_id(&self) -> Option<TableId> {
+        match self.object_id.as_ref() {
+            Some(CommentObjectId::Table(table_id)) => Some(*table_id),
+            _ => None,
         }
+    }
+
+    pub fn flow_id(&self) -> Option<FlowId> {
+        match self.object_id.as_ref() {
+            Some(CommentObjectId::Flow(flow_id)) => Some(*flow_id),
+            _ => None,
+        }
+    }
+
+    fn set_table_id(&mut self, table_id: TableId) {
+        self.object_id = Some(CommentObjectId::Table(table_id));
+    }
+
+    fn set_flow_id(&mut self, flow_id: FlowId) {
+        self.object_id = Some(CommentObjectId::Flow(flow_id));
+    }
+
+    /// Returns the cache identifiers for the object being commented on.
+    pub fn cache_idents(&self) -> Vec<CacheIdent> {
+        match self.object_type {
+            CommentObjectType::Table | CommentObjectType::Column => {
+                let mut cache_idents = Vec::with_capacity(2);
+                if let Some(CommentObjectId::Table(table_id)) = self.object_id.as_ref() {
+                    cache_idents.push(CacheIdent::TableId(*table_id));
+                }
+                cache_idents.push(CacheIdent::TableName(TableName {
+                    catalog_name: self.catalog_name.clone(),
+                    schema_name: self.schema_name.clone(),
+                    table_name: self.object_name.clone(),
+                }));
+                cache_idents
+            }
+            CommentObjectType::Flow => {
+                let mut cache_idents = Vec::with_capacity(2);
+                if let Some(CommentObjectId::Flow(flow_id)) = self.object_id.as_ref() {
+                    cache_idents.push(CacheIdent::FlowId(*flow_id));
+                }
+                cache_idents.push(CacheIdent::FlowName(FlowName {
+                    catalog_name: self.catalog_name.clone(),
+                    flow_name: self.object_name.clone(),
+                }));
+                cache_idents
+            }
+        }
+    }
+
+    /// Enriches the `object_id` field of the `CommentOnTask`
+    /// by looking up the corresponding table or flow ID using the provided managers.
+    pub async fn enrich_object_id(
+        &mut self,
+        table_name_manager: &TableNameManager,
+        flow_name_manager: &FlowNameManager,
+    ) -> Result<()> {
+        match self.object_type {
+            CommentObjectType::Table | CommentObjectType::Column => {
+                let table_id = table_name_manager
+                    .get(TableNameKey::new(
+                        &self.catalog_name,
+                        &self.schema_name,
+                        &self.object_name,
+                    ))
+                    .await?
+                    .with_context(|| error::TableNotFoundSnafu {
+                        table_name: format_full_table_name(
+                            &self.catalog_name,
+                            &self.schema_name,
+                            &self.object_name,
+                        ),
+                    })?
+                    .table_id();
+
+                self.set_table_id(table_id);
+            }
+            CommentObjectType::Flow => {
+                let flow_id = flow_name_manager
+                    .get(&self.catalog_name, &self.object_name)
+                    .await?
+                    .with_context(|| error::FlowNotFoundSnafu {
+                        flow_name: format_full_flow_name(&self.catalog_name, &self.object_name),
+                    })?
+                    .flow_id();
+
+                self.set_flow_id(flow_id);
+            }
+        }
+
+        Ok(())
     }
 }
 

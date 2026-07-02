@@ -133,6 +133,12 @@ impl UnorderedScan {
                         yield record_batch?;
                     }
                 } else if stream_ctx.is_file_range_index(*index) {
+                    // Common manifest-level fast-skip shared by UnorderedScan and SeqScan.
+                    if partition_pruner
+                        .try_skip_manifest_pruned_file_range(*index, &part_metrics)
+                    {
+                        continue;
+                    }
                     let stream = scan_flat_file_ranges(
                         stream_ctx.clone(),
                         part_metrics.clone(),
@@ -353,6 +359,10 @@ impl RegionScanner for UnorderedScan {
 
     fn set_logical_region(&mut self, logical_region: bool) {
         self.properties.set_logical_region(logical_region);
+    }
+
+    fn set_query_load_region_id(&mut self, region_id: store_api::storage::RegionId) {
+        self.properties.set_query_load_region_id(region_id);
     }
 
     fn snapshot_sequence(&self) -> Option<u64> {

@@ -693,7 +693,7 @@ impl RegionManifestManager {
         version
     }
 
-    fn last_version(&self) -> ManifestVersion {
+    pub fn last_version(&self) -> ManifestVersion {
         self.last_version.load(Ordering::Relaxed)
     }
 

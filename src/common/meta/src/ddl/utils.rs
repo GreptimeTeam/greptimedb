@@ -32,20 +32,19 @@ use common_error::ext::BoxedError;
 use common_procedure::error::Error as ProcedureError;
 use common_telemetry::tracing_context::TracingContext;
 use common_telemetry::{error, info, warn};
-use common_wal::options::WalOptions;
 use futures::future::join_all;
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::metadata::ColumnMetadata;
 use store_api::metric_engine_consts::{LOGICAL_TABLE_METADATA_KEY, MANIFEST_INFO_EXTENSION_KEY};
 use store_api::region_engine::RegionManifestInfo;
-use store_api::storage::{RegionId, RegionNumber};
+use store_api::storage::RegionId;
 use table::metadata::TableId;
 use table::table_reference::TableReference;
 
 use crate::ddl::{DdlContext, DetectingRegion};
 use crate::error::{
-    self, DecodeJsonSnafu, Error, MetadataCorruptionSnafu, OperateDatanodeSnafu,
-    ParseWalOptionsSnafu, Result, TableNotFoundSnafu, UnsupportedSnafu,
+    self, DecodeJsonSnafu, Error, MetadataCorruptionSnafu, OperateDatanodeSnafu, Result,
+    TableNotFoundSnafu, UnsupportedSnafu,
 };
 use crate::key::datanode_table::DatanodeTableValue;
 use crate::key::table_name::TableNameKey;
@@ -54,6 +53,7 @@ use crate::key::{TableMetadataManager, TableMetadataManagerRef};
 use crate::peer::Peer;
 use crate::rpc::ddl::CreateTableTask;
 use crate::rpc::router::{RegionRoute, find_follower_regions, find_followers};
+use crate::wal_provider::RegionWalOptions;
 
 /// Adds [Peer] context if the error is unretryable.
 pub fn add_peer_context_if_needed(datanode: Peer) -> impl FnOnce(Error) -> Error {
@@ -182,25 +182,12 @@ pub fn convert_region_routes_to_detecting_regions(
         .collect::<Vec<_>>()
 }
 
-/// Parses [WalOptions] from serialized strings in hashmap.
-pub fn parse_region_wal_options(
-    serialized_options: &HashMap<RegionNumber, String>,
-) -> Result<HashMap<RegionNumber, WalOptions>> {
-    let mut region_wal_options = HashMap::with_capacity(serialized_options.len());
-    for (region_number, wal_options) in serialized_options {
-        let wal_option = serde_json::from_str::<WalOptions>(wal_options)
-            .context(ParseWalOptionsSnafu { wal_options })?;
-        region_wal_options.insert(*region_number, wal_option);
-    }
-    Ok(region_wal_options)
-}
-
 /// Gets the wal options for a table.
 pub async fn get_region_wal_options(
     table_metadata_manager: &TableMetadataManager,
     table_route_value: &TableRouteValue,
     physical_table_id: TableId,
-) -> Result<HashMap<RegionNumber, WalOptions>> {
+) -> Result<RegionWalOptions> {
     let region_wal_options =
         if let TableRouteValue::Physical(table_route_value) = &table_route_value {
             let datanode_table_values = table_metadata_manager
@@ -217,12 +204,10 @@ pub async fn get_region_wal_options(
 /// Extracts region wal options from [DatanodeTableValue]s.
 pub fn extract_region_wal_options(
     datanode_table_values: &Vec<DatanodeTableValue>,
-) -> Result<HashMap<RegionNumber, WalOptions>> {
-    let mut region_wal_options = HashMap::new();
+) -> Result<RegionWalOptions> {
+    let mut region_wal_options = RegionWalOptions::new();
     for value in datanode_table_values {
-        let serialized_options = &value.region_info.region_wal_options;
-        let parsed_options = parse_region_wal_options(serialized_options)?;
-        region_wal_options.extend(parsed_options);
+        region_wal_options.extend(value.region_info.region_wal_options.clone());
     }
     Ok(region_wal_options)
 }

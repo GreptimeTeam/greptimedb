@@ -81,6 +81,29 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Kafka WAL helper request failed, operation: {}", operation))]
+    KafkaWalHelperRequest {
+        operation: String,
+        #[snafu(source)]
+        error: reqwest::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Kafka WAL helper returned non-success status, operation: {}, status: {}, body: {}",
+        operation,
+        status,
+        body
+    ))]
+    KafkaWalHelperStatus {
+        operation: String,
+        status: reqwest::StatusCode,
+        body: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to assert: {}", reason))]
     Assert {
         reason: String,

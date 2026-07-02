@@ -827,6 +827,7 @@ mod tests {
     use datatypes::arrow::datatypes::{DataType as ArrowDataType, Field, Schema, TimeUnit};
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::ColumnSchema;
+    use datatypes::types::json_type::{JsonNativeType, JsonObjectType};
     use datatypes::value::ValueRef;
     use datatypes::vectors::{Int64Vector, TimestampMillisecondVector, UInt8Vector, UInt64Vector};
     use mito_codec::row_converter::{
@@ -838,10 +839,15 @@ mod tests {
     use store_api::storage::consts::ReservedColumnId;
 
     use super::*;
+    use crate::error::InvalidMetadataSnafu;
+    use crate::read::read_columns::ReadColumn;
     use crate::sst::parquet::flat_format::{
-        FlatReadFormat, FlatWriteFormat, sequence_column_index,
+        FlatReadFormat, FlatWriteFormat, sequence_column_index, sst_column_id_indices,
     };
-    use crate::sst::{FlatSchemaOptions, to_flat_sst_arrow_schema, with_field_id};
+    use crate::sst::{
+        FlatSchemaOptions, OP_TYPE_PARQUET_FIELD_ID, PRIMARY_KEY_PARQUET_FIELD_ID,
+        SEQUENCE_PARQUET_FIELD_ID, to_flat_sst_arrow_schema, with_field_id,
+    };
 
     const TEST_SEQUENCE: u64 = 1;
     const TEST_OP_TYPE: u8 = OpType::Put as u8;
@@ -907,10 +913,20 @@ mod tests {
                     Box::new(ArrowDataType::Binary),
                 ),
                 false,
-                None,
+                Some(PRIMARY_KEY_PARQUET_FIELD_ID),
             ),
-            make_field("__sequence", ArrowDataType::UInt64, false, None),
-            make_field("__op_type", ArrowDataType::UInt8, false, None),
+            make_field(
+                "__sequence",
+                ArrowDataType::UInt64,
+                false,
+                Some(SEQUENCE_PARQUET_FIELD_ID),
+            ),
+            make_field(
+                "__op_type",
+                ArrowDataType::UInt8,
+                false,
+                Some(OP_TYPE_PARQUET_FIELD_ID),
+            ),
         ];
         Arc::new(Schema::new(fields))
     }
@@ -997,6 +1013,59 @@ mod tests {
             &[1, 2, 3, 4, 5],
             read_format.parquet_read_columns().root_indices()
         );
+    }
+
+    #[test]
+    fn test_format_projection_preserves_nested_paths() -> Result<()> {
+        let mut builder = RegionMetadataBuilder::new(RegionId::new(1, 1));
+        builder
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new("tag0", ConcreteDataType::string_datatype(), true),
+                semantic_type: SemanticType::Tag,
+                column_id: 1,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "j",
+                    ConcreteDataType::json2(JsonNativeType::Object(JsonObjectType::from([
+                        ("a".to_string(), JsonNativeType::i64()),
+                        ("b".to_string(), JsonNativeType::String),
+                    ]))),
+                    true,
+                ),
+                semantic_type: SemanticType::Field,
+                column_id: 4,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "ts",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Timestamp,
+                column_id: 5,
+            })
+            .primary_key(vec![1]);
+        let metadata = Arc::new(builder.build().context(InvalidMetadataSnafu)?);
+        let column_id_to_parquet_index = sst_column_id_indices(&metadata);
+        let projection = FormatProjection::compute_format_projection(
+            &column_id_to_parquet_index,
+            metadata.column_metadatas.len() + FIXED_POS_COLUMN_NUM,
+            ReadColumns {
+                cols: vec![ReadColumn::new(
+                    4,
+                    vec![vec!["j".to_string(), "a".to_string()]],
+                )],
+            },
+        );
+
+        let columns = projection.parquet_read_cols.columns();
+        assert_eq!(1, columns[0].root_index());
+        assert_eq!(
+            &[vec!["j".to_string(), "a".to_string()]],
+            columns[0].nested_paths()
+        );
+        Ok(())
     }
 
     #[test]
@@ -1167,9 +1236,9 @@ mod tests {
             Some(4),
             Some(2),
             Some(5),
-            None,
-            None,
-            None,
+            Some(PRIMARY_KEY_PARQUET_FIELD_ID),
+            Some(SEQUENCE_PARQUET_FIELD_ID),
+            Some(OP_TYPE_PARQUET_FIELD_ID),
         ];
         let fields: Vec<_> = build_test_flat_sst_schema()
             .fields()

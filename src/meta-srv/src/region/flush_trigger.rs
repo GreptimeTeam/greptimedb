@@ -29,6 +29,7 @@ use common_telemetry::{debug, error, info, warn};
 use common_time::util::current_time_millis;
 use common_wal::config::kafka::common::{
     DEFAULT_CHECKPOINT_TRIGGER_SIZE, DEFAULT_FLUSH_TRIGGER_SIZE,
+    DEFAULT_PERIODIC_CHECKPOINT_PERSIST_INTERVAL, DEFAULT_REGION_FLUSH_TRIGGER_INTERVAL,
 };
 use snafu::{OptionExt, ResultExt};
 use store_api::region_request::RegionFlushReason;
@@ -39,14 +40,8 @@ use crate::error::{self, Result};
 use crate::service::mailbox::{Channel, MailboxRef};
 use crate::{define_ticker, metrics};
 
-/// The interval of the region flush ticker.
-const TICKER_INTERVAL: Duration = Duration::from_secs(60);
-
 /// The duration of the recent period.
 const RECENT_DURATION: Duration = Duration::from_secs(300);
-
-/// The interval to periodically persist region checkpoints regardless of replay size.
-const PERIODIC_CHECKPOINT_PERSIST_INTERVAL: Duration = Duration::from_secs(60 * 60);
 
 /// [`Event`] represents various types of events that can be processed by the region flush ticker.
 ///
@@ -87,6 +82,10 @@ pub struct RegionFlushTrigger {
     flush_trigger_size: ReadableSize,
     /// The checkpoint trigger size.
     checkpoint_trigger_size: ReadableSize,
+    /// The interval of the region flush trigger.
+    region_flush_trigger_interval: Duration,
+    /// The interval to periodically persist region checkpoints regardless of replay size.
+    periodic_checkpoint_persist_interval: Duration,
     /// The last timestamp in milliseconds when a region checkpoint was persisted.
     last_checkpoint_persist_millis_by_region: HashMap<RegionId, i64>,
     /// The receiver of events.
@@ -95,6 +94,7 @@ pub struct RegionFlushTrigger {
 
 impl RegionFlushTrigger {
     /// Creates a new [`RegionFlushTrigger`].
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         table_metadata_manager: TableMetadataManagerRef,
         leader_region_registry: LeaderRegionRegistryRef,
@@ -103,6 +103,8 @@ impl RegionFlushTrigger {
         server_addr: String,
         mut flush_trigger_size: ReadableSize,
         mut checkpoint_trigger_size: ReadableSize,
+        mut region_flush_trigger_interval: Duration,
+        mut periodic_checkpoint_persist_interval: Duration,
     ) -> (Self, RegionFlushTicker) {
         if flush_trigger_size.as_bytes() == 0 {
             flush_trigger_size = DEFAULT_FLUSH_TRIGGER_SIZE;
@@ -118,8 +120,22 @@ impl RegionFlushTrigger {
                 checkpoint_trigger_size
             );
         }
+        if region_flush_trigger_interval.is_zero() {
+            region_flush_trigger_interval = DEFAULT_REGION_FLUSH_TRIGGER_INTERVAL;
+            warn!(
+                "region_flush_trigger_interval is not set, using default value: {:?}",
+                region_flush_trigger_interval
+            );
+        }
+        if periodic_checkpoint_persist_interval.is_zero() {
+            periodic_checkpoint_persist_interval = DEFAULT_PERIODIC_CHECKPOINT_PERSIST_INTERVAL;
+            warn!(
+                "periodic_checkpoint_persist_interval is not set, using default value: {:?}",
+                periodic_checkpoint_persist_interval
+            );
+        }
         let (tx, rx) = Self::channel();
-        let region_flush_ticker = RegionFlushTicker::new(TICKER_INTERVAL, tx);
+        let region_flush_ticker = RegionFlushTicker::new(region_flush_trigger_interval, tx);
         let region_flush_trigger = Self {
             table_metadata_manager,
             leader_region_registry,
@@ -128,6 +144,8 @@ impl RegionFlushTrigger {
             server_addr,
             flush_trigger_size,
             checkpoint_trigger_size,
+            region_flush_trigger_interval,
+            periodic_checkpoint_persist_interval,
             last_checkpoint_persist_millis_by_region: HashMap::new(),
             receiver: rx,
         };
@@ -230,12 +248,21 @@ impl RegionFlushTrigger {
             topic_regions.keys().copied(),
             &self.last_checkpoint_persist_millis_by_region,
             now_millis,
-            PERIODIC_CHECKPOINT_PERSIST_INTERVAL,
+            self.periodic_checkpoint_persist_interval,
         );
         let regions_to_persist = merge_region_ids(size_based_regions, periodic_regions);
         let region_manifests = self
             .leader_region_registry
             .batch_get(topic_regions.keys().cloned());
+
+        let pruned_entry_id = self
+            .table_metadata_manager
+            .topic_name_manager()
+            .get(topic)
+            .await
+            .context(error::TableMetadataManagerSnafu)?
+            .map(|v| v.into_inner().pruned_entry_id);
+        debug!("Topic: {}, pruned entry id: {:?}", topic, pruned_entry_id);
 
         match self
             .persist_region_checkpoints(
@@ -256,10 +283,8 @@ impl RegionFlushTrigger {
             Err(err) => error!(err; "Failed to persist region checkpoints for topic: {}", topic),
         }
 
-        if let Some((latest_entry_id, avg_record_size)) = topic_stat {
-            self.flush_regions_in_topic(topic, latest_entry_id, avg_record_size, region_manifests)
-                .await?;
-        }
+        self.flush_regions_in_topic(topic, topic_stat, pruned_entry_id, region_manifests)
+            .await?;
 
         Ok(())
     }
@@ -277,7 +302,7 @@ impl RegionFlushTrigger {
 
         let Some(stat) = self
             .topic_stats_registry
-            .get_calculated_topic_stat(topic, TICKER_INTERVAL)
+            .get_calculated_topic_stat(topic, self.region_flush_trigger_interval)
         else {
             debug!("No topic stat found for topic: {}", topic);
             return None;
@@ -331,6 +356,12 @@ impl RegionFlushTrigger {
 
         let max_txn_ops = self.table_metadata_manager.kv_backend().max_txn_ops();
         let batch_size = max_txn_ops.min(regions.len());
+        debug!(
+            "persisting {} region checkpoints for topic '{}', regions: {:?}",
+            regions.len(),
+            topic,
+            regions,
+        );
         for batch in regions.chunks(batch_size) {
             let batch = batch
                 .iter()
@@ -356,31 +387,42 @@ impl RegionFlushTrigger {
     async fn flush_regions_in_topic(
         &self,
         topic: &str,
-        latest_entry_id: u64,
-        avg_record_size: usize,
+        topic_stat: Option<(u64, usize)>,
+        topic_pruned_entry_id: Option<u64>,
         region_manifests: HashMap<RegionId, LeaderRegion>,
     ) -> Result<()> {
         let regions = region_manifests
             .into_iter()
             .map(|(region_id, region)| (region_id, region.manifest.prunable_entry_id()))
             .collect::<Vec<_>>();
-        let min_entry_id = regions.iter().min_by_key(|(_, entry_id)| *entry_id);
-        if let Some((_, min_entry_id)) = min_entry_id {
-            let replay_size = (latest_entry_id.saturating_sub(*min_entry_id))
-                .saturating_mul(avg_record_size as u64);
-            metrics::METRIC_META_TOPIC_ESTIMATED_REPLAY_SIZE
-                .with_label_values(&[topic])
-                .set(replay_size as i64);
-        }
 
-        // Selects regions to flush from the set of active regions.
-        let regions_to_flush = filter_regions_by_replay_size(
+        let regions_to_flush = if let Some((latest_entry_id, avg_record_size)) = topic_stat {
+            let min_entry_id = regions.iter().min_by_key(|(_, entry_id)| *entry_id);
+            if let Some((_, min_entry_id)) = min_entry_id {
+                let replay_size = (latest_entry_id.saturating_sub(*min_entry_id))
+                    .saturating_mul(avg_record_size as u64);
+                metrics::METRIC_META_TOPIC_ESTIMATED_REPLAY_SIZE
+                    .with_label_values(&[topic])
+                    .set(replay_size as i64);
+            }
+
+            // Selects regions to flush from the set of active regions.
+            filter_regions_by_replay_size(
+                topic,
+                regions.iter().copied(),
+                avg_record_size as u64,
+                latest_entry_id,
+                self.flush_trigger_size,
+            )
+        } else {
+            Vec::new()
+        };
+        let pruned_regions_to_flush = filter_regions_below_topic_pruned_entry_id(
             topic,
             regions.into_iter(),
-            avg_record_size as u64,
-            latest_entry_id,
-            self.flush_trigger_size,
+            topic_pruned_entry_id,
         );
+        let regions_to_flush = merge_region_ids(regions_to_flush, pruned_regions_to_flush);
 
         // Sends flush instructions to datanodes.
         if !regions_to_flush.is_empty() {
@@ -488,6 +530,30 @@ fn filter_regions_by_replay_size<I: Iterator<Item = (RegionId, u64)>>(
                 );
                 regions_to_flush.push(region_id);
             }
+        }
+    }
+
+    regions_to_flush
+}
+
+/// Filters regions whose prunable entry id is behind the topic pruned entry id.
+fn filter_regions_below_topic_pruned_entry_id<I: Iterator<Item = (RegionId, u64)>>(
+    topic: &str,
+    regions: I,
+    topic_pruned_entry_id: Option<u64>,
+) -> Vec<RegionId> {
+    let Some(topic_pruned_entry_id) = topic_pruned_entry_id else {
+        return Vec::new();
+    };
+
+    let mut regions_to_flush = Vec::new();
+    for (region_id, prunable_entry_id) in regions {
+        if prunable_entry_id < topic_pruned_entry_id {
+            debug!(
+                "Region {}: prunable entry id {} is below topic pruned entry id {}, topic: '{}'",
+                region_id, prunable_entry_id, topic_pruned_entry_id, topic,
+            );
+            regions_to_flush.push(region_id);
         }
     }
 
@@ -809,6 +875,32 @@ mod tests {
         assert_eq!(result, vec![region_id(1, 1), region_id(1, 2)]);
     }
 
+    #[test]
+    fn test_filter_regions_below_topic_pruned_entry_id_none() {
+        let topic = "test_topic";
+        let regions = vec![(region_id(1, 1), 90), (region_id(1, 2), 100)];
+
+        let result = filter_regions_below_topic_pruned_entry_id(topic, regions.into_iter(), None);
+
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_filter_regions_below_topic_pruned_entry_id() {
+        let topic = "test_topic";
+        let regions = vec![
+            (region_id(1, 1), 99),  // below the topic pruned entry id
+            (region_id(1, 2), 100), // equal to the topic pruned entry id
+            (region_id(1, 3), 101), // above the topic pruned entry id
+            (region_id(1, 4), 80),  // below the topic pruned entry id
+        ];
+
+        let result =
+            filter_regions_below_topic_pruned_entry_id(topic, regions.into_iter(), Some(100));
+
+        assert_eq!(result, vec![region_id(1, 1), region_id(1, 4)]);
+    }
+
     fn metric_leader_region(replay_entry_id: u64, metadata_replay_entry_id: u64) -> LeaderRegion {
         LeaderRegion {
             datanode_id: 1,
@@ -918,6 +1010,8 @@ mod tests {
             "127.0.0.1:3002".to_string(),
             ReadableSize(1),
             ReadableSize(1),
+            DEFAULT_REGION_FLUSH_TRIGGER_INTERVAL,
+            DEFAULT_PERIODIC_CHECKPOINT_PERSIST_INTERVAL,
         );
 
         let topic = "test_topic";
@@ -990,6 +1084,8 @@ mod tests {
             "127.0.0.1:3002".to_string(),
             ReadableSize(1),
             ReadableSize(1),
+            DEFAULT_REGION_FLUSH_TRIGGER_INTERVAL,
+            DEFAULT_PERIODIC_CHECKPOINT_PERSIST_INTERVAL,
         );
 
         let topic = "test_topic".to_string();

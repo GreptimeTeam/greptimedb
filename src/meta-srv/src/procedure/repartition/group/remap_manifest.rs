@@ -31,6 +31,7 @@ use crate::handler::HeartbeatMailbox;
 use crate::procedure::repartition::group::apply_staging_manifest::ApplyStagingManifest;
 use crate::procedure::repartition::group::{Context, State};
 use crate::procedure::repartition::plan::{SourceRegionDescriptor, TargetRegionDescriptor};
+use crate::procedure::utils::instruction_error_result;
 use crate::service::mailbox::{Channel, MailboxRef};
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -226,16 +227,16 @@ impl RemapManifest {
             }
         );
 
-        if error.is_some() {
-            return error::RetryLaterSnafu {
-                reason: format!(
+        if let Some(error) = error {
+            return instruction_error_result(
+                &error,
+                format!(
                     "Failed to remap manifest on datanode {:?}, error: {:?}, elapsed: {:?}",
                     peer,
                     error,
                     now.elapsed()
                 ),
-            }
-            .fail();
+            );
         }
 
         Ok(manifest_paths)

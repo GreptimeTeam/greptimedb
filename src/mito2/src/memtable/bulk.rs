@@ -16,6 +16,7 @@
 
 pub(crate) mod chunk_reader;
 pub mod context;
+pub(crate) mod json_align;
 pub mod part;
 pub mod part_reader;
 mod row_group_reader;
@@ -46,6 +47,7 @@ use tokio::sync::Semaphore;
 use crate::error::{Result, UnsupportedOperationSnafu};
 use crate::flush::WriteBufferManagerRef;
 use crate::memtable::bulk::context::BulkIterContext;
+use crate::memtable::bulk::json_align::Json2Aligner;
 use crate::memtable::bulk::part::{
     BulkPart, BulkPartEncodeMetrics, BulkPartEncoder, MultiBulkPart, UnorderedPart,
     should_prune_bulk_part,
@@ -62,7 +64,6 @@ use crate::read::flat_merge::FlatMergeIterator;
 use crate::region::options::MergeMode;
 use crate::sst::parquet::flat_format::field_column_start;
 use crate::sst::parquet::{DEFAULT_READ_BATCH_SIZE, DEFAULT_ROW_GROUP_SIZE};
-use crate::sst::{FlatSchemaOptions, to_flat_sst_arrow_schema};
 
 /// Default merge threshold for triggering compaction.
 const DEFAULT_MERGE_THRESHOLD: usize = 16;
@@ -384,8 +385,6 @@ pub struct BulkMemtable {
     min_timestamp: AtomicI64,
     max_sequence: AtomicU64,
     num_rows: AtomicUsize,
-    /// Cached flat SST arrow schema for memtable compaction.
-    flat_arrow_schema: SchemaRef,
     /// Compactor for merging bulk parts
     compactor: Arc<Mutex<MemtableCompactor>>,
     /// Dispatcher for scheduling compaction tasks
@@ -618,12 +617,6 @@ impl Memtable for BulkMemtable {
     }
 
     fn fork(&self, id: MemtableId, metadata: &RegionMetadataRef) -> MemtableRef {
-        // Computes the new flat schema based on the new metadata.
-        let flat_arrow_schema = to_flat_sst_arrow_schema(
-            metadata,
-            &FlatSchemaOptions::from_encoding(metadata.primary_key_encoding),
-        );
-
         Arc::new(Self {
             id,
             config: self.config.clone(),
@@ -634,7 +627,6 @@ impl Memtable for BulkMemtable {
             min_timestamp: AtomicI64::new(i64::MAX),
             max_sequence: AtomicU64::new(0),
             num_rows: AtomicUsize::new(0),
-            flat_arrow_schema,
             compactor: Arc::new(Mutex::new(MemtableCompactor::new(
                 metadata.region_id,
                 id,
@@ -661,7 +653,6 @@ impl Memtable for BulkMemtable {
             .should_merge_parts(self.config.merge_threshold);
         if should_merge {
             compactor.merge_parts(
-                &self.flat_arrow_schema,
                 &self.parts,
                 &self.metadata,
                 !self.append_mode,
@@ -685,11 +676,6 @@ impl BulkMemtable {
         merge_mode: MergeMode,
     ) -> Self {
         let config = config.sanitize();
-        let flat_arrow_schema = to_flat_sst_arrow_schema(
-            &metadata,
-            &FlatSchemaOptions::from_encoding(metadata.primary_key_encoding),
-        );
-
         let region_id = metadata.region_id;
         Self {
             id,
@@ -701,7 +687,6 @@ impl BulkMemtable {
             min_timestamp: AtomicI64::new(i64::MAX),
             max_sequence: AtomicU64::new(0),
             num_rows: AtomicUsize::new(0),
-            flat_arrow_schema,
             compactor: Arc::new(Mutex::new(MemtableCompactor::new(region_id, id, config))),
             compact_dispatcher,
             append_mode,
@@ -768,7 +753,6 @@ impl BulkMemtable {
                 metadata: self.metadata.clone(),
                 parts: self.parts.clone(),
                 config: self.config.clone(),
-                flat_arrow_schema: self.flat_arrow_schema.clone(),
                 compactor: self.compactor.clone(),
                 append_mode: self.append_mode,
                 merge_mode: self.merge_mode,
@@ -832,6 +816,10 @@ impl IterBuilder for BulkRangeIterBuilder {
         Ok(Box::new(iter))
     }
 
+    fn record_batch_schema_hint(&self) -> Option<SchemaRef> {
+        Some(self.part.schema())
+    }
+
     fn encoded_range(&self) -> Option<EncodedRange> {
         None
     }
@@ -862,6 +850,10 @@ impl IterBuilder for MultiBulkRangeIterBuilder {
             // All batches were pruned by the predicate. Return an empty iterator.
             None => Ok(Box::new(std::iter::empty())),
         }
+    }
+
+    fn record_batch_schema_hint(&self) -> Option<SchemaRef> {
+        self.part.schemas().next()
     }
 
     fn encoded_range(&self) -> Option<EncodedRange> {
@@ -903,6 +895,10 @@ impl IterBuilder for EncodedBulkRangeIterBuilder {
             // Return an empty iterator if no data to read
             Ok(Box::new(std::iter::empty()))
         }
+    }
+
+    fn record_batch_schema_hint(&self) -> Option<SchemaRef> {
+        Some(self.part.schema())
     }
 
     fn encoded_range(&self) -> Option<EncodedRange> {
@@ -1022,6 +1018,20 @@ impl PartToMerge {
         }
     }
 
+    /// Returns the Arrow schema of the record batches contained in this [`PartToMerge`].
+    fn arrow_schema(&self) -> SchemaRef {
+        match self {
+            PartToMerge::Bulk { part, .. } => part.schema(),
+            // A MultiBulkPart is built from batches that have already been aligned, so
+            // all contained batches are expected to share the same arrow schema.
+            PartToMerge::Multi { part, .. } => part
+                .schemas()
+                .next()
+                .expect("MultiBulkPart must contain at least one record batch"),
+            PartToMerge::Encoded { part, .. } => part.schema(),
+        }
+    }
+
     /// Creates a record batch iterator for this part.
     fn create_iterator(
         self,
@@ -1065,7 +1075,6 @@ impl MemtableCompactor {
     /// Merges parts (bulk and encoded) and then encodes the result.
     fn merge_parts(
         &mut self,
-        arrow_schema: &SchemaRef,
         bulk_parts: &RwLock<BulkParts>,
         metadata: &RegionMetadataRef,
         dedup: bool,
@@ -1105,7 +1114,6 @@ impl MemtableCompactor {
             .map(|group| {
                 Self::merge_parts_group(
                     group,
-                    arrow_schema,
                     metadata,
                     dedup,
                     merge_mode,
@@ -1139,7 +1147,6 @@ impl MemtableCompactor {
     /// Merges a group of parts into a single part (either MultiBulkPart or EncodedBulkPart).
     fn merge_parts_group(
         parts_to_merge: Vec<PartToMerge>,
-        arrow_schema: &SchemaRef,
         metadata: &RegionMetadataRef,
         dedup: bool,
         merge_mode: MergeMode,
@@ -1183,10 +1190,12 @@ impl MemtableCompactor {
             true,
         )?);
 
-        // Creates iterators for all parts to merge.
+        let aligner = Json2Aligner::try_new(parts_to_merge.iter().map(PartToMerge::arrow_schema))?;
+
         let iterators: Vec<BoxedRecordBatchIterator> = parts_to_merge
             .into_iter()
             .filter_map(|part| part.create_iterator(context.clone()).ok().flatten())
+            .map(|iter| aligner.wrap_iter(iter))
             .collect();
 
         if iterators.is_empty() {
@@ -1194,10 +1203,9 @@ impl MemtableCompactor {
         }
 
         let merged_iter =
-            FlatMergeIterator::new(arrow_schema.clone(), iterators, DEFAULT_READ_BATCH_SIZE)?;
+            FlatMergeIterator::new(aligner.schema().clone(), iterators, DEFAULT_READ_BATCH_SIZE)?;
 
         let boxed_iter: BoxedRecordBatchIterator = if dedup {
-            // Applies deduplication based on merge mode
             match merge_mode {
                 MergeMode::LastRow => {
                     let dedup_iter = FlatDedupIterator::new(merged_iter, FlatLastRow::new(false));
@@ -1205,7 +1213,7 @@ impl MemtableCompactor {
                 }
                 MergeMode::LastNonNull => {
                     let field_column_start =
-                        field_column_start(metadata, arrow_schema.fields().len());
+                        field_column_start(metadata, aligner.schema().fields().len());
 
                     let dedup_iter = FlatDedupIterator::new(
                         merged_iter,
@@ -1226,7 +1234,7 @@ impl MemtableCompactor {
             let mut metrics = BulkPartEncodeMetrics::default();
             let encoded_part = encoder.encode_record_batch_iter(
                 boxed_iter,
-                arrow_schema.clone(),
+                aligner.schema().clone(),
                 min_timestamp,
                 max_timestamp,
                 max_sequence,
@@ -1277,8 +1285,6 @@ struct MemCompactTask {
     parts: Arc<RwLock<BulkParts>>,
     /// Configuration for the bulk memtable.
     config: BulkMemtableConfig,
-    /// Cached flat SST arrow schema
-    flat_arrow_schema: SchemaRef,
     /// Compactor for merging bulk parts
     compactor: Arc<Mutex<MemtableCompactor>>,
     /// Whether the append mode is enabled
@@ -1298,7 +1304,6 @@ impl MemCompactTask {
             .should_merge_parts(self.config.merge_threshold);
         if should_merge {
             compactor.merge_parts(
-                &self.flat_arrow_schema,
                 &self.parts,
                 &self.metadata,
                 !self.append_mode,
@@ -1406,13 +1411,25 @@ impl MemtableBuilder for BulkMemtableBuilder {
 
 #[cfg(test)]
 mod tests {
+    use api::helper::encode_json_value;
+    use api::v1::value::ValueData;
+    use api::v1::{Mutation, Row, Rows, SemanticType};
+    use datatypes::data_type::ConcreteDataType;
+    use datatypes::extension::json::{JsonExtensionType, JsonMetadata};
+    use datatypes::json::value::JsonValue;
+    use datatypes::schema::ColumnSchema;
+    use datatypes::types::json_type::{JsonNativeType, JsonObjectType};
     use mito_codec::row_converter::build_primary_key_codec;
+    use serde_json::json;
+    use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder, RegionMetadataRef};
 
     use super::*;
     use crate::memtable::bulk::part::BulkPartConverter;
     use crate::read::scan_region::PredicateGroup;
     use crate::sst::{FlatSchemaOptions, to_flat_sst_arrow_schema};
-    use crate::test_util::memtable_util::{build_key_values_with_ts_seq_values, metadata_for_test};
+    use crate::test_util::memtable_util::{
+        build_key_values_with_ts_seq_values, metadata_for_test, region_metadata_to_row_schema,
+    };
 
     fn create_bulk_part_with_converter(
         k0: &str,
@@ -1539,6 +1556,138 @@ mod tests {
             }
             assert_eq!(total_rows, range.num_rows());
         }
+    }
+
+    #[test]
+    fn test_bulk_memtable_compact_parts_with_json2() {
+        let metadata = mock_metadata_with_json2();
+
+        let config = BulkMemtableConfig {
+            merge_threshold: 2,
+            encode_row_threshold: 1,
+            encode_bytes_threshold: 1,
+            ..Default::default()
+        };
+        let memtable = BulkMemtable::new(
+            999,
+            config,
+            metadata.clone(),
+            None,
+            None,
+            true,
+            MergeMode::LastRow,
+        );
+        memtable.set_unordered_part_threshold(0);
+
+        let part1 = mock_bulk_part_with_json2(&metadata, vec![1000, 2000], 100).unwrap();
+        let part2 = mock_bulk_part_with_json2(&metadata, vec![3000, 4000], 200).unwrap();
+
+        memtable.write_bulk(part1).unwrap();
+        memtable.write_bulk(part2).unwrap();
+        memtable.compact(false).unwrap();
+
+        let stats = memtable.stats();
+        assert_eq!(4, stats.num_rows);
+        assert_eq!(201, stats.max_sequence);
+
+        let predicate_group = PredicateGroup::new(&metadata, &[]).unwrap();
+        let opts = RangesOptions::default().with_predicate(predicate_group);
+        let ranges = memtable.ranges(None, opts).unwrap();
+
+        assert_eq!(1, ranges.ranges.len());
+        let total_rows: usize = ranges.ranges.values().map(|r| r.stats().num_rows()).sum();
+        assert_eq!(4, total_rows);
+    }
+
+    fn mock_metadata_with_json2() -> RegionMetadataRef {
+        let col_meta_1 = ColumnMetadata {
+            column_schema: ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            ),
+            semantic_type: SemanticType::Timestamp,
+            column_id: 0,
+        };
+
+        let data_type = ConcreteDataType::json2(JsonNativeType::Object(JsonObjectType::new()));
+        let mut col_schema = ColumnSchema::new("data", data_type, true);
+        let extension = JsonExtensionType::new(Arc::new(JsonMetadata::default()));
+        col_schema.with_extension_type(&extension).unwrap();
+
+        let col_meta_2 = ColumnMetadata {
+            column_schema: col_schema,
+            semantic_type: SemanticType::Field,
+            column_id: 1,
+        };
+        let mut builder = RegionMetadataBuilder::new(RegionId::new(123, 789));
+        builder
+            .push_column_metadata(col_meta_1)
+            .push_column_metadata(col_meta_2)
+            .primary_key(vec![]);
+        Arc::new(builder.build().unwrap())
+    }
+
+    fn mock_bulk_part_with_json2(
+        metadata: &RegionMetadataRef,
+        timestamps: Vec<i64>,
+        sequence: u64,
+    ) -> Result<BulkPart> {
+        let capacity = timestamps.len();
+        let primary_key_codec = build_primary_key_codec(metadata);
+        let json_type = JsonNativeType::Object(JsonObjectType::from([
+            ("id".to_string(), JsonNativeType::i64()),
+            (
+                "payload".to_string(),
+                JsonNativeType::Object(JsonObjectType::from([(
+                    "message".to_string(),
+                    JsonNativeType::String,
+                )])),
+            ),
+        ]));
+        let mut options = FlatSchemaOptions::from_encoding(metadata.primary_key_encoding);
+        options
+            .concretized_json_types
+            .insert("data".to_string(), json_type.as_arrow_type());
+        let schema = to_flat_sst_arrow_schema(metadata, &options);
+
+        let mut converter =
+            BulkPartConverter::new(metadata, schema, capacity, primary_key_codec, true);
+
+        let rows = timestamps
+            .into_iter()
+            .map(|ts| {
+                let val1 = api::v1::Value {
+                    value_data: Some(ValueData::TimestampMillisecondValue(ts)),
+                };
+                let value_data = ValueData::JsonValue(encode_json_value(JsonValue::from(json!({
+                    "id": ts,
+                    "payload": {
+                        "message": format!("row-{ts}"),
+                    },
+                }))));
+                let val2 = api::v1::Value {
+                    value_data: Some(value_data),
+                };
+                Row {
+                    values: vec![val1, val2],
+                }
+            })
+            .collect();
+
+        let mutation = Mutation {
+            op_type: 1,
+            sequence,
+            rows: Some(Rows {
+                schema: region_metadata_to_row_schema(metadata),
+                rows,
+            }),
+            write_hint: None,
+        };
+        let key_values = KeyValues::new(metadata.as_ref(), mutation).unwrap();
+
+        converter.append_key_values(&key_values)?;
+        converter.convert()
     }
 
     #[test]

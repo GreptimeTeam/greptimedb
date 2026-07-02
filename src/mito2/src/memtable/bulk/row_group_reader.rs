@@ -15,6 +15,7 @@
 use std::sync::Arc;
 
 use bytes::Bytes;
+use datatypes::extension::json::is_structured_json_field;
 use parquet::arrow::ProjectionMask;
 use parquet::arrow::arrow_reader::{
     ArrowReaderMetadata, ArrowReaderOptions, ParquetRecordBatchReader,
@@ -43,8 +44,25 @@ impl MemtableRowGroupReaderBuilder {
         data: Bytes,
     ) -> error::Result<Self> {
         // Create ArrowReaderMetadata for building the reader.
-        let arrow_reader_options =
-            ArrowReaderOptions::new().with_schema(context.read_format().arrow_schema().clone());
+        let mut arrow_reader_options = ArrowReaderOptions::new();
+
+        // JSON2 columns in region metadata are not concretized with nested
+        // fields here, so let parquet use its embedded Arrow schema instead.
+        //
+        // TODO: Pass the encoded part's concrete schema into this builder. It
+        // avoids parsing the Arrow schema from parquet metadata while keeping
+        // JSON2 nested fields exact.
+        if !context
+            .read_format()
+            .arrow_schema()
+            .fields()
+            .iter()
+            .any(is_structured_json_field)
+        {
+            arrow_reader_options =
+                arrow_reader_options.with_schema(context.read_format().arrow_schema().clone());
+        }
+
         let arrow_metadata =
             ArrowReaderMetadata::try_new(parquet_metadata.clone(), arrow_reader_options)
                 .context(ReadDataPartSnafu)?;

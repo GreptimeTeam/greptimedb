@@ -15,18 +15,18 @@
 //! Frontend client to run flow as batching task which is time-window-aware normal query triggered every tick set by user
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex, RwLock, Weak};
 
 use api::v1::greptime_request::Request;
 use api::v1::query_request::Query;
 use api::v1::{CreateTableExpr, QueryRequest};
-use client::{Client, Database, OutputWithMetrics};
+use client::{Client, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, Database, OutputWithMetrics};
 use common_error::ext::BoxedError;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager, load_client_tls_config};
 use common_meta::peer::{Peer, PeerDiscovery};
 use common_query::{Output, OutputData};
-use common_recordbatch::adapter::{RecordBatchMetrics, RegionWatermarkEntry};
 use common_telemetry::warn;
+use futures::stream::{FuturesUnordered, StreamExt};
 use meta_client::client::MetaClient;
 use query::datafusion::QUERY_PARALLELISM_HINT;
 use query::metrics::terminal_recordbatch_metrics_from_plan;
@@ -39,12 +39,12 @@ use session::hints::READ_PREFERENCE_HINT;
 use snafu::{OptionExt, ResultExt};
 use tokio::sync::SetOnce;
 
+use crate::Error;
 use crate::batching_mode::BatchingModeOptions;
 use crate::error::{
     CreateSinkTableSnafu, ExternalSnafu, InvalidClientConfigSnafu, InvalidRequestSnafu,
     NoAvailableFrontendSnafu, UnexpectedSnafu,
 };
-use crate::{Error, FlowAuthHeader};
 
 /// Adapter trait for [`GrpcQueryHandler`] that boxes the underlying error into [`BoxedError`].
 ///
@@ -92,7 +92,6 @@ pub enum FrontendClient {
     Distributed {
         meta_client: Arc<MetaClient>,
         chnl_mgr: ChannelManager,
-        auth: Option<FlowAuthHeader>,
         query: QueryOptions,
         batch_opts: BatchingModeOptions,
     },
@@ -133,11 +132,10 @@ impl FrontendClient {
 
     pub fn from_meta_client(
         meta_client: Arc<MetaClient>,
-        auth: Option<FlowAuthHeader>,
         query: QueryOptions,
         batch_opts: BatchingModeOptions,
     ) -> Result<Self, Error> {
-        common_telemetry::info!("Frontend client build with auth={:?}", auth);
+        common_telemetry::info!("Frontend client build without auth");
         Ok(Self::Distributed {
             meta_client,
             chnl_mgr: {
@@ -149,7 +147,6 @@ impl FrontendClient {
                     .context(InvalidClientConfigSnafu)?;
                 ChannelManager::with_config(cfg, tls_config)
             },
-            auth,
             query,
             batch_opts,
         })
@@ -212,6 +209,63 @@ impl FrontendClient {
             .context(ExternalSnafu)
     }
 
+    /// Probes all discovered frontends without auth.
+    ///
+    /// Returns non-auth failures to allow callers to retry transient connectivity
+    /// errors. Authentication failures are returned immediately because they mean
+    /// a frontend advertised an auth-protected endpoint to flownodes.
+    pub(crate) async fn check_all_frontends_without_auth(
+        &self,
+        frontends: &[Peer],
+    ) -> Result<Vec<String>, Error> {
+        let Self::Distributed {
+            chnl_mgr,
+            batch_opts,
+            ..
+        } = self
+        else {
+            return Ok(vec![]);
+        };
+
+        let probe_timeout = batch_opts.grpc_conn_timeout;
+        let mut probes = frontends
+            .iter()
+            .map(|peer| {
+                let addr = peer.addr.clone();
+                let chnl_mgr = chnl_mgr.clone();
+
+                async move {
+                    let client = Client::with_manager_and_urls(chnl_mgr, vec![addr.clone()]);
+                    let database = Database::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, client);
+
+                    match tokio::time::timeout(probe_timeout, database.sql("SELECT 1")).await {
+                        Ok(Ok(_)) => Ok(None),
+                        Ok(Err(err)) if err.tonic_code() == Some(tonic::Code::Unauthenticated) => {
+                            Err(err).context(InvalidRequestSnafu {
+                                context: format!(
+                                    "Frontend {addr} rejected unauthenticated flownode probe; ensure frontend internal_grpc is advertised to metasrv"
+                                ),
+                            })
+                        }
+                        Ok(Err(err)) => Ok(Some(format!("{addr}: {err}"))),
+                        Err(_) => Ok(Some(format!(
+                            "{addr}: health check timed out after {probe_timeout:?}"
+                        ))),
+                    }
+                }
+            })
+            .collect::<FuturesUnordered<_>>();
+
+        let mut failures = Vec::new();
+        while let Some(probe_result) = probes.next().await {
+            if let Some(failure) = probe_result? {
+                failures.push(failure);
+            }
+        }
+
+        Ok(failures)
+    }
+
     /// Get a frontend discovered by metasrv and verified with a query probe.
     async fn get_random_active_frontend(
         &self,
@@ -221,7 +275,6 @@ impl FrontendClient {
         let Self::Distributed {
             meta_client: _,
             chnl_mgr,
-            auth,
             query: _,
             batch_opts,
         } = self
@@ -242,13 +295,7 @@ impl FrontendClient {
             for peer in frontends {
                 let addr = peer.addr.clone();
                 let client = Client::with_manager_and_urls(chnl_mgr.clone(), vec![addr.clone()]);
-                let database = {
-                    let mut db = Database::new(catalog, schema, client);
-                    if let Some(auth) = auth {
-                        db.set_auth(auth.auth().clone());
-                    }
-                    db
-                };
+                let database = Database::new(catalog, schema, client);
                 let db = DatabaseWithPeer::new(database, peer);
                 match db.try_select_one().await {
                     Ok(_) => return Ok(db),
@@ -340,12 +387,15 @@ impl FrontendClient {
         }
     }
 
+    /// Execute a flow query and return terminal metrics. `snapshot_seqs` are
+    /// optional read upper bounds used only by snapshot-fenced repair chunks.
     pub(crate) async fn query_with_terminal_metrics(
         &self,
         catalog: &str,
         schema: &str,
         request: QueryRequest,
         extensions: &[(&str, &str)],
+        snapshot_seqs: &HashMap<u64, u64>,
         peer_desc: &mut Option<PeerDesc>,
     ) -> Result<OutputWithMetrics, Error> {
         let flow_extensions = build_flow_extensions(extensions)?;
@@ -363,7 +413,12 @@ impl FrontendClient {
                     peer: db.peer.clone(),
                 });
                 db.database
-                    .query_with_terminal_metrics_and_flow_extensions(request, &hints, extensions)
+                    .query_with_terminal_metrics_and_flow_extensions(
+                        request,
+                        &hints,
+                        extensions,
+                        snapshot_seqs,
+                    )
                     .await
                     .map_err(BoxedError::new)
                     .context(ExternalSnafu)
@@ -384,6 +439,7 @@ impl FrontendClient {
                     .current_catalog(catalog.to_string())
                     .current_schema(schema.to_string())
                     .extensions(extensions_map)
+                    .snapshot_seqs(Arc::new(RwLock::new(snapshot_seqs.clone())))
                     .build();
                 let ctx = Arc::new(ctx);
                 let database_client = {
@@ -409,7 +465,7 @@ impl FrontendClient {
                     .do_query(Request::Query(request), ctx.clone())
                     .await
                     .map(|output| {
-                        wrap_standalone_output_with_terminal_metrics(output, &flow_extensions, &ctx)
+                        wrap_standalone_output_with_terminal_metrics(output, &flow_extensions)
                     })
                     .map_err(BoxedError::new)
                     .context(ExternalSnafu)
@@ -517,7 +573,6 @@ fn build_flow_extensions(extensions: &[(&str, &str)]) -> Result<FlowQueryExtensi
 fn wrap_standalone_output_with_terminal_metrics(
     output: Output,
     flow_extensions: &FlowQueryExtensions,
-    query_ctx: &QueryContextRef,
 ) -> OutputWithMetrics {
     let should_collect_region_watermark = flow_extensions.should_collect_region_watermark();
     let terminal_metrics =
@@ -527,7 +582,6 @@ fn wrap_standalone_output_with_terminal_metrics(
                 .plan
                 .clone()
                 .and_then(terminal_recordbatch_metrics_from_plan)
-                .or_else(|| terminal_recordbatch_metrics_from_snapshots(query_ctx))
         } else {
             None
         };
@@ -536,28 +590,6 @@ fn wrap_standalone_output_with_terminal_metrics(
         result.metrics.update(Some(metrics));
     }
     result
-}
-
-fn terminal_recordbatch_metrics_from_snapshots(
-    query_ctx: &QueryContextRef,
-) -> Option<RecordBatchMetrics> {
-    let mut region_watermarks = query_ctx
-        .snapshots()
-        .into_iter()
-        .map(|(region_id, watermark)| RegionWatermarkEntry {
-            region_id,
-            watermark: Some(watermark),
-        })
-        .collect::<Vec<_>>();
-    if region_watermarks.is_empty() {
-        return None;
-    }
-
-    region_watermarks.sort_by_key(|entry| entry.region_id);
-    Some(RecordBatchMetrics {
-        region_watermarks,
-        ..Default::default()
-    })
 }
 
 /// Describe a peer of frontend
@@ -591,6 +623,8 @@ mod tests {
     use std::task::{Context, Poll};
     use std::time::Duration;
 
+    use arrow_flight::flight_service_server::FlightServiceServer;
+    use arrow_flight::{FlightData, Ticket};
     use common_query::{Output, OutputData};
     use common_recordbatch::adapter::RecordBatchMetrics;
     use common_recordbatch::{OrderOption, RecordBatch, RecordBatchStream};
@@ -598,7 +632,12 @@ mod tests {
     use datatypes::schema::{ColumnSchema, Schema};
     use datatypes::vectors::Int32Vector;
     use futures::StreamExt;
+    use servers::grpc::flight::{FlightCraft, FlightCraftWrapper, TonicStream};
+    use tokio::net::TcpListener;
+    use tokio::task::JoinHandle;
     use tokio::time::timeout;
+    use tokio_stream::wrappers::TcpListenerStream;
+    use tonic::{Request as TonicRequest, Response as TonicResponse, Status};
 
     use super::*;
 
@@ -656,6 +695,16 @@ mod tests {
 
     #[derive(Debug)]
     struct SnapshotBindingHandler;
+
+    #[derive(Debug)]
+    struct RejectUnauthenticatedFlight;
+
+    #[derive(Debug)]
+    struct SlowFlight;
+
+    struct WaitForConcurrentFlight {
+        barrier: Arc<tokio::sync::Barrier>,
+    }
 
     #[async_trait::async_trait]
     impl GrpcQueryHandlerWithBoxedError for NoopHandler {
@@ -720,9 +769,59 @@ mod tests {
             ctx: QueryContextRef,
         ) -> std::result::Result<Output, BoxedError> {
             assert_eq!(ctx.extension("flow.return_region_seq"), Some("true"));
+            assert_eq!(ctx.get_snapshot(1), Some(10));
+            assert_eq!(ctx.get_snapshot(2), Some(20));
             ctx.set_snapshot(42, 99);
             Ok(Output::new_with_affected_rows(1))
         }
+    }
+
+    #[async_trait::async_trait]
+    impl FlightCraft for RejectUnauthenticatedFlight {
+        async fn do_get(
+            &self,
+            _request: TonicRequest<Ticket>,
+        ) -> std::result::Result<TonicResponse<TonicStream<FlightData>>, Status> {
+            Err(Status::unauthenticated("auth failed"))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl FlightCraft for SlowFlight {
+        async fn do_get(
+            &self,
+            _request: TonicRequest<Ticket>,
+        ) -> std::result::Result<TonicResponse<TonicStream<FlightData>>, Status> {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            Err(Status::unavailable("slow response"))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl FlightCraft for WaitForConcurrentFlight {
+        async fn do_get(
+            &self,
+            _request: TonicRequest<Ticket>,
+        ) -> std::result::Result<TonicResponse<TonicStream<FlightData>>, Status> {
+            self.barrier.wait().await;
+            Err(Status::unavailable("probe started concurrently"))
+        }
+    }
+
+    async fn start_flight_server<T: FlightCraft>(handler: T) -> (String, JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test flight server");
+        let addr = listener.local_addr().expect("local addr").to_string();
+        let server = tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(FlightServiceServer::new(FlightCraftWrapper(handler)))
+                .serve_with_incoming(TcpListenerStream::new(listener))
+                .await
+                .expect("serve test flight server");
+        });
+
+        (addr, server)
     }
 
     #[tokio::test]
@@ -759,7 +858,6 @@ mod tests {
         let meta_client = Arc::new(MetaClient::new(0, api::v1::meta::Role::Frontend));
         let client = FrontendClient::from_meta_client(
             meta_client,
-            None,
             QueryOptions::default(),
             BatchingModeOptions::default(),
         )
@@ -786,6 +884,7 @@ mod tests {
                     query: Some(Query::Sql("select 1".to_string())),
                 },
                 &[],
+                &HashMap::new(),
                 &mut peer_desc,
             )
             .await
@@ -823,6 +922,7 @@ mod tests {
                     query: Some(Query::Sql("insert into t select 1".to_string())),
                 },
                 &[("flow.return_region_seq", "true")],
+                &HashMap::new(),
                 &mut peer_desc,
             )
             .await
@@ -848,6 +948,7 @@ mod tests {
                     query: Some(Query::Sql("insert into t select * from src".to_string())),
                 },
                 &[("flow.return_region_seq", "true")],
+                &HashMap::from([(1, 10), (2, 20)]),
                 &mut peer_desc,
             )
             .await
@@ -855,10 +956,7 @@ mod tests {
         assert!(matches!(peer_desc, Some(PeerDesc::Standalone)));
 
         assert!(result.metrics.is_ready());
-        assert_eq!(
-            result.region_watermark_map(),
-            Some(HashMap::from([(42, 99)]))
-        );
+        assert_eq!(result.region_watermark_map(), None);
     }
 
     #[tokio::test]
@@ -876,11 +974,117 @@ mod tests {
                     query: Some(Query::Sql("select 1".to_string())),
                 },
                 &[("flow.return_region_seq", "not-a-bool")],
+                &HashMap::new(),
                 &mut peer_desc,
             )
             .await
             .unwrap_err();
 
         assert!(format!("{err:?}").contains("Invalid value for flow.return_region_seq"));
+    }
+
+    #[tokio::test]
+    async fn test_check_all_frontends_without_auth_fails_fast_on_unauthenticated_frontend() {
+        let (addr, server) = start_flight_server(RejectUnauthenticatedFlight).await;
+        let client = FrontendClient::from_meta_client(
+            Arc::new(MetaClient::new(0, api::v1::meta::Role::Frontend)),
+            QueryOptions::default(),
+            BatchingModeOptions::default(),
+        )
+        .unwrap();
+
+        let err = client
+            .check_all_frontends_without_auth(&[Peer {
+                id: 1,
+                addr: addr.clone(),
+            }])
+            .await
+            .unwrap_err();
+        server.abort();
+
+        let Error::InvalidRequest {
+            context, source, ..
+        } = err
+        else {
+            panic!("expected InvalidRequest, got {err:?}");
+        };
+        assert!(context.contains(&addr));
+        assert!(context.contains("rejected unauthenticated flownode probe"));
+        assert_eq!(source.tonic_code(), Some(tonic::Code::Unauthenticated));
+    }
+
+    #[tokio::test]
+    async fn test_check_all_frontends_without_auth_uses_grpc_connection_timeout() {
+        let (addr, server) = start_flight_server(SlowFlight).await;
+        let client = FrontendClient::from_meta_client(
+            Arc::new(MetaClient::new(0, api::v1::meta::Role::Frontend)),
+            QueryOptions::default(),
+            BatchingModeOptions {
+                grpc_conn_timeout: Duration::from_millis(50),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let failures = client
+            .check_all_frontends_without_auth(&[Peer {
+                id: 1,
+                addr: addr.clone(),
+            }])
+            .await
+            .unwrap();
+        server.abort();
+
+        assert_eq!(failures.len(), 1);
+        assert!(failures[0].contains(&addr));
+        assert!(failures[0].contains("health check timed out"));
+    }
+
+    #[tokio::test]
+    async fn test_check_all_frontends_without_auth_checks_frontends_concurrently() {
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        let (addr1, server1) = start_flight_server(WaitForConcurrentFlight {
+            barrier: barrier.clone(),
+        })
+        .await;
+        let (addr2, server2) = start_flight_server(WaitForConcurrentFlight { barrier }).await;
+        let client = FrontendClient::from_meta_client(
+            Arc::new(MetaClient::new(0, api::v1::meta::Role::Frontend)),
+            QueryOptions::default(),
+            BatchingModeOptions {
+                grpc_conn_timeout: Duration::from_millis(500),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let failures = timeout(
+            Duration::from_secs(2),
+            client.check_all_frontends_without_auth(&[
+                Peer {
+                    id: 1,
+                    addr: addr1.clone(),
+                },
+                Peer {
+                    id: 2,
+                    addr: addr2.clone(),
+                },
+            ]),
+        )
+        .await
+        .expect("concurrent probes should complete before per-peer timeouts")
+        .unwrap();
+        server1.abort();
+        server2.abort();
+
+        assert_eq!(failures.len(), 2);
+        assert!(failures.iter().any(|failure| failure.contains(&addr1)));
+        assert!(failures.iter().any(|failure| failure.contains(&addr2)));
+        assert!(
+            failures
+                .iter()
+                .all(|failure| !failure.contains("health check timed out")),
+            "sequential probes would time out before both requests reach the barrier: {failures:?}"
+        );
     }
 }

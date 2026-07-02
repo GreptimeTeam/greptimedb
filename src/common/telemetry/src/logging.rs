@@ -271,6 +271,9 @@ pub struct LoggingOptions {
     /// Additional HTTP headers for OTLP exporter.
     #[serde(skip_serializing_if = "HashMap::is_empty")]
     pub otlp_headers: HashMap<String, String>,
+
+    /// Whether to enable per-region metrics.
+    pub enable_per_region_metrics: bool,
 }
 
 /// The protocol of OTLP export.
@@ -346,6 +349,7 @@ impl PartialEq for LoggingOptions {
             && self.otlp_endpoint == other.otlp_endpoint
             && self.tracing_sample_ratio == other.tracing_sample_ratio
             && self.append_stdout == other.append_stdout
+            && self.enable_per_region_metrics == other.enable_per_region_metrics
     }
 }
 
@@ -373,6 +377,7 @@ impl Default for LoggingOptions {
             max_log_files: 720,
             otlp_export_protocol: None,
             otlp_headers: HashMap::new(),
+            enable_per_region_metrics: false,
         }
     }
 }

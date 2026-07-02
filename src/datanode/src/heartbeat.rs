@@ -418,12 +418,10 @@ impl HeartbeatTask {
                 if let Some(serialized) = region_stat.serialize_to_vec() {
                     extensions.insert(REGION_STATISTIC_KEY.to_string(), serialized);
                 }
-
                 RegionStat {
                     region_id: stat.region_id.as_u64(),
                     engine: stat.engine,
                     role: RegionRole::from(stat.role).into(),
-                    // TODO(weny): w/rcus
                     rcus: 0,
                     wcus: 0,
                     approximate_bytes: region_stat.estimated_disk_size() as i64,

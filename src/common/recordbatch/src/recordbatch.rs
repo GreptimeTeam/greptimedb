@@ -21,7 +21,7 @@ use datafusion_common::arrow::array::ArrayRef;
 use datafusion_common::arrow::compute;
 use datafusion_common::arrow::datatypes::{DataType as ArrowDataType, SchemaRef as ArrowSchemaRef};
 use datatypes::arrow::array::{Array, AsArray, RecordBatchOptions};
-use datatypes::extension::json::is_json_extension_type;
+use datatypes::extension::json::is_structured_json_field;
 use datatypes::prelude::DataType;
 use datatypes::schema::SchemaRef;
 use datatypes::vectors::json::array::JsonArray;
@@ -359,13 +359,13 @@ fn maybe_align_json_array_with_schema(
     schema: &ArrowSchemaRef,
     arrays: Vec<ArrayRef>,
 ) -> Result<Vec<ArrayRef>> {
-    if schema.fields().iter().all(|f| !is_json_extension_type(f)) {
+    if schema.fields().iter().all(|f| !is_structured_json_field(f)) {
         return Ok(arrays);
     }
 
     let mut aligned = Vec::with_capacity(arrays.len());
     for (field, array) in schema.fields().iter().zip(arrays) {
-        if !is_json_extension_type(field) {
+        if !is_structured_json_field(field) {
             aligned.push(array);
             continue;
         }
@@ -382,10 +382,11 @@ fn maybe_align_json_array_with_schema(
 mod tests {
     use std::sync::Arc;
 
-    use datatypes::arrow::array::{AsArray, UInt32Array};
+    use datatypes::arrow::array::{AsArray, BinaryArray, UInt32Array};
     use datatypes::arrow::datatypes::{DataType, Field, Schema as ArrowSchema, UInt32Type};
     use datatypes::arrow_array::StringArray;
     use datatypes::data_type::ConcreteDataType;
+    use datatypes::extension::json::{JsonExtensionType, JsonMetadata};
     use datatypes::schema::{ColumnSchema, Schema};
     use datatypes::vectors::{StringVector, UInt32Vector};
 
@@ -506,5 +507,18 @@ mod tests {
         let merged = merge_record_batches(schema.clone(), &[recordbatch, recordbatch2])
             .expect("merge recordbatch");
         assert_eq!(merged.num_rows(), 8);
+    }
+
+    #[test]
+    fn test_legacy_json_with_extension_does_not_align_as_structured_json() {
+        let field = Field::new("j", DataType::Binary, true)
+            .with_extension_type(JsonExtensionType::new(Arc::new(JsonMetadata::default())));
+        let arrow_schema = Arc::new(ArrowSchema::new(vec![field]));
+        let schema = Arc::new(Schema::try_from(arrow_schema).unwrap());
+        let arrays =
+            vec![Arc::new(BinaryArray::from(vec![Some(br#"{"a":1}"#.as_slice())])) as ArrayRef];
+
+        let aligned = maybe_align_json_array_with_schema(schema.arrow_schema(), arrays).unwrap();
+        assert_eq!(aligned[0].data_type(), &DataType::Binary);
     }
 }

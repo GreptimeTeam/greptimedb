@@ -30,6 +30,7 @@ use log_store::raft_engine::log_store::RaftEngineLogStore;
 use object_store::ObjectStore;
 use object_store::manager::ObjectStoreManagerRef;
 use object_store::util::{is_object_storage, normalize_dir};
+use parquet::file::metadata::PageIndexPolicy;
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::logstore::LogStore;
 use store_api::logstore::provider::Provider;
@@ -45,6 +46,7 @@ use crate::access_layer::AccessLayer;
 use crate::cache::CacheManagerRef;
 use crate::cache::file_cache::{FileCache, FileType, IndexKey};
 use crate::config::MitoConfig;
+use crate::engine::region_hook::RegionHookRef;
 use crate::error;
 use crate::error::{
     EmptyRegionDirSnafu, InvalidMetadataSnafu, InvalidRegionOptionsSnafu, ObjectStoreNotFoundSnafu,
@@ -82,6 +84,13 @@ const PARQUET_META_PRELOAD_CONCURRENCY: usize = 8;
 static PARQUET_META_PRELOAD_SEMAPHORE: LazyLock<Semaphore> =
     LazyLock::new(|| Semaphore::new(PARQUET_META_PRELOAD_CONCURRENCY));
 
+fn initial_pruned_entry_id(wal_options: &WalOptions) -> EntryId {
+    match wal_options {
+        WalOptions::Kafka(options) => options.initial_pruned_entry_id.unwrap_or(0),
+        WalOptions::RaftEngine | WalOptions::Noop => 0,
+    }
+}
+
 /// A fetcher to retrieve partition expr for a region.
 ///
 /// Compatibility: older regions didn't persist `partition_expr` in engine metadata,
@@ -114,6 +123,7 @@ pub(crate) struct RegionOpener {
     replay_checkpoint: Option<u64>,
     file_ref_manager: FileReferenceManagerRef,
     partition_expr_fetcher: PartitionExprFetcherRef,
+    hook: Option<RegionHookRef>,
 }
 
 impl RegionOpener {
@@ -152,7 +162,14 @@ impl RegionOpener {
             replay_checkpoint: None,
             file_ref_manager,
             partition_expr_fetcher,
+            hook: None,
         }
+    }
+
+    /// Sets the region hook for observing manifest mutations.
+    pub(crate) fn hook(mut self, hook: Option<RegionHookRef>) -> Self {
+        self.hook = hook;
+        self
     }
 
     /// Sets metadata builder of the region to create.
@@ -207,8 +224,11 @@ impl RegionOpener {
         Ok(self)
     }
 
-    /// Ensures the current region open request satisfies its requirements.
-    pub(crate) fn ensure_open_requirements(&self, requirements: RegionRequirements) -> Result<()> {
+    /// Ensures the current region request satisfies its requirements.
+    pub(crate) fn ensure_region_requirements(
+        &self,
+        requirements: RegionRequirements,
+    ) -> Result<()> {
         if !requirements.object_storage {
             return Ok(());
         }
@@ -220,7 +240,7 @@ impl RegionOpener {
 
         ensure!(
             supports_open_region_object_storage_requirement(&object_store),
-            error::OpenRegionRequirementSnafu {
+            error::RegionRequirementSnafu {
                 region_id: self.region_id,
                 requirement: "object storage",
                 reason: "region data must be accessible from another datanode",
@@ -312,7 +332,10 @@ impl RegionOpener {
             .and_then(|cm| cm.write_cache())
             .and_then(|wc| wc.manifest_cache());
         // For remote WAL, we need to set flushed_entry_id to current topic's latest entry id.
-        let flushed_entry_id = provider.initial_flushed_entry_id::<S>(wal.store());
+        // Kafka WAL allocation also carries the topic's pruned entry id as a create-time hint.
+        let flushed_entry_id = provider
+            .initial_flushed_entry_id::<S>(wal.store())
+            .max(initial_pruned_entry_id(&options.wal_options));
         let manifest_manager = RegionManifestManager::new(
             metadata.clone(),
             flushed_entry_id,
@@ -359,6 +382,7 @@ impl RegionOpener {
             manifest_ctx: Arc::new(ManifestContext::new(
                 manifest_manager,
                 RegionRoleState::Leader(RegionLeaderState::Writable),
+                self.hook.clone(),
             )),
             file_purger: create_file_purger(
                 config.gc.enable,
@@ -610,6 +634,7 @@ impl RegionOpener {
             manifest_ctx: Arc::new(ManifestContext::new(
                 manifest_manager,
                 RegionRoleState::Follower,
+                self.hook.clone(),
             )),
             file_purger,
             provider: provider.clone(),
@@ -1079,7 +1104,7 @@ async fn preload_parquet_meta_cache_for_files(
         let file_id = file_handle.file_id();
         let mut cache_metrics = MetadataCacheMetrics::default();
         if let Some(metadata) = cache_manager
-            .get_parquet_meta_data(file_id, &mut cache_metrics, Default::default())
+            .get_parquet_meta_data(file_id, &mut cache_metrics, PageIndexPolicy::Optional)
             .await
         {
             if file_handle.primary_key_range().is_none()
@@ -1101,7 +1126,8 @@ async fn preload_parquet_meta_cache_for_files(
 
         let file_size = file_handle.meta_ref().file_size;
         let file_path = file_handle.file_path(&table_dir, path_type);
-        let loader = MetadataLoader::new(object_store.clone(), &file_path, file_size);
+        let mut loader = MetadataLoader::new(object_store.clone(), &file_path, file_size);
+        loader.with_page_index_policy(PageIndexPolicy::Optional);
         match loader.load(&mut cache_metrics).await {
             Ok(metadata) => {
                 if let Some(primary_key_range) =
@@ -1217,6 +1243,7 @@ mod tests {
     use common_base::readable_size::ReadableSize;
     use common_test_util::temp_dir::create_temp_dir;
     use common_time::Timestamp;
+    use common_wal::options::{KafkaWalOptions, WalOptions};
     use datatypes::arrow::array::{ArrayRef, BinaryArray, Int64Array};
     use datatypes::arrow::record_batch::RecordBatch;
     use object_store::ObjectStore;
@@ -1228,7 +1255,7 @@ mod tests {
     use store_api::storage::{FileId, RegionId};
 
     use super::{
-        preload_parquet_meta_cache_for_files, sanitize_region_options,
+        initial_pruned_entry_id, preload_parquet_meta_cache_for_files, sanitize_region_options,
         supports_open_region_object_storage_requirement,
     };
     use crate::cache::CacheManager;
@@ -1262,6 +1289,25 @@ mod tests {
         ObjectStore::new(Fs::default().root("/tmp"))
             .unwrap()
             .finish()
+    }
+
+    #[test]
+    fn test_initial_pruned_entry_id() {
+        assert_eq!(0, initial_pruned_entry_id(&WalOptions::RaftEngine));
+        assert_eq!(0, initial_pruned_entry_id(&WalOptions::Noop));
+        assert_eq!(
+            0,
+            initial_pruned_entry_id(&WalOptions::Kafka(KafkaWalOptions::new(
+                "test_topic".to_string()
+            )))
+        );
+        assert_eq!(
+            42,
+            initial_pruned_entry_id(&WalOptions::Kafka(KafkaWalOptions {
+                topic: "test_topic".to_string(),
+                initial_pruned_entry_id: Some(42),
+            }))
+        );
     }
 
     #[test]
@@ -1437,6 +1483,16 @@ mod tests {
         assert!(
             cache_manager
                 .get_parquet_meta_data_from_mem_cache(region_file_id)
+                .is_some()
+        );
+        // The cached entry must carry the page index so that later `Optional` queries hit
+        // the in-memory cache instead of reloading metadata on demand.
+        assert!(
+            cache_manager
+                .get_sst_meta_data_from_mem_cache(
+                    region_file_id,
+                    parquet::file::metadata::PageIndexPolicy::Optional,
+                )
                 .is_some()
         );
         assert!(file_handle.primary_key_range().is_some());

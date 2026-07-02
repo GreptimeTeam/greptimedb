@@ -18,15 +18,27 @@ use common_meta::cache::CacheRegistryBuilder;
 use frontend::error::{IllegalAuthConfigSnafu, Result};
 use frontend::frontend::FrontendOptions;
 use frontend::instance::Instance;
+use frontend::instance::builder::FrontendBuilder;
 use snafu::ResultExt;
 
 use crate::options::PluginOptions;
 
+/// Sets up frontend plugins before the [`FrontendBuilder`] is constructed.
+///
+/// This is where "infrastructure configurators" are registered — plugins that the builder
+/// consumes during construction (e.g., `CatalogManagerConfiguratorRef`, cache invalidators).
+///
+/// In distributed mode this is called twice:
+/// 1. First without meta config (before `create_meta_client`), for plugins needed by the meta client.
+/// 2. Second with meta config pulled from metasrv, for dynamic configurators.
+///
+/// In standalone mode it is called once with `None`.
 #[allow(unused_mut)]
-pub async fn setup_frontend_plugins(
+pub async fn setup_frontend_plugins_pre_build(
     plugins: &mut Plugins,
     _plugin_options: &[PluginOptions],
     fe_opts: &FrontendOptions,
+    _meta_config: Option<&[PluginOptions]>,
 ) -> Result<()> {
     if let Some(user_provider) = fe_opts.user_provider.as_ref() {
         let provider =
@@ -39,15 +51,15 @@ pub async fn setup_frontend_plugins(
     Ok(())
 }
 
-/// Setup dynamic plugins based on the meta config in frontend.
-/// This is called after the `setup_frontend_plugins` because the meta client needs to be created first.
+/// Sets up frontend plugins after the [`FrontendBuilder`] is constructed
+/// but before [`FrontendBuilder::try_build()`] and [`FrontendBuilder::with_plugin()`].
 ///
-/// For those configs/plugins which are corresponding with the metasrv's config,
-/// we pull from metasrv first, then create/override the current config/plugin.
-/// Note: make sure the override works as expected.
-pub async fn setup_frontend_dynamic_plugins(
-    _meta_config: Vec<PluginOptions>,
+/// This is where "feature plugins" are registered — plugins that consume builder context
+/// (e.g., `KvBackendRef`, `CatalogManagerRef`) to construct themselves.
+pub async fn setup_frontend_plugins_post_build(
     _plugins: &mut Plugins,
+    _plugin_options: &[PluginOptions],
+    _builder: &FrontendBuilder,
 ) -> Result<()> {
     Ok(())
 }

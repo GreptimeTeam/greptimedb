@@ -15,6 +15,7 @@
 //! Import V2 CLI command.
 
 use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -29,7 +30,7 @@ use crate::data::export_v2::data::{build_copy_source, execute_copy_database_from
 use crate::data::export_v2::manifest::{ChunkMeta, ChunkStatus, DataFormat, MANIFEST_VERSION};
 use crate::data::import_v2::coordinator::{
     ImportResumeConfig, ImportTaskExecutor, build_import_tasks, chunk_has_schema_files,
-    import_with_resume_session, prepare_import_resume,
+    import_with_resume_session_with_progress, prepare_import_resume,
 };
 use crate::data::import_v2::error::{
     ChunkImportFailedSnafu, EmptyChunkManifestSnafu, ImportStatePathUnavailableSnafu,
@@ -39,6 +40,7 @@ use crate::data::import_v2::error::{
 use crate::data::import_v2::executor::{DdlExecutor, DdlStatement};
 use crate::data::import_v2::state::{ImportTaskKey, default_state_path};
 use crate::data::path::{data_dir_for_schema_chunk, ddl_path_for_schema};
+use crate::data::progress::{ProgressMode, build_progress_reporter};
 use crate::data::snapshot_storage::{OpenDalStorage, SnapshotStorage, validate_uri};
 use crate::database::{DatabaseClient, parse_proxy_opts};
 
@@ -65,6 +67,20 @@ pub struct ImportV2Command {
     /// Verify without importing (dry-run).
     #[clap(long)]
     dry_run: bool,
+
+    /// Progress reporting mode.
+    #[clap(long, value_enum, default_value_t = ProgressMode::Auto)]
+    progress: ProgressMode,
+
+    /// Number of import data tasks to run concurrently on the client (1..=64).
+    #[clap(long, default_value = "1", value_parser = parse_task_parallelism)]
+    task_parallelism: usize,
+
+    /// Override the import resume state file path.
+    ///
+    /// Defaults to a stable path under `~/.greptime/import_state`.
+    #[clap(long)]
+    state_path: Option<PathBuf>,
 
     /// Basic authentication (user:password).
     #[clap(long)]
@@ -126,6 +142,9 @@ impl ImportV2Command {
             catalog: self.catalog.clone(),
             schemas,
             dry_run: self.dry_run,
+            progress: self.progress,
+            task_parallelism: self.task_parallelism,
+            state_path: self.state_path.clone(),
             snapshot_uri: self.from.clone(),
             storage_config: self.storage.clone(),
             storage: Box::new(storage),
@@ -134,11 +153,45 @@ impl ImportV2Command {
     }
 }
 
+/// Resolves the import resume state file path. When `override_path` is set it is
+/// used verbatim; otherwise the stable default under `~/.greptime/import_state`
+/// is derived from the import identity.
+fn resolve_state_path(
+    override_path: Option<&Path>,
+    snapshot_id: &str,
+    target_addr: &str,
+    catalog: &str,
+    schemas: &[String],
+) -> Result<PathBuf> {
+    if let Some(path) = override_path {
+        return Ok(path.to_path_buf());
+    }
+    default_state_path(snapshot_id, target_addr, catalog, schemas).context(
+        ImportStatePathUnavailableSnafu {
+            snapshot_id: snapshot_id.to_string(),
+        },
+    )
+}
+
+fn parse_task_parallelism(value: &str) -> std::result::Result<usize, String> {
+    let parallelism = value
+        .parse::<usize>()
+        .map_err(|_| "task parallelism must be an integer between 1 and 64".to_string())?;
+    if (1..=64).contains(&parallelism) {
+        Ok(parallelism)
+    } else {
+        Err("task parallelism must be between 1 and 64".to_string())
+    }
+}
+
 /// Import tool implementation.
 pub struct Import {
     catalog: String,
     schemas: Option<Vec<String>>,
     dry_run: bool,
+    progress: ProgressMode,
+    task_parallelism: usize,
+    state_path: Option<PathBuf>,
     snapshot_uri: String,
     storage_config: ObjectStoreConfig,
     storage: Box<dyn SnapshotStorage>,
@@ -217,15 +270,13 @@ impl Import {
         }
 
         let mut resume_session = if !data_tasks.is_empty() {
-            let state_path = default_state_path(
+            let state_path = resolve_state_path(
+                self.state_path.as_deref(),
                 &manifest.snapshot_id.to_string(),
                 self.database_client.addr(),
                 &self.catalog,
                 &schemas_to_import,
-            )
-            .context(ImportStatePathUnavailableSnafu {
-                snapshot_id: manifest.snapshot_id.to_string(),
-            })?;
+            )?;
             Some(
                 prepare_import_resume(ImportResumeConfig {
                     snapshot_id: manifest.snapshot_id.to_string(),
@@ -234,6 +285,7 @@ impl Import {
                     schemas: schemas_to_import.clone(),
                     state_path,
                     tasks: data_tasks,
+                    task_parallelism: self.task_parallelism,
                 })
                 .await?,
             )
@@ -266,7 +318,9 @@ impl Import {
                 import: self,
                 format: manifest.format,
             };
-            import_with_resume_session(resume_session, &executor).await?;
+            let progress = build_progress_reporter(self.progress);
+            import_with_resume_session_with_progress(resume_session, &executor, progress.as_ref())
+                .await?;
         }
 
         if ddl_executed {
@@ -674,6 +728,138 @@ mod tests {
 
         async fn delete_snapshot(&self) -> crate::data::export_v2::error::Result<()> {
             unimplemented!("not needed in import_v2::command tests")
+        }
+    }
+
+    fn parse_command(extra: &[&str]) -> ImportV2Command {
+        let mut args = vec![
+            "import-v2",
+            "--addr",
+            "127.0.0.1:4000",
+            "--from",
+            "file:///tmp/snapshot",
+        ];
+        args.extend_from_slice(extra);
+        ImportV2Command::try_parse_from(args).expect("command should parse")
+    }
+
+    #[test]
+    fn test_progress_mode_defaults_to_auto() {
+        assert_eq!(parse_command(&[]).progress, ProgressMode::Auto);
+    }
+
+    #[test]
+    fn test_progress_mode_parses_explicit_values() {
+        assert_eq!(
+            parse_command(&["--progress", "always"]).progress,
+            ProgressMode::Always
+        );
+        assert_eq!(
+            parse_command(&["--progress", "never"]).progress,
+            ProgressMode::Never
+        );
+        assert_eq!(
+            parse_command(&["--progress", "auto"]).progress,
+            ProgressMode::Auto
+        );
+    }
+
+    #[test]
+    fn test_progress_mode_rejects_unknown_value() {
+        assert!(
+            ImportV2Command::try_parse_from([
+                "import-v2",
+                "--addr",
+                "127.0.0.1:4000",
+                "--from",
+                "file:///tmp/snapshot",
+                "--progress",
+                "bogus",
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn test_task_parallelism_defaults_to_one() {
+        assert_eq!(parse_command(&[]).task_parallelism, 1);
+    }
+
+    #[test]
+    fn test_task_parallelism_parses_valid_values() {
+        assert_eq!(
+            parse_command(&["--task-parallelism", "2"]).task_parallelism,
+            2
+        );
+        assert_eq!(
+            parse_command(&["--task-parallelism", "64"]).task_parallelism,
+            64
+        );
+    }
+
+    #[test]
+    fn test_state_path_defaults_to_none() {
+        assert_eq!(parse_command(&[]).state_path, None);
+    }
+
+    #[test]
+    fn test_state_path_parses_explicit_value() {
+        assert_eq!(
+            parse_command(&["--state-path", "/tmp/import_state.json"]).state_path,
+            Some(PathBuf::from("/tmp/import_state.json"))
+        );
+    }
+
+    #[test]
+    fn test_resolve_state_path_prefers_override() {
+        let override_path = PathBuf::from("/tmp/custom_import_state.json");
+        let resolved = resolve_state_path(
+            Some(override_path.as_path()),
+            "snapshot-1",
+            "127.0.0.1:4000",
+            "greptime",
+            &["public".to_string()],
+        )
+        .unwrap();
+        assert_eq!(resolved, override_path);
+    }
+
+    #[test]
+    fn test_resolve_state_path_uses_default_when_absent() {
+        let resolved = resolve_state_path(
+            None,
+            "snapshot-1",
+            "127.0.0.1:4000",
+            "greptime",
+            &["public".to_string()],
+        )
+        .unwrap();
+        let expected = default_state_path(
+            "snapshot-1",
+            "127.0.0.1:4000",
+            "greptime",
+            &["public".to_string()],
+        )
+        .unwrap();
+        assert_eq!(resolved, expected);
+    }
+
+    #[test]
+    fn test_task_parallelism_rejects_invalid_values() {
+        for value in ["0", "65", "abc"] {
+            assert!(
+                ImportV2Command::try_parse_from([
+                    "import-v2",
+                    "--addr",
+                    "127.0.0.1:4000",
+                    "--from",
+                    "file:///tmp/snapshot",
+                    "--task-parallelism",
+                    value,
+                ])
+                .is_err(),
+                "value {value} should be rejected"
+            );
         }
     }
 

@@ -38,6 +38,7 @@ use mime_guess::mime;
 use operator::expr_helper::{create_table_expr_by_column_schemas, expr_to_create};
 use pipeline::util::to_pipeline_version;
 use pipeline::{ContextReq, GreptimePipelineParams, PipelineContext, PipelineDefinition};
+use prometheus::{HistogramVec, IntCounterVec};
 use serde::{Deserialize, Serialize};
 use serde_json::{Deserializer, Map, Value as JsonValue, json};
 use session::context::{Channel, QueryContext, QueryContextRef};
@@ -53,7 +54,10 @@ use crate::error::{
     status_code_to_http_status,
 };
 use crate::http::HttpResponse;
-use crate::http::header::constants::GREPTIME_PIPELINE_PARAMS_HEADER;
+use crate::http::header::constants::{
+    GREPTIME_LOG_PIPELINE_NAME_HEADER_NAME, GREPTIME_PIPELINE_NAME_HEADER_NAME,
+    GREPTIME_PIPELINE_PARAMS_HEADER,
+};
 use crate::http::header::{
     CONTENT_TYPE_NDJSON_STR, CONTENT_TYPE_NDJSON_SUBTYPE_STR, CONTENT_TYPE_PROTOBUF_STR,
 };
@@ -383,7 +387,7 @@ pub async fn delete_pipeline(
 
 /// Transform NDJSON array into a single array
 /// always return an array
-fn transform_ndjson_array_factory(
+pub(crate) fn transform_ndjson_array_factory(
     values: impl IntoIterator<Item = Result<VrlValue, serde_json::Error>>,
     ignore_error: bool,
 ) -> Result<Vec<VrlValue>> {
@@ -692,6 +696,29 @@ pub(crate) fn extract_pipeline_params_map_from_headers(
     )
 }
 
+/// Extracts the pipeline name from the request headers.
+///
+/// Both `x-greptime-pipeline-name` and the deprecated `x-greptime-log-pipeline-name`
+/// are accepted, matching the headers already honored by the OTLP/Elasticsearch/Splunk
+/// log ingestion endpoints. If both are present, the non-deprecated
+/// `x-greptime-pipeline-name` takes precedence. Empty header values are ignored so that
+/// they fall back to the `pipeline_name` query parameter.
+fn pipeline_name_from_headers(headers: &HeaderMap) -> Option<String> {
+    [
+        GREPTIME_PIPELINE_NAME_HEADER_NAME,
+        GREPTIME_LOG_PIPELINE_NAME_HEADER_NAME,
+    ]
+    .iter()
+    .find_map(|name| {
+        headers
+            .get(*name)
+            .and_then(|value| value.to_str().ok())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string)
+    })
+}
+
 #[axum_macros::debug_handler]
 pub async fn log_ingester(
     State(log_state): State<LogState>,
@@ -719,9 +746,14 @@ pub async fn log_ingester(
 
     let ignore_errors = query_params.ignore_errors.unwrap_or(false);
 
-    let pipeline_name = query_params.pipeline_name.context(InvalidParameterSnafu {
-        reason: "pipeline_name is required",
-    })?;
+    // A pipeline name supplied via header takes precedence over the query parameter,
+    // consistent with how other pipeline options (e.g. `x-greptime-pipeline-params`)
+    // outrank their query-parameter counterparts.
+    let pipeline_name = pipeline_name_from_headers(&headers)
+        .or(query_params.pipeline_name)
+        .context(InvalidParameterSnafu {
+            reason: "pipeline_name is required",
+        })?;
     let skip_error = query_params.skip_error.unwrap_or(false);
     let version = to_pipeline_version(query_params.version.as_deref()).context(PipelineSnafu)?;
     let pipeline = PipelineDefinition::from_name(
@@ -920,9 +952,9 @@ pub(crate) async fn ingest_logs_inner(
     query_ctx: QueryContextRef,
     pipeline_params: GreptimePipelineParams,
 ) -> Result<HttpResponse> {
-    let db = query_ctx.get_db_string();
-    let exec_timer = std::time::Instant::now();
-
+    // Keep the timer boundary before pipeline execution to preserve existing
+    // ingestion elapsed metrics.
+    let exec_timer = Instant::now();
     let mut req = ContextReq::default();
 
     let pipeline_ctx = PipelineContext::new(&pipeline, &pipeline_params, query_ctx.channel());
@@ -933,10 +965,31 @@ pub(crate) async fn ingest_logs_inner(
         req.merge(requests);
     }
 
-    let mut outputs = Vec::new();
+    execute_log_context_req(
+        handler,
+        req,
+        query_ctx,
+        exec_timer,
+        &METRIC_HTTP_LOGS_INGESTION_COUNTER,
+        &METRIC_HTTP_LOGS_INGESTION_ELAPSED,
+    )
+    .await
+}
+
+pub(crate) async fn execute_log_context_req(
+    handler: PipelineHandlerRef,
+    ctx_req: ContextReq,
+    query_ctx: QueryContextRef,
+    exec_timer: Instant,
+    counter: &IntCounterVec,
+    elapsed: &HistogramVec,
+) -> Result<HttpResponse> {
+    let db = query_ctx.get_db_string();
+
+    let mut outputs = Vec::with_capacity(ctx_req.map_len());
     let mut total_rows: u64 = 0;
     let mut fail = false;
-    for (temp_ctx, act_req) in req.as_req_iter(query_ctx) {
+    for (temp_ctx, act_req) in ctx_req.as_req_iter(query_ctx) {
         let output = handler.insert(act_req, temp_ctx).await;
 
         if let Ok(Output {
@@ -951,16 +1004,15 @@ pub(crate) async fn ingest_logs_inner(
         outputs.push(output);
     }
 
+    // Record one aggregate metric sample for the whole ingestion request.
     if total_rows > 0 {
-        METRIC_HTTP_LOGS_INGESTION_COUNTER
-            .with_label_values(&[db.as_str()])
-            .inc_by(total_rows);
-        METRIC_HTTP_LOGS_INGESTION_ELAPSED
+        counter.with_label_values(&[db.as_str()]).inc_by(total_rows);
+        elapsed
             .with_label_values(&[db.as_str(), METRIC_SUCCESS_VALUE])
             .observe(exec_timer.elapsed().as_secs_f64());
     }
     if fail {
-        METRIC_HTTP_LOGS_INGESTION_ELAPSED
+        elapsed
             .with_label_values(&[db.as_str(), METRIC_FAILURE_VALUE])
             .observe(exec_timer.elapsed().as_secs_f64());
     }

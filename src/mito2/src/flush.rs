@@ -23,6 +23,7 @@ use std::time::Instant;
 use bytes::Bytes;
 use common_telemetry::{debug, error, info};
 use datatypes::arrow::datatypes::SchemaRef;
+use datatypes::extension::json::is_structured_json_field;
 use partition::expr::PartitionExpr;
 use smallvec::{SmallVec, smallvec};
 use snafu::ResultExt;
@@ -36,12 +37,14 @@ use crate::access_layer::{
 };
 use crate::cache::CacheManagerRef;
 use crate::config::MitoConfig;
+use crate::engine::region_hook::SstFileInfo;
 use crate::error::{
     Error, FlushRegionSnafu, JoinSnafu, RegionClosedSnafu, RegionDroppedSnafu,
     RegionTruncatedSnafu, Result,
 };
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
 use crate::memtable::bulk::ENCODE_ROW_THRESHOLD;
+use crate::memtable::bulk::json_align::Json2Aligner;
 use crate::memtable::{BoxedRecordBatchIterator, EncodedRange, MemtableRanges, RangesOptions};
 use crate::metrics::{
     FLUSH_BYTES_TOTAL, FLUSH_ELAPSED, FLUSH_FAILURE_TOTAL, FLUSH_FILE_TOTAL, FLUSH_REQUESTS_TOTAL,
@@ -386,6 +389,7 @@ impl RegionFlushTask {
             series_count,
             encoded_part_count,
             flush_metrics,
+            sst_infos,
         } = self.do_flush_memtables(version, write_opts).await?;
 
         if !file_metas.is_empty() {
@@ -413,6 +417,20 @@ impl RegionFlushTask {
             flush_metrics,
         );
         flush_metrics.observe();
+
+        let hook = self.manifest_ctx.hook();
+        if let Some(hook) = &hook {
+            let files: Vec<SstFileInfo<'_>> = sst_infos
+                .iter()
+                .zip(file_metas.iter())
+                .map(|(sst_info, file_meta)| SstFileInfo {
+                    sst_info_ref: sst_info,
+                    file_meta,
+                })
+                .collect();
+            hook.on_sst_files_written(self.region_id, &version.metadata, &files)
+                .await;
+        }
 
         let edit = RegionEdit {
             files_to_add: file_metas,
@@ -444,12 +462,12 @@ impl RegionFlushTask {
         };
         // We will leak files if the manifest update fails, but we ignore them for simplicity. We can
         // add a cleanup job to remove them later.
-        let version = self
+        let manifest_version = self
             .manifest_ctx
             .update_manifest(expected_state, action_list, self.is_staging)
             .await?;
         info!(
-            "Successfully update manifest version to {version}, region: {}, is_staging: {}, reason: {}",
+            "Successfully update manifest version to {manifest_version}, region: {}, is_staging: {}, reason: {}",
             self.region_id,
             self.is_staging,
             self.reason.as_str()
@@ -470,6 +488,8 @@ impl RegionFlushTask {
         let mut encoded_part_count = 0;
         let mut flush_metrics = Metrics::new(WriteType::Flush);
         let partition_expr = parse_partition_expr(self.partition_expr.as_deref())?;
+        let hook = self.manifest_ctx.hook();
+        let mut all_sst_infos = Vec::new();
         for mem in memtables {
             if mem.is_empty() {
                 // Skip empty memtables.
@@ -523,7 +543,7 @@ impl RegionFlushTask {
 
                 flush_metrics = flush_metrics.merge(metrics);
 
-                for sst_info in ssts_written {
+                for sst_info in &ssts_written {
                     flushed_bytes += sst_info.file_size;
                     let pk_range = sst_info
                         .file_metadata
@@ -536,6 +556,9 @@ impl RegionFlushTask {
                         partition_expr.clone(),
                         pk_range,
                     ));
+                }
+                if hook.is_some() {
+                    all_sst_infos.extend(ssts_written);
                 }
             }
 
@@ -558,6 +581,7 @@ impl RegionFlushTask {
             series_count,
             encoded_part_count,
             flush_metrics,
+            sst_infos: all_sst_infos,
         })
     }
 
@@ -626,7 +650,7 @@ impl RegionFlushTask {
     fn new_file_meta(
         region_id: RegionId,
         max_sequence: u64,
-        sst_info: SstInfo,
+        sst_info: &SstInfo,
         partition_expr: Option<PartitionExpr>,
         primary_key_range: Option<(Bytes, Bytes)>,
     ) -> FileMeta {
@@ -722,6 +746,7 @@ struct DoFlushMemtablesResult {
     series_count: usize,
     encoded_part_count: usize,
     flush_metrics: Metrics,
+    sst_infos: Vec<SstInfo>,
 }
 
 struct FlatSources {
@@ -782,11 +807,27 @@ fn memtable_flat_sources(
         let num_ranges = ranges.len();
         let mut input_iters = Vec::with_capacity(num_ranges);
         let mut current_ranges = Vec::new();
+
+        let has_json2 = schema.fields().iter().any(is_structured_json_field);
+        let mut json_align_schemas = if has_json2 {
+            Some(Vec::with_capacity(num_ranges))
+        } else {
+            None
+        };
+
         for (_range_id, range) in ranges {
             if let Some(encoded) = range.encoded() {
                 let max_sequence = range.stats().max_sequence();
                 flat_sources.encoded.push((encoded, max_sequence));
                 continue;
+            }
+
+            // Collect schemas if has json2 field.
+            if let Some(schemas) = json_align_schemas.as_mut() {
+                let schema = range
+                    .record_batch_schema_hint()
+                    .unwrap_or_else(|| schema.clone());
+                schemas.push(schema);
             }
 
             let iter = range.build_record_batch_iter(None, None)?;
@@ -816,20 +857,33 @@ fn memtable_flat_sources(
                     .max()
                     .unwrap_or(0);
 
+                let input_iters =
+                    std::mem::replace(&mut input_iters, Vec::with_capacity(num_ranges));
+                let (schema, input_iters) = maybe_align_json2_iters(
+                    schema.clone(),
+                    json_align_schemas.take(),
+                    input_iters,
+                )?;
+
                 let maybe_dedup = merge_and_dedup(
                     &schema,
                     options.append_mode,
                     options.merge_mode(),
                     field_column_start,
-                    std::mem::replace(&mut input_iters, Vec::with_capacity(num_ranges)),
+                    input_iters,
                 )?;
 
-                flat_sources.sources.push((
-                    FlatSource::new_iter(schema.clone(), maybe_dedup),
-                    max_sequence,
-                ));
+                flat_sources
+                    .sources
+                    .push((FlatSource::new_iter(schema, maybe_dedup), max_sequence));
                 last_iter_rows = 0;
                 current_ranges.clear();
+
+                json_align_schemas = if has_json2 {
+                    Some(Vec::with_capacity(num_ranges))
+                } else {
+                    None
+                };
             }
         }
 
@@ -842,6 +896,10 @@ fn memtable_flat_sources(
                 input_iters.len(),
                 rows_remaining
             );
+
+            let (schema, input_iters) =
+                maybe_align_json2_iters(schema, json_align_schemas, input_iters)?;
+
             let max_sequence = current_ranges
                 .iter()
                 .map(|r| r.stats().max_sequence())
@@ -863,6 +921,24 @@ fn memtable_flat_sources(
     }
 
     Ok(flat_sources)
+}
+
+fn maybe_align_json2_iters(
+    schema: SchemaRef,
+    schemas: Option<Vec<SchemaRef>>,
+    input_iters: Vec<BoxedRecordBatchIterator>,
+) -> Result<(SchemaRef, Vec<BoxedRecordBatchIterator>)> {
+    let Some(schemas) = schemas else {
+        return Ok((schema, input_iters));
+    };
+
+    let aligner = Json2Aligner::try_new(schemas)?;
+    let input_iters = input_iters
+        .into_iter()
+        .map(|input_iter| aligner.wrap_iter(input_iter))
+        .collect();
+
+    Ok((aligner.schema().clone(), input_iters))
 }
 
 /// Merges multiple record batch iterators and applies deduplication based on the specified mode.

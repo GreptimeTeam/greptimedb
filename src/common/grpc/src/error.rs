@@ -15,7 +15,7 @@
 use std::any::Any;
 use std::io;
 
-use common_error::ext::ErrorExt;
+use common_error::ext::{ErrorExt, RetryHint, retry_hint_from_io_error};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use datatypes::arrow::error::ArrowError;
@@ -132,5 +132,21 @@ impl ErrorExt for Error {
 
     fn as_any(&self) -> &dyn Any {
         self
+    }
+
+    fn retry_hint(&self) -> RetryHint {
+        match self {
+            Error::CreateChannel { .. } => RetryHint::Retryable,
+            Error::Arrow { error, .. } => retry_hint_from_arrow_error(error),
+            Error::FileWatch { source, .. } => source.retry_hint(),
+            _ => RetryHint::NonRetryable,
+        }
+    }
+}
+
+fn retry_hint_from_arrow_error(error: &ArrowError) -> RetryHint {
+    match error {
+        ArrowError::IoError(_, error) => retry_hint_from_io_error(error),
+        _ => RetryHint::NonRetryable,
     }
 }

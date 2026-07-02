@@ -16,6 +16,8 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::{Display, Formatter};
 use std::time::Duration;
 
+use common_error::ext::{ErrorExt, RetryHint};
+use common_error::status_code::StatusCode;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use store_api::region_engine::SyncRegionFromRequest;
 use store_api::region_request::{RegionFlushReason, RegionRequirements};
@@ -28,7 +30,96 @@ use crate::flow_name::FlowName;
 use crate::key::schema_name::SchemaName;
 use crate::key::{FlowId, FlowPartitionId};
 use crate::peer::Peer;
+use crate::wal_provider::{RegionWalOptions, region_wal_options_serde};
 use crate::{DatanodeId, FlownodeId};
+
+/// A structured error returned by instruction replies.
+#[derive(Debug, Serialize, PartialEq, Eq, Clone)]
+pub struct InstructionError {
+    /// Numeric status code aligned with [`StatusCode`].
+    #[serde(
+        serialize_with = "StatusCode::serialize_as_u32",
+        deserialize_with = "StatusCode::deserialize_from_u32"
+    )]
+    pub code: StatusCode,
+    /// User-facing error message aligned with [`ErrorExt::output_msg`].
+    pub message: String,
+    /// Retry hint serialized as a string.
+    #[serde(
+        serialize_with = "RetryHint::serialize_as_str",
+        deserialize_with = "RetryHint::deserialize_from_str"
+    )]
+    pub retry_hint: RetryHint,
+}
+
+impl<'de> Deserialize<'de> for InstructionError {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Compat {
+            Structured {
+                #[serde(deserialize_with = "StatusCode::deserialize_from_u32")]
+                code: StatusCode,
+                message: String,
+                #[serde(deserialize_with = "RetryHint::deserialize_from_str")]
+                retry_hint: RetryHint,
+            },
+            Legacy(String),
+        }
+
+        match Compat::deserialize(deserializer)? {
+            Compat::Structured {
+                code,
+                message,
+                retry_hint,
+            } => Ok(Self {
+                code,
+                message,
+                retry_hint,
+            }),
+            Compat::Legacy(message) => Ok(Self::legacy_internal_retryable(message)),
+        }
+    }
+}
+
+impl InstructionError {
+    pub fn new(code: StatusCode, message: impl Into<String>, retry_hint: RetryHint) -> Self {
+        Self {
+            code,
+            message: message.into(),
+            retry_hint,
+        }
+    }
+
+    pub fn legacy_internal_retryable(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::Internal, message, RetryHint::Retryable)
+    }
+
+    pub fn from_error<E: ErrorExt>(error: &E) -> Self {
+        Self {
+            code: error.status_code(),
+            message: error.output_msg(),
+            retry_hint: error.retry_hint(),
+        }
+    }
+}
+
+impl Display for InstructionError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "InstructionError(code={}, retry_hint={}, message={})",
+            self.code as u32,
+            self.retry_hint.as_str(),
+            self.message
+        )
+    }
+}
+
+pub type InstructionResult<T> = std::result::Result<T, InstructionError>;
 
 #[derive(Eq, Hash, PartialEq, Clone, Debug, Serialize, Deserialize)]
 pub struct RegionIdent {
@@ -68,7 +159,7 @@ pub struct DowngradeRegionReply {
     /// Indicates whether the region exists.
     pub exists: bool,
     /// Return error if any during the operation.
-    pub error: Option<String>,
+    pub error: Option<InstructionError>,
 }
 
 impl Display for DowngradeRegionReply {
@@ -84,7 +175,7 @@ impl Display for DowngradeRegionReply {
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
 pub struct SimpleReply {
     pub result: bool,
-    pub error: Option<String>,
+    pub error: Option<InstructionError>,
 }
 
 /// Reply for flush region operations with support for batch results.
@@ -93,7 +184,7 @@ pub struct FlushRegionReply {
     /// Results for each region that was attempted to be flushed.
     /// For single region flushes, this will contain one result.
     /// For batch flushes, this contains results for all attempted regions.
-    pub results: Vec<(RegionId, Result<(), String>)>,
+    pub results: Vec<(RegionId, InstructionResult<()>)>,
     /// Overall success: true if all regions were flushed successfully.
     pub overall_success: bool,
 }
@@ -108,7 +199,7 @@ impl FlushRegionReply {
     }
 
     /// Create a failed single region reply.
-    pub fn error_single(region_id: RegionId, error: String) -> Self {
+    pub fn error_single(region_id: RegionId, error: InstructionError) -> Self {
         Self {
             results: vec![(region_id, Err(error))],
             overall_success: false,
@@ -116,7 +207,7 @@ impl FlushRegionReply {
     }
 
     /// Create a batch reply from individual results.
-    pub fn from_results(results: Vec<(RegionId, Result<(), String>)>) -> Self {
+    pub fn from_results(results: Vec<(RegionId, InstructionResult<()>)>) -> Self {
         let overall_success = results.iter().all(|(_, result)| result.is_ok());
         Self {
             results,
@@ -144,7 +235,9 @@ impl FlushRegionReply {
                 .collect();
             SimpleReply {
                 result: false,
-                error: Some(errors.join("; ")),
+                error: Some(InstructionError::legacy_internal_retryable(
+                    errors.join("; "),
+                )),
             }
         }
     }
@@ -204,8 +297,8 @@ pub struct OpenRegion {
     pub region_storage_path: String,
     pub region_options: HashMap<String, String>,
     #[serde(default)]
-    #[serde_as(as = "HashMap<serde_with::DisplayFromStr, _>")]
-    pub region_wal_options: HashMap<RegionNumber, String>,
+    #[serde(with = "region_wal_options_serde")]
+    pub region_wal_options: RegionWalOptions,
     #[serde(default)]
     pub skip_wal_replay: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -219,7 +312,7 @@ impl OpenRegion {
         region_ident: RegionIdent,
         path: &str,
         region_options: HashMap<String, String>,
-        region_wal_options: HashMap<RegionNumber, String>,
+        region_wal_options: RegionWalOptions,
         skip_wal_replay: bool,
         reason: Option<OpenRegionReason>,
         requirements: RegionRequirements,
@@ -517,7 +610,7 @@ pub struct GetFileRefsReply {
     /// Whether the operation was successful.
     pub success: bool,
     /// Error message if any.
-    pub error: Option<String>,
+    pub error: Option<InstructionError>,
 }
 
 impl Display for GetFileRefsReply {
@@ -535,7 +628,7 @@ impl Display for GetFileRefsReply {
 /// Reply for GC instruction.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct GcRegionsReply {
-    pub result: Result<GcReport, String>,
+    pub result: InstructionResult<GcReport>,
 }
 
 impl Display for GcRegionsReply {
@@ -831,7 +924,7 @@ pub struct UpgradeRegionReply {
     /// Indicates whether the region exists.
     pub exists: bool,
     /// Returns error if any.
-    pub error: Option<String>,
+    pub error: Option<InstructionError>,
 }
 
 impl Display for UpgradeRegionReply {
@@ -918,7 +1011,7 @@ pub struct EnterStagingRegionReply {
     /// Indicates whether the region exists.
     pub exists: bool,
     /// Return error if any during the operation.
-    pub error: Option<String>,
+    pub error: Option<InstructionError>,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
@@ -942,7 +1035,7 @@ pub struct SyncRegionReply {
     /// Indicates whether the region exists.
     pub exists: bool,
     /// Return error message if any during the operation.
-    pub error: Option<String>,
+    pub error: Option<InstructionError>,
 }
 
 /// Reply for a batch of region sync requests.
@@ -964,7 +1057,7 @@ pub struct RemapManifestReply {
     /// A map from region IDs to their corresponding remapped manifest paths.
     pub manifest_paths: HashMap<RegionId, String>,
     /// Return error if any during the operation.
-    pub error: Option<String>,
+    pub error: Option<InstructionError>,
 }
 
 impl Display for RemapManifestReply {
@@ -996,7 +1089,7 @@ pub struct ApplyStagingManifestReply {
     /// Indicates whether the region exists.
     pub exists: bool,
     /// Return error if any during the operation.
-    pub error: Option<String>,
+    pub error: Option<InstructionError>,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
@@ -1129,9 +1222,75 @@ impl InstructionReply {
 mod tests {
     use std::collections::HashSet;
 
+    use common_error::mock::MockError;
+    use common_wal::options::WalOptions;
     use store_api::storage::{FileId, FileRef};
 
     use super::*;
+
+    #[test]
+    fn test_instruction_error_serde() {
+        let error = InstructionError::new(
+            StatusCode::RegionNotFound,
+            "region not found",
+            RetryHint::Retryable,
+        );
+
+        let serialized = serde_json::to_string(&error).unwrap();
+        assert_eq!(
+            r#"{"code":4005,"message":"region not found","retry_hint":"retryable"}"#,
+            serialized
+        );
+
+        let deserialized: InstructionError = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(error, deserialized);
+
+        assert!(
+            serde_json::from_str::<InstructionError>(
+                r#"{"code":999999,"message":"unknown","retry_hint":"retryable"}"#
+            )
+            .is_err()
+        );
+        assert!(
+            serde_json::from_str::<InstructionError>(
+                r#"{"code":4005,"message":"unknown","retry_hint":"unknown"}"#
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn test_instruction_error_from_error() {
+        let error = MockError::new(StatusCode::RegionNotFound);
+
+        let instruction_error = InstructionError::from_error(&error);
+
+        assert_eq!(StatusCode::RegionNotFound, instruction_error.code);
+        assert_eq!("RegionNotFound", instruction_error.message);
+        assert_eq!(RetryHint::NonRetryable, instruction_error.retry_hint);
+    }
+
+    #[test]
+    fn test_instruction_result_serde() {
+        let success: InstructionResult<bool> = Ok(true);
+        let serialized = serde_json::to_string(&success).unwrap();
+        assert_eq!(r#"{"Ok":true}"#, serialized);
+        let deserialized: InstructionResult<bool> = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(success, deserialized);
+
+        let failure: InstructionResult<bool> = Err(InstructionError::new(
+            StatusCode::RegionBusy,
+            "region busy",
+            RetryHint::Retryable,
+        ));
+        let serialized = serde_json::to_string(&failure).unwrap();
+        assert_eq!(
+            r#"{"Err":{"code":4009,"message":"region busy","retry_hint":"retryable"}}"#,
+            serialized
+        );
+        let deserialized: InstructionResult<bool> = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(failure, deserialized);
+    }
 
     #[test]
     fn test_serialize_instruction() {
@@ -1399,6 +1558,18 @@ mod tests {
     }
 
     #[test]
+    fn test_deserialize_open_region_with_legacy_region_wal_options() {
+        let open_region = r#"{"region_ident":{"datanode_id":2,"table_id":1024,"region_number":1,"engine":"mito2"},"region_storage_path":"test/foo","region_options":{},"region_wal_options":{"1":"{\"wal.provider\":\"raft_engine\"}"},"skip_wal_replay":false}"#;
+
+        let open_region: OpenRegion = serde_json::from_str(open_region).unwrap();
+
+        assert_eq!(
+            open_region.region_wal_options,
+            HashMap::from([(1, WalOptions::RaftEngine)])
+        );
+    }
+
+    #[test]
     fn test_serialize_open_region_with_reason_and_requirements() {
         let open_region = OpenRegion::new(
             RegionIdent {
@@ -1502,7 +1673,10 @@ mod tests {
         assert!(success_reply.results[0].1.is_ok());
 
         // Failed single region reply
-        let error_reply = FlushRegionReply::error_single(region_id, "test error".to_string());
+        let error_reply = FlushRegionReply::error_single(
+            region_id,
+            InstructionError::legacy_internal_retryable("test error"),
+        );
         assert!(!error_reply.overall_success);
         assert_eq!(error_reply.results.len(), 1);
         assert_eq!(error_reply.results[0].0, region_id);
@@ -1512,7 +1686,10 @@ mod tests {
         let region_id2 = RegionId::new(1024, 2);
         let results = vec![
             (region_id, Ok(())),
-            (region_id2, Err("flush failed".to_string())),
+            (
+                region_id2,
+                Err(InstructionError::legacy_internal_retryable("flush failed")),
+            ),
         ];
         let batch_reply = FlushRegionReply::from_results(results);
         assert!(!batch_reply.overall_success);
@@ -1522,7 +1699,7 @@ mod tests {
         let simple_reply = batch_reply.to_simple_reply();
         assert!(!simple_reply.result);
         assert!(simple_reply.error.is_some());
-        assert!(simple_reply.error.unwrap().contains("flush failed"));
+        assert!(simple_reply.error.unwrap().message.contains("flush failed"));
     }
 
     #[test]

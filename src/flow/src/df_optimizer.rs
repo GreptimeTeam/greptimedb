@@ -62,7 +62,13 @@ pub async fn apply_df_optimizer(
             context: "Fail to apply analyzer",
         })?;
 
-    let ctx = OptimizerContext::new();
+    let mut ctx = OptimizerContext::new();
+    let scheduled_time = query::options::parse_scheduled_time_datetime(&query_ctx.extensions())
+        .map_err(BoxedError::new)
+        .context(ExternalSnafu)?;
+    if let Some(dt) = scheduled_time {
+        ctx = ctx.with_query_execution_start_time(dt);
+    }
     let optimizer = Optimizer::with_rules(vec![
         Arc::new(OptimizeProjections::new()),
         Arc::new(CommonSubexprEliminate::new()),

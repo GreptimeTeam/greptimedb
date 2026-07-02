@@ -22,7 +22,7 @@ use api::v1::meta::CreateFlowTask as PbCreateFlowTask;
 use api::v1::repartition::Source;
 use api::v1::{
     AlterDatabaseExpr, AlterTableExpr, CreateFlowExpr, CreateTableExpr, CreateViewExpr,
-    PartitionExprs, Repartition, UnpartitionedSource, column_def,
+    PartitionedSource, Repartition, TargetPartitionColumns, UnpartitionedSource, column_def,
 };
 #[cfg(feature = "enterprise")]
 use api::v1::{
@@ -89,7 +89,8 @@ use table::TableRef;
 use table::dist_table::DistTable;
 use table::metadata::{self, TableId, TableInfo, TableMeta, TableType};
 use table::requests::{
-    AlterKind, AlterTableRequest, COMMENT_KEY, DDL_TIMEOUT, DDL_WAIT, TableOptions,
+    AlterKind, AlterTableRequest, COMMENT_KEY, DDL_TIMEOUT, DDL_WAIT, REPARTITION_COLUMN_HINT_KEY,
+    TableOptions,
 };
 use table::table_name::TableName;
 use table::table_reference::TableReference;
@@ -180,7 +181,18 @@ fn normalize_flow_bool_option(key: &str, value: &str) -> Result<String> {
 
 fn validate_and_normalize_flow_options(
     options: HashMap<String, String>,
+    eval_interval: Option<i64>,
 ) -> Result<HashMap<String, String>> {
+    // Reject non-positive eval_interval (zero or negative).
+    if let Some(secs) = eval_interval
+        && secs <= 0
+    {
+        return InvalidSqlSnafu {
+            err_msg: format!("EVAL INTERVAL must be positive, got {secs} seconds"),
+        }
+        .fail();
+    }
+
     options
         .into_iter()
         .map(|(key, value)| {
@@ -721,7 +733,20 @@ impl StatementExecutor {
         mut expr: CreateFlowExpr,
         query_context: QueryContextRef,
     ) -> Result<SubmitDdlTaskResponse> {
-        expr.flow_options = validate_and_normalize_flow_options(expr.flow_options)?;
+        let eval_interval_secs = expr.eval_interval.as_ref().map(|e| e.seconds);
+
+        // Reject non-positive eval_interval (zero or negative).
+        if let Some(secs) = eval_interval_secs
+            && secs <= 0
+        {
+            return InvalidSqlSnafu {
+                err_msg: format!("EVAL INTERVAL must be positive, got {secs} seconds"),
+            }
+            .fail();
+        }
+
+        expr.flow_options =
+            validate_and_normalize_flow_options(expr.flow_options, eval_interval_secs)?;
 
         let flow_type = self
             .determine_flow_type(&expr, query_context.clone())
@@ -1517,8 +1542,17 @@ impl StatementExecutor {
 
         let table_info = table.table_info();
         let existing_partition_columns = table_info.meta.partition_columns().collect::<Vec<_>>();
-        let partition_columns = match &request.source {
-            RepartitionSource::Partitions { .. } => {
+        let column_schemas = table_info.meta.schema.column_schemas();
+        // `REPARTITION ... ON COLUMNS` uses overwrite semantics: the provided
+        // columns are the full target partition columns, not an extension of the
+        // current ones. Therefore source expressions are converted with the
+        // existing partition columns, while target expressions and the final
+        // partition rule are validated against this effective target column set.
+        let target_partition_columns = match &request.source {
+            RepartitionSource::Partitions {
+                target_partition_columns,
+                ..
+            } => {
                 ensure!(
                     !existing_partition_columns.is_empty(),
                     InvalidPartitionRuleSnafu {
@@ -1528,7 +1562,21 @@ impl StatementExecutor {
                         )
                     }
                 );
-                existing_partition_columns
+
+                if let Some(target_partition_columns) = target_partition_columns {
+                    ensure!(
+                        !target_partition_columns.is_empty(),
+                        InvalidPartitionRuleSnafu {
+                            reason: "ON COLUMNS requires at least one partition column"
+                        }
+                    );
+                    validate_and_collect_partition_columns(
+                        target_partition_columns,
+                        column_schemas,
+                    )?
+                } else {
+                    existing_partition_columns.clone()
+                }
             }
             RepartitionSource::Unpartitioned { partition_columns } => {
                 ensure!(
@@ -1543,7 +1591,6 @@ impl StatementExecutor {
                         reason: format!("table {} already has partition columns", table_ref)
                     }
                 );
-                let column_schemas = table_info.meta.schema.column_schemas();
                 partition_columns
                     .iter()
                     .map(|column_name| {
@@ -1556,16 +1603,18 @@ impl StatementExecutor {
             }
         };
 
-        let column_name_and_type = partition_columns
+        let from_column_name_and_type = column_name_and_type(&existing_partition_columns);
+        let target_column_name_and_type = column_name_and_type(&target_partition_columns);
+        let target_partition_column_names = target_partition_columns
             .iter()
-            .map(|column| (&column.name, column.data_type.clone()))
-            .collect();
+            .map(|column| column.name.clone())
+            .collect::<Vec<_>>();
         let timezone = query_context.timezone();
         // Convert SQL Exprs to PartitionExprs.
         let from_partition_exprs = match &request.source {
-            RepartitionSource::Partitions { from_exprs } => from_exprs
+            RepartitionSource::Partitions { from_exprs, .. } => from_exprs
                 .iter()
-                .map(|expr| convert_one_expr(expr, &column_name_and_type, &timezone))
+                .map(|expr| convert_one_expr(expr, &from_column_name_and_type, &timezone))
                 .collect::<Result<Vec<_>>>()?,
             RepartitionSource::Unpartitioned { .. } => vec![],
         };
@@ -1573,7 +1622,7 @@ impl StatementExecutor {
         let mut into_partition_exprs = request
             .into_exprs
             .iter()
-            .map(|expr| convert_one_expr(expr, &column_name_and_type, &timezone))
+            .map(|expr| convert_one_expr(expr, &target_column_name_and_type, &timezone))
             .collect::<Result<Vec<_>>>()?;
 
         // `MERGE PARTITION` (and some `REPARTITION`) generates a single `OR` expression from
@@ -1630,12 +1679,16 @@ impl StatementExecutor {
                 .collect(),
             RepartitionSource::Unpartitioned { .. } => into_partition_exprs.clone(),
         };
+        ensure_partition_expr_columns_in_target(
+            &new_partition_exprs,
+            &target_partition_column_names.iter().collect(),
+        )?;
         let new_partition_exprs_len = new_partition_exprs.len();
         let from_partition_exprs_len = from_partition_exprs.len();
 
         // Validate the new partition expressions using MultiDimPartitionRule and PartitionChecker.
         let _ = MultiDimPartitionRule::try_new(
-            partition_columns.iter().map(|c| c.name.clone()).collect(),
+            target_partition_column_names,
             vec![],
             new_partition_exprs,
             true,
@@ -1653,8 +1706,14 @@ impl StatementExecutor {
         let from_partition_exprs_json = serialize_exprs(from_partition_exprs)?;
         let into_partition_exprs_json = serialize_exprs(into_partition_exprs)?;
         let source = match &request.source {
-            RepartitionSource::Partitions { .. } => Source::PartitionExprs(PartitionExprs {
+            RepartitionSource::Partitions {
+                target_partition_columns,
+                ..
+            } => Source::PartitionExprs(PartitionedSource {
                 exprs: from_partition_exprs_json,
+                target_partition_columns: target_partition_columns
+                    .clone()
+                    .map(|columns| TargetPartitionColumns { columns }),
             }),
             RepartitionSource::Unpartitioned { partition_columns } => {
                 Source::Unpartitioned(UnpartitionedSource {
@@ -2266,8 +2325,15 @@ pub fn create_table_info(
         })
         .collect::<Result<Vec<_>>>()?;
 
-    let table_options = TableOptions::try_from_iter(&create_table.table_options)
+    let mut table_options = TableOptions::try_from_iter(&create_table.table_options)
         .context(UnrecognizedTableOptionSnafu)?;
+
+    validate_repartition_column_hint(
+        &mut table_options,
+        &column_name_to_index_map,
+        &partition_key_indices,
+        &create_table.time_index,
+    )?;
 
     let meta = TableMeta {
         schema,
@@ -2302,6 +2368,61 @@ pub fn create_table_info(
         table_type: TableType::Base,
     };
     Ok(table_info)
+}
+
+fn validate_repartition_column_hint(
+    table_options: &mut TableOptions,
+    column_name_to_index_map: &HashMap<String, usize>,
+    partition_key_indices: &[usize],
+    time_index: &str,
+) -> Result<()> {
+    let Some(column_name) = table_options
+        .extra_options
+        .get(REPARTITION_COLUMN_HINT_KEY)
+        .map(|value| value.trim().to_string())
+    else {
+        return Ok(());
+    };
+
+    ensure!(
+        !column_name.is_empty(),
+        InvalidPartitionRuleSnafu {
+            reason: format!("{REPARTITION_COLUMN_HINT_KEY} expects exactly one column name"),
+        }
+    );
+
+    ensure!(
+        !column_name.contains(','),
+        InvalidPartitionRuleSnafu {
+            reason: format!("{REPARTITION_COLUMN_HINT_KEY} expects exactly one column name"),
+        }
+    );
+
+    ensure!(
+        partition_key_indices.is_empty(),
+        InvalidPartitionRuleSnafu {
+            reason: format!(
+                "cannot set {REPARTITION_COLUMN_HINT_KEY} on a table with partition metadata"
+            ),
+        }
+    );
+
+    column_name_to_index_map
+        .get(&column_name)
+        .context(ColumnNotFoundSnafu { msg: &column_name })?;
+
+    ensure!(
+        column_name != time_index,
+        InvalidPartitionRuleSnafu {
+            reason: format!("cannot set {REPARTITION_COLUMN_HINT_KEY} to the time index column"),
+        }
+    );
+
+    table_options
+        .extra_options
+        .insert(REPARTITION_COLUMN_HINT_KEY.to_string(), column_name);
+
+    Ok(())
 }
 
 fn find_partition_columns(partitions: &Option<Partitions>) -> Result<Vec<String>> {
@@ -2358,6 +2479,73 @@ fn find_partition_entries(
     }
 
     Ok(partition_exprs)
+}
+
+fn column_name_and_type<'a>(
+    partition_columns: &'a [&'a ColumnSchema],
+) -> HashMap<&'a String, ConcreteDataType> {
+    partition_columns
+        .iter()
+        .map(|column| (&column.name, column.data_type.clone()))
+        .collect()
+}
+
+fn validate_and_collect_partition_columns<'a>(
+    column_names: &[String],
+    column_schemas: &'a [ColumnSchema],
+) -> Result<Vec<&'a ColumnSchema>> {
+    let mut seen = HashSet::with_capacity(column_names.len());
+    column_names
+        .iter()
+        .map(|column_name| {
+            ensure!(
+                seen.insert(column_name),
+                InvalidPartitionRuleSnafu {
+                    reason: format!("duplicate partition column '{}'", column_name)
+                }
+            );
+            column_schemas
+                .iter()
+                .find(|column| &column.name == column_name)
+                .with_context(|| ColumnNotFoundSnafu { msg: column_name })
+        })
+        .collect()
+}
+
+fn ensure_partition_expr_columns_in_target(
+    partition_exprs: &[PartitionExpr],
+    target_partition_columns: &HashSet<&String>,
+) -> Result<()> {
+    for expr in partition_exprs {
+        ensure_partition_operand_columns_in_target(&expr.lhs, target_partition_columns)?;
+        ensure_partition_operand_columns_in_target(&expr.rhs, target_partition_columns)?;
+    }
+
+    Ok(())
+}
+
+fn ensure_partition_operand_columns_in_target(
+    operand: &Operand,
+    target_partition_columns: &HashSet<&String>,
+) -> Result<()> {
+    match operand {
+        Operand::Column(column) => ensure!(
+            target_partition_columns.contains(column),
+            InvalidPartitionRuleSnafu {
+                reason: format!(
+                    "partition expression references column '{}' that is not in target partition columns",
+                    column
+                )
+            }
+        ),
+        Operand::Expr(expr) => {
+            ensure_partition_operand_columns_in_target(&expr.lhs, target_partition_columns)?;
+            ensure_partition_operand_columns_in_target(&expr.rhs, target_partition_columns)?;
+        }
+        Operand::Value(_) => {}
+    }
+
+    Ok(())
 }
 
 fn convert_one_expr(
@@ -2477,7 +2665,7 @@ mod test {
     #[test]
     fn test_validate_and_normalize_flow_options_empty() {
         assert!(
-            validate_and_normalize_flow_options(HashMap::new())
+            validate_and_normalize_flow_options(HashMap::new(), None)
                 .unwrap()
                 .is_empty()
         );
@@ -2494,7 +2682,7 @@ mod test {
         ]);
 
         assert_eq!(
-            validate_and_normalize_flow_options(options).unwrap(),
+            validate_and_normalize_flow_options(options, None).unwrap(),
             HashMap::from([
                 (DEFER_ON_MISSING_SOURCE_KEY.to_string(), "true".to_string(),),
                 (
@@ -2507,24 +2695,27 @@ mod test {
 
     #[test]
     fn test_validate_and_normalize_flow_options_unknown_option() {
-        let err = validate_and_normalize_flow_options(HashMap::from([(
-            "foo".to_string(),
-            "bar".to_string(),
-        )]))
+        let err = validate_and_normalize_flow_options(
+            HashMap::from([("foo".to_string(), "bar".to_string())]),
+            None,
+        )
         .unwrap_err();
 
         assert!(
             err.to_string()
-                .contains("unknown flow option 'foo', supported options: defer_on_missing_source, experimental_enable_incremental_read")
+                .contains("unknown flow option 'foo', supported options:")
         );
     }
 
     #[test]
     fn test_validate_and_normalize_flow_options_reserved_option() {
-        let err = validate_and_normalize_flow_options(HashMap::from([(
-            FlowType::FLOW_TYPE_KEY.to_string(),
-            FlowType::BATCHING.to_string(),
-        )]))
+        let err = validate_and_normalize_flow_options(
+            HashMap::from([(
+                FlowType::FLOW_TYPE_KEY.to_string(),
+                FlowType::BATCHING.to_string(),
+            )]),
+            None,
+        )
         .unwrap_err();
 
         assert!(
@@ -2535,10 +2726,13 @@ mod test {
 
     #[test]
     fn test_validate_and_normalize_flow_options_invalid_bool() {
-        let err = validate_and_normalize_flow_options(HashMap::from([(
-            DEFER_ON_MISSING_SOURCE_KEY.to_string(),
-            "not-a-bool".to_string(),
-        )]))
+        let err = validate_and_normalize_flow_options(
+            HashMap::from([(
+                DEFER_ON_MISSING_SOURCE_KEY.to_string(),
+                "not-a-bool".to_string(),
+            )]),
+            None,
+        )
         .unwrap_err();
 
         assert!(
@@ -2566,11 +2760,53 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;";
         };
         let expr =
             expr_helper::to_create_flow_task_expr(create_flow, &QueryContext::arc()).unwrap();
-        let err = validate_and_normalize_flow_options(expr.flow_options).unwrap_err();
+        let err = validate_and_normalize_flow_options(expr.flow_options, None).unwrap_err();
 
-        assert!(err.to_string().contains(
-            "unknown flow option 'access_key_id', supported options: defer_on_missing_source"
-        ));
+        assert!(
+            err.to_string()
+                .contains("unknown flow option 'access_key_id'")
+        );
+    }
+
+    // --- Schedule option tests ---
+
+    #[test]
+    fn test_eval_interval_rejected_non_positive() {
+        // Zero eval_interval should be rejected.
+        let err = validate_and_normalize_flow_options(HashMap::new(), Some(0)).unwrap_err();
+        assert!(err.to_string().contains("EVAL INTERVAL must be positive"));
+
+        // Negative eval_interval should be rejected.
+        let err = validate_and_normalize_flow_options(HashMap::new(), Some(-5)).unwrap_err();
+        assert!(err.to_string().contains("EVAL INTERVAL must be positive"));
+
+        // Positive eval_interval should be accepted.
+        let result = validate_and_normalize_flow_options(HashMap::new(), Some(300));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_schedule_and_internal_keys_rejected_as_unknown_options() {
+        for key in [
+            "eval_interval_anchor",
+            "eval_interval_start",
+            "eval_interval_missed_tick_policy",
+            "eval_interval_catchup_max_runs",
+            "eval_interval_catchup_max_lag",
+            "__greptime_internal_eval_schedule",
+        ] {
+            let err = validate_and_normalize_flow_options(
+                HashMap::from([(key.to_string(), "value".to_string())]),
+                Some(300),
+            )
+            .unwrap_err();
+
+            assert!(
+                err.to_string()
+                    .contains(&format!("unknown flow option '{key}'")),
+                "unexpected error for {key}: {err}"
+            );
+        }
     }
 
     #[test]
@@ -2646,6 +2882,216 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;";
         physical_partition_exprs.sort_unstable();
         logical_partition_exprs.sort_unstable();
         assert_eq!(physical_partition_exprs, logical_partition_exprs);
+    }
+
+    #[test]
+    fn test_repartition_target_partition_columns_are_overwrite_context() {
+        let device_id = ColumnSchema::new("device_id", ConcreteDataType::int32_datatype(), true);
+        let area = ColumnSchema::new("area", ConcreteDataType::string_datatype(), true);
+        let existing_partition_columns = vec![&device_id];
+        let target_partition_columns = vec![&device_id, &area];
+        let existing_column_name_and_type = column_name_and_type(&existing_partition_columns);
+        let target_column_name_and_type = column_name_and_type(&target_partition_columns);
+        let timezone = Timezone::from_tz_string("UTC").unwrap();
+        let dialect = GreptimeDbDialect {};
+
+        let mut parser = Parser::new(&dialect)
+            .try_with_sql("device_id < 100 AND area < 'South'")
+            .unwrap();
+        let expr = parser.parse_expr().unwrap();
+
+        let err = convert_one_expr(&expr, &existing_column_name_and_type, &timezone).unwrap_err();
+        assert!(err.to_string().contains("area"));
+
+        let partition_expr = convert_one_expr(&expr, &target_column_name_and_type, &timezone)
+            .expect("target columns should overwrite the conversion context");
+        let partition_expr = partition_expr.to_string();
+        assert!(partition_expr.contains("device_id"));
+        assert!(partition_expr.contains("area"));
+        assert!(partition_expr.contains("South"));
+    }
+
+    #[test]
+    fn test_repartition_rejects_remaining_expr_outside_target_columns() {
+        let device_id = "device_id".to_string();
+        let area = "area".to_string();
+        let timezone = Timezone::from_tz_string("UTC").unwrap();
+        let column_name_and_type = HashMap::from([
+            (&device_id, ConcreteDataType::int32_datatype()),
+            (&area, ConcreteDataType::string_datatype()),
+        ]);
+        let dialect = GreptimeDbDialect {};
+        let mut parser = Parser::new(&dialect)
+            .try_with_sql("device_id >= 100")
+            .unwrap();
+        let remaining_old_expr = convert_one_expr(
+            &parser.parse_expr().unwrap(),
+            &column_name_and_type,
+            &timezone,
+        )
+        .unwrap();
+        let target_partition_columns = HashSet::from([&area]);
+
+        let err = ensure_partition_expr_columns_in_target(
+            &[remaining_old_expr],
+            &target_partition_columns,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("device_id"));
+        assert!(err.to_string().contains("target partition columns"));
+    }
+
+    #[test]
+    fn test_repartition_rejects_duplicate_target_partition_columns() {
+        let device_id = ColumnSchema::new("device_id", ConcreteDataType::int32_datatype(), true);
+        let column_schemas = vec![device_id];
+        let target_partition_columns = vec!["device_id".to_string(), "device_id".to_string()];
+
+        let err =
+            validate_and_collect_partition_columns(&target_partition_columns, &column_schemas)
+                .unwrap_err();
+
+        assert!(err.to_string().contains("duplicate partition column"));
+        assert!(err.to_string().contains("device_id"));
+    }
+
+    fn create_expr_from_sql(sql: &str) -> CreateTableExpr {
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+
+        match &result[0] {
+            Statement::CreateTable(create) => {
+                expr_helper::create_to_expr(create, &QueryContext::arc()).unwrap()
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn test_create_table_with_repartition_column_hint() {
+        let expr = create_expr_from_sql(
+            r"
+CREATE TABLE metrics (
+  host STRING,
+  ts TIMESTAMP TIME INDEX,
+  cpu DOUBLE,
+  PRIMARY KEY(host)
+)
+WITH ('repartition.column.hint' = ' host ')",
+        );
+
+        let table_info = create_table_info(&expr, vec![]).unwrap();
+        assert_eq!(
+            table_info
+                .meta
+                .options
+                .extra_options
+                .get(REPARTITION_COLUMN_HINT_KEY),
+            Some(&"host".to_string())
+        );
+    }
+
+    #[test]
+    fn test_create_table_with_empty_repartition_column_hint() {
+        let expr = create_expr_from_sql(
+            r"
+CREATE TABLE metrics (
+  host STRING,
+  ts TIMESTAMP TIME INDEX,
+  cpu DOUBLE,
+  PRIMARY KEY(host)
+)
+WITH ('repartition.column.hint' = '')",
+        );
+
+        let err = create_table_info(&expr, vec![]).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("repartition.column.hint expects exactly one column name")
+        );
+    }
+
+    #[test]
+    fn test_create_table_with_multiple_repartition_column_hints() {
+        let expr = create_expr_from_sql(
+            r"
+CREATE TABLE metrics (
+  host STRING,
+  region_id STRING,
+  ts TIMESTAMP TIME INDEX,
+  cpu DOUBLE,
+  PRIMARY KEY(host)
+)
+WITH ('repartition.column.hint' = 'host,region_id')",
+        );
+
+        let err = create_table_info(&expr, vec![]).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("repartition.column.hint expects exactly one column name")
+        );
+    }
+
+    #[test]
+    fn test_create_table_with_missing_repartition_column_hint() {
+        let expr = create_expr_from_sql(
+            r"
+CREATE TABLE metrics (
+  host STRING,
+  ts TIMESTAMP TIME INDEX,
+  cpu DOUBLE,
+  PRIMARY KEY(host)
+)
+WITH ('repartition.column.hint' = 'region_id')",
+        );
+
+        let err = create_table_info(&expr, vec![]).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Cannot find column by name: region")
+        );
+    }
+
+    #[test]
+    fn test_create_table_with_time_index_repartition_column_hint() {
+        let expr = create_expr_from_sql(
+            r"
+CREATE TABLE metrics (
+  host STRING,
+  ts TIMESTAMP TIME INDEX,
+  cpu DOUBLE,
+  PRIMARY KEY(host)
+)
+WITH ('repartition.column.hint' = 'ts')",
+        );
+
+        let err = create_table_info(&expr, vec![]).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("cannot set repartition.column.hint to the time index column")
+        );
+    }
+
+    #[test]
+    fn test_create_partitioned_table_with_repartition_column_hint() {
+        let expr = create_expr_from_sql(
+            r"
+CREATE TABLE metrics (
+  host STRING,
+  ts TIMESTAMP TIME INDEX,
+  cpu DOUBLE,
+  PRIMARY KEY(host)
+)
+WITH ('repartition.column.hint' = 'host')",
+        );
+
+        let err = create_table_info(&expr, vec!["host".to_string()]).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("cannot set repartition.column.hint on a table with partition metadata")
+        );
     }
 
     #[tokio::test]

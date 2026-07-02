@@ -231,6 +231,10 @@ auto_create_topics = true
 ## **It's only used when the provider is `kafka`**.
 auto_prune_interval = "30m"
 
+## Whether automatically WAL pruning only updates the metadata marker and skips Kafka DeleteRecords.
+## Set to `true` for Kafka deployments that do not support DeleteRecords.
+## **It's only used when the provider is `kafka`**.
+auto_prune_logical_delete = false
 
 ## Estimated size threshold to trigger a flush when using Kafka remote WAL.
 ## Since multiple regions may share a Kafka topic, the estimated size is calculated as:

@@ -26,42 +26,6 @@ use crate::Error;
 pub type FlowId = u64;
 pub type TableName = [String; 3];
 
-#[derive(Clone)]
-pub struct FlowAuthHeader {
-    auth_schema: api::v1::auth_header::AuthScheme,
-}
-
-impl std::fmt::Debug for FlowAuthHeader {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self.auth() {
-            api::v1::auth_header::AuthScheme::Basic(basic) => f
-                .debug_struct("Basic")
-                .field("username", &basic.username)
-                .field("password", &"<RETRACTED>")
-                .finish(),
-            api::v1::auth_header::AuthScheme::Token(_) => f
-                .debug_struct("Token")
-                .field("token", &"<RETRACTED>")
-                .finish(),
-        }
-    }
-}
-
-impl FlowAuthHeader {
-    pub fn from_user_pwd(username: &str, pwd: &str) -> Self {
-        Self {
-            auth_schema: api::v1::auth_header::AuthScheme::Basic(api::v1::Basic {
-                username: username.to_string(),
-                password: pwd.to_string(),
-            }),
-        }
-    }
-
-    pub fn auth(&self) -> &api::v1::auth_header::AuthScheme {
-        &self.auth_schema
-    }
-}
-
 /// The arguments to create a flow
 #[derive(Debug, Clone)]
 pub struct CreateFlowArgs {
@@ -76,6 +40,8 @@ pub struct CreateFlowArgs {
     pub sql: String,
     pub flow_options: HashMap<String, String>,
     pub query_ctx: Option<QueryContext>,
+    /// Typed schedule configuration for `EVAL INTERVAL` flows.
+    pub eval_schedule: Option<common_meta::key::flow::flow_info::FlowScheduleConfig>,
 }
 
 pub trait FlowEngine {

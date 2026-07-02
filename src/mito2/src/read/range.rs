@@ -397,7 +397,7 @@ pub struct FileRangeBuilder {
 
 impl FileRangeBuilder {
     /// Builds a file range builder from context and row groups.
-    pub(crate) fn new(context: FileRangeContextRef, selection: RowGroupSelection) -> Self {
+    pub fn new(context: FileRangeContextRef, selection: RowGroupSelection) -> Self {
         Self {
             context: Some(context),
             selection,

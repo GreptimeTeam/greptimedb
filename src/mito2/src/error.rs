@@ -16,7 +16,7 @@ use std::any::Any;
 use std::sync::Arc;
 
 use common_datasource::compression::CompressionType;
-use common_error::ext::{BoxedError, ErrorExt};
+use common_error::ext::{BoxedError, ErrorExt, RetryHint};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use common_memory_manager;
@@ -26,6 +26,7 @@ use common_time::timestamp::TimeUnit;
 use datatypes::arrow::error::ArrowError;
 use datatypes::prelude::ConcreteDataType;
 use object_store::ErrorKind;
+use object_store::error::retry_hint_from_opendal_error;
 use partition::error::Error as PartitionError;
 use prost::DecodeError;
 use snafu::{Location, Snafu};
@@ -231,6 +232,20 @@ pub enum Error {
         region_id: RegionId,
         given_seq: u64,
         min_readable_seq: u64,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "STALE_SNAPSHOT_FENCE: snapshot upper bound stale, region: {}, given_seq: {}, min_enforceable_seq: {}, retry_hint: REBIND_SNAPSHOT_FENCE",
+        region_id,
+        given_seq,
+        min_enforceable_seq
+    ))]
+    SnapshotFenceStale {
+        region_id: RegionId,
+        given_seq: u64,
+        min_enforceable_seq: u64,
         #[snafu(implicit)]
         location: Location,
     },
@@ -917,12 +932,12 @@ pub enum Error {
     },
 
     #[snafu(display(
-        "Region {} does not satisfy open requirement '{}': {}",
+        "Region {} does not satisfy requirement '{}': {}",
         region_id,
         requirement,
         reason
     ))]
-    OpenRegionRequirement {
+    RegionRequirement {
         region_id: RegionId,
         requirement: &'static str,
         reason: &'static str,
@@ -1356,7 +1371,7 @@ impl ErrorExt for Error {
             | SerializePartitionExpr { .. }
             | InvalidSourceAndTargetRegion { .. } => StatusCode::InvalidArguments,
 
-            IncrementalQueryStale { .. } => StatusCode::RequestOutdated,
+            IncrementalQueryStale { .. } | SnapshotFenceStale { .. } => StatusCode::RequestOutdated,
 
             RegionMetadataNotFound { .. }
             | Join { .. }
@@ -1390,7 +1405,7 @@ impl ErrorExt for Error {
             PrimaryKeyLengthMismatch { .. } => StatusCode::InvalidArguments,
             InvalidSender { .. } => StatusCode::InvalidArguments,
             InvalidSchedulerState { .. } => StatusCode::InvalidArguments,
-            OpenRegionRequirement { .. } => StatusCode::InvalidArguments,
+            RegionRequirement { .. } => StatusCode::InvalidArguments,
             DeleteSsts { .. } | DeleteIndex { .. } | DeleteIndexes { .. } => {
                 StatusCode::StorageUnavailable
             }
@@ -1483,5 +1498,81 @@ impl ErrorExt for Error {
 
     fn as_any(&self) -> &dyn Any {
         self
+    }
+
+    fn retry_hint(&self) -> RetryHint {
+        use Error::*;
+
+        match self {
+            ReadParquet { .. }
+            | WriteParquet { .. }
+            | RejectWrite { .. }
+            | Download { .. }
+            | Upload { .. }
+            | RegionState { .. }
+            | UpdateManifest { .. }
+            | RegionStopped { .. }
+            | RegionBusy { .. }
+            | FlushableRegionState { .. } => RetryHint::Retryable,
+
+            OpenDal { error, .. }
+            | DeleteSsts { error, .. }
+            | DeleteIndex { error, .. }
+            | DeleteIndexes { error, .. } => retry_hint_from_opendal_error(error),
+
+            WriteWal { source, .. }
+            | ReadWal { source, .. }
+            | DeleteWal { source, .. }
+            | FetchManifests { source, .. }
+            | External { source, .. } => source.retry_hint(),
+
+            OpenRegion { source, .. }
+            | WriteGroup { source, .. }
+            | FlushRegion { source, .. }
+            | BuildIndexAsync { source, .. }
+            | CompactRegion { source, .. }
+            | EditRegion { source, .. }
+            | ScanSeries { source, .. }
+            | PruneFile { source, .. } => source.retry_hint(),
+
+            DataTypeMismatch { source, .. }
+            | ConvertVector { source, .. }
+            | ConvertValue { source, .. }
+            | IndexOptions { source, .. }
+            | CastVector { source, .. } => source.retry_hint(),
+
+            BuildIndexApplier { source, .. }
+            | PushIndexValue { source, .. }
+            | ApplyInvertedIndex { source, .. }
+            | IndexFinish { source, .. } => source.retry_hint(),
+
+            ApplyBloomFilterIndex { source, .. }
+            | PushBloomFilterValue { source, .. }
+            | BloomFilterFinish { source, .. } => source.retry_hint(),
+
+            PuffinReadBlob { source, .. }
+            | PuffinAddBlob { source, .. }
+            | PuffinInitStager { source, .. }
+            | PuffinBuildReader { source, .. }
+            | PuffinPurgeStager { source, .. } => source.retry_hint(),
+
+            CreateFulltextCreator { source, .. }
+            | FulltextPushText { source, .. }
+            | FulltextFinish { source, .. }
+            | ApplyFulltextIndex { source, .. } => source.retry_hint(),
+
+            InvalidRegionRequest { source, .. } => source.retry_hint(),
+            InvalidPartitionExpr { source, .. } => source.retry_hint(),
+            RecordBatch { source, .. } => source.retry_hint(),
+            GetSchemaMetadata { source, .. } => source.retry_hint(),
+            CompactionMemoryExhausted { source, .. } => source.retry_hint(),
+            ConvertBulkWalEntry { source, .. } => source.retry_hint(),
+            Encode { source, .. } | Decode { source, .. } => source.retry_hint(),
+
+            #[cfg(feature = "enterprise")]
+            ScanExternalRange { source, .. } => source.retry_hint(),
+
+            _ => RetryHint::NonRetryable,
+        }
     }
 }

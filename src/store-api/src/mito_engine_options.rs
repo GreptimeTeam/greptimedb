@@ -23,6 +23,8 @@ pub const APPEND_MODE_KEY: &str = "append_mode";
 pub const MERGE_MODE_KEY: &str = "merge_mode";
 /// Option key for TTL(time-to-live)
 pub const TTL_KEY: &str = "ttl";
+/// Option key for the per-table auto flush interval.
+pub const AUTO_FLUSH_INTERVAL_KEY: &str = "auto_flush_interval";
 /// Option key for snapshot read.
 pub const SNAPSHOT_READ: &str = "snapshot_read";
 /// Option key for compaction type.
@@ -70,6 +72,7 @@ pub const SST_FORMAT_KEY: &str = "sst_format";
 pub fn is_mito_engine_option_key(key: &str) -> bool {
     [
         "ttl",
+        AUTO_FLUSH_INTERVAL_KEY,
         COMPACTION_TYPE,
         COMPACTION_OVERRIDE,
         TWCS_TRIGGER_FILE_NUM,
@@ -104,6 +107,7 @@ mod tests {
     #[test]
     fn test_is_mito_engine_option_key() {
         assert!(is_mito_engine_option_key("ttl"));
+        assert!(is_mito_engine_option_key("auto_flush_interval"));
         assert!(is_mito_engine_option_key("compaction.type"));
         assert!(is_mito_engine_option_key("compaction.override"));
         assert!(is_mito_engine_option_key(

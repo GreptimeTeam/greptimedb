@@ -9,7 +9,7 @@ Author: "Dennis Zhuang <killme2008@gmail.com>"
 
 Attach a thin layer of semantic metadata to each table so machine consumers — LLM agents, alert generators, dashboard builders, MCP servers, ETL pipelines — can align it with the observability concepts they already know (OTel instrument kinds, Prometheus naming conventions, UCUM units, semantic conventions, severity numbers, OTel ↔ Prometheus translation rules).
 
-The mechanism reuses what already exists in `table_options` (the same slot that today carries `table_data_model` and `otlp_metric_compat`): a reserved `greptime.semantic.*` namespace, plus standard SQL column `COMMENT` for field-level supplements, plus an `information_schema.semantic_tables` view as the discovery entry point. No new protocol, no new DDL keyword.
+The mechanism reuses what already exists in `table_options` (the same slot that today carries `table_data_model` and `otlp_metric_compat`): a reserved `greptime.semantic.*` namespace, plus standard SQL column `COMMENT` for field-level supplements, plus an `information_schema.table_semantics` view as the discovery entry point. No new protocol, no new DDL keyword.
 
 Per-table identity only. Cross-table relationships are deferred.
 
@@ -44,39 +44,47 @@ The audience is broader than LLM agents. Alert generators need to choose between
 
 1. **`greptime.semantic.*` table options** — table-level identity and lineage. Carried inside the existing `table_options` blob. This is the same slot that today carries `table_data_model = 'greptime_trace_v1'` and `otlp_metric_compat = 'prom'`, so the mechanism is generalising what the OTLP trace auto-create path already does.
 2. **Column `COMMENT`** — column-level supplements ("this column is `resource.service.name`"; "this column carries delta values"). Standard SQL.
-3. **`information_schema.semantic_tables` view** — a denormalised projection of the options, registered through the existing `with_extra_table_factories()` hook. Tables without a `greptime.semantic.*` option do not appear in the view.
+3. **`information_schema.table_semantics` view** — a denormalised projection of the options, registered through the existing `with_extra_table_factories()` hook. Tables without a `greptime.semantic.*` option do not appear in the view.
 
 ## Vocabulary
 
-All keys are flat strings under the `greptime.semantic.` prefix; values are strings; unknown keys are tolerated so the vocabulary can grow without coordinated rollouts.
+All keys are flat strings under the `greptime.semantic.` prefix; values are strings.
+
+The vocabulary is deliberately small. A key earns its place only when it records
+something a consumer cannot cheaply and reliably recover on its own — from the
+schema, the column set, or the metric-naming conventions it already understands.
+Keys whose value is already in the metric name by convention (Prometheus
+`_total`/`_bucket` suffixes), is a constant for the only producer that sets it,
+or merely restates an existing column are intentionally omitted rather than
+stamped for completeness. This is why, for example, Prometheus remote write
+tables carry only the common identity (their type/unit live in the name), and
+why resource-attribute lineage is not stamped (it is an ingest/collector-config
+concern, not query-time semantics).
 
 **Common (all signals)**
 
 | Key | Example |
 | --- | --- |
 | `greptime.semantic.signal_type` | `trace` / `log` / `metric` / `event` |
-| `greptime.semantic.source` | `opentelemetry` / `prometheus` / `elasticsearch` / `loki` / `custom` |
-| `greptime.semantic.source_version` | protocol or SDK version, e.g. `v2` (Prom remote write), `1.30.0` (optional) |
-| `greptime.semantic.pipeline` | `greptime_trace_v1` (subsumes the existing `table_data_model` value) |
+| `greptime.semantic.source` | `opentelemetry` / `prometheus` / `influxdb` / `opentsdb` / `elasticsearch` / `loki` / `custom` |
+| `greptime.semantic.source_version` | Source protocol version, e.g. Prometheus remote write `1.0` / `2.0` |
+| `greptime.semantic.pipeline` | `greptime_trace_v1` (the signal-agnostic successor to `table_data_model`) |
 
-**Trace**: `greptime.semantic.trace.conventions` (e.g. `otel-semconv-1.27`, lifted from `schema_url`, which is the version of the OpenTelemetry semantic conventions used in this table), `greptime.semantic.trace.has_events`, `greptime.semantic.trace.has_links`.
+**Trace**: `greptime.semantic.trace.conventions` (the OTel `schema_url` the rows conform to, or `mixed` / `unknown` when not single-valued).
 
-**Metric** — v1 assumes one metric type per table, which is how both Prom RW and the post-v0.16 OTel ingestion path land data today; mixed-type tables are a follow-up.
+**Metric** — v1 assumes one metric type per table, which is how both Prom RW and the post-v0.16 OTel ingestion path land data today; mixed-type tables are a follow-up. These are stamped for OTLP (which declares them on the wire and then discards them); Prometheus carries its type/unit in the name and gets identity only.
 
 | Key | Example |
 | --- | --- |
 | `greptime.semantic.metric.type` | `counter` / `gauge` / `histogram` / `summary` / `updown_counter` / `gauge_histogram` / `info` / `stateset` |
-| `greptime.semantic.metric.unit` | UCUM, e.g. `s`, `By`, `{request}` |
-| `greptime.semantic.metric.temporality` | `cumulative` / `delta` (OTel only) |
-| `greptime.semantic.metric.monotonic` | `true` / `false` |
-| `greptime.semantic.metric.metadata_quality` | `declared` (OTLP / Prom RW v2 / exposition) or `inferred` (Prom RW v1, name-suffix guess) |
-| `greptime.semantic.metric.original_name` | Pre-translation OTel name when the table name was Prometheus-ised |
+| `greptime.semantic.metric.unit` | UCUM, e.g. `s`, `By`, `{request}` (discarded by the row encoders, so unrecoverable once ingested) |
+| `greptime.semantic.metric.temporality` | `cumulative` / `delta` (OTel only; invisible in the name) |
+| `greptime.semantic.metric.metadata_quality` | `declared` (OTLP / exposition) or `inferred` (Prom RW v1, name-suffix guess) |
+| `greptime.semantic.metric.original_name` | Pre-translation OTel name when the table name was Prometheus-ised; the key a consumer uses to look the metric up in the OTel semantic conventions |
 
 `metadata_quality = inferred` is the load-bearing field for confidence-aware tooling: an inferred counter should be re-checked before betting on `rate()`-style semantics.
 
-**Log**: `greptime.semantic.log.severity_scheme` (`otlp` / `syslog` / `custom`), `greptime.semantic.log.body_format` (`string` / `json` / `mixed`).
-
-**Resource / scope preservation**: `greptime.semantic.resource.attributes_preserved` (JSON array string of attrs promoted to columns), `greptime.semantic.resource.attributes_dropped` (boolean), `greptime.semantic.scope.preserved` (boolean). These answer the most common downstream question: "is this data missing because it was dropped, or because it lives on a different column than I think?" List-shaped values use JSON array strings rather than comma-separated text to avoid escaping and ordering ambiguity.
+**Deliberately omitted (and why)**: `metric.monotonic` (a function of `type`); `trace.has_events`/`has_links` (constant for the v1 model and derivable from the `span_events`/`span_links` columns); `log.severity_scheme`/`log.body_format` (constant / derivable by sampling, and the latter cost an O(rows) scan); `resource.attributes_preserved`/`attributes_dropped`/`scope.preserved` (the preserved set restates columns, the dropped flag is a contentless boolean, and lineage is a collector-config concern). Some are reserved for follow-ups (see Future Work).
 
 ## Conflict and update semantics
 
@@ -85,13 +93,13 @@ Two design decisions worth pinning down up front, because they constrain everyth
 - **Conflict.** Some table-level keys (`trace.conventions` lifted from `schema_url`, `metric.temporality`, ...) cannot represent the truth when a long-lived table sees rows from multiple sources. v1 records `mixed` or `unknown` rather than a fictitious single value. Downstream consumers must treat any single-valued semantic key as best-effort, not strong evidence.
 - **Update.** Semantic options are stamped at table creation. v1 does not specify an update path; promoting `metadata_quality` from `inferred` to `declared`, refreshing `resource.attributes_preserved`, or revising `trace.conventions` on later writes is deferred. If real usage shows update is needed, it lands as a separate RFC.
 
-## `information_schema.semantic_tables`
+## `information_schema.table_semantics`
 
 A consumer's first SQL on connect:
 
 ```sql
 SELECT table_catalog, table_schema, table_name, signal_type, source, pipeline
-FROM information_schema.semantic_tables;
+FROM information_schema.table_semantics;
 ```
 
 returns one row per semantic-tagged table. The view exposes a stable set of core columns (`table_catalog`, `table_schema`, `table_name`, `signal_type`, `source`, `source_version`, `pipeline`) plus a `semantic_options` JSON column carrying the rest of the `greptime.semantic.*` keys verbatim. Future keys appear inside `semantic_options` without forcing a view-schema change; only widely-used keys are ever promoted to first-class columns.
@@ -103,7 +111,7 @@ Four phases, each independently shippable.
 1. **Identity.** Stamp `signal_type` and `source` on every auto-create path. The OTLP paths already have natural injection points; Prom remote write is the one non-trivial path because metric-engine logical tables share physical storage (see Open Question 2).
 2. **Metric specifics.** Add type / unit / temporality / monotonic / metadata_quality / original_name at OTel metric and Prom RW ingestion sites; the data is already at hand inside the OTel translator.
 3. **Resource / scope lineage.** Record what the OTel-to-Prometheus translation kept and dropped.
-4. **`information_schema.semantic_tables` view + documentation** as a stable user-facing contract.
+4. **`information_schema.table_semantics` view + documentation** as a stable user-facing contract.
 
 # Relationship to OpenTelemetry standardisation
 

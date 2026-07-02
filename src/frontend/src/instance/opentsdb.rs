@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
 use common_error::ext::BoxedError;
@@ -22,6 +24,7 @@ use servers::opentsdb::data_point_to_grpc_row_insert_requests;
 use servers::query_handler::OpentsdbProtocolHandler;
 use session::context::QueryContextRef;
 use snafu::prelude::*;
+use table::requests::{SEMANTIC_SIGNAL_TYPE, SEMANTIC_SOURCE, SIGNAL_TYPE_METRIC, SOURCE_OPENTSDB};
 
 use crate::instance::Instance;
 
@@ -40,6 +43,13 @@ impl OpentsdbProtocolHandler for Instance {
             .context(AuthSnafu)?;
 
         let (requests, _) = data_point_to_grpc_row_insert_requests(data_points)?;
+
+        let ctx = {
+            let mut c = (*ctx).clone();
+            c.set_extension(SEMANTIC_SIGNAL_TYPE, SIGNAL_TYPE_METRIC);
+            c.set_extension(SEMANTIC_SOURCE, SOURCE_OPENTSDB);
+            Arc::new(c)
+        };
 
         // OpenTSDB is single value.
         let output = self

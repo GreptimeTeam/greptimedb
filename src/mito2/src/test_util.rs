@@ -33,6 +33,7 @@ use api::v1::column_def::options_from_column_schema;
 use api::v1::helper::row;
 use api::v1::value::ValueData;
 use api::v1::{OpType, Row, Rows, SemanticType};
+use arrow_schema::extension::{EXTENSION_TYPE_NAME_KEY, ExtensionType};
 use common_base::Plugins;
 use common_base::readable_size::ReadableSize;
 use common_datasource::compression::CompressionType;
@@ -44,6 +45,7 @@ use common_telemetry::{debug, warn};
 use common_test_util::temp_dir::{TempDir, create_temp_dir};
 use common_wal::options::{KafkaWalOptions, WAL_OPTIONS_KEY, WalOptions};
 use datatypes::arrow::array::{TimestampMillisecondArray, UInt8Array, UInt64Array};
+use datatypes::extension::json::JsonExtensionType;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::ColumnSchema;
 use log_store::kafka::log_store::KafkaLogStore;
@@ -298,10 +300,20 @@ impl TestEnv {
     }
 
     pub(crate) async fn new_mito_engine(&self, config: MitoConfig) -> MitoEngine {
+        self.new_mito_engine_with_plugins(config, Plugins::new())
+            .await
+    }
+
+    pub(crate) async fn new_mito_engine_with_plugins(
+        &self,
+        config: MitoConfig,
+        plugins: Plugins,
+    ) -> MitoEngine {
         async fn create<S: LogStore>(
             zelf: &TestEnv,
             config: MitoConfig,
             log_store: Arc<S>,
+            plugins: Plugins,
         ) -> MitoEngine {
             let data_home = zelf.data_home().display().to_string();
             MitoEngine::new(
@@ -312,15 +324,15 @@ impl TestEnv {
                 zelf.schema_metadata_manager.clone(),
                 zelf.file_ref_manager.clone(),
                 zelf.partition_expr_fetcher.clone(),
-                Plugins::new(),
+                plugins,
             )
             .await
             .unwrap()
         }
 
         match self.log_store.as_ref().unwrap().clone() {
-            LogStoreImpl::RaftEngine(log_store) => create(self, config, log_store).await,
-            LogStoreImpl::Kafka(log_store) => create(self, config, log_store).await,
+            LogStoreImpl::RaftEngine(log_store) => create(self, config, log_store, plugins).await,
+            LogStoreImpl::Kafka(log_store) => create(self, config, log_store, plugins).await,
         }
     }
 
@@ -333,6 +345,21 @@ impl TestEnv {
         self.object_store_manager = Some(object_store_manager.clone());
 
         self.new_mito_engine(config).await
+    }
+
+    /// Creates a new engine with specific config and plugins.
+    pub async fn create_engine_with_plugins(
+        &mut self,
+        config: MitoConfig,
+        plugins: Plugins,
+    ) -> MitoEngine {
+        let (log_store, object_store_manager) = self.create_log_and_object_store_manager().await;
+
+        let object_store_manager = Arc::new(object_store_manager);
+        self.log_store = Some(log_store.clone());
+        self.object_store_manager = Some(object_store_manager.clone());
+
+        self.new_mito_engine_with_plugins(config, plugins).await
     }
 
     /// Creates a new engine with specific config and existing logstore and object store manager.
@@ -724,6 +751,7 @@ pub struct CreateRequestBuilder {
     table_dir: String,
     tag_num: usize,
     field_num: usize,
+    field_datatype: ConcreteDataType,
     options: HashMap<String, String>,
     primary_key: Option<Vec<ColumnId>>,
     all_not_null: bool,
@@ -740,6 +768,7 @@ impl Default for CreateRequestBuilder {
             table_dir: "test".to_string(),
             tag_num: 1,
             field_num: 1,
+            field_datatype: ConcreteDataType::float64_datatype(),
             options: HashMap::new(),
             primary_key: None,
             all_not_null: false,
@@ -772,6 +801,11 @@ impl CreateRequestBuilder {
     #[must_use]
     pub fn field_num(mut self, value: usize) -> Self {
         self.field_num = value;
+        self
+    }
+
+    pub(crate) fn field_datatype(mut self, value: ConcreteDataType) -> Self {
+        self.field_datatype = value;
         self
     }
 
@@ -830,12 +864,16 @@ impl CreateRequestBuilder {
             column_id += 1;
         }
         for i in 0..self.field_num {
+            let mut column_schema =
+                ColumnSchema::new(format!("field_{i}"), self.field_datatype.clone(), nullable);
+            if self.field_datatype.is_json() {
+                column_schema.mut_metadata().insert(
+                    EXTENSION_TYPE_NAME_KEY.to_string(),
+                    JsonExtensionType::NAME.to_string(),
+                );
+            }
             column_metadatas.push(ColumnMetadata {
-                column_schema: ColumnSchema::new(
-                    format!("field_{i}"),
-                    ConcreteDataType::float64_datatype(),
-                    nullable,
-                ),
+                column_schema,
                 semantic_type: SemanticType::Field,
                 column_id,
             });
@@ -853,9 +891,7 @@ impl CreateRequestBuilder {
         });
         let mut options = self.options.clone();
         if let Some(topic) = &self.kafka_topic {
-            let wal_options = WalOptions::Kafka(KafkaWalOptions {
-                topic: topic.clone(),
-            });
+            let wal_options = WalOptions::Kafka(KafkaWalOptions::new(topic.clone()));
             options.insert(
                 WAL_OPTIONS_KEY.to_string(),
                 serde_json::to_string(&wal_options).unwrap(),
@@ -869,6 +905,7 @@ impl CreateRequestBuilder {
             table_dir: self.table_dir.clone(),
             path_type: PathType::Bare,
             partition_expr_json: self.partition_expr_json.clone(),
+            requirements: Default::default(),
         }
     }
 
@@ -892,12 +929,16 @@ impl CreateRequestBuilder {
             column_id += 1;
         }
         for i in 0..self.field_num {
+            let mut column_schema =
+                ColumnSchema::new(format!("field_{i}"), self.field_datatype.clone(), nullable);
+            if self.field_datatype.is_json() {
+                column_schema.mut_metadata().insert(
+                    EXTENSION_TYPE_NAME_KEY.to_string(),
+                    JsonExtensionType::NAME.to_string(),
+                );
+            }
             column_metadatas.push(ColumnMetadata {
-                column_schema: ColumnSchema::new(
-                    format!("field_{i}"),
-                    ConcreteDataType::float64_datatype(),
-                    nullable,
-                ),
+                column_schema,
                 semantic_type: SemanticType::Field,
                 column_id,
             });
@@ -915,9 +956,7 @@ impl CreateRequestBuilder {
         });
         let mut options = self.options.clone();
         if let Some(topic) = &self.kafka_topic {
-            let wal_options = WalOptions::Kafka(KafkaWalOptions {
-                topic: topic.clone(),
-            });
+            let wal_options = WalOptions::Kafka(KafkaWalOptions::new(topic.clone()));
             options.insert(
                 WAL_OPTIONS_KEY.to_string(),
                 serde_json::to_string(&wal_options).unwrap(),
@@ -931,6 +970,7 @@ impl CreateRequestBuilder {
             table_dir: self.table_dir.clone(),
             path_type: PathType::Bare,
             partition_expr_json: self.partition_expr_json.clone(),
+            requirements: Default::default(),
         }
     }
 }

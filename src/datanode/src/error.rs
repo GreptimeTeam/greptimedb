@@ -16,9 +16,10 @@ use std::any::Any;
 use std::sync::Arc;
 
 use common_error::define_into_tonic_status;
-use common_error::ext::{BoxedError, ErrorExt};
+use common_error::ext::{BoxedError, ErrorExt, RetryHint};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
+use common_runtime::JoinError;
 use snafu::{Location, Snafu};
 use store_api::storage::RegionId;
 use table::error::Error as TableError;
@@ -63,6 +64,15 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
         source: query::error::Error,
+    },
+
+    #[snafu(display("Failed to join datanode runtime task, request_type: {}", request_type))]
+    RuntimeJoin {
+        request_type: &'static str,
+        #[snafu(source)]
+        error: JoinError,
+        #[snafu(implicit)]
+        location: Location,
     },
 
     #[snafu(display("Failed to create plan decoder"))]
@@ -291,6 +301,15 @@ pub enum Error {
         source: store_api::metadata::MetadataError,
     },
 
+    #[snafu(display("Failed to serialize WAL options for region {}", region_id))]
+    SerializeWalOptions {
+        region_id: RegionId,
+        #[snafu(source)]
+        error: serde_json::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to stop region engine {}", name))]
     StopRegionEngine {
         name: String,
@@ -443,14 +462,17 @@ impl ErrorExt for Error {
 
             PayloadNotExist { .. }
             | Unexpected { .. }
+            | SerializeWalOptions { .. }
             | WatchAsyncTaskChange { .. }
             | BuildHttpClient { .. } => StatusCode::Unexpected,
 
             AsyncTaskExecute { source, .. } => source.status_code(),
 
-            CreateDir { .. } | RemoveDir { .. } | ShutdownInstance { .. } | DataFusion { .. } => {
-                StatusCode::Internal
-            }
+            CreateDir { .. }
+            | RemoveDir { .. }
+            | ShutdownInstance { .. }
+            | DataFusion { .. }
+            | RuntimeJoin { .. } => StatusCode::Internal,
 
             RegionNotFound { .. } => StatusCode::RegionNotFound,
             RegionNotReady { .. } => StatusCode::RegionNotReady,
@@ -484,6 +506,69 @@ impl ErrorExt for Error {
     fn as_any(&self) -> &dyn Any {
         self
     }
+
+    fn retry_hint(&self) -> RetryHint {
+        use Error::*;
+
+        match self {
+            RegionBusy { .. }
+            | RegionNotReady { .. }
+            | ConcurrentQueryLimiterClosed { .. }
+            | ConcurrentQueryLimiterTimeout { .. } => RetryHint::Retryable,
+            NewPlanDecoder { source, .. } | ExecuteLogicalPlan { source, .. } => {
+                source.retry_hint()
+            }
+            HandleHeartbeatResponse { source, .. } | GetMetadata { source, .. } => {
+                source.retry_hint()
+            }
+            DecodeLogicalPlan { source, .. } => source.retry_hint(),
+            Delete { source, .. } => source.retry_hint(),
+            AsyncTaskExecute { source, .. } => source.retry_hint(),
+            StartServer { source, .. } | ShutdownServer { source, .. } => source.retry_hint(),
+            OpenLogStore { source, .. } => source.retry_hint(),
+            MetaClientInit { source, .. } => source.retry_hint(),
+            HandleRegionRequest { source, .. }
+            | GetRegionMetadata { source, .. }
+            | HandleBatchOpenRequest { source, .. }
+            | HandleBatchDdlRequest { source, .. }
+            | StopRegionEngine { source, .. } => source.retry_hint(),
+            FindLogicalRegions { source, .. } => source.retry_hint(),
+            BuildMitoEngine { source, .. } => source.retry_hint(),
+            GcMitoEngine { source, .. } => source.retry_hint(),
+            BuildMetricEngine { source, .. } => source.retry_hint(),
+            ListStorageSsts { source, .. } => source.retry_hint(),
+            ObjectStore { source, .. } => source.retry_hint(),
+            _ => RetryHint::NonRetryable,
+        }
+    }
 }
 
 define_into_tonic_status!(Error);
+
+#[cfg(test)]
+mod tests {
+    use common_error::ext::RetryHint;
+
+    use super::*;
+
+    #[test]
+    fn test_region_state_hints_are_retryable() {
+        let region_id = RegionId::new(1024, 1);
+
+        let err = RegionBusySnafu { region_id }.build();
+        assert_eq!(err.retry_hint(), RetryHint::Retryable);
+
+        let err = RegionNotReadySnafu { region_id }.build();
+        assert_eq!(err.retry_hint(), RetryHint::Retryable);
+    }
+
+    #[test]
+    fn test_default_hint_is_non_retryable() {
+        let err = UnexpectedSnafu {
+            violated: "mock error",
+        }
+        .build();
+
+        assert_eq!(err.retry_hint(), RetryHint::NonRetryable);
+    }
+}

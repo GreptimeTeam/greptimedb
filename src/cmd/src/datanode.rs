@@ -14,7 +14,10 @@
 
 pub mod builder;
 #[allow(clippy::print_stdout)]
-mod objbench;
+pub(crate) mod objbench;
+#[cfg(feature = "dev-tools")]
+#[allow(clippy::print_stdout)]
+mod parquetbench;
 #[allow(clippy::print_stdout)]
 mod scanbench;
 
@@ -37,6 +40,8 @@ use tracing_appender::non_blocking::WorkerGuard;
 use crate::App;
 use crate::datanode::builder::InstanceBuilder;
 use crate::datanode::objbench::ObjbenchCommand;
+#[cfg(feature = "dev-tools")]
+use crate::datanode::parquetbench::ParquetbenchCommand;
 use crate::datanode::scanbench::ScanbenchCommand;
 use crate::error::{
     LoadLayeredConfigSnafu, MissingConfigSnafu, Result, ShutdownDatanodeSnafu, StartDatanodeSnafu,
@@ -108,18 +113,23 @@ impl Command {
     pub fn load_options(&self, global_options: &GlobalOptions) -> Result<DatanodeOptions> {
         match &self.subcmd {
             SubCommand::Start(cmd) => cmd.load_options(global_options),
-            SubCommand::Objbench(_) | SubCommand::Scanbench(_) => {
-                // For bench commands, we don't need to load DatanodeOptions
-                // They are standalone utility commands
-                let mut opts = datanode::config::DatanodeOptions::default();
-                opts.sanitize();
-                Ok(DatanodeOptions {
-                    runtime: Default::default(),
-                    plugins: Default::default(),
-                    component: opts,
-                })
-            }
+            // Bench commands are standalone utilities and don't need to load DatanodeOptions.
+            SubCommand::Objbench(_) | SubCommand::Scanbench(_) => Self::default_bench_options(),
+            #[cfg(feature = "dev-tools")]
+            SubCommand::Parquetbench(_) => Self::default_bench_options(),
         }
+    }
+
+    /// Builds default [`DatanodeOptions`] for standalone bench commands that don't
+    /// load a real datanode config.
+    fn default_bench_options() -> Result<DatanodeOptions> {
+        let mut opts = datanode::config::DatanodeOptions::default();
+        opts.sanitize();
+        Ok(DatanodeOptions {
+            runtime: Default::default(),
+            plugins: Default::default(),
+            component: opts,
+        })
     }
 }
 
@@ -130,6 +140,9 @@ pub enum SubCommand {
     Objbench(ObjbenchCommand),
     /// Scan benchmark tool - benchmarks scanning a region directly from storage
     Scanbench(ScanbenchCommand),
+    /// Benchmark scanning a single parquet SST.
+    #[cfg(feature = "dev-tools")]
+    Parquetbench(ParquetbenchCommand),
 }
 
 impl SubCommand {
@@ -144,6 +157,11 @@ impl SubCommand {
                 std::process::exit(0);
             }
             SubCommand::Scanbench(cmd) => {
+                cmd.run().await?;
+                std::process::exit(0);
+            }
+            #[cfg(feature = "dev-tools")]
+            SubCommand::Parquetbench(cmd) => {
                 cmd.run().await?;
                 std::process::exit(0);
             }

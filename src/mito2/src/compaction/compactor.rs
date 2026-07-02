@@ -16,6 +16,7 @@ use std::num::NonZero;
 use std::sync::Arc;
 use std::time::Duration;
 
+use common_base::Plugins;
 use common_base::cancellation::{CancellableFuture, CancellationHandle};
 use common_meta::key::SchemaMetadataManagerRef;
 use common_telemetry::{debug, info, warn};
@@ -26,6 +27,7 @@ use object_store::manager::ObjectStoreManagerRef;
 use partition::expr::PartitionExpr;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
+use store_api::ManifestVersion;
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_request::PathType;
 use store_api::storage::RegionId;
@@ -37,6 +39,7 @@ use crate::cache::{CacheManager, CacheManagerRef};
 use crate::compaction::picker::PickerOutput;
 use crate::compaction::{CompactionOutput, CompactionSstReaderBuilder, find_dynamic_options};
 use crate::config::MitoConfig;
+use crate::engine::region_hook::{RegionHookRef, SstFileInfo};
 use crate::error;
 use crate::error::{
     EmptyRegionDirSnafu, InvalidPartitionExprSnafu, ObjectStoreNotFoundSnafu, Result,
@@ -53,8 +56,8 @@ use crate::sst::file_purger::LocalFilePurger;
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
 use crate::sst::location::region_dir_from_table_dir;
-use crate::sst::parquet::WriteOptions;
 use crate::sst::parquet::metadata::extract_primary_key_range;
+use crate::sst::parquet::{SstInfo, WriteOptions};
 use crate::sst::version::{SstVersion, SstVersionRef};
 
 /// Region version for compaction that does not hold memtables.
@@ -106,16 +109,20 @@ pub struct CompactionRegion {
     /// The parallel is inside this compaction task, not across different compaction tasks.
     /// It can be different windows of the same compaction task or something like this.
     pub max_parallelism: usize,
+
+    pub(crate) plugins: Plugins,
 }
 
 /// OpenCompactionRegionRequest represents the request to open a compaction region.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct OpenCompactionRegionRequest {
     pub region_id: RegionId,
     pub table_dir: String,
     pub path_type: PathType,
     pub region_options: RegionOptions,
     pub max_parallelism: usize,
+    /// Plugins for the compaction region, used to look up the [`RegionHook`](crate::engine::region_hook::RegionHook).
+    pub plugins: Plugins,
 }
 
 /// Open a compaction region from a compaction request.
@@ -174,9 +181,11 @@ pub async fn open_compaction_region(
 
     let manifest = manifest_manager.manifest();
     let region_metadata = manifest.metadata.clone();
+    let hook: Option<RegionHookRef> = req.plugins.get();
     let manifest_ctx = Arc::new(ManifestContext::new(
         manifest_manager,
         RegionRoleState::Leader(RegionLeaderState::Writable),
+        hook,
     ));
 
     let file_purger = {
@@ -230,6 +239,7 @@ pub async fn open_compaction_region(
         file_purger: Some(file_purger),
         ttl: Some(ttl),
         max_parallelism: req.max_parallelism,
+        plugins: req.plugins.clone(),
     })
 }
 
@@ -247,14 +257,100 @@ impl CompactionRegion {
             Ok(())
         }
     }
+
+    /// Fires [`RegionHook::on_sst_files_written`] for the freshly-merged SST
+    /// files in `merge_output`. Shared by both compaction paths, it must run
+    /// before [`Compactor::update_manifest`], whose `on_manifest_updated`
+    /// drains the per-region state this hook populates.
+    pub async fn invoke_sst_hook(&self, merge_output: &MergeOutput) {
+        let Some(hook) = self.plugins.get::<RegionHookRef>() else {
+            return;
+        };
+
+        // Remote compaction deserializes `MergeOutput` over gRPC, where
+        // `sst_infos` is `#[serde(skip)]`. Rebuild each `SstInfo` from the
+        // matching `FileMeta` so the hook observes real ids/rows/sizes rather
+        // than zeros — see [`sst_info_from_file_meta`] for what stays default.
+        let synthesized: Vec<SstInfo>;
+        let infos: &[SstInfo] = if merge_output.sst_infos.is_empty() {
+            synthesized = merge_output
+                .files_to_add
+                .iter()
+                .map(sst_info_from_file_meta)
+                .collect();
+            &synthesized
+        } else {
+            // `sst_infos` and `files_to_add` are documented as 1:1. If they
+            // ever diverge, `zip` below would silently truncate; warn so the
+            // mismatch is observable rather than dropping files from the hook.
+            if merge_output.sst_infos.len() != merge_output.files_to_add.len() {
+                warn!(
+                    "sst_infos length ({}) does not match files_to_add length ({}) for region {}",
+                    merge_output.sst_infos.len(),
+                    merge_output.files_to_add.len(),
+                    self.region_id
+                );
+            }
+            &merge_output.sst_infos
+        };
+
+        let files: Vec<SstFileInfo<'_>> = merge_output
+            .files_to_add
+            .iter()
+            .zip(infos)
+            .map(|(meta, info)| SstFileInfo {
+                sst_info_ref: info,
+                file_meta: meta,
+            })
+            .collect();
+        hook.on_sst_files_written(self.region_id, &self.region_metadata, &files)
+            .await;
+    }
+}
+
+/// Builds an [`SstInfo`] for the remote-compaction path by copying the scalar
+/// fields that [`FileMeta`] also carries.
+///
+/// Remote compaction runs off-process and ships `MergeOutput` over the wire;
+/// [`MergeOutput::sst_infos`] is `#[serde(skip)]` because the parquet footer
+/// (`ParquetMetaData`) is not serde-serializable. To avoid feeding the hook
+/// default (zero) values for real SSTs, this rebuilds the seven fields `FileMeta`
+/// and `SstInfo` share: `file_id`, `time_range`, `file_size`,
+/// `max_row_group_uncompressed_size`, `num_rows`, `num_row_groups`, `num_series`.
+///
+/// Two fields stay default and **cannot be recovered on the datanode**:
+/// - `file_metadata` — the parquet footer, whose column min/max/null-count
+///   statistics are required by hooks building richer artifacts (e.g. an Iceberg
+///   manifest). That data is produced by the compactor's writer and exists only
+///   in the freshly-written SST on object storage.
+/// - `index_metadata` — `FileMeta` tracks indexes via `available_indexes` /
+///   `indexes`, not as an [`IndexOutput`].
+///
+/// A hook that needs column stats must fetch the footer from object storage
+/// (the [`CompactionRegion`]'s `access_layer` reaches the store), or the footer
+/// must be shipped over the wire (revisit the `#[serde(skip)]` on `sst_infos`).
+/// `num_rows` may read `0` for legacy `FileMeta`s where the count is unknown.
+fn sst_info_from_file_meta(meta: &FileMeta) -> SstInfo {
+    SstInfo {
+        file_id: meta.file_id,
+        time_range: meta.time_range,
+        file_size: meta.file_size,
+        max_row_group_uncompressed_size: meta.max_row_group_uncompressed_size,
+        num_rows: meta.num_rows as usize,
+        num_row_groups: meta.num_row_groups,
+        num_series: meta.num_series,
+        ..Default::default()
+    }
 }
 
 /// `[MergeOutput]` represents the output of merging SST files.
-#[derive(Default, Clone, Debug, Serialize, Deserialize)]
+#[derive(Default, Debug, Serialize, Deserialize)]
 pub struct MergeOutput {
     pub files_to_add: Vec<FileMeta>,
     pub files_to_remove: Vec<FileMeta>,
     pub compaction_time_window: Option<i64>,
+    #[serde(skip)]
+    pub sst_infos: Vec<SstInfo>,
 }
 
 impl MergeOutput {
@@ -286,7 +382,7 @@ pub trait Compactor: Send + Sync + 'static {
         &self,
         compaction_region: &CompactionRegion,
         merge_output: MergeOutput,
-    ) -> Result<RegionEdit>;
+    ) -> Result<(RegionEdit, ManifestVersion)>;
 }
 
 /// Trait for merging a single compaction output into SST files.
@@ -300,7 +396,7 @@ pub trait SstMerger: Send + Sync + 'static {
         compaction_region: CompactionRegion,
         output: CompactionOutput,
         write_opts: WriteOptions,
-    ) -> Result<Vec<FileMeta>>;
+    ) -> Result<(Vec<FileMeta>, Vec<SstInfo>)>;
 }
 
 /// The production [`SstMerger`] that reads, merges, and writes SST files.
@@ -314,7 +410,7 @@ impl SstMerger for DefaultSstMerger {
         compaction_region: CompactionRegion,
         output: CompactionOutput,
         write_opts: WriteOptions,
-    ) -> Result<Vec<FileMeta>> {
+    ) -> Result<(Vec<FileMeta>, Vec<SstInfo>)> {
         let region_id = compaction_region.region_id;
         let storage = compaction_region.region_options.storage.clone();
         let index_options = compaction_region
@@ -359,6 +455,7 @@ impl SstMerger for DefaultSstMerger {
             merge_mode,
         };
         let source = builder.build_flat_sst_reader().await?;
+
         let mut metrics = Metrics::new(WriteType::Compaction);
         let region_metadata = compaction_region.region_metadata.clone();
         let sst_infos = compaction_region
@@ -400,7 +497,7 @@ impl SstMerger for DefaultSstMerger {
         };
 
         let output_files = sst_infos
-            .into_iter()
+            .iter()
             .map(|sst_info| {
                 let pk_range = sst_info
                     .file_metadata
@@ -438,7 +535,7 @@ impl SstMerger for DefaultSstMerger {
             region_id, input_file_names, output_file_names, flat_format, metrics
         );
         metrics.observe();
-        Ok(output_files)
+        Ok((output_files, sst_infos.into_iter().collect()))
     }
 }
 
@@ -506,7 +603,9 @@ where
             tasks.push((inputs_to_remove, fut));
         }
 
+        let hook: Option<RegionHookRef> = compaction_region.plugins.get();
         let mut output_files = Vec::with_capacity(tasks.len());
+        let mut all_sst_infos: Vec<SstInfo> = Vec::new();
         let mut compacted_inputs = Vec::with_capacity(
             tasks.iter().map(|(inputs, _)| inputs.len()).sum::<usize>()
                 + picker_output.expired_ssts.len(),
@@ -530,8 +629,11 @@ where
             while let Some((inputs, handle)) = spawned.pop() {
                 let abort_handle = handle.abort_handle();
                 match CancellableFuture::new(handle, self.cancel_handle.clone()).await {
-                    Ok(Ok(Ok(files))) => {
+                    Ok(Ok(Ok((files, infos)))) => {
                         output_files.extend(files);
+                        if hook.is_some() {
+                            all_sst_infos.extend(infos);
+                        }
                         compacted_inputs.extend(inputs);
                     }
                     Ok(Ok(Err(e))) => {
@@ -591,6 +693,7 @@ where
             files_to_add: output_files,
             files_to_remove: compacted_inputs,
             compaction_time_window: Some(compaction_time_window),
+            sst_infos: all_sst_infos,
         })
     }
 
@@ -598,7 +701,7 @@ where
         &self,
         compaction_region: &CompactionRegion,
         merge_output: MergeOutput,
-    ) -> Result<RegionEdit> {
+    ) -> Result<(RegionEdit, ManifestVersion)> {
         // Write region edit to manifest.
         let edit = RegionEdit {
             files_to_add: merge_output.files_to_add,
@@ -615,12 +718,12 @@ where
 
         let action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(edit.clone()));
         // TODO: We might leak files if we fail to update manifest. We can add a cleanup task to remove them later.
-        compaction_region
+        let manifest_version = compaction_region
             .manifest_ctx
             .update_manifest_for_compaction(action_list)
             .await?;
 
-        Ok(edit)
+        Ok((edit, manifest_version))
     }
 }
 
@@ -679,6 +782,7 @@ mod tests {
             file_purger: None,
             ttl: None,
             max_parallelism: 1,
+            plugins: Plugins::new(),
         }
     }
 
@@ -707,10 +811,10 @@ mod tests {
             _compaction_region: CompactionRegion,
             _output: CompactionOutput,
             _write_opts: WriteOptions,
-        ) -> Result<Vec<FileMeta>> {
+        ) -> Result<(Vec<FileMeta>, Vec<SstInfo>)> {
             let idx = self.call_idx.fetch_add(1, Ordering::SeqCst);
             match self.results.lock().unwrap().get(idx) {
-                Some(Ok(files)) => Ok(files.clone()),
+                Some(Ok(files)) => Ok((files.clone(), Vec::new())),
                 Some(Err(_)) => error::InvalidMetaSnafu {
                     reason: format!("simulated failure at index {idx}"),
                 }
@@ -879,7 +983,7 @@ mod tests {
             _compaction_region: CompactionRegion,
             _output: CompactionOutput,
             _write_opts: WriteOptions,
-        ) -> Result<Vec<FileMeta>> {
+        ) -> Result<(Vec<FileMeta>, Vec<SstInfo>)> {
             self.call_idx.fetch_add(1, Ordering::SeqCst);
             std::future::pending().await
         }

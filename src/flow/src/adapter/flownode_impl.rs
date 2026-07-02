@@ -25,9 +25,12 @@ use api::v1::region::InsertRequests;
 use catalog::CatalogManager;
 use common_base::Plugins;
 use common_error::ext::BoxedError;
-use common_meta::ddl::create_flow::FlowType;
+use common_meta::ddl::create_flow::{
+    FlowType, INTERNAL_EVAL_SCHEDULE_KEY, effective_eval_schedule_from_flow_info,
+};
 use common_meta::error::Result as MetaResult;
 use common_meta::key::flow::FlowMetadataManager;
+use common_meta::key::flow::flow_info::FlowScheduleConfig;
 use common_meta::key::flow::flow_state::FlowStat;
 use common_runtime::JoinHandle;
 use common_telemetry::{error, info, trace, warn};
@@ -198,9 +201,9 @@ impl FlowDualEngine {
         }
     }
 
-    /// In distributed mode, scan periodically(1s) until available frontend is found, or timeout,
-    /// in standalone mode, return immediately
-    /// notice here if any frontend appear in cluster info this function will return immediately
+    /// In distributed mode, scan periodically(1s) until all advertised frontends
+    /// accept unauthenticated queries, or timeout. In standalone mode, return
+    /// immediately.
     async fn wait_for_available_frontend(&self, timeout: std::time::Duration) -> Result<(), Error> {
         if !self.is_distributed() {
             return Ok(());
@@ -215,8 +218,20 @@ impl FlowDualEngine {
                     .iter()
                     .map(|peer| &peer.addr)
                     .collect::<Vec<_>>();
-                info!("Available frontend found: {:?}", fe_list);
-                return Ok(());
+                let probe_failures = frontend_client
+                    .check_all_frontends_without_auth(&frontend_list)
+                    .await?;
+                if probe_failures.is_empty() {
+                    info!(
+                        "Available frontend found and unauthenticated probe succeeded: {:?}",
+                        fe_list
+                    );
+                    return Ok(());
+                }
+                warn!(
+                    "Unauthenticated frontend probe failed, will retry. frontends={:?}, failures={:?}",
+                    fe_list, probe_failures
+                );
             }
             let elapsed = now.elapsed();
             tokio::time::sleep(sleep_duration).await;
@@ -224,7 +239,7 @@ impl FlowDualEngine {
             if elapsed >= timeout {
                 return NoAvailableFrontendSnafu {
                     timeout,
-                    context: "No available frontend found in cluster info",
+                    context: "No frontend accepted unauthenticated flownode probe",
                 }
                 .fail();
             }
@@ -368,6 +383,7 @@ impl FlowDualEngine {
                         comment: Some(info.comment().clone()),
                         sql: info.raw_sql().clone(),
                         flow_options: info.options().clone(),
+                        eval_schedule: effective_eval_schedule_from_flow_info(&info),
                         query_ctx: info
                             .query_context()
                             .clone()
@@ -499,19 +515,14 @@ impl ConsistentCheckTask {
             .batching_engine()
             .batch_opts
             .experimental_frontend_scan_timeout;
+        engine
+            .wait_for_available_frontend(frontend_scan_timeout)
+            .await?;
         let (tx, mut rx) = tokio::sync::mpsc::channel(1);
         let (trigger_tx, mut trigger_rx) =
             tokio::sync::mpsc::channel::<(bool, bool, tokio::sync::oneshot::Sender<()>)>(10);
         let handle = common_runtime::spawn_global(async move {
-            // first check if available frontend is found
-            if let Err(err) = engine
-                .wait_for_available_frontend(frontend_scan_timeout)
-                .await
-            {
-                warn!("No frontend is available yet:\n {err:?}");
-            }
-
-            // then do recover flows, if failed, always retry
+            // Recover flows after the startup frontend probe succeeds.
             let mut recover_retry = 0;
             while let Err(err) = engine.check_flow_consistent(true, false).await {
                 recover_retry += 1;
@@ -832,7 +843,7 @@ impl common_meta::node_manager::Flownode for FlowDualEngine {
                 eval_interval,
                 comment,
                 sql,
-                flow_options,
+                mut flow_options,
                 or_replace,
             })) => {
                 let source_table_ids = source_table_ids.into_iter().map(|id| id.id).collect_vec();
@@ -842,6 +853,10 @@ impl common_meta::node_manager::Flownode for FlowDualEngine {
                     sink_table_name.table_name,
                 ];
                 let expire_after = expire_after.map(|e| e.value);
+
+                let eval_schedule = decode_internal_eval_schedule(&mut flow_options)
+                    .map_err(to_meta_err(snafu::location!()))?;
+
                 let args = CreateFlowArgs {
                     flow_id: task_id.id as u64,
                     sink_table_name,
@@ -854,6 +869,7 @@ impl common_meta::node_manager::Flownode for FlowDualEngine {
                     sql: sql.clone(),
                     flow_options,
                     query_ctx,
+                    eval_schedule,
                 };
                 let ret = self
                     .create_flow(args)
@@ -909,6 +925,24 @@ impl common_meta::node_manager::Flownode for FlowDualEngine {
             .await
             .map(|_| FlowResponse::default())
             .map_err(to_meta_err(snafu::location!()))
+    }
+}
+
+/// Decode typed schedule config from the internal transient key emitted by metasrv.
+/// Malformed JSON is an internal error rather than a reason to silently fall back.
+fn decode_internal_eval_schedule(
+    flow_options: &mut HashMap<String, String>,
+) -> Result<Option<FlowScheduleConfig>, Error> {
+    match flow_options.remove(INTERNAL_EVAL_SCHEDULE_KEY) {
+        Some(json) => serde_json::from_str::<FlowScheduleConfig>(&json)
+            .map(Some)
+            .map_err(|err| {
+                InternalSnafu {
+                    reason: format!("Invalid internal eval schedule payload: {err}"),
+                }
+                .build()
+            }),
+        None => Ok(None),
     }
 }
 
@@ -1119,5 +1153,32 @@ impl StreamingEngine {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use common_meta::ddl::create_flow::INTERNAL_EVAL_SCHEDULE_KEY;
+
+    use super::decode_internal_eval_schedule;
+    use crate::error::Error;
+
+    #[test]
+    fn test_malformed_internal_eval_schedule_json_is_error() {
+        let mut flow_options = HashMap::new();
+        flow_options.insert(
+            INTERNAL_EVAL_SCHEDULE_KEY.to_string(),
+            "not-json".to_string(),
+        );
+
+        let err = decode_internal_eval_schedule(&mut flow_options).unwrap_err();
+        assert!(matches!(
+            err,
+            Error::Internal { reason, .. }
+                if reason.contains("Invalid internal eval schedule payload")
+        ));
+        assert!(!flow_options.contains_key(INTERNAL_EVAL_SCHEDULE_KEY));
     }
 }

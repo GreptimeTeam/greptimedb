@@ -60,12 +60,15 @@ impl TreeNodeRewriter for FallbackPlanRewriter {
                         let partition_key_indices = info.meta.partition_key_indices.clone();
                         let schema = info.meta.schema.clone();
                         let partition_cols = partition_key_indices
-                            .into_iter()
-                            .map(|index| schema.column_name_by_index(index).to_string())
+                            .iter()
+                            .map(|index| schema.column_name_by_index(*index).to_string())
                             .collect::<Vec<String>>();
                         debug!(
-                            "FallbackPlanRewriter: table {} has partition columns: {:?}",
-                            info.name, partition_cols
+                            "FallbackPlanRewriter: loaded table partition metadata, table: {}, table_id: {}, partition_key_indices: {:?}, partition_columns: {:?}",
+                            info.name,
+                            info.ident.table_id,
+                            info.meta.partition_key_indices,
+                            partition_cols,
                         );
                         Some(partition_cols
                                 .into_iter()

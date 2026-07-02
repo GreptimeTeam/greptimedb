@@ -31,6 +31,9 @@ use pipeline::{
 use serde_json::{Deserializer, Value, json};
 use session::context::{Channel, QueryContext};
 use snafu::{ResultExt, ensure};
+use table::requests::{
+    SEMANTIC_SIGNAL_TYPE, SEMANTIC_SOURCE, SIGNAL_TYPE_LOG, SOURCE_ELASTICSEARCH,
+};
 use vrl::value::Value as VrlValue;
 
 use crate::error::{
@@ -134,6 +137,8 @@ async fn do_handle_bulk_api(
 
     // The `schema` is already set in the query_ctx in auth process.
     query_ctx.set_channel(Channel::Elasticsearch);
+    query_ctx.set_extension(SEMANTIC_SIGNAL_TYPE, SIGNAL_TYPE_LOG);
+    query_ctx.set_extension(SEMANTIC_SOURCE, SOURCE_ELASTICSEARCH);
 
     let db = query_ctx.current_schema();
 

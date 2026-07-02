@@ -15,7 +15,7 @@
 use std::any::Any;
 use std::sync::Arc;
 
-use common_error::ext::{BoxedError, ErrorExt};
+use common_error::ext::{BoxedError, ErrorExt, RetryHint};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use datatypes::prelude::ConcreteDataType;
@@ -463,5 +463,31 @@ impl ErrorExt for Error {
 
     fn as_any(&self) -> &dyn Any {
         self
+    }
+
+    fn retry_hint(&self) -> RetryHint {
+        use Error::*;
+
+        match self {
+            CreateMitoRegion { source, .. }
+            | OpenMitoRegion { source, .. }
+            | BatchOpenMitoRegion { source, .. }
+            | BatchCatchupMitoRegion { source, .. }
+            | CloseMitoRegion { source, .. }
+            | MitoReadOperation { source, .. }
+            | MitoWriteOperation { source, .. }
+            | MitoFlushOperation { source, .. }
+            | MitoSyncOperation { source, .. }
+            | MitoEnterStagingOperation { source, .. }
+            | MitoCopyRegionFromOperation { source, .. }
+            | MitoEditRegion { source, .. } => source.retry_hint(),
+
+            EncodePrimaryKey { source, .. } => source.retry_hint(),
+            CollectRecordBatchStream { source, .. } => source.retry_hint(),
+            StartRepeatedTask { source, .. } => source.retry_hint(),
+            CacheGet { source, .. } => source.retry_hint(),
+
+            _ => RetryHint::NonRetryable,
+        }
     }
 }

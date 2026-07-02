@@ -21,9 +21,17 @@ pub mod options;
 pub mod standalone;
 
 pub use cli::SubCommand;
-pub use datanode::{setup_datanode_plugins, start_datanode_plugins};
-pub use flownode::{setup_flownode_plugins, start_flownode_plugins};
-pub use frontend::{setup_frontend_plugins, start_frontend_plugins};
-pub use meta_srv::{setup_metasrv_plugins, start_metasrv_plugins};
+pub use datanode::{
+    setup_datanode_plugins_post_build, setup_datanode_plugins_pre_build, start_datanode_plugins,
+};
+pub use flownode::{
+    setup_flownode_plugins_post_build, setup_flownode_plugins_pre_build, start_flownode_plugins,
+};
+pub use frontend::{
+    setup_frontend_plugins_post_build, setup_frontend_plugins_pre_build, start_frontend_plugins,
+};
+pub use meta_srv::{
+    setup_metasrv_plugins_post_build, setup_metasrv_plugins_pre_build, start_metasrv_plugins,
+};
 pub use options::PluginOptions;
 pub use standalone::setup_standalone_plugins;

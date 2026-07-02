@@ -18,10 +18,9 @@ use std::fmt::{self, Display};
 use common_wal::options::WalOptions;
 use serde::{Deserialize, Serialize};
 use snafu::OptionExt;
-use store_api::storage::{RegionId, RegionNumber};
+use store_api::storage::RegionId;
 use table::metadata::TableId;
 
-use crate::ddl::utils::parse_region_wal_options;
 use crate::error::{Error, InvalidMetadataSnafu, Result};
 use crate::key::{MetadataKey, MetadataValue, TOPIC_REGION_PATTERN, TOPIC_REGION_PREFIX};
 use crate::kv_backend::KvBackendRef;
@@ -30,6 +29,7 @@ use crate::rpc::KeyValue;
 use crate::rpc::store::{
     BatchDeleteRequest, BatchGetRequest, BatchPutRequest, PutRequest, RangeRequest,
 };
+use crate::wal_provider::RegionWalOptions;
 
 // The TopicRegionKey is a key for the topic-region mapping in the kvbackend.
 // The layout of the key is `__topic_region/{topic_name}/{region_id}`.
@@ -265,10 +265,9 @@ impl TopicRegionManager {
     pub fn build_create_txn(
         &self,
         table_id: TableId,
-        region_wal_options: &HashMap<RegionNumber, String>,
+        region_wal_options: &RegionWalOptions,
     ) -> Result<Txn> {
-        let region_wal_options = parse_region_wal_options(region_wal_options)?;
-        let topic_region_mapping = self.get_topic_region_mapping(table_id, &region_wal_options);
+        let topic_region_mapping = self.get_topic_region_mapping(table_id, region_wal_options);
         let topic_region_keys = topic_region_mapping
             .iter()
             .map(|(region_id, topic)| TopicRegionKey::new(*region_id, topic))
@@ -284,13 +283,11 @@ impl TopicRegionManager {
     pub fn build_update_txn(
         &self,
         table_id: TableId,
-        old_region_wal_options: &HashMap<RegionNumber, String>,
-        new_region_wal_options: &HashMap<RegionNumber, String>,
+        old_region_wal_options: &RegionWalOptions,
+        new_region_wal_options: &RegionWalOptions,
     ) -> Result<Txn> {
-        let old_wal_options_parsed = parse_region_wal_options(old_region_wal_options)?;
-        let new_wal_options_parsed = parse_region_wal_options(new_region_wal_options)?;
-        let old_mapping = self.get_topic_region_mapping(table_id, &old_wal_options_parsed);
-        let new_mapping = self.get_topic_region_mapping(table_id, &new_wal_options_parsed);
+        let old_mapping = self.get_topic_region_mapping(table_id, old_region_wal_options);
+        let new_mapping = self.get_topic_region_mapping(table_id, new_region_wal_options);
 
         // Convert to HashMap for easier lookup: RegionId -> Topic
         let old_map: HashMap<RegionId, &str> = old_mapping.into_iter().collect();
@@ -369,7 +366,7 @@ impl TopicRegionManager {
     pub fn get_topic_region_mapping<'a>(
         &self,
         table_id: TableId,
-        region_wal_options: &'a HashMap<RegionNumber, WalOptions>,
+        region_wal_options: &'a RegionWalOptions,
     ) -> Vec<(RegionId, &'a str)> {
         region_wal_options
             .keys()
@@ -516,17 +513,14 @@ mod tests {
             .map(|i| {
                 let region_number = i;
                 let wal_options = if i % 2 == 0 {
-                    WalOptions::Kafka(KafkaWalOptions {
-                        topic: format!("topic_{}", i),
-                    })
+                    WalOptions::Kafka(KafkaWalOptions::new(format!("topic_{}", i)))
                 } else {
                     WalOptions::RaftEngine
                 };
-                (region_number, serde_json::to_string(&wal_options).unwrap())
+                (region_number, wal_options)
             })
             .collect::<HashMap<_, _>>();
 
-        let region_wal_options = parse_region_wal_options(&region_wal_options).unwrap();
         let mut topic_region_mapping =
             manager.get_topic_region_mapping(table_id, &region_wal_options);
         let mut expected = (0..64)
@@ -569,20 +563,15 @@ mod tests {
         let region_wal_options = vec![
             (
                 0,
-                WalOptions::Kafka(KafkaWalOptions {
-                    topic: "topic_0".to_string(),
-                }),
+                WalOptions::Kafka(KafkaWalOptions::new("topic_0".to_string())),
             ),
             (
                 1,
-                WalOptions::Kafka(KafkaWalOptions {
-                    topic: "topic_1".to_string(),
-                }),
+                WalOptions::Kafka(KafkaWalOptions::new("topic_1".to_string())),
             ),
             (2, WalOptions::RaftEngine), // Should be ignored
         ]
         .into_iter()
-        .map(|(num, opts)| (num, serde_json::to_string(&opts).unwrap()))
         .collect::<HashMap<_, _>>();
 
         let txn = manager
@@ -628,29 +617,21 @@ mod tests {
         let table_id = 1;
         let old_region_wal_options = vec![(
             0,
-            WalOptions::Kafka(KafkaWalOptions {
-                topic: "topic_0".to_string(),
-            }),
+            WalOptions::Kafka(KafkaWalOptions::new("topic_0".to_string())),
         )]
         .into_iter()
-        .map(|(num, opts)| (num, serde_json::to_string(&opts).unwrap()))
         .collect::<HashMap<_, _>>();
         let new_region_wal_options = vec![
             (
                 0,
-                WalOptions::Kafka(KafkaWalOptions {
-                    topic: "topic_0".to_string(),
-                }),
+                WalOptions::Kafka(KafkaWalOptions::new("topic_0".to_string())),
             ),
             (
                 1,
-                WalOptions::Kafka(KafkaWalOptions {
-                    topic: "topic_1".to_string(),
-                }),
+                WalOptions::Kafka(KafkaWalOptions::new("topic_1".to_string())),
             ),
         ]
         .into_iter()
-        .map(|(num, opts)| (num, serde_json::to_string(&opts).unwrap()))
         .collect::<HashMap<_, _>>();
         let txn = manager
             .build_update_txn(table_id, &old_region_wal_options, &new_region_wal_options)
@@ -675,28 +656,20 @@ mod tests {
         let old_region_wal_options = vec![
             (
                 0,
-                WalOptions::Kafka(KafkaWalOptions {
-                    topic: "topic_0".to_string(),
-                }),
+                WalOptions::Kafka(KafkaWalOptions::new("topic_0".to_string())),
             ),
             (
                 1,
-                WalOptions::Kafka(KafkaWalOptions {
-                    topic: "topic_1".to_string(),
-                }),
+                WalOptions::Kafka(KafkaWalOptions::new("topic_1".to_string())),
             ),
         ]
         .into_iter()
-        .map(|(num, opts)| (num, serde_json::to_string(&opts).unwrap()))
         .collect::<HashMap<_, _>>();
         let new_region_wal_options = vec![(
             0,
-            WalOptions::Kafka(KafkaWalOptions {
-                topic: "topic_0".to_string(),
-            }),
+            WalOptions::Kafka(KafkaWalOptions::new("topic_0".to_string())),
         )]
         .into_iter()
-        .map(|(num, opts)| (num, serde_json::to_string(&opts).unwrap()))
         .collect::<HashMap<_, _>>();
         let txn = manager
             .build_update_txn(table_id, &old_region_wal_options, &new_region_wal_options)
@@ -723,21 +696,15 @@ mod tests {
         let table_id = 1;
         let old_region_wal_options = vec![(
             0,
-            WalOptions::Kafka(KafkaWalOptions {
-                topic: "topic_0".to_string(),
-            }),
+            WalOptions::Kafka(KafkaWalOptions::new("topic_0".to_string())),
         )]
         .into_iter()
-        .map(|(num, opts)| (num, serde_json::to_string(&opts).unwrap()))
         .collect::<HashMap<_, _>>();
         let new_region_wal_options = vec![(
             0,
-            WalOptions::Kafka(KafkaWalOptions {
-                topic: "topic_0_new".to_string(),
-            }),
+            WalOptions::Kafka(KafkaWalOptions::new("topic_0_new".to_string())),
         )]
         .into_iter()
-        .map(|(num, opts)| (num, serde_json::to_string(&opts).unwrap()))
         .collect::<HashMap<_, _>>();
         let txn = manager
             .build_update_txn(table_id, &old_region_wal_options, &new_region_wal_options)
@@ -780,19 +747,14 @@ mod tests {
         let region_wal_options = vec![
             (
                 0,
-                WalOptions::Kafka(KafkaWalOptions {
-                    topic: "topic_0".to_string(),
-                }),
+                WalOptions::Kafka(KafkaWalOptions::new("topic_0".to_string())),
             ),
             (
                 1,
-                WalOptions::Kafka(KafkaWalOptions {
-                    topic: "topic_1".to_string(),
-                }),
+                WalOptions::Kafka(KafkaWalOptions::new("topic_1".to_string())),
             ),
         ]
         .into_iter()
-        .map(|(num, opts)| (num, serde_json::to_string(&opts).unwrap()))
         .collect::<HashMap<_, _>>();
         let txn = manager
             .build_update_txn(table_id, &region_wal_options, &region_wal_options)
@@ -810,49 +772,35 @@ mod tests {
         let old_region_wal_options = vec![
             (
                 0,
-                WalOptions::Kafka(KafkaWalOptions {
-                    topic: "topic_0".to_string(),
-                }),
+                WalOptions::Kafka(KafkaWalOptions::new("topic_0".to_string())),
             ),
             (
                 1,
-                WalOptions::Kafka(KafkaWalOptions {
-                    topic: "topic_1".to_string(),
-                }),
+                WalOptions::Kafka(KafkaWalOptions::new("topic_1".to_string())),
             ),
             (
                 2,
-                WalOptions::Kafka(KafkaWalOptions {
-                    topic: "topic_2".to_string(),
-                }),
+                WalOptions::Kafka(KafkaWalOptions::new("topic_2".to_string())),
             ),
         ]
         .into_iter()
-        .map(|(num, opts)| (num, serde_json::to_string(&opts).unwrap()))
         .collect::<HashMap<_, _>>();
         let new_region_wal_options = vec![
             (
                 0,
-                WalOptions::Kafka(KafkaWalOptions {
-                    topic: "topic_0".to_string(), // Unchanged
-                }),
+                WalOptions::Kafka(KafkaWalOptions::new("topic_0".to_string())), // Unchanged
             ),
             (
                 1,
-                WalOptions::Kafka(KafkaWalOptions {
-                    topic: "topic_1_new".to_string(), // Topic changed
-                }),
+                WalOptions::Kafka(KafkaWalOptions::new("topic_1_new".to_string())), // Topic changed
             ),
             // Region 2 removed
             (
                 3,
-                WalOptions::Kafka(KafkaWalOptions {
-                    topic: "topic_3".to_string(), // New region
-                }),
+                WalOptions::Kafka(KafkaWalOptions::new("topic_3".to_string())), // New region
             ),
         ]
         .into_iter()
-        .map(|(num, opts)| (num, serde_json::to_string(&opts).unwrap()))
         .collect::<HashMap<_, _>>();
         let txn = manager
             .build_update_txn(table_id, &old_region_wal_options, &new_region_wal_options)
@@ -931,31 +879,23 @@ mod tests {
         let old_region_wal_options = vec![
             (
                 0,
-                WalOptions::Kafka(KafkaWalOptions {
-                    topic: "topic_0".to_string(),
-                }),
+                WalOptions::Kafka(KafkaWalOptions::new("topic_0".to_string())),
             ),
             (1, WalOptions::RaftEngine), // Should be ignored
         ]
         .into_iter()
-        .map(|(num, opts)| (num, serde_json::to_string(&opts).unwrap()))
         .collect::<HashMap<_, _>>();
         let new_region_wal_options = vec![
             (
                 0,
-                WalOptions::Kafka(KafkaWalOptions {
-                    topic: "topic_0".to_string(),
-                }),
+                WalOptions::Kafka(KafkaWalOptions::new("topic_0".to_string())),
             ),
             (
                 1,
-                WalOptions::Kafka(KafkaWalOptions {
-                    topic: "topic_1".to_string(), // Changed from RaftEngine to Kafka
-                }),
+                WalOptions::Kafka(KafkaWalOptions::new("topic_1".to_string())), // Changed from RaftEngine to Kafka
             ),
         ]
         .into_iter()
-        .map(|(num, opts)| (num, serde_json::to_string(&opts).unwrap()))
         .collect::<HashMap<_, _>>();
         let txn = manager
             .build_update_txn(table_id, &old_region_wal_options, &new_region_wal_options)

@@ -110,7 +110,6 @@ pub struct FlownodeOptions {
     pub logging: LoggingOptions,
     pub tracing: TracingOptions,
     pub query: QueryOptions,
-    pub user_provider: Option<String>,
     pub memory: MemoryOptions,
 }
 
@@ -130,8 +129,8 @@ impl Default for FlownodeOptions {
                 parallelism: 1,
                 allow_query_fallback: false,
                 memory_pool_size: MemoryLimit::default(),
+                enable_per_region_metrics: false,
             },
-            user_provider: None,
             memory: MemoryOptions::default(),
         }
     }
@@ -747,6 +746,7 @@ impl StreamingEngine {
             sql,
             flow_options,
             query_ctx,
+            ..
         } = args;
 
         let mut node_ctx = self.node_context.write().await;

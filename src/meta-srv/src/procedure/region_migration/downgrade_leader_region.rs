@@ -35,6 +35,7 @@ use crate::handler::HeartbeatMailbox;
 use crate::procedure::region_migration::update_metadata::UpdateMetadata;
 use crate::procedure::region_migration::upgrade_candidate_region::UpgradeCandidateRegion;
 use crate::procedure::region_migration::{Context, State};
+use crate::procedure::utils::instruction_error_result;
 use crate::service::mailbox::Channel;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -146,14 +147,17 @@ impl DowngradeLeaderRegion {
             error,
         } = reply;
 
-        if error.is_some() {
-            return error::RetryLaterSnafu {
-                reason: format!(
+        if let Some(error) = error {
+            return instruction_error_result(
+                error,
+                format!(
                     "Failed to downgrade the region {} on datanode {:?}, error: {:?}, elapsed: {:?}",
-                    region_id, leader, error, now.elapsed()
+                    region_id,
+                    leader,
+                    error,
+                    now.elapsed()
                 ),
-            }
-            .fail();
+            );
         }
 
         if !exists {
@@ -379,6 +383,7 @@ mod tests {
     use common_meta::key::test_utils::new_test_table_info;
     use common_meta::peer::Peer;
     use common_meta::rpc::router::{Region, RegionRoute};
+    use common_meta::wal_provider::RegionWalOptions;
     use store_api::storage::RegionId;
     use tokio::time::Instant;
 
@@ -402,7 +407,7 @@ mod tests {
         )
     }
 
-    async fn prepare_table_metadata(ctx: &Context, wal_options: HashMap<u32, String>) {
+    async fn prepare_table_metadata(ctx: &Context, wal_options: RegionWalOptions) {
         let region_id = ctx.persistent_ctx.region_ids[0];
         let table_info = new_test_table_info(region_id.table_id());
         let region_routes = vec![RegionRoute {

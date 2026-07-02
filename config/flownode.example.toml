@@ -2,11 +2,6 @@
 ## @toml2docs:none-default
 node_id = 14
 
-## The user provider for authentication.
-## Examples: "static_user_provider:file:/path/to/users", "static_user_provider:cmd:greptime_user=greptime_pwd"
-## @toml2docs:none-default
-#+ user_provider = "static_user_provider:file:/path/to/users"
-
 ## flow engine options.
 [flow]
 ## The number of flow worker in flownode.

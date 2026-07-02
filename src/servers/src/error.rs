@@ -23,7 +23,7 @@ use axum::{Json, http};
 use base64::DecodeError;
 use common_base::readable_size::ReadableSize;
 use common_error::define_into_tonic_status;
-use common_error::ext::{BoxedError, ErrorExt};
+use common_error::ext::{BoxedError, ErrorExt, RetryHint};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use common_telemetry::{error, warn};
@@ -286,6 +286,14 @@ pub enum Error {
 
     #[snafu(display("Failed to decompress snappy prometheus remote request"))]
     DecompressSnappyPromRemoteRequest {
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        error: snap::Error,
+    },
+
+    #[snafu(display("Failed to decompress snappy Loki request"))]
+    DecompressSnappyLokiRequest {
         #[snafu(implicit)]
         location: Location,
         #[snafu(source)]
@@ -756,6 +764,7 @@ impl ErrorExt for Error {
             | UnsupportedJsonContentType { .. }
             | CompressPromRemoteRequest { .. }
             | DecompressSnappyPromRemoteRequest { .. }
+            | DecompressSnappyLokiRequest { .. }
             | DecompressZstdPromRemoteRequest { .. }
             | InvalidPromRemoteRequest { .. }
             | InvalidFlightTicket { .. }
@@ -841,6 +850,47 @@ impl ErrorExt for Error {
             Partition { source, .. } => source.status_code(),
             MetricEngine { source, .. } => source.status_code(),
             SubmitBatch { source, .. } => source.status_code(),
+        }
+    }
+
+    fn retry_hint(&self) -> RetryHint {
+        use Error::*;
+        match self {
+            ExecuteQuery { source, .. }
+            | ExecutePlan { source, .. }
+            | ExecuteGrpcQuery { source, .. }
+            | ExecuteGrpcRequest { source, .. }
+            | CheckDatabaseValidity { source, .. }
+            | DescribeStatement { source } => source.retry_hint(),
+
+            Pipeline { source, .. } => source.retry_hint(),
+            CommonMeta { source, .. } => source.retry_hint(),
+            Catalog { source, .. } => source.retry_hint(),
+            RowWriter { source, .. } => source.retry_hint(),
+            Auth { source, .. } => source.retry_hint(),
+
+            #[cfg(feature = "mem-prof")]
+            DumpProfileData { source, .. } => source.retry_hint(),
+
+            ParsePromQL { source, .. } => source.retry_hint(),
+            Other { source, .. } => source.retry_hint(),
+
+            #[cfg(feature = "pprof")]
+            DumpPprof { source, .. } => source.retry_hint(),
+
+            ConvertScalarValue { source, .. } => source.retry_hint(),
+            ConvertSqlValue { source, .. } => source.retry_hint(),
+            GreptimeProto { source, .. } => source.retry_hint(),
+            Partition { source, .. } => source.retry_hint(),
+            MetricEngine { source, .. } => source.retry_hint(),
+            SubmitBatch { source, .. } => source.retry_hint(),
+
+            MemoryLimitExceeded { source, .. } => source.retry_hint(),
+            CollectRecordbatch { source, .. } => source.retry_hint(),
+
+            TooManyConcurrentRequests { .. } => RetryHint::Retryable,
+
+            _ => RetryHint::NonRetryable,
         }
     }
 

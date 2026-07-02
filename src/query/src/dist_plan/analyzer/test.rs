@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::{BTreeSet, HashSet};
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -28,10 +29,12 @@ use datafusion::execution::SessionState;
 use datafusion::functions_aggregate::expr_fn::avg;
 use datafusion::functions_aggregate::min_max::{max, min};
 use datafusion::prelude::SessionContext;
-use datafusion_common::{JoinType, ScalarValue};
-use datafusion_expr::expr::ScalarFunction;
+use datafusion_common::tree_node::TreeNodeRecursion;
+use datafusion_common::{ExprSchema, JoinType, ScalarValue};
+use datafusion_expr::expr::{Exists, ScalarFunction};
 use datafusion_expr::{
-    AggregateUDF, Expr, ExprSchemable as _, LogicalPlanBuilder, Operator, binary_expr, col, lit,
+    AggregateUDF, Expr, ExprSchemable as _, LogicalPlanBuilder, Operator, Subquery, binary_expr,
+    col, lit,
 };
 use datafusion_functions::datetime::date_bin;
 use datafusion_functions::datetime::expr_fn::now;
@@ -53,14 +56,136 @@ use table::{Table, TableRef};
 
 use super::*;
 
+fn collect_merge_scan_remote_dyn_filter_producer_ids(
+    plan: &LogicalPlan,
+    producer_ids: &mut BTreeSet<RemoteDynFilterProducerId>,
+) {
+    let mut producer_id_list = Vec::new();
+    collect_merge_scan_remote_dyn_filter_producer_id_list(plan, &mut producer_id_list);
+    producer_ids.extend(producer_id_list);
+}
+
+struct MergeScanRemoteDynFilterProducerIdCollector<'a> {
+    producer_ids: &'a mut Vec<RemoteDynFilterProducerId>,
+}
+
+impl TreeNodeRewriter for MergeScanRemoteDynFilterProducerIdCollector<'_> {
+    type Node = LogicalPlan;
+
+    fn f_up(&mut self, node: Self::Node) -> DfResult<Transformed<Self::Node>> {
+        if let LogicalPlan::Extension(extension) = &node
+            && let Some(merge_scan) = extension
+                .node
+                .as_any()
+                .downcast_ref::<MergeScanLogicalPlan>()
+        {
+            self.producer_ids.push(
+                merge_scan
+                    .remote_dyn_filter_producer_id()
+                    .expect("MergeScan remote dynamic filter producer id must be assigned"),
+            );
+        }
+
+        Ok(Transformed::no(node))
+    }
+}
+
+fn collect_merge_scan_remote_dyn_filter_producer_id_list(
+    plan: &LogicalPlan,
+    producer_ids: &mut Vec<RemoteDynFilterProducerId>,
+) {
+    let _ = plan
+        .clone()
+        .rewrite_with_subqueries(&mut MergeScanRemoteDynFilterProducerIdCollector { producer_ids })
+        .unwrap();
+}
+
+fn assert_remote_table_scan_filters_are_safe(plan: &LogicalPlan) {
+    let mut checked_filters = 0;
+    assert_remote_table_scan_filters_are_safe_inner(plan, false, &mut checked_filters);
+    assert!(
+        checked_filters > 0,
+        "expected at least one remote TableScan filter in plan:\n{plan}"
+    );
+}
+
+fn assert_remote_table_scan_filters_are_safe_inner(
+    plan: &LogicalPlan,
+    in_merge_scan_remote_input: bool,
+    checked_filters: &mut usize,
+) {
+    if let LogicalPlan::Extension(extension) = plan
+        && let Some(merge_scan) = extension
+            .node
+            .as_any()
+            .downcast_ref::<MergeScanLogicalPlan>()
+    {
+        assert_remote_table_scan_filters_are_safe_inner(merge_scan.input(), true, checked_filters);
+    }
+
+    if in_merge_scan_remote_input && let LogicalPlan::TableScan(table_scan) = plan {
+        for filter in &table_scan.filters {
+            assert_table_scan_filter_is_remote_safe(table_scan, filter);
+            *checked_filters += 1;
+        }
+    }
+
+    for child in plan.inputs() {
+        assert_remote_table_scan_filters_are_safe_inner(
+            child,
+            in_merge_scan_remote_input,
+            checked_filters,
+        );
+    }
+}
+
+fn assert_table_scan_filter_is_remote_safe(
+    table_scan: &datafusion_expr::logical_plan::TableScan,
+    filter: &Expr,
+) {
+    filter
+        .apply(|expr| match expr {
+            Expr::Exists(_)
+            | Expr::InSubquery(_)
+            | Expr::ScalarSubquery(_)
+            | Expr::SetComparison(_)
+            | Expr::OuterReferenceColumn(_, _) => {
+                panic!("remote TableScan filter contains non-scan-local expression: {filter}")
+            }
+            _ => Ok(TreeNodeRecursion::Continue),
+        })
+        .unwrap();
+
+    let mut columns = HashSet::new();
+    expr_to_columns(filter, &mut columns).unwrap();
+    for column in columns {
+        assert!(
+            table_scan
+                .projected_schema
+                .field_from_column(&column)
+                .is_ok(),
+            "remote TableScan filter references non-scan column {column}: {filter}\nscan schema: {:?}",
+            table_scan.projected_schema
+        );
+    }
+}
+
 pub(crate) struct TestTable;
 
 impl TestTable {
     pub fn table_with_name(table_id: TableId, name: String) -> TableRef {
+        Self::table_with_filter_pushdown(table_id, name, FilterPushDownType::Unsupported)
+    }
+
+    pub fn table_with_filter_pushdown(
+        table_id: TableId,
+        name: String,
+        filter_pushdown: FilterPushDownType,
+    ) -> TableRef {
         let data_source = Arc::new(TestDataSource::new(Self::schema()));
         let table = Table::new(
             Self::table_info(table_id, name, "test_engine".to_string()),
-            FilterPushDownType::Unsupported,
+            filter_pushdown,
             data_source,
         );
         Arc::new(table)
@@ -1361,6 +1486,102 @@ fn test_simplify_select_now_expression() {
 }
 
 #[test]
+fn sibling_merge_scans_have_unique_remote_dyn_filter_producer_ids() {
+    init_default_ut_logging();
+    let left_table = TestTable::table_with_name(0, "left_table".to_string());
+    let right_table = TestTable::table_with_name(1, "right_table".to_string());
+
+    let left_source = Arc::new(DefaultTableSource::new(Arc::new(
+        DfTableProviderAdapter::new(left_table),
+    )));
+    let right_source = Arc::new(DefaultTableSource::new(Arc::new(
+        DfTableProviderAdapter::new(right_table),
+    )));
+
+    let left_sorted =
+        LogicalPlanBuilder::scan_with_filters("left_table", left_source, None, vec![])
+            .unwrap()
+            .sort(vec![col("pk1").sort(true, false)])
+            .unwrap()
+            .build()
+            .unwrap();
+
+    let right_sorted =
+        LogicalPlanBuilder::scan_with_filters("right_table", right_source, None, vec![])
+            .unwrap()
+            .sort(vec![col("pk1").sort(true, false)])
+            .unwrap()
+            .build()
+            .unwrap();
+
+    let plan = LogicalPlanBuilder::from(left_sorted)
+        .cross_join(right_sorted)
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let config = ConfigOptions::default();
+    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+
+    let mut producer_ids = Vec::new();
+    collect_merge_scan_remote_dyn_filter_producer_id_list(&result, &mut producer_ids);
+    let unique_producer_ids = producer_ids.iter().copied().collect::<BTreeSet<_>>();
+
+    assert!(
+        producer_ids.len() >= 2,
+        "Expected at least 2 RemoteDynFilterProducerIds, got {}: {producer_ids:?}",
+        producer_ids.len()
+    );
+    assert_eq!(
+        producer_ids.len(),
+        unique_producer_ids.len(),
+        "Expected all sibling RemoteDynFilterProducerIds to be unique, got ids: {producer_ids:?}"
+    );
+}
+
+#[test]
+fn pre_merge_scan_optimizer_eliminates_projected_false_filter() {
+    init_default_ut_logging();
+    let left_table =
+        TestTable::table_with_filter_pushdown(0, "i1".to_string(), FilterPushDownType::Inexact);
+    let right_table =
+        TestTable::table_with_filter_pushdown(1, "i2".to_string(), FilterPushDownType::Inexact);
+
+    let left_source = Arc::new(DefaultTableSource::new(Arc::new(
+        DfTableProviderAdapter::new(left_table),
+    )));
+    let right_source = Arc::new(DefaultTableSource::new(Arc::new(
+        DfTableProviderAdapter::new(right_table),
+    )));
+
+    let left = LogicalPlanBuilder::scan_with_filters("i1", left_source, None, vec![])
+        .unwrap()
+        .build()
+        .unwrap();
+    let right = LogicalPlanBuilder::scan_with_filters("i2", right_source, None, vec![])
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let plan = LogicalPlanBuilder::from(left)
+        .cross_join(right)
+        .unwrap()
+        .project(vec![lit(false).alias("cond")])
+        .unwrap()
+        .filter(col("cond"))
+        .unwrap()
+        .sort(vec![col("cond").sort(true, true)])
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let config = ConfigOptions::default();
+    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+
+    assert_eq!("EmptyRelation: rows=0", result.to_string());
+}
+
+#[test]
 fn test_simplify_now_expression() {
     init_default_ut_logging();
     let test_table = TestTable::table_with_name(0, "t".to_string());
@@ -1443,6 +1664,9 @@ fn expand_proj_limit_part_col_aggr_sort() {
 
     let config = ConfigOptions::default();
     let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+    // Pre-MergeScan optimizer intentionally excludes PushDownLimit, so the
+    // remote plan shows an explicit Limit node instead of `fetch=10` on
+    // TableScan.
     let expected = [
         "Sort: t.pk2 ASC NULLS LAST",
         "  Aggregate: groupBy=[[t.pk1, t.pk2]], aggr=[[min(t.number)]]",
@@ -1485,6 +1709,9 @@ fn expand_proj_limit_sort_part_col_aggr() {
 
     let config = ConfigOptions::default();
     let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+    // Pre-MergeScan optimizer intentionally excludes PushDownLimit, so the
+    // remote plan shows an explicit Limit node instead of `fetch=10` on
+    // TableScan.
     let expected = [
         "Aggregate: groupBy=[[t.pk1, t.pk2]], aggr=[[min(t.number)]]",
         "  Sort: t.pk2 ASC NULLS LAST",
@@ -1745,7 +1972,7 @@ fn transform_unalighed_join_with_alias() {
     let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
     let expected = [
         "Limit: skip=0, fetch=1",
-        "  LeftSemi Join:  Filter: t.number = right.number",
+        "  LeftSemi Join: t.number = right.number",
         "    Projection: t.number",
         "      MergeScan [is_placeholder=false, remote_input=[",
         "TableScan: t",
@@ -1821,6 +2048,39 @@ fn transform_sort_subquery_alias() {
     ]
     .join("\n");
     assert_eq!(expected, result.to_string());
+}
+
+#[test]
+fn remote_dyn_filter_producer_ids_do_not_collide_between_subquery_and_outer_plan() {
+    let test_table = TestTable::table_with_name(0, "numbers".to_string());
+    let table_source = Arc::new(DefaultTableSource::new(Arc::new(
+        DfTableProviderAdapter::new(test_table),
+    )));
+    let subquery_plan =
+        LogicalPlanBuilder::scan_with_filters("inner", table_source.clone(), None, vec![])
+            .unwrap()
+            .build()
+            .unwrap();
+    let subquery = Subquery {
+        subquery: Arc::new(subquery_plan),
+        outer_ref_columns: Default::default(),
+        spans: Default::default(),
+    };
+    let outer_plan = LogicalPlanBuilder::scan_with_filters("outer", table_source, None, vec![])
+        .unwrap()
+        .filter(Expr::Exists(Exists {
+            subquery,
+            negated: false,
+        }))
+        .unwrap()
+        .build()
+        .unwrap();
+    let rewritten = DistPlannerAnalyzer {}.try_push_down(outer_plan).unwrap();
+
+    let mut producer_ids = BTreeSet::new();
+    collect_merge_scan_remote_dyn_filter_producer_ids(&rewritten, &mut producer_ids);
+
+    assert_eq!(producer_ids.len(), 2);
 }
 
 #[test]
@@ -2001,4 +2261,396 @@ fn test_table_scan_projection() {
     ]
     .join("\n");
     assert_eq!(expected, result.to_string());
+}
+
+/// Test that static side-local predicates on a JOIN input reach the remote
+/// region TableScan before MergeScan wrapping (issue #8338).
+///
+/// Plan shape: Filter(t1.pk1 = 'v') -> Join(t1.number = t2.number) -> TableScan(t1), TableScan(t2)
+///
+/// After PushDownFilter runs, the side-local filter should be pushed into the
+/// left child branch (inside the MergeScan remote_input), making it visible for
+/// time-index / bloom / skipping pruning.
+#[test]
+fn test_join_side_local_filter_pushdown_into_merge_scan() {
+    init_default_ut_logging();
+    let left_table =
+        TestTable::table_with_filter_pushdown(0, "t1".to_string(), FilterPushDownType::Inexact);
+    let right_table =
+        TestTable::table_with_filter_pushdown(1, "t2".to_string(), FilterPushDownType::Inexact);
+    let left_source = Arc::new(DefaultTableSource::new(Arc::new(
+        DfTableProviderAdapter::new(left_table),
+    )));
+    let right_source = Arc::new(DefaultTableSource::new(Arc::new(
+        DfTableProviderAdapter::new(right_table),
+    )));
+
+    let right_plan = LogicalPlanBuilder::scan_with_filters("t2", right_source, None, vec![])
+        .unwrap()
+        .build()
+        .unwrap();
+
+    // Plan: Filter -> Join -> TableScan(left), TableScan(right)
+    let plan = LogicalPlanBuilder::scan_with_filters("t1", left_source, None, vec![])
+        .unwrap()
+        .join_on(
+            right_plan,
+            JoinType::Inner,
+            vec![col("t1.number").eq(col("t2.number"))],
+        )
+        .unwrap()
+        .filter(col("t1.pk1").eq(lit("v"))) // side-local filter on left partition column
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let config = ConfigOptions::default();
+    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+    assert_remote_table_scan_filters_are_safe(&result);
+
+    let plan_str = result.to_string();
+    // After PushDownFilter runs, the predicate `t1.pk1 = Utf8("v")` should appear
+    // inside the left MergeScan's remote_input. The pre-MergeScan optimizer may
+    // combine it with join-derived IS NOT NULL pushdowns, so it may not appear as
+    // a standalone Filter: line. It must still be in TableScan partial_filters
+    // and below the Inner Join.
+    assert!(
+        plan_str.contains("t1.pk1 = Utf8(\"v\")"),
+        "Expected predicate t1.pk1 = Utf8(\"v\") in plan, got:\n{plan_str}"
+    );
+    assert!(
+        plan_str.contains(
+            "TableScan: t1, partial_filters=[t1.pk1 = Utf8(\"v\"), t1.number IS NOT NULL]"
+        ),
+        "Expected t1 TableScan partial_filters to contain pushed predicate, got:\n{plan_str}"
+    );
+
+    // Find the position of the filter and verify it appears after a MergeScan
+    // opening (i.e., inside remote_input) rather than before the Join.
+    let filter_pos = plan_str
+        .find("TableScan: t1, partial_filters=[t1.pk1 = Utf8(\"v\"), t1.number IS NOT NULL]")
+        .unwrap();
+    let join_pos = plan_str.find("Inner Join").unwrap();
+    // The filter should be after the Join (meaning it was pushed down below the Join,
+    // into a MergeScan's remote_input)
+    assert!(
+        filter_pos > join_pos,
+        "Filter should be pushed below Join (into MergeScan remote_input), but found before Join"
+    );
+}
+
+/// LEFT JOIN preserves the left side, so a left-local WHERE predicate is safe
+/// to push into the left scan before MergeScan wrapping.
+#[test]
+fn test_left_join_left_side_filter_pushdown_into_merge_scan() {
+    init_default_ut_logging();
+    let left_table =
+        TestTable::table_with_filter_pushdown(0, "t1".to_string(), FilterPushDownType::Inexact);
+    let right_table =
+        TestTable::table_with_filter_pushdown(1, "t2".to_string(), FilterPushDownType::Inexact);
+    let left_source = Arc::new(DefaultTableSource::new(Arc::new(
+        DfTableProviderAdapter::new(left_table),
+    )));
+    let right_source = Arc::new(DefaultTableSource::new(Arc::new(
+        DfTableProviderAdapter::new(right_table),
+    )));
+
+    let right_plan = LogicalPlanBuilder::scan_with_filters("t2", right_source, None, vec![])
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let plan = LogicalPlanBuilder::scan_with_filters("t1", left_source, None, vec![])
+        .unwrap()
+        .join_on(
+            right_plan,
+            JoinType::Left,
+            vec![col("t1.number").eq(col("t2.number"))],
+        )
+        .unwrap()
+        .filter(col("t1.pk1").eq(lit("v")))
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let config = ConfigOptions::default();
+    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+    assert_remote_table_scan_filters_are_safe(&result);
+
+    let plan_str = result.to_string();
+    assert!(
+        plan_str.contains("TableScan: t1, partial_filters=[t1.pk1 = Utf8(\"v\")]"),
+        "Expected left-side TableScan partial_filters under LEFT JOIN, got:\n{plan_str}"
+    );
+    let scan_filter_pos = plan_str
+        .find("TableScan: t1, partial_filters=[t1.pk1 = Utf8(\"v\")]")
+        .unwrap();
+    let join_pos = plan_str.find("Left Join").unwrap();
+    assert!(
+        scan_filter_pos > join_pos,
+        "Left-side filter should be pushed below LEFT JOIN into MergeScan remote_input:\n{plan_str}"
+    );
+}
+
+/// Negative case: cross-table predicate t1.pk1 = t2.pk2 should NOT become a
+/// side-local scan filter but remain as a join filter.
+#[test]
+fn test_join_cross_table_predicate_not_pushed_to_single_side() {
+    init_default_ut_logging();
+    let left_table =
+        TestTable::table_with_filter_pushdown(0, "t1".to_string(), FilterPushDownType::Inexact);
+    let right_table =
+        TestTable::table_with_filter_pushdown(1, "t2".to_string(), FilterPushDownType::Inexact);
+    let left_source = Arc::new(DefaultTableSource::new(Arc::new(
+        DfTableProviderAdapter::new(left_table),
+    )));
+    let right_source = Arc::new(DefaultTableSource::new(Arc::new(
+        DfTableProviderAdapter::new(right_table),
+    )));
+
+    let right_plan = LogicalPlanBuilder::scan_with_filters("t2", right_source, None, vec![])
+        .unwrap()
+        .build()
+        .unwrap();
+
+    // Plan: Filter(t1.pk1 = t2.pk2) -> Join(t1.number = t2.number) -> ...
+    // The filter involves columns from both tables, so PushDownFilter should
+    // keep it as a join filter (not push into a single side's scan).
+    let plan = LogicalPlanBuilder::scan_with_filters("t1", left_source, None, vec![])
+        .unwrap()
+        .join_on(
+            right_plan,
+            JoinType::Inner,
+            vec![col("t1.number").eq(col("t2.number"))],
+        )
+        .unwrap()
+        .filter(col("t1.pk1").eq(col("t2.pk2"))) // cross-table predicate
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let config = ConfigOptions::default();
+    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+    assert_remote_table_scan_filters_are_safe(&result);
+
+    let plan_str = result.to_string();
+    // The cross-table predicate should NOT appear as a filter on a single table's
+    // scan inside a MergeScan remote_input. It should remain as part of the
+    // Join's filter.
+    // The key assertion: it should NOT appear as "Filter: t1.pk1 = t2.pk2"
+    assert!(
+        !plan_str.contains("Filter: t1.pk1 = t2.pk2"),
+        "Cross-table predicate should not become a side-local Filter:\n{plan_str}"
+    );
+    assert!(
+        plan_str.contains("t1.pk1 = t2.pk2") || plan_str.contains("t2.pk2 = t1.pk1"),
+        "Cross-table predicate should remain in the join plan:\n{plan_str}"
+    );
+    assert!(
+        !plan_str.contains("partial_filters=[t1.pk1 = t2.pk2]")
+            && !plan_str.contains("partial_filters=[t2.pk2 = t1.pk1]")
+            && !plan_str.contains("full_filters=[t1.pk1 = t2.pk2]")
+            && !plan_str.contains("full_filters=[t2.pk2 = t1.pk1]"),
+        "Cross-table predicate should not become a single-side TableScan filter:\n{plan_str}"
+    );
+}
+
+/// When `ScheduledTimeExtension` is injected into `ConfigOptions`, the
+/// `SimplifyExpressions` pass (driven by `PatchOptimizerContext`) uses the
+/// scheduled time instead of wall-clock time. The remote sub-plan must contain
+/// the scheduled literal — not a variable wall-clock value.
+#[test]
+fn scheduled_now_yields_stable_literal_in_remote_plan() {
+    init_default_ut_logging();
+    let scheduled_time =
+        chrono::DateTime::<chrono::Utc>::from_timestamp_millis(1700000000000).unwrap();
+    let scheduled_ns = 1700000000000000000i64;
+
+    let test_table = TestTable::table_with_name(0, "t".to_string());
+    let table_source = Arc::new(DefaultTableSource::new(Arc::new(
+        DfTableProviderAdapter::new(test_table),
+    )));
+
+    // Build a plan with `now()` in filter and both `now()` and its
+    // `current_timestamp()` alias in projection.
+    let plan = LogicalPlanBuilder::scan_with_filters("t", table_source.clone(), None, vec![])
+        .unwrap()
+        .filter(binary_expr(now(), Operator::LtEq, col("ts")))
+        .unwrap()
+        .project(vec![now(), now().alias("current_timestamp()")])
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let mut config = ConfigOptions::default();
+    config.extensions.insert(ScheduledTimeExtension {
+        scheduled_time: Some(scheduled_time),
+    });
+
+    let result = DistPlannerAnalyzer {}
+        .analyze(plan.clone(), &config)
+        .unwrap();
+    let result_str = result.to_string();
+    common_telemetry::info!("Analyzed plan with scheduled time: {}", result_str);
+
+    // The top-level should still say `Projection: now()` (schema recovery).
+    assert!(
+        result_str.contains("Projection: now()"),
+        "Expected top-level Projection: now(), got:\n{result_str}"
+    );
+    assert!(
+        result_str.contains("current_timestamp()"),
+        "Expected top-level current_timestamp() alias, got:\n{result_str}"
+    );
+
+    // The remote sub-plan must contain the scheduled-time literal, i.e.
+    // `TimestampNanosecond(1700000000000000000, None)`.
+    let expected_literal = format!("TimestampNanosecond({scheduled_ns}, None)");
+    assert!(
+        result_str.contains(&expected_literal),
+        "Expected remote plan literal '{expected_literal}', got:\n{result_str}"
+    );
+
+    // The remote sub-plan must contain the simplified literal (TimestampNanosecond).
+    let remote_section = if let Some(idx) = result_str.find("remote_input=[") {
+        &result_str[idx..]
+    } else {
+        ""
+    };
+    assert!(
+        remote_section.contains("TimestampNanosecond("),
+        "Remote plan should contain TimestampNanosecond literal:\n{result_str}"
+    );
+
+    // Absent the extension (default config), the same plan simplifies to a
+    // wall-clock literal — the remote_input contains a variable timestamp.
+    let default_config = ConfigOptions::default();
+    let wall_result = DistPlannerAnalyzer {}
+        .analyze(plan, &default_config)
+        .unwrap();
+    let wall_str = wall_result.to_string();
+    // The wall-clock result must NOT contain the scheduled literal.
+    assert!(
+        !wall_str.contains(&expected_literal),
+        "Wall-clock result should not contain scheduled literal {expected_literal}:\n{wall_str}"
+    );
+    // It should still simplify to a literal (TimestampNanosecond present in remote).
+    let wall_remote = if let Some(idx) = wall_str.find("remote_input=[") {
+        &wall_str[idx..]
+    } else {
+        ""
+    };
+    assert!(
+        wall_remote.contains("TimestampNanosecond("),
+        "Wall-clock remote plan should contain TimestampNanosecond:\n{wall_str}"
+    );
+}
+
+/// `current_timestamp()` is an alias of `now()` in DataFusion, but keep a
+/// dedicated SQL-level regression: when it appears in a side-local filter, it
+/// must be folded to the scheduled literal before the filter interacts with the
+/// pre-MergeScan pushdown / remote planning path.
+#[test]
+fn scheduled_current_timestamp_filter_folds_before_remote_pushdown() {
+    init_default_ut_logging();
+    let scheduled_time =
+        chrono::DateTime::<chrono::Utc>::from_timestamp_millis(1700000000000).unwrap();
+
+    let left_table =
+        TestTable::table_with_filter_pushdown(0, "t1".to_string(), FilterPushDownType::Inexact);
+    let right_table =
+        TestTable::table_with_filter_pushdown(1, "t2".to_string(), FilterPushDownType::Inexact);
+    let left_provider = Arc::new(DfTableProviderAdapter::new(left_table));
+    let right_provider = Arc::new(DfTableProviderAdapter::new(right_table));
+    let ctx = SessionContext::new();
+    ctx.register_table(TableReference::bare("t1"), left_provider)
+        .unwrap();
+    ctx.register_table(TableReference::bare("t2"), right_provider)
+        .unwrap();
+
+    let plan = futures::executor::block_on(async {
+        ctx.sql(
+            "SELECT t1.number \
+             FROM t1 JOIN t2 ON t1.number = t2.number \
+             WHERE t1.ts < date_trunc('second', current_timestamp())",
+        )
+        .await
+        .unwrap()
+    })
+    .into_unoptimized_plan();
+    assert!(
+        plan.to_string().contains("current_timestamp") || plan.to_string().contains("now()"),
+        "Unoptimized plan should contain the time function spelling before analysis:\n{plan}"
+    );
+
+    let mut config = ConfigOptions::default();
+    config.extensions.insert(ScheduledTimeExtension {
+        scheduled_time: Some(scheduled_time),
+    });
+
+    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+    assert_remote_table_scan_filters_are_safe(&result);
+
+    let result_str = result.to_string();
+    common_telemetry::info!("Analyzed current_timestamp filter plan: {}", result_str);
+    let remote_section = result_str
+        .find("remote_input=[")
+        .map(|idx| &result_str[idx..])
+        .unwrap_or("");
+
+    assert!(
+        remote_section.contains("TableScan: t1") && remote_section.contains("partial_filters="),
+        "Expected left-side filter to be pushed into the remote TableScan:\n{result_str}"
+    );
+    assert!(
+        remote_section.contains("1700000000000000000") || remote_section.contains("1700000000000"),
+        "Expected scheduled timestamp literal in remote filter:\n{result_str}"
+    );
+    assert!(
+        !remote_section.contains("current_timestamp") && !remote_section.contains("now()"),
+        "Remote filter should be folded before pushdown, got:\n{result_str}"
+    );
+}
+
+/// When `ScheduledTimeExtension.scheduled_time` is `None`, the analyzer
+/// must fall back to wall-clock behavior (same as no extension at all).
+#[test]
+fn scheduled_none_falls_back_to_wall_clock() {
+    init_default_ut_logging();
+
+    let test_table = TestTable::table_with_name(0, "t".to_string());
+    let table_source = Arc::new(DefaultTableSource::new(Arc::new(
+        DfTableProviderAdapter::new(test_table),
+    )));
+
+    let plan = LogicalPlanBuilder::scan_with_filters("t", table_source, None, vec![])
+        .unwrap()
+        .project(vec![now()])
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let mut config = ConfigOptions::default();
+    config.extensions.insert(ScheduledTimeExtension {
+        scheduled_time: None,
+    });
+
+    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+    let result_str = result.to_string();
+
+    // Must still simplify now() — remotely a literal, top is now().
+    assert!(
+        result_str.contains("Projection: now()"),
+        "Top-level projection: {result_str}"
+    );
+    let remote_section = if let Some(idx) = result_str.find("remote_input=[") {
+        &result_str[idx..]
+    } else {
+        ""
+    };
+    // The literal must be TimestampNanosecond (since fallback uses wall clock).
+    assert!(
+        remote_section.contains("TimestampNanosecond("),
+        "Remote should contain TimestampNanosecond:\n{result_str}"
+    );
 }

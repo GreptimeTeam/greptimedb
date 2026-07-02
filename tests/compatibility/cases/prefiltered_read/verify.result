@@ -1,0 +1,42 @@
+SELECT host, site, val, cpu_load, active
+FROM t_prefiltered_read
+WHERE val >= 5 AND val <= 13
+ORDER BY host;
+
++--------+---------+-----+----------+--------+
+| host   | site    | val | cpu_load | active |
++--------+---------+-----+----------+--------+
+| host_b | us-east | 5   | 0.5      | false  |
+| host_c | eu-west | 8   | 0.8      | true   |
+| host_d | eu-west | 13  | 1.3      | false  |
++--------+---------+-----+----------+--------+
+
+SELECT host, val
+FROM t_prefiltered_read
+WHERE site = 'eu-west' AND active = true
+ORDER BY host;
+
++--------+-----+
+| host   | val |
++--------+-----+
+| host_c | 8   |
++--------+-----+
+
+SELECT count(*) FROM t_prefiltered_read WHERE cpu_load > 0.40 AND host != 'host_e';
+
++----------+
+| count(*) |
++----------+
+| 3        |
++----------+
+
+SELECT host
+FROM t_prefiltered_read
+WHERE site IN ('us-east', 'ap-south') AND val > 10
+ORDER BY host;
+
++--------+
+| host   |
++--------+
+| host_e |
++--------+

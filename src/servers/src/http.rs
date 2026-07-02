@@ -104,6 +104,7 @@ pub mod pprof;
 pub mod prom_store;
 pub mod prometheus;
 pub mod result;
+pub mod splunk;
 mod timeout;
 pub mod utils;
 
@@ -119,6 +120,7 @@ pub mod test_helpers;
 
 pub const HTTP_API_VERSION: &str = "v1";
 pub const HTTP_API_PREFIX: &str = "/v1/";
+pub const HTTP_API_PREFIX_WITHOUT_TRAILING_SLASH: &str = "/v1";
 /// Default http body limit (64M).
 const DEFAULT_BODY_LIMIT: ReadableSize = ReadableSize::mb(64);
 
@@ -126,8 +128,12 @@ const DEFAULT_BODY_LIMIT: ReadableSize = ReadableSize::mb(64);
 pub const AUTHORIZATION_HEADER: &str = "x-greptime-auth";
 
 // TODO(fys): This is a temporary workaround, it will be improved later
-pub static PUBLIC_API_PREFIX: [&str; 3] =
-    ["/v1/influxdb/ping", "/v1/influxdb/health", "/v1/health"];
+pub static PUBLIC_API_PREFIX: [&str; 4] = [
+    "/v1/influxdb/ping",
+    "/v1/influxdb/health",
+    "/v1/health",
+    "/v1/splunk/services/collector/health",
+];
 
 #[derive(Default)]
 pub struct HttpServer {
@@ -160,6 +166,8 @@ pub struct HttpOptions {
     pub cors_allowed_origins: Vec<String>,
 
     pub enable_cors: bool,
+
+    pub experimental_enable_explain_analyze_stream: bool,
 }
 
 impl Default for HttpOptions {
@@ -172,6 +180,7 @@ impl Default for HttpOptions {
             cors_allowed_origins: Vec::new(),
             enable_cors: true,
             prom_validation_mode: PromValidationMode::Strict,
+            experimental_enable_explain_analyze_stream: false,
         }
     }
 }
@@ -496,6 +505,7 @@ impl From<NullResponse> for HttpResponse {
 #[derive(Clone)]
 pub struct ApiState {
     pub sql_handler: ServerSqlQueryHandlerRef,
+    pub experimental_enable_explain_analyze_stream: bool,
 }
 
 #[derive(Clone)]
@@ -532,7 +542,12 @@ impl HttpServerBuilder {
     }
 
     pub fn with_sql_handler(self, sql_handler: ServerSqlQueryHandlerRef) -> Self {
-        let sql_router = HttpServer::route_sql(ApiState { sql_handler });
+        let sql_router = HttpServer::route_sql(ApiState {
+            sql_handler,
+            experimental_enable_explain_analyze_stream: self
+                .options
+                .experimental_enable_explain_analyze_stream,
+        });
 
         Self {
             router: self
@@ -673,7 +688,12 @@ impl HttpServerBuilder {
             &format!("/{HTTP_API_VERSION}/elasticsearch/"),
             Router::new()
                 .route("/", routing::get(elasticsearch::handle_get_version))
-                .with_state(log_state),
+                .with_state(log_state.clone()),
+        );
+
+        let router = router.nest(
+            &format!("/{HTTP_API_VERSION}/splunk"),
+            HttpServer::route_splunk(log_state),
         );
 
         Self { router, ..self }
@@ -930,6 +950,34 @@ impl HttpServer {
             .with_state(log_state)
     }
 
+    fn route_splunk<S>(log_state: LogState) -> Router<S> {
+        Router::new()
+            .route(
+                "/services/collector/health",
+                routing::get(splunk::handle_health),
+            )
+            .route(
+                "/services/collector/health/1.0",
+                routing::get(splunk::handle_health),
+            )
+            // The event endpoint plus its base and versioned aliases all serve
+            // the same handler (Splunk JSON event protocol).
+            .route(
+                "/services/collector/event",
+                routing::post(splunk::handle_event),
+            )
+            .route("/services/collector", routing::post(splunk::handle_event))
+            .route(
+                "/services/collector/event/1.0",
+                routing::post(splunk::handle_event),
+            )
+            .layer(
+                ServiceBuilder::new()
+                    .layer(RequestDecompressionLayer::new().pass_through_unaccepted(true)),
+            )
+            .with_state(log_state)
+    }
+
     fn route_elasticsearch<S>(log_state: LogState) -> Router<S> {
         Router::new()
             // Return fake responsefor HEAD '/' request.
@@ -1058,7 +1106,7 @@ impl HttpServer {
     }
 
     fn route_sql<S>(api_state: ApiState) -> Router<S> {
-        Router::new()
+        let mut router = Router::new()
             .route("/sql", routing::get(handler::sql).post(handler::sql))
             .route(
                 "/sql/parse",
@@ -1071,8 +1119,16 @@ impl HttpServer {
             .route(
                 "/promql",
                 routing::get(handler::promql).post(handler::promql),
-            )
-            .with_state(api_state)
+            );
+
+        if api_state.experimental_enable_explain_analyze_stream {
+            router = router.route(
+                "/sql/analyze/stream",
+                routing::post(handler::sql_analyze_stream),
+            );
+        }
+
+        router.with_state(api_state)
     }
 
     fn route_logs<S>(log_handler: LogQueryHandlerRef) -> Router<S> {
@@ -1299,7 +1355,7 @@ mod test {
     use axum::handler::Handler;
     use axum::http::StatusCode;
     use axum::routing::get;
-    use common_query::Output;
+    use common_query::{Output, OutputData};
     use common_recordbatch::RecordBatches;
     use datafusion_expr::LogicalPlan;
     use datatypes::prelude::*;
@@ -1326,6 +1382,11 @@ mod test {
     impl SqlQueryHandler for DummyInstance {
         async fn do_query(&self, _: &str, _: QueryContextRef) -> Vec<Result<Output>> {
             unimplemented!()
+        }
+
+        async fn do_analyze_stream_query(&self, _: &str, _: QueryContextRef) -> Result<Output> {
+            let stream = common_recordbatch::RecordBatches::empty().as_stream();
+            Ok(Output::new(OutputData::Stream(stream), Default::default()))
         }
 
         async fn do_promql_query(&self, _: &PromQuery, _: QueryContextRef) -> Vec<Result<Output>> {
@@ -1375,6 +1436,31 @@ mod test {
             "/test/timeout",
             get(forever.layer(ServiceBuilder::new().layer(timeout()))),
         )
+    }
+
+    #[tokio::test]
+    pub async fn test_analyze_stream_route_config_gate() {
+        let (tx, _rx) = mpsc::channel(100);
+        let app = make_test_app_custom(tx, HttpOptions::default());
+        let client = TestClient::new(app).await;
+        let res = client
+            .post("/v1/sql/analyze/stream?sql=EXPLAIN%20ANALYZE%20VERBOSE%20SELECT%201")
+            .send()
+            .await;
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+
+        let (tx, _rx) = mpsc::channel(100);
+        let options = HttpOptions {
+            experimental_enable_explain_analyze_stream: true,
+            ..Default::default()
+        };
+        let app = make_test_app_custom(tx, options);
+        let client = TestClient::new(app).await;
+        let res = client
+            .post("/v1/sql/analyze/stream?sql=EXPLAIN%20ANALYZE%20VERBOSE%20SELECT%201")
+            .send()
+            .await;
+        assert_ne!(res.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
