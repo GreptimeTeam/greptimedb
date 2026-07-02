@@ -225,7 +225,8 @@ impl MetricEngineInner {
             modified_requests.push(request.rows);
         }
 
-        let schema = Self::build_rows_union_schema(&modified_requests);
+        let schema =
+            Self::build_union_schema(modified_requests.iter().map(|rows| rows.schema.as_slice()));
         let mut merged_rows = Vec::with_capacity(total_rows);
         for rows in modified_requests {
             merged_rows.extend(Self::align_rows_to_schema(rows, &schema));
@@ -256,7 +257,8 @@ impl MetricEngineInner {
         requests: Vec<(RegionId, RegionPutRequest)>,
     ) -> Result<(RegionPutRequest, AffectedRows)> {
         // Build union schema from all requests
-        let merged_schema = Self::build_union_schema(&requests);
+        let merged_schema =
+            Self::build_union_schema(requests.iter().map(|(_, req)| req.rows.schema.as_slice()));
 
         // Align all rows to the merged schema and collect table_ids
         let (merged_rows, table_ids, merged_version) =
@@ -297,10 +299,12 @@ impl MetricEngineInner {
         Ok((merged_request, table_ids.len() as AffectedRows))
     }
 
-    fn build_rows_union_schema(requests: &[Rows]) -> Vec<ColumnSchema> {
+    fn build_union_schema<'a>(
+        schemas: impl IntoIterator<Item = &'a [ColumnSchema]>,
+    ) -> Vec<ColumnSchema> {
         let mut schema = Vec::new();
-        for rows in requests {
-            for col in &rows.schema {
+        for columns in schemas {
+            for col in columns {
                 if !schema
                     .iter()
                     .any(|existing: &ColumnSchema| existing.column_name == col.column_name)
@@ -310,19 +314,6 @@ impl MetricEngineInner {
             }
         }
         schema
-    }
-
-    /// Builds a union schema containing all columns from all requests.
-    fn build_union_schema(requests: &[(RegionId, RegionPutRequest)]) -> Vec<ColumnSchema> {
-        let mut schema_map: HashMap<&str, ColumnSchema> = HashMap::new();
-        for (_, request) in requests {
-            for col in &request.rows.schema {
-                schema_map
-                    .entry(col.column_name.as_str())
-                    .or_insert_with(|| col.clone());
-            }
-        }
-        schema_map.into_values().collect()
     }
 
     fn align_requests_to_schema(
@@ -352,7 +343,7 @@ impl MetricEngineInner {
             let table_id = logical_region_id.table_id();
             let row_count = request.rows.rows.len();
             merged_rows.extend(Self::align_rows_to_schema(request.rows, merged_schema));
-            table_ids.extend(std::iter::repeat(table_id).take(row_count));
+            table_ids.extend(std::iter::repeat_n(table_id, row_count));
         }
 
         Ok((merged_rows, table_ids, merged_version))
@@ -1058,9 +1049,9 @@ mod tests {
             }],
         };
 
-        let schema = MetricEngineInner::build_rows_union_schema(&[
-            sample_rows.clone(),
-            histogram_rows.clone(),
+        let schema = MetricEngineInner::build_union_schema([
+            sample_rows.schema.as_slice(),
+            histogram_rows.schema.as_slice(),
         ]);
         let merged_rows = MetricEngineInner::align_rows_to_schema(sample_rows, &schema)
             .into_iter()

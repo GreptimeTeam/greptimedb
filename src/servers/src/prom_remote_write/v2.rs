@@ -265,7 +265,10 @@ fn write_native_histogram_value(
 }
 
 fn native_histogram_column_schema() -> ColumnSchema {
-    let (datatype, datatype_extension) = native_histogram_column_type().into_parts();
+    let (datatype, datatype_extension) =
+        ColumnDataTypeWrapper::try_from(native_histogram_value_type())
+            .expect("native histogram type is convertible to protobuf")
+            .into_parts();
 
     ColumnSchema {
         column_name: NATIVE_HISTOGRAM_FIELD.to_string(),
@@ -274,83 +277,6 @@ fn native_histogram_column_schema() -> ColumnSchema {
         datatype_extension,
         options: None,
     }
-}
-
-fn native_histogram_column_type() -> ColumnDataTypeWrapper {
-    ColumnDataTypeWrapper::struct_datatype(vec![
-        (
-            SCHEMA_FIELD.to_string(),
-            ColumnDataTypeWrapper::int32_datatype(),
-        ),
-        (
-            ZERO_THRESHOLD_FIELD.to_string(),
-            ColumnDataTypeWrapper::float64_datatype(),
-        ),
-        (
-            SUM_FIELD.to_string(),
-            ColumnDataTypeWrapper::float64_datatype(),
-        ),
-        (
-            RESET_HINT_FIELD.to_string(),
-            ColumnDataTypeWrapper::int32_datatype(),
-        ),
-        (
-            START_TIMESTAMP_FIELD.to_string(),
-            ColumnDataTypeWrapper::timestamp_millisecond_datatype(),
-        ),
-        (
-            CUSTOM_VALUES_FIELD.to_string(),
-            ColumnDataTypeWrapper::list_datatype(ColumnDataTypeWrapper::float64_datatype()),
-        ),
-        (
-            POSITIVE_SPAN_OFFSETS_FIELD.to_string(),
-            ColumnDataTypeWrapper::list_datatype(ColumnDataTypeWrapper::int32_datatype()),
-        ),
-        (
-            POSITIVE_SPAN_LENGTHS_FIELD.to_string(),
-            ColumnDataTypeWrapper::list_datatype(ColumnDataTypeWrapper::uint32_datatype()),
-        ),
-        (
-            NEGATIVE_SPAN_OFFSETS_FIELD.to_string(),
-            ColumnDataTypeWrapper::list_datatype(ColumnDataTypeWrapper::int32_datatype()),
-        ),
-        (
-            NEGATIVE_SPAN_LENGTHS_FIELD.to_string(),
-            ColumnDataTypeWrapper::list_datatype(ColumnDataTypeWrapper::uint32_datatype()),
-        ),
-        (
-            COUNT_U64_FIELD.to_string(),
-            ColumnDataTypeWrapper::uint64_datatype(),
-        ),
-        (
-            ZERO_COUNT_U64_FIELD.to_string(),
-            ColumnDataTypeWrapper::uint64_datatype(),
-        ),
-        (
-            POSITIVE_BUCKETS_I64_FIELD.to_string(),
-            ColumnDataTypeWrapper::list_datatype(ColumnDataTypeWrapper::int64_datatype()),
-        ),
-        (
-            NEGATIVE_BUCKETS_I64_FIELD.to_string(),
-            ColumnDataTypeWrapper::list_datatype(ColumnDataTypeWrapper::int64_datatype()),
-        ),
-        (
-            COUNT_F64_FIELD.to_string(),
-            ColumnDataTypeWrapper::float64_datatype(),
-        ),
-        (
-            ZERO_COUNT_F64_FIELD.to_string(),
-            ColumnDataTypeWrapper::float64_datatype(),
-        ),
-        (
-            POSITIVE_BUCKETS_F64_FIELD.to_string(),
-            ColumnDataTypeWrapper::list_datatype(ColumnDataTypeWrapper::float64_datatype()),
-        ),
-        (
-            NEGATIVE_BUCKETS_F64_FIELD.to_string(),
-            ColumnDataTypeWrapper::list_datatype(ColumnDataTypeWrapper::float64_datatype()),
-        ),
-    ])
 }
 
 fn native_histogram_struct_value(histogram: &Histogram) -> Result<ValueData> {
