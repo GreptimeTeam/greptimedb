@@ -14,6 +14,7 @@
 
 mod base64_serde;
 mod initial_remote_dyn_filter_reg;
+mod join_hash_bloom;
 
 use std::sync::Arc;
 
@@ -39,6 +40,11 @@ pub use self::initial_remote_dyn_filter_reg::{
     INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY, InitialDynFilterReg,
     InitialDynFilterRegs, InitialDynFilterSnapshot,
 };
+pub use self::join_hash_bloom::{
+    BLOOM_ENCODER_BITS_PER_HASH, BLOOM_ENCODER_MAX_NUM_BITS_BUDGET, BLOOM_ENCODER_MIN_NUM_BITS,
+    BLOOM_ENCODER_NUM_PROBES, BLOOM_PROTO_ENVELOPE_OVERHEAD_ESTIMATE, JOIN_HASH_BLOOM_VERSION,
+    JoinHashBloomPayload, MAX_BLOOM_NUM_PROBES, MAX_BLOOM_RESIDUAL_BYTES,
+};
 use crate::error::{DynFilterPayloadTooLargeSnafu, Error as CommonQueryError};
 
 pub const DYN_FILTER_PROTOCOL_VERSION: u32 = 1;
@@ -61,9 +67,19 @@ pub enum DynFilterPayload {
     /// A serialized DataFusion [`PhysicalExpr`] encoded as a protobuf
     /// [`PhysicalExprNode`].
     Datafusion(#[serde(with = "base64_serde::bytes")] Vec<u8>),
+    /// A join-hash Bloom filter over DataFusion `u64` join hashes.
+    JoinHashBloom(JoinHashBloomPayload),
 }
 
 impl DynFilterPayload {
+    /// Validates payload-level invariants that can be checked without a receiver schema.
+    pub fn validate(&self) -> DataFusionResult<()> {
+        match self {
+            Self::Datafusion(_) => Ok(()),
+            Self::JoinHashBloom(bloom) => bloom.validate(),
+        }
+    }
+
     /// Encodes a DataFusion physical expression into a bounded dynamic filter payload.
     ///
     /// Runtime-only hash lookup predicates are degraded to `true` before encoding so
@@ -96,7 +112,12 @@ impl DynFilterPayload {
         input_schema: &datafusion::arrow::datatypes::Schema,
         max_payload_bytes: usize,
     ) -> DataFusionResult<Arc<dyn PhysicalExpr>> {
-        let Self::Datafusion(bytes) = self;
+        let Self::Datafusion(bytes) = self else {
+            return Err(DataFusionError::Plan(
+                "DynFilterPayload::decode_datafusion_expr called on non-Datafusion payload"
+                    .to_string(),
+            ));
+        };
         validate_payload_size(bytes.len(), max_payload_bytes).map_err(DataFusionError::from)?;
         let codec = DefaultPhysicalExtensionCodec {};
         let proto = PhysicalExprNode::decode(bytes.as_slice()).map_err(|e| {
@@ -107,6 +128,66 @@ impl DynFilterPayload {
         validate_supported_payload_expr(&expr)?;
         validate_decoded_payload_expr(&expr, input_schema)?;
         Ok(expr)
+    }
+
+    /// Returns the proto-encoded byte size of this payload for budget tracking.
+    ///
+    /// - `Datafusion`: length of the raw protobuf bytes.
+    /// - `JoinHashBloom`: `encoded_len()` of the whole typed
+    ///   `RemoteDynFilterPayload` proto that carries the Bloom payload,
+    ///   conservatively computed by converting to proto and measuring.
+    pub fn encoded_payload_bytes(&self) -> usize {
+        match self {
+            Self::Datafusion(bytes) => bytes.len(),
+            Self::JoinHashBloom(_bloom) => {
+                let proto = self.to_region_proto_payload();
+                proto.encoded_len()
+            }
+        }
+    }
+
+    /// Converts this payload to the corresponding gRPC
+    /// `RemoteDynFilterPayload` proto.
+    pub fn to_region_proto_payload(&self) -> api::v1::region::RemoteDynFilterPayload {
+        match self {
+            Self::Datafusion(bytes) => api::v1::region::RemoteDynFilterPayload {
+                kind: Some(
+                    api::v1::region::remote_dyn_filter_payload::Kind::DatafusionPhysicalExpr(
+                        bytes.clone(),
+                    ),
+                ),
+            },
+            Self::JoinHashBloom(bloom) => api::v1::region::RemoteDynFilterPayload {
+                kind: Some(
+                    api::v1::region::remote_dyn_filter_payload::Kind::JoinHashBloom(
+                        bloom.to_proto(),
+                    ),
+                ),
+            },
+        }
+    }
+
+    /// Constructs a `DynFilterPayload` from a gRPC
+    /// `RemoteDynFilterPayload` proto.
+    ///
+    /// Rejects missing `kind` and validates the payload.
+    pub fn from_region_proto_payload(
+        payload: api::v1::region::RemoteDynFilterPayload,
+    ) -> DataFusionResult<Self> {
+        let kind = payload.kind.ok_or_else(|| {
+            DataFusionError::Plan("RemoteDynFilterPayload::kind is missing".to_string())
+        })?;
+
+        match kind {
+            api::v1::region::remote_dyn_filter_payload::Kind::DatafusionPhysicalExpr(bytes) => {
+                Ok(Self::Datafusion(bytes))
+            }
+            api::v1::region::remote_dyn_filter_payload::Kind::JoinHashBloom(bloom) => {
+                let model = JoinHashBloomPayload::from_proto(&bloom)?;
+                model.validate()?;
+                Ok(Self::JoinHashBloom(model))
+            }
+        }
     }
 }
 

@@ -430,6 +430,7 @@ async fn fanout_snapshot_for_query(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(deprecated)]
 async fn fanout_update_for_query(
     query_id: QueryId,
     region_query_handler: &RegionQueryHandlerRef,
@@ -449,6 +450,7 @@ async fn fanout_update_for_query(
             payload: payload.clone(),
             generation,
             is_complete,
+            typed_payload: None,
         };
 
         match await_control_rpc_or_lifecycle_close(
@@ -903,6 +905,7 @@ mod tests {
             unreachable!("remote dyn filter registry tests should not execute remote queries")
         }
 
+        #[allow(deprecated)]
         async fn handle_remote_dyn_filter_update(
             &self,
             region_id: RegionId,

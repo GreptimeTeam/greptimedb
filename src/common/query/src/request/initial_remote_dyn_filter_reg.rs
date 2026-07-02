@@ -90,6 +90,15 @@ impl InitialDynFilterRegs {
                     reg.filter_id
                 ));
             }
+
+            if let Some(snapshot) = &reg.initial_snapshot {
+                snapshot.payload.validate().map_err(|err| {
+                    format!(
+                        "InitialDynFilterRegs contains invalid initial snapshot for filter_id '{}': {}",
+                        reg.filter_id, err
+                    )
+                })?;
+            }
         }
 
         Ok(())
@@ -198,9 +207,7 @@ impl InitialDynFilterSnapshot {
     }
 
     pub fn encoded_payload_bytes(&self) -> usize {
-        match &self.payload {
-            DynFilterPayload::Datafusion(bytes) => bytes.len(),
-        }
+        self.payload.encoded_payload_bytes()
     }
 }
 
@@ -214,6 +221,29 @@ mod tests {
     use datafusion_common::DataFusionError;
 
     use super::*;
+    use crate::request::join_hash_bloom::JoinHashBloomPayload;
+
+    /// Convenience helper to create a test Bloom payload with minimal fields.
+    fn make_test_bloom(
+        num_bits: u64,
+        bitset: Vec<u8>,
+        residual: Vec<u8>,
+        join_key_child_indices: Vec<u32>,
+    ) -> JoinHashBloomPayload {
+        JoinHashBloomPayload {
+            version: 1,
+            df_seed0: 0,
+            df_seed1: 0,
+            df_seed2: 0,
+            df_seed3: 0,
+            num_bits,
+            num_probes: 2,
+            bitset,
+            join_key_child_indices,
+            residual_datafusion_physical_expr: residual,
+            hash_compat_fingerprint: 0,
+        }
+    }
 
     #[test]
     fn initial_dyn_filter_regs_json_round_trip() {
@@ -392,5 +422,84 @@ mod tests {
             .unwrap_err();
 
         assert!(matches!(err, DataFusionError::Plan(_)));
+    }
+
+    // ── Bloom snapshot tests ──────────────────────────────────
+
+    #[test]
+    fn initial_dyn_filter_snapshot_bloom_encoded_payload_bytes_counts_full_proto() {
+        let bitset = vec![0u8; 128];
+        let bloom = make_test_bloom(1024, bitset.clone(), vec![1, 2, 3], vec![0]);
+
+        let snapshot =
+            InitialDynFilterSnapshot::new(DynFilterPayload::JoinHashBloom(bloom.clone()), 2, false);
+
+        let encoded_bytes = snapshot.encoded_payload_bytes();
+
+        // Should be more than bitset + residual alone (includes proto overhead)
+        assert!(
+            encoded_bytes > bitset.len() + bloom.residual_datafusion_physical_expr.len(),
+            "expected > {}, got {encoded_bytes}",
+            bitset.len() + bloom.residual_datafusion_physical_expr.len()
+        );
+    }
+
+    #[test]
+    fn initial_dyn_filter_reg_encoded_registration_bytes_include_bloom_snapshot() {
+        let bloom = make_test_bloom(64, vec![0u8; 8], vec![1], vec![0]);
+
+        let snapshot =
+            InitialDynFilterSnapshot::new(DynFilterPayload::JoinHashBloom(bloom), 2, false);
+
+        let reg = InitialDynFilterReg::new("filter-bloom", vec![vec![1, 2, 3]])
+            .with_initial_snapshot(snapshot);
+
+        let child_bytes = reg.encoded_child_expr_bytes();
+        let total_bytes = reg.encoded_registration_bytes();
+
+        assert_eq!(child_bytes, 3);
+        // The Bloom payload proto encoded size should be > 0
+        assert!(
+            total_bytes > child_bytes,
+            "expected total_bytes > {child_bytes}, got {total_bytes}"
+        );
+    }
+
+    #[test]
+    fn initial_dyn_filter_regs_json_round_trip_with_bloom_snapshot() {
+        let bloom = make_test_bloom(256, vec![0u8; 32], vec![4, 5, 6], vec![0]);
+
+        let regs = InitialDynFilterRegs::new(vec![
+            InitialDynFilterReg::new("filter-bloom", vec![vec![1, 2, 3]]).with_initial_snapshot(
+                InitialDynFilterSnapshot::new(DynFilterPayload::JoinHashBloom(bloom), 7, true),
+            ),
+        ]);
+
+        let encoded = regs.to_extension_value().unwrap();
+        let json: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+        let decoded = InitialDynFilterRegs::from_extension_value(&encoded).unwrap();
+
+        assert_eq!(
+            json["registrations"][0]["initial_snapshot"]["payload"]["kind"],
+            "join_hash_bloom"
+        );
+        assert_eq!(decoded, regs);
+    }
+
+    #[test]
+    fn initial_dyn_filter_regs_from_extension_rejects_invalid_bloom_snapshot() {
+        let bloom = make_test_bloom(256, vec![0u8; 32], vec![4, 5, 6], vec![]);
+
+        let regs = InitialDynFilterRegs::new(vec![
+            InitialDynFilterReg::new("filter-bloom", vec![vec![1, 2, 3]]).with_initial_snapshot(
+                InitialDynFilterSnapshot::new(DynFilterPayload::JoinHashBloom(bloom), 7, true),
+            ),
+        ]);
+
+        let encoded = serde_json::to_string(&regs).unwrap();
+        let err = InitialDynFilterRegs::from_extension_value(&encoded).unwrap_err();
+
+        assert!(err.to_string().contains("invalid initial snapshot"));
+        assert!(err.to_string().contains("join_key_child_indices is empty"));
     }
 }

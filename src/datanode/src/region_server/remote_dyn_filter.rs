@@ -170,6 +170,7 @@ impl RegionServer {
         }
     }
 
+    #[allow(deprecated)]
     async fn handle_remote_dyn_filter_update(
         &self,
         query_id: &QueryId,
@@ -339,6 +340,7 @@ impl Stream for RemoteDynFilterGuardedStream {
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use std::assert_matches;
     use std::collections::{HashMap, HashSet};
@@ -729,6 +731,7 @@ mod tests {
                         payload: vec![1],
                         generation: 1,
                         is_complete: false,
+                        typed_payload: None,
                     },
                 )),
             })
@@ -754,6 +757,7 @@ mod tests {
                         payload: Vec::new(),
                         generation: 1,
                         is_complete: false,
+                        typed_payload: None,
                     },
                 )),
             })

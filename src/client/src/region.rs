@@ -426,6 +426,7 @@ mod test {
         assert_eq!(msg, "blabla");
     }
 
+    #[allow(deprecated)]
     #[test]
     fn test_build_remote_dyn_filter_request_sets_header_and_body() {
         let request = build_remote_dyn_filter_update_request(
@@ -435,6 +436,7 @@ mod test {
                 payload: vec![1, 2, 3],
                 generation: 7,
                 is_complete: false,
+                typed_payload: None,
             },
         );
 
