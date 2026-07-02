@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["foo","is_send"]};

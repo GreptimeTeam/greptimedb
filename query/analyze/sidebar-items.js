@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["NODE","PLAN","STAGE"],"fn":["analyze_plan_metrics_to_json_value","create_output_batch","metrics_to_string"],"struct":["AnalyzeOutputBuilder","DistAnalyzeExec","JsonMetrics"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["DEFAULT_SPLUNK_TABLE","HEC_HEALTHY_CODE"],"fn":["apply_tag_columns","handle_event","handle_health","hec_event_to_map","hec_response","ingest_events","is_blank_event","is_splunk_request","parse_hec_events","parse_hec_time","sanitize_index","validate_event"]};

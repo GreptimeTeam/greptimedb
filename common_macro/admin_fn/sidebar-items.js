@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["build_struct","extract_handler_type","process_admin_fn"],"macro":["error","ok"]};

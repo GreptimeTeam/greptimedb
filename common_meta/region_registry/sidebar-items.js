@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["LeaderRegionManifestInfo"],"struct":["LeaderRegion","LeaderRegionRegistry"],"type":["LeaderRegionRegistryRef"]};

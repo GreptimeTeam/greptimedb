@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["SubCommand"],"mod":["bare","compat","compat_case","kube"],"struct":["Command","SqlnessConfig"]};

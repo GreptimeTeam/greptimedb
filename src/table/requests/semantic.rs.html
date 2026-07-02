@@ -1,0 +1,277 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `src/table/src/requests/semantic.rs`."><title>semantic.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="table" data-themes="" data-resource-suffix="" data-rustdoc-version="1.96.0-nightly (ac7f9ec7d 2026-03-20)" data-channel="nightly" data-search-js="search-63369b7b.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../../../static.files/src-script-813739b1.js"></script><script defer src="../../../src-files.js"></script><script defer src="../../../static.files/main-5013f961.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1><div class="sub-heading">table/requests/</div>semantic.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="comment">// Copyright 2023 Greptime Team
+<a href=#2 id=2 data-nosnippet>2</a>//
+<a href=#3 id=3 data-nosnippet>3</a>// Licensed under the Apache License, Version 2.0 (the "License");
+<a href=#4 id=4 data-nosnippet>4</a>// you may not use this file except in compliance with the License.
+<a href=#5 id=5 data-nosnippet>5</a>// You may obtain a copy of the License at
+<a href=#6 id=6 data-nosnippet>6</a>//
+<a href=#7 id=7 data-nosnippet>7</a>//     http://www.apache.org/licenses/LICENSE-2.0
+<a href=#8 id=8 data-nosnippet>8</a>//
+<a href=#9 id=9 data-nosnippet>9</a>// Unless required by applicable law or agreed to in writing, software
+<a href=#10 id=10 data-nosnippet>10</a>// distributed under the License is distributed on an "AS IS" BASIS,
+<a href=#11 id=11 data-nosnippet>11</a>// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+<a href=#12 id=12 data-nosnippet>12</a>// See the License for the specific language governing permissions and
+<a href=#13 id=13 data-nosnippet>13</a>// limitations under the License.
+<a href=#14 id=14 data-nosnippet>14</a>
+<a href=#15 id=15 data-nosnippet>15</a></span><span class="doccomment">//! Table semantic layer vocabulary.
+<a href=#16 id=16 data-nosnippet>16</a>//!
+<a href=#17 id=17 data-nosnippet>17</a>//! A thin layer of semantic metadata attached to a table via `table_options`, so
+<a href=#18 id=18 data-nosnippet>18</a>//! machine consumers (LLM agents, alert/dashboard builders, MCP servers, ETL) can
+<a href=#19 id=19 data-nosnippet>19</a>//! align a table with the observability concept it stands for without guessing
+<a href=#20 id=20 data-nosnippet>20</a>//! from column names. See `docs/rfcs/2026-05-28-table-semantic-layer.md`.
+<a href=#21 id=21 data-nosnippet>21</a>//!
+<a href=#22 id=22 data-nosnippet>22</a>//! The vocabulary is intentionally small: a key earns its place only when it
+<a href=#23 id=23 data-nosnippet>23</a>//! records something a consumer cannot cheaply and reliably recover from the
+<a href=#24 id=24 data-nosnippet>24</a>//! schema/data itself. Keys whose value is already in the metric name by
+<a href=#25 id=25 data-nosnippet>25</a>//! convention, is a constant, or duplicates an existing column are deliberately
+<a href=#26 id=26 data-nosnippet>26</a>//! omitted rather than stamped for completeness.
+<a href=#27 id=27 data-nosnippet>27</a>//!
+<a href=#28 id=28 data-nosnippet>28</a>//! All public keys share the [`SEMANTIC_PREFIX`] namespace and are string-valued.
+<a href=#29 id=29 data-nosnippet>29</a>//! [`is_semantic_option_key`] gates them through
+<a href=#30 id=30 data-nosnippet>30</a>//! [`crate::requests::validate_table_option`], so they are accepted both on the
+<a href=#31 id=31 data-nosnippet>31</a>//! ingestion auto-create path and on explicit `CREATE TABLE ... WITH (...)` DDL.
+<a href=#32 id=32 data-nosnippet>32</a>
+<a href=#33 id=33 data-nosnippet>33</a>/// Reserved prefix for every public semantic table-option key.
+<a href=#34 id=34 data-nosnippet>34</a></span><span class="kw">pub const </span>SEMANTIC_PREFIX: <span class="kw-2">&amp;</span>str = <span class="string">"greptime.semantic."</span>;
+<a href=#35 id=35 data-nosnippet>35</a>
+<a href=#36 id=36 data-nosnippet>36</a><span class="doccomment">/// Internal `QueryContext` extension key carrying the per-table semantic index
+<a href=#37 id=37 data-nosnippet>37</a>/// (a `{table_name -&gt; {semantic_key: value}}` JSON blob) from the ingestion
+<a href=#38 id=38 data-nosnippet>38</a>/// encode path to the auto-create site. Deliberately OUTSIDE [`SEMANTIC_PREFIX`]
+<a href=#39 id=39 data-nosnippet>39</a>/// so it is not a valid table option and never leaks into a table's options.
+<a href=#40 id=40 data-nosnippet>40</a></span><span class="kw">pub const </span>SEMANTIC_PER_TABLE_INDEX_KEY: <span class="kw-2">&amp;</span>str = <span class="string">"greptime.internal.semantic.per_table_index"</span>;
+<a href=#41 id=41 data-nosnippet>41</a>
+<a href=#42 id=42 data-nosnippet>42</a><span class="comment">// ---- Common keys (all signals) ----
+<a href=#43 id=43 data-nosnippet>43</a>
+<a href=#44 id=44 data-nosnippet>44</a></span><span class="doccomment">/// Signal kind: one of [`SIGNAL_TYPE_TRACE`] / [`SIGNAL_TYPE_LOG`] /
+<a href=#45 id=45 data-nosnippet>45</a>/// [`SIGNAL_TYPE_METRIC`] / [`SIGNAL_TYPE_EVENT`].
+<a href=#46 id=46 data-nosnippet>46</a></span><span class="kw">pub const </span>SEMANTIC_SIGNAL_TYPE: <span class="kw-2">&amp;</span>str = <span class="string">"greptime.semantic.signal_type"</span>;
+<a href=#47 id=47 data-nosnippet>47</a><span class="doccomment">/// Ingestion ecosystem, e.g. [`SOURCE_OPENTELEMETRY`] / [`SOURCE_PROMETHEUS`].
+<a href=#48 id=48 data-nosnippet>48</a></span><span class="kw">pub const </span>SEMANTIC_SOURCE: <span class="kw-2">&amp;</span>str = <span class="string">"greptime.semantic.source"</span>;
+<a href=#49 id=49 data-nosnippet>49</a><span class="doccomment">/// Source protocol version, e.g. Prometheus remote write `1.0` / `2.0`.
+<a href=#50 id=50 data-nosnippet>50</a></span><span class="kw">pub const </span>SEMANTIC_SOURCE_VERSION: <span class="kw-2">&amp;</span>str = <span class="string">"greptime.semantic.source_version"</span>;
+<a href=#51 id=51 data-nosnippet>51</a><span class="doccomment">/// Internal ingestion pipeline / data model, e.g. `greptime_trace_v1`. The
+<a href=#52 id=52 data-nosnippet>52</a>/// signal-agnostic successor to the engine-specific `table_data_model` option.
+<a href=#53 id=53 data-nosnippet>53</a></span><span class="kw">pub const </span>SEMANTIC_PIPELINE: <span class="kw-2">&amp;</span>str = <span class="string">"greptime.semantic.pipeline"</span>;
+<a href=#54 id=54 data-nosnippet>54</a>
+<a href=#55 id=55 data-nosnippet>55</a><span class="comment">// ---- Trace keys ----
+<a href=#56 id=56 data-nosnippet>56</a>
+<a href=#57 id=57 data-nosnippet>57</a></span><span class="doccomment">/// Semantic-conventions version the rows conform to (e.g. the OTel schema URL),
+<a href=#58 id=58 data-nosnippet>58</a>/// or [`SEMANTIC_VALUE_UNKNOWN`] / [`SEMANTIC_VALUE_MIXED`] when not single-valued.
+<a href=#59 id=59 data-nosnippet>59</a></span><span class="kw">pub const </span>SEMANTIC_TRACE_CONVENTIONS: <span class="kw-2">&amp;</span>str = <span class="string">"greptime.semantic.trace.conventions"</span>;
+<a href=#60 id=60 data-nosnippet>60</a>
+<a href=#61 id=61 data-nosnippet>61</a><span class="comment">// ---- Metric keys ----
+<a href=#62 id=62 data-nosnippet>62</a>
+<a href=#63 id=63 data-nosnippet>63</a></span><span class="doccomment">/// Instrument kind: `counter` / `gauge` / `histogram` / `summary` /
+<a href=#64 id=64 data-nosnippet>64</a>/// `updown_counter` / `gauge_histogram` / `info` / `stateset`.
+<a href=#65 id=65 data-nosnippet>65</a></span><span class="kw">pub const </span>SEMANTIC_METRIC_TYPE: <span class="kw-2">&amp;</span>str = <span class="string">"greptime.semantic.metric.type"</span>;
+<a href=#66 id=66 data-nosnippet>66</a><span class="doccomment">/// UCUM unit, e.g. `s`, `By`, `{request}`. Discarded by the row encoders, so it
+<a href=#67 id=67 data-nosnippet>67</a>/// is unrecoverable once ingested.
+<a href=#68 id=68 data-nosnippet>68</a></span><span class="kw">pub const </span>SEMANTIC_METRIC_UNIT: <span class="kw-2">&amp;</span>str = <span class="string">"greptime.semantic.metric.unit"</span>;
+<a href=#69 id=69 data-nosnippet>69</a><span class="doccomment">/// `cumulative` / `delta` (OTel only). Invisible in the metric name, so it is
+<a href=#70 id=70 data-nosnippet>70</a>/// unrecoverable from the table alone.
+<a href=#71 id=71 data-nosnippet>71</a></span><span class="kw">pub const </span>SEMANTIC_METRIC_TEMPORALITY: <span class="kw-2">&amp;</span>str = <span class="string">"greptime.semantic.metric.temporality"</span>;
+<a href=#72 id=72 data-nosnippet>72</a><span class="doccomment">/// [`METADATA_QUALITY_DECLARED`] when the protocol stated the type, or
+<a href=#73 id=73 data-nosnippet>73</a>/// [`METADATA_QUALITY_INFERRED`] when guessed from a name suffix.
+<a href=#74 id=74 data-nosnippet>74</a></span><span class="kw">pub const </span>SEMANTIC_METRIC_METADATA_QUALITY: <span class="kw-2">&amp;</span>str = <span class="string">"greptime.semantic.metric.metadata_quality"</span>;
+<a href=#75 id=75 data-nosnippet>75</a><span class="doccomment">/// Pre-translation OTel name when the table name was Prometheus-ised; the key a
+<a href=#76 id=76 data-nosnippet>76</a>/// consumer uses to look the metric up in the OTel semantic conventions.
+<a href=#77 id=77 data-nosnippet>77</a></span><span class="kw">pub const </span>SEMANTIC_METRIC_ORIGINAL_NAME: <span class="kw-2">&amp;</span>str = <span class="string">"greptime.semantic.metric.original_name"</span>;
+<a href=#78 id=78 data-nosnippet>78</a>
+<a href=#79 id=79 data-nosnippet>79</a><span class="comment">// ---- Value constants ----
+<a href=#80 id=80 data-nosnippet>80</a>
+<a href=#81 id=81 data-nosnippet>81</a></span><span class="kw">pub const </span>SIGNAL_TYPE_TRACE: <span class="kw-2">&amp;</span>str = <span class="string">"trace"</span>;
+<a href=#82 id=82 data-nosnippet>82</a><span class="kw">pub const </span>SIGNAL_TYPE_LOG: <span class="kw-2">&amp;</span>str = <span class="string">"log"</span>;
+<a href=#83 id=83 data-nosnippet>83</a><span class="kw">pub const </span>SIGNAL_TYPE_METRIC: <span class="kw-2">&amp;</span>str = <span class="string">"metric"</span>;
+<a href=#84 id=84 data-nosnippet>84</a><span class="kw">pub const </span>SIGNAL_TYPE_EVENT: <span class="kw-2">&amp;</span>str = <span class="string">"event"</span>;
+<a href=#85 id=85 data-nosnippet>85</a>
+<a href=#86 id=86 data-nosnippet>86</a><span class="kw">pub const </span>SOURCE_OPENTELEMETRY: <span class="kw-2">&amp;</span>str = <span class="string">"opentelemetry"</span>;
+<a href=#87 id=87 data-nosnippet>87</a><span class="kw">pub const </span>SOURCE_PROMETHEUS: <span class="kw-2">&amp;</span>str = <span class="string">"prometheus"</span>;
+<a href=#88 id=88 data-nosnippet>88</a><span class="kw">pub const </span>SOURCE_INFLUXDB: <span class="kw-2">&amp;</span>str = <span class="string">"influxdb"</span>;
+<a href=#89 id=89 data-nosnippet>89</a><span class="kw">pub const </span>SOURCE_OPENTSDB: <span class="kw-2">&amp;</span>str = <span class="string">"opentsdb"</span>;
+<a href=#90 id=90 data-nosnippet>90</a><span class="kw">pub const </span>SOURCE_LOKI: <span class="kw-2">&amp;</span>str = <span class="string">"loki"</span>;
+<a href=#91 id=91 data-nosnippet>91</a><span class="kw">pub const </span>SOURCE_ELASTICSEARCH: <span class="kw-2">&amp;</span>str = <span class="string">"elasticsearch"</span>;
+<a href=#92 id=92 data-nosnippet>92</a>
+<a href=#93 id=93 data-nosnippet>93</a><span class="kw">pub const </span>METADATA_QUALITY_DECLARED: <span class="kw-2">&amp;</span>str = <span class="string">"declared"</span>;
+<a href=#94 id=94 data-nosnippet>94</a><span class="kw">pub const </span>METADATA_QUALITY_INFERRED: <span class="kw-2">&amp;</span>str = <span class="string">"inferred"</span>;
+<a href=#95 id=95 data-nosnippet>95</a>
+<a href=#96 id=96 data-nosnippet>96</a><span class="doccomment">/// Sentinel for a key that cannot be determined at stamp time.
+<a href=#97 id=97 data-nosnippet>97</a></span><span class="kw">pub const </span>SEMANTIC_VALUE_UNKNOWN: <span class="kw-2">&amp;</span>str = <span class="string">"unknown"</span>;
+<a href=#98 id=98 data-nosnippet>98</a><span class="doccomment">/// Sentinel for a single-valued key that saw conflicting sources.
+<a href=#99 id=99 data-nosnippet>99</a></span><span class="kw">pub const </span>SEMANTIC_VALUE_MIXED: <span class="kw-2">&amp;</span>str = <span class="string">"mixed"</span>;
+<a href=#100 id=100 data-nosnippet>100</a>
+<a href=#101 id=101 data-nosnippet>101</a><span class="doccomment">/// Every recognised public semantic table-option key. The set is a closed
+<a href=#102 id=102 data-nosnippet>102</a>/// whitelist: keys under [`SEMANTIC_PREFIX`] that are not listed here are rejected,
+<a href=#103 id=103 data-nosnippet>103</a>/// so an unknown key like `greptime.semantic.unknown_key` does not silently land
+<a href=#104 id=104 data-nosnippet>104</a>/// in a table's options. Adding a key to the vocabulary means adding it here.
+<a href=#105 id=105 data-nosnippet>105</a></span><span class="kw">pub const </span>SEMANTIC_OPTION_KEYS: <span class="kw-2">&amp;</span>[<span class="kw-2">&amp;</span>str] = <span class="kw-2">&amp;</span>[
+<a href=#106 id=106 data-nosnippet>106</a>    SEMANTIC_SIGNAL_TYPE,
+<a href=#107 id=107 data-nosnippet>107</a>    SEMANTIC_SOURCE,
+<a href=#108 id=108 data-nosnippet>108</a>    SEMANTIC_SOURCE_VERSION,
+<a href=#109 id=109 data-nosnippet>109</a>    SEMANTIC_PIPELINE,
+<a href=#110 id=110 data-nosnippet>110</a>    SEMANTIC_TRACE_CONVENTIONS,
+<a href=#111 id=111 data-nosnippet>111</a>    SEMANTIC_METRIC_TYPE,
+<a href=#112 id=112 data-nosnippet>112</a>    SEMANTIC_METRIC_UNIT,
+<a href=#113 id=113 data-nosnippet>113</a>    SEMANTIC_METRIC_TEMPORALITY,
+<a href=#114 id=114 data-nosnippet>114</a>    SEMANTIC_METRIC_METADATA_QUALITY,
+<a href=#115 id=115 data-nosnippet>115</a>    SEMANTIC_METRIC_ORIGINAL_NAME,
+<a href=#116 id=116 data-nosnippet>116</a>];
+<a href=#117 id=117 data-nosnippet>117</a>
+<a href=#118 id=118 data-nosnippet>118</a><span class="doccomment">/// Returns true if `key` is a recognised semantic table-option key (whitelist).
+<a href=#119 id=119 data-nosnippet>119</a>///
+<a href=#120 id=120 data-nosnippet>120</a>/// Note this is membership, not a prefix test: unknown keys under
+<a href=#121 id=121 data-nosnippet>121</a>/// [`SEMANTIC_PREFIX`] are rejected, and the internal
+<a href=#122 id=122 data-nosnippet>122</a>/// [`SEMANTIC_PER_TABLE_INDEX_KEY`] (outside the prefix) never matches.
+<a href=#123 id=123 data-nosnippet>123</a></span><span class="kw">pub fn </span>is_semantic_option_key(key: <span class="kw-2">&amp;</span>str) -&gt; bool {
+<a href=#124 id=124 data-nosnippet>124</a>    SEMANTIC_OPTION_KEYS.contains(<span class="kw-2">&amp;</span>key)
+<a href=#125 id=125 data-nosnippet>125</a>}
+<a href=#126 id=126 data-nosnippet>126</a>
+<a href=#127 id=127 data-nosnippet>127</a><span class="doccomment">/// Validates a `greptime.semantic.*` option's `value` against its allowed domain.
+<a href=#128 id=128 data-nosnippet>128</a>///
+<a href=#129 id=129 data-nosnippet>129</a>/// Open-value keys (unit, original_name, pipeline, conventions) accept any
+<a href=#130 id=130 data-nosnippet>130</a>/// non-empty string. Closed-domain keys accept a fixed set, plus the `unknown`
+<a href=#131 id=131 data-nosnippet>131</a>/// sentinel, plus `mixed` for the keys where one long-lived table can
+<a href=#132 id=132 data-nosnippet>132</a>/// legitimately see multiple values. Keys not in [`SEMANTIC_OPTION_KEYS`] are
+<a href=#133 id=133 data-nosnippet>133</a>/// rejected.
+<a href=#134 id=134 data-nosnippet>134</a></span><span class="kw">pub fn </span>validate_semantic_option(key: <span class="kw-2">&amp;</span>str, value: <span class="kw-2">&amp;</span>str) -&gt; bool {
+<a href=#135 id=135 data-nosnippet>135</a>    <span class="kw">match </span>key {
+<a href=#136 id=136 data-nosnippet>136</a>        SEMANTIC_PIPELINE
+<a href=#137 id=137 data-nosnippet>137</a>        | SEMANTIC_SOURCE_VERSION
+<a href=#138 id=138 data-nosnippet>138</a>        | SEMANTIC_METRIC_UNIT
+<a href=#139 id=139 data-nosnippet>139</a>        | SEMANTIC_METRIC_ORIGINAL_NAME
+<a href=#140 id=140 data-nosnippet>140</a>        | SEMANTIC_TRACE_CONVENTIONS =&gt; !value.is_empty(),
+<a href=#141 id=141 data-nosnippet>141</a>
+<a href=#142 id=142 data-nosnippet>142</a>        SEMANTIC_SIGNAL_TYPE =&gt; <span class="macro">matches!</span>(value, <span class="string">"trace" </span>| <span class="string">"log" </span>| <span class="string">"metric" </span>| <span class="string">"event" </span>| <span class="string">"unknown"</span>),
+<a href=#143 id=143 data-nosnippet>143</a>        SEMANTIC_SOURCE =&gt; <span class="macro">matches!</span>(
+<a href=#144 id=144 data-nosnippet>144</a>            value,
+<a href=#145 id=145 data-nosnippet>145</a>            <span class="string">"opentelemetry"
+<a href=#146 id=146 data-nosnippet>146</a>                </span>| <span class="string">"prometheus"
+<a href=#147 id=147 data-nosnippet>147</a>                </span>| <span class="string">"influxdb"
+<a href=#148 id=148 data-nosnippet>148</a>                </span>| <span class="string">"opentsdb"
+<a href=#149 id=149 data-nosnippet>149</a>                </span>| <span class="string">"elasticsearch"
+<a href=#150 id=150 data-nosnippet>150</a>                </span>| <span class="string">"loki"
+<a href=#151 id=151 data-nosnippet>151</a>                </span>| <span class="string">"custom"
+<a href=#152 id=152 data-nosnippet>152</a>                </span>| <span class="string">"mixed"
+<a href=#153 id=153 data-nosnippet>153</a>                </span>| <span class="string">"unknown"
+<a href=#154 id=154 data-nosnippet>154</a>        </span>),
+<a href=#155 id=155 data-nosnippet>155</a>        SEMANTIC_METRIC_TYPE =&gt; <span class="macro">matches!</span>(
+<a href=#156 id=156 data-nosnippet>156</a>            value,
+<a href=#157 id=157 data-nosnippet>157</a>            <span class="string">"counter"
+<a href=#158 id=158 data-nosnippet>158</a>                </span>| <span class="string">"gauge"
+<a href=#159 id=159 data-nosnippet>159</a>                </span>| <span class="string">"histogram"
+<a href=#160 id=160 data-nosnippet>160</a>                </span>| <span class="string">"summary"
+<a href=#161 id=161 data-nosnippet>161</a>                </span>| <span class="string">"updown_counter"
+<a href=#162 id=162 data-nosnippet>162</a>                </span>| <span class="string">"gauge_histogram"
+<a href=#163 id=163 data-nosnippet>163</a>                </span>| <span class="string">"info"
+<a href=#164 id=164 data-nosnippet>164</a>                </span>| <span class="string">"stateset"
+<a href=#165 id=165 data-nosnippet>165</a>                </span>| <span class="string">"mixed"
+<a href=#166 id=166 data-nosnippet>166</a>                </span>| <span class="string">"unknown"
+<a href=#167 id=167 data-nosnippet>167</a>        </span>),
+<a href=#168 id=168 data-nosnippet>168</a>        SEMANTIC_METRIC_TEMPORALITY =&gt; {
+<a href=#169 id=169 data-nosnippet>169</a>            <span class="macro">matches!</span>(value, <span class="string">"cumulative" </span>| <span class="string">"delta" </span>| <span class="string">"mixed" </span>| <span class="string">"unknown"</span>)
+<a href=#170 id=170 data-nosnippet>170</a>        }
+<a href=#171 id=171 data-nosnippet>171</a>        SEMANTIC_METRIC_METADATA_QUALITY =&gt; <span class="macro">matches!</span>(value, <span class="string">"declared" </span>| <span class="string">"inferred" </span>| <span class="string">"unknown"</span>),
+<a href=#172 id=172 data-nosnippet>172</a>
+<a href=#173 id=173 data-nosnippet>173</a>        <span class="kw">_ </span>=&gt; <span class="bool-val">false</span>,
+<a href=#174 id=174 data-nosnippet>174</a>    }
+<a href=#175 id=175 data-nosnippet>175</a>}
+<a href=#176 id=176 data-nosnippet>176</a>
+<a href=#177 id=177 data-nosnippet>177</a><span class="attr">#[cfg(test)]
+<a href=#178 id=178 data-nosnippet>178</a></span><span class="kw">mod </span>tests {
+<a href=#179 id=179 data-nosnippet>179</a>    <span class="kw">use </span>super::<span class="kw-2">*</span>;
+<a href=#180 id=180 data-nosnippet>180</a>
+<a href=#181 id=181 data-nosnippet>181</a>    <span class="attr">#[test]
+<a href=#182 id=182 data-nosnippet>182</a>    </span><span class="kw">fn </span>test_is_semantic_option_key() {
+<a href=#183 id=183 data-nosnippet>183</a>        <span class="macro">assert!</span>(is_semantic_option_key(SEMANTIC_SIGNAL_TYPE));
+<a href=#184 id=184 data-nosnippet>184</a>        <span class="macro">assert!</span>(is_semantic_option_key(SEMANTIC_METRIC_TYPE));
+<a href=#185 id=185 data-nosnippet>185</a>        <span class="macro">assert!</span>(is_semantic_option_key(SEMANTIC_PIPELINE));
+<a href=#186 id=186 data-nosnippet>186</a>
+<a href=#187 id=187 data-nosnippet>187</a>        <span class="comment">// Unknown keys under the prefix are not whitelisted.
+<a href=#188 id=188 data-nosnippet>188</a>        </span><span class="macro">assert!</span>(!is_semantic_option_key(<span class="string">"greptime.semantic.future.key"</span>));
+<a href=#189 id=189 data-nosnippet>189</a>        <span class="macro">assert!</span>(!is_semantic_option_key(<span class="string">"greptime.semantic.unknown_key"</span>));
+<a href=#190 id=190 data-nosnippet>190</a>        <span class="comment">// Keys cut from the vocabulary are no longer accepted.
+<a href=#191 id=191 data-nosnippet>191</a>        </span><span class="macro">assert!</span>(!is_semantic_option_key(
+<a href=#192 id=192 data-nosnippet>192</a>            <span class="string">"greptime.semantic.metric.monotonic"
+<a href=#193 id=193 data-nosnippet>193</a>        </span>));
+<a href=#194 id=194 data-nosnippet>194</a>        <span class="macro">assert!</span>(!is_semantic_option_key(
+<a href=#195 id=195 data-nosnippet>195</a>            <span class="string">"greptime.semantic.resource.attributes_dropped"
+<a href=#196 id=196 data-nosnippet>196</a>        </span>));
+<a href=#197 id=197 data-nosnippet>197</a>        <span class="comment">// Near-misses must not match.
+<a href=#198 id=198 data-nosnippet>198</a>        </span><span class="macro">assert!</span>(!is_semantic_option_key(<span class="string">"greptime.semanticx"</span>));
+<a href=#199 id=199 data-nosnippet>199</a>        <span class="macro">assert!</span>(!is_semantic_option_key(<span class="string">"semantic.signal_type"</span>));
+<a href=#200 id=200 data-nosnippet>200</a>        <span class="macro">assert!</span>(!is_semantic_option_key(<span class="string">"table_data_model"</span>));
+<a href=#201 id=201 data-nosnippet>201</a>        <span class="comment">// The internal transport key must never be treated as a table option.
+<a href=#202 id=202 data-nosnippet>202</a>        </span><span class="macro">assert!</span>(!is_semantic_option_key(SEMANTIC_PER_TABLE_INDEX_KEY));
+<a href=#203 id=203 data-nosnippet>203</a>    }
+<a href=#204 id=204 data-nosnippet>204</a>
+<a href=#205 id=205 data-nosnippet>205</a>    <span class="attr">#[test]
+<a href=#206 id=206 data-nosnippet>206</a>    </span><span class="kw">fn </span>test_validate_semantic_option() {
+<a href=#207 id=207 data-nosnippet>207</a>        <span class="comment">// Enum keys reject out-of-domain values.
+<a href=#208 id=208 data-nosnippet>208</a>        </span><span class="macro">assert!</span>(validate_semantic_option(SEMANTIC_SIGNAL_TYPE, <span class="string">"metric"</span>));
+<a href=#209 id=209 data-nosnippet>209</a>        <span class="macro">assert!</span>(!validate_semantic_option(SEMANTIC_SIGNAL_TYPE, <span class="string">"spans"</span>));
+<a href=#210 id=210 data-nosnippet>210</a>        <span class="macro">assert!</span>(validate_semantic_option(SEMANTIC_METRIC_TYPE, <span class="string">"counter"</span>));
+<a href=#211 id=211 data-nosnippet>211</a>        <span class="macro">assert!</span>(validate_semantic_option(SEMANTIC_METRIC_TYPE, <span class="string">"mixed"</span>));
+<a href=#212 id=212 data-nosnippet>212</a>        <span class="macro">assert!</span>(!validate_semantic_option(SEMANTIC_METRIC_TYPE, <span class="string">"bogus"</span>));
+<a href=#213 id=213 data-nosnippet>213</a>
+<a href=#214 id=214 data-nosnippet>214</a>        <span class="comment">// Sentinels and open values.
+<a href=#215 id=215 data-nosnippet>215</a>        </span><span class="macro">assert!</span>(validate_semantic_option(
+<a href=#216 id=216 data-nosnippet>216</a>            SEMANTIC_METRIC_TEMPORALITY,
+<a href=#217 id=217 data-nosnippet>217</a>            <span class="string">"unknown"
+<a href=#218 id=218 data-nosnippet>218</a>        </span>));
+<a href=#219 id=219 data-nosnippet>219</a>        <span class="macro">assert!</span>(validate_semantic_option(SEMANTIC_METRIC_UNIT, <span class="string">"By"</span>));
+<a href=#220 id=220 data-nosnippet>220</a>        <span class="macro">assert!</span>(!validate_semantic_option(SEMANTIC_METRIC_UNIT, <span class="string">""</span>));
+<a href=#221 id=221 data-nosnippet>221</a>        <span class="macro">assert!</span>(validate_semantic_option(
+<a href=#222 id=222 data-nosnippet>222</a>            SEMANTIC_PIPELINE,
+<a href=#223 id=223 data-nosnippet>223</a>            <span class="string">"greptime_trace_v1"
+<a href=#224 id=224 data-nosnippet>224</a>        </span>));
+<a href=#225 id=225 data-nosnippet>225</a>
+<a href=#226 id=226 data-nosnippet>226</a>        <span class="comment">// A cut key validates to false regardless of value.
+<a href=#227 id=227 data-nosnippet>227</a>        </span><span class="macro">assert!</span>(!validate_semantic_option(
+<a href=#228 id=228 data-nosnippet>228</a>            <span class="string">"greptime.semantic.metric.monotonic"</span>,
+<a href=#229 id=229 data-nosnippet>229</a>            <span class="string">"true"
+<a href=#230 id=230 data-nosnippet>230</a>        </span>));
+<a href=#231 id=231 data-nosnippet>231</a>        <span class="comment">// Unknown key is rejected regardless of value.
+<a href=#232 id=232 data-nosnippet>232</a>        </span><span class="macro">assert!</span>(!validate_semantic_option(
+<a href=#233 id=233 data-nosnippet>233</a>            <span class="string">"greptime.semantic.future.key"</span>,
+<a href=#234 id=234 data-nosnippet>234</a>            <span class="string">"x"
+<a href=#235 id=235 data-nosnippet>235</a>        </span>));
+<a href=#236 id=236 data-nosnippet>236</a>
+<a href=#237 id=237 data-nosnippet>237</a>        <span class="comment">// Drift guard: every value stamped by the ingestion path must validate.
+<a href=#238 id=238 data-nosnippet>238</a>        </span><span class="macro">assert!</span>(validate_semantic_option(
+<a href=#239 id=239 data-nosnippet>239</a>            SEMANTIC_SIGNAL_TYPE,
+<a href=#240 id=240 data-nosnippet>240</a>            SIGNAL_TYPE_TRACE
+<a href=#241 id=241 data-nosnippet>241</a>        ));
+<a href=#242 id=242 data-nosnippet>242</a>        <span class="macro">assert!</span>(validate_semantic_option(
+<a href=#243 id=243 data-nosnippet>243</a>            SEMANTIC_SIGNAL_TYPE,
+<a href=#244 id=244 data-nosnippet>244</a>            SIGNAL_TYPE_METRIC
+<a href=#245 id=245 data-nosnippet>245</a>        ));
+<a href=#246 id=246 data-nosnippet>246</a>        <span class="macro">assert!</span>(validate_semantic_option(
+<a href=#247 id=247 data-nosnippet>247</a>            SEMANTIC_SIGNAL_TYPE,
+<a href=#248 id=248 data-nosnippet>248</a>            SIGNAL_TYPE_LOG
+<a href=#249 id=249 data-nosnippet>249</a>        ));
+<a href=#250 id=250 data-nosnippet>250</a>        <span class="macro">assert!</span>(validate_semantic_option(
+<a href=#251 id=251 data-nosnippet>251</a>            SEMANTIC_SOURCE,
+<a href=#252 id=252 data-nosnippet>252</a>            SOURCE_OPENTELEMETRY
+<a href=#253 id=253 data-nosnippet>253</a>        ));
+<a href=#254 id=254 data-nosnippet>254</a>        <span class="macro">assert!</span>(validate_semantic_option(SEMANTIC_SOURCE, SOURCE_PROMETHEUS));
+<a href=#255 id=255 data-nosnippet>255</a>        <span class="macro">assert!</span>(validate_semantic_option(SEMANTIC_SOURCE_VERSION, <span class="string">"2.0"</span>));
+<a href=#256 id=256 data-nosnippet>256</a>        <span class="macro">assert!</span>(validate_semantic_option(
+<a href=#257 id=257 data-nosnippet>257</a>            SEMANTIC_METRIC_METADATA_QUALITY,
+<a href=#258 id=258 data-nosnippet>258</a>            METADATA_QUALITY_INFERRED
+<a href=#259 id=259 data-nosnippet>259</a>        ));
+<a href=#260 id=260 data-nosnippet>260</a>        <span class="macro">assert!</span>(validate_semantic_option(
+<a href=#261 id=261 data-nosnippet>261</a>            SEMANTIC_METRIC_METADATA_QUALITY,
+<a href=#262 id=262 data-nosnippet>262</a>            METADATA_QUALITY_DECLARED
+<a href=#263 id=263 data-nosnippet>263</a>        ));
+<a href=#264 id=264 data-nosnippet>264</a>        <span class="macro">assert!</span>(validate_semantic_option(
+<a href=#265 id=265 data-nosnippet>265</a>            SEMANTIC_TRACE_CONVENTIONS,
+<a href=#266 id=266 data-nosnippet>266</a>            SEMANTIC_VALUE_UNKNOWN
+<a href=#267 id=267 data-nosnippet>267</a>        ));
+<a href=#268 id=268 data-nosnippet>268</a>        <span class="comment">// An empty value never validates, for any whitelisted key.
+<a href=#269 id=269 data-nosnippet>269</a>        </span><span class="kw">for </span>key <span class="kw">in </span>SEMANTIC_OPTION_KEYS {
+<a href=#270 id=270 data-nosnippet>270</a>            <span class="macro">assert!</span>(
+<a href=#271 id=271 data-nosnippet>271</a>                !validate_semantic_option(key, <span class="string">""</span>),
+<a href=#272 id=272 data-nosnippet>272</a>                <span class="string">"empty value should never validate for {key}"
+<a href=#273 id=273 data-nosnippet>273</a>            </span>);
+<a href=#274 id=274 data-nosnippet>274</a>        }
+<a href=#275 id=275 data-nosnippet>275</a>    }
+<a href=#276 id=276 data-nosnippet>276</a>}
+</code></pre></div></section></main></body></html>

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["TraceCoerceError"],"fn":["coerce_non_null_value","coerce_value_data","is_supported_trace_coercion","resolve_new_trace_column_type","trace_value_datatype"]};

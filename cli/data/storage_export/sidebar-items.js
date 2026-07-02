@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["StorageType"],"fn":["expose_optional_secret","format_root_path","format_uri","mask_secrets"],"macro":["define_backend"],"struct":["AzblobBackend","FsBackend","GcsBackend","OssBackend","S3Backend"],"trait":["StorageExport"]};

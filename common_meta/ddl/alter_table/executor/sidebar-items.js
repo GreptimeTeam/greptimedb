@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["build_new_table_info","make_alter_region_request"],"struct":["AlterTableExecutor"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"struct":["PendingManifestHook","SstFileInfo"],"trait":["RegionHook"],"type":["RegionHookRef"]};

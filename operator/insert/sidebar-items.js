@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["SPLUNK_PK_METADATA_ORDER_KEY"],"enum":["AutoCreateTableType"],"fn":["apply_per_table_semantic_options","build_create_table_expr","fill_table_options_for_create","reorder_splunk_primary_keys","validate_column_count_match"],"struct":["CreateAlterTableResult","FlowMirrorTask","Inserter","InstantAndNormalInsertRequests"],"type":["InserterRef"]};

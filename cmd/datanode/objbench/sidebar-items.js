@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["build_access_layer_simple","build_cache_manager","build_object_store","extract_region_metadata","load_parquet_metadata","new_noop_file_purger","parse_config","parse_file_dir_components"],"struct":["FileDirComponents","ObjbenchCommand"]};

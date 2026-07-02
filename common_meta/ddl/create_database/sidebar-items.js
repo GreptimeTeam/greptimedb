@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["CreateDatabaseState"],"struct":["CreateDatabaseData","CreateDatabaseProcedure"]};

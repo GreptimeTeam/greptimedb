@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["extract_eval_timestamps","extract_range_dict"],"struct":["ExtrapolatedRate"],"type":["Delta","Increase","Rate"]};

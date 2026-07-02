@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["default_max_batch_rows","default_max_concurrent_flushes","default_max_inflight_requests","default_worker_channel_capacity"],"struct":["PromStoreOptions"]};

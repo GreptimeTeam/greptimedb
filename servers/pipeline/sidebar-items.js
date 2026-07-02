@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["get_pipeline","run_custom_pipeline","run_identity_pipeline","run_pipeline","table_suffix_to_table_name"],"macro":["push_to_map"]};

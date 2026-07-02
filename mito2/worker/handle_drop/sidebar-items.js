@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["GC_TASK_INTERVAL_SEC","MAX_RETRY_TIMES"],"fn":["later_drop_task_with_global_gc","later_drop_task_without_global_gc","remove_region_dir_once","remove_region_with_retry"]};

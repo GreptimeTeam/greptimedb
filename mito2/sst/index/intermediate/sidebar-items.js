@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["INTERMEDIATE_DIR"],"struct":["IntermediateLocation","IntermediateManager","TempFileProvider"]};

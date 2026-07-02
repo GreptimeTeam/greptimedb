@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["append_manifest_info","encode_manifest_info_to_extensions","get_region_statistic","to_data_region_id","to_metadata_region_id"]};

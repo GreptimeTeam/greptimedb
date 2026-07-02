@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["RegionMetaAction","RemovedFile","TruncateKind"],"struct":["RegionChange","RegionCheckpoint","RegionEdit","RegionManifest","RegionManifestBuilder","RegionMetaActionList","RegionPartitionExprChange","RegionRemove","RegionTruncate","RemovedFiles","RemovedFilesRecord"]};

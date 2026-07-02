@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["ensure_region_requirements"],"struct":["EngineInner","FileRegionEngine"],"type":["EngineInnerRef"]};

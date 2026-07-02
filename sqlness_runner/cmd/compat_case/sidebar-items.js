@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["VersionConstraint"],"fn":["discover_cases","is_valid_namespace","parse_version_constraint","sanitize_namespace","try_infer_version","validate_case_namespaces","validate_cases_metadata","validate_version_constraints","version_matches_range"],"struct":["CaseMetadata","CompatCase","Version"]};

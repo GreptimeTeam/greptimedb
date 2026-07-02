@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["apply_remote_write_special_label","decode_remote_write_v2_request","into_context_req","resolve_series_labels","symbol_ref","table_data_to_row_insert_request","validate_label","write_sample","write_samples"],"mod":["test_util"],"trait":["RemoteWriteV2RequestExt"],"type":["PromTags","ResolvedSeriesLabels"]};

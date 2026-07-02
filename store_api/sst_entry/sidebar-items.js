@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["PUFFIN_INDEX_TYPE_BLOOM_FILTER","PUFFIN_INDEX_TYPE_FULLTEXT_BLOOM","PUFFIN_INDEX_TYPE_FULLTEXT_TANTIVY","PUFFIN_INDEX_TYPE_INVERTED"],"fn":["build_plan_helper"],"struct":["ManifestSstEntry","PuffinIndexMetaEntry","StorageSstEntry"]};

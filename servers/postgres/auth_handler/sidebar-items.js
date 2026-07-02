@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["DbResolution"],"fn":["resolve_db_info","send_error","set_client_info"],"struct":["LoginInfo","PgLoginVerifier"]};
