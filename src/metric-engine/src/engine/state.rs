@@ -17,7 +17,6 @@
 use std::collections::{HashMap, HashSet};
 
 use api::v1::SemanticType;
-use common_telemetry::warn;
 use common_time::timestamp::TimeUnit;
 use snafu::OptionExt;
 use store_api::codec::PrimaryKeyEncoding;
@@ -37,10 +36,6 @@ pub struct PhysicalRegionState {
     /// row batch. The time index is fixed at region creation and never
     /// changes, so this stays in sync with `physical_columns`.
     time_index_column_name: String,
-    /// Name of the field column. Metric regions have exactly one field column
-    /// verified at creation time, so the write path can validate completeness
-    /// without consulting per-logical-region metadata.
-    field_column_name: String,
     primary_key_encoding: PrimaryKeyEncoding,
     options: PhysicalRegionOptions,
     time_index_unit: TimeUnit,
@@ -61,16 +56,10 @@ impl PhysicalRegionState {
             .find(|(_, meta)| meta.semantic_type == SemanticType::Timestamp)
             .map(|(name, _)| name.clone())
             .unwrap_or_default();
-        let field_column_name = physical_columns
-            .iter()
-            .find(|(_, meta)| meta.semantic_type == SemanticType::Field)
-            .map(|(name, _)| name.clone())
-            .unwrap_or_default();
         Self {
             logical_regions: HashSet::new(),
             physical_columns,
             time_index_column_name,
-            field_column_name,
             primary_key_encoding,
             options,
             time_index_unit,
@@ -90,11 +79,6 @@ impl PhysicalRegionState {
     /// Returns the cached name of the time index column.
     pub fn time_index_column_name(&self) -> &str {
         &self.time_index_column_name
-    }
-
-    /// Returns the cached name of the field column.
-    pub fn field_column_name(&self) -> &str {
-        &self.field_column_name
     }
 
     /// Returns a reference to the physical region options.
@@ -160,12 +144,6 @@ impl MetricEngineState {
                 SemanticType::Timestamp,
                 "unexpected time index column {col} added to an existing physical region"
             );
-            if meta.semantic_type == SemanticType::Field {
-                warn!(
-                    "Unexpected field column {col} added to physical region {physical_region_id}; cached field column remains {}",
-                    state.field_column_name
-                );
-            }
             state.physical_columns.insert(col, meta);
         }
     }

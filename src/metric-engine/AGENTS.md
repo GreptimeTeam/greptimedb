@@ -59,7 +59,9 @@ Mito2 data region. Queries against a physical region pass straight through.
   `store-api`'s metric engine consts; keep them in sync with `engine.rs`.
 - **Metadata K-V encoding** (`metadata_region.rs`): changes the on-disk metadata layout.
 - **RegionId group mapping** (`utils.rs`): data vs metadata region derivation.
-- **Physical column rules** (`engine/alter/`): a physical region allows only one field column.
+- **Physical column rules** (`engine/alter/`): ordinary metric fields stay on
+  logical tables; shared physical field adds are only for the native histogram
+  Struct field.
 
 ## Testing
 

@@ -15,6 +15,7 @@
 pub mod columnar_value;
 pub mod error;
 pub mod logical_plan;
+pub mod native_histogram;
 pub mod prelude;
 pub mod request;
 pub mod stream;

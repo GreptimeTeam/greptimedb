@@ -41,6 +41,7 @@ mod http;
 mod interceptor;
 mod mysql;
 mod postgres;
+mod prom_remote_write_v2_test;
 
 pub struct DummyInstance {
     query_engine: QueryEngineRef,

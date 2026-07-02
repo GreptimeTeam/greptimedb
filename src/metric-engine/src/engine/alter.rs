@@ -17,6 +17,8 @@ mod validate;
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
+use api::v1::SemanticType;
+use common_query::native_histogram::is_native_histogram_value_schema;
 use extract_new_columns::extract_new_columns;
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::metadata::ColumnMetadata;
@@ -27,8 +29,8 @@ use validate::validate_alter_region_requests;
 
 use crate::engine::MetricEngineInner;
 use crate::error::{
-    LogicalRegionNotFoundSnafu, PhysicalRegionNotFoundSnafu, Result, SerializeColumnMetadataSnafu,
-    UnexpectedRequestSnafu,
+    AddingFieldColumnSnafu, LogicalRegionNotFoundSnafu, PhysicalRegionNotFoundSnafu, Result,
+    SerializeColumnMetadataSnafu, UnexpectedRequestSnafu,
 };
 use crate::utils::{append_manifest_info, encode_manifest_info_to_extensions, to_data_region_id};
 
@@ -117,6 +119,8 @@ impl MetricEngineInner {
     ) -> Result<AffectedRows> {
         // Checks all alter requests are add columns.
         validate_alter_region_requests(&requests)?;
+        self.validate_logical_field_alters(physical_region_id, &requests)
+            .await?;
 
         // Finds new columns to add
         let mut new_column_names = HashSet::new();
@@ -207,6 +211,54 @@ impl MetricEngineInner {
         state.invalid_logical_regions_cache(requests.iter().map(|(region_id, _)| *region_id));
 
         Ok(0)
+    }
+
+    async fn validate_logical_field_alters(
+        &self,
+        physical_region_id: RegionId,
+        requests: &[(RegionId, RegionAlterRequest)],
+    ) -> Result<()> {
+        // Logical metric tables have one field column. Native histograms are a
+        // special struct field, so field alters must leave exactly that field.
+        for (region_id, request) in requests {
+            let AlterKind::AddColumns { columns } = &request.kind else {
+                unreachable!()
+            };
+            let added_fields = columns
+                .iter()
+                .filter(|col| col.column_metadata.semantic_type == SemanticType::Field)
+                .collect::<Vec<_>>();
+            let Some(first_added_field) = added_fields.first() else {
+                continue;
+            };
+            let first_added_field_name =
+                first_added_field.column_metadata.column_schema.name.clone();
+
+            let mut fields = self
+                .load_logical_columns(physical_region_id, *region_id)
+                .await?
+                .into_iter()
+                .filter(|col| col.semantic_type == SemanticType::Field)
+                .collect::<Vec<_>>();
+            fields.extend(
+                added_fields
+                    .into_iter()
+                    .map(|col| col.column_metadata.clone()),
+            );
+
+            ensure!(
+                fields.len() == 1
+                    && is_native_histogram_value_schema(
+                        &fields[0].column_schema.name,
+                        &fields[0].column_schema.data_type
+                    ),
+                AddingFieldColumnSnafu {
+                    name: first_added_field_name,
+                }
+            );
+        }
+
+        Ok(())
     }
 
     async fn alter_physical_region(

@@ -263,7 +263,7 @@ pub fn write_json(
     )
 }
 
-fn write_by_schema(
+pub(crate) fn write_by_schema(
     table_data: &mut TableData,
     kv_iter: impl Iterator<Item = (ColumnSchema, Option<ValueData>)>,
     one_row: &mut Vec<Value>,

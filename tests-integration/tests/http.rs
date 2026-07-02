@@ -17,7 +17,10 @@ use std::io::Write;
 use std::str::FromStr;
 use std::time::Duration;
 
-use api::greptime_proto::io::prometheus::write::v2::Sample as RemoteWriteV2Sample;
+use api::greptime_proto::io::prometheus::write::v2::histogram::{Count, ZeroCount};
+use api::greptime_proto::io::prometheus::write::v2::{
+    BucketSpan, Histogram, Sample as RemoteWriteV2Sample, TimeSeries as RemoteWriteV2TimeSeries,
+};
 use api::prom_store::remote::label_matcher::Type as MatcherType;
 use api::prom_store::remote::{
     Label, LabelMatcher, Query, ReadRequest, ReadResponse, Sample, TimeSeries, WriteRequest,
@@ -122,6 +125,7 @@ macro_rules! http_tests {
                 test_dashboard_api,
                 test_prometheus_remote_write,
                 test_prometheus_remote_write_v2,
+                test_prometheus_remote_write_v2_native_histogram,
                 test_prometheus_remote_write_batched,
                 test_prometheus_remote_special_labels,
                 test_prometheus_remote_schema_labels,
@@ -279,6 +283,14 @@ fn basic_auth(username: &str, password: &str) -> String {
 }
 
 fn assert_remote_write_v2_written_headers(headers: &HeaderMap, samples: &str) {
+    assert_remote_write_v2_written_headers_with_histograms(headers, samples, "0")
+}
+
+fn assert_remote_write_v2_written_headers_with_histograms(
+    headers: &HeaderMap,
+    samples: &str,
+    histograms: &str,
+) {
     assert_eq!(
         Some(samples),
         headers
@@ -286,7 +298,7 @@ fn assert_remote_write_v2_written_headers(headers: &HeaderMap, samples: &str) {
             .map(|x| x.to_str().unwrap())
     );
     assert_eq!(
-        Some("0"),
+        Some(histograms),
         headers
             .get("X-Prometheus-Remote-Write-Histograms-Written")
             .map(|x| x.to_str().unwrap())
@@ -2344,7 +2356,7 @@ pub async fn test_prometheus_remote_write_v2(store_type: StorageType) {
         "select greptime_timestamp, greptime_value, job, instance from remote_write_v2_total order by greptime_timestamp;",
         "[[1000,42.0,\"api\",\"localhost:9090\"],[2000,43.0,\"api\",\"localhost:9090\"]]",
     )
-    .await;
+        .await;
 
     validate_data(
         "prometheus_remote_write_v2_semantic_identity",
@@ -2357,13 +2369,113 @@ pub async fn test_prometheus_remote_write_v2(store_type: StorageType) {
     )
     .await;
 
-    let write_request = remote_write_v2::request_with_labels_and_histograms(
-        vec![(
-            prom_store::METRIC_NAME_LABEL,
-            "remote_write_v2_histogram_only",
-        )],
-        vec![remote_write_v2::histogram(3000)],
+    guard.remove_all().await;
+}
+
+pub async fn test_prometheus_remote_write_v2_native_histogram(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) = setup_test_prom_app_with_frontend(
+        store_type,
+        "prometheus_remote_write_v2_native_histogram",
+    )
+    .await;
+    let client = TestClient::new(app).await;
+
+    let mut write_request = remote_write_v2::request_with_labels_and_samples(
+        vec![
+            (
+                prom_store::METRIC_NAME_LABEL,
+                "remote_write_v2_sample_seconds",
+            ),
+            ("job", "api"),
+            ("instance", "localhost:9090"),
+        ],
+        vec![RemoteWriteV2Sample {
+            value: 5.0,
+            timestamp: 2500,
+            start_timestamp: 0,
+        }],
     );
+    let name_ref = write_request
+        .symbols
+        .iter()
+        .position(|symbol| symbol == prom_store::METRIC_NAME_LABEL)
+        .unwrap() as u32;
+    let job_ref = write_request
+        .symbols
+        .iter()
+        .position(|symbol| symbol == "job")
+        .unwrap() as u32;
+    let api_ref = write_request
+        .symbols
+        .iter()
+        .position(|symbol| symbol == "api")
+        .unwrap() as u32;
+    let instance_ref = write_request
+        .symbols
+        .iter()
+        .position(|symbol| symbol == "instance")
+        .unwrap() as u32;
+    let localhost_ref = write_request
+        .symbols
+        .iter()
+        .position(|symbol| symbol == "localhost:9090")
+        .unwrap() as u32;
+    let histogram_metric_ref = write_request.symbols.len() as u32;
+    write_request
+        .symbols
+        .push("remote_write_v2_latency_seconds".to_string());
+    write_request.timeseries.push(RemoteWriteV2TimeSeries {
+        labels_refs: vec![
+            name_ref,
+            histogram_metric_ref,
+            job_ref,
+            api_ref,
+            instance_ref,
+            localhost_ref,
+        ],
+        histograms: vec![
+            Histogram {
+                count: Some(Count::CountInt(4)),
+                sum: 10.0,
+                schema: 1,
+                zero_threshold: 0.001,
+                zero_count: Some(ZeroCount::ZeroCountInt(1)),
+                negative_spans: vec![BucketSpan {
+                    offset: -2,
+                    length: 1,
+                }],
+                negative_deltas: vec![1],
+                positive_spans: vec![BucketSpan {
+                    offset: 0,
+                    length: 3,
+                }],
+                positive_deltas: vec![1, 2, -1],
+                reset_hint: 2,
+                timestamp: 3000,
+                start_timestamp: 1500,
+                custom_values: vec![0.5, 1.5],
+                ..Default::default()
+            },
+            Histogram {
+                count: Some(Count::CountFloat(3.5)),
+                sum: 20.0,
+                schema: 2,
+                zero_threshold: 0.002,
+                zero_count: Some(ZeroCount::ZeroCountFloat(0.5)),
+                positive_spans: vec![BucketSpan {
+                    offset: 3,
+                    length: 2,
+                }],
+                positive_counts: vec![2.0, 3.5],
+                reset_hint: 3,
+                timestamp: 4000,
+                start_timestamp: 2500,
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    });
     let serialized_request = write_request.encode_to_vec();
     let compressed_request =
         prom_store::snappy_compress(&serialized_request).expect("failed to encode snappy");
@@ -2380,13 +2492,37 @@ pub async fn test_prometheus_remote_write_v2(store_type: StorageType) {
         .await;
     assert_eq!(res.status(), StatusCode::NO_CONTENT);
     let headers = res.headers();
-    assert_remote_write_v2_written_headers(&headers, "0");
+    assert_remote_write_v2_written_headers_with_histograms(&headers, "1", "2");
     assert!(res.text().await.is_empty());
 
     validate_data(
-        "prometheus_remote_write_v2_histogram_only",
+        "prometheus_remote_write_v2_native_histogram_sample_rows",
         &client,
-        "select count(*) from information_schema.tables where table_name = 'remote_write_v2_histogram_only';",
+        "select greptime_timestamp, greptime_value, job, instance from remote_write_v2_sample_seconds order by greptime_timestamp;",
+        "[[2500,5.0,\"api\",\"localhost:9090\"]]",
+    )
+    .await;
+
+    validate_data(
+        "prometheus_remote_write_v2_native_histogram_rows",
+        &client,
+        "select greptime_timestamp, greptime_native_histogram, job, instance from remote_write_v2_latency_seconds order by greptime_timestamp;",
+        "[[3000,{\"count_f64\":null,\"count_u64\":4,\"custom_values\":[0.5,1.5],\"negative_buckets_f64\":[],\"negative_buckets_i64\":[1],\"negative_span_lengths\":[1],\"negative_span_offsets\":[-2],\"positive_buckets_f64\":[],\"positive_buckets_i64\":[1,3,2],\"positive_span_lengths\":[3],\"positive_span_offsets\":[0],\"reset_hint\":2,\"schema\":1,\"start_timestamp\":1500,\"sum\":10.0,\"zero_count_f64\":null,\"zero_count_u64\":1,\"zero_threshold\":0.001},\"api\",\"localhost:9090\"],[4000,{\"count_f64\":3.5,\"count_u64\":null,\"custom_values\":[],\"negative_buckets_f64\":[],\"negative_buckets_i64\":[],\"negative_span_lengths\":[],\"negative_span_offsets\":[],\"positive_buckets_f64\":[2.0,3.5],\"positive_buckets_i64\":[],\"positive_span_lengths\":[2],\"positive_span_offsets\":[3],\"reset_hint\":3,\"schema\":2,\"start_timestamp\":2500,\"sum\":20.0,\"zero_count_f64\":0.5,\"zero_count_u64\":null,\"zero_threshold\":0.002},\"api\",\"localhost:9090\"]]",
+    )
+    .await;
+
+    validate_data(
+        "prometheus_remote_write_v2_native_histogram_table_created",
+        &client,
+        "select count(*) from information_schema.tables where table_name = 'remote_write_v2_latency_seconds';",
+        "[[1]]",
+    )
+    .await;
+
+    validate_data(
+        "prometheus_remote_write_v2_native_histogram_suffix_table_not_created",
+        &client,
+        "select count(*) from information_schema.tables where table_name = 'remote_write_v2_latency_seconds_native_histogram';",
         "[[0]]",
     )
     .await;

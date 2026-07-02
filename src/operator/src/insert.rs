@@ -37,6 +37,9 @@ use common_meta::cache::TableFlownodeSetCacheRef;
 use common_meta::node_manager::{AffectedRows, NodeManagerRef};
 use common_meta::peer::Peer;
 use common_query::Output;
+use common_query::native_histogram::{
+    NATIVE_HISTOGRAM_FIELD, is_native_histogram_value_schema, native_histogram_value_type,
+};
 use common_query::prelude::{greptime_timestamp, greptime_value};
 use common_telemetry::tracing_context::TracingContext;
 use common_telemetry::{error, info, warn};
@@ -907,6 +910,10 @@ impl Inserter {
         let table_name = table.table_info().name.clone();
 
         let request_schema = req.rows.as_ref().unwrap().schema.as_slice();
+        let request_field_count = request_schema
+            .iter()
+            .filter(|col| col.semantic_type == SemanticType::Field as i32)
+            .count();
         let column_exprs = ColumnExpr::from_column_schemas(request_schema);
         let add_columns = expr_helper::extract_add_columns_expr(&table.schema(), column_exprs)?;
         let Some(mut add_columns) = add_columns else {
@@ -915,12 +922,22 @@ impl Inserter {
 
         // If accommodate_existing_schema is true, update request schema for Timestamp/Field columns
         if accommodate_existing_schema {
+            let request_is_native_histogram = request_is_native_histogram(request_schema);
+            let table_is_native_histogram = table_is_native_histogram(table);
+            ensure!(
+                request_is_native_histogram == table_is_native_histogram,
+                InvalidInsertRequestSnafu {
+                    reason: format!(
+                        "Table `{table_name}` cannot mix native histogram and float sample fields"
+                    ),
+                }
+            );
             let table_schema = table.schema();
             // Find timestamp column name
             let ts_col_name = table_schema.timestamp_column().map(|c| c.name.clone());
             // Find field column name if there is only one and `is_single_value` is true.
             let mut field_col_name = None;
-            if is_single_value {
+            if is_single_value && request_field_count <= 1 {
                 let mut multiple_field_cols = false;
                 table.field_columns().for_each(|col| {
                     if field_col_name.is_none() {
@@ -1061,6 +1078,32 @@ impl Inserter {
     pub fn partition_manager(&self) -> &PartitionRuleManagerRef {
         &self.partition_manager
     }
+}
+
+fn request_is_native_histogram(request_schema: &[ColumnSchema]) -> bool {
+    let mut fields = request_schema
+        .iter()
+        .filter(|col| col.semantic_type == SemanticType::Field as i32);
+    let Some(col) = fields.next() else {
+        return false;
+    };
+
+    fields.next().is_none()
+        && col.column_name == NATIVE_HISTOGRAM_FIELD
+        && api::helper::is_column_type_value_eq(
+            col.datatype,
+            col.datatype_extension.clone(),
+            &native_histogram_value_type(),
+        )
+}
+
+fn table_is_native_histogram(table: &TableRef) -> bool {
+    let mut fields = table.field_columns();
+    let Some(col) = fields.next() else {
+        return false;
+    };
+
+    fields.next().is_none() && is_native_histogram_value_schema(&col.name, &col.data_type)
 }
 
 fn validate_column_count_match(requests: &RowInsertRequests) -> Result<()> {

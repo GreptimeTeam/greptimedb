@@ -195,12 +195,10 @@ impl MetricEngineInner {
         requests: Vec<(RegionId, RegionPutRequest)>,
     ) -> Result<(RegionPutRequest, AffectedRows)> {
         let total_rows: usize = requests.iter().map(|(_, req)| req.rows.rows.len()).sum();
-        let mut merged_rows = Vec::with_capacity(total_rows);
+        let mut modified_requests = Vec::with_capacity(requests.len());
         let mut total_affected_rows: AffectedRows = 0;
-        let mut output_schema: Option<Vec<ColumnSchema>> = None;
         let mut merged_version: Option<u64> = None;
 
-        // Modify and collect rows from each request
         for (logical_region_id, mut request) in requests {
             if let Some(request_version) = request.partition_expr_version {
                 if let Some(merged_version) = merged_version {
@@ -224,17 +222,15 @@ impl MetricEngineInner {
 
             let row_count = request.rows.rows.len();
             total_affected_rows += row_count as AffectedRows;
-
-            // Capture the output schema from the first modified request
-            if output_schema.is_none() {
-                output_schema = Some(request.rows.schema.clone());
-            }
-
-            merged_rows.extend(request.rows.rows);
+            modified_requests.push(request.rows);
         }
 
-        // Safe to unwrap: requests is guaranteed non-empty by caller
-        let schema = output_schema.unwrap();
+        let schema =
+            Self::build_union_schema(modified_requests.iter().map(|rows| rows.schema.as_slice()));
+        let mut merged_rows = Vec::with_capacity(total_rows);
+        for rows in modified_requests {
+            merged_rows.extend(Self::align_rows_to_schema(rows, &schema));
+        }
 
         let merged_request = RegionPutRequest {
             rows: Rows {
@@ -261,7 +257,8 @@ impl MetricEngineInner {
         requests: Vec<(RegionId, RegionPutRequest)>,
     ) -> Result<(RegionPutRequest, AffectedRows)> {
         // Build union schema from all requests
-        let merged_schema = Self::build_union_schema(&requests);
+        let merged_schema =
+            Self::build_union_schema(requests.iter().map(|(_, req)| req.rows.schema.as_slice()));
 
         // Align all rows to the merged schema and collect table_ids
         let (merged_rows, table_ids, merged_version) =
@@ -302,17 +299,21 @@ impl MetricEngineInner {
         Ok((merged_request, table_ids.len() as AffectedRows))
     }
 
-    /// Builds a union schema containing all columns from all requests.
-    fn build_union_schema(requests: &[(RegionId, RegionPutRequest)]) -> Vec<ColumnSchema> {
-        let mut schema_map: HashMap<&str, ColumnSchema> = HashMap::new();
-        for (_, request) in requests {
-            for col in &request.rows.schema {
-                schema_map
-                    .entry(col.column_name.as_str())
-                    .or_insert_with(|| col.clone());
+    fn build_union_schema<'a>(
+        schemas: impl IntoIterator<Item = &'a [ColumnSchema]>,
+    ) -> Vec<ColumnSchema> {
+        let mut schema = Vec::new();
+        for columns in schemas {
+            for col in columns {
+                if !schema
+                    .iter()
+                    .any(|existing: &ColumnSchema| existing.column_name == col.column_name)
+                {
+                    schema.push(col.clone());
+                }
             }
         }
-        schema_map.into_values().collect()
+        schema
     }
 
     fn align_requests_to_schema(
@@ -324,8 +325,6 @@ impl MetricEngineInner {
         let mut merged_rows = Vec::with_capacity(total_rows);
         let mut table_ids = Vec::with_capacity(total_rows);
         let mut merged_version: Option<u64> = None;
-
-        let null_value = Value { value_data: None };
 
         for (logical_region_id, request) in requests {
             if let Some(request_version) = request.partition_expr_version {
@@ -342,45 +341,52 @@ impl MetricEngineInner {
                 }
             }
             let table_id = logical_region_id.table_id();
-
-            // Build column name to index mapping once per request
-            let col_name_to_idx: FxHashMap<&str, usize> = request
-                .rows
-                .schema
-                .iter()
-                .enumerate()
-                .map(|(idx, col)| (col.column_name.as_str(), idx))
-                .collect();
-
-            // Build column mapping array once per request
-            // col_mapping[i] = Some(idx) means merged_schema[i] is at request.schema[idx]
-            // col_mapping[i] = None means merged_schema[i] doesn't exist in request.schema
-            let col_mapping: Vec<Option<usize>> = merged_schema
-                .iter()
-                .map(|merged_col| {
-                    col_name_to_idx
-                        .get(merged_col.column_name.as_str())
-                        .copied()
-                })
-                .collect();
-
-            // Apply the mapping to all rows
-            for mut row in request.rows.rows {
-                let mut aligned_values = Vec::with_capacity(merged_schema.len());
-                for &opt_idx in &col_mapping {
-                    aligned_values.push(match opt_idx {
-                        Some(idx) => std::mem::take(&mut row.values[idx]),
-                        None => null_value.clone(),
-                    });
-                }
-                merged_rows.push(Row {
-                    values: aligned_values,
-                });
-                table_ids.push(table_id);
-            }
+            let row_count = request.rows.rows.len();
+            merged_rows.extend(Self::align_rows_to_schema(request.rows, merged_schema));
+            table_ids.extend(std::iter::repeat_n(table_id, row_count));
         }
 
         Ok((merged_rows, table_ids, merged_version))
+    }
+
+    fn align_rows_to_schema(rows: Rows, merged_schema: &[ColumnSchema]) -> Vec<Row> {
+        let Rows { schema, rows } = rows;
+        if schema.len() == merged_schema.len()
+            && schema
+                .iter()
+                .zip(merged_schema)
+                .all(|(left, right)| left.column_name == right.column_name)
+        {
+            return rows;
+        }
+
+        let col_name_to_idx: FxHashMap<&str, usize> = schema
+            .iter()
+            .enumerate()
+            .map(|(idx, col)| (col.column_name.as_str(), idx))
+            .collect();
+        let col_mapping: Vec<Option<usize>> = merged_schema
+            .iter()
+            .map(|merged_col| {
+                col_name_to_idx
+                    .get(merged_col.column_name.as_str())
+                    .copied()
+            })
+            .collect();
+        let null_value = Value { value_data: None };
+
+        rows.into_iter()
+            .map(|mut row| {
+                let values = col_mapping
+                    .iter()
+                    .map(|opt_idx| match opt_idx {
+                        Some(idx) => std::mem::take(&mut row.values[*idx]),
+                        None => null_value.clone(),
+                    })
+                    .collect();
+                Row { values }
+            })
+            .collect()
     }
 
     /// Find the physical region id for a logical region.
@@ -519,7 +525,7 @@ impl MetricEngineInner {
     /// - Check if every column in the request exists in the physical region
     /// - Check each column's datatype and semantic type match the physical region's schema
     /// - Check the time index column is present
-    /// - When `check_fields` is true, check every physical field column is present.
+    /// - When `check_fields` is true, check every logical field column is present.
     ///   Set this to `false` for delete requests, which legitimately carry only
     ///   the primary key + timestamp.
     async fn verify_rows(
@@ -531,23 +537,29 @@ impl MetricEngineInner {
     ) -> Result<()> {
         // Check if the region exists
         let data_region_id = to_data_region_id(physical_region_id);
-        let state = self.state.read().unwrap();
-        if !state.is_logical_region_exist(logical_region_id) {
-            error!("Trying to write to an nonexistent region {logical_region_id}");
-            return LogicalRegionNotFoundSnafu {
-                region_id: logical_region_id,
+        let (physical_columns, ts_name) = {
+            let state = self.state.read().unwrap();
+            if !state.is_logical_region_exist(logical_region_id) {
+                error!("Trying to write to an nonexistent region {logical_region_id}");
+                return LogicalRegionNotFoundSnafu {
+                    region_id: logical_region_id,
+                }
+                .fail();
             }
-            .fail();
-        }
+
+            let physical_state = state
+                .physical_region_states()
+                .get(&data_region_id)
+                .context(PhysicalRegionNotFoundSnafu {
+                    region_id: data_region_id,
+                })?;
+            (
+                physical_state.physical_columns().clone(),
+                physical_state.time_index_column_name().to_string(),
+            )
+        };
 
         // Type + semantic check on every column in the request schema.
-        let physical_state = state
-            .physical_region_states()
-            .get(&data_region_id)
-            .context(PhysicalRegionNotFoundSnafu {
-                region_id: data_region_id,
-            })?;
-        let physical_columns = physical_state.physical_columns();
         for col in &rows.schema {
             let info = physical_columns
                 .get(&col.column_name)
@@ -593,7 +605,6 @@ impl MetricEngineInner {
             );
         }
 
-        let ts_name = physical_state.time_index_column_name();
         ensure!(
             rows.schema.iter().any(|col| col.column_name == ts_name),
             InvalidRequestSnafu {
@@ -602,17 +613,56 @@ impl MetricEngineInner {
             }
         );
 
+        let logical_columns = self
+            .load_logical_columns(physical_region_id, logical_region_id)
+            .await?;
+        let logical_fields = logical_columns
+            .iter()
+            .filter(|col| col.semantic_type == SemanticType::Field)
+            .map(|col| (col.column_schema.name.as_str(), col))
+            .collect::<HashMap<_, _>>();
+
+        for col in &rows.schema {
+            if api::helper::is_semantic_type_eq(col.semantic_type, SemanticType::Field) {
+                ensure!(
+                    logical_fields.contains_key(col.column_name.as_str()),
+                    InvalidRequestSnafu {
+                        region_id: logical_region_id,
+                        reason: format!(
+                            "field column {} does not belong to logical region {logical_region_id}",
+                            col.column_name,
+                        ),
+                    }
+                );
+            }
+        }
+
         if check_fields {
-            let field_name = physical_state.field_column_name();
-            if !rows.schema.iter().any(|col| col.column_name == field_name) {
-                let field_meta =
-                    physical_columns
-                        .get(field_name)
-                        .with_context(|| ColumnNotFoundSnafu {
-                            name: field_name,
-                            region_id: logical_region_id,
-                        })?;
-                Self::fill_missing_field_column(logical_region_id, field_name, field_meta, rows)?;
+            // Sparse logical writes may omit nullable field columns. Fill them
+            // before the rows are rewritten for the shared physical table.
+            for (field_name, field_meta) in logical_fields {
+                if !rows.schema.iter().any(|col| col.column_name == field_name) {
+                    Self::fill_missing_field_column(
+                        logical_region_id,
+                        field_name,
+                        field_meta,
+                        rows,
+                    )?;
+                }
+            }
+
+            for (field_name, field_meta) in physical_columns
+                .iter()
+                .filter(|(_, col)| col.semantic_type == SemanticType::Field)
+            {
+                if !rows.schema.iter().any(|col| col.column_name == *field_name) {
+                    Self::fill_missing_field_column(
+                        logical_region_id,
+                        field_name,
+                        field_meta,
+                        rows,
+                    )?;
+                }
             }
         }
 
@@ -625,6 +675,8 @@ impl MetricEngineInner {
         field_meta: &ColumnMetadata,
         rows: &mut Rows,
     ) -> Result<()> {
+        // This is only for schema columns with a concrete default, usually NULL
+        // for field columns from other logical tables sharing this physical table.
         ensure!(
             !field_meta.column_schema.is_default_impure(),
             UnexpectedRequestSnafu {
@@ -715,6 +767,8 @@ mod tests {
     use common_error::ext::ErrorExt;
     use common_error::status_code::StatusCode;
     use common_function::utils::partition_expr_version;
+    use common_query::native_histogram::NATIVE_HISTOGRAM_FIELD;
+    use common_query::prelude::{greptime_timestamp, greptime_value};
     use common_recordbatch::RecordBatches;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema};
@@ -812,6 +866,13 @@ mod tests {
             )
             .await
             .unwrap();
+    }
+
+    fn column_index(rows: &Rows, name: &str) -> usize {
+        rows.schema
+            .iter()
+            .position(|col| col.column_name == name)
+            .unwrap()
     }
 
     async fn run_batch_write_with_schema_variants(
@@ -927,6 +988,103 @@ mod tests {
         let batches = RecordBatches::try_collect(stream).await.unwrap();
 
         assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 5);
+    }
+
+    #[test]
+    fn test_sparse_batch_aligns_mixed_field_order() {
+        let primary_key = PbColumnSchema {
+            column_name: PRIMARY_KEY_COLUMN_NAME.to_string(),
+            datatype: ColumnDataType::Binary as i32,
+            semantic_type: SemanticType::Tag as _,
+            datatype_extension: None,
+            options: None,
+        };
+        let timestamp = PbColumnSchema {
+            column_name: greptime_timestamp().to_string(),
+            datatype: ColumnDataType::TimestampMillisecond as i32,
+            semantic_type: SemanticType::Timestamp as _,
+            datatype_extension: None,
+            options: None,
+        };
+        let value = PbColumnSchema {
+            column_name: greptime_value().to_string(),
+            datatype: ColumnDataType::Float64 as i32,
+            semantic_type: SemanticType::Field as _,
+            datatype_extension: None,
+            options: None,
+        };
+        let histogram = PbColumnSchema {
+            column_name: NATIVE_HISTOGRAM_FIELD.to_string(),
+            datatype: ColumnDataType::Struct as i32,
+            semantic_type: SemanticType::Field as _,
+            datatype_extension: None,
+            options: None,
+        };
+
+        let sample_rows = Rows {
+            schema: vec![
+                primary_key.clone(),
+                timestamp.clone(),
+                value.clone(),
+                histogram.clone(),
+            ],
+            rows: vec![Row {
+                values: vec![
+                    ValueData::BinaryValue(vec![1]).into(),
+                    ValueData::TimestampMillisecondValue(0).into(),
+                    ValueData::F64Value(1.0).into(),
+                    Value { value_data: None },
+                ],
+            }],
+        };
+        let histogram_rows = Rows {
+            schema: vec![primary_key, timestamp, histogram, value],
+            rows: vec![Row {
+                values: vec![
+                    ValueData::BinaryValue(vec![2]).into(),
+                    ValueData::TimestampMillisecondValue(0).into(),
+                    ValueData::StructValue(api::v1::StructValue { items: vec![] }).into(),
+                    Value { value_data: None },
+                ],
+            }],
+        };
+
+        let schema = MetricEngineInner::build_union_schema([
+            sample_rows.schema.as_slice(),
+            histogram_rows.schema.as_slice(),
+        ]);
+        let merged_rows = MetricEngineInner::align_rows_to_schema(sample_rows, &schema)
+            .into_iter()
+            .chain(MetricEngineInner::align_rows_to_schema(
+                histogram_rows,
+                &schema,
+            ))
+            .collect();
+        let merged_request = Rows {
+            schema,
+            rows: merged_rows,
+        };
+
+        let value_idx = column_index(&merged_request, greptime_value());
+        let histogram_idx = column_index(&merged_request, NATIVE_HISTOGRAM_FIELD);
+        assert!(matches!(
+            merged_request.rows[0].values[value_idx].value_data,
+            Some(ValueData::F64Value(_))
+        ));
+        assert!(
+            merged_request.rows[0].values[histogram_idx]
+                .value_data
+                .is_none()
+        );
+        assert!(
+            merged_request.rows[1].values[value_idx]
+                .value_data
+                .is_none()
+        );
+        assert!(matches!(
+            merged_request.rows[1].values[histogram_idx].value_data,
+            Some(ValueData::StructValue(_))
+        ));
     }
 
     #[tokio::test]
