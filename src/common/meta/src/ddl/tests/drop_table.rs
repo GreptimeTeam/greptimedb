@@ -14,17 +14,19 @@
 
 use std::assert_matches;
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 
+use api::region::RegionResponse;
 use api::v1::region::{RegionRequest, region_request};
 use async_trait::async_trait;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
-use common_error::ext::ErrorExt;
+use common_error::ext::{BoxedError, ErrorExt, StackError};
 use common_error::status_code::StatusCode;
 use common_procedure::Procedure;
 use common_procedure_test::{
     execute_procedure_until, execute_procedure_until_done, new_test_procedure_context,
 };
+use snafu::ResultExt;
 use store_api::region_engine::RegionRole;
 use store_api::storage::RegionId;
 use table::metadata::TableId;
@@ -42,7 +44,7 @@ use crate::ddl::test_util::{
 };
 use crate::ddl::undrop_table::UndropTableProcedure;
 use crate::ddl::{DetectingRegion, RegionFailureDetectorController, TableMetadata};
-use crate::error::Error;
+use crate::error::{self, Error};
 use crate::key::table_name::TableNameKey;
 use crate::key::table_route::TableRouteValue;
 use crate::kv_backend::memory::MemoryKvBackend;
@@ -333,7 +335,9 @@ async fn test_soft_drop_closes_regions_and_keeps_tombstone() {
 #[tokio::test]
 async fn test_hard_drop_keeps_delete_tombstone_flow() {
     let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
-    let ddl_context = new_ddl_context(node_manager);
+    let detector_controller = Arc::new(RecordingRegionFailureDetectorController::default());
+    let mut ddl_context = new_ddl_context(node_manager);
+    ddl_context.region_failure_detector_controller = detector_controller.clone();
     let table_id = 1024;
     let table_name = "foo";
     let task = test_create_table_task(table_name, table_id);
@@ -372,6 +376,10 @@ async fn test_hard_drop_keeps_delete_tombstone_flow() {
         .await
         .unwrap();
     assert!(dropped_table.is_none());
+    assert_eq!(
+        detector_controller.deregistered().await,
+        vec![(1, RegionId::new(table_id, 1))]
+    );
 }
 
 #[tokio::test]
@@ -808,6 +816,54 @@ async fn test_undrop_table_fails_when_live_name_is_created_after_prepare() {
 }
 
 #[tokio::test]
+async fn test_undrop_table_replayed_restore_metadata_is_idempotent() {
+    let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
+    let mut ddl_context = new_ddl_context(node_manager);
+    ddl_context.soft_drop_enabled = true;
+    let table_id = 1024;
+    let table_name = "foo";
+    let task = test_create_table_task(table_name, table_id);
+    ddl_context
+        .table_metadata_manager
+        .create_table_metadata(
+            task.table_info.clone(),
+            TableRouteValue::physical(vec![]),
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+    let mut drop_procedure = DropTableProcedure::new(
+        new_drop_table_task(table_name, table_id, false),
+        ddl_context.clone(),
+    );
+    execute_procedure_until_done(&mut drop_procedure).await;
+
+    let mut procedure =
+        UndropTableProcedure::new(new_undrop_table_task(table_id), ddl_context.clone());
+    let ctx = new_test_procedure_context();
+    procedure.execute(&ctx).await.unwrap();
+    let restore_metadata_data = procedure.dump().unwrap();
+    procedure.execute(&ctx).await.unwrap();
+
+    let mut replayed =
+        UndropTableProcedure::from_json(&restore_metadata_data, ddl_context.clone()).unwrap();
+    execute_procedure_until_done(&mut replayed).await;
+
+    let live_table = ddl_context
+        .table_metadata_manager
+        .table_name_manager()
+        .get(TableNameKey::new(
+            DEFAULT_CATALOG_NAME,
+            DEFAULT_SCHEMA_NAME,
+            table_name,
+        ))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(live_table.table_id(), table_id);
+}
+
+#[tokio::test]
 async fn test_purge_dropped_table_drops_regions_and_deletes_tombstone() {
     let (tx, mut rx) = mpsc::channel(8);
     let datanode_handler = DatanodeWatcher::new(tx);
@@ -948,6 +1004,106 @@ async fn test_purge_dropped_table_by_id_selects_tombstone_when_live_table_exists
     };
     assert_eq!(req.region_id, RegionId::new(dropped_table_id, 1).as_u64());
     assert!(rx.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn test_purge_dropped_table_replayed_open_regions_ignores_dropped_regions() {
+    let (tx, mut rx) = mpsc::channel(8);
+    let dropped_regions = Arc::new(StdMutex::new(HashSet::new()));
+    let datanode_handler = DatanodeWatcher::new(tx).with_handler({
+        let dropped_regions = dropped_regions.clone();
+        move |_peer, request| {
+            let Some(body) = request.body.as_ref() else {
+                return Ok(RegionResponse::new(0));
+            };
+            match body {
+                region_request::Body::Open(req)
+                    if dropped_regions.lock().unwrap().contains(&req.region_id) =>
+                {
+                    Err::<RegionResponse, _>(BoxedError::new(MockRegionNotFoundError))
+                        .context(error::ExternalSnafu)
+                }
+                region_request::Body::Drop(req) => {
+                    dropped_regions.lock().unwrap().insert(req.region_id);
+                    Ok(RegionResponse::new(0))
+                }
+                _ => Ok(RegionResponse::new(0)),
+            }
+        }
+    });
+    let node_manager = Arc::new(MockDatanodeManager::new(datanode_handler));
+    let mut ddl_context = new_ddl_context(node_manager);
+    ddl_context.soft_drop_enabled = true;
+    let table_id = 1024;
+    let table_name = "foo";
+    let task = test_create_table_task(table_name, table_id);
+    ddl_context
+        .table_metadata_manager
+        .create_table_metadata(
+            task.table_info.clone(),
+            TableRouteValue::physical(vec![RegionRoute {
+                region: Region::new_test(RegionId::new(table_id, 1)),
+                leader_peer: Some(Peer::empty(1)),
+                follower_peers: vec![],
+                leader_state: None,
+                leader_down_since: None,
+                write_route_policy: None,
+            }]),
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+    let mut drop_procedure = DropTableProcedure::new(
+        new_drop_table_task(table_name, table_id, false),
+        ddl_context.clone(),
+    );
+    execute_procedure_until_done(&mut drop_procedure).await;
+    while rx.try_recv().is_ok() {}
+
+    let mut procedure = PurgeDroppedTableProcedure::new(
+        new_purge_dropped_table_task(table_id),
+        ddl_context.clone(),
+    );
+    let ctx = new_test_procedure_context();
+    procedure.execute(&ctx).await.unwrap();
+    let open_regions_data = procedure.dump().unwrap();
+    procedure.execute(&ctx).await.unwrap();
+    procedure.execute(&ctx).await.unwrap();
+
+    let mut replayed =
+        PurgeDroppedTableProcedure::from_json(&open_regions_data, ddl_context.clone()).unwrap();
+    execute_procedure_until_done(&mut replayed).await;
+
+    assert!(
+        ddl_context
+            .table_metadata_manager
+            .get_dropped_table(&drop_procedure.data.task.table_name())
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[derive(Debug, snafu::Snafu)]
+#[snafu(display("mock region not found"))]
+struct MockRegionNotFoundError;
+
+impl StackError for MockRegionNotFoundError {
+    fn debug_fmt(&self, _: usize, _: &mut Vec<String>) {}
+
+    fn next(&self) -> Option<&dyn StackError> {
+        None
+    }
+}
+
+impl ErrorExt for MockRegionNotFoundError {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn status_code(&self) -> StatusCode {
+        StatusCode::RegionNotFound
+    }
 }
 
 #[tokio::test]

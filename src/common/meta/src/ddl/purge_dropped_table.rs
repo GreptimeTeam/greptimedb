@@ -29,7 +29,7 @@ use table::table_name::TableName;
 
 use crate::ddl::DdlContext;
 use crate::ddl::drop_table::executor::DropTableExecutor;
-use crate::ddl::undrop_table::open_regions;
+use crate::ddl::undrop_table::open_regions_ignore_region_not_found;
 use crate::ddl::utils::{
     convert_region_routes_to_detecting_regions, is_metric_engine_logical_table,
     map_to_procedure_error,
@@ -90,7 +90,7 @@ impl PurgeDroppedTableProcedure {
 
     async fn on_open_regions(&mut self) -> Result<Status> {
         if let Some(region_routes) = self.data.physical_region_routes() {
-            open_regions(
+            open_regions_ignore_region_not_found(
                 &self.context,
                 self.data.table_id(),
                 self.data.table_name(),

@@ -200,6 +200,11 @@ impl DropTableProcedure {
                 false,
             )
             .await?;
+        self.context
+            .deregister_failure_detectors(convert_region_routes_to_detecting_regions(
+                &self.data.physical_region_routes,
+            ))
+            .await;
 
         self.data.state = DropTableState::DeleteTombstone;
         Ok(Status::executing(true))
