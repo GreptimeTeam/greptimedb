@@ -737,47 +737,6 @@ mod tests {
     }
 
     #[test]
-    fn test_into_context_req_accepts_utf8_label_names() {
-        let ctx_req = into_write_requests(test_util::request_with_labels_and_samples(
-            vec![
-                (METRIC_NAME_LABEL, "http_requests_total"),
-                ("service.name", "api"),
-                ("区域", "华东"),
-            ],
-            vec![Sample {
-                value: 42.0,
-                timestamp: 1000,
-                start_timestamp: 0,
-            }],
-        ))
-        .unwrap();
-
-        let mut inserts = ctx_req.samples.all_req().collect::<Vec<_>>();
-        assert_eq!(inserts.len(), 1);
-        let rows = inserts.pop().unwrap().rows.unwrap();
-        assert_eq!(
-            rows.schema
-                .iter()
-                .map(|col| col.column_name.as_str())
-                .collect::<Vec<_>>(),
-            vec![
-                greptime_timestamp(),
-                greptime_value(),
-                "service.name",
-                "区域"
-            ]
-        );
-        assert_eq!(
-            rows.rows[0].values[2].value_data,
-            Some(ValueData::StringValue("api".to_string()))
-        );
-        assert_eq!(
-            rows.rows[0].values[3].value_data,
-            Some(ValueData::StringValue("华东".to_string()))
-        );
-    }
-
-    #[test]
     fn test_into_context_req_special_labels() {
         let ctx_req = into_write_requests(test_util::request_with_labels_and_samples(
             vec![
@@ -870,6 +829,18 @@ mod tests {
         cases.push((
             "invalid label name",
             request_with_sample(vec![(METRIC_NAME_LABEL, "metric"), ("has-dash", "api")]),
+            "invalid label name",
+        ));
+
+        cases.push((
+            "dotted label name",
+            request_with_sample(vec![(METRIC_NAME_LABEL, "metric"), ("service.name", "api")]),
+            "invalid label name",
+        ));
+
+        cases.push((
+            "non-ascii label name",
+            request_with_sample(vec![(METRIC_NAME_LABEL, "metric"), ("区域", "api")]),
             "invalid label name",
         ));
 
