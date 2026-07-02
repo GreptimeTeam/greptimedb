@@ -26,6 +26,7 @@ use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use common_base::hash::partition_expr_version;
+use common_recordbatch::adapter::RegionQueryStatCounters;
 use common_telemetry::{error, info, warn};
 use crossbeam_utils::atomic::AtomicCell;
 use partition::expr::PartitionExpr;
@@ -173,10 +174,38 @@ pub struct MitoRegion {
     /// There are no WAL entries in range [flushed_entry_id, topic_latest_entry_id] for current region,
     /// which means these WAL entries maybe able to be pruned up to `topic_latest_entry_id`.
     pub(crate) topic_latest_entry_id: AtomicU64,
-    /// The total bytes written to the region.
-    pub(crate) written_bytes: Arc<AtomicU64>,
+    /// Region stats.
+    pub(crate) region_stats: RegionStats,
     /// manifest stats
     stats: ManifestStats,
+}
+
+/// Runtime statistics of a region.
+#[derive(Debug)]
+pub(crate) struct RegionStats {
+    /// The total bytes written to the region.
+    pub(crate) written_bytes: Arc<AtomicU64>,
+    /// The total query CPU time of the region in milliseconds.
+    pub(crate) query_cpu_time_millis: Arc<AtomicU64>,
+    /// The total scanned bytes of the region.
+    pub(crate) query_scanned_bytes: Arc<AtomicU64>,
+}
+
+impl RegionStats {
+    pub(crate) fn new() -> Self {
+        Self {
+            written_bytes: Arc::new(AtomicU64::new(0)),
+            query_cpu_time_millis: Arc::new(AtomicU64::new(0)),
+            query_scanned_bytes: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    pub(crate) fn query_stat_counters(&self) -> RegionQueryStatCounters {
+        RegionQueryStatCounters {
+            query_cpu_time_millis: self.query_cpu_time_millis.clone(),
+            query_scanned_bytes: self.query_scanned_bytes.clone(),
+        }
+    }
 }
 
 pub type MitoRegionRef = Arc<MitoRegion>;
@@ -644,7 +673,15 @@ impl MitoRegion {
         let file_removed_cnt = self.stats.file_removed_cnt();
 
         let topic_latest_entry_id = self.topic_latest_entry_id.load(Ordering::Relaxed);
-        let written_bytes = self.written_bytes.load(Ordering::Relaxed);
+        let written_bytes = self.region_stats.written_bytes.load(Ordering::Relaxed);
+        let query_cpu_time_millis = self
+            .region_stats
+            .query_cpu_time_millis
+            .load(Ordering::Relaxed);
+        let query_scanned_bytes = self
+            .region_stats
+            .query_scanned_bytes
+            .load(Ordering::Relaxed);
 
         RegionStatistic {
             num_rows,
@@ -662,6 +699,8 @@ impl MitoRegion {
             data_topic_latest_entry_id: topic_latest_entry_id,
             metadata_topic_latest_entry_id: topic_latest_entry_id,
             written_bytes,
+            query_cpu_time_millis,
+            query_scanned_bytes,
         }
     }
 
@@ -1836,7 +1875,7 @@ mod tests {
             last_schedule_compaction_millis: Default::default(),
             time_provider: Arc::new(StdTimeProvider),
             topic_latest_entry_id: Default::default(),
-            written_bytes: Arc::new(AtomicU64::new(0)),
+            region_stats: RegionStats::new(),
             stats: ManifestStats::default(),
         }
     }
@@ -2195,7 +2234,7 @@ mod tests {
             last_schedule_compaction_millis: Default::default(),
             time_provider: Arc::new(StdTimeProvider),
             topic_latest_entry_id: Default::default(),
-            written_bytes: Arc::new(AtomicU64::new(0)),
+            region_stats: RegionStats::new(),
             stats: ManifestStats::default(),
         };
 

@@ -23,6 +23,7 @@ use std::time::Instant;
 use api::v1::SemanticType;
 use common_error::ext::BoxedError;
 use common_recordbatch::SendableRecordBatchStream;
+use common_recordbatch::adapter::RegionQueryStatCounters;
 use common_recordbatch::filter::SimpleFilterEvaluator;
 use common_telemetry::tracing::Instrument;
 use common_telemetry::{debug, error, tracing, warn};
@@ -251,6 +252,8 @@ pub(crate) struct ScanRegion {
     /// Whether to filter out the deleted rows.
     /// Usually true for normal read, and false for scan for compaction.
     filter_deleted: bool,
+    /// Counters that should receive query-load metrics.
+    query_stat_counters: Option<RegionQueryStatCounters>,
     #[cfg(feature = "enterprise")]
     extension_range_provider: Option<BoxedExtensionRangeProvider>,
 }
@@ -274,9 +277,17 @@ impl ScanRegion {
             ignore_bloom_filter: false,
             start_time: None,
             filter_deleted: true,
+            query_stat_counters: None,
             #[cfg(feature = "enterprise")]
             extension_range_provider: None,
         }
+    }
+
+    /// Sets counters that should receive query-load metrics.
+    #[must_use]
+    pub(crate) fn with_query_stat_counters(mut self, counters: RegionQueryStatCounters) -> Self {
+        self.query_stat_counters = Some(counters);
+        self
     }
 
     /// Sets maximum number of SST files to scan concurrently.
@@ -592,7 +603,8 @@ impl ScanRegion {
                     .snapshot_on_scan
                     .then_some(self.request.memtable_max_sequence)
                     .flatten(),
-            );
+            )
+            .with_query_stat_counters(self.query_stat_counters);
         #[cfg(feature = "vector_index")]
         let input = input
             .with_vector_index_applier(vector_index_applier)
@@ -835,6 +847,8 @@ pub struct ScanInput {
     pub(crate) snapshot_sequence: Option<SequenceNumber>,
     /// Whether this scan is for compaction.
     pub(crate) compaction: bool,
+    /// Counters that should receive query-load metrics.
+    pub(crate) query_stat_counters: Option<RegionQueryStatCounters>,
     #[cfg(feature = "enterprise")]
     extension_ranges: Vec<BoxedExtensionRange>,
 }
@@ -871,6 +885,7 @@ impl ScanInput {
             explain_flat_format: false,
             snapshot_sequence: None,
             compaction: false,
+            query_stat_counters: None,
             #[cfg(feature = "enterprise")]
             extension_ranges: Vec::new(),
         }
@@ -988,6 +1003,14 @@ impl ScanInput {
     #[must_use]
     pub(crate) fn with_append_mode(mut self, is_append_mode: bool) -> Self {
         self.append_mode = is_append_mode;
+        self
+    }
+
+    pub(crate) fn with_query_stat_counters(
+        mut self,
+        counters: Option<RegionQueryStatCounters>,
+    ) -> Self {
+        self.query_stat_counters = counters;
         self
     }
 

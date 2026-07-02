@@ -131,7 +131,7 @@ async fn test_write_to_region_with_format(flat_format: bool) {
     };
     put_rows(&engine, region_id, rows).await;
     let region = engine.get_region(region_id).unwrap();
-    assert!(region.written_bytes.load(Ordering::Relaxed) > 0);
+    assert!(region.region_stats.written_bytes.load(Ordering::Relaxed) > 0);
 }
 
 #[apply(multiple_log_store_factories)]
@@ -220,7 +220,7 @@ async fn test_region_replay_with_format(factory: Option<LogStoreFactory>, flat_f
 
     // The replay won't update the write bytes rate meter.
     let region = engine.get_region(region_id).unwrap();
-    assert_eq!(region.written_bytes.load(Ordering::Relaxed), 0);
+    assert_eq!(region.region_stats.written_bytes.load(Ordering::Relaxed), 0);
 
     let request = ScanRequest::default();
     let stream = engine.scan_to_stream(region_id, request).await.unwrap();

@@ -29,7 +29,7 @@ use common_error::ext::BoxedError;
 use common_function::function::FunctionContext;
 use common_function::function_factory::ScalarFunctionFactory;
 use common_query::{Output, OutputData, OutputMeta};
-use common_recordbatch::adapter::RecordBatchStreamAdapter;
+use common_recordbatch::adapter::{RecordBatchStreamAdapter, RegionQueryStatCounters};
 use common_recordbatch::{EmptyRecordBatchStream, SendableRecordBatchStream};
 use common_telemetry::tracing;
 use datafusion::catalog::TableFunction;
@@ -99,6 +99,45 @@ fn query_load_region_id(plan: &Arc<dyn ExecutionPlan>) -> Option<u64> {
     }
 
     region_id
+}
+
+// Finds the region-owned query statistic counters from the local datanode scan plan.
+//
+// Unlike the Prometheus read-load reporting in `MergeScanExec`, the heartbeat
+// counters must be updated before metrics leave the datanode process. The
+// `RecordBatchStreamAdapter` that resolves `RecordBatchMetrics` does not know
+// the owning `MitoRegion`, so we extract the counters from `RegionScanExec` and
+// pass them to the adapter. If a plan contains scans from different regions,
+// return `None` to avoid charging the whole plan metrics to one region.
+fn query_stat_counters(plan: &Arc<dyn ExecutionPlan>) -> Option<RegionQueryStatCounters> {
+    let mut counters: Option<RegionQueryStatCounters> = None;
+    let mut stack = vec![plan.clone()];
+
+    while let Some(plan) = stack.pop() {
+        if plan.name() == REGION_SCAN_EXEC_NAME
+            && let Some(scan) = plan.as_any().downcast_ref::<RegionScanExec>()
+            && let Some(scan_counters) = scan.query_stat_counters()
+        {
+            match &counters {
+                Some(counters)
+                    if !Arc::ptr_eq(
+                        &counters.query_cpu_time_millis,
+                        &scan_counters.query_cpu_time_millis,
+                    ) || !Arc::ptr_eq(
+                        &counters.query_scanned_bytes,
+                        &scan_counters.query_scanned_bytes,
+                    ) =>
+                {
+                    return None;
+                }
+                Some(_) => {}
+                None => counters = Some(scan_counters),
+            }
+        }
+        stack.extend(plan.children().into_iter().cloned());
+    }
+
+    counters
 }
 
 pub struct DatafusionQueryEngine {
@@ -635,6 +674,7 @@ impl QueryExecutor for DatafusionQueryEngine {
                     .context(QueryExecutionSnafu)?;
                 stream.set_metrics2(plan.clone());
                 stream.set_query_load_region_id(query_load_region_id(plan));
+                stream.set_query_stat_counters(query_stat_counters(plan));
                 stream.set_explain_verbose(explain_verbose);
                 let stream = OnDone::new(Box::pin(stream), move || {
                     let exec_cost = exec_timer.stop_and_record();
@@ -669,6 +709,7 @@ impl QueryExecutor for DatafusionQueryEngine {
                     .context(QueryExecutionSnafu)?;
                 stream.set_metrics2(plan.clone());
                 stream.set_query_load_region_id(query_load_region_id(plan));
+                stream.set_query_stat_counters(query_stat_counters(plan));
                 stream.set_explain_verbose(explain_verbose);
                 let stream = OnDone::new(Box::pin(stream), move || {
                     let exec_cost = exec_timer.stop_and_record();
@@ -693,7 +734,7 @@ impl QueryExecutor for DatafusionQueryEngine {
 mod tests {
     use std::fmt;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
     use api::v1::SemanticType;
     use arrow::array::{ArrayRef, UInt64Array};
@@ -817,6 +858,19 @@ mod tests {
     fn build_query_load_region_scan(
         query_load_region_id: Option<RegionId>,
     ) -> Arc<dyn ExecutionPlan> {
+        build_region_scan(query_load_region_id, None)
+    }
+
+    fn build_query_stat_counter_region_scan(
+        counters: RegionQueryStatCounters,
+    ) -> Arc<dyn ExecutionPlan> {
+        build_region_scan(None, Some(counters))
+    }
+
+    fn build_region_scan(
+        query_load_region_id: Option<RegionId>,
+        query_stat_counters: Option<RegionQueryStatCounters>,
+    ) -> Arc<dyn ExecutionPlan> {
         let schema = Arc::new(datatypes::schema::Schema::new(vec![ColumnSchema::new(
             "ts",
             ConcreteDataType::timestamp_millisecond_datatype(),
@@ -846,8 +900,18 @@ mod tests {
         if let Some(region_id) = query_load_region_id {
             scanner.set_query_load_region_id(region_id);
         }
+        if let Some(counters) = query_stat_counters {
+            scanner.properties.set_query_stat_counters(counters);
+        }
 
         Arc::new(RegionScanExec::new(Box::new(scanner), ScanRequest::default(), None).unwrap())
+    }
+
+    fn query_stat_counters_for_test() -> RegionQueryStatCounters {
+        RegionQueryStatCounters {
+            query_cpu_time_millis: Arc::new(AtomicU64::new(0)),
+            query_scanned_bytes: Arc::new(AtomicU64::new(0)),
+        }
     }
 
     #[test]
@@ -878,6 +942,67 @@ mod tests {
             super::query_load_region_id(&plan),
             Some(query_load_region_id.as_u64())
         );
+    }
+
+    #[test]
+    fn query_stat_counters_returns_shared_counter_for_multi_scan_plan() {
+        let counters = query_stat_counters_for_test();
+        let left = build_query_stat_counter_region_scan(counters.clone());
+        let right = build_query_stat_counter_region_scan(counters.clone());
+        let on: JoinOn = vec![(
+            Arc::new(Column::new("ts", 0)) as Arc<dyn PhysicalExpr>,
+            Arc::new(Column::new("ts", 0)) as Arc<dyn PhysicalExpr>,
+        )];
+        let plan: Arc<dyn ExecutionPlan> = Arc::new(
+            HashJoinExec::try_new(
+                left,
+                right,
+                on,
+                None,
+                &JoinType::Inner,
+                None,
+                PartitionMode::CollectLeft,
+                NullEquality::NullEqualsNull,
+                false,
+            )
+            .unwrap(),
+        );
+
+        let actual = super::query_stat_counters(&plan).unwrap();
+        assert!(Arc::ptr_eq(
+            &actual.query_cpu_time_millis,
+            &counters.query_cpu_time_millis
+        ));
+        assert!(Arc::ptr_eq(
+            &actual.query_scanned_bytes,
+            &counters.query_scanned_bytes
+        ));
+    }
+
+    #[test]
+    fn query_stat_counters_ignores_mixed_counter_plan() {
+        let left = build_query_stat_counter_region_scan(query_stat_counters_for_test());
+        let right = build_query_stat_counter_region_scan(query_stat_counters_for_test());
+        let on: JoinOn = vec![(
+            Arc::new(Column::new("ts", 0)) as Arc<dyn PhysicalExpr>,
+            Arc::new(Column::new("ts", 0)) as Arc<dyn PhysicalExpr>,
+        )];
+        let plan: Arc<dyn ExecutionPlan> = Arc::new(
+            HashJoinExec::try_new(
+                left,
+                right,
+                on,
+                None,
+                &JoinType::Inner,
+                None,
+                PartitionMode::CollectLeft,
+                NullEquality::NullEqualsNull,
+                false,
+            )
+            .unwrap(),
+        );
+
+        assert!(super::query_stat_counters(&plan).is_none());
     }
 
     async fn create_test_engine() -> QueryEngineRef {

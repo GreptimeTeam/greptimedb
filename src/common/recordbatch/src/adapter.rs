@@ -18,6 +18,7 @@ use std::marker::PhantomData;
 use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::{Context, Poll};
 
 use common_base::readable_size::ReadableSize;
@@ -51,6 +52,8 @@ use crate::{
     DfRecordBatch, DfSendableRecordBatchStream, OrderOption, RecordBatch, RecordBatchStream,
     SendableRecordBatchStream, Stream,
 };
+
+const REGION_SCAN_EXEC_NAME: &str = "RegionScanExec";
 
 type FutureStream =
     Pin<Box<dyn std::future::Future<Output = Result<SendableRecordBatchStream>> + Send>>;
@@ -218,9 +221,19 @@ pub struct RecordBatchStreamAdapter {
     /// Aggregated plan-level metrics. Resolved after an [ExecutionPlan] is finished.
     metrics_2: Metrics,
     query_load_region_id: Option<u64>,
+    query_stat_counters: Option<RegionQueryStatCounters>,
     /// Display plan and metrics in verbose mode.
     explain_verbose: bool,
     span: Span,
+}
+
+/// Query statistic counters owned by a region.
+#[derive(Debug, Clone)]
+pub struct RegionQueryStatCounters {
+    /// The total query CPU time in milliseconds.
+    pub query_cpu_time_millis: Arc<AtomicU64>,
+    /// The total scanned bytes.
+    pub query_scanned_bytes: Arc<AtomicU64>,
 }
 
 /// Json encoded metrics. Contains metric from a whole plan tree.
@@ -241,6 +254,7 @@ impl RecordBatchStreamAdapter {
             metrics: None,
             metrics_2: Metrics::Unavailable,
             query_load_region_id: None,
+            query_stat_counters: None,
             explain_verbose: false,
             span: Span::current(),
         })
@@ -256,6 +270,7 @@ impl RecordBatchStreamAdapter {
             metrics: None,
             metrics_2: Metrics::Unavailable,
             query_load_region_id: None,
+            query_stat_counters: None,
             explain_verbose: false,
             span: subspan,
         })
@@ -269,10 +284,35 @@ impl RecordBatchStreamAdapter {
         self.query_load_region_id = region_id;
     }
 
+    pub fn set_query_stat_counters(&mut self, counters: Option<RegionQueryStatCounters>) {
+        self.query_stat_counters = counters;
+    }
+
     /// Set the verbose mode for displaying plan and metrics.
     pub fn set_explain_verbose(&mut self, verbose: bool) {
         self.explain_verbose = verbose;
     }
+}
+
+/// Extracts total `output_bytes` from region scan plan nodes.
+pub fn region_scan_output_bytes(metrics: &RecordBatchMetrics) -> usize {
+    metrics
+        .plan_metrics
+        .iter()
+        .filter(|pm| pm.plan_name == REGION_SCAN_EXEC_NAME)
+        .flat_map(|pm| &pm.metrics)
+        .filter_map(|(name, value)| (name == "output_bytes").then_some(*value))
+        .sum()
+}
+
+fn record_query_stats(counters: &RegionQueryStatCounters, metrics: &RecordBatchMetrics) {
+    counters.query_cpu_time_millis.fetch_add(
+        (metrics.elapsed_compute as u64) / 1_000_000,
+        Ordering::Relaxed,
+    );
+    counters
+        .query_scanned_bytes
+        .fetch_add(region_scan_output_bytes(metrics) as u64, Ordering::Relaxed);
 }
 
 impl RecordBatchStream for RecordBatchStreamAdapter {
@@ -339,6 +379,9 @@ impl Stream for RecordBatchStreamAdapter {
                     accept(df_plan.as_ref(), &mut metric_collector).unwrap();
                     metric_collector.record_batch_metrics.query_load_region_id =
                         self.query_load_region_id;
+                    if let Some(counters) = &self.query_stat_counters {
+                        record_query_stats(counters, &metric_collector.record_batch_metrics);
+                    }
                     self.metrics_2 = Metrics::Resolved(metric_collector.record_batch_metrics);
                 }
                 Poll::Ready(None)
@@ -919,6 +962,29 @@ mod test {
                 assert!(binary_array_json.is_null(i));
             }
         }
+    }
+
+    #[test]
+    fn test_record_query_stats_updates_region_counters() {
+        let counters = RegionQueryStatCounters {
+            query_cpu_time_millis: Arc::new(AtomicU64::new(10)),
+            query_scanned_bytes: Arc::new(AtomicU64::new(20)),
+        };
+        let metrics = RecordBatchMetrics {
+            elapsed_compute: 2_000_000,
+            plan_metrics: vec![PlanMetrics {
+                plan: "RegionScanExec: region=1".to_string(),
+                plan_name: REGION_SCAN_EXEC_NAME.to_string(),
+                level: 0,
+                metrics: vec![("output_bytes".to_string(), 42)],
+            }],
+            ..Default::default()
+        };
+
+        record_query_stats(&counters, &metrics);
+
+        assert_eq!(counters.query_cpu_time_millis.load(Ordering::Relaxed), 12);
+        assert_eq!(counters.query_scanned_bytes.load(Ordering::Relaxed), 62);
     }
 
     #[test]

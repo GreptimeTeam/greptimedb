@@ -100,6 +100,12 @@ pub struct RegionStat {
     pub region_manifest: RegionManifestInfo,
     /// The total bytes written of the region since region opened.
     pub written_bytes: u64,
+    /// The total query CPU time of the region since region opened.
+    ///
+    /// Unit: milliseconds.
+    pub query_cpu_time_millis: u64,
+    /// The total scanned bytes of the region since region opened.
+    pub query_scanned_bytes: u64,
     /// The latest entry id of topic used by data.
     /// **Only used by remote WAL prune.**
     pub data_topic_latest_entry_id: u64,
@@ -317,6 +323,8 @@ impl From<&api::v1::meta::RegionStat> for RegionStat {
             index_size: region_stat.index_size,
             region_manifest: region_stat.manifest.into(),
             written_bytes: region_stat.written_bytes,
+            query_cpu_time_millis: region_stat.query_cpu_time_millis,
+            query_scanned_bytes: region_stat.query_scanned_bytes,
             data_topic_latest_entry_id: region_stat.data_topic_latest_entry_id,
             metadata_topic_latest_entry_id: region_stat.metadata_topic_latest_entry_id,
         }

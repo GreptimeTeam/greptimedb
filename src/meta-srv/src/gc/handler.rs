@@ -484,6 +484,8 @@ fn dropped_region_stat(region_id: RegionId) -> RegionStat {
             file_removed_cnt: 0,
         },
         written_bytes: 0,
+        query_cpu_time_millis: 0,
+        query_scanned_bytes: 0,
         data_topic_latest_entry_id: 0,
         metadata_topic_latest_entry_id: 0,
     }
