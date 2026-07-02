@@ -601,7 +601,7 @@
 | `region_engine.mito.gc` | -- | -- | -- |
 | `region_engine.mito.gc.enable` | Bool | `false` | Whether GC is enabled. Need to be the same with metasrv's `gc.enable` or unexpected behavior will occur |
 | `region_engine.mito.gc.lingering_time` | String | `1m` | Lingering time before deleting files.<br/>Should be long enough to allow long running queries to finish.<br/>If set to None, then unused files will be deleted immediately. |
-| `region_engine.mito.gc.unknown_file_lingering_time` | String | `1h` | Lingering time before deleting unknown files(files with undetermine expel time).<br/>expel time is the time when the file is considered as removed, as in removed from the manifest.<br/>This should only occur rarely, as manifest keep tracks in `removed_files` field<br/>unless something goes wrong. |
+| `region_engine.mito.gc.unknown_file_lingering_time` | String | `1d` | Lingering time before deleting unknown files (files with undetermined expel time).<br/>Only applies during full file listing GC.<br/>This uses the object's last-modified timestamp as a heuristic (strict less-than comparison);<br/>do not configure this value too small in production to avoid deleting pre-manifest files<br/>from in-progress compaction or flush.<br/>For active/open regions, an unknown file is deleted only if its object last-modified time exceeds this TTL.<br/>If the object store does not provide a last-modified timestamp, the file is conservatively kept.<br/>For dropped regions, unknown files are deleted immediately. |
 | `region_engine.file` | -- | -- | Enable the file engine. |
 | `region_engine.metric` | -- | -- | Metric engine options. |
 | `region_engine.metric.sparse_primary_key_encoding` | Bool | `true` | Whether to use sparse primary key encoding. |

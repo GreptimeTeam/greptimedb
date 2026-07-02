@@ -17,6 +17,8 @@ use std::sync::Arc;
 
 use api::v1::Rows;
 use common_telemetry::init_default_ut_logging;
+use futures::TryStreamExt;
+use object_store::{Entry, ObjectStore, services};
 use store_api::region_engine::RegionEngine as _;
 use store_api::region_request::{RegionCompactRequest, RegionRequest};
 use store_api::storage::{FileRef, FileRefsManifest, RegionId};
@@ -24,7 +26,7 @@ use store_api::storage::{FileRef, FileRefsManifest, RegionId};
 use crate::config::MitoConfig;
 use crate::engine::MitoEngine;
 use crate::engine::compaction_test::{delete_and_flush, put_and_flush};
-use crate::gc::{GcConfig, LocalGcWorker};
+use crate::gc::{GcConfig, LocalGcWorker, should_delete_file};
 use crate::manifest::action::RemovedFile;
 use crate::region::MitoRegionRef;
 use crate::test_util::{
@@ -418,4 +420,321 @@ async fn test_gc_worker_compact_with_ref() {
 
     assert_eq!(report.deleted_files.get(&region_id).unwrap().len(), 0);
     assert!(report.need_retry_regions.is_empty());
+}
+
+// --- Tests for unknown_file_lingering_time TTL logic ---
+
+/// Helper to write a dummy parquet file to an in-memory object store and
+/// retrieve its Entry via listing.
+async fn write_and_list_entry(store: &ObjectStore, path: &str) -> Entry {
+    store
+        .write(path, b"dummy_parquet_content".as_slice())
+        .await
+        .unwrap();
+    // List the parent directory to get the entry.
+    let parent = std::path::Path::new(path).parent().and_then(|p| {
+        if p.as_os_str().is_empty() {
+            None
+        } else {
+            Some(p)
+        }
+    });
+    let prefix = match parent {
+        Some(p) => format!("{}/", p.to_str().unwrap()),
+        None => String::new(), // root
+    };
+    let lister = store.lister_with(&prefix).await.unwrap();
+    let entries: Vec<Entry> = lister.try_collect().await.unwrap();
+    let expected_name = std::path::Path::new(path)
+        .file_name()
+        .unwrap()
+        .to_str()
+        .unwrap();
+    match entries.iter().find(|e| e.name() == expected_name) {
+        Some(e) => e.clone(),
+        None => {
+            panic!(
+                "entry '{}' not found when listing prefix '{}'; entries: {:?}",
+                expected_name,
+                prefix,
+                entries.iter().map(|e| e.name()).collect::<Vec<_>>()
+            )
+        }
+    }
+}
+
+/// Test: active/open region unknown file within TTL (last_modified newer than
+/// threshold) should NOT be deleted.
+/// NOTE: Memory backend leaves `last_modified` as `None`, so this test also
+/// covers the "missing last_modified → keep" conservative behavior.
+#[tokio::test]
+async fn test_unknown_file_within_ttl_not_deleted() {
+    let builder = services::Memory::default();
+    let store = ObjectStore::new(builder).unwrap().finish();
+
+    let entry = write_and_list_entry(&store, "test/1.parquet").await;
+
+    // unknown_file_may_linger_until set to epoch (very old) → file is "too young"
+    // since last_modified is ~now.
+    let threshold = chrono::DateTime::from_timestamp(0, 0).unwrap();
+
+    let should_delete = should_delete_file(
+        false, // not in manifest
+        false, // not in tmp_ref
+        false, // not in may_linger
+        false, // not eligible for delete
+        false, // active region (not dropped)
+        &entry, threshold,
+    );
+    assert!(
+        !should_delete,
+        "Active-region unknown file within TTL should NOT be deleted"
+    );
+}
+
+/// Test: active/open region unknown file exceeding TTL (last_modified older
+/// than threshold) should be deleted.
+#[tokio::test]
+async fn test_unknown_file_exceeded_ttl_deleted() {
+    // Use Fs backend so that last_modified is properly set on file metadata.
+    let tmp_dir = common_test_util::temp_dir::create_temp_dir("gc_unknown_ttl");
+    let root = tmp_dir.path().to_string_lossy().to_string();
+    let builder = services::Fs::default().root(&root);
+    let store = ObjectStore::new(builder).unwrap().finish();
+
+    let entry = write_and_list_entry(&store, "2.parquet").await;
+
+    // threshold set far into the future → any file with last_modified before now
+    // is guaranteed to be older than the threshold.
+    let threshold = chrono::Utc::now() + chrono::Duration::days(1);
+
+    let should_delete = should_delete_file(
+        false, // not in manifest
+        false, // not in tmp_ref
+        false, // not in may_linger
+        false, // not eligible for delete
+        false, // active region (not dropped)
+        &entry, threshold,
+    );
+    assert!(
+        should_delete,
+        "Active-region unknown file exceeding TTL should be deleted"
+    );
+}
+
+/// Test: dropped region unknown file should always be deleted regardless of TTL.
+#[tokio::test]
+async fn test_unknown_file_dropped_region_deleted() {
+    let builder = services::Memory::default();
+    let store = ObjectStore::new(builder).unwrap().finish();
+
+    let entry = write_and_list_entry(&store, "test/3.parquet").await;
+
+    // Even with threshold far in the past (epoch), dropped region deletes immediately.
+    let threshold = chrono::DateTime::from_timestamp(0, 0).unwrap();
+
+    let should_delete = should_delete_file(
+        false, // not in manifest
+        false, // not in tmp_ref
+        false, // not in may_linger
+        false, // not eligible for delete
+        true,  // region dropped
+        &entry, threshold,
+    );
+    assert!(
+        should_delete,
+        "Dropped region unknown file should be deleted immediately"
+    );
+}
+
+/// Test: file in manifest should NOT be deleted even if unknown.
+#[tokio::test]
+async fn test_file_in_manifest_not_deleted() {
+    let builder = services::Memory::default();
+    let store = ObjectStore::new(builder).unwrap().finish();
+
+    let entry = write_and_list_entry(&store, "test/4.parquet").await;
+    let threshold = chrono::Utc::now() + chrono::Duration::days(1);
+
+    let should_delete = should_delete_file(
+        true,  // in manifest
+        false, // not in tmp_ref
+        false, false, false, // active region
+        &entry, threshold,
+    );
+    assert!(!should_delete, "File in manifest should NOT be deleted");
+}
+
+/// Test: file in tmp_ref should NOT be deleted even if unknown.
+#[tokio::test]
+async fn test_file_in_tmp_ref_not_deleted() {
+    let builder = services::Memory::default();
+    let store = ObjectStore::new(builder).unwrap().finish();
+
+    let entry = write_and_list_entry(&store, "test/5.parquet").await;
+    let threshold = chrono::Utc::now() + chrono::Duration::days(1);
+
+    let should_delete = should_delete_file(
+        false, true, // in tmp_ref
+        false, false, false, // active region
+        &entry, threshold,
+    );
+    assert!(!should_delete, "File in tmp_ref should NOT be deleted");
+}
+
+/// Test: known removed file that is still lingering should NOT be deleted.
+/// (is_linger=true but is_eligible_for_delete=false)
+#[tokio::test]
+async fn test_known_file_still_lingering_not_deleted() {
+    let builder = services::Memory::default();
+    let store = ObjectStore::new(builder).unwrap().finish();
+
+    let entry = write_and_list_entry(&store, "test/6.parquet").await;
+    let threshold = chrono::Utc::now() + chrono::Duration::days(1);
+
+    let should_delete = should_delete_file(
+        false, false, true,  // is_linger
+        false, // not yet eligible for delete
+        false, &entry, threshold,
+    );
+    assert!(
+        !should_delete,
+        "Known file still in lingering period should NOT be deleted"
+    );
+}
+
+/// Test: known removed file eligible for delete should be deleted.
+/// (is_linger=true and is_eligible_for_delete=true)
+#[tokio::test]
+async fn test_known_file_eligible_for_delete_deleted() {
+    let builder = services::Memory::default();
+    let store = ObjectStore::new(builder).unwrap().finish();
+
+    let entry = write_and_list_entry(&store, "test/7.parquet").await;
+    let threshold = chrono::DateTime::from_timestamp(0, 0).unwrap();
+
+    let should_delete = should_delete_file(
+        false, false, true, // is_linger
+        true, // eligible for delete
+        false, &entry, threshold,
+    );
+    assert!(
+        should_delete,
+        "Known file eligible for delete should be deleted"
+    );
+}
+
+// --- Tests for boundary conditions and explicit "keep" semantics ---
+
+/// Test: when `last_modified` equals the cutoff exactly, the file should be
+/// kept (strict `<` comparison, not `<=`).
+#[tokio::test]
+async fn test_unknown_file_at_cutoff_not_deleted() {
+    // Use Fs backend for real last_modified
+    let tmp_dir = common_test_util::temp_dir::create_temp_dir("gc_at_cutoff");
+    let root = tmp_dir.path().to_string_lossy().to_string();
+    let builder = services::Fs::default().root(&root);
+    let store = ObjectStore::new(builder).unwrap().finish();
+
+    let entry = write_and_list_entry(&store, "cutoff.parquet").await;
+
+    // Set threshold to the actual last_modified → should NOT be deleted (strict <)
+    let actual_mtime_millis = entry
+        .metadata()
+        .last_modified()
+        .map(|ts| ts.into_inner().as_millisecond())
+        .expect("Fs backend must provide last_modified");
+    // Construct a chrono::DateTime at exactly the same millisecond
+    let threshold = chrono::DateTime::from_timestamp_millis(actual_mtime_millis).unwrap();
+
+    let should_delete = should_delete_file(
+        false, // not in manifest
+        false, // not in tmp_ref
+        false, // not in may_linger
+        false, // not eligible for delete
+        false, // active region
+        &entry, threshold,
+    );
+    assert!(
+        !should_delete,
+        "File at exact cutoff (last_modified == threshold) should NOT be deleted (strict < comparison)"
+    );
+}
+
+/// Test: active unknown file with missing `last_modified` (e.g. object store
+/// that does not provide the timestamp) should be conservatively kept.
+#[tokio::test]
+async fn test_missing_last_modified_unknown_kept() {
+    // Memory backend does NOT set last_modified
+    let builder = services::Memory::default();
+    let store = ObjectStore::new(builder).unwrap().finish();
+
+    let entry = write_and_list_entry(&store, "test/missing_mtime.parquet").await;
+    // Verify that last_modified is indeed None
+    assert!(
+        entry.metadata().last_modified().is_none(),
+        "Memory backend must not provide last_modified for this test"
+    );
+
+    // threshold in the far past → should still NOT delete
+    let threshold = chrono::DateTime::from_timestamp(0, 0).unwrap();
+
+    let should_delete = should_delete_file(
+        false, false, false, false, // active unknown
+        false, // active region
+        &entry, threshold,
+    );
+    assert!(
+        !should_delete,
+        "Missing last_modified should keep the file (conservative behavior)"
+    );
+}
+
+/// Test: file in manifest should NOT be deleted even when its object
+/// `last_modified` is very old (far below the TTL cutoff).
+#[tokio::test]
+async fn test_file_in_manifest_old_mtime_kept() {
+    let tmp_dir = common_test_util::temp_dir::create_temp_dir("gc_manifest_old");
+    let root = tmp_dir.path().to_string_lossy().to_string();
+    let builder = services::Fs::default().root(&root);
+    let store = ObjectStore::new(builder).unwrap().finish();
+
+    let entry = write_and_list_entry(&store, "in_manifest.parquet").await;
+    // threshold far in the future → mtime is definitely old, but manifest protects
+    let threshold = chrono::Utc::now() + chrono::Duration::days(1);
+
+    let should_delete = should_delete_file(
+        true,  // in manifest
+        false, // not in tmp_ref
+        false, false, false, // not linger/eligible, active
+        &entry, threshold,
+    );
+    assert!(
+        !should_delete,
+        "File in manifest should NOT be deleted even with old last-modified time"
+    );
+}
+
+/// Test: file in tmp_ref should NOT be deleted even when its object
+/// `last_modified` is very old (far below the TTL cutoff).
+#[tokio::test]
+async fn test_file_in_tmp_ref_old_mtime_kept() {
+    let tmp_dir = common_test_util::temp_dir::create_temp_dir("gc_tmpref_old");
+    let root = tmp_dir.path().to_string_lossy().to_string();
+    let builder = services::Fs::default().root(&root);
+    let store = ObjectStore::new(builder).unwrap().finish();
+
+    let entry = write_and_list_entry(&store, "in_tmp_ref.parquet").await;
+    // threshold far in the future → mtime is definitely old, but tmp_ref protects
+    let threshold = chrono::Utc::now() + chrono::Duration::days(1);
+
+    let should_delete = should_delete_file(
+        false, true, // in tmp_ref
+        false, false, false, // not linger/eligible, active
+        &entry, threshold,
+    );
+    assert!(
+        !should_delete,
+        "File in tmp_ref should NOT be deleted even with old last-modified time"
+    );
 }

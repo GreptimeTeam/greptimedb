@@ -65,18 +65,36 @@ fn should_delete_file(
     is_linger: bool,
     is_eligible_for_delete: bool,
     is_region_dropped: bool,
-    _entry: &Entry,
-    _unknown_file_may_linger_until: chrono::DateTime<chrono::Utc>,
+    entry: &Entry,
+    unknown_file_may_linger_until: chrono::DateTime<chrono::Utc>,
 ) -> bool {
-    let is_known = is_linger || is_eligible_for_delete;
+    if is_in_manifest || is_in_tmp_ref {
+        return false;
+    }
 
-    !is_in_manifest
-        && !is_in_tmp_ref
-        && if is_known {
-            is_eligible_for_delete
-        } else {
-            !is_in_tmp_ref && is_region_dropped
-        }
+    let is_known = is_linger || is_eligible_for_delete;
+    if is_known {
+        return is_eligible_for_delete;
+    }
+
+    // Unknown file: not in manifest, tmp_ref, or known removed records.
+    // For dropped regions, unknown files not protected by manifest/tmp refs/cross-region refs
+    // are deleted immediately. This relies on meta collecting FileRefsManifest from related
+    // active regions before issuing dropped-region GC; preserving young unknown files would
+    // also require keeping the table_repart tombstone for retry.
+    // For active/open regions, only delete if the object's last-modified time exceeds the
+    // unknown_file_lingering_time TTL.
+    if is_region_dropped {
+        return true;
+    }
+
+    entry
+        .metadata()
+        .last_modified()
+        .map(|ts| {
+            ts.into_inner().as_millisecond() < unknown_file_may_linger_until.timestamp_millis()
+        })
+        .unwrap_or(false)
 }
 
 /// Limit the amount of concurrent GC jobs on the datanode
@@ -156,8 +174,10 @@ impl Default for GcConfig {
             enable: false,
             // expect long running queries to be finished(or at least be able to notify it's using a deleted file) within a reasonable time
             lingering_time: Some(Duration::from_secs(60)),
-            // 1 hours, for unknown expel time, which is when this file get removed from manifest, it should rarely happen, can keep it longer
-            unknown_file_lingering_time: Duration::from_secs(60 * 60),
+            // 1 day, for unknown expel time, which is when this file get removed from manifest.
+            // Only applies to full-listing GC for active/open regions. A long default avoids
+            // accidentally deleting pre-manifest files (e.g. compaction/flush still in progress).
+            unknown_file_lingering_time: Duration::from_secs(24 * 60 * 60),
             max_concurrent_lister_per_gc_job: 32,
             max_concurrent_gc_job: 4,
         }
