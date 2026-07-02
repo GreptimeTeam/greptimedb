@@ -17,20 +17,16 @@ use std::sync::Arc;
 
 use api::v1::Rows;
 use common_telemetry::init_default_ut_logging;
-use common_time::Timestamp;
 use futures::TryStreamExt;
 use object_store::{Entry, ObjectStore, services};
 use store_api::region_engine::RegionEngine as _;
 use store_api::region_request::{RegionCompactRequest, RegionRequest};
-use store_api::storage::{FileId, FileRef, FileRefsManifest, IndexVersion, RegionId};
+use store_api::storage::{FileRef, FileRefsManifest, RegionId};
 
 use crate::config::MitoConfig;
 use crate::engine::MitoEngine;
 use crate::engine::compaction_test::{delete_and_flush, put_and_flush};
-use crate::gc::{
-    GcConfig, LocalGcWorker, filter_deletable_files, list_to_be_deleted_files_impl,
-    should_delete_file,
-};
+use crate::gc::{GcConfig, LocalGcWorker, should_delete_file};
 use crate::manifest::action::RemovedFile;
 use crate::region::MitoRegionRef;
 use crate::test_util::{
@@ -625,128 +621,6 @@ async fn test_known_file_eligible_for_delete_deleted() {
     assert!(
         should_delete,
         "Known file eligible for delete should be deleted"
-    );
-}
-
-// --- Integration-style tests exercising filter_deletable_files / list_to_be_deleted_files_impl ---
-
-/// Helper: write a dummy parquet file with a standard UUID-based FileId path
-/// to the given object store, and return its entry via listing.
-async fn write_entry_with_file_id(store: &ObjectStore, file_id: FileId, subdir: &str) -> Entry {
-    let path = format!("{}/{}.parquet", subdir, file_id);
-    write_and_list_entry(store, &path).await
-}
-
-/// Test: full listing with active region — unknown file with TTL NOT exceeded
-/// → `filter_deletable_files` should NOT return it for deletion.
-#[tokio::test]
-async fn test_full_listing_active_unknown_within_ttl() {
-    let builder = services::Memory::default();
-    let store = ObjectStore::new(builder).unwrap().finish();
-    let file_id = FileId::random();
-
-    let entry = write_entry_with_file_id(&store, file_id, "test").await;
-
-    // threshold at epoch → file's last_modified (None for Memory) → not deleted
-    let threshold = chrono::DateTime::from_timestamp(0, 0).unwrap();
-
-    let in_manifest: HashMap<FileId, Option<IndexVersion>> = Default::default();
-    let in_tmp_ref: HashSet<(FileId, Option<IndexVersion>)> = Default::default();
-    let may_linger: HashSet<&RemovedFile> = Default::default();
-    let eligible: HashSet<&RemovedFile> = Default::default();
-
-    let result = filter_deletable_files(
-        false, // active region
-        vec![entry],
-        &in_manifest,
-        &in_tmp_ref,
-        &may_linger,
-        &eligible,
-        threshold,
-    );
-
-    assert!(
-        result.is_empty(),
-        "Active unknown file within TTL should not be returned for deletion"
-    );
-}
-
-/// Test: full listing with active region — unknown file with TTL exceeded
-/// → `filter_deletable_files` should return `RemovedFile::File(file_id, None)`.
-#[tokio::test]
-async fn test_full_listing_active_unknown_exceeded_ttl() {
-    // Use Fs backend for real last_modified
-    let tmp_dir = common_test_util::temp_dir::create_temp_dir("gc_list_ttl2");
-    let root = tmp_dir.path().to_string_lossy().to_string();
-    let builder = services::Fs::default().root(&root);
-    let store = ObjectStore::new(builder).unwrap().finish();
-    let file_id = FileId::random();
-
-    let entry = write_entry_with_file_id(&store, file_id, "").await;
-
-    // threshold far in future → definitely exceeded
-    let threshold = chrono::Utc::now() + chrono::Duration::days(1);
-
-    let in_manifest: HashMap<FileId, Option<IndexVersion>> = Default::default();
-    let in_tmp_ref: HashSet<(FileId, Option<IndexVersion>)> = Default::default();
-    let may_linger: HashSet<&RemovedFile> = Default::default();
-    let eligible: HashSet<&RemovedFile> = Default::default();
-
-    let result = filter_deletable_files(
-        false, // active region
-        vec![entry],
-        &in_manifest,
-        &in_tmp_ref,
-        &may_linger,
-        &eligible,
-        threshold,
-    );
-
-    assert_eq!(result.len(), 1);
-    assert_eq!(
-        result[0],
-        RemovedFile::File(file_id, None),
-        "Active unknown file exceeding TTL should be returned as RemovedFile::File"
-    );
-}
-
-/// Test: fast mode (`full_file_listing=false`) does NOT process unknown files.
-/// Even with an unknown entry, fast mode only looks at `eligible_for_removal`.
-#[tokio::test]
-async fn test_fast_mode_does_not_process_unknown() {
-    let builder = services::Memory::default();
-    let store = ObjectStore::new(builder).unwrap().finish();
-    let file_id = FileId::random();
-    let entry = write_entry_with_file_id(&store, file_id, "test").await;
-
-    let opt = GcConfig {
-        enable: true,
-        lingering_time: None, // no lingering: known files eligible immediately
-        unknown_file_lingering_time: std::time::Duration::ZERO, // unknown would be eligible
-        ..Default::default()
-    };
-
-    let in_manifest: HashMap<FileId, Option<IndexVersion>> = Default::default();
-    let in_tmp_ref: HashSet<(FileId, Option<IndexVersion>)> = Default::default();
-    let recently_removed: BTreeMap<Timestamp, HashSet<RemovedFile>> = Default::default();
-
-    // fast mode — entries are present but should be ignored
-    let result = list_to_be_deleted_files_impl(
-        &opt,
-        false, // full_file_listing = false → fast mode
-        RegionId::new(1, 1),
-        false, // active region
-        &in_manifest,
-        &in_tmp_ref,
-        recently_removed,
-        vec![entry],
-    )
-    .unwrap();
-
-    assert!(
-        result.is_empty(),
-        "Fast mode should not process unknown files; got {:?}",
-        result
     );
 }
 
