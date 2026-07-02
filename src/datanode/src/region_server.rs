@@ -68,7 +68,9 @@ use servers::error::{
 use servers::grpc::FlightCompression;
 use servers::grpc::flight::{FlightCraft, FlightRecordBatchStream, TonicStream};
 use servers::grpc::region_server::RegionServerHandler;
-use session::context::{QueryContext, QueryContextBuilder, QueryContextRef};
+use session::context::{
+    FLIGHT_METRICS_HEARTBEAT_INTERVAL, QueryContext, QueryContextBuilder, QueryContextRef,
+};
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::metric_engine_consts::{
     FILE_ENGINE_NAME, LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME,
@@ -84,7 +86,7 @@ use store_api::region_request::{
 };
 use store_api::storage::RegionId;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
-use tokio::time::timeout;
+use tokio::time::{self, timeout};
 use tonic::{Request, Response, Result as TonicResult};
 
 use crate::error::{
@@ -1803,6 +1805,7 @@ impl RegionServerInner {
         request: QueryRequest,
         query_ctx: QueryContextRef,
     ) -> Result<SendableRecordBatchStream> {
+        let explain_verbose = query_ctx.explain_verbose();
         let inner = self.clone();
         let mut stream = common_runtime::spawn_query(async move {
             inner.handle_read_inner(request, query_ctx).await
@@ -1819,10 +1822,27 @@ impl RegionServerInner {
         let producer_metrics = metrics.clone();
 
         let producer_handle = common_runtime::spawn_query(async move {
-            while let Some(batch) = stream.next().await {
-                *producer_metrics.write().unwrap() = stream.metrics();
-                if sender.send(batch).await.is_err() {
-                    break;
+            if explain_verbose {
+                loop {
+                    match time::timeout(FLIGHT_METRICS_HEARTBEAT_INTERVAL, stream.next()).await {
+                        Ok(Some(batch)) => {
+                            *producer_metrics.write().unwrap() = stream.metrics();
+                            if sender.send(batch).await.is_err() {
+                                return;
+                            }
+                        }
+                        Ok(None) => break,
+                        Err(_) => {
+                            *producer_metrics.write().unwrap() = stream.metrics();
+                        }
+                    }
+                }
+            } else {
+                while let Some(batch) = stream.next().await {
+                    *producer_metrics.write().unwrap() = stream.metrics();
+                    if sender.send(batch).await.is_err() {
+                        break;
+                    }
                 }
             }
             *producer_metrics.write().unwrap() = stream.metrics();

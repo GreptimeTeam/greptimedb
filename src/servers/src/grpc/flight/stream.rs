@@ -28,9 +28,13 @@ use futures::channel::mpsc;
 use futures::channel::mpsc::Sender;
 use futures::{SinkExt, Stream, StreamExt};
 use pin_project::{pin_project, pinned_drop};
-use session::context::QueryContextRef;
+use session::context::{
+    FLIGHT_METRICS_HEARTBEAT_INTERVAL, QueryContextRef,
+    SUPPORT_FLIGHT_METRICS_BEFORE_BATCH_EXTENSION_KEY,
+};
 use snafu::ResultExt;
 use tokio::task::JoinHandle;
+use tokio::time;
 
 use crate::error;
 use crate::grpc::FlightCompression;
@@ -102,6 +106,35 @@ pub struct FlightRecordBatchStream {
 }
 
 impl FlightRecordBatchStream {
+    async fn send_metrics(
+        tx: &mut Sender<TonicResult<FlightMessage>>,
+        metrics: &mut StreamMetrics,
+        metrics_str: String,
+    ) -> bool {
+        metrics.metrics_count += 1;
+        let start = Instant::now();
+        if let Err(e) = tx.send(Ok(FlightMessage::Metrics(metrics_str))).await {
+            warn!(e; "stop sending Flight data");
+            return false;
+        }
+        metrics.send_metrics_duration += start.elapsed();
+        true
+    }
+
+    async fn send_metrics_if_changed(
+        tx: &mut Sender<TonicResult<FlightMessage>>,
+        metrics: &mut StreamMetrics,
+        last_metrics_str: &mut Option<String>,
+        metrics_str: String,
+    ) -> bool {
+        if last_metrics_str.as_deref() == Some(metrics_str.as_str()) {
+            return true;
+        }
+
+        *last_metrics_str = Some(metrics_str.clone());
+        Self::send_metrics(tx, metrics, metrics_str).await
+    }
+
     pub fn new(
         recordbatches: SendableRecordBatchStream,
         tracing_context: TracingContext,
@@ -109,11 +142,19 @@ impl FlightRecordBatchStream {
         query_ctx: QueryContextRef,
     ) -> Self {
         let should_send_partial_metrics = query_ctx.explain_verbose();
+        let can_send_metrics_before_batch = query_ctx
+            .extension(SUPPORT_FLIGHT_METRICS_BEFORE_BATCH_EXTENSION_KEY)
+            .is_some_and(|value| value.eq_ignore_ascii_case("true"));
         let (tx, rx) = mpsc::channel::<TonicResult<FlightMessage>>(1);
         let join_handle = common_runtime::spawn_global(async move {
-            Self::flight_data_stream(recordbatches, tx, should_send_partial_metrics)
-                .trace(tracing_context.attach(info_span!("flight_data_stream")))
-                .await
+            Self::flight_data_stream(
+                recordbatches,
+                tx,
+                should_send_partial_metrics,
+                can_send_metrics_before_batch,
+            )
+            .trace(tracing_context.attach(info_span!("flight_data_stream")))
+            .await
         });
         let encoder = if compression.arrow_compression() {
             FlightEncoder::default()
@@ -133,8 +174,10 @@ impl FlightRecordBatchStream {
         mut recordbatches: SendableRecordBatchStream,
         mut tx: Sender<TonicResult<FlightMessage>>,
         should_send_partial_metrics: bool,
+        can_send_metrics_before_batch: bool,
     ) {
         let mut metrics = StreamMetrics::new(should_send_partial_metrics);
+        let mut last_metrics_str = None;
 
         let schema = recordbatches.schema().arrow_schema().clone();
         let start = Instant::now();
@@ -144,12 +187,41 @@ impl FlightRecordBatchStream {
         }
         metrics.send_schema_duration += start.elapsed();
 
-        while let Some(batch_or_err) = {
+        loop {
             let start = Instant::now();
-            let result = recordbatches.next().in_current_span().await;
+            let batch_or_err = if should_send_partial_metrics && can_send_metrics_before_batch {
+                match time::timeout(
+                    FLIGHT_METRICS_HEARTBEAT_INTERVAL,
+                    recordbatches.next().in_current_span(),
+                )
+                .await
+                {
+                    Ok(result) => result,
+                    Err(_) => {
+                        if let Some(metrics_str) = recordbatches
+                            .metrics()
+                            .and_then(|m| serde_json::to_string(&m).ok())
+                            && !Self::send_metrics_if_changed(
+                                &mut tx,
+                                &mut metrics,
+                                &mut last_metrics_str,
+                                metrics_str,
+                            )
+                            .await
+                        {
+                            return;
+                        }
+                        metrics.fetch_content_duration += start.elapsed();
+                        continue;
+                    }
+                }
+            } else {
+                recordbatches.next().in_current_span().await
+            };
             metrics.fetch_content_duration += start.elapsed();
-            result
-        } {
+            let Some(batch_or_err) = batch_or_err else {
+                break;
+            };
             match batch_or_err {
                 Ok(recordbatch) => {
                     metrics.total_rows += recordbatch.num_rows();
@@ -172,14 +244,12 @@ impl FlightRecordBatchStream {
                         && let Some(metrics_str) = recordbatches
                             .metrics()
                             .and_then(|m| serde_json::to_string(&m).ok())
-                    {
-                        metrics.metrics_count += 1;
-                        let start = Instant::now();
-                        if let Err(e) = tx.send(Ok(FlightMessage::Metrics(metrics_str))).await {
-                            warn!(e; "stop sending Flight data");
-                            return;
+                        && {
+                            last_metrics_str = Some(metrics_str.clone());
+                            !Self::send_metrics(&mut tx, &mut metrics, metrics_str).await
                         }
-                        metrics.send_metrics_duration += start.elapsed();
+                    {
+                        return;
                     }
                 }
                 Err(e) => {
@@ -200,10 +270,7 @@ impl FlightRecordBatchStream {
             .metrics()
             .and_then(|m| serde_json::to_string(&m).ok())
         {
-            metrics.metrics_count += 1;
-            let start = Instant::now();
-            let _ = tx.send(Ok(FlightMessage::Metrics(metrics_str))).await;
-            metrics.send_metrics_duration += start.elapsed();
+            let _ = Self::send_metrics(&mut tx, &mut metrics, metrics_str).await;
         }
     }
 }
@@ -255,17 +322,50 @@ impl Stream for FlightRecordBatchStream {
 
 #[cfg(test)]
 mod test {
+    use std::pin::Pin;
     use std::sync::Arc;
+    use std::task::{Context, Poll};
+    use std::time::Duration;
 
     use common_grpc::flight::{FlightDecoder, FlightMessage};
-    use common_recordbatch::{RecordBatch, RecordBatches};
+    use common_recordbatch::adapter::RecordBatchMetrics;
+    use common_recordbatch::{OrderOption, RecordBatch, RecordBatchStream, RecordBatches};
     use datatypes::prelude::*;
-    use datatypes::schema::{ColumnSchema, Schema};
+    use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
     use datatypes::vectors::Int32Vector;
     use futures::StreamExt;
-    use session::context::QueryContext;
+    use session::context::{
+        QueryContext, QueryContextBuilder, SUPPORT_FLIGHT_METRICS_BEFORE_BATCH_EXTENSION_KEY,
+    };
 
     use super::*;
+
+    struct PendingMetricsStream {
+        schema: SchemaRef,
+        metrics: RecordBatchMetrics,
+    }
+
+    impl RecordBatchStream for PendingMetricsStream {
+        fn schema(&self) -> SchemaRef {
+            self.schema.clone()
+        }
+
+        fn output_ordering(&self) -> Option<&[OrderOption]> {
+            None
+        }
+
+        fn metrics(&self) -> Option<RecordBatchMetrics> {
+            Some(self.metrics.clone())
+        }
+    }
+
+    impl Stream for PendingMetricsStream {
+        type Item = common_recordbatch::error::Result<RecordBatch>;
+
+        fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            Poll::Pending
+        }
+    }
 
     #[tokio::test]
     async fn test_flight_record_batch_stream() {
@@ -314,5 +414,145 @@ mod test {
             }
             _ => unreachable!(),
         }
+    }
+
+    #[tokio::test]
+    async fn test_flight_record_batch_stream_emits_metrics_while_pending() {
+        let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
+            "a",
+            ConcreteDataType::int32_datatype(),
+            false,
+        )]));
+        let metrics = RecordBatchMetrics {
+            elapsed_compute: 42,
+            ..Default::default()
+        };
+        let recordbatches = Box::pin(PendingMetricsStream {
+            schema: schema.clone(),
+            metrics,
+        });
+        let query_ctx = Arc::new(
+            QueryContextBuilder::default()
+                .set_extension(
+                    SUPPORT_FLIGHT_METRICS_BEFORE_BATCH_EXTENSION_KEY.to_string(),
+                    "true".to_string(),
+                )
+                .build(),
+        );
+        query_ctx.set_explain_verbose(true);
+        let mut stream = FlightRecordBatchStream::new(
+            recordbatches,
+            TracingContext::default(),
+            FlightCompression::default(),
+            query_ctx,
+        );
+
+        let decoder = &mut FlightDecoder::default();
+        let schema_data = stream.next().await.unwrap().unwrap();
+        match decoder.try_decode(&schema_data).unwrap().unwrap() {
+            FlightMessage::Schema(actual_schema) => {
+                assert_eq!(&actual_schema, schema.arrow_schema());
+            }
+            _ => unreachable!(),
+        }
+
+        let metrics_data = tokio::time::timeout(Duration::from_secs(2), stream.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        match decoder.try_decode(&metrics_data).unwrap().unwrap() {
+            FlightMessage::Metrics(metrics) => {
+                let metrics: RecordBatchMetrics = serde_json::from_str(&metrics).unwrap();
+                assert_eq!(metrics.elapsed_compute, 42);
+            }
+            other => panic!("expected metrics message, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_flight_record_batch_stream_requires_capability_for_pre_batch_metrics() {
+        let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
+            "a",
+            ConcreteDataType::int32_datatype(),
+            false,
+        )]));
+        let recordbatches = Box::pin(PendingMetricsStream {
+            schema: schema.clone(),
+            metrics: RecordBatchMetrics {
+                elapsed_compute: 42,
+                ..Default::default()
+            },
+        });
+        let query_ctx = QueryContext::arc();
+        query_ctx.set_explain_verbose(true);
+        let mut stream = FlightRecordBatchStream::new(
+            recordbatches,
+            TracingContext::default(),
+            FlightCompression::default(),
+            query_ctx,
+        );
+
+        let decoder = &mut FlightDecoder::default();
+        let schema_data = stream.next().await.unwrap().unwrap();
+        assert!(matches!(
+            decoder.try_decode(&schema_data).unwrap().unwrap(),
+            FlightMessage::Schema(_)
+        ));
+        assert!(
+            tokio::time::timeout(
+                FLIGHT_METRICS_HEARTBEAT_INTERVAL + Duration::from_millis(200),
+                stream.next()
+            )
+            .await
+            .is_err(),
+            "pre-batch Metrics must be gated by client capability"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_flight_record_batch_stream_requires_explain_verbose_for_pre_batch_metrics() {
+        let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
+            "a",
+            ConcreteDataType::int32_datatype(),
+            false,
+        )]));
+        let recordbatches = Box::pin(PendingMetricsStream {
+            schema: schema.clone(),
+            metrics: RecordBatchMetrics {
+                elapsed_compute: 42,
+                ..Default::default()
+            },
+        });
+        let query_ctx = Arc::new(
+            QueryContextBuilder::default()
+                .set_extension(
+                    SUPPORT_FLIGHT_METRICS_BEFORE_BATCH_EXTENSION_KEY.to_string(),
+                    "true".to_string(),
+                )
+                .build(),
+        );
+        let mut stream = FlightRecordBatchStream::new(
+            recordbatches,
+            TracingContext::default(),
+            FlightCompression::default(),
+            query_ctx,
+        );
+
+        let decoder = &mut FlightDecoder::default();
+        let schema_data = stream.next().await.unwrap().unwrap();
+        assert!(matches!(
+            decoder.try_decode(&schema_data).unwrap().unwrap(),
+            FlightMessage::Schema(_)
+        ));
+        assert!(
+            tokio::time::timeout(
+                FLIGHT_METRICS_HEARTBEAT_INTERVAL + Duration::from_millis(200),
+                stream.next()
+            )
+            .await
+            .is_err(),
+            "pre-batch Metrics must be gated by explain verbose even when capability is set"
+        );
     }
 }

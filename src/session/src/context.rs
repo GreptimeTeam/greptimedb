@@ -32,7 +32,9 @@ use datafusion_common::config::ConfigOptions;
 use derive_builder::Builder;
 use sql::dialect::{Dialect, GenericDialect, GreptimeDbDialect, MySqlDialect, PostgreSqlDialect};
 
-pub use crate::hints::REMOTE_QUERY_ID_EXTENSION_KEY;
+pub use crate::hints::{
+    REMOTE_QUERY_ID_EXTENSION_KEY, SUPPORT_FLIGHT_METRICS_BEFORE_BATCH_EXTENSION_KEY,
+};
 use crate::protocol_ctx::ProtocolCtx;
 use crate::query_id::QueryId;
 use crate::session_config::{PGByteaOutputValue, PGDateOrder, PGDateTimeStyle, PGIntervalStyle};
@@ -40,6 +42,8 @@ use crate::{MutableInner, ReadPreference};
 
 pub type QueryContextRef = Arc<QueryContext>;
 pub type ConnInfoRef = Arc<ConnInfo>;
+
+pub const FLIGHT_METRICS_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(1);
 
 const CURSOR_COUNT_WARNING_LIMIT: usize = 10;
 
