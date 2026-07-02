@@ -35,6 +35,10 @@ SHOW CREATE TABLE test_alter_auto_flush_interval;
 -- SQLNESS REPLACE \d+\(\d+,\s+\d+\) REDACTED
 ALTER TABLE test_alter_auto_flush_interval SET 'auto_flush_interval' = 'not_a_duration';
 
+-- Trying to set a zero duration should fail (engine requires > 0)
+-- SQLNESS REPLACE \d+\(\d+,\s+\d+\) REDACTED
+ALTER TABLE test_alter_auto_flush_interval SET 'auto_flush_interval' = '0s';
+
 -- Clean up
 DROP TABLE test_alter_auto_flush_interval;
 

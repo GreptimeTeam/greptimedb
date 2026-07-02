@@ -1400,6 +1400,9 @@ impl TryFrom<&PbOption> for SetRegionOption {
             AUTO_FLUSH_INTERVAL_KEY => {
                 let interval = humantime::parse_duration(value)
                     .map_err(|_| InvalidSetRegionOptionRequestSnafu { key, value }.build())?;
+                if interval <= Duration::ZERO {
+                    return InvalidSetRegionOptionRequestSnafu { key, value }.fail();
+                }
                 Ok(Self::AutoFlushInterval(Some(interval)))
             }
             _ => InvalidSetRegionOptionRequestSnafu { key, value }.fail(),
