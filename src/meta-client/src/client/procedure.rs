@@ -286,7 +286,7 @@ impl Inner {
             }),
             region_ids: request.region_ids,
             full_file_listing: request.full_file_listing,
-            timeout_secs: timeout.as_secs() as u32,
+            timeout_secs: gc_timeout_secs(timeout),
         };
 
         let resp: GcRegionsResponse = self
@@ -294,7 +294,9 @@ impl Inner {
                 "gc_regions",
                 move |mut client| {
                     let mut req = Request::new(req.clone());
-                    req.set_timeout(timeout);
+                    if let Some(timeout) = timeout {
+                        req.set_timeout(timeout);
+                    }
                     async move { client.gc_regions(req).await.map(|res| res.into_inner()) }
                 },
                 |resp: &GcRegionsResponse| &resp.header,
@@ -323,7 +325,7 @@ impl Inner {
             schema_name: request.schema_name,
             table_name: request.table_name,
             full_file_listing: request.full_file_listing,
-            timeout_secs: timeout.as_secs() as u32,
+            timeout_secs: gc_timeout_secs(timeout),
         };
 
         let resp: GcTableResponse = self
@@ -331,7 +333,9 @@ impl Inner {
                 "gc_table",
                 move |mut client| {
                     let mut req = Request::new(req.clone());
-                    req.set_timeout(timeout);
+                    if let Some(timeout) = timeout {
+                        req.set_timeout(timeout);
+                    }
                     async move { client.gc_table(req).await.map(|res| res.into_inner()) }
                 },
                 |resp: &GcTableResponse| &resp.header,
@@ -413,6 +417,12 @@ impl Inner {
     }
 }
 
+fn gc_timeout_secs(timeout: Option<Duration>) -> u32 {
+    timeout
+        .map(|timeout| timeout.as_secs().max(1).try_into().unwrap_or(u32::MAX))
+        .unwrap_or(0)
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::{Duration, Instant};
@@ -438,7 +448,17 @@ mod tests {
     use tonic::codec::CompressionEncoding;
     use tonic::{Request, Response, Status};
 
+    use super::gc_timeout_secs;
     use crate::client::MetaClientBuilder;
+
+    #[test]
+    fn test_gc_timeout_secs() {
+        assert_eq!(gc_timeout_secs(None), 0);
+        assert_eq!(gc_timeout_secs(Some(Duration::from_millis(1))), 1);
+        assert_eq!(gc_timeout_secs(Some(Duration::from_millis(999))), 1);
+        assert_eq!(gc_timeout_secs(Some(Duration::from_secs(1))), 1);
+        assert_eq!(gc_timeout_secs(Some(Duration::from_secs(10))), 10);
+    }
 
     #[derive(Clone)]
     struct MockHeartbeat {

@@ -42,22 +42,22 @@ WHERE c.tier = 'gold';
 |               |     Projection: o.id, o.customer_id, o.amount                                                                                     |
 |               |       MergeScan [is_placeholder=false, remote_input=[                                                                             |
 |               | SubqueryAlias: o                                                                                                                  |
-|               |   TableScan: orders                                                                                                               |
+|               |   Filter: orders.customer_id IS NOT NULL                                                                                          |
+|               |     TableScan: orders, partial_filters=[orders.customer_id IS NOT NULL]                                                           |
 |               | ]]                                                                                                                                |
-|               |     Filter: c.tier = Utf8("gold")                                                                                                 |
-|               |       Projection: c.customer_id, c.name, c.tier                                                                                   |
-|               |         MergeScan [is_placeholder=false, remote_input=[                                                                           |
+|               |     Projection: c.customer_id, c.name, c.tier                                                                                     |
+|               |       MergeScan [is_placeholder=false, remote_input=[                                                                             |
 |               | SubqueryAlias: c                                                                                                                  |
-|               |   TableScan: customers                                                                                                            |
+|               |   Filter: customers.customer_id IS NOT NULL AND customers.tier = Utf8("gold")                                                     |
+|               |     TableScan: customers, partial_filters=[customers.tier = Utf8("gold"), customers.customer_id IS NOT NULL]                      |
 |               | ]]                                                                                                                                |
 | physical_plan | HashJoinExec: mode=Partitioned, join_type=Inner, on=[(customer_id@1, customer_id@0)], projection=[id@0, amount@2, name@4, tier@5] |
 |               |   RepartitionExec: REDACTED
 |               |     ProjectionExec: expr=[id@0 as id, customer_id@1 as customer_id, amount@2 as amount]                                           |
 |               |       MergeScanExec: REDACTED
 |               |   RepartitionExec: REDACTED
-|               |     FilterExec: tier@2 = gold                                                                                                     |
-|               |       ProjectionExec: expr=[customer_id@0 as customer_id, name@1 as name, tier@2 as tier]                                         |
-|               |         MergeScanExec: REDACTED
+|               |     ProjectionExec: expr=[customer_id@0 as customer_id, name@1 as name, tier@2 as tier]                                           |
+|               |       MergeScanExec: REDACTED
 |               |                                                                                                                                   |
 +---------------+-----------------------------------------------------------------------------------------------------------------------------------+
 
@@ -91,15 +91,16 @@ WHERE c.tier = 'gold';
 |_|_|_ProjectionExec: expr=[id@0 as id, customer_id@1 as customer_id, amount@2 as amount] metrics=REDACTED_|
 |_|_|_MergeScanExec: REDACTED
 |_|_|_RepartitionExec: partitioning=REDACTED
-|_|_|_FilterExec: tier@2 = gold metrics=REDACTED_|
 |_|_|_ProjectionExec: expr=[customer_id@0 as customer_id, name@1 as name, tier@2 as tier] metrics=REDACTED_|
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
-| 1_| 0_|_CooperativeExec metrics=REDACTED_|
-|_|_|_SeqScan: region=REDACTED, {"partition_count":REDACTED, "projection": ["id", "customer_id", "amount", "ts"], "flat_format":REDACTED, "metrics_per_partition": REDACTED metrics=REDACTED_|
+| 1_| 0_|_FilterExec: customer_id@1 IS NOT NULL metrics=REDACTED_|
+|_|_|_CooperativeExec metrics=REDACTED_|
+|_|_|_SeqScan: region=REDACTED, {"partition_count":REDACTED, "projection": ["id", "customer_id", "amount", "ts"], "filters": ["customer_id IS NOT NULL"], "flat_format":REDACTED, "metrics_per_partition": REDACTED metrics=REDACTED_|
 |_|_|_|
-| 1_| 0_|_CooperativeExec metrics=REDACTED_|
-|_|_|_SeqScan: region=REDACTED, {"partition_count":REDACTED, "projection": ["customer_id", "name", "tier", "ts"], "dyn_filters": ["DynamicFilter [ REDACTED ]"], "flat_format":REDACTED, "metrics_per_partition": REDACTED metrics=REDACTED_|
+| 1_| 0_|_FilterExec: customer_id@0 IS NOT NULL AND tier@2 = gold metrics=REDACTED_|
+|_|_|_CooperativeExec metrics=REDACTED_|
+|_|_|_SeqScan: region=REDACTED, {"partition_count":REDACTED, "projection": ["customer_id", "name", "tier", "ts"], "filters": ["tier = Utf8(\"gold\")", "customer_id IS NOT NULL"], "dyn_filters": ["DynamicFilter [ REDACTED ]"], "flat_format":REDACTED, "metrics_per_partition": REDACTED metrics=REDACTED_|
 |_|_|_|
 |_|_| Total rows: REDACTED_|
 +-+-+-+
@@ -160,33 +161,33 @@ FROM (SELECT "id", customer_id as cid, amount, ts FROM orders) o
 JOIN customers c ON o.cid = c.customer_id
 WHERE c.tier IN ('gold', 'silver');
 
-+---------------+---------------------------------------------------------------------------------------------------------------------------+
-| plan_type     | plan                                                                                                                      |
-+---------------+---------------------------------------------------------------------------------------------------------------------------+
-| logical_plan  | Projection: o.id, o.amount, c.name, c.tier                                                                                |
-|               |   Inner Join: o.cid = c.customer_id                                                                                       |
-|               |     Projection: o.id, o.cid, o.amount                                                                                     |
-|               |       MergeScan [is_placeholder=false, remote_input=[                                                                     |
-|               | SubqueryAlias: o                                                                                                          |
-|               |   Projection: orders.id, orders.customer_id AS cid, orders.amount, orders.ts                                              |
-|               |     TableScan: orders                                                                                                     |
-|               | ]]                                                                                                                        |
-|               |     Filter: c.tier = Utf8("gold") OR c.tier = Utf8("silver")                                                              |
-|               |       Projection: c.customer_id, c.name, c.tier                                                                           |
-|               |         MergeScan [is_placeholder=false, remote_input=[                                                                   |
-|               | SubqueryAlias: c                                                                                                          |
-|               |   TableScan: customers                                                                                                    |
-|               | ]]                                                                                                                        |
-| physical_plan | HashJoinExec: mode=Partitioned, join_type=Inner, on=[(cid@1, customer_id@0)], projection=[id@0, amount@2, name@4, tier@5] |
++---------------+-------------------------------------------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                                                            |
++---------------+-------------------------------------------------------------------------------------------------------------------------------------------------+
+| logical_plan  | Projection: o.id, o.amount, c.name, c.tier                                                                                                      |
+|               |   Inner Join: o.cid = c.customer_id                                                                                                             |
+|               |     Projection: o.id, o.cid, o.amount                                                                                                           |
+|               |       MergeScan [is_placeholder=false, remote_input=[                                                                                           |
+|               | SubqueryAlias: o                                                                                                                                |
+|               |   Projection: orders.id, orders.customer_id AS cid, orders.amount, orders.ts                                                                    |
+|               |     Filter: orders.customer_id IS NOT NULL                                                                                                      |
+|               |       TableScan: orders, partial_filters=[orders.customer_id IS NOT NULL]                                                                       |
+|               | ]]                                                                                                                                              |
+|               |     Projection: c.customer_id, c.name, c.tier                                                                                                   |
+|               |       MergeScan [is_placeholder=false, remote_input=[                                                                                           |
+|               | SubqueryAlias: c                                                                                                                                |
+|               |   Filter: customers.customer_id IS NOT NULL AND (customers.tier = Utf8("gold") OR customers.tier = Utf8("silver"))                              |
+|               |     TableScan: customers, partial_filters=[customers.tier = Utf8("gold") OR customers.tier = Utf8("silver"), customers.customer_id IS NOT NULL] |
+|               | ]]                                                                                                                                              |
+| physical_plan | HashJoinExec: mode=Partitioned, join_type=Inner, on=[(cid@1, customer_id@0)], projection=[id@0, amount@2, name@4, tier@5]                       |
 |               |   RepartitionExec: REDACTED
-|               |     ProjectionExec: expr=[id@0 as id, cid@1 as cid, amount@2 as amount]                                                   |
+|               |     ProjectionExec: expr=[id@0 as id, cid@1 as cid, amount@2 as amount]                                                                         |
 |               |       MergeScanExec: REDACTED
 |               |   RepartitionExec: REDACTED
-|               |     FilterExec: tier@2 = gold OR tier@2 = silver                                                                          |
-|               |       ProjectionExec: expr=[customer_id@0 as customer_id, name@1 as name, tier@2 as tier]                                 |
-|               |         MergeScanExec: REDACTED
-|               |                                                                                                                           |
-+---------------+---------------------------------------------------------------------------------------------------------------------------+
+|               |     ProjectionExec: expr=[customer_id@0 as customer_id, name@1 as name, tier@2 as tier]                                                         |
+|               |       MergeScanExec: REDACTED
+|               |                                                                                                                                                 |
++---------------+-------------------------------------------------------------------------------------------------------------------------------------------------+
 
 -- SQLNESS REPLACE ("metrics_per_partition":\s*.*metrics=) "metrics_per_partition": REDACTED metrics=
 -- SQLNESS REPLACE (metrics=\{.*\}) metrics=REDACTED
@@ -218,16 +219,17 @@ WHERE c.tier IN ('gold', 'silver');
 |_|_|_ProjectionExec: expr=[id@0 as id, cid@1 as cid, amount@2 as amount] metrics=REDACTED_|
 |_|_|_MergeScanExec: REDACTED
 |_|_|_RepartitionExec: partitioning=REDACTED
-|_|_|_FilterExec: tier@2 = gold OR tier@2 = silver metrics=REDACTED_|
 |_|_|_ProjectionExec: expr=[customer_id@0 as customer_id, name@1 as name, tier@2 as tier] metrics=REDACTED_|
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
 | 1_| 0_|_ProjectionExec: expr=[id@0 as id, customer_id@1 as cid, amount@2 as amount, ts@3 as ts] metrics=REDACTED_|
+|_|_|_FilterExec: customer_id@1 IS NOT NULL metrics=REDACTED_|
 |_|_|_CooperativeExec metrics=REDACTED_|
-|_|_|_SeqScan: region=REDACTED, {"partition_count":REDACTED, "projection": ["id", "customer_id", "amount", "ts"], "flat_format":REDACTED, "metrics_per_partition": REDACTED metrics=REDACTED_|
+|_|_|_SeqScan: region=REDACTED, {"partition_count":REDACTED, "projection": ["id", "customer_id", "amount", "ts"], "filters": ["customer_id IS NOT NULL"], "flat_format":REDACTED, "metrics_per_partition": REDACTED metrics=REDACTED_|
 |_|_|_|
-| 1_| 0_|_CooperativeExec metrics=REDACTED_|
-|_|_|_SeqScan: region=REDACTED, {"partition_count":REDACTED, "projection": ["customer_id", "name", "tier", "ts"], "dyn_filters": ["DynamicFilter [ REDACTED ]"], "flat_format":REDACTED, "metrics_per_partition": REDACTED metrics=REDACTED_|
+| 1_| 0_|_FilterExec: customer_id@0 IS NOT NULL AND (tier@2 = gold OR tier@2 = silver) metrics=REDACTED_|
+|_|_|_CooperativeExec metrics=REDACTED_|
+|_|_|_SeqScan: region=REDACTED, {"partition_count":REDACTED, "projection": ["customer_id", "name", "tier", "ts"], "filters": ["tier = Utf8(\"gold\") OR tier = Utf8(\"silver\")", "customer_id IS NOT NULL"], "dyn_filters": ["DynamicFilter [ REDACTED ]"], "flat_format":REDACTED, "metrics_per_partition": REDACTED metrics=REDACTED_|
 |_|_|_|
 |_|_| Total rows: REDACTED_|
 +-+-+-+

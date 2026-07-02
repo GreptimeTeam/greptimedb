@@ -55,7 +55,7 @@ WHERE s."id"=e.sid
   AND e.grade <= (SELECT AVG(e2.grade) - 1 FROM exams e2 WHERE s."id"=e2.sid OR (e2.curriculum=s.major AND s."year">=e2."year")) 
 ORDER BY "name", course;
 
-Error: 1001(Unsupported), This feature is not implemented: Physical plan does not support logical expression ScalarSubquery(<subquery>)
+Error: 3001(EngineExecuteQuery), Error during planning: Correlated scalar subquery can only be used in Projection, Filter, Aggregate plan nodes
 
 -- Test 3: EXISTS subquery
 SELECT "name", major 

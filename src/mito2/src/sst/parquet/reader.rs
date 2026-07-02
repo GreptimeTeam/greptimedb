@@ -1428,6 +1428,8 @@ pub(crate) struct ReaderFilterMetrics {
     pub(crate) pruner_cache_miss: usize,
     /// Duration spent waiting for pruner to build file ranges.
     pub(crate) pruner_prune_cost: Duration,
+    /// Number of files filtered by manifest time-range pruning.
+    pub(crate) files_time_range_pruned: usize,
 }
 
 impl ReaderFilterMetrics {
@@ -1460,6 +1462,7 @@ impl ReaderFilterMetrics {
         self.pruner_cache_hit += other.pruner_cache_hit;
         self.pruner_cache_miss += other.pruner_cache_miss;
         self.pruner_prune_cost += other.pruner_prune_cost;
+        self.files_time_range_pruned += other.files_time_range_pruned;
 
         // Merge optional applier metrics
         if let Some(other_metrics) = &other.inverted_index_apply_metrics {
