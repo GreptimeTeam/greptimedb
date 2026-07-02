@@ -2465,8 +2465,10 @@ impl PromPlanner {
             plan: &LogicalPlan,
             out: &mut BTreeSet<String>,
         ) -> Result<()> {
-            if let LogicalPlan::TableScan(scan) = plan {
-                let table = planner.table_from_source(&scan.source)?;
+            // Derived PromQL plans may contain non-Greptime scans without row-key metadata.
+            if let LogicalPlan::TableScan(scan) = plan
+                && let Ok(table) = planner.table_from_source(&scan.source)
+            {
                 for col in table.table_info().meta.row_key_column_names() {
                     if col != DATA_SCHEMA_TABLE_ID_COLUMN_NAME
                         && col != DATA_SCHEMA_TSID_COLUMN_NAME
@@ -6574,6 +6576,51 @@ mod test {
             .find(|line| line.contains("Aggregate: groupBy="))
             .unwrap();
         assert!(!aggr_line.contains(DATA_SCHEMA_TSID_COLUMN_NAME));
+    }
+
+    #[tokio::test]
+    async fn aggregate_over_binary_time_function_expr() {
+        for op in ["sum", "min", "max", "avg"] {
+            let prom_expr = parser::parse(&format!(
+                "{op} by (tag_0, tag_1, tag_2) (time() - some_metric)"
+            ))
+            .unwrap();
+            let eval_stmt = EvalStmt {
+                expr: prom_expr,
+                start: UNIX_EPOCH,
+                end: UNIX_EPOCH
+                    .checked_add(Duration::from_secs(100_000))
+                    .unwrap(),
+                interval: Duration::from_secs(5),
+                lookback_delta: Duration::from_secs(1),
+            };
+
+            let table_provider = build_test_table_provider_with_tsid(
+                &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
+                3,
+                1,
+            )
+            .await;
+            let plan =
+                PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
+                    .await
+                    .unwrap();
+
+            let plan_str = plan.display_indent_schema().to_string();
+            let aggr_line = plan_str
+                .lines()
+                .find(|line| line.contains("Aggregate: groupBy="))
+                .unwrap();
+            assert!(aggr_line.contains(op), "{plan_str}");
+            assert!(aggr_line.contains("first_value"), "{plan_str}");
+            assert!(
+                !plan
+                    .schema()
+                    .fields()
+                    .iter()
+                    .any(|field| { field.name() == DATA_SCHEMA_TSID_COLUMN_NAME })
+            );
+        }
     }
 
     #[tokio::test]
