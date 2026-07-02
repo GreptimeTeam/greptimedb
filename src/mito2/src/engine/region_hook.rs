@@ -19,8 +19,8 @@
 //! The [`RegionHook`] trait provides two methods with clear separation of concerns:
 //!
 //! - [`on_sst_files_written`]: Fires when mito2 physically writes SST **data files**.
-//!   Provides per-file [`SstInfo`] + [`FileMeta`] — the richest available metadata
-//!   (row counts, index metadata, Parquet metadata, etc.).
+//!   Provides per-file [`SstInfo`] + [`FileMeta`]; metadata richness varies by path
+//!   (see [`SstFileInfo`] and the coverage footnote).
 //!
 //! - [`on_manifest_updated`]: Fires after **any** manifest write is successfully committed.
 //!   Receives the full [`RegionMetaActionList`] so consumers can inspect what changed
@@ -46,9 +46,10 @@
 //! | Enter staging                | ❌ (no SST files)       | ✅ Yes                |
 //! | Async index build            | ❌ (index files only)   | ✅ Yes                |
 //!
-//! ¹ Remote compaction runs on a dedicated compactor node via `open_compaction_region()`.
-//!   The caller must pass plugins via `OpenCompactionRegionRequest` to enable hooks on the
-//!   compactor node.
+//! ¹ Remote compaction runs on a dedicated compactor node via `open_compaction_region()`;
+//!   pass plugins via `OpenCompactionRegionRequest` to enable hooks there. `sst_infos` is
+//!   `#[serde(skip)]` over the wire, so each [`SstInfo`] is rebuilt from [`FileMeta`] with
+//!   empty footer/index — see [`SstFileInfo`] for field-level detail.
 //! ² Apply staging fires `on_manifest_updated` twice: once when the staging SST files are
 //!   committed via `RegionEdit`, and once when `exit_staging_on_success` merges all staged
 //!   manifest actions into the live manifest.
@@ -168,6 +169,12 @@ impl PendingManifestHook {
 }
 
 /// Information about a single SST data file written during flush or compaction.
+///
+/// `file_meta` is always complete. `sst_info_ref` mirrors those scalars and adds the
+/// Parquet footer (`file_metadata`) and full `index_metadata` — but **only when mito2
+/// wrote the file in-process** (flush, local compaction). On remote compaction `SstInfo`
+/// is rebuilt from `FileMeta`, so both are empty; hooks needing column statistics must
+/// fetch the footer from object storage.
 pub struct SstFileInfo<'a> {
     pub sst_info_ref: &'a SstInfo,
     pub file_meta: &'a FileMeta,
@@ -190,6 +197,11 @@ pub trait RegionHook: Send + Sync + Debug {
     /// This fires only when mito2 itself writes SST files (flush and compaction).
     /// It does **not** fire when SST files are pre-written externally (bulk ingestion,
     /// copy region) or when only index files are written (async index build).
+    ///
+    /// # Metadata availability
+    /// See [`SstFileInfo`]: `file_meta` is always complete, but the [`SstInfo`] footer
+    /// and index output are empty on remote compaction. Hooks needing column statistics
+    /// (e.g. an Iceberg manifest) must fetch the footer from object storage.
     async fn on_sst_files_written(
         &self,
         region_id: RegionId,

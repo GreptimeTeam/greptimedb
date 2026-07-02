@@ -1,0 +1,8 @@
+name = "table_ttl"
+reason = "Verify table TTL metadata created by old binaries is preserved and can be changed after upgrade."
+introduced_by = "PR #8352"
+topologies = ["distributed"]
+from_range = ["*"]
+to_range = ["*"]
+features = ["table", "ttl"]
+owner = "storage"

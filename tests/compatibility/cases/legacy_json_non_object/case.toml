@@ -1,0 +1,8 @@
+name = "legacy_json_non_object"
+reason = "Verify non-object JSON values written by old JSONB binaries remain readable after JSON2 non-object write rejection changes."
+introduced_by = "PR #8381"
+topologies = ["distributed"]
+from_range = ["<=v1.1.0"]
+to_range = [">=v1.2.0"]
+features = ["json", "table"]
+owner = "query"

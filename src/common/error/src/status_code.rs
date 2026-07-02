@@ -14,6 +14,7 @@
 
 use std::fmt;
 
+use serde::{Deserialize, Deserializer, Serializer};
 use strum::{AsRefStr, EnumIter, EnumString, FromRepr};
 use tonic::Code;
 
@@ -185,6 +186,22 @@ impl StatusCode {
 
     pub fn from_u32(value: u32) -> Option<Self> {
         StatusCode::from_repr(value as usize)
+    }
+
+    pub fn serialize_as_u32<S>(code: &Self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_u32(*code as u32)
+    }
+
+    pub fn deserialize_from_u32<'de, D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let code = u32::deserialize(deserializer)?;
+        StatusCode::from_u32(code)
+            .ok_or_else(|| serde::de::Error::custom(format!("unknown status code: {code}")))
     }
 }
 

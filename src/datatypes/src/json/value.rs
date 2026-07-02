@@ -144,13 +144,6 @@ impl JsonVariant {
         }
     }
 
-    pub(crate) fn as_f64(&self) -> Option<f64> {
-        match self {
-            JsonVariant::Number(n) => Some(n.as_f64()),
-            _ => None,
-        }
-    }
-
     pub(crate) fn native_type(&self) -> JsonNativeType {
         match self {
             JsonVariant::Null => JsonNativeType::Null,
@@ -513,6 +506,7 @@ impl JsonValue {
         }
 
         let x = std::mem::take(&mut self.json_variant);
+
         self.json_variant = helper(x, expected.native_type())?;
         self.json_type = OnceLock::new();
         Ok(())
@@ -650,6 +644,7 @@ where
         Some(t) => t,
         None => return JsonNativeType::Array(Box::new(JsonNativeType::Null)),
     };
+
     for x in iter {
         if matches!(item_type, JsonNativeType::Variant) {
             break;
@@ -796,7 +791,7 @@ impl<'a> JsonValueRef<'a> {
         }
     }
 
-    fn as_value_ref(&self) -> ValueRef<'_> {
+    pub fn as_value_ref(&self) -> ValueRef<'_> {
         fn helper<'a>(v: &'a JsonVariantRef) -> ValueRef<'a> {
             match v {
                 JsonVariantRef::Null => ValueRef::Null,
@@ -844,17 +839,6 @@ impl<'a> JsonValueRef<'a> {
 
     pub(crate) fn variant(&self) -> &JsonVariantRef<'a> {
         &self.json_variant
-    }
-
-    pub(crate) fn as_struct_value(&self) -> ValueRef<'_> {
-        if self.is_object() {
-            return self.as_value_ref();
-        }
-
-        ValueRef::Struct(StructValueRef::RefList {
-            val: vec![self.as_value_ref()],
-            fields: self.json_type().as_struct_type(),
-        })
     }
 }
 

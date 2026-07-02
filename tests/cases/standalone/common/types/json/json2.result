@@ -8,6 +8,26 @@ create table json2_table (
 
 Affected Rows: 0
 
+insert into json2_table (ts, j) values (101, '[1, 2, 3]');
+
+Error: 1001(Unsupported), Non-object json is not supported currently
+
+insert into json2_table (ts, j) values (102, '"hello"');
+
+Error: 1001(Unsupported), Non-object json is not supported currently
+
+insert into json2_table (ts, j) values (103, '42');
+
+Error: 1001(Unsupported), Non-object json is not supported currently
+
+insert into json2_table (ts, j) values (104, 'true');
+
+Error: 1001(Unsupported), Non-object json is not supported currently
+
+insert into json2_table (ts, j) values (105, 'null');
+
+Error: 1001(Unsupported), Non-object json is not supported currently
+
 insert into json2_table (ts, j)
 values (1, '{"a": {"b": 1}, "c": "s1", "d": [{"e": {"f": 0.1}}]}'),
        (2, '{"a": {"b": -2}, "c": "s2", "d": [{"e": {"f": 0.2}}]}');
@@ -209,4 +229,26 @@ select j.d from json2_table order by ts;
 drop table json2_table;
 
 Affected Rows: 0
+
+create table json2_default_null_ok (
+    ts timestamp time index,
+    j json2(
+        a int64 null default null
+    )
+);
+
+Affected Rows: 0
+
+drop table json2_default_null_ok;
+
+Affected Rows: 0
+
+create table json2_default_null_check (
+    ts timestamp time index,
+    j json2(
+        a int64 not null default null
+    )
+);
+
+Error: 2000(InvalidSyntax), Invalid SQL, error: invalid DEFAULT for JSON2 type hint 'a': Default value should not be null for non null column
 

@@ -1020,7 +1020,7 @@ jobs:
       artifact-name: bins
 
   compat:
-    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' || (github.event_name == 'pull_request' && github.event.action == 'ready_for_review')) }}
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' || (github.event_name == 'pull_request' && (github.event.action == 'ready_for_review' || (github.event.action == 'opened' && github.event.pull_request.draft == false)))) }}
     name: Compatibility Test (recent releases)
     needs: build
     runs-on: ubuntu-latest

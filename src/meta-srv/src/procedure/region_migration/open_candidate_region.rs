@@ -35,6 +35,7 @@ use crate::error::{self, Result};
 use crate::handler::HeartbeatMailbox;
 use crate::procedure::region_migration::flush_leader_region::PreFlushRegion;
 use crate::procedure::region_migration::{Context, RegionMigrationTriggerReason, State};
+use crate::procedure::utils::instruction_error_result;
 use crate::service::mailbox::Channel;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -192,10 +193,19 @@ impl OpenCandidateRegion {
 
                 if result {
                     Ok(())
-                } else {
-                    error::RetryLaterSnafu {
-                        reason: format!(
+                } else if let Some(error) = error {
+                    instruction_error_result(
+                        &error,
+                        format!(
                             "Region {region_ids:?} is not opened by datanode {:?}, error: {error:?}, elapsed: {:?}",
+                            candidate,
+                            now.elapsed()
+                        ),
+                    )
+                } else {
+                    error::UnexpectedSnafu {
+                        violated: format!(
+                            "Region {region_ids:?} is not opened by datanode {:?}, but error is absent, elapsed: {:?}",
                             candidate,
                             now.elapsed()
                         ),
@@ -222,7 +232,10 @@ mod tests {
     use std::collections::HashMap;
 
     use common_catalog::consts::MITO2_ENGINE;
+    use common_error::ext::RetryHint;
+    use common_error::status_code::StatusCode;
     use common_meta::DatanodeId;
+    use common_meta::instruction::InstructionError;
     use common_meta::key::table_route::TableRouteValue;
     use common_meta::key::test_utils::new_test_table_info;
     use common_meta::peer::Peer;
@@ -234,7 +247,8 @@ mod tests {
     use crate::procedure::region_migration::test_util::{self, TestingEnv, new_procedure_context};
     use crate::procedure::region_migration::{ContextFactory, PersistentContext};
     use crate::procedure::test_util::{
-        new_close_region_reply, new_open_region_reply, send_mock_reply,
+        new_close_region_reply, new_open_region_reply, new_open_region_reply_with_error,
+        send_mock_reply,
     };
 
     fn new_persistent_context() -> PersistentContext {
@@ -477,6 +491,79 @@ mod tests {
         assert_matches!(err, Error::RetryLater { .. });
         assert!(err.is_retryable());
         assert!(format!("{err:?}").contains("test mocked"));
+    }
+
+    #[tokio::test]
+    async fn test_open_candidate_region_non_retryable_instruction_error() {
+        let state = OpenCandidateRegion;
+        let persistent_context = new_persistent_context();
+        let region_id = persistent_context.region_ids[0];
+        let to_peer_id = persistent_context.to_peer.id;
+        let mut env = TestingEnv::new();
+
+        let mut ctx = env.context_factory().new_context(persistent_context);
+        let mailbox_ctx = env.mailbox_context();
+        let mailbox = mailbox_ctx.mailbox().clone();
+
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+
+        mailbox_ctx
+            .insert_heartbeat_response_receiver(Channel::Datanode(to_peer_id), tx)
+            .await;
+
+        send_mock_reply(mailbox, rx, |id| {
+            Ok(new_open_region_reply_with_error(
+                id,
+                false,
+                Some(InstructionError {
+                    code: StatusCode::Internal,
+                    message: "non retryable mocked".to_string(),
+                    retry_hint: RetryHint::NonRetryable,
+                }),
+            ))
+        });
+
+        let open_instruction = new_mock_open_instruction(to_peer_id, region_id);
+        let err = state
+            .open_candidate_region(&mut ctx, open_instruction)
+            .await
+            .unwrap_err();
+
+        assert_matches!(err, Error::Unexpected { .. });
+        assert!(!err.is_retryable());
+        assert!(format!("{err:?}").contains("non retryable mocked"));
+    }
+
+    #[tokio::test]
+    async fn test_open_candidate_region_false_without_error_is_unexpected() {
+        let state = OpenCandidateRegion;
+        let persistent_context = new_persistent_context();
+        let region_id = persistent_context.region_ids[0];
+        let to_peer_id = persistent_context.to_peer.id;
+        let mut env = TestingEnv::new();
+
+        let mut ctx = env.context_factory().new_context(persistent_context);
+        let mailbox_ctx = env.mailbox_context();
+        let mailbox = mailbox_ctx.mailbox().clone();
+
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+
+        mailbox_ctx
+            .insert_heartbeat_response_receiver(Channel::Datanode(to_peer_id), tx)
+            .await;
+
+        send_mock_reply(mailbox, rx, |id| {
+            Ok(new_open_region_reply_with_error(id, false, None))
+        });
+
+        let open_instruction = new_mock_open_instruction(to_peer_id, region_id);
+        let err = state
+            .open_candidate_region(&mut ctx, open_instruction)
+            .await
+            .unwrap_err();
+
+        assert_matches!(err, Error::Unexpected { .. });
+        assert!(!err.is_retryable());
     }
 
     #[tokio::test]

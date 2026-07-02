@@ -1,0 +1,52 @@
+SELECT host, ts, cpu
+FROM t_last_row_append_mode
+ORDER BY host, ts, cpu;
+
++-------+-------------------------+------+
+| host  | ts                      | cpu  |
++-------+-------------------------+------+
+| host1 | 1970-01-01T00:00:00     | 10.0 |
+| host2 | 1970-01-01T00:00:00.001 | 20.0 |
++-------+-------------------------+------+
+
+ALTER TABLE t_last_row_append_mode SET 'append_mode' = 'true';
+
+Affected Rows: 0
+
+SHOW CREATE TABLE t_last_row_append_mode;
+
++------------------------+-------------------------------------------------------+
+| Table                  | Create Table                                          |
++------------------------+-------------------------------------------------------+
+| t_last_row_append_mode | CREATE TABLE IF NOT EXISTS "t_last_row_append_mode" ( |
+|                        |   "host" STRING NULL,                                 |
+|                        |   "ts" TIMESTAMP(3) NOT NULL,                         |
+|                        |   "cpu" DOUBLE NULL,                                  |
+|                        |   TIME INDEX ("ts"),                                  |
+|                        |   PRIMARY KEY ("host")                                |
+|                        | )                                                     |
+|                        |                                                       |
+|                        | ENGINE=mito                                           |
+|                        | WITH(                                                 |
+|                        |   append_mode = 'true'                                |
+|                        | )                                                     |
++------------------------+-------------------------------------------------------+
+
+INSERT INTO t_last_row_append_mode VALUES
+('host1', 0, 100.0),
+('host2', 1, 200.0);
+
+Affected Rows: 2
+
+SELECT host, ts, cpu
+FROM t_last_row_append_mode
+ORDER BY host, ts, cpu;
+
++-------+-------------------------+-------+
+| host  | ts                      | cpu   |
++-------+-------------------------+-------+
+| host1 | 1970-01-01T00:00:00     | 10.0  |
+| host1 | 1970-01-01T00:00:00     | 100.0 |
+| host2 | 1970-01-01T00:00:00.001 | 20.0  |
+| host2 | 1970-01-01T00:00:00.001 | 200.0 |
++-------+-------------------------+-------+

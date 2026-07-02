@@ -268,7 +268,7 @@ impl procedure_service_server::ProcedureService for Metasrv {
             .handle_gc_regions(MetaGcRegionsRequest {
                 region_ids,
                 full_file_listing,
-                timeout: Duration::from_secs(timeout_secs as u64),
+                timeout: Self::normalize_gc_timeout(Duration::from_secs(timeout_secs as u64)),
             })
             .await?;
 
@@ -295,7 +295,7 @@ impl procedure_service_server::ProcedureService for Metasrv {
                 schema_name,
                 table_name,
                 full_file_listing,
-                timeout: Duration::from_secs(timeout_secs as u64),
+                timeout: Self::normalize_gc_timeout(Duration::from_secs(timeout_secs as u64)),
             })
             .await?;
 
@@ -356,9 +356,8 @@ impl Metasrv {
         &self,
         region_ids: Vec<RegionId>,
         full_file_listing: bool,
-        timeout: Duration,
+        timeout: Option<Duration>,
     ) -> error::Result<GcResponse> {
-        let timeout = Self::normalize_gc_timeout(timeout);
         let gc_ticker = self.gc_ticker().context(error::UnexpectedSnafu {
             violated: "GC ticker not available".to_string(),
         })?;

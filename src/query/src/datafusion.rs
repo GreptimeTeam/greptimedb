@@ -67,6 +67,7 @@ use crate::metrics::{
     OnDone, QUERY_STAGE_ELAPSED, maybe_attach_region_watermark_metrics,
     should_collect_region_watermark_from_query_ctx,
 };
+use crate::options::ScheduledTimeExtension;
 use crate::physical_wrapper::PhysicalPlanWrapperRef;
 use crate::planner::{DfLogicalPlanner, LogicalPlanner};
 use crate::query_engine::{DescribeResult, QueryEngineContext, QueryEngineState};
@@ -557,6 +558,17 @@ impl QueryEngine for DatafusionQueryEngine {
             .insert(FunctionContext {
                 query_ctx: query_ctx.clone(),
                 state: self.engine_state().function_state(),
+            });
+
+        // Carry scheduled Flow time through ConfigOptions.extensions so that
+        // the distributed plan analyzer can read it during expression
+        // simplification (preventing wall-clock constant-folding of `now()`).
+        state
+            .config_mut()
+            .options_mut()
+            .extensions
+            .insert(ScheduledTimeExtension {
+                scheduled_time: crate::options::scheduled_time_from_ctx(&query_ctx),
             });
 
         let config_options = state.config_options().clone();

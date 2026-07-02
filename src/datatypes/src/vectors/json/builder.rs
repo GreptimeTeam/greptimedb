@@ -19,7 +19,7 @@ use crate::error::{Result, TryFromValueSnafu, UnsupportedOperationSnafu};
 use crate::json::value::{JsonValue, JsonVariant};
 use crate::prelude::{ValueRef, Vector, VectorRef};
 use crate::types::JsonType;
-use crate::types::json_type::JsonNativeType;
+use crate::types::json_type::{JsonFormat, JsonNativeType};
 use crate::vectors::{MutableVector, StructVectorBuilder};
 
 #[derive(Clone)]
@@ -29,9 +29,13 @@ pub(crate) struct JsonVectorBuilder {
 }
 
 impl JsonVectorBuilder {
-    pub(crate) fn new(json_type: JsonNativeType, capacity: usize) -> Self {
+    pub(crate) fn new(initial_native_type: JsonNativeType, capacity: usize) -> Self {
+        debug_assert!(matches!(
+            initial_native_type,
+            JsonNativeType::Object(_) | JsonNativeType::Null
+        ));
         Self {
-            merged_type: JsonType::new_json2(json_type),
+            merged_type: JsonType::new_json2(initial_native_type),
             values: Vec::with_capacity(capacity),
         }
     }
@@ -43,14 +47,11 @@ impl JsonVectorBuilder {
         );
         for value in self.values.iter_mut() {
             value.try_align(&self.merged_type)?;
-
             if value.is_null() {
                 builder.push_null();
                 continue;
             }
-
-            let value = value.as_ref();
-            builder.try_push_value_ref(&value.as_struct_value())?;
+            builder.try_push_value_ref(&value.as_ref().as_value_ref())?;
         }
         Ok(builder.to_vector())
     }
@@ -89,6 +90,16 @@ impl MutableVector for JsonVectorBuilder {
             .fail();
         };
         let json_type = value.json_type();
+        if !matches!(
+            json_type.format,
+            JsonFormat::Json2(ref native_type)
+                if matches!(native_type.as_ref(), JsonNativeType::Object(_) | JsonNativeType::Null)
+        ) {
+            return TryFromValueSnafu {
+                reason: format!("expected json object value, got {value:?}"),
+            }
+            .fail();
+        }
         if !self.merged_type.is_include(json_type) {
             self.merged_type.merge(json_type)?;
         }
@@ -173,39 +184,51 @@ mod tests {
             ))
         );
 
-        // Root-level conflicts should be lifted to a plain Variant field that preserves
-        // each original JSON payload.
-        let mut variant_builder = JsonVectorBuilder::new(JsonNativeType::Bool, 2);
-        let object = parse_json_value(r#"{"k":1}"#);
-        let boolean = parse_json_value("true");
-        variant_builder.try_push_value_ref(&boolean.as_value_ref())?;
-        variant_builder.try_push_value_ref(&object.as_value_ref())?;
+        // A Null initial type represents an unknown JSON2 runtime type. The first
+        // non-null value should set the concrete type instead of aligning all rows to Null.
+        let mut inferred_builder = JsonVectorBuilder::new(JsonNativeType::Null, 2);
+        let inferred_value = parse_json_value(r#"{"id":3}"#);
+        inferred_builder.push_null();
+        inferred_builder.try_push_value_ref(&inferred_value.as_value_ref())?;
 
-        let variant_type = JsonType::new_json2(JsonNativeType::Variant);
+        let inferred_type = JsonType::new_json2(JsonNativeType::Object(JsonObjectType::from([(
+            "id".to_string(),
+            JsonNativeType::i64(),
+        )])));
         assert_eq!(
-            variant_builder.data_type(),
-            ConcreteDataType::Json(variant_type.clone())
+            inferred_builder.data_type(),
+            ConcreteDataType::Json(inferred_type.clone())
         );
 
-        let variant_struct_type = variant_type.as_struct_type();
-        let vector = variant_builder.to_vector();
-        assert_eq!(
-            vector.get(0),
-            Value::Struct(StructValue::new(
-                vec![Value::Binary(Bytes::from(b"true".to_vec()))],
-                variant_struct_type.clone(),
-            ))
-        );
+        let inferred_struct_type = inferred_type.as_struct_type();
+        let vector = inferred_builder.to_vector();
+        assert_eq!(vector.get(0), Value::Null);
         assert_eq!(
             vector.get(1),
             Value::Struct(StructValue::new(
-                vec![Value::Binary(Bytes::from(br#"{"k":1}"#.to_vec()))],
-                variant_struct_type,
+                vec![Value::Int64(3)],
+                inferred_struct_type,
             ))
         );
 
+        // Non-object initial types are rejected by the builder invariant.
+        let result = std::panic::catch_unwind(|| JsonVectorBuilder::new(JsonNativeType::Bool, 2));
+        assert!(result.is_err());
+
+        // Non-object root values should be rejected at push time.
+        let mut object_builder =
+            JsonVectorBuilder::new(JsonNativeType::Object(Default::default()), 2);
+        let object = parse_json_value(r#"{"k":1}"#);
+        let boolean = parse_json_value("true");
+        let err = object_builder
+            .try_push_value_ref(&boolean.as_value_ref())
+            .unwrap_err();
+        assert!(err.to_string().contains("expected json object value"));
+        object_builder.try_push_value_ref(&object.as_value_ref())?;
+
         // Non-JSON values should be rejected at push time.
-        let mut invalid_builder = JsonVectorBuilder::new(JsonNativeType::Bool, 1);
+        let mut invalid_builder =
+            JsonVectorBuilder::new(JsonNativeType::Object(Default::default()), 1);
         let err = invalid_builder
             .try_push_value_ref(&ValueRef::Boolean(true))
             .unwrap_err();

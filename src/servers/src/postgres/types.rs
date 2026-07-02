@@ -30,7 +30,7 @@ use common_time::{IntervalDayTime, IntervalMonthDayNano, IntervalYearMonth};
 use datafusion_common::ScalarValue;
 use datafusion_expr::LogicalPlan;
 use datatypes::arrow::datatypes::DataType as ArrowDataType;
-use datatypes::json::JsonStructureSettings;
+use datatypes::json::JsonSettings;
 use datatypes::prelude::{ConcreteDataType, Value};
 use datatypes::schema::{Schema, SchemaRef};
 use datatypes::types::{Decimal128Type, IntervalType, TimestampType, jsonb_to_string};
@@ -81,7 +81,7 @@ pub(super) fn schema_to_pg(
 /// this function will encode greptime's `StructValue` into PostgreSQL jsonb type
 ///
 /// Note that greptimedb has different types of StructValue for storing json data,
-/// based on policy defined in `JsonStructureSettings`. But here the `StructValue`
+/// based on policy defined in `JsonSettings`. But here the `StructValue`
 /// should be fully structured.
 ///
 /// there are alternatives like records, arrays, etc. but there are also limitations:
@@ -93,7 +93,7 @@ fn encode_struct<S: Encoder>(
     builder: &mut S,
     pg_field: &FieldInfo,
 ) -> PgWireResult<()> {
-    let encoding_setting = JsonStructureSettings::Structured(None);
+    let encoding_setting = JsonSettings::default();
     let json_value = encoding_setting
         .decode(Value::Struct(struct_value))
         .map_err(|e| PgWireError::ApiError(Box::new(e)))?;

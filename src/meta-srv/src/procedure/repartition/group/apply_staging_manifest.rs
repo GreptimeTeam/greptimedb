@@ -38,6 +38,7 @@ use crate::procedure::repartition::group::utils::{
 };
 use crate::procedure::repartition::group::{Context, State};
 use crate::procedure::repartition::plan::TargetRegionDescriptor;
+use crate::procedure::utils::instruction_error_result;
 use crate::service::mailbox::{Channel, MailboxRef};
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -374,16 +375,16 @@ impl ApplyStagingManifest {
             }
         );
 
-        if error.is_some() {
-            return error::RetryLaterSnafu {
-                reason: format!(
+        if let Some(error) = error {
+            return instruction_error_result(
+                error,
+                format!(
                     "Failed to apply staging manifest on datanode {:?}, error: {:?}, elapsed: {:?}",
                     peer,
                     error,
                     now.elapsed()
                 ),
-            }
-            .fail();
+            );
         }
 
         ensure!(

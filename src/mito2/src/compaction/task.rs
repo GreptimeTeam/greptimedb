@@ -28,7 +28,6 @@ use crate::compaction::LocalCompactionState;
 use crate::compaction::compactor::{CompactionRegion, Compactor, MergeOutput};
 use crate::compaction::memory_manager::{CompactionMemoryGuard, CompactionMemoryManager};
 use crate::compaction::picker::{CompactionTask, PickerOutput};
-use crate::engine::region_hook::{RegionHookRef, SstFileInfo};
 use crate::error::{CompactRegionSnafu, CompactionMemoryExhaustedSnafu};
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
 use crate::metrics::{COMPACTION_FAILURE_COUNT, COMPACTION_MEMORY_WAIT, COMPACTION_STAGE_ELAPSED};
@@ -286,24 +285,7 @@ impl CompactionTaskImpl {
     }
 
     async fn invoke_sst_hook(&self, merge_output: &MergeOutput) {
-        let hook: Option<RegionHookRef> = self.compaction_region.plugins.get();
-        if let Some(hook) = hook {
-            let files: Vec<SstFileInfo<'_>> = merge_output
-                .sst_infos
-                .iter()
-                .zip(merge_output.files_to_add.iter())
-                .map(|(info, meta)| SstFileInfo {
-                    sst_info_ref: info,
-                    file_meta: meta,
-                })
-                .collect();
-            hook.on_sst_files_written(
-                self.compaction_region.region_id,
-                &self.compaction_region.region_metadata,
-                &files,
-            )
-            .await;
-        }
+        self.compaction_region.invoke_sst_hook(merge_output).await;
     }
 }
 
