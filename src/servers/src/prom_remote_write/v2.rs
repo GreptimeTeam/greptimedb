@@ -33,6 +33,7 @@ use snafu::{OptionExt, ResultExt, ensure};
 use crate::error::{self, Result};
 use crate::prom_remote_write::row_builder::PromCtx;
 use crate::prom_remote_write::try_decompress;
+use crate::prom_remote_write::validation::validate_label_name;
 #[allow(deprecated)]
 use crate::prom_store::{
     DATABASE_LABEL, DATABASE_LABEL_ALT, METRIC_NAME_LABEL, PHYSICAL_TABLE_LABEL,
@@ -98,9 +99,7 @@ pub(crate) fn into_write_requests(request: Request) -> Result<RemoteWriteV2Write
         }
 
         let (prom_ctx, table_name, tags) = resolve_series_labels(&symbols, &series)?;
-        if histogram_count > 0 {
-            ensure_no_internal_histogram_labels(&tags)?;
-        }
+        ensure_no_internal_histogram_labels(&tags)?;
         let metric_key = (prom_ctx.clone(), table_name.clone());
         if sample_count > 0 {
             ensure!(
@@ -429,7 +428,7 @@ fn resolve_series_labels(symbols: &[String], series: &TimeSeries) -> Result<Reso
     for pair in series.labels_refs.chunks_exact(2) {
         let name = symbol_ref(symbols, pair[0], "label name")?;
         let value = symbol_ref(symbols, pair[1], "label value")?;
-        validate_label(name, value)?;
+        validate_label(name)?;
         ensure!(
             label_names.insert(name),
             error::InvalidPromRemoteRequestSnafu {
@@ -451,21 +450,21 @@ fn resolve_series_labels(symbols: &[String], series: &TimeSeries) -> Result<Reso
     let table_name = table_name.context(error::InvalidPromRemoteRequestSnafu {
         msg: "missing '__name__' label in time-series".to_string(),
     })?;
+    ensure!(
+        !table_name.is_empty(),
+        error::InvalidPromRemoteRequestSnafu {
+            msg: "remote write v2 label `__name__` value must not be empty".to_string(),
+        }
+    );
 
     Ok((prom_ctx, table_name, tags))
 }
 
-fn validate_label(name: &str, value: &str) -> Result<()> {
+fn validate_label(name: &str) -> Result<()> {
     ensure!(
-        !name.is_empty(),
+        validate_label_name(name.as_bytes()),
         error::InvalidPromRemoteRequestSnafu {
-            msg: "remote write v2 label names must not be empty".to_string(),
-        }
-    );
-    ensure!(
-        !value.is_empty(),
-        error::InvalidPromRemoteRequestSnafu {
-            msg: format!("remote write v2 label `{name}` value must not be empty"),
+            msg: format!("remote write v2 invalid label name `{name}`"),
         }
     );
 
@@ -865,18 +864,53 @@ mod tests {
         cases.push((
             "empty label name",
             request_with_sample(vec![(METRIC_NAME_LABEL, "metric"), ("", "api")]),
-            "label names must not be empty",
+            "invalid label name",
         ));
 
         cases.push((
-            "empty label value",
-            request_with_sample(vec![(METRIC_NAME_LABEL, "metric"), ("job", "")]),
-            "label `job` value must not be empty",
+            "invalid label name",
+            request_with_sample(vec![(METRIC_NAME_LABEL, "metric"), ("has-dash", "api")]),
+            "invalid label name",
+        ));
+
+        cases.push((
+            "empty metric name",
+            request_with_sample(vec![(METRIC_NAME_LABEL, "")]),
+            "label `__name__` value must not be empty",
+        ));
+
+        cases.push((
+            "internal histogram label on samples",
+            request_with_sample(vec![
+                (METRIC_NAME_LABEL, "metric"),
+                (NATIVE_HISTOGRAM_FIELD, "user_value"),
+            ]),
+            "conflicts with an internal native histogram label",
         ));
 
         for (name, request, expected) in cases {
             assert_invalid(name, request, expected);
         }
+    }
+
+    #[test]
+    fn test_into_context_req_allows_empty_label_values() {
+        let ctx_req = into_write_requests(test_util::request_with_labels_and_samples(
+            vec![(METRIC_NAME_LABEL, "metric"), ("job", "")],
+            vec![Sample {
+                value: 1.0,
+                timestamp: 1000,
+                start_timestamp: 0,
+            }],
+        ))
+        .unwrap();
+
+        let rows = ctx_req.samples.all_req().next().unwrap().rows.unwrap();
+        let job_idx = column_index(&rows.schema, "job");
+        assert_eq!(
+            rows.rows[0].values[job_idx].value_data,
+            Some(ValueData::StringValue(String::new()))
+        );
     }
 
     #[test]
