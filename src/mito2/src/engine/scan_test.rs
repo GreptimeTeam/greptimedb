@@ -34,7 +34,9 @@ use futures::TryStreamExt;
 use serde_json::json;
 use store_api::region_engine::{PrepareRequest, RegionEngine, RegionScanner};
 use store_api::region_request::RegionRequest;
-use store_api::storage::{ProjectionInput, RegionId, ScanRequest, TimeSeriesDistribution};
+use store_api::storage::{
+    JsonReadHint, ProjectionInput, RegionId, ScanRequest, TimeSeriesDistribution,
+};
 
 use crate::config::MitoConfig;
 use crate::error::Error;
@@ -105,13 +107,13 @@ async fn test_json_type_hint_pushdown_scanner_returns_batches() -> WhateverResul
         projection_input: Some(ProjectionInput::new(vec![1, 0])),
         json_type_hint: HashMap::from([(
             "field_0".to_string(),
-            JsonNativeType::Object(JsonObjectType::from([(
+            JsonReadHint::Paths(JsonNativeType::Object(JsonObjectType::from([(
                 "a".to_string(),
                 JsonNativeType::Object(JsonObjectType::from([(
                     "x".to_string(),
                     JsonNativeType::i64(),
                 )])),
-            )])),
+            )]))),
         )]),
         ..Default::default()
     };

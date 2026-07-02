@@ -47,7 +47,7 @@ use parquet::file::metadata::PageIndexPolicy;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::RegionMetadataRef;
-use store_api::storage::RegionId;
+use store_api::storage::{JsonReadHint, RegionId};
 use task::MAX_PARALLEL_COMPACTION;
 use tokio::sync::mpsc::{self, Sender};
 
@@ -1060,7 +1060,12 @@ impl CompactionSstReaderBuilder<'_> {
                 }
             }
 
-            Some(json_type_hint)
+            Some(
+                json_type_hint
+                    .into_iter()
+                    .map(|(column, json_type)| (column, JsonReadHint::Paths(json_type)))
+                    .collect::<HashMap<_, _>>(),
+            )
         } else {
             None
         };
