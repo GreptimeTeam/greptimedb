@@ -14,6 +14,7 @@
 
 mod cluster_info;
 pub mod columns;
+pub mod flow_statistics;
 pub mod flows;
 mod information_memory_table;
 pub mod key_column_usage;
@@ -67,6 +68,7 @@ use crate::CatalogManager;
 use crate::error::{Error, Result};
 use crate::process_manager::ProcessManagerRef;
 use crate::system_schema::information_schema::cluster_info::InformationSchemaClusterInfo;
+use crate::system_schema::information_schema::flow_statistics::InformationSchemaFlowStatistics;
 use crate::system_schema::information_schema::flows::InformationSchemaFlows;
 use crate::system_schema::information_schema::information_memory_table::get_schema_columns;
 use crate::system_schema::information_schema::key_column_usage::InformationSchemaKeyColumnUsage;
@@ -263,6 +265,11 @@ impl SystemSchemaProviderInner for InformationSchemaProvider {
                 self.catalog_manager.clone(),
                 self.flow_metadata_manager.clone(),
             )) as _),
+            FLOW_STATISTICS => Some(Arc::new(InformationSchemaFlowStatistics::new(
+                self.catalog_name.clone(),
+                self.catalog_manager.clone(),
+                self.flow_metadata_manager.clone(),
+            )) as _),
             PROCEDURE_INFO => Some(
                 Arc::new(procedure_info::InformationSchemaProcedureInfo::new(
                     self.catalog_manager.clone(),
@@ -393,6 +400,10 @@ impl InformationSchemaProvider {
             self.build_table(STATISTICS).unwrap(),
         );
         tables.insert(FLOWS.to_string(), self.build_table(FLOWS).unwrap());
+        tables.insert(
+            FLOW_STATISTICS.to_string(),
+            self.build_table(FLOW_STATISTICS).unwrap(),
+        );
         tables.insert(
             TABLE_SEMANTICS.to_string(),
             self.build_table(TABLE_SEMANTICS).unwrap(),

@@ -290,6 +290,10 @@ impl BatchingTask {
         self.state.read().unwrap().last_execution_time_millis()
     }
 
+    pub fn start_time_millis(&self) -> Option<i64> {
+        self.state.read().unwrap().start_time_millis()
+    }
+
     /// Collect flow-related extensions from the task's query context that should be
     /// forwarded to the frontend (e.g. scheduled time).
     fn frontend_extensions(&self) -> HashMap<String, String> {

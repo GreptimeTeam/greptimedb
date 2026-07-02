@@ -47,6 +47,8 @@ pub struct TaskState {
     last_query_duration: Duration,
     /// Last successful execution time in unix timestamp milliseconds.
     last_exec_time_millis: Option<i64>,
+    /// First execution time in unix timestamp milliseconds, set once.
+    start_time_millis: Option<i64>,
     /// Dirty Time windows need to be updated
     /// mapping of `start -> end` and non-overlapping
     pub(crate) dirty_time_windows: DirtyTimeWindows,
@@ -80,6 +82,7 @@ impl TaskState {
             last_update_time: Instant::now(),
             last_query_duration: Duration::from_secs(0),
             last_exec_time_millis: None,
+            start_time_millis: None,
             dirty_time_windows,
             checkpoint_mode: CheckpointMode::FullSnapshot,
             pending_fenced_repair: None,
@@ -97,6 +100,9 @@ impl TaskState {
         self.exec_state = ExecState::Idle;
         self.last_query_duration = elapsed;
         self.last_update_time = Instant::now();
+        if self.start_time_millis.is_none() {
+            self.start_time_millis = Some(common_time::util::current_time_millis());
+        }
         if is_succ {
             self.last_exec_time_millis = Some(common_time::util::current_time_millis());
         }
@@ -104,6 +110,11 @@ impl TaskState {
 
     pub fn last_execution_time_millis(&self) -> Option<i64> {
         self.last_exec_time_millis
+    }
+
+    /// First execution time in unix timestamp milliseconds, set once.
+    pub fn start_time_millis(&self) -> Option<i64> {
+        self.start_time_millis
     }
 
     pub fn checkpoint_mode(&self) -> CheckpointMode {
