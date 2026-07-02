@@ -79,9 +79,12 @@ pub(crate) fn should_delete_file(
     }
 
     // Unknown file: not in manifest, tmp_ref, or known removed records.
-    // For dropped regions, we can safely delete unknown files immediately.
-    // For active/open regions, only delete if the object's last-modified time
-    // exceeds the unknown_file_lingering_time TTL.
+    // For dropped regions, unknown files not protected by manifest/tmp refs/cross-region refs
+    // are deleted immediately. This relies on meta collecting FileRefsManifest from related
+    // active regions before issuing dropped-region GC; preserving young unknown files would
+    // also require keeping the table_repart tombstone for retry.
+    // For active/open regions, only delete if the object's last-modified time exceeds the
+    // unknown_file_lingering_time TTL.
     //
     // Both timestamps are compared as milliseconds-since-epoch (i64).
     // OpenDAL's `Timestamp` wraps `jiff::Timestamp`, whose `as_millisecond()`
@@ -490,16 +493,16 @@ impl LocalGcWorker {
             .map(|file_ref| (file_ref.file_id, file_ref.index_version))
             .collect::<HashSet<_>>();
 
-        let deletable_files = self
-            .list_to_be_deleted_files(
-                region_id,
-                is_region_dropped,
-                &in_manifest,
-                &in_tmp_ref,
-                recently_removed_files,
-                all_entries,
-            )
-            .await?;
+        let deletable_files = list_to_be_deleted_files_impl(
+            &self.opt,
+            self.full_file_listing,
+            region_id,
+            is_region_dropped,
+            &in_manifest,
+            &in_tmp_ref,
+            recently_removed_files,
+            all_entries,
+        )?;
 
         let unused_file_cnt = deletable_files.len();
 
@@ -835,35 +838,6 @@ impl LocalGcWorker {
         }
 
         Ok(all_entries)
-    }
-
-    /// List files to be deleted based on their presence in the manifest, temporary references, and recently removed files.
-    /// Returns a vector of `RemovedFile` that are eligible for deletion.
-    ///
-    /// When `full_file_listing` is false, this method will only delete (subset of) files tracked in
-    /// `recently_removed_files`, which significantly
-    /// improves performance. When `full_file_listing` is true, it read from `all_entries` to find
-    /// and delete orphan files (files not tracked in the manifest).
-    ///
-    pub async fn list_to_be_deleted_files(
-        &self,
-        region_id: RegionId,
-        is_region_dropped: bool,
-        in_manifest: &HashMap<FileId, Option<IndexVersion>>,
-        in_tmp_ref: &HashSet<(FileId, Option<IndexVersion>)>,
-        recently_removed_files: BTreeMap<Timestamp, HashSet<RemovedFile>>,
-        all_entries: Vec<Entry>,
-    ) -> Result<Vec<RemovedFile>> {
-        list_to_be_deleted_files_impl(
-            &self.opt,
-            self.full_file_listing,
-            region_id,
-            is_region_dropped,
-            in_manifest,
-            in_tmp_ref,
-            recently_removed_files,
-            all_entries,
-        )
     }
 }
 
