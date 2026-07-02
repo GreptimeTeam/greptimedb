@@ -117,12 +117,6 @@ impl PartitionPruner {
         Ok(ranges)
     }
 
-    /// Skips a file range that was pruned before entering [`Pruner::build_file_ranges`].
-    #[allow(dead_code)]
-    pub fn skip_file_range(&self, index: RowGroupIndex, reader_metrics: &mut ReaderMetrics) {
-        self.pruner.skip_file_range(index, reader_metrics);
-    }
-
     /// Checks whether the file range at `index` can be skipped because the
     /// current predicate definitively prunes it at manifest level (no I/O).
     ///
@@ -130,9 +124,8 @@ impl PartitionPruner {
     /// balances the pruner's per-file reference count and merges the resulting
     /// reader metrics into `part_metrics`.
     ///
-    /// Uses the shared `PrunerInner::manifest_pruned_files` cache so that a
-    /// single CAS-per-file costs one predicate evaluation regardless of how many
-    /// row groups the file has.
+    /// Uses shared per-file state so repeated row groups can skip cheaply after
+    /// the first manifest-prune decision.
     pub fn try_skip_manifest_pruned_file_range(
         &self,
         index: RowGroupIndex,
@@ -202,8 +195,8 @@ struct PrunerInner {
     /// Positive manifest-prune cache shared across all scan partitions.
     ///
     /// SAFETY: cached positives are valid because dynamic filters only tighten;
-    /// negative decisions are not cached.  Reset by `add_partition_ranges()` for
-    /// each file referenced by the incoming partition ranges.
+    /// negative decisions are not cached. Reset by `add_partition_ranges()` for
+    /// each fresh batch of partition ranges.
     manifest_pruned_files: Vec<AtomicBool>,
 }
 
@@ -306,7 +299,7 @@ impl Pruner {
         }
     }
 
-    /// Adds reference counts for all partitions' ranges and resets the
+    /// Adds reference counts for all partitions' ranges and resets the full
     /// manifest-prune cache so that dynamic-filter updates are visible to the
     /// fresh scan.
     pub fn add_partition_ranges(&self, partition_ranges: &[PartitionRange]) {
@@ -370,6 +363,9 @@ impl Pruner {
     /// `add_partition_ranges()`. It may also clear a cached builder when this was the
     /// last remaining range for the file.
     pub fn skip_file_range(&self, index: RowGroupIndex, reader_metrics: &mut ReaderMetrics) {
+        if !self.inner.stream_ctx.is_file_range_index(index) {
+            return;
+        }
         let file_index = index.index - self.inner.stream_ctx.input.num_memtables();
         self.decrement_and_maybe_clear(file_index, reader_metrics);
     }
