@@ -38,7 +38,6 @@ use datafusion::execution::memory_pool::{
     GreedyMemoryPool, MemoryConsumer, MemoryLimit, MemoryPool, MemoryReservation,
     TrackConsumersPool,
 };
-use datafusion::execution::runtime_env::{RuntimeEnv, RuntimeEnvBuilder};
 use datafusion::physical_optimizer::PhysicalOptimizerRule;
 use datafusion::physical_optimizer::optimizer::PhysicalOptimizer;
 use datafusion::physical_optimizer::sanity_checker::SanityCheckPlan;
@@ -79,6 +78,9 @@ use crate::optimizer::windowed_sort::WindowedSortPhysicalRule;
 use crate::options::QueryOptions as QueryOptionsNew;
 use crate::query_engine::DefaultSerializer;
 use crate::query_engine::options::QueryOptions;
+use crate::query_engine::runtime::{
+    DefaultQueryRuntimeProvider, QueryRuntimeContext, QueryRuntimeProviderRef,
+};
 use crate::range_select::planner::RangeSelectPlanner;
 use crate::region_query::RegionQueryHandlerRef;
 
@@ -117,18 +119,37 @@ impl QueryEngineState {
         plugins: Plugins,
         options: QueryOptionsNew,
     ) -> Self {
+        Self::try_new(
+            catalog_list,
+            partition_rule_manager,
+            region_query_handler,
+            table_mutation_handler,
+            procedure_service_handler,
+            flow_service_handler,
+            with_dist_planner,
+            plugins,
+            options,
+        )
+        .expect("Failed to build query engine state")
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_new(
+        catalog_list: CatalogManagerRef,
+        partition_rule_manager: Option<PartitionRuleManagerRef>,
+        region_query_handler: Option<RegionQueryHandlerRef>,
+        table_mutation_handler: Option<TableMutationHandlerRef>,
+        procedure_service_handler: Option<ProcedureServiceHandlerRef>,
+        flow_service_handler: Option<FlowServiceHandlerRef>,
+        with_dist_planner: bool,
+        plugins: Plugins,
+        options: QueryOptionsNew,
+    ) -> DfResult<Self> {
         let total_memory = get_total_memory_bytes().max(0) as u64;
         let memory_pool_size = options.memory_pool_size.resolve(total_memory) as usize;
-        let runtime_env = if memory_pool_size > 0 {
-            Arc::new(
-                RuntimeEnvBuilder::new()
-                    .with_memory_pool(Arc::new(MetricsMemoryPool::new(memory_pool_size)))
-                    .build()
-                    .expect("Failed to build RuntimeEnv"),
-            )
-        } else {
-            Arc::new(RuntimeEnv::default())
-        };
+        let runtime_provider = plugins
+            .get::<QueryRuntimeProviderRef>()
+            .unwrap_or_else(|| Arc::new(DefaultQueryRuntimeProvider));
         let mut session_config = SessionConfig::new().with_create_default_catalog_and_schema(false);
         if options.parallelism > 0 {
             session_config = session_config.with_target_partitions(options.parallelism);
@@ -148,6 +169,11 @@ impl QueryEngineState {
             .options_mut()
             .execution
             .skip_physical_aggregate_schema_check = true;
+
+        let runtime_context = QueryRuntimeContext::new(&options, memory_pool_size);
+        runtime_provider.configure_session_config(runtime_context, &mut session_config);
+        let runtime_builder = DefaultQueryRuntimeProvider::runtime_env_builder(runtime_context);
+        let runtime_env = runtime_provider.build_runtime_env(runtime_context, runtime_builder)?;
 
         // Apply extension rules
         let mut extension_rules = Vec::new();
@@ -242,7 +268,7 @@ impl QueryEngineState {
         let df_context = SessionContext::new_with_state(session_state);
         register_function_aliases(&df_context);
 
-        Self {
+        Ok(Self {
             df_context,
             catalog_manager: catalog_list,
             dyn_filter_registry_manager: Arc::new(DynFilterRegistryManager::default()),
@@ -256,7 +282,7 @@ impl QueryEngineState {
             extension_rules,
             plugins,
             scalar_functions: Arc::new(RwLock::new(HashMap::new())),
-        }
+        })
     }
 
     fn remove_physical_optimizer_rule(
@@ -541,7 +567,7 @@ impl DfQueryPlanner {
 /// This wrapper intercepts all memory pool operations and updates
 /// Prometheus metrics for monitoring query memory usage and rejections.
 #[derive(Debug)]
-struct MetricsMemoryPool {
+pub(super) struct MetricsMemoryPool {
     inner: Arc<TrackConsumersPool<GreedyMemoryPool>>,
 }
 
@@ -549,7 +575,7 @@ impl MetricsMemoryPool {
     // Number of top memory consumers to report in OOM error messages
     const TOP_CONSUMERS_TO_REPORT: usize = 5;
 
-    fn new(limit: usize) -> Self {
+    pub(super) fn new(limit: usize) -> Self {
         Self {
             inner: Arc::new(TrackConsumersPool::new(
                 GreedyMemoryPool::new(limit),
@@ -607,13 +633,25 @@ impl MemoryPool for MetricsMemoryPool {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
     use common_base::Plugins;
+    use common_base::memory_limit::MemoryLimit;
+    use common_base::readable_size::ReadableSize;
+    use datafusion::error::DataFusionError;
+    use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryLimit as DfMemoryLimit};
+    use datafusion::execution::runtime_env::{RuntimeEnv, RuntimeEnvBuilder};
     use session::context::QueryContext;
 
     use super::*;
     use crate::options::QueryOptions;
+    use crate::query_engine::runtime::{QueryRuntimeProvider, QueryRuntimeProviderRef};
 
     fn new_query_engine_state() -> QueryEngineState {
+        new_query_engine_state_with(Plugins::default(), QueryOptions::default())
+    }
+
+    fn new_query_engine_state_with(plugins: Plugins, options: QueryOptions) -> QueryEngineState {
         QueryEngineState::new(
             catalog::memory::new_memory_catalog_manager().unwrap(),
             None,
@@ -622,9 +660,146 @@ mod tests {
             None,
             None,
             false,
+            plugins,
+            options,
+        )
+    }
+
+    struct TestRuntimeProvider {
+        build_called: AtomicBool,
+        configure_called: AtomicBool,
+    }
+
+    impl TestRuntimeProvider {
+        fn new() -> Self {
+            Self {
+                build_called: AtomicBool::new(false),
+                configure_called: AtomicBool::new(false),
+            }
+        }
+    }
+
+    impl QueryRuntimeProvider for TestRuntimeProvider {
+        fn configure_session_config(
+            &self,
+            ctx: QueryRuntimeContext<'_>,
+            config: &mut SessionConfig,
+        ) {
+            assert_eq!(ctx.resolved_memory_pool_size, 1024);
+            self.configure_called.store(true, Ordering::SeqCst);
+            *config = config.clone().with_target_partitions(7);
+        }
+
+        fn build_runtime_env(
+            &self,
+            ctx: QueryRuntimeContext<'_>,
+            builder: RuntimeEnvBuilder,
+        ) -> DfResult<Arc<RuntimeEnv>> {
+            assert_eq!(ctx.resolved_memory_pool_size, 1024);
+            self.build_called.store(true, Ordering::SeqCst);
+            builder
+                .with_memory_pool(Arc::new(GreedyMemoryPool::new(2048)))
+                .build()
+                .map(Arc::new)
+        }
+    }
+
+    struct ErrorRuntimeProvider;
+
+    impl QueryRuntimeProvider for ErrorRuntimeProvider {
+        fn build_runtime_env(
+            &self,
+            _ctx: QueryRuntimeContext<'_>,
+            _builder: RuntimeEnvBuilder,
+        ) -> DfResult<Arc<RuntimeEnv>> {
+            Err(DataFusionError::Execution("runtime provider error".into()))
+        }
+    }
+
+    #[test]
+    fn query_runtime_default_provider_keeps_bounded_memory_pool() {
+        let state = new_query_engine_state_with(
             Plugins::default(),
+            QueryOptions {
+                memory_pool_size: MemoryLimit::Size(ReadableSize(1024)),
+                ..Default::default()
+            },
+        );
+
+        assert!(matches!(
+            state
+                .session_state()
+                .runtime_env()
+                .memory_pool
+                .memory_limit(),
+            DfMemoryLimit::Finite(1024)
+        ));
+    }
+
+    #[test]
+    fn query_runtime_provider_from_plugins_builds_runtime_env() {
+        let plugins = Plugins::default();
+        let provider = Arc::new(TestRuntimeProvider::new());
+        plugins.insert::<QueryRuntimeProviderRef>(provider.clone());
+
+        let state = new_query_engine_state_with(
+            plugins,
+            QueryOptions {
+                memory_pool_size: MemoryLimit::Size(ReadableSize(1024)),
+                ..Default::default()
+            },
+        );
+
+        assert!(provider.build_called.load(Ordering::SeqCst));
+        assert!(matches!(
+            state
+                .session_state()
+                .runtime_env()
+                .memory_pool
+                .memory_limit(),
+            DfMemoryLimit::Finite(2048)
+        ));
+    }
+
+    #[test]
+    fn query_runtime_provider_from_plugins_configures_session_config() {
+        let plugins = Plugins::default();
+        let provider = Arc::new(TestRuntimeProvider::new());
+        plugins.insert::<QueryRuntimeProviderRef>(provider.clone());
+
+        let state = new_query_engine_state_with(
+            plugins,
+            QueryOptions {
+                memory_pool_size: MemoryLimit::Size(ReadableSize(1024)),
+                ..Default::default()
+            },
+        );
+
+        assert!(provider.configure_called.load(Ordering::SeqCst));
+        assert_eq!(7, state.session_state().config().target_partitions());
+    }
+
+    #[test]
+    fn query_runtime_provider_error_is_returned_by_try_new() {
+        let plugins = Plugins::default();
+        plugins.insert::<QueryRuntimeProviderRef>(Arc::new(ErrorRuntimeProvider));
+
+        let err = QueryEngineState::try_new(
+            catalog::memory::new_memory_catalog_manager().unwrap(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+            plugins,
             QueryOptions::default(),
         )
+        .unwrap_err();
+
+        assert!(
+            matches!(err, DataFusionError::Execution(message) if message == "runtime provider error")
+        );
     }
 
     #[test]

@@ -15,6 +15,7 @@
 mod context;
 mod default_serializer;
 pub mod options;
+pub mod runtime;
 mod state;
 use std::any::Any;
 use std::sync::Arc;
@@ -41,6 +42,9 @@ use crate::error::Result;
 use crate::options::QueryOptions;
 use crate::planner::LogicalPlanner;
 pub use crate::query_engine::context::QueryEngineContext;
+pub use crate::query_engine::runtime::{
+    DefaultQueryRuntimeProvider, QueryRuntimeContext, QueryRuntimeProvider, QueryRuntimeProviderRef,
+};
 pub use crate::query_engine::state::QueryEngineState;
 use crate::region_query::RegionQueryHandlerRef;
 
@@ -113,7 +117,28 @@ impl QueryEngineFactory {
         with_dist_planner: bool,
         options: QueryOptions,
     ) -> Self {
-        Self::new_with_plugins(
+        Self::try_new(
+            catalog_manager,
+            region_query_handler,
+            table_mutation_handler,
+            procedure_service_handler,
+            flow_service_handler,
+            with_dist_planner,
+            options,
+        )
+        .expect("Failed to build query engine factory")
+    }
+
+    pub fn try_new(
+        catalog_manager: CatalogManagerRef,
+        region_query_handler: Option<RegionQueryHandlerRef>,
+        table_mutation_handler: Option<TableMutationHandlerRef>,
+        procedure_service_handler: Option<ProcedureServiceHandlerRef>,
+        flow_service_handler: Option<FlowServiceHandlerRef>,
+        with_dist_planner: bool,
+        options: QueryOptions,
+    ) -> datafusion::error::Result<Self> {
+        Self::try_new_with_plugins(
             catalog_manager,
             None,
             region_query_handler,
@@ -138,7 +163,33 @@ impl QueryEngineFactory {
         plugins: Plugins,
         options: QueryOptions,
     ) -> Self {
-        let state = Arc::new(QueryEngineState::new(
+        Self::try_new_with_plugins(
+            catalog_manager,
+            partition_rule_manager,
+            region_query_handler,
+            table_mutation_handler,
+            procedure_service_handler,
+            flow_service_handler,
+            with_dist_planner,
+            plugins,
+            options,
+        )
+        .expect("Failed to build query engine factory")
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_new_with_plugins(
+        catalog_manager: CatalogManagerRef,
+        partition_rule_manager: Option<PartitionRuleManagerRef>,
+        region_query_handler: Option<RegionQueryHandlerRef>,
+        table_mutation_handler: Option<TableMutationHandlerRef>,
+        procedure_service_handler: Option<ProcedureServiceHandlerRef>,
+        flow_service_handler: Option<FlowServiceHandlerRef>,
+        with_dist_planner: bool,
+        plugins: Plugins,
+        options: QueryOptions,
+    ) -> datafusion::error::Result<Self> {
+        let state = Arc::new(QueryEngineState::try_new(
             catalog_manager,
             partition_rule_manager,
             region_query_handler,
@@ -148,10 +199,10 @@ impl QueryEngineFactory {
             with_dist_planner,
             plugins.clone(),
             options,
-        ));
+        )?);
         let query_engine = Arc::new(DatafusionQueryEngine::new(state, plugins));
         register_functions(&query_engine);
-        Self { query_engine }
+        Ok(Self { query_engine })
     }
 
     pub fn query_engine(&self) -> QueryEngineRef {
