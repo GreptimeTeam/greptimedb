@@ -391,11 +391,8 @@ impl DataType for JsonType {
     }
 
     fn as_arrow_type(&self) -> ArrowDataType {
-        match &self.format {
+        match self.format {
             JsonFormat::Jsonb => ArrowDataType::Binary,
-            JsonFormat::Json2(native_type) if native_type.as_ref() == &JsonNativeType::Variant => {
-                ArrowDataType::Binary
-            }
             JsonFormat::Json2(_) => self.as_struct_type().as_arrow_type(),
         }
     }
@@ -751,14 +748,6 @@ mod tests {
                 )])),
             )])),
             true,
-        );
-    }
-
-    #[test]
-    fn test_json2_variant_arrow_type() {
-        assert_eq!(
-            ArrowDataType::Binary,
-            JsonType::new_json2(JsonNativeType::Variant).as_arrow_type()
         );
     }
 

@@ -111,10 +111,6 @@ impl JsonArray<'_> {
             expect
         );
 
-        if !matches!(expect, DataType::Struct(_)) {
-            return self.try_cast(expect);
-        }
-
         let struct_array = self.inner.as_struct_opt().context(AlignJsonArraySnafu {
             reason: "expect struct array",
         })?;
@@ -170,6 +166,12 @@ impl JsonArray<'_> {
                     j += 1;
                 }
             }
+        }
+        if expect_fields.is_empty() {
+            return Ok(Arc::new(StructArray::new_empty_fields(
+                struct_array.len(),
+                struct_array.nulls().cloned(),
+            )));
         }
         if i < expect_fields.len() {
             for field in &expect_fields[i..] {
@@ -486,19 +488,15 @@ mod test {
         )
         .test()?;
 
-        let root: ArrayRef = Arc::new(StructArray::from(vec![
-            (
-                Arc::new(Field::new("int", DataType::Int64, true)),
-                Arc::new(Int64Array::from(vec![Some(1)])) as ArrayRef,
-            ),
-            (
-                Arc::new(Field::new("missing", DataType::Int64, true)),
-                Arc::new(Int64Array::from(vec![None])) as ArrayRef,
-            ),
-        ]));
-        let aligned = JsonArray::from(&root).try_align(&DataType::Binary)?;
-        assert_eq!(aligned.data_type(), &DataType::Binary);
-        assert_eq!(binary_array_value(&aligned, 0), br#"{"int":1}"#);
+        // Test aligning a non-empty json array to an empty struct schema.
+        let empty_fields = Fields::from(Vec::<Arc<Field>>::new());
+        let root_json: ArrayRef = Arc::new(StructArray::from(vec![(
+            Arc::new(Field::new("int", DataType::Int64, true)),
+            Arc::new(Int64Array::from(vec![Some(1), None])) as ArrayRef,
+        )]));
+        let aligned = JsonArray::from(&root_json).try_align(&DataType::Struct(empty_fields))?;
+        let expected = Arc::new(StructArray::new_empty_fields(2, None)) as ArrayRef;
+        assert_eq!(aligned.as_ref(), expected.as_ref());
 
         // Test simple json array alignment.
         TestCase::new(

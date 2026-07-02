@@ -117,6 +117,7 @@ impl FlatCompatBatch {
         }
 
         let expect_schema = mapper.batch_schema();
+        let expect_schema = Self::resolve_json_root_schema(expect_schema, &actual_schema);
         if expect_schema == actual_schema {
             // Although the SST has a different schema, but the schema after projection is the same
             // as expected schema.
@@ -129,7 +130,7 @@ impl FlatCompatBatch {
         }
 
         let (index_or_defaults, fields) =
-            Self::compute_index_and_fields(&actual_schema, expect_schema, mapper.metadata())?;
+            Self::compute_index_and_fields(&actual_schema, &expect_schema, mapper.metadata())?;
 
         let compat_pk = FlatCompatPrimaryKey::new(mapper.metadata(), actual)?;
 
@@ -138,6 +139,35 @@ impl FlatCompatBatch {
             arrow_schema: Arc::new(Schema::new(fields)),
             compat_pk,
         }))
+    }
+
+    fn resolve_json_root_schema(
+        expect_schema: &[(ColumnId, ConcreteDataType)],
+        actual_schema: &[(ColumnId, ConcreteDataType)],
+    ) -> Vec<(ColumnId, ConcreteDataType)> {
+        let actual_schema_index: HashMap<_, _> = actual_schema
+            .iter()
+            .map(|(column_id, data_type)| (*column_id, data_type))
+            .collect();
+
+        expect_schema
+            .iter()
+            .map(|(column_id, expect_data_type)| {
+                if let Some(actual_data_type) = actual_schema_index.get(column_id)
+                    && expect_data_type
+                        .as_json()
+                        .is_some_and(|json_type| json_type.is_json2())
+                    && matches!(
+                        expect_data_type.as_arrow_type(),
+                        datatypes::arrow::datatypes::DataType::Struct(fields) if fields.is_empty()
+                    )
+                {
+                    (*column_id, (*actual_data_type).clone())
+                } else {
+                    (*column_id, expect_data_type.clone())
+                }
+            })
+            .collect()
     }
 
     fn compute_index_and_fields(
