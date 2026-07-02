@@ -44,12 +44,14 @@ pub mod drop_flow;
 pub mod drop_table;
 pub mod drop_view;
 pub mod flow_meta;
+pub mod purge_dropped_table;
 pub mod table_meta;
 #[cfg(any(test, feature = "testing"))]
 pub mod test_util;
 #[cfg(test)]
 pub(crate) mod tests;
 pub mod truncate_table;
+pub mod undrop_table;
 pub mod utils;
 
 /// Metadata allocated to a table.
@@ -117,6 +119,8 @@ pub struct DdlContext {
     pub flow_metadata_allocator: FlowMetadataAllocatorRef,
     /// controller of region failure detector.
     pub region_failure_detector_controller: RegionFailureDetectorControllerRef,
+    /// Whether table drops should stop after tombstoning metadata.
+    pub soft_drop_enabled: bool,
 }
 
 impl DdlContext {
@@ -134,7 +138,10 @@ impl DdlContext {
     ///
     /// Once the regions were dropped, subsequent heartbeats no longer include these regions.
     /// Therefore, we should remove the failure detectors for these dropped regions.
-    async fn deregister_failure_detectors(&self, detecting_regions: Vec<DetectingRegion>) {
+    pub(crate) async fn deregister_failure_detectors(
+        &self,
+        detecting_regions: Vec<DetectingRegion>,
+    ) {
         self.region_failure_detector_controller
             .deregister_failure_detectors(detecting_regions)
             .await;
