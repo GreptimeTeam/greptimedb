@@ -42,6 +42,7 @@ use crate::dist_plan::commutativity::{
 use crate::dist_plan::merge_scan::MergeScanLogicalPlan;
 use crate::dist_plan::merge_sort::MergeSortLogicalPlan;
 use crate::metrics::PUSH_DOWN_FALLBACK_ERRORS_TOTAL;
+use crate::options::ScheduledTimeExtension;
 use crate::plan::ExtractExpr;
 use crate::query_engine::DefaultSerializer;
 
@@ -111,9 +112,18 @@ impl AnalyzerRule for DistPlannerAnalyzer {
         config.optimizer.filter_null_join_keys = true;
         let config = Arc::new(config);
 
+        // When the query is running under a scheduled Flow context, carry the
+        // logical "now" so that `SimplifyExpressions` does not constant-fold
+        // `now()` into wall-clock literals on the remote sub-plans.
+        let scheduled_time = config
+            .extensions
+            .get::<ScheduledTimeExtension>()
+            .and_then(|ext| ext.scheduled_time);
+
         let optimizer_context = PatchOptimizerContext {
             inner: datafusion_optimizer::OptimizerContext::new(),
             config: config.clone(),
+            scheduled_time,
         };
 
         let plan = plan

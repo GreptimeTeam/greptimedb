@@ -16,6 +16,7 @@ use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
 use common_base::memory_limit::MemoryLimit;
+use datafusion::config::{ConfigEntry, ConfigExtension, ExtensionOptions};
 use serde::{Deserialize, Serialize};
 use session::context::QueryContextRef;
 use store_api::storage::RegionId;
@@ -322,13 +323,49 @@ pub fn parse_scheduled_time_datetime(
     }
 }
 
-/// Convenience helper: extract scheduled time from a [`QueryContextRef`] as a [`DateTime<Utc>`].
+/// Best-effort helper: extract scheduled time from a [`QueryContextRef`] as a [`DateTime<Utc>`].
 ///
-/// Errors are silently swallowed, returning `None`.
-/// Use [`parse_scheduled_time_datetime`] when a `Result` is needed.
+/// Errors are silently swallowed, returning `None`; use [`parse_scheduled_time_datetime`]
+/// at call sites that need to reject malformed scheduled time.
 pub fn scheduled_time_from_ctx(query_ctx: &QueryContextRef) -> Option<DateTime<Utc>> {
     let extensions = query_ctx.extensions();
     parse_scheduled_time_datetime(&extensions).ok().flatten()
+}
+
+/// Carries the scheduled logical "now" through [`ConfigOptions::extensions`] so
+/// that the distributed plan analyzer can apply it during expression
+/// simplification (preventing wall-clock constant-folding of `now()`).
+#[derive(Debug, Clone)]
+pub(crate) struct ScheduledTimeExtension {
+    pub(crate) scheduled_time: Option<DateTime<Utc>>,
+}
+
+impl ConfigExtension for ScheduledTimeExtension {
+    const PREFIX: &'static str = "flow_scheduled_time";
+}
+
+impl ExtensionOptions for ScheduledTimeExtension {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+
+    fn cloned(&self) -> Box<dyn ExtensionOptions> {
+        Box::new(self.clone())
+    }
+
+    fn set(&mut self, key: &str, value: &str) -> datafusion::error::Result<()> {
+        Err(datafusion_common::DataFusionError::NotImplemented(format!(
+            "ScheduledTimeExtension does not support set key: {key} with value: {value}"
+        )))
+    }
+
+    fn entries(&self) -> Vec<ConfigEntry> {
+        vec![]
+    }
 }
 
 fn invalid_query_context_extension(reason: String) -> Error {
