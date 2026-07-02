@@ -478,6 +478,10 @@ fn prune_field_by_nested_paths(field: &FieldRef, nested_paths: &[&[String]]) -> 
         return field.clone();
     };
 
+    if nested_paths.iter().any(|path| path.is_empty()) {
+        return field.clone();
+    }
+
     let pruned_fields = fields
         .iter()
         .filter_map(|field| {
@@ -1221,6 +1225,38 @@ mod tests {
             ),
         ]);
 
+        assert_eq!(schema, expected);
+    }
+
+    #[test]
+    fn test_prune_schema_by_root_nested_path() {
+        fn new_field(name: &str, data_type: ArrowDataType) -> FieldRef {
+            Arc::new(Field::new(name, data_type, true))
+        }
+
+        let mut schema = Schema::new([new_field(
+            "j",
+            ArrowDataType::Struct(
+                vec![new_field("a", ArrowDataType::Int64)]
+                    .into_iter()
+                    .collect(),
+            ),
+        )]);
+        let nested_paths = [vec![["j"].iter().map(|x| x.to_string()).collect()]];
+
+        prune_schema_by_nested_paths(
+            &mut schema,
+            nested_paths.iter().map(|paths| paths.as_slice()),
+        );
+
+        let expected = Schema::new([new_field(
+            "j",
+            ArrowDataType::Struct(
+                vec![new_field("a", ArrowDataType::Int64)]
+                    .into_iter()
+                    .collect(),
+            ),
+        )]);
         assert_eq!(schema, expected);
     }
 }

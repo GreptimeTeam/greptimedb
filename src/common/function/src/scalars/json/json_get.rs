@@ -26,6 +26,7 @@ use datafusion_common::arrow::datatypes::DataType;
 use datafusion_common::{DataFusionError, Result, ScalarValue, exec_datafusion_err, exec_err};
 use datafusion_expr::{ColumnarValue, ScalarFunctionArgs, Signature, Volatility};
 use datatypes::arrow_array::{int_array_value_at_index, string_array_value_at_index};
+use datatypes::types::jsonb_to_string;
 use datatypes::vectors::json::array::JsonArray;
 use derive_more::Display;
 use serde_json::Value;
@@ -50,6 +51,7 @@ fn get_json_by_path(json: &[u8], path: &str) -> Option<Vec<u8>> {
 
 enum JsonResultValue<'a> {
     Jsonb(Vec<u8>),
+    JsonBytes(Vec<u8>),
     #[expect(unused)]
     JsonStructByColumn(&'a ArrayRef, usize),
     JsonStructByValue(&'a Value),
@@ -86,6 +88,14 @@ impl JsonGetResultBuilder for StringResultBuilder {
     fn append_value(&mut self, value: JsonResultValue<'_>) -> Result<()> {
         match value {
             JsonResultValue::Jsonb(value) => self.0.append_option(jsonb::to_str(&value).ok()),
+            JsonResultValue::JsonBytes(value) => {
+                let value = jsonb_to_string(&value).ok().or_else(|| {
+                    serde_json::from_slice::<Value>(&value)
+                        .ok()
+                        .map(|v| v.to_string())
+                });
+                self.0.append_option(value.as_deref())
+            }
             JsonResultValue::JsonStructByColumn(column, i) => {
                 if let Some(v) = string_array_value_at_index(column, i) {
                     self.0.append_value(v);
@@ -148,6 +158,12 @@ impl JsonGetResultBuilder for IntResultBuilder {
     fn append_value(&mut self, value: JsonResultValue<'_>) -> Result<()> {
         match value {
             JsonResultValue::Jsonb(value) => self.0.append_option(jsonb::to_i64(&value).ok()),
+            JsonResultValue::JsonBytes(value) => {
+                let value = jsonb::to_i64(&value)
+                    .ok()
+                    .or_else(|| serde_json::from_slice::<Value>(&value).ok()?.as_i64());
+                self.0.append_option(value)
+            }
             JsonResultValue::JsonStructByColumn(column, i) => {
                 self.0.append_option(int_array_value_at_index(column, i))
             }
@@ -199,6 +215,12 @@ impl JsonGetResultBuilder for FloatResultBuilder {
     fn append_value(&mut self, value: JsonResultValue<'_>) -> Result<()> {
         match value {
             JsonResultValue::Jsonb(value) => self.0.append_option(jsonb::to_f64(&value).ok()),
+            JsonResultValue::JsonBytes(value) => {
+                let value = jsonb::to_f64(&value)
+                    .ok()
+                    .or_else(|| serde_json::from_slice::<Value>(&value).ok()?.as_f64());
+                self.0.append_option(value)
+            }
             JsonResultValue::JsonStructByColumn(column, i) => {
                 let result = if column.data_type() == &DataType::Float64 {
                     column
@@ -258,6 +280,12 @@ impl JsonGetResultBuilder for BoolResultBuilder {
     fn append_value(&mut self, value: JsonResultValue<'_>) -> Result<()> {
         match value {
             JsonResultValue::Jsonb(value) => self.0.append_option(jsonb::to_bool(&value).ok()),
+            JsonResultValue::JsonBytes(value) => {
+                let value = jsonb::to_bool(&value)
+                    .ok()
+                    .or_else(|| serde_json::from_slice::<Value>(&value).ok()?.as_bool());
+                self.0.append_option(value)
+            }
             JsonResultValue::JsonStructByColumn(column, i) => {
                 let result = if column.data_type() == &DataType::Boolean {
                     column
@@ -319,14 +347,18 @@ fn jsonb_get(
     let size = jsons.len();
     for i in 0..size {
         let json = jsons.is_valid(i).then(|| jsons.value(i));
-        let result = match json {
-            Some(json) => get_json_by_path(json, path),
-            _ => None,
-        };
-        if let Some(v) = result {
-            builder.append_value(JsonResultValue::Jsonb(v))?;
-        } else {
-            builder.append_null();
+        match json {
+            Some(json) if path.is_empty() => {
+                builder.append_value(JsonResultValue::JsonBytes(json.to_vec()))?
+            }
+            Some(json) => {
+                if let Some(v) = get_json_by_path(json, path) {
+                    builder.append_value(JsonResultValue::Jsonb(v))?;
+                } else {
+                    builder.append_null();
+                }
+            }
+            _ => builder.append_null(),
         }
     }
     Ok(())
@@ -901,7 +933,7 @@ mod tests {
         let expects = [
             Some("a"),
             Some("d"),
-            None,
+            Some(r#"{"a":"g","b":"h","c":{"a":"g"}}"#),
             Some("foo"),
             Some("404"),
             Some("1.234"),
@@ -1034,7 +1066,7 @@ mod tests {
         let expects = [
             Some("a"),
             Some("d"),
-            None,
+            Some(r#"{"a":"g","b":"h","c":{"a":"g"}}"#),
             Some("foo"),
             Some("404"),
             Some("1.234"),

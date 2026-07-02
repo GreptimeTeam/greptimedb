@@ -1442,6 +1442,9 @@ fn narrow_read_columns_by_json_type_hint(
         let mut paths = Vec::new();
         let mut current = vec![column_name.clone()];
         collect_json_nested_paths(json_type, &mut current, &mut paths);
+        if matches!(json_type, JsonNativeType::Variant) {
+            paths.clear();
+        }
         merge_nested_paths(&mut read_column.nested_paths, paths)
     }
 }
@@ -2136,6 +2139,18 @@ mod tests {
             read_columns,
             ReadColumns {
                 cols: vec![ReadColumn::new(0, vec![])]
+            }
+        );
+
+        let hint = HashMap::from([("j".to_string(), JsonNativeType::Variant)]);
+        let mut read_columns = ReadColumns {
+            cols: vec![ReadColumn::new(1, vec![])],
+        };
+        narrow_read_columns_by_json_type_hint(&mut read_columns, &hint, metadata.as_ref());
+        assert_eq!(
+            read_columns,
+            ReadColumns {
+                cols: vec![ReadColumn::new(1, vec![])]
             }
         );
         Ok(())

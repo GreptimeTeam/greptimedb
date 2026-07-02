@@ -126,6 +126,10 @@ fn deduce_json_type(expr: &Expr) -> Result<Option<(String, JsonNativeType)>> {
     let with_type =
         JsonNativeType::try_from(&with_type).map_err(|e| plan_datafusion_err!("{e:?}"))?;
 
+    if path.is_empty() {
+        return Ok(Some((column.name.clone(), JsonNativeType::Variant)));
+    }
+
     let mut split = path.rsplit(".");
     let Some(leaf) = split.next() else {
         return Ok(Some((column.name.clone(), JsonNativeType::String)));
@@ -250,6 +254,27 @@ mod tests {
                 .transformed
         );
         assert!(provider.scan_request().json_type_hint.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn test_json_type_concretize_rule_empty_path_uses_variant() -> Result<()> {
+        let exprs = vec![json_get_expr(
+            Expr::Column(Column::new_unqualified("k0")),
+            path_expr(""),
+            None,
+        )?];
+        let (provider, plan) = build_plan(exprs)?;
+
+        assert!(
+            JsonTypeConcretizeRule
+                .rewrite(plan, &OptimizerContext::default())?
+                .transformed
+        );
+        assert_eq!(
+            Some(&JsonNativeType::Variant),
+            provider.scan_request().json_type_hint.get("k0")
+        );
         Ok(())
     }
 

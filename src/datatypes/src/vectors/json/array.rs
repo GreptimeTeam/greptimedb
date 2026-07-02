@@ -65,16 +65,13 @@ impl JsonArray<'_> {
             }
             DataType::Struct(_) => {
                 let structs = array.as_struct();
-                let object = structs
-                    .fields()
-                    .iter()
-                    .zip(structs.columns())
-                    .map(|(field, column)| {
-                        JsonArray::from(column)
-                            .try_get_value(i)
-                            .map(|v| (field.name().clone(), v))
-                    })
-                    .collect::<Result<_>>()?;
+                let mut object = serde_json::Map::new();
+                for (field, column) in structs.fields().iter().zip(structs.columns()) {
+                    let value = JsonArray::from(column).try_get_value(i)?;
+                    if !value.is_null() {
+                        object.insert(field.name().clone(), value);
+                    }
+                }
                 Value::Object(object)
             }
             DataType::List(_) => {
@@ -113,6 +110,10 @@ impl JsonArray<'_> {
             self.inner.data_type(),
             expect
         );
+
+        if !matches!(expect, DataType::Struct(_)) {
+            return self.try_cast(expect);
+        }
 
         let struct_array = self.inner.as_struct_opt().context(AlignJsonArraySnafu {
             reason: "expect struct array",
@@ -411,7 +412,7 @@ mod test {
         );
         assert_eq!(
             JsonArray::from(&structs).try_get_value(1)?,
-            json!({"flag": null, "items": [2]})
+            json!({"items": [2]})
         );
 
         let unsupported: ArrayRef = Arc::new(Int32Array::from(vec![1]));
@@ -484,6 +485,20 @@ mod test {
             ]),
         )
         .test()?;
+
+        let root: ArrayRef = Arc::new(StructArray::from(vec![
+            (
+                Arc::new(Field::new("int", DataType::Int64, true)),
+                Arc::new(Int64Array::from(vec![Some(1)])) as ArrayRef,
+            ),
+            (
+                Arc::new(Field::new("missing", DataType::Int64, true)),
+                Arc::new(Int64Array::from(vec![None])) as ArrayRef,
+            ),
+        ]));
+        let aligned = JsonArray::from(&root).try_align(&DataType::Binary)?;
+        assert_eq!(aligned.data_type(), &DataType::Binary);
+        assert_eq!(binary_array_value(&aligned, 0), br#"{"int":1}"#);
 
         // Test simple json array alignment.
         TestCase::new(

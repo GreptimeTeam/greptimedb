@@ -327,7 +327,11 @@ impl FlatProjectionMapper {
             }
 
             let field = &self.output_schema.arrow_schema().fields()[output_idx];
-            if is_structured_json_field(field) {
+            let output_type = &self.output_schema.column_schemas()[output_idx].data_type;
+            if output_type
+                .as_json()
+                .is_some_and(|json_type| json_type.is_json2())
+            {
                 array = JsonArray::from(&array)
                     .try_align(field.data_type())
                     .context(DataTypesSnafu)?;
@@ -557,11 +561,15 @@ impl DfBatchAssembler {
 
 #[cfg(test)]
 mod tests {
+    use datatypes::arrow::array::{Array, ArrayRef, Int64Array, StructArray};
+    use datatypes::arrow::datatypes::{DataType as ArrowDataType, Field, Schema as ArrowSchema};
+    use datatypes::arrow::record_batch::RecordBatch as ArrowRecordBatch;
     use datatypes::types::json_type::JsonObjectType;
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
     use store_api::storage::RegionId;
 
     use super::*;
+    use crate::cache::CacheStrategy;
 
     fn metadata_with_legacy_json() -> RegionMetadataRef {
         let mut builder = RegionMetadataBuilder::new(RegionId::new(1024, 0));
@@ -608,6 +616,59 @@ mod tests {
         assert_eq!(
             mapper.batch_schema()[0],
             (0, ConcreteDataType::json_datatype())
+        );
+    }
+
+    #[test]
+    fn test_json_type_hint_variant_converts_struct_to_binary() {
+        let mut builder = RegionMetadataBuilder::new(RegionId::new(1024, 0));
+        builder
+            .push_column_metadata(ColumnMetadata {
+                column_schema: datatypes::schema::ColumnSchema::new(
+                    "j",
+                    ConcreteDataType::json2(JsonNativeType::Object(JsonObjectType::new())),
+                    true,
+                ),
+                semantic_type: SemanticType::Field,
+                column_id: 0,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: datatypes::schema::ColumnSchema::new(
+                    "ts",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Timestamp,
+                column_id: 1,
+            });
+        let metadata = Arc::new(builder.build().unwrap());
+        let hint = HashMap::from([("j".to_string(), JsonNativeType::Variant)]);
+        let mapper = FlatProjectionMapper::new_with_read_columns(
+            &metadata,
+            vec![0],
+            ReadColumns::from_deduped_column_ids([0]),
+            Some(&hint),
+        )
+        .unwrap();
+
+        let json_array = Arc::new(StructArray::from(vec![(
+            Arc::new(Field::new("a", ArrowDataType::Int64, true)),
+            Arc::new(Int64Array::from(vec![Some(1)])) as ArrayRef,
+        )])) as ArrayRef;
+        let batch = ArrowRecordBatch::try_new(
+            Arc::new(ArrowSchema::new(vec![Field::new(
+                "j",
+                json_array.data_type().clone(),
+                true,
+            )])),
+            vec![json_array],
+        )
+        .unwrap();
+
+        let converted = mapper.convert(&batch, &CacheStrategy::Disabled).unwrap();
+        assert_eq!(
+            converted.df_record_batch().schema().field(0).data_type(),
+            &ArrowDataType::Binary
         );
     }
 }
