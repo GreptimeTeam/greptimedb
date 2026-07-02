@@ -14,6 +14,7 @@
 
 use std::sync::Arc;
 
+use datafusion::error::Result as DfResult;
 use datafusion::execution::context::SessionConfig;
 use datafusion::execution::runtime_env::{RuntimeEnv, RuntimeEnvBuilder};
 
@@ -54,8 +55,8 @@ pub trait QueryRuntimeProvider: Send + Sync + 'static {
         &self,
         _ctx: QueryRuntimeContext<'_>,
         builder: RuntimeEnvBuilder,
-    ) -> Arc<RuntimeEnv> {
-        Arc::new(builder.build().expect("Failed to build RuntimeEnv"))
+    ) -> DfResult<Arc<RuntimeEnv>> {
+        builder.build().map(Arc::new)
     }
 }
 

@@ -119,6 +119,32 @@ impl QueryEngineState {
         plugins: Plugins,
         options: QueryOptionsNew,
     ) -> Self {
+        Self::try_new(
+            catalog_list,
+            partition_rule_manager,
+            region_query_handler,
+            table_mutation_handler,
+            procedure_service_handler,
+            flow_service_handler,
+            with_dist_planner,
+            plugins,
+            options,
+        )
+        .expect("Failed to build query engine state")
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_new(
+        catalog_list: CatalogManagerRef,
+        partition_rule_manager: Option<PartitionRuleManagerRef>,
+        region_query_handler: Option<RegionQueryHandlerRef>,
+        table_mutation_handler: Option<TableMutationHandlerRef>,
+        procedure_service_handler: Option<ProcedureServiceHandlerRef>,
+        flow_service_handler: Option<FlowServiceHandlerRef>,
+        with_dist_planner: bool,
+        plugins: Plugins,
+        options: QueryOptionsNew,
+    ) -> DfResult<Self> {
         let total_memory = get_total_memory_bytes().max(0) as u64;
         let memory_pool_size = options.memory_pool_size.resolve(total_memory) as usize;
         let runtime_provider = plugins
@@ -147,7 +173,7 @@ impl QueryEngineState {
         let runtime_context = QueryRuntimeContext::new(&options, memory_pool_size);
         runtime_provider.configure_session_config(runtime_context, &mut session_config);
         let runtime_builder = DefaultQueryRuntimeProvider::runtime_env_builder(runtime_context);
-        let runtime_env = runtime_provider.build_runtime_env(runtime_context, runtime_builder);
+        let runtime_env = runtime_provider.build_runtime_env(runtime_context, runtime_builder)?;
 
         // Apply extension rules
         let mut extension_rules = Vec::new();
@@ -242,7 +268,7 @@ impl QueryEngineState {
         let df_context = SessionContext::new_with_state(session_state);
         register_function_aliases(&df_context);
 
-        Self {
+        Ok(Self {
             df_context,
             catalog_manager: catalog_list,
             dyn_filter_registry_manager: Arc::new(DynFilterRegistryManager::default()),
@@ -256,7 +282,7 @@ impl QueryEngineState {
             extension_rules,
             plugins,
             scalar_functions: Arc::new(RwLock::new(HashMap::new())),
-        }
+        })
     }
 
     fn remove_physical_optimizer_rule(
@@ -612,6 +638,7 @@ mod tests {
     use common_base::Plugins;
     use common_base::memory_limit::MemoryLimit;
     use common_base::readable_size::ReadableSize;
+    use datafusion::error::DataFusionError;
     use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryLimit as DfMemoryLimit};
     use datafusion::execution::runtime_env::{RuntimeEnv, RuntimeEnvBuilder};
     use session::context::QueryContext;
@@ -667,15 +694,25 @@ mod tests {
             &self,
             ctx: QueryRuntimeContext<'_>,
             builder: RuntimeEnvBuilder,
-        ) -> Arc<RuntimeEnv> {
+        ) -> DfResult<Arc<RuntimeEnv>> {
             assert_eq!(ctx.resolved_memory_pool_size, 1024);
             self.build_called.store(true, Ordering::SeqCst);
-            Arc::new(
-                builder
-                    .with_memory_pool(Arc::new(GreedyMemoryPool::new(2048)))
-                    .build()
-                    .unwrap(),
-            )
+            builder
+                .with_memory_pool(Arc::new(GreedyMemoryPool::new(2048)))
+                .build()
+                .map(Arc::new)
+        }
+    }
+
+    struct ErrorRuntimeProvider;
+
+    impl QueryRuntimeProvider for ErrorRuntimeProvider {
+        fn build_runtime_env(
+            &self,
+            _ctx: QueryRuntimeContext<'_>,
+            _builder: RuntimeEnvBuilder,
+        ) -> DfResult<Arc<RuntimeEnv>> {
+            Err(DataFusionError::Execution("runtime provider error".into()))
         }
     }
 
@@ -740,6 +777,29 @@ mod tests {
 
         assert!(provider.configure_called.load(Ordering::SeqCst));
         assert_eq!(7, state.session_state().config().target_partitions());
+    }
+
+    #[test]
+    fn query_runtime_provider_error_is_returned_by_try_new() {
+        let plugins = Plugins::default();
+        plugins.insert::<QueryRuntimeProviderRef>(Arc::new(ErrorRuntimeProvider));
+
+        let err = QueryEngineState::try_new(
+            catalog::memory::new_memory_catalog_manager().unwrap(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+            plugins,
+            QueryOptions::default(),
+        )
+        .unwrap_err();
+
+        assert!(
+            matches!(err, DataFusionError::Execution(message) if message == "runtime provider error")
+        );
     }
 
     #[test]
