@@ -2302,6 +2302,12 @@ fn test_table_scan_cast_projection_pushdown() {
 
 #[test]
 fn test_cast_filter_simplified_after_pushdown() {
+    // This test invokes `DistPlannerAnalyzer` directly rather than the full
+    // query `SessionState`, so the globally-registered `ConstNormalizationRule`
+    // does not run here. The native timestamp filter below proves the focused
+    // pre-MergeScan pass can do this by running DataFusion `SimplifyExpressions`
+    // after `PushDownFilter` has pushed the alias predicate through the cast
+    // projection into `TableScan.filters`.
     init_default_ut_logging();
     let test_table =
         TestTable::table_with_filter_pushdown(0, "t".to_string(), FilterPushDownType::Inexact);
