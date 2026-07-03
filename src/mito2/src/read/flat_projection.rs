@@ -338,6 +338,8 @@ impl FlatProjectionMapper {
                     .as_json()
                     .is_some_and(|json_type| json_type.is_json2())
             {
+                // Root JSON2 reads don't have a concretized schema hint. Use the
+                // actual array type as the output type.
                 let json_type =
                     JsonNativeType::try_from(array.data_type()).context(DataTypesSnafu)?;
                 output_column_schemas[output_idx].data_type = ConcreteDataType::json2(json_type);
