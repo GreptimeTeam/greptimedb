@@ -23,6 +23,15 @@ on:
         description: Runner HTTP timeout seconds
         required: true
         default: "300"
+      cargo_profile:
+        description: Cargo profile to build base and candidate binaries with
+        required: true
+        type: choice
+        default: nightly
+        options:
+          - nightly
+          - release
+          - dev
   pull_request:
     types: [labeled, synchronize, reopened]
 
@@ -38,6 +47,8 @@ jobs:
     if: ${{ github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'query-regression') }}
     runs-on: ubuntu-latest
     timeout-minutes: 120
+    env:
+      CARGO_PROFILE: ${{ github.event_name == 'pull_request' && 'nightly' || inputs.cargo_profile }}
     steps:
       - name: Checkout base source
         uses: actions/checkout@v4
@@ -81,11 +92,11 @@ jobs:
 
       - name: Build base greptime
         working-directory: base-src
-        run: cargo build -p cmd --bin greptime
+        run: cargo build --profile "${CARGO_PROFILE}" -p cmd --bin greptime
 
       - name: Build candidate greptime and fixture generator
         working-directory: candidate-src
-        run: cargo build -p cmd --bin greptime --bin query_perf_fixture
+        run: cargo build --profile "${CARGO_PROFILE}" -p cmd --bin greptime --bin query_perf_fixture
 
       - name: Run query regression
         id: run
@@ -100,11 +111,15 @@ jobs:
           if [[ "${ALLOW_LARGE_FIXTURE}" == "true" ]]; then
             EXTRA_ARGS+=(--allow-large-fixture)
           fi
+          PROFILE_DIR="${CARGO_PROFILE}"
+          if [[ "${PROFILE_DIR}" == "dev" ]]; then
+            PROFILE_DIR="debug"
+          fi
           uv run --no-project python candidate-src/tests/perf/query_regression_runner.py \
             --case "candidate-src/${CASE_PATH}" \
-            --base-bin base-src/target/debug/greptime \
-            --candidate-bin candidate-src/target/debug/greptime \
-            --fixture-generator candidate-src/target/debug/query_perf_fixture \
+            --base-bin "base-src/target/${PROFILE_DIR}/greptime" \
+            --candidate-bin "candidate-src/target/${PROFILE_DIR}/greptime" \
+            --fixture-generator "candidate-src/target/${PROFILE_DIR}/query_perf_fixture" \
             --work-dir query-regression-work \
             --http-timeout "${HTTP_TIMEOUT}" \
             "${EXTRA_ARGS[@]}"
@@ -121,7 +136,11 @@ jobs:
           BASE_REF: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || inputs.base_ref }}
           CANDIDATE_REF: ${{ github.event_name == 'pull_request' && format('refs/pull/{0}/merge', github.event.pull_request.number) || inputs.candidate_ref || github.ref }}
         run: |
-          uv run --no-project python candidate-src/.github/scripts/query-regression-summary.py \
+          SUMMARY_SCRIPT="candidate-src/.github/scripts/query-regression-summary.py"
+          if [[ -f "base-src/.github/scripts/query-regression-summary.py" ]]; then
+            SUMMARY_SCRIPT="base-src/.github/scripts/query-regression-summary.py"
+          fi
+          uv run --no-project python "${SUMMARY_SCRIPT}" \
             --report query-regression-work/query-regression-report.json \
             --run-url "${RUN_URL}" \
             --case-name "${CASE_NAME}" \
