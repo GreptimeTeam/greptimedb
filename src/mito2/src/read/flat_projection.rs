@@ -28,6 +28,7 @@ use datatypes::arrow::datatypes::{DataType as ArrowDataType, Field};
 use datatypes::extension::json::is_structured_json_field;
 use datatypes::prelude::{ConcreteDataType, DataType};
 use datatypes::schema::{Schema, SchemaRef};
+use datatypes::types::json_type::JsonNativeType;
 use datatypes::value::Value;
 use datatypes::vectors::Helper;
 use snafu::{OptionExt, ResultExt};
@@ -97,6 +98,24 @@ impl FlatProjectionMapper {
         read_cols: ReadColumns,
         json_type_hint: Option<&HashMap<String, JsonReadHint>>,
     ) -> Result<Self> {
+        Self::new_with_read_columns_and_json_root_types(
+            metadata,
+            projection,
+            read_cols,
+            json_type_hint,
+            None,
+        )
+    }
+
+    /// Returns a new mapper with output projection, explicit read columns, and
+    /// concrete JSON2 root types inferred from scan sources.
+    pub fn new_with_read_columns_and_json_root_types(
+        metadata: &RegionMetadataRef,
+        projection: Vec<usize>,
+        read_cols: ReadColumns,
+        json_type_hint: Option<&HashMap<String, JsonReadHint>>,
+        json_root_types: Option<&HashMap<String, JsonNativeType>>,
+    ) -> Result<Self> {
         // If the original projection is empty.
         let is_empty_projection = projection.is_empty();
 
@@ -117,7 +136,9 @@ impl FlatProjectionMapper {
 
             let mut schema = col.column_schema.clone();
             let json_read_hint = json_type_hint.and_then(|x| x.get(&schema.name));
-            let json_output_plan = Json2OutputPlan::new(&schema.data_type, json_read_hint);
+            let json_root_type = json_root_types.and_then(|x| x.get(&schema.name));
+            let json_output_plan =
+                Json2OutputPlan::new(&schema.data_type, json_read_hint, json_root_type);
             if let Some(concretized) = json_output_plan.planned_type() {
                 schema.data_type = concretized.clone();
             }
@@ -145,10 +166,13 @@ impl FlatProjectionMapper {
                 if data_type
                     .as_json()
                     .is_some_and(|json_type| json_type.is_json2())
-                    && let Some(json_output_plan) = metadata
-                        .column_by_id(*column_id)
-                        .and_then(|x| json_type_hint.get(&x.column_schema.name))
-                        .map(|hint| Json2OutputPlan::new(data_type, Some(hint)))
+                    && let Some(json_output_plan) =
+                        metadata.column_by_id(*column_id).and_then(|col| {
+                            let hint = json_type_hint.get(&col.column_schema.name)?;
+                            let root_json_type =
+                                json_root_types.and_then(|x| x.get(&col.column_schema.name));
+                            Some(Json2OutputPlan::new(data_type, Some(hint), root_json_type))
+                        })
                     && let Some(concretized) = json_output_plan.planned_type()
                 {
                     *data_type = concretized.clone();

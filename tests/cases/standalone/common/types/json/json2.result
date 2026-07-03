@@ -275,7 +275,14 @@ Affected Rows: 2
 
 select json_get(j, '') from json2_root_merge order by ts;
 
-Error: 3001(EngineExecuteQuery), Invalid argument error: It is not possible to interleave arrays of different data types (Struct("a": Struct("b": Int64, "x": Boolean), "c": Utf8View, "d": Boolean, "e": Struct("x": Int64)) and Struct("a": Struct("b": Int64), "f": List(Int64), "z": Utf8View))
++---------------------------------------+
+| json_get(json2_root_merge.j,Utf8("")) |
++---------------------------------------+
+| {"a":{"b":10},"e":{"x":1}}            |
+| {"a":{"b":20},"f":[1,2]}              |
+| {"a":{"x":false},"c":"sst2"}          |
+| {"z":"mem"}                           |
++---------------------------------------+
 
 drop table json2_root_merge;
 

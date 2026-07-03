@@ -1218,7 +1218,10 @@ pub(crate) fn scan_flat_mem_ranges(
             let mut iter = range.build_record_batch_iter(Some(time_range), mem_scan_metrics.clone())?;
             part_metrics.inc_build_reader_cost(build_reader_start.elapsed());
 
-            while let Some(record_batch) = iter.next().transpose()? {
+            while let Some(mut record_batch) = iter.next().transpose()? {
+                if let Some(aligner) = &stream_ctx.input.json_aligner {
+                    record_batch = aligner.align_batch(record_batch)?;
+                }
                 yield record_batch;
             }
 
