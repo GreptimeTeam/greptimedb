@@ -1076,6 +1076,7 @@ impl EngineInner {
             request,
             CacheStrategy::EnableAll(cache_manager),
         )
+        .with_query_stat_counters(region.region_stats.query_stat_counters())
         .with_max_concurrent_scan_files(self.config.max_concurrent_scan_files)
         .with_ignore_inverted_index(self.config.inverted_index.apply_on_query.disabled())
         .with_ignore_fulltext_index(self.config.fulltext_index.apply_on_query.disabled())

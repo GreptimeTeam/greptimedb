@@ -19,6 +19,7 @@ use std::task::{Context, Poll};
 use std::time::Instant;
 
 use common_error::ext::BoxedError;
+use common_recordbatch::adapter::RegionQueryStatCounters;
 use common_recordbatch::{
     DfRecordBatch, DfSendableRecordBatchStream, MemoryTrackedStream, QueryMemoryTracker,
     SendableRecordBatchStream,
@@ -368,6 +369,14 @@ impl RegionScanExec {
             .properties()
             .query_load_region_id()
             .map(|region_id| region_id.as_u64())
+    }
+
+    pub fn query_stat_counters(&self) -> Option<RegionQueryStatCounters> {
+        self.scanner
+            .lock()
+            .unwrap()
+            .properties()
+            .query_stat_counters()
     }
 }
 

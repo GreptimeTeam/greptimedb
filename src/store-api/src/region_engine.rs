@@ -23,6 +23,7 @@ use api::greptime_proto::v1::meta::{GrantedRegion as PbGrantedRegion, RegionRole
 use api::region::RegionResponse;
 use async_trait::async_trait;
 use common_error::ext::BoxedError;
+use common_recordbatch::adapter::RegionQueryStatCounters;
 use common_recordbatch::{EmptyRecordBatchStream, QueryMemoryTracker, SendableRecordBatchStream};
 use common_time::Timestamp;
 use datafusion_physical_plan::metrics::ExecutionPlanMetricsSet;
@@ -316,6 +317,8 @@ pub struct ScannerProperties {
 
     /// Region id that should receive query-load metrics for this scanner.
     query_load_region_id: Option<RegionId>,
+    /// Counters that should receive query-load metrics for this scanner.
+    query_stat_counters: Option<RegionQueryStatCounters>,
 }
 
 impl ScannerProperties {
@@ -341,6 +344,7 @@ impl ScannerProperties {
             target_partitions: 0,
             logical_region: false,
             query_load_region_id: None,
+            query_stat_counters: None,
         }
     }
 
@@ -394,9 +398,19 @@ impl ScannerProperties {
         self.query_load_region_id
     }
 
+    /// Returns the counters that should receive query-load metrics.
+    pub fn query_stat_counters(&self) -> Option<RegionQueryStatCounters> {
+        self.query_stat_counters.clone()
+    }
+
     /// Sets the region id that should receive query-load metrics.
     pub fn set_query_load_region_id(&mut self, region_id: RegionId) {
         self.query_load_region_id = Some(region_id);
+    }
+
+    /// Sets the counters that should receive query-load metrics.
+    pub fn set_query_stat_counters(&mut self, counters: RegionQueryStatCounters) {
+        self.query_stat_counters = Some(counters);
     }
 }
 
@@ -531,6 +545,14 @@ pub struct RegionStatistic {
     #[serde(default)]
     /// The total bytes written of the region since region opened.
     pub written_bytes: u64,
+    /// The total query CPU time of the region since region opened.
+    ///
+    /// Unit: nanoseconds.
+    #[serde(default)]
+    pub query_cpu_time: u64,
+    /// The total scanned bytes of the region since region opened.
+    #[serde(default)]
+    pub query_scanned_bytes: u64,
     /// The latest entry id of the region's remote WAL since last flush.
     /// For metric engine, there're two latest entry ids, one for data and one for metadata.
     /// TODO(weny): remove this two fields and use single instead.
@@ -681,6 +703,38 @@ impl RegionStatistic {
     /// Returns the estimated disk size of the region.
     pub fn estimated_disk_size(&self) -> u64 {
         self.wal_size + self.sst_size + self.manifest_size + self.index_size
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn region_statistic_deserializes_without_query_stats() {
+        let statistic: RegionStatistic = serde_json::from_value(json!({
+            "num_rows": 1,
+            "memtable_size": 2,
+            "wal_size": 3,
+            "manifest_size": 4,
+            "sst_size": 5,
+            "sst_num": 6,
+            "index_size": 7,
+            "manifest": {
+                "Mito": {
+                    "manifest_version": 8,
+                    "flushed_entry_id": 9,
+                    "file_removed_cnt": 10
+                }
+            },
+            "written_bytes": 11
+        }))
+        .unwrap();
+
+        assert_eq!(statistic.query_cpu_time, 0);
+        assert_eq!(statistic.query_scanned_bytes, 0);
     }
 }
 
