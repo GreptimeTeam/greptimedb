@@ -80,7 +80,7 @@ fn merge_region_statistic(
             metadata_manifest_version: metadata_stat.manifest.data_manifest_version(),
         },
         written_bytes: metadata_stat.written_bytes + data_stat.written_bytes,
-        query_cpu_time_millis: data_stat.query_cpu_time_millis,
+        query_cpu_time: data_stat.query_cpu_time,
         query_scanned_bytes: data_stat.query_scanned_bytes,
         data_topic_latest_entry_id: data_stat.data_topic_latest_entry_id,
         metadata_topic_latest_entry_id: metadata_stat.metadata_topic_latest_entry_id,
@@ -147,13 +147,13 @@ mod tests {
     #[test]
     fn merge_region_statistic_uses_data_region_query_stats() {
         let metadata_stat = RegionStatistic {
-            query_cpu_time_millis: 100,
+            query_cpu_time: 100,
             query_scanned_bytes: 200,
             manifest: RegionManifestInfo::mito(1, 2, 0),
             ..Default::default()
         };
         let data_stat = RegionStatistic {
-            query_cpu_time_millis: 10,
+            query_cpu_time: 10,
             query_scanned_bytes: 20,
             manifest: RegionManifestInfo::mito(3, 4, 0),
             ..Default::default()
@@ -161,7 +161,7 @@ mod tests {
 
         let statistic = merge_region_statistic(&metadata_stat, &data_stat);
 
-        assert_eq!(statistic.query_cpu_time_millis, 10);
+        assert_eq!(statistic.query_cpu_time, 10);
         assert_eq!(statistic.query_scanned_bytes, 20);
     }
 }

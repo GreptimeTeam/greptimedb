@@ -61,7 +61,7 @@ const INIT_CAPACITY: usize = 42;
 /// - `region_number`: The region number.
 /// - `region_rows`: The number of rows in region.
 /// - `written_bytes_since_open`: The total bytes written of the region since region opened.
-/// - `query_cpu_time_millis`: The total query CPU time of the region since region opened.
+/// - `query_cpu_time_millis`: The total query CPU time of the region since region opened, in milliseconds.
 /// - `query_scanned_bytes`: The total bytes scanned by queries since region opened.
 /// - `memtable_size`: The memtable size in bytes.
 /// - `disk_size`: The approximate disk size in bytes.
@@ -223,7 +223,7 @@ impl InformationSchemaRegionStatisticsBuilder {
             (WRITTEN_BYTES, &Value::from(region_stat.written_bytes)),
             (
                 QUERY_CPU_TIME_MILLIS,
-                &Value::from(region_stat.query_cpu_time_millis),
+                &Value::from(region_stat.query_cpu_time / 1_000_000),
             ),
             (
                 QUERY_SCANNED_BYTES,
@@ -250,7 +250,7 @@ impl InformationSchemaRegionStatisticsBuilder {
         self.region_rows.push(Some(region_stat.num_rows));
         self.written_bytes.push(Some(region_stat.written_bytes));
         self.query_cpu_time_millis
-            .push(Some(region_stat.query_cpu_time_millis));
+            .push(Some(region_stat.query_cpu_time / 1_000_000));
         self.query_scanned_bytes
             .push(Some(region_stat.query_scanned_bytes));
         self.disk_sizes.push(Some(region_stat.approximate_bytes));

@@ -185,8 +185,8 @@ pub struct MitoRegion {
 pub(crate) struct RegionStats {
     /// The total bytes written to the region.
     pub(crate) written_bytes: Arc<AtomicU64>,
-    /// The total query CPU time of the region in milliseconds.
-    pub(crate) query_cpu_time_millis: Arc<AtomicU64>,
+    /// The total query CPU time of the region in nanoseconds.
+    pub(crate) query_cpu_time: Arc<AtomicU64>,
     /// The total scanned bytes of the region.
     pub(crate) query_scanned_bytes: Arc<AtomicU64>,
 }
@@ -195,14 +195,14 @@ impl RegionStats {
     pub(crate) fn new() -> Self {
         Self {
             written_bytes: Arc::new(AtomicU64::new(0)),
-            query_cpu_time_millis: Arc::new(AtomicU64::new(0)),
+            query_cpu_time: Arc::new(AtomicU64::new(0)),
             query_scanned_bytes: Arc::new(AtomicU64::new(0)),
         }
     }
 
     pub(crate) fn query_stat_counters(&self) -> RegionQueryStatCounters {
         RegionQueryStatCounters {
-            query_cpu_time_millis: self.query_cpu_time_millis.clone(),
+            query_cpu_time: self.query_cpu_time.clone(),
             query_scanned_bytes: self.query_scanned_bytes.clone(),
         }
     }
@@ -674,10 +674,7 @@ impl MitoRegion {
 
         let topic_latest_entry_id = self.topic_latest_entry_id.load(Ordering::Relaxed);
         let written_bytes = self.region_stats.written_bytes.load(Ordering::Relaxed);
-        let query_cpu_time_millis = self
-            .region_stats
-            .query_cpu_time_millis
-            .load(Ordering::Relaxed);
+        let query_cpu_time = self.region_stats.query_cpu_time.load(Ordering::Relaxed);
         let query_scanned_bytes = self
             .region_stats
             .query_scanned_bytes
@@ -699,7 +696,7 @@ impl MitoRegion {
             data_topic_latest_entry_id: topic_latest_entry_id,
             metadata_topic_latest_entry_id: topic_latest_entry_id,
             written_bytes,
-            query_cpu_time_millis,
+            query_cpu_time,
             query_scanned_bytes,
         }
     }

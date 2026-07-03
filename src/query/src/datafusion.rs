@@ -120,13 +120,11 @@ fn query_stat_counters(plan: &Arc<dyn ExecutionPlan>) -> Option<RegionQueryStatC
         {
             match &counters {
                 Some(counters)
-                    if !Arc::ptr_eq(
-                        &counters.query_cpu_time_millis,
-                        &scan_counters.query_cpu_time_millis,
-                    ) || !Arc::ptr_eq(
-                        &counters.query_scanned_bytes,
-                        &scan_counters.query_scanned_bytes,
-                    ) =>
+                    if !Arc::ptr_eq(&counters.query_cpu_time, &scan_counters.query_cpu_time)
+                        || !Arc::ptr_eq(
+                            &counters.query_scanned_bytes,
+                            &scan_counters.query_scanned_bytes,
+                        ) =>
                 {
                     return None;
                 }
@@ -909,7 +907,7 @@ mod tests {
 
     fn query_stat_counters_for_test() -> RegionQueryStatCounters {
         RegionQueryStatCounters {
-            query_cpu_time_millis: Arc::new(AtomicU64::new(0)),
+            query_cpu_time: Arc::new(AtomicU64::new(0)),
             query_scanned_bytes: Arc::new(AtomicU64::new(0)),
         }
     }
@@ -970,8 +968,8 @@ mod tests {
 
         let actual = super::query_stat_counters(&plan).unwrap();
         assert!(Arc::ptr_eq(
-            &actual.query_cpu_time_millis,
-            &counters.query_cpu_time_millis
+            &actual.query_cpu_time,
+            &counters.query_cpu_time
         ));
         assert!(Arc::ptr_eq(
             &actual.query_scanned_bytes,

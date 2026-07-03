@@ -547,9 +547,9 @@ pub struct RegionStatistic {
     pub written_bytes: u64,
     /// The total query CPU time of the region since region opened.
     ///
-    /// Unit: milliseconds.
+    /// Unit: nanoseconds.
     #[serde(default)]
-    pub query_cpu_time_millis: u64,
+    pub query_cpu_time: u64,
     /// The total scanned bytes of the region since region opened.
     #[serde(default)]
     pub query_scanned_bytes: u64,
@@ -733,7 +733,7 @@ mod tests {
         }))
         .unwrap();
 
-        assert_eq!(statistic.query_cpu_time_millis, 0);
+        assert_eq!(statistic.query_cpu_time, 0);
         assert_eq!(statistic.query_scanned_bytes, 0);
     }
 }

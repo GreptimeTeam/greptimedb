@@ -102,9 +102,11 @@ pub struct RegionStat {
     pub written_bytes: u64,
     /// The total query CPU time of the region since region opened.
     ///
-    /// Unit: milliseconds.
-    pub query_cpu_time_millis: u64,
+    /// Unit: nanoseconds.
+    #[serde(default)]
+    pub query_cpu_time: u64,
     /// The total scanned bytes of the region since region opened.
+    #[serde(default)]
     pub query_scanned_bytes: u64,
     /// The latest entry id of topic used by data.
     /// **Only used by remote WAL prune.**
@@ -323,7 +325,7 @@ impl From<&api::v1::meta::RegionStat> for RegionStat {
             index_size: region_stat.index_size,
             region_manifest: region_stat.manifest.into(),
             written_bytes: region_stat.written_bytes,
-            query_cpu_time_millis: region_stat.query_cpu_time_millis,
+            query_cpu_time: region_stat.query_cpu_time,
             query_scanned_bytes: region_stat.query_scanned_bytes,
             data_topic_latest_entry_id: region_stat.data_topic_latest_entry_id,
             metadata_topic_latest_entry_id: region_stat.metadata_topic_latest_entry_id,
@@ -561,6 +563,48 @@ mod tests {
         let stat = stats.first().unwrap();
         assert_eq!(101, stat.id);
         assert_eq!(100, stat.region_num);
+    }
+
+    #[test]
+    fn test_stat_val_deserializes_without_query_stats() {
+        let stat = Stat {
+            region_stats: vec![RegionStat {
+                id: RegionId::new(1024, 1),
+                rcus: 0,
+                wcus: 0,
+                approximate_bytes: 0,
+                engine: "mito".to_string(),
+                role: RegionRole::Leader,
+                num_rows: 0,
+                memtable_size: 0,
+                manifest_size: 0,
+                sst_size: 0,
+                sst_num: 0,
+                index_size: 0,
+                region_manifest: RegionManifestInfo::Mito {
+                    manifest_version: 0,
+                    flushed_entry_id: 0,
+                    file_removed_cnt: 0,
+                },
+                written_bytes: 0,
+                query_cpu_time: 10,
+                query_scanned_bytes: 20,
+                data_topic_latest_entry_id: 0,
+                metadata_topic_latest_entry_id: 0,
+            }],
+            ..Default::default()
+        };
+        let stat_val = DatanodeStatValue { stats: vec![stat] };
+        let mut value = serde_json::to_value(stat_val).unwrap();
+        let region_stat = value[0]["region_stats"][0].as_object_mut().unwrap();
+        region_stat.remove("query_cpu_time");
+        region_stat.remove("query_scanned_bytes");
+
+        let stat_val: DatanodeStatValue = serde_json::from_value(value).unwrap();
+        let region_stat = &stat_val.stats[0].region_stats[0];
+
+        assert_eq!(region_stat.query_cpu_time, 0);
+        assert_eq!(region_stat.query_scanned_bytes, 0);
     }
 
     #[test]

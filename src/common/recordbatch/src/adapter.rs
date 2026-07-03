@@ -230,8 +230,8 @@ pub struct RecordBatchStreamAdapter {
 /// Query statistic counters owned by a region.
 #[derive(Debug, Clone)]
 pub struct RegionQueryStatCounters {
-    /// The total query CPU time in milliseconds.
-    pub query_cpu_time_millis: Arc<AtomicU64>,
+    /// The total query CPU time in nanoseconds.
+    pub query_cpu_time: Arc<AtomicU64>,
     /// The total scanned bytes.
     pub query_scanned_bytes: Arc<AtomicU64>,
 }
@@ -324,10 +324,9 @@ pub fn region_scan_output_bytes(metrics: &RecordBatchMetrics) -> usize {
 }
 
 fn record_query_stats(counters: &RegionQueryStatCounters, metrics: &RecordBatchMetrics) {
-    counters.query_cpu_time_millis.fetch_add(
-        (metrics.elapsed_compute as u64) / 1_000_000,
-        Ordering::Relaxed,
-    );
+    counters
+        .query_cpu_time
+        .fetch_add(metrics.elapsed_compute as u64, Ordering::Relaxed);
     counters
         .query_scanned_bytes
         .fetch_add(region_scan_output_bytes(metrics) as u64, Ordering::Relaxed);
@@ -988,7 +987,7 @@ mod test {
     #[test]
     fn test_record_query_stats_updates_region_counters() {
         let counters = RegionQueryStatCounters {
-            query_cpu_time_millis: Arc::new(AtomicU64::new(10)),
+            query_cpu_time: Arc::new(AtomicU64::new(10)),
             query_scanned_bytes: Arc::new(AtomicU64::new(20)),
         };
         let metrics = RecordBatchMetrics {
@@ -1004,7 +1003,7 @@ mod test {
 
         record_query_stats(&counters, &metrics);
 
-        assert_eq!(counters.query_cpu_time_millis.load(Ordering::Relaxed), 12);
+        assert_eq!(counters.query_cpu_time.load(Ordering::Relaxed), 2_000_010);
         assert_eq!(counters.query_scanned_bytes.load(Ordering::Relaxed), 62);
     }
 
@@ -1022,7 +1021,7 @@ mod test {
             ),
         );
         let counters = RegionQueryStatCounters {
-            query_cpu_time_millis: Arc::new(AtomicU64::new(10)),
+            query_cpu_time: Arc::new(AtomicU64::new(10)),
             query_scanned_bytes: Arc::new(AtomicU64::new(20)),
         };
         let metrics = RecordBatchMetrics {
@@ -1048,7 +1047,7 @@ mod test {
 
         drop(adapter);
 
-        assert_eq!(counters.query_cpu_time_millis.load(Ordering::Relaxed), 12);
+        assert_eq!(counters.query_cpu_time.load(Ordering::Relaxed), 2_000_010);
         assert_eq!(counters.query_scanned_bytes.load(Ordering::Relaxed), 62);
     }
 
