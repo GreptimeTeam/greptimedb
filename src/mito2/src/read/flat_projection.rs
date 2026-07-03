@@ -28,16 +28,15 @@ use datatypes::arrow::datatypes::{DataType as ArrowDataType, Field};
 use datatypes::extension::json::is_structured_json_field;
 use datatypes::prelude::{ConcreteDataType, DataType};
 use datatypes::schema::{Schema, SchemaRef};
-use datatypes::types::json_type::JsonNativeType;
 use datatypes::value::Value;
 use datatypes::vectors::Helper;
-use datatypes::vectors::json::array::JsonArray;
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 use store_api::storage::{ColumnId, JsonReadHint};
 
 use crate::cache::CacheStrategy;
 use crate::error::{InvalidRequestSnafu, RecordBatchSnafu, Result};
+use crate::read::json_schema::{Json2OutputPlan, normalize_json2_output};
 use crate::read::projection::{read_column_ids_from_projection, repeated_vector_with_cache};
 use crate::read::read_columns::ReadColumns;
 use crate::sst::parquet::flat_format::sst_column_id_indices;
@@ -72,8 +71,8 @@ pub struct FlatProjectionMapper {
     batch_indices: Vec<usize>,
     /// Precomputed Arrow schema for input batches.
     input_arrow_schema: datatypes::arrow::datatypes::SchemaRef,
-    /// Whether each output column is a JSON2 root read.
-    json_root_output_columns: Vec<bool>,
+    /// JSON2 output handling plan for each output column.
+    json_output_plans: Vec<Json2OutputPlan>,
 }
 
 impl FlatProjectionMapper {
@@ -103,7 +102,7 @@ impl FlatProjectionMapper {
 
         // Output column schemas for the projection.
         let mut col_schemas = Vec::with_capacity(projection.len());
-        let mut json_root_output_columns = Vec::with_capacity(projection.len());
+        let mut json_output_plans = Vec::with_capacity(projection.len());
         // Column ids of the output projection without deduplication.
         let mut output_col_ids = Vec::with_capacity(projection.len());
         for idx in &projection {
@@ -117,18 +116,12 @@ impl FlatProjectionMapper {
             output_col_ids.push(col.column_id);
 
             let mut schema = col.column_schema.clone();
-            let is_json2 = schema
-                .data_type
-                .as_json()
-                .is_some_and(|json_type| json_type.is_json2());
             let json_read_hint = json_type_hint.and_then(|x| x.get(&schema.name));
-            json_root_output_columns
-                .push(is_json2 && matches!(json_read_hint, Some(JsonReadHint::Root)));
-            if is_json2
-                && let Some(concretized) = json_read_hint.and_then(json_read_hint_to_data_type)
-            {
-                schema.data_type = concretized;
+            let json_output_plan = Json2OutputPlan::new(&schema.data_type, json_read_hint);
+            if let Some(concretized) = json_output_plan.planned_type() {
+                schema.data_type = concretized.clone();
             }
+            json_output_plans.push(json_output_plan);
             col_schemas.push(schema);
         }
 
@@ -152,12 +145,13 @@ impl FlatProjectionMapper {
                 if data_type
                     .as_json()
                     .is_some_and(|json_type| json_type.is_json2())
-                    && let Some(concretized) = metadata
+                    && let Some(json_output_plan) = metadata
                         .column_by_id(*column_id)
                         .and_then(|x| json_type_hint.get(&x.column_schema.name))
-                        .and_then(json_read_hint_to_data_type)
+                        .map(|hint| Json2OutputPlan::new(data_type, Some(hint)))
+                    && let Some(concretized) = json_output_plan.planned_type()
                 {
-                    *data_type = concretized;
+                    *data_type = concretized.clone();
                 }
             }
         }
@@ -209,7 +203,7 @@ impl FlatProjectionMapper {
             is_empty_projection,
             batch_indices,
             input_arrow_schema,
-            json_root_output_columns,
+            json_output_plans,
         })
     }
 
@@ -332,25 +326,12 @@ impl FlatProjectionMapper {
                 }
             }
 
-            let output_type = &output_column_schemas[output_idx].data_type;
-            if self.json_root_output_columns[output_idx]
-                && output_type
-                    .as_json()
-                    .is_some_and(|json_type| json_type.is_json2())
-            {
-                // Root JSON2 reads don't have a concretized schema hint. Use the
-                // actual array type as the output type.
-                let json_type =
-                    JsonNativeType::try_from(array.data_type()).context(DataTypesSnafu)?;
-                output_column_schemas[output_idx].data_type = ConcreteDataType::json2(json_type);
-            } else if output_type
-                .as_json()
-                .is_some_and(|json_type| json_type.is_json2())
-            {
-                array = JsonArray::from(&array)
-                    .try_align(&output_type.as_arrow_type())
-                    .context(DataTypesSnafu)?;
-            }
+            array = normalize_json2_output(
+                array,
+                &mut output_column_schemas[output_idx].data_type,
+                &self.json_output_plans[output_idx],
+            )
+            .context(DataTypesSnafu)?;
 
             arrays.push(array);
         }
@@ -386,13 +367,6 @@ impl FlatProjectionMapper {
             columns.push(vector);
         }
         Ok(columns)
-    }
-}
-
-fn json_read_hint_to_data_type(hint: &JsonReadHint) -> Option<ConcreteDataType> {
-    match hint {
-        JsonReadHint::Root => None,
-        JsonReadHint::Paths(json_type) => Some(ConcreteDataType::json2(json_type.clone())),
     }
 }
 
@@ -586,7 +560,7 @@ mod tests {
     use datatypes::arrow::array::{Array, ArrayRef, Int64Array, StructArray};
     use datatypes::arrow::datatypes::{DataType as ArrowDataType, Field, Schema as ArrowSchema};
     use datatypes::arrow::record_batch::RecordBatch as ArrowRecordBatch;
-    use datatypes::types::json_type::JsonObjectType;
+    use datatypes::types::json_type::{JsonNativeType, JsonObjectType};
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
     use store_api::storage::RegionId;
 

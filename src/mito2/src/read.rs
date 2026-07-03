@@ -20,6 +20,7 @@ pub mod dedup;
 pub mod flat_dedup;
 pub mod flat_merge;
 pub mod flat_projection;
+pub(crate) mod json_schema;
 pub mod last_row;
 pub mod projection;
 pub(crate) mod prune;

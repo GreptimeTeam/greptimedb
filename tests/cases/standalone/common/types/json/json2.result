@@ -173,11 +173,37 @@ select j.c, j.y from json2_table order by ts;
 
 select j from json2_table order by ts;
 
-Error: 3001(EngineExecuteQuery), Failed to align JSON array, reason: Invalid argument error: use StructArray::try_new_with_length or StructArray::new_empty_fields to create a struct array with no fields so that the length can be set correctly
++----+
+| j  |
++----+
+| {} |
+| {} |
+| {} |
+| {} |
+| {} |
+| {} |
+| {} |
+| {} |
+| {} |
+| {} |
++----+
 
 select * from json2_table order by ts;
 
-Error: 3001(EngineExecuteQuery), Failed to align JSON array, reason: Invalid argument error: use StructArray::try_new_with_length or StructArray::new_empty_fields to create a struct array with no fields so that the length can be set correctly
++-------------------------+----+
+| ts                      | j  |
++-------------------------+----+
+| 1970-01-01T00:00:00.001 | {} |
+| 1970-01-01T00:00:00.002 | {} |
+| 1970-01-01T00:00:00.003 | {} |
+| 1970-01-01T00:00:00.004 | {} |
+| 1970-01-01T00:00:00.005 | {} |
+| 1970-01-01T00:00:00.006 | {} |
+| 1970-01-01T00:00:00.007 | {} |
+| 1970-01-01T00:00:00.008 | {} |
+| 1970-01-01T00:00:00.009 | {} |
+| 1970-01-01T00:00:00.010 | {} |
++-------------------------+----+
 
 select j.a.b + 1 from json2_table order by ts;
 

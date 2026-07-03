@@ -14,7 +14,7 @@
 
 //! Scans a region according to the scan request.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::fmt;
 use std::num::NonZeroU64;
 use std::sync::Arc;
@@ -34,7 +34,6 @@ use datafusion_expr::Expr;
 use datafusion_expr::utils::expr_to_columns;
 use datatypes::arrow::array::{ArrayRef, BooleanArray, UInt64Array};
 use datatypes::extension::json::is_structured_json_field;
-use datatypes::types::json_type::JsonNativeType;
 use datatypes::value::timestamp_to_scalar_value;
 use futures::StreamExt;
 use itertools::Itertools;
@@ -44,8 +43,8 @@ use snafu::ResultExt;
 use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 use store_api::region_engine::{PartitionRange, RegionScannerRef};
 use store_api::storage::{
-    JsonReadHint, NestedPath, RegionId, ScanRequest, SequenceNumber, SequenceRange,
-    TimeSeriesDistribution, TimeSeriesRowSelector,
+    RegionId, ScanRequest, SequenceNumber, SequenceRange, TimeSeriesDistribution,
+    TimeSeriesRowSelector,
 };
 use table::predicate::{Predicate, build_time_range_predicate, extract_time_range_from_expr};
 use tokio::sync::{Semaphore, mpsc};
@@ -61,11 +60,11 @@ use crate::memtable::{MemtableRange, RangesOptions};
 use crate::metrics::READ_SST_COUNT;
 use crate::read::compat::{self, FlatCompatBatch};
 use crate::read::flat_projection::FlatProjectionMapper;
+use crate::read::json_schema::apply_json_read_hints_to_read_columns;
 use crate::read::range::{FileRangeBuilder, MemRangeBuilder, RangeMeta, RowGroupIndex};
 use crate::read::range_cache::{ScanRequestFingerprint, implied_time_range_from_exprs};
 use crate::read::read_columns::{
-    ReadColumns, merge, merge_nested_paths, read_columns_from_predicate,
-    read_columns_from_projection,
+    ReadColumns, merge, read_columns_from_predicate, read_columns_from_projection,
 };
 use crate::read::seq_scan::SeqScan;
 use crate::read::series_scan::SeriesScan;
@@ -440,7 +439,7 @@ impl ScanRegion {
             .iter()
             .any(is_structured_json_field);
         if has_structured_json {
-            narrow_read_columns_by_json_type_hint(
+            apply_json_read_hints_to_read_columns(
                 &mut read_cols,
                 &self.request.json_type_hint,
                 &self.version.metadata,
@@ -1421,53 +1420,6 @@ fn pre_filter_mode(append_mode: bool, merge_mode: MergeMode) -> PreFilterMode {
     }
 }
 
-fn narrow_read_columns_by_json_type_hint(
-    read_columns: &mut ReadColumns,
-    json_type_hint: &HashMap<String, JsonReadHint>,
-    metadata: &RegionMetadata,
-) {
-    if json_type_hint.is_empty() {
-        return;
-    }
-
-    for read_column in &mut read_columns.cols {
-        let Some(column) = metadata.column_by_id(read_column.column_id) else {
-            continue;
-        };
-        let column_name = &column.column_schema.name;
-        let Some(json_type) = json_type_hint.get(column_name) else {
-            continue;
-        };
-
-        let JsonReadHint::Paths(json_type) = json_type else {
-            read_column.nested_paths.clear();
-            continue;
-        };
-
-        let mut paths = Vec::new();
-        let mut current = vec![column_name.clone()];
-        collect_json_nested_paths(json_type, &mut current, &mut paths);
-        merge_nested_paths(&mut read_column.nested_paths, paths)
-    }
-}
-
-fn collect_json_nested_paths(
-    json_type: &JsonNativeType,
-    current: &mut NestedPath,
-    paths: &mut Vec<NestedPath>,
-) {
-    match json_type {
-        JsonNativeType::Object(fields) if !fields.is_empty() => {
-            for (field, child) in fields {
-                current.push(field.clone());
-                collect_json_nested_paths(child, current, paths);
-                current.pop();
-            }
-        }
-        _ => paths.push(current.clone()),
-    }
-}
-
 /// Output of [build_scan_fingerprint]: the cache fingerprint plus the derived
 /// implied time range used to decide whether the cache key can drop the time
 /// predicates for a given partition (see `build_range_cache_key`).
@@ -1957,6 +1909,7 @@ impl PredicateGroup {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::sync::Arc;
 
     use common_time::timestamp::{TimeUnit, Timestamp};
@@ -1968,11 +1921,13 @@ mod tests {
     };
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::ColumnSchema;
-    use datatypes::types::json_type::JsonObjectType;
+    use datatypes::types::json_type::{JsonNativeType, JsonObjectType};
     use datatypes::value::Value;
     use partition::expr::col as partition_col;
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
-    use store_api::storage::{RegionId, TimeSeriesDistribution, TimeSeriesRowSelector};
+    use store_api::storage::{
+        JsonReadHint, NestedPath, RegionId, TimeSeriesDistribution, TimeSeriesRowSelector,
+    };
 
     use super::*;
     use crate::cache::CacheManager;
@@ -2119,7 +2074,7 @@ mod tests {
         let mut read_columns = ReadColumns {
             cols: vec![ReadColumn::new(1, vec![]), ReadColumn::new(0, vec![])],
         };
-        narrow_read_columns_by_json_type_hint(&mut read_columns, &hint, metadata.as_ref());
+        apply_json_read_hints_to_read_columns(&mut read_columns, &hint, metadata.as_ref());
         assert_eq!(
             read_columns,
             ReadColumns {
@@ -2136,7 +2091,7 @@ mod tests {
         let mut read_columns = ReadColumns {
             cols: vec![ReadColumn::new(0, vec![])],
         };
-        narrow_read_columns_by_json_type_hint(&mut read_columns, &hint, metadata.as_ref());
+        apply_json_read_hints_to_read_columns(&mut read_columns, &hint, metadata.as_ref());
         assert_eq!(
             read_columns,
             ReadColumns {
@@ -2148,7 +2103,7 @@ mod tests {
         let mut read_columns = ReadColumns {
             cols: vec![ReadColumn::new(1, vec![])],
         };
-        narrow_read_columns_by_json_type_hint(&mut read_columns, &hint, metadata.as_ref());
+        apply_json_read_hints_to_read_columns(&mut read_columns, &hint, metadata.as_ref());
         assert_eq!(
             read_columns,
             ReadColumns {
