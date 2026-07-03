@@ -42,6 +42,26 @@ ALTER TABLE test_alter_auto_flush_interval SET 'auto_flush_interval' = '0s';
 -- Clean up
 DROP TABLE test_alter_auto_flush_interval;
 
+-- Test clearing the auto_flush_interval override via SET = NULL
+CREATE TABLE test_alter_auto_flush_interval_clear(
+    host STRING,
+    ts TIMESTAMP TIME INDEX,
+    cpu DOUBLE,
+    PRIMARY KEY(host)
+) ENGINE=mito WITH ('auto_flush_interval' = '15m');
+
+-- Verify initial value
+SHOW CREATE TABLE test_alter_auto_flush_interval_clear;
+
+-- Clear the override by setting to NULL
+ALTER TABLE test_alter_auto_flush_interval_clear SET 'auto_flush_interval' = NULL;
+
+-- Verify the override is cleared (the option should no longer appear in SHOW CREATE)
+SHOW CREATE TABLE test_alter_auto_flush_interval_clear;
+
+-- Clean up
+DROP TABLE test_alter_auto_flush_interval_clear;
+
 -- Test altering auto_flush_interval on a table that already had it set at create time
 CREATE TABLE test_alter_auto_flush_interval_with_default(
     host STRING,

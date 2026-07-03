@@ -1398,6 +1398,12 @@ impl TryFrom<&PbOption> for SetRegionOption {
                 Ok(Self::AppendMode(append_mode))
             }
             AUTO_FLUSH_INTERVAL_KEY => {
+                if value.is_empty() {
+                    // SET 'auto_flush_interval' = NULL comes through as an empty
+                    // string; treat it as clearing the override (fall back to
+                    // the global default), same as Ttl.
+                    return Ok(Self::AutoFlushInterval(None));
+                }
                 let interval = humantime::parse_duration(value)
                     .map_err(|_| InvalidSetRegionOptionRequestSnafu { key, value }.build())?;
                 if interval <= Duration::ZERO {
@@ -1687,6 +1693,44 @@ mod tests {
             location: None,
         })
         .unwrap_err();
+    }
+
+    #[test]
+    fn test_set_region_option_auto_flush_interval_try_from() {
+        use std::time::Duration;
+
+        // Valid duration
+        let pb = PbOption {
+            key: "auto_flush_interval".to_string(),
+            value: "5m".to_string(),
+        };
+        let opt = SetRegionOption::try_from(&pb).unwrap();
+        assert_eq!(
+            opt,
+            SetRegionOption::AutoFlushInterval(Some(Duration::from_secs(300)))
+        );
+
+        // Empty value clears the override (mirrors Ttl's behaviour for `SET key = NULL`).
+        let pb = PbOption {
+            key: "auto_flush_interval".to_string(),
+            value: String::new(),
+        };
+        let opt = SetRegionOption::try_from(&pb).unwrap();
+        assert_eq!(opt, SetRegionOption::AutoFlushInterval(None));
+
+        // Zero is rejected up front (engine invariant).
+        let pb = PbOption {
+            key: "auto_flush_interval".to_string(),
+            value: "0s".to_string(),
+        };
+        assert!(SetRegionOption::try_from(&pb).is_err());
+
+        // Garbage value is rejected.
+        let pb = PbOption {
+            key: "auto_flush_interval".to_string(),
+            value: "not_a_duration".to_string(),
+        };
+        assert!(SetRegionOption::try_from(&pb).is_err());
     }
 
     #[test]
