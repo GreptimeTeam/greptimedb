@@ -616,7 +616,7 @@ mod tests {
     }
 
     #[test]
-    fn test_json_type_hint_root_keeps_struct_schema() {
+    fn test_json2_root_read_keeps_struct_schema() {
         let mut builder = RegionMetadataBuilder::new(RegionId::new(1024, 0));
         builder
             .push_column_metadata(ColumnMetadata {
@@ -638,14 +638,6 @@ mod tests {
                 column_id: 1,
             });
         let metadata = Arc::new(builder.build().unwrap());
-        let hint = HashMap::from([("j".to_string(), JsonReadHint::Root)]);
-        let mapper = FlatProjectionMapper::new_with_read_columns(
-            &metadata,
-            vec![0],
-            ReadColumns::from_deduped_column_ids([0]),
-            Some(&hint),
-        )
-        .unwrap();
 
         let json_array = Arc::new(StructArray::from(vec![(
             Arc::new(Field::new("a", ArrowDataType::Int64, true)),
@@ -661,10 +653,28 @@ mod tests {
         )
         .unwrap();
 
+        let hint = HashMap::from([("j".to_string(), JsonReadHint::Root)]);
+        let mapper = FlatProjectionMapper::new_with_read_columns(
+            &metadata,
+            vec![0],
+            ReadColumns::from_deduped_column_ids([0]),
+            Some(&hint),
+        )
+        .unwrap();
+
         let converted = mapper.convert(&batch, &CacheStrategy::Disabled).unwrap();
         assert_eq!(
             converted.df_record_batch().schema().field(0).data_type(),
             json_array.data_type()
         );
+
+        let mapper = FlatProjectionMapper::new_with_read_columns(
+            &metadata,
+            vec![0],
+            ReadColumns::from_deduped_column_ids([0]),
+            None,
+        )
+        .unwrap();
+        assert!(mapper.convert(&batch, &CacheStrategy::Disabled).is_err());
     }
 }

@@ -173,37 +173,11 @@ select j.c, j.y from json2_table order by ts;
 
 select j from json2_table order by ts;
 
-+----+
-| j  |
-+----+
-| {} |
-| {} |
-| {} |
-| {} |
-| {} |
-| {} |
-| {} |
-| {} |
-| {} |
-| {} |
-+----+
+Error: 3001(EngineExecuteQuery), Unsupported operation: direct JSON2 column projection is not supported yet; use json_get(column, '') to read the root JSON2 value for vector: Json2
 
 select * from json2_table order by ts;
 
-+-------------------------+----+
-| ts                      | j  |
-+-------------------------+----+
-| 1970-01-01T00:00:00.001 | {} |
-| 1970-01-01T00:00:00.002 | {} |
-| 1970-01-01T00:00:00.003 | {} |
-| 1970-01-01T00:00:00.004 | {} |
-| 1970-01-01T00:00:00.005 | {} |
-| 1970-01-01T00:00:00.006 | {} |
-| 1970-01-01T00:00:00.007 | {} |
-| 1970-01-01T00:00:00.008 | {} |
-| 1970-01-01T00:00:00.009 | {} |
-| 1970-01-01T00:00:00.010 | {} |
-+-------------------------+----+
+Error: 3001(EngineExecuteQuery), Unsupported operation: direct JSON2 column projection is not supported yet; use json_get(column, '') to read the root JSON2 value for vector: Json2
 
 select j.a.b + 1 from json2_table order by ts;
 
