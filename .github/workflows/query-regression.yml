@@ -33,7 +33,7 @@ on:
           - release
           - dev
   pull_request:
-    types: [labeled, synchronize, reopened]
+    types: [labeled, ready_for_review, reopened]
 
 permissions:
   contents: read
@@ -44,7 +44,12 @@ concurrency:
 
 jobs:
   query-regression:
-    if: ${{ github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'query-regression') }}
+    if: >-
+      ${{ github.event_name == 'workflow_dispatch' ||
+          (github.event_name == 'pull_request' &&
+           !github.event.pull_request.draft &&
+           contains(github.event.pull_request.labels.*.name, 'query-regression') &&
+           (github.event.action != 'labeled' || github.event.label.name == 'query-regression')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 120
     env:
