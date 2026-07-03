@@ -280,10 +280,16 @@ impl Inner {
             .get(addr)
             .context(error::CreateChannelSnafu)?;
 
+        let config = self.channel_manager.config();
+        let max_decoding_message_size = config.max_recv_message_size.as_bytes() as usize;
+        let max_encoding_message_size = config.max_send_message_size.as_bytes() as usize;
+
         Ok(HeartbeatClient::new(channel)
             .accept_compressed(CompressionEncoding::Zstd)
             .accept_compressed(CompressionEncoding::Gzip)
-            .send_compressed(CompressionEncoding::Zstd))
+            .send_compressed(CompressionEncoding::Zstd)
+            .max_decoding_message_size(max_decoding_message_size)
+            .max_encoding_message_size(max_encoding_message_size))
     }
 
     #[inline]
