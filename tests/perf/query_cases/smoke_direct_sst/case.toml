@@ -10,6 +10,11 @@ data_mode = "direct_readable_sst"
 mode = "direct_readable_sst"
 seed = 42
 
+[workload]
+kind = "direct_readable_sst"
+
+[workload.direct_readable_sst]
+
 [[tables]]
 database = "public"
 name = "smoke_direct_sst"

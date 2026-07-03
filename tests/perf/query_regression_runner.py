@@ -147,10 +147,14 @@ def case_tables(case: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def workload_kind(case: dict[str, Any]) -> str:
-    workload = case.get("workload") or {}
-    kind = workload.get("kind", "direct_readable_sst")
+    workload = case.get("workload")
+    if not isinstance(workload, dict):
+        raise ValueError("case requires [workload] with kind = 'direct_readable_sst'")
+    kind = workload.get("kind")
     if kind != "direct_readable_sst":
         raise ValueError(f"unsupported workload kind {kind!r}; only 'direct_readable_sst' is supported")
+    if not isinstance(workload.get("direct_readable_sst"), dict):
+        raise ValueError("direct_readable_sst workload requires [workload.direct_readable_sst]")
     return kind
 
 
@@ -693,7 +697,7 @@ def main() -> int:
     args = parse_args()
     case_path = args.case.resolve()
     case = load_case(case_path)
-    kind = workload_kind(case)
+    workload_kind(case)
     tables = case_tables(case)
     work_root = args.work_dir.resolve()
     work_root.mkdir(parents=True, exist_ok=True)
@@ -708,7 +712,7 @@ def main() -> int:
     targets = [make_target("base", args.base_bin.resolve(), work_root, ports[:8]), make_target("candidate", args.candidate_bin.resolve(), work_root, ports[8:])]
     require_fresh_work_dirs(targets, reuse_work_dir=args.reuse_work_dir, dry_run=args.dry_run, fixture_only=args.fixture_only)
     fixture_dir = work_root / "fixture"
-    report: dict[str, Any] = {"case_path": str(case_path), "case": case.get("case", {}), "fixture": case.get("fixture", {}), "workload": {"kind": kind, **(case.get("workload") or {})}, "queries": planned_queries(case), "dry_run": args.dry_run, "fixture_only": args.fixture_only, "query_mode": "fixture-only" if args.fixture_only else "distributed", "reuse_work_dir": args.reuse_work_dir, "http_timeout": args.http_timeout, "targets": [], "thresholds": [], "status": "planned" if args.dry_run else "running"}
+    report: dict[str, Any] = {"case_path": str(case_path), "case": case.get("case", {}), "fixture": case.get("fixture", {}), "workload": case["workload"], "queries": planned_queries(case), "dry_run": args.dry_run, "fixture_only": args.fixture_only, "query_mode": "fixture-only" if args.fixture_only else "distributed", "reuse_work_dir": args.reuse_work_dir, "http_timeout": args.http_timeout, "targets": [], "thresholds": [], "status": "planned" if args.dry_run else "running"}
 
     if args.fixture_only or args.dry_run:
         generations = []

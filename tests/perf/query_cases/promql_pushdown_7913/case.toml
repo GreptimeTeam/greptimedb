@@ -13,6 +13,11 @@ data_mode = "direct_readable_sst"
 mode = "direct_readable_sst"
 seed = 7913
 
+[workload]
+kind = "direct_readable_sst"
+
+[workload.direct_readable_sst]
+
 [[tables]]
 database = "public"
 name = "promql_pushdown_7913"

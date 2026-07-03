@@ -152,9 +152,46 @@ def build_markdown(
     return "\n".join(lines) + "\n"
 
 
+def build_combined_markdown(
+    reports: list[tuple[Path, dict[str, Any]]],
+    run_url: str | None,
+    case_name: str | None,
+    base_ref: str | None,
+    candidate_ref: str | None,
+) -> str:
+    if len(reports) == 1:
+        path, report = reports[0]
+        return build_markdown(report, path, run_url, case_name, base_ref, candidate_ref)
+
+    overall = "failed" if any(report.get("status") != "ok" for _, report in reports) else "ok"
+    lines = [f"## {status_emoji(overall)} Query regression report: `{esc(case_name or 'multiple cases')}`", ""]
+    lines.append(f"- **Status:** `{esc(overall)}`")
+    if base_ref:
+        lines.append(f"- **Base ref:** `{esc(base_ref)}`")
+    if candidate_ref:
+        lines.append(f"- **Candidate ref:** `{esc(candidate_ref)}`")
+    if run_url:
+        lines.append(f"- **Workflow run:** {run_url}")
+    lines.append("- **Artifacts:** query-regression-work logs, fixture metadata, and JSON reports are uploaded with this run.")
+
+    lines.extend(["", "### Cases", "", "| Case | Status | Report |", "| --- | --- | --- |"])
+    for path, report in reports:
+        case = report.get("case") or {}
+        name = case.get("name") or path.parent.name
+        status = report.get("status", "missing")
+        lines.append(f"| `{esc(name)}` | {status_emoji(status)} `{esc(status)}` | `{esc(path)}` |")
+
+    for path, report in reports:
+        case = report.get("case") or {}
+        name = case.get("name") or path.parent.name
+        lines.extend(["", "---", ""])
+        lines.append(build_markdown(report, path, None, name, None, None).rstrip())
+    return "\n".join(lines) + "\n"
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--report", required=True, type=Path)
+    parser.add_argument("--report", required=True, type=Path, action="append")
     parser.add_argument("--run-url")
     parser.add_argument("--case-name")
     parser.add_argument("--base-ref")
@@ -162,13 +199,15 @@ def main() -> int:
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
 
-    if args.report.exists():
-        report = json.loads(args.report.read_text())
-    else:
-        report = {"status": "failed", "error": f"report not found: {args.report}", "targets": []}
-    markdown = build_markdown(
-        report,
-        args.report,
+    reports = []
+    for report_path in args.report:
+        if report_path.exists():
+            report = json.loads(report_path.read_text())
+        else:
+            report = {"status": "failed", "error": f"report not found: {report_path}", "targets": []}
+        reports.append((report_path, report))
+    markdown = build_combined_markdown(
+        reports,
         args.run_url,
         args.case_name,
         args.base_ref,

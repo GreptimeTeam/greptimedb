@@ -53,10 +53,9 @@ time_range_layout = "non_overlapping_per_sst"
 series_layout = "round_robin"
 ```
 
-`[workload]` is optional for older cases and defaults to
-`kind = "direct_readable_sst"`. Other workload variants are intentionally
-unsupported for now, but the nested shape leaves room for future
-`write_then_query` and `write_while_query` configuration.
+`[workload]` is required. Other workload variants are intentionally unsupported
+for now, but the nested shape leaves room for future `write_then_query` and
+`write_while_query` configuration.
 
 The generator should use these declarations to produce:
 

@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       case:
-        description: Query perf case path in candidate checkout
+        description: Query perf case path(s) in candidate checkout, or all
         required: true
-        default: tests/perf/query_cases/promql_pushdown_7913/case.toml
+        default: all
       base_ref:
         description: Base ref/sha to build
         required: true
@@ -51,7 +51,7 @@ jobs:
            contains(github.event.pull_request.labels.*.name, 'query-regression') &&
            (github.event.action != 'labeled' || github.event.label.name == 'query-regression')) }}
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 180
     env:
       CARGO_PROFILE: ${{ github.event_name == 'pull_request' && 'nightly' || inputs.cargo_profile }}
     steps:
@@ -105,58 +105,18 @@ jobs:
 
       - name: Run query regression
         id: run
-        shell: bash
         env:
-          CASE_PATH: ${{ github.event_name == 'pull_request' && 'tests/perf/query_cases/promql_pushdown_7913/case.toml' || inputs.case }}
+          CASE_PATHS: ${{ github.event_name == 'pull_request' && 'all' || inputs.case }}
           HTTP_TIMEOUT: ${{ github.event_name == 'pull_request' && '300' || inputs.http_timeout }}
           ALLOW_LARGE_FIXTURE: ${{ github.event_name == 'pull_request' && 'true' || inputs.allow_large_fixture }}
-        run: |
-          set +e
-          EXTRA_ARGS=()
-          if [[ "${ALLOW_LARGE_FIXTURE}" == "true" ]]; then
-            EXTRA_ARGS+=(--allow-large-fixture)
-          fi
-          PROFILE_DIR="${CARGO_PROFILE}"
-          if [[ "${PROFILE_DIR}" == "dev" ]]; then
-            PROFILE_DIR="debug"
-          fi
-          uv run --no-project python candidate-src/tests/perf/query_regression_runner.py \
-            --case "candidate-src/${CASE_PATH}" \
-            --base-bin "base-src/target/${PROFILE_DIR}/greptime" \
-            --candidate-bin "candidate-src/target/${PROFILE_DIR}/greptime" \
-            --fixture-generator "candidate-src/target/${PROFILE_DIR}/query_perf_fixture" \
-            --work-dir query-regression-work \
-            --http-timeout "${HTTP_TIMEOUT}" \
-            "${EXTRA_ARGS[@]}"
-          STATUS=$?
-          echo "status=${STATUS}" >> "${GITHUB_OUTPUT}"
-          exit 0
-
-      - name: Generate Markdown summary
-        if: always()
-        shell: bash
-        env:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          CASE_NAME: ${{ github.event_name == 'pull_request' && 'promql_pushdown_7913' || inputs.case }}
+          CASE_NAME: ${{ github.event_name == 'pull_request' && 'default case set' || inputs.case }}
           BASE_REF: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || inputs.base_ref }}
           CANDIDATE_REF: ${{ github.event_name == 'pull_request' && format('refs/pull/{0}/merge', github.event.pull_request.number) || inputs.candidate_ref || github.ref }}
-        run: |
-          SUMMARY_SCRIPT="candidate-src/.github/scripts/query-regression-summary.py"
-          if [[ -f "base-src/.github/scripts/query-regression-summary.py" ]]; then
-            SUMMARY_SCRIPT="base-src/.github/scripts/query-regression-summary.py"
-          fi
-          uv run --no-project python "${SUMMARY_SCRIPT}" \
-            --report query-regression-work/query-regression-report.json \
-            --run-url "${RUN_URL}" \
-            --case-name "${CASE_NAME}" \
-            --base-ref "${BASE_REF}" \
-            --candidate-ref "${CANDIDATE_REF}" \
-            --output query-regression-summary.md
-          cat query-regression-summary.md >> "${GITHUB_STEP_SUMMARY}"
+        run: uv run --no-project python candidate-src/.github/scripts/query-regression-run.py
 
       - name: Write PR metadata for trusted comment workflow
         if: ${{ always() && github.event_name == 'pull_request' }}
-        shell: bash
         env:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
@@ -164,23 +124,7 @@ jobs:
           BASE_REPO: ${{ github.event.pull_request.base.repo.full_name }}
           RUN_ID: ${{ github.run_id }}
           RUN_ATTEMPT: ${{ github.run_attempt }}
-        run: |
-          python3 - <<'PY'
-          import json
-          import os
-
-          metadata = {
-              "pr_number": int(os.environ["PR_NUMBER"]),
-              "head_sha": os.environ["HEAD_SHA"],
-              "head_repo": os.environ["HEAD_REPO"],
-              "base_repo": os.environ["BASE_REPO"],
-              "run_id": int(os.environ["RUN_ID"]),
-              "run_attempt": int(os.environ["RUN_ATTEMPT"]),
-          }
-          with open("query-regression-pr.json", "w", encoding="utf-8") as fp:
-              json.dump(metadata, fp, sort_keys=True)
-              fp.write("\n")
-          PY
+        run: uv run --no-project python candidate-src/.github/scripts/query-regression-pr-metadata.py
 
       - name: Upload query regression artifacts
         if: always()

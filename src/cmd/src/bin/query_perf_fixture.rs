@@ -106,6 +106,7 @@ struct CaseFile {
     case: CaseInfo,
     #[serde(default)]
     fixture: Option<FixtureConfig>,
+    workload: Workload,
     tables: Vec<TableConfig>,
     layout: LayoutConfig,
 }
@@ -119,6 +120,31 @@ struct FixtureConfig {
 #[derive(Debug, Deserialize)]
 struct CaseInfo {
     name: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "kind")]
+enum Workload {
+    #[serde(rename = "direct_readable_sst")]
+    DirectReadableSst {
+        direct_readable_sst: DirectReadableSstWorkload,
+    },
+}
+
+#[derive(Debug, Deserialize)]
+struct DirectReadableSstWorkload {}
+
+impl Workload {
+    fn kind(&self) -> &'static str {
+        match self {
+            Workload::DirectReadableSst {
+                direct_readable_sst,
+            } => {
+                let _ = direct_readable_sst;
+                "direct_readable_sst"
+            }
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -514,8 +540,13 @@ async fn main() {
         other => panic!("unsupported sst_format {other}"),
     };
     println!(
-        "query_perf_fixture case={} table={}.{} ssts={} rows_per_sst={} format={format:?}",
-        case.case.name, table.database, table.name, case.layout.sst_count, case.layout.rows_per_sst
+        "query_perf_fixture case={} workload={} table={}.{} ssts={} rows_per_sst={} format={format:?}",
+        case.case.name,
+        case.workload.kind(),
+        table.database,
+        table.name,
+        case.layout.sst_count,
+        case.layout.rows_per_sst
     );
     println!(
         "out_dir={} table_dir={} region_dir={}",

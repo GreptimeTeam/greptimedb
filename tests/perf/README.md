@@ -192,14 +192,14 @@ query regression runs. It builds its own binaries for now:
   candidate checkout
 - runner and summary formatter from the candidate checkout
 
-The workflow runs automatically only for PRs labeled `query-regression` (on
-label/synchronize/reopen events). PR runs default to the
-`promql_pushdown_7913` case and pass `--allow-large-fixture`; manual
-`workflow_dispatch` runs can override the case path and refs. It always uploads
-`query-regression-work/**` and `query-regression-summary.md`, writes the Markdown
-summary to the workflow step summary, and updates a sticky PR comment when the PR
-comes from the same repository. Fork PRs still get artifacts and the step summary,
-but comments are skipped.
+The workflow runs automatically only for non-draft PRs labeled
+`query-regression` (on label/ready-for-review/reopen events, not every push).
+PR runs build base/candidate once and then run the default case set with
+`--allow-large-fixture`. Manual `workflow_dispatch` runs can pass `all`, one case
+path, or a comma/whitespace-separated list of case paths, and can override refs.
+It always uploads `query-regression-work/**` and `query-regression-summary.md`,
+writes the Markdown summary to the workflow step summary, and updates a sticky PR
+comment through the trusted follow-up workflow.
 
 ## Built-in cases
 
