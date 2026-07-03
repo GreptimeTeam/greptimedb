@@ -21,6 +21,7 @@ use std::sync::Arc;
 
 use datatypes::data_type::ConcreteDataType;
 use datatypes::types::{StructField, StructType};
+use once_cell::sync::Lazy;
 
 pub const NATIVE_HISTOGRAM_FIELD: &str = "greptime_native_histogram";
 pub const SCHEMA_FIELD: &str = "schema";
@@ -65,6 +66,17 @@ pub const NATIVE_HISTOGRAM_FIELD_NAMES: &[&str] = &[
     NEGATIVE_BUCKETS_F64_FIELD,
 ];
 
+static NATIVE_HISTOGRAM_VALUE_TYPE: Lazy<ConcreteDataType> = Lazy::new(|| {
+    let fields = NATIVE_HISTOGRAM_FIELD_NAMES
+        .iter()
+        .filter_map(|name| {
+            let data_type = native_histogram_field_type(name)?;
+            Some(StructField::new((*name).to_string(), data_type, true))
+        })
+        .collect();
+    ConcreteDataType::struct_datatype(StructType::new(Arc::new(fields)))
+});
+
 /// Returns the exact Greptime type for a persisted native histogram field.
 pub fn native_histogram_field_type(name: &str) -> Option<ConcreteDataType> {
     match name {
@@ -91,16 +103,9 @@ pub fn native_histogram_field_type(name: &str) -> Option<ConcreteDataType> {
 }
 
 pub fn native_histogram_value_type() -> ConcreteDataType {
-    let fields = NATIVE_HISTOGRAM_FIELD_NAMES
-        .iter()
-        .filter_map(|name| {
-            let data_type = native_histogram_field_type(name)?;
-            Some(StructField::new((*name).to_string(), data_type, true))
-        })
-        .collect();
-    ConcreteDataType::struct_datatype(StructType::new(Arc::new(fields)))
+    NATIVE_HISTOGRAM_VALUE_TYPE.clone()
 }
 
 pub fn is_native_histogram_value_schema(name: &str, data_type: &ConcreteDataType) -> bool {
-    name == NATIVE_HISTOGRAM_FIELD && *data_type == native_histogram_value_type()
+    name == NATIVE_HISTOGRAM_FIELD && data_type == &*NATIVE_HISTOGRAM_VALUE_TYPE
 }

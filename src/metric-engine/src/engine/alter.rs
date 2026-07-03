@@ -228,11 +228,9 @@ impl MetricEngineInner {
                 .iter()
                 .filter(|col| col.column_metadata.semantic_type == SemanticType::Field)
                 .collect::<Vec<_>>();
-            let Some(first_added_field) = added_fields.first() else {
+            let Some(&first_added_field) = added_fields.first() else {
                 continue;
             };
-            let first_added_field_name =
-                first_added_field.column_metadata.column_schema.name.clone();
 
             let mut fields = self
                 .load_logical_columns(physical_region_id, *region_id)
@@ -253,7 +251,7 @@ impl MetricEngineInner {
                         &fields[0].column_schema.data_type
                     ),
                 AddingFieldColumnSnafu {
-                    name: first_added_field_name,
+                    name: first_added_field.column_metadata.column_schema.name.clone(),
                 }
             );
         }
