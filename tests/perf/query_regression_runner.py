@@ -18,7 +18,6 @@
 from __future__ import annotations
 
 import argparse
-import contextlib
 import json
 import os
 import re
@@ -252,31 +251,6 @@ def wait_health(port: int, timeout_s: float = 60.0) -> None:
     raise TimeoutError(f"health check timed out on port {port}: {last}")
 
 
-@contextlib.contextmanager
-def standalone(target: RunTarget):
-    logs = target.work_dir / "logs"
-    logs.mkdir(parents=True, exist_ok=True)
-    env = os.environ.copy()
-    env.update({
-        "GREPTIMEDB_STANDALONE__WAL__DIR": str(target.work_dir / "wal"),
-        "GREPTIMEDB_STANDALONE__STORAGE__DATA_HOME": str(target.data_dir),
-        "GREPTIMEDB_STANDALONE__LOGGING__DIR": str(logs),
-    })
-    cmd = [str(target.binary), "standalone", "start", "--http-addr", f"127.0.0.1:{target.http_port}", "--grpc-bind-addr", f"127.0.0.1:{target.grpc_port}", "--mysql-addr", f"127.0.0.1:{target.mysql_port}", "--postgres-addr", f"127.0.0.1:{target.postgres_port}"]
-    with (logs / "stdout.log").open("ab") as out, (logs / "stderr.log").open("ab") as err:
-        proc = subprocess.Popen(cmd, env=env, stdout=out, stderr=err)
-        try:
-            wait_health(target.http_port)
-            yield proc
-        finally:
-            proc.terminate()
-            try:
-                proc.wait(timeout=20)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait(timeout=20)
-
-
 class DistributedCluster:
     """Local metasrv + one datanode + frontend cluster for query-mode runs."""
 
@@ -420,22 +394,6 @@ class DistributedCluster:
     def restart_frontend(self) -> None:
         self.stop_component("frontend")
         self.start_frontend()
-
-
-def discover_region(data_dir: Path, table: dict[str, Any]) -> dict[str, Any]:
-    catalog, schema = "greptime", table["database"]
-    root = data_dir / "data" / catalog / schema
-    matches = list(root.glob("*/")) if root.exists() else []
-    regions = []
-    for table_dir in matches:
-        regions.extend([p for p in table_dir.glob(f"{table_dir.name}_0000000000") if p.is_dir()])
-    if len(regions) != 1:
-        raise RuntimeError(f"expected exactly one region under {root}, found {len(regions)}: {[str(p) for p in regions]}")
-    region = regions[0]
-    table_id = int(region.parent.name)
-    region_id = (table_id << 32) | 0
-    table_dir_rel = region.parent.relative_to(data_dir).as_posix() + "/"
-    return {"catalog": catalog, "schema": schema, "table_id": table_id, "region_id": region_id, "table_dir": table_dir_rel, "region_dir": region.relative_to(data_dir).as_posix()}
 
 
 def extract_rows(body: Any) -> list[Any]:

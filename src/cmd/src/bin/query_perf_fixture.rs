@@ -29,7 +29,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::io::{BufWriter, Write};
-use std::num::NonZeroU64;
+use std::num::{NonZeroU64, NonZeroUsize};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -148,7 +148,10 @@ struct ColumnConfig {
 #[serde(tag = "kind")]
 enum Distribution {
     #[serde(rename = "cardinality")]
-    Cardinality { values: usize, prefix: String },
+    Cardinality {
+        values: NonZeroUsize,
+        prefix: String,
+    },
     #[serde(rename = "deterministic_wave")]
     DeterministicWave { min: f64, max: f64 },
 }
@@ -159,7 +162,7 @@ struct LayoutConfig {
     sst_count: usize,
     rows_per_sst: usize,
     row_group_size: usize,
-    series_count: usize,
+    series_count: NonZeroUsize,
     start_unix_nanos: i64,
     step_nanos: i64,
     time_range_layout: String,
@@ -232,7 +235,7 @@ fn build_region_metadata(table: &TableConfig, region_id: RegionId) -> RegionMeta
                     granularity: 1,
                     ..Default::default()
                 })
-                .unwrap();
+                .expect("valid skipping index options for query perf fixture");
         }
         if col.name == table.time_index {
             schema = schema.with_time_index(true);
@@ -256,7 +259,9 @@ fn build_region_metadata(table: &TableConfig, region_id: RegionId) -> RegionMeta
         .collect();
     builder.primary_key(pk_ids);
     builder.primary_key_encoding(PrimaryKeyEncoding::Dense);
-    builder.build().unwrap()
+    builder
+        .build()
+        .expect("region metadata should be valid for fixture table config")
 }
 
 fn encode_dense_primary_key(table: &TableConfig, values: &HashMap<String, String>) -> Vec<u8> {
@@ -279,7 +284,7 @@ fn encode_dense_primary_key(table: &TableConfig, values: &HashMap<String, String
                 .iter()
                 .map(|name| datatypes::value::ValueRef::String(values[name].as_str())),
         )
-        .unwrap()
+        .expect("dense primary key encoding should match fixture primary key fields")
 }
 
 fn tag_value(col: &ColumnConfig, series: usize) -> String {
@@ -288,7 +293,9 @@ fn tag_value(col: &ColumnConfig, series: usize) -> String {
         .as_ref()
         .expect("tag distribution is required")
     {
-        Distribution::Cardinality { values, prefix } => format!("{}{}", prefix, series % values),
+        Distribution::Cardinality { values, prefix } => {
+            format!("{}{}", prefix, series % values.get())
+        }
         _ => panic!("tag column {} requires cardinality distribution", col.name),
     }
 }
@@ -317,9 +324,9 @@ fn generate_record_batch(
                 let mut b = StringDictionaryBuilder::<UInt32Type>::new();
                 for row in 0..rows {
                     let series = if layout.series_layout == "round_robin" {
-                        (base_row + row) % layout.series_count
+                        (base_row + row) % layout.series_count.get()
                     } else {
-                        sst_idx % layout.series_count
+                        sst_idx % layout.series_count.get()
                     };
                     let value = tag_value(col, series);
                     b.append_value(value);
@@ -362,9 +369,9 @@ fn generate_record_batch(
     let mut pk_builder = BinaryDictionaryBuilder::<UInt32Type>::new();
     for row in 0..rows {
         let series = if layout.series_layout == "round_robin" {
-            (base_row + row) % layout.series_count
+            (base_row + row) % layout.series_count.get()
         } else {
-            sst_idx % layout.series_count
+            sst_idx % layout.series_count.get()
         };
         let values = table
             .columns
@@ -374,12 +381,13 @@ fn generate_record_batch(
             .collect();
         pk_builder
             .append(encode_dense_primary_key(table, &values))
-            .unwrap();
+            .expect("append generated dense primary key to Arrow dictionary builder");
     }
     columns.push(Arc::new(pk_builder.finish()));
     columns.push(Arc::new(UInt64Array::from_value(sequence, rows)));
     columns.push(Arc::new(UInt8Array::from_value(OpType::Put as u8, rows)));
-    RecordBatch::try_new(flat_schema, columns).unwrap()
+    RecordBatch::try_new(flat_schema, columns)
+        .expect("generated fixture columns should match flat SST Arrow schema")
 }
 
 fn file_meta_from_sst_info(
@@ -439,7 +447,7 @@ fn remap_sst_file(
         PathType::Bare,
     ));
     if let Some(parent) = new_path.parent() {
-        fs::create_dir_all(parent).unwrap();
+        fs::create_dir_all(parent).expect("failed to create remapped SST parent directory");
     }
     fs::rename(&old_path, &new_path).unwrap_or_else(|err| {
         panic!(
@@ -453,7 +461,8 @@ fn remap_sst_file(
 #[tokio::main]
 async fn main() {
     let args = Args::parse();
-    let case: CaseFile = toml::from_str(&fs::read_to_string(&args.case).unwrap()).unwrap();
+    let case_text = fs::read_to_string(&args.case).expect("failed to read query perf case TOML");
+    let case: CaseFile = toml::from_str(&case_text).expect("failed to parse query perf case TOML");
     if case.tables.is_empty() || case.layout.regions != 1 {
         panic!("fixture generator supports one or more tables and exactly one region per table");
     }
@@ -520,10 +529,10 @@ async fn main() {
 
     let obj_store_dir = args.out_dir.join("object-store");
     let manifest_dir = args.out_dir.join("manifest");
-    fs::create_dir_all(&obj_store_dir).unwrap();
-    fs::create_dir_all(&manifest_dir).unwrap();
+    fs::create_dir_all(&obj_store_dir).expect("failed to create fixture object-store directory");
+    fs::create_dir_all(&manifest_dir).expect("failed to create fixture manifest directory");
     let ostorage = ObjectStore::new(FsBuilder::default().root(&obj_store_dir.to_string_lossy()))
-        .unwrap()
+        .expect("failed to create filesystem object store for fixture output")
         .finish();
     let metadata: RegionMetadataRef = Arc::new(build_region_metadata(table, region_id));
     let mut files = HashMap::with_capacity(case.layout.sst_count);
@@ -558,7 +567,7 @@ async fn main() {
                     .await
             }
         }
-        .unwrap();
+        .expect("failed to write fixture SST through Mito parquet writer");
         for info in infos {
             let file_id = deterministic_file_id(
                 seed.wrapping_add((table_index as u64) << 16),
@@ -596,17 +605,22 @@ async fn main() {
         compacted_actions: manifest.files.len(),
         checkpoint: Some(manifest.clone()),
     };
-    let checkpoint_bytes = checkpoint.encode().unwrap();
+    let checkpoint_bytes = checkpoint
+        .encode()
+        .expect("failed to encode fixture region checkpoint");
     let checkpoint_path = manifest_dir.join(format!("{:020}.checkpoint", args.checkpoint_version));
-    fs::write(&checkpoint_path, &checkpoint_bytes).unwrap();
-    fs::write(manifest_dir.join("_last_checkpoint"), serde_json::to_vec_pretty(&serde_json::json!({ "size": checkpoint_bytes.len(), "version": args.checkpoint_version, "checksum": null, "extend_metadata": {} })).unwrap()).unwrap();
+    fs::write(&checkpoint_path, &checkpoint_bytes).expect("failed to write checkpoint file");
+    fs::write(manifest_dir.join("_last_checkpoint"), serde_json::to_vec_pretty(&serde_json::json!({ "size": checkpoint_bytes.len(), "version": args.checkpoint_version, "checksum": null, "extend_metadata": {} })).expect("failed to serialize _last_checkpoint metadata")).expect("failed to write _last_checkpoint file");
     let files_jsonl_path = args.out_dir.join("files.jsonl");
-    let mut jsonl = BufWriter::new(fs::File::create(&files_jsonl_path).unwrap());
+    let mut jsonl = BufWriter::new(
+        fs::File::create(&files_jsonl_path).expect("failed to create fixture files.jsonl"),
+    );
     let mut entries: Vec<_> = manifest.files.iter().collect();
     entries.sort_by_key(|(id, _)| id.to_string());
     for (file_id, meta) in entries {
-        writeln!(jsonl, "{}", serde_json::to_string(&serde_json::json!({ "file_id": file_id.to_string(), "region_id": meta.region_id.as_u64(), "object_path": mito2::sst::location::sst_file_path(&table_dir, RegionFileId::new(meta.region_id, *file_id), PathType::Bare), "time_range_start": meta.time_range.0.value(), "time_range_end": meta.time_range.1.value(), "num_rows": meta.num_rows, "num_row_groups": meta.num_row_groups, "file_size": meta.file_size, "num_series": meta.num_series, "sequence": meta.sequence.map(|s| s.get()) })).unwrap()).unwrap();
+        writeln!(jsonl, "{}", serde_json::to_string(&serde_json::json!({ "file_id": file_id.to_string(), "region_id": meta.region_id.as_u64(), "object_path": mito2::sst::location::sst_file_path(&table_dir, RegionFileId::new(meta.region_id, *file_id), PathType::Bare), "time_range_start": meta.time_range.0.value(), "time_range_end": meta.time_range.1.value(), "num_rows": meta.num_rows, "num_row_groups": meta.num_row_groups, "file_size": meta.file_size, "num_series": meta.num_series, "sequence": meta.sequence.map(|s| s.get()) })).expect("failed to serialize fixture SST metadata JSONL entry")).expect("failed to write fixture SST metadata JSONL entry");
     }
-    fs::write(args.out_dir.join("summary.json"), serde_json::to_vec_pretty(&serde_json::json!({ "case": case.case.name, "seed": seed, "table_index": table_index, "table": table.name, "database": table.database, "region_id": region_id.as_u64(), "table_dir": table_dir, "region_dir": region_dir, "sst_format": format!("{format:?}"), "sst_count": case.layout.sst_count, "rows_per_sst": case.layout.rows_per_sst, "row_group_size": case.layout.row_group_size, "total_rows": case.layout.sst_count * case.layout.rows_per_sst, "checkpoint_path": checkpoint_path, "files_jsonl_path": files_jsonl_path, "readback_validated": false, "metadata_source": "synthetic" })).unwrap()).unwrap();
+    jsonl.flush().expect("failed to flush fixture files.jsonl");
+    fs::write(args.out_dir.join("summary.json"), serde_json::to_vec_pretty(&serde_json::json!({ "case": case.case.name, "seed": seed, "table_index": table_index, "table": table.name, "database": table.database, "region_id": region_id.as_u64(), "table_dir": table_dir, "region_dir": region_dir, "sst_format": format!("{format:?}"), "sst_count": case.layout.sst_count, "rows_per_sst": case.layout.rows_per_sst, "row_group_size": case.layout.row_group_size, "total_rows": case.layout.sst_count * case.layout.rows_per_sst, "checkpoint_path": checkpoint_path, "files_jsonl_path": files_jsonl_path, "readback_validated": false, "metadata_source": "synthetic" })).expect("failed to serialize fixture summary")).expect("failed to write fixture summary.json");
     println!("Done. wrote {} SST file entries", manifest.files.len());
 }
