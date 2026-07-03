@@ -12,17 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Helpers for JSON2 schema handling in the read path.
+//! JSON2 schema policy used by the read path.
 //!
 //! JSON2 schemas used by reads are inferred from query expressions. For example,
 //! `json_get(j, "a.b")` gives us a concrete schema for the requested paths, so
 //! the reader can prune nested fields and align the output array to that schema.
 //!
-//! Root JSON2 reads are different: the query doesn't provide a concrete schema.
-//! They read the whole JSON2 column, and the output schema is whatever the
-//! actual array carries. A projected JSON2 column without a read hint is not
-//! supported by this module yet; it must not be aligned to the manifest's empty
-//! JSON2 schema because that would silently drop fields.
+//! Root JSON2 reads are different: the query can only say that the whole JSON2
+//! column should be read, but it cannot provide a concrete root schema. The
+//! read path must infer the root schema from the merged source schemas before
+//! building output plans. The root read still reads the whole JSON2 column, but
+//! later stages use the inferred schema to keep batch schemas consistent.
 
 pub(crate) mod align;
 
@@ -43,9 +43,12 @@ use crate::read::read_columns::{ReadColumns, merge_nested_paths};
 
 /// Applies JSON2 read hints to the nested paths in read columns.
 ///
-/// [`JsonReadHint::Root`] is a read strategy: it reads the whole JSON2 column
-/// and therefore clears nested path pruning. [`JsonReadHint::Paths`] narrows the
-/// read to the leaves described by the hinted JSON type.
+/// Behavior by hint:
+///
+/// - [`JsonReadHint::Root`] reads the whole JSON2 column, so this function
+///   clears nested path pruning for that column.
+/// - [`JsonReadHint::Paths`] narrows the read to the leaf paths described by
+///   the hinted JSON type.
 pub(crate) fn apply_json_read_hints_to_read_columns(
     read_cols: &mut ReadColumns,
     json_type_hint: &HashMap<String, JsonReadHint>,
@@ -93,15 +96,17 @@ fn collect_json_nested_paths(
     }
 }
 
-/// Infers concrete schemas for JSON2 root read hints from an Arrow schema.
+/// Infers concrete schemas for uninferred JSON2 root read hints from an Arrow schema.
 ///
-/// - `json_type_hint` contains query-driven JSON2 read hints. This function
-///   only updates entries whose hint is `JsonReadHint::Root(_)`; path hints and
-///   non-JSON2 entries are left unchanged.
-/// - `schema` is the merged source schema used by the read path. For each root
-///   read hint, this function looks up the field with the same column name,
-///   converts the field's Arrow type to `JsonNativeType`, and rewrites the hint
-///   to `JsonReadHint::Root(JsonRootReadHint::Inferred(...))`.
+/// - `json_type_hint` contains JSON2 read hints produced by the query phase and
+///   refined by the read path. This function only updates entries whose hint is
+///   `JsonReadHint::Root(JsonRootReadHint::Uninferred)`. Path hints,
+///   already-inferred root hints, and non-JSON2 entries are left unchanged.
+/// - `schema` is the merged source schema used by the read path. For each
+///   uninferred root read hint, this function looks up the field with the same
+///   column name, converts the field's Arrow type to `JsonNativeType`, and
+///   rewrites the hint to
+///   `JsonReadHint::Root(JsonRootReadHint::Inferred(...))`.
 ///
 /// If a hinted root column is not present in `schema`, the hint is left as-is.
 /// If the field exists but its Arrow type cannot be converted to a JSON native
@@ -111,7 +116,7 @@ pub(crate) fn infer_json2_root_hints_from_schema(
     schema: &ArrowSchemaRef,
 ) -> Result<()> {
     for (col_name, hint) in json_type_hint {
-        if !matches!(hint, JsonReadHint::Root(_)) {
+        if !matches!(hint, JsonReadHint::Root(JsonRootReadHint::Uninferred)) {
             continue;
         }
 
@@ -131,29 +136,18 @@ pub(crate) fn infer_json2_root_hints_from_schema(
 pub(crate) enum Json2OutputPlan {
     /// The column isn't JSON2 and doesn't need JSON2 output handling.
     NonJson2,
-    /// The column is a direct JSON2 projection without a read hint.
-    UnsupportedDirectProjection,
-    /// Read the root JSON2 value.
-    ///
-    /// The read path aligns root arrays to this concrete type before returning
-    /// them.
-    Root(ConcreteDataType),
-    /// Align the array to the expected JSON2 type.
+    /// Align the array to the expected JSON2 output type.
     Align(ConcreteDataType),
 }
 
 impl Json2OutputPlan {
     /// Builds an output plan from a column type and its optional read hint.
     ///
-    /// JSON2 path hints have a concrete schema and use [`Json2OutputPlan::Align`],
-    /// while JSON2 root hints use [`Json2OutputPlan::Root`]. A missing hint on a
-    /// JSON2 column means a direct projection such as `SELECT j`, which is not
-    /// handled here yet.
-    ///
-    /// The caller must infer root read hints before building output plans.
-    /// `JsonReadHint::Root(JsonRootReadHint::Uninferred)` means the read path
-    /// has not inspected the source schemas yet, so this function cannot decide
-    /// the concrete output type for the root column.
+    /// Path hints and inferred root hints both carry a concrete JSON2 schema,
+    /// so they produce an [`Json2OutputPlan::Align`] plan. The caller must
+    /// infer root hints before calling this function; `Root(Uninferred)` cannot
+    /// produce an output type. A missing hint on a JSON2 column is treated as an
+    /// unsupported direct projection, such as `SELECT j`.
     pub(crate) fn new(
         data_type: &ConcreteDataType,
         hint: Option<&JsonReadHint>,
@@ -163,18 +157,20 @@ impl Json2OutputPlan {
         }
 
         let plan = match hint {
-            Some(JsonReadHint::Root(JsonRootReadHint::Inferred(json_type))) => {
-                Self::Root(ConcreteDataType::json2(json_type.clone()))
+            Some(JsonReadHint::Root(JsonRootReadHint::Inferred(json_type)))
+            | Some(JsonReadHint::Paths(json_type)) => {
+                Self::Align(ConcreteDataType::json2(json_type.clone()))
             }
             Some(JsonReadHint::Root(JsonRootReadHint::Uninferred)) => UnsupportedOperationSnafu {
                 op: "JSON2 root read schema must be inferred before building output plans",
                 vector_type: "Json2",
             }
             .fail()?,
-            Some(JsonReadHint::Paths(json_type)) => {
-                Self::Align(ConcreteDataType::json2(json_type.clone()))
+            None => UnsupportedOperationSnafu {
+                op: "direct JSON2 column projection is not supported yet; use json_get(column, '') to read the root JSON2 value",
+                vector_type: "Json2",
             }
-            None => Self::UnsupportedDirectProjection,
+            .fail()?,
         };
         Ok(plan)
     }
@@ -184,8 +180,7 @@ impl Json2OutputPlan {
     pub(crate) fn planned_type(&self) -> Option<&ConcreteDataType> {
         match self {
             Self::Align(data_type) => Some(data_type),
-            Self::Root(data_type) => Some(data_type),
-            Self::NonJson2 | Self::UnsupportedDirectProjection => None,
+            Self::NonJson2 => None,
         }
     }
 }
@@ -195,11 +190,6 @@ impl Json2OutputPlan {
 /// Behavior by plan:
 ///
 /// - [`Json2OutputPlan::NonJson2`] returns the array unchanged.
-/// - [`Json2OutputPlan::UnsupportedDirectProjection`] returns an error. Without
-///   a read hint, aligning a direct JSON2 projection to the manifest's empty
-///   JSON2 schema would silently drop all fields.
-/// - [`Json2OutputPlan::Root`] updates `output_type` to its concrete type and
-///   aligns the array to it.
 /// - [`Json2OutputPlan::Align`] updates `output_type` to the planned JSON2 type
 ///   and aligns the array to that type, filling missing fields with nulls.
 ///
@@ -208,9 +198,8 @@ impl Json2OutputPlan {
 /// - `array`: the column data read from memtables or SSTs.
 /// - `output_type`: the type used in the returned record batch schema. This
 ///   function updates it when the JSON2 plan determines a more precise type.
-/// - `plan`: whether the column is a non-JSON2 column, an unsupported direct
-///   JSON2 projection, a root JSON2 read, or a path JSON2 read with a concrete
-///   schema.
+/// - `plan`: whether the column is a non-JSON2 column or a JSON2 read with a
+///   concrete output schema.
 pub(crate) fn normalize_json2_output(
     array: ArrayRef,
     output_type: &mut ConcreteDataType,
@@ -218,15 +207,6 @@ pub(crate) fn normalize_json2_output(
 ) -> DataTypeResult<ArrayRef> {
     match plan {
         Json2OutputPlan::NonJson2 => Ok(array),
-        Json2OutputPlan::UnsupportedDirectProjection => UnsupportedOperationSnafu {
-            op: "direct JSON2 column projection is not supported yet; use json_get(column, '') to read the root JSON2 value",
-            vector_type: "Json2",
-        }
-        .fail(),
-        Json2OutputPlan::Root(data_type) => {
-            *output_type = data_type.clone();
-            JsonArray::from(&array).try_align(&data_type.as_arrow_type())
-        }
         Json2OutputPlan::Align(data_type) => {
             *output_type = data_type.clone();
             JsonArray::from(&array).try_align(&data_type.as_arrow_type())
@@ -242,21 +222,14 @@ fn is_json2_type(data_type: &ConcreteDataType) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
-    use datatypes::arrow::array::NullArray;
     use datatypes::types::json_type::JsonObjectType;
 
     use super::*;
 
     #[test]
     fn test_json2_output_plan_rejects_unhinted_json2_projection() {
-        let mut output_type =
-            ConcreteDataType::json2(JsonNativeType::Object(JsonObjectType::new()));
-        let plan = Json2OutputPlan::new(&output_type, None).unwrap();
-        assert!(matches!(plan, Json2OutputPlan::UnsupportedDirectProjection));
-
-        let err = normalize_json2_output(Arc::new(NullArray::new(1)), &mut output_type, &plan)
+        let output_type = ConcreteDataType::json2(JsonNativeType::Object(JsonObjectType::new()));
+        let err = Json2OutputPlan::new(&output_type, None)
             .unwrap_err()
             .to_string();
         assert!(err.contains("use json_get(column, '')"));

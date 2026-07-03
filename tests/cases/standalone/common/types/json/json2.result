@@ -230,7 +230,7 @@ drop table json2_table;
 
 Affected Rows: 0
 
-create table json2_root_merge (
+create table json2_root_schema_merge (
     ts timestamp time index,
     j  json2
 ) with (
@@ -239,52 +239,52 @@ create table json2_root_merge (
 
 Affected Rows: 0
 
-insert into json2_root_merge
+insert into json2_root_schema_merge
 values (1, '{"a": {"b": 1}, "c": "sst1"}'),
        (2, '{"a": {"b": 2}, "d": true}');
 
 Affected Rows: 2
 
-admin flush_table('json2_root_merge');
+admin flush_table('json2_root_schema_merge');
 
-+---------------------------------------+
-| ADMIN flush_table('json2_root_merge') |
-+---------------------------------------+
-| 0                                     |
-+---------------------------------------+
++----------------------------------------------+
+| ADMIN flush_table('json2_root_schema_merge') |
++----------------------------------------------+
+| 0                                            |
++----------------------------------------------+
 
-insert into json2_root_merge
+insert into json2_root_schema_merge
 values (1, '{"a": {"b": 10}, "e": {"x": 1}}'),
        (3, '{"a": {"x": false}, "c": "sst2"}');
 
 Affected Rows: 2
 
-admin flush_table('json2_root_merge');
+admin flush_table('json2_root_schema_merge');
 
-+---------------------------------------+
-| ADMIN flush_table('json2_root_merge') |
-+---------------------------------------+
-| 0                                     |
-+---------------------------------------+
++----------------------------------------------+
+| ADMIN flush_table('json2_root_schema_merge') |
++----------------------------------------------+
+| 0                                            |
++----------------------------------------------+
 
-insert into json2_root_merge
+insert into json2_root_schema_merge
 values (2, '{"a": {"b": 20}, "f": [1, 2]}'),
        (4, '{"z": "mem"}');
 
 Affected Rows: 2
 
-select json_get(j, '') from json2_root_merge order by ts;
+select json_get(j, '') from json2_root_schema_merge order by ts;
 
-+---------------------------------------+
-| json_get(json2_root_merge.j,Utf8("")) |
-+---------------------------------------+
-| {"a":{"b":10},"e":{"x":1}}            |
-| {"a":{"b":20},"f":[1,2]}              |
-| {"a":{"x":false},"c":"sst2"}          |
-| {"z":"mem"}                           |
-+---------------------------------------+
++----------------------------------------------+
+| json_get(json2_root_schema_merge.j,Utf8("")) |
++----------------------------------------------+
+| {"a":{"b":10},"e":{"x":1}}                   |
+| {"a":{"b":20},"f":[1,2]}                     |
+| {"a":{"x":false},"c":"sst2"}                 |
+| {"z":"mem"}                                  |
++----------------------------------------------+
 
-drop table json2_root_merge;
+drop table json2_root_schema_merge;
 
 Affected Rows: 0
 
