@@ -86,6 +86,10 @@ pub const SEMANTIC_METRIC_ORIGINAL_NAME: &str = "greptime.semantic.metric.origin
 /// `docs/rfcs/2026-06-25-entity-relationships-and-graph-query.md`.
 pub const SEMANTIC_ENTITY_PREFIX: &str = "greptime.semantic.entity.";
 
+/// The well-known entity-identity key auto-stamped on OTLP trace tables; its value
+/// is the `service_name` tag column, declaring the logical `service` entity.
+pub const SEMANTIC_ENTITY_SERVICE_ID: &str = "greptime.semantic.entity.service.id";
+
 /// The role a set of columns plays for an entity: `id` (identifying attributes,
 /// must be tag columns — enforced at DDL time), `descriptive`, or `scope`.
 const ENTITY_ROLES: [&str; 3] = ["id", "descriptive", "scope"];
@@ -352,6 +356,10 @@ mod tests {
 
         // A non-entity semantic key is not an entity key.
         assert!(!is_entity_option_key(SEMANTIC_SIGNAL_TYPE));
+
+        // Drift guard: the auto-stamped constant is a well-formed entity key.
+        assert!(is_entity_option_key(SEMANTIC_ENTITY_SERVICE_ID));
+        assert!(is_semantic_option_key(SEMANTIC_ENTITY_SERVICE_ID));
     }
 
     #[test]
