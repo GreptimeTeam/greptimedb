@@ -615,6 +615,7 @@ mod tests {
     use datafusion_optimizer::analyzer::AnalyzerRule;
     use datafusion_optimizer::optimizer::{Optimizer, OptimizerContext};
     use datafusion_optimizer::push_down_filter::PushDownFilter;
+    use datafusion_optimizer::simplify_expressions::SimplifyExpressions;
     use table::predicate::build_time_range_predicate;
 
     use super::{
@@ -982,6 +983,127 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_const_normalization_vs_datafusion_cast_preimage_overlap() {
+        struct Case {
+            name: &'static str,
+            fields: Vec<Field>,
+            predicate: Expr,
+            expected_greptime: &'static str,
+            expected_datafusion: &'static str,
+        }
+
+        let cases = [
+            Case {
+                name: "integer widening binary",
+                fields: vec![Field::new("v", DataType::Int16, false)],
+                predicate: cast(col("v"), DataType::Int64).gt_eq(lit(42_i64)),
+                expected_greptime: "Filter: t.v >= Int16(42)\n  TableScan: t",
+                expected_datafusion: "Filter: t.v >= Int16(42)\n  TableScan: t",
+            },
+            Case {
+                name: "swapped integer comparison",
+                fields: vec![Field::new("v", DataType::Int16, false)],
+                predicate: lit(42_i64).lt_eq(cast(col("v"), DataType::Int64)),
+                expected_greptime: "Filter: t.v >= Int16(42)\n  TableScan: t",
+                expected_datafusion: "Filter: t.v >= Int16(42)\n  TableScan: t",
+            },
+            Case {
+                name: "try_cast integer widening binary",
+                fields: vec![Field::new("v", DataType::Int16, false)],
+                predicate: try_cast(col("v"), DataType::Int64).gt_eq(lit(42_i64)),
+                expected_greptime: "Filter: t.v >= Int16(42)\n  TableScan: t",
+                expected_datafusion: "Filter: t.v >= Int16(42)\n  TableScan: t",
+            },
+            Case {
+                name: "exact in-list",
+                fields: vec![Field::new("v", DataType::Int16, false)],
+                predicate: cast(col("v"), DataType::Int64)
+                    .in_list(vec![lit(1_i64), lit(2_i64)], false),
+                expected_greptime: "Filter: t.v IN ([Int16(1), Int16(2)])\n  TableScan: t",
+                expected_datafusion: "Filter: t.v = Int16(1) OR t.v = Int16(2)\n  TableScan: t",
+            },
+            Case {
+                name: "integer between",
+                fields: vec![Field::new("v", DataType::Int16, false)],
+                predicate: cast(col("v"), DataType::Int64).between(lit(3_i64), lit(5_i64)),
+                expected_greptime: "Filter: t.v BETWEEN Int16(3) AND Int16(5)\n  TableScan: t",
+                expected_datafusion: "Filter: t.v >= Int16(3) AND t.v <= Int16(5)\n  TableScan: t",
+            },
+            Case {
+                name: "not between",
+                fields: vec![Field::new("v", DataType::Int16, false)],
+                predicate: Expr::Between(Between {
+                    expr: Box::new(cast(col("v"), DataType::Int64)),
+                    negated: true,
+                    low: Box::new(lit(3_i64)),
+                    high: Box::new(lit(5_i64)),
+                }),
+                expected_greptime: "Filter: t.v NOT BETWEEN Int16(3) AND Int16(5)\n  TableScan: t",
+                expected_datafusion: "Filter: t.v < Int16(3) OR t.v > Int16(5)\n  TableScan: t",
+            },
+            Case {
+                name: "plain literal",
+                fields: vec![Field::new("v", DataType::Int16, false)],
+                predicate: col("v").gt_eq(lit(42_i64)),
+                expected_greptime: "Filter: t.v >= Int16(42)\n  TableScan: t",
+                expected_datafusion: "Filter: t.v >= Int64(42)\n  TableScan: t",
+            },
+            Case {
+                name: "casted constant",
+                fields: vec![Field::new("v", DataType::Int16, false)],
+                predicate: col("v").gt_eq(cast(lit(42_i8), DataType::Int64)),
+                expected_greptime: "Filter: t.v >= Int16(42)\n  TableScan: t",
+                expected_datafusion: "Filter: t.v >= Int64(42)\n  TableScan: t",
+            },
+            Case {
+                name: "timestamp downcast equality",
+                fields: vec![Field::new(
+                    "ts_ns",
+                    DataType::Timestamp(ArrowTimeUnit::Nanosecond, None),
+                    false,
+                )],
+                predicate: cast(
+                    col("ts_ns"),
+                    DataType::Timestamp(ArrowTimeUnit::Millisecond, None),
+                )
+                .eq(ts_ms_literal(5000)),
+                expected_greptime: "Filter: CAST(t.ts_ns AS Timestamp(ms)) = TimestampMillisecond(5000, None)\n  TableScan: t",
+                expected_datafusion: "Filter: t.ts_ns >= TimestampNanosecond(5000000000, None) AND t.ts_ns < TimestampNanosecond(5001000000, None)\n  TableScan: t",
+            },
+            Case {
+                name: "timestamp widening exact",
+                fields: vec![Field::new(
+                    "ts_ms",
+                    DataType::Timestamp(ArrowTimeUnit::Millisecond, None),
+                    false,
+                )],
+                predicate: cast(
+                    col("ts_ms"),
+                    DataType::Timestamp(ArrowTimeUnit::Nanosecond, None),
+                )
+                .eq(lit(ScalarValue::TimestampNanosecond(
+                    Some(5_000_000_000),
+                    None,
+                ))),
+                expected_greptime: "Filter: CAST(t.ts_ms AS Timestamp(ns)) = TimestampNanosecond(5000000000, None)\n  TableScan: t",
+                expected_datafusion: "Filter: t.ts_ms = TimestampMillisecond(5000, None)\n  TableScan: t",
+            },
+        ];
+
+        for case in cases {
+            let greptime =
+                greptime_const_normalized_filter(case.fields.clone(), case.predicate.clone());
+            let datafusion = datafusion_simplified_filter(case.fields, case.predicate);
+            assert_eq!(case.expected_greptime, greptime, "{} greptime", case.name);
+            assert_eq!(
+                case.expected_datafusion, datafusion,
+                "{} datafusion",
+                case.name
+            );
+        }
+    }
+
     fn assert_pattern_match_plan(kind: PatternMatchKind, pattern: ScalarValue, expected: &str) {
         let predicate = match kind {
             PatternMatchKind::Like => Expr::Like(Like::new(
@@ -1031,6 +1153,18 @@ mod tests {
 
     fn analyze_filter(fields: Vec<Field>, predicate: Expr) -> LogicalPlan {
         analyze_plan(build_filter_plan(test_schema(fields), predicate))
+    }
+
+    fn greptime_const_normalized_filter(fields: Vec<Field>, predicate: Expr) -> String {
+        analyze_filter(fields, predicate).to_string()
+    }
+
+    fn datafusion_simplified_filter(fields: Vec<Field>, predicate: Expr) -> String {
+        let plan = build_filter_plan(test_schema(fields), predicate);
+        Optimizer::with_rules(vec![Arc::new(SimplifyExpressions::new())])
+            .optimize(plan, &OptimizerContext::new(), |_, _| {})
+            .unwrap()
+            .to_string()
     }
 
     fn analyze_plan(plan: LogicalPlan) -> LogicalPlan {
