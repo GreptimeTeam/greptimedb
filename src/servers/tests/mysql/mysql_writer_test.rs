@@ -359,7 +359,7 @@ fn test_timestamp_display_timezone_offset() {
     let base_s: i64 = 1_748_836_200;
 
     let tz_utc = Timezone::from_tz_string("UTC").unwrap();
-    let tz_ist = Timezone::from_tz_string("+05:30").unwrap();
+    let tz_india = Timezone::from_tz_string("+05:30").unwrap();
     let tz_neg = Timezone::from_tz_string("-08:00").unwrap();
 
     let ts = Timestamp::new(base_s * 1_000 + 195, TimeUnit::Millisecond);
@@ -369,7 +369,7 @@ fn test_timestamp_display_timezone_offset() {
         "2026-06-02 03:50:00.195"
     );
     assert_eq!(
-        ts.to_timezone_aware_string(Some(&tz_ist)),
+        ts.to_timezone_aware_string(Some(&tz_india)),
         "2026-06-02 09:20:00.195"
     );
     assert_eq!(
@@ -465,7 +465,11 @@ fn test_create_mysql_column_def_preserves_order() {
         ColumnSchema::new("alpha", ConcreteDataType::int32_datatype(), true),
         ColumnSchema::new("beta", ConcreteDataType::string_datatype(), true),
         ColumnSchema::new("gamma", ConcreteDataType::float64_datatype(), true),
-        ColumnSchema::new("delta", ConcreteDataType::timestamp_millisecond_datatype(), false),
+        ColumnSchema::new(
+            "delta",
+            ConcreteDataType::timestamp_millisecond_datatype(),
+            false,
+        ),
     ];
     let schema = Arc::new(Schema::new(schemas.clone()));
     let cols = create_mysql_column_def(&schema).unwrap();

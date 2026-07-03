@@ -352,7 +352,7 @@ impl MysqlResultWriter {
     }
 }
 
-pub(crate) fn create_mysql_column(
+pub fn create_mysql_column(
     data_type: &ConcreteDataType,
     column_name: &str,
 ) -> Result<Column> {
