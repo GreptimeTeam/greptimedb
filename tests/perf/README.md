@@ -60,6 +60,11 @@ start_unix_millis = 1_704_067_200_000
 step_millis = 15_000
 chunk_series_count = 4
 visibility_timeout_seconds = 30
+# Optional: split by time so each helper invocation writes only this many samples
+# per series, then periodically flush the physical metric table to produce
+# multiple time-interval SSTs.
+# sample_chunk_size = 300
+# flush_every_sample_chunks = 1
 
 [scenario.remote_write.prom_store]
 pending_rows_flush_interval = "1s"
@@ -73,10 +78,20 @@ Use `--remote-write-generator /path/to/prom_remote_write_fixture` to provide the
 Rust payload helper. `--fixture-only` is rejected for remote-write cases; use
 `--dry-run` for planning.
 
+Large manual remote-write cases can set `sample_chunk_size` to split ingestion by
+time. For each chunk, the runner invokes `prom_remote_write_fixture` with the
+same series cardinality but a shorter `--samples-per-series` and an advanced
+`--start-unix-millis`. `flush_every_sample_chunks` controls periodic
+`ADMIN FLUSH_TABLE('<physical_table>')` calls; with `flush_every_sample_chunks = 1`,
+each time chunk is flushed separately, creating multiple SSTs/file ranges instead
+of one large final SST. If `sample_chunk_size` is omitted, the runner keeps the
+older single-helper-invocation behavior and flushes once at the end.
+
 `tests/perf/query_cases/prom_remote_write_7913/case.toml` is a larger manual
-case for issue #7913. It writes 8192 series × 1800 samples through remote-write
-before running 5m/15m/30m TQL selectors. It is not included in the default case
-set because ingestion cost dominates routine CI validation.
+case for issue #7913. It writes 32768 series × 3600 samples through remote-write
+in 300-sample time chunks, flushing after each chunk before running 5m/15m/1h TQL
+selectors. It is not included in the default case set because ingestion cost
+dominates routine CI validation.
 
 ## Generator contract
 

@@ -839,6 +839,82 @@ def run_remote_write(generator: Path | None, target: RunTarget, remote: dict[str
     return result
 
 
+def summarize_remote_write_chunks(chunks: list[dict[str, Any]]) -> dict[str, Any]:
+    summary = {"rows": 0, "samples_written": 0, "batches": 0, "elapsed_seconds": 0.0}
+    for chunk in chunks:
+        chunk_summary = chunk.get("summary") or {}
+        summary["rows"] += int(chunk_summary.get("rows", 0))
+        summary["samples_written"] += int(chunk_summary.get("samples_written", chunk_summary.get("rows", 0)))
+        summary["batches"] += int(chunk_summary.get("batches", 0))
+        summary["elapsed_seconds"] += float(chunk_summary.get("elapsed_seconds", chunk.get("elapsed_seconds", 0.0)))
+    return summary
+
+
+def flush_remote_physical_table(target: RunTarget, db: str, physical_table: str, args: argparse.Namespace, *, dry_run: bool, reason: str, chunk_index: int | None = None) -> dict[str, Any]:
+    if dry_run:
+        return {"status": "dry-run", "physical_table": physical_table, "reason": reason, "chunk_index": chunk_index}
+    result = http_post_sql(target.http_port, f"ADMIN FLUSH_TABLE({sql_string(physical_table)})", db, args.http_timeout)
+    result["physical_table"] = physical_table
+    result["reason"] = reason
+    result["chunk_index"] = chunk_index
+    return result
+
+
+def run_remote_write_ingestion(generator: Path | None, target: RunTarget, remote: dict[str, Any], args: argparse.Namespace, *, dry_run: bool) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    sample_chunk_size = remote.get("sample_chunk_size")
+    db = remote.get("database", "public")
+    physical_table = remote.get("physical_table", "greptime_physical_table")
+    if sample_chunk_size is None:
+        rw = run_remote_write(generator, target, remote, dry_run=dry_run)
+        flush = flush_remote_physical_table(target, db, physical_table, args, dry_run=dry_run, reason="final")
+        return rw, [flush]
+
+    total_samples = int(remote.get("samples_per_series", 30))
+    chunk_samples = int(sample_chunk_size)
+    if chunk_samples <= 0:
+        raise ValueError("scenario.remote_write.sample_chunk_size must be positive")
+    flush_every = int(remote.get("flush_every_sample_chunks", 1))
+    if flush_every <= 0:
+        raise ValueError("scenario.remote_write.flush_every_sample_chunks must be positive")
+    start = int(remote.get("start_unix_millis", 1_704_067_200_000))
+    step = int(remote.get("step_millis", 15_000))
+    chunks: list[dict[str, Any]] = []
+    flushes: list[dict[str, Any]] = []
+    chunk_index = 0
+    last_flushed_chunk = 0
+    for offset in range(0, total_samples, chunk_samples):
+        current = min(chunk_samples, total_samples - offset)
+        chunk_index += 1
+        chunk_remote = dict(remote)
+        chunk_remote["samples_per_series"] = current
+        chunk_remote["start_unix_millis"] = start + offset * step
+        result = run_remote_write(generator, target, chunk_remote, dry_run=dry_run)
+        result["sample_offset"] = offset
+        result["samples_per_series"] = current
+        result["chunk_index"] = chunk_index
+        chunks.append(result)
+        if chunk_index % flush_every == 0:
+            flushes.append(flush_remote_physical_table(target, db, physical_table, args, dry_run=dry_run, reason="periodic", chunk_index=chunk_index))
+            last_flushed_chunk = chunk_index
+    if last_flushed_chunk != chunk_index:
+        flushes.append(flush_remote_physical_table(target, db, physical_table, args, dry_run=dry_run, reason="final", chunk_index=chunk_index))
+    aggregate = summarize_remote_write_chunks(chunks)
+    if dry_run:
+        series_count = int(remote.get("series_count", 8))
+        chunk_series_count = int(remote.get("chunk_series_count", remote.get("batch_size", 8)))
+        aggregate["rows"] = series_count * total_samples
+        aggregate["samples_written"] = aggregate["rows"]
+        aggregate["batches"] = chunk_index * ((series_count + chunk_series_count - 1) // chunk_series_count)
+    return {
+        "status": "dry-run" if dry_run else ("ok" if all(chunk.get("status") == "ok" for chunk in chunks) else "failed"),
+        "mode": "sample-chunked",
+        "sample_chunk_size": chunk_samples,
+        "flush_every_sample_chunks": flush_every,
+        "chunks": chunks,
+        "aggregate": aggregate,
+    }, flushes
+
+
 def expected_remote_write_rows(remote: dict[str, Any]) -> int:
     return int(remote.get("series_count", 8)) * int(remote.get("samples_per_series", 30))
 
@@ -911,19 +987,18 @@ def run_remote_write_scenario(args: argparse.Namespace, case: dict[str, Any], ca
             create_database = {"status": "dry-run", "database": db}
             if not args.dry_run:
                 create_database = http_post_sql(target.http_port, f"CREATE DATABASE IF NOT EXISTS {sql_ident(db)}", "public", args.http_timeout)
-            rw = run_remote_write(args.remote_write_generator, target, remote, dry_run=args.dry_run)
+            rw, flushes = run_remote_write_ingestion(args.remote_write_generator, target, remote, args, dry_run=args.dry_run)
             physical = remote.get("physical_table", "greptime_physical_table")
-            flush = {"status": "dry-run", "physical_table": physical}
             visibility = {"status": "dry-run"}
             query_result = {"validation": [], "validation_errors": [], "measurements": [], "status": "planned"}
             if not args.dry_run:
-                flush = http_post_sql(target.http_port, f"ADMIN FLUSH_TABLE({sql_string(physical)})", db, args.http_timeout)
                 visibility = poll_expected_count(target, tables[0]["name"], db, expected_remote_write_rows(remote), float(remote.get("visibility_timeout_seconds", 30)), args.http_timeout)
                 query_result = run_queries(target, case, tables, args.http_timeout)
-            tr = {"name": target.name, "binary": str(target.binary), "work_dir": str(target.work_dir), "components": cluster.component_report(), "frontend_config": str(config_path), "create_database": create_database, "remote_write": rw, "flush": flush, "visibility": visibility, **query_result}
-            remote_checks_ok = args.dry_run or (create_database.get("ok") and flush.get("ok") and visibility.get("ok") and visibility.get("row_count_ok"))
+            tr = {"name": target.name, "binary": str(target.binary), "work_dir": str(target.work_dir), "components": cluster.component_report(), "frontend_config": str(config_path), "create_database": create_database, "remote_write": rw, "flushes": flushes, "flush": flushes[-1] if flushes else None, "visibility": visibility, **query_result}
+            flushes_ok = all(flush.get("ok") for flush in flushes)
+            remote_checks_ok = args.dry_run or (create_database.get("ok") and flushes_ok and visibility.get("ok") and visibility.get("row_count_ok"))
             if not remote_checks_ok:
-                tr.setdefault("validation_errors", []).append({"phase": "remote_write_visibility", "create_database_ok": create_database.get("ok"), "flush_ok": flush.get("ok"), "visibility_ok": visibility.get("ok"), "row_count_ok": visibility.get("row_count_ok"), "create_database": create_database, "flush": flush, "visibility": visibility})
+                tr.setdefault("validation_errors", []).append({"phase": "remote_write_visibility", "create_database_ok": create_database.get("ok"), "flushes_ok": flushes_ok, "visibility_ok": visibility.get("ok"), "row_count_ok": visibility.get("row_count_ok"), "create_database": create_database, "flushes": flushes, "visibility": visibility})
             tr["status"] = "planned" if args.dry_run else ("measured" if remote_checks_ok and query_result["status"] == "ok" else "failed")
             write_json(target.report_path, tr)
             report["targets"].append(tr)

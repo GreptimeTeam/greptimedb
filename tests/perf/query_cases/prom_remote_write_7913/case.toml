@@ -15,13 +15,15 @@ kind = "prom_remote_write_then_query"
 database = "public"
 metric = "prom_remote_write_7913"
 physical_table = "greptime_physical_table"
-series_count = 8192
-samples_per_series = 1800
+series_count = 32768
+samples_per_series = 3600
+sample_chunk_size = 300
+flush_every_sample_chunks = 1
 start_unix_millis = 1_704_067_200_000 # 2024-01-01T00:00:00Z
 step_millis = 1000
 chunk_series_count = 512
 timeout_seconds = 600
-visibility_timeout_seconds = 180
+visibility_timeout_seconds = 300
 
 [scenario.remote_write.prom_store]
 pending_rows_flush_interval = "1s"
@@ -33,7 +35,7 @@ name = "selector_5m_remote_write_high_cardinality"
 kind = "tql"
 query = "TQL ANALYZE VERBOSE (1704067800, 1704068100, '15s') prom_remote_write_7913{host=~'host.*'}"
 warmup = 1
-iterations = 3
+iterations = 2
 
 [scenario.queries.thresholds]
 max_candidate_latency_regression_pct = 100
@@ -43,17 +45,17 @@ name = "selector_15m_remote_write_high_cardinality"
 kind = "tql"
 query = "TQL ANALYZE VERBOSE (1704067800, 1704068700, '15s') prom_remote_write_7913{host=~'host.*'}"
 warmup = 1
-iterations = 3
+iterations = 2
 
 [scenario.queries.thresholds]
 max_candidate_latency_regression_pct = 100
 
 [[scenario.queries]]
-name = "selector_30m_remote_write_high_cardinality"
+name = "selector_1h_remote_write_high_cardinality"
 kind = "tql"
-query = "TQL ANALYZE VERBOSE (1704067200, 1704069000, '15s') prom_remote_write_7913{host=~'host.*'}"
+query = "TQL ANALYZE VERBOSE (1704067200, 1704070800, '15s') prom_remote_write_7913{host=~'host.*'}"
 warmup = 1
-iterations = 3
+iterations = 2
 
 [scenario.queries.thresholds]
 max_candidate_latency_regression_pct = 100
