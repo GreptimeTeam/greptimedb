@@ -76,6 +76,24 @@ pub const SEMANTIC_METRIC_METADATA_QUALITY: &str = "greptime.semantic.metric.met
 /// consumer uses to look the metric up in the OTel semantic conventions.
 pub const SEMANTIC_METRIC_ORIGINAL_NAME: &str = "greptime.semantic.metric.original_name";
 
+// ---- Entity keys (open sub-namespace) ----
+
+/// Reserved prefix for the entity-identity sub-namespace:
+/// `greptime.semantic.entity.<type>.{id|descriptive|scope}`. Unlike the rest of
+/// the vocabulary (a closed whitelist), entity types are open-ended (`service`,
+/// `host`, `k8s.pod`, `process`, `agent`, custom, ...), so keys here are validated
+/// by prefix + shape rather than membership. See
+/// `docs/rfcs/2026-06-25-entity-relationships-and-graph-query.md`.
+pub const SEMANTIC_ENTITY_PREFIX: &str = "greptime.semantic.entity.";
+
+/// The well-known entity-identity key auto-stamped on OTLP trace tables; its value
+/// is the `service_name` tag column, declaring the logical `service` entity.
+pub const SEMANTIC_ENTITY_SERVICE_ID: &str = "greptime.semantic.entity.service.id";
+
+/// The role a set of columns plays for an entity: `id` (identifying attributes,
+/// must be tag columns — enforced at DDL time), `descriptive`, or `scope`.
+const ENTITY_ROLES: [&str; 3] = ["id", "descriptive", "scope"];
+
 // ---- Value constants ----
 
 pub const SIGNAL_TYPE_TRACE: &str = "trace";
@@ -115,13 +133,41 @@ pub const SEMANTIC_OPTION_KEYS: &[&str] = &[
     SEMANTIC_METRIC_ORIGINAL_NAME,
 ];
 
-/// Returns true if `key` is a recognised semantic table-option key (whitelist).
+/// Returns true if `ty` is a syntactically valid entity type, e.g. `service`,
+/// `host`, `k8s.pod`, `service.instance`. An entity type is one or more
+/// dot-separated segments, each a non-empty `[a-z0-9_]+` token. The dotted form
+/// carries the two-entity-layer convention (`service` vs `service.instance`).
+fn is_valid_entity_type(ty: &str) -> bool {
+    !ty.is_empty()
+        && ty.split('.').all(|seg| {
+            !seg.is_empty()
+                && seg
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+        })
+}
+
+/// Returns true if `key` is a well-formed entity-identity option key of the shape
+/// `greptime.semantic.entity.<type>.{id|descriptive|scope}`. The `<type>` may
+/// itself contain dots; the role is the final dot-separated segment.
+pub fn is_entity_option_key(key: &str) -> bool {
+    let Some(rest) = key.strip_prefix(SEMANTIC_ENTITY_PREFIX) else {
+        return false;
+    };
+    let Some((ty, role)) = rest.rsplit_once('.') else {
+        return false;
+    };
+    is_valid_entity_type(ty) && ENTITY_ROLES.contains(&role)
+}
+
+/// Returns true if `key` is a recognised semantic table-option key.
 ///
-/// Note this is membership, not a prefix test: unknown keys under
-/// [`SEMANTIC_PREFIX`] are rejected, and the internal
-/// [`SEMANTIC_PER_TABLE_INDEX_KEY`] (outside the prefix) never matches.
+/// Two acceptance rules: membership in the closed [`SEMANTIC_OPTION_KEYS`]
+/// whitelist, OR the open entity sub-namespace ([`is_entity_option_key`], validated
+/// by prefix + shape). Everything else under [`SEMANTIC_PREFIX`] is rejected, and
+/// the internal [`SEMANTIC_PER_TABLE_INDEX_KEY`] (outside the prefix) never matches.
 pub fn is_semantic_option_key(key: &str) -> bool {
-    SEMANTIC_OPTION_KEYS.contains(&key)
+    SEMANTIC_OPTION_KEYS.contains(&key) || is_entity_option_key(key)
 }
 
 /// Validates a `greptime.semantic.*` option's `value` against its allowed domain.
@@ -129,9 +175,15 @@ pub fn is_semantic_option_key(key: &str) -> bool {
 /// Open-value keys (unit, original_name, pipeline, conventions) accept any
 /// non-empty string. Closed-domain keys accept a fixed set, plus the `unknown`
 /// sentinel, plus `mixed` for the keys where one long-lived table can
-/// legitimately see multiple values. Keys not in [`SEMANTIC_OPTION_KEYS`] are
-/// rejected.
+/// legitimately see multiple values. Entity keys ([`is_entity_option_key`]) take a
+/// comma-separated column-name list (each token non-empty); the "id columns must
+/// be tag columns" invariant is enforced later against the table schema at DDL
+/// time, not here. Keys that are neither whitelisted nor a well-formed entity key
+/// are rejected.
 pub fn validate_semantic_option(key: &str, value: &str) -> bool {
+    if is_entity_option_key(key) {
+        return !value.is_empty() && value.split(',').all(|col| !col.trim().is_empty());
+    }
     match key {
         SEMANTIC_PIPELINE
         | SEMANTIC_SOURCE_VERSION
@@ -272,5 +324,68 @@ mod tests {
                 "empty value should never validate for {key}"
             );
         }
+    }
+
+    #[test]
+    fn test_entity_option_key() {
+        // Well-formed entity keys are accepted by the open sub-namespace, and are
+        // therefore recognised as semantic option keys.
+        for key in [
+            "greptime.semantic.entity.service.id",
+            "greptime.semantic.entity.k8s.pod.id",
+            "greptime.semantic.entity.service.instance.descriptive",
+            "greptime.semantic.entity.host.scope",
+            "greptime.semantic.entity.agent.id",
+        ] {
+            assert!(is_entity_option_key(key), "should accept {key}");
+            assert!(is_semantic_option_key(key), "should recognise {key}");
+        }
+
+        // Malformed: empty type segment, bogus role, missing role, bare prefix,
+        // invalid (uppercase) charset in the type.
+        for key in [
+            "greptime.semantic.entity..id",
+            "greptime.semantic.entity.service.bogusrole",
+            "greptime.semantic.entity.service",
+            "greptime.semantic.entity.",
+            "greptime.semantic.entity.Service.id",
+        ] {
+            assert!(!is_entity_option_key(key), "should reject {key}");
+            assert!(!is_semantic_option_key(key), "should not recognise {key}");
+        }
+
+        // A non-entity semantic key is not an entity key.
+        assert!(!is_entity_option_key(SEMANTIC_SIGNAL_TYPE));
+
+        // Drift guard: the auto-stamped constant is a well-formed entity key.
+        assert!(is_entity_option_key(SEMANTIC_ENTITY_SERVICE_ID));
+        assert!(is_semantic_option_key(SEMANTIC_ENTITY_SERVICE_ID));
+    }
+
+    #[test]
+    fn test_validate_entity_option() {
+        // Single- and composite-id column lists validate.
+        assert!(validate_semantic_option(
+            "greptime.semantic.entity.service.id",
+            "service_name"
+        ));
+        assert!(validate_semantic_option(
+            "greptime.semantic.entity.process.id",
+            "pid,start_time"
+        ));
+        // Empty value and blank/empty tokens do not.
+        assert!(!validate_semantic_option(
+            "greptime.semantic.entity.service.id",
+            ""
+        ));
+        assert!(!validate_semantic_option(
+            "greptime.semantic.entity.process.id",
+            "pid,"
+        ));
+        // A malformed entity key validates to false regardless of value.
+        assert!(!validate_semantic_option(
+            "greptime.semantic.entity.service.bogusrole",
+            "service_name"
+        ));
     }
 }

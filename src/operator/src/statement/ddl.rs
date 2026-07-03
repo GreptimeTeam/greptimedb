@@ -92,7 +92,7 @@ use table::dist_table::DistTable;
 use table::metadata::{self, TableId, TableInfo, TableMeta, TableType};
 use table::requests::{
     AlterKind, AlterTableRequest, COMMENT_KEY, DDL_TIMEOUT, DDL_WAIT, REPARTITION_COLUMN_HINT_KEY,
-    TableOptions,
+    TableOptions, is_entity_option_key,
 };
 use table::table_name::TableName;
 use table::table_reference::TableReference;
@@ -101,12 +101,12 @@ use crate::error::{
     self, AlterExprToRequestSnafu, BuildDfLogicalPlanSnafu, CatalogSnafu, ColumnDataTypeSnafu,
     ColumnNotFoundSnafu, ConvertSchemaSnafu, CreateLogicalTablesSnafu,
     DeserializePartitionExprSnafu, EmptyDdlExprSnafu, ExternalSnafu, ExtractTableNamesSnafu,
-    FlowNotFoundSnafu, InvalidPartitionRuleSnafu, InvalidPartitionSnafu, InvalidSqlSnafu,
-    InvalidTableNameSnafu, InvalidViewNameSnafu, InvalidViewStmtSnafu, NotSupportedSnafu,
-    PartitionExprToPbSnafu, Result, SchemaInUseSnafu, SchemaNotFoundSnafu, SchemaReadOnlySnafu,
-    SerializePartitionExprSnafu, SubstraitCodecSnafu, TableAlreadyExistsSnafu,
-    TableMetadataManagerSnafu, TableNotFoundSnafu, UnrecognizedTableOptionSnafu,
-    ViewAlreadyExistsSnafu,
+    FlowNotFoundSnafu, InvalidEntitySemanticOptionSnafu, InvalidPartitionRuleSnafu,
+    InvalidPartitionSnafu, InvalidSqlSnafu, InvalidTableNameSnafu, InvalidViewNameSnafu,
+    InvalidViewStmtSnafu, NotSupportedSnafu, PartitionExprToPbSnafu, Result, SchemaInUseSnafu,
+    SchemaNotFoundSnafu, SchemaReadOnlySnafu, SerializePartitionExprSnafu, SubstraitCodecSnafu,
+    TableAlreadyExistsSnafu, TableMetadataManagerSnafu, TableNotFoundSnafu,
+    UnrecognizedTableOptionSnafu, ViewAlreadyExistsSnafu,
 };
 use crate::expr_helper::{self, RepartitionRequest, RepartitionSource};
 use crate::statement::StatementExecutor;
@@ -2377,6 +2377,12 @@ pub fn create_table_info(
         &create_table.time_index,
     )?;
 
+    validate_entity_semantic_options(
+        &table_options,
+        &column_name_to_index_map,
+        &primary_key_indices,
+    )?;
+
     let meta = TableMeta {
         schema,
         primary_key_indices,
@@ -2491,6 +2497,37 @@ fn validate_repartition_column_hint(
         .extra_options
         .insert(REPARTITION_COLUMN_HINT_KEY.to_string(), column_name);
 
+    Ok(())
+}
+
+/// Validates `greptime.semantic.entity.<type>.{id|descriptive|scope}` options
+/// against the table schema: every named column must exist, and `id` columns must
+/// additionally be tag (primary-key) columns so entity identity stays indexable
+/// and joinable. See `docs/rfcs/2026-06-25-entity-relationships-and-graph-query.md`.
+fn validate_entity_semantic_options(
+    table_options: &TableOptions,
+    column_name_to_index_map: &HashMap<String, usize>,
+    primary_key_indices: &[usize],
+) -> Result<()> {
+    for (key, value) in &table_options.extra_options {
+        if !is_entity_option_key(key) {
+            continue;
+        }
+        let is_id_role = key.ends_with(".id");
+        for col in value.split(',').map(str::trim).filter(|c| !c.is_empty()) {
+            let idx = column_name_to_index_map
+                .get(col)
+                .context(ColumnNotFoundSnafu { msg: col })?;
+            ensure!(
+                !is_id_role || primary_key_indices.contains(idx),
+                InvalidEntitySemanticOptionSnafu {
+                    reason: format!(
+                        "entity id column `{col}` (option `{key}`) must be a tag/primary-key column"
+                    ),
+                }
+            );
+        }
+    }
     Ok(())
 }
 
@@ -2991,6 +3028,58 @@ mod test {
         let ddl_options = parse_ddl_options(&options).unwrap();
         assert!(!ddl_options.wait);
         assert_eq!(Duration::from_secs(300), ddl_options.timeout);
+    }
+
+    #[test]
+    fn test_validate_entity_semantic_options() {
+        let col_map = HashMap::from([
+            ("service_name".to_string(), 0usize),
+            ("host_id".to_string(), 1usize),
+            ("value".to_string(), 2usize),
+        ]);
+        // service_name (0) and host_id (1) are tags; value (2) is a field.
+        let pk = vec![0usize, 1usize];
+        let opts = |pairs: &[(&str, &str)]| TableOptions {
+            extra_options: pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            ..Default::default()
+        };
+
+        // id on a tag column, composite id on tags, and descriptive on a field
+        // column are all accepted.
+        for pairs in [
+            &[("greptime.semantic.entity.service.id", "service_name")][..],
+            &[(
+                "greptime.semantic.entity.process.id",
+                "service_name,host_id",
+            )][..],
+            &[("greptime.semantic.entity.service.descriptive", "value")][..],
+        ] {
+            assert!(validate_entity_semantic_options(&opts(pairs), &col_map, &pk).is_ok());
+        }
+
+        // id pointing at a field column is rejected.
+        let err = validate_entity_semantic_options(
+            &opts(&[("greptime.semantic.entity.service.id", "value")]),
+            &col_map,
+            &pk,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            error::Error::InvalidEntitySemanticOption { .. }
+        ));
+
+        // id pointing at a missing column is rejected.
+        let err = validate_entity_semantic_options(
+            &opts(&[("greptime.semantic.entity.service.id", "nope")]),
+            &col_map,
+            &pk,
+        )
+        .unwrap_err();
+        assert!(matches!(err, error::Error::ColumnNotFound { .. }));
     }
 
     #[test]
