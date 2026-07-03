@@ -73,6 +73,11 @@ Use `--remote-write-generator /path/to/prom_remote_write_fixture` to provide the
 Rust payload helper. `--fixture-only` is rejected for remote-write cases; use
 `--dry-run` for planning.
 
+`tests/perf/query_cases/prom_remote_write_7913/case.toml` is a larger manual
+case for issue #7913. It writes 8192 series × 1800 samples through remote-write
+before running 5m/15m/30m TQL selectors. It is not included in the default case
+set because ingestion cost dominates routine CI validation.
+
 ## Generator contract
 
 The direct-SST generator should accept a case definition with:
