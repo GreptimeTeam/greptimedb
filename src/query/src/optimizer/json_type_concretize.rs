@@ -23,7 +23,7 @@ use datafusion_common::{Result, plan_datafusion_err, plan_err};
 use datafusion_expr::{Expr, LogicalPlan};
 use datafusion_optimizer::{OptimizerConfig, OptimizerRule};
 use datatypes::types::json_type::{JsonNativeType, JsonObjectType};
-use store_api::storage::JsonReadHint;
+use store_api::storage::{JsonReadHint, JsonRootReadHint};
 
 use crate::dummy_catalog::DummyTableProvider;
 
@@ -101,10 +101,10 @@ fn merge_json_read_hint(
             entry.insert(hint);
         }
         Entry::Occupied(mut entry) => match (entry.get_mut(), hint) {
-            (existing @ JsonReadHint::Paths(_), JsonReadHint::Root) => {
-                *existing = JsonReadHint::Root;
+            (existing @ JsonReadHint::Paths(_), JsonReadHint::Root(_)) => {
+                *existing = JsonReadHint::Root(JsonRootReadHint::Uninferred);
             }
-            (JsonReadHint::Root, _) => {}
+            (JsonReadHint::Root(_), _) => {}
             (JsonReadHint::Paths(existing), JsonReadHint::Paths(incoming)) => {
                 existing.merge(&incoming);
             }
@@ -150,7 +150,10 @@ fn deduce_json_type(expr: &Expr) -> Result<Option<(String, JsonReadHint)>> {
         JsonNativeType::try_from(&with_type).map_err(|e| plan_datafusion_err!("{e:?}"))?;
 
     if path.is_empty() {
-        return Ok(Some((column.name.clone(), JsonReadHint::Root)));
+        return Ok(Some((
+            column.name.clone(),
+            JsonReadHint::Root(JsonRootReadHint::Uninferred),
+        )));
     }
 
     let mut split = path.rsplit(".");
@@ -301,7 +304,7 @@ mod tests {
                 .transformed
         );
         assert_eq!(
-            Some(&JsonReadHint::Root),
+            Some(&JsonReadHint::Root(JsonRootReadHint::Uninferred)),
             provider.scan_request().json_type_hint.get("k0")
         );
         Ok(())
@@ -329,7 +332,7 @@ mod tests {
                 .transformed
         );
         assert_eq!(
-            Some(&JsonReadHint::Root),
+            Some(&JsonReadHint::Root(JsonRootReadHint::Uninferred)),
             provider.scan_request().json_type_hint.get("k0")
         );
         Ok(())

@@ -100,15 +100,35 @@ pub enum TimeSeriesDistribution {
 #[derive(Debug, Clone, PartialEq)]
 pub enum JsonReadHint {
     /// Read the whole JSON2 root value.
-    Root,
+    Root(JsonRootReadHint),
     /// Read and align the specified JSON2 subpaths.
     Paths(JsonNativeType),
+}
+
+/// Schema state for reading a whole JSON2 root value.
+///
+/// Unlike `json_get(j, 'a')`, a root read such as `json_get(j, '')` does not
+/// carry any JSON path that the query optimizer can use to infer a concrete
+/// JSON2 schema. The query phase can only mark the column as a root read. The
+/// storage read path initializes the concrete schema later by inspecting and
+/// merging the actual schemas from the scan sources, including SSTs and
+/// memtables.
+#[derive(Debug, Clone, PartialEq)]
+pub enum JsonRootReadHint {
+    /// The query asks for the root value, but the concrete root schema cannot
+    /// be inferred from the query expression.
+    Uninferred,
+    /// The concrete root schema inferred from the scan sources.
+    Inferred(JsonNativeType),
 }
 
 impl Display for JsonReadHint {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            JsonReadHint::Root => write!(f, "root"),
+            JsonReadHint::Root(JsonRootReadHint::Uninferred) => write!(f, "root"),
+            JsonReadHint::Root(JsonRootReadHint::Inferred(json_type)) => {
+                write!(f, "root({json_type})")
+            }
             JsonReadHint::Paths(json_type) => write!(f, "{json_type}"),
         }
     }
@@ -360,7 +380,10 @@ mod tests {
 
         let request = ScanRequest {
             json_type_hint: HashMap::from([
-                ("j".to_string(), JsonReadHint::Root),
+                (
+                    "j".to_string(),
+                    JsonReadHint::Root(JsonRootReadHint::Uninferred),
+                ),
                 (
                     "k".to_string(),
                     JsonReadHint::Paths(JsonNativeType::Object(JsonObjectType::from([(

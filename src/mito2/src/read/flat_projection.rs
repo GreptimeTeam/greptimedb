@@ -28,7 +28,6 @@ use datatypes::arrow::datatypes::{DataType as ArrowDataType, Field};
 use datatypes::extension::json::is_structured_json_field;
 use datatypes::prelude::{ConcreteDataType, DataType};
 use datatypes::schema::{Schema, SchemaRef};
-use datatypes::types::json_type::JsonNativeType;
 use datatypes::value::Value;
 use datatypes::vectors::Helper;
 use snafu::{OptionExt, ResultExt};
@@ -36,7 +35,7 @@ use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 use store_api::storage::{ColumnId, JsonReadHint};
 
 use crate::cache::CacheStrategy;
-use crate::error::{InvalidRequestSnafu, RecordBatchSnafu, Result};
+use crate::error::{DataTypeMismatchSnafu, InvalidRequestSnafu, RecordBatchSnafu, Result};
 use crate::read::json_schema::{Json2OutputPlan, normalize_json2_output};
 use crate::read::projection::{read_column_ids_from_projection, repeated_vector_with_cache};
 use crate::read::read_columns::ReadColumns;
@@ -98,24 +97,6 @@ impl FlatProjectionMapper {
         read_cols: ReadColumns,
         json_type_hint: Option<&HashMap<String, JsonReadHint>>,
     ) -> Result<Self> {
-        Self::new_with_read_columns_and_json_root_types(
-            metadata,
-            projection,
-            read_cols,
-            json_type_hint,
-            None,
-        )
-    }
-
-    /// Returns a new mapper with output projection, explicit read columns, and
-    /// concrete JSON2 root types inferred from scan sources.
-    pub fn new_with_read_columns_and_json_root_types(
-        metadata: &RegionMetadataRef,
-        projection: Vec<usize>,
-        read_cols: ReadColumns,
-        json_type_hint: Option<&HashMap<String, JsonReadHint>>,
-        json_root_types: Option<&HashMap<String, JsonNativeType>>,
-    ) -> Result<Self> {
         // If the original projection is empty.
         let is_empty_projection = projection.is_empty();
 
@@ -136,9 +117,8 @@ impl FlatProjectionMapper {
 
             let mut schema = col.column_schema.clone();
             let json_read_hint = json_type_hint.and_then(|x| x.get(&schema.name));
-            let json_root_type = json_root_types.and_then(|x| x.get(&schema.name));
-            let json_output_plan =
-                Json2OutputPlan::new(&schema.data_type, json_read_hint, json_root_type);
+            let json_output_plan = Json2OutputPlan::new(&schema.data_type, json_read_hint)
+                .context(DataTypeMismatchSnafu)?;
             if let Some(concretized) = json_output_plan.planned_type() {
                 schema.data_type = concretized.clone();
             }
@@ -163,18 +143,23 @@ impl FlatProjectionMapper {
             && !json_type_hint.is_empty()
         {
             for (column_id, data_type) in batch_schema.iter_mut() {
-                if data_type
+                if !data_type
                     .as_json()
                     .is_some_and(|json_type| json_type.is_json2())
-                    && let Some(json_output_plan) =
-                        metadata.column_by_id(*column_id).and_then(|col| {
-                            let hint = json_type_hint.get(&col.column_schema.name)?;
-                            let root_json_type =
-                                json_root_types.and_then(|x| x.get(&col.column_schema.name));
-                            Some(Json2OutputPlan::new(data_type, Some(hint), root_json_type))
-                        })
-                    && let Some(concretized) = json_output_plan.planned_type()
                 {
+                    continue;
+                }
+
+                let Some(col) = metadata.column_by_id(*column_id) else {
+                    continue;
+                };
+                let Some(hint) = json_type_hint.get(&col.column_schema.name) else {
+                    continue;
+                };
+
+                let json_output_plan =
+                    Json2OutputPlan::new(data_type, Some(hint)).context(DataTypeMismatchSnafu)?;
+                if let Some(concretized) = json_output_plan.planned_type() {
                     *data_type = concretized.clone();
                 }
             }
@@ -586,7 +571,7 @@ mod tests {
     use datatypes::arrow::record_batch::RecordBatch as ArrowRecordBatch;
     use datatypes::types::json_type::{JsonNativeType, JsonObjectType};
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
-    use store_api::storage::RegionId;
+    use store_api::storage::{JsonRootReadHint, RegionId};
 
     use super::*;
     use crate::cache::CacheStrategy;
@@ -677,7 +662,12 @@ mod tests {
         )
         .unwrap();
 
-        let hint = HashMap::from([("j".to_string(), JsonReadHint::Root)]);
+        let hint = HashMap::from([(
+            "j".to_string(),
+            JsonReadHint::Root(JsonRootReadHint::Inferred(
+                JsonNativeType::try_from(json_array.data_type()).unwrap(),
+            )),
+        )]);
         let mapper = FlatProjectionMapper::new_with_read_columns(
             &metadata,
             vec![0],

@@ -46,7 +46,7 @@ use snafu::ResultExt;
 use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 use store_api::region_engine::{PartitionRange, RegionScannerRef};
 use store_api::storage::{
-    RegionId, ScanRequest, SequenceNumber, SequenceRange, TimeSeriesDistribution,
+    JsonReadHint, RegionId, ScanRequest, SequenceNumber, SequenceRange, TimeSeriesDistribution,
     TimeSeriesRowSelector,
 };
 use table::predicate::{Predicate, build_time_range_predicate, extract_time_range_from_expr};
@@ -64,7 +64,9 @@ use crate::metrics::READ_SST_COUNT;
 use crate::read::compat::{self, FlatCompatBatch};
 use crate::read::flat_projection::FlatProjectionMapper;
 use crate::read::json_schema::align::Json2Aligner;
-use crate::read::json_schema::{apply_json_read_hints_to_read_columns, build_json2_root_aligner};
+use crate::read::json_schema::{
+    apply_json_read_hints_to_read_columns, infer_json2_root_hints_from_schema,
+};
 use crate::read::range::{FileRangeBuilder, MemRangeBuilder, RangeMeta, RowGroupIndex};
 use crate::read::range_cache::{ScanRequestFingerprint, implied_time_range_from_exprs};
 use crate::read::read_columns::{
@@ -518,36 +520,52 @@ impl ScanRegion {
             }));
         }
 
-        let json_type_hint = has_structured_json
-            .then_some(&self.request.json_type_hint)
-            .inspect(|json_type_hint| {
-                debug!(
-                    "Concretized JSON type: {{{}}}",
-                    json_type_hint
-                        .iter()
-                        .map(|(k, v)| format!("{}: {}", k, v))
-                        .join(", ")
-                );
-            });
+        let mut json_type_hint = has_structured_json.then(|| self.request.json_type_hint.clone());
+        if let Some(json_type_hint) = json_type_hint.as_mut() {
+            debug!(
+                "Concretized JSON type: {{{}}}",
+                json_type_hint
+                    .iter()
+                    .map(|(k, v)| format!("{}: {}", k, v))
+                    .join(", ")
+            );
+        }
 
-        let (json_aligner, json_root_types) = if let Some(json_type_hint) = json_type_hint {
-            let source_schemas = self
-                .collect_source_arrow_schemas(&files, &mem_range_builders)
-                .await?;
-            match build_json2_root_aligner(json_type_hint, source_schemas)? {
-                Some((aligner, root_types)) => (Some(aligner), Some(root_types)),
-                None => (None, None),
+        let json_aligner = match json_type_hint.as_mut() {
+            Some(json_type_hint)
+                if json_type_hint
+                    .values()
+                    .any(|hint| matches!(hint, JsonReadHint::Root(_))) =>
+            {
+                let source_schemas = self
+                    .collect_source_arrow_schemas(&files, &mem_range_builders)
+                    .await?;
+                if source_schemas.is_empty() {
+                    None
+                } else {
+                    let aligner = Json2Aligner::try_new(source_schemas)?;
+                    infer_json2_root_hints_from_schema(json_type_hint, aligner.schema())?;
+                    Some(aligner)
+                }
             }
-        } else {
-            (None, None)
+            _ => None,
         };
 
-        let mapper = FlatProjectionMapper::new_with_read_columns_and_json_root_types(
+        if let Some(json_type_hint) = json_type_hint.as_ref() {
+            debug!(
+                "Initialized JSON type hint: {{{}}}",
+                json_type_hint
+                    .iter()
+                    .map(|(k, v)| format!("{}: {}", k, v))
+                    .join(", ")
+            );
+        }
+
+        let mapper = FlatProjectionMapper::new_with_read_columns(
             &self.version.metadata,
             projection,
             read_cols,
-            json_type_hint,
-            json_root_types.as_ref(),
+            json_type_hint.as_ref(),
         )?;
 
         let region_id = self.region_id();
@@ -2003,7 +2021,8 @@ mod tests {
     use partition::expr::col as partition_col;
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
     use store_api::storage::{
-        JsonReadHint, NestedPath, RegionId, TimeSeriesDistribution, TimeSeriesRowSelector,
+        JsonReadHint, JsonRootReadHint, NestedPath, RegionId, TimeSeriesDistribution,
+        TimeSeriesRowSelector,
     };
 
     use super::*;
@@ -2176,7 +2195,10 @@ mod tests {
             }
         );
 
-        let hint = HashMap::from([("j".to_string(), JsonReadHint::Root)]);
+        let hint = HashMap::from([(
+            "j".to_string(),
+            JsonReadHint::Root(JsonRootReadHint::Uninferred),
+        )]);
         let mut read_columns = ReadColumns {
             cols: vec![ReadColumn::new(1, vec![])],
         };
