@@ -1,0 +1,124 @@
+name: Query Regression Comment
+
+on:
+  workflow_run:
+    workflows: [Query Regression]
+    types: [completed]
+
+permissions:
+  contents: read
+  actions: read
+  pull-requests: write
+
+jobs:
+  comment:
+    if: >-
+      ${{ github.event.workflow_run.event == 'pull_request' &&
+          github.event.workflow_run.conclusion != 'cancelled' &&
+          github.event.workflow_run.conclusion != 'skipped' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download query regression comment artifact
+        id: download
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: query-regression-comment
+          path: query-regression-comment
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ github.event.workflow_run.id }}
+
+      - name: Validate PR metadata and prepare comment
+        id: validate
+        if: ${{ steps.download.outcome == 'success' }}
+        uses: actions/github-script@v7
+        env:
+          WORKFLOW_RUN_ID: ${{ github.event.workflow_run.id }}
+          WORKFLOW_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+
+            const artifactDir = 'query-regression-comment';
+            const metadataPath = path.join(artifactDir, 'query-regression-pr.json');
+            const summaryPath = path.join(artifactDir, 'query-regression-summary.md');
+
+            if (!fs.existsSync(metadataPath)) {
+              core.info('Missing query-regression-pr.json; skipping sticky comment.');
+              core.setOutput('should_post', 'false');
+              return;
+            }
+
+            let metadata;
+            try {
+              metadata = JSON.parse(fs.readFileSync(metadataPath, 'utf8'));
+            } catch (error) {
+              core.warning(`Invalid PR metadata JSON: ${error.message}`);
+              core.setOutput('should_post', 'false');
+              return;
+            }
+
+            const expectedRunId = Number(process.env.WORKFLOW_RUN_ID);
+            const expectedRunAttempt = Number(process.env.WORKFLOW_RUN_ATTEMPT);
+            if (metadata.run_id !== expectedRunId || metadata.run_attempt !== expectedRunAttempt) {
+              core.info('Artifact metadata does not match this workflow_run; skipping.');
+              core.setOutput('should_post', 'false');
+              return;
+            }
+
+            if (metadata.base_repo !== context.repo.owner + '/' + context.repo.repo) {
+              core.info(`PR targets ${metadata.base_repo}, not this repository; skipping.`);
+              core.setOutput('should_post', 'false');
+              return;
+            }
+
+            const prNumber = Number(metadata.pr_number);
+            if (!Number.isInteger(prNumber) || prNumber <= 0) {
+              core.info('Invalid PR number in metadata; skipping.');
+              core.setOutput('should_post', 'false');
+              return;
+            }
+
+            const { data: pull } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: prNumber,
+            });
+
+            if (pull.state !== 'open') {
+              core.info(`PR #${prNumber} is ${pull.state}; skipping.`);
+              core.setOutput('should_post', 'false');
+              return;
+            }
+            if (pull.base.repo.full_name !== metadata.base_repo || pull.head.repo.full_name !== metadata.head_repo) {
+              core.info('Current PR repository metadata does not match artifact; skipping.');
+              core.setOutput('should_post', 'false');
+              return;
+            }
+            if (pull.head.sha !== metadata.head_sha) {
+              core.info('Current PR head SHA differs from artifact; skipping stale run.');
+              core.setOutput('should_post', 'false');
+              return;
+            }
+
+            let body = 'Query regression completed, but no summary artifact was found.';
+            if (fs.existsSync(summaryPath)) {
+              body = fs.readFileSync(summaryPath, 'utf8');
+            }
+            if (body.length > 59999) {
+              body = body.slice(0, 59500) + '\n\n…\n\n_Comment truncated because it exceeded 60000 characters._\n';
+            }
+            fs.writeFileSync(summaryPath, body);
+
+            core.setOutput('should_post', 'true');
+            core.setOutput('pr_number', String(prNumber));
+            core.setOutput('summary_path', summaryPath);
+
+      - name: Post sticky PR comment
+        if: ${{ steps.validate.outputs.should_post == 'true' }}
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: query-regression-report
+          number: ${{ steps.validate.outputs.pr_number }}
+          path: ${{ steps.validate.outputs.summary_path }}

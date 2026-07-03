@@ -82,7 +82,9 @@ change-coupling points, and gotchas:
 6. If you changed a persisted or wire format, add a compatibility test case (see
    `.agents/architecture-invariants.md`).
 7. Use a conventional-commit title, sign off commits (`git commit -s`), and sign
-   the CLA.
+   the CLA. Every commit pushed to a PR must include a `Signed-off-by` trailer;
+   if DCO reports `ACTION_REQUIRED`, immediately amend with
+   `git commit --amend --no-edit --signoff` and push with `--force-with-lease`.
 
 ## More
 

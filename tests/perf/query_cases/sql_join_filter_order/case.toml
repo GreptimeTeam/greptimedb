@@ -1,0 +1,100 @@
+# SQL two-table JOIN case over direct SSTs.
+
+[case]
+name = "sql_join_filter_order"
+description = "Join fact and dimension-like tables on host with filters, aggregate ordering, and LIMIT"
+data_mode = "direct_readable_sst"
+
+[fixture]
+mode = "direct_readable_sst"
+seed = 1003
+
+[workload]
+kind = "direct_readable_sst"
+
+[workload.direct_readable_sst]
+
+[[tables]]
+database = "public"
+name = "sql_join_fact"
+engine = "mito"
+append_mode = true
+sst_format = "flat"
+primary_key = ["host", "instance"]
+time_index = "ts"
+
+[[tables.columns]]
+name = "host"
+type = "STRING"
+semantic = "tag"
+distribution = { kind = "cardinality", values = 16, prefix = "host" }
+
+[[tables.columns]]
+name = "instance"
+type = "STRING"
+semantic = "tag"
+distribution = { kind = "cardinality", values = 64, prefix = "instance" }
+
+[[tables.columns]]
+name = "value"
+type = "DOUBLE"
+semantic = "field"
+distribution = { kind = "deterministic_wave", min = 1.0, max = 500.0 }
+
+[[tables.columns]]
+name = "ts"
+type = "TIMESTAMP(9)"
+semantic = "timestamp"
+
+[[tables]]
+database = "public"
+name = "sql_join_dim"
+engine = "mito"
+append_mode = true
+sst_format = "flat"
+primary_key = ["host", "zone"]
+time_index = "ts"
+
+[[tables.columns]]
+name = "host"
+type = "STRING"
+semantic = "tag"
+distribution = { kind = "cardinality", values = 16, prefix = "host" }
+
+[[tables.columns]]
+name = "zone"
+type = "STRING"
+semantic = "tag"
+distribution = { kind = "cardinality", values = 4, prefix = "zone" }
+
+[[tables.columns]]
+name = "weight"
+type = "DOUBLE"
+semantic = "field"
+distribution = { kind = "deterministic_wave", min = 0.1, max = 10.0 }
+
+[[tables.columns]]
+name = "ts"
+type = "TIMESTAMP(9)"
+semantic = "timestamp"
+
+[layout]
+regions = 1
+sst_count = 32
+rows_per_sst = 512
+row_group_size = 128
+series_count = 64
+start_unix_nanos = 1704067200000000000
+step_nanos = 1000000000
+time_range_layout = "non_overlapping_per_sst"
+series_layout = "round_robin"
+
+[[queries]]
+name = "join_host_aggregate_top"
+kind = "sql"
+query = "SELECT f.host, d.zone, avg(f.value * d.weight) AS score FROM sql_join_fact f JOIN sql_join_dim d ON f.host = d.host WHERE f.ts >= '2024-01-01 00:00:00+0000'::TIMESTAMP AND f.ts < '2024-01-01 04:00:00+0000'::TIMESTAMP AND d.ts >= '2024-01-01 00:00:00+0000'::TIMESTAMP AND d.ts < '2024-01-01 04:00:00+0000'::TIMESTAMP AND d.zone IN ('zone1', 'zone2') GROUP BY f.host, d.zone ORDER BY score DESC LIMIT 10"
+warmup = 1
+iterations = 3
+
+[queries.thresholds]
+max_candidate_latency_regression_pct = 50

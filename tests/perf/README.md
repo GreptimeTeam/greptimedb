@@ -63,6 +63,20 @@ expected to affect. A case should define:
 - metrics to collect
 - base-vs-candidate thresholds
 
+Cases may also declare the workload kind. Omitted `[workload]` sections default
+to `direct_readable_sst` for compatibility with older cases:
+
+```toml
+[workload]
+kind = "direct_readable_sst"
+
+[workload.direct_readable_sst]
+# currently no required fields
+```
+
+The runner currently supports only `direct_readable_sst`. The enum-style shape is
+reserved for future `write_then_query` and `write_while_query` workloads.
+
 ## Metrics
 
 Primary gates should compare query work rather than plan text:
@@ -83,19 +97,25 @@ main pass/fail signal.
 current MVP parses a case, creates per-target work directories, and in real query
 mode starts a local distributed cluster for each target: metasrv (memory-store,
 region failover disabled), one datanode (`node_id=0`), and one frontend. It
-creates the configured Mito table through frontend HTTP SQL, discovers the real
-region via `information_schema`, stops only the owning datanode, generates one
-shared direct-SST fixture using the discovered `--region-id` and `--table-dir`,
-injects only that region subtree into the datanode data home, restarts the
-datanode, then validates and measures through frontend. Reports are written as
-JSON under the work directory.
+creates the configured Mito table(s) through frontend HTTP SQL, discovers the
+real one-region-per-table metadata via `information_schema`, stops only the
+owning datanode, generates one shared direct-SST fixture per table using the
+discovered `--region-id`, `--table-dir`, and `--table`, injects those region
+subtrees into the datanode data home, restarts the datanode, then validates and
+measures through frontend. Reports are written as JSON under the work directory.
 
 The runner intentionally keeps metasrv alive for the whole target run because
 memory-store metadata would otherwise be lost. It replaces only the discovered
 datanode region directory under `data/greptime/<schema>/<table_id>/...` with
-generated SST files and a manifest checkpoint. For the first implementation,
-base and candidate must discover identical `table_dir` and `region_id`; otherwise
-the run fails.
+generated SST files and a manifest checkpoint. For multi-table cases this is
+repeated per table, enabling true JOIN fixtures while still requiring exactly one
+region per table. Base and candidate must discover identical per-table
+`table_dir` and `region_id`; otherwise the run fails.
+
+Multi-table direct-SST cases must use unique table names as well as unique
+`(database, name)` pairs because the generator currently selects a table with
+`--table <name>`. Per-table fixture directories are derived from table index,
+database, and table name with path-unsafe characters sanitized.
 
 Currently enforced threshold:
 
@@ -181,7 +201,7 @@ summary to the workflow step summary, and updates a sticky PR comment when the P
 comes from the same repository. Fork PRs still get artifacts and the step summary,
 but comments are skipped.
 
-## Example case: PromQL non-ms time-index pushdown
+## Built-in cases
 
 The `promql_pushdown_7913` case is only one case using the generic fixture
 format. It should generate a metric-like table with a nanosecond time index and
@@ -189,3 +209,12 @@ many SSTs with non-overlapping time ranges. A narrow PromQL/TQL query should
 touch only a small time window. The candidate build is expected to scan
 materially fewer files/ranges/rows than the base build when an optimizer PR
 claims to improve this path.
+
+Additional SQL optimizer cases:
+
+- `sql_topk_order_by`: single-table TopK / `ORDER BY` on a DOUBLE field with
+  time and tag predicates.
+- `sql_aggregate_order_by`: grouped aggregate ordered by aggregate value with a
+  `LIMIT`.
+- `sql_join_filter_order`: two direct-SST tables joined on a shared tag with
+  time filters, aggregate ordering, and `LIMIT`.

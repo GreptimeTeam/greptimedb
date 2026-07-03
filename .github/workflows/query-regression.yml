@@ -28,7 +28,6 @@ on:
 
 permissions:
   contents: read
-  pull-requests: write
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
@@ -131,6 +130,34 @@ jobs:
             --output query-regression-summary.md
           cat query-regression-summary.md >> "${GITHUB_STEP_SUMMARY}"
 
+      - name: Write PR metadata for trusted comment workflow
+        if: ${{ always() && github.event_name == 'pull_request' }}
+        shell: bash
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          BASE_REPO: ${{ github.event.pull_request.base.repo.full_name }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+
+          metadata = {
+              "pr_number": int(os.environ["PR_NUMBER"]),
+              "head_sha": os.environ["HEAD_SHA"],
+              "head_repo": os.environ["HEAD_REPO"],
+              "base_repo": os.environ["BASE_REPO"],
+              "run_id": int(os.environ["RUN_ID"]),
+              "run_attempt": int(os.environ["RUN_ATTEMPT"]),
+          }
+          with open("query-regression-pr.json", "w", encoding="utf-8") as fp:
+              json.dump(metadata, fp, sort_keys=True)
+              fp.write("\n")
+          PY
+
       - name: Upload query regression artifacts
         if: always()
         uses: actions/upload-artifact@v4
@@ -141,12 +168,16 @@ jobs:
             query-regression-summary.md
           if-no-files-found: warn
 
-      - name: Post sticky PR comment
-        if: ${{ always() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository }}
-        uses: marocchino/sticky-pull-request-comment@v2
+      - name: Upload trusted comment artifact
+        if: ${{ always() && github.event_name == 'pull_request' }}
+        uses: actions/upload-artifact@v4
         with:
-          header: query-regression-report
-          path: query-regression-summary.md
+          name: query-regression-comment
+          path: |
+            query-regression-pr.json
+            query-regression-summary.md
+          if-no-files-found: warn
+          retention-days: 7
 
       - name: Fail on regression failure
         if: ${{ steps.run.outputs.status != '0' }}

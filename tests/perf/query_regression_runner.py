@@ -21,6 +21,7 @@ import argparse
 import contextlib
 import json
 import os
+import re
 import shutil
 import socket
 import statistics
@@ -133,11 +134,35 @@ def column_sql(col: dict[str, Any]) -> str:
     return f"{sql_ident(col['name'])} {col['type']}"
 
 
-def case_table(case: dict[str, Any]) -> dict[str, Any]:
+def case_tables(case: dict[str, Any]) -> list[dict[str, Any]]:
     tables = case.get("tables") or []
-    if len(tables) != 1 or case.get("layout", {}).get("regions") != 1:
-        raise ValueError("runner MVP supports exactly one table and one region")
-    return tables[0]
+    if not tables or case.get("layout", {}).get("regions") != 1:
+        raise ValueError("runner supports one or more tables and exactly one region per table")
+    pairs = [(table.get("database"), table.get("name")) for table in tables]
+    if len(set(pairs)) != len(pairs):
+        raise ValueError("duplicate (database, name) table entries are not supported")
+    names = [table.get("name") for table in tables]
+    if len(set(names)) != len(names):
+        raise ValueError("duplicate table names are not supported because fixture generator --table selects by name")
+    return list(tables)
+
+
+def workload_kind(case: dict[str, Any]) -> str:
+    workload = case.get("workload") or {}
+    kind = workload.get("kind", "direct_readable_sst")
+    if kind != "direct_readable_sst":
+        raise ValueError(f"unsupported workload kind {kind!r}; only 'direct_readable_sst' is supported")
+    return kind
+
+
+def fixture_subdir(table: dict[str, Any], index: int) -> str:
+    raw = f"{index:02d}_{table['database']}_{table['name']}"
+    safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", raw).strip("._-")
+    return safe or f"table_{index:02d}"
+
+
+def table_fixture_dir(root: Path, tables: list[dict[str, Any]], table: dict[str, Any], index: int) -> Path:
+    return root if len(tables) == 1 else root / fixture_subdir(table, index)
 
 
 def create_table_sql(table: dict[str, Any]) -> str:
@@ -498,7 +523,11 @@ def discover_region_via_frontend(target: RunTarget, table: dict[str, Any], http_
     }
 
 
-def assert_fixture_summary(summary: dict[str, Any], *, region_id: int | None, table_dir: str | None, region_dir: str | None = None) -> None:
+def assert_fixture_summary(summary: dict[str, Any], *, region_id: int | None, table_dir: str | None, region_dir: str | None = None, table_name: str | None = None, database: str | None = None) -> None:
+    if table_name is not None and summary.get("table") != table_name:
+        raise RuntimeError(f"fixture table mismatch: {summary.get('table')} != {table_name}")
+    if database is not None and summary.get("database") != database:
+        raise RuntimeError(f"fixture database mismatch: {summary.get('database')} != {database}")
     if region_id is not None and int(summary["region_id"]) != region_id:
         raise RuntimeError(f"fixture region_id mismatch: {summary['region_id']} != {region_id}")
     if table_dir is not None and summary["table_dir"] != table_dir:
@@ -507,18 +536,20 @@ def assert_fixture_summary(summary: dict[str, Any], *, region_id: int | None, ta
         raise RuntimeError(f"fixture region_dir mismatch: {summary['region_dir']} != {region_dir}")
 
 
-def generate_fixture(generator: Path | None, case_path: Path, fixture_dir: Path, *, dry_run: bool, reuse_fixture: bool, allow_large_fixture: bool, region_id: int | None = None, table_dir: str | None = None, region_dir: str | None = None) -> dict[str, Any]:
+def generate_fixture(generator: Path | None, case_path: Path, fixture_dir: Path, *, dry_run: bool, reuse_fixture: bool, allow_large_fixture: bool, table_name: str | None = None, database: str | None = None, region_id: int | None = None, table_dir: str | None = None, region_dir: str | None = None) -> dict[str, Any]:
     if generator is None:
         return {"status": "skipped", "reason": "no fixture generator provided"}
     summary_path = fixture_dir / "summary.json"
     if reuse_fixture and summary_path.exists():
         summary = json.loads(summary_path.read_text())
-        assert_fixture_summary(summary, region_id=region_id, table_dir=table_dir, region_dir=region_dir)
+        assert_fixture_summary(summary, region_id=region_id, table_dir=table_dir, region_dir=region_dir, table_name=table_name, database=database)
         return {"status": "reused", "fixture_dir": str(fixture_dir), "summary": summary}
     if fixture_dir.exists() and not reuse_fixture:
         shutil.rmtree(fixture_dir)
     fixture_dir.mkdir(parents=True, exist_ok=True)
     cmd = [str(generator), "--case", str(case_path), "--out-dir", str(fixture_dir)]
+    if table_name is not None:
+        cmd += ["--table", table_name]
     if region_id is not None:
         cmd += ["--region-id", str(region_id)]
     if table_dir is not None:
@@ -532,7 +563,7 @@ def generate_fixture(generator: Path | None, case_path: Path, fixture_dir: Path,
     if result["returncode"] != 0:
         raise RuntimeError(f"fixture generator failed: {result['stderr'][:2000]}")
     summary = json.loads(summary_path.read_text())
-    assert_fixture_summary(summary, region_id=region_id, table_dir=table_dir, region_dir=region_dir)
+    assert_fixture_summary(summary, region_id=region_id, table_dir=table_dir, region_dir=region_dir, table_name=table_name, database=database)
     result["summary"] = summary
     return result
 
@@ -549,14 +580,15 @@ def copy_tree_contents(src: Path, dst: Path) -> None:
             shutil.copy2(child, target)
 
 
-def materialize_fixture(target: RunTarget, *, dry_run: bool, preserve_state: bool, expected_region_dir: str | None = None) -> dict[str, Any]:
-    summary_path = target.fixture_dir / "summary.json"
+def materialize_fixture(target: RunTarget, *, dry_run: bool, preserve_state: bool, expected_region_dir: str | None = None, fixture_dir: Path | None = None, reset_data: bool = True) -> dict[str, Any]:
+    fixture_dir = fixture_dir or target.fixture_dir
+    summary_path = fixture_dir / "summary.json"
     materialize_root = target.datanode_data_dir if preserve_state else target.data_dir
     if dry_run:
         return {"status": "dry-run", "summary_path": str(summary_path), "data_dir": str(materialize_root)}
     summary = json.loads(summary_path.read_text())
-    object_store_dir = target.fixture_dir / "object-store"
-    manifest_dir = target.fixture_dir / "manifest"
+    object_store_dir = fixture_dir / "object-store"
+    manifest_dir = fixture_dir / "manifest"
     region_dir = summary["region_dir"].strip("/")
     target_region_dir = materialize_root / region_dir
     data_root = materialize_root.resolve()
@@ -566,7 +598,7 @@ def materialize_fixture(target: RunTarget, *, dry_run: bool, preserve_state: boo
     if expected_region_dir is not None and region_dir != expected_region_dir.strip("/"):
         raise RuntimeError(f"fixture region_dir {region_dir} does not equal discovered {expected_region_dir}")
     target_manifest_dir = target_region_dir / "manifest"
-    if not preserve_state and materialize_root.exists():
+    if not preserve_state and reset_data and materialize_root.exists():
         shutil.rmtree(materialize_root)
     materialize_root.mkdir(parents=True, exist_ok=True)
     if preserve_state and target_region_dir.exists():
@@ -600,20 +632,30 @@ def validate_show_create(result: dict[str, Any], table: dict[str, Any]) -> list[
     return errors
 
 
-def run_queries(target: RunTarget, case: dict[str, Any], table: dict[str, Any], http_timeout: float) -> dict[str, Any]:
+def run_queries(target: RunTarget, case: dict[str, Any], tables: list[dict[str, Any]], http_timeout: float) -> dict[str, Any]:
+    table = tables[0]
     db = table["database"]
+    queries = planned_queries(case)
+    if not queries:
+        queries = [{"name": "count_all", "kind": "sql", "query": f"SELECT count(*) FROM {sql_ident(table['name'])}", "warmup": 0, "iterations": 1}]
     validations = []
     validation_errors = []
-    for sql in [f"SHOW CREATE TABLE {sql_ident(table['name'])}", planned_queries(case)[0]["query"] if planned_queries(case) else f"SELECT count(*) FROM {sql_ident(table['name'])}"]:
-        result = http_post_sql(target.http_port, sql, db, http_timeout)
+    for table in tables:
+        for sql in [f"SHOW CREATE TABLE {sql_ident(table['name'])}"]:
+            result = http_post_sql(target.http_port, sql, table["database"], http_timeout)
+            if not result["ok"]:
+                validation_errors.append({"sql": sql, "error": result.get("error"), "response": result.get("response")})
+            else:
+                for error in validate_show_create(result, table):
+                    validation_errors.append({"sql": sql, "error": error, "response": result.get("response")})
+            validations.append(result)
+    if queries:
+        result = http_post_sql(target.http_port, queries[0]["query"], db, http_timeout)
         if not result["ok"]:
-            validation_errors.append({"sql": sql, "error": result.get("error"), "response": result.get("response")})
-        elif sql.startswith("SHOW CREATE"):
-            for error in validate_show_create(result, table):
-                validation_errors.append({"sql": sql, "error": error, "response": result.get("response")})
+            validation_errors.append({"sql": queries[0]["query"], "error": result.get("error"), "response": result.get("response")})
         validations.append(result)
     measurements = []
-    for q in planned_queries(case):
+    for q in queries:
         for _ in range(int(q.get("warmup", 0))):
             warmup = http_post_sql(target.http_port, q["query"], db, http_timeout)
             if not warmup["ok"]:
@@ -693,7 +735,8 @@ def main() -> int:
     args = parse_args()
     case_path = args.case.resolve()
     case = load_case(case_path)
-    table = case_table(case)
+    kind = workload_kind(case)
+    tables = case_tables(case)
     work_root = args.work_dir.resolve()
     work_root.mkdir(parents=True, exist_ok=True)
     require_binary(args.base_bin, "base", dry_run=args.dry_run or args.fixture_only)
@@ -707,13 +750,21 @@ def main() -> int:
     targets = [make_target("base", args.base_bin.resolve(), work_root, ports[:8]), make_target("candidate", args.candidate_bin.resolve(), work_root, ports[8:])]
     require_fresh_work_dirs(targets, reuse_work_dir=args.reuse_work_dir, dry_run=args.dry_run, fixture_only=args.fixture_only)
     fixture_dir = work_root / "fixture"
-    report: dict[str, Any] = {"case_path": str(case_path), "case": case.get("case", {}), "fixture": case.get("fixture", {}), "queries": planned_queries(case), "dry_run": args.dry_run, "fixture_only": args.fixture_only, "query_mode": "fixture-only" if args.fixture_only else "distributed", "reuse_work_dir": args.reuse_work_dir, "http_timeout": args.http_timeout, "targets": [], "thresholds": [], "status": "planned" if args.dry_run else "running"}
+    report: dict[str, Any] = {"case_path": str(case_path), "case": case.get("case", {}), "fixture": case.get("fixture", {}), "workload": {"kind": kind, **(case.get("workload") or {})}, "queries": planned_queries(case), "dry_run": args.dry_run, "fixture_only": args.fixture_only, "query_mode": "fixture-only" if args.fixture_only else "distributed", "reuse_work_dir": args.reuse_work_dir, "http_timeout": args.http_timeout, "targets": [], "thresholds": [], "status": "planned" if args.dry_run else "running"}
 
     if args.fixture_only or args.dry_run:
-        report["fixture_generation"] = generate_fixture(args.fixture_generator, case_path, fixture_dir, dry_run=args.dry_run, reuse_fixture=args.reuse_fixture, allow_large_fixture=args.allow_large_fixture)
+        generations = []
+        for table_idx, table in enumerate(tables):
+            per_table_fixture_dir = table_fixture_dir(fixture_dir, tables, table, table_idx)
+            generations.append(generate_fixture(args.fixture_generator, case_path, per_table_fixture_dir, dry_run=args.dry_run, reuse_fixture=args.reuse_fixture, allow_large_fixture=args.allow_large_fixture, table_name=table["name"] if len(tables) > 1 else None, database=table["database"] if len(tables) > 1 else None))
+        report["fixture_generation"] = generations[0] if len(generations) == 1 else generations
         for target in targets:
             target.work_dir.mkdir(parents=True, exist_ok=True)
-            tr = {"name": target.name, "binary": str(target.binary), "work_dir": str(target.work_dir), "data_dir": str(target.data_dir), "fixture_dir": str(fixture_dir), "fixture_materialization": materialize_fixture(target, dry_run=args.dry_run, preserve_state=False), "measurements": [], "status": "planned" if args.dry_run else "fixture-ready"}
+            mats = []
+            for table_idx, table in enumerate(tables):
+                per_table_fixture_dir = table_fixture_dir(fixture_dir, tables, table, table_idx)
+                mats.append(materialize_fixture(target, dry_run=args.dry_run, preserve_state=False, fixture_dir=per_table_fixture_dir, reset_data=not mats))
+            tr = {"name": target.name, "binary": str(target.binary), "work_dir": str(target.work_dir), "data_dir": str(target.data_dir), "fixture_dir": str(fixture_dir), "fixture_materialization": mats[0] if len(mats) == 1 else mats, "measurements": [], "status": "planned" if args.dry_run else "fixture-ready"}
             write_json(target.report_path, tr)
             report["targets"].append(tr)
         report["status"] = "planned" if args.dry_run else "fixture-ready"
@@ -729,33 +780,44 @@ def main() -> int:
             cluster = DistributedCluster(target)
             clusters.append(cluster)
             cluster.start_all()
-            create_result = http_post_sql(target.http_port, create_table_sql(table), table["database"], args.http_timeout)
-            if not create_result["ok"]:
-                raise RuntimeError(f"CREATE TABLE failed for {target.name}: {create_result}")
-            meta = discover_region_via_frontend(target, table, args.http_timeout)
+            create_results = []
+            metas = []
+            for table in tables:
+                create_result = http_post_sql(target.http_port, create_table_sql(table), table["database"], args.http_timeout)
+                if not create_result["ok"]:
+                    raise RuntimeError(f"CREATE TABLE {table['name']} failed for {target.name}: {create_result}")
+                create_results.append({"table": table["name"], "result": create_result})
+                metas.append({"table": table["name"], **discover_region_via_frontend(target, table, args.http_timeout)})
             cluster.stop_component("datanode")
             cluster._ensure_metasrv_alive()
-            discovered.append(meta)
-            report["targets"].append({"name": target.name, "binary": str(target.binary), "work_dir": str(target.work_dir), "data_dir": str(target.data_dir), "datanode_data_home": str(target.datanode_data_dir), "components": cluster.component_report(), "create_table": create_result, "discovered": meta})
+            discovered.append(metas)
+            report["targets"].append({"name": target.name, "binary": str(target.binary), "work_dir": str(target.work_dir), "data_dir": str(target.data_dir), "datanode_data_home": str(target.datanode_data_dir), "components": cluster.component_report(), "create_table": create_results[0]["result"] if len(create_results) == 1 else create_results, "discovered": metas[0] if len(metas) == 1 else metas, "discovered_tables": metas})
 
-        if discovered[0]["region_id"] != discovered[1]["region_id"] or discovered[0]["table_dir"] != discovered[1]["table_dir"]:
+        if len(discovered[0]) != len(discovered[1]) or any(a["table"] != b["table"] or a["region_id"] != b["region_id"] or a["table_dir"] != b["table_dir"] for a, b in zip(discovered[0], discovered[1])):
             raise RuntimeError(f"base/candidate metadata mismatch: {discovered}")
-        report["fixture_generation"] = generate_fixture(args.fixture_generator, case_path, fixture_dir, dry_run=False, reuse_fixture=args.reuse_fixture, allow_large_fixture=args.allow_large_fixture, region_id=discovered[0]["region_id"], table_dir=discovered[0]["table_dir"], region_dir=discovered[0]["region_dir"])
+        generations = []
+        for table_idx, meta in enumerate(discovered[0]):
+            per_table_fixture_dir = table_fixture_dir(fixture_dir, tables, tables[table_idx], table_idx)
+            generations.append(generate_fixture(args.fixture_generator, case_path, per_table_fixture_dir, dry_run=False, reuse_fixture=args.reuse_fixture, allow_large_fixture=args.allow_large_fixture, table_name=meta["table"] if len(tables) > 1 else None, database=meta["schema"] if len(tables) > 1 else None, region_id=meta["region_id"], table_dir=meta["table_dir"], region_dir=meta["region_dir"]))
+        report["fixture_generation"] = generations[0] if len(generations) == 1 else generations
 
         target_results = []
         for idx, target in enumerate(targets):
             cluster = clusters[idx]
-            materialize = materialize_fixture(target, dry_run=False, preserve_state=True, expected_region_dir=discovered[idx]["region_dir"])
+            materialize = []
+            for table_idx, meta in enumerate(discovered[idx]):
+                per_table_fixture_dir = table_fixture_dir(fixture_dir, tables, tables[table_idx], table_idx)
+                materialize.append(materialize_fixture(target, dry_run=False, preserve_state=True, expected_region_dir=meta["region_dir"], fixture_dir=per_table_fixture_dir))
             cluster.start_datanode()
-            query_result = run_queries(target, case, table, args.http_timeout)
+            query_result = run_queries(target, case, tables, args.http_timeout)
             if query_result["status"] == "failed":
                 cluster.restart_frontend()
-                retry_result = run_queries(target, case, table, args.http_timeout)
+                retry_result = run_queries(target, case, tables, args.http_timeout)
                 query_result["frontend_restart_retry"] = retry_result
                 if retry_result["status"] == "ok":
                     query_result = retry_result
             report["targets"][idx]["fixture_dir"] = str(fixture_dir)
-            report["targets"][idx]["fixture_materialization"] = materialize
+            report["targets"][idx]["fixture_materialization"] = materialize[0] if len(materialize) == 1 else materialize
             report["targets"][idx].update(query_result)
             report["targets"][idx]["status"] = "measured" if query_result["status"] == "ok" else "failed"
             write_json(target.report_path, report["targets"][idx])

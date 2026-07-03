@@ -12,6 +12,12 @@ Each case describes:
 mode = "direct_readable_sst"
 seed = 12345
 
+[workload]
+kind = "direct_readable_sst"
+
+[workload.direct_readable_sst]
+# currently no required fields
+
 [[tables]]
 database = "public"
 name = "example_metric"
@@ -47,6 +53,11 @@ time_range_layout = "non_overlapping_per_sst"
 series_layout = "round_robin"
 ```
 
+`[workload]` is optional for older cases and defaults to
+`kind = "direct_readable_sst"`. Other workload variants are intentionally
+unsupported for now, but the nested shape leaves room for future
+`write_then_query` and `write_while_query` configuration.
+
 The generator should use these declarations to produce:
 
 - object-store SST files written through the real Mito SST writer
@@ -80,6 +91,18 @@ It is less realistic than ingestion-path data because it bypasses writes,
 memtables, flush scheduling, and compaction. That tradeoff is intentional for
 PR-level query regression. A later nightly/release suite can add ingestion-based
 cases for end-to-end realism.
+
+Multi-table cases are supported by generating one fixture directory per table.
+Each table is still limited to one region, and the runner passes `--table`, the
+discovered `--region-id`, and the discovered `--table-dir` for each table before
+materializing all generated region subtrees into the same datanode data home.
+This supports JOIN regression cases without changing existing single-table case
+files.
+
+Multi-table cases must use unique table names and unique `(database, name)`
+pairs. The runner derives each fixture subdirectory from table index, database,
+and table name, sanitizing path-unsafe characters to avoid collisions and unsafe
+paths.
 
 The preferred compatibility path is:
 

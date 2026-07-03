@@ -84,6 +84,10 @@ struct Args {
     #[arg(long, value_name = "DIR")]
     table_dir: Option<String>,
 
+    /// Table name to generate when the case contains multiple [[tables]].
+    #[arg(long, value_name = "NAME")]
+    table: Option<String>,
+
     /// Manifest/checkpoint version.
     #[arg(long, default_value = "1000000")]
     checkpoint_version: u64,
@@ -450,8 +454,8 @@ fn remap_sst_file(
 async fn main() {
     let args = Args::parse();
     let case: CaseFile = toml::from_str(&fs::read_to_string(&args.case).unwrap()).unwrap();
-    if case.tables.len() != 1 || case.layout.regions != 1 {
-        panic!("MVP supports exactly one table and one region");
+    if case.tables.is_empty() || case.layout.regions != 1 {
+        panic!("fixture generator supports one or more tables and exactly one region per table");
     }
     if case.layout.time_range_layout != "non_overlapping_per_sst" {
         panic!("MVP supports time_range_layout=non_overlapping_per_sst");
@@ -464,7 +468,20 @@ async fn main() {
         .as_ref()
         .and_then(|fixture| fixture.seed)
         .unwrap_or(0);
-    let table = &case.tables[0];
+    let table_index = match args.table.as_deref() {
+        Some(name) => case
+            .tables
+            .iter()
+            .position(|table| table.name == name)
+            .unwrap_or_else(|| panic!("--table {name} was not found in case {}", case.case.name)),
+        None if case.tables.len() == 1 => 0,
+        None => panic!(
+            "case {} contains {} tables; pass --table <name> to choose one",
+            case.case.name,
+            case.tables.len()
+        ),
+    };
+    let table = &case.tables[table_index];
     if table.engine != "mito" {
         panic!("MVP supports engine=mito");
     }
@@ -543,7 +560,10 @@ async fn main() {
         }
         .unwrap();
         for info in infos {
-            let file_id = deterministic_file_id(seed, next_file_index);
+            let file_id = deterministic_file_id(
+                seed.wrapping_add((table_index as u64) << 16),
+                next_file_index,
+            );
             next_file_index += 1;
             remap_sst_file(&obj_store_dir, &table_dir, region_id, info.file_id, file_id);
             files.insert(
@@ -587,6 +607,6 @@ async fn main() {
     for (file_id, meta) in entries {
         writeln!(jsonl, "{}", serde_json::to_string(&serde_json::json!({ "file_id": file_id.to_string(), "region_id": meta.region_id.as_u64(), "object_path": mito2::sst::location::sst_file_path(&table_dir, RegionFileId::new(meta.region_id, *file_id), PathType::Bare), "time_range_start": meta.time_range.0.value(), "time_range_end": meta.time_range.1.value(), "num_rows": meta.num_rows, "num_row_groups": meta.num_row_groups, "file_size": meta.file_size, "num_series": meta.num_series, "sequence": meta.sequence.map(|s| s.get()) })).unwrap()).unwrap();
     }
-    fs::write(args.out_dir.join("summary.json"), serde_json::to_vec_pretty(&serde_json::json!({ "case": case.case.name, "seed": seed, "table": table.name, "database": table.database, "region_id": region_id.as_u64(), "table_dir": table_dir, "region_dir": region_dir, "sst_format": format!("{format:?}"), "sst_count": case.layout.sst_count, "rows_per_sst": case.layout.rows_per_sst, "row_group_size": case.layout.row_group_size, "total_rows": case.layout.sst_count * case.layout.rows_per_sst, "checkpoint_path": checkpoint_path, "files_jsonl_path": files_jsonl_path, "readback_validated": false, "metadata_source": "synthetic" })).unwrap()).unwrap();
+    fs::write(args.out_dir.join("summary.json"), serde_json::to_vec_pretty(&serde_json::json!({ "case": case.case.name, "seed": seed, "table_index": table_index, "table": table.name, "database": table.database, "region_id": region_id.as_u64(), "table_dir": table_dir, "region_dir": region_dir, "sst_format": format!("{format:?}"), "sst_count": case.layout.sst_count, "rows_per_sst": case.layout.rows_per_sst, "row_group_size": case.layout.row_group_size, "total_rows": case.layout.sst_count * case.layout.rows_per_sst, "checkpoint_path": checkpoint_path, "files_jsonl_path": files_jsonl_path, "readback_validated": false, "metadata_source": "synthetic" })).unwrap()).unwrap();
     println!("Done. wrote {} SST file entries", manifest.files.len());
 }

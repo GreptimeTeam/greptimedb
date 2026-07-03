@@ -69,7 +69,11 @@ def target_table(targets: list[dict[str, Any]]) -> str:
     rows = ["| Target | Status | Validation errors | Region | Datanode data home |", "| --- | --- | ---: | --- | --- |"]
     for target in targets:
         errors = len(target.get("validation_errors") or [])
-        region = (target.get("discovered") or {}).get("region_id")
+        discovered = target.get("discovered") or {}
+        if isinstance(discovered, list):
+            region = ", ".join(str(item.get("region_id")) for item in discovered)
+        else:
+            region = discovered.get("region_id")
         rows.append(
             "| {name} | {status} {raw} | {errors} | {region} | `{data}` |".format(
                 name=esc(target.get("name")),
