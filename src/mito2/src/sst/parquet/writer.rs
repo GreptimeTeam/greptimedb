@@ -33,6 +33,7 @@ use datatypes::arrow::compute::{max, min};
 use datatypes::arrow::datatypes::{DataType, SchemaRef, TimeUnit};
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::extension::json::is_structured_json_field;
+use datatypes::prelude::ConcreteDataType;
 use object_store::{FuturesAsyncWriter, ObjectStore};
 use parquet::arrow::AsyncArrowWriter;
 use parquet::basic::{Compression, Encoding, ZstdLevel};
@@ -379,8 +380,9 @@ where
 
     /// Customizes per-column config according to schema and maybe column cardinality.
     fn customize_column_config(
-        builder: WriterPropertiesBuilder,
+        mut builder: WriterPropertiesBuilder,
         region_metadata: &RegionMetadataRef,
+        opts: &WriteOptions,
     ) -> WriterPropertiesBuilder {
         let ts_col = ColumnPath::new(vec![
             region_metadata
@@ -392,12 +394,31 @@ where
         let seq_col = ColumnPath::new(vec![SEQUENCE_COLUMN_NAME.to_string()]);
         let op_type_col = ColumnPath::new(vec![OP_TYPE_COLUMN_NAME.to_string()]);
 
-        builder
+        builder = builder
             .set_column_encoding(seq_col.clone(), Encoding::DELTA_BINARY_PACKED)
             .set_column_dictionary_enabled(seq_col, false)
             .set_column_encoding(ts_col.clone(), Encoding::DELTA_BINARY_PACKED)
             .set_column_dictionary_enabled(ts_col, false)
-            .set_column_compression(op_type_col, Compression::UNCOMPRESSED)
+            .set_column_compression(op_type_col, Compression::UNCOMPRESSED);
+
+        if let Some(byte_stream_split_column) =
+            opts.metric_engine_value_byte_stream_split_column.as_deref()
+        {
+            for column in region_metadata.field_columns() {
+                if matches!(
+                    column.column_schema.data_type,
+                    ConcreteDataType::Float32(_) | ConcreteDataType::Float64(_)
+                ) && column.column_schema.name == byte_stream_split_column
+                {
+                    let column_path = ColumnPath::new(vec![column.column_schema.name.clone()]);
+                    builder = builder
+                        .set_column_encoding(column_path.clone(), Encoding::BYTE_STREAM_SPLIT)
+                        .set_column_dictionary_enabled(column_path, false);
+                }
+            }
+        }
+
+        builder
     }
 
     async fn write_next_flat_batch(
@@ -445,7 +466,7 @@ where
                 .set_column_index_truncate_length(None)
                 .set_statistics_truncate_length(None);
 
-            let props_builder = Self::customize_column_config(props_builder, &self.metadata);
+            let props_builder = Self::customize_column_config(props_builder, &self.metadata, opts);
             let writer_props = props_builder.build();
 
             let sst_file_path = self.path_provider.build_sst_file_path(RegionFileId::new(

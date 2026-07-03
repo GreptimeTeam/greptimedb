@@ -17,9 +17,13 @@
 use std::sync::Arc;
 
 use common_base::readable_size::ReadableSize;
+use datatypes::prelude::ConcreteDataType;
 use parquet::file::metadata::ParquetMetaData;
+use store_api::metadata::RegionMetadata;
+use store_api::metric_engine_consts::METRIC_DATA_REGION_GROUP;
 use store_api::storage::FileId;
 
+use crate::region::options::RegionOptions;
 use crate::sst::DEFAULT_WRITE_BUFFER_SIZE;
 use crate::sst::file::FileTimeRange;
 use crate::sst::index::IndexOutput;
@@ -65,6 +69,8 @@ pub struct WriteOptions {
     /// Note: This is not a hard limit as we can only observe the file size when
     /// ArrowWrite writes to underlying writers.
     pub max_file_size: Option<usize>,
+    /// Metric engine value column to encode with Parquet BYTE_STREAM_SPLIT.
+    pub metric_engine_value_byte_stream_split_column: Option<String>,
 }
 
 impl Default for WriteOptions {
@@ -73,8 +79,35 @@ impl Default for WriteOptions {
             write_buffer_size: DEFAULT_WRITE_BUFFER_SIZE,
             row_group_size: DEFAULT_ROW_GROUP_SIZE,
             max_file_size: None,
+            metric_engine_value_byte_stream_split_column: None,
         }
     }
+}
+
+/// Returns the metric engine value column name to encode with BYTE_STREAM_SPLIT.
+pub(crate) fn metric_engine_value_byte_stream_split_column(
+    enabled: bool,
+    region_metadata: &RegionMetadata,
+    region_options: &RegionOptions,
+) -> Option<String> {
+    if !enabled
+        || region_metadata.region_id.region_group() != METRIC_DATA_REGION_GROUP
+        || region_options.primary_key_encoding.is_none()
+    {
+        return None;
+    }
+
+    let value_column = common_query::prelude::greptime_value();
+    region_metadata
+        .field_columns()
+        .any(|column| {
+            column.column_schema.name == value_column
+                && matches!(
+                    column.column_schema.data_type,
+                    ConcreteDataType::Float32(_) | ConcreteDataType::Float64(_)
+                )
+        })
+        .then(|| value_column.to_string())
 }
 
 /// Parquet SST info returned by the writer.
@@ -117,8 +150,8 @@ mod tests {
     use datafusion_expr::{BinaryExpr, Expr, Literal, Operator, col, lit};
     use datatypes::arrow;
     use datatypes::arrow::array::{
-        ArrayRef, BinaryDictionaryBuilder, RecordBatch, StringArray, StringDictionaryBuilder,
-        TimestampMillisecondArray, UInt8Array, UInt64Array,
+        Array, ArrayRef, BinaryDictionaryBuilder, Float32Array, Float64Array, RecordBatch,
+        StringArray, StringDictionaryBuilder, TimestampMillisecondArray, UInt8Array, UInt64Array,
     };
     use datatypes::arrow::datatypes::{DataType, Field, Schema, UInt32Type};
     use datatypes::arrow::util::pretty::pretty_format_batches;
@@ -131,6 +164,7 @@ mod tests {
     use parquet::file::properties::WriterProperties;
     use store_api::codec::PrimaryKeyEncoding;
     use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataBuilder};
+    use store_api::metric_engine_consts::{DATA_SCHEMA_TSID_COLUMN_NAME, METRIC_DATA_REGION_GROUP};
     use store_api::region_request::PathType;
     use store_api::storage::{ColumnSchema, RegionId};
     use table::predicate::Predicate;
@@ -143,7 +177,7 @@ mod tests {
     use crate::cache::{CacheManager, CacheStrategy};
     use crate::config::IndexConfig;
     use crate::read::FlatSource;
-    use crate::region::options::{IndexOptions, InvertedIndexOptions};
+    use crate::region::options::{IndexOptions, InvertedIndexOptions, RegionOptions};
     use crate::sst::file::{FileHandle, FileMeta, RegionFileId, RegionIndexId};
     use crate::sst::file_purger::NoopFilePurger;
     use crate::sst::index::bloom_filter::applier::BloomFilterIndexApplierBuilder;
@@ -411,6 +445,300 @@ mod tests {
                 .parquet_metadata();
 
         assert_parquet_metadata_equal(cached_writer_metadata, reader_metadata);
+    }
+
+    fn float_field_region_metadata(
+        region_id: RegionId,
+        field_name: &str,
+        data_type: ConcreteDataType,
+    ) -> Arc<RegionMetadata> {
+        let mut builder = RegionMetadataBuilder::new(region_id);
+        builder
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    DATA_SCHEMA_TSID_COLUMN_NAME,
+                    ConcreteDataType::uint64_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Field,
+                column_id: 0,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "tag_0",
+                    ConcreteDataType::string_datatype(),
+                    true,
+                ),
+                semantic_type: SemanticType::Tag,
+                column_id: 1,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(field_name, data_type, true),
+                semantic_type: SemanticType::Field,
+                column_id: 2,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "field_i",
+                    ConcreteDataType::uint64_datatype(),
+                    true,
+                ),
+                semantic_type: SemanticType::Field,
+                column_id: 3,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "ts",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Timestamp,
+                column_id: 4,
+            });
+        builder.primary_key(vec![1]);
+        Arc::new(builder.build().unwrap())
+    }
+
+    fn float_field_record_batch(metadata: &Arc<RegionMetadata>, field: ArrayRef) -> RecordBatch {
+        let flat_schema = to_flat_sst_arrow_schema(metadata, &FlatSchemaOptions::default());
+        let rows = field.len();
+        let mut tag_0_builder = StringDictionaryBuilder::<UInt32Type>::new();
+        let mut pk_builder = BinaryDictionaryBuilder::<UInt32Type>::new();
+        for idx in 0..rows {
+            let tag = format!("tag_{idx}");
+            tag_0_builder.append_value(&tag);
+            pk_builder.append(new_primary_key(&[&tag])).unwrap();
+        }
+
+        RecordBatch::try_new(
+            flat_schema,
+            vec![
+                Arc::new(tag_0_builder.finish()) as ArrayRef,
+                Arc::new(UInt64Array::from_iter_values(0..rows as u64)) as ArrayRef,
+                field,
+                Arc::new(UInt64Array::from_iter_values(0..rows as u64)) as ArrayRef,
+                Arc::new(TimestampMillisecondArray::from_iter_values(0..rows as i64)) as ArrayRef,
+                Arc::new(pk_builder.finish()) as ArrayRef,
+                Arc::new(UInt64Array::from_value(1000, rows)) as ArrayRef,
+                Arc::new(UInt8Array::from_value(OpType::Put as u8, rows)) as ArrayRef,
+            ],
+        )
+        .unwrap()
+    }
+
+    async fn write_float_field_sst(
+        metadata: Arc<RegionMetadata>,
+        batch: RecordBatch,
+        enable_bss: bool,
+        region_options: RegionOptions,
+    ) -> (ObjectStore, FileHandle, SstInfo) {
+        let mut env = TestEnv::new().await;
+        let object_store = env.init_object_store_manager();
+        let handle = sst_file_handle(0, 1000);
+        let write_opts = WriteOptions {
+            row_group_size: 50,
+            metric_engine_value_byte_stream_split_column:
+                metric_engine_value_byte_stream_split_column(enable_bss, &metadata, &region_options),
+            ..Default::default()
+        };
+        let mut metrics = Metrics::new(WriteType::Flush);
+        let mut writer = ParquetWriter::new_with_object_store(
+            object_store.clone(),
+            metadata,
+            IndexConfig::default(),
+            NoopIndexBuilder,
+            FixedPathProvider {
+                region_file_id: handle.file_id(),
+            },
+            &mut metrics,
+        )
+        .await;
+        let sst_info = writer
+            .write_all_flat_as_primary_key(
+                new_flat_source_from_record_batches(vec![batch]),
+                None,
+                &write_opts,
+            )
+            .await
+            .unwrap()
+            .remove(0);
+
+        std::mem::forget(env);
+        (object_store, handle, sst_info)
+    }
+
+    fn metric_data_region_options() -> RegionOptions {
+        RegionOptions {
+            primary_key_encoding: Some(PrimaryKeyEncoding::Sparse),
+            ..Default::default()
+        }
+    }
+
+    fn column_has_encoding(sst_info: &SstInfo, column_name: &str, encoding: Encoding) -> bool {
+        let parquet_meta = sst_info.file_metadata.as_ref().unwrap();
+        (0..parquet_meta.num_row_groups()).any(|row_group_idx| {
+            let row_group = parquet_meta.row_group(row_group_idx);
+            (0..row_group.num_columns()).any(|column_idx| {
+                let column = row_group.column(column_idx);
+                column.column_descr().path().string() == column_name
+                    && column.encodings().any(|actual| actual == encoding)
+            })
+        })
+    }
+
+    #[tokio::test]
+    async fn test_metric_engine_value_byte_stream_split_default_off() {
+        let metadata = float_field_region_metadata(
+            RegionId::with_group_and_seq(1, METRIC_DATA_REGION_GROUP, 0),
+            common_query::prelude::greptime_value(),
+            ConcreteDataType::float32_datatype(),
+        );
+        let batch = float_field_record_batch(
+            &metadata,
+            Arc::new(Float32Array::from(vec![Some(1.0), Some(f32::NAN), None])) as ArrayRef,
+        );
+        let (_object_store, _handle, sst_info) =
+            write_float_field_sst(metadata, batch, false, metric_data_region_options()).await;
+
+        assert!(!column_has_encoding(
+            &sst_info,
+            common_query::prelude::greptime_value(),
+            Encoding::BYTE_STREAM_SPLIT
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_metric_engine_float32_value_byte_stream_split() {
+        let metadata = float_field_region_metadata(
+            RegionId::with_group_and_seq(1, METRIC_DATA_REGION_GROUP, 0),
+            common_query::prelude::greptime_value(),
+            ConcreteDataType::float32_datatype(),
+        );
+        let values = vec![
+            Some(1.5),
+            Some(f32::NAN),
+            Some(f32::INFINITY),
+            Some(-0.0),
+            None,
+        ];
+        let batch = float_field_record_batch(
+            &metadata,
+            Arc::new(Float32Array::from(values.clone())) as ArrayRef,
+        );
+        let expected = batch.clone();
+        let (object_store, handle, sst_info) =
+            write_float_field_sst(metadata, batch, true, metric_data_region_options()).await;
+
+        assert!(column_has_encoding(
+            &sst_info,
+            common_query::prelude::greptime_value(),
+            Encoding::BYTE_STREAM_SPLIT
+        ));
+        assert!(!column_has_encoding(
+            &sst_info,
+            DATA_SCHEMA_TSID_COLUMN_NAME,
+            Encoding::BYTE_STREAM_SPLIT
+        ));
+        assert!(!column_has_encoding(
+            &sst_info,
+            "tag_0",
+            Encoding::BYTE_STREAM_SPLIT
+        ));
+        assert!(!column_has_encoding(
+            &sst_info,
+            "ts",
+            Encoding::BYTE_STREAM_SPLIT
+        ));
+        assert!(!column_has_encoding(
+            &sst_info,
+            "field_i",
+            Encoding::BYTE_STREAM_SPLIT
+        ));
+
+        let mut reader =
+            ParquetReaderBuilder::new(FILE_DIR.to_string(), PathType::Bare, handle, object_store)
+                .build()
+                .await
+                .unwrap()
+                .unwrap();
+        check_record_batch_reader_result(&mut reader, &[expected]).await;
+    }
+
+    #[tokio::test]
+    async fn test_metric_engine_float64_value_byte_stream_split() {
+        let metadata = float_field_region_metadata(
+            RegionId::with_group_and_seq(1, METRIC_DATA_REGION_GROUP, 0),
+            common_query::prelude::greptime_value(),
+            ConcreteDataType::float64_datatype(),
+        );
+        let values = vec![
+            Some(1.5),
+            Some(f64::NEG_INFINITY),
+            Some(0.0),
+            Some(-0.0),
+            None,
+        ];
+        let batch =
+            float_field_record_batch(&metadata, Arc::new(Float64Array::from(values)) as ArrayRef);
+        let expected = batch.clone();
+        let (object_store, handle, sst_info) =
+            write_float_field_sst(metadata, batch, true, metric_data_region_options()).await;
+
+        assert!(column_has_encoding(
+            &sst_info,
+            common_query::prelude::greptime_value(),
+            Encoding::BYTE_STREAM_SPLIT
+        ));
+
+        let mut reader =
+            ParquetReaderBuilder::new(FILE_DIR.to_string(), PathType::Bare, handle, object_store)
+                .build()
+                .await
+                .unwrap()
+                .unwrap();
+        check_record_batch_reader_result(&mut reader, &[expected]).await;
+    }
+
+    #[tokio::test]
+    async fn test_byte_stream_split_skips_non_metric_region_float_field() {
+        let metadata = float_field_region_metadata(
+            RegionId::new(1, 0),
+            common_query::prelude::greptime_value(),
+            ConcreteDataType::float32_datatype(),
+        );
+        let batch = float_field_record_batch(
+            &metadata,
+            Arc::new(Float32Array::from(vec![Some(1.0), Some(2.0)])) as ArrayRef,
+        );
+        let (_object_store, _handle, sst_info) =
+            write_float_field_sst(metadata, batch, true, RegionOptions::default()).await;
+
+        assert!(!column_has_encoding(
+            &sst_info,
+            common_query::prelude::greptime_value(),
+            Encoding::BYTE_STREAM_SPLIT
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_byte_stream_split_skips_non_value_float_field_in_metric_region() {
+        let metadata = float_field_region_metadata(
+            RegionId::with_group_and_seq(1, METRIC_DATA_REGION_GROUP, 0),
+            "field_0",
+            ConcreteDataType::float32_datatype(),
+        );
+        let batch = float_field_record_batch(
+            &metadata,
+            Arc::new(Float32Array::from(vec![Some(1.0), Some(2.0)])) as ArrayRef,
+        );
+        let (_object_store, _handle, sst_info) =
+            write_float_field_sst(metadata, batch, true, metric_data_region_options()).await;
+
+        assert!(!column_has_encoding(
+            &sst_info,
+            "field_0",
+            Encoding::BYTE_STREAM_SPLIT
+        ));
     }
 
     #[tokio::test]
