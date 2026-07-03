@@ -675,7 +675,7 @@ def enforce_thresholds(case: dict[str, Any], base: dict[str, Any], candidate: di
             results.append({"query": cm["name"], "threshold": "max_candidate_latency_regression_pct", "status": "passed" if ratio <= max_reg else "failed", "actual_pct": ratio, "limit_pct": max_reg})
         for key in th:
             if key != "max_candidate_latency_regression_pct":
-                results.append({"query": cm["name"], "threshold": key, "status": "not_enforced", "reason": "runner does not yet extract server scan metrics"})
+                results.append({"query": cm["name"], "threshold": key, "status": "failed", "reason": "unsupported threshold"})
     return results
 
 

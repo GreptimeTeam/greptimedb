@@ -64,8 +64,4 @@ warmup = 2
 iterations = 5
 
 [scenario.queries.thresholds]
-# Relative thresholds compare candidate to base. Exact numbers should be tuned
-# after the runner emits stable metrics on the large-IOPS runner.
 max_candidate_latency_regression_pct = 15
-max_candidate_file_ranges_ratio_to_base = 0.3
-max_candidate_scanned_rows_ratio_to_base = 0.3

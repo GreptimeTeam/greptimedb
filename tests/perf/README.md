@@ -134,9 +134,9 @@ Currently enforced threshold:
 
 - `max_candidate_latency_regression_pct`, based on client-side median latency.
 
-Server-side scan thresholds such as file ranges and scanned rows are reported as
-`not_enforced` diagnostics until the runner extracts those metrics from query
-responses or logs.
+Server-side scan thresholds such as file ranges and scanned rows are planned for
+a follow-up PR that extracts them from structured `EXPLAIN ANALYZE VERBOSE`
+output. Do not add those threshold keys until the runner enforces them.
 
 Dry-run example:
 
