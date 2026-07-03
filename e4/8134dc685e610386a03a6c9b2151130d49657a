@@ -1,0 +1,58 @@
+src/meta-srv/src/selector/weight_compute.rs
+  s_10fbd04729022c::t_45e3a21dc4c219 203,235,267
+src/standalone/src/information_extension.rs
+  s_10fbd04729022c::t_2df95cfa80f1dd 140
+src/meta-srv/src/handler/collect_leader_region_handler.rs
+  s_10fbd04729022c::t_45e3a21dc4c219 92
+src/meta-srv/src/gc/mock.rs
+  s_10fbd04729022c::t_45e3a21dc4c219 422
+src/common/recordbatch/src/adapter.rs
+  s_10fbd04729022c::t_2df95cfa80f1dd 233-234,327-329,990,1024
+  s_10fbd04729022c::t_29c32ceef48b66 1006,1050
+src/catalog/src/system_schema/information_schema/region_statistics.rs
+  s_10fbd04729022c::t_45e3a21dc4c219 64,226,253
+src/meta-srv/src/gc/handler.rs
+  s_10fbd04729022c::t_45e3a21dc4c219 487
+src/meta-srv/src/handler/failure_handler.rs
+  s_10fbd04729022c::t_45e3a21dc4c219 110
+src/common/meta/src/datanode.rs
+  s_10fbd04729022c::t_2df95cfa80f1dd 105-107,109,328
+  s_10fbd04729022c::t_ba1dbd450e48a0 569-583,589-609
+  s_10fbd04729022c::t_d0bfb7bcb3bfd4 584-588
+  s_10fbd04729022c::t_bdfcf353714ba5 568
+src/meta-srv/src/handler/region_lease_handler.rs
+  s_10fbd04729022c::t_45e3a21dc4c219 183
+src/mito2/src/region.rs
+  s_10fbd04729022c::t_2df95cfa80f1dd 188-189,198,205,699
+  s_10fbd04729022c::t_29c32ceef48b66 677
+src/metric-engine/src/utils.rs
+  s_10fbd04729022c::t_2df95cfa80f1dd 83,150,156,164
+src/store-api/src/region_engine.rs
+  s_10fbd04729022c::t_2df95cfa80f1dd 550,552,736
+src/meta-srv/src/handler/persist_stats_handler.rs
+  s_10fbd04729022c::t_45e3a21dc4c219 303
+src/query/src/datafusion.rs
+  s_10fbd04729022c::t_2df95cfa80f1dd 910,971-972
+  s_10fbd04729022c::t_29c32ceef48b66 123-127
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.8",
+  "base_commit_sha": "e48134dc685e610386a03a6c9b2151130d49657a",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_10fbd04729022c": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_0df3e1963ffe2s74hrRp5vj9gk",
+        "model": "gpt-5.5"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
