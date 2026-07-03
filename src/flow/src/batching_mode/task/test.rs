@@ -314,6 +314,50 @@ fn flow_error_with_status(status_code: StatusCode) -> Error {
         .unwrap_err()
 }
 
+/// Test-only error that carries a non-RequestOutdated status code but
+/// displays a stale-snapshot-fence marker string, simulating the real-world
+/// scenario where the structured status code is lost through frontend/client
+/// wrapping layers.
+#[derive(Debug)]
+struct StaleFenceTextError {
+    code: StatusCode,
+    message: String,
+}
+
+impl std::fmt::Display for StaleFenceTextError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.message)
+    }
+}
+
+impl std::error::Error for StaleFenceTextError {}
+
+impl common_error::ext::ErrorExt for StaleFenceTextError {
+    fn status_code(&self) -> StatusCode {
+        self.code
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+impl common_error::ext::StackError for StaleFenceTextError {
+    fn debug_fmt(&self, _: usize, _: &mut Vec<String>) {}
+    fn next(&self) -> Option<&dyn common_error::ext::StackError> {
+        None
+    }
+}
+
+fn flow_error_with_code_and_text(code: StatusCode, text: &str) -> Error {
+    let inner = StaleFenceTextError {
+        code,
+        message: text.to_string(),
+    };
+    Err::<(), _>(BoxedError::new(inner))
+        .context(crate::error::ExternalSnafu)
+        .unwrap_err()
+}
+
 fn dirty_range(start: i64, end: i64) -> DirtyTimeWindows {
     let mut dirty = DirtyTimeWindows::default();
     dirty.add_window(
@@ -935,6 +979,78 @@ fn test_query_failure_reason_distinguishes_fenced_repair_stale_fence() {
     );
 }
 
+/// Wrapped errors carrying stale snapshot fence marker text in their
+/// Display/Debug chain should be classified as `SnapshotFenceExpired` on
+/// fenced repair coverage, even when the structured `StatusCode::RequestOutdated`
+/// was lost through client layering. This prevents an infinite retry loop
+/// where the fenced chunk re-sends the same stale `given_seq` every tick.
+#[test]
+fn test_query_failure_reason_text_fallback_stale_snapshot_fence() {
+    let high = BTreeMap::new();
+    let fenced = QueryCoverage::FencedRepairChunk { high: high.clone() };
+
+    // STALE_SNAPSHOT_FENCE marker with a non-RequestOutdated status code
+    let err = flow_error_with_code_and_text(
+        StatusCode::Internal,
+        "gRPC error: STALE_SNAPSHOT_FENCE: snapshot upper bound stale, region: 1024/0",
+    );
+    assert_eq!(
+        BatchingTask::query_failure_reason(&err, &fenced),
+        FlowQueryFallbackReason::SnapshotFenceExpired
+    );
+
+    // REBIND_SNAPSHOT_FENCE marker
+    let err = flow_error_with_code_and_text(
+        StatusCode::Internal,
+        "STALE_SNAPSHOT_FENCE ... retry_hint: REBIND_SNAPSHOT_FENCE",
+    );
+    assert_eq!(
+        BatchingTask::query_failure_reason(&err, &fenced),
+        FlowQueryFallbackReason::SnapshotFenceExpired
+    );
+
+    // snapshot upper bound stale marker (the natural-language fragment)
+    let err = flow_error_with_code_and_text(
+        StatusCode::Internal,
+        "query failed: snapshot upper bound stale, consider rebinding",
+    );
+    assert_eq!(
+        BatchingTask::query_failure_reason(&err, &fenced),
+        FlowQueryFallbackReason::SnapshotFenceExpired
+    );
+
+    // Fenced coverage with a generic wrapped error (no stale-fence marker) →
+    // still QueryFailure
+    let generic_err =
+        flow_error_with_code_and_text(StatusCode::Internal, "some transient network error");
+    assert_eq!(
+        BatchingTask::query_failure_reason(&generic_err, &fenced),
+        FlowQueryFallbackReason::QueryFailure
+    );
+
+    // Non-fenced incremental coverage with stale-fence marker text must NOT
+    // classify as SnapshotFenceExpired; it should remain IncrementalQueryFailure.
+    let err = flow_error_with_code_and_text(
+        StatusCode::Internal,
+        "STALE_SNAPSHOT_FENCE blob in unexpected context",
+    );
+    assert_eq!(
+        BatchingTask::query_failure_reason(&err, &QueryCoverage::IncrementalDelta),
+        FlowQueryFallbackReason::IncrementalQueryFailure
+    );
+
+    // Existing RequestOutdated behavior is unchanged.
+    let outdated_err = flow_error_with_status(StatusCode::RequestOutdated);
+    assert_eq!(
+        BatchingTask::query_failure_reason(&outdated_err, &fenced),
+        FlowQueryFallbackReason::SnapshotFenceExpired
+    );
+    assert_eq!(
+        BatchingTask::query_failure_reason(&outdated_err, &QueryCoverage::IncrementalDelta),
+        FlowQueryFallbackReason::StaleCursor
+    );
+}
+
 #[test]
 fn test_fenced_repair_coverage_produces_snapshot_seq_map_for_distributed_metadata_path() {
     // Covers the metadata boundary between QueryCoverage and the
@@ -1079,6 +1195,82 @@ fn test_fenced_repair_transient_non_stale_failure_retries_same_high() {
         state.dirty_time_windows.len(),
         0,
         "live dirty windows unchanged (not where in-flight was restored)"
+    );
+}
+
+/// When `query_failure_reason` classifies a wrapped error as
+/// `SnapshotFenceExpired` via the text-marker fallback (not via
+/// `StatusCode::RequestOutdated`), the state machine must still
+/// abandon the fenced repair and produce a `ScopedBaseRepair` plan
+/// next, exactly like the structured-code path.
+#[tokio::test]
+async fn test_text_fallback_stale_fence_produces_scoped_base_repair() {
+    let TestTaskParts {
+        task,
+        query_engine,
+        ..
+    } = new_time_window_test_task_with_query(
+        "SELECT number, date_bin(INTERVAL '5 second', ts) AS time_window FROM numbers_with_ts GROUP BY time_window, number",
+    )
+    .await;
+    let high = BTreeMap::from([(1_u64, 10_u64), (2_u64, 20_u64)]);
+    let filter = {
+        let mut state = task.state.write().unwrap();
+        state
+            .dirty_time_windows
+            .add_window(Timestamp::new_second(10), Some(Timestamp::new_second(15)));
+        state
+            .dirty_time_windows
+            .add_window(Timestamp::new_second(100), Some(Timestamp::new_second(105)));
+        state.start_fenced_repair(high.clone()).unwrap();
+        next_fenced_repair_filter(&mut state, 1)
+    };
+
+    // Construct a wrapped error that hits the text fallback (non-RequestOutdated
+    // status code with STALE_SNAPSHOT_FENCE marker text).
+    let err = flow_error_with_code_and_text(
+        StatusCode::Internal,
+        "STALE_SNAPSHOT_FENCE: snapshot upper bound stale, retry_hint: REBIND_SNAPSHOT_FENCE",
+    );
+    let coverage = QueryCoverage::FencedRepairChunk { high };
+    let reason = BatchingTask::query_failure_reason(&err, &coverage);
+    assert_eq!(reason, FlowQueryFallbackReason::SnapshotFenceExpired);
+
+    {
+        let mut state = task.state.write().unwrap();
+        let decision = BatchingTask::apply_query_failure_to_state(
+            &mut state,
+            std::time::Duration::from_millis(1),
+            &coverage,
+            reason,
+        );
+        assert_eq!(
+            decision,
+            Some(FlowCheckpointDecision::FallbackToFullSnapshot {
+                previous_mode: CheckpointMode::FullSnapshot,
+                reason: FlowQueryFallbackReason::SnapshotFenceExpired,
+            })
+        );
+        assert!(state.pending_fenced_repair().is_none());
+
+        // Simulate the outer execution failure restore for the in-flight chunk.
+        state.restore_scoped_windows(&filter);
+    }
+
+    let plan = task
+        .gen_query_with_time_window(
+            query_engine,
+            &aggregate_time_window_sink_schema(),
+            &[],
+            false,
+            Some(1),
+        )
+        .await
+        .unwrap()
+        .expect("text-fallback stale fence should restore dirty windows for a fresh scoped repair");
+    assert!(
+        matches!(plan.coverage, QueryCoverage::ScopedBaseRepair),
+        "next plan after text-fallback stale fence should be ScopedBaseRepair"
     );
 }
 
