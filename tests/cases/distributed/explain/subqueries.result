@@ -91,7 +91,7 @@ order by t.i desc;
 |_|_Cross Join:_|
 |_|_Projection: integers.i_|
 |_|_MergeScan [is_placeholder=false, remote_input=[_|
-|_| Filter: integers.i IS NOT NULL AND Boolean(true)_|
+|_| Filter: integers.i IS NOT NULL_|
 |_|_TableScan: integers, partial_filters=[integers.i IS NOT NULL, Boolean(true)] |
 |_| ]]_|
 |_|_Projection:_|

@@ -2263,6 +2263,90 @@ fn test_table_scan_projection() {
     assert_eq!(expected, result.to_string());
 }
 
+#[test]
+fn test_table_scan_cast_projection_pushdown() {
+    init_default_ut_logging();
+    let test_table = TestTable::table_with_name(0, "t".to_string());
+    let table_provider = Arc::new(DfTableProviderAdapter::new(test_table));
+    let table_source = Arc::new(DefaultTableSource::new(table_provider.clone() as _));
+    let ctx = SessionContext::new();
+    ctx.register_table(TableReference::bare("t"), table_provider.clone() as _)
+        .unwrap();
+
+    let scan = LogicalPlanBuilder::scan_with_filters("t", table_source, Some(vec![3]), vec![])
+        .unwrap()
+        .build()
+        .unwrap();
+    let ts_cast_type = DataType::Timestamp(TimeUnit::Millisecond, Some("+00:00".into()));
+    let ts_cast_expr = col("ts").cast_to(&ts_cast_type, scan.schema()).unwrap();
+    let plan = LogicalPlanBuilder::from(scan)
+        .project(vec![ts_cast_expr.alias("ts")])
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let config = ConfigOptions::default();
+    let result = DistPlannerAnalyzer {}
+        .analyze(plan.clone(), &config)
+        .unwrap();
+    let expected = [
+        "Projection: ts",
+        "  MergeScan [is_placeholder=false, remote_input=[",
+        "Projection: CAST(t.ts AS Timestamp(ms, \"+00:00\")) AS ts",
+        "  TableScan: t projection=[ts]",
+        "]]",
+    ]
+    .join("\n");
+    assert_eq!(expected, result.to_string());
+}
+
+#[test]
+fn test_cast_filter_simplified_after_pushdown() {
+    // This test invokes `DistPlannerAnalyzer` directly rather than the full
+    // query `SessionState`, so the globally-registered `ConstNormalizationRule`
+    // does not run here. The native timestamp filter below proves the focused
+    // pre-MergeScan pass can do this by running DataFusion `SimplifyExpressions`
+    // after `PushDownFilter` has pushed the alias predicate through the cast
+    // projection into `TableScan.filters`.
+    init_default_ut_logging();
+    let test_table =
+        TestTable::table_with_filter_pushdown(0, "t".to_string(), FilterPushDownType::Inexact);
+    let table_provider = Arc::new(DfTableProviderAdapter::new(test_table));
+    let table_source = Arc::new(DefaultTableSource::new(table_provider.clone() as _));
+    let ctx = SessionContext::new();
+    ctx.register_table(TableReference::bare("t"), table_provider.clone() as _)
+        .unwrap();
+
+    let scan = LogicalPlanBuilder::scan_with_filters("t", table_source, Some(vec![3]), vec![])
+        .unwrap()
+        .build()
+        .unwrap();
+    let ts_cast_type = DataType::Timestamp(TimeUnit::Second, None);
+    let ts_cast_expr = col("ts").cast_to(&ts_cast_type, scan.schema()).unwrap();
+    let plan = LogicalPlanBuilder::from(scan)
+        .project(vec![ts_cast_expr.alias("ts")])
+        .unwrap()
+        .filter(col("ts").gt_eq(lit(ScalarValue::TimestampSecond(Some(10), None))))
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let config = ConfigOptions::default();
+    let result = DistPlannerAnalyzer {}
+        .analyze(plan.clone(), &config)
+        .unwrap();
+    let expected = [
+        "Projection: ts",
+        "  MergeScan [is_placeholder=false, remote_input=[",
+        "Projection: CAST(t.ts AS Timestamp(s)) AS ts",
+        "  Filter: t.ts >= TimestampMillisecond(10000, None)",
+        "    TableScan: t projection=[ts], partial_filters=[t.ts >= TimestampMillisecond(10000, None)]",
+        "]]",
+    ]
+    .join("\n");
+    assert_eq!(expected, result.to_string());
+}
+
 /// When `ScheduledTimeExtension` is injected into `ConfigOptions`, the
 /// `SimplifyExpressions` pass (driven by `PatchOptimizerContext`) uses the
 /// scheduled time instead of wall-clock time. The remote sub-plan must contain
