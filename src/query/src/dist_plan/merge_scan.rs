@@ -22,7 +22,7 @@ use async_stream::stream;
 use common_catalog::parse_catalog_and_schema_from_db_string;
 use common_plugins::GREPTIME_EXEC_READ_COST;
 use common_query::request::QueryRequest;
-use common_recordbatch::adapter::RecordBatchMetrics;
+use common_recordbatch::adapter::{RecordBatchMetrics, region_scan_output_bytes};
 use common_telemetry::tracing_context::TracingContext;
 use datafusion::execution::{SessionState, TaskContext};
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
@@ -48,7 +48,6 @@ use meter_macros::read_meter;
 use session::context::QueryContextRef;
 use store_api::metrics::{REGION_QUERY_CPU_TIME, REGION_QUERY_SCANNED_BYTES};
 use store_api::storage::RegionId;
-use table::table::scan::REGION_SCAN_EXEC_NAME;
 use table::table_name::TableName;
 use tokio::time::Instant;
 use tracing::{Instrument, Span};
@@ -915,21 +914,10 @@ impl DisplayAs for MergeScanExec {
     }
 }
 
-/// Extract total `output_bytes` from [`RegionScanExec`] plan nodes.
-fn scan_output_bytes(metrics: &RecordBatchMetrics) -> usize {
-    metrics
-        .plan_metrics
-        .iter()
-        .filter(|pm| pm.plan_name == REGION_SCAN_EXEC_NAME)
-        .flat_map(|pm| &pm.metrics)
-        .filter_map(|(name, value)| (name == "output_bytes").then_some(*value))
-        .sum()
-}
-
 fn region_scan_load(metrics: &RecordBatchMetrics) -> ReadItem {
     ReadItem {
         cpu_time: metrics.elapsed_compute as u64,
-        table_scan: scan_output_bytes(metrics) as u64,
+        table_scan: region_scan_output_bytes(metrics) as u64,
     }
 }
 
@@ -952,6 +940,9 @@ fn query_load_region_id(default_region_id: RegionId, metrics: &RecordBatchMetric
 
 impl Drop for MergeScanExec {
     fn drop(&mut self) {
+        // Per-region Prometheus metrics can have high cardinality, so they are
+        // controlled by `enable_per_region_metrics`. Region-owned counters for
+        // heartbeat reporting are updated on datanodes when query metrics resolve.
         if !self.enable_per_region_metrics {
             return;
         }
@@ -1030,6 +1021,7 @@ mod tests {
     use session::ReadPreference;
     use session::context::QueryContext;
     use session::query_id::QueryId;
+    use table::table::scan::REGION_SCAN_EXEC_NAME;
     use table::table_name::TableName;
     use uuid::Uuid;
 
@@ -1274,7 +1266,7 @@ mod tests {
             ..Default::default()
         };
 
-        assert_eq!(scan_output_bytes(&metrics), 42);
+        assert_eq!(region_scan_output_bytes(&metrics), 42);
     }
 
     #[test]
@@ -1289,7 +1281,7 @@ mod tests {
             ..Default::default()
         };
 
-        assert_eq!(scan_output_bytes(&metrics), 0);
+        assert_eq!(region_scan_output_bytes(&metrics), 0);
     }
 
     #[test]
@@ -1312,7 +1304,7 @@ mod tests {
             ..Default::default()
         };
 
-        assert_eq!(scan_output_bytes(&metrics), 60);
+        assert_eq!(region_scan_output_bytes(&metrics), 60);
     }
 
     #[test]

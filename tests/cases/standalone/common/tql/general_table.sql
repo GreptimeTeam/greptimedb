@@ -16,6 +16,10 @@ WITH(
 -- SQLNESS REPLACE (Hash.*) REDACTED
 -- SQLNESS REPLACE (-+) -
 -- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (cpu_usage\.ts_range) ts_range
+-- SQLNESS REPLACE (cpu_usage\.ts) ts
+-- SQLNESS REPLACE (?m)^\|_\|_\|_SortExec:.*\n\|_\|_\|_RepartitionExec:.*\n
+-- SQLNESS REPLACE (SeriesScan:.*|SeqScan:.*) ScanExec: REDACTED
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 TQL analyze (0, 10, '1s')  sum by(job) (irate(cpu_usage{job="fire"}[5s])) / 1e9;

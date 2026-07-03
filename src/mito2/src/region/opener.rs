@@ -62,6 +62,7 @@ use crate::region::options::RegionOptions;
 use crate::region::version::{VersionBuilder, VersionControl, VersionControlRef};
 use crate::region::{
     ManifestContext, ManifestStats, MitoRegion, MitoRegionRef, RegionLeaderState, RegionRoleState,
+    RegionStats,
 };
 use crate::region_write_ctx::RegionWriteCtx;
 use crate::request::OptionOutputTx;
@@ -397,7 +398,7 @@ impl RegionOpener {
             last_schedule_compaction_millis: AtomicI64::new(now),
             time_provider: self.time_provider.clone(),
             topic_latest_entry_id: AtomicU64::new(flushed_entry_id),
-            written_bytes: Arc::new(AtomicU64::new(0)),
+            region_stats: RegionStats::new(),
             stats: self.stats,
         }))
     }
@@ -642,7 +643,7 @@ impl RegionOpener {
             last_schedule_compaction_millis: AtomicI64::new(now),
             time_provider: self.time_provider.clone(),
             topic_latest_entry_id: AtomicU64::new(topic_latest_entry_id),
-            written_bytes: Arc::new(AtomicU64::new(0)),
+            region_stats: RegionStats::new(),
             stats: self.stats.clone(),
         };
 

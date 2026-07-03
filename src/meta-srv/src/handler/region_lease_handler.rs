@@ -180,6 +180,8 @@ mod test {
             data_topic_latest_entry_id: 0,
             metadata_topic_latest_entry_id: 0,
             written_bytes: 0,
+            query_cpu_time: 0,
+            query_scanned_bytes: 0,
         }
     }
 
