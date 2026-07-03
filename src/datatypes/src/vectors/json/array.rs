@@ -174,10 +174,11 @@ impl JsonArray<'_> {
             }
         }
 
-        let json_array = StructArray::try_new(
+        let json_array = StructArray::try_new_with_length(
             expect_fields.clone(),
             aligned,
             struct_array.nulls().cloned(),
+            struct_array.len(),
         )
         .map_err(|e| {
             AlignJsonArraySnafu {

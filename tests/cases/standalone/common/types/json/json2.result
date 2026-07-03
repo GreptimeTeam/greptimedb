@@ -150,8 +150,8 @@ select j.a, j.a.x from json2_table order by ts;
 |                                   |                                     |
 | {"b":"s7"}                        |                                     |
 | {"b":8}                           |                                     |
-| {"b":null,"x":true}               | true                                |
-| {"b":10,"x":null}                 | null                                |
+| {"x":true}                        | true                                |
+| {"b":10}                          |                                     |
 +-----------------------------------+-------------------------------------+
 
 select j.c, j.y from json2_table order by ts;
