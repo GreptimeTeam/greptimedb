@@ -5,7 +5,7 @@
 
 [case]
 name = "promql_pushdown_7913"
-description = "PromQL/TQL non-ms time-index query should prune SSTs for narrow time ranges"
+description = "PromQL/TQL small-window selectors should stay fast on high-cardinality metric-like fixtures"
 issue = "https://github.com/GreptimeTeam/greptimedb/issues/7913"
 
 [scenario]
@@ -48,20 +48,44 @@ semantic = "timestamp"
 [scenario.layout]
 regions = 1
 sst_count = 1024
-rows_per_sst = 4096
-row_group_size = 512
+rows_per_sst = 32768
+row_group_size = 8192
 series_count = 4096
-start_unix_nanos = 1704067200000000000 # 2024-01-01T00:00:00Z
-step_nanos = 1000000000
+start_unix_nanos = 1_704_067_200_000_000_000 # 2024-01-01T00:00:00Z
+step_nanos = 1_000_000_000
 time_range_layout = "non_overlapping_per_sst"
-series_layout = "round_robin"
+series_layout = "timestamp_major"
 
 [[scenario.queries]]
-name = "narrow_window"
+name = "selector_5m_high_cardinality"
 kind = "tql"
-query = "TQL ANALYZE VERBOSE (1704070800000, 1704070860000, '15s') promql_pushdown_7913{host=~'host.*'}"
-warmup = 2
-iterations = 5
+# TQL start/end timestamps are epoch seconds. `timestamp_major` layout writes one
+# sample for every series at each scrape timestamp, so short PromQL windows still
+# scan millions of raw samples instead of millisecond-scale synthetic trickles.
+# The default 5-minute lookback means scans start before each query window.
+query = "TQL ANALYZE VERBOSE (1704069000, 1704069300, '15s') promql_pushdown_7913{host=~'host.*'}"
+warmup = 3
+iterations = 9
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 15
+
+[[scenario.queries]]
+name = "selector_15m_high_cardinality"
+kind = "tql"
+query = "TQL ANALYZE VERBOSE (1704069000, 1704069900, '15s') promql_pushdown_7913{host=~'host.*'}"
+warmup = 3
+iterations = 9
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 15
+
+[[scenario.queries]]
+name = "selector_1h_high_cardinality"
+kind = "tql"
+query = "TQL ANALYZE VERBOSE (1704069000, 1704072600, '15s') promql_pushdown_7913{host=~'host.*'}"
+warmup = 3
+iterations = 9
 
 [scenario.queries.thresholds]
 max_candidate_latency_regression_pct = 15

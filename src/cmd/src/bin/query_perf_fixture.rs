@@ -314,6 +314,25 @@ fn tag_value(col: &ColumnConfig, series: usize) -> String {
     }
 }
 
+fn series_for_row(layout: &LayoutConfig, sst_idx: usize, base_row: usize, row: usize) -> usize {
+    match layout.series_layout.as_str() {
+        "round_robin" | "timestamp_major" => (base_row + row) % layout.series_count.get(),
+        "per_sst" => sst_idx % layout.series_count.get(),
+        other => panic!("unsupported series_layout {other}"),
+    }
+}
+
+fn timestamp_for_row(layout: &LayoutConfig, base_row: usize, row: usize) -> i64 {
+    let logical_row = base_row + row;
+    let timestamp_step = if layout.series_layout == "timestamp_major" {
+        logical_row / layout.series_count.get()
+    } else {
+        logical_row
+    };
+
+    layout.start_unix_nanos + (timestamp_step as i64 * layout.step_nanos)
+}
+
 fn wave_value(min: f64, max: f64, row: usize) -> f64 {
     let span = max - min;
     let phase = (row % 1024) as f64 / 1023.0;
@@ -337,11 +356,7 @@ fn generate_record_batch(
             ("tag", "STRING") => {
                 let mut b = StringDictionaryBuilder::<UInt32Type>::new();
                 for row in 0..rows {
-                    let series = if layout.series_layout == "round_robin" {
-                        (base_row + row) % layout.series_count.get()
-                    } else {
-                        sst_idx % layout.series_count.get()
-                    };
+                    let series = series_for_row(layout, sst_idx, base_row, row);
                     let value = tag_value(col, series);
                     b.append_value(value);
                 }
@@ -363,16 +378,13 @@ fn generate_record_batch(
             )) as ArrayRef),
             ("timestamp", "TIMESTAMP(9)") => columns.push(Arc::new(TimestampNanosecondArray::from(
                 (0..rows)
-                    .map(|r| layout.start_unix_nanos + ((base_row + r) as i64 * layout.step_nanos))
+                    .map(|r| timestamp_for_row(layout, base_row, r))
                     .collect::<Vec<_>>(),
             )) as ArrayRef),
             ("timestamp", "TIMESTAMP(3)") => {
                 columns.push(Arc::new(TimestampMillisecondArray::from(
                     (0..rows)
-                        .map(|r| {
-                            (layout.start_unix_nanos + ((base_row + r) as i64 * layout.step_nanos))
-                                / 1_000_000
-                        })
+                        .map(|r| timestamp_for_row(layout, base_row, r) / 1_000_000)
                         .collect::<Vec<_>>(),
                 )) as ArrayRef)
             }
@@ -382,11 +394,7 @@ fn generate_record_batch(
 
     let mut pk_builder = BinaryDictionaryBuilder::<UInt32Type>::new();
     for row in 0..rows {
-        let series = if layout.series_layout == "round_robin" {
-            (base_row + row) % layout.series_count.get()
-        } else {
-            sst_idx % layout.series_count.get()
-        };
+        let series = series_for_row(layout, sst_idx, base_row, row);
         let values = table
             .columns
             .iter()
@@ -492,6 +500,16 @@ async fn main() {
     }
     if scenario.layout.time_range_layout != "non_overlapping_per_sst" {
         panic!("MVP supports time_range_layout=non_overlapping_per_sst");
+    }
+    if scenario.layout.series_layout == "timestamp_major"
+        && !scenario
+            .layout
+            .rows_per_sst
+            .is_multiple_of(scenario.layout.series_count.get())
+    {
+        panic!(
+            "series_layout=timestamp_major requires rows_per_sst to be divisible by series_count"
+        );
     }
     if scenario.layout.sst_count > 1000 && !args.allow_large {
         panic!("sst_count exceeds 1000; pass --allow-large");

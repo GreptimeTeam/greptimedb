@@ -18,6 +18,8 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
+import hashlib
 import json
 import os
 import re
@@ -34,6 +36,9 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+
+FICLONE = 0x40049409
 
 
 @dataclass(frozen=True)
@@ -61,7 +66,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--base-bin", required=True, type=Path)
     p.add_argument("--candidate-bin", required=True, type=Path)
     p.add_argument("--fixture-generator", type=Path)
+    p.add_argument("--remote-write-generator", type=Path, help="prom_remote_write_fixture helper binary")
     p.add_argument("--work-dir", required=True, type=Path)
+    p.add_argument("--fixture-cache-dir", type=Path, help="persistent directory for generated fixtures, keyed by case content")
     p.add_argument("--reuse-fixture", action="store_true")
     p.add_argument("--allow-large-fixture", action="store_true")
     p.add_argument("--dry-run", action="store_true")
@@ -129,6 +136,10 @@ def sql_ident(name: str) -> str:
     return '"' + name.replace('"', '""') + '"'
 
 
+def sql_string(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
+
+
 def column_sql(col: dict[str, Any]) -> str:
     return f"{sql_ident(col['name'])} {col['type']}"
 
@@ -136,15 +147,22 @@ def column_sql(col: dict[str, Any]) -> str:
 def scenario(case: dict[str, Any]) -> dict[str, Any]:
     value = case.get("scenario")
     if not isinstance(value, dict):
-        raise ValueError("case requires [scenario] with kind = 'direct_readable_sst'")
+        raise ValueError("case requires [scenario] with kind = 'direct_readable_sst' or 'prom_remote_write_then_query'")
     kind = value.get("kind")
-    if kind != "direct_readable_sst":
-        raise ValueError(f"unsupported scenario kind {kind!r}; only 'direct_readable_sst' is supported")
+    if kind not in ("direct_readable_sst", "prom_remote_write_then_query"):
+        raise ValueError(f"unsupported scenario kind {kind!r}; supported: 'direct_readable_sst', 'prom_remote_write_then_query'")
     return value
 
 
 def case_tables(case: dict[str, Any]) -> list[dict[str, Any]]:
     value = scenario(case)
+    if value.get("kind") == "prom_remote_write_then_query":
+        remote = value.get("remote_write") or {}
+        metric = remote.get("metric") or remote.get("metric_name")
+        database = remote.get("database", "public")
+        if not metric:
+            raise ValueError("remote-write scenario requires scenario.remote_write.metric")
+        return [{"database": database, "name": metric, "engine": "metric", "validate_show_create_engine": False}]
     tables = value.get("tables") or []
     if not tables or value.get("layout", {}).get("regions") != 1:
         raise ValueError("runner supports one or more tables and exactly one region per table")
@@ -161,6 +179,21 @@ def fixture_subdir(table: dict[str, Any], index: int) -> str:
     raw = f"{index:02d}_{table['database']}_{table['name']}"
     safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", raw).strip("._-")
     return safe or f"table_{index:02d}"
+
+
+def safe_path_component(raw: str) -> str:
+    safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", raw).strip("._-")
+    return safe or "query_perf_case"
+
+
+def fixture_root(work_root: Path, case_path: Path, case: dict[str, Any], fixture_cache_dir: Path | None) -> Path:
+    if fixture_cache_dir is None:
+        return work_root / "fixture"
+    case_name = case.get("case", {}).get("name") or case_path.parent.name or case_path.stem
+    fixture_config = dict(scenario(case))
+    fixture_config.pop("queries", None)
+    digest = hashlib.sha256(json.dumps(fixture_config, sort_keys=True).encode()).hexdigest()[:16]
+    return fixture_cache_dir.resolve() / f"{safe_path_component(case_name)}-{digest}"
 
 
 def table_fixture_dir(root: Path, tables: list[dict[str, Any]], table: dict[str, Any], index: int) -> Path:
@@ -347,15 +380,17 @@ class DistributedCluster:
         )
         wait_health(self.target.datanode_http_port)
 
-    def start_frontend(self) -> None:
+    def start_frontend(self, config_file: Path | None = None) -> None:
         self._ensure_metasrv_alive()
         log_dir = self.target.work_dir / "logs" / "frontend"
-        self._spawn(
-            "frontend",
-            [
+        cmd = [
                 str(self.target.binary),
                 "frontend",
                 "start",
+        ]
+        if config_file is not None:
+            cmd += ["--config-file", str(config_file)]
+        cmd += [
                 "--metasrv-addrs",
                 f"127.0.0.1:{self.target.metasrv_rpc_port}",
                 "--http-addr",
@@ -370,14 +405,14 @@ class DistributedCluster:
                 f"127.0.0.1:{self.target.postgres_port}",
                 "--log-dir",
                 str(log_dir),
-            ],
-        )
+        ]
+        self._spawn("frontend", cmd)
         wait_health(self.target.http_port)
 
-    def start_all(self) -> None:
+    def start_all(self, frontend_config: Path | None = None) -> None:
         self.start_metasrv()
         self.start_datanode()
-        self.start_frontend()
+        self.start_frontend(frontend_config)
 
     def stop_component(self, name: str) -> None:
         proc = self.procs.pop(name, None)
@@ -501,10 +536,15 @@ def generate_fixture(generator: Path | None, case_path: Path, fixture_dir: Path,
     if generator is None:
         return {"status": "skipped", "reason": "no fixture generator provided"}
     summary_path = fixture_dir / "summary.json"
+    reuse_miss: str | None = None
     if reuse_fixture and summary_path.exists():
         summary = json.loads(summary_path.read_text())
-        assert_fixture_summary(summary, region_id=region_id, table_dir=table_dir, region_dir=region_dir, table_name=table_name, database=database)
-        return {"status": "reused", "fixture_dir": str(fixture_dir), "summary": summary}
+        try:
+            assert_fixture_summary(summary, region_id=region_id, table_dir=table_dir, region_dir=region_dir, table_name=table_name, database=database)
+            return {"status": "reused", "fixture_dir": str(fixture_dir), "summary": summary}
+        except RuntimeError as e:
+            reuse_miss = str(e)
+            shutil.rmtree(fixture_dir)
     if fixture_dir.exists() and not reuse_fixture:
         shutil.rmtree(fixture_dir)
     fixture_dir.mkdir(parents=True, exist_ok=True)
@@ -526,19 +566,75 @@ def generate_fixture(generator: Path | None, case_path: Path, fixture_dir: Path,
     summary = json.loads(summary_path.read_text())
     assert_fixture_summary(summary, region_id=region_id, table_dir=table_dir, region_dir=region_dir, table_name=table_name, database=database)
     result["summary"] = summary
+    if reuse_miss is not None:
+        result["reuse_miss"] = reuse_miss
     return result
 
 
-def copy_tree_contents(src: Path, dst: Path) -> None:
+def copy_stats() -> dict[str, int]:
+    return {"files": 0, "dirs": 0, "reflinked": 0, "hardlinked": 0, "copied": 0}
+
+
+def merge_copy_stats(left: dict[str, int], right: dict[str, int]) -> None:
+    for key, value in right.items():
+        left[key] = left.get(key, 0) + value
+
+
+def reflink_file(src: Path, dst: Path) -> bool:
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    sfd = os.open(src, os.O_RDONLY)
+    try:
+        dfd = os.open(dst, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, src.stat().st_mode & 0o777)
+        try:
+            fcntl.ioctl(dfd, FICLONE, sfd)
+            shutil.copystat(src, dst, follow_symlinks=True)
+            return True
+        finally:
+            os.close(dfd)
+    except OSError:
+        try:
+            dst.unlink()
+        except FileNotFoundError:
+            pass
+        return False
+    finally:
+        os.close(sfd)
+
+
+def materialize_file(src: Path, dst: Path, *, allow_hardlink: bool) -> str:
+    if reflink_file(src, dst):
+        return "reflinked"
+    if allow_hardlink:
+        try:
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                dst.unlink()
+            except FileNotFoundError:
+                pass
+            os.link(src, dst)
+            return "hardlinked"
+        except OSError:
+            pass
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(src, dst)
+    return "copied"
+
+
+def copy_tree_contents(src: Path, dst: Path, *, allow_hardlinks: bool = True) -> dict[str, int]:
     if not src.exists():
         raise FileNotFoundError(f"fixture path does not exist: {src}")
+    stats = copy_stats()
     dst.mkdir(parents=True, exist_ok=True)
     for child in src.iterdir():
         target = dst / child.name
         if child.is_dir():
-            shutil.copytree(child, target, dirs_exist_ok=True)
+            stats["dirs"] += 1
+            merge_copy_stats(stats, copy_tree_contents(child, target, allow_hardlinks=allow_hardlinks))
         else:
-            shutil.copy2(child, target)
+            mode = materialize_file(child, target, allow_hardlink=allow_hardlinks)
+            stats["files"] += 1
+            stats[mode] += 1
+    return stats
 
 
 def materialize_fixture(target: RunTarget, *, dry_run: bool, preserve_state: bool, expected_region_dir: str | None = None, fixture_dir: Path | None = None, reset_data: bool = True) -> dict[str, Any]:
@@ -564,15 +660,16 @@ def materialize_fixture(target: RunTarget, *, dry_run: bool, preserve_state: boo
     materialize_root.mkdir(parents=True, exist_ok=True)
     if preserve_state and target_region_dir.exists():
         shutil.rmtree(target_region_dir)
+    object_stats: dict[str, int]
     if preserve_state:
         fixture_region_dir = object_store_dir / region_dir
-        copy_tree_contents(fixture_region_dir, target_region_dir)
+        object_stats = copy_tree_contents(fixture_region_dir, target_region_dir, allow_hardlinks=True)
     else:
-        copy_tree_contents(object_store_dir, materialize_root)
+        object_stats = copy_tree_contents(object_store_dir, materialize_root, allow_hardlinks=True)
     if target_manifest_dir.exists():
         shutil.rmtree(target_manifest_dir)
-    copy_tree_contents(manifest_dir, target_manifest_dir)
-    return {"status": "ok", "summary_path": str(summary_path), "data_dir": str(materialize_root), "region_dir": region_dir, "manifest_dir": str(target_manifest_dir), "preserve_state": preserve_state}
+    manifest_stats = copy_tree_contents(manifest_dir, target_manifest_dir, allow_hardlinks=False)
+    return {"status": "ok", "summary_path": str(summary_path), "data_dir": str(materialize_root), "region_dir": region_dir, "manifest_dir": str(target_manifest_dir), "preserve_state": preserve_state, "copy_stats": {"object_store": object_stats, "manifest": manifest_stats}}
 
 
 def response_text(body: Any) -> str:
@@ -584,7 +681,7 @@ def validate_show_create(result: dict[str, Any], table: dict[str, Any]) -> list[
     errors = []
     if table["name"].lower() not in text:
         errors.append("SHOW CREATE output does not contain table name")
-    if "engine" not in text or "mito" not in text:
+    if table.get("validate_show_create_engine", True) and ("engine" not in text or "mito" not in text):
         errors.append("SHOW CREATE output does not mention ENGINE=mito")
     if "append_mode" in table and "append_mode" not in text:
         errors.append("SHOW CREATE output does not mention append_mode")
@@ -692,17 +789,165 @@ def require_fresh_work_dirs(targets: list[RunTarget], *, reuse_work_dir: bool, d
             raise RuntimeError(f"target work_dir exists and is non-empty: {target.work_dir}; pass --reuse-work-dir to override")
 
 
+def write_frontend_prom_config(target: RunTarget, remote: dict[str, Any]) -> Path:
+    prom = remote.get("prom_store") or {}
+    path = target.work_dir / "frontend-prom-store.toml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "[prom_store]\n"
+        "enable = true\n"
+        "with_metric_engine = true\n"
+        f"pending_rows_flush_interval = {json.dumps(str(prom.get('pending_rows_flush_interval', '1s')))}\n"
+        f"max_batch_rows = {int(prom.get('max_batch_rows', 100000))}\n"
+        f"max_concurrent_flushes = {int(prom.get('max_concurrent_flushes', 256))}\n"
+        f"worker_channel_capacity = {int(prom.get('worker_channel_capacity', 65526))}\n"
+        f"max_inflight_requests = {int(prom.get('max_inflight_requests', 3000))}\n"
+    )
+    return path
+
+
+def run_remote_write(generator: Path | None, target: RunTarget, remote: dict[str, Any], *, dry_run: bool) -> dict[str, Any]:
+    if generator is None:
+        if not dry_run:
+            raise ValueError("--remote-write-generator is required for prom_remote_write_then_query unless --dry-run is set")
+        generator = Path("prom_remote_write_fixture")
+    metric = remote.get("metric") or remote.get("metric_name")
+    physical_table = remote.get("physical_table", "greptime_physical_table")
+    cmd = [
+        str(generator),
+        "--endpoint", f"http://127.0.0.1:{target.http_port}/v1/prometheus/write",
+        "--database", remote.get("database", "public"),
+        "--metric", metric,
+        "--physical-table", physical_table,
+        "--series-count", str(int(remote.get("series_count", 8))),
+        "--samples-per-series", str(int(remote.get("samples_per_series", 30))),
+        "--start-unix-millis", str(int(remote.get("start_unix_millis", 1_704_067_200_000))),
+        "--step-millis", str(int(remote.get("step_millis", 15_000))),
+        "--chunk-series-count", str(int(remote.get("chunk_series_count", remote.get("batch_size", 8)))),
+        "--timeout-seconds", str(int(remote.get("timeout_seconds", 60))),
+    ]
+    if dry_run:
+        return {"status": "dry-run", "cmd": cmd}
+    result = run_command(cmd)
+    result["status"] = "ok" if result["returncode"] == 0 else "failed"
+    if result["returncode"] != 0:
+        raise RuntimeError(f"remote-write generator failed for {target.name}: {result['stderr'][:2000]}")
+    try:
+        result["summary"] = json.loads(result["stdout"])
+    except json.JSONDecodeError:
+        result["summary_parse_error"] = result["stdout"]
+    return result
+
+
+def expected_remote_write_rows(remote: dict[str, Any]) -> int:
+    return int(remote.get("series_count", 8)) * int(remote.get("samples_per_series", 30))
+
+
+def extract_count_value(result: dict[str, Any]) -> int | None:
+    body = result.get("response")
+    if not isinstance(body, dict):
+        return None
+    data = body.get("data")
+    if not isinstance(data, list) or not data:
+        return None
+    row = data[0]
+    if not isinstance(row, dict):
+        return None
+    for key, value in row.items():
+        if key.lower() == "count(*)" or key.lower().startswith("count("):
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
+def poll_expected_count(target: RunTarget, table_name: str, db: str, expected_rows: int, timeout_s: float, http_timeout: float) -> dict[str, Any]:
+    sql = f"SELECT count(*) FROM {sql_ident(table_name)}"
+    deadline = time.monotonic() + timeout_s
+    attempts = 0
+    last: dict[str, Any] | None = None
+    while True:
+        attempts += 1
+        result = http_post_sql(target.http_port, sql, db, http_timeout)
+        observed_rows = extract_count_value(result)
+        result["expected_rows"] = expected_rows
+        result["observed_rows"] = observed_rows
+        result["attempts"] = attempts
+        result["row_count_ok"] = result.get("ok") and observed_rows == expected_rows
+        if result["row_count_ok"]:
+            return result
+        last = result
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(0.5)
+    assert last is not None
+    last["ok"] = False
+    last["row_count_ok"] = False
+    last["error"] = f"expected {expected_rows} rows but observed {last.get('observed_rows')} after {attempts} attempts"
+    return last
+
+
+def run_remote_write_scenario(args: argparse.Namespace, case: dict[str, Any], case_path: Path, targets: list[RunTarget], report: dict[str, Any]) -> None:
+    remote = scenario(case).get("remote_write") or {}
+    tables = case_tables(case)
+    if args.fixture_only:
+        raise ValueError("--fixture-only is not supported for prom_remote_write_then_query; use --dry-run for planning")
+    if args.remote_write_generator is not None:
+        require_binary(args.remote_write_generator, "remote-write generator", dry_run=args.dry_run)
+    elif not args.dry_run:
+        raise ValueError("--remote-write-generator is required for prom_remote_write_then_query")
+    clusters: list[DistributedCluster] = []
+    target_results = []
+    try:
+        for target in targets:
+            target.work_dir.mkdir(parents=True, exist_ok=True)
+            config_path = write_frontend_prom_config(target, remote)
+            cluster = DistributedCluster(target)
+            clusters.append(cluster)
+            if not args.dry_run:
+                cluster.start_all(config_path)
+            db = remote.get("database", "public")
+            create_database = {"status": "dry-run", "database": db}
+            if not args.dry_run:
+                create_database = http_post_sql(target.http_port, f"CREATE DATABASE IF NOT EXISTS {sql_ident(db)}", "public", args.http_timeout)
+            rw = run_remote_write(args.remote_write_generator, target, remote, dry_run=args.dry_run)
+            physical = remote.get("physical_table", "greptime_physical_table")
+            flush = {"status": "dry-run", "physical_table": physical}
+            visibility = {"status": "dry-run"}
+            query_result = {"validation": [], "validation_errors": [], "measurements": [], "status": "planned"}
+            if not args.dry_run:
+                flush = http_post_sql(target.http_port, f"ADMIN FLUSH_TABLE({sql_string(physical)})", db, args.http_timeout)
+                visibility = poll_expected_count(target, tables[0]["name"], db, expected_remote_write_rows(remote), float(remote.get("visibility_timeout_seconds", 30)), args.http_timeout)
+                query_result = run_queries(target, case, tables, args.http_timeout)
+            tr = {"name": target.name, "binary": str(target.binary), "work_dir": str(target.work_dir), "components": cluster.component_report(), "frontend_config": str(config_path), "create_database": create_database, "remote_write": rw, "flush": flush, "visibility": visibility, **query_result}
+            remote_checks_ok = args.dry_run or (create_database.get("ok") and flush.get("ok") and visibility.get("ok") and visibility.get("row_count_ok"))
+            if not remote_checks_ok:
+                tr.setdefault("validation_errors", []).append({"phase": "remote_write_visibility", "create_database_ok": create_database.get("ok"), "flush_ok": flush.get("ok"), "visibility_ok": visibility.get("ok"), "row_count_ok": visibility.get("row_count_ok"), "create_database": create_database, "flush": flush, "visibility": visibility})
+            tr["status"] = "planned" if args.dry_run else ("measured" if remote_checks_ok and query_result["status"] == "ok" else "failed")
+            write_json(target.report_path, tr)
+            report["targets"].append(tr)
+            target_results.append(query_result)
+        if not args.dry_run:
+            report["thresholds"] = enforce_thresholds(case, target_results[0], target_results[1])
+        report["status"] = "planned" if args.dry_run else ("failed" if any(t["status"] == "failed" for t in report["thresholds"]) or any(t.get("status") == "failed" for t in report["targets"]) else "ok")
+    finally:
+        for cluster in reversed(clusters):
+            cluster.stop_all()
+
+
 def main() -> int:
     args = parse_args()
     case_path = args.case.resolve()
     case = load_case(case_path)
     scenario_config = scenario(case)
+    scenario_kind = scenario_config.get("kind")
     tables = case_tables(case)
     work_root = args.work_dir.resolve()
     work_root.mkdir(parents=True, exist_ok=True)
     require_binary(args.base_bin, "base", dry_run=args.dry_run or args.fixture_only)
     require_binary(args.candidate_bin, "candidate", dry_run=args.dry_run or args.fixture_only)
-    if not args.dry_run and args.fixture_generator is None:
+    if scenario_kind == "direct_readable_sst" and not args.dry_run and args.fixture_generator is None:
         raise ValueError("--fixture-generator is required unless --dry-run is set")
     if args.fixture_generator is not None:
         require_binary(args.fixture_generator, "fixture generator", dry_run=args.dry_run)
@@ -710,14 +955,25 @@ def main() -> int:
     ports = allocate_ports(16)
     targets = [make_target("base", args.base_bin.resolve(), work_root, ports[:8]), make_target("candidate", args.candidate_bin.resolve(), work_root, ports[8:])]
     require_fresh_work_dirs(targets, reuse_work_dir=args.reuse_work_dir, dry_run=args.dry_run, fixture_only=args.fixture_only)
-    fixture_dir = work_root / "fixture"
-    report: dict[str, Any] = {"case_path": str(case_path), "case": case.get("case", {}), "scenario": scenario_config, "queries": planned_queries(case), "dry_run": args.dry_run, "fixture_only": args.fixture_only, "query_mode": "fixture-only" if args.fixture_only else "distributed", "reuse_work_dir": args.reuse_work_dir, "http_timeout": args.http_timeout, "targets": [], "thresholds": [], "status": "planned" if args.dry_run else "running"}
+    fixture_dir = fixture_root(work_root, case_path, case, args.fixture_cache_dir)
+    reuse_fixture = args.reuse_fixture or args.fixture_cache_dir is not None
+    report: dict[str, Any] = {"case_path": str(case_path), "case": case.get("case", {}), "scenario": scenario_config, "queries": planned_queries(case), "dry_run": args.dry_run, "fixture_only": args.fixture_only, "query_mode": "fixture-only" if args.fixture_only else "distributed", "reuse_work_dir": args.reuse_work_dir, "reuse_fixture": reuse_fixture, "fixture_cache_dir": str(args.fixture_cache_dir.resolve()) if args.fixture_cache_dir is not None else None, "fixture_dir": str(fixture_dir), "http_timeout": args.http_timeout, "targets": [], "thresholds": [], "status": "planned" if args.dry_run else "running"}
+
+    if scenario_kind == "prom_remote_write_then_query":
+        try:
+            run_remote_write_scenario(args, case, case_path, targets, report)
+        except Exception as e:  # noqa: BLE001 - write machine-readable failure report
+            report["status"] = "failed"
+            report["error"] = repr(e)
+        write_json(work_root / "query-regression-report.json", report)
+        print(json.dumps(report, indent=2, sort_keys=True))
+        return 1 if report["status"] == "failed" else 0
 
     if args.fixture_only or args.dry_run:
         generations = []
         for table_idx, table in enumerate(tables):
             per_table_fixture_dir = table_fixture_dir(fixture_dir, tables, table, table_idx)
-            generations.append(generate_fixture(args.fixture_generator, case_path, per_table_fixture_dir, dry_run=args.dry_run, reuse_fixture=args.reuse_fixture, allow_large_fixture=args.allow_large_fixture, table_name=table["name"] if len(tables) > 1 else None, database=table["database"] if len(tables) > 1 else None))
+            generations.append(generate_fixture(args.fixture_generator, case_path, per_table_fixture_dir, dry_run=args.dry_run, reuse_fixture=reuse_fixture, allow_large_fixture=args.allow_large_fixture, table_name=table["name"] if len(tables) > 1 else None, database=table["database"] if len(tables) > 1 else None))
         report["fixture_generation"] = generations[0] if len(generations) == 1 else generations
         for target in targets:
             target.work_dir.mkdir(parents=True, exist_ok=True)
@@ -759,7 +1015,7 @@ def main() -> int:
         generations = []
         for table_idx, meta in enumerate(discovered[0]):
             per_table_fixture_dir = table_fixture_dir(fixture_dir, tables, tables[table_idx], table_idx)
-            generations.append(generate_fixture(args.fixture_generator, case_path, per_table_fixture_dir, dry_run=False, reuse_fixture=args.reuse_fixture, allow_large_fixture=args.allow_large_fixture, table_name=meta["table"] if len(tables) > 1 else None, database=meta["schema"] if len(tables) > 1 else None, region_id=meta["region_id"], table_dir=meta["table_dir"], region_dir=meta["region_dir"]))
+            generations.append(generate_fixture(args.fixture_generator, case_path, per_table_fixture_dir, dry_run=False, reuse_fixture=reuse_fixture, allow_large_fixture=args.allow_large_fixture, table_name=meta["table"] if len(tables) > 1 else None, database=meta["schema"] if len(tables) > 1 else None, region_id=meta["region_id"], table_dir=meta["table_dir"], region_dir=meta["region_dir"]))
         report["fixture_generation"] = generations[0] if len(generations) == 1 else generations
 
         target_results = []
