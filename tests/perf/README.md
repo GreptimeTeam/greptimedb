@@ -63,19 +63,32 @@ expected to affect. A case should define:
 - metrics to collect
 - base-vs-candidate thresholds
 
-Cases may also declare the workload kind. Omitted `[workload]` sections default
-to `direct_readable_sst` for compatibility with older cases:
+The `[case]` table is metadata for reports. The executable regression config
+lives under `[scenario]`. A scenario owns data generation, queries, and
+thresholds:
 
 ```toml
-[workload]
-kind = "direct_readable_sst"
+[case]
+name = "example"
+description = "what this regression protects"
 
-[workload.direct_readable_sst]
-# currently no required fields
+[scenario]
+kind = "direct_readable_sst"
+seed = 12345
+
+[[scenario.tables]]
+# table schema and distributions
+
+[scenario.layout]
+# SST and series layout
+
+[[scenario.queries]]
+# query, warmups, iterations, thresholds
 ```
 
-The runner currently supports only `direct_readable_sst`. The enum-style shape is
-reserved for future `write_then_query` and `write_while_query` workloads.
+The runner currently supports only `direct_readable_sst`. The enum-style
+`scenario.kind` is reserved for future scenarios such as `write_then_query` and
+`cache_warm_query`.
 
 ## Metrics
 

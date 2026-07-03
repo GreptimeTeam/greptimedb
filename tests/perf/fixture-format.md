@@ -8,17 +8,15 @@ of issue-specific data loaders.
 Each case describes:
 
 ```toml
-[fixture]
-mode = "direct_readable_sst"
+[case]
+name = "example_metric"
+description = "example direct-readable-SST regression"
+
+[scenario]
+kind = "direct_readable_sst"
 seed = 12345
 
-[workload]
-kind = "direct_readable_sst"
-
-[workload.direct_readable_sst]
-# currently no required fields
-
-[[tables]]
+[[scenario.tables]]
 database = "public"
 name = "example_metric"
 engine = "mito"
@@ -27,35 +25,42 @@ sst_format = "flat"
 primary_key = ["host", "instance"]
 time_index = "ts"
 
-[[tables.columns]]
+[[scenario.tables.columns]]
 name = "host"
 type = "STRING"
 semantic = "tag"
 distribution = { kind = "cardinality", values = 100, prefix = "host" }
 
-[[tables.columns]]
+[[scenario.tables.columns]]
 name = "value"
 type = "DOUBLE"
 semantic = "field"
 distribution = { kind = "deterministic_wave", min = 0.0, max = 100.0 }
 
-[[tables.columns]]
+[[scenario.tables.columns]]
 name = "ts"
 type = "TIMESTAMP(9)"
 semantic = "timestamp"
 
-[layout]
+[scenario.layout]
 regions = 1
 sst_count = 1024
 rows_per_sst = 4096
 row_group_size = 512
 time_range_layout = "non_overlapping_per_sst"
 series_layout = "round_robin"
+
+[[scenario.queries]]
+name = "count_all"
+kind = "sql"
+query = "SELECT count(*) FROM example_metric"
+warmup = 0
+iterations = 1
 ```
 
-`[workload]` is required. Other workload variants are intentionally unsupported
-for now, but the nested shape leaves room for future `write_then_query` and
-`write_while_query` configuration.
+`[scenario]` is required. Other scenario variants are intentionally unsupported
+for now, but `scenario.kind` leaves room for future `write_then_query` and
+`cache_warm_query` configuration.
 
 The generator should use these declarations to produce:
 

@@ -9,7 +9,9 @@
 - The case DSL is not required to keep compatibility inside this PR. When the
   DSL changes, update TOML cases, the Python runner, Rust fixture generator, and
   docs together.
-- `[workload]` is required in every case. Keep workload parsing explicit in both
+- `[case]` is report metadata only. `[scenario]` is the executable regression
+  configuration and must include `kind`, data layout, tables, queries, and
+  thresholds. Keep scenario parsing explicit in both
   `tests/perf/query_regression_runner.py` and
   `src/cmd/src/bin/query_perf_fixture.rs`.
 - Keep the direct-SST generator generic. Issue-specific behavior belongs in case

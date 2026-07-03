@@ -133,9 +133,20 @@ def column_sql(col: dict[str, Any]) -> str:
     return f"{sql_ident(col['name'])} {col['type']}"
 
 
+def scenario(case: dict[str, Any]) -> dict[str, Any]:
+    value = case.get("scenario")
+    if not isinstance(value, dict):
+        raise ValueError("case requires [scenario] with kind = 'direct_readable_sst'")
+    kind = value.get("kind")
+    if kind != "direct_readable_sst":
+        raise ValueError(f"unsupported scenario kind {kind!r}; only 'direct_readable_sst' is supported")
+    return value
+
+
 def case_tables(case: dict[str, Any]) -> list[dict[str, Any]]:
-    tables = case.get("tables") or []
-    if not tables or case.get("layout", {}).get("regions") != 1:
+    value = scenario(case)
+    tables = value.get("tables") or []
+    if not tables or value.get("layout", {}).get("regions") != 1:
         raise ValueError("runner supports one or more tables and exactly one region per table")
     pairs = [(table.get("database"), table.get("name")) for table in tables]
     if len(set(pairs)) != len(pairs):
@@ -144,18 +155,6 @@ def case_tables(case: dict[str, Any]) -> list[dict[str, Any]]:
     if len(set(names)) != len(names):
         raise ValueError("duplicate table names are not supported because fixture generator --table selects by name")
     return list(tables)
-
-
-def workload_kind(case: dict[str, Any]) -> str:
-    workload = case.get("workload")
-    if not isinstance(workload, dict):
-        raise ValueError("case requires [workload] with kind = 'direct_readable_sst'")
-    kind = workload.get("kind")
-    if kind != "direct_readable_sst":
-        raise ValueError(f"unsupported workload kind {kind!r}; only 'direct_readable_sst' is supported")
-    if not isinstance(workload.get("direct_readable_sst"), dict):
-        raise ValueError("direct_readable_sst workload requires [workload.direct_readable_sst]")
-    return kind
 
 
 def fixture_subdir(table: dict[str, Any], index: int) -> str:
@@ -183,7 +182,7 @@ def create_table_sql(table: dict[str, Any]) -> str:
 
 
 def planned_queries(case: dict[str, Any]) -> list[dict[str, Any]]:
-    queries = case.get("queries", [])
+    queries = scenario(case).get("queries", [])
     if isinstance(queries, dict):
         return [{"name": name, **value} for name, value in queries.items()]
     return list(queries)
@@ -697,7 +696,7 @@ def main() -> int:
     args = parse_args()
     case_path = args.case.resolve()
     case = load_case(case_path)
-    workload_kind(case)
+    scenario_config = scenario(case)
     tables = case_tables(case)
     work_root = args.work_dir.resolve()
     work_root.mkdir(parents=True, exist_ok=True)
@@ -712,7 +711,7 @@ def main() -> int:
     targets = [make_target("base", args.base_bin.resolve(), work_root, ports[:8]), make_target("candidate", args.candidate_bin.resolve(), work_root, ports[8:])]
     require_fresh_work_dirs(targets, reuse_work_dir=args.reuse_work_dir, dry_run=args.dry_run, fixture_only=args.fixture_only)
     fixture_dir = work_root / "fixture"
-    report: dict[str, Any] = {"case_path": str(case_path), "case": case.get("case", {}), "fixture": case.get("fixture", {}), "workload": case["workload"], "queries": planned_queries(case), "dry_run": args.dry_run, "fixture_only": args.fixture_only, "query_mode": "fixture-only" if args.fixture_only else "distributed", "reuse_work_dir": args.reuse_work_dir, "http_timeout": args.http_timeout, "targets": [], "thresholds": [], "status": "planned" if args.dry_run else "running"}
+    report: dict[str, Any] = {"case_path": str(case_path), "case": case.get("case", {}), "scenario": scenario_config, "queries": planned_queries(case), "dry_run": args.dry_run, "fixture_only": args.fixture_only, "query_mode": "fixture-only" if args.fixture_only else "distributed", "reuse_work_dir": args.reuse_work_dir, "http_timeout": args.http_timeout, "targets": [], "thresholds": [], "status": "planned" if args.dry_run else "running"}
 
     if args.fixture_only or args.dry_run:
         generations = []

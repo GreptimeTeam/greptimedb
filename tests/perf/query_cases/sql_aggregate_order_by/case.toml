@@ -3,18 +3,13 @@
 [case]
 name = "sql_aggregate_order_by"
 description = "Grouped aggregate ordered by aggregate value with LIMIT"
-data_mode = "direct_readable_sst"
 
-[fixture]
-mode = "direct_readable_sst"
+[scenario]
+kind = "direct_readable_sst"
 seed = 1002
 
-[workload]
-kind = "direct_readable_sst"
 
-[workload.direct_readable_sst]
-
-[[tables]]
+[[scenario.tables]]
 database = "public"
 name = "sql_aggregate_order_by"
 engine = "mito"
@@ -23,30 +18,30 @@ sst_format = "flat"
 primary_key = ["service", "host"]
 time_index = "ts"
 
-[[tables.columns]]
+[[scenario.tables.columns]]
 name = "service"
 type = "STRING"
 semantic = "tag"
 distribution = { kind = "cardinality", values = 8, prefix = "service" }
 
-[[tables.columns]]
+[[scenario.tables.columns]]
 name = "host"
 type = "STRING"
 semantic = "tag"
 distribution = { kind = "cardinality", values = 64, prefix = "host" }
 
-[[tables.columns]]
+[[scenario.tables.columns]]
 name = "cpu"
 type = "DOUBLE"
 semantic = "field"
 distribution = { kind = "deterministic_wave", min = 0.0, max = 100.0 }
 
-[[tables.columns]]
+[[scenario.tables.columns]]
 name = "ts"
 type = "TIMESTAMP(9)"
 semantic = "timestamp"
 
-[layout]
+[scenario.layout]
 regions = 1
 sst_count = 64
 rows_per_sst = 1024
@@ -57,12 +52,12 @@ step_nanos = 1000000000
 time_range_layout = "non_overlapping_per_sst"
 series_layout = "round_robin"
 
-[[queries]]
+[[scenario.queries]]
 name = "aggregate_service_top"
 kind = "sql"
 query = "SELECT service, avg(cpu) AS avg_cpu, sum(cpu) AS sum_cpu FROM sql_aggregate_order_by WHERE ts >= '2024-01-01 00:00:00+0000'::TIMESTAMP AND ts < '2024-01-01 08:00:00+0000'::TIMESTAMP GROUP BY service ORDER BY avg_cpu DESC LIMIT 5"
 warmup = 1
 iterations = 3
 
-[queries.thresholds]
+[scenario.queries.thresholds]
 max_candidate_latency_regression_pct = 50

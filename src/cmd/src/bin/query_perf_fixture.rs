@@ -103,46 +103,34 @@ struct Args {
 
 #[derive(Debug, Deserialize)]
 struct CaseFile {
-    case: CaseInfo,
-    #[serde(default)]
-    fixture: Option<FixtureConfig>,
-    workload: Workload,
-    tables: Vec<TableConfig>,
-    layout: LayoutConfig,
-}
-
-#[derive(Debug, Deserialize)]
-struct FixtureConfig {
-    #[serde(default)]
-    seed: Option<u64>,
-}
-
-#[derive(Debug, Deserialize)]
-struct CaseInfo {
-    name: String,
+    scenario: Scenario,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "kind")]
-enum Workload {
+enum Scenario {
     #[serde(rename = "direct_readable_sst")]
-    DirectReadableSst {
-        direct_readable_sst: DirectReadableSstWorkload,
-    },
+    DirectReadableSst(DirectReadableSstScenario),
 }
 
 #[derive(Debug, Deserialize)]
-struct DirectReadableSstWorkload {}
+struct DirectReadableSstScenario {
+    #[serde(default)]
+    seed: Option<u64>,
+    tables: Vec<TableConfig>,
+    layout: LayoutConfig,
+}
 
-impl Workload {
+impl Scenario {
     fn kind(&self) -> &'static str {
         match self {
-            Workload::DirectReadableSst {
-                direct_readable_sst,
-            } => {
-                let _ = direct_readable_sst;
-                "direct_readable_sst"
-            }
+            Scenario::DirectReadableSst(_) => "direct_readable_sst",
+        }
+    }
+
+    fn direct_readable_sst(&self) -> &DirectReadableSstScenario {
+        match self {
+            Scenario::DirectReadableSst(scenario) => scenario,
         }
     }
 }
@@ -484,39 +472,45 @@ fn remap_sst_file(
     });
 }
 
+fn case_name_from_path(path: &Path) -> String {
+    path.parent()
+        .and_then(Path::file_name)
+        .and_then(|name| name.to_str())
+        .unwrap_or("query_perf_case")
+        .to_string()
+}
+
 #[tokio::main]
 async fn main() {
     let args = Args::parse();
     let case_text = fs::read_to_string(&args.case).expect("failed to read query perf case TOML");
     let case: CaseFile = toml::from_str(&case_text).expect("failed to parse query perf case TOML");
-    if case.tables.is_empty() || case.layout.regions != 1 {
+    let case_name = case_name_from_path(&args.case);
+    let scenario = case.scenario.direct_readable_sst();
+    if scenario.tables.is_empty() || scenario.layout.regions != 1 {
         panic!("fixture generator supports one or more tables and exactly one region per table");
     }
-    if case.layout.time_range_layout != "non_overlapping_per_sst" {
+    if scenario.layout.time_range_layout != "non_overlapping_per_sst" {
         panic!("MVP supports time_range_layout=non_overlapping_per_sst");
     }
-    if case.layout.sst_count > 1000 && !args.allow_large {
+    if scenario.layout.sst_count > 1000 && !args.allow_large {
         panic!("sst_count exceeds 1000; pass --allow-large");
     }
-    let seed = case
-        .fixture
-        .as_ref()
-        .and_then(|fixture| fixture.seed)
-        .unwrap_or(0);
+    let seed = scenario.seed.unwrap_or(0);
     let table_index = match args.table.as_deref() {
-        Some(name) => case
+        Some(name) => scenario
             .tables
             .iter()
             .position(|table| table.name == name)
-            .unwrap_or_else(|| panic!("--table {name} was not found in case {}", case.case.name)),
-        None if case.tables.len() == 1 => 0,
+            .unwrap_or_else(|| panic!("--table {name} was not found in case {case_name}")),
+        None if scenario.tables.len() == 1 => 0,
         None => panic!(
             "case {} contains {} tables; pass --table <name> to choose one",
-            case.case.name,
-            case.tables.len()
+            case_name,
+            scenario.tables.len()
         ),
     };
-    let table = &case.tables[table_index];
+    let table = &scenario.tables[table_index];
     if table.engine != "mito" {
         panic!("MVP supports engine=mito");
     }
@@ -540,13 +534,13 @@ async fn main() {
         other => panic!("unsupported sst_format {other}"),
     };
     println!(
-        "query_perf_fixture case={} workload={} table={}.{} ssts={} rows_per_sst={} format={format:?}",
-        case.case.name,
-        case.workload.kind(),
+        "query_perf_fixture case={} scenario={} table={}.{} ssts={} rows_per_sst={} format={format:?}",
+        case_name,
+        case.scenario.kind(),
         table.database,
         table.name,
-        case.layout.sst_count,
-        case.layout.rows_per_sst
+        scenario.layout.sst_count,
+        scenario.layout.rows_per_sst
     );
     println!(
         "out_dir={} table_dir={} region_dir={}",
@@ -566,11 +560,11 @@ async fn main() {
         .expect("failed to create filesystem object store for fixture output")
         .finish();
     let metadata: RegionMetadataRef = Arc::new(build_region_metadata(table, region_id));
-    let mut files = HashMap::with_capacity(case.layout.sst_count);
+    let mut files = HashMap::with_capacity(scenario.layout.sst_count);
     let mut next_file_index = 1;
-    for i in 0..case.layout.sst_count {
+    for i in 0..scenario.layout.sst_count {
         let sequence = 1000 + i as u64;
-        let batch = generate_record_batch(table, &metadata, &case.layout, i, sequence);
+        let batch = generate_record_batch(table, &metadata, &scenario.layout, i, sequence);
         let source =
             FlatSource::new_iter(batch.schema(), Box::new(vec![batch].into_iter().map(Ok)));
         let mut metrics = Metrics::new(WriteType::Flush);
@@ -587,7 +581,7 @@ async fn main() {
         .await;
         let opts = WriteOptions {
             write_buffer_size: DEFAULT_WRITE_BUFFER_SIZE,
-            row_group_size: case.layout.row_group_size,
+            row_group_size: scenario.layout.row_group_size,
             max_file_size: None,
         };
         let infos = match format {
@@ -652,6 +646,6 @@ async fn main() {
         writeln!(jsonl, "{}", serde_json::to_string(&serde_json::json!({ "file_id": file_id.to_string(), "region_id": meta.region_id.as_u64(), "object_path": mito2::sst::location::sst_file_path(&table_dir, RegionFileId::new(meta.region_id, *file_id), PathType::Bare), "time_range_start": meta.time_range.0.value(), "time_range_end": meta.time_range.1.value(), "num_rows": meta.num_rows, "num_row_groups": meta.num_row_groups, "file_size": meta.file_size, "num_series": meta.num_series, "sequence": meta.sequence.map(|s| s.get()) })).expect("failed to serialize fixture SST metadata JSONL entry")).expect("failed to write fixture SST metadata JSONL entry");
     }
     jsonl.flush().expect("failed to flush fixture files.jsonl");
-    fs::write(args.out_dir.join("summary.json"), serde_json::to_vec_pretty(&serde_json::json!({ "case": case.case.name, "seed": seed, "table_index": table_index, "table": table.name, "database": table.database, "region_id": region_id.as_u64(), "table_dir": table_dir, "region_dir": region_dir, "sst_format": format!("{format:?}"), "sst_count": case.layout.sst_count, "rows_per_sst": case.layout.rows_per_sst, "row_group_size": case.layout.row_group_size, "total_rows": case.layout.sst_count * case.layout.rows_per_sst, "checkpoint_path": checkpoint_path, "files_jsonl_path": files_jsonl_path, "readback_validated": false, "metadata_source": "synthetic" })).expect("failed to serialize fixture summary")).expect("failed to write fixture summary.json");
+    fs::write(args.out_dir.join("summary.json"), serde_json::to_vec_pretty(&serde_json::json!({ "case": case_name, "seed": seed, "table_index": table_index, "table": table.name, "database": table.database, "region_id": region_id.as_u64(), "table_dir": table_dir, "region_dir": region_dir, "sst_format": format!("{format:?}"), "sst_count": scenario.layout.sst_count, "rows_per_sst": scenario.layout.rows_per_sst, "row_group_size": scenario.layout.row_group_size, "total_rows": scenario.layout.sst_count * scenario.layout.rows_per_sst, "checkpoint_path": checkpoint_path, "files_jsonl_path": files_jsonl_path, "readback_validated": false, "metadata_source": "synthetic" })).expect("failed to serialize fixture summary")).expect("failed to write fixture summary.json");
     println!("Done. wrote {} SST file entries", manifest.files.len());
 }
