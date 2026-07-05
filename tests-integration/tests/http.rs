@@ -1925,6 +1925,7 @@ experimental_manifest_keep_removed_file_ttl = "1h"
 compress_manifest = false
 experimental_compaction_memory_limit = "unlimited"
 experimental_compaction_on_exhausted = "wait"
+experimental_enable_metric_engine_value_byte_stream_split = false
 auto_flush_interval = "30m"
 enable_write_cache = false
 write_cache_path = ""
