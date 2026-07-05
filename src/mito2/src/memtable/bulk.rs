@@ -679,28 +679,6 @@ impl BulkMemtable {
         append_mode: bool,
         merge_mode: MergeMode,
     ) -> Self {
-        Self::new_with_encode_options(
-            id,
-            config,
-            metadata,
-            write_buffer_manager,
-            compact_dispatcher,
-            append_mode,
-            merge_mode,
-            BulkPartEncodeOptions::default(),
-        )
-    }
-
-    fn new_with_encode_options(
-        id: MemtableId,
-        config: BulkMemtableConfig,
-        metadata: RegionMetadataRef,
-        write_buffer_manager: Option<WriteBufferManagerRef>,
-        compact_dispatcher: Option<Arc<CompactDispatcher>>,
-        append_mode: bool,
-        merge_mode: MergeMode,
-        encode_options: BulkPartEncodeOptions,
-    ) -> Self {
         let config = config.sanitize();
         let region_id = metadata.region_id;
         Self {
@@ -717,7 +695,7 @@ impl BulkMemtable {
             compact_dispatcher,
             append_mode,
             merge_mode,
-            encode_options,
+            encode_options: BulkPartEncodeOptions::default(),
         }
     }
 
@@ -1461,7 +1439,7 @@ impl MemtableBuilder for BulkMemtableBuilder {
             self.encode_options.clone()
         };
 
-        Arc::new(BulkMemtable::new_with_encode_options(
+        let mut memtable = BulkMemtable::new(
             id,
             self.config.clone(),
             metadata.clone(),
@@ -1469,8 +1447,9 @@ impl MemtableBuilder for BulkMemtableBuilder {
             self.compact_dispatcher.clone(),
             self.append_mode,
             self.merge_mode,
-            encode_options,
-        ))
+        );
+        memtable.encode_options = encode_options;
+        Arc::new(memtable)
     }
 
     fn use_bulk_insert(&self, _metadata: &RegionMetadataRef) -> bool {
