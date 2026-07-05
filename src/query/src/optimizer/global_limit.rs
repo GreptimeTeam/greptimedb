@@ -23,7 +23,7 @@ use datafusion::physical_plan::repartition::RepartitionExec;
 use datafusion::physical_plan::sorts::sort_preserving_merge::SortPreservingMergeExec;
 use datafusion::physical_plan::{ExecutionPlan, ExecutionPlanProperties};
 use datafusion_common::Result as DfResult;
-use datafusion_physical_expr::{Distribution, OrderingRequirements};
+use datafusion_physical_expr::{Distribution, OrderingRequirements, Partitioning};
 
 #[derive(Debug)]
 pub struct EnsureGlobalLimitForFetch;
@@ -62,6 +62,7 @@ impl EnsureGlobalLimitForFetch {
                 global_fetch: provided_global_fetch(&plan),
                 required_ordering: None,
                 required_distribution: Distribution::UnspecifiedDistribution,
+                partitioning_to_restore: None,
             };
             let children = children
                 .into_iter()
@@ -71,6 +72,14 @@ impl EnsureGlobalLimitForFetch {
                         .get(idx)
                         .cloned()
                         .unwrap_or(Distribution::UnspecifiedDistribution);
+                    let partitioning_to_restore =
+                        partitioning_to_restore_for(child, &required_distribution).or_else(|| {
+                            inherited_partitioning_to_restore(
+                                &plan,
+                                child,
+                                &parent.required_distribution,
+                            )
+                        });
                     let required_ordering = required_input_ordering
                         .get(idx)
                         .cloned()
@@ -86,6 +95,7 @@ impl EnsureGlobalLimitForFetch {
                     let parent = ParentContext {
                         required_ordering,
                         required_distribution,
+                        partitioning_to_restore,
                         ..child_parent.clone()
                     };
                     Self::optimize_plan(Arc::clone(child), parent)
@@ -111,7 +121,7 @@ impl EnsureGlobalLimitForFetch {
             plan,
             fetch,
             parent.required_ordering,
-            parent.required_distribution,
+            parent.partitioning_to_restore,
         )
     }
 }
@@ -121,6 +131,7 @@ struct ParentContext {
     global_fetch: Option<usize>,
     required_ordering: Option<OrderingRequirements>,
     required_distribution: Distribution,
+    partitioning_to_restore: Option<Partitioning>,
 }
 
 impl Default for ParentContext {
@@ -129,6 +140,7 @@ impl Default for ParentContext {
             global_fetch: None,
             required_ordering: None,
             required_distribution: Distribution::UnspecifiedDistribution,
+            partitioning_to_restore: None,
         }
     }
 }
@@ -145,9 +157,8 @@ fn add_global_fetch(
     plan: Arc<dyn ExecutionPlan>,
     fetch: usize,
     required_ordering: Option<OrderingRequirements>,
-    required_distribution: Distribution,
+    partitioning_to_restore: Option<Partitioning>,
 ) -> DfResult<Arc<dyn ExecutionPlan>> {
-    let original_partition_count = plan.output_partitioning().partition_count();
     let plan = if required_ordering.is_some()
         && let Some(ordering) = plan.output_ordering().cloned()
     {
@@ -158,22 +169,67 @@ fn add_global_fetch(
             as Arc<dyn ExecutionPlan>
     };
 
-    restore_required_distribution(plan, required_distribution, original_partition_count)
+    restore_required_partitioning(plan, partitioning_to_restore)
 }
 
-fn restore_required_distribution(
+fn restore_required_partitioning(
     plan: Arc<dyn ExecutionPlan>,
-    required_distribution: Distribution,
-    partition_count: usize,
+    partitioning_to_restore: Option<Partitioning>,
 ) -> DfResult<Arc<dyn ExecutionPlan>> {
-    if partition_count <= 1 || !matches!(&required_distribution, Distribution::HashPartitioned(_)) {
+    let Some(partitioning) = partitioning_to_restore else {
+        return Ok(plan);
+    };
+
+    if partitioning.partition_count() <= 1 || !matches!(&partitioning, Partitioning::Hash(_, _)) {
         return Ok(plan);
     }
 
-    let partitioning = required_distribution.create_partitioning(partition_count);
     Ok(Arc::new(
         RepartitionExec::try_new(plan, partitioning)?.with_preserve_order(),
     ))
+}
+
+fn partitioning_to_restore_for(
+    child: &Arc<dyn ExecutionPlan>,
+    required_distribution: &Distribution,
+) -> Option<Partitioning> {
+    if !matches!(required_distribution, Distribution::HashPartitioned(_))
+        || child.output_partitioning().partition_count() <= 1
+    {
+        return None;
+    }
+
+    if child
+        .output_partitioning()
+        .satisfaction(required_distribution, child.equivalence_properties(), false)
+        .is_satisfied()
+    {
+        Some(child.output_partitioning().clone())
+    } else {
+        Some(
+            required_distribution
+                .clone()
+                .create_partitioning(child.output_partitioning().partition_count()),
+        )
+    }
+}
+
+fn inherited_partitioning_to_restore(
+    plan: &Arc<dyn ExecutionPlan>,
+    child: &Arc<dyn ExecutionPlan>,
+    required_distribution: &Distribution,
+) -> Option<Partitioning> {
+    if !matches!(required_distribution, Distribution::HashPartitioned(_))
+        || child.output_partitioning().partition_count() <= 1
+        || !matches!(child.output_partitioning(), Partitioning::Hash(_, _))
+    {
+        return None;
+    }
+
+    plan.output_partitioning()
+        .satisfaction(required_distribution, plan.equivalence_properties(), false)
+        .is_satisfied()
+        .then(|| child.output_partitioning().clone())
 }
 
 #[cfg(test)]
@@ -292,7 +348,7 @@ mod tests {
             filter,
             1,
             Some(OrderingRequirements::from(required_ordering)),
-            Distribution::UnspecifiedDistribution,
+            None,
         )
         .unwrap();
         let merge = optimized
@@ -356,6 +412,53 @@ mod tests {
         let left = optimized.children()[0];
         let repartition = left.as_any().downcast_ref::<RepartitionExec>().unwrap();
 
+        assert!(matches!(
+            repartition.partitioning(),
+            Partitioning::Hash(_, 3)
+        ));
+        assert!(repartition.input().as_any().is::<CoalescePartitionsExec>());
+        assert_eq!(repartition.input().fetch(), Some(1));
+    }
+
+    #[test]
+    fn restores_inherited_hash_distribution_through_projection() {
+        let filter = filter_fetch(hash_repartition(unordered_input()), 1);
+        let projection = Arc::new(
+            ProjectionExec::try_new(
+                vec![(col("a", filter.schema().as_ref()).unwrap(), "a".to_string())],
+                filter,
+            )
+            .unwrap(),
+        ) as Arc<dyn ExecutionPlan>;
+        let right = hash_repartition(unordered_input());
+        let on = vec![(
+            col("a", projection.schema().as_ref()).unwrap(),
+            col("a", right.schema().as_ref()).unwrap(),
+        )];
+        let join = Arc::new(
+            HashJoinExec::try_new(
+                projection,
+                right,
+                on,
+                None,
+                &JoinType::Inner,
+                None,
+                PartitionMode::Partitioned,
+                NullEquality::NullEqualsNothing,
+                false,
+            )
+            .unwrap(),
+        ) as Arc<dyn ExecutionPlan>;
+
+        let optimized =
+            EnsureGlobalLimitForFetch::optimize_plan(join, ParentContext::default()).unwrap();
+        let projection = optimized.children()[0];
+        let repartition = projection.children()[0]
+            .as_any()
+            .downcast_ref::<RepartitionExec>()
+            .unwrap();
+
+        assert!(projection.as_any().is::<ProjectionExec>());
         assert!(matches!(
             repartition.partitioning(),
             Partitioning::Hash(_, 3)
