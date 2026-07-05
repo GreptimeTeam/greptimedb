@@ -63,6 +63,7 @@ impl EnsureGlobalLimitForFetch {
                 required_ordering: None,
                 required_distribution: Distribution::UnspecifiedDistribution,
                 partitioning_to_restore: None,
+                preserve_hash_partitioning: false,
             };
             let children = children
                 .into_iter()
@@ -73,13 +74,9 @@ impl EnsureGlobalLimitForFetch {
                         .cloned()
                         .unwrap_or(Distribution::UnspecifiedDistribution);
                     let partitioning_to_restore =
-                        partitioning_to_restore_for(child, &required_distribution).or_else(|| {
-                            inherited_partitioning_to_restore(
-                                &plan,
-                                child,
-                                &parent.required_distribution,
-                            )
-                        });
+                        partitioning_to_restore_for(child, &required_distribution)
+                            .or_else(|| inherited_partitioning_to_restore(&plan, child, &parent));
+                    let preserve_hash_partitioning = partitioning_to_restore.is_some();
                     let required_ordering = required_input_ordering
                         .get(idx)
                         .cloned()
@@ -96,6 +93,7 @@ impl EnsureGlobalLimitForFetch {
                         required_ordering,
                         required_distribution,
                         partitioning_to_restore,
+                        preserve_hash_partitioning,
                         ..child_parent.clone()
                     };
                     Self::optimize_plan(Arc::clone(child), parent)
@@ -132,6 +130,7 @@ struct ParentContext {
     required_ordering: Option<OrderingRequirements>,
     required_distribution: Distribution,
     partitioning_to_restore: Option<Partitioning>,
+    preserve_hash_partitioning: bool,
 }
 
 impl Default for ParentContext {
@@ -141,6 +140,7 @@ impl Default for ParentContext {
             required_ordering: None,
             required_distribution: Distribution::UnspecifiedDistribution,
             partitioning_to_restore: None,
+            preserve_hash_partitioning: false,
         }
     }
 }
@@ -217,18 +217,30 @@ fn partitioning_to_restore_for(
 fn inherited_partitioning_to_restore(
     plan: &Arc<dyn ExecutionPlan>,
     child: &Arc<dyn ExecutionPlan>,
-    required_distribution: &Distribution,
+    parent: &ParentContext,
 ) -> Option<Partitioning> {
-    if !matches!(required_distribution, Distribution::HashPartitioned(_))
-        || child.output_partitioning().partition_count() <= 1
+    if child.output_partitioning().partition_count() <= 1
         || !matches!(child.output_partitioning(), Partitioning::Hash(_, _))
+        || !matches!(plan.output_partitioning(), Partitioning::Hash(_, _))
+        || plan.output_partitioning().partition_count()
+            != child.output_partitioning().partition_count()
     {
         return None;
     }
 
-    plan.output_partitioning()
-        .satisfaction(required_distribution, plan.equivalence_properties(), false)
-        .is_satisfied()
+    let satisfies_parent_distribution = matches!(
+        parent.required_distribution,
+        Distribution::HashPartitioned(_)
+    ) && plan
+        .output_partitioning()
+        .satisfaction(
+            &parent.required_distribution,
+            plan.equivalence_properties(),
+            false,
+        )
+        .is_satisfied();
+
+    (satisfies_parent_distribution || parent.preserve_hash_partitioning)
         .then(|| child.output_partitioning().clone())
 }
 
@@ -467,6 +479,50 @@ mod tests {
         assert_eq!(repartition.input().fetch(), Some(1));
     }
 
+    #[test]
+    fn restores_inherited_hash_distribution_through_multiple_projections() {
+        let filter = filter_fetch(hash_repartition(unordered_input()), 1);
+        let projection = project_a(filter);
+        let projection = project_a(projection);
+        let right = hash_repartition(unordered_input());
+        let on = vec![(
+            col("a", projection.schema().as_ref()).unwrap(),
+            col("a", right.schema().as_ref()).unwrap(),
+        )];
+        let join = Arc::new(
+            HashJoinExec::try_new(
+                projection,
+                right,
+                on,
+                None,
+                &JoinType::Inner,
+                None,
+                PartitionMode::Partitioned,
+                NullEquality::NullEqualsNothing,
+                false,
+            )
+            .unwrap(),
+        ) as Arc<dyn ExecutionPlan>;
+
+        let optimized =
+            EnsureGlobalLimitForFetch::optimize_plan(join, ParentContext::default()).unwrap();
+        let outer_projection = optimized.children()[0];
+        let inner_projection = outer_projection.children()[0];
+        let repartition = inner_projection.children()[0]
+            .as_any()
+            .downcast_ref::<RepartitionExec>()
+            .unwrap();
+
+        assert!(outer_projection.as_any().is::<ProjectionExec>());
+        assert!(inner_projection.as_any().is::<ProjectionExec>());
+        assert!(matches!(
+            repartition.partitioning(),
+            Partitioning::Hash(_, 3)
+        ));
+        assert!(repartition.input().as_any().is::<CoalescePartitionsExec>());
+        assert_eq!(repartition.input().fetch(), Some(1));
+    }
+
     fn unordered_input() -> Arc<dyn ExecutionPlan> {
         let schema = schema();
         let batch = batch(schema.clone());
@@ -499,6 +555,16 @@ mod tests {
     fn hash_repartition(input: Arc<dyn ExecutionPlan>) -> Arc<dyn ExecutionPlan> {
         let partitioning = Partitioning::Hash(vec![col("a", input.schema().as_ref()).unwrap()], 3);
         Arc::new(RepartitionExec::try_new(input, partitioning).unwrap())
+    }
+
+    fn project_a(input: Arc<dyn ExecutionPlan>) -> Arc<dyn ExecutionPlan> {
+        Arc::new(
+            ProjectionExec::try_new(
+                vec![(col("a", input.schema().as_ref()).unwrap(), "a".to_string())],
+                input,
+            )
+            .unwrap(),
+        )
     }
 
     fn schema() -> Arc<Schema> {
