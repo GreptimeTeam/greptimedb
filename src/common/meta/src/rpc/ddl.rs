@@ -31,7 +31,8 @@ use api::v1::meta::{
     DdlTaskResponse as PbDdlTaskResponse, DropDatabaseTask as PbDropDatabaseTask,
     DropFlowTask as PbDropFlowTask, DropTableTask as PbDropTableTask,
     DropTableTasks as PbDropTableTasks, DropViewTask as PbDropViewTask, Partition, ProcedureId,
-    TruncateTableTask as PbTruncateTableTask,
+    PurgeDroppedTableTask as PbPurgeDroppedTableTask, TruncateTableTask as PbTruncateTableTask,
+    UndropTableTask as PbUndropTableTask,
 };
 use api::v1::{
     AlterDatabaseExpr, AlterTableExpr, CommentObjectType as PbCommentObjectType, CommentOnExpr,
@@ -71,6 +72,8 @@ pub const ORIGIN_FRONTEND_ADDR_EXTENSION_KEY: &str = "__greptime_origin_frontend
 pub enum DdlTask {
     CreateTable(CreateTableTask),
     DropTable(DropTableTask),
+    UndropTable(UndropTableTask),
+    PurgeDroppedTable(PurgeDroppedTableTask),
     AlterTable(AlterTableTask),
     TruncateTable(TruncateTableTask),
     CreateLogicalTables(Vec<CreateTableTask>),
@@ -152,6 +155,16 @@ impl DdlTask {
         })
     }
 
+    /// Creates a [`DdlTask`] to undrop a table.
+    pub fn new_undrop_table(table_id: TableId) -> Self {
+        DdlTask::UndropTable(UndropTableTask { table_id })
+    }
+
+    /// Creates a [`DdlTask`] to purge a dropped table.
+    pub fn new_purge_dropped_table(table_id: TableId) -> Self {
+        DdlTask::PurgeDroppedTable(PurgeDroppedTableTask { table_id })
+    }
+
     /// Creates a [`DdlTask`] to create a database.
     pub fn new_create_database(
         catalog: String,
@@ -225,6 +238,12 @@ impl TryFrom<Task> for DdlTask {
                 Ok(DdlTask::CreateTable(create_table.try_into()?))
             }
             Task::DropTableTask(drop_table) => Ok(DdlTask::DropTable(drop_table.try_into()?)),
+            Task::UndropTableTask(undrop_table) => {
+                Ok(DdlTask::UndropTable(undrop_table.try_into()?))
+            }
+            Task::PurgeDroppedTableTask(purge_dropped_table) => {
+                Ok(DdlTask::PurgeDroppedTable(purge_dropped_table.try_into()?))
+            }
             Task::AlterTableTask(alter_table) => Ok(DdlTask::AlterTable(alter_table.try_into()?)),
             Task::TruncateTableTask(truncate_table) => {
                 Ok(DdlTask::TruncateTable(truncate_table.try_into()?))
@@ -335,6 +354,8 @@ impl TryFrom<SubmitDdlTaskRequest> for PbDdlTaskRequest {
         let task = match request.task {
             DdlTask::CreateTable(task) => Task::CreateTableTask(task.try_into()?),
             DdlTask::DropTable(task) => Task::DropTableTask(task.into()),
+            DdlTask::UndropTable(task) => Task::UndropTableTask(task.into()),
+            DdlTask::PurgeDroppedTable(task) => Task::PurgeDroppedTableTask(task.into()),
             DdlTask::AlterTable(task) => Task::AlterTableTask(task.try_into()?),
             DdlTask::TruncateTable(task) => Task::TruncateTableTask(task.try_into()?),
             DdlTask::CreateLogicalTables(tasks) => {
@@ -594,6 +615,62 @@ pub struct DropTableTask {
     pub table_id: TableId,
     #[serde(default)]
     pub drop_if_exists: bool,
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
+pub struct UndropTableTask {
+    pub table_id: TableId,
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
+pub struct PurgeDroppedTableTask {
+    pub table_id: TableId,
+}
+
+impl TryFrom<PbUndropTableTask> for UndropTableTask {
+    type Error = error::Error;
+
+    fn try_from(pb: PbUndropTableTask) -> Result<Self> {
+        Ok(Self {
+            table_id: pb
+                .table_id
+                .context(error::InvalidProtoMsgSnafu {
+                    err_msg: "expected table_id",
+                })?
+                .id,
+        })
+    }
+}
+
+impl From<UndropTableTask> for PbUndropTableTask {
+    fn from(task: UndropTableTask) -> Self {
+        Self {
+            table_id: Some(api::v1::TableId { id: task.table_id }),
+        }
+    }
+}
+
+impl TryFrom<PbPurgeDroppedTableTask> for PurgeDroppedTableTask {
+    type Error = error::Error;
+
+    fn try_from(pb: PbPurgeDroppedTableTask) -> Result<Self> {
+        Ok(Self {
+            table_id: pb
+                .table_id
+                .context(error::InvalidProtoMsgSnafu {
+                    err_msg: "expected table_id",
+                })?
+                .id,
+        })
+    }
+}
+
+impl From<PurgeDroppedTableTask> for PbPurgeDroppedTableTask {
+    fn from(task: PurgeDroppedTableTask) -> Self {
+        Self {
+            table_id: Some(api::v1::TableId { id: task.table_id }),
+        }
+    }
 }
 
 impl DropTableTask {
@@ -1757,6 +1834,56 @@ mod tests {
         let task = AlterTableTask {
             alter_table: AlterTableExpr::default(),
         };
+
+        let output = serde_json::to_vec(&task).unwrap();
+
+        let de = serde_json::from_slice(&output).unwrap();
+        assert_eq!(task, de);
+    }
+
+    #[test]
+    fn test_undrop_table_task_pb_roundtrip() {
+        let expected = UndropTableTask { table_id: 1024 };
+        let request = SubmitDdlTaskRequest::new(
+            QueryContext::default(),
+            DdlTask::UndropTable(expected.clone()),
+        );
+
+        let pb = PbDdlTaskRequest::try_from(request).unwrap();
+        let pb_task = pb.task.unwrap();
+        let de = DdlTask::try_from(pb_task).unwrap();
+
+        assert!(matches!(de, DdlTask::UndropTable(task) if task == expected));
+    }
+
+    #[test]
+    fn test_purge_dropped_table_task_pb_roundtrip() {
+        let expected = PurgeDroppedTableTask { table_id: 1024 };
+        let request = SubmitDdlTaskRequest::new(
+            QueryContext::default(),
+            DdlTask::PurgeDroppedTable(expected.clone()),
+        );
+
+        let pb = PbDdlTaskRequest::try_from(request).unwrap();
+        let pb_task = pb.task.unwrap();
+        let de = DdlTask::try_from(pb_task).unwrap();
+
+        assert!(matches!(de, DdlTask::PurgeDroppedTable(task) if task == expected));
+    }
+
+    #[test]
+    fn test_undrop_table_task_json_roundtrip() {
+        let task = UndropTableTask { table_id: 1024 };
+
+        let output = serde_json::to_vec(&task).unwrap();
+
+        let de = serde_json::from_slice(&output).unwrap();
+        assert_eq!(task, de);
+    }
+
+    #[test]
+    fn test_purge_dropped_table_task_json_roundtrip() {
+        let task = PurgeDroppedTableTask { table_id: 1024 };
 
         let output = serde_json::to_vec(&task).unwrap();
 

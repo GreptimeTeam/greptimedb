@@ -5939,7 +5939,7 @@ dependencies = [
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=b6b665d8b6fce4f1f0da49c8c79fb150636df4ff#b6b665d8b6fce4f1f0da49c8c79fb150636df4ff"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=4a69c9e75240a76afeb0796798085813669288f8#4a69c9e75240a76afeb0796798085813669288f8"
 dependencies = [
  "prost 0.14.1",
  "prost-types 0.14.1",
@@ -11184,7 +11184,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a56d757972c98b346a9b766e3f02746cde6dd1cd1d1d563472929fdd74bec4d"
 dependencies = [
  "anyhow",
- "itertools 0.14.0",
+ "itertools 0.11.0",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
@@ -11197,7 +11197,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9120690fafc389a67ba3803df527d0ec9cbbc9cc45e4cc20b332996dfb672425"
 dependencies = [
  "anyhow",
- "itertools 0.14.0",
+ "itertools 0.11.0",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
