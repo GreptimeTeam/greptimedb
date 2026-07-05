@@ -68,6 +68,7 @@ use crate::sst::SeriesEstimator;
 use crate::sst::index::IndexOutput;
 use crate::sst::parquet::flat_format::primary_key_column_index;
 use crate::sst::parquet::format::{PrimaryKeyArray, PrimaryKeyArrayBuilder};
+use crate::sst::parquet::writer::apply_byte_stream_split_to_field_column;
 use crate::sst::parquet::{PARQUET_METADATA_KEY, SstInfo};
 
 const INIT_DICT_VALUE_CAPACITY: usize = 8;
@@ -1137,24 +1138,49 @@ pub struct BulkPartEncoder {
     writer_props: Option<WriterProperties>,
 }
 
+/// Runtime-only options for bulk part encoding.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct BulkPartEncodeOptions {
+    /// Metric engine value column to encode with Parquet BYTE_STREAM_SPLIT.
+    pub(crate) metric_engine_value_byte_stream_split_column: Option<String>,
+}
+
 impl BulkPartEncoder {
     pub fn new(metadata: RegionMetadataRef, row_group_size: usize) -> Result<BulkPartEncoder> {
+        Self::new_with_options(metadata, row_group_size, BulkPartEncodeOptions::default())
+    }
+
+    /// Creates an encoder for pre-encoded bulk SST parts.
+    ///
+    /// The `row_group_size` and writer properties used here are final for the
+    /// produced parquet bytes. Later flush `WriteOptions` are not applied to
+    /// already pre-encoded bulk parts.
+    pub(crate) fn new_with_options(
+        metadata: RegionMetadataRef,
+        row_group_size: usize,
+        options: BulkPartEncodeOptions,
+    ) -> Result<BulkPartEncoder> {
         // TODO(yingwen): Skip arrow schema if needed.
         let json = metadata.to_json().context(InvalidMetadataSnafu)?;
         let key_value_meta =
             parquet::file::metadata::KeyValue::new(PARQUET_METADATA_KEY.to_string(), json);
 
         // TODO(yingwen): Do we need compression?
-        let writer_props = Some(
-            WriterProperties::builder()
-                .set_key_value_metadata(Some(vec![key_value_meta]))
-                .set_write_batch_size(row_group_size)
-                .set_max_row_group_row_count(Some(row_group_size))
-                .set_compression(Compression::ZSTD(ZstdLevel::default()))
-                .set_column_index_truncate_length(None)
-                .set_statistics_truncate_length(None)
-                .build(),
+        let writer_props_builder = WriterProperties::builder()
+            .set_key_value_metadata(Some(vec![key_value_meta]))
+            .set_write_batch_size(row_group_size)
+            .set_max_row_group_row_count(Some(row_group_size))
+            .set_compression(Compression::ZSTD(ZstdLevel::default()))
+            .set_column_index_truncate_length(None)
+            .set_statistics_truncate_length(None);
+        let writer_props_builder = apply_byte_stream_split_to_field_column(
+            writer_props_builder,
+            &metadata,
+            options
+                .metric_engine_value_byte_stream_split_column
+                .as_deref(),
         );
+        let writer_props = Some(writer_props_builder.build());
 
         Ok(Self {
             metadata,
@@ -1649,18 +1675,21 @@ impl MultiBulkPart {
 
 #[cfg(test)]
 mod tests {
-    use api::v1::{Row, SemanticType, WriteHint};
+    use api::v1::{OpType, Row, SemanticType, WriteHint};
     use datafusion_common::ScalarValue;
     use datatypes::arrow::array::{
-        BinaryArray, DictionaryArray, Float64Array, TimestampMillisecondArray,
+        ArrayRef, BinaryArray, BinaryDictionaryBuilder, DictionaryArray, Float32Array,
+        Float64Array, StringDictionaryBuilder, TimestampMillisecondArray, UInt8Array, UInt64Array,
     };
     use datatypes::arrow::datatypes::UInt32Type;
     use datatypes::prelude::{ConcreteDataType, Value};
     use datatypes::schema::ColumnSchema;
     use mito_codec::row_converter::build_primary_key_codec;
+    use parquet::basic::Encoding;
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
+    use store_api::metric_engine_consts::{DATA_SCHEMA_TSID_COLUMN_NAME, METRIC_DATA_REGION_GROUP};
     use store_api::storage::RegionId;
-    use store_api::storage::consts::ReservedColumnId;
+    use store_api::storage::consts::{PRIMARY_KEY_COLUMN_NAME, ReservedColumnId};
     use table::predicate::Predicate;
 
     use super::*;
@@ -1700,6 +1729,250 @@ mod tests {
         let part = converter.convert().unwrap();
         let encoder = BulkPartEncoder::new(metadata, 1024).unwrap();
         encoder.encode_part(&part).unwrap().unwrap()
+    }
+
+    fn metric_value_metadata(field_name: &str, data_type: ConcreteDataType) -> RegionMetadataRef {
+        let mut builder = RegionMetadataBuilder::new(RegionId::with_group_and_seq(
+            1,
+            METRIC_DATA_REGION_GROUP,
+            0,
+        ));
+        builder
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "tag_0",
+                    ConcreteDataType::string_datatype(),
+                    true,
+                ),
+                semantic_type: SemanticType::Tag,
+                column_id: 1,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    DATA_SCHEMA_TSID_COLUMN_NAME,
+                    ConcreteDataType::uint64_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Field,
+                column_id: 2,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(field_name, data_type, true),
+                semantic_type: SemanticType::Field,
+                column_id: 3,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "field_i",
+                    ConcreteDataType::uint64_datatype(),
+                    true,
+                ),
+                semantic_type: SemanticType::Field,
+                column_id: 4,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "ts",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Timestamp,
+                column_id: 5,
+            });
+        builder.primary_key(vec![1]);
+        Arc::new(builder.build().unwrap())
+    }
+
+    fn metric_value_batch(metadata: &RegionMetadataRef, field: ArrayRef) -> RecordBatch {
+        let schema = to_flat_sst_arrow_schema(metadata, &FlatSchemaOptions::default());
+        let rows = field.len();
+        let mut tag_builder = StringDictionaryBuilder::<UInt32Type>::new();
+        let mut pk_builder = BinaryDictionaryBuilder::<UInt32Type>::new();
+        for idx in 0..rows {
+            let tag = format!("tag_{idx}");
+            tag_builder.append_value(&tag);
+            pk_builder.append(tag.as_bytes()).unwrap();
+        }
+
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(tag_builder.finish()) as ArrayRef,
+                Arc::new(UInt64Array::from_iter_values(0..rows as u64)) as ArrayRef,
+                field,
+                Arc::new(UInt64Array::from_iter_values(0..rows as u64)) as ArrayRef,
+                Arc::new(TimestampMillisecondArray::from_iter_values(0..rows as i64)) as ArrayRef,
+                Arc::new(pk_builder.finish()) as ArrayRef,
+                Arc::new(UInt64Array::from_value(1000, rows)) as ArrayRef,
+                Arc::new(UInt8Array::from_value(OpType::Put as u8, rows)) as ArrayRef,
+            ],
+        )
+        .unwrap()
+    }
+
+    fn encoded_column_has_encoding(
+        part: &EncodedBulkPart,
+        column_name: &str,
+        encoding: Encoding,
+    ) -> bool {
+        let parquet_meta = &part.metadata().parquet_metadata;
+        (0..parquet_meta.num_row_groups()).any(|row_group_idx| {
+            let row_group = parquet_meta.row_group(row_group_idx);
+            (0..row_group.num_columns()).any(|column_idx| {
+                let column = row_group.column(column_idx);
+                column.column_descr().path().string() == column_name
+                    && column.encodings().any(|actual| actual == encoding)
+            })
+        })
+    }
+
+    fn encode_metric_value_batch(
+        metadata: RegionMetadataRef,
+        batch: RecordBatch,
+        selected_column: Option<String>,
+    ) -> EncodedBulkPart {
+        encode_metric_value_batch_with_row_group_size(metadata, batch, selected_column, 1024)
+    }
+
+    fn encode_metric_value_batch_with_row_group_size(
+        metadata: RegionMetadataRef,
+        batch: RecordBatch,
+        selected_column: Option<String>,
+        row_group_size: usize,
+    ) -> EncodedBulkPart {
+        let schema = batch.schema();
+        let encoder = BulkPartEncoder::new_with_options(
+            metadata,
+            row_group_size,
+            BulkPartEncodeOptions {
+                metric_engine_value_byte_stream_split_column: selected_column,
+            },
+        )
+        .unwrap();
+        let iter: BoxedRecordBatchIterator = Box::new(vec![Ok(batch)].into_iter());
+        encoder
+            .encode_record_batch_iter(
+                iter,
+                schema,
+                0,
+                10,
+                1000,
+                &mut BulkPartEncodeMetrics::default(),
+            )
+            .unwrap()
+            .unwrap()
+    }
+
+    #[test]
+    fn test_bulk_part_encoder_metric_value_byte_stream_split() {
+        let value_column = common_query::prelude::greptime_value();
+        let metadata = metric_value_metadata(value_column, ConcreteDataType::float32_datatype());
+        let batch = metric_value_batch(
+            &metadata,
+            Arc::new(Float32Array::from(vec![
+                Some(1.0),
+                Some(f32::NAN),
+                Some(f32::INFINITY),
+                Some(-0.0),
+                None,
+            ])) as ArrayRef,
+        );
+
+        let part = encode_metric_value_batch(metadata, batch, Some(value_column.to_string()));
+
+        assert!(encoded_column_has_encoding(
+            &part,
+            value_column,
+            Encoding::BYTE_STREAM_SPLIT
+        ));
+        assert!(!encoded_column_has_encoding(
+            &part,
+            "tag_0",
+            Encoding::BYTE_STREAM_SPLIT
+        ));
+        assert!(!encoded_column_has_encoding(
+            &part,
+            DATA_SCHEMA_TSID_COLUMN_NAME,
+            Encoding::BYTE_STREAM_SPLIT
+        ));
+        assert!(!encoded_column_has_encoding(
+            &part,
+            "field_i",
+            Encoding::BYTE_STREAM_SPLIT
+        ));
+        assert!(!encoded_column_has_encoding(
+            &part,
+            "ts",
+            Encoding::BYTE_STREAM_SPLIT
+        ));
+        assert!(!encoded_column_has_encoding(
+            &part,
+            PRIMARY_KEY_COLUMN_NAME,
+            Encoding::BYTE_STREAM_SPLIT
+        ));
+    }
+
+    #[test]
+    fn test_bulk_part_encoder_metric_value_byte_stream_split_default_off() {
+        let value_column = common_query::prelude::greptime_value();
+        let metadata = metric_value_metadata(value_column, ConcreteDataType::float64_datatype());
+        let batch = metric_value_batch(
+            &metadata,
+            Arc::new(Float64Array::from(vec![
+                Some(1.0),
+                Some(f64::NEG_INFINITY),
+                None,
+            ])) as ArrayRef,
+        );
+
+        let part = encode_metric_value_batch(metadata, batch, None);
+
+        assert!(!encoded_column_has_encoding(
+            &part,
+            value_column,
+            Encoding::BYTE_STREAM_SPLIT
+        ));
+    }
+
+    #[test]
+    fn test_bulk_part_encoder_byte_stream_split_skips_non_target_field() {
+        let metadata = metric_value_metadata("field_0", ConcreteDataType::float32_datatype());
+        let batch = metric_value_batch(
+            &metadata,
+            Arc::new(Float32Array::from(vec![Some(1.0), Some(2.0)])) as ArrayRef,
+        );
+
+        let part = encode_metric_value_batch(
+            metadata,
+            batch,
+            Some(common_query::prelude::greptime_value().to_string()),
+        );
+
+        assert!(!encoded_column_has_encoding(
+            &part,
+            "field_0",
+            Encoding::BYTE_STREAM_SPLIT
+        ));
+    }
+
+    #[test]
+    fn test_bulk_part_encoder_uses_own_row_group_size() {
+        let value_column = common_query::prelude::greptime_value();
+        let metadata = metric_value_metadata(value_column, ConcreteDataType::float32_datatype());
+        let batch = metric_value_batch(
+            &metadata,
+            Arc::new(Float32Array::from(vec![
+                Some(1.0),
+                Some(2.0),
+                Some(3.0),
+                Some(4.0),
+                Some(5.0),
+            ])) as ArrayRef,
+        );
+
+        let part = encode_metric_value_batch_with_row_group_size(metadata, batch, None, 2);
+
+        assert_eq!(3, part.metadata().parquet_metadata.num_row_groups());
     }
 
     #[test]

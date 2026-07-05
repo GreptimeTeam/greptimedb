@@ -63,6 +63,32 @@ use crate::sst::{
     DEFAULT_WRITE_BUFFER_SIZE, DEFAULT_WRITE_CONCURRENCY, FlatSchemaOptions, SeriesEstimator,
 };
 
+/// Applies Parquet BYTE_STREAM_SPLIT encoding to the selected Float32/Float64 field column.
+pub(crate) fn apply_byte_stream_split_to_field_column(
+    mut builder: WriterPropertiesBuilder,
+    region_metadata: &RegionMetadataRef,
+    selected_column: Option<&str>,
+) -> WriterPropertiesBuilder {
+    let Some(selected_column) = selected_column else {
+        return builder;
+    };
+
+    if let Some(column) = region_metadata.field_columns().find(|column| {
+        column.column_schema.name == selected_column
+            && matches!(
+                column.column_schema.data_type,
+                ConcreteDataType::Float32(_) | ConcreteDataType::Float64(_)
+            )
+    }) {
+        let column_path = ColumnPath::new(vec![column.column_schema.name.clone()]);
+        builder = builder
+            .set_column_encoding(column_path.clone(), Encoding::BYTE_STREAM_SPLIT)
+            .set_column_dictionary_enabled(column_path, false);
+    }
+
+    builder
+}
+
 /// Converts a flat RecordBatch for writing to parquet.
 enum FlatBatchConverter {
     /// Write as-is in flat format.
@@ -401,24 +427,11 @@ where
             .set_column_dictionary_enabled(ts_col, false)
             .set_column_compression(op_type_col, Compression::UNCOMPRESSED);
 
-        if let Some(byte_stream_split_column) =
-            opts.metric_engine_value_byte_stream_split_column.as_deref()
-        {
-            for column in region_metadata.field_columns() {
-                if matches!(
-                    column.column_schema.data_type,
-                    ConcreteDataType::Float32(_) | ConcreteDataType::Float64(_)
-                ) && column.column_schema.name == byte_stream_split_column
-                {
-                    let column_path = ColumnPath::new(vec![column.column_schema.name.clone()]);
-                    builder = builder
-                        .set_column_encoding(column_path.clone(), Encoding::BYTE_STREAM_SPLIT)
-                        .set_column_dictionary_enabled(column_path, false);
-                }
-            }
-        }
-
-        builder
+        apply_byte_stream_split_to_field_column(
+            builder,
+            region_metadata,
+            opts.metric_engine_value_byte_stream_split_column.as_deref(),
+        )
     }
 
     async fn write_next_flat_batch(

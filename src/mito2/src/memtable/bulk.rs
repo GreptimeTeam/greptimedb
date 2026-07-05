@@ -49,8 +49,8 @@ use crate::flush::WriteBufferManagerRef;
 use crate::memtable::bulk::context::BulkIterContext;
 use crate::memtable::bulk::json_align::Json2Aligner;
 use crate::memtable::bulk::part::{
-    BulkPart, BulkPartEncodeMetrics, BulkPartEncoder, MultiBulkPart, UnorderedPart,
-    should_prune_bulk_part,
+    BulkPart, BulkPartEncodeMetrics, BulkPartEncodeOptions, BulkPartEncoder, MultiBulkPart,
+    UnorderedPart, should_prune_bulk_part,
 };
 use crate::memtable::bulk::part_reader::BulkPartBatchIter;
 use crate::memtable::stats::WriteMetrics;
@@ -393,6 +393,8 @@ pub struct BulkMemtable {
     append_mode: bool,
     /// Mode to handle duplicate rows while merging
     merge_mode: MergeMode,
+    /// Runtime-only options for pre-encoding bulk parts.
+    encode_options: BulkPartEncodeOptions,
 }
 
 impl std::fmt::Debug for BulkMemtable {
@@ -635,6 +637,7 @@ impl Memtable for BulkMemtable {
             compact_dispatcher: self.compact_dispatcher.clone(),
             append_mode: self.append_mode,
             merge_mode: self.merge_mode,
+            encode_options: self.encode_options.clone(),
         })
     }
 
@@ -657,6 +660,7 @@ impl Memtable for BulkMemtable {
                 &self.metadata,
                 !self.append_mode,
                 self.merge_mode,
+                self.encode_options.clone(),
             )?;
         }
 
@@ -675,6 +679,28 @@ impl BulkMemtable {
         append_mode: bool,
         merge_mode: MergeMode,
     ) -> Self {
+        Self::new_with_encode_options(
+            id,
+            config,
+            metadata,
+            write_buffer_manager,
+            compact_dispatcher,
+            append_mode,
+            merge_mode,
+            BulkPartEncodeOptions::default(),
+        )
+    }
+
+    fn new_with_encode_options(
+        id: MemtableId,
+        config: BulkMemtableConfig,
+        metadata: RegionMetadataRef,
+        write_buffer_manager: Option<WriteBufferManagerRef>,
+        compact_dispatcher: Option<Arc<CompactDispatcher>>,
+        append_mode: bool,
+        merge_mode: MergeMode,
+        encode_options: BulkPartEncodeOptions,
+    ) -> Self {
         let config = config.sanitize();
         let region_id = metadata.region_id;
         Self {
@@ -691,6 +717,7 @@ impl BulkMemtable {
             compact_dispatcher,
             append_mode,
             merge_mode,
+            encode_options,
         }
     }
 
@@ -756,6 +783,7 @@ impl BulkMemtable {
                 compactor: self.compactor.clone(),
                 append_mode: self.append_mode,
                 merge_mode: self.merge_mode,
+                encode_options: self.encode_options.clone(),
             };
 
             dispatcher.dispatch_compact(task);
@@ -1079,6 +1107,7 @@ impl MemtableCompactor {
         metadata: &RegionMetadataRef,
         dedup: bool,
         merge_mode: MergeMode,
+        encode_options: BulkPartEncodeOptions,
     ) -> Result<()> {
         let start = Instant::now();
 
@@ -1119,6 +1148,7 @@ impl MemtableCompactor {
                     merge_mode,
                     encode_row_threshold,
                     encode_bytes_threshold,
+                    encode_options.clone(),
                 )
             })
             .collect::<Result<Vec<Option<MergedPart>>>>()?;
@@ -1152,6 +1182,7 @@ impl MemtableCompactor {
         merge_mode: MergeMode,
         encode_row_threshold: usize,
         encode_bytes_threshold: usize,
+        encode_options: BulkPartEncodeOptions,
     ) -> Result<Option<MergedPart>> {
         if parts_to_merge.is_empty() {
             return Ok(None);
@@ -1230,7 +1261,11 @@ impl MemtableCompactor {
         if estimated_total_rows > encode_row_threshold
             || estimated_total_bytes > encode_bytes_threshold
         {
-            let encoder = BulkPartEncoder::new(metadata.clone(), DEFAULT_ROW_GROUP_SIZE)?;
+            let encoder = BulkPartEncoder::new_with_options(
+                metadata.clone(),
+                DEFAULT_ROW_GROUP_SIZE,
+                encode_options,
+            )?;
             let mut metrics = BulkPartEncodeMetrics::default();
             let encoded_part = encoder.encode_record_batch_iter(
                 boxed_iter,
@@ -1291,6 +1326,8 @@ struct MemCompactTask {
     append_mode: bool,
     /// Mode to handle duplicate rows while merging
     merge_mode: MergeMode,
+    /// Runtime-only options for pre-encoding bulk parts.
+    encode_options: BulkPartEncodeOptions,
 }
 
 impl MemCompactTask {
@@ -1308,6 +1345,7 @@ impl MemCompactTask {
                 &self.metadata,
                 !self.append_mode,
                 self.merge_mode,
+                self.encode_options.clone(),
             )?;
         }
 
@@ -1355,6 +1393,9 @@ pub struct BulkMemtableBuilder {
     compact_dispatcher: Option<Arc<CompactDispatcher>>,
     append_mode: bool,
     merge_mode: MergeMode,
+    experimental_enable_metric_engine_value_byte_stream_split: bool,
+    region_options: Option<Arc<crate::region::options::RegionOptions>>,
+    encode_options: BulkPartEncodeOptions,
 }
 
 impl BulkMemtableBuilder {
@@ -1370,7 +1411,21 @@ impl BulkMemtableBuilder {
             compact_dispatcher: None,
             append_mode,
             merge_mode,
+            experimental_enable_metric_engine_value_byte_stream_split: false,
+            region_options: None,
+            encode_options: BulkPartEncodeOptions::default(),
         }
+    }
+
+    /// Sets region context for runtime-only bulk encoding options.
+    pub fn with_region_options(
+        mut self,
+        enabled: bool,
+        region_options: crate::region::options::RegionOptions,
+    ) -> Self {
+        self.experimental_enable_metric_engine_value_byte_stream_split = enabled;
+        self.region_options = Some(Arc::new(region_options));
+        self
     }
 
     /// Sets the bulk memtable config.
@@ -1393,7 +1448,20 @@ impl BulkMemtableBuilder {
 
 impl MemtableBuilder for BulkMemtableBuilder {
     fn build(&self, id: MemtableId, metadata: &RegionMetadataRef) -> MemtableRef {
-        Arc::new(BulkMemtable::new(
+        let encode_options = if let Some(region_options) = &self.region_options {
+            BulkPartEncodeOptions {
+                metric_engine_value_byte_stream_split_column:
+                    crate::sst::parquet::metric_engine_value_byte_stream_split_column(
+                        self.experimental_enable_metric_engine_value_byte_stream_split,
+                        metadata,
+                        region_options,
+                    ),
+            }
+        } else {
+            self.encode_options.clone()
+        };
+
+        Arc::new(BulkMemtable::new_with_encode_options(
             id,
             self.config.clone(),
             metadata.clone(),
@@ -1401,6 +1469,7 @@ impl MemtableBuilder for BulkMemtableBuilder {
             self.compact_dispatcher.clone(),
             self.append_mode,
             self.merge_mode,
+            encode_options,
         ))
     }
 
@@ -1413,19 +1482,30 @@ impl MemtableBuilder for BulkMemtableBuilder {
 mod tests {
     use api::helper::encode_json_value;
     use api::v1::value::ValueData;
-    use api::v1::{Mutation, Row, Rows, SemanticType};
+    use api::v1::{Mutation, OpType, Row, Rows, SemanticType};
+    use common_recordbatch::DfRecordBatch as RecordBatch;
+    use datatypes::arrow::array::{
+        ArrayRef, BinaryDictionaryBuilder, Float32Array, StringDictionaryBuilder,
+        TimestampMillisecondArray, UInt8Array, UInt64Array,
+    };
+    use datatypes::arrow::datatypes::UInt32Type;
     use datatypes::data_type::ConcreteDataType;
     use datatypes::extension::json::{JsonExtensionType, JsonMetadata};
     use datatypes::json::value::JsonValue;
     use datatypes::schema::ColumnSchema;
     use datatypes::types::json_type::{JsonNativeType, JsonObjectType};
     use mito_codec::row_converter::build_primary_key_codec;
+    use parquet::basic::Encoding;
     use serde_json::json;
+    use store_api::codec::PrimaryKeyEncoding;
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder, RegionMetadataRef};
+    use store_api::metric_engine_consts::{DATA_SCHEMA_TSID_COLUMN_NAME, METRIC_DATA_REGION_GROUP};
+    use store_api::storage::RegionId;
 
     use super::*;
     use crate::memtable::bulk::part::BulkPartConverter;
     use crate::read::scan_region::PredicateGroup;
+    use crate::region::options::RegionOptions;
     use crate::sst::{FlatSchemaOptions, to_flat_sst_arrow_schema};
     use crate::test_util::memtable_util::{
         build_key_values_with_ts_seq_values, metadata_for_test, region_metadata_to_row_schema,
@@ -1460,6 +1540,207 @@ mod tests {
 
         converter.append_key_values(&key_values)?;
         converter.convert()
+    }
+
+    fn metric_value_metadata() -> RegionMetadataRef {
+        let value_column = common_query::prelude::greptime_value();
+        let mut builder = RegionMetadataBuilder::new(RegionId::with_group_and_seq(
+            1,
+            METRIC_DATA_REGION_GROUP,
+            0,
+        ));
+        builder
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "tag_0",
+                    ConcreteDataType::string_datatype(),
+                    true,
+                ),
+                semantic_type: SemanticType::Tag,
+                column_id: 1,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    DATA_SCHEMA_TSID_COLUMN_NAME,
+                    ConcreteDataType::uint64_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Field,
+                column_id: 2,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    value_column,
+                    ConcreteDataType::float32_datatype(),
+                    true,
+                ),
+                semantic_type: SemanticType::Field,
+                column_id: 3,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "field_i",
+                    ConcreteDataType::uint64_datatype(),
+                    true,
+                ),
+                semantic_type: SemanticType::Field,
+                column_id: 4,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "ts",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Timestamp,
+                column_id: 5,
+            });
+        builder.primary_key(vec![1]);
+        Arc::new(builder.build().unwrap())
+    }
+
+    fn metric_value_bulk_part(
+        metadata: &RegionMetadataRef,
+        rows: usize,
+        sequence: u64,
+    ) -> BulkPart {
+        let schema = to_flat_sst_arrow_schema(metadata, &FlatSchemaOptions::default());
+        let mut tag_builder = StringDictionaryBuilder::<UInt32Type>::new();
+        let mut pk_builder = BinaryDictionaryBuilder::<UInt32Type>::new();
+        for idx in 0..rows {
+            let tag = format!("tag_{idx}");
+            tag_builder.append_value(&tag);
+            pk_builder.append(tag.as_bytes()).unwrap();
+        }
+
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(tag_builder.finish()) as ArrayRef,
+                Arc::new(UInt64Array::from_iter_values(0..rows as u64)) as ArrayRef,
+                Arc::new(Float32Array::from(
+                    (0..rows).map(|idx| Some(idx as f32)).collect::<Vec<_>>(),
+                )) as ArrayRef,
+                Arc::new(UInt64Array::from_iter_values(0..rows as u64)) as ArrayRef,
+                Arc::new(TimestampMillisecondArray::from_iter_values(0..rows as i64)) as ArrayRef,
+                Arc::new(pk_builder.finish()) as ArrayRef,
+                Arc::new(UInt64Array::from_value(sequence, rows)) as ArrayRef,
+                Arc::new(UInt8Array::from_value(OpType::Put as u8, rows)) as ArrayRef,
+            ],
+        )
+        .unwrap();
+
+        BulkPart {
+            batch,
+            max_timestamp: rows as i64 - 1,
+            min_timestamp: 0,
+            sequence,
+            timestamp_index: 4,
+            raw_data: None,
+        }
+    }
+
+    fn encoded_column_has_encoding(
+        part: &EncodedBulkPart,
+        column_name: &str,
+        encoding: Encoding,
+    ) -> bool {
+        let parquet_meta = &part.metadata().parquet_metadata;
+        parquet_metadata_column_has_encoding(parquet_meta, column_name, encoding)
+    }
+
+    fn parquet_metadata_column_has_encoding(
+        parquet_meta: &parquet::file::metadata::ParquetMetaData,
+        column_name: &str,
+        encoding: Encoding,
+    ) -> bool {
+        (0..parquet_meta.num_row_groups()).any(|row_group_idx| {
+            let row_group = parquet_meta.row_group(row_group_idx);
+            (0..row_group.num_columns()).any(|column_idx| {
+                let column = row_group.column(column_idx);
+                column.column_descr().path().string() == column_name
+                    && column.encodings().any(|actual| actual == encoding)
+            })
+        })
+    }
+
+    #[test]
+    fn test_bulk_merge_preencode_metric_value_byte_stream_split() {
+        let value_column = common_query::prelude::greptime_value();
+        let metadata = metric_value_metadata();
+        let parts = vec![
+            PartToMerge::Bulk {
+                part: metric_value_bulk_part(&metadata, 2, 1),
+                file_id: FileId::random(),
+            },
+            PartToMerge::Bulk {
+                part: metric_value_bulk_part(&metadata, 2, 2),
+                file_id: FileId::random(),
+            },
+        ];
+
+        let merged = MemtableCompactor::merge_parts_group(
+            parts,
+            &metadata,
+            false,
+            MergeMode::LastRow,
+            1,
+            usize::MAX,
+            BulkPartEncodeOptions {
+                metric_engine_value_byte_stream_split_column: Some(value_column.to_string()),
+            },
+        )
+        .unwrap()
+        .unwrap();
+
+        let MergedPart::Encoded(part) = merged else {
+            panic!("expected encoded part");
+        };
+        assert!(encoded_column_has_encoding(
+            &part,
+            value_column,
+            Encoding::BYTE_STREAM_SPLIT
+        ));
+    }
+
+    #[test]
+    fn test_bulk_memtable_builder_metric_value_byte_stream_split() {
+        let value_column = common_query::prelude::greptime_value();
+        let metadata = metric_value_metadata();
+        let region_options = RegionOptions {
+            primary_key_encoding: Some(PrimaryKeyEncoding::Sparse),
+            ..Default::default()
+        };
+        let builder = BulkMemtableBuilder::new(None, true, MergeMode::LastRow)
+            .with_config(BulkMemtableConfig {
+                merge_threshold: 2,
+                encode_row_threshold: 1,
+                encode_bytes_threshold: usize::MAX,
+                max_merge_groups: 1,
+            })
+            .with_region_options(true, region_options);
+        let memtable = builder.build(42, &metadata);
+
+        memtable
+            .write_bulk(metric_value_bulk_part(&metadata, 2000, 1))
+            .unwrap();
+        memtable
+            .write_bulk(metric_value_bulk_part(&metadata, 2000, 2))
+            .unwrap();
+        memtable.compact(false).unwrap();
+
+        let ranges = memtable.ranges(None, RangesOptions::default()).unwrap();
+        let encoded = ranges
+            .ranges
+            .values()
+            .find_map(|range| range.encoded())
+            .expect("bulk builder path should produce a pre-encoded range");
+        let parquet_meta = encoded.sst_info.file_metadata.as_ref().unwrap();
+        assert!(parquet_metadata_column_has_encoding(
+            parquet_meta,
+            value_column,
+            Encoding::BYTE_STREAM_SPLIT
+        ));
     }
 
     #[test]
