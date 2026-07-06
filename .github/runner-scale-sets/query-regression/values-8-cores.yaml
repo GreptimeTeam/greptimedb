@@ -10,7 +10,6 @@ template:
     automountServiceAccountToken: false
     activeDeadlineSeconds: 11400
     securityContext:
-      runAsNonRoot: true
       seccompProfile:
         type: RuntimeDefault
     containers:

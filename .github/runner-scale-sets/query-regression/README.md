@@ -104,8 +104,9 @@ capacity:
 - use ephemeral runner pods and no shared work directory with trusted jobs;
 - disable service account token mounting in runner pods unless Kubernetes API
   access is intentionally required;
-- run pods as non-root with privilege escalation disabled, dropped Linux
-  capabilities, and the runtime-default seccomp profile;
+- use a runner image whose default user is non-root, disable privilege
+  escalation, drop Linux capabilities, and use the runtime-default seccomp
+  profile;
 - keep GitHub tokens least-privilege and rely on normal `pull_request` behavior
   for fork PRs, where repository secrets are withheld and `GITHUB_TOKEN` is
   read-only;
