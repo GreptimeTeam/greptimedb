@@ -251,7 +251,15 @@ pub fn router(metasrv: Arc<Metasrv>) -> Router {
         // For quick network failures detection.
         .http2_keepalive_interval(Some(metasrv.options().grpc.http2_keep_alive_interval))
         .http2_keepalive_timeout(Some(metasrv.options().grpc.http2_keep_alive_timeout));
-    let router = add_compressed_service!(router, HeartbeatServer::from_arc(metasrv.clone()));
+    let grpc_config = metasrv.options().grpc.as_config();
+    let heartbeat_server = HeartbeatServer::from_arc(metasrv.clone())
+        .accept_compressed(CompressionEncoding::Gzip)
+        .accept_compressed(CompressionEncoding::Zstd)
+        .send_compressed(CompressionEncoding::Gzip)
+        .send_compressed(CompressionEncoding::Zstd)
+        .max_decoding_message_size(grpc_config.max_recv_message_size)
+        .max_encoding_message_size(grpc_config.max_send_message_size);
+    let router = router.add_service(heartbeat_server);
     let router = add_compressed_service!(router, StoreServer::from_arc(metasrv.clone()));
     let router = add_compressed_service!(router, ClusterServer::from_arc(metasrv.clone()));
     let router = add_compressed_service!(router, ProcedureServiceServer::from_arc(metasrv.clone()));
