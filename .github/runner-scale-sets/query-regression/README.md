@@ -21,7 +21,8 @@ already installed:
 helm upgrade --install arc \
   oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set-controller \
   --namespace arc-systems \
-  --create-namespace
+  --create-namespace \
+  --version 0.14.2
 ```
 
 Create the GitHub App or PAT secret in the namespace that will host the runner
@@ -75,6 +76,7 @@ helm upgrade --install perf-regression-8-cores \
   oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set \
   --namespace arc-runners \
   --create-namespace \
+  --version 0.14.2 \
   -f .github/runner-scale-sets/query-regression/values-8-cores.yaml
 ```
 

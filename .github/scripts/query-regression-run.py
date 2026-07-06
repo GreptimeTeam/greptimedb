@@ -55,9 +55,9 @@ def profile_dir(cargo_profile: str) -> str:
 
 
 def configured_path(value: str | None) -> Path | None:
-    if not value:
+    if not value or not value.strip():
         return None
-    return Path(value)
+    return Path(value.strip())
 
 
 def resolve_case_path(candidate_src: Path, case: str) -> Path:
