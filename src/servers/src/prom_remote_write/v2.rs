@@ -265,7 +265,7 @@ fn write_native_histogram_value(
 
 fn native_histogram_column_schema() -> ColumnSchema {
     let (datatype, datatype_extension) =
-        ColumnDataTypeWrapper::try_from(native_histogram_value_type())
+        ColumnDataTypeWrapper::try_from(native_histogram_value_type().clone())
             .expect("native histogram type is convertible to protobuf")
             .into_parts();
 

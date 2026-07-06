@@ -102,10 +102,10 @@ pub fn native_histogram_field_type(name: &str) -> Option<ConcreteDataType> {
     }
 }
 
-pub fn native_histogram_value_type() -> ConcreteDataType {
-    (*NATIVE_HISTOGRAM_VALUE_TYPE).clone()
+pub fn native_histogram_value_type() -> &'static ConcreteDataType {
+    &NATIVE_HISTOGRAM_VALUE_TYPE
 }
 
 pub fn is_native_histogram_value_schema(name: &str, data_type: &ConcreteDataType) -> bool {
-    name == NATIVE_HISTOGRAM_FIELD && data_type == &*NATIVE_HISTOGRAM_VALUE_TYPE
+    name == NATIVE_HISTOGRAM_FIELD && data_type == native_histogram_value_type()
 }

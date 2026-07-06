@@ -1093,7 +1093,7 @@ fn request_is_native_histogram(request_schema: &[ColumnSchema]) -> bool {
         && api::helper::is_column_type_value_eq(
             col.datatype,
             col.datatype_extension.clone(),
-            &native_histogram_value_type(),
+            native_histogram_value_type(),
         )
 }
 

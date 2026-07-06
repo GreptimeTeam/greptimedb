@@ -878,7 +878,7 @@ mod test {
                 semantic_type: SemanticType::Field,
                 column_schema: ColumnSchema::new(
                     NATIVE_HISTOGRAM_FIELD,
-                    native_histogram_value_type(),
+                    native_histogram_value_type().clone(),
                     true,
                 ),
             },
