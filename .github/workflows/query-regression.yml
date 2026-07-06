@@ -39,9 +39,6 @@ on:
         default: perf-regression-8-cores
         options:
           - perf-regression-8-cores
-          - perf-regression-16-cores
-          - perf-regression-32-cores
-          - perf-regression-64-cores
   pull_request:
     types: [labeled, ready_for_review, reopened]
 
