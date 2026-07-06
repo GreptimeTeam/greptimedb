@@ -55,8 +55,10 @@ fn matches_stale_snapshot_fence_text(err: &Error) -> bool {
     // Walk the error source chain.
     let mut source = err.source();
     while let Some(s) = source {
+        let debug_str = format!("{:?}", s);
+        let display_str = s.to_string();
         for marker in &markers {
-            if s.to_string().contains(marker) || format!("{:?}", s).contains(marker) {
+            if debug_str.contains(marker) || display_str.contains(marker) {
                 return true;
             }
         }
