@@ -36,6 +36,27 @@ kubectl -n arc-runners create secret generic greptimedb-arc-github-app \
 
 The values files in this directory reference that secret by name.
 
+## Build the runner image
+
+Use a derived ARC runner image instead of the minimal upstream runner image. The
+image keeps the official `/home/runner/run.sh` entrypoint layout and adds the
+tools this workflow expects to be present on a normal CI host, including `wget`,
+`uv`, C/C++ build tools, OpenSSL headers, and protobuf tooling.
+
+```bash
+docker build \
+  -f .github/runner-scale-sets/query-regression/Dockerfile \
+  -t ghcr.io/greptimeteam/greptimedb-query-regression-runner:latest \
+  .github/runner-scale-sets/query-regression
+
+docker push ghcr.io/greptimeteam/greptimedb-query-regression-runner:latest
+```
+
+The workflow still runs setup actions for pinned toolchain behavior, including
+`rui314/setup-mold` and `astral-sh/setup-uv`. Preinstalling `uv` in the image
+also lets `always()` cleanup and metadata steps run even when an earlier setup
+step fails.
+
 ## Install the query-regression scale set
 
 Install the runner scale set. The Helm release name and `runnerScaleSetName`
