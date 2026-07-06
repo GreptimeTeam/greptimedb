@@ -202,6 +202,7 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test;
 | physical_plan after FilterPushdown(Post)_| SAME TEXT AS ABOVE_|
 | physical_plan after WindowedSortRule_| SAME TEXT AS ABOVE_|
 | physical_plan after MatchesConstantTerm_| SAME TEXT AS ABOVE_|
+| physical_plan after EnsureGlobalLimitForFetch_| SAME TEXT AS ABOVE_|
 | physical_plan after RemoveDuplicateRule_| SAME TEXT AS ABOVE_|
 | physical_plan after SanityCheckPlan_| SAME TEXT AS ABOVE_|
 | physical_plan_| CooperativeExec_|
@@ -353,6 +354,7 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test AS series;
 | physical_plan after FilterPushdown(Post)_| SAME TEXT AS ABOVE_|
 | physical_plan after WindowedSortRule_| SAME TEXT AS ABOVE_|
 | physical_plan after MatchesConstantTerm_| SAME TEXT AS ABOVE_|
+| physical_plan after EnsureGlobalLimitForFetch_| SAME TEXT AS ABOVE_|
 | physical_plan after RemoveDuplicateRule_| SAME TEXT AS ABOVE_|
 | physical_plan after SanityCheckPlan_| SAME TEXT AS ABOVE_|
 | physical_plan_| CooperativeExec_|
@@ -534,6 +536,7 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test_nano;
 | physical_plan after FilterPushdown(Post)_| SAME TEXT AS ABOVE_|
 | physical_plan after WindowedSortRule_| SAME TEXT AS ABOVE_|
 | physical_plan after MatchesConstantTerm_| SAME TEXT AS ABOVE_|
+| physical_plan after EnsureGlobalLimitForFetch_| SAME TEXT AS ABOVE_|
 | physical_plan after RemoveDuplicateRule_| SAME TEXT AS ABOVE_|
 | physical_plan after SanityCheckPlan_| SAME TEXT AS ABOVE_|
 | physical_plan_| CooperativeExec_|
