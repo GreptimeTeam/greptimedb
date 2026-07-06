@@ -35,10 +35,9 @@ use snafu::{OptionExt, ResultExt};
 use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 use store_api::storage::{ColumnId, JsonReadHint};
 
-use super::json_schema::Json2OutputPlan;
 use crate::cache::CacheStrategy;
 use crate::error::{DataTypeMismatchSnafu, InvalidRequestSnafu, RecordBatchSnafu, Result};
-use crate::read::json_schema::planned_json2_output_type;
+use crate::read::json_schema::{Json2OutputPlan, planned_json2_output_type};
 use crate::read::projection::{read_column_ids_from_projection, repeated_vector_with_cache};
 use crate::read::read_columns::ReadColumns;
 use crate::sst::parquet::flat_format::sst_column_id_indices;

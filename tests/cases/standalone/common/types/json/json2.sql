@@ -96,6 +96,8 @@ values (2, '{"a": {"b": 20}, "f": [1, 2]}'),
 
 select json_get(j, '') from json2_root_schema_merge order by ts;
 
+select json_get(j, ''), json_get(j, 'a.b') from json2_root_schema_merge order by ts;
+
 drop table json2_root_schema_merge;
 
 create table json2_default_null_ok (

@@ -284,6 +284,17 @@ select json_get(j, '') from json2_root_schema_merge order by ts;
 | {"z":"mem"}                                  |
 +----------------------------------------------+
 
+select json_get(j, ''), json_get(j, 'a.b') from json2_root_schema_merge order by ts;
+
++----------------------------------------------+-------------------------------------------------+
+| json_get(json2_root_schema_merge.j,Utf8("")) | json_get(json2_root_schema_merge.j,Utf8("a.b")) |
++----------------------------------------------+-------------------------------------------------+
+| {"a":{"b":10},"e":{"x":1}}                   | 10                                              |
+| {"a":{"b":20},"f":[1,2]}                     | 20                                              |
+| {"a":{"x":false},"c":"sst2"}                 |                                                 |
+| {"z":"mem"}                                  |                                                 |
++----------------------------------------------+-------------------------------------------------+
+
 drop table json2_root_schema_merge;
 
 Affected Rows: 0
