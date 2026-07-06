@@ -45,7 +45,7 @@ use query::QueryEngineFactory;
 use query::region_query::RegionQueryHandlerFactoryRef;
 use snafu::{OptionExt, ResultExt};
 
-use crate::error::{self, ExternalSnafu, Result};
+use crate::error::{self, DataFusionSnafu, ExternalSnafu, Result};
 use crate::events::EventHandlerImpl;
 use crate::frontend::FrontendOptions;
 use crate::heartbeat::frontend_peer_addr;
@@ -242,7 +242,7 @@ impl FrontendBuilder {
 
         let mut query_options = self.options.query.clone();
         query_options.enable_per_region_metrics = self.options.logging.enable_per_region_metrics;
-        let query_engine = QueryEngineFactory::new_with_plugins(
+        let query_engine = QueryEngineFactory::try_new_with_plugins(
             self.catalog_manager.clone(),
             Some(partition_manager.clone()),
             Some(region_query_handler.clone()),
@@ -253,6 +253,7 @@ impl FrontendBuilder {
             plugins.clone(),
             query_options,
         )
+        .context(DataFusionSnafu)?
         .query_engine();
 
         let frontend_peer_addr = frontend_peer_addr(&self.options);

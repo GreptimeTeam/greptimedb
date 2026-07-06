@@ -57,8 +57,8 @@ use crate::adapter::flownode_impl::{FlowDualEngine, FlowDualEngineRef};
 use crate::adapter::{FlowStreamingEngineRef, create_worker};
 use crate::batching_mode::engine::BatchingEngine;
 use crate::error::{
-    CacheRequiredSnafu, ExternalSnafu, ListFlowsSnafu, ParseAddrSnafu, ShutdownServerSnafu,
-    StartServerSnafu, UnexpectedSnafu, to_status_with_last_err,
+    CacheRequiredSnafu, DatafusionSnafu, ExternalSnafu, ListFlowsSnafu, ParseAddrSnafu,
+    ShutdownServerSnafu, StartServerSnafu, UnexpectedSnafu, to_status_with_last_err,
 };
 use crate::heartbeat::HeartbeatTask;
 use crate::metrics::{METRIC_FLOW_PROCESSING_TIME, METRIC_FLOW_ROWS};
@@ -384,7 +384,7 @@ impl FlownodeBuilder {
 
     pub async fn build(mut self) -> Result<FlownodeInstance, Error> {
         // TODO(discord9): does this query engine need those?
-        let query_engine_factory = QueryEngineFactory::new_with_plugins(
+        let query_engine_factory = QueryEngineFactory::try_new_with_plugins(
             // query engine in flownode is only used for translate plan with resolved table source.
             self.catalog_manager.clone(),
             None,
@@ -395,7 +395,10 @@ impl FlownodeBuilder {
             false,
             Default::default(),
             self.opts.query.clone(),
-        );
+        )
+        .context(DatafusionSnafu {
+            context: "Failed to build query engine",
+        })?;
         let manager = Arc::new(
             self.build_manager(query_engine_factory.query_engine())
                 .await?,
