@@ -16,7 +16,7 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap};
 
-use arrow::array::{Array, AsArray};
+use arrow::array::{Array, AsArray, StructArray};
 use arrow::datatypes::{Float64Type, TimestampMillisecondType};
 use arrow_schema::DataType;
 use axum::Json;
@@ -24,6 +24,9 @@ use axum::http::HeaderValue;
 use axum::response::{IntoResponse, Response};
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
+use common_query::native_histogram::{
+    NativeHistogram, is_native_histogram_value_type, read_histogram,
+};
 use common_query::prometheus::is_prometheus_stale_nan;
 use common_query::{Output, OutputData};
 use common_recordbatch::RecordBatches;
@@ -36,12 +39,36 @@ use serde_json::Value;
 use snafu::{OptionExt, ResultExt};
 
 use crate::error::{
-    ArrowSnafu, CollectRecordbatchSnafu, Result, UnexpectedResultSnafu, status_code_to_http_status,
+    ArrowSnafu, CollectRecordbatchSnafu, DataFusionSnafu, Result, UnexpectedResultSnafu,
+    status_code_to_http_status,
 };
 use crate::http::header::{GREPTIME_DB_HEADER_METRICS, collect_plan_metrics};
 use crate::http::prometheus::{
-    PromData, PromQueryResult, PromSeriesMatrix, PromSeriesVector, PrometheusResponse,
+    PromData, PromNativeHistogram, PromQueryResult, PromSeriesMatrix, PromSeriesVector,
+    PrometheusResponse,
 };
+
+#[derive(Default)]
+struct PromSeriesSamples {
+    values: Vec<(f64, String)>,
+    histograms: Vec<(f64, PromNativeHistogram)>,
+}
+
+fn prometheus_native_histogram(histogram: &NativeHistogram) -> Option<PromNativeHistogram> {
+    Some(PromNativeHistogram {
+        count: histogram.count.to_string(),
+        sum: histogram.sum.to_string(),
+        buckets: histogram.to_prometheus_buckets()?,
+    })
+}
+
+fn prometheus_native_histogram_or_error(
+    histogram: &NativeHistogram,
+) -> Result<PromNativeHistogram> {
+    prometheus_native_histogram(histogram).context(UnexpectedResultSnafu {
+        reason: "native histogram cannot be converted to Prometheus buckets".to_string(),
+    })
+}
 
 #[derive(Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct PrometheusJsonResponse {
@@ -56,6 +83,8 @@ pub struct PrometheusJsonResponse {
     pub error_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub warnings: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub infos: Option<Vec<String>>,
 
     #[serde(skip)]
     pub status_code: Option<StatusCode>,
@@ -100,6 +129,7 @@ impl PrometheusJsonResponse {
             error: Some(reason.into()),
             error_type: Some(error_type.to_string()),
             warnings: None,
+            infos: None,
             resp_metrics: Default::default(),
             status_code: Some(error_type),
         }
@@ -112,6 +142,7 @@ impl PrometheusJsonResponse {
             error: None,
             error_type: None,
             warnings: None,
+            infos: None,
             resp_metrics: Default::default(),
             status_code: None,
         }
@@ -125,6 +156,7 @@ impl PrometheusJsonResponse {
     ) -> Self {
         let response: Result<Self> = try {
             let result = result?;
+            let mut meta = result.meta;
             let mut resp =
                 match result.data {
                     OutputData::RecordBatches(batches) => Self::success(
@@ -145,8 +177,16 @@ impl PrometheusJsonResponse {
                         "expected data result, but got affected rows",
                     ),
                 };
+            meta.collect_promql_annotations();
 
-            if let Some(physical_plan) = result.meta.plan {
+            if !meta.warnings.is_empty() {
+                resp.warnings = Some(meta.warnings);
+            }
+            if !meta.infos.is_empty() {
+                resp.infos = Some(meta.infos);
+            }
+
+            if let Some(physical_plan) = meta.plan {
                 let mut result_map = HashMap::new();
                 let mut tmp = vec![&mut result_map];
                 collect_plan_metrics(&physical_plan, &mut tmp);
@@ -200,6 +240,7 @@ impl PrometheusJsonResponse {
         let mut timestamp_column_index = None;
         let mut tag_column_indices = Vec::new();
         let mut first_field_column_index = None;
+        let mut native_histogram_column_index = None;
 
         let mut num_label_columns = 0;
 
@@ -225,6 +266,11 @@ impl PrometheusJsonResponse {
                 {
                     first_field_column_index = Some(i);
                 }
+                _ if native_histogram_column_index.is_none()
+                    && is_native_histogram_value_type(&column.data_type) =>
+                {
+                    native_histogram_column_index = Some(i);
+                }
                 ConcreteDataType::String(_) => {
                     tag_column_indices.push(i);
                     num_label_columns += 1;
@@ -236,13 +282,16 @@ impl PrometheusJsonResponse {
         let timestamp_column_index = timestamp_column_index.context(UnexpectedResultSnafu {
             reason: "no timestamp column found".to_string(),
         })?;
-        let first_field_column_index = first_field_column_index.context(UnexpectedResultSnafu {
-            reason: "no value column found".to_string(),
-        })?;
+        if first_field_column_index.is_none() && native_histogram_column_index.is_none() {
+            return UnexpectedResultSnafu {
+                reason: "no value column found".to_string(),
+            }
+            .fail();
+        }
 
         // Preserves the order of output tags.
         // Tag order matters, e.g., after sorc and sort_desc, the output order must be kept.
-        let mut buffer = IndexMap::<Vec<(&str, &str)>, Vec<(f64, String)>>::new();
+        let mut buffer = IndexMap::<Vec<(&str, &str)>, PromSeriesSamples>::new();
 
         let schema = batches.schema();
         for batch in batches.iter() {
@@ -259,42 +308,74 @@ impl PrometheusJsonResponse {
                 .column(timestamp_column_index)
                 .as_primitive::<TimestampMillisecondType>();
 
-            let array =
-                arrow::compute::cast(batch.column(first_field_column_index), &DataType::Float64)
-                    .context(ArrowSnafu)?;
-            let field_column = array.as_primitive::<Float64Type>();
+            let field_array = first_field_column_index
+                .map(|index| arrow::compute::cast(batch.column(index), &DataType::Float64))
+                .transpose()
+                .context(ArrowSnafu)?;
+            let field_column = field_array
+                .as_ref()
+                .map(|array| array.as_primitive::<Float64Type>());
+            let native_histogram_column = native_histogram_column_index
+                .map(|index| {
+                    batch
+                        .column(index)
+                        .as_any()
+                        .downcast_ref::<StructArray>()
+                        .with_context(|| UnexpectedResultSnafu {
+                            reason: "native histogram column is not a struct array".to_string(),
+                        })
+                })
+                .transpose()?;
 
             // assemble rows
             for row_index in 0..batch.num_rows() {
-                // retrieve value
-                if field_column.is_valid(row_index) {
-                    let v = field_column.value(row_index);
-                    // Ignore Prometheus stale markers.
-                    if is_prometheus_stale_nan(v) {
-                        continue;
+                let value = field_column.and_then(|field_column| {
+                    if !field_column.is_valid(row_index) {
+                        return None;
                     }
+                    let value = field_column.value(row_index);
+                    (!is_prometheus_stale_nan(value))
+                        .then_some((timestamp_column.value(row_index), value))
+                });
+                let histogram = native_histogram_column
+                    .and_then(|column| {
+                        read_histogram(column, row_index)
+                            .context(DataFusionSnafu)
+                            .transpose()
+                    })
+                    .transpose()?
+                    .map(|histogram| {
+                        prometheus_native_histogram_or_error(&histogram)
+                            .map(|histogram| (timestamp_column.value(row_index), histogram))
+                    })
+                    .transpose()?;
 
-                    // retrieve tags
-                    let mut tags = Vec::with_capacity(num_label_columns + 1);
-                    if let Some(metric_name) = &metric_name {
-                        tags.push((METRIC_NAME, metric_name.as_str()));
+                if value.is_none() && histogram.is_none() {
+                    continue;
+                }
+
+                // retrieve tags
+                let mut tags = Vec::with_capacity(num_label_columns + 1);
+                if let Some(metric_name) = &metric_name {
+                    tags.push((METRIC_NAME, metric_name.as_str()));
+                }
+                for (tag_column, tag_name) in tag_columns.iter().zip(tag_names.iter()) {
+                    // TODO(ruihang): add test for NULL tag
+                    if tag_column.is_valid(row_index) {
+                        tags.push((tag_name, tag_column.value(row_index)));
                     }
-                    for (tag_column, tag_name) in tag_columns.iter().zip(tag_names.iter()) {
-                        // TODO(ruihang): add test for NULL tag
-                        if tag_column.is_valid(row_index) {
-                            tags.push((tag_name, tag_column.value(row_index)));
-                        }
-                    }
+                }
 
-                    // retrieve timestamp
-                    let timestamp_millis = timestamp_column.value(row_index);
-                    let timestamp = timestamp_millis as f64 / 1000.0;
-
-                    buffer
-                        .entry(tags)
-                        .or_default()
-                        .push((timestamp, Into::<f64>::into(v).to_string()));
-                };
+                let entry = buffer.entry(tags).or_default();
+                if let Some((timestamp_millis, histogram)) = histogram {
+                    entry
+                        .histograms
+                        .push((timestamp_millis as f64 / 1000.0, histogram));
+                } else if let Some((timestamp_millis, value)) = value {
+                    entry
+                        .values
+                        .push((timestamp_millis as f64 / 1000.0, value.to_string()));
+                }
             }
         }
 
@@ -307,28 +388,46 @@ impl PrometheusJsonResponse {
         };
 
         // accumulate data into result
-        buffer.into_iter().for_each(|(tags, mut values)| {
+        buffer.into_iter().for_each(|(tags, mut samples)| {
             let metric = tags
                 .into_iter()
                 .map(|(k, v)| (k.to_string(), v.to_string()))
                 .collect::<BTreeMap<_, _>>();
             match result {
                 PromQueryResult::Vector(ref mut v) => {
+                    let histogram = samples.histograms.pop();
+                    let value = if histogram.is_none() {
+                        samples.values.pop()
+                    } else {
+                        None
+                    };
                     v.push(PromSeriesVector {
                         metric,
-                        value: values.pop(),
+                        value,
+                        histogram,
                     });
                 }
                 PromQueryResult::Matrix(ref mut v) => {
                     // sort values by timestamp
-                    if !values.is_sorted_by(|a, b| a.0 <= b.0) {
-                        values.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(Ordering::Equal));
+                    if !samples.values.is_sorted_by(|a, b| a.0 <= b.0) {
+                        samples
+                            .values
+                            .sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(Ordering::Equal));
+                    }
+                    if !samples.histograms.is_sorted_by(|a, b| a.0 <= b.0) {
+                        samples
+                            .histograms
+                            .sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(Ordering::Equal));
                     }
 
-                    v.push(PromSeriesMatrix { metric, values });
+                    v.push(PromSeriesMatrix {
+                        metric,
+                        values: samples.values,
+                        histograms: samples.histograms,
+                    });
                 }
                 PromQueryResult::Scalar(ref mut v) => {
-                    *v = values.pop();
+                    *v = samples.values.pop();
                 }
                 PromQueryResult::String(ref mut _v) => {
                     // TODO(ruihang): Not supported yet
@@ -356,10 +455,17 @@ impl PrometheusJsonResponse {
 mod tests {
     use std::sync::Arc;
 
+    use common_query::native_histogram::{
+        NATIVE_HISTOGRAM_FIELD, NativeHistogram, Span, build_histogram_array,
+        native_histogram_value_type,
+    };
+    use common_query::{Output, OutputData, OutputMeta};
     use common_recordbatch::{RecordBatch, RecordBatches};
     use datatypes::data_type::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, Schema};
-    use datatypes::vectors::{Float64Vector, TimestampMillisecondVector};
+    use datatypes::vectors::{
+        Float64Vector, StringVector, StructVector, TimestampMillisecondVector, VectorRef,
+    };
 
     use super::*;
 
@@ -404,6 +510,251 @@ mod tests {
         assert_eq!(
             series[0].values,
             vec![(1.0, "1".to_string()), (2.0, "NaN".to_string())]
+        );
+    }
+
+    fn sample_histogram() -> NativeHistogram {
+        NativeHistogram {
+            schema: 0,
+            zero_threshold: 0.001,
+            sum: 3.0,
+            reset_hint: 0,
+            start_timestamp: Some(0),
+            custom_values: vec![],
+            positive_spans: vec![Span {
+                offset: 0,
+                length: 1,
+            }],
+            negative_spans: vec![],
+            count: 2.0,
+            zero_count: 1.0,
+            positive_buckets: vec![1.0],
+            negative_buckets: vec![],
+        }
+    }
+
+    fn histogram_vector(values: &[Option<NativeHistogram>]) -> VectorRef {
+        let histogram_array = build_histogram_array(values);
+        let histogram_array = histogram_array
+            .as_any()
+            .downcast_ref::<StructArray>()
+            .unwrap()
+            .clone();
+        let ConcreteDataType::Struct(histogram_type) = native_histogram_value_type().clone() else {
+            unreachable!("native histogram type must be a struct")
+        };
+        Arc::new(StructVector::try_new(histogram_type, histogram_array).unwrap())
+    }
+
+    #[tokio::test]
+    async fn from_query_result_preserves_warnings_and_infos() {
+        let recordbatches = RecordBatches::empty();
+        let mut meta = OutputMeta::default();
+        meta.warnings.push("warn".to_string());
+        meta.infos.push("info".to_string());
+        let response = PrometheusJsonResponse::from_query_result(
+            Ok(Output::new(OutputData::RecordBatches(recordbatches), meta)),
+            None,
+            ValueType::Vector,
+        )
+        .await;
+
+        assert_eq!(response.warnings, Some(vec!["warn".to_string()]));
+        assert_eq!(response.infos, Some(vec!["info".to_string()]));
+    }
+
+    #[test]
+    fn record_batches_to_data_serializes_aliased_native_histogram_vector() {
+        let schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new(
+                "greptime_timestamp",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
+            ColumnSchema::new("job", ConcreteDataType::string_datatype(), false),
+            ColumnSchema::new(
+                "prom_native_histogram_rate(greptime_native_histogram)",
+                native_histogram_value_type().clone(),
+                true,
+            ),
+        ]));
+        let columns: Vec<VectorRef> = vec![
+            Arc::new(TimestampMillisecondVector::from_values([1000])),
+            Arc::new(StringVector::from(vec![Some("api")])),
+            histogram_vector(&[Some(sample_histogram())]),
+        ];
+        let recordbatch = RecordBatch::new(schema.clone(), columns).unwrap();
+        let recordbatches = RecordBatches::try_new(schema, vec![recordbatch]).unwrap();
+
+        let response = PrometheusJsonResponse::record_batches_to_data(
+            recordbatches,
+            Some("http_requests".to_string()),
+            ValueType::Vector,
+        )
+        .unwrap();
+
+        let PrometheusResponse::PromData(PromData {
+            result: PromQueryResult::Vector(series),
+            ..
+        }) = response
+        else {
+            panic!("expected vector response");
+        };
+        assert_eq!(series.len(), 1);
+        assert_eq!(series[0].metric["__name__"], "http_requests");
+        assert_eq!(series[0].metric["job"], "api");
+        assert!(series[0].value.is_none());
+
+        let (timestamp, histogram) = series[0].histogram.as_ref().unwrap();
+        assert_eq!(*timestamp, 1.0);
+        assert_eq!(histogram.count, "2");
+        assert_eq!(histogram.sum, "3");
+        assert_eq!(
+            histogram.buckets,
+            vec![
+                (
+                    3,
+                    "-0.001".to_string(),
+                    "0.001".to_string(),
+                    "1".to_string()
+                ),
+                (0, "0.5".to_string(), "1".to_string(), "1".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn record_batches_to_data_prefers_histogram_for_instant_vector() {
+        let schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new(
+                "greptime_timestamp",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
+            ColumnSchema::new("job", ConcreteDataType::string_datatype(), false),
+            ColumnSchema::new("value", ConcreteDataType::float64_datatype(), true),
+            ColumnSchema::new(
+                NATIVE_HISTOGRAM_FIELD,
+                native_histogram_value_type().clone(),
+                true,
+            ),
+        ]));
+        let columns: Vec<VectorRef> = vec![
+            Arc::new(TimestampMillisecondVector::from_values([1000])),
+            Arc::new(StringVector::from(vec![Some("api")])),
+            Arc::new(Float64Vector::from_slice([42.0])),
+            histogram_vector(&[Some(sample_histogram())]),
+        ];
+        let recordbatch = RecordBatch::new(schema.clone(), columns).unwrap();
+        let recordbatches = RecordBatches::try_new(schema, vec![recordbatch]).unwrap();
+
+        let response = PrometheusJsonResponse::record_batches_to_data(
+            recordbatches,
+            Some("http_requests".to_string()),
+            ValueType::Vector,
+        )
+        .unwrap();
+
+        let PrometheusResponse::PromData(PromData {
+            result: PromQueryResult::Vector(series),
+            ..
+        }) = response
+        else {
+            panic!("expected vector response");
+        };
+
+        assert_eq!(series.len(), 1);
+        assert!(series[0].value.is_none());
+        assert!(series[0].histogram.is_some());
+    }
+
+    #[test]
+    fn record_batches_to_data_prefers_histogram_for_matrix_row() {
+        let schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new(
+                "greptime_timestamp",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
+            ColumnSchema::new("job", ConcreteDataType::string_datatype(), false),
+            ColumnSchema::new("value", ConcreteDataType::float64_datatype(), true),
+            ColumnSchema::new(
+                NATIVE_HISTOGRAM_FIELD,
+                native_histogram_value_type().clone(),
+                true,
+            ),
+        ]));
+        let columns: Vec<VectorRef> = vec![
+            Arc::new(TimestampMillisecondVector::from_values([1000, 2000])),
+            Arc::new(StringVector::from(vec![Some("api"), Some("api")])),
+            Arc::new(Float64Vector::from_slice([42.0, 7.0])),
+            histogram_vector(&[Some(sample_histogram()), None]),
+        ];
+        let recordbatch = RecordBatch::new(schema.clone(), columns).unwrap();
+        let recordbatches = RecordBatches::try_new(schema, vec![recordbatch]).unwrap();
+
+        let response = PrometheusJsonResponse::record_batches_to_data(
+            recordbatches,
+            Some("http_requests".to_string()),
+            ValueType::Matrix,
+        )
+        .unwrap();
+
+        let PrometheusResponse::PromData(PromData {
+            result: PromQueryResult::Matrix(series),
+            ..
+        }) = response
+        else {
+            panic!("expected matrix response");
+        };
+
+        assert_eq!(series.len(), 1);
+        assert_eq!(series[0].values, vec![(2.0, "7".to_string())]);
+        assert_eq!(series[0].histograms.len(), 1);
+        assert_eq!(series[0].histograms[0].0, 1.0);
+    }
+
+    #[test]
+    fn record_batches_to_data_errors_on_unrenderable_native_histogram() {
+        let schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new(
+                "greptime_timestamp",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
+            ColumnSchema::new("job", ConcreteDataType::string_datatype(), false),
+            ColumnSchema::new(
+                NATIVE_HISTOGRAM_FIELD,
+                native_histogram_value_type().clone(),
+                true,
+            ),
+        ]));
+        let mut histogram = sample_histogram();
+        histogram.schema = 100;
+        let columns: Vec<VectorRef> = vec![
+            Arc::new(TimestampMillisecondVector::from_values([1000])),
+            Arc::new(StringVector::from(vec![Some("api")])),
+            histogram_vector(&[Some(histogram)]),
+        ];
+        let recordbatch = RecordBatch::new(schema.clone(), columns).unwrap();
+        let recordbatches = RecordBatches::try_new(schema, vec![recordbatch]).unwrap();
+
+        let error = PrometheusJsonResponse::record_batches_to_data(
+            recordbatches,
+            Some("http_requests".to_string()),
+            ValueType::Vector,
+        )
+        .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("native histogram cannot be converted to Prometheus buckets"),
+            "{error}"
         );
     }
 }

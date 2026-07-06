@@ -22,7 +22,9 @@ use catalog::table_source::DfTableSourceProvider;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_function::function::FunctionContext;
+use common_query::native_histogram::native_histogram_value_type;
 use common_query::prelude::greptime_value;
+use common_query::promql_annotations::PromqlAnnotationCollector;
 use datafusion::common::DFSchemaRef;
 use datafusion::datasource::DefaultTableSource;
 use datafusion::functions_aggregate::average::avg_udaf;
@@ -52,7 +54,7 @@ use datafusion_expr::{
 };
 use datafusion_functions::core::coalesce;
 use datatypes::arrow::datatypes::{DataType as ArrowDataType, TimeUnit as ArrowTimeUnit};
-use datatypes::data_type::ConcreteDataType;
+use datatypes::data_type::{ConcreteDataType, DataType as GreptimeDataType};
 use itertools::Itertools;
 use once_cell::sync::Lazy;
 use promql::extension_plan::{
@@ -61,9 +63,18 @@ use promql::extension_plan::{
 };
 use promql::functions::{
     AbsentOverTime, AvgOverTime, Changes, CountOverTime, Delta, Deriv, DoubleExponentialSmoothing,
-    IDelta, Increase, LastOverTime, MaxOverTime, MinOverTime, PredictLinear, PresentOverTime,
-    QuantileOverTime, Rate, Resets, Round, StddevOverTime, StdvarOverTime, SumOverTime,
-    quantile_udaf,
+    IDelta, Increase, LastOverTime, MaxOverTime, MinOverTime, NativeHistogramAbsentOverTime,
+    NativeHistogramAdd, NativeHistogramAggAvg, NativeHistogramAggSum, NativeHistogramAvg,
+    NativeHistogramAvgOverTime, NativeHistogramChanges, NativeHistogramCount,
+    NativeHistogramCountOverTime, NativeHistogramDelta, NativeHistogramDivScalar,
+    NativeHistogramDrop, NativeHistogramEq, NativeHistogramFraction, NativeHistogramIDelta,
+    NativeHistogramIRate, NativeHistogramIncrease, NativeHistogramLastOverTime,
+    NativeHistogramMulScalar, NativeHistogramNeg, NativeHistogramNotEq,
+    NativeHistogramPresentOverTime, NativeHistogramQuantile, NativeHistogramRate,
+    NativeHistogramResets, NativeHistogramScalarMul, NativeHistogramStddev, NativeHistogramStdvar,
+    NativeHistogramSub, NativeHistogramSum, NativeHistogramSumOverTime, NativeHistogramToString,
+    PredictLinear, PresentOverTime, QuantileOverTime, Rate, Resets, Round, StddevOverTime,
+    StdvarOverTime, SumOverTime, quantile_udaf,
 };
 use promql_parser::label::{METRIC_NAME, MatchOp, Matcher, Matchers};
 use promql_parser::parser::token::TokenType;
@@ -377,6 +388,7 @@ impl PromPlannerContext {
 pub struct PromPlanner {
     table_provider: DfTableSourceProvider,
     ctx: PromPlannerContext,
+    promql_annotations: Option<PromqlAnnotationCollector>,
 }
 
 impl PromPlanner {
@@ -385,9 +397,19 @@ impl PromPlanner {
         stmt: &EvalStmt,
         query_engine_state: &QueryEngineState,
     ) -> Result<LogicalPlan> {
+        Self::stmt_to_plan_with_annotations(table_provider, stmt, query_engine_state, None).await
+    }
+
+    pub async fn stmt_to_plan_with_annotations(
+        table_provider: DfTableSourceProvider,
+        stmt: &EvalStmt,
+        query_engine_state: &QueryEngineState,
+        promql_annotations: Option<PromqlAnnotationCollector>,
+    ) -> Result<LogicalPlan> {
         let mut planner = Self {
             table_provider,
             ctx: PromPlannerContext::from_eval_stmt(stmt),
+            promql_annotations,
         };
 
         let plan = planner
@@ -702,6 +724,22 @@ impl PromPlanner {
 
         let group_exprs = self.agg_modifier_to_col(input.schema(), modifier, false)?;
 
+        if self.all_field_columns_are_native_histograms(input.schema()) {
+            let promql_annotations = self.promql_annotations.clone();
+            return self.projection_for_each_field_column(input, |col| {
+                Ok(DfExpr::ScalarFunction(ScalarFunction {
+                    func: Arc::new(NativeHistogramDrop::float_null_udf(
+                        format!(
+                            "{}: dropped native histogram samples because this aggregation is not supported for native histograms",
+                            op
+                        ),
+                        promql_annotations.clone(),
+                    )),
+                    args: vec![DfExpr::Column(Column::from_name(col))],
+                }))
+            });
+        }
+
         let val = Self::get_param_as_literal_expr(param, Some(*op), Some(ArrowDataType::Float64))?;
 
         // convert op and value columns to window exprs.
@@ -778,6 +816,14 @@ impl PromPlanner {
         let UnaryExpr { expr } = unary_expr;
         // Unary Expr in PromQL implys the `-` operator
         let input = self.prom_expr_to_plan(expr, query_engine_state).await?;
+        if self.all_field_columns_are_native_histograms(input.schema()) {
+            return self.projection_for_each_field_column(input, |col| {
+                Ok(DfExpr::ScalarFunction(ScalarFunction {
+                    func: Arc::new(NativeHistogramNeg::scalar_udf()),
+                    args: vec![DfExpr::Column(col.into())],
+                }))
+            });
+        }
         self.projection_for_each_field_column(input, |col| {
             Ok(DfExpr::Negative(Box::new(DfExpr::Column(col.into()))))
         })
@@ -819,6 +865,16 @@ impl PromPlanner {
                 alias,
                 display_table: leaf.display_table.clone(),
             });
+        }
+
+        if planned_leaves.iter().any(|leaf| {
+            leaf.ctx
+                .field_columns
+                .iter()
+                .any(|field| Self::field_column_is_native_histogram(leaf.plan.schema(), field))
+        }) {
+            self.ctx = original_ctx;
+            return Ok(None);
         }
 
         if !Self::binary_island_join_contexts_supported(&planned_leaves) {
@@ -1169,10 +1225,25 @@ impl PromPlanner {
                 if let Some(time_expr) = self.try_build_special_time_expr_with_context(lhs) {
                     expr = time_expr
                 }
+                let input_schema = input.schema().clone();
+                let promql_annotations = self.promql_annotations.clone();
                 let bin_expr_builder = |col: &String| {
                     let binary_expr_builder = Self::prom_token_to_binary_expr_builder(*op)?;
-                    let mut binary_expr =
-                        binary_expr_builder(expr.clone(), DfExpr::Column(col.into()))?;
+                    let rhs_is_histogram =
+                        Self::field_column_is_native_histogram(&input_schema, col);
+                    let rhs = DfExpr::Column(col.into());
+                    let mut binary_expr = match Self::native_histogram_binary_expr(
+                        *op,
+                        expr.clone(),
+                        false,
+                        rhs.clone(),
+                        rhs_is_histogram,
+                        is_comparison_op && !should_return_bool,
+                        promql_annotations.clone(),
+                    )? {
+                        Some(expr) => expr,
+                        None => binary_expr_builder(expr.clone(), rhs)?,
+                    };
 
                     if is_comparison_op && should_return_bool {
                         binary_expr = DfExpr::Cast(Cast {
@@ -1195,10 +1266,25 @@ impl PromPlanner {
                 if let Some(time_expr) = self.try_build_special_time_expr_with_context(rhs) {
                     expr = time_expr
                 }
+                let input_schema = input.schema().clone();
+                let promql_annotations = self.promql_annotations.clone();
                 let bin_expr_builder = |col: &String| {
                     let binary_expr_builder = Self::prom_token_to_binary_expr_builder(*op)?;
-                    let mut binary_expr =
-                        binary_expr_builder(DfExpr::Column(col.into()), expr.clone())?;
+                    let lhs_is_histogram =
+                        Self::field_column_is_native_histogram(&input_schema, col);
+                    let lhs = DfExpr::Column(col.into());
+                    let mut binary_expr = match Self::native_histogram_binary_expr(
+                        *op,
+                        lhs.clone(),
+                        lhs_is_histogram,
+                        expr.clone(),
+                        false,
+                        is_comparison_op && !should_return_bool,
+                        promql_annotations.clone(),
+                    )? {
+                        Some(expr) => expr,
+                        None => binary_expr_builder(lhs, expr.clone())?,
+                    };
 
                     if is_comparison_op && should_return_bool {
                         binary_expr = DfExpr::Cast(Cast {
@@ -1294,21 +1380,38 @@ impl PromPlanner {
                     &right_context,
                 )?;
                 let join_plan_schema = join_plan.schema().clone();
+                let promql_annotations = self.promql_annotations.clone();
 
                 let bin_expr_builder = |_: &String| {
                     let (left_col_name, right_col_name) = field_columns.next().unwrap();
-                    let left_col = join_plan_schema
+                    let left_field = join_plan_schema
                         .qualified_field_with_name(Some(&left_table_ref), left_col_name)
-                        .context(DataFusionPlanningSnafu)?
-                        .into();
-                    let right_col = join_plan_schema
+                        .context(DataFusionPlanningSnafu)?;
+                    let right_field = join_plan_schema
                         .qualified_field_with_name(Some(&right_table_ref), right_col_name)
-                        .context(DataFusionPlanningSnafu)?
-                        .into();
+                        .context(DataFusionPlanningSnafu)?;
+                    let left_is_histogram =
+                        left_field.1.data_type() == &Self::native_histogram_arrow_type();
+                    let right_is_histogram =
+                        right_field.1.data_type() == &Self::native_histogram_arrow_type();
+                    let left_col = left_field.into();
+                    let right_col = right_field.into();
 
                     let binary_expr_builder = Self::prom_token_to_binary_expr_builder(*op)?;
-                    let mut binary_expr =
-                        binary_expr_builder(DfExpr::Column(left_col), DfExpr::Column(right_col))?;
+                    let lhs = DfExpr::Column(left_col);
+                    let rhs = DfExpr::Column(right_col);
+                    let mut binary_expr = match Self::native_histogram_binary_expr(
+                        *op,
+                        lhs.clone(),
+                        left_is_histogram,
+                        rhs.clone(),
+                        right_is_histogram,
+                        is_comparison_op && !should_return_bool,
+                        promql_annotations.clone(),
+                    )? {
+                        Some(expr) => expr,
+                        None => binary_expr_builder(lhs, rhs)?,
+                    };
                     if is_comparison_op && should_return_bool {
                         binary_expr = DfExpr::Cast(Cast {
                             expr: Box::new(binary_expr),
@@ -1628,8 +1731,12 @@ impl PromPlanner {
                 ),
             })
         };
-        let (mut func_exprs, new_tags) =
-            self.create_function_expr(func, args.literals.clone(), query_engine_state)?;
+        let (mut func_exprs, new_tags) = self.create_function_expr(
+            func,
+            args.literals.clone(),
+            input.schema(),
+            query_engine_state,
+        )?;
         func_exprs.insert(0, self.create_time_index_column_expr()?);
         func_exprs.extend_from_slice(&self.create_tag_column_exprs()?);
         if let Some(tsid_col) =
@@ -2753,6 +2860,7 @@ impl PromPlanner {
         &mut self,
         func: &Function,
         other_input_exprs: Vec<DfExpr>,
+        input_schema: &DFSchemaRef,
         query_engine_state: &QueryEngineState,
     ) -> Result<(Vec<DfExpr>, Vec<String>)> {
         // TODO(ruihang): check function args list
@@ -2763,35 +2871,136 @@ impl PromPlanner {
         let mut exprs = Vec::with_capacity(self.ctx.field_columns.len());
         // New labels after executing the function, e.g. `label_replace` etc.
         let mut new_tags = vec![];
+        let promql_annotations = self.promql_annotations.clone();
+        let native_histogram_drop_udf = |name: &str| {
+            Arc::new(NativeHistogramDrop::float_null_udf(
+                format!(
+                    "{name}: dropped native histogram samples because this function is not supported for native histograms"
+                ),
+                promql_annotations.clone(),
+            ))
+        };
         let scalar_func = match func.name {
+            "increase" if self.all_field_columns_are_native_histogram_ranges(input_schema) => {
+                ScalarFunc::ExtrapolateUdf(
+                    Arc::new(NativeHistogramIncrease::scalar_udf_with_collector(
+                        self.promql_annotations.clone(),
+                    )),
+                    self.ctx.range.context(ExpectRangeSelectorSnafu)?,
+                )
+            }
             "increase" => ScalarFunc::ExtrapolateUdf(
                 Arc::new(Increase::scalar_udf()),
                 self.ctx.range.context(ExpectRangeSelectorSnafu)?,
             ),
+            "rate" if self.all_field_columns_are_native_histogram_ranges(input_schema) => {
+                ScalarFunc::ExtrapolateUdf(
+                    Arc::new(NativeHistogramRate::scalar_udf_with_collector(
+                        self.promql_annotations.clone(),
+                    )),
+                    self.ctx.range.context(ExpectRangeSelectorSnafu)?,
+                )
+            }
             "rate" => ScalarFunc::ExtrapolateUdf(
                 Arc::new(Rate::scalar_udf()),
                 self.ctx.range.context(ExpectRangeSelectorSnafu)?,
             ),
+            "delta" if self.all_field_columns_are_native_histogram_ranges(input_schema) => {
+                ScalarFunc::ExtrapolateUdf(
+                    Arc::new(NativeHistogramDelta::scalar_udf_with_collector(
+                        self.promql_annotations.clone(),
+                    )),
+                    self.ctx.range.context(ExpectRangeSelectorSnafu)?,
+                )
+            }
             "delta" => ScalarFunc::ExtrapolateUdf(
                 Arc::new(Delta::scalar_udf()),
                 self.ctx.range.context(ExpectRangeSelectorSnafu)?,
             ),
+            "idelta" if self.all_field_columns_are_native_histogram_ranges(input_schema) => {
+                ScalarFunc::Udf(Arc::new(NativeHistogramIDelta::scalar_udf_with_collector(
+                    self.promql_annotations.clone(),
+                )))
+            }
             "idelta" => ScalarFunc::Udf(Arc::new(IDelta::<false>::scalar_udf())),
+            "irate" if self.all_field_columns_are_native_histogram_ranges(input_schema) => {
+                ScalarFunc::Udf(Arc::new(NativeHistogramIRate::scalar_udf_with_collector(
+                    self.promql_annotations.clone(),
+                )))
+            }
             "irate" => ScalarFunc::Udf(Arc::new(IDelta::<true>::scalar_udf())),
+            "resets" if self.all_field_columns_are_native_histogram_ranges(input_schema) => {
+                ScalarFunc::Udf(Arc::new(NativeHistogramResets::scalar_udf()))
+            }
             "resets" => ScalarFunc::Udf(Arc::new(Resets::scalar_udf())),
+            "changes" if self.all_field_columns_are_native_histogram_ranges(input_schema) => {
+                ScalarFunc::Udf(Arc::new(NativeHistogramChanges::scalar_udf()))
+            }
             "changes" => ScalarFunc::Udf(Arc::new(Changes::scalar_udf())),
+            "deriv" if self.all_field_columns_are_native_histogram_ranges(input_schema) => {
+                ScalarFunc::Udf(native_histogram_drop_udf(func.name))
+            }
             "deriv" => ScalarFunc::Udf(Arc::new(Deriv::scalar_udf())),
+            "avg_over_time" if self.all_field_columns_are_native_histogram_ranges(input_schema) => {
+                ScalarFunc::Udf(Arc::new(
+                    NativeHistogramAvgOverTime::scalar_udf_with_collector(
+                        self.promql_annotations.clone(),
+                    ),
+                ))
+            }
             "avg_over_time" => ScalarFunc::Udf(Arc::new(AvgOverTime::scalar_udf())),
+            "min_over_time" | "max_over_time"
+                if self.all_field_columns_are_native_histogram_ranges(input_schema) =>
+            {
+                ScalarFunc::Udf(native_histogram_drop_udf(func.name))
+            }
             "min_over_time" => ScalarFunc::Udf(Arc::new(MinOverTime::scalar_udf())),
             "max_over_time" => ScalarFunc::Udf(Arc::new(MaxOverTime::scalar_udf())),
+            "sum_over_time" if self.all_field_columns_are_native_histogram_ranges(input_schema) => {
+                ScalarFunc::Udf(Arc::new(
+                    NativeHistogramSumOverTime::scalar_udf_with_collector(
+                        self.promql_annotations.clone(),
+                    ),
+                ))
+            }
             "sum_over_time" => ScalarFunc::Udf(Arc::new(SumOverTime::scalar_udf())),
+            "count_over_time"
+                if self.all_field_columns_are_native_histogram_ranges(input_schema) =>
+            {
+                ScalarFunc::Udf(Arc::new(NativeHistogramCountOverTime::scalar_udf()))
+            }
             "count_over_time" => ScalarFunc::Udf(Arc::new(CountOverTime::scalar_udf())),
+            "last_over_time"
+                if self.all_field_columns_are_native_histogram_ranges(input_schema) =>
+            {
+                ScalarFunc::Udf(Arc::new(NativeHistogramLastOverTime::scalar_udf()))
+            }
             "last_over_time" => ScalarFunc::Udf(Arc::new(LastOverTime::scalar_udf())),
+            "absent_over_time"
+                if self.all_field_columns_are_native_histogram_ranges(input_schema) =>
+            {
+                ScalarFunc::Udf(Arc::new(NativeHistogramAbsentOverTime::scalar_udf()))
+            }
             "absent_over_time" => ScalarFunc::Udf(Arc::new(AbsentOverTime::scalar_udf())),
+            "present_over_time"
+                if self.all_field_columns_are_native_histogram_ranges(input_schema) =>
+            {
+                ScalarFunc::Udf(Arc::new(NativeHistogramPresentOverTime::scalar_udf()))
+            }
             "present_over_time" => ScalarFunc::Udf(Arc::new(PresentOverTime::scalar_udf())),
+            "stddev_over_time" | "stdvar_over_time" | "quantile_over_time"
+                if self.all_field_columns_are_native_histogram_ranges(input_schema) =>
+            {
+                ScalarFunc::Udf(native_histogram_drop_udf(func.name))
+            }
             "stddev_over_time" => ScalarFunc::Udf(Arc::new(StddevOverTime::scalar_udf())),
             "stdvar_over_time" => ScalarFunc::Udf(Arc::new(StdvarOverTime::scalar_udf())),
             "quantile_over_time" => ScalarFunc::Udf(Arc::new(QuantileOverTime::scalar_udf())),
+            "predict_linear"
+                if self.all_field_columns_are_native_histogram_ranges(input_schema) =>
+            {
+                ScalarFunc::Udf(native_histogram_drop_udf(func.name))
+            }
             "predict_linear" => {
                 other_input_exprs[0] = DfExpr::Cast(Cast {
                     expr: Box::new(other_input_exprs[0].clone()),
@@ -2799,8 +3008,31 @@ impl PromPlanner {
                 });
                 ScalarFunc::Udf(Arc::new(PredictLinear::scalar_udf()))
             }
+            "double_exponential_smoothing" | "holt_winters"
+                if self.all_field_columns_are_native_histogram_ranges(input_schema) =>
+            {
+                ScalarFunc::Udf(native_histogram_drop_udf(func.name))
+            }
             "double_exponential_smoothing" | "holt_winters" => {
                 ScalarFunc::Udf(Arc::new(DoubleExponentialSmoothing::scalar_udf()))
+            }
+            "histogram_count" => {
+                ScalarFunc::NativeHistogramUdf(Arc::new(NativeHistogramCount::scalar_udf()))
+            }
+            "histogram_sum" => {
+                ScalarFunc::NativeHistogramUdf(Arc::new(NativeHistogramSum::scalar_udf()))
+            }
+            "histogram_avg" => {
+                ScalarFunc::NativeHistogramUdf(Arc::new(NativeHistogramAvg::scalar_udf()))
+            }
+            "histogram_stddev" => {
+                ScalarFunc::NativeHistogramUdf(Arc::new(NativeHistogramStddev::scalar_udf()))
+            }
+            "histogram_stdvar" => {
+                ScalarFunc::NativeHistogramUdf(Arc::new(NativeHistogramStdvar::scalar_udf()))
+            }
+            "histogram_fraction" => {
+                ScalarFunc::NativeHistogramUdf(Arc::new(NativeHistogramFraction::scalar_udf()))
             }
             "time" => {
                 exprs.push(build_special_time_expr(
@@ -2950,11 +3182,20 @@ impl PromPlanner {
 
                 ScalarFunc::GeneratedExpr
             }
+            "round" if self.all_field_columns_are_native_histograms(input_schema) => {
+                if other_input_exprs.is_empty() {
+                    other_input_exprs.push_front(0.0f64.lit());
+                }
+                ScalarFunc::DataFusionUdf(native_histogram_drop_udf(func.name))
+            }
             "round" => {
                 if other_input_exprs.is_empty() {
                     other_input_exprs.push_front(0.0f64.lit());
                 }
                 ScalarFunc::DataFusionUdf(Arc::new(Round::scalar_udf()))
+            }
+            "rad" | "deg" | "sgn" if self.all_field_columns_are_native_histograms(input_schema) => {
+                ScalarFunc::DataFusionUdf(native_histogram_drop_udf(func.name))
             }
             "rad" => ScalarFunc::DataFusionBuiltin(datafusion::functions::math::radians()),
             "deg" => ScalarFunc::DataFusionBuiltin(datafusion::functions::math::degrees()),
@@ -2975,20 +3216,32 @@ impl PromPlanner {
                     .scalar_functions()
                     .get(func.name)
                 {
-                    ScalarFunc::DataFusionBuiltin(f.clone())
+                    if self.all_field_columns_are_native_histograms(input_schema) {
+                        ScalarFunc::DataFusionUdf(native_histogram_drop_udf(func.name))
+                    } else {
+                        ScalarFunc::DataFusionBuiltin(f.clone())
+                    }
                 } else if let Some(factory) = query_engine_state.scalar_function(func.name) {
-                    let func_state = query_engine_state.function_state();
-                    let query_ctx = self.table_provider.query_ctx();
+                    if self.all_field_columns_are_native_histograms(input_schema) {
+                        ScalarFunc::DataFusionUdf(native_histogram_drop_udf(func.name))
+                    } else {
+                        let func_state = query_engine_state.function_state();
+                        let query_ctx = self.table_provider.query_ctx();
 
-                    ScalarFunc::DataFusionUdf(Arc::new(factory.provide(FunctionContext {
-                        state: func_state,
-                        query_ctx: query_ctx.clone(),
-                    })))
+                        ScalarFunc::DataFusionUdf(Arc::new(factory.provide(FunctionContext {
+                            state: func_state,
+                            query_ctx: query_ctx.clone(),
+                        })))
+                    }
                 } else if let Some(f) = datafusion_functions::math::functions()
                     .iter()
                     .find(|f| f.name() == func.name)
                 {
-                    ScalarFunc::DataFusionUdf(f.clone())
+                    if self.all_field_columns_are_native_histograms(input_schema) {
+                        ScalarFunc::DataFusionUdf(native_histogram_drop_udf(func.name))
+                    } else {
+                        ScalarFunc::DataFusionUdf(f.clone())
+                    }
                 } else {
                     return UnsupportedExprSnafu {
                         name: func.name.to_string(),
@@ -3019,6 +3272,25 @@ impl PromPlanner {
                     )
                     .collect_vec();
                     exprs.push(DfExpr::ScalarFunction(ScalarFunction { func, args }))
+                }
+                ScalarFunc::NativeHistogramUdf(func) => {
+                    if Self::field_column_is_native_histogram(input_schema, value) {
+                        let args = itertools::chain!(
+                            other_input_exprs.iter().take(field_column_pos).cloned(),
+                            std::iter::once(col_expr),
+                            other_input_exprs.iter().skip(field_column_pos).cloned()
+                        )
+                        .collect_vec();
+                        exprs.push(DfExpr::ScalarFunction(ScalarFunction { func, args }));
+                    } else {
+                        exprs.push(
+                            DfExpr::Literal(ScalarValue::Float64(None), None).alias(format!(
+                                "{}_{}",
+                                func.name(),
+                                value
+                            )),
+                        );
+                    }
                 }
                 ScalarFunc::Udf(func) => {
                     let ts_range_expr = DfExpr::Column(Column::from_name(
@@ -3406,6 +3678,11 @@ impl PromPlanner {
                 }
             );
         }
+
+        if self.all_field_columns_are_native_histograms(input_plan.schema()) {
+            return self.create_native_histogram_aggregate_exprs(op, input_plan);
+        }
+
         let aggr = match op.id() {
             token::T_SUM => sum_udaf(),
             token::T_QUANTILE => {
@@ -3477,6 +3754,85 @@ impl PromPlanner {
             new_field_columns.push(expr.schema_name().to_string());
         }
         self.ctx.field_columns = new_field_columns;
+
+        Ok((exprs, prev_field_exprs))
+    }
+
+    fn create_native_histogram_aggregate_exprs(
+        &mut self,
+        op: TokenType,
+        input_plan: &LogicalPlan,
+    ) -> Result<(Vec<DfExpr>, Vec<DfExpr>)> {
+        let prev_field_exprs = if op.id() == token::T_COUNT_VALUES {
+            ensure!(
+                self.ctx.field_columns.len() == 1,
+                UnsupportedExprSnafu {
+                    name: "count_values on multi-value input"
+                }
+            );
+            self.ctx
+                .field_columns
+                .iter()
+                .map(|col| {
+                    DfExpr::ScalarFunction(ScalarFunction {
+                        func: Arc::new(NativeHistogramToString::scalar_udf()),
+                        args: vec![DfExpr::Column(Column::from_name(col))],
+                    })
+                })
+                .collect::<Vec<_>>()
+        } else {
+            vec![]
+        };
+
+        let exprs = self
+            .ctx
+            .field_columns
+            .iter()
+            .map(|col| {
+                let input = DfExpr::Column(Column::from_name(col));
+                let expr = match op.id() {
+                    token::T_SUM => Arc::new(NativeHistogramAggSum::aggregate_udf_with_collector(
+                        self.promql_annotations.clone(),
+                    ))
+                        .call(vec![input])
+                        .alias(col),
+                    token::T_AVG => Arc::new(NativeHistogramAggAvg::aggregate_udf_with_collector(
+                        self.promql_annotations.clone(),
+                    ))
+                        .call(vec![input])
+                        .alias(col),
+                    token::T_COUNT_VALUES | token::T_COUNT => count_udaf().call(vec![input]).alias(col),
+                    token::T_GROUP => max_udaf().call(vec![lit(1_f64)]).alias(col),
+                    token::T_MIN
+                    | token::T_MAX
+                    | token::T_STDDEV
+                    | token::T_STDVAR
+                    | token::T_QUANTILE
+                    | token::T_TOPK
+                    | token::T_BOTTOMK => sum_udaf()
+                        .call(vec![DfExpr::ScalarFunction(ScalarFunction {
+                            func: Arc::new(NativeHistogramDrop::float_null_udf(
+                                format!(
+                                    "{}: dropped native histogram samples because this aggregation is not supported for native histograms",
+                                    op
+                                ),
+                                self.promql_annotations.clone(),
+                            )),
+                            args: vec![input],
+                        })])
+                        .alias(col),
+                    _ => return UnexpectedTokenSnafu { token: op }.fail(),
+                };
+                Ok(expr)
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        let normalized_exprs =
+            normalize_cols(exprs.iter().cloned(), input_plan).context(DataFusionPlanningSnafu)?;
+        self.ctx.field_columns = normalized_exprs
+            .into_iter()
+            .map(|expr| expr.schema_name().to_string())
+            .collect();
 
         Ok((exprs, prev_field_exprs))
     }
@@ -3649,6 +4005,10 @@ impl PromPlanner {
         let input_plan = self.strip_tsid_column(input_plan)?;
         self.ctx.use_tsid = false;
 
+        if self.all_field_columns_are_native_histograms(input_plan.schema()) {
+            return self.create_native_histogram_quantile_plan(phi, input_plan);
+        }
+
         if !self.ctx.has_le_tag() {
             // Return empty result instead of error when 'le' column is not found
             // This handles the case when histogram metrics don't exist
@@ -3690,6 +4050,43 @@ impl PromPlanner {
                 .context(DataFusionPlanningSnafu)?,
             ),
         }))
+    }
+
+    fn create_native_histogram_quantile_plan(
+        &mut self,
+        phi: f64,
+        input_plan: LogicalPlan,
+    ) -> Result<LogicalPlan> {
+        ensure!(
+            self.ctx.field_columns.len() == 1,
+            MultiFieldsNotSupportedSnafu {
+                operator: SPECIAL_HISTOGRAM_QUANTILE
+            },
+        );
+
+        let field_column = self.ctx.field_columns[0].clone();
+        let quantile_expr = DfExpr::ScalarFunction(ScalarFunction {
+            func: Arc::new(NativeHistogramQuantile::scalar_udf()),
+            args: vec![
+                DfExpr::Column(Column::from_name(field_column)),
+                DfExpr::Literal(ScalarValue::Float64(Some(phi)), None),
+            ],
+        });
+        let display_name = quantile_expr.schema_name().to_string();
+        self.ctx.field_columns = vec![display_name.clone()];
+
+        let project_exprs = std::iter::once(self.create_time_index_column_expr()?)
+            .chain(std::iter::once(quantile_expr.alias(display_name)))
+            .chain(self.create_tag_column_exprs()?)
+            .collect::<Vec<_>>();
+
+        LogicalPlanBuilder::from(input_plan)
+            .project(project_exprs)
+            .context(DataFusionPlanningSnafu)?
+            .filter(self.create_empty_values_filter_expr()?)
+            .context(DataFusionPlanningSnafu)?
+            .build()
+            .context(DataFusionPlanningSnafu)
     }
 
     /// Create a [SPECIAL_VECTOR_FUNCTION] plan
@@ -3899,6 +4296,69 @@ impl PromPlanner {
         }
     }
 
+    fn native_histogram_binary_expr(
+        token: TokenType,
+        lhs: DfExpr,
+        lhs_is_histogram: bool,
+        rhs: DfExpr,
+        rhs_is_histogram: bool,
+        filter_context: bool,
+        promql_annotations: Option<PromqlAnnotationCollector>,
+    ) -> Result<Option<DfExpr>> {
+        if !lhs_is_histogram && !rhs_is_histogram {
+            return Ok(None);
+        }
+
+        let scalar_fn = |func: ScalarUdfDef, args| {
+            DfExpr::ScalarFunction(ScalarFunction {
+                func: Arc::new(func),
+                args,
+            })
+        };
+        let invalid_expr = || {
+            let message = format!(
+                "{}: dropped native histogram samples because this binary operation is not supported for native histograms",
+                token
+            );
+            let func = if filter_context {
+                NativeHistogramDrop::bool_false_udf(message, promql_annotations.clone())
+            } else {
+                NativeHistogramDrop::float_null_udf(message, promql_annotations.clone())
+            };
+            let args = vec![lhs.clone(), rhs.clone()];
+            scalar_fn(func, args)
+        };
+
+        let expr = match (token.id(), lhs_is_histogram, rhs_is_histogram) {
+            (token::T_ADD, true, true) => scalar_fn(
+                NativeHistogramAdd::scalar_udf_with_collector(promql_annotations.clone()),
+                vec![lhs, rhs],
+            ),
+            (token::T_SUB, true, true) => scalar_fn(
+                NativeHistogramSub::scalar_udf_with_collector(promql_annotations.clone()),
+                vec![lhs, rhs],
+            ),
+            (token::T_MUL, true, false) => {
+                scalar_fn(NativeHistogramMulScalar::scalar_udf(), vec![lhs, rhs])
+            }
+            (token::T_MUL, false, true) => {
+                scalar_fn(NativeHistogramScalarMul::scalar_udf(), vec![lhs, rhs])
+            }
+            (token::T_DIV, true, false) => {
+                scalar_fn(NativeHistogramDivScalar::scalar_udf(), vec![lhs, rhs])
+            }
+            (token::T_EQLC, true, true) => {
+                scalar_fn(NativeHistogramEq::scalar_udf(), vec![lhs, rhs])
+            }
+            (token::T_NEQ, true, true) => {
+                scalar_fn(NativeHistogramNotEq::scalar_udf(), vec![lhs, rhs])
+            }
+            _ => invalid_expr(),
+        };
+
+        Ok(Some(expr))
+    }
+
     /// Return a lambda to build binary expression from token.
     /// Because some binary operator are function in DataFusion like `atan2` or `^`.
     #[allow(clippy::type_complexity)]
@@ -4003,6 +4463,52 @@ impl PromPlanner {
             .fields()
             .iter()
             .any(|field| field.name() == DATA_SCHEMA_TSID_COLUMN_NAME)
+    }
+
+    fn native_histogram_arrow_type() -> ArrowDataType {
+        native_histogram_value_type().as_arrow_type()
+    }
+
+    fn field_column_type<'a>(
+        schema: &'a DFSchemaRef,
+        field_column: &str,
+    ) -> Option<&'a ArrowDataType> {
+        schema
+            .index_of_column_by_name(None, field_column)
+            .map(|idx| schema.field(idx).data_type())
+    }
+
+    fn field_column_is_native_histogram(schema: &DFSchemaRef, field_column: &str) -> bool {
+        Self::field_column_type(schema, field_column)
+            .is_some_and(|data_type| data_type == &Self::native_histogram_arrow_type())
+    }
+
+    fn field_column_is_native_histogram_range(schema: &DFSchemaRef, field_column: &str) -> bool {
+        Self::field_column_type(schema, field_column).is_some_and(|data_type| {
+            matches!(
+                data_type,
+                ArrowDataType::Dictionary(_, value_type)
+                    if value_type.as_ref() == &Self::native_histogram_arrow_type()
+            )
+        })
+    }
+
+    fn all_field_columns_are_native_histograms(&self, schema: &DFSchemaRef) -> bool {
+        !self.ctx.field_columns.is_empty()
+            && self
+                .ctx
+                .field_columns
+                .iter()
+                .all(|field| Self::field_column_is_native_histogram(schema, field))
+    }
+
+    fn all_field_columns_are_native_histogram_ranges(&self, schema: &DFSchemaRef) -> bool {
+        !self.ctx.field_columns.is_empty()
+            && self
+                .ctx
+                .field_columns
+                .iter()
+                .all(|field| Self::field_column_is_native_histogram_range(schema, field))
     }
 
     fn optional_tsid_projection(
@@ -5056,6 +5562,9 @@ enum ScalarFunc {
     /// Similar to DataFusionBuiltin but for custom functions not built into DataFusion.
     /// Processing: Direct pass-through with argument positioning.
     DataFusionUdf(Arc<ScalarUdfDef>),
+    /// Native histogram helper UDFs. Non-histogram inputs are projected as NULL
+    /// so the normal PromQL empty-value filter drops them.
+    NativeHistogramUdf(Arc<ScalarUdfDef>),
     /// PromQL-specific functions that operate on time series data with temporal context.
     /// These functions require both timestamp ranges and values to perform calculations.
     /// Processing: Automatically injects timestamp_range and value columns as first arguments.
@@ -5082,6 +5591,7 @@ mod test {
     use catalog::memory::{MemoryCatalogManager, new_memory_catalog_manager};
     use common_base::Plugins;
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+    use common_query::native_histogram::NATIVE_HISTOGRAM_FIELD;
     use common_query::prelude::greptime_timestamp;
     use common_query::test_util::DummyDecoder;
     use datafusion::arrow::array::{
@@ -5546,6 +6056,62 @@ mod test {
                     .is_ok()
             );
         }
+
+        DfTableSourceProvider::new(
+            catalog_list,
+            false,
+            QueryContext::arc(),
+            DummyDecoder::arc(),
+            false,
+        )
+    }
+
+    async fn build_test_native_histogram_table_provider(table_name: &str) -> DfTableSourceProvider {
+        let catalog_list = MemoryCatalogManager::with_default_setup();
+        let columns = vec![
+            ColumnSchema::new(
+                "tag_0".to_string(),
+                ConcreteDataType::string_datatype(),
+                false,
+            ),
+            ColumnSchema::new(
+                "timestamp".to_string(),
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
+            ColumnSchema::new(
+                NATIVE_HISTOGRAM_FIELD.to_string(),
+                native_histogram_value_type().clone(),
+                true,
+            ),
+        ];
+        let schema = Arc::new(Schema::new(columns));
+        let table_meta = TableMetaBuilder::empty()
+            .schema(schema)
+            .primary_key_indices(vec![0])
+            .value_indices(vec![2])
+            .next_column_id(1024)
+            .build()
+            .unwrap();
+        let table_info = TableInfoBuilder::default()
+            .name(table_name)
+            .meta(table_meta)
+            .build()
+            .unwrap();
+        let table = EmptyTable::from_table_info(&table_info);
+
+        assert!(
+            catalog_list
+                .register_table_sync(RegisterTableRequest {
+                    catalog: DEFAULT_CATALOG_NAME.to_string(),
+                    schema: DEFAULT_SCHEMA_NAME.to_string(),
+                    table_name: table_name.to_string(),
+                    table_id: 1024,
+                    table,
+                })
+                .is_ok()
+        );
 
         DfTableSourceProvider::new(
             catalog_list,
@@ -6936,6 +7502,7 @@ mod test {
         let mut planner = PromPlanner {
             table_provider,
             ctx: PromPlannerContext::from_eval_stmt(&eval_stmt),
+            promql_annotations: None,
         };
         let plan = planner
             .prom_expr_to_plan(&eval_stmt.expr, &build_query_engine_state())
@@ -7788,6 +8355,78 @@ mod test {
         );
 
         indie_query_plan_compare(query, expected).await;
+    }
+
+    async fn native_histogram_plan(query: &str) -> String {
+        let table_provider = build_test_native_histogram_table_provider("some_metric").await;
+        let plan = PromPlanner::stmt_to_plan(
+            table_provider,
+            &build_eval_stmt(query),
+            &build_query_engine_state(),
+        )
+        .await
+        .unwrap();
+        plan.display_indent_schema().to_string()
+    }
+
+    #[tokio::test]
+    async fn native_histogram_count_uses_native_udf() {
+        let plan = native_histogram_plan("histogram_count(some_metric)").await;
+
+        assert!(plan.contains("prom_native_histogram_count"), "{plan}");
+        assert!(!plan.contains("PromHistogramFold"), "{plan}");
+    }
+
+    #[tokio::test]
+    async fn native_histogram_rate_can_feed_count() {
+        let plan = native_histogram_plan("histogram_count(rate(some_metric[5m]))").await;
+
+        assert!(plan.contains("prom_native_histogram_rate"), "{plan}");
+        assert!(plan.contains("prom_native_histogram_count"), "{plan}");
+    }
+
+    #[tokio::test]
+    async fn native_histogram_quantile_skips_classic_fold() {
+        let plan = native_histogram_plan("histogram_quantile(0.9, some_metric)").await;
+
+        assert!(plan.contains("prom_native_histogram_quantile"), "{plan}");
+        assert!(!plan.contains("PromHistogramFold"), "{plan}");
+    }
+
+    #[tokio::test]
+    async fn native_histogram_topk_uses_drop_udf() {
+        let plan = native_histogram_plan("topk(1, some_metric)").await;
+
+        assert!(plan.contains("prom_native_histogram_drop_float"), "{plan}");
+    }
+
+    #[tokio::test]
+    async fn unsupported_native_histogram_functions_use_drop_udf() {
+        for query in [
+            "deriv(some_metric[5m])",
+            "min_over_time(some_metric[5m])",
+            "quantile_over_time(0.9, some_metric[5m])",
+            "predict_linear(some_metric[5m], 60)",
+            "round(some_metric)",
+            "abs(some_metric)",
+        ] {
+            let plan = native_histogram_plan(query).await;
+
+            assert!(
+                plan.contains("prom_native_histogram_drop_float"),
+                "{query}\n{plan}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn native_histogram_absent_over_time_uses_native_udf() {
+        let plan = native_histogram_plan("absent_over_time(some_metric[5m])").await;
+
+        assert!(
+            plan.contains("prom_native_histogram_absent_over_time"),
+            "{plan}"
+        );
     }
 
     #[tokio::test]

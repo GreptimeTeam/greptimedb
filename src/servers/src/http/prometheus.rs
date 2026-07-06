@@ -78,17 +78,31 @@ use crate::prometheus_handler::{
 
 /// For [ValueType::Vector] result type
 #[derive(Debug, Default, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct PromSeriesVector {
     pub metric: BTreeMap<String, String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub value: Option<(f64, String)>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub histogram: Option<(f64, PromNativeHistogram)>,
 }
 
 /// For [ValueType::Matrix] result type
 #[derive(Debug, Default, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct PromSeriesMatrix {
     pub metric: BTreeMap<String, String>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub values: Vec<(f64, String)>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub histograms: Vec<(f64, PromNativeHistogram)>,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct PromNativeHistogram {
+    pub count: String,
+    pub sum: String,
+    pub buckets: Vec<(u8, String, String, String)>,
 }
 
 /// Variants corresponding to [ValueType]

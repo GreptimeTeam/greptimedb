@@ -872,6 +872,7 @@ pub async fn test_prom_gateway_query(store_type: StorageType) {
                 .into_iter()
                 .collect(),
                 value: Some((5.0, "1".to_string())),
+                ..Default::default()
             },
             PromSeriesVector {
                 metric: [
@@ -881,6 +882,7 @@ pub async fn test_prom_gateway_query(store_type: StorageType) {
                 .into_iter()
                 .collect(),
                 value: Some((5.0, "2".to_string())),
+                ..Default::default()
             },
         ]
     );
@@ -932,6 +934,7 @@ pub async fn test_prom_gateway_query(store_type: StorageType) {
                 .into_iter()
                 .collect(),
                 values: vec![(5.0, "1".to_string()), (10.0, "1".to_string())],
+                ..Default::default()
             },
             PromSeriesMatrix {
                 metric: [
@@ -941,6 +944,7 @@ pub async fn test_prom_gateway_query(store_type: StorageType) {
                 .into_iter()
                 .collect(),
                 values: vec![(5.0, "2".to_string()), (10.0, "2".to_string())],
+                ..Default::default()
             },
         ]
     );
@@ -973,6 +977,7 @@ pub async fn test_prom_gateway_query(store_type: StorageType) {
         error: None,
         error_type: None,
         warnings: None,
+        infos: None,
         resp_metrics: Default::default(),
         status_code: None,
     };

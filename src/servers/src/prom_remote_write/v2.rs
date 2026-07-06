@@ -16,9 +16,11 @@ use std::collections::hash_map::Entry;
 
 use ahash::{HashMap, HashMapExt, HashSet, HashSetExt};
 use api::greptime_proto::io::prometheus::write::v2::histogram::{Count, ZeroCount};
+use api::greptime_proto::io::prometheus::write::v2::{
+    BucketSpan, Histogram, Request, Sample, TimeSeries,
+};
 #[cfg(test)]
 use api::greptime_proto::io::prometheus::write::v2::{Exemplar, Metadata, metadata};
-use api::greptime_proto::io::prometheus::write::v2::{Histogram, Request, Sample, TimeSeries};
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::value::ValueData;
 use api::v1::{ColumnSchema, ListValue, RowInsertRequest, Rows, SemanticType, Value};
@@ -43,6 +45,9 @@ use crate::row_writer::{self, TableData};
 
 type PromTags = Vec<(String, String)>;
 type ResolvedSeriesLabels = (PromCtx, String, PromTags);
+const MIN_REMOTE_WRITE_V2_SCHEMA: i32 = -4;
+const MAX_REMOTE_WRITE_V2_SCHEMA: i32 = 8;
+const MAX_REDUCIBLE_REMOTE_WRITE_V2_SCHEMA: i32 = 52;
 
 pub(crate) fn decode_remote_write_v2_request(is_zstd: bool, body: Bytes) -> Result<Request> {
     let _timer = crate::metrics::METRIC_HTTP_PROM_STORE_DECODE_ELAPSED.start_timer();
@@ -279,6 +284,9 @@ fn native_histogram_column_schema() -> ColumnSchema {
 }
 
 fn native_histogram_struct_value(histogram: &Histogram) -> Result<ValueData> {
+    let uses_float_counts = native_histogram_uses_float_counts(histogram)?;
+    validate_native_histogram(histogram, uses_float_counts)?;
+
     let mut items = Vec::with_capacity(NATIVE_HISTOGRAM_FIELD_NAMES.len());
     items.extend([
         pb_value(ValueData::I32Value(histogram.schema)),
@@ -295,39 +303,39 @@ fn native_histogram_struct_value(histogram: &Histogram) -> Result<ValueData> {
         u32_list_value(histogram.negative_spans.iter().map(|span| span.length)),
     ]);
 
-    let int_counts = match (&histogram.count, &histogram.zero_count) {
-        (Some(Count::CountInt(count)), Some(ZeroCount::ZeroCountInt(zero_count))) => {
-            (*count, *zero_count)
-        }
-        (Some(Count::CountInt(count)), _) => (*count, 0),
-        (_, Some(ZeroCount::ZeroCountInt(zero_count))) => (0, *zero_count),
-        _ => (0, 0),
-    };
-    let float_counts = match (&histogram.count, &histogram.zero_count) {
-        (Some(Count::CountFloat(count)), Some(ZeroCount::ZeroCountFloat(zero_count))) => {
-            Some((*count, *zero_count))
-        }
-        (Some(Count::CountFloat(count)), _) => Some((*count, 0.0)),
-        _ => None,
-    };
-
-    if let Some(counts) = float_counts {
+    if uses_float_counts {
+        let count = match histogram.count.as_ref() {
+            Some(Count::CountFloat(count)) => *count,
+            _ => 0.0,
+        };
+        let zero_count = match histogram.zero_count.as_ref() {
+            Some(ZeroCount::ZeroCountFloat(zero_count)) => *zero_count,
+            _ => 0.0,
+        };
         items.extend([
             null_pb_value(),
             null_pb_value(),
             i64_list_value(std::iter::empty()),
             i64_list_value(std::iter::empty()),
-            pb_value(ValueData::F64Value(counts.0)),
-            pb_value(ValueData::F64Value(counts.1)),
+            pb_value(ValueData::F64Value(count)),
+            pb_value(ValueData::F64Value(zero_count)),
             f64_list_value(histogram.positive_counts.iter().copied()),
             f64_list_value(histogram.negative_counts.iter().copied()),
         ]);
     } else {
+        let count = match histogram.count.as_ref() {
+            Some(Count::CountInt(count)) => *count,
+            _ => 0,
+        };
+        let zero_count = match histogram.zero_count.as_ref() {
+            Some(ZeroCount::ZeroCountInt(zero_count)) => *zero_count,
+            _ => 0,
+        };
         let positive_buckets = bucket_counts_from_deltas(&histogram.positive_deltas)?;
         let negative_buckets = bucket_counts_from_deltas(&histogram.negative_deltas)?;
         items.extend([
-            pb_value(ValueData::U64Value(int_counts.0)),
-            pb_value(ValueData::U64Value(int_counts.1)),
+            pb_value(ValueData::U64Value(count)),
+            pb_value(ValueData::U64Value(zero_count)),
             i64_list_value(positive_buckets.iter().copied()),
             i64_list_value(negative_buckets.iter().copied()),
             null_pb_value(),
@@ -338,6 +346,229 @@ fn native_histogram_struct_value(histogram: &Histogram) -> Result<ValueData> {
     }
 
     Ok(ValueData::StructValue(api::v1::StructValue { items }))
+}
+
+fn validate_native_histogram(histogram: &Histogram, uses_float_counts: bool) -> Result<()> {
+    validate_native_histogram_schema(histogram.schema)?;
+    validate_native_histogram_custom_values(histogram)?;
+
+    let (positive_buckets, negative_buckets) = if uses_float_counts {
+        (
+            histogram.positive_counts.len(),
+            histogram.negative_counts.len(),
+        )
+    } else {
+        (
+            histogram.positive_deltas.len(),
+            histogram.negative_deltas.len(),
+        )
+    };
+    let custom_max_index =
+        (histogram.schema == CUSTOM_BUCKETS_SCHEMA).then_some(histogram.custom_values.len() as i32);
+    validate_native_histogram_spans(
+        "positive",
+        &histogram.positive_spans,
+        positive_buckets,
+        custom_max_index,
+    )?;
+    validate_native_histogram_spans(
+        "negative",
+        &histogram.negative_spans,
+        negative_buckets,
+        None,
+    )?;
+
+    if histogram.schema == CUSTOM_BUCKETS_SCHEMA {
+        ensure!(
+            histogram.zero_threshold == 0.0 && native_histogram_zero_count_is_zero(histogram),
+            error::InvalidPromRemoteRequestSnafu {
+                msg: "remote write v2 custom native histogram must not use a zero bucket"
+                    .to_string(),
+            }
+        );
+        ensure!(
+            histogram.negative_spans.is_empty()
+                && histogram.negative_deltas.is_empty()
+                && histogram.negative_counts.is_empty(),
+            error::InvalidPromRemoteRequestSnafu {
+                msg: "remote write v2 custom native histogram must not use negative buckets"
+                    .to_string(),
+            }
+        );
+    }
+
+    Ok(())
+}
+
+fn validate_native_histogram_schema(schema: i32) -> Result<()> {
+    if schema == CUSTOM_BUCKETS_SCHEMA
+        || (MIN_REMOTE_WRITE_V2_SCHEMA..=MAX_REMOTE_WRITE_V2_SCHEMA).contains(&schema)
+    {
+        return Ok(());
+    }
+
+    if (MAX_REMOTE_WRITE_V2_SCHEMA + 1..=MAX_REDUCIBLE_REMOTE_WRITE_V2_SCHEMA).contains(&schema) {
+        error::InvalidPromRemoteRequestSnafu {
+            msg: format!(
+                "remote write v2 native histogram schema {schema} must be reduced before ingestion"
+            ),
+        }
+        .fail()
+    } else {
+        error::InvalidPromRemoteRequestSnafu {
+            msg: format!("remote write v2 native histogram schema {schema} is unsupported"),
+        }
+        .fail()
+    }
+}
+
+fn validate_native_histogram_custom_values(histogram: &Histogram) -> Result<()> {
+    if histogram.schema != CUSTOM_BUCKETS_SCHEMA {
+        ensure!(
+            histogram.custom_values.is_empty(),
+            error::InvalidPromRemoteRequestSnafu {
+                msg: "remote write v2 standard native histogram must not use custom_values"
+                    .to_string(),
+            }
+        );
+        return Ok(());
+    }
+
+    for value in &histogram.custom_values {
+        ensure!(
+            !value.is_nan() && *value != f64::INFINITY,
+            error::InvalidPromRemoteRequestSnafu {
+                msg: "remote write v2 custom native histogram custom_values must not contain +Inf or NaN"
+                    .to_string(),
+            }
+        );
+    }
+    for values in histogram.custom_values.windows(2) {
+        ensure!(
+            values[0] < values[1],
+            error::InvalidPromRemoteRequestSnafu {
+                msg: "remote write v2 custom native histogram custom_values must be sorted"
+                    .to_string(),
+            }
+        );
+    }
+
+    Ok(())
+}
+
+fn validate_native_histogram_spans(
+    name: &str,
+    spans: &[BucketSpan],
+    bucket_count: usize,
+    custom_max_index: Option<i32>,
+) -> Result<()> {
+    let span_len = spans
+        .iter()
+        .try_fold(0usize, |sum, span| sum.checked_add(span.length as usize))
+        .context(error::InvalidPromRemoteRequestSnafu {
+            msg: format!("remote write v2 native histogram {name} spans overflow"),
+        })?;
+    ensure!(
+        span_len == bucket_count,
+        error::InvalidPromRemoteRequestSnafu {
+            msg: format!(
+                "remote write v2 native histogram {name} spans describe {span_len} buckets, found {bucket_count}"
+            ),
+        }
+    );
+
+    let mut current_index = 0i32;
+    let mut first = true;
+    for span in spans {
+        current_index = if first {
+            first = false;
+            span.offset
+        } else {
+            current_index.checked_add(span.offset).context(
+                error::InvalidPromRemoteRequestSnafu {
+                    msg: format!(
+                        "remote write v2 native histogram {name} span index overflows i32"
+                    ),
+                },
+            )?
+        };
+
+        for _ in 0..span.length {
+            if let Some(max_index) = custom_max_index {
+                ensure!(
+                    (0..=max_index).contains(&current_index),
+                    error::InvalidPromRemoteRequestSnafu {
+                        msg: format!(
+                            "remote write v2 custom native histogram {name} bucket index {current_index} is out of range"
+                        ),
+                    }
+                );
+            }
+            current_index =
+                current_index
+                    .checked_add(1)
+                    .context(error::InvalidPromRemoteRequestSnafu {
+                        msg: format!(
+                            "remote write v2 native histogram {name} span index overflows i32"
+                        ),
+                    })?;
+        }
+    }
+
+    Ok(())
+}
+
+fn native_histogram_zero_count_is_zero(histogram: &Histogram) -> bool {
+    match histogram.zero_count.as_ref() {
+        Some(ZeroCount::ZeroCountInt(zero_count)) => *zero_count == 0,
+        Some(ZeroCount::ZeroCountFloat(zero_count)) => *zero_count == 0.0,
+        None => true,
+    }
+}
+
+fn native_histogram_uses_float_counts(histogram: &Histogram) -> Result<bool> {
+    let uses_float_count = matches!(histogram.count, Some(Count::CountFloat(_)))
+        || matches!(histogram.zero_count, Some(ZeroCount::ZeroCountFloat(_)));
+    let uses_int_count = matches!(histogram.count, Some(Count::CountInt(_)))
+        || matches!(histogram.zero_count, Some(ZeroCount::ZeroCountInt(_)));
+    let uses_float_buckets =
+        !histogram.positive_counts.is_empty() || !histogram.negative_counts.is_empty();
+    let uses_int_buckets =
+        !histogram.positive_deltas.is_empty() || !histogram.negative_deltas.is_empty();
+
+    if matches!(
+        (&histogram.count, &histogram.zero_count),
+        (Some(Count::CountInt(_)), Some(ZeroCount::ZeroCountFloat(_)))
+            | (Some(Count::CountFloat(_)), Some(ZeroCount::ZeroCountInt(_)))
+    ) {
+        return error::InvalidPromRemoteRequestSnafu {
+            msg: "remote write v2 native histogram count and zero_count must use the same integer or float family".to_string(),
+        }
+        .fail();
+    }
+
+    ensure!(
+        !(uses_float_buckets && uses_int_buckets),
+        error::InvalidPromRemoteRequestSnafu {
+            msg: "remote write v2 native histogram bucket counts must use either integer deltas or float counts".to_string(),
+        }
+    );
+    ensure!(
+        !(uses_float_count && uses_int_buckets),
+        error::InvalidPromRemoteRequestSnafu {
+            msg: "remote write v2 float native histogram must not use integer bucket deltas"
+                .to_string(),
+        }
+    );
+    ensure!(
+        !(uses_int_count && uses_float_buckets),
+        error::InvalidPromRemoteRequestSnafu {
+            msg: "remote write v2 integer native histogram must not use float bucket counts"
+                .to_string(),
+        }
+    );
+
+    Ok(uses_float_count || uses_float_buckets)
 }
 
 fn pb_value(value_data: ValueData) -> Value {
@@ -859,6 +1090,126 @@ mod tests {
             "conflicts with an internal native histogram label",
         ));
 
+        cases.push((
+            "int count with float zero count",
+            request_with_histogram(Histogram {
+                count: Some(Count::CountInt(1)),
+                zero_count: Some(ZeroCount::ZeroCountFloat(0.5)),
+                ..Default::default()
+            }),
+            "count and zero_count must use the same integer or float family",
+        ));
+
+        cases.push((
+            "float count with int zero count",
+            request_with_histogram(Histogram {
+                count: Some(Count::CountFloat(1.0)),
+                zero_count: Some(ZeroCount::ZeroCountInt(1)),
+                ..Default::default()
+            }),
+            "count and zero_count must use the same integer or float family",
+        ));
+
+        cases.push((
+            "reducible schema",
+            request_with_histogram(Histogram {
+                schema: 9,
+                ..Default::default()
+            }),
+            "schema 9 must be reduced before ingestion",
+        ));
+
+        cases.push((
+            "unsupported schema",
+            request_with_histogram(Histogram {
+                schema: 53,
+                ..Default::default()
+            }),
+            "schema 53 is unsupported",
+        ));
+
+        cases.push((
+            "standard schema with custom values",
+            request_with_histogram(Histogram {
+                schema: 1,
+                custom_values: vec![1.0],
+                ..Default::default()
+            }),
+            "standard native histogram must not use custom_values",
+        ));
+
+        cases.push((
+            "custom values with inf",
+            request_with_histogram(Histogram {
+                schema: CUSTOM_BUCKETS_SCHEMA,
+                custom_values: vec![f64::INFINITY],
+                ..Default::default()
+            }),
+            "custom_values must not contain +Inf or NaN",
+        ));
+
+        cases.push((
+            "custom values not sorted",
+            request_with_histogram(Histogram {
+                schema: CUSTOM_BUCKETS_SCHEMA,
+                custom_values: vec![2.0, 1.0],
+                ..Default::default()
+            }),
+            "custom_values must be sorted",
+        ));
+
+        cases.push((
+            "custom schema with zero bucket",
+            request_with_histogram(Histogram {
+                schema: CUSTOM_BUCKETS_SCHEMA,
+                zero_count: Some(ZeroCount::ZeroCountInt(1)),
+                ..Default::default()
+            }),
+            "custom native histogram must not use a zero bucket",
+        ));
+
+        cases.push((
+            "custom schema with negative buckets",
+            request_with_histogram(Histogram {
+                schema: CUSTOM_BUCKETS_SCHEMA,
+                negative_spans: vec![BucketSpan {
+                    offset: -1,
+                    length: 1,
+                }],
+                negative_deltas: vec![1],
+                ..Default::default()
+            }),
+            "custom native histogram must not use negative buckets",
+        ));
+
+        cases.push((
+            "span count mismatch",
+            request_with_histogram(Histogram {
+                positive_spans: vec![BucketSpan {
+                    offset: 0,
+                    length: 2,
+                }],
+                positive_deltas: vec![1],
+                ..Default::default()
+            }),
+            "positive spans describe 2 buckets, found 1",
+        ));
+
+        cases.push((
+            "custom span index out of range",
+            request_with_histogram(Histogram {
+                schema: CUSTOM_BUCKETS_SCHEMA,
+                custom_values: vec![1.0],
+                positive_spans: vec![BucketSpan {
+                    offset: 2,
+                    length: 1,
+                }],
+                positive_deltas: vec![1],
+                ..Default::default()
+            }),
+            "positive bucket index 2 is out of range",
+        ));
+
         for (name, request, expected) in cases {
             assert_invalid(name, request, expected);
         }
@@ -1112,6 +1463,13 @@ mod tests {
                 timestamp: 1000,
                 start_timestamp: 0,
             }],
+        )
+    }
+
+    fn request_with_histogram(histogram: Histogram) -> Request {
+        test_util::request_with_labels_and_histograms(
+            vec![(METRIC_NAME_LABEL, "metric")],
+            vec![histogram],
         )
     }
 

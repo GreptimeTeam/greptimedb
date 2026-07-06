@@ -18,6 +18,7 @@ mod deriv;
 mod double_exponential_smoothing;
 mod extrapolate_rate;
 mod idelta;
+mod native_histogram;
 mod predict_linear;
 mod quantile;
 mod quantile_aggr;
@@ -42,6 +43,18 @@ pub use deriv::Deriv;
 pub use double_exponential_smoothing::DoubleExponentialSmoothing;
 pub use extrapolate_rate::{Delta, Increase, Rate};
 pub use idelta::IDelta;
+pub use native_histogram::{
+    NativeHistogramAbsentOverTime, NativeHistogramAdd, NativeHistogramAggAvg,
+    NativeHistogramAggSum, NativeHistogramAvg, NativeHistogramAvgOverTime, NativeHistogramChanges,
+    NativeHistogramCount, NativeHistogramCountOverTime, NativeHistogramDelta,
+    NativeHistogramDivScalar, NativeHistogramDrop, NativeHistogramEq, NativeHistogramFraction,
+    NativeHistogramIDelta, NativeHistogramIRate, NativeHistogramIncrease,
+    NativeHistogramLastOverTime, NativeHistogramMulScalar, NativeHistogramNeg,
+    NativeHistogramNotEq, NativeHistogramPresentOverTime, NativeHistogramQuantile,
+    NativeHistogramRate, NativeHistogramResets, NativeHistogramScalarMul, NativeHistogramStddev,
+    NativeHistogramStdvar, NativeHistogramSub, NativeHistogramSum, NativeHistogramSumOverTime,
+    NativeHistogramToString,
+};
 pub use predict_linear::PredictLinear;
 pub use quantile::QuantileOverTime;
 pub use quantile_aggr::{QUANTILE_NAME, quantile_udaf};

@@ -18,6 +18,7 @@ pub mod logical_plan;
 pub mod native_histogram;
 pub mod prelude;
 pub mod prometheus;
+pub mod promql_annotations;
 pub mod request;
 pub mod stream;
 #[cfg(any(test, feature = "testing"))]
@@ -35,6 +36,8 @@ use common_recordbatch::{
 use datafusion::physical_plan::ExecutionPlan;
 use serde::{Deserialize, Serialize};
 use sqlparser_derive::{Visit, VisitMut};
+
+use crate::promql_annotations::PromqlAnnotationCollector;
 
 /// new Output struct with output data(previously Output) and output meta
 #[derive(Debug)]
@@ -73,6 +76,9 @@ pub struct OutputMeta {
     /// May exist for query output. One can retrieve execution metrics from this plan.
     pub plan: Option<Arc<dyn ExecutionPlan>>,
     pub cost: OutputCost,
+    pub warnings: Vec<String>,
+    pub infos: Vec<String>,
+    pub promql_annotations: Option<PromqlAnnotationCollector>,
 }
 
 impl Output {
@@ -162,18 +168,47 @@ impl Debug for OutputData {
 
 impl OutputMeta {
     pub fn new(plan: Option<Arc<dyn ExecutionPlan>>, cost: usize) -> Self {
-        Self { plan, cost }
+        Self {
+            plan,
+            cost,
+            warnings: Vec::new(),
+            infos: Vec::new(),
+            promql_annotations: None,
+        }
     }
 
     pub fn new_with_plan(plan: Arc<dyn ExecutionPlan>) -> Self {
         Self {
             plan: Some(plan),
             cost: 0,
+            warnings: Vec::new(),
+            infos: Vec::new(),
+            promql_annotations: None,
         }
     }
 
     pub fn new_with_cost(cost: usize) -> Self {
-        Self { plan: None, cost }
+        Self {
+            plan: None,
+            cost,
+            warnings: Vec::new(),
+            infos: Vec::new(),
+            promql_annotations: None,
+        }
+    }
+
+    pub fn with_promql_annotations(
+        mut self,
+        promql_annotations: Option<PromqlAnnotationCollector>,
+    ) -> Self {
+        self.promql_annotations = promql_annotations;
+        self
+    }
+
+    pub fn collect_promql_annotations(&mut self) {
+        if let Some(collector) = &self.promql_annotations {
+            collector.append_to(&mut self.warnings, &mut self.infos);
+        }
     }
 }
 
