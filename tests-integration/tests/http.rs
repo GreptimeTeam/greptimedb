@@ -77,7 +77,7 @@ use tests_integration::test_util::{
     StorageType, setup_test_http_app, setup_test_http_app_with_frontend,
     setup_test_http_app_with_frontend_and_slow_query_threshold,
     setup_test_http_app_with_frontend_and_user_provider, setup_test_prom_app_with_frontend,
-    setup_test_prom_app_with_frontend_batched,
+    setup_test_prom_app_with_frontend_batched, setup_test_prom_app_with_frontend_native_histogram,
 };
 use urlencoding::encode;
 use yaml_rust::YamlLoader;
@@ -2374,7 +2374,7 @@ pub async fn test_prometheus_remote_write_v2(store_type: StorageType) {
 
 pub async fn test_prometheus_remote_write_v2_native_histogram(store_type: StorageType) {
     common_telemetry::init_default_ut_logging();
-    let (app, mut guard) = setup_test_prom_app_with_frontend(
+    let (app, mut guard) = setup_test_prom_app_with_frontend_native_histogram(
         store_type,
         "prometheus_remote_write_v2_native_histogram",
     )

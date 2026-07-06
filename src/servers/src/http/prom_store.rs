@@ -71,6 +71,7 @@ pub struct PromStoreState {
     pub pipeline_handler: Option<PipelineHandlerRef>,
     pub prom_store_with_metric_engine: bool,
     pub prom_validation_mode: PromValidationMode,
+    pub experimental_enable_prometheus_native_histogram: bool,
     pub pending_rows_batcher: Option<Arc<PendingRowsBatcher>>,
 }
 
@@ -142,6 +143,7 @@ async fn remote_write_v1(
         pipeline_handler,
         prom_store_with_metric_engine,
         prom_validation_mode,
+        experimental_enable_prometheus_native_histogram: _,
         pending_rows_batcher,
     } = state;
 
@@ -214,6 +216,7 @@ async fn remote_write_v2(
         pipeline_handler: _,
         prom_store_with_metric_engine,
         prom_validation_mode: _,
+        experimental_enable_prometheus_native_histogram,
         pending_rows_batcher,
     } = state;
 
@@ -232,6 +235,18 @@ async fn remote_write_v2(
         Ok(request) => request,
         Err(error) => return Ok(remote_write_v2_error_response(error, 0, 0, 0)),
     };
+    if !experimental_enable_prometheus_native_histogram && request_has_native_histograms(&request) {
+        return Ok(remote_write_v2_error_response(
+            error::InvalidPromRemoteRequestSnafu {
+                msg: "prometheus remote write v2 native histogram ingestion is experimental; set http.experimental_enable_prometheus_native_histogram = true to enable it"
+                    .to_string(),
+            }
+            .build(),
+            0,
+            0,
+            0,
+        ));
+    }
     let req = match into_write_requests(request) {
         Ok(req) => req,
         Err(error) => return Ok(remote_write_v2_error_response(error, 0, 0, 0)),
@@ -299,6 +314,15 @@ async fn remote_write_v2(
     append_remote_write_v2_written_headers(&mut headers, samples_written, histograms_written, 0);
 
     Ok((StatusCode::NO_CONTENT, headers).into_response())
+}
+
+fn request_has_native_histograms(
+    request: &api::greptime_proto::io::prometheus::write::v2::Request,
+) -> bool {
+    request
+        .timeseries
+        .iter()
+        .any(|series| !series.histograms.is_empty())
 }
 
 fn vm_proto_version_response(params: &RemoteWriteQuery) -> Option<axum::response::Response> {
@@ -686,6 +710,7 @@ mod tests {
             pipeline_handler: None,
             prom_store_with_metric_engine: false,
             prom_validation_mode: PromValidationMode::Strict,
+            experimental_enable_prometheus_native_histogram: false,
             pending_rows_batcher: None,
         }
     }

@@ -103,7 +103,7 @@ pub fn native_histogram_field_type(name: &str) -> Option<ConcreteDataType> {
 }
 
 pub fn native_histogram_value_type() -> ConcreteDataType {
-    NATIVE_HISTOGRAM_VALUE_TYPE.clone()
+    (*NATIVE_HISTOGRAM_VALUE_TYPE).clone()
 }
 
 pub fn is_native_histogram_value_schema(name: &str, data_type: &ConcreteDataType) -> bool {

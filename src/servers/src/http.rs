@@ -163,6 +163,9 @@ pub struct HttpOptions {
     /// Validation mode while decoding Prometheus remote write requests.
     pub prom_validation_mode: PromValidationMode,
 
+    /// Enables experimental Prometheus remote write v2 native histogram ingestion.
+    pub experimental_enable_prometheus_native_histogram: bool,
+
     pub cors_allowed_origins: Vec<String>,
 
     pub enable_cors: bool,
@@ -180,6 +183,7 @@ impl Default for HttpOptions {
             cors_allowed_origins: Vec::new(),
             enable_cors: true,
             prom_validation_mode: PromValidationMode::Strict,
+            experimental_enable_prometheus_native_histogram: false,
             experimental_enable_explain_analyze_stream: false,
         }
     }
@@ -601,6 +605,9 @@ impl HttpServerBuilder {
             pipeline_handler,
             prom_store_with_metric_engine,
             prom_validation_mode,
+            experimental_enable_prometheus_native_histogram: self
+                .options
+                .experimental_enable_prometheus_native_histogram,
             pending_rows_batcher,
         };
 
