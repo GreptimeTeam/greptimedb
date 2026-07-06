@@ -26,6 +26,7 @@ use crate::config::{IndexBuildMode, MitoConfig};
 use crate::error::{RegionNotFoundSnafu, Result};
 use crate::flush::{FlushReason, RegionFlushTask};
 use crate::region::MitoRegionRef;
+use crate::region::version::VersionRef;
 use crate::request::{BuildIndexRequest, FlushFailed, FlushFinished, OnFailure, OptionOutputTx};
 use crate::sst::index::IndexBuildType;
 use crate::worker::RegionWorkerLoop;
@@ -85,8 +86,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             }
 
             let version = region.version();
-            let region_memtable_size =
-                version.memtables.mutable_usage() + version.memtables.immutables_usage();
+            let region_memtable_size = region_memtable_usage(&version);
 
             let auto_flush_interval = version
                 .options
@@ -152,6 +152,33 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         Ok(())
     }
 
+    pub(crate) fn maybe_flush_write_regions(
+        &mut self,
+        region_ids: impl IntoIterator<Item = RegionId>,
+    ) {
+        for region_id in region_ids {
+            let Some(region) = self.regions.get_region(region_id) else {
+                continue;
+            };
+            if self.flush_scheduler.is_flush_requested(region.region_id) || !region.is_writable() {
+                // Already flushing or not writable.
+                continue;
+            }
+            if !should_flush_region(&region.version()) {
+                continue;
+            }
+
+            let task =
+                self.new_flush_task(&region, FlushReason::RegionFull, None, self.config.clone());
+            if let Err(e) =
+                self.flush_scheduler
+                    .schedule_flush(region.region_id, &region.version_control, task)
+            {
+                error!(e; "Failed to schedule flush task for region {}", region.region_id);
+            }
+        }
+    }
+
     /// Creates a flush task with specific `reason` for the `region`.
     pub(crate) fn new_flush_task(
         &self,
@@ -177,6 +204,29 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             partition_expr: region.maybe_staging_partition_expr_str(),
         }
     }
+}
+
+pub(crate) fn region_memtable_usage(version: &VersionRef) -> usize {
+    version.memtables.mutable_usage() + version.memtables.immutables_usage()
+}
+
+pub(crate) fn region_write_buffer_size(version: &VersionRef) -> Option<usize> {
+    version
+        .options
+        .write_buffer_size
+        .map(|size| size.as_bytes() as usize)
+}
+
+fn should_flush_region(version: &VersionRef) -> bool {
+    let Some(write_buffer_size) = region_write_buffer_size(version) else {
+        return false;
+    };
+
+    let mutable_usage = version.memtables.mutable_usage();
+    let memory_usage = region_memtable_usage(version);
+    let mutable_limit = std::cmp::max(1, write_buffer_size / 2);
+
+    mutable_usage >= mutable_limit || memory_usage >= write_buffer_size
 }
 
 impl<S: LogStore> RegionWorkerLoop<S> {

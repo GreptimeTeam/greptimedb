@@ -29,6 +29,7 @@ use rstest::rstest;
 use rstest_reuse::{self, apply};
 use store_api::ManifestVersion;
 use store_api::metadata::RegionMetadataRef;
+use store_api::mito_engine_options::WRITE_BUFFER_SIZE_KEY;
 use store_api::region_engine::RegionEngine;
 use store_api::region_request::{
     PathType, RegionCloseRequest, RegionFlushRequest, RegionOpenRequest, RegionRequest,
@@ -271,6 +272,227 @@ async fn test_write_stall_with_format(flat_format: bool) {
 | b     | 1.0     | 1970-01-01T00:00:01 |
 +-------+---------+---------------------+";
     assert_eq!(expected, batches.pretty_print().unwrap());
+}
+
+#[tokio::test]
+async fn test_region_write_buffer_limit_flushes_hot_region() {
+    let mut env = TestEnv::new().await;
+    let listener = Arc::new(FlushListener::default());
+    let engine = env
+        .create_engine_with(MitoConfig::default(), None, Some(listener.clone()), None)
+        .await;
+
+    let hot_region_id = RegionId::new(1, 1);
+    let normal_region_id = RegionId::new(2, 1);
+    let idle_region_id = RegionId::new(3, 1);
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            hot_region_id.table_id(),
+            "hot_table",
+            "test_catalog",
+            "test_schema",
+            None,
+            env.get_kv_backend(),
+        )
+        .await;
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            idle_region_id.table_id(),
+            "idle_table",
+            "test_catalog",
+            "test_schema",
+            None,
+            env.get_kv_backend(),
+        )
+        .await;
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            normal_region_id.table_id(),
+            "normal_table",
+            "test_catalog",
+            "test_schema",
+            None,
+            env.get_kv_backend(),
+        )
+        .await;
+
+    let hot_request = CreateRequestBuilder::new()
+        .insert_option(WRITE_BUFFER_SIZE_KEY, "1B")
+        .build();
+    let hot_schema = rows_schema(&hot_request);
+    engine
+        .handle_request(hot_region_id, RegionRequest::Create(hot_request))
+        .await
+        .unwrap();
+
+    let normal_request = CreateRequestBuilder::new().table_dir("normal").build();
+    let normal_schema = rows_schema(&normal_request);
+    engine
+        .handle_request(normal_region_id, RegionRequest::Create(normal_request))
+        .await
+        .unwrap();
+
+    let idle_request = CreateRequestBuilder::new()
+        .table_dir("idle")
+        .insert_option(WRITE_BUFFER_SIZE_KEY, "1B")
+        .build();
+    let idle_schema = rows_schema(&idle_request);
+    engine
+        .handle_request(idle_region_id, RegionRequest::Create(idle_request))
+        .await
+        .unwrap();
+
+    put_rows(
+        &engine,
+        hot_region_id,
+        Rows {
+            schema: hot_schema.clone(),
+            rows: build_rows_for_key("hot", 0, 2, 0),
+        },
+    )
+    .await;
+    put_rows(
+        &engine,
+        normal_region_id,
+        Rows {
+            schema: normal_schema,
+            rows: build_rows_for_key("normal", 0, 2, 0),
+        },
+    )
+    .await;
+    put_rows(
+        &engine,
+        idle_region_id,
+        Rows {
+            schema: idle_schema,
+            rows: build_rows_for_key("idle", 0, 2, 0),
+        },
+    )
+    .await;
+
+    put_rows(
+        &engine,
+        hot_region_id,
+        Rows {
+            schema: hot_schema,
+            rows: build_rows_for_key("hot", 2, 2, 0),
+        },
+    )
+    .await;
+    listener.wait().await;
+
+    let scanner = engine
+        .scanner(hot_region_id, ScanRequest::default())
+        .await
+        .unwrap();
+    assert_eq!(1, scanner.num_files());
+
+    let scanner = engine
+        .scanner(normal_region_id, ScanRequest::default())
+        .await
+        .unwrap();
+    assert_eq!(0, scanner.num_files());
+    assert_eq!(1, scanner.num_memtables());
+
+    let scanner = engine
+        .scanner(idle_region_id, ScanRequest::default())
+        .await
+        .unwrap();
+    assert_eq!(0, scanner.num_files());
+    assert_eq!(1, scanner.num_memtables());
+}
+
+#[tokio::test]
+async fn test_region_write_buffer_stall_does_not_block_other_region() {
+    let mut env = TestEnv::new().await;
+    let listener = Arc::new(StallListener::default());
+    let engine = env
+        .create_engine_with(MitoConfig::default(), None, Some(listener.clone()), None)
+        .await;
+
+    let stalled_region_id = RegionId::new(1, 1);
+    let normal_region_id = RegionId::new(2, 1);
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            stalled_region_id.table_id(),
+            "stalled_table",
+            "test_catalog",
+            "test_schema",
+            None,
+            env.get_kv_backend(),
+        )
+        .await;
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            normal_region_id.table_id(),
+            "normal_table",
+            "test_catalog",
+            "test_schema",
+            None,
+            env.get_kv_backend(),
+        )
+        .await;
+
+    let stalled_request = CreateRequestBuilder::new()
+        .insert_option(WRITE_BUFFER_SIZE_KEY, "1B")
+        .build();
+    let stalled_schema = rows_schema(&stalled_request);
+    engine
+        .handle_request(stalled_region_id, RegionRequest::Create(stalled_request))
+        .await
+        .unwrap();
+
+    let normal_request = CreateRequestBuilder::new().table_dir("normal").build();
+    let normal_schema = rows_schema(&normal_request);
+    engine
+        .handle_request(normal_region_id, RegionRequest::Create(normal_request))
+        .await
+        .unwrap();
+
+    put_rows(
+        &engine,
+        stalled_region_id,
+        Rows {
+            schema: stalled_schema.clone(),
+            rows: build_rows_for_key("stalled", 0, 2, 0),
+        },
+    )
+    .await;
+
+    let engine_cloned = engine.clone();
+    let stalled_write = tokio::spawn(async move {
+        put_rows(
+            &engine_cloned,
+            stalled_region_id,
+            Rows {
+                schema: stalled_schema,
+                rows: build_rows_for_key("stalled", 2, 2, 0),
+            },
+        )
+        .await;
+    });
+
+    listener.wait().await;
+
+    put_rows(
+        &engine,
+        normal_region_id,
+        Rows {
+            schema: normal_schema,
+            rows: build_rows_for_key("normal", 0, 2, 0),
+        },
+    )
+    .await;
+
+    flush_region(&engine, stalled_region_id, None).await;
+    stalled_write.await.unwrap();
+
+    let scanner = engine
+        .scanner(normal_region_id, ScanRequest::default())
+        .await
+        .unwrap();
+    assert_eq!(0, scanner.num_files());
+    assert_eq!(1, scanner.num_memtables());
 }
 
 #[tokio::test]

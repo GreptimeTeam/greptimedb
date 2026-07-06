@@ -188,6 +188,20 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         let mut current_options = version.options.clone();
         for option in options {
             match option {
+                SetRegionOption::WriteBufferSize(new_write_buffer_size) => {
+                    info!(
+                        "Update region write_buffer_size: {}, previous: {:?} new: {:?}",
+                        region.region_id, current_options.write_buffer_size, new_write_buffer_size
+                    );
+                    current_options.write_buffer_size = new_write_buffer_size;
+                    current_options.validate().map_err(|e| {
+                        store_api::metadata::InvalidRegionRequestSnafu {
+                            region_id: region.region_id,
+                            err: e.to_string(),
+                        }
+                        .build()
+                    })?;
+                }
                 SetRegionOption::Ttl(new_ttl) => {
                     info!(
                         "Update region ttl: {}, previous: {:?} new: {:?}",
@@ -273,7 +287,8 @@ fn new_region_options_on_empty_memtable(
     let mut current_options = current_options.clone();
     for option in options {
         match option {
-            SetRegionOption::Ttl(_)
+            SetRegionOption::WriteBufferSize(_)
+            | SetRegionOption::Ttl(_)
             | SetRegionOption::Twsc(_, _)
             | SetRegionOption::AutoFlushInterval(_) => (),
             SetRegionOption::Format(format_str) => {

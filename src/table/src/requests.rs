@@ -155,7 +155,7 @@ pub struct TableOptions {
     pub extra_options: HashMap<String, String>,
 }
 
-pub const WRITE_BUFFER_SIZE_KEY: &str = "write_buffer_size";
+pub const WRITE_BUFFER_SIZE_KEY: &str = store_api::mito_engine_options::WRITE_BUFFER_SIZE_KEY;
 pub const TTL_KEY: &str = store_api::mito_engine_options::TTL_KEY;
 pub const STORAGE_KEY: &str = "storage";
 pub const COMMENT_KEY: &str = "comment";
