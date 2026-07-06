@@ -366,4 +366,38 @@ mod tests {
     fn struct_array(fields: Fields, arrays: Vec<ArrayRef>) -> ArrayRef {
         Arc::new(StructArray::new(fields, arrays, None))
     }
+
+    /// Verifies that `Json2Aligner` can align a projected batch where the JSON2
+    /// column is at a different index than in the full schema used to build the
+    /// aligner. Columns are matched by `PARQUET:field_id`, not positional index.
+    #[test]
+    fn test_align_batch_works_with_projected_batch() {
+        let id_fields = Fields::from(vec![id_field()]);
+        // Full schema: [ts(id=0), j(id=1)]
+        let full_schema = schema_with_json_field(json_field("j", id_fields.clone()));
+        let aligner = Json2Aligner::try_new([full_schema]).unwrap();
+        assert_eq!(aligner.json_columns.len(), 1);
+        assert_eq!(aligner.json_columns[0].0, 1); // column_id = 1
+
+        // Projected batch: only [j(id=1)], at index 0
+        let projected_schema = Arc::new(Schema::new(vec![
+            Arc::new(json_field("j", id_fields.clone())),
+        ]));
+        let batch = RecordBatch::try_new(
+            projected_schema,
+            vec![struct_array(
+                id_fields,
+                vec![Arc::new(Int64Array::from_iter_values([10, 20])) as ArrayRef],
+            )],
+        )
+        .unwrap();
+
+        // Should NOT panic — aligner finds j by column_id=1, not index
+        let aligned = aligner.align_batch(batch).unwrap();
+        assert_eq!(aligned.num_columns(), 1);
+        assert_eq!(
+            aligned.schema_ref().field(0).data_type(),
+            &aligner.json_columns[0].1
+        );
+    }
 }
