@@ -3,10 +3,13 @@
 The `Query Regression` workflow targets self-hosted GitHub Actions runners via
 runner labels or ARC runner scale set names:
 
-- `ubuntu-22.04-8-cores`
-- `ubuntu-22.04-16-cores`
-- `ubuntu-22.04-32-cores`
-- `ubuntu-22.04-64-cores`
+- `perf-regression-8-cores`
+- `perf-regression-16-cores`
+- `perf-regression-32-cores`
+- `perf-regression-64-cores`
+
+The names intentionally avoid generic labels such as `ubuntu-22.04-8-cores`,
+which may already be used by GitHub-hosted larger runners or other runner pools.
 
 For Kubernetes-based runners, ARC runner pods run inside the target Kubernetes
 cluster and connect outbound to GitHub; GitHub can then dispatch jobs whose
@@ -42,25 +45,25 @@ Install one or more sizes. The Helm release name and `runnerScaleSetName` should
 match the `runs-on` value used by the workflow.
 
 ```bash
-helm upgrade --install ubuntu-22.04-8-cores \
+helm upgrade --install perf-regression-8-cores \
   oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set \
   --namespace arc-runners \
   --create-namespace \
   -f .github/runner-scale-sets/query-regression/values-8-cores.yaml
 
-helm upgrade --install ubuntu-22.04-16-cores \
+helm upgrade --install perf-regression-16-cores \
   oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set \
   --namespace arc-runners \
   --create-namespace \
   -f .github/runner-scale-sets/query-regression/values-16-cores.yaml
 
-helm upgrade --install ubuntu-22.04-32-cores \
+helm upgrade --install perf-regression-32-cores \
   oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set \
   --namespace arc-runners \
   --create-namespace \
   -f .github/runner-scale-sets/query-regression/values-32-cores.yaml
 
-helm upgrade --install ubuntu-22.04-64-cores \
+helm upgrade --install perf-regression-64-cores \
   oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set \
   --namespace arc-runners \
   --create-namespace \

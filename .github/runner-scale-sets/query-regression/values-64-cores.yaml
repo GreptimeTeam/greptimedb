@@ -1,7 +1,7 @@
 githubConfigUrl: "https://github.com/GreptimeTeam/greptimedb"
 githubConfigSecret: greptimedb-arc-github-app
 
-runnerScaleSetName: "ubuntu-22.04-64-cores"
+runnerScaleSetName: "perf-regression-64-cores"
 minRunners: 0
 maxRunners: 1
 

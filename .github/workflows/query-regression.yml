@@ -36,12 +36,12 @@ on:
         description: Self-hosted runner label or ARC runner scale set for this query regression run
         required: true
         type: choice
-        default: ubuntu-22.04-8-cores
+        default: perf-regression-8-cores
         options:
-          - ubuntu-22.04-8-cores
-          - ubuntu-22.04-16-cores
-          - ubuntu-22.04-32-cores
-          - ubuntu-22.04-64-cores
+          - perf-regression-8-cores
+          - perf-regression-16-cores
+          - perf-regression-32-cores
+          - perf-regression-64-cores
   pull_request:
     types: [labeled, ready_for_review, reopened]
 
@@ -60,7 +60,7 @@ jobs:
             !github.event.pull_request.draft &&
             contains(github.event.pull_request.labels.*.name, 'query-regression') &&
             (github.event.action != 'labeled' || github.event.label.name == 'query-regression')) }}
-    runs-on: ${{ github.event_name == 'workflow_dispatch' && inputs.runner || 'ubuntu-22.04-8-cores' }}
+    runs-on: ${{ github.event_name == 'workflow_dispatch' && inputs.runner || 'perf-regression-8-cores' }}
     timeout-minutes: 180
     env:
       CARGO_PROFILE: ${{ github.event_name == 'pull_request' && 'nightly' || inputs.cargo_profile }}
