@@ -1,0 +1,8 @@
+name = "ssts_limit_old_manifest"
+reason = "Verify distributed information_schema.ssts_manifest LIMIT queries over SSTs written by old binaries obey a global limit."
+introduced_by = "PR #8412"
+topologies = ["distributed"]
+from_range = ["*"]
+to_range = [">v1.1.1"]
+features = ["information_schema", "sst", "metadata", "table", "query"]
+owner = "query"
