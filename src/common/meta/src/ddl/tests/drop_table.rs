@@ -22,7 +22,7 @@ use async_trait::async_trait;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::ext::{BoxedError, ErrorExt, StackError};
 use common_error::status_code::StatusCode;
-use common_procedure::Procedure;
+use common_procedure::{Procedure, StringKey};
 use common_procedure_test::{
     execute_procedure_until, execute_procedure_until_done, new_test_procedure_context,
 };
@@ -870,6 +870,174 @@ async fn test_undrop_table_fails_when_live_name_is_created_after_prepare() {
         .unwrap()
         .unwrap();
     assert_eq!(live_table.table_id(), live_table_id);
+}
+
+#[tokio::test]
+async fn test_undrop_table_closes_opened_regions_when_restore_metadata_races_with_create() {
+    let (tx, mut rx) = mpsc::channel(8);
+    let datanode_handler = DatanodeWatcher::new(tx);
+    let node_manager = Arc::new(MockDatanodeManager::new(datanode_handler));
+    let detector_controller = Arc::new(RecordingRegionFailureDetectorController::default());
+    let mut ddl_context = new_ddl_context(node_manager);
+    ddl_context.soft_drop_enabled = true;
+    ddl_context.region_failure_detector_controller = detector_controller.clone();
+    let dropped_table_id = 1024;
+    let live_table_id = 1025;
+    let table_name = "foo";
+    let task = test_create_table_task(table_name, dropped_table_id);
+    ddl_context
+        .table_metadata_manager
+        .create_table_metadata(
+            task.table_info.clone(),
+            TableRouteValue::physical(vec![RegionRoute {
+                region: Region::new_test(RegionId::new(dropped_table_id, 1)),
+                leader_peer: Some(Peer::empty(1)),
+                follower_peers: vec![Peer::empty(2)],
+                leader_state: None,
+                leader_down_since: None,
+                write_route_policy: None,
+            }]),
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+    let mut drop_procedure = DropTableProcedure::new(
+        new_drop_table_task(table_name, dropped_table_id, false),
+        ddl_context.clone(),
+    );
+    execute_procedure_until_done(&mut drop_procedure).await;
+    while rx.try_recv().is_ok() {}
+    detector_controller.clear().await;
+
+    let mut procedure =
+        UndropTableProcedure::new(new_undrop_table_task(dropped_table_id), ddl_context.clone());
+    let ctx = new_test_procedure_context();
+    procedure.execute(&ctx).await.unwrap();
+    procedure.execute(&ctx).await.unwrap();
+
+    let mut opened_regions = HashSet::new();
+    for _ in 0..2 {
+        let (peer, request) = rx.try_recv().unwrap();
+        let Some(region_request::Body::Open(req)) = request.body else {
+            unreachable!();
+        };
+        opened_regions.insert((peer.id, req.region_id));
+    }
+    assert_eq!(
+        opened_regions,
+        HashSet::from([
+            (1, RegionId::new(dropped_table_id, 1).as_u64()),
+            (2, RegionId::new(dropped_table_id, 1).as_u64()),
+        ])
+    );
+    assert_eq!(
+        detector_controller.registered().await,
+        vec![(1, RegionId::new(dropped_table_id, 1))]
+    );
+
+    ddl_context
+        .table_metadata_manager
+        .create_table_metadata(
+            test_create_table_task(table_name, live_table_id).table_info,
+            TableRouteValue::physical(vec![]),
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+
+    let err = procedure.execute(&ctx).await.unwrap_err();
+    assert_eq!(err.status_code(), StatusCode::TableAlreadyExists);
+
+    let mut closed_regions = HashSet::new();
+    for _ in 0..2 {
+        let (peer, request) = rx.try_recv().unwrap();
+        let Some(region_request::Body::Close(req)) = request.body else {
+            unreachable!();
+        };
+        closed_regions.insert((peer.id, req.region_id));
+    }
+    assert_eq!(
+        closed_regions,
+        HashSet::from([
+            (1, RegionId::new(dropped_table_id, 1).as_u64()),
+            (2, RegionId::new(dropped_table_id, 1).as_u64()),
+        ])
+    );
+    assert!(rx.try_recv().is_err());
+    assert_eq!(
+        detector_controller.deregistered().await,
+        vec![(1, RegionId::new(dropped_table_id, 1))]
+    );
+
+    let live_table = ddl_context
+        .table_metadata_manager
+        .table_name_manager()
+        .get(TableNameKey::new(
+            DEFAULT_CATALOG_NAME,
+            DEFAULT_SCHEMA_NAME,
+            table_name,
+        ))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(live_table.table_id(), live_table_id);
+}
+
+#[tokio::test]
+async fn test_undrop_table_lock_key_includes_original_table_name_before_prepare() {
+    let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
+    let mut ddl_context = new_ddl_context(node_manager);
+    ddl_context.soft_drop_enabled = true;
+    let table_id = 1024;
+    let table_name = "foo";
+    let task = test_create_table_task(table_name, table_id);
+    ddl_context
+        .table_metadata_manager
+        .create_table_metadata(
+            task.table_info.clone(),
+            TableRouteValue::physical(vec![]),
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+    let mut drop_procedure = DropTableProcedure::new(
+        new_drop_table_task(table_name, table_id, false),
+        ddl_context.clone(),
+    );
+    execute_procedure_until_done(&mut drop_procedure).await;
+
+    let original_table_name = ddl_context
+        .table_metadata_manager
+        .get_dropped_table_by_id(table_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .table_name;
+    let procedure = UndropTableProcedure::new_with_original_table_name(
+        new_undrop_table_task(table_id),
+        ddl_context,
+        Some(original_table_name),
+    );
+
+    let keys = procedure
+        .lock_key()
+        .keys_to_lock()
+        .cloned()
+        .collect::<Vec<_>>();
+    assert!(
+        keys.iter().any(|key| matches!(
+            key,
+            StringKey::Exclusive(key) if key == "__table_name_lock/greptime.public.foo"
+        )),
+        "undrop lock keys should include the original table name: {keys:?}"
+    );
+    assert!(
+        keys.iter().any(|key| matches!(
+            key,
+            StringKey::Exclusive(key) if key == "__table_lock/1024"
+        )),
+        "undrop lock keys should include the dropped table id: {keys:?}"
+    );
 }
 
 #[tokio::test]

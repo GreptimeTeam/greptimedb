@@ -480,7 +480,16 @@ impl DdlManager {
         undrop_table_task: UndropTableTask,
     ) -> Result<(ProcedureId, Option<Output>)> {
         let context = self.create_context();
-        let procedure = UndropTableProcedure::new(undrop_table_task, context);
+        let original_table_name = context
+            .table_metadata_manager
+            .get_dropped_table_by_id(undrop_table_task.table_id)
+            .await?
+            .map(|dropped_table| dropped_table.table_name);
+        let procedure = UndropTableProcedure::new_with_original_table_name(
+            undrop_table_task,
+            context,
+            original_table_name,
+        );
         let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
 
         self.execute_procedure_and_wait(procedure_with_id).await

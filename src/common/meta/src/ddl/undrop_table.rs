@@ -23,6 +23,7 @@ use common_procedure::{
     Context as ProcedureContext, LockKey, Procedure, Result as ProcedureResult, Status,
 };
 use common_telemetry::tracing_context::TracingContext;
+use common_telemetry::warn;
 use common_wal::options::WalOptions;
 use futures::future::join_all;
 use serde::{Deserialize, Serialize};
@@ -32,6 +33,7 @@ use strum::AsRefStr;
 use table::metadata::TableId;
 use table::table_name::TableName;
 
+use crate::ddl::drop_table::executor::DropTableExecutor;
 use crate::ddl::utils::{
     add_peer_context_if_needed, convert_region_routes_to_detecting_regions,
     is_metric_engine_logical_table, map_to_procedure_error, region_storage_path,
@@ -41,7 +43,7 @@ use crate::error::{self, Result};
 use crate::instruction::CacheIdent;
 use crate::key::table_name::TableNameKey;
 use crate::key::table_route::TableRouteValue;
-use crate::lock_key::TableLock;
+use crate::lock_key::{CatalogLock, SchemaLock, TableLock, TableNameLock};
 use crate::rpc::ddl::UndropTableTask;
 use crate::rpc::router::{
     RegionRoute, find_follower_regions, find_followers, find_leader_regions, find_leaders,
@@ -56,10 +58,17 @@ impl UndropTableProcedure {
     pub const TYPE_NAME: &'static str = "metasrv-procedure::UndropTable";
 
     pub fn new(task: UndropTableTask, context: DdlContext) -> Self {
-        Self {
-            context,
-            data: UndropTableData::new(task),
-        }
+        Self::new_with_original_table_name(task, context, None)
+    }
+
+    pub(crate) fn new_with_original_table_name(
+        task: UndropTableTask,
+        context: DdlContext,
+        table_name: Option<TableName>,
+    ) -> Self {
+        let mut data = UndropTableData::new(task);
+        data.table_name = table_name;
+        Self { context, data }
     }
 
     pub fn from_json(json: &str, context: DdlContext) -> ProcedureResult<Self> {
@@ -107,7 +116,8 @@ impl UndropTableProcedure {
 
     async fn on_restore_metadata(&mut self) -> Result<Status> {
         let table_route_value = self.data.table_route_value();
-        self.context
+        if let Err(err) = self
+            .context
             .table_metadata_manager
             .restore_table_metadata(
                 self.data.task.table_id,
@@ -116,17 +126,58 @@ impl UndropTableProcedure {
                 &self.data.region_wal_options,
             )
             .await
-            .map_err(|err| match err {
-                error::Error::TombstoneTargetAlreadyExists { .. } => {
-                    error::TableAlreadyExistsSnafu {
-                        table_name: self.data.table_name().to_string(),
-                    }
-                    .build()
-                }
-                err => err,
-            })?;
+        {
+            let should_cleanup_opened_regions = !err.is_retry_later();
+            let err = self.map_restore_metadata_error(err);
+            if should_cleanup_opened_regions
+                && let Err(cleanup_err) = self.cleanup_opened_regions_after_restore_failure().await
+            {
+                warn!(
+                    cleanup_err;
+                    "Failed to close opened regions after undrop metadata restore failure, table_id: {}",
+                    self.data.task.table_id
+                );
+            }
+            return Err(err);
+        }
         self.data.state = UndropTableState::InvalidateTableCache;
         Ok(Status::executing(true))
+    }
+
+    fn map_restore_metadata_error(&self, err: error::Error) -> error::Error {
+        match err {
+            error::Error::TombstoneTargetAlreadyExists { .. } => error::TableAlreadyExistsSnafu {
+                table_name: self.data.table_name().to_string(),
+            }
+            .build(),
+            err => err,
+        }
+    }
+
+    async fn cleanup_opened_regions_after_restore_failure(&self) -> Result<()> {
+        let TableRouteValue::Physical(route) = self.data.table_route_value() else {
+            return Ok(());
+        };
+        let region_routes = route.region_routes.clone();
+        let executor = DropTableExecutor::new(
+            self.data.table_name().clone(),
+            self.data.task.table_id,
+            false,
+        );
+
+        executor
+            .on_close_regions(
+                &self.context.node_manager,
+                &self.context.leader_region_registry,
+                &region_routes,
+            )
+            .await?;
+        self.context
+            .deregister_failure_detectors(convert_region_routes_to_detecting_regions(
+                &region_routes,
+            ))
+            .await;
+        Ok(())
     }
 
     async fn on_open_regions(&mut self) -> Result<Status> {
@@ -211,7 +262,22 @@ impl Procedure for UndropTableProcedure {
     }
 
     fn lock_key(&self) -> LockKey {
-        LockKey::new(vec![TableLock::Write(self.data.task.table_id).into()])
+        let mut lock_key = Vec::new();
+        if let Some(table_name) = &self.data.table_name {
+            lock_key.push(CatalogLock::Read(&table_name.catalog_name).into());
+            lock_key
+                .push(SchemaLock::read(&table_name.catalog_name, &table_name.schema_name).into());
+            lock_key.push(
+                TableNameLock::new(
+                    &table_name.catalog_name,
+                    &table_name.schema_name,
+                    &table_name.table_name,
+                )
+                .into(),
+            );
+        }
+        lock_key.push(TableLock::Write(self.data.task.table_id).into());
+        LockKey::new(lock_key)
     }
 }
 
