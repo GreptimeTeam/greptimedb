@@ -30,13 +30,15 @@ use datatypes::prelude::{ConcreteDataType, DataType};
 use datatypes::schema::{Schema, SchemaRef};
 use datatypes::value::Value;
 use datatypes::vectors::Helper;
+use datatypes::vectors::json::array::JsonArray;
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 use store_api::storage::{ColumnId, JsonReadHint};
 
+use super::json_schema::Json2OutputPlan;
 use crate::cache::CacheStrategy;
 use crate::error::{DataTypeMismatchSnafu, InvalidRequestSnafu, RecordBatchSnafu, Result};
-use crate::read::json_schema::{Json2OutputPlan, normalize_json2_output};
+use crate::read::json_schema::planned_json2_output_type;
 use crate::read::projection::{read_column_ids_from_projection, repeated_vector_with_cache};
 use crate::read::read_columns::ReadColumns;
 use crate::sst::parquet::flat_format::sst_column_id_indices;
@@ -117,10 +119,14 @@ impl FlatProjectionMapper {
 
             let mut schema = col.column_schema.clone();
             let json_read_hint = json_type_hint.and_then(|x| x.get(&schema.name));
-            let json_output_plan = Json2OutputPlan::new(&schema.data_type, json_read_hint)
+
+            let json_output_plan = planned_json2_output_type(&schema.data_type, json_read_hint)
                 .context(DataTypeMismatchSnafu)?;
-            if let Some(concretized) = json_output_plan.planned_type() {
-                schema.data_type = concretized.clone();
+            match &json_output_plan {
+                Json2OutputPlan::AlignTo(data_type) => {
+                    schema.data_type = data_type.clone();
+                }
+                Json2OutputPlan::NonJson2 => {}
             }
             json_output_plans.push(json_output_plan);
             col_schemas.push(schema);
@@ -149,18 +155,17 @@ impl FlatProjectionMapper {
                 {
                     continue;
                 }
-
                 let Some(col) = metadata.column_by_id(*column_id) else {
                     continue;
                 };
                 let Some(hint) = json_type_hint.get(&col.column_schema.name) else {
                     continue;
                 };
-
-                let json_output_plan =
-                    Json2OutputPlan::new(data_type, Some(hint)).context(DataTypeMismatchSnafu)?;
-                if let Some(concretized) = json_output_plan.planned_type() {
-                    *data_type = concretized.clone();
+                if let Json2OutputPlan::AlignTo(concretized) =
+                    planned_json2_output_type(data_type, Some(hint))
+                        .context(DataTypeMismatchSnafu)?
+                {
+                    *data_type = concretized;
                 }
             }
         }
@@ -334,14 +339,15 @@ impl FlatProjectionMapper {
                     array = casted;
                 }
             }
-
-            array = normalize_json2_output(
-                array,
-                &mut output_column_schemas[output_idx].data_type,
-                &self.json_output_plans[output_idx],
-            )
-            .context(DataTypesSnafu)?;
-
+            let array = match &self.json_output_plans[output_idx] {
+                Json2OutputPlan::NonJson2 => array,
+                Json2OutputPlan::AlignTo(data_type) => {
+                    output_column_schemas[output_idx].data_type = data_type.clone();
+                    JsonArray::from(&array)
+                        .try_align(&data_type.as_arrow_type())
+                        .context(DataTypesSnafu)?
+                }
+            };
             arrays.push(array);
         }
 

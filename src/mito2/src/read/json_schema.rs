@@ -28,12 +28,10 @@ pub(crate) mod align;
 
 use std::collections::HashMap;
 
-use datatypes::arrow::array::ArrayRef;
 use datatypes::arrow::datatypes::SchemaRef as ArrowSchemaRef;
 use datatypes::error::{Result as DataTypeResult, UnsupportedOperationSnafu};
-use datatypes::prelude::{ConcreteDataType, DataType};
+use datatypes::prelude::ConcreteDataType;
 use datatypes::types::json_type::JsonNativeType;
-use datatypes::vectors::json::array::JsonArray;
 use snafu::ResultExt;
 use store_api::metadata::RegionMetadata;
 use store_api::storage::{JsonReadHint, JsonRootReadHint, NestedPath};
@@ -135,111 +133,36 @@ pub(crate) fn infer_json2_root_hints_from_schema(
 pub(crate) fn planned_json2_output_type(
     data_type: &ConcreteDataType,
     hint: Option<&JsonReadHint>,
-) -> DataTypeResult<Option<ConcreteDataType>> {
-    todo!()
-}
+) -> DataTypeResult<Json2OutputPlan> {
+    if data_type
+        .as_json()
+        .is_some_and(|json_type| json_type.is_json2())
+    {
+        return Ok(Json2OutputPlan::NonJson2);
+    }
 
-/// JSON2 output handling plan for one projected column.
-#[derive(Debug, Clone)]
-pub(crate) enum Json2OutputPlan {
-    /// The column isn't JSON2 and doesn't need JSON2 output handling.
-    NonJson2,
-    /// Align the array to the expected JSON2 output type.
-    Align(ConcreteDataType),
-}
-
-impl Json2OutputPlan {
-    /// Builds an output plan from a column type and its optional read hint.
-    ///
-    /// Path hints and inferred root hints both carry a concrete JSON2 schema,
-    /// so they produce an [`Json2OutputPlan::Align`] plan. The caller must
-    /// infer root hints before calling this function; `Root(Uninferred)` cannot
-    /// produce an output type. A missing hint on a JSON2 column is treated as an
-    /// unsupported direct projection, such as `SELECT j`.
-    pub(crate) fn new(
-        data_type: &ConcreteDataType,
-        hint: Option<&JsonReadHint>,
-    ) -> DataTypeResult<Self> {
-        if !is_json2_type(data_type) {
-            return Ok(Self::NonJson2);
-        }
-
-        let plan = match hint {
+    match hint {
             Some(JsonReadHint::Root(JsonRootReadHint::Inferred(json_type)))
             | Some(JsonReadHint::Paths(json_type)) => {
-                Self::Align(ConcreteDataType::json2(json_type.clone()))
+                Ok(Json2OutputPlan::AlignTo(ConcreteDataType::json2(json_type.clone())))
             }
             Some(JsonReadHint::Root(JsonRootReadHint::Uninferred)) => UnsupportedOperationSnafu {
-                op: "JSON2 root read schema must be inferred before building output plans",
+                op: "JSON2 root read schema must be inferred",
                 vector_type: "Json2",
             }
-            .fail()?,
+            .fail(),
             None => UnsupportedOperationSnafu {
                 op: "direct JSON2 column projection is not supported yet; use json_get(column, '') to read the root JSON2 value",
                 vector_type: "Json2",
             }
-            .fail()?,
-        };
-        Ok(plan)
-    }
-
-    /// Returns the planned concrete output type, if this plan has one before
-    /// reading actual data.
-    pub(crate) fn planned_type(&self) -> Option<&ConcreteDataType> {
-        match self {
-            Self::Align(data_type) => Some(data_type),
-            Self::NonJson2 => None,
+            .fail(),
         }
-    }
 }
 
-/// Normalizes one output array and its schema type according to its JSON2 read plan.
-///
-/// Behavior by plan:
-///
-/// - [`Json2OutputPlan::NonJson2`] returns the array unchanged.
-/// - [`Json2OutputPlan::Align`] updates `output_type` to the planned JSON2 type
-///   and aligns the array to that type, filling missing fields with nulls.
-///
-/// Parameters:
-///
-/// - `array`: the column data read from memtables or SSTs.
-/// - `output_type`: the type used in the returned record batch schema. This
-///   function updates it when the JSON2 plan determines a more precise type.
-/// - `plan`: whether the column is a non-JSON2 column or a JSON2 read with a
-///   concrete output schema.
-pub(crate) fn normalize_json2_output(
-    array: ArrayRef,
-    output_type: &mut ConcreteDataType,
-    plan: &Json2OutputPlan,
-) -> DataTypeResult<ArrayRef> {
-    match plan {
-        Json2OutputPlan::NonJson2 => Ok(array),
-        Json2OutputPlan::Align(data_type) => {
-            *output_type = data_type.clone();
-            JsonArray::from(&array).try_align(&data_type.as_arrow_type())
-        }
-    }
-}
-
-fn is_json2_type(data_type: &ConcreteDataType) -> bool {
-    data_type
-        .as_json()
-        .is_some_and(|json_type| json_type.is_json2())
-}
-
-#[cfg(test)]
-mod tests {
-    use datatypes::types::json_type::JsonObjectType;
-
-    use super::*;
-
-    #[test]
-    fn test_json2_output_plan_rejects_unhinted_json2_projection() {
-        let output_type = ConcreteDataType::json2(JsonNativeType::Object(JsonObjectType::new()));
-        let err = Json2OutputPlan::new(&output_type, None)
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("use json_get(column, '')"));
-    }
+/// JSON2 output handling plan for one projected column.
+pub(crate) enum Json2OutputPlan {
+    /// The column isn't JSON2 and doesn't need JSON2 output handling.
+    NonJson2,
+    /// Align the array to the expected JSON2 output type.
+    AlignTo(ConcreteDataType),
 }
