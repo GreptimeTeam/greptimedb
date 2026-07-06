@@ -75,16 +75,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             .encode_to_vec(),
         )?;
-        let status = client
+        let response = client
             .post(&args.endpoint)
             .header("Content-Encoding", "snappy")
             .body(body)
             .send()
-            .await?
-            .status();
+            .await?;
+        let status = response.status();
         http_statuses.push(status.as_u16());
         if !status.is_success() {
-            return Err(format!("remote-write failed with status {status}").into());
+            let body_text = response.text().await.unwrap_or_default();
+            return Err(format!("remote-write failed with status {status}: {body_text}").into());
         }
         batches += 1;
     }

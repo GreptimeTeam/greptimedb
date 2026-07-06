@@ -106,6 +106,8 @@ def run_case(args: argparse.Namespace, case_path: Path, work_dir: Path) -> int:
         str(candidate_bin),
         "--fixture-generator",
         str(fixture_generator),
+        "--remote-write-generator",
+        str(args.remote_write_generator),
         "--work-dir",
         str(work_dir),
         "--http-timeout",
@@ -159,6 +161,11 @@ def main() -> int:
     parser.add_argument("--http-timeout", default=os.environ.get("HTTP_TIMEOUT", "300"))
     parser.add_argument("--allow-large-fixture", default=os.environ.get("ALLOW_LARGE_FIXTURE", "false"))
     parser.add_argument(
+        "--remote-write-generator",
+        type=Path,
+        default=configured_path(os.environ.get("REMOTE_WRITE_GENERATOR")),
+    )
+    parser.add_argument(
         "--summary-script",
         type=Path,
         default=Path("candidate-src/.github/scripts/query-regression-summary.py"),
@@ -170,6 +177,8 @@ def main() -> int:
     parser.add_argument("--candidate-ref", default=os.environ.get("CANDIDATE_REF", ""))
     parser.add_argument("--github-output", default=os.environ.get("GITHUB_OUTPUT"))
     args = parser.parse_args()
+    if args.remote_write_generator is None:
+        args.remote_write_generator = args.candidate_src / "target" / profile_dir(args.cargo_profile) / "prom_remote_write_fixture"
 
     try:
         cases = split_cases(args.cases or [os.environ.get("CASE_PATHS", "all")])

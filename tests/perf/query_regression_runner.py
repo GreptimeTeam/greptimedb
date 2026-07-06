@@ -581,24 +581,25 @@ def merge_copy_stats(left: dict[str, int], right: dict[str, int]) -> None:
 
 
 def reflink_file(src: Path, dst: Path) -> bool:
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    sfd = os.open(src, os.O_RDONLY)
     try:
-        dfd = os.open(dst, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, src.stat().st_mode & 0o777)
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        sfd = os.open(src, os.O_RDONLY)
         try:
-            fcntl.ioctl(dfd, FICLONE, sfd)
-            shutil.copystat(src, dst, follow_symlinks=True)
-            return True
+            dfd = os.open(dst, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, src.stat().st_mode & 0o777)
+            try:
+                fcntl.ioctl(dfd, FICLONE, sfd)
+                shutil.copystat(src, dst, follow_symlinks=True)
+                return True
+            finally:
+                os.close(dfd)
         finally:
-            os.close(dfd)
+            os.close(sfd)
     except OSError:
         try:
             dst.unlink()
-        except FileNotFoundError:
+        except OSError:
             pass
         return False
-    finally:
-        os.close(sfd)
 
 
 def materialize_file(src: Path, dst: Path, *, allow_hardlink: bool) -> str:
