@@ -9,6 +9,10 @@ default-run = "greptime"
 name = "greptime"
 path = "src/bin/greptime.rs"
 
+[[bin]]
+name = "query_perf_fixture"
+path = "src/bin/query_perf_fixture.rs"
+
 [features]
 default = [
     "servers/pprof",
@@ -27,6 +31,7 @@ vector_index = ["mito2/vector_index", "query/vector_index"]
 workspace = true
 
 [dependencies]
+api.workspace = true
 async-trait.workspace = true
 auth.workspace = true
 base64.workspace = true
@@ -75,6 +80,7 @@ log-store.workspace = true
 meta-client.workspace = true
 meta-srv.workspace = true
 metric-engine.workspace = true
+mito-codec.workspace = true
 mito2.workspace = true
 moka = { workspace = true, features = ["future"] }
 object-store.workspace = true

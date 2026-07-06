@@ -166,6 +166,8 @@ pub struct HttpOptions {
     pub cors_allowed_origins: Vec<String>,
 
     pub enable_cors: bool,
+
+    pub experimental_enable_explain_analyze_stream: bool,
 }
 
 impl Default for HttpOptions {
@@ -178,6 +180,7 @@ impl Default for HttpOptions {
             cors_allowed_origins: Vec::new(),
             enable_cors: true,
             prom_validation_mode: PromValidationMode::Strict,
+            experimental_enable_explain_analyze_stream: false,
         }
     }
 }
@@ -502,6 +505,7 @@ impl From<NullResponse> for HttpResponse {
 #[derive(Clone)]
 pub struct ApiState {
     pub sql_handler: ServerSqlQueryHandlerRef,
+    pub experimental_enable_explain_analyze_stream: bool,
 }
 
 #[derive(Clone)]
@@ -538,7 +542,12 @@ impl HttpServerBuilder {
     }
 
     pub fn with_sql_handler(self, sql_handler: ServerSqlQueryHandlerRef) -> Self {
-        let sql_router = HttpServer::route_sql(ApiState { sql_handler });
+        let sql_router = HttpServer::route_sql(ApiState {
+            sql_handler,
+            experimental_enable_explain_analyze_stream: self
+                .options
+                .experimental_enable_explain_analyze_stream,
+        });
 
         Self {
             router: self
@@ -1097,7 +1106,7 @@ impl HttpServer {
     }
 
     fn route_sql<S>(api_state: ApiState) -> Router<S> {
-        Router::new()
+        let mut router = Router::new()
             .route("/sql", routing::get(handler::sql).post(handler::sql))
             .route(
                 "/sql/parse",
@@ -1110,8 +1119,16 @@ impl HttpServer {
             .route(
                 "/promql",
                 routing::get(handler::promql).post(handler::promql),
-            )
-            .with_state(api_state)
+            );
+
+        if api_state.experimental_enable_explain_analyze_stream {
+            router = router.route(
+                "/sql/analyze/stream",
+                routing::post(handler::sql_analyze_stream),
+            );
+        }
+
+        router.with_state(api_state)
     }
 
     fn route_logs<S>(log_handler: LogQueryHandlerRef) -> Router<S> {
@@ -1338,7 +1355,7 @@ mod test {
     use axum::handler::Handler;
     use axum::http::StatusCode;
     use axum::routing::get;
-    use common_query::Output;
+    use common_query::{Output, OutputData};
     use common_recordbatch::RecordBatches;
     use datafusion_expr::LogicalPlan;
     use datatypes::prelude::*;
@@ -1365,6 +1382,11 @@ mod test {
     impl SqlQueryHandler for DummyInstance {
         async fn do_query(&self, _: &str, _: QueryContextRef) -> Vec<Result<Output>> {
             unimplemented!()
+        }
+
+        async fn do_analyze_stream_query(&self, _: &str, _: QueryContextRef) -> Result<Output> {
+            let stream = common_recordbatch::RecordBatches::empty().as_stream();
+            Ok(Output::new(OutputData::Stream(stream), Default::default()))
         }
 
         async fn do_promql_query(&self, _: &PromQuery, _: QueryContextRef) -> Vec<Result<Output>> {
@@ -1414,6 +1436,31 @@ mod test {
             "/test/timeout",
             get(forever.layer(ServiceBuilder::new().layer(timeout()))),
         )
+    }
+
+    #[tokio::test]
+    pub async fn test_analyze_stream_route_config_gate() {
+        let (tx, _rx) = mpsc::channel(100);
+        let app = make_test_app_custom(tx, HttpOptions::default());
+        let client = TestClient::new(app).await;
+        let res = client
+            .post("/v1/sql/analyze/stream?sql=EXPLAIN%20ANALYZE%20VERBOSE%20SELECT%201")
+            .send()
+            .await;
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+
+        let (tx, _rx) = mpsc::channel(100);
+        let options = HttpOptions {
+            experimental_enable_explain_analyze_stream: true,
+            ..Default::default()
+        };
+        let app = make_test_app_custom(tx, options);
+        let client = TestClient::new(app).await;
+        let res = client
+            .post("/v1/sql/analyze/stream?sql=EXPLAIN%20ANALYZE%20VERBOSE%20SELECT%201")
+            .send()
+            .await;
+        assert_ne!(res.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

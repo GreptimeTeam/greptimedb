@@ -41,6 +41,8 @@ const TABLE_ID: &str = "table_id";
 const REGION_NUMBER: &str = "region_number";
 const REGION_ROWS: &str = "region_rows";
 const WRITTEN_BYTES: &str = "written_bytes_since_open";
+const QUERY_CPU_TIME_MILLIS: &str = "query_cpu_time_millis";
+const QUERY_SCANNED_BYTES: &str = "query_scanned_bytes";
 const DISK_SIZE: &str = "disk_size";
 const MEMTABLE_SIZE: &str = "memtable_size";
 const MANIFEST_SIZE: &str = "manifest_size";
@@ -59,6 +61,8 @@ const INIT_CAPACITY: usize = 42;
 /// - `region_number`: The region number.
 /// - `region_rows`: The number of rows in region.
 /// - `written_bytes_since_open`: The total bytes written of the region since region opened.
+/// - `query_cpu_time_millis`: The total query CPU time of the region since region opened, in milliseconds.
+/// - `query_scanned_bytes`: The total bytes scanned by queries since region opened.
 /// - `memtable_size`: The memtable size in bytes.
 /// - `disk_size`: The approximate disk size in bytes.
 /// - `manifest_size`: The manifest size in bytes.
@@ -87,6 +91,16 @@ impl InformationSchemaRegionStatistics {
             ColumnSchema::new(REGION_NUMBER, ConcreteDataType::uint32_datatype(), false),
             ColumnSchema::new(REGION_ROWS, ConcreteDataType::uint64_datatype(), true),
             ColumnSchema::new(WRITTEN_BYTES, ConcreteDataType::uint64_datatype(), true),
+            ColumnSchema::new(
+                QUERY_CPU_TIME_MILLIS,
+                ConcreteDataType::uint64_datatype(),
+                true,
+            ),
+            ColumnSchema::new(
+                QUERY_SCANNED_BYTES,
+                ConcreteDataType::uint64_datatype(),
+                true,
+            ),
             ColumnSchema::new(DISK_SIZE, ConcreteDataType::uint64_datatype(), true),
             ColumnSchema::new(MEMTABLE_SIZE, ConcreteDataType::uint64_datatype(), true),
             ColumnSchema::new(MANIFEST_SIZE, ConcreteDataType::uint64_datatype(), true),
@@ -151,6 +165,8 @@ struct InformationSchemaRegionStatisticsBuilder {
     region_numbers: UInt32VectorBuilder,
     region_rows: UInt64VectorBuilder,
     written_bytes: UInt64VectorBuilder,
+    query_cpu_time_millis: UInt64VectorBuilder,
+    query_scanned_bytes: UInt64VectorBuilder,
     disk_sizes: UInt64VectorBuilder,
     memtable_sizes: UInt64VectorBuilder,
     manifest_sizes: UInt64VectorBuilder,
@@ -171,6 +187,8 @@ impl InformationSchemaRegionStatisticsBuilder {
             region_numbers: UInt32VectorBuilder::with_capacity(INIT_CAPACITY),
             region_rows: UInt64VectorBuilder::with_capacity(INIT_CAPACITY),
             written_bytes: UInt64VectorBuilder::with_capacity(INIT_CAPACITY),
+            query_cpu_time_millis: UInt64VectorBuilder::with_capacity(INIT_CAPACITY),
+            query_scanned_bytes: UInt64VectorBuilder::with_capacity(INIT_CAPACITY),
             disk_sizes: UInt64VectorBuilder::with_capacity(INIT_CAPACITY),
             memtable_sizes: UInt64VectorBuilder::with_capacity(INIT_CAPACITY),
             manifest_sizes: UInt64VectorBuilder::with_capacity(INIT_CAPACITY),
@@ -203,6 +221,14 @@ impl InformationSchemaRegionStatisticsBuilder {
             (REGION_NUMBER, &Value::from(region_stat.id.region_number())),
             (REGION_ROWS, &Value::from(region_stat.num_rows)),
             (WRITTEN_BYTES, &Value::from(region_stat.written_bytes)),
+            (
+                QUERY_CPU_TIME_MILLIS,
+                &Value::from(region_stat.query_cpu_time / 1_000_000),
+            ),
+            (
+                QUERY_SCANNED_BYTES,
+                &Value::from(region_stat.query_scanned_bytes),
+            ),
             (DISK_SIZE, &Value::from(region_stat.approximate_bytes)),
             (MEMTABLE_SIZE, &Value::from(region_stat.memtable_size)),
             (MANIFEST_SIZE, &Value::from(region_stat.manifest_size)),
@@ -223,6 +249,10 @@ impl InformationSchemaRegionStatisticsBuilder {
             .push(Some(region_stat.id.region_number()));
         self.region_rows.push(Some(region_stat.num_rows));
         self.written_bytes.push(Some(region_stat.written_bytes));
+        self.query_cpu_time_millis
+            .push(Some(region_stat.query_cpu_time / 1_000_000));
+        self.query_scanned_bytes
+            .push(Some(region_stat.query_scanned_bytes));
         self.disk_sizes.push(Some(region_stat.approximate_bytes));
         self.memtable_sizes.push(Some(region_stat.memtable_size));
         self.manifest_sizes.push(Some(region_stat.manifest_size));
@@ -240,6 +270,8 @@ impl InformationSchemaRegionStatisticsBuilder {
             Arc::new(self.region_numbers.finish()),
             Arc::new(self.region_rows.finish()),
             Arc::new(self.written_bytes.finish()),
+            Arc::new(self.query_cpu_time_millis.finish()),
+            Arc::new(self.query_scanned_bytes.finish()),
             Arc::new(self.disk_sizes.finish()),
             Arc::new(self.memtable_sizes.finish()),
             Arc::new(self.manifest_sizes.finish()),

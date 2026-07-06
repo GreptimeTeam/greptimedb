@@ -202,6 +202,7 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test;
 | physical_plan after FilterPushdown(Post)_| SAME TEXT AS ABOVE_|
 | physical_plan after WindowedSortRule_| SAME TEXT AS ABOVE_|
 | physical_plan after MatchesConstantTerm_| SAME TEXT AS ABOVE_|
+| physical_plan after EnsureGlobalLimitForFetch_| SAME TEXT AS ABOVE_|
 | physical_plan after RemoveDuplicateRule_| SAME TEXT AS ABOVE_|
 | physical_plan after SanityCheckPlan_| SAME TEXT AS ABOVE_|
 | physical_plan_| CooperativeExec_|
@@ -353,6 +354,7 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test AS series;
 | physical_plan after FilterPushdown(Post)_| SAME TEXT AS ABOVE_|
 | physical_plan after WindowedSortRule_| SAME TEXT AS ABOVE_|
 | physical_plan after MatchesConstantTerm_| SAME TEXT AS ABOVE_|
+| physical_plan after EnsureGlobalLimitForFetch_| SAME TEXT AS ABOVE_|
 | physical_plan after RemoveDuplicateRule_| SAME TEXT AS ABOVE_|
 | physical_plan after SanityCheckPlan_| SAME TEXT AS ABOVE_|
 | physical_plan_| CooperativeExec_|
@@ -380,25 +382,21 @@ Affected Rows: 3
 -- SQLNESS REPLACE (RepartitionExec:.*) RepartitionExec: REDACTED
 TQL EXPLAIN (0, 10, '5s') test_nano;
 
-+---------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| plan_type     | plan                                                                                                                                                                                         |
-+---------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| logical_plan  | PromInstantManipulate: range=[0..10000], lookback=[300000], interval=[5000], time index=[j]                                                                                                  |
-|               |   PromSeriesDivide: tags=["k"]                                                                                                                                                               |
-|               |     Sort: test_nano.k ASC NULLS FIRST, test_nano.j ASC NULLS FIRST                                                                                                                           |
-|               |       Projection: test_nano.i, test_nano.k, CAST(test_nano.j AS Timestamp(ms)) AS j                                                                                                          |
-|               |         MergeScan [is_placeholder=false, remote_input=[                                                                                                                                      |
-|               | Filter: CAST(test_nano.j AS Timestamp(ms)) >= TimestampMillisecond(-299999, None) AND CAST(test_nano.j AS Timestamp(ms)) <= TimestampMillisecond(10000, None)                                |
-|               |   TableScan: test_nano, partial_filters=[CAST(test_nano.j AS Timestamp(ms)) >= TimestampMillisecond(-299999, None), CAST(test_nano.j AS Timestamp(ms)) <= TimestampMillisecond(10000, None)] |
-|               | ]]                                                                                                                                                                                           |
-| physical_plan | PromInstantManipulateExec: range=[0..10000], lookback=[300000], interval=[5000], time index=[j]                                                                                              |
-|               |   PromSeriesDivideExec: tags=["k"]                                                                                                                                                           |
-|               |     SortExec: expr=[k@1 ASC, j@2 ASC], preserve_partitioning=[true]                                                                                                                          |
-|               |       RepartitionExec: REDACTED
-|               |         ProjectionExec: expr=[i@0 as i, k@2 as k, CAST(j@1 AS Timestamp(ms)) as j]                                                                                                           |
-|               |           MergeScanExec: REDACTED
-|               |                                                                                                                                                                                              |
-+---------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
++---------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                                                                            |
++---------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| logical_plan  | MergeScan [is_placeholder=false, remote_input=[                                                                                                                 |
+|               | PromInstantManipulate: range=[0..10000], lookback=[300000], interval=[5000], time index=[j]                                                                     |
+|               |   PromSeriesDivide: tags=["k"]                                                                                                                                  |
+|               |     Sort: test_nano.k ASC NULLS FIRST, test_nano.j ASC NULLS FIRST                                                                                              |
+|               |       Projection: test_nano.i, test_nano.k, CAST(test_nano.j AS Timestamp(ms)) AS j                                                                             |
+|               |         Filter: test_nano.j >= TimestampNanosecond(-299999999999, None) AND test_nano.j < TimestampNanosecond(10001000000, None)                                |
+|               |           TableScan: test_nano, partial_filters=[test_nano.j >= TimestampNanosecond(-299999999999, None), test_nano.j < TimestampNanosecond(10001000000, None)] |
+|               | ]]                                                                                                                                                              |
+| physical_plan | CooperativeExec                                                                                                                                                 |
+|               |   MergeScanExec: REDACTED
+|               |                                                                                                                                                                 |
++---------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------+
 
 -- explain verbose at 0s, 5s and 10s for a nanosecond time index.
 -- SQLNESS REPLACE (-+) -
@@ -425,14 +423,14 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test_nano;
 | logical_plan after resolve_grouping_function_| SAME TEXT AS ABOVE_|
 | logical_plan after type_coercion_| SAME TEXT AS ABOVE_|
 | logical_plan after ConstNormalizationRule_| SAME TEXT AS ABOVE_|
-| logical_plan after DistPlannerAnalyzer_| PromInstantManipulate: range=[0..10000], lookback=[300000], interval=[5000], time index=[j]_|
+| logical_plan after DistPlannerAnalyzer_| Projection: test_nano.i, test_nano.k, test_nano.j_|
+|_|_MergeScan [is_placeholder=false, remote_input=[_|
+|_| PromInstantManipulate: range=[0..10000], lookback=[300000], interval=[5000], time index=[j]_|
 |_|_PromSeriesDivide: tags=["k"]_|
 |_|_Sort: test_nano.k ASC NULLS FIRST, test_nano.j ASC NULLS FIRST_|
 |_|_Projection: test_nano.i, test_nano.k, CAST(test_nano.j AS Timestamp(ms)) AS j_|
-|_|_Projection: test_nano.i, test_nano.j, test_nano.k_|
-|_|_MergeScan [is_placeholder=false, remote_input=[_|
-|_| Filter: CAST(test_nano.j AS Timestamp(ms)) >= TimestampMillisecond(-299999, None) AND CAST(test_nano.j AS Timestamp(ms)) <= TimestampMillisecond(10000, None)_|
-|_|_TableScan: test_nano, partial_filters=[CAST(test_nano.j AS Timestamp(ms)) >= TimestampMillisecond(-299999, None), CAST(test_nano.j AS Timestamp(ms)) <= TimestampMillisecond(10000, None)] |
+|_|_Filter: test_nano.j >= TimestampNanosecond(-299999999999, None) AND test_nano.j < TimestampNanosecond(10001000000, None)_|
+|_|_TableScan: test_nano, partial_filters=[test_nano.j >= TimestampNanosecond(-299999999999, None), test_nano.j < TimestampNanosecond(10001000000, None)] |
 |_| ]]_|
 | logical_plan after FixStateUdafOrderingAnalyzer_| SAME TEXT AS ABOVE_|
 | analyzed_logical_plan_| SAME TEXT AS ABOVE_|
@@ -459,13 +457,13 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test_nano;
 | logical_plan after common_sub_expression_eliminate_| SAME TEXT AS ABOVE_|
 | logical_plan after extract_leaf_expressions_| SAME TEXT AS ABOVE_|
 | logical_plan after push_down_leaf_projections_| SAME TEXT AS ABOVE_|
-| logical_plan after optimize_projections_| PromInstantManipulate: range=[0..10000], lookback=[300000], interval=[5000], time index=[j]_|
+| logical_plan after optimize_projections_| MergeScan [is_placeholder=false, remote_input=[_|
+|_| PromInstantManipulate: range=[0..10000], lookback=[300000], interval=[5000], time index=[j]_|
 |_|_PromSeriesDivide: tags=["k"]_|
 |_|_Sort: test_nano.k ASC NULLS FIRST, test_nano.j ASC NULLS FIRST_|
 |_|_Projection: test_nano.i, test_nano.k, CAST(test_nano.j AS Timestamp(ms)) AS j_|
-|_|_MergeScan [is_placeholder=false, remote_input=[_|
-|_| Filter: CAST(test_nano.j AS Timestamp(ms)) >= TimestampMillisecond(-299999, None) AND CAST(test_nano.j AS Timestamp(ms)) <= TimestampMillisecond(10000, None)_|
-|_|_TableScan: test_nano, partial_filters=[CAST(test_nano.j AS Timestamp(ms)) >= TimestampMillisecond(-299999, None), CAST(test_nano.j AS Timestamp(ms)) <= TimestampMillisecond(10000, None)] |
+|_|_Filter: test_nano.j >= TimestampNanosecond(-299999999999, None) AND test_nano.j < TimestampNanosecond(10001000000, None)_|
+|_|_TableScan: test_nano, partial_filters=[test_nano.j >= TimestampNanosecond(-299999999999, None), test_nano.j < TimestampNanosecond(10001000000, None)] |
 |_| ]]_|
 | logical_plan after ScanHintRule_| SAME TEXT AS ABOVE_|
 | logical_plan after JsonTypeConcretizeRule_| SAME TEXT AS ABOVE_|
@@ -495,37 +493,21 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test_nano;
 | logical_plan after optimize_projections_| SAME TEXT AS ABOVE_|
 | logical_plan after ScanHintRule_| SAME TEXT AS ABOVE_|
 | logical_plan after JsonTypeConcretizeRule_| SAME TEXT AS ABOVE_|
-| logical_plan_| PromInstantManipulate: range=[0..10000], lookback=[300000], interval=[5000], time index=[j]_|
+| logical_plan_| MergeScan [is_placeholder=false, remote_input=[_|
+|_| PromInstantManipulate: range=[0..10000], lookback=[300000], interval=[5000], time index=[j]_|
 |_|_PromSeriesDivide: tags=["k"]_|
 |_|_Sort: test_nano.k ASC NULLS FIRST, test_nano.j ASC NULLS FIRST_|
 |_|_Projection: test_nano.i, test_nano.k, CAST(test_nano.j AS Timestamp(ms)) AS j_|
-|_|_MergeScan [is_placeholder=false, remote_input=[_|
-|_| Filter: CAST(test_nano.j AS Timestamp(ms)) >= TimestampMillisecond(-299999, None) AND CAST(test_nano.j AS Timestamp(ms)) <= TimestampMillisecond(10000, None)_|
-|_|_TableScan: test_nano, partial_filters=[CAST(test_nano.j AS Timestamp(ms)) >= TimestampMillisecond(-299999, None), CAST(test_nano.j AS Timestamp(ms)) <= TimestampMillisecond(10000, None)] |
+|_|_Filter: test_nano.j >= TimestampNanosecond(-299999999999, None) AND test_nano.j < TimestampNanosecond(10001000000, None)_|
+|_|_TableScan: test_nano, partial_filters=[test_nano.j >= TimestampNanosecond(-299999999999, None), test_nano.j < TimestampNanosecond(10001000000, None)] |
 |_| ]]_|
-| initial_physical_plan_| PromInstantManipulateExec: range=[0..10000], lookback=[300000], interval=[5000], time index=[j]_|
-|_|_PromSeriesDivideExec: tags=["k"]_|
-|_|_SortExec: expr=[k@1 ASC, j@2 ASC], preserve_partitioning=[false]_|
-|_|_ProjectionExec: expr=[i@0 as i, k@2 as k, CAST(j@1 AS Timestamp(ms)) as j]_|
-|_|_MergeScanExec: REDACTED
+| initial_physical_plan_| MergeScanExec: REDACTED
 |_|_|
-| initial_physical_plan_with_stats_| PromInstantManipulateExec: range=[0..10000], lookback=[300000], interval=[5000], time index=[j], statistics=[Rows=Inexact(2), Bytes=Absent, [(Col[0]:),(Col[1]:),(Col[2]:)]]_|
-|_|_PromSeriesDivideExec: tags=["k"], statistics=[Rows=Absent, Bytes=Absent, [(Col[0]:),(Col[1]:),(Col[2]:)]]_|
-|_|_SortExec: expr=[k@1 ASC, j@2 ASC], preserve_partitioning=[false], statistics=[Rows=Absent, Bytes=Absent, [(Col[0]:),(Col[1]:),(Col[2]:)]]_|
-|_|_ProjectionExec: expr=[i@0 as i, k@2 as k, CAST(j@1 AS Timestamp(ms)) as j], statistics=[Rows=Absent, Bytes=Absent, [(Col[0]:),(Col[1]:),(Col[2]:)]]_|
-|_|_MergeScanExec: REDACTED
+| initial_physical_plan_with_stats_| MergeScanExec: REDACTED
 |_|_|
-| initial_physical_plan_with_schema_| PromInstantManipulateExec: range=[0..10000], lookback=[300000], interval=[5000], time index=[j], schema=[i:Float64;N, k:Utf8;N, j:Timestamp(ms)]_|
-|_|_PromSeriesDivideExec: tags=["k"], schema=[i:Float64;N, k:Utf8;N, j:Timestamp(ms)]_|
-|_|_SortExec: expr=[k@1 ASC, j@2 ASC], preserve_partitioning=[false], schema=[i:Float64;N, k:Utf8;N, j:Timestamp(ms)]_|
-|_|_ProjectionExec: expr=[i@0 as i, k@2 as k, CAST(j@1 AS Timestamp(ms)) as j], schema=[i:Float64;N, k:Utf8;N, j:Timestamp(ms)]_|
-|_|_MergeScanExec: REDACTED
+| initial_physical_plan_with_schema_| MergeScanExec: REDACTED
 |_|_|
 | physical_plan after OutputRequirements_| OutputRequirementExec: order_by=[], dist_by=Unspecified_|
-|_|_PromInstantManipulateExec: range=[0..10000], lookback=[300000], interval=[5000], time index=[j]_|
-|_|_PromSeriesDivideExec: tags=["k"]_|
-|_|_SortExec: expr=[k@1 ASC, j@2 ASC], preserve_partitioning=[false]_|
-|_|_ProjectionExec: expr=[i@0 as i, k@2 as k, CAST(j@1 AS Timestamp(ms)) as j]_|
 |_|_MergeScanExec: REDACTED
 |_|_|
 | physical_plan after aggregate_statistics_| SAME TEXT AS ABOVE_|
@@ -535,70 +517,35 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test_nano;
 | physical_plan after parallelize_scan_| SAME TEXT AS ABOVE_|
 | physical_plan after PassDistributionRule_| SAME TEXT AS ABOVE_|
 | physical_plan after PromqlTsidNarrowJoin_| SAME TEXT AS ABOVE_|
-| physical_plan after EnforceSorting_| OutputRequirementExec: order_by=[], dist_by=Unspecified_|
-|_|_PromInstantManipulateExec: range=[0..10000], lookback=[300000], interval=[5000], time index=[j]_|
-|_|_PromSeriesDivideExec: tags=["k"]_|
-|_|_SortExec: expr=[k@1 ASC, j@2 ASC], preserve_partitioning=[true]_|
-|_|_ProjectionExec: expr=[i@0 as i, k@2 as k, CAST(j@1 AS Timestamp(ms)) as j]_|
-|_|_MergeScanExec: REDACTED
-|_|_|
-| physical_plan after EnforceDistribution_| OutputRequirementExec: order_by=[], dist_by=Unspecified_|
-|_|_PromInstantManipulateExec: range=[0..10000], lookback=[300000], interval=[5000], time index=[j]_|
-|_|_PromSeriesDivideExec: tags=["k"]_|
-|_|_SortExec: expr=[k@1 ASC, j@2 ASC], preserve_partitioning=[true]_|
-|_|_RepartitionExec: REDACTED
-|_|_SortExec: expr=[k@1 ASC, j@2 ASC], preserve_partitioning=[true]_|
-|_|_ProjectionExec: expr=[i@0 as i, k@2 as k, CAST(j@1 AS Timestamp(ms)) as j]_|
-|_|_MergeScanExec: REDACTED
-|_|_|
+| physical_plan after EnforceSorting_| SAME TEXT AS ABOVE_|
+| physical_plan after EnforceDistribution_| SAME TEXT AS ABOVE_|
 | physical_plan after CombinePartialFinalAggregate_| SAME TEXT AS ABOVE_|
-| physical_plan after EnforceSorting_| OutputRequirementExec: order_by=[], dist_by=Unspecified_|
-|_|_PromInstantManipulateExec: range=[0..10000], lookback=[300000], interval=[5000], time index=[j]_|
-|_|_PromSeriesDivideExec: tags=["k"]_|
-|_|_SortExec: expr=[k@1 ASC, j@2 ASC], preserve_partitioning=[true]_|
-|_|_RepartitionExec: REDACTED
-|_|_ProjectionExec: expr=[i@0 as i, k@2 as k, CAST(j@1 AS Timestamp(ms)) as j]_|
-|_|_MergeScanExec: REDACTED
-|_|_|
+| physical_plan after EnforceSorting_| SAME TEXT AS ABOVE_|
 | physical_plan after OptimizeAggregateOrder_| SAME TEXT AS ABOVE_|
 | physical_plan after ProjectionPushdown_| SAME TEXT AS ABOVE_|
-| physical_plan after OutputRequirements_| PromInstantManipulateExec: range=[0..10000], lookback=[300000], interval=[5000], time index=[j]_|
-|_|_PromSeriesDivideExec: tags=["k"]_|
-|_|_SortExec: expr=[k@1 ASC, j@2 ASC], preserve_partitioning=[true]_|
-|_|_RepartitionExec: REDACTED
-|_|_ProjectionExec: expr=[i@0 as i, k@2 as k, CAST(j@1 AS Timestamp(ms)) as j]_|
-|_|_MergeScanExec: REDACTED
+| physical_plan after OutputRequirements_| MergeScanExec: REDACTED
 |_|_|
 | physical_plan after LimitAggregation_| SAME TEXT AS ABOVE_|
 | physical_plan after LimitPushPastWindows_| SAME TEXT AS ABOVE_|
 | physical_plan after LimitPushdown_| SAME TEXT AS ABOVE_|
 | physical_plan after ProjectionPushdown_| SAME TEXT AS ABOVE_|
 | physical_plan after PushdownSort_| SAME TEXT AS ABOVE_|
-| physical_plan after EnsureCooperative_| SAME TEXT AS ABOVE_|
+| physical_plan after EnsureCooperative_| CooperativeExec_|
+|_|_MergeScanExec: REDACTED
+|_|_|
 | physical_plan after FilterPushdown(Post)_| SAME TEXT AS ABOVE_|
 | physical_plan after WindowedSortRule_| SAME TEXT AS ABOVE_|
 | physical_plan after MatchesConstantTerm_| SAME TEXT AS ABOVE_|
+| physical_plan after EnsureGlobalLimitForFetch_| SAME TEXT AS ABOVE_|
 | physical_plan after RemoveDuplicateRule_| SAME TEXT AS ABOVE_|
 | physical_plan after SanityCheckPlan_| SAME TEXT AS ABOVE_|
-| physical_plan_| PromInstantManipulateExec: range=[0..10000], lookback=[300000], interval=[5000], time index=[j]_|
-|_|_PromSeriesDivideExec: tags=["k"]_|
-|_|_SortExec: expr=[k@1 ASC, j@2 ASC], preserve_partitioning=[true]_|
-|_|_RepartitionExec: REDACTED
-|_|_ProjectionExec: expr=[i@0 as i, k@2 as k, CAST(j@1 AS Timestamp(ms)) as j]_|
+| physical_plan_| CooperativeExec_|
 |_|_MergeScanExec: REDACTED
 |_|_|
-| physical_plan_with_stats_| PromInstantManipulateExec: range=[0..10000], lookback=[300000], interval=[5000], time index=[j], statistics=[Rows=Inexact(2), Bytes=Absent, [(Col[0]:),(Col[1]:),(Col[2]:)]]_|
-|_|_PromSeriesDivideExec: tags=["k"], statistics=[Rows=Absent, Bytes=Absent, [(Col[0]:),(Col[1]:),(Col[2]:)]]_|
-|_|_SortExec: expr=[k@1 ASC, j@2 ASC], preserve_partitioning=[true], statistics=[Rows=Absent, Bytes=Absent, [(Col[0]:),(Col[1]:),(Col[2]:)]]_|
-|_|_RepartitionExec: REDACTED
-|_|_ProjectionExec: expr=[i@0 as i, k@2 as k, CAST(j@1 AS Timestamp(ms)) as j], statistics=[Rows=Absent, Bytes=Absent, [(Col[0]:),(Col[1]:),(Col[2]:)]]_|
+| physical_plan_with_stats_| CooperativeExec, statistics=[Rows=Absent, Bytes=Absent, [(Col[0]:),(Col[1]:),(Col[2]:)]]_|
 |_|_MergeScanExec: REDACTED
 |_|_|
-| physical_plan_with_schema_| PromInstantManipulateExec: range=[0..10000], lookback=[300000], interval=[5000], time index=[j], schema=[i:Float64;N, k:Utf8;N, j:Timestamp(ms)]_|
-|_|_PromSeriesDivideExec: tags=["k"], schema=[i:Float64;N, k:Utf8;N, j:Timestamp(ms)]_|
-|_|_SortExec: expr=[k@1 ASC, j@2 ASC], preserve_partitioning=[true], schema=[i:Float64;N, k:Utf8;N, j:Timestamp(ms)]_|
-|_|_RepartitionExec: REDACTED
-|_|_ProjectionExec: expr=[i@0 as i, k@2 as k, CAST(j@1 AS Timestamp(ms)) as j], schema=[i:Float64;N, k:Utf8;N, j:Timestamp(ms)]_|
+| physical_plan_with_schema_| CooperativeExec, schema=[i:Float64;N, k:Utf8;N, j:Timestamp(ms)]_|
 |_|_MergeScanExec: REDACTED
 |_|_|
 +-+-+

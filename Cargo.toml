@@ -137,7 +137,7 @@ datafusion-functions-aggregate-common = "=53.1.0"
 datafusion-functions-window-common = "=53.1.0"
 datafusion-optimizer = "=53.1.0"
 datafusion-orc = { git = "https://github.com/datafusion-contrib/datafusion-orc.git", rev = "6c07fa282dc8d62db2aa4ded06ab55485efc811a" }
-datafusion-pg-catalog = "0.17"
+datafusion-pg-catalog = "0.17.3"
 datafusion-physical-expr = "=53.1.0"
 datafusion-physical-plan = "=53.1.0"
 datafusion-proto = "=53.1.0"
@@ -158,7 +158,7 @@ fs2 = "0.4"
 fst = "0.4.7"
 futures = "0.3"
 futures-util = "0.3"
-greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "b6b665d8b6fce4f1f0da49c8c79fb150636df4ff" }
+greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "4a69c9e75240a76afeb0796798085813669288f8" }
 hex = "0.4"
 http = "1"
 humantime = "2.1"
@@ -341,21 +341,21 @@ git = "https://github.com/GreptimeTeam/greptime-meter.git"
 rev = "5618e779cf2bb4755b499c630fba4c35e91898cb"
 
 [patch.crates-io]
-datafusion = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "e8a127c28e8839964bb6aefdd909810dc11cd2c9" }
-datafusion-common = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "e8a127c28e8839964bb6aefdd909810dc11cd2c9" }
-datafusion-datasource = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "e8a127c28e8839964bb6aefdd909810dc11cd2c9" }
-datafusion-expr = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "e8a127c28e8839964bb6aefdd909810dc11cd2c9" }
-datafusion-expr-common = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "e8a127c28e8839964bb6aefdd909810dc11cd2c9" }
-datafusion-functions = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "e8a127c28e8839964bb6aefdd909810dc11cd2c9" }
-datafusion-functions-aggregate-common = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "e8a127c28e8839964bb6aefdd909810dc11cd2c9" }
-datafusion-functions-window-common = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "e8a127c28e8839964bb6aefdd909810dc11cd2c9" }
-datafusion-optimizer = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "e8a127c28e8839964bb6aefdd909810dc11cd2c9" }
-datafusion-physical-expr = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "e8a127c28e8839964bb6aefdd909810dc11cd2c9" }
-datafusion-physical-expr-common = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "e8a127c28e8839964bb6aefdd909810dc11cd2c9" }
-datafusion-physical-plan = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "e8a127c28e8839964bb6aefdd909810dc11cd2c9" }
-datafusion-proto = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "e8a127c28e8839964bb6aefdd909810dc11cd2c9" }
-datafusion-sql = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "e8a127c28e8839964bb6aefdd909810dc11cd2c9" }
-datafusion-substrait = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "e8a127c28e8839964bb6aefdd909810dc11cd2c9" }
+datafusion = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "25e823d9ceefc2e538dee93f58c1a5c9e05e8182" }
+datafusion-common = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "25e823d9ceefc2e538dee93f58c1a5c9e05e8182" }
+datafusion-datasource = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "25e823d9ceefc2e538dee93f58c1a5c9e05e8182" }
+datafusion-expr = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "25e823d9ceefc2e538dee93f58c1a5c9e05e8182" }
+datafusion-expr-common = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "25e823d9ceefc2e538dee93f58c1a5c9e05e8182" }
+datafusion-functions = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "25e823d9ceefc2e538dee93f58c1a5c9e05e8182" }
+datafusion-functions-aggregate-common = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "25e823d9ceefc2e538dee93f58c1a5c9e05e8182" }
+datafusion-functions-window-common = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "25e823d9ceefc2e538dee93f58c1a5c9e05e8182" }
+datafusion-optimizer = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "25e823d9ceefc2e538dee93f58c1a5c9e05e8182" }
+datafusion-physical-expr = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "25e823d9ceefc2e538dee93f58c1a5c9e05e8182" }
+datafusion-physical-expr-common = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "25e823d9ceefc2e538dee93f58c1a5c9e05e8182" }
+datafusion-physical-plan = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "25e823d9ceefc2e538dee93f58c1a5c9e05e8182" }
+datafusion-proto = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "25e823d9ceefc2e538dee93f58c1a5c9e05e8182" }
+datafusion-sql = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "25e823d9ceefc2e538dee93f58c1a5c9e05e8182" }
+datafusion-substrait = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "25e823d9ceefc2e538dee93f58c1a5c9e05e8182" }
 sqlparser = { git = "https://github.com/GreptimeTeam/sqlparser-rs.git", rev = "2aefa08a8d69c96eec2d6d6703598a009bba6e4c" }                           # on branch v0.61.x
 
 [profile.release]

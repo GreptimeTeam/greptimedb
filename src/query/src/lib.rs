@@ -45,6 +45,7 @@ pub(crate) mod test_util;
 #[cfg(test)]
 mod tests;
 
+pub use crate::analyze::analyze_plan_metrics_to_json_value;
 pub use crate::datafusion::DfContextProviderAdapter;
 pub use crate::query_engine::{
     QueryEngine, QueryEngineContext, QueryEngineFactory, QueryEngineRef,

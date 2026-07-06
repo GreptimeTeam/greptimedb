@@ -1807,6 +1807,7 @@ body_limit = "64MiB"
 prom_validation_mode = "strict"
 cors_allowed_origins = []
 enable_cors = true
+experimental_enable_explain_analyze_stream = false
 
 [grpc]
 bind_addr = "127.0.0.1:4001"
@@ -1969,7 +1970,7 @@ mem_threshold_on_create = "auto"
 {vector_index_config}[region_engine.mito.gc]
 enable = false
 lingering_time = "1m"
-unknown_file_lingering_time = "1h"
+unknown_file_lingering_time = "1day"
 max_concurrent_lister_per_gc_job = 32
 max_concurrent_gc_job = 4
 

@@ -1,0 +1,177 @@
+name: Query Regression Comment
+
+on:
+  workflow_run:
+    workflows: ["Query Regression"]
+    types: [completed]
+
+permissions:
+  contents: read
+  actions: read
+  pull-requests: write
+
+jobs:
+  comment:
+    if: >-
+      ${{ github.event.workflow_run.event == 'pull_request' &&
+          github.event.workflow_run.conclusion != 'cancelled' &&
+          github.event.workflow_run.conclusion != 'skipped' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Locate query regression comment artifact
+        id: artifact
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const run_id = context.payload.workflow_run.id;
+            const { data } = await github.rest.actions.listWorkflowRunArtifacts({
+              owner,
+              repo,
+              run_id,
+              per_page: 100,
+            });
+            const artifact = data.artifacts.find(
+              item => item.name === 'query-regression-comment' && !item.expired
+            );
+            if (!artifact) {
+              core.info('No query-regression-comment artifact found; skipping.');
+              core.setOutput('found', 'false');
+              return;
+            }
+            const maxBytes = 1024 * 1024;
+            if (artifact.size_in_bytes > maxBytes) {
+              core.warning(`Comment artifact too large: ${artifact.size_in_bytes} bytes`);
+              core.setOutput('found', 'false');
+              return;
+            }
+            core.setOutput('found', 'true');
+            core.setOutput('id', String(artifact.id));
+
+      - name: Download query regression comment artifact
+        id: download
+        if: ${{ steps.artifact.outputs.found == 'true' }}
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: query-regression-comment
+          path: query-regression-comment
+          repository: ${{ github.repository }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ github.event.workflow_run.id }}
+
+      - name: Validate PR metadata and prepare comment
+        id: validate
+        if: ${{ steps.download.outcome == 'success' }}
+        uses: actions/github-script@v7
+        env:
+          WORKFLOW_RUN_ID: ${{ github.event.workflow_run.id }}
+          WORKFLOW_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+
+            const artifactDir = 'query-regression-comment';
+            const metadataPath = path.join(artifactDir, 'query-regression-pr.json');
+            const summaryPath = path.join(artifactDir, 'query-regression-summary.md');
+
+            function skip(message) {
+              core.info(message);
+              core.setOutput('should_post', 'false');
+            }
+
+            if (!fs.existsSync(metadataPath)) {
+              return skip('Missing query-regression-pr.json; skipping sticky comment.');
+            }
+
+            let metadata;
+            try {
+              metadata = JSON.parse(fs.readFileSync(metadataPath, 'utf8'));
+            } catch (error) {
+              core.warning(`Invalid PR metadata JSON: ${error.message}`);
+              return skip('Invalid PR metadata JSON; skipping sticky comment.');
+            }
+
+            const expectedRunId = Number(process.env.WORKFLOW_RUN_ID);
+            const expectedRunAttempt = Number(process.env.WORKFLOW_RUN_ATTEMPT);
+            if (metadata.run_id !== expectedRunId || metadata.run_attempt !== expectedRunAttempt) {
+              return skip('Artifact metadata does not match this workflow_run; skipping.');
+            }
+
+            if (metadata.base_repo !== context.repo.owner + '/' + context.repo.repo) {
+              return skip(`PR targets ${metadata.base_repo}, not this repository; skipping.`);
+            }
+
+            const prNumber = Number(metadata.pr_number);
+            if (!Number.isInteger(prNumber) || prNumber <= 0) {
+              return skip('Invalid PR number in metadata; skipping.');
+            }
+
+            const run = context.payload.workflow_run;
+            const trustedPrNumbers = new Set(
+              (run.pull_requests || [])
+                .map(pr => Number(pr.number))
+                .filter(Number.isInteger)
+            );
+            try {
+              const { data: associatedPrs } = await github.rest.repos.listPullRequestsAssociatedWithCommit({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                commit_sha: run.head_sha,
+              });
+              for (const pr of associatedPrs) {
+                trustedPrNumbers.add(Number(pr.number));
+              }
+            } catch (error) {
+              core.warning(`Could not list PRs associated with workflow_run head SHA: ${error.message}`);
+            }
+            if (!trustedPrNumbers.has(prNumber)) {
+              return skip(`PR #${prNumber} is not associated with workflow_run ${run.id}; skipping.`);
+            }
+
+            const { data: pull } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: prNumber,
+            });
+
+            if (pull.state !== 'open') {
+              return skip(`PR #${prNumber} is ${pull.state}; skipping.`);
+            }
+            if (pull.base.repo.full_name !== metadata.base_repo || pull.head.repo.full_name !== metadata.head_repo) {
+              return skip('Current PR repository metadata does not match artifact; skipping.');
+            }
+            if (pull.head.sha !== metadata.head_sha) {
+              return skip('Current PR head SHA differs from artifact; skipping stale run.');
+            }
+
+            let body = 'Query regression completed, but no summary artifact was found.';
+            if (fs.existsSync(summaryPath)) {
+              const maxSummaryBytes = 1024 * 1024;
+              const summarySize = fs.statSync(summaryPath).size;
+              if (summarySize > maxSummaryBytes) {
+                return skip(`Summary file too large: ${summarySize} bytes.`);
+              }
+              body = fs.readFileSync(summaryPath, 'utf8');
+            }
+            body = body
+              .replace(/<!--[\s\S]*?-->/g, '')
+              .replace(/@/g, '@\u200b');
+            if (body.length > 59999) {
+              body = body.slice(0, 59500) + '\n\n…\n\n_Comment truncated because it exceeded 60000 characters._\n';
+            }
+            fs.writeFileSync(summaryPath, body);
+
+            core.setOutput('should_post', 'true');
+            core.setOutput('pr_number', String(prNumber));
+            core.setOutput('summary_path', summaryPath);
+
+      - name: Post sticky PR comment
+        if: ${{ steps.validate.outputs.should_post == 'true' }}
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: query-regression-report
+          number: ${{ steps.validate.outputs.pr_number }}
+          path: ${{ steps.validate.outputs.summary_path }}

@@ -379,6 +379,20 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display(
+        "Cannot drop table '{}': tombstoned table id {} already uses the same full name",
+        table_name,
+        existing_table_id
+    ))]
+    /// Raised when a live table is recreated with a name still reserved by an older tombstone.
+    TableNameTombstoneConflict {
+        table_name: String,
+        existing_table_id: TableId,
+        dropping_table_id: TableId,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("View already exists, view: {}", view_name))]
     ViewAlreadyExists {
         view_name: String,
@@ -723,6 +737,13 @@ pub enum Error {
     #[snafu(display("Failed to move values: {err_msg}"))]
     MoveValues {
         err_msg: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to restore tombstone, target key already exists: {key}"))]
+    TombstoneTargetAlreadyExists {
+        key: String,
         #[snafu(implicit)]
         location: Location,
     },
@@ -1130,6 +1151,7 @@ impl ErrorExt for Error {
             | EtcdTxnFailed { .. }
             | ConnectEtcd { .. }
             | MoveValues { .. }
+            | TombstoneTargetAlreadyExists { .. }
             | GetCache { .. }
             | GetLatestCacheRetryExceeded { .. }
             | SerializeToJson { .. }
@@ -1221,7 +1243,9 @@ impl ErrorExt for Error {
             ViewNotFound { .. } | TableNotFound { .. } | RegionNotFound { .. } => {
                 StatusCode::TableNotFound
             }
-            ViewAlreadyExists { .. } | TableAlreadyExists { .. } => StatusCode::TableAlreadyExists,
+            ViewAlreadyExists { .. }
+            | TableAlreadyExists { .. }
+            | TableNameTombstoneConflict { .. } => StatusCode::TableAlreadyExists,
 
             SubmitProcedure { source, .. }
             | QueryProcedure { source, .. }

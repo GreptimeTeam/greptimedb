@@ -32,6 +32,7 @@
 | `http.enable_cors` | Bool | `true` | HTTP CORS support, it's turned on by default<br/>This allows browser to access http APIs without CORS restrictions |
 | `http.cors_allowed_origins` | Array | Unset | Customize allowed origins for HTTP CORS. |
 | `http.prom_validation_mode` | String | `strict` | Whether to enable validation for Prometheus remote write requests.<br/>Available options:<br/>- strict: deny invalid UTF-8 strings (default).<br/>- lossy: allow invalid UTF-8 strings, replace invalid characters with REPLACEMENT_CHARACTER(U+FFFD).<br/>- unchecked: do not valid strings. |
+| `http.experimental_enable_explain_analyze_stream` | Bool | `false` | Experimental: enable POST /v1/sql/analyze/stream for streaming EXPLAIN ANALYZE VERBOSE metrics. |
 | `grpc` | -- | -- | The gRPC server options. |
 | `grpc.bind_addr` | String | `127.0.0.1:4001` | The address to bind the gRPC server. |
 | `grpc.runtime_size` | Integer | `8` | The number of server worker threads. |
@@ -247,6 +248,7 @@
 | `http.enable_cors` | Bool | `true` | HTTP CORS support, it's turned on by default<br/>This allows browser to access http APIs without CORS restrictions |
 | `http.cors_allowed_origins` | Array | Unset | Customize allowed origins for HTTP CORS. |
 | `http.prom_validation_mode` | String | `strict` | Whether to enable validation for Prometheus remote write requests.<br/>Available options:<br/>- strict: deny invalid UTF-8 strings (default).<br/>- lossy: allow invalid UTF-8 strings, replace invalid characters with REPLACEMENT_CHARACTER(U+FFFD).<br/>- unchecked: do not valid strings. |
+| `http.experimental_enable_explain_analyze_stream` | Bool | `false` | Experimental: enable POST /v1/sql/analyze/stream for streaming EXPLAIN ANALYZE VERBOSE metrics. |
 | `grpc` | -- | -- | The gRPC server options. |
 | `grpc.bind_addr` | String | `127.0.0.1:4001` | The address to bind the gRPC server. |
 | `grpc.server_addr` | String | `127.0.0.1:4001` | The address advertised to the metasrv, and used for connections from outside the host.<br/>If left empty or unset, the server will automatically use the IP address of the first network interface<br/>on the host, with the same port number as the one specified in `grpc.bind_addr`. |
@@ -599,7 +601,7 @@
 | `region_engine.mito.gc` | -- | -- | -- |
 | `region_engine.mito.gc.enable` | Bool | `false` | Whether GC is enabled. Need to be the same with metasrv's `gc.enable` or unexpected behavior will occur |
 | `region_engine.mito.gc.lingering_time` | String | `1m` | Lingering time before deleting files.<br/>Should be long enough to allow long running queries to finish.<br/>If set to None, then unused files will be deleted immediately. |
-| `region_engine.mito.gc.unknown_file_lingering_time` | String | `1h` | Lingering time before deleting unknown files(files with undetermine expel time).<br/>expel time is the time when the file is considered as removed, as in removed from the manifest.<br/>This should only occur rarely, as manifest keep tracks in `removed_files` field<br/>unless something goes wrong. |
+| `region_engine.mito.gc.unknown_file_lingering_time` | String | `1d` | Lingering time before deleting unknown files (files with undetermined expel time).<br/>Only applies during full file listing GC.<br/>This uses the object's last-modified timestamp as a heuristic (strict less-than comparison);<br/>do not configure this value too small in production to avoid deleting pre-manifest files<br/>from in-progress compaction or flush.<br/>For active/open regions, an unknown file is deleted only if its object last-modified time exceeds this TTL.<br/>If the object store does not provide a last-modified timestamp, the file is conservatively kept.<br/>For dropped regions, unknown files are deleted immediately. |
 | `region_engine.file` | -- | -- | Enable the file engine. |
 | `region_engine.metric` | -- | -- | Metric engine options. |
 | `region_engine.metric.sparse_primary_key_encoding` | Bool | `true` | Whether to use sparse primary key encoding. |

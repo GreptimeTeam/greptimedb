@@ -56,6 +56,10 @@ impl SqlQueryHandler for DummyInstance {
         unimplemented!()
     }
 
+    async fn do_analyze_stream_query(&self, _: &str, _: QueryContextRef) -> Result<Output> {
+        unimplemented!()
+    }
+
     async fn do_exec_plan(
         &self,
         _plan: LogicalPlan,

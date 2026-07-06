@@ -23,6 +23,7 @@ use std::time::Instant;
 use api::v1::SemanticType;
 use common_error::ext::BoxedError;
 use common_recordbatch::SendableRecordBatchStream;
+use common_recordbatch::adapter::RegionQueryStatCounters;
 use common_recordbatch::filter::SimpleFilterEvaluator;
 use common_telemetry::tracing::Instrument;
 use common_telemetry::{debug, error, tracing, warn};
@@ -251,6 +252,8 @@ pub(crate) struct ScanRegion {
     /// Whether to filter out the deleted rows.
     /// Usually true for normal read, and false for scan for compaction.
     filter_deleted: bool,
+    /// Counters that should receive query-load metrics.
+    query_stat_counters: Option<RegionQueryStatCounters>,
     #[cfg(feature = "enterprise")]
     extension_range_provider: Option<BoxedExtensionRangeProvider>,
 }
@@ -274,9 +277,17 @@ impl ScanRegion {
             ignore_bloom_filter: false,
             start_time: None,
             filter_deleted: true,
+            query_stat_counters: None,
             #[cfg(feature = "enterprise")]
             extension_range_provider: None,
         }
+    }
+
+    /// Sets counters that should receive query-load metrics.
+    #[must_use]
+    pub(crate) fn with_query_stat_counters(mut self, counters: RegionQueryStatCounters) -> Self {
+        self.query_stat_counters = Some(counters);
+        self
     }
 
     /// Sets maximum number of SST files to scan concurrently.
@@ -592,7 +603,8 @@ impl ScanRegion {
                     .snapshot_on_scan
                     .then_some(self.request.memtable_max_sequence)
                     .flatten(),
-            );
+            )
+            .with_query_stat_counters(self.query_stat_counters);
         #[cfg(feature = "vector_index")]
         let input = input
             .with_vector_index_applier(vector_index_applier)
@@ -835,6 +847,8 @@ pub struct ScanInput {
     pub(crate) snapshot_sequence: Option<SequenceNumber>,
     /// Whether this scan is for compaction.
     pub(crate) compaction: bool,
+    /// Counters that should receive query-load metrics.
+    pub(crate) query_stat_counters: Option<RegionQueryStatCounters>,
     #[cfg(feature = "enterprise")]
     extension_ranges: Vec<BoxedExtensionRange>,
 }
@@ -871,6 +885,7 @@ impl ScanInput {
             explain_flat_format: false,
             snapshot_sequence: None,
             compaction: false,
+            query_stat_counters: None,
             #[cfg(feature = "enterprise")]
             extension_ranges: Vec::new(),
         }
@@ -991,6 +1006,14 @@ impl ScanInput {
         self
     }
 
+    pub(crate) fn with_query_stat_counters(
+        mut self,
+        counters: Option<RegionQueryStatCounters>,
+    ) -> Self {
+        self.query_stat_counters = counters;
+        self
+    }
+
     /// Sets whether to remove deletion markers during scan.
     #[must_use]
     pub(crate) fn with_filter_deleted(mut self, filter_deleted: bool) -> Self {
@@ -1056,7 +1079,7 @@ impl ScanInput {
         ranges
     }
 
-    fn predicate_for_file(&self, file: &FileHandle) -> Option<Predicate> {
+    pub(crate) fn predicate_for_file(&self, file: &FileHandle) -> Option<Predicate> {
         if self.should_skip_region_partition(file) {
             self.predicate.predicate_without_region().cloned()
         } else {
@@ -1095,7 +1118,35 @@ impl ScanInput {
         })
     }
 
+    /// Checks whether a file can be definitively pruned using only its manifest-level
+    /// time range and the current predicate, without reading any parquet metadata.
+    ///
+    /// Returns `true` if [PruningStatistics] proves the file cannot contain matching rows.
+    #[inline]
+    pub(crate) fn can_manifest_prune_file(&self, file: &FileHandle) -> bool {
+        let predicate = self.predicate_for_file(file);
+        self.manifest_prunes_file(file, predicate.as_ref())
+    }
+
+    fn manifest_prunes_file(&self, file: &FileHandle, predicate: Option<&Predicate>) -> bool {
+        if let Some(pred) = predicate
+            && !pred.is_empty()
+            && let Some(file_level_stats) = self.try_file_level_pruning_stats(file)
+        {
+            let pruning_results = pred.prune_with_stats(
+                &file_level_stats,
+                self.mapper.metadata().schema.arrow_schema(),
+            );
+            pruning_results.first() == Some(&false)
+        } else {
+            false
+        }
+    }
+
     /// Prunes a file to scan and returns the builder to build readers.
+    ///
+    /// This is the public entry point used by direct tests and non-pruner callers.
+    /// It performs its own manifest-level pruning check internally.
     #[tracing::instrument(
         skip_all,
         fields(
@@ -1112,22 +1163,29 @@ impl ScanInput {
         let predicate = self.predicate_for_file(file);
 
         // Early file-level pruning using manifest time range before any parquet metadata access.
-        // This avoids I/O for files that definitely can't match the current predicate snapshot,
-        // especially after TopK dynamic filters have established a timestamp threshold.
-        if let Some(ref pred) = predicate
-            && !pred.is_empty()
-            && let Some(file_level_stats) = self.try_file_level_pruning_stats(file)
-        {
-            let pruning_results = pred.prune_with_stats(
-                &file_level_stats,
-                self.mapper.metadata().schema.arrow_schema(),
-            );
-            if pruning_results.first() == Some(&false) {
-                reader_metrics.filter_metrics.files_time_range_pruned += 1;
-                return Ok(FileRangeBuilder::default());
-            }
+        if self.manifest_prunes_file(file, predicate.as_ref()) {
+            reader_metrics.filter_metrics.files_time_range_pruned += 1;
+            return Ok(FileRangeBuilder::default());
         }
 
+        self.prune_file_after_manifest_check(file, pre_filter_mode, predicate, reader_metrics)
+            .await
+    }
+
+    /// Second half of `prune_file` — performs the actual parquet metadata /
+    /// reader setup. Callers that already performed manifest-level pruning
+    /// (e.g. the `Pruner` via its shared `manifest_pruned_files` cache) should
+    /// call this directly to avoid a redundant manifest check.
+    ///
+    /// `predicate` is the result of `self.predicate_for_file(file)` computed
+    /// externally so the caller can reuse it if needed.
+    pub(crate) async fn prune_file_after_manifest_check(
+        &self,
+        file: &FileHandle,
+        pre_filter_mode: PreFilterMode,
+        predicate: Option<Predicate>,
+        reader_metrics: &mut ReaderMetrics,
+    ) -> Result<FileRangeBuilder> {
         let may_build_selective_row_selection = predicate.is_some();
         let decode_pk_values = !self.compaction
             && self
@@ -1955,9 +2013,11 @@ mod tests {
     use std::sync::Arc;
 
     use common_time::timestamp::{TimeUnit, Timestamp};
-    use datafusion::physical_plan::expressions::lit as physical_lit;
+    use datafusion::physical_plan::expressions::{
+        binary as physical_binary, col as physical_col, lit as physical_lit,
+    };
     use datafusion_common::ScalarValue;
-    use datafusion_expr::{col, lit};
+    use datafusion_expr::{Operator, col, lit};
     use datatypes::arrow::datatypes::{
         DataType as ArrowDataType, Field, Schema as ArrowSchema, TimeUnit as ArrowTimeUnit,
     };
@@ -2417,6 +2477,39 @@ mod tests {
         let mut ranges = SmallVec::new();
         builder.build_ranges(-1, &mut ranges);
         assert!(ranges.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_manifest_pruning_observes_dynamic_filter_update() {
+        let metadata = Arc::new(metadata_with_primary_key(vec![0, 1], false));
+        let mapper = FlatProjectionMapper::new(&metadata, [0, 2, 3]).unwrap();
+        let predicate_group = PredicateGroup::new(metadata.as_ref(), &[]).unwrap();
+        let arrow_schema = metadata.schema.arrow_schema();
+        let ts_expr = physical_col("ts", arrow_schema.as_ref()).unwrap();
+        let dyn_filter = Arc::new(DynamicFilterPhysicalExpr::new(
+            vec![ts_expr.clone()],
+            physical_lit(true),
+        ));
+        predicate_group.add_dyn_filters(vec![dyn_filter.clone()]);
+        let input = ScanInput::new(SchedulerEnv::new().await.access_layer.clone(), mapper)
+            .with_predicate(predicate_group);
+        let file = file_handle_with_time_range(
+            Timestamp::new_millisecond(0),
+            Timestamp::new_millisecond(1000),
+        );
+
+        assert!(!input.can_manifest_prune_file(&file));
+
+        let updated = physical_binary(
+            ts_expr,
+            Operator::Gt,
+            physical_lit(ScalarValue::TimestampMillisecond(Some(1000), None)),
+            arrow_schema.as_ref(),
+        )
+        .unwrap();
+        dyn_filter.update(updated).unwrap();
+
+        assert!(input.can_manifest_prune_file(&file));
     }
 
     #[tokio::test]

@@ -98,6 +98,83 @@ impl ChainedRecordBatchStream {
     }
 }
 
+/// A stream that stops after yielding at most `remaining` rows.
+pub struct LimitedRecordBatchStream {
+    input: Option<SendableRecordBatchStream>,
+    remaining: usize,
+    schema: SchemaRef,
+    output_ordering: Option<Vec<OrderOption>>,
+}
+
+impl LimitedRecordBatchStream {
+    pub fn new(input: SendableRecordBatchStream, limit: usize) -> Self {
+        let schema = input.schema();
+        let output_ordering = input.output_ordering().map(|o| o.to_vec());
+        Self {
+            input: Some(input),
+            remaining: limit,
+            schema,
+            output_ordering,
+        }
+    }
+}
+
+impl RecordBatchStream for LimitedRecordBatchStream {
+    fn name(&self) -> &str {
+        "LimitedRecordBatchStream"
+    }
+
+    fn schema(&self) -> SchemaRef {
+        self.schema.clone()
+    }
+
+    fn output_ordering(&self) -> Option<&[OrderOption]> {
+        self.output_ordering.as_deref()
+    }
+
+    fn metrics(&self) -> Option<RecordBatchMetrics> {
+        self.input.as_ref().and_then(|input| input.metrics())
+    }
+}
+
+impl Stream for LimitedRecordBatchStream {
+    type Item = Result<RecordBatch>;
+
+    fn poll_next(mut self: Pin<&mut Self>, ctx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        if self.remaining == 0 {
+            self.input.take();
+            return Poll::Ready(None);
+        }
+
+        let Some(input) = self.input.as_mut() else {
+            return Poll::Ready(None);
+        };
+
+        match input.poll_next_unpin(ctx) {
+            Poll::Ready(Some(Ok(batch))) => {
+                let num_rows = batch.num_rows();
+                if num_rows > self.remaining {
+                    let remaining = self.remaining;
+                    self.remaining = 0;
+                    self.input.take();
+                    Poll::Ready(Some(batch.slice(0, remaining)))
+                } else {
+                    self.remaining -= num_rows;
+                    if self.remaining == 0 {
+                        self.input.take();
+                    }
+                    Poll::Ready(Some(Ok(batch)))
+                }
+            }
+            Poll::Ready(None) => {
+                self.input.take();
+                Poll::Ready(None)
+            }
+            other => other,
+        }
+    }
+}
+
 impl RecordBatchStream for ChainedRecordBatchStream {
     fn name(&self) -> &str {
         "ChainedRecordBatchStream"
@@ -170,6 +247,75 @@ mod tests {
                 Poll::Ready(None)
             }
         }
+    }
+
+    #[tokio::test]
+    async fn test_limited_chained_stream() {
+        let column_schemas = vec![ColumnSchema::new(
+            "number",
+            ConcreteDataType::uint32_datatype(),
+            false,
+        )];
+
+        let schema = Arc::new(Schema::try_new(column_schemas).unwrap());
+        let first = RecordBatch::new(
+            schema.clone(),
+            [Arc::new(UInt32Vector::from_vec(vec![0, 1, 2])) as _],
+        )
+        .unwrap();
+        let second = RecordBatch::new(
+            schema.clone(),
+            [Arc::new(UInt32Vector::from_vec(vec![3, 4, 5])) as _],
+        )
+        .unwrap();
+        let chained = ChainedRecordBatchStream::new(vec![
+            Box::pin(MockRecordBatchStream {
+                schema: schema.clone(),
+                batch: Some(first),
+            }),
+            Box::pin(MockRecordBatchStream {
+                schema: schema.clone(),
+                batch: Some(second),
+            }),
+        ])
+        .unwrap();
+
+        let batches = collect(Box::pin(LimitedRecordBatchStream::new(
+            Box::pin(chained),
+            4,
+        )))
+        .await
+        .unwrap();
+
+        assert_eq!(2, batches.len());
+        assert_eq!(3, batches[0].num_rows());
+        assert_eq!(1, batches[1].num_rows());
+    }
+
+    #[tokio::test]
+    async fn test_limited_stream_with_zero_limit() {
+        let column_schemas = vec![ColumnSchema::new(
+            "number",
+            ConcreteDataType::uint32_datatype(),
+            false,
+        )];
+
+        let schema = Arc::new(Schema::try_new(column_schemas).unwrap());
+        let batch = RecordBatch::new(
+            schema.clone(),
+            [Arc::new(UInt32Vector::from_vec(vec![0])) as _],
+        )
+        .unwrap();
+        let stream = MockRecordBatchStream {
+            schema,
+            batch: Some(batch),
+        };
+
+        let batches = collect(Box::pin(LimitedRecordBatchStream::new(Box::pin(stream), 0)))
+            .await
+            .unwrap();
+
+        assert!(batches.is_empty());
     }
 
     #[tokio::test]

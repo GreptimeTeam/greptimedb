@@ -73,6 +73,7 @@ greptimedb_data
 .gemini
 .opencode
 .worktrees/
+.slim/deepwork/
 
 # local design docs
 docs/specs/

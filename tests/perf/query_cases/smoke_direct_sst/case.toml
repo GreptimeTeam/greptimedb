@@ -1,0 +1,61 @@
+# Small fixture-generator smoke case. This is intentionally tiny so developers
+# can validate direct-SST generation without creating the large #7913 dataset.
+
+[case]
+name = "smoke_direct_sst"
+description = "Tiny generic direct-SST fixture smoke test"
+
+[scenario]
+kind = "direct_readable_sst"
+seed = 42
+
+
+[[scenario.tables]]
+database = "public"
+name = "smoke_direct_sst"
+engine = "mito"
+append_mode = true
+sst_format = "flat"
+primary_key = ["host", "instance"]
+time_index = "ts"
+
+[[scenario.tables.columns]]
+name = "host"
+type = "STRING"
+semantic = "tag"
+distribution = { kind = "cardinality", values = 2, prefix = "host" }
+
+[[scenario.tables.columns]]
+name = "instance"
+type = "STRING"
+semantic = "tag"
+distribution = { kind = "cardinality", values = 4, prefix = "instance" }
+
+[[scenario.tables.columns]]
+name = "value"
+type = "DOUBLE"
+semantic = "field"
+distribution = { kind = "deterministic_wave", min = 0.0, max = 10.0 }
+
+[[scenario.tables.columns]]
+name = "ts"
+type = "TIMESTAMP(9)"
+semantic = "timestamp"
+
+[scenario.layout]
+regions = 1
+sst_count = 2
+rows_per_sst = 8
+row_group_size = 4
+series_count = 4
+start_unix_nanos = 1704067200000000000
+step_nanos = 1000000000
+time_range_layout = "non_overlapping_per_sst"
+series_layout = "round_robin"
+
+[[scenario.queries]]
+name = "count_all"
+kind = "sql"
+query = "SELECT count(*) FROM smoke_direct_sst"
+warmup = 0
+iterations = 1

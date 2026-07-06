@@ -62,6 +62,9 @@ impl UnorderedScan {
         let mut properties = ScannerProperties::default()
             .with_append_mode(input.append_mode)
             .with_total_rows(input.total_rows());
+        if let Some(counters) = input.query_stat_counters.clone() {
+            properties.set_query_stat_counters(counters);
+        }
         let stream_ctx = Arc::new(StreamContext::unordered_scan_ctx(input));
         properties.partitions = vec![stream_ctx.partition_ranges()];
 
@@ -133,6 +136,12 @@ impl UnorderedScan {
                         yield record_batch?;
                     }
                 } else if stream_ctx.is_file_range_index(*index) {
+                    // Common manifest-level fast-skip shared by UnorderedScan and SeqScan.
+                    if partition_pruner
+                        .try_skip_manifest_pruned_file_range(*index, &part_metrics)
+                    {
+                        continue;
+                    }
                     let stream = scan_flat_file_ranges(
                         stream_ctx.clone(),
                         part_metrics.clone(),

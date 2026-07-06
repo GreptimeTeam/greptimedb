@@ -37,6 +37,7 @@ use datafusion_common::{DataFusionError, internal_err};
 use datafusion_physical_expr::{Distribution, EquivalenceProperties, Partitioning};
 use futures::StreamExt;
 use serde::Serialize;
+use serde_json::{Value, json};
 use sqlparser::ast::AnalyzeFormat;
 
 use crate::dist_plan::MergeScanExec;
@@ -84,6 +85,52 @@ impl DistAnalyzeExec {
             properties.boundedness,
         )
     }
+
+    pub fn input(&self) -> &Arc<dyn ExecutionPlan> {
+        &self.input
+    }
+}
+
+/// Returns verbose analyze metrics as JSON values using the same `JsonMetrics` shape
+/// as `EXPLAIN ANALYZE VERBOSE FORMAT JSON`.
+///
+/// This reads metrics directly from a running physical plan for the experimental
+/// HTTP analyze stream. It is a best-effort diagnostic live snapshot, not a
+/// transactionally consistent snapshot; metric values may change while this
+/// function traverses the plan.
+pub fn analyze_plan_metrics_to_json_value(
+    plan: &Arc<dyn ExecutionPlan>,
+    verbose: bool,
+) -> serde_json::Result<Value> {
+    let input = plan
+        .as_any()
+        .downcast_ref::<DistAnalyzeExec>()
+        .map(|exec| exec.input().clone())
+        .unwrap_or_else(|| plan.clone());
+
+    let mut stages = Vec::new();
+    let mut collector = MetricCollector::new(verbose);
+    accept(input.as_ref(), &mut collector).unwrap();
+    stages.push(json!({
+        "stage": 0,
+        "node": 0,
+        "plan": JsonMetrics::from_record_batch_metrics(collector.record_batch_metrics),
+    }));
+
+    let _ = input.apply(|plan| {
+        if let Some(merge_scan) = plan.as_any().downcast_ref::<MergeScanExec>() {
+            for (node, metric) in merge_scan.sub_stage_metrics().into_iter().enumerate() {
+                stages.push(json!({
+                    "stage": 1,
+                    "node": node,
+                    "plan": JsonMetrics::from_record_batch_metrics(metric),
+                }));
+            }
+        }
+        Ok(TreeNodeRecursion::Continue)
+    });
+
+    Ok(Value::Array(stages))
 }
 
 impl DisplayAs for DistAnalyzeExec {
