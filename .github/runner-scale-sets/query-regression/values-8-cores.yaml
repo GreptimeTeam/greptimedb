@@ -7,11 +7,22 @@ maxRunners: 4
 
 template:
   spec:
+    automountServiceAccountToken: false
+    activeDeadlineSeconds: 11400
+    securityContext:
+      runAsNonRoot: true
+      seccompProfile:
+        type: RuntimeDefault
     containers:
       - name: runner
-        image: greptime-registry.cn-hangzhou.cr.aliyuncs.com/greptime/greptimedb-query-regression-runner:latest
+        image: greptime-registry.cn-hangzhou.cr.aliyuncs.com/greptime/greptimedb-query-regression-runner@sha256:108b7357532e5cf3329853373f561b0c674e954d6307b53d37075df5a189b0b2
         imagePullPolicy: Always
         command: ["/home/runner/run.sh"]
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+              - ALL
         resources:
           requests:
             cpu: "8"

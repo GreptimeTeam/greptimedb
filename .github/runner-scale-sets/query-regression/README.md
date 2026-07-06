@@ -52,10 +52,18 @@ docker build \
 docker push greptime-registry.cn-hangzhou.cr.aliyuncs.com/greptime/greptimedb-query-regression-runner:latest
 ```
 
-The workflow still runs setup actions for pinned toolchain behavior, including
-`rui314/setup-mold` and `astral-sh/setup-uv`. Preinstalling `uv` in the image
-also lets `always()` cleanup and metadata steps run even when an earlier setup
-step fails.
+Deploy the runner image by digest rather than by a mutable tag. Update
+`values-8-cores.yaml` after pushing a rebuilt image.
+
+The workflow still runs setup actions for pinned Rust and `uv` behavior. `mold`
+is installed in the image and selected through `CARGO_BUILD_RUSTFLAGS`, so jobs
+do not need privileged package installation at runtime.
+
+Decide whether the registry repository is public or private. Public pull access
+avoids distributing registry credentials to the runner namespace. If the image
+must be private, create a dedicated read-only image-pull secret for this image
+and attach it only as `imagePullSecrets`; do not expose registry credentials to
+runner containers.
 
 ## Install the query-regression scale set
 
@@ -84,12 +92,20 @@ The scale sets should also appear under repository Actions runner settings.
 Maintainer-approved fork PRs can run on self-hosted runners. Approval only lets
 the workflow execute; it does not make the fork code trusted.
 
+The `query-regression` label is the explicit trigger for PR runs. Updating a PR
+does not rerun the benchmark automatically; remove and re-add the label after
+reviewing the updated changes.
+
 These runners execute PR code and should be treated as untrusted execution
 capacity:
 
 - keep them isolated from sensitive internal services unless explicitly required;
 - do not mount host paths, Docker socket, kubeconfig, or long-lived credentials;
 - use ephemeral runner pods and no shared work directory with trusted jobs;
+- disable service account token mounting in runner pods unless Kubernetes API
+  access is intentionally required;
+- run pods as non-root with privilege escalation disabled, dropped Linux
+  capabilities, and the runtime-default seccomp profile;
 - keep GitHub tokens least-privilege and rely on normal `pull_request` behavior
   for fork PRs, where repository secrets are withheld and `GITHUB_TOKEN` is
   read-only;
@@ -99,16 +115,25 @@ If stronger isolation is required, install a separate runner group/namespace jus
 for query-regression PR workloads and restrict repository/workflow access to the
 `Query Regression` workflow.
 
+Use namespace or cluster network policy to restrict runner egress where the CNI
+supports the needed controls. Query-regression runners need outbound access to
+GitHub Actions services, GitHub artifact/cache endpoints, Rust/crate/toolchain
+endpoints, DNS, and the configured image registries. Block access to unrelated
+cluster services, private network ranges, and cloud metadata endpoints unless a
+case explicitly needs them.
+
 ## Build cache
 
-The workflow builds the base and candidate checkouts in the same job with a
-shared `CARGO_TARGET_DIR`. After the base binary is built, it is copied aside;
-the candidate build then reuses the dependency artifacts from the base build in
-that same target directory.
+The workflow builds base and candidate in the same job, the same source path,
+and a shared `CARGO_TARGET_DIR`. It checks out the base ref into `src`, builds
+and copies the base binary aside, then resets that same `src` checkout to the
+candidate ref before building the candidate binary. Keeping the workspace path
+stable improves Cargo incremental reuse for local workspace crates compared with
+building separate `base-src` and `candidate-src` checkouts.
 
-The workflow also uses the GitHub Actions Rust cache. Fork PRs restore existing
-trusted caches but do not save new cache entries; workflow dispatch and
-same-repository PRs may refresh the cache.
+The workflow also uses the GitHub Actions Rust cache for restore-only cache
+reuse. PR and dispatch runs do not save cache entries. Refresh shared caches from
+trusted maintenance workflows only.
 
 The ARC values in this directory do not configure a cross-run runner-local
 compiler cache. If cross-run compile time still dominates the benchmark,
