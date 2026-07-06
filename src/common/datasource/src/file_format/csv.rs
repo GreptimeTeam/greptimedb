@@ -49,6 +49,7 @@ const SKIP_BAD_RECORDS_BATCH_SIZE: usize = 1;
 pub struct CsvFormat {
     pub has_header: bool,
     pub skip_bad_records: bool,
+    pub strict_headers: bool,
     pub delimiter: u8,
     pub schema_infer_max_record: Option<usize>,
     pub compression_type: CompressionType,
@@ -111,6 +112,16 @@ impl TryFrom<&HashMap<String, String>> for CsvFormat {
             format.skip_bad_records =
                 parse_bool(file_format::FORMAT_SKIP_BAD_RECORDS, skip_bad_records)?;
         };
+        if let Some(strict_headers) = value.get(file_format::FORMAT_STRICT_HEADERS) {
+            format.strict_headers = parse_bool(file_format::FORMAT_STRICT_HEADERS, strict_headers)?;
+        };
+        if format.strict_headers && !format.has_header {
+            return error::ParseFormatSnafu {
+                key: file_format::FORMAT_STRICT_HEADERS,
+                value: "strict_headers=true requires headers=true".to_string(),
+            }
+            .fail();
+        }
         if let Some(timestamp_format) = value.get(file_format::TIMESTAMP_FORMAT) {
             format.timestamp_format = Some(timestamp_format.clone());
         }
@@ -135,6 +146,7 @@ impl Default for CsvFormat {
         Self {
             has_header: true,
             skip_bad_records: false,
+            strict_headers: false,
             delimiter: b',',
             schema_infer_max_record: Some(file_format::DEFAULT_SCHEMA_INFER_MAX_RECORD),
             compression_type: CompressionType::Uncompressed,
@@ -365,7 +377,8 @@ mod tests {
     use super::*;
     use crate::file_format::{
         FORMAT_COMPRESSION_TYPE, FORMAT_DELIMITER, FORMAT_HAS_HEADER, FORMAT_HEADERS,
-        FORMAT_SCHEMA_INFER_MAX_RECORD, FORMAT_SKIP_BAD_RECORDS, FileFormat, file_to_stream,
+        FORMAT_SCHEMA_INFER_MAX_RECORD, FORMAT_SKIP_BAD_RECORDS, FORMAT_STRICT_HEADERS, FileFormat,
+        file_to_stream,
     };
     use crate::test_util::{format_schema, test_store};
 
@@ -492,6 +505,7 @@ mod tests {
                 delimiter: b'\t',
                 has_header: false,
                 skip_bad_records: false,
+                strict_headers: false,
                 timestamp_format: None,
                 time_format: None,
                 date_format: None
@@ -505,6 +519,17 @@ mod tests {
             format,
             CsvFormat {
                 skip_bad_records: true,
+                ..CsvFormat::default()
+            }
+        );
+
+        let map = HashMap::from([(FORMAT_STRICT_HEADERS.to_string(), "true".to_string())]);
+        let format = CsvFormat::try_from(&map).unwrap();
+
+        assert_eq!(
+            format,
+            CsvFormat {
+                strict_headers: true,
                 ..CsvFormat::default()
             }
         );
@@ -544,6 +569,9 @@ mod tests {
 
         let map = HashMap::from([(FORMAT_HEADERS.to_string(), "yes".to_string())]);
         assert!(CsvFormat::try_from(&map).is_err());
+
+        let map = HashMap::from([(FORMAT_STRICT_HEADERS.to_string(), "yes".to_string())]);
+        assert!(CsvFormat::try_from(&map).is_err());
     }
 
     #[test]
@@ -551,6 +579,15 @@ mod tests {
         let map = HashMap::from([
             (FORMAT_HEADERS.to_string(), "false".to_string()),
             (FORMAT_HAS_HEADER.to_string(), "true".to_string()),
+        ]);
+        assert!(CsvFormat::try_from(&map).is_err());
+    }
+
+    #[test]
+    fn test_try_from_rejects_strict_headerless_csv() {
+        let map = HashMap::from([
+            (FORMAT_HEADERS.to_string(), "false".to_string()),
+            (FORMAT_STRICT_HEADERS.to_string(), "true".to_string()),
         ]);
         assert!(CsvFormat::try_from(&map).is_err());
     }

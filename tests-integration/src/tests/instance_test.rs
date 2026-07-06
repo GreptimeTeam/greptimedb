@@ -1091,6 +1091,134 @@ async fn test_execute_copy_from_headerless_csv(instance: Arc<dyn MockInstance>) 
 }
 
 #[apply(both_instances_cases)]
+async fn test_execute_copy_from_csv_strict_headers(instance: Arc<dyn MockInstance>) {
+    let instance = instance.frontend();
+    let tmp_dir = temp_dir::create_temp_dir("test_execute_copy_from_csv_strict_headers");
+    let matching_path = tmp_dir.path().join("matching.csv");
+    let unknown_path = tmp_dir.path().join("unknown.csv");
+    let missing_path = tmp_dir.path().join("missing.csv");
+    let duplicate_path = tmp_dir.path().join("duplicate.csv");
+    std::fs::write(
+        &matching_path,
+        "ts,host_id,reading_value\n2024-01-01T00:00:00,1,10.5\n",
+    )
+    .unwrap();
+    std::fs::write(
+        &unknown_path,
+        "host_id,reading_value,ts,extra\n1,10.5,2024-01-01T00:00:00,ignored\n",
+    )
+    .unwrap();
+    std::fs::write(&missing_path, "host_id,ts\n1,2024-01-01T00:00:00\n").unwrap();
+    std::fs::write(
+        &duplicate_path,
+        "host_id,reading_value,ts,host_id\n1,10.5,2024-01-01T00:00:00,2\n",
+    )
+    .unwrap();
+
+    let output = execute_sql(
+        &instance,
+        "CREATE TABLE csv_strict_headers(host_id INT, reading_value DOUBLE, ts TIMESTAMP TIME INDEX);",
+    )
+    .await
+    .data;
+    assert!(matches!(output, OutputData::AffectedRows(0)));
+
+    let output = execute_sql(
+        &instance,
+        &format!(
+            "COPY csv_strict_headers FROM '{}' WITH (FORMAT='csv', STRICT_HEADERS='true');",
+            matching_path.display()
+        ),
+    )
+    .await
+    .data;
+    assert!(matches!(output, OutputData::AffectedRows(1)));
+
+    let output = execute_sql(&instance, "SELECT * FROM csv_strict_headers;")
+        .await
+        .data;
+    let expect = "\
++---------+---------------+---------------------+
+| host_id | reading_value | ts                  |
++---------+---------------+---------------------+
+| 1       | 10.5          | 2024-01-01T00:00:00 |
++---------+---------------+---------------------+";
+    check_output_stream(output, expect).await;
+
+    let err = try_execute_sql(
+        &instance,
+        &format!(
+            "COPY csv_strict_headers FROM '{}' WITH (FORMAT='csv', STRICT_HEADERS='true');",
+            unknown_path.display()
+        ),
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(
+        unwrap_frontend_error(&err),
+        Error::TableOperation {
+            source: OperatorError::CsvHeaderMismatch {
+                unknown_columns,
+                missing_columns,
+                duplicate_columns,
+                ..
+            },
+            ..
+        } if unknown_columns == &vec!["extra".to_string()]
+            && missing_columns.is_empty()
+            && duplicate_columns.is_empty()
+    ));
+
+    let err = try_execute_sql(
+        &instance,
+        &format!(
+            "COPY csv_strict_headers FROM '{}' WITH (FORMAT='csv', STRICT_HEADERS='true');",
+            missing_path.display()
+        ),
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(
+        unwrap_frontend_error(&err),
+        Error::TableOperation {
+            source: OperatorError::CsvHeaderMismatch {
+                unknown_columns,
+                missing_columns,
+                duplicate_columns,
+                ..
+            },
+            ..
+        } if unknown_columns.is_empty()
+            && missing_columns == &vec!["reading_value".to_string()]
+            && duplicate_columns.is_empty()
+    ));
+
+    let err = try_execute_sql(
+        &instance,
+        &format!(
+            "COPY csv_strict_headers FROM '{}' WITH (FORMAT='csv', STRICT_HEADERS='true');",
+            duplicate_path.display()
+        ),
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(
+        unwrap_frontend_error(&err),
+        Error::TableOperation {
+            source: OperatorError::CsvHeaderMismatch {
+                unknown_columns,
+                missing_columns,
+                duplicate_columns,
+                ..
+            },
+            ..
+        } if unknown_columns.is_empty()
+            && missing_columns.is_empty()
+            && duplicate_columns == &vec!["host_id".to_string()]
+    ));
+}
+
+#[apply(both_instances_cases)]
 async fn test_execute_query_external_table_json(instance: Arc<dyn MockInstance>) {
     unsafe {
         std::env::set_var("TZ", "UTC");
