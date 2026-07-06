@@ -83,14 +83,16 @@ time. For each chunk, the runner invokes `prom_remote_write_fixture` with the
 same series cardinality but a shorter `--samples-per-series` and an advanced
 `--start-unix-millis`. `flush_every_sample_chunks` controls periodic
 `ADMIN FLUSH_TABLE('<physical_table>')` calls; with `flush_every_sample_chunks = 1`,
-each time chunk is flushed separately, creating multiple SSTs/file ranges instead
-of one large final SST. If `sample_chunk_size` is omitted, the runner keeps the
-older single-helper-invocation behavior and flushes once at the end.
+each time chunk is flushed separately. The final visible SST/file-range layout is
+still determined by the storage engine's normal compaction policy, so cases that
+need multi-window file distribution should span multiple compaction windows. If
+`sample_chunk_size` is omitted, the runner keeps the older single-helper-invocation
+behavior and flushes once at the end.
 
 `tests/perf/query_cases/prom_remote_write_7913/case.toml` is a larger manual
-case for issue #7913. It writes 32768 series × 3600 samples through remote-write
-in 300-sample time chunks, flushing after each chunk before running 5m/15m/1h TQL
-selectors. It is not included in the default case set because ingestion cost
+case for issue #7913. It writes 8192 series × 20160 samples through remote-write
+in 1440-sample daily time chunks, flushing after each chunk before running 1d/7d/14d
+TQL selectors. It is not included in the default case set because ingestion cost
 dominates routine CI validation.
 
 ## Generator contract
