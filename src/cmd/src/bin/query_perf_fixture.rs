@@ -38,7 +38,7 @@ use async_trait::async_trait;
 use clap::Parser;
 use datatypes::arrow::array::{
     ArrayRef, BinaryDictionaryBuilder, Float64Array, RecordBatch, StringDictionaryBuilder,
-    TimestampMillisecondArray, TimestampNanosecondArray, UInt8Array, UInt64Array,
+    TimestampMillisecondArray, TimestampNanosecondArray, UInt8Array, UInt32Array, UInt64Array,
 };
 use datatypes::arrow::datatypes::UInt32Type;
 use datatypes::prelude::ConcreteDataType;
@@ -48,10 +48,11 @@ use mito2::access_layer::{FilePathProvider, Metrics, WriteType};
 use mito2::config::IndexConfig;
 use mito2::manifest::action::{RegionCheckpoint, RegionManifest, RemovedFilesRecord};
 use mito2::read::FlatSource;
+use mito2::region::options::{MetricEngineValueEncoding, RegionOptions};
 use mito2::sst::file::{FileMeta, RegionFileId};
 use mito2::sst::index::{Indexer, IndexerBuilder};
 use mito2::sst::parquet::writer::ParquetWriter;
-use mito2::sst::parquet::{SstInfo, WriteOptions};
+use mito2::sst::parquet::{SstInfo, WriteOptions, metric_engine_value_column_encoding};
 use mito2::sst::{
     DEFAULT_WRITE_BUFFER_SIZE, FlatSchemaOptions, FormatType, to_flat_sst_arrow_schema,
 };
@@ -60,9 +61,15 @@ use object_store::services::Fs as FsBuilder;
 use serde::Deserialize;
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataRef};
+use store_api::metric_engine_consts::{
+    DATA_SCHEMA_TABLE_ID_COLUMN_NAME, DATA_SCHEMA_TSID_COLUMN_NAME,
+};
 use store_api::path_utils::region_name;
 use store_api::region_request::PathType;
-use store_api::storage::{FileId, RegionId};
+use store_api::storage::consts::{
+    OP_TYPE_COLUMN_NAME, PRIMARY_KEY_COLUMN_NAME, ReservedColumnId, SEQUENCE_COLUMN_NAME,
+};
+use store_api::storage::{ColumnId, FileId, RegionId};
 
 #[derive(Parser, Debug)]
 #[command(name = "query_perf_fixture")]
@@ -147,6 +154,10 @@ struct TableConfig {
     primary_key: Vec<String>,
     time_index: String,
     columns: Vec<ColumnConfig>,
+    #[serde(default)]
+    metric_physical: bool,
+    #[serde(default)]
+    metric_engine_value_encoding: MetricEngineValueEncoding,
 }
 
 #[derive(Debug, Deserialize)]
@@ -168,6 +179,8 @@ enum Distribution {
     },
     #[serde(rename = "deterministic_wave")]
     DeterministicWave { min: f64, max: f64 },
+    #[serde(rename = "metric_signal")]
+    MetricSignal { min: f64, max: f64 },
 }
 
 #[derive(Debug, Deserialize)]
@@ -175,6 +188,8 @@ struct LayoutConfig {
     regions: usize,
     sst_count: usize,
     rows_per_sst: usize,
+    #[serde(default)]
+    source_batch_rows: Option<NonZeroUsize>,
     row_group_size: usize,
     series_count: NonZeroUsize,
     start_unix_nanos: i64,
@@ -225,6 +240,7 @@ fn concrete_type(ty: &str) -> ConcreteDataType {
     match ty.to_ascii_uppercase().as_str() {
         "STRING" => ConcreteDataType::string_datatype(),
         "DOUBLE" => ConcreteDataType::float64_datatype(),
+        "UINT32" => ConcreteDataType::uint32_datatype(),
         "UINT64" => ConcreteDataType::uint64_datatype(),
         "TIMESTAMP(9)" => ConcreteDataType::timestamp_nanosecond_datatype(),
         "TIMESTAMP(3)" => ConcreteDataType::timestamp_millisecond_datatype(),
@@ -234,6 +250,27 @@ fn concrete_type(ty: &str) -> ConcreteDataType {
 
 fn build_region_metadata(table: &TableConfig, region_id: RegionId) -> RegionMetadata {
     let mut builder = store_api::metadata::RegionMetadataBuilder::new(region_id);
+    if table.metric_physical {
+        builder
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    DATA_SCHEMA_TABLE_ID_COLUMN_NAME,
+                    ConcreteDataType::uint32_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Tag,
+                column_id: ReservedColumnId::table_id(),
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    DATA_SCHEMA_TSID_COLUMN_NAME,
+                    ConcreteDataType::uint64_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Tag,
+                column_id: ReservedColumnId::tsid(),
+            });
+    }
     for (idx, col) in table.columns.iter().enumerate() {
         let mut schema = ColumnSchema::new(
             &col.name,
@@ -260,17 +297,18 @@ fn build_region_metadata(table: &TableConfig, region_id: RegionId) -> RegionMeta
             column_id: idx as u32,
         });
     }
-    let pk_ids = table
-        .primary_key
-        .iter()
-        .map(|name| {
-            table
-                .columns
-                .iter()
-                .position(|c| c.name == *name)
-                .unwrap_or_else(|| panic!("primary key column {name} not found")) as u32
-        })
-        .collect();
+    let mut pk_ids: Vec<ColumnId> = Vec::new();
+    if table.metric_physical {
+        pk_ids.push(ReservedColumnId::table_id());
+        pk_ids.push(ReservedColumnId::tsid());
+    }
+    pk_ids.extend(table.primary_key.iter().map(|name| {
+        table
+            .columns
+            .iter()
+            .position(|c| c.name == *name)
+            .unwrap_or_else(|| panic!("primary key column {name} not found")) as u32
+    }));
     builder.primary_key(pk_ids);
     builder.primary_key_encoding(PrimaryKeyEncoding::Dense);
     builder
@@ -278,26 +316,44 @@ fn build_region_metadata(table: &TableConfig, region_id: RegionId) -> RegionMeta
         .expect("region metadata should be valid for fixture table config")
 }
 
-fn encode_dense_primary_key(table: &TableConfig, values: &HashMap<String, String>) -> Vec<u8> {
-    let fields = table
+#[derive(Clone)]
+enum FixtureValue {
+    String(String),
+    UInt32(u32),
+    UInt64(u64),
+}
+
+fn encode_dense_primary_key(
+    metadata: &RegionMetadata,
+    values: &HashMap<String, FixtureValue>,
+) -> Vec<u8> {
+    let fields = metadata
         .primary_key
         .iter()
-        .enumerate()
-        .map(|(idx, _)| {
+        .map(|column_id| {
+            let column = metadata
+                .column_by_id(*column_id)
+                .unwrap_or_else(|| panic!("primary key column id {column_id} not found"));
             (
-                idx as u32,
-                SortField::new(ConcreteDataType::string_datatype()),
+                *column_id,
+                SortField::new(column.column_schema.data_type.clone()),
             )
         })
         .collect();
     let converter = DensePrimaryKeyCodec::with_fields(fields);
     converter
-        .encode(
-            table
-                .primary_key
-                .iter()
-                .map(|name| datatypes::value::ValueRef::String(values[name].as_str())),
-        )
+        .encode(metadata.primary_key.iter().map(|column_id| {
+            let name = &metadata
+                .column_by_id(*column_id)
+                .unwrap()
+                .column_schema
+                .name;
+            match &values[name] {
+                FixtureValue::String(v) => datatypes::value::ValueRef::String(v.as_str()),
+                FixtureValue::UInt32(v) => datatypes::value::ValueRef::UInt32(*v),
+                FixtureValue::UInt64(v) => datatypes::value::ValueRef::UInt64(*v),
+            }
+        }))
         .expect("dense primary key encoding should match fixture primary key fields")
 }
 
@@ -320,41 +376,129 @@ fn wave_value(min: f64, max: f64, row: usize) -> f64 {
     min + span * (0.5 - 0.5 * (std::f64::consts::TAU * phase).cos())
 }
 
+fn unit_noise(row: usize, series: usize) -> f64 {
+    let mut x = (row as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        ^ (series as u64).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    x ^= x >> 30;
+    x = x.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    x ^= x >> 27;
+    x = x.wrapping_mul(0x94D0_49BB_1331_11EB);
+    x ^= x >> 31;
+    (x as f64) / (u64::MAX as f64)
+}
+
+fn metric_signal_value(min: f64, max: f64, row: usize, series: usize) -> f64 {
+    let span = max - min;
+    let center = min + span * 0.5;
+    let series_phase = (series as f64 * 0.618_033_988_75).fract() * std::f64::consts::TAU;
+    let baseline = (series as f64 * 0.013_579).sin() * span * 0.08;
+    let trend = (((row as f64) * 0.000_013 + series as f64 * 0.000_17).fract() - 0.5) * span * 0.12;
+    let periodic = ((row as f64) * 0.017 + series_phase).sin() * span * 0.18
+        + ((row as f64) * 0.001_9 + series_phase * 0.37).cos() * span * 0.07;
+    let jitter = (unit_noise(row, series) - 0.5) * span * 0.04;
+    (center + baseline + trend + periodic + jitter).clamp(min - span * 0.05, max + span * 0.05)
+}
+
 fn generate_record_batch(
     table: &TableConfig,
     metadata: &RegionMetadataRef,
     layout: &LayoutConfig,
     sst_idx: usize,
+    row_offset_in_sst: usize,
+    rows: usize,
     sequence: u64,
 ) -> RecordBatch {
     let flat_schema = to_flat_sst_arrow_schema(metadata, &FlatSchemaOptions::default());
-    let rows = layout.rows_per_sst;
-    let mut columns = Vec::new();
-    let base_row = sst_idx * rows;
+    let mut columns = Vec::with_capacity(flat_schema.fields().len());
+    let base_row = sst_idx * layout.rows_per_sst + row_offset_in_sst;
+    let column_by_name: HashMap<_, _> =
+        table.columns.iter().map(|c| (c.name.as_str(), c)).collect();
 
-    for col in &table.columns {
+    for field in flat_schema.fields() {
+        let name = field.name().as_str();
+        if name == DATA_SCHEMA_TABLE_ID_COLUMN_NAME {
+            columns.push(Arc::new(UInt32Array::from_value(1, rows)) as ArrayRef);
+            continue;
+        }
+        if name == DATA_SCHEMA_TSID_COLUMN_NAME {
+            columns.push(Arc::new(UInt64Array::from(
+                (0..rows)
+                    .map(|row| series_for_row(layout, sst_idx, base_row + row) as u64)
+                    .collect::<Vec<_>>(),
+            )) as ArrayRef);
+            continue;
+        }
+        if name == PRIMARY_KEY_COLUMN_NAME {
+            let mut pk_builder = BinaryDictionaryBuilder::<UInt32Type>::new();
+            for row in 0..rows {
+                let global_row = base_row + row;
+                let series = series_for_row(layout, sst_idx, global_row);
+                let mut values = HashMap::new();
+                if table.metric_physical {
+                    values.insert(
+                        DATA_SCHEMA_TABLE_ID_COLUMN_NAME.to_string(),
+                        FixtureValue::UInt32(1),
+                    );
+                    values.insert(
+                        DATA_SCHEMA_TSID_COLUMN_NAME.to_string(),
+                        FixtureValue::UInt64(series as u64),
+                    );
+                }
+                for col in table.columns.iter().filter(|c| c.semantic == "tag") {
+                    values.insert(
+                        col.name.clone(),
+                        FixtureValue::String(tag_value(col, series)),
+                    );
+                }
+                pk_builder
+                    .append(encode_dense_primary_key(metadata, &values))
+                    .expect("append generated dense primary key to Arrow dictionary builder");
+            }
+            columns.push(Arc::new(pk_builder.finish()) as ArrayRef);
+            continue;
+        }
+        if name == SEQUENCE_COLUMN_NAME {
+            columns.push(Arc::new(UInt64Array::from_value(sequence, rows)) as ArrayRef);
+            continue;
+        }
+        if name == OP_TYPE_COLUMN_NAME {
+            columns.push(Arc::new(UInt8Array::from_value(OpType::Put as u8, rows)) as ArrayRef);
+            continue;
+        }
+
+        let col = column_by_name
+            .get(name)
+            .unwrap_or_else(|| panic!("flat schema column {name} not found in table config"));
         match (col.semantic.as_str(), col.ty.to_ascii_uppercase().as_str()) {
             ("tag", "STRING") => {
                 let mut b = StringDictionaryBuilder::<UInt32Type>::new();
                 for row in 0..rows {
-                    let series = if layout.series_layout == "round_robin" {
-                        (base_row + row) % layout.series_count.get()
-                    } else {
-                        sst_idx % layout.series_count.get()
-                    };
-                    let value = tag_value(col, series);
-                    b.append_value(value);
+                    let series = series_for_row(layout, sst_idx, base_row + row);
+                    b.append_value(tag_value(col, series));
                 }
                 columns.push(Arc::new(b.finish()) as ArrayRef);
             }
             ("field", "DOUBLE") => {
                 let (min, max) = match col.distribution.as_ref() {
                     Some(Distribution::DeterministicWave { min, max }) => (*min, *max),
+                    Some(Distribution::MetricSignal { min, max }) => (*min, *max),
                     _ => (0.0, 1.0),
                 };
+                let metric_signal = matches!(
+                    col.distribution.as_ref(),
+                    Some(Distribution::MetricSignal { .. })
+                );
                 columns.push(Arc::new(Float64Array::from(
                     (0..rows)
-                        .map(|r| wave_value(min, max, base_row + r))
+                        .map(|r| {
+                            let global_row = base_row + r;
+                            if metric_signal {
+                                let series = series_for_row(layout, sst_idx, global_row);
+                                metric_signal_value(min, max, global_row, series)
+                            } else {
+                                wave_value(min, max, global_row)
+                            }
+                        })
                         .collect::<Vec<_>>(),
                 )) as ArrayRef);
             }
@@ -380,28 +524,16 @@ fn generate_record_batch(
         }
     }
 
-    let mut pk_builder = BinaryDictionaryBuilder::<UInt32Type>::new();
-    for row in 0..rows {
-        let series = if layout.series_layout == "round_robin" {
-            (base_row + row) % layout.series_count.get()
-        } else {
-            sst_idx % layout.series_count.get()
-        };
-        let values = table
-            .columns
-            .iter()
-            .filter(|c| c.semantic == "tag")
-            .map(|c| (c.name.clone(), tag_value(c, series)))
-            .collect();
-        pk_builder
-            .append(encode_dense_primary_key(table, &values))
-            .expect("append generated dense primary key to Arrow dictionary builder");
-    }
-    columns.push(Arc::new(pk_builder.finish()));
-    columns.push(Arc::new(UInt64Array::from_value(sequence, rows)));
-    columns.push(Arc::new(UInt8Array::from_value(OpType::Put as u8, rows)));
     RecordBatch::try_new(flat_schema, columns)
         .expect("generated fixture columns should match flat SST Arrow schema")
+}
+
+fn series_for_row(layout: &LayoutConfig, sst_idx: usize, global_row: usize) -> usize {
+    if layout.series_layout == "round_robin" {
+        global_row % layout.series_count.get()
+    } else {
+        sst_idx % layout.series_count.get()
+    }
 }
 
 fn file_meta_from_sst_info(
@@ -429,6 +561,64 @@ fn file_meta_from_sst_info(
         primary_key_min: None,
         primary_key_max: None,
     }
+}
+
+fn parquet_column_metadata(info: &SstInfo) -> serde_json::Value {
+    let Some(parquet_meta) = info.file_metadata.as_ref() else {
+        return serde_json::json!({});
+    };
+
+    let mut columns = serde_json::Map::new();
+    for row_group in parquet_meta.row_groups() {
+        for column in row_group.columns() {
+            let name = column.column_path().string();
+            let entry = columns.entry(name).or_insert_with(|| {
+                serde_json::json!({
+                    "compressed_size": 0_i64,
+                    "uncompressed_size": 0_i64,
+                    "encodings": [],
+                    "has_dictionary": false,
+                    "has_byte_stream_split": false,
+                })
+            });
+            let obj = entry.as_object_mut().expect("column metadata is object");
+            obj["compressed_size"] = serde_json::json!(
+                obj["compressed_size"].as_i64().unwrap_or_default()
+                    + column.compressed_size().max(0)
+            );
+            obj["uncompressed_size"] = serde_json::json!(
+                obj["uncompressed_size"].as_i64().unwrap_or_default()
+                    + column.uncompressed_size().max(0)
+            );
+
+            let mut encodings = obj["encodings"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|value| value.as_str().map(ToString::to_string))
+                .collect::<Vec<_>>();
+            for encoding in column.encodings() {
+                let encoding = format!("{encoding:?}");
+                if !encodings.contains(&encoding) {
+                    encodings.push(encoding);
+                }
+            }
+            encodings.sort();
+            obj["has_dictionary"] = serde_json::json!(
+                encodings
+                    .iter()
+                    .any(|encoding| encoding == "PLAIN_DICTIONARY" || encoding == "RLE_DICTIONARY")
+            );
+            obj["has_byte_stream_split"] = serde_json::json!(
+                encodings
+                    .iter()
+                    .any(|encoding| encoding == "BYTE_STREAM_SPLIT")
+            );
+            obj["encodings"] = serde_json::json!(encodings);
+        }
+    }
+    serde_json::Value::Object(columns)
 }
 
 fn deterministic_file_id(seed: u64, index: usize) -> FileId {
@@ -560,13 +750,41 @@ async fn main() {
         .expect("failed to create filesystem object store for fixture output")
         .finish();
     let metadata: RegionMetadataRef = Arc::new(build_region_metadata(table, region_id));
+    let region_options = RegionOptions {
+        primary_key_encoding: table.metric_physical.then_some(PrimaryKeyEncoding::Dense),
+        experimental_metric_engine_value_encoding: table.metric_engine_value_encoding,
+        ..Default::default()
+    };
     let mut files = HashMap::with_capacity(scenario.layout.sst_count);
+    let mut files_column_metadata = HashMap::with_capacity(scenario.layout.sst_count);
     let mut next_file_index = 1;
     for i in 0..scenario.layout.sst_count {
         let sequence = 1000 + i as u64;
-        let batch = generate_record_batch(table, &metadata, &scenario.layout, i, sequence);
-        let source =
-            FlatSource::new_iter(batch.schema(), Box::new(vec![batch].into_iter().map(Ok)));
+        let source_batch_rows = scenario
+            .layout
+            .source_batch_rows
+            .map(NonZeroUsize::get)
+            .unwrap_or(scenario.layout.rows_per_sst);
+        let mut batches = Vec::new();
+        let mut offset = 0;
+        while offset < scenario.layout.rows_per_sst {
+            let rows = source_batch_rows.min(scenario.layout.rows_per_sst - offset);
+            batches.push(generate_record_batch(
+                table,
+                &metadata,
+                &scenario.layout,
+                i,
+                offset,
+                rows,
+                sequence,
+            ));
+            offset += rows;
+        }
+        let schema = batches
+            .first()
+            .expect("rows_per_sst must produce at least one batch")
+            .schema();
+        let source = FlatSource::new_iter(schema, Box::new(batches.into_iter().map(Ok)));
         let mut metrics = Metrics::new(WriteType::Flush);
         let mut writer = ParquetWriter::new_with_object_store(
             ostorage.clone(),
@@ -583,7 +801,10 @@ async fn main() {
             write_buffer_size: DEFAULT_WRITE_BUFFER_SIZE,
             row_group_size: scenario.layout.row_group_size,
             max_file_size: None,
-            metric_engine_value_byte_stream_split_column: None,
+            metric_engine_value_encoding: metric_engine_value_column_encoding(
+                &metadata,
+                &region_options,
+            ),
         };
         let infos = match format {
             FormatType::Flat => writer.write_all_flat(source, Some(sequence), &opts).await,
@@ -600,7 +821,9 @@ async fn main() {
                 next_file_index,
             );
             next_file_index += 1;
+            let column_metadata = parquet_column_metadata(&info);
             remap_sst_file(&obj_store_dir, &table_dir, region_id, info.file_id, file_id);
+            files_column_metadata.insert(file_id, column_metadata);
             files.insert(
                 file_id,
                 file_meta_from_sst_info(&info, region_id, file_id, sequence),
@@ -644,9 +867,43 @@ async fn main() {
     let mut entries: Vec<_> = manifest.files.iter().collect();
     entries.sort_by_key(|(id, _)| id.to_string());
     for (file_id, meta) in entries {
-        writeln!(jsonl, "{}", serde_json::to_string(&serde_json::json!({ "file_id": file_id.to_string(), "region_id": meta.region_id.as_u64(), "object_path": mito2::sst::location::sst_file_path(&table_dir, RegionFileId::new(meta.region_id, *file_id), PathType::Bare), "time_range_start": meta.time_range.0.value(), "time_range_end": meta.time_range.1.value(), "num_rows": meta.num_rows, "num_row_groups": meta.num_row_groups, "file_size": meta.file_size, "num_series": meta.num_series, "sequence": meta.sequence.map(|s| s.get()) })).expect("failed to serialize fixture SST metadata JSONL entry")).expect("failed to write fixture SST metadata JSONL entry");
+        let column_metadata = files_column_metadata
+            .get(file_id)
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({}));
+        writeln!(jsonl, "{}", serde_json::to_string(&serde_json::json!({ "file_id": file_id.to_string(), "region_id": meta.region_id.as_u64(), "object_path": mito2::sst::location::sst_file_path(&table_dir, RegionFileId::new(meta.region_id, *file_id), PathType::Bare), "time_range_start": meta.time_range.0.value(), "time_range_end": meta.time_range.1.value(), "num_rows": meta.num_rows, "num_row_groups": meta.num_row_groups, "file_size": meta.file_size, "num_series": meta.num_series, "sequence": meta.sequence.map(|s| s.get()), "columns": column_metadata })).expect("failed to serialize fixture SST metadata JSONL entry")).expect("failed to write fixture SST metadata JSONL entry");
     }
     jsonl.flush().expect("failed to flush fixture files.jsonl");
-    fs::write(args.out_dir.join("summary.json"), serde_json::to_vec_pretty(&serde_json::json!({ "case": case_name, "seed": seed, "table_index": table_index, "table": table.name, "database": table.database, "region_id": region_id.as_u64(), "table_dir": table_dir, "region_dir": region_dir, "sst_format": format!("{format:?}"), "sst_count": scenario.layout.sst_count, "rows_per_sst": scenario.layout.rows_per_sst, "row_group_size": scenario.layout.row_group_size, "total_rows": scenario.layout.sst_count * scenario.layout.rows_per_sst, "checkpoint_path": checkpoint_path, "files_jsonl_path": files_jsonl_path, "readback_validated": false, "metadata_source": "synthetic" })).expect("failed to serialize fixture summary")).expect("failed to write fixture summary.json");
+    fs::write(args.out_dir.join("summary.json"), serde_json::to_vec_pretty(&serde_json::json!({ "case": case_name, "seed": seed, "table_index": table_index, "table": table.name, "database": table.database, "region_id": region_id.as_u64(), "table_dir": table_dir, "region_dir": region_dir, "sst_format": format!("{format:?}"), "sst_count": scenario.layout.sst_count, "rows_per_sst": scenario.layout.rows_per_sst, "source_batch_rows": scenario.layout.source_batch_rows.map(NonZeroUsize::get), "row_group_size": scenario.layout.row_group_size, "metric_physical": table.metric_physical, "metric_engine_value_encoding": table.metric_engine_value_encoding, "total_rows": scenario.layout.sst_count * scenario.layout.rows_per_sst, "checkpoint_path": checkpoint_path, "files_jsonl_path": files_jsonl_path, "readback_validated": false, "metadata_source": "synthetic" })).expect("failed to serialize fixture summary")).expect("failed to write fixture summary.json");
     println!("Done. wrote {} SST file entries", manifest.files.len());
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+
+    use super::*;
+
+    #[test]
+    fn test_metric_signal_is_deterministic_and_finite() {
+        let first = metric_signal_value(0.0, 1000.0, 42, 7);
+        let second = metric_signal_value(0.0, 1000.0, 42, 7);
+
+        assert_eq!(first.to_bits(), second.to_bits());
+        assert!(first.is_finite());
+        assert!((-50.0..=1050.0).contains(&first));
+    }
+
+    #[test]
+    fn test_metric_signal_avoids_short_exact_cycle() {
+        let values = (0..4096)
+            .map(|row| metric_signal_value(0.0, 1000.0, row, row % 64).to_bits())
+            .collect::<HashSet<_>>();
+
+        assert!(values.len() > 3500, "unique values: {}", values.len());
+        assert_ne!(
+            metric_signal_value(0.0, 1000.0, 0, 0).to_bits(),
+            metric_signal_value(0.0, 1000.0, 1024, 0).to_bits()
+        );
+    }
 }

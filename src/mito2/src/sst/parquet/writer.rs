@@ -54,36 +54,43 @@ use crate::error::{
     InvalidMetadataSnafu, OpenDalSnafu, Result, UnexpectedSnafu, WriteParquetSnafu,
 };
 use crate::read::FlatSource;
+use crate::region::options::MetricEngineValueEncoding;
 use crate::sst::file::RegionFileId;
 use crate::sst::index::{IndexOutput, Indexer, IndexerBuilder};
 use crate::sst::parquet::flat_format::{FlatWriteFormat, time_index_column_index};
 use crate::sst::parquet::format::PrimaryKeyWriteFormat;
-use crate::sst::parquet::{PARQUET_METADATA_KEY, SstInfo, WriteOptions};
+use crate::sst::parquet::{PARQUET_METADATA_KEY, SelectedColumnEncoding, SstInfo, WriteOptions};
 use crate::sst::{
     DEFAULT_WRITE_BUFFER_SIZE, DEFAULT_WRITE_CONCURRENCY, FlatSchemaOptions, SeriesEstimator,
 };
 
-/// Applies Parquet BYTE_STREAM_SPLIT encoding to the selected Float32/Float64 field column.
-pub(crate) fn apply_byte_stream_split_to_field_column(
+/// Applies selected parquet encoding override to a Float32/Float64 field column.
+pub(crate) fn apply_encoding_to_field_column(
     mut builder: WriterPropertiesBuilder,
     region_metadata: &RegionMetadataRef,
-    selected_column: Option<&str>,
+    selected: Option<&SelectedColumnEncoding>,
 ) -> WriterPropertiesBuilder {
-    let Some(selected_column) = selected_column else {
+    let Some(selected) = selected else {
         return builder;
     };
 
     if let Some(column) = region_metadata.field_columns().find(|column| {
-        column.column_schema.name == selected_column
+        column.column_schema.name == selected.column
             && matches!(
                 column.column_schema.data_type,
                 ConcreteDataType::Float32(_) | ConcreteDataType::Float64(_)
             )
     }) {
         let column_path = ColumnPath::new(vec![column.column_schema.name.clone()]);
-        builder = builder
-            .set_column_encoding(column_path.clone(), Encoding::BYTE_STREAM_SPLIT)
-            .set_column_dictionary_enabled(column_path, false);
+        if selected.encoding == MetricEngineValueEncoding::ByteStreamSplit {
+            builder = builder.set_column_encoding(column_path.clone(), Encoding::BYTE_STREAM_SPLIT);
+        }
+        if matches!(
+            selected.encoding,
+            MetricEngineValueEncoding::NoDictionary | MetricEngineValueEncoding::ByteStreamSplit
+        ) {
+            builder = builder.set_column_dictionary_enabled(column_path, false);
+        }
     }
 
     builder
@@ -427,10 +434,10 @@ where
             .set_column_dictionary_enabled(ts_col, false)
             .set_column_compression(op_type_col, Compression::UNCOMPRESSED);
 
-        apply_byte_stream_split_to_field_column(
+        apply_encoding_to_field_column(
             builder,
             region_metadata,
-            opts.metric_engine_value_byte_stream_split_column.as_deref(),
+            opts.metric_engine_value_encoding.as_ref(),
         )
     }
 

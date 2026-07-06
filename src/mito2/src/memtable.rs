@@ -442,11 +442,7 @@ impl MemtableBuilderProvider {
                 BulkMemtableBuilder::new(self.write_buffer_manager.clone(), !dedup, merge_mode)
                     .with_config(config.clone())
                     .with_compact_dispatcher(self.compact_dispatcher.clone())
-                    .with_region_options(
-                        self.config
-                            .experimental_enable_metric_engine_value_byte_stream_split,
-                        options.clone(),
-                    ),
+                    .with_region_options(options.clone()),
             ),
             Some(MemtableOptions::TimeSeries) => Arc::new(TimeSeriesMemtableBuilder::new(
                 self.write_buffer_manager.clone(),
@@ -469,11 +465,7 @@ impl MemtableBuilderProvider {
             merge_mode,
         )
         .with_compact_dispatcher(self.compact_dispatcher.clone())
-        .with_region_options(
-            self.config
-                .experimental_enable_metric_engine_value_byte_stream_split,
-            options.clone(),
-        );
+        .with_region_options(options.clone());
 
         if let Some(MemtableOptions::Bulk(config)) = &options.memtable {
             builder = builder.with_config(config.clone());

@@ -65,7 +65,7 @@ use crate::sst::file::FileMeta;
 use crate::sst::parquet::metadata::extract_primary_key_range;
 use crate::sst::parquet::{
     DEFAULT_READ_BATCH_SIZE, DEFAULT_ROW_GROUP_SIZE, SstInfo, WriteOptions, flat_format,
-    metric_engine_value_byte_stream_split_column,
+    metric_engine_value_column_encoding,
 };
 use crate::sst::{FlatSchemaOptions, FormatType, to_flat_sst_arrow_schema};
 use crate::worker::WorkerListener;
@@ -378,13 +378,10 @@ impl RegionFlushTask {
 
         let mut write_opts = WriteOptions {
             write_buffer_size: self.engine_config.sst_write_buffer_size,
-            metric_engine_value_byte_stream_split_column:
-                metric_engine_value_byte_stream_split_column(
-                    self.engine_config
-                        .experimental_enable_metric_engine_value_byte_stream_split,
-                    &version.metadata,
-                    &version.options,
-                ),
+            metric_engine_value_encoding: metric_engine_value_column_encoding(
+                &version.metadata,
+                &version.options,
+            ),
             ..Default::default()
         };
         if let Some(row_group_size) = self.row_group_size {

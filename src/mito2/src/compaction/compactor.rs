@@ -57,7 +57,7 @@ use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
 use crate::sst::location::region_dir_from_table_dir;
 use crate::sst::parquet::metadata::extract_primary_key_range;
-use crate::sst::parquet::{SstInfo, WriteOptions, metric_engine_value_byte_stream_split_column};
+use crate::sst::parquet::{SstInfo, WriteOptions, metric_engine_value_column_encoding};
 use crate::sst::version::{SstVersion, SstVersionRef};
 
 /// Region version for compaction that does not hold memtables.
@@ -591,14 +591,10 @@ where
             let write_opts = WriteOptions {
                 write_buffer_size: compaction_region.engine_config.sst_write_buffer_size,
                 max_file_size: picker_output.max_file_size,
-                metric_engine_value_byte_stream_split_column:
-                    metric_engine_value_byte_stream_split_column(
-                        compaction_region
-                            .engine_config
-                            .experimental_enable_metric_engine_value_byte_stream_split,
-                        &compaction_region.region_metadata,
-                        &compaction_region.region_options,
-                    ),
+                metric_engine_value_encoding: metric_engine_value_column_encoding(
+                    &compaction_region.region_metadata,
+                    &compaction_region.region_options,
+                ),
                 ..Default::default()
             };
             let merger = self.merger.clone();

@@ -577,11 +577,6 @@ compress_manifest = false
 ## @toml2docs:none-default="wait"
 #+ experimental_compaction_on_exhausted = "wait"
 
-## Experimental: write metric engine `greptime_value` Float32/Float64 columns with
-## Parquet BYTE_STREAM_SPLIT. Enable only after all readers in rolling upgrades
-## support BYTE_STREAM_SPLIT; disabling it does not rewrite existing BSS SSTs.
-experimental_enable_metric_engine_value_byte_stream_split = false
-
 ## Interval to auto flush a region if it has not flushed yet.
 auto_flush_interval = "1h"
 

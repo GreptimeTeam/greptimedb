@@ -158,6 +158,8 @@ impl TryFrom<&HashMap<String, String>> for PhysicalRegionOptions {
 
 #[cfg(test)]
 mod tests {
+    use store_api::mito_engine_options::EXPERIMENTAL_METRIC_ENGINE_VALUE_ENCODING;
+
     use super::*;
 
     #[test]
@@ -184,6 +186,22 @@ mod tests {
         ] {
             assert_eq!(options.get(key), None);
         }
+    }
+
+    #[test]
+    fn test_set_data_region_options_preserves_metric_value_encoding() {
+        let mut options = HashMap::new();
+        options.insert(
+            EXPERIMENTAL_METRIC_ENGINE_VALUE_ENCODING.to_string(),
+            "byte_stream_split".to_string(),
+        );
+
+        set_data_region_options(&mut options, true);
+
+        assert_eq!(
+            Some(&"byte_stream_split".to_string()),
+            options.get(EXPERIMENTAL_METRIC_ENGINE_VALUE_ENCODING)
+        );
     }
 
     #[test]

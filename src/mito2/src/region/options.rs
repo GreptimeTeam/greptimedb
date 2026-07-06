@@ -32,7 +32,9 @@ use store_api::codec::PrimaryKeyEncoding;
 use store_api::metric_engine_consts::{
     MEMTABLE_PARTITION_TREE_PRIMARY_KEY_ENCODING, PRIMARY_KEY_ENCODING,
 };
-use store_api::mito_engine_options::COMPACTION_OVERRIDE;
+use store_api::mito_engine_options::{
+    COMPACTION_OVERRIDE, EXPERIMENTAL_METRIC_ENGINE_VALUE_ENCODING,
+};
 use store_api::storage::{ColumnId, RegionId};
 use strum::EnumString;
 
@@ -72,6 +74,20 @@ pub enum MergeMode {
     LastNonNull,
 }
 
+/// Experimental Parquet encoding override for metric-engine physical data value column.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, EnumString)]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
+pub enum MetricEngineValueEncoding {
+    /// Keep default parquet writer behavior.
+    #[default]
+    Plain,
+    /// Disable dictionary for the metric value column.
+    NoDictionary,
+    /// Use BYTE_STREAM_SPLIT and disable dictionary for the metric value column.
+    ByteStreamSplit,
+}
+
 // Note: We need to update [store_api::mito_engine_options::is_mito_engine_option_key()]
 // if we want expose the option to table options.
 /// Options that affect the entire region.
@@ -107,6 +123,8 @@ pub struct RegionOptions {
     /// Internal primary key encoding override used by metric-engine.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub primary_key_encoding: Option<PrimaryKeyEncoding>,
+    /// Experimental metric-engine physical data value column encoding.
+    pub experimental_metric_engine_value_encoding: MetricEngineValueEncoding,
 }
 
 impl RegionOptions {
@@ -242,6 +260,18 @@ impl RegionOptions {
                 .build()),
             })
             .transpose()?;
+        let experimental_metric_engine_value_encoding = options_map
+            .get(EXPERIMENTAL_METRIC_ENGINE_VALUE_ENCODING)
+            .map(|v| {
+                v.parse::<MetricEngineValueEncoding>().map_err(|_| {
+                    InvalidRegionOptionsSnafu {
+                        reason: format!("Invalid metric engine value encoding: {v}"),
+                    }
+                    .build()
+                })
+            })
+            .transpose()?
+            .unwrap_or(options.experimental_metric_engine_value_encoding);
 
         let opts = RegionOptions {
             ttl: options.ttl,
@@ -256,6 +286,7 @@ impl RegionOptions {
             merge_mode: options.merge_mode,
             sst_format,
             primary_key_encoding,
+            experimental_metric_engine_value_encoding,
         };
         opts.validate()?;
 
@@ -365,6 +396,8 @@ struct RegionOptionsWithoutEnum {
     merge_mode: Option<MergeMode>,
     #[serde_as(as = "NoneAsEmptyString")]
     sst_format: Option<FormatType>,
+    #[serde_as(as = "DisplayFromStr")]
+    experimental_metric_engine_value_encoding: MetricEngineValueEncoding,
 }
 
 impl Default for RegionOptionsWithoutEnum {
@@ -377,6 +410,8 @@ impl Default for RegionOptionsWithoutEnum {
             append_mode: options.append_mode,
             merge_mode: options.merge_mode,
             sst_format: options.sst_format,
+            experimental_metric_engine_value_encoding: options
+                .experimental_metric_engine_value_encoding,
         }
     }
 }
@@ -535,6 +570,40 @@ mod tests {
         let map = make_map(&[]);
         let options = RegionOptions::try_from_options(RegionId::new(0, 0), &map).unwrap();
         assert_eq!(RegionOptions::default(), options);
+    }
+
+    #[test]
+    fn test_metric_engine_value_encoding_options() {
+        let options = RegionOptions::try_from_options(
+            RegionId::new(0, 0),
+            &make_map(&[(
+                EXPERIMENTAL_METRIC_ENGINE_VALUE_ENCODING,
+                "byte_stream_split",
+            )]),
+        )
+        .unwrap();
+        assert_eq!(
+            MetricEngineValueEncoding::ByteStreamSplit,
+            options.experimental_metric_engine_value_encoding
+        );
+
+        let options = RegionOptions::try_from_options(
+            RegionId::new(0, 0),
+            &make_map(&[(EXPERIMENTAL_METRIC_ENGINE_VALUE_ENCODING, "no_dictionary")]),
+        )
+        .unwrap();
+        assert_eq!(
+            MetricEngineValueEncoding::NoDictionary,
+            options.experimental_metric_engine_value_encoding
+        );
+
+        assert!(
+            RegionOptions::try_from_options(
+                RegionId::new(0, 0),
+                &make_map(&[(EXPERIMENTAL_METRIC_ENGINE_VALUE_ENCODING, "bogus")]),
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -898,6 +967,7 @@ mod tests {
             merge_mode: Some(MergeMode::LastNonNull),
             sst_format: Some(FormatType::Flat),
             primary_key_encoding: None,
+            experimental_metric_engine_value_encoding: MetricEngineValueEncoding::Plain,
         };
         assert_eq!(expect, options);
     }
@@ -928,6 +998,7 @@ mod tests {
             merge_mode: Some(MergeMode::LastNonNull),
             sst_format: None,
             primary_key_encoding: None,
+            experimental_metric_engine_value_encoding: MetricEngineValueEncoding::Plain,
         };
         let region_options_json_str = serde_json::to_string(&options).unwrap();
         let got: RegionOptions = serde_json::from_str(&region_options_json_str).unwrap();
@@ -985,6 +1056,7 @@ mod tests {
             merge_mode: Some(MergeMode::LastNonNull),
             sst_format: None,
             primary_key_encoding: None,
+            experimental_metric_engine_value_encoding: MetricEngineValueEncoding::Plain,
         };
         assert_eq!(options, got);
     }

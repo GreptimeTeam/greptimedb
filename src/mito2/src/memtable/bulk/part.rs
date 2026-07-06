@@ -68,8 +68,8 @@ use crate::sst::SeriesEstimator;
 use crate::sst::index::IndexOutput;
 use crate::sst::parquet::flat_format::primary_key_column_index;
 use crate::sst::parquet::format::{PrimaryKeyArray, PrimaryKeyArrayBuilder};
-use crate::sst::parquet::writer::apply_byte_stream_split_to_field_column;
-use crate::sst::parquet::{PARQUET_METADATA_KEY, SstInfo};
+use crate::sst::parquet::writer::apply_encoding_to_field_column;
+use crate::sst::parquet::{PARQUET_METADATA_KEY, SelectedColumnEncoding, SstInfo};
 
 const INIT_DICT_VALUE_CAPACITY: usize = 8;
 
@@ -1141,8 +1141,8 @@ pub struct BulkPartEncoder {
 /// Runtime-only options for bulk part encoding.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct BulkPartEncodeOptions {
-    /// Metric engine value column to encode with Parquet BYTE_STREAM_SPLIT.
-    pub(crate) metric_engine_value_byte_stream_split_column: Option<String>,
+    /// Metric engine value column encoding override.
+    pub(crate) metric_engine_value_encoding: Option<SelectedColumnEncoding>,
 }
 
 impl BulkPartEncoder {
@@ -1173,12 +1173,10 @@ impl BulkPartEncoder {
             .set_compression(Compression::ZSTD(ZstdLevel::default()))
             .set_column_index_truncate_length(None)
             .set_statistics_truncate_length(None);
-        let writer_props_builder = apply_byte_stream_split_to_field_column(
+        let writer_props_builder = apply_encoding_to_field_column(
             writer_props_builder,
             &metadata,
-            options
-                .metric_engine_value_byte_stream_split_column
-                .as_deref(),
+            options.metric_engine_value_encoding.as_ref(),
         );
         let writer_props = Some(writer_props_builder.build());
 
@@ -1826,26 +1824,35 @@ mod tests {
         })
     }
 
+    fn encoded_column_has_dictionary_encoding(part: &EncodedBulkPart, column_name: &str) -> bool {
+        encoded_column_has_encoding(part, column_name, Encoding::PLAIN_DICTIONARY)
+            || encoded_column_has_encoding(part, column_name, Encoding::RLE_DICTIONARY)
+    }
+
     fn encode_metric_value_batch(
         metadata: RegionMetadataRef,
         batch: RecordBatch,
-        selected_column: Option<String>,
+        encoding: Option<crate::region::options::MetricEngineValueEncoding>,
     ) -> EncodedBulkPart {
-        encode_metric_value_batch_with_row_group_size(metadata, batch, selected_column, 1024)
+        encode_metric_value_batch_with_row_group_size(metadata, batch, encoding, 1024)
     }
 
     fn encode_metric_value_batch_with_row_group_size(
         metadata: RegionMetadataRef,
         batch: RecordBatch,
-        selected_column: Option<String>,
+        encoding: Option<crate::region::options::MetricEngineValueEncoding>,
         row_group_size: usize,
     ) -> EncodedBulkPart {
         let schema = batch.schema();
+        let selected = encoding.map(|encoding| SelectedColumnEncoding {
+            column: common_query::prelude::greptime_value().to_string(),
+            encoding,
+        });
         let encoder = BulkPartEncoder::new_with_options(
             metadata,
             row_group_size,
             BulkPartEncodeOptions {
-                metric_engine_value_byte_stream_split_column: selected_column,
+                metric_engine_value_encoding: selected,
             },
         )
         .unwrap();
@@ -1878,7 +1885,11 @@ mod tests {
             ])) as ArrayRef,
         );
 
-        let part = encode_metric_value_batch(metadata, batch, Some(value_column.to_string()));
+        let part = encode_metric_value_batch(
+            metadata,
+            batch,
+            Some(crate::region::options::MetricEngineValueEncoding::ByteStreamSplit),
+        );
 
         assert!(encoded_column_has_encoding(
             &part,
@@ -1935,6 +1946,29 @@ mod tests {
     }
 
     #[test]
+    fn test_bulk_part_encoder_metric_value_no_dictionary() {
+        let value_column = common_query::prelude::greptime_value();
+        let metadata = metric_value_metadata(value_column, ConcreteDataType::float64_datatype());
+        let batch = metric_value_batch(
+            &metadata,
+            Arc::new(Float64Array::from(vec![Some(42.0); 200])) as ArrayRef,
+        );
+
+        let part = encode_metric_value_batch(
+            metadata,
+            batch,
+            Some(crate::region::options::MetricEngineValueEncoding::NoDictionary),
+        );
+
+        assert!(!encoded_column_has_encoding(
+            &part,
+            value_column,
+            Encoding::BYTE_STREAM_SPLIT
+        ));
+        assert!(!encoded_column_has_dictionary_encoding(&part, value_column));
+    }
+
+    #[test]
     fn test_bulk_part_encoder_byte_stream_split_skips_non_target_field() {
         let metadata = metric_value_metadata("field_0", ConcreteDataType::float32_datatype());
         let batch = metric_value_batch(
@@ -1945,7 +1979,7 @@ mod tests {
         let part = encode_metric_value_batch(
             metadata,
             batch,
-            Some(common_query::prelude::greptime_value().to_string()),
+            Some(crate::region::options::MetricEngineValueEncoding::ByteStreamSplit),
         );
 
         assert!(!encoded_column_has_encoding(

@@ -1371,7 +1371,6 @@ pub struct BulkMemtableBuilder {
     compact_dispatcher: Option<Arc<CompactDispatcher>>,
     append_mode: bool,
     merge_mode: MergeMode,
-    experimental_enable_metric_engine_value_byte_stream_split: bool,
     region_options: Option<Arc<crate::region::options::RegionOptions>>,
     encode_options: BulkPartEncodeOptions,
 }
@@ -1389,7 +1388,6 @@ impl BulkMemtableBuilder {
             compact_dispatcher: None,
             append_mode,
             merge_mode,
-            experimental_enable_metric_engine_value_byte_stream_split: false,
             region_options: None,
             encode_options: BulkPartEncodeOptions::default(),
         }
@@ -1398,10 +1396,8 @@ impl BulkMemtableBuilder {
     /// Sets region context for runtime-only bulk encoding options.
     pub fn with_region_options(
         mut self,
-        enabled: bool,
         region_options: crate::region::options::RegionOptions,
     ) -> Self {
-        self.experimental_enable_metric_engine_value_byte_stream_split = enabled;
         self.region_options = Some(Arc::new(region_options));
         self
     }
@@ -1428,9 +1424,8 @@ impl MemtableBuilder for BulkMemtableBuilder {
     fn build(&self, id: MemtableId, metadata: &RegionMetadataRef) -> MemtableRef {
         let encode_options = if let Some(region_options) = &self.region_options {
             BulkPartEncodeOptions {
-                metric_engine_value_byte_stream_split_column:
-                    crate::sst::parquet::metric_engine_value_byte_stream_split_column(
-                        self.experimental_enable_metric_engine_value_byte_stream_split,
+                metric_engine_value_encoding:
+                    crate::sst::parquet::metric_engine_value_column_encoding(
                         metadata,
                         region_options,
                     ),
@@ -1465,7 +1460,7 @@ mod tests {
     use common_recordbatch::DfRecordBatch as RecordBatch;
     use datatypes::arrow::array::{
         ArrayRef, BinaryDictionaryBuilder, Float32Array, StringDictionaryBuilder,
-        TimestampMillisecondArray, UInt8Array, UInt64Array,
+        TimestampMillisecondArray, UInt8Array, UInt32Array, UInt64Array,
     };
     use datatypes::arrow::datatypes::UInt32Type;
     use datatypes::data_type::ConcreteDataType;
@@ -1478,8 +1473,11 @@ mod tests {
     use serde_json::json;
     use store_api::codec::PrimaryKeyEncoding;
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder, RegionMetadataRef};
-    use store_api::metric_engine_consts::{DATA_SCHEMA_TSID_COLUMN_NAME, METRIC_DATA_REGION_GROUP};
+    use store_api::metric_engine_consts::{
+        DATA_SCHEMA_TABLE_ID_COLUMN_NAME, DATA_SCHEMA_TSID_COLUMN_NAME, METRIC_DATA_REGION_GROUP,
+    };
     use store_api::storage::RegionId;
+    use store_api::storage::consts::ReservedColumnId;
 
     use super::*;
     use crate::memtable::bulk::part::BulkPartConverter;
@@ -1531,12 +1529,12 @@ mod tests {
         builder
             .push_column_metadata(ColumnMetadata {
                 column_schema: ColumnSchema::new(
-                    "tag_0",
-                    ConcreteDataType::string_datatype(),
-                    true,
+                    DATA_SCHEMA_TABLE_ID_COLUMN_NAME,
+                    ConcreteDataType::uint32_datatype(),
+                    false,
                 ),
                 semantic_type: SemanticType::Tag,
-                column_id: 1,
+                column_id: ReservedColumnId::table_id(),
             })
             .push_column_metadata(ColumnMetadata {
                 column_schema: ColumnSchema::new(
@@ -1544,8 +1542,17 @@ mod tests {
                     ConcreteDataType::uint64_datatype(),
                     false,
                 ),
-                semantic_type: SemanticType::Field,
-                column_id: 2,
+                semantic_type: SemanticType::Tag,
+                column_id: ReservedColumnId::tsid(),
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "tag_0",
+                    ConcreteDataType::string_datatype(),
+                    true,
+                ),
+                semantic_type: SemanticType::Tag,
+                column_id: 1,
             })
             .push_column_metadata(ColumnMetadata {
                 column_schema: ColumnSchema::new(
@@ -1574,7 +1581,11 @@ mod tests {
                 semantic_type: SemanticType::Timestamp,
                 column_id: 5,
             });
-        builder.primary_key(vec![1]);
+        builder.primary_key(vec![
+            ReservedColumnId::table_id(),
+            ReservedColumnId::tsid(),
+            1,
+        ]);
         Arc::new(builder.build().unwrap())
     }
 
@@ -1595,8 +1606,9 @@ mod tests {
         let batch = RecordBatch::try_new(
             schema,
             vec![
-                Arc::new(tag_builder.finish()) as ArrayRef,
+                Arc::new(UInt32Array::from_value(1, rows)) as ArrayRef,
                 Arc::new(UInt64Array::from_iter_values(0..rows as u64)) as ArrayRef,
+                Arc::new(tag_builder.finish()) as ArrayRef,
                 Arc::new(Float32Array::from(
                     (0..rows).map(|idx| Some(idx as f32)).collect::<Vec<_>>(),
                 )) as ArrayRef,
@@ -1643,6 +1655,18 @@ mod tests {
         })
     }
 
+    fn parquet_metadata_column_has_dictionary_encoding(
+        parquet_meta: &parquet::file::metadata::ParquetMetaData,
+        column_name: &str,
+    ) -> bool {
+        parquet_metadata_column_has_encoding(parquet_meta, column_name, Encoding::PLAIN_DICTIONARY)
+            || parquet_metadata_column_has_encoding(
+                parquet_meta,
+                column_name,
+                Encoding::RLE_DICTIONARY,
+            )
+    }
+
     #[test]
     fn test_bulk_merge_preencode_metric_value_byte_stream_split() {
         let value_column = common_query::prelude::greptime_value();
@@ -1666,7 +1690,10 @@ mod tests {
             1,
             usize::MAX,
             BulkPartEncodeOptions {
-                metric_engine_value_byte_stream_split_column: Some(value_column.to_string()),
+                metric_engine_value_encoding: Some(crate::sst::parquet::SelectedColumnEncoding {
+                    column: value_column.to_string(),
+                    encoding: crate::region::options::MetricEngineValueEncoding::ByteStreamSplit,
+                }),
             },
         )
         .unwrap()
@@ -1683,11 +1710,60 @@ mod tests {
     }
 
     #[test]
+    fn test_bulk_merge_preencode_metric_value_no_dictionary() {
+        let value_column = common_query::prelude::greptime_value();
+        let metadata = metric_value_metadata();
+        let parts = vec![
+            PartToMerge::Bulk {
+                part: metric_value_bulk_part(&metadata, 2, 1),
+                file_id: FileId::random(),
+            },
+            PartToMerge::Bulk {
+                part: metric_value_bulk_part(&metadata, 2, 2),
+                file_id: FileId::random(),
+            },
+        ];
+
+        let merged = MemtableCompactor::merge_parts_group(
+            parts,
+            &metadata,
+            false,
+            MergeMode::LastRow,
+            1,
+            usize::MAX,
+            BulkPartEncodeOptions {
+                metric_engine_value_encoding: Some(crate::sst::parquet::SelectedColumnEncoding {
+                    column: value_column.to_string(),
+                    encoding: crate::region::options::MetricEngineValueEncoding::NoDictionary,
+                }),
+            },
+        )
+        .unwrap()
+        .unwrap();
+
+        let MergedPart::Encoded(part) = merged else {
+            panic!("expected encoded part");
+        };
+        let parquet_meta = &part.metadata().parquet_metadata;
+        assert!(!parquet_metadata_column_has_encoding(
+            parquet_meta,
+            value_column,
+            Encoding::BYTE_STREAM_SPLIT
+        ));
+        assert!(!parquet_metadata_column_has_dictionary_encoding(
+            parquet_meta,
+            value_column
+        ));
+    }
+
+    #[test]
     fn test_bulk_memtable_builder_metric_value_byte_stream_split() {
         let value_column = common_query::prelude::greptime_value();
         let metadata = metric_value_metadata();
         let region_options = RegionOptions {
             primary_key_encoding: Some(PrimaryKeyEncoding::Sparse),
+            experimental_metric_engine_value_encoding:
+                crate::region::options::MetricEngineValueEncoding::ByteStreamSplit,
             ..Default::default()
         };
         let builder = BulkMemtableBuilder::new(None, true, MergeMode::LastRow)
@@ -1697,7 +1773,7 @@ mod tests {
                 encode_bytes_threshold: usize::MAX,
                 max_merge_groups: 1,
             })
-            .with_region_options(true, region_options);
+            .with_region_options(region_options);
         let memtable = builder.build(42, &metadata);
 
         memtable
@@ -1719,6 +1795,52 @@ mod tests {
             parquet_meta,
             value_column,
             Encoding::BYTE_STREAM_SPLIT
+        ));
+    }
+
+    #[test]
+    fn test_bulk_memtable_builder_metric_value_no_dictionary() {
+        let value_column = common_query::prelude::greptime_value();
+        let metadata = metric_value_metadata();
+        let region_options = RegionOptions {
+            primary_key_encoding: Some(PrimaryKeyEncoding::Sparse),
+            experimental_metric_engine_value_encoding:
+                crate::region::options::MetricEngineValueEncoding::NoDictionary,
+            ..Default::default()
+        };
+        let builder = BulkMemtableBuilder::new(None, true, MergeMode::LastRow)
+            .with_config(BulkMemtableConfig {
+                merge_threshold: 2,
+                encode_row_threshold: 1,
+                encode_bytes_threshold: usize::MAX,
+                max_merge_groups: 1,
+            })
+            .with_region_options(region_options);
+        let memtable = builder.build(42, &metadata);
+
+        memtable
+            .write_bulk(metric_value_bulk_part(&metadata, 2000, 1))
+            .unwrap();
+        memtable
+            .write_bulk(metric_value_bulk_part(&metadata, 2000, 2))
+            .unwrap();
+        memtable.compact(false).unwrap();
+
+        let ranges = memtable.ranges(None, RangesOptions::default()).unwrap();
+        let encoded = ranges
+            .ranges
+            .values()
+            .find_map(|range| range.encoded())
+            .expect("bulk builder path should produce a pre-encoded range");
+        let parquet_meta = encoded.sst_info.file_metadata.as_ref().unwrap();
+        assert!(!parquet_metadata_column_has_encoding(
+            parquet_meta,
+            value_column,
+            Encoding::BYTE_STREAM_SPLIT
+        ));
+        assert!(!parquet_metadata_column_has_dictionary_encoding(
+            parquet_meta,
+            value_column
         ));
     }
 

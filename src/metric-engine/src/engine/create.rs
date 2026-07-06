@@ -655,6 +655,7 @@ mod test {
     use common_meta::ddl::utils::{parse_column_metadatas, parse_manifest_infos_from_extensions};
     use common_query::prelude::{greptime_timestamp, greptime_value};
     use store_api::metric_engine_consts::{METRIC_ENGINE_NAME, PHYSICAL_TABLE_METADATA_KEY};
+    use store_api::mito_engine_options::EXPERIMENTAL_METRIC_ENGINE_VALUE_ENCODING;
     use store_api::region_request::{BatchRegionDdlRequest, RegionRequirements};
 
     use super::*;
@@ -668,6 +669,19 @@ mod test {
         let tsid_col = tsid_col();
         assert!(is_metric_name_col(&table_id_col));
         assert!(is_tsid_col(&tsid_col));
+    }
+
+    #[test]
+    fn test_region_options_for_metadata_region_strips_metric_value_encoding() {
+        let mut original = HashMap::new();
+        original.insert(
+            EXPERIMENTAL_METRIC_ENGINE_VALUE_ENCODING.to_string(),
+            "byte_stream_split".to_string(),
+        );
+
+        let metadata_options = region_options_for_metadata_region(&original);
+
+        assert!(!metadata_options.contains_key(EXPERIMENTAL_METRIC_ENGINE_VALUE_ENCODING));
     }
 
     #[test]

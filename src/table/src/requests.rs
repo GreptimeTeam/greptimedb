@@ -493,6 +493,8 @@ pub struct CopyQueryToRequest {
 mod tests {
     use std::time::Duration;
 
+    use store_api::mito_engine_options::EXPERIMENTAL_METRIC_ENGINE_VALUE_ENCODING;
+
     use super::*;
 
     #[test]
@@ -504,6 +506,9 @@ mod tests {
         assert!(validate_table_option(WRITE_BUFFER_SIZE_KEY));
         assert!(validate_table_option(STORAGE_KEY));
         assert!(validate_table_option(MEMTABLE_BULK_MERGE_THRESHOLD));
+        assert!(validate_table_option(
+            EXPERIMENTAL_METRIC_ENGINE_VALUE_ENCODING
+        ));
         assert!(validate_table_option(REPARTITION_COLUMN_HINT_KEY));
         assert!(!validate_table_option("foo"));
 

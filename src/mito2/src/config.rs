@@ -96,9 +96,6 @@ pub struct MitoConfig {
     pub experimental_compaction_memory_limit: MemoryLimit,
     /// Behavior when compaction cannot acquire memory from the budget.
     pub experimental_compaction_on_exhausted: OnExhaustedPolicy,
-    /// Experimental/default-off: write metric engine value columns with Parquet
-    /// BYTE_STREAM_SPLIT. Enable only after all readers in rolling upgrades support it.
-    pub experimental_enable_metric_engine_value_byte_stream_split: bool,
 
     // Flush configs:
     /// Interval to auto flush a region if it has not flushed yet (default 30 min).
@@ -202,7 +199,6 @@ impl Default for MitoConfig {
             max_background_purges: get_total_cpu_cores(),
             experimental_compaction_memory_limit: MemoryLimit::Unlimited,
             experimental_compaction_on_exhausted: OnExhaustedPolicy::default(),
-            experimental_enable_metric_engine_value_byte_stream_split: false,
             auto_flush_interval: Duration::from_secs(30 * 60),
             global_write_buffer_size: ReadableSize::gb(1),
             global_write_buffer_reject_size: ReadableSize::gb(2),

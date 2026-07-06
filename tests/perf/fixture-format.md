@@ -24,6 +24,10 @@ append_mode = true
 sst_format = "flat"
 primary_key = ["host", "instance"]
 time_index = "ts"
+# Optional: emit MetricEngine physical-data-like SSTs for manual value encoding
+# experiments. Defaults are false/plain.
+metric_physical = false
+metric_engine_value_encoding = "plain" # plain | no_dictionary | byte_stream_split
 
 [[scenario.tables.columns]]
 name = "host"
@@ -36,6 +40,9 @@ name = "value"
 type = "DOUBLE"
 semantic = "field"
 distribution = { kind = "deterministic_wave", min = 0.0, max = 100.0 }
+# For metric-like value encoding experiments, use a deterministic signal with
+# per-series baseline/phase, trend, periodic components, and pseudo-noise.
+# distribution = { kind = "metric_signal", min = 0.0, max = 100.0 }
 
 [[scenario.tables.columns]]
 name = "ts"
@@ -46,6 +53,9 @@ semantic = "timestamp"
 regions = 1
 sst_count = 1024
 rows_per_sst = 4096
+# Optional: split each SST source into chunks before passing them to the writer.
+# If omitted, the generator preserves the historical one RecordBatch per SST.
+source_batch_rows = 1024
 row_group_size = 512
 time_range_layout = "non_overlapping_per_sst"
 series_layout = "round_robin"
@@ -67,6 +77,17 @@ The generator should use these declarations to produce:
 - object-store SST files written through the real Mito SST writer
 - manifest checkpoint and `_last_checkpoint`
 - fixture summary with file IDs, row counts, time ranges, and generated schema
+
+`metric_physical = true` is intended for manual MetricEngine value-column
+encoding suites. It injects the physical data-region marker tags `__table_id`
+and `__tsid` into the synthetic Mito region metadata and primary key so the
+MetricEngine `greptime_value` encoding selector is exercised. Existing query
+regression cases should omit it unless they intentionally need this storage
+layout.
+
+For `DOUBLE` fields, `deterministic_wave` is kept for backward compatibility.
+New metric encoding perf cases should prefer `metric_signal` to avoid a short
+exact-value cycle that makes Parquet dictionary encoding unrealistically strong.
 
 ## Why this is generic
 
