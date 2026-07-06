@@ -46,8 +46,8 @@ use snafu::ResultExt;
 use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 use store_api::region_engine::{PartitionRange, RegionScannerRef};
 use store_api::storage::{
-    JsonReadHint, RegionId, ScanRequest, SequenceNumber, SequenceRange, TimeSeriesDistribution,
-    TimeSeriesRowSelector,
+    JsonReadHint, JsonRootReadHint, RegionId, ScanRequest, SequenceNumber, SequenceRange,
+    TimeSeriesDistribution, TimeSeriesRowSelector,
 };
 use table::predicate::{Predicate, build_time_range_predicate, extract_time_range_from_expr};
 use tokio::sync::{Semaphore, mpsc};
@@ -533,14 +533,18 @@ impl ScanRegion {
 
         let json_aligner = match json_type_hint.as_mut() {
             Some(json_type_hint)
-                if json_type_hint
-                    .values()
-                    .any(|hint| matches!(hint, JsonReadHint::Root(_))) =>
+                if json_type_hint.values().any(|hint| {
+                    matches!(hint, JsonReadHint::Root(JsonRootReadHint::Uninferred))
+                }) =>
             {
                 let source_schemas = self
                     .collect_source_arrow_schemas(&files, &mem_range_builders)
                     .await?;
                 if source_schemas.is_empty() {
+                    infer_json2_root_hints_from_schema(
+                        json_type_hint,
+                        self.version.metadata.schema.arrow_schema(),
+                    )?;
                     None
                 } else {
                     let aligner = Json2Aligner::try_new(source_schemas)?;
@@ -658,7 +662,8 @@ impl ScanRegion {
 
         for file in files {
             schemas.push(Arc::new(
-                self.collect_arrow_schema_from_parquet(file).await?,
+                self.collect_arrow_schema_from_parquet_metadata(file)
+                    .await?,
             ));
         }
 
@@ -671,7 +676,10 @@ impl ScanRegion {
         Ok(schemas)
     }
 
-    async fn collect_arrow_schema_from_parquet(&self, file: &FileHandle) -> Result<Schema> {
+    async fn collect_arrow_schema_from_parquet_metadata(
+        &self,
+        file: &FileHandle,
+    ) -> Result<Schema> {
         let file_path =
             file.file_path(self.access_layer.table_dir(), self.access_layer.path_type());
         let file_size = file.meta_ref().file_size;
@@ -682,6 +690,8 @@ impl ScanRegion {
             .read_parquet_metadata(
                 &file_path,
                 file_size,
+                // TODO: Report metadata cache metrics for this schema inference path.
+                // Dropping them here can hide cache misses when debugging scan latency.
                 &mut MetadataCacheMetrics::default(),
                 PageIndexPolicy::default(),
             )

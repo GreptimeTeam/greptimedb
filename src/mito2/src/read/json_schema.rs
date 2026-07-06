@@ -134,7 +134,7 @@ pub(crate) fn planned_json2_output_type(
     data_type: &ConcreteDataType,
     hint: Option<&JsonReadHint>,
 ) -> DataTypeResult<Json2OutputPlan> {
-    if data_type
+    if !data_type
         .as_json()
         .is_some_and(|json_type| json_type.is_json2())
     {
@@ -142,21 +142,21 @@ pub(crate) fn planned_json2_output_type(
     }
 
     match hint {
-            Some(JsonReadHint::Root(JsonRootReadHint::Inferred(json_type)))
-            | Some(JsonReadHint::Paths(json_type)) => {
-                Ok(Json2OutputPlan::AlignTo(ConcreteDataType::json2(json_type.clone())))
-            }
-            Some(JsonReadHint::Root(JsonRootReadHint::Uninferred)) => UnsupportedOperationSnafu {
-                op: "JSON2 root read schema must be inferred",
-                vector_type: "Json2",
-            }
-            .fail(),
-            None => UnsupportedOperationSnafu {
-                op: "direct JSON2 column projection is not supported yet; use json_get(column, '') to read the root JSON2 value",
-                vector_type: "Json2",
-            }
-            .fail(),
+        Some(JsonReadHint::Root(JsonRootReadHint::Inferred(json_type)))
+        | Some(JsonReadHint::Paths(json_type)) => Ok(Json2OutputPlan::AlignTo(
+            ConcreteDataType::json2(json_type.clone()),
+        )),
+        Some(JsonReadHint::Root(JsonRootReadHint::Uninferred)) => UnsupportedOperationSnafu {
+            op: "JSON2 root read schema must be inferred",
+            vector_type: "Json2",
         }
+        .fail(),
+        None => UnsupportedOperationSnafu {
+            op: "direct JSON2 column projection is not supported yet; use json_get(column, '') to read the root JSON2 value",
+            vector_type: "Json2",
+        }
+        .fail(),
+    }
 }
 
 /// JSON2 output handling plan for one projected column.
