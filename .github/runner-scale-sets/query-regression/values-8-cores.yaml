@@ -9,7 +9,7 @@ template:
   spec:
     containers:
       - name: runner
-        image: ghcr.io/greptimeteam/greptimedb-query-regression-runner:latest
+        image: greptime-registry.cn-hangzhou.cr.aliyuncs.com/greptime/greptimedb-query-regression-runner:latest
         imagePullPolicy: Always
         command: ["/home/runner/run.sh"]
         resources:

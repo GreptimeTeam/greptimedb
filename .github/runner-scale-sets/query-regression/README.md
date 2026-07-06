@@ -46,10 +46,10 @@ tools this workflow expects to be present on a normal CI host, including `wget`,
 ```bash
 docker build \
   -f .github/runner-scale-sets/query-regression/Dockerfile \
-  -t ghcr.io/greptimeteam/greptimedb-query-regression-runner:latest \
+  -t greptime-registry.cn-hangzhou.cr.aliyuncs.com/greptime/greptimedb-query-regression-runner:latest \
   .github/runner-scale-sets/query-regression
 
-docker push ghcr.io/greptimeteam/greptimedb-query-regression-runner:latest
+docker push greptime-registry.cn-hangzhou.cr.aliyuncs.com/greptime/greptimedb-query-regression-runner:latest
 ```
 
 The workflow still runs setup actions for pinned toolchain behavior, including
