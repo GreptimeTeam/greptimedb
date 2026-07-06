@@ -1,0 +1,23 @@
+githubConfigUrl: "https://github.com/GreptimeTeam/greptimedb"
+githubConfigSecret: greptimedb-arc-github-app
+
+runnerScaleSetName: "ubuntu-22.04-8-cores"
+minRunners: 0
+maxRunners: 4
+
+template:
+  spec:
+    containers:
+      - name: runner
+        image: ghcr.io/actions/actions-runner:latest
+        imagePullPolicy: Always
+        command: ["/home/runner/run.sh"]
+        resources:
+          requests:
+            cpu: "8"
+            memory: 24Gi
+            ephemeral-storage: 80Gi
+          limits:
+            cpu: "8"
+            memory: 24Gi
+            ephemeral-storage: 80Gi

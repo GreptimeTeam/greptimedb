@@ -32,6 +32,16 @@ on:
           - nightly
           - release
           - dev
+      runner:
+        description: Self-hosted runner label or ARC runner scale set for this query regression run
+        required: true
+        type: choice
+        default: ubuntu-22.04-8-cores
+        options:
+          - ubuntu-22.04-8-cores
+          - ubuntu-22.04-16-cores
+          - ubuntu-22.04-32-cores
+          - ubuntu-22.04-64-cores
   pull_request:
     types: [labeled, ready_for_review, reopened]
 
@@ -46,14 +56,15 @@ jobs:
   query-regression:
     if: >-
       ${{ github.event_name == 'workflow_dispatch' ||
-          (github.event_name == 'pull_request' &&
-           !github.event.pull_request.draft &&
-           contains(github.event.pull_request.labels.*.name, 'query-regression') &&
-           (github.event.action != 'labeled' || github.event.label.name == 'query-regression')) }}
-    runs-on: ubuntu-latest
+           (github.event_name == 'pull_request' &&
+            !github.event.pull_request.draft &&
+            contains(github.event.pull_request.labels.*.name, 'query-regression') &&
+            (github.event.action != 'labeled' || github.event.label.name == 'query-regression')) }}
+    runs-on: ${{ github.event_name == 'workflow_dispatch' && inputs.runner || 'ubuntu-22.04-8-cores' }}
     timeout-minutes: 180
     env:
       CARGO_PROFILE: ${{ github.event_name == 'pull_request' && 'nightly' || inputs.cargo_profile }}
+      CARGO_TARGET_DIR: ${{ github.workspace }}/query-regression-target
     steps:
       - name: Checkout base source
         uses: actions/checkout@v4
@@ -75,7 +86,28 @@ jobs:
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
+      - uses: rui314/setup-mold@v1
+
       - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
+
+      # Fork PRs can restore trusted caches but should not save new ones.
+      # Workflow dispatch and same-repository PRs may refresh the query-regression cache.
+      # This is a GitHub Actions cache; runner-local/sccache storage is configured by
+      # the self-hosted runner deployment, not by this workflow.
+      - name: Set Rust cache save policy
+        id: rust-cache-policy
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name || '' }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          if [[ "${EVENT_NAME}" == "workflow_dispatch" || "${HEAD_REPO}" == "${REPOSITORY}" ]]; then
+            echo "save=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "save=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - uses: astral-sh/setup-uv@v5
 
@@ -85,7 +117,7 @@ jobs:
           workspaces: base-src
           shared-key: query-regression-base
           cache-all-crates: "true"
-          save-if: false
+          save-if: ${{ steps.rust-cache-policy.outputs.save == 'true' }}
 
       - name: Rust cache (candidate)
         uses: Swatinem/rust-cache@v2
@@ -93,15 +125,33 @@ jobs:
           workspaces: candidate-src
           shared-key: query-regression-candidate
           cache-all-crates: "true"
-          save-if: false
+          save-if: ${{ steps.rust-cache-policy.outputs.save == 'true' }}
 
       - name: Build base greptime
         working-directory: base-src
-        run: cargo build --profile "${CARGO_PROFILE}" -p cmd --bin greptime
+        run: |
+          cargo build --profile "${CARGO_PROFILE}" -p cmd --bin greptime
+          target_dir="${CARGO_PROFILE}"
+          if [[ "${CARGO_PROFILE}" == "dev" ]]; then
+            target_dir="debug"
+          fi
+          mkdir -p "${GITHUB_WORKSPACE}/query-regression-bins/base"
+          cp "${CARGO_TARGET_DIR}/${target_dir}/greptime" \
+            "${GITHUB_WORKSPACE}/query-regression-bins/base/greptime"
 
       - name: Build candidate greptime and fixture generator
         working-directory: candidate-src
-        run: cargo build --profile "${CARGO_PROFILE}" -p cmd --bin greptime --bin query_perf_fixture
+        run: |
+          cargo build --profile "${CARGO_PROFILE}" -p cmd --bin greptime --bin query_perf_fixture
+          target_dir="${CARGO_PROFILE}"
+          if [[ "${CARGO_PROFILE}" == "dev" ]]; then
+            target_dir="debug"
+          fi
+          mkdir -p "${GITHUB_WORKSPACE}/query-regression-bins/candidate"
+          cp "${CARGO_TARGET_DIR}/${target_dir}/greptime" \
+            "${GITHUB_WORKSPACE}/query-regression-bins/candidate/greptime"
+          cp "${CARGO_TARGET_DIR}/${target_dir}/query_perf_fixture" \
+            "${GITHUB_WORKSPACE}/query-regression-bins/candidate/query_perf_fixture"
 
       - name: Run query regression
         id: run
@@ -113,6 +163,9 @@ jobs:
           CASE_NAME: ${{ github.event_name == 'pull_request' && 'default case set' || inputs.case }}
           BASE_REF: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || inputs.base_ref }}
           CANDIDATE_REF: ${{ github.event_name == 'pull_request' && format('refs/pull/{0}/merge', github.event.pull_request.number) || inputs.candidate_ref || github.ref }}
+          BASE_BIN: ${{ github.workspace }}/query-regression-bins/base/greptime
+          CANDIDATE_BIN: ${{ github.workspace }}/query-regression-bins/candidate/greptime
+          FIXTURE_GENERATOR: ${{ github.workspace }}/query-regression-bins/candidate/query_perf_fixture
         run: uv run --no-project python candidate-src/.github/scripts/query-regression-run.py
 
       - name: Write PR metadata for trusted comment workflow
