@@ -131,6 +131,14 @@ pub(crate) fn infer_json2_root_hints_from_schema(
     Ok(())
 }
 
+/// Returns the concrete JSON2 output type required by a read hint.
+pub(crate) fn planned_json2_output_type(
+    data_type: &ConcreteDataType,
+    hint: Option<&JsonReadHint>,
+) -> DataTypeResult<Option<ConcreteDataType>> {
+    todo!()
+}
+
 /// JSON2 output handling plan for one projected column.
 #[derive(Debug, Clone)]
 pub(crate) enum Json2OutputPlan {
