@@ -26,6 +26,9 @@ use bytes::Bytes;
 use common_base::AffectedRows;
 use common_grpc::FlightData;
 use common_grpc::flight::{FlightEncoder, FlightMessage};
+use common_meta::cache::TableFlownodeSetCacheRef;
+use common_meta::node_manager::NodeManagerRef;
+use common_meta::peer::Peer;
 use common_telemetry::error;
 use common_telemetry::tracing_context::TracingContext;
 use snafu::{OptionExt, ResultExt, ensure};
@@ -54,9 +57,12 @@ impl Inserter {
         }
 
         let body_size = raw_flight_data.data_body.len();
-        // TODO(yingwen): Fill record batch impure default values. Note that we should override `raw_flight_data` if we have to fill defaults.
-        // notify flownode to update dirty timestamps if flow is configured.
-        self.maybe_update_flow_dirty_window(table_info.clone(), record_batch.clone());
+
+        // Precompute the flow dirty-window notification before any source write
+        // so cache/timestamp errors fail before commit.
+        let dirty_task =
+            FlowDirtyWindowTask::new(&self.table_flownode_set_cache, &table_info, &record_batch)
+                .await?;
 
         metrics::BULK_REQUEST_MESSAGE_SIZE.observe(body_size as f64);
         metrics::BULK_REQUEST_ROWS
@@ -125,6 +131,7 @@ impl Inserter {
                 .context(error::RequestRegionSnafu)
                 .map(|r| r.affected_rows);
             if let Ok(rows) = result {
+                dirty_task.detach(self.node_manager.clone());
                 crate::metrics::DIST_INGEST_ROW_COUNT
                     .with_label_values(&[db_name.as_str()])
                     .inc_by(rows as u64);
@@ -240,79 +247,123 @@ impl Inserter {
             }
         }
 
-        let region_responses = futures::future::try_join_all(handles)
-            .await
-            .context(error::JoinTaskSnafu)?;
+        let region_responses = futures::future::join_all(handles).await;
         wait_all_datanode_timer.observe_duration();
         let mut rows_inserted: usize = 0;
-        for res in region_responses {
-            rows_inserted += res?.affected_rows;
+        let mut any_success = false;
+        let mut first_error = None;
+        for handle_result in region_responses {
+            match handle_result {
+                Ok(Ok(ref resp)) => {
+                    rows_inserted += resp.affected_rows;
+                    any_success = true;
+                }
+                Ok(Err(e)) => {
+                    first_error = first_error.or(Some(e));
+                }
+                Err(join_err) => {
+                    // Collect join errors instead of early-returning,
+                    // so we still check any_success and dispatch dirty below.
+                    first_error = first_error.or(Some(
+                        Err::<(), common_runtime::JoinError>(join_err)
+                            .context(error::JoinTaskSnafu)
+                            .unwrap_err(),
+                    ));
+                }
+            }
         }
+
+        if any_success {
+            dirty_task.detach(self.node_manager.clone());
+        }
+
+        if let Some(e) = first_error {
+            return Err(e);
+        }
+
         crate::metrics::DIST_INGEST_ROW_COUNT
             .with_label_values(&[db_name.as_str()])
             .inc_by(rows_inserted as u64);
         Ok(rows_inserted)
     }
+}
 
-    fn maybe_update_flow_dirty_window(&self, table_info: TableInfoRef, record_batch: RecordBatch) {
+/// Precompute the flow dirty-window notification before any source write.
+/// `new()` extracts timestamps and resolves flownode peers so cache/timestamp
+/// failures happen before commit. `detach()` does fire-and-forget best-effort
+/// dispatch only after the relevant success boundary.
+struct FlowDirtyWindowTask {
+    table_id: u32,
+    timestamps: Vec<i64>,
+    peers: Vec<Peer>,
+}
+
+impl FlowDirtyWindowTask {
+    async fn new(
+        cache: &TableFlownodeSetCacheRef,
+        table_info: &TableInfoRef,
+        record_batch: &RecordBatch,
+    ) -> error::Result<Self> {
         let table_id = table_info.table_id();
-        let table_flownode_set_cache = self.table_flownode_set_cache.clone();
-        let node_manager = self.node_manager.clone();
-        common_runtime::spawn_global(async move {
-            let result = table_flownode_set_cache
-                .get(table_id)
-                .await
-                .context(error::RequestInsertsSnafu);
-            let flownodes = match result {
-                Ok(flownodes) => flownodes.unwrap_or_default(),
-                Err(e) => {
-                    error!(e; "Failed to get flownodes for table id: {}", table_id);
-                    return;
-                }
-            };
+        let flownodes = cache
+            .get(table_id)
+            .await
+            .context(error::RequestInsertsSnafu)?
+            .unwrap_or_default();
+        let peers: Vec<Peer> = flownodes
+            .values()
+            .cloned()
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
 
-            let peers: HashSet<_> = flownodes.values().cloned().collect();
-            if peers.is_empty() {
-                return;
-            }
-
-            let Ok(timestamps) = extract_timestamps(
-                &record_batch,
-                &table_info
+        let timestamps = if peers.is_empty() {
+            vec![]
+        } else {
+            extract_timestamps(
+                record_batch,
+                table_info
                     .meta
                     .schema
                     .timestamp_column()
                     .as_ref()
                     .unwrap()
-                    .name,
-            )
-            .inspect_err(|e| {
-                error!(e; "Failed to extract timestamps from record batch");
-            }) else {
-                return;
-            };
+                    .name
+                    .as_str(),
+            )?
+        };
 
-            for peer in peers {
-                let node_manager = node_manager.clone();
-                let timestamps = timestamps.clone();
-                common_runtime::spawn_global(async move {
-                    if let Err(e) = node_manager
-                        .flownode(&peer)
-                        .await
-                        .handle_mark_window_dirty(DirtyWindowRequests {
-                            requests: vec![DirtyWindowRequest {
-                                table_id,
-                                timestamps,
-                            }],
-                        })
-                        .await
-                        .context(error::RequestInsertsSnafu)
-                    {
-                        error!(e; "Failed to mark timestamps as dirty, table: {}", table_id);
-                    }
-                });
-            }
-        });
+        Ok(Self {
+            table_id,
+            timestamps,
+            peers,
+        })
+    }
+
+    fn detach(self, node_manager: NodeManagerRef) {
+        if self.peers.is_empty() || self.timestamps.is_empty() {
+            return;
+        }
+        for peer in self.peers {
+            let timestamps = self.timestamps.clone();
+            let node_manager = node_manager.clone();
+            let table_id = self.table_id;
+            common_runtime::spawn_global(async move {
+                let result = node_manager
+                    .flownode(&peer)
+                    .await
+                    .handle_mark_window_dirty(DirtyWindowRequests {
+                        requests: vec![DirtyWindowRequest {
+                            table_id,
+                            timestamps,
+                        }],
+                    })
+                    .await;
+                if let Err(e) = result {
+                    error!(e; "Failed to mark timestamps as dirty, table: {}", table_id);
+                }
+            });
+        }
     }
 }
 
@@ -333,4 +384,267 @@ fn extract_timestamps(rb: &RecordBatch, timestamp_index_name: &str) -> error::Re
             }
         })?;
     Ok(primitive.iter().flatten().collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use api::v1::flow::FlowResponse;
+    use arrow::array::{Int64Array, TimestampMillisecondArray};
+    use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
+    use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+    use common_meta::cache::new_table_flownode_set_cache;
+    use common_meta::ddl::test_util::datanode_handler::NaiveDatanodeHandler;
+    use common_meta::instruction::{CacheIdent, CreateFlow};
+    use common_meta::node_manager::{DatanodeManager, DatanodeRef, FlownodeManager, FlownodeRef};
+    use common_meta::peer::Peer;
+    use common_meta::test_util::MockDatanodeManager;
+    use moka::future::Cache;
+    use tokio::sync::mpsc;
+
+    use super::*;
+    use crate::tests::prepare_mocked_backend;
+
+    /// Combined mock for DatanodeManager + FlownodeManager (same as in insert.rs tests).
+    struct CombinedNodeManager<D: DatanodeManager, F: FlownodeManager> {
+        datanode_mgr: D,
+        flownode_mgr: F,
+    }
+
+    #[async_trait::async_trait]
+    impl<D: DatanodeManager + Send + Sync, F: FlownodeManager + Send + Sync> DatanodeManager
+        for CombinedNodeManager<D, F>
+    {
+        async fn datanode(&self, peer: &Peer) -> DatanodeRef {
+            self.datanode_mgr.datanode(peer).await
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl<D: DatanodeManager + Send + Sync, F: FlownodeManager + Send + Sync> FlownodeManager
+        for CombinedNodeManager<D, F>
+    {
+        async fn flownode(&self, peer: &Peer) -> FlownodeRef {
+            self.flownode_mgr.flownode(peer).await
+        }
+    }
+
+    /// A `MockFlownodeHandler` that records flownode calls through a channel.
+    #[derive(Clone)]
+    struct RecordingFlownodeHandler {
+        tx: mpsc::UnboundedSender<()>,
+    }
+
+    #[async_trait::async_trait]
+    impl common_meta::test_util::MockFlownodeHandler for RecordingFlownodeHandler {
+        async fn handle_inserts(
+            &self,
+            _peer: &Peer,
+            _requests: api::v1::region::InsertRequests,
+        ) -> common_meta::error::Result<FlowResponse> {
+            let _ = self.tx.send(());
+            Ok(FlowResponse::default())
+        }
+
+        async fn handle_mark_window_dirty(
+            &self,
+            _peer: &Peer,
+            _req: api::v1::flow::DirtyWindowRequests,
+        ) -> common_meta::error::Result<FlowResponse> {
+            let _ = self.tx.send(());
+            Ok(FlowResponse::default())
+        }
+    }
+
+    /// Populates the flownode set cache so that `table_id` resolves to `peers`.
+    async fn populate_flownode_cache(
+        cache: &TableFlownodeSetCacheRef,
+        table_id: u32,
+        peers: Vec<Peer>,
+    ) {
+        let ident = vec![CacheIdent::CreateFlow(CreateFlow {
+            flow_id: 1,
+            source_table_ids: vec![table_id],
+            partition_to_peer_mapping: peers
+                .into_iter()
+                .enumerate()
+                .map(|(i, p)| (i as u32, p))
+                .collect(),
+        })];
+        cache.invalidate(&ident).await.unwrap();
+    }
+
+    /// Create a `RecordBatch` with a single timestamp column and a value column.
+    fn make_record_batch(ts_millis: &[i64]) -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(
+                "ts",
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new("val", DataType::Int64, true),
+        ]));
+        let ts_array = Arc::new(TimestampMillisecondArray::from(
+            ts_millis.iter().map(|&ts| Some(ts)).collect::<Vec<_>>(),
+        ));
+        let val_array = Arc::new(Int64Array::from(vec![42i64; ts_millis.len()]));
+        RecordBatch::try_new(schema, vec![ts_array, val_array]).unwrap()
+    }
+
+    /// Create a `TableInfoRef` with a timestamp column named "ts".
+    fn make_table_info_ref(table_id: u32) -> TableInfoRef {
+        let col_schemas = vec![
+            datatypes::schema::ColumnSchema::new(
+                "ts",
+                datatypes::data_type::ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
+            datatypes::schema::ColumnSchema::new(
+                "val",
+                datatypes::data_type::ConcreteDataType::int64_datatype(),
+                true,
+            ),
+        ];
+        let schema = Arc::new(
+            datatypes::schema::SchemaBuilder::try_from(col_schemas)
+                .unwrap()
+                .build()
+                .unwrap(),
+        );
+        let meta = table::metadata::TableMetaBuilder::empty()
+            .schema(schema)
+            .primary_key_indices(vec![])
+            .value_indices(vec![1])
+            .engine("mito")
+            .next_column_id(2)
+            .options(Default::default())
+            .created_on(Default::default())
+            .build()
+            .unwrap();
+        Arc::new(
+            table::metadata::TableInfoBuilder::default()
+                .table_id(table_id)
+                .table_version(0)
+                .name("test_table")
+                .schema_name(DEFAULT_SCHEMA_NAME)
+                .catalog_name(DEFAULT_CATALOG_NAME)
+                .desc(None)
+                .table_type(table::metadata::TableType::Base)
+                .meta(meta)
+                .build()
+                .unwrap(),
+        )
+    }
+
+    // --- Flow dirty-window ordering tests ---
+
+    /// Verifies that `FlowDirtyWindowTask::detach` sends dirty-window requests
+    /// to the flownode via the node manager.
+    #[tokio::test]
+    async fn test_flow_dirty_window_task_detach_sends_dirty() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+
+        let kv_backend = prepare_mocked_backend().await;
+        let cache = Arc::new(new_table_flownode_set_cache(
+            String::new(),
+            Cache::new(100),
+            kv_backend,
+        ));
+        // Populate cache so table 1 has flownode peer (id=1)
+        populate_flownode_cache(&cache, 1, vec![Peer::empty(1)]).await;
+
+        let flownode_mgr =
+            common_meta::test_util::MockFlownodeManager::new(RecordingFlownodeHandler {
+                tx: tx.clone(),
+            });
+        let datanode_mgr = MockDatanodeManager::new(NaiveDatanodeHandler);
+        let node_manager: NodeManagerRef = Arc::new(CombinedNodeManager {
+            datanode_mgr,
+            flownode_mgr,
+        });
+
+        let record_batch = make_record_batch(&[1000, 2000, 3000]);
+        let table_info = make_table_info_ref(1);
+
+        // Precompute the task — should extract timestamps and find flownode peers
+        let task = FlowDirtyWindowTask::new(&cache, &table_info, &record_batch)
+            .await
+            .unwrap();
+
+        assert!(!task.timestamps.is_empty(), "should extract timestamps");
+        assert!(!task.peers.is_empty(), "should find flownode peers");
+
+        // Detach should spawn flownode calls
+        task.detach(node_manager);
+
+        // Wait for the spawned task to actually send
+        tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+            .await
+            .expect("flownode handle_mark_window_dirty should be called after detach");
+    }
+
+    /// Verifies that `FlowDirtyWindowTask` with no flownode peers is a no-op on detach.
+    #[tokio::test]
+    async fn test_flow_dirty_window_task_no_peers_noop() {
+        let kv_backend = prepare_mocked_backend().await;
+        let cache = Arc::new(new_table_flownode_set_cache(
+            String::new(),
+            Cache::new(100),
+            kv_backend,
+        ));
+        // Don't populate cache — no flownode peers
+
+        let record_batch = make_record_batch(&[1000, 2000]);
+        let table_info = make_table_info_ref(1);
+
+        let task = FlowDirtyWindowTask::new(&cache, &table_info, &record_batch)
+            .await
+            .unwrap();
+
+        // No peers found — timestamps should be empty
+        assert!(task.timestamps.is_empty());
+        assert!(task.peers.is_empty());
+
+        // Detach should be a no-op (no flownode calls spawned)
+        // We use MockDatanodeManager (flownode() is unimplemented!) but
+        // detach returns early when peers is empty, so it's safe.
+        let datanode_mgr = MockDatanodeManager::new(NaiveDatanodeHandler);
+        task.detach(Arc::new(datanode_mgr));
+    }
+
+    /// Verifies that `extract_timestamps` correctly extracts all timestamp
+    /// values from a record batch.
+    #[test]
+    fn test_extract_timestamps() {
+        let rb = make_record_batch(&[1000, 2000, 3000, 1000]);
+        let timestamps = extract_timestamps(&rb, "ts").unwrap();
+        assert_eq!(timestamps, vec![1000, 2000, 3000, 1000]);
+    }
+
+    /// Verifies that `extract_timestamps` returns an empty vec for an empty batch.
+    #[test]
+    fn test_extract_timestamps_empty() {
+        let rb = make_record_batch(&[]);
+        let timestamps = extract_timestamps(&rb, "ts").unwrap();
+        assert!(timestamps.is_empty());
+    }
+
+    // ── Note on bulk insert ordering guarantees ──
+    //
+    // Full `handle_bulk_insert` ordering tests (blocking datanode, asserting
+    // no dirty before release, multi-region partial failure) require heavy
+    // integration setup: TableRef, FlightData, partition manager with real
+    // region routes, etc. The structural guarantees are enforced by the code:
+    //
+    // - Single-region: dirty_task.detach() is only called inside
+    //   `if let Ok(rows) = result { ... }`, after datanode write completes.
+    // - Multi-region: dirty_task.detach() is only called after
+    //   `join_all(handles).await` completes and `any_success` is computed.
+    //   Join errors are collected (not early-returned) before dirty dispatch.
+    //
+    // The isolated `FlowDirtyWindowTask` tests above verify that:
+    // - `new()` extracts timestamps and resolves flownode peers (precompute)
+    // - `detach()` spawns flownode dirty-window calls (best-effort dispatch)
 }
