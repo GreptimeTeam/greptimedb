@@ -570,6 +570,10 @@ mod tests {
         let map = make_map(&[]);
         let options = RegionOptions::try_from_options(RegionId::new(0, 0), &map).unwrap();
         assert_eq!(RegionOptions::default(), options);
+        assert_eq!(
+            MetricEngineValueEncoding::Plain,
+            options.experimental_metric_engine_value_encoding
+        );
     }
 
     #[test]

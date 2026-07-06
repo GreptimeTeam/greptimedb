@@ -24,7 +24,10 @@ use store_api::metric_engine_consts::{
     METRIC_ENGINE_INDEX_SKIPPING_INDEX_GRANULARITY_OPTION_DEFAULT, METRIC_ENGINE_INDEX_TYPE_OPTION,
     PRIMARY_KEY_ENCODING,
 };
-use store_api::mito_engine_options::{COMPACTION_TYPE, COMPACTION_TYPE_TWCS, TWCS_TIME_WINDOW};
+use store_api::mito_engine_options::{
+    COMPACTION_TYPE, COMPACTION_TYPE_TWCS, EXPERIMENTAL_METRIC_ENGINE_VALUE_ENCODING,
+    TWCS_TIME_WINDOW,
+};
 
 /// Prefix for legacy `memtable.partition_tree.*` option keys. These keys are
 /// silently dropped by the metric engine; the partition tree memtable is gone.
@@ -59,8 +62,34 @@ pub enum IndexOptions {
     },
 }
 
-/// Sets data region specific options.
-pub fn set_data_region_options(
+/// Sets data region specific options for newly-created MetricEngine data regions.
+///
+/// New data regions materialize `no_dictionary` for the metric value encoding
+/// when the user omits the option. This keeps the new-write default explicit in
+/// persisted region options without changing the serde/default meaning of old
+/// region options that do not contain this key.
+pub fn set_data_region_options_for_create(
+    options: &mut HashMap<String, String>,
+    sparse_primary_key_encoding_if_absent: bool,
+) {
+    set_data_region_options(options, sparse_primary_key_encoding_if_absent);
+    options
+        .entry(EXPERIMENTAL_METRIC_ENGINE_VALUE_ENCODING.to_string())
+        .or_insert_with(|| "no_dictionary".to_string());
+}
+
+/// Sets data region specific options for opening existing MetricEngine data regions.
+///
+/// Unlike create, open must not synthesize a missing metric value encoding. Old
+/// regions/manifests without the option should continue to parse as `plain`.
+pub fn set_data_region_options_for_open(
+    options: &mut HashMap<String, String>,
+    sparse_primary_key_encoding_if_absent: bool,
+) {
+    set_data_region_options(options, sparse_primary_key_encoding_if_absent);
+}
+
+fn set_data_region_options(
     options: &mut HashMap<String, String>,
     sparse_primary_key_encoding_if_absent: bool,
 ) {
@@ -177,7 +206,7 @@ mod tests {
             METRIC_ENGINE_INDEX_SKIPPING_INDEX_FALSE_POSITIVE_RATE_OPTION.to_string(),
             "0.01".to_string(),
         );
-        set_data_region_options(&mut options, false);
+        set_data_region_options_for_open(&mut options, false);
 
         for key in [
             METRIC_ENGINE_INDEX_TYPE_OPTION,
@@ -196,10 +225,65 @@ mod tests {
             "byte_stream_split".to_string(),
         );
 
-        set_data_region_options(&mut options, true);
+        set_data_region_options_for_create(&mut options, true);
 
         assert_eq!(
             Some(&"byte_stream_split".to_string()),
+            options.get(EXPERIMENTAL_METRIC_ENGINE_VALUE_ENCODING)
+        );
+    }
+
+    #[test]
+    fn test_set_data_region_options_for_create_defaults_metric_value_encoding() {
+        let mut options = HashMap::new();
+
+        set_data_region_options_for_create(&mut options, true);
+
+        assert_eq!(
+            Some(&"no_dictionary".to_string()),
+            options.get(EXPERIMENTAL_METRIC_ENGINE_VALUE_ENCODING)
+        );
+    }
+
+    #[test]
+    fn test_set_data_region_options_for_open_preserves_missing_metric_value_encoding() {
+        let mut options = HashMap::new();
+
+        set_data_region_options_for_open(&mut options, true);
+
+        assert!(!options.contains_key(EXPERIMENTAL_METRIC_ENGINE_VALUE_ENCODING));
+    }
+
+    #[test]
+    fn test_set_data_region_options_for_open_preserves_explicit_metric_value_encoding() {
+        for value in ["plain", "no_dictionary", "byte_stream_split"] {
+            let mut options = HashMap::new();
+            options.insert(
+                EXPERIMENTAL_METRIC_ENGINE_VALUE_ENCODING.to_string(),
+                value.to_string(),
+            );
+
+            set_data_region_options_for_open(&mut options, true);
+
+            assert_eq!(
+                Some(&value.to_string()),
+                options.get(EXPERIMENTAL_METRIC_ENGINE_VALUE_ENCODING)
+            );
+        }
+    }
+
+    #[test]
+    fn test_set_data_region_options_preserves_plain_metric_value_encoding() {
+        let mut options = HashMap::new();
+        options.insert(
+            EXPERIMENTAL_METRIC_ENGINE_VALUE_ENCODING.to_string(),
+            "plain".to_string(),
+        );
+
+        set_data_region_options_for_create(&mut options, true);
+
+        assert_eq!(
+            Some(&"plain".to_string()),
             options.get(EXPERIMENTAL_METRIC_ENGINE_VALUE_ENCODING)
         );
     }
@@ -245,7 +329,7 @@ mod tests {
     fn test_set_data_region_options_default_compaction_time_window() {
         // Test that default time window is set when not specified
         let mut options = HashMap::new();
-        set_data_region_options(&mut options, false);
+        set_data_region_options_for_open(&mut options, false);
 
         assert_eq!(options.get("memtable.type"), Some(&"bulk".to_string()));
         assert_eq!(options.get("sst_format"), Some(&"flat".to_string()));
@@ -259,7 +343,7 @@ mod tests {
     #[test]
     fn test_set_data_region_options_sparse_primary_key_encoding() {
         let mut options = HashMap::new();
-        set_data_region_options(&mut options, true);
+        set_data_region_options_for_open(&mut options, true);
 
         assert_eq!(options.get("memtable.type"), Some(&"bulk".to_string()));
         assert_eq!(options.get("sst_format"), Some(&"flat".to_string()));
@@ -282,7 +366,7 @@ mod tests {
             "memtable.partition_tree.index_max_keys_per_shard".to_string(),
             "2048".to_string(),
         );
-        set_data_region_options(&mut options, false);
+        set_data_region_options_for_open(&mut options, false);
 
         assert_eq!(options.get("memtable.type"), Some(&"bulk".to_string()));
         assert_eq!(options.get("sst_format"), Some(&"flat".to_string()));
@@ -300,7 +384,7 @@ mod tests {
         let mut options = HashMap::new();
         options.insert(PRIMARY_KEY_ENCODING.to_string(), "dense".to_string());
         // Sparse flag is on but caller already specified dense.
-        set_data_region_options(&mut options, true);
+        set_data_region_options_for_open(&mut options, true);
 
         assert_eq!(
             options.get(PRIMARY_KEY_ENCODING),
@@ -314,7 +398,7 @@ mod tests {
         let mut options = HashMap::new();
         options.insert(TWCS_TIME_WINDOW.to_string(), "2h".to_string());
         options.insert(COMPACTION_TYPE.to_string(), "twcs".to_string());
-        set_data_region_options(&mut options, false);
+        set_data_region_options_for_open(&mut options, false);
 
         // User's time window should be preserved
         assert_eq!(options.get(TWCS_TIME_WINDOW), Some(&"2h".to_string()));

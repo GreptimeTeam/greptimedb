@@ -41,7 +41,7 @@ use store_api::storage::consts::ReservedColumnId;
 
 use crate::engine::MetricEngineInner;
 use crate::engine::create::extract_new_columns::extract_new_columns;
-use crate::engine::options::{PhysicalRegionOptions, set_data_region_options};
+use crate::engine::options::{PhysicalRegionOptions, set_data_region_options_for_create};
 use crate::error::{
     ColumnTypeMismatchSnafu, ConflictRegionOptionSnafu, CreateMitoRegionSnafu,
     InternalColumnOccupiedSnafu, InvalidMetadataSnafu, MissingRegionOptionSnafu,
@@ -544,7 +544,7 @@ impl MetricEngineInner {
         data_region_request.primary_key = primary_key;
 
         // set data region options
-        set_data_region_options(
+        set_data_region_options_for_create(
             &mut data_region_request.options,
             self.config.sparse_primary_key_encoding,
         );
@@ -914,8 +914,42 @@ mod test {
         );
         assert!(data_region_request.options.contains_key("ttl"));
         assert_eq!(
+            Some(&"no_dictionary".to_string()),
+            data_region_request
+                .options
+                .get(EXPERIMENTAL_METRIC_ENGINE_VALUE_ENCODING)
+        );
+        assert_eq!(
             data_region_request.requirements,
             RegionRequirements::object_storage()
+        );
+
+        let mut explicit_plain_request = request.clone();
+        explicit_plain_request.options.insert(
+            EXPERIMENTAL_METRIC_ENGINE_VALUE_ENCODING.to_string(),
+            "plain".to_string(),
+        );
+        let explicit_plain_data_region_request =
+            engine_inner.create_request_for_data_region(&explicit_plain_request);
+        assert_eq!(
+            Some(&"plain".to_string()),
+            explicit_plain_data_region_request
+                .options
+                .get(EXPERIMENTAL_METRIC_ENGINE_VALUE_ENCODING)
+        );
+
+        let mut explicit_bss_request = request.clone();
+        explicit_bss_request.options.insert(
+            EXPERIMENTAL_METRIC_ENGINE_VALUE_ENCODING.to_string(),
+            "byte_stream_split".to_string(),
+        );
+        let explicit_bss_data_region_request =
+            engine_inner.create_request_for_data_region(&explicit_bss_request);
+        assert_eq!(
+            Some(&"byte_stream_split".to_string()),
+            explicit_bss_data_region_request
+                .options
+                .get(EXPERIMENTAL_METRIC_ENGINE_VALUE_ENCODING)
         );
 
         // check create metadata region request

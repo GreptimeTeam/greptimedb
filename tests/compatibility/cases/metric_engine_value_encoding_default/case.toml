@@ -1,0 +1,8 @@
+name = "metric_engine_value_encoding_default"
+reason = "Verify MetricEngine regions created before experimental_metric_engine_value_encoding still open as plain/missing and continue to read/write on newer binaries."
+introduced_by = "PR #8414"
+topologies = ["distributed"]
+from_range = ["<v1.2.0"]
+to_range = [">=v1.2.0"]
+features = ["metric-engine", "region-options", "manifest"]
+owner = "storage"

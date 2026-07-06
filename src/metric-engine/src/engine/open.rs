@@ -27,7 +27,7 @@ use store_api::storage::RegionId;
 
 use crate::engine::MetricEngineInner;
 use crate::engine::create::region_options_for_metadata_region;
-use crate::engine::options::{PhysicalRegionOptions, set_data_region_options};
+use crate::engine::options::{PhysicalRegionOptions, set_data_region_options_for_open};
 use crate::error::{
     BatchOpenMitoRegionSnafu, NoOpenRegionResultSnafu, OpenMitoRegionSnafu,
     PhysicalRegionNotFoundSnafu, Result,
@@ -226,7 +226,7 @@ impl MetricEngineInner {
         };
 
         let mut data_region_options = request.options;
-        set_data_region_options(
+        set_data_region_options_for_open(
             &mut data_region_options,
             self.config.sparse_primary_key_encoding,
         );
@@ -362,4 +362,57 @@ impl MetricEngineInner {
     }
 }
 
-// Unit tests in engine.rs
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use store_api::metric_engine_consts::METRIC_ENGINE_NAME;
+    use store_api::mito_engine_options::EXPERIMENTAL_METRIC_ENGINE_VALUE_ENCODING;
+    use store_api::region_request::RegionRequirements;
+
+    use super::*;
+    use crate::config::EngineConfig;
+    use crate::engine::MetricEngine;
+    use crate::test_util::TestEnv;
+
+    fn physical_open_request(options: HashMap<String, String>) -> RegionOpenRequest {
+        RegionOpenRequest {
+            table_dir: "/test_dir".to_string(),
+            path_type: PathType::Bare,
+            options,
+            engine: METRIC_ENGINE_NAME.to_string(),
+            skip_wal_replay: false,
+            checkpoint: None,
+            requirements: RegionRequirements::object_storage(),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_open_data_region_options_do_not_materialize_metric_value_encoding() {
+        let env = TestEnv::new().await;
+        let engine = MetricEngine::try_new(env.mito(), EngineConfig::default()).unwrap();
+        let engine_inner = engine.inner;
+
+        let (_metadata_request, data_request) = engine_inner
+            .transform_open_physical_region_request(physical_open_request(HashMap::new()));
+        assert!(
+            !data_request
+                .options
+                .contains_key(EXPERIMENTAL_METRIC_ENGINE_VALUE_ENCODING)
+        );
+
+        let mut explicit_plain = HashMap::new();
+        explicit_plain.insert(
+            EXPERIMENTAL_METRIC_ENGINE_VALUE_ENCODING.to_string(),
+            "plain".to_string(),
+        );
+        let (_metadata_request, data_request) = engine_inner
+            .transform_open_physical_region_request(physical_open_request(explicit_plain));
+        assert_eq!(
+            Some(&"plain".to_string()),
+            data_request
+                .options
+                .get(EXPERIMENTAL_METRIC_ENGINE_VALUE_ENCODING)
+        );
+    }
+}

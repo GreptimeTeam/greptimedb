@@ -1,0 +1,48 @@
+SELECT ts, host, greptime_value
+FROM metric_value_encoding_default
+ORDER BY ts, host;
+
++---------------------+--------+----------------+
+| ts                  | host   | greptime_value |
++---------------------+--------+----------------+
+| 2024-01-01T00:00:00 | host_a | 1.5            |
+| 2024-01-01T00:01:00 | host_b | 2.5            |
++---------------------+--------+----------------+
+
+SELECT
+    COUNT(*) > 0 AS has_region,
+    SUM(
+        CASE
+            WHEN region_options LIKE '%experimental_metric_engine_value_encoding%' THEN 1
+            ELSE 0
+        END
+    ) AS synthesized_option_count
+FROM information_schema.region_info
+WHERE region_id IN (
+    SELECT region_id
+    FROM information_schema.region_peers
+    WHERE table_name = 'metric_value_encoding_default_phy'
+);
+
++------------+--------------------------+
+| has_region | synthesized_option_count |
++------------+--------------------------+
+| true       | 1                        |
++------------+--------------------------+
+
+INSERT INTO metric_value_encoding_default (host, ts, greptime_value) VALUES
+    ('host_c', '2024-01-01 00:02:00+0000', 3.5);
+
+Affected Rows: 1
+
+SELECT ts, host, greptime_value
+FROM metric_value_encoding_default
+ORDER BY ts, host;
+
++---------------------+--------+----------------+
+| ts                  | host   | greptime_value |
++---------------------+--------+----------------+
+| 2024-01-01T00:00:00 | host_a | 1.5            |
+| 2024-01-01T00:01:00 | host_b | 2.5            |
+| 2024-01-01T00:02:00 | host_c | 3.5            |
++---------------------+--------+----------------+

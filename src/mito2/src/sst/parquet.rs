@@ -861,6 +861,73 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_metric_engine_float64_value_encoding_modes_readback_compatible() {
+        let value_column = common_query::prelude::greptime_value();
+        let values = (0..200)
+            .map(|idx| Some((idx % 7) as f64 + 0.25))
+            .collect::<Vec<_>>();
+
+        for encoding in [
+            MetricEngineValueEncoding::Plain,
+            MetricEngineValueEncoding::NoDictionary,
+            MetricEngineValueEncoding::ByteStreamSplit,
+        ] {
+            let metadata = metric_physical_field_region_metadata(
+                RegionId::with_group_and_seq(1, METRIC_DATA_REGION_GROUP, 0),
+                value_column,
+                ConcreteDataType::float64_datatype(),
+            );
+            let batch = float_field_record_batch(
+                &metadata,
+                value_column,
+                Arc::new(Float64Array::from(values.clone())) as ArrayRef,
+            );
+            let expected = batch.clone();
+            let (object_store, handle, sst_info) =
+                write_float_field_sst(metadata, batch, metric_data_region_options(encoding)).await;
+
+            match encoding {
+                MetricEngineValueEncoding::Plain => {
+                    assert!(!column_has_encoding(
+                        &sst_info,
+                        value_column,
+                        Encoding::BYTE_STREAM_SPLIT
+                    ));
+                    assert!(column_has_dictionary_encoding(&sst_info, value_column));
+                }
+                MetricEngineValueEncoding::NoDictionary => {
+                    assert!(!column_has_encoding(
+                        &sst_info,
+                        value_column,
+                        Encoding::BYTE_STREAM_SPLIT
+                    ));
+                    assert!(!column_has_dictionary_encoding(&sst_info, value_column));
+                }
+                MetricEngineValueEncoding::ByteStreamSplit => {
+                    assert!(column_has_encoding(
+                        &sst_info,
+                        value_column,
+                        Encoding::BYTE_STREAM_SPLIT
+                    ));
+                    assert!(!column_has_dictionary_encoding(&sst_info, value_column));
+                }
+            }
+
+            let mut reader = ParquetReaderBuilder::new(
+                FILE_DIR.to_string(),
+                PathType::Bare,
+                handle,
+                object_store,
+            )
+            .build()
+            .await
+            .unwrap()
+            .unwrap();
+            check_record_batch_reader_result(&mut reader, &[expected]).await;
+        }
+    }
+
+    #[tokio::test]
     async fn test_metric_engine_float32_value_byte_stream_split() {
         let value_column = common_query::prelude::greptime_value();
         let metadata = metric_physical_field_region_metadata(
