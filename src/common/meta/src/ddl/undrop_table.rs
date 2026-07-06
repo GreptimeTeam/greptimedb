@@ -18,8 +18,6 @@ use api::v1::region::{
     OpenRequest as PbOpenRegionRequest, RegionRequest, RegionRequestHeader, region_request,
 };
 use async_trait::async_trait;
-use common_error::ext::ErrorExt;
-use common_error::status_code::StatusCode;
 use common_procedure::error::{FromJsonSnafu, ToJsonSnafu};
 use common_procedure::{
     Context as ProcedureContext, LockKey, Procedure, Result as ProcedureResult, Status,
@@ -232,27 +230,6 @@ pub(crate) async fn open_regions(
         table_info,
         region_routes,
         region_wal_options,
-        false,
-    )
-    .await
-}
-
-pub(crate) async fn open_regions_ignore_region_not_found(
-    context: &DdlContext,
-    table_id: TableId,
-    table_name: &TableName,
-    table_info: &table::metadata::TableInfo,
-    region_routes: &[RegionRoute],
-    region_wal_options: &HashMap<RegionNumber, WalOptions>,
-) -> Result<()> {
-    open_regions_inner(
-        context,
-        table_id,
-        table_name,
-        table_info,
-        region_routes,
-        region_wal_options,
-        true,
     )
     .await
 }
@@ -264,7 +241,6 @@ async fn open_regions_inner(
     table_info: &table::metadata::TableInfo,
     region_routes: &[RegionRoute],
     region_wal_options: &HashMap<RegionNumber, WalOptions>,
-    ignore_region_not_found: bool,
 ) -> Result<()> {
     let template = build_template_from_raw_table_info(table_info)?;
     let builder = CreateRequestBuilder::new(template, None);
@@ -303,9 +279,7 @@ async fn open_regions_inner(
             let datanode = datanode.clone();
             let requester = requester.clone();
             tasks.push(async move {
-                if let Err(err) = requester.handle(request).await
-                    && !(ignore_region_not_found && err.status_code() == StatusCode::RegionNotFound)
-                {
+                if let Err(err) = requester.handle(request).await {
                     return Err(add_peer_context_if_needed(datanode)(err));
                 }
                 Ok(())

@@ -963,15 +963,13 @@ async fn test_purge_dropped_table_drops_regions_and_deletes_tombstone() {
     execute_procedure_until_done(&mut procedure).await;
 
     let mut requests = Vec::new();
-    for _ in 0..4 {
+    for _ in 0..2 {
         let (peer, request) = rx.try_recv().unwrap();
         requests.push((peer.id, request.body.unwrap()));
     }
     requests.sort_unstable_by_key(|(peer_id, _)| *peer_id);
-    assert_matches!(requests[0].1, region_request::Body::Open(_));
-    assert_matches!(requests[1].1, region_request::Body::Drop(_));
-    assert_matches!(requests[2].1, region_request::Body::Open(_));
-    assert_matches!(requests[3].1, region_request::Body::Close(_));
+    assert_matches!(requests[0].1, region_request::Body::Drop(_));
+    assert_matches!(requests[1].1, region_request::Body::Close(_));
     assert!(rx.try_recv().is_err());
     assert!(
         ddl_context
@@ -1050,12 +1048,6 @@ async fn test_purge_dropped_table_by_id_selects_tombstone_when_live_table_exists
     assert_eq!(live_table.table_id(), live_table_id);
 
     let (_, request) = rx.try_recv().unwrap();
-    let Some(region_request::Body::Open(req)) = request.body else {
-        unreachable!();
-    };
-    assert_eq!(req.region_id, RegionId::new(dropped_table_id, 1).as_u64());
-
-    let (_, request) = rx.try_recv().unwrap();
     let Some(region_request::Body::Drop(req)) = request.body else {
         unreachable!();
     };
@@ -1064,7 +1056,7 @@ async fn test_purge_dropped_table_by_id_selects_tombstone_when_live_table_exists
 }
 
 #[tokio::test]
-async fn test_purge_dropped_table_replayed_open_regions_ignores_dropped_regions() {
+async fn test_purge_dropped_table_replayed_legacy_open_regions_does_not_open_regions() {
     let (tx, mut rx) = mpsc::channel(8);
     let dropped_regions = Arc::new(StdMutex::new(HashSet::new()));
     let datanode_handler = DatanodeWatcher::new(tx).with_handler({
@@ -1123,14 +1115,19 @@ async fn test_purge_dropped_table_replayed_open_regions_ignores_dropped_regions(
     );
     let ctx = new_test_procedure_context();
     procedure.execute(&ctx).await.unwrap();
-    let open_regions_data = procedure.dump().unwrap();
-    procedure.execute(&ctx).await.unwrap();
-    procedure.execute(&ctx).await.unwrap();
+    let legacy_open_regions_data = procedure
+        .dump()
+        .unwrap()
+        .replace("\"state\":\"DropRegions\"", "\"state\":\"OpenRegions\"");
 
     let mut replayed =
-        PurgeDroppedTableProcedure::from_json(&open_regions_data, ddl_context.clone()).unwrap();
+        PurgeDroppedTableProcedure::from_json(&legacy_open_regions_data, ddl_context.clone())
+            .unwrap();
     execute_procedure_until_done(&mut replayed).await;
 
+    let (_, request) = rx.try_recv().unwrap();
+    assert_matches!(request.body, Some(region_request::Body::Drop(_)));
+    assert!(rx.try_recv().is_err());
     assert!(
         ddl_context
             .table_metadata_manager

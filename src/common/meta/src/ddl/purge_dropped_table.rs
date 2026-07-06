@@ -29,7 +29,6 @@ use table::table_name::TableName;
 
 use crate::ddl::DdlContext;
 use crate::ddl::drop_table::executor::DropTableExecutor;
-use crate::ddl::undrop_table::open_regions_ignore_region_not_found;
 use crate::ddl::utils::{
     convert_region_routes_to_detecting_regions, is_metric_engine_logical_table,
     map_to_procedure_error,
@@ -84,22 +83,14 @@ impl PurgeDroppedTableProcedure {
         self.data.table_info = Some(dropped_table.table_info_value.table_info);
         self.data.table_route_value = Some(dropped_table.table_route_value);
         self.data.region_wal_options = dropped_table.region_wal_options;
-        self.data.state = PurgeDroppedTableState::OpenRegions;
+        self.data.state = PurgeDroppedTableState::DropRegions;
         Ok(Status::executing(true))
     }
 
     async fn on_open_regions(&mut self) -> Result<Status> {
-        if let Some(region_routes) = self.data.physical_region_routes() {
-            open_regions_ignore_region_not_found(
-                &self.context,
-                self.data.table_id(),
-                self.data.table_name(),
-                self.data.table_info(),
-                region_routes,
-                &self.data.region_wal_options,
-            )
-            .await?;
-        }
+        // Compatibility with procedure states dumped by the old reopen-then-drop purge flow.
+        // A purged soft-dropped table has already closed its regions, so purge must not reopen
+        // those tombstoned regions just to issue the final drop.
         self.data.state = PurgeDroppedTableState::DropRegions;
         Ok(Status::executing(true))
     }
@@ -206,10 +197,6 @@ impl PurgeDroppedTableData {
         self.table_name.as_ref().unwrap()
     }
 
-    fn table_info(&self) -> &TableInfo {
-        self.table_info.as_ref().unwrap()
-    }
-
     fn table_route_value(&self) -> &TableRouteValue {
         self.table_route_value.as_ref().unwrap()
     }
@@ -225,6 +212,8 @@ impl PurgeDroppedTableData {
 #[derive(Debug, Serialize, Deserialize, AsRefStr, PartialEq)]
 enum PurgeDroppedTableState {
     Prepare,
+    // Kept only so procedures persisted by the old reopen-then-drop implementation can resume
+    // without deserialization failures. New procedures transition from Prepare to DropRegions.
     OpenRegions,
     DropRegions,
     DeleteTombstone,
