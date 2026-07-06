@@ -682,13 +682,14 @@ mod tests {
             json_array.data_type()
         );
 
-        let mapper = FlatProjectionMapper::new_with_read_columns(
-            &metadata,
-            vec![0],
-            ReadColumns::from_deduped_column_ids([0]),
-            None,
-        )
-        .unwrap();
-        assert!(mapper.convert(&batch, &CacheStrategy::Disabled).is_err());
+        assert!(
+            FlatProjectionMapper::new_with_read_columns(
+                &metadata,
+                vec![0],
+                ReadColumns::from_deduped_column_ids([0]),
+                None,
+            )
+            .is_err()
+        );
     }
 }
