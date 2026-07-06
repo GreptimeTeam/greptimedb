@@ -45,7 +45,7 @@ use crate::http::header::{
 use crate::pending_rows_batcher::PendingRowsBatcher;
 use crate::prom_remote_write::decode::PromSeriesProcessor;
 use crate::prom_remote_write::decode_remote_write_request;
-use crate::prom_remote_write::v2::{RemoteWriteV2RequestExt, decode_remote_write_v2_request};
+use crate::prom_remote_write::v2::{decode_remote_write_v2_request, into_write_requests};
 use crate::prom_remote_write::validation::PromValidationMode;
 use crate::prom_store::{extract_schema_from_read_request, snappy_decompress};
 use crate::query_handler::{PipelineHandlerRef, PromStoreProtocolHandlerRef, PromStoreResponse};
@@ -71,6 +71,7 @@ pub struct PromStoreState {
     pub pipeline_handler: Option<PipelineHandlerRef>,
     pub prom_store_with_metric_engine: bool,
     pub prom_validation_mode: PromValidationMode,
+    pub experimental_enable_prometheus_native_histogram: bool,
     pub pending_rows_batcher: Option<Arc<PendingRowsBatcher>>,
 }
 
@@ -142,6 +143,7 @@ async fn remote_write_v1(
         pipeline_handler,
         prom_store_with_metric_engine,
         prom_validation_mode,
+        experimental_enable_prometheus_native_histogram: _,
         pending_rows_batcher,
     } = state;
 
@@ -177,15 +179,22 @@ async fn remote_write_v1(
         req.as_insert_requests()
     };
 
-    let outcome = write_prometheus_rows(
+    let outcome = match write_prometheus_rows_with_progress(
         prom_store_handler,
         pending_rows_batcher,
         prom_store_with_metric_engine,
-        &db,
         query_ctx,
         req,
     )
-    .await?;
+    .await
+    {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            record_remote_write_samples(&db, error.rows_written);
+            return Err(error.error);
+        }
+    };
+    record_remote_write_samples(&db, outcome.rows_written);
 
     Ok((
         StatusCode::NO_CONTENT,
@@ -207,6 +216,7 @@ async fn remote_write_v2(
         pipeline_handler: _,
         prom_store_with_metric_engine,
         prom_validation_mode: _,
+        experimental_enable_prometheus_native_histogram,
         pending_rows_batcher,
     } = state;
 
@@ -225,36 +235,94 @@ async fn remote_write_v2(
         Ok(request) => request,
         Err(error) => return Ok(remote_write_v2_error_response(error, 0, 0, 0)),
     };
-    let req = match request.into_context_req() {
+    if !experimental_enable_prometheus_native_histogram && request_has_native_histograms(&request) {
+        return Ok(remote_write_v2_error_response(
+            error::InvalidPromRemoteRequestSnafu {
+                msg: "prometheus remote write v2 native histogram ingestion is experimental; set http.experimental_enable_prometheus_native_histogram = true to enable it"
+                    .to_string(),
+            }
+            .build(),
+            0,
+            0,
+            0,
+        ));
+    }
+    let req = match into_write_requests(request) {
         Ok(req) => req,
         Err(error) => return Ok(remote_write_v2_error_response(error, 0, 0, 0)),
     };
 
-    let outcome = match write_prometheus_rows_with_progress(
-        prom_store_handler,
-        pending_rows_batcher,
-        prom_store_with_metric_engine,
-        &db,
-        query_ctx,
-        req,
-    )
-    .await
-    {
-        Ok(outcome) => outcome,
-        Err(error) => {
-            return Ok(remote_write_v2_error_response(
-                error.error,
-                error.rows_written,
-                0,
-                0,
-            ));
+    let outcome = if req.sample_count > 0 {
+        match write_prometheus_rows_with_progress(
+            prom_store_handler.clone(),
+            pending_rows_batcher.clone(),
+            prom_store_with_metric_engine,
+            query_ctx.clone(),
+            req.samples,
+        )
+        .await
+        {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                record_remote_write_samples(&db, error.rows_written);
+                return Ok(remote_write_v2_error_response(
+                    error.error,
+                    error.rows_written,
+                    0,
+                    0,
+                ));
+            }
+        }
+    } else {
+        PromWriteOutcome {
+            write_cost: 0,
+            rows_written: 0,
         }
     };
+    let samples_written = outcome.rows_written;
+    record_remote_write_samples(&db, samples_written);
+    let mut histograms_written = 0;
+    let mut write_cost = outcome.write_cost;
 
-    let mut headers = write_cost_header_map(outcome.write_cost);
-    append_remote_write_v2_written_headers(&mut headers, outcome.rows_written, 0, 0);
+    if req.histogram_count > 0 {
+        let outcome = match write_prometheus_rows_with_progress(
+            prom_store_handler,
+            None,
+            prom_store_with_metric_engine,
+            query_ctx,
+            req.histograms,
+        )
+        .await
+        {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                record_remote_write_histograms(&db, error.rows_written);
+                return Ok(remote_write_v2_error_response(
+                    error.error,
+                    samples_written,
+                    error.rows_written,
+                    0,
+                ));
+            }
+        };
+        histograms_written = outcome.rows_written;
+        record_remote_write_histograms(&db, histograms_written);
+        write_cost += outcome.write_cost;
+    }
+
+    let mut headers = write_cost_header_map(write_cost);
+    append_remote_write_v2_written_headers(&mut headers, samples_written, histograms_written, 0);
 
     Ok((StatusCode::NO_CONTENT, headers).into_response())
+}
+
+fn request_has_native_histograms(
+    request: &api::greptime_proto::io::prometheus::write::v2::Request,
+) -> bool {
+    request
+        .timeseries
+        .iter()
+        .any(|series| !series.histograms.is_empty())
 }
 
 fn vm_proto_version_response(params: &RemoteWriteQuery) -> Option<axum::response::Response> {
@@ -302,31 +370,14 @@ struct PromWriteError {
     rows_written: u64,
 }
 
-async fn write_prometheus_rows(
-    prom_store_handler: PromStoreProtocolHandlerRef,
-    pending_rows_batcher: Option<Arc<PendingRowsBatcher>>,
-    prom_store_with_metric_engine: bool,
-    db: &str,
-    query_ctx: Arc<QueryContext>,
-    req: ContextReq,
-) -> Result<PromWriteOutcome> {
-    write_prometheus_rows_with_progress(
-        prom_store_handler,
-        pending_rows_batcher,
-        prom_store_with_metric_engine,
-        db,
-        query_ctx,
-        req,
-    )
-    .await
-    .map_err(|error| error.error)
-}
-
+/// Writes one decoded PRW batch and keeps the number of persisted rows on error.
+///
+/// The v2 handler uses that partial progress to return Prometheus' written
+/// sample/histogram headers even when a later table write fails.
 async fn write_prometheus_rows_with_progress(
     prom_store_handler: PromStoreProtocolHandlerRef,
     pending_rows_batcher: Option<Arc<PendingRowsBatcher>>,
     prom_store_with_metric_engine: bool,
-    db: &str,
     query_ctx: Arc<QueryContext>,
     req: ContextReq,
 ) -> std::result::Result<PromWriteOutcome, PromWriteError> {
@@ -347,9 +398,6 @@ async fn write_prometheus_rows_with_progress(
                     error,
                     rows_written,
                 })?;
-            crate::metrics::PROM_STORE_REMOTE_WRITE_SAMPLES
-                .with_label_values(&[db])
-                .inc_by(rows);
             rows_written += rows;
         }
         return Ok(PromWriteOutcome {
@@ -373,9 +421,6 @@ async fn write_prometheus_rows_with_progress(
                 error,
                 rows_written,
             })?;
-        crate::metrics::PROM_STORE_REMOTE_WRITE_SAMPLES
-            .with_label_values(&[db])
-            .inc_by(cnt);
         write_cost += output.meta.cost;
         rows_written += cnt;
     }
@@ -384,6 +429,24 @@ async fn write_prometheus_rows_with_progress(
         write_cost,
         rows_written,
     })
+}
+
+fn record_remote_write_samples(db: &str, rows: u64) {
+    if rows == 0 {
+        return;
+    }
+    crate::metrics::PROM_STORE_REMOTE_WRITE_SAMPLES
+        .with_label_values(&[db])
+        .inc_by(rows);
+}
+
+fn record_remote_write_histograms(db: &str, rows: u64) {
+    if rows == 0 {
+        return;
+    }
+    crate::metrics::PROM_STORE_REMOTE_WRITE_HISTOGRAMS
+        .with_label_values(&[db])
+        .inc_by(rows);
 }
 
 fn remote_write_v2_error_response(
@@ -647,6 +710,7 @@ mod tests {
             pipeline_handler: None,
             prom_store_with_metric_engine: false,
             prom_validation_mode: PromValidationMode::Strict,
+            experimental_enable_prometheus_native_histogram: false,
             pending_rows_batcher: None,
         }
     }
