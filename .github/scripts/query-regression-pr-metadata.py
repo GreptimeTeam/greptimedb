@@ -31,6 +31,7 @@ def main() -> int:
     metadata = {
         "pr_number": int(os.environ["PR_NUMBER"]),
         "head_sha": os.environ["HEAD_SHA"],
+        "base_sha": os.environ["BASE_SHA"],
         "head_repo": os.environ["HEAD_REPO"],
         "base_repo": os.environ["BASE_REPO"],
         "run_id": int(os.environ["RUN_ID"]),

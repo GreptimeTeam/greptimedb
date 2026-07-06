@@ -32,8 +32,15 @@ on:
           - nightly
           - release
           - dev
+      runner:
+        description: Self-hosted runner label or ARC runner scale set for this query regression run
+        required: true
+        type: choice
+        default: perf-regression-8-cores
+        options:
+          - perf-regression-8-cores
   pull_request:
-    types: [labeled, ready_for_review, reopened]
+    types: [labeled]
 
 permissions:
   contents: read
@@ -46,62 +53,85 @@ jobs:
   query-regression:
     if: >-
       ${{ github.event_name == 'workflow_dispatch' ||
-          (github.event_name == 'pull_request' &&
-           !github.event.pull_request.draft &&
-           contains(github.event.pull_request.labels.*.name, 'query-regression') &&
-           (github.event.action != 'labeled' || github.event.label.name == 'query-regression')) }}
-    runs-on: ubuntu-latest
+           (github.event_name == 'pull_request' &&
+            !github.event.pull_request.draft &&
+            contains(github.event.pull_request.labels.*.name, 'query-regression') &&
+            (github.event.action != 'labeled' || github.event.label.name == 'query-regression')) }}
+    runs-on: ${{ github.event_name == 'workflow_dispatch' && inputs.runner || 'perf-regression-8-cores' }}
     timeout-minutes: 180
     env:
       CARGO_PROFILE: ${{ github.event_name == 'pull_request' && 'nightly' || inputs.cargo_profile }}
+      CARGO_TARGET_DIR: ${{ github.workspace }}/query-regression-target
+      CARGO_BUILD_RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
+      BASE_REF: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || inputs.base_ref }}
+      CANDIDATE_REF: ${{ github.event_name == 'pull_request' && format('refs/pull/{0}/merge', github.event.pull_request.number) || inputs.candidate_ref || github.ref }}
     steps:
       - name: Checkout base source
         uses: actions/checkout@v4
         with:
           repository: ${{ github.repository }}
-          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || inputs.base_ref }}
-          path: base-src
+          ref: ${{ env.BASE_REF }}
+          path: src
           persist-credentials: false
 
-      - name: Checkout candidate source
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ github.repository }}
-          ref: ${{ github.event_name == 'pull_request' && format('refs/pull/{0}/merge', github.event.pull_request.number) || inputs.candidate_ref || github.ref }}
-          path: candidate-src
-          persist-credentials: false
+      - name: Preserve trusted query regression scripts
+        run: |
+          mkdir -p query-regression-trusted-scripts
+          cp src/.github/scripts/query-regression-pr-metadata.py \
+            query-regression-trusted-scripts/query-regression-pr-metadata.py
+          cp src/.github/scripts/query-regression-summary.py \
+            query-regression-trusted-scripts/query-regression-summary.py
 
       - uses: arduino/setup-protoc@v3
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
 
       - uses: astral-sh/setup-uv@v5
 
-      - name: Rust cache (base)
+      - name: Rust cache
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: base-src
-          shared-key: query-regression-base
-          cache-all-crates: "true"
-          save-if: false
-
-      - name: Rust cache (candidate)
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: candidate-src
-          shared-key: query-regression-candidate
+          workspaces: src
+          shared-key: query-regression
           cache-all-crates: "true"
           save-if: false
 
       - name: Build base greptime
-        working-directory: base-src
-        run: cargo build --profile "${CARGO_PROFILE}" -p cmd --bin greptime
+        working-directory: src
+        run: |
+          cargo build --profile "${CARGO_PROFILE}" -p cmd --bin greptime
+          target_dir="${CARGO_PROFILE}"
+          if [[ "${CARGO_PROFILE}" == "dev" ]]; then
+            target_dir="debug"
+          fi
+          mkdir -p "${GITHUB_WORKSPACE}/query-regression-bins/base"
+          cp "${CARGO_TARGET_DIR}/${target_dir}/greptime" \
+            "${GITHUB_WORKSPACE}/query-regression-bins/base/greptime"
+
+      - name: Switch source to candidate
+        working-directory: src
+        run: |
+          git fetch --no-tags --prune --depth=1 origin "${CANDIDATE_REF}"
+          git reset --hard FETCH_HEAD
+          git clean -ffdx
 
       - name: Build candidate greptime and fixture generator
-        working-directory: candidate-src
-        run: cargo build --profile "${CARGO_PROFILE}" -p cmd --bin greptime --bin query_perf_fixture
+        working-directory: src
+        run: |
+          cargo build --profile "${CARGO_PROFILE}" -p cmd --bin greptime --bin query_perf_fixture
+          target_dir="${CARGO_PROFILE}"
+          if [[ "${CARGO_PROFILE}" == "dev" ]]; then
+            target_dir="debug"
+          fi
+          mkdir -p "${GITHUB_WORKSPACE}/query-regression-bins/candidate"
+          cp "${CARGO_TARGET_DIR}/${target_dir}/greptime" \
+            "${GITHUB_WORKSPACE}/query-regression-bins/candidate/greptime"
+          cp "${CARGO_TARGET_DIR}/${target_dir}/query_perf_fixture" \
+            "${GITHUB_WORKSPACE}/query-regression-bins/candidate/query_perf_fixture"
 
       - name: Run query regression
         id: run
@@ -111,20 +141,26 @@ jobs:
           ALLOW_LARGE_FIXTURE: ${{ github.event_name == 'pull_request' && 'true' || inputs.allow_large_fixture }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           CASE_NAME: ${{ github.event_name == 'pull_request' && 'default case set' || inputs.case }}
-          BASE_REF: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || inputs.base_ref }}
-          CANDIDATE_REF: ${{ github.event_name == 'pull_request' && format('refs/pull/{0}/merge', github.event.pull_request.number) || inputs.candidate_ref || github.ref }}
-        run: uv run --no-project python candidate-src/.github/scripts/query-regression-run.py
+          BASE_BIN: ${{ github.workspace }}/query-regression-bins/base/greptime
+          CANDIDATE_BIN: ${{ github.workspace }}/query-regression-bins/candidate/greptime
+          FIXTURE_GENERATOR: ${{ github.workspace }}/query-regression-bins/candidate/query_perf_fixture
+        run: >-
+          uv run --no-project python src/.github/scripts/query-regression-run.py
+          --base-src src
+          --candidate-src src
+          --summary-script query-regression-trusted-scripts/query-regression-summary.py
 
       - name: Write PR metadata for trusted comment workflow
         if: ${{ always() && github.event_name == 'pull_request' }}
         env:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
           BASE_REPO: ${{ github.event.pull_request.base.repo.full_name }}
           RUN_ID: ${{ github.run_id }}
           RUN_ATTEMPT: ${{ github.run_attempt }}
-        run: uv run --no-project python candidate-src/.github/scripts/query-regression-pr-metadata.py
+        run: uv run --no-project python query-regression-trusted-scripts/query-regression-pr-metadata.py
 
       - name: Upload query regression artifacts
         if: always()
@@ -143,7 +179,7 @@ jobs:
           name: query-regression-comment
           path: |
             query-regression-pr.json
-            query-regression-summary.md
+            query-regression-work/**/query-regression-report.json
           if-no-files-found: warn
           retention-days: 7
 

@@ -54,6 +54,12 @@ def profile_dir(cargo_profile: str) -> str:
     return cargo_profile
 
 
+def configured_path(value: str | None) -> Path | None:
+    if not value or not value.strip():
+        return None
+    return Path(value.strip())
+
+
 def resolve_case_path(candidate_src: Path, case: str) -> Path:
     path = Path(case)
     if path.is_absolute() or path.parts[:1] == (candidate_src.name,):
@@ -83,6 +89,9 @@ def append_step_summary(summary: Path) -> None:
 
 def run_case(args: argparse.Namespace, case_path: Path, work_dir: Path) -> int:
     target_dir = profile_dir(args.cargo_profile)
+    base_bin = args.base_bin or args.base_src / "target" / target_dir / "greptime"
+    candidate_bin = args.candidate_bin or args.candidate_src / "target" / target_dir / "greptime"
+    fixture_generator = args.fixture_generator or args.candidate_src / "target" / target_dir / "query_perf_fixture"
     cmd = [
         "uv",
         "run",
@@ -92,11 +101,11 @@ def run_case(args: argparse.Namespace, case_path: Path, work_dir: Path) -> int:
         "--case",
         str(case_path),
         "--base-bin",
-        str(args.base_src / "target" / target_dir / "greptime"),
+        str(base_bin),
         "--candidate-bin",
-        str(args.candidate_src / "target" / target_dir / "greptime"),
+        str(candidate_bin),
         "--fixture-generator",
-        str(args.candidate_src / "target" / target_dir / "query_perf_fixture"),
+        str(fixture_generator),
         "--work-dir",
         str(work_dir),
         "--http-timeout",
@@ -138,6 +147,13 @@ def main() -> int:
     parser.add_argument("--cases", action="append", help="'all' or comma/space separated case paths")
     parser.add_argument("--base-src", type=Path, default=Path("base-src"))
     parser.add_argument("--candidate-src", type=Path, default=Path("candidate-src"))
+    parser.add_argument("--base-bin", type=Path, default=configured_path(os.environ.get("BASE_BIN")))
+    parser.add_argument("--candidate-bin", type=Path, default=configured_path(os.environ.get("CANDIDATE_BIN")))
+    parser.add_argument(
+        "--fixture-generator",
+        type=Path,
+        default=configured_path(os.environ.get("FIXTURE_GENERATOR")),
+    )
     parser.add_argument("--cargo-profile", default=os.environ.get("CARGO_PROFILE", "nightly"))
     parser.add_argument("--work-dir", default=Path("query-regression-work"), type=Path)
     parser.add_argument("--http-timeout", default=os.environ.get("HTTP_TIMEOUT", "300"))
