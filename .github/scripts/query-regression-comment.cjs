@@ -35,11 +35,21 @@ function findReports(dir) {
 
 function text(value) {
   if (value === null || value === undefined || value === '') return 'N/A';
-  return String(value)
+  const result = String(value)
     .replace(/<!--[\s\S]*?-->/g, '')
+    .replace(/\\/g, '\\\\')
+    .replace(/`/g, '&#96;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/\[/g, '\\[')
+    .replace(/\]/g, '\\]')
+    .replace(/\(/g, '\\(')
+    .replace(/\)/g, '\\)')
+    .replace(/!/g, '\\!')
     .replace(/@/g, '@\u200b')
     .replace(/\|/g, '\\|')
     .replace(/\r?\n/g, ' ');
+  return result.length > 512 ? `${result.slice(0, 509)}...` : result;
 }
 
 function statusEmoji(status) {
@@ -143,30 +153,75 @@ module.exports = async function validateQueryRegressionComment({ github, context
   }
 
   const run = context.payload.workflow_run;
-  const trustedPrNumbers = new Set(
-    (run.pull_requests || []).map(pr => Number(pr.number)).filter(Number.isInteger)
-  );
-  try {
-    const { data: associatedPrs } = await github.rest.repos.listPullRequestsAssociatedWithCommit({
-      owner: context.repo.owner,
-      repo: context.repo.repo,
-      commit_sha: run.head_sha,
-    });
-    for (const pr of associatedPrs) {
-      trustedPrNumbers.add(Number(pr.number));
-    }
-  } catch (error) {
-    core.warning(`Could not list PRs associated with workflow_run head SHA: ${error.message}`);
+  if (run.event !== 'pull_request') {
+    return skip(core, `Workflow run event is ${run.event}, not pull_request; skipping.`);
   }
-  if (!trustedPrNumbers.has(prNumber)) {
-    return skip(core, `PR #${prNumber} is not associated with workflow_run ${run.id}; skipping.`);
+  if (run.head_sha !== metadata.head_sha) {
+    return skip(core, 'Workflow run head SHA differs from artifact metadata; skipping.');
+  }
+  const runHeadRepo = run.head_repository?.full_name;
+  if (!runHeadRepo) {
+    return skip(core, 'Workflow run head repository is missing; skipping.');
+  }
+  if (runHeadRepo !== metadata.head_repo) {
+    return skip(core, 'Workflow run head repository differs from artifact metadata; skipping.');
   }
 
-  const { data: pull } = await github.rest.pulls.get({
-    owner: context.repo.owner,
-    repo: context.repo.repo,
-    pull_number: prNumber,
-  });
+  // GitHub leaves workflow_run.pull_requests empty for fork PRs. When present,
+  // use it as an extra guard; otherwise resolve the unique open PR from trusted
+  // workflow_run head repo/branch/SHA metadata before accepting the artifact PR.
+  const workflowPrNumbers = new Set(
+    (run.pull_requests || []).map(pr => Number(pr.number)).filter(Number.isInteger)
+  );
+  if (workflowPrNumbers.size > 0) {
+    if (!workflowPrNumbers.has(prNumber)) {
+      return skip(core, `PR #${prNumber} is not listed in workflow_run ${run.id}; skipping.`);
+    }
+  } else {
+    const runHeadOwner = run.head_repository?.owner?.login;
+    const runHeadBranch = run.head_branch;
+    if (!runHeadOwner || !runHeadBranch) {
+      return skip(core, 'Workflow run head owner or branch is missing; skipping.');
+    }
+
+    let matchingPrs;
+    try {
+      const { data: pullRequests } = await github.rest.pulls.list({
+        owner: context.repo.owner,
+        repo: context.repo.repo,
+        state: 'open',
+        head: `${runHeadOwner}:${runHeadBranch}`,
+        per_page: 100,
+      });
+      matchingPrs = pullRequests.filter(pr => (
+        pr.head.repo?.full_name === runHeadRepo &&
+        pr.head.sha === run.head_sha &&
+        pr.base.repo?.full_name === metadata.base_repo
+      ));
+    } catch (error) {
+      core.warning(`Could not resolve PR from workflow_run metadata: ${error.message}`);
+      return skip(core, 'Could not resolve PR from workflow_run metadata; skipping.');
+    }
+
+    if (matchingPrs.length !== 1) {
+      return skip(core, `Workflow run matched ${matchingPrs.length} open PRs; skipping.`);
+    }
+    if (Number(matchingPrs[0].number) !== prNumber) {
+      return skip(core, `Artifact PR #${prNumber} does not match workflow_run PR #${matchingPrs[0].number}; skipping.`);
+    }
+  }
+
+  let pull;
+  try {
+    ({ data: pull } = await github.rest.pulls.get({
+      owner: context.repo.owner,
+      repo: context.repo.repo,
+      pull_number: prNumber,
+    }));
+  } catch (error) {
+    core.warning(`Could not read PR #${prNumber}: ${error.message}`);
+    return skip(core, `Could not read PR #${prNumber}; skipping.`);
+  }
 
   if (pull.state !== 'open') {
     return skip(core, `PR #${prNumber} is ${pull.state}; skipping.`);
@@ -186,6 +241,7 @@ module.exports = async function validateQueryRegressionComment({ github, context
     '> Rendered by a trusted workflow from JSON artifacts produced by the query-regression run. Results from untrusted PR code are advisory until reviewed.',
     '',
     `- **Workflow run:** ${serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${expectedRunId}`,
+    `- **Base SHA:** \`${text(metadata.base_sha)}\``,
     `- **Head SHA:** \`${text(metadata.head_sha)}\``,
     '',
   ].join('\n');
