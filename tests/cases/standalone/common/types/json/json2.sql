@@ -71,6 +71,35 @@ select j.d from json2_table order by ts;
 
 drop table json2_table;
 
+create table json2_root_schema_merge (
+    ts timestamp time index,
+    j  json2
+) with (
+    'sst_format' = 'flat',
+);
+
+insert into json2_root_schema_merge
+values (1, '{"a": {"b": 1}, "c": "sst1"}'),
+       (2, '{"a": {"b": 2}, "d": true}');
+
+admin flush_table('json2_root_schema_merge');
+
+insert into json2_root_schema_merge
+values (1, '{"a": {"b": 10}, "e": {"x": 1}}'),
+       (3, '{"a": {"x": false}, "c": "sst2"}');
+
+admin flush_table('json2_root_schema_merge');
+
+insert into json2_root_schema_merge
+values (2, '{"a": {"b": 20}, "f": [1, 2]}'),
+       (4, '{"z": "mem"}');
+
+select json_get(j, '') from json2_root_schema_merge order by ts;
+
+select json_get(j, ''), json_get(j, 'a.b') from json2_root_schema_merge order by ts;
+
+drop table json2_root_schema_merge;
+
 create table json2_default_null_ok (
     ts timestamp time index,
     j json2(

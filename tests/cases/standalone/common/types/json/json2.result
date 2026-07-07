@@ -150,8 +150,8 @@ select j.a, j.a.x from json2_table order by ts;
 |                                   |                                     |
 | {"b":"s7"}                        |                                     |
 | {"b":8}                           |                                     |
-| {"b":null,"x":true}               | true                                |
-| {"b":10,"x":null}                 | null                                |
+| {"x":true}                        | true                                |
+| {"b":10}                          |                                     |
 +-----------------------------------+-------------------------------------+
 
 select j.c, j.y from json2_table order by ts;
@@ -173,11 +173,11 @@ select j.c, j.y from json2_table order by ts;
 
 select j from json2_table order by ts;
 
-Error: 3001(EngineExecuteQuery), Failed to align JSON array, reason: Invalid argument error: use StructArray::try_new_with_length or StructArray::new_empty_fields to create a struct array with no fields so that the length can be set correctly
+Error: 3001(EngineExecuteQuery), Unsupported operation: direct JSON2 column projection is not supported yet; use json_get(column, '') to read the root JSON2 value for vector: Json2
 
 select * from json2_table order by ts;
 
-Error: 3001(EngineExecuteQuery), Failed to align JSON array, reason: Invalid argument error: use StructArray::try_new_with_length or StructArray::new_empty_fields to create a struct array with no fields so that the length can be set correctly
+Error: 3001(EngineExecuteQuery), Unsupported operation: direct JSON2 column projection is not supported yet; use json_get(column, '') to read the root JSON2 value for vector: Json2
 
 select j.a.b + 1 from json2_table order by ts;
 
@@ -227,6 +227,75 @@ select j.d from json2_table order by ts;
 +-----------------------------------+
 
 drop table json2_table;
+
+Affected Rows: 0
+
+create table json2_root_schema_merge (
+    ts timestamp time index,
+    j  json2
+) with (
+    'sst_format' = 'flat',
+);
+
+Affected Rows: 0
+
+insert into json2_root_schema_merge
+values (1, '{"a": {"b": 1}, "c": "sst1"}'),
+       (2, '{"a": {"b": 2}, "d": true}');
+
+Affected Rows: 2
+
+admin flush_table('json2_root_schema_merge');
+
++----------------------------------------------+
+| ADMIN flush_table('json2_root_schema_merge') |
++----------------------------------------------+
+| 0                                            |
++----------------------------------------------+
+
+insert into json2_root_schema_merge
+values (1, '{"a": {"b": 10}, "e": {"x": 1}}'),
+       (3, '{"a": {"x": false}, "c": "sst2"}');
+
+Affected Rows: 2
+
+admin flush_table('json2_root_schema_merge');
+
++----------------------------------------------+
+| ADMIN flush_table('json2_root_schema_merge') |
++----------------------------------------------+
+| 0                                            |
++----------------------------------------------+
+
+insert into json2_root_schema_merge
+values (2, '{"a": {"b": 20}, "f": [1, 2]}'),
+       (4, '{"z": "mem"}');
+
+Affected Rows: 2
+
+select json_get(j, '') from json2_root_schema_merge order by ts;
+
++----------------------------------------------+
+| json_get(json2_root_schema_merge.j,Utf8("")) |
++----------------------------------------------+
+| {"a":{"b":10},"e":{"x":1}}                   |
+| {"a":{"b":20},"f":[1,2]}                     |
+| {"a":{"x":false},"c":"sst2"}                 |
+| {"z":"mem"}                                  |
++----------------------------------------------+
+
+select json_get(j, ''), json_get(j, 'a.b') from json2_root_schema_merge order by ts;
+
++----------------------------------------------+-------------------------------------------------+
+| json_get(json2_root_schema_merge.j,Utf8("")) | json_get(json2_root_schema_merge.j,Utf8("a.b")) |
++----------------------------------------------+-------------------------------------------------+
+| {"a":{"b":10},"e":{"x":1}}                   | 10                                              |
+| {"a":{"b":20},"f":[1,2]}                     | 20                                              |
+| {"a":{"x":false},"c":"sst2"}                 |                                                 |
+| {"z":"mem"}                                  |                                                 |
++----------------------------------------------+-------------------------------------------------+
+
+drop table json2_root_schema_merge;
 
 Affected Rows: 0
 

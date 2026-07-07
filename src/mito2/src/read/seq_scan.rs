@@ -222,6 +222,8 @@ impl SeqScan {
             // that source may have duplicate rows.
             sources.pop().unwrap()
         } else {
+            // TODO: Currently although the json type hint for the qury is passed
+            // in, it is not concretized when read the whole column.
             let schema = mapper.input_arrow_schema(stream_ctx.input.compaction);
             let metrics_reporter = part_metrics.map(|m| m.merge_metrics_reporter());
             let reader =

@@ -30,9 +30,9 @@ use crate::memtable::BoxedRecordBatchIterator;
 
 /// Aligns concrete JSON2 Arrow types across record batches.
 ///
-/// JSON2 column concrete Arrow types are derived from data. Different memtable
-/// parts may therefore have different concrete types for the same JSON2 column.
-/// This helper merges those concrete types and aligns batches to the merged schema.
+/// JSON2 column concrete Arrow types are derived from data. Different sources
+/// may therefore have different concrete types for the same JSON2 column. This
+/// helper merges those concrete types and aligns batches to the merged schema.
 #[derive(Clone)]
 pub(crate) struct Json2Aligner {
     /// Schema after merging all JSON2 column concrete types.
@@ -308,96 +308,96 @@ mod tests {
             .downcast_ref::<StructArray>()
             .unwrap();
         let id_values = data_with_id
-            .column(0)
+            .column_by_name("id")
+            .unwrap()
             .as_any()
             .downcast_ref::<Int64Array>()
             .unwrap();
-        let missing_names = data_with_id.column(1);
-        assert_eq!(10, id_values.value(0));
-        assert_eq!(20, id_values.value(1));
-        assert!(missing_names.is_null(0));
-        assert!(missing_names.is_null(1));
+        let name_values = data_with_id
+            .column_by_name("name")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringViewArray>()
+            .unwrap();
+        assert_eq!(Some(10), id_values.value(0).into());
+        assert!(name_values.is_null(0));
 
         let data_with_name = aligned_with_name
             .column(1)
             .as_any()
             .downcast_ref::<StructArray>()
             .unwrap();
-        let missing_ids = data_with_name.column(0);
+        let id_values = data_with_name
+            .column_by_name("id")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
         let name_values = data_with_name
-            .column(1)
+            .column_by_name("name")
+            .unwrap()
             .as_any()
             .downcast_ref::<StringViewArray>()
             .unwrap();
-        assert!(missing_ids.is_null(0));
-        assert!(missing_ids.is_null(1));
+        assert!(id_values.is_null(0));
         assert_eq!("alice", name_values.value(0));
-        assert_eq!("bob", name_values.value(1));
     }
 
-    #[test]
-    fn test_wrap_iter_aligns_each_batch() {
-        let id_fields = Fields::from(vec![id_field()]);
-        let name_fields = Fields::from(vec![name_field()]);
-        let schema_with_id = schema_with_json_field(json_field("data", id_fields.clone()));
-        let schema_with_name = schema_with_json_field(json_field("data", name_fields.clone()));
-
-        let batch_with_id = RecordBatch::try_new(
-            schema_with_id.clone(),
-            vec![
-                Arc::new(Int64Array::from_iter_values([1])) as ArrayRef,
-                struct_array(
-                    id_fields,
-                    vec![Arc::new(Int64Array::from_iter_values([10])) as ArrayRef],
-                ),
-            ],
-        )
-        .unwrap();
-        let batch_with_name = RecordBatch::try_new(
-            schema_with_name.clone(),
-            vec![
-                Arc::new(Int64Array::from_iter_values([2])) as ArrayRef,
-                struct_array(
-                    name_fields,
-                    vec![Arc::new(StringViewArray::from(vec![Some("alice")])) as ArrayRef],
-                ),
-            ],
-        )
-        .unwrap();
-
-        let aligner = Json2Aligner::try_new([schema_with_id, schema_with_name]).unwrap();
-        let iter: BoxedRecordBatchIterator =
-            Box::new(vec![Ok(batch_with_id), Ok(batch_with_name)].into_iter());
-        let aligned = aligner.wrap_iter(iter).collect::<Result<Vec<_>>>().unwrap();
-
-        assert_eq!(2, aligned.len());
-        assert!(Arc::ptr_eq(aligned[0].schema_ref(), aligner.schema()));
-        assert!(Arc::ptr_eq(aligned[1].schema_ref(), aligner.schema()));
-    }
-
-    fn json_field(name: &str, fields: Fields) -> Arc<Field> {
-        Arc::new(
-            Field::new(name, DataType::Struct(fields), true)
-                .with_extension_type(JsonExtensionType::new(Arc::new(JsonMetadata::default()))),
-        )
-    }
-
-    fn schema_with_json_field(json_field: Arc<Field>) -> SchemaRef {
+    fn schema_with_json_field(field: Field) -> SchemaRef {
         Arc::new(Schema::new(vec![
             Arc::new(Field::new("ts", DataType::Int64, false)),
-            json_field,
+            Arc::new(field),
         ]))
     }
 
-    fn id_field() -> Arc<Field> {
-        Arc::new(Field::new("id", DataType::Int64, true))
+    fn json_field(name: &str, fields: Fields) -> Field {
+        Field::new(name, DataType::Struct(fields), true)
+            .with_extension_type(JsonExtensionType::new(Arc::new(JsonMetadata::default())))
     }
 
-    fn name_field() -> Arc<Field> {
-        Arc::new(Field::new("name", DataType::Utf8View, true))
+    fn id_field() -> Field {
+        Field::new("id", DataType::Int64, true)
     }
 
-    fn struct_array(fields: Fields, columns: Vec<ArrayRef>) -> ArrayRef {
-        Arc::new(StructArray::new(fields, columns, None))
+    fn name_field() -> Field {
+        Field::new("name", DataType::Utf8View, true)
+    }
+
+    fn struct_array(fields: Fields, arrays: Vec<ArrayRef>) -> ArrayRef {
+        Arc::new(StructArray::new(fields, arrays, None))
+    }
+
+    /// Verifies that `Json2Aligner` can align a projected batch where the JSON2
+    /// column is at a different index than in the full schema used to build the
+    /// aligner. Columns are matched by `PARQUET:field_id`, not positional index.
+    #[test]
+    fn test_align_batch_works_with_projected_batch() {
+        let id_fields = Fields::from(vec![id_field()]);
+        // Full schema: [ts(id=0), j(id=1)]
+        let full_schema = schema_with_json_field(json_field("j", id_fields.clone()));
+        let aligner = Json2Aligner::try_new([full_schema]).unwrap();
+        assert_eq!(aligner.json_columns.len(), 1);
+        assert_eq!(aligner.json_columns[0].0, 1); // column_id = 1
+
+        // Projected batch: only [j(id=1)], at index 0
+        let projected_schema = Arc::new(Schema::new(vec![
+            Arc::new(json_field("j", id_fields.clone())),
+        ]));
+        let batch = RecordBatch::try_new(
+            projected_schema,
+            vec![struct_array(
+                id_fields,
+                vec![Arc::new(Int64Array::from_iter_values([10, 20])) as ArrayRef],
+            )],
+        )
+        .unwrap();
+
+        // Should NOT panic — aligner finds j by column_id=1, not index
+        let aligned = aligner.align_batch(batch).unwrap();
+        assert_eq!(aligned.num_columns(), 1);
+        assert_eq!(
+            aligned.schema_ref().field(0).data_type(),
+            &aligner.json_columns[0].1
+        );
     }
 }

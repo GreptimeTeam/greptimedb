@@ -30,7 +30,8 @@ pub use self::descriptors::*;
 pub use self::file::{FileId, FileRef, FileRefsManifest, GcReport, IndexVersion, ParseIdError};
 pub use self::projection::{NestedPath, ProjectionInput};
 pub use self::requests::{
-    ScanRequest, TimeSeriesDistribution, TimeSeriesRowSelector, VectorDistanceMetric,
-    VectorIndexEngine, VectorIndexEngineType, VectorSearchMatches, VectorSearchRequest,
+    JsonReadHint, JsonRootReadHint, ScanRequest, TimeSeriesDistribution, TimeSeriesRowSelector,
+    VectorDistanceMetric, VectorIndexEngine, VectorIndexEngineType, VectorSearchMatches,
+    VectorSearchRequest,
 };
 pub use self::types::{SequenceNumber, SequenceRange};

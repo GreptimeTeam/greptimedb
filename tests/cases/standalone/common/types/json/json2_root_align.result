@@ -1,0 +1,41 @@
+create table json2_root_align (
+    ts timestamp time index,
+    col_x int64,
+    j json2
+) with (
+    'sst_format' = 'flat',
+);
+
+Affected Rows: 0
+
+-- SST data
+insert into json2_root_align values (1, 100, '{"a": 1}');
+
+Affected Rows: 1
+
+insert into json2_root_align values (2, 200, '{"a": 2}');
+
+Affected Rows: 1
+
+admin flush_table('json2_root_align');
+
++---------------------------------------+
+| ADMIN flush_table('json2_root_align') |
++---------------------------------------+
+| 0                                     |
++---------------------------------------+
+
+-- memtable data (unflushed)
+insert into json2_root_align values (3, 300, '{"b": 3}');
+
+Affected Rows: 1
+
+-- Root read: only the JSON2 column in projection
+select json_get(j, '') from json2_root_align order by ts;
+
+Error: 3001(EngineExecuteQuery), Failed to align JSON array, reason: expect struct array
+
+drop table json2_root_align;
+
+Affected Rows: 0
+

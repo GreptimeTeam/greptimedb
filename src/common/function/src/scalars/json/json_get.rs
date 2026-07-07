@@ -319,14 +319,15 @@ fn jsonb_get(
     let size = jsons.len();
     for i in 0..size {
         let json = jsons.is_valid(i).then(|| jsons.value(i));
-        let result = match json {
-            Some(json) => get_json_by_path(json, path),
-            _ => None,
-        };
-        if let Some(v) = result {
-            builder.append_value(JsonResultValue::Jsonb(v))?;
-        } else {
-            builder.append_null();
+        match json {
+            Some(json) => {
+                if let Some(v) = get_json_by_path(json, path) {
+                    builder.append_value(JsonResultValue::Jsonb(v))?;
+                } else {
+                    builder.append_null();
+                }
+            }
+            _ => builder.append_null(),
         }
     }
     Ok(())

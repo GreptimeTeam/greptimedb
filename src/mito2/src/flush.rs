@@ -44,7 +44,6 @@ use crate::error::{
 };
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
 use crate::memtable::bulk::ENCODE_ROW_THRESHOLD;
-use crate::memtable::bulk::json_align::Json2Aligner;
 use crate::memtable::{BoxedRecordBatchIterator, EncodedRange, MemtableRanges, RangesOptions};
 use crate::metrics::{
     FLUSH_BYTES_TOTAL, FLUSH_ELAPSED, FLUSH_FAILURE_TOTAL, FLUSH_FILE_TOTAL, FLUSH_REQUESTS_TOTAL,
@@ -53,6 +52,7 @@ use crate::metrics::{
 use crate::read::FlatSource;
 use crate::read::flat_dedup::{FlatDedupIterator, FlatLastNonNull, FlatLastRow};
 use crate::read::flat_merge::FlatMergeIterator;
+use crate::read::json_schema::align::Json2Aligner;
 use crate::region::options::{IndexOptions, MergeMode, RegionOptions};
 use crate::region::version::{VersionControlData, VersionControlRef, VersionRef};
 use crate::region::{ManifestContextRef, RegionLeaderState, RegionRoleState, parse_partition_expr};

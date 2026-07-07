@@ -65,16 +65,13 @@ impl JsonArray<'_> {
             }
             DataType::Struct(_) => {
                 let structs = array.as_struct();
-                let object = structs
-                    .fields()
-                    .iter()
-                    .zip(structs.columns())
-                    .map(|(field, column)| {
-                        JsonArray::from(column)
-                            .try_get_value(i)
-                            .map(|v| (field.name().clone(), v))
-                    })
-                    .collect::<Result<_>>()?;
+                let mut object = serde_json::Map::new();
+                for (field, col) in structs.fields().iter().zip(structs.columns()) {
+                    let value = JsonArray::from(col).try_get_value(i)?;
+                    if !value.is_null() {
+                        object.insert(field.name().clone(), value);
+                    }
+                }
                 Value::Object(object)
             }
             DataType::List(_) => {
@@ -170,16 +167,18 @@ impl JsonArray<'_> {
                 }
             }
         }
+
         if i < expect_fields.len() {
             for field in &expect_fields[i..] {
                 aligned.push(new_null_array(field.data_type(), struct_array.len()));
             }
         }
 
-        let json_array = StructArray::try_new(
+        let json_array = StructArray::try_new_with_length(
             expect_fields.clone(),
             aligned,
             struct_array.nulls().cloned(),
+            struct_array.len(),
         )
         .map_err(|e| {
             AlignJsonArraySnafu {
@@ -411,7 +410,7 @@ mod test {
         );
         assert_eq!(
             JsonArray::from(&structs).try_get_value(1)?,
-            json!({"flag": null, "items": [2]})
+            json!({"items": [2]})
         );
 
         let unsupported: ArrayRef = Arc::new(Int32Array::from(vec![1]));
@@ -484,6 +483,16 @@ mod test {
             ]),
         )
         .test()?;
+
+        // Test aligning a non-empty json array to an empty struct schema.
+        let empty_fields = Fields::from(Vec::<Arc<Field>>::new());
+        let root_json: ArrayRef = Arc::new(StructArray::from(vec![(
+            Arc::new(Field::new("int", DataType::Int64, true)),
+            Arc::new(Int64Array::from(vec![Some(1), None])) as ArrayRef,
+        )]));
+        let aligned = JsonArray::from(&root_json).try_align(&DataType::Struct(empty_fields))?;
+        let expected = Arc::new(StructArray::new_empty_fields(2, None)) as ArrayRef;
+        assert_eq!(aligned.as_ref(), expected.as_ref());
 
         // Test simple json array alignment.
         TestCase::new(

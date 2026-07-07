@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 
 use arrow_schema::DataType;
 use common_function::scalars::json::json_get::JsonGetWithType;
@@ -22,6 +23,7 @@ use datafusion_common::{Result, plan_datafusion_err, plan_err};
 use datafusion_expr::{Expr, LogicalPlan};
 use datafusion_optimizer::{OptimizerConfig, OptimizerRule};
 use datatypes::types::json_type::{JsonNativeType, JsonObjectType};
+use store_api::storage::{JsonReadHint, JsonRootReadHint};
 
 use crate::dummy_catalog::DummyTableProvider;
 
@@ -72,14 +74,14 @@ impl OptimizerRule for JsonTypeConcretizeRule {
     }
 }
 
-fn deduce_json_types(plan: &LogicalPlan) -> Result<HashMap<String, JsonNativeType>> {
-    let mut json_types = HashMap::<String, JsonNativeType>::new();
+fn deduce_json_types(plan: &LogicalPlan) -> Result<HashMap<String, JsonReadHint>> {
+    let mut json_types = HashMap::<String, JsonReadHint>::new();
 
     plan.apply(|plan| {
         for expr in plan.expressions() {
             expr.apply(|expr| {
-                if let Some((column, json_type)) = deduce_json_type(expr)? {
-                    json_types.entry(column).or_default().merge(&json_type);
+                if let Some((column, json_hint)) = deduce_json_type(expr)? {
+                    merge_json_read_hint(&mut json_types, column, json_hint);
                 }
                 Ok(TreeNodeRecursion::Continue)
             })?;
@@ -89,7 +91,28 @@ fn deduce_json_types(plan: &LogicalPlan) -> Result<HashMap<String, JsonNativeTyp
     Ok(json_types)
 }
 
-fn deduce_json_type(expr: &Expr) -> Result<Option<(String, JsonNativeType)>> {
+fn merge_json_read_hint(
+    json_types: &mut HashMap<String, JsonReadHint>,
+    column: String,
+    hint: JsonReadHint,
+) {
+    match json_types.entry(column) {
+        Entry::Vacant(entry) => {
+            entry.insert(hint);
+        }
+        Entry::Occupied(mut entry) => match (entry.get_mut(), hint) {
+            (existing @ JsonReadHint::Paths(_), JsonReadHint::Root(_)) => {
+                *existing = JsonReadHint::Root(JsonRootReadHint::Uninferred);
+            }
+            (JsonReadHint::Root(_), _) => {}
+            (JsonReadHint::Paths(existing), JsonReadHint::Paths(incoming)) => {
+                existing.merge(&incoming);
+            }
+        },
+    }
+}
+
+fn deduce_json_type(expr: &Expr) -> Result<Option<(String, JsonReadHint)>> {
     let f = match expr {
         Expr::ScalarFunction(f) if f.name().eq_ignore_ascii_case(JsonGetWithType::NAME) => f,
         _ => return Ok(None),
@@ -126,9 +149,19 @@ fn deduce_json_type(expr: &Expr) -> Result<Option<(String, JsonNativeType)>> {
     let with_type =
         JsonNativeType::try_from(&with_type).map_err(|e| plan_datafusion_err!("{e:?}"))?;
 
+    if path.is_empty() {
+        return Ok(Some((
+            column.name.clone(),
+            JsonReadHint::Root(JsonRootReadHint::Uninferred),
+        )));
+    }
+
     let mut split = path.rsplit(".");
     let Some(leaf) = split.next() else {
-        return Ok(Some((column.name.clone(), JsonNativeType::String)));
+        return Ok(Some((
+            column.name.clone(),
+            JsonReadHint::Paths(JsonNativeType::String),
+        )));
     };
 
     let mut object = JsonObjectType::new();
@@ -141,7 +174,7 @@ fn deduce_json_type(expr: &Expr) -> Result<Option<(String, JsonNativeType)>> {
         root = JsonNativeType::Object(object);
     }
 
-    Ok(Some((column.name.clone(), root)))
+    Ok(Some((column.name.clone(), JsonReadHint::Paths(root))))
 }
 
 #[cfg(test)]
@@ -211,7 +244,10 @@ mod tests {
 
         let request = provider.scan_request();
         assert_eq!(1, request.json_type_hint.len());
-        assert_eq!(Some(&expected), request.json_type_hint.get("k0"));
+        assert_eq!(
+            Some(&JsonReadHint::Paths(expected)),
+            request.json_type_hint.get("k0")
+        );
         Ok(())
     }
 
@@ -234,7 +270,7 @@ mod tests {
             JsonNativeType::Variant,
         )]));
         assert_eq!(
-            Some(&expected),
+            Some(&JsonReadHint::Paths(expected)),
             provider.scan_request().json_type_hint.get("k0")
         );
         Ok(())
@@ -250,6 +286,55 @@ mod tests {
                 .transformed
         );
         assert!(provider.scan_request().json_type_hint.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn test_json_type_concretize_rule_empty_path_uses_root() -> Result<()> {
+        let exprs = vec![json_get_expr(
+            Expr::Column(Column::new_unqualified("k0")),
+            path_expr(""),
+            None,
+        )?];
+        let (provider, plan) = build_plan(exprs)?;
+
+        assert!(
+            JsonTypeConcretizeRule
+                .rewrite(plan, &OptimizerContext::default())?
+                .transformed
+        );
+        assert_eq!(
+            Some(&JsonReadHint::Root(JsonRootReadHint::Uninferred)),
+            provider.scan_request().json_type_hint.get("k0")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_json_type_concretize_rule_root_overrides_paths() -> Result<()> {
+        let exprs = vec![
+            json_get_expr(
+                Expr::Column(Column::new_unqualified("k0")),
+                path_expr("a.b"),
+                None,
+            )?,
+            json_get_expr(
+                Expr::Column(Column::new_unqualified("k0")),
+                path_expr(""),
+                None,
+            )?,
+        ];
+        let (provider, plan) = build_plan(exprs)?;
+
+        assert!(
+            JsonTypeConcretizeRule
+                .rewrite(plan, &OptimizerContext::default())?
+                .transformed
+        );
+        assert_eq!(
+            Some(&JsonReadHint::Root(JsonRootReadHint::Uninferred)),
+            provider.scan_request().json_type_hint.get("k0")
+        );
         Ok(())
     }
 
@@ -302,7 +387,10 @@ mod tests {
             )])),
         )]));
 
-        assert_eq!(Some(("k0".to_string(), expected)), deduced);
+        assert_eq!(
+            Some(("k0".to_string(), JsonReadHint::Paths(expected))),
+            deduced
+        );
         Ok(())
     }
 }

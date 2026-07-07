@@ -16,7 +16,6 @@
 
 pub(crate) mod chunk_reader;
 pub mod context;
-pub(crate) mod json_align;
 pub mod part;
 pub mod part_reader;
 mod row_group_reader;
@@ -47,7 +46,6 @@ use tokio::sync::Semaphore;
 use crate::error::{Result, UnsupportedOperationSnafu};
 use crate::flush::WriteBufferManagerRef;
 use crate::memtable::bulk::context::BulkIterContext;
-use crate::memtable::bulk::json_align::Json2Aligner;
 use crate::memtable::bulk::part::{
     BulkPart, BulkPartEncodeMetrics, BulkPartEncoder, MultiBulkPart, UnorderedPart,
     should_prune_bulk_part,
@@ -61,6 +59,7 @@ use crate::memtable::{
 };
 use crate::read::flat_dedup::{FlatDedupIterator, FlatLastNonNull, FlatLastRow};
 use crate::read::flat_merge::FlatMergeIterator;
+use crate::read::json_schema::align::Json2Aligner;
 use crate::region::options::MergeMode;
 use crate::sst::parquet::flat_format::field_column_start;
 use crate::sst::parquet::{DEFAULT_READ_BATCH_SIZE, DEFAULT_ROW_GROUP_SIZE};

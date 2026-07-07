@@ -14,7 +14,7 @@
 
 //! Scans a region according to the scan request.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::fmt;
 use std::num::NonZeroU64;
 use std::sync::Arc;
@@ -34,19 +34,21 @@ use datafusion_common::{Column, ScalarValue};
 use datafusion_expr::Expr;
 use datafusion_expr::utils::expr_to_columns;
 use datatypes::arrow::array::{ArrayRef, BooleanArray, UInt64Array};
+use datatypes::arrow::datatypes::{Schema, SchemaRef as ArrowSchemaRef};
 use datatypes::extension::json::is_structured_json_field;
-use datatypes::types::json_type::JsonNativeType;
 use datatypes::value::timestamp_to_scalar_value;
 use futures::StreamExt;
 use itertools::Itertools;
+use parquet::arrow::parquet_to_arrow_schema;
+use parquet::file::metadata::PageIndexPolicy;
 use partition::expr::PartitionExpr;
 use smallvec::SmallVec;
 use snafu::ResultExt;
 use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 use store_api::region_engine::{PartitionRange, RegionScannerRef};
 use store_api::storage::{
-    NestedPath, RegionId, ScanRequest, SequenceNumber, SequenceRange, TimeSeriesDistribution,
-    TimeSeriesRowSelector,
+    JsonReadHint, JsonRootReadHint, RegionId, ScanRequest, SequenceNumber, SequenceRange,
+    TimeSeriesDistribution, TimeSeriesRowSelector,
 };
 use table::predicate::{Predicate, build_time_range_predicate, extract_time_range_from_expr};
 use tokio::sync::{Semaphore, mpsc};
@@ -55,18 +57,21 @@ use tokio_stream::wrappers::ReceiverStream;
 use crate::access_layer::AccessLayerRef;
 use crate::cache::CacheStrategy;
 use crate::config::DEFAULT_MAX_CONCURRENT_SCAN_FILES;
-use crate::error::{InvalidPartitionExprSnafu, Result};
+use crate::error::{InvalidPartitionExprSnafu, ParquetToArrowSchemaSnafu, Result};
 #[cfg(feature = "enterprise")]
 use crate::extension::{BoxedExtensionRange, BoxedExtensionRangeProvider};
 use crate::memtable::{MemtableRange, RangesOptions};
 use crate::metrics::READ_SST_COUNT;
 use crate::read::compat::{self, FlatCompatBatch};
 use crate::read::flat_projection::FlatProjectionMapper;
+use crate::read::json_schema::align::Json2Aligner;
+use crate::read::json_schema::{
+    apply_json_read_hints_to_read_columns, infer_json2_root_hints_from_schema,
+};
 use crate::read::range::{FileRangeBuilder, MemRangeBuilder, RangeMeta, RowGroupIndex};
 use crate::read::range_cache::{ScanRequestFingerprint, implied_time_range_from_exprs};
 use crate::read::read_columns::{
-    ReadColumns, merge, merge_nested_paths, read_columns_from_predicate,
-    read_columns_from_projection,
+    ReadColumns, merge, read_columns_from_predicate, read_columns_from_projection,
 };
 use crate::read::seq_scan::SeqScan;
 use crate::read::series_scan::SeriesScan;
@@ -86,7 +91,7 @@ use crate::sst::index::inverted_index::applier::builder::InvertedIndexApplierBui
 #[cfg(feature = "vector_index")]
 use crate::sst::index::vector_index::applier::{VectorIndexApplier, VectorIndexApplierRef};
 use crate::sst::parquet::file_range::PreFilterMode;
-use crate::sst::parquet::reader::ReaderMetrics;
+use crate::sst::parquet::reader::{MetadataCacheMetrics, ReaderMetrics};
 
 #[cfg(feature = "vector_index")]
 const VECTOR_INDEX_OVERFETCH_MULTIPLIER: usize = 2;
@@ -451,7 +456,7 @@ impl ScanRegion {
             .iter()
             .any(is_structured_json_field);
         if has_structured_json {
-            narrow_read_columns_by_json_type_hint(
+            apply_json_read_hints_to_read_columns(
                 &mut read_cols,
                 &self.request.json_type_hint,
                 &self.version.metadata,
@@ -465,24 +470,6 @@ impl ScanRegion {
             .projection_indices()
             .map(|x| x.to_vec())
             .unwrap_or_else(|| (0..self.version.metadata.column_metadatas.len()).collect());
-        let json_type_hint = has_structured_json
-            .then_some(&self.request.json_type_hint)
-            .inspect(|json_type_hint| {
-                debug!(
-                    "Concretized JSON type: {{{}}}",
-                    json_type_hint
-                        .iter()
-                        .map(|(k, v)| format!("{}: {}", k, v))
-                        .join(", ")
-                );
-            });
-        let mapper = FlatProjectionMapper::new_with_read_columns(
-            &self.version.metadata,
-            projection,
-            read_cols,
-            json_type_hint,
-        )?;
-
         let ssts = &self.version.ssts;
         let mut files = Vec::new();
         if !self.request.skip_sst_files {
@@ -544,6 +531,58 @@ impl ScanRegion {
             }));
         }
 
+        let mut json_type_hint = has_structured_json.then(|| self.request.json_type_hint.clone());
+        if let Some(json_type_hint) = json_type_hint.as_mut() {
+            debug!(
+                "Concretized JSON type: {{{}}}",
+                json_type_hint
+                    .iter()
+                    .map(|(k, v)| format!("{}: {}", k, v))
+                    .join(", ")
+            );
+        }
+
+        let json_aligner = match json_type_hint.as_mut() {
+            Some(json_type_hint)
+                if json_type_hint.values().any(|hint| {
+                    matches!(hint, JsonReadHint::Root(JsonRootReadHint::Uninferred))
+                }) =>
+            {
+                let source_schemas = self
+                    .collect_source_arrow_schemas(&files, &mem_range_builders)
+                    .await?;
+                if source_schemas.is_empty() {
+                    infer_json2_root_hints_from_schema(
+                        json_type_hint,
+                        self.version.metadata.schema.arrow_schema(),
+                    )?;
+                    None
+                } else {
+                    let aligner = Json2Aligner::try_new(source_schemas)?;
+                    infer_json2_root_hints_from_schema(json_type_hint, aligner.schema())?;
+                    Some(aligner)
+                }
+            }
+            _ => None,
+        };
+
+        if let Some(json_type_hint) = json_type_hint.as_ref() {
+            debug!(
+                "Initialized JSON type hint: {{{}}}",
+                json_type_hint
+                    .iter()
+                    .map(|(k, v)| format!("{}: {}", k, v))
+                    .join(", ")
+            );
+        }
+
+        let mapper = FlatProjectionMapper::new_with_read_columns(
+            &self.version.metadata,
+            projection,
+            read_cols,
+            json_type_hint.as_ref(),
+        )?;
+
         let region_id = self.region_id();
         debug!(
             "Scan region {}, request: {:?}, time range: {:?}, memtables: {}, ssts_to_read: {}, append_mode: {}",
@@ -585,6 +624,7 @@ impl ScanRegion {
             .with_memtables(mem_range_builders)
             .with_files(files)
             .with_cache(self.cache_strategy)
+            .with_json_aligner(json_aligner)
             .with_inverted_index_appliers(inverted_index_appliers)
             .with_bloom_filter_index_appliers(bloom_filter_appliers)
             .with_fulltext_index_appliers(fulltext_index_appliers)
@@ -623,6 +663,60 @@ impl ScanRegion {
             input
         };
         Ok(input)
+    }
+
+    async fn collect_source_arrow_schemas(
+        &self,
+        files: &[FileHandle],
+        mem_range_builders: &[MemRangeBuilder],
+    ) -> Result<Vec<ArrowSchemaRef>> {
+        let mut schemas = Vec::with_capacity(files.len() + mem_range_builders.len());
+
+        for file in files {
+            schemas.push(Arc::new(
+                self.collect_arrow_schema_from_parquet_metadata(file)
+                    .await?,
+            ));
+        }
+
+        schemas.extend(
+            mem_range_builders
+                .iter()
+                .filter_map(MemRangeBuilder::record_batch_schema_hint),
+        );
+
+        Ok(schemas)
+    }
+
+    async fn collect_arrow_schema_from_parquet_metadata(
+        &self,
+        file: &FileHandle,
+    ) -> Result<Schema> {
+        let file_path =
+            file.file_path(self.access_layer.table_dir(), self.access_layer.path_type());
+        let file_size = file.meta_ref().file_size;
+        let parquet_metadata = self
+            .access_layer
+            .read_sst(file.clone())
+            .cache(self.cache_strategy.clone())
+            .read_parquet_metadata(
+                &file_path,
+                file_size,
+                // TODO: Report metadata cache metrics for this schema inference path.
+                // Dropping them here can hide cache misses when debugging scan latency.
+                &mut MetadataCacheMetrics::default(),
+                PageIndexPolicy::default(),
+            )
+            .await?
+            .0
+            .parquet_metadata();
+        let file_metadata = parquet_metadata.file_metadata();
+
+        parquet_to_arrow_schema(
+            file_metadata.schema_descr(),
+            file_metadata.key_value_metadata(),
+        )
+        .context(ParquetToArrowSchemaSnafu { file: file_path })
     }
 
     fn region_id(&self) -> RegionId {
@@ -815,6 +909,8 @@ pub struct ScanInput {
     pub(crate) files: Vec<FileHandle>,
     /// Cache.
     pub(crate) cache_strategy: CacheStrategy,
+    /// Aligns JSON2 memtable batches to the scan-time merged root schema.
+    pub(crate) json_aligner: Option<Json2Aligner>,
     /// Ignores file not found error.
     ignore_file_not_found: bool,
     /// Maximum number of SST files to scan concurrently.
@@ -867,6 +963,7 @@ impl ScanInput {
             memtables: Vec::new(),
             files: Vec::new(),
             cache_strategy: CacheStrategy::Disabled,
+            json_aligner: None,
             ignore_file_not_found: false,
             max_concurrent_scan_files: DEFAULT_MAX_CONCURRENT_SCAN_FILES,
             inverted_index_appliers: [None, None],
@@ -924,6 +1021,13 @@ impl ScanInput {
     #[must_use]
     pub(crate) fn with_cache(mut self, cache: CacheStrategy) -> Self {
         self.cache_strategy = cache;
+        self
+    }
+
+    /// Sets the JSON2 aligner for memtable batches.
+    #[must_use]
+    pub(crate) fn with_json_aligner(mut self, aligner: Option<Json2Aligner>) -> Self {
+        self.json_aligner = aligner;
         self
     }
 
@@ -1479,48 +1583,6 @@ fn pre_filter_mode(append_mode: bool, merge_mode: MergeMode) -> PreFilterMode {
     }
 }
 
-fn narrow_read_columns_by_json_type_hint(
-    read_columns: &mut ReadColumns,
-    json_type_hint: &HashMap<String, JsonNativeType>,
-    metadata: &RegionMetadata,
-) {
-    if json_type_hint.is_empty() {
-        return;
-    }
-
-    for read_column in &mut read_columns.cols {
-        let Some(column) = metadata.column_by_id(read_column.column_id) else {
-            continue;
-        };
-        let column_name = &column.column_schema.name;
-        let Some(json_type) = json_type_hint.get(column_name) else {
-            continue;
-        };
-
-        let mut paths = Vec::new();
-        let mut current = vec![column_name.clone()];
-        collect_json_nested_paths(json_type, &mut current, &mut paths);
-        merge_nested_paths(&mut read_column.nested_paths, paths)
-    }
-}
-
-fn collect_json_nested_paths(
-    json_type: &JsonNativeType,
-    current: &mut NestedPath,
-    paths: &mut Vec<NestedPath>,
-) {
-    match json_type {
-        JsonNativeType::Object(fields) if !fields.is_empty() => {
-            for (field, child) in fields {
-                current.push(field.clone());
-                collect_json_nested_paths(child, current, paths);
-                current.pop();
-            }
-        }
-        _ => paths.push(current.clone()),
-    }
-}
-
 /// Output of [build_scan_fingerprint]: the cache fingerprint plus the derived
 /// implied time range used to decide whether the cache key can drop the time
 /// predicates for a given partition (see `build_range_cache_key`).
@@ -2010,6 +2072,7 @@ impl PredicateGroup {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::sync::Arc;
 
     use common_time::timestamp::{TimeUnit, Timestamp};
@@ -2023,11 +2086,14 @@ mod tests {
     };
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::ColumnSchema;
-    use datatypes::types::json_type::JsonObjectType;
+    use datatypes::types::json_type::{JsonNativeType, JsonObjectType};
     use datatypes::value::Value;
     use partition::expr::col as partition_col;
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
-    use store_api::storage::{RegionId, TimeSeriesDistribution, TimeSeriesRowSelector};
+    use store_api::storage::{
+        JsonReadHint, JsonRootReadHint, NestedPath, RegionId, TimeSeriesDistribution,
+        TimeSeriesRowSelector,
+    };
 
     use super::*;
     use crate::cache::CacheManager;
@@ -2155,7 +2221,7 @@ mod tests {
         let metadata = json_projection_test_metadata()?;
         let hint = HashMap::from([(
             "j".to_string(),
-            JsonNativeType::Object(JsonObjectType::from([
+            JsonReadHint::Paths(JsonNativeType::Object(JsonObjectType::from([
                 ("a".to_string(), JsonNativeType::i64()),
                 (
                     "b".to_string(),
@@ -2164,7 +2230,7 @@ mod tests {
                         JsonNativeType::String,
                     )])),
                 ),
-            ])),
+            ]))),
         )]);
 
         fn nested_path(parts: &[&str]) -> NestedPath {
@@ -2174,7 +2240,7 @@ mod tests {
         let mut read_columns = ReadColumns {
             cols: vec![ReadColumn::new(1, vec![]), ReadColumn::new(0, vec![])],
         };
-        narrow_read_columns_by_json_type_hint(&mut read_columns, &hint, metadata.as_ref());
+        apply_json_read_hints_to_read_columns(&mut read_columns, &hint, metadata.as_ref());
         assert_eq!(
             read_columns,
             ReadColumns {
@@ -2191,11 +2257,26 @@ mod tests {
         let mut read_columns = ReadColumns {
             cols: vec![ReadColumn::new(0, vec![])],
         };
-        narrow_read_columns_by_json_type_hint(&mut read_columns, &hint, metadata.as_ref());
+        apply_json_read_hints_to_read_columns(&mut read_columns, &hint, metadata.as_ref());
         assert_eq!(
             read_columns,
             ReadColumns {
                 cols: vec![ReadColumn::new(0, vec![])]
+            }
+        );
+
+        let hint = HashMap::from([(
+            "j".to_string(),
+            JsonReadHint::Root(JsonRootReadHint::Uninferred),
+        )]);
+        let mut read_columns = ReadColumns {
+            cols: vec![ReadColumn::new(1, vec![])],
+        };
+        apply_json_read_hints_to_read_columns(&mut read_columns, &hint, metadata.as_ref());
+        assert_eq!(
+            read_columns,
+            ReadColumns {
+                cols: vec![ReadColumn::new(1, vec![])]
             }
         );
         Ok(())

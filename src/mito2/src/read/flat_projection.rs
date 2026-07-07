@@ -28,16 +28,16 @@ use datatypes::arrow::datatypes::{DataType as ArrowDataType, Field};
 use datatypes::extension::json::is_structured_json_field;
 use datatypes::prelude::{ConcreteDataType, DataType};
 use datatypes::schema::{Schema, SchemaRef};
-use datatypes::types::json_type::JsonNativeType;
 use datatypes::value::Value;
 use datatypes::vectors::Helper;
 use datatypes::vectors::json::array::JsonArray;
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::{RegionMetadata, RegionMetadataRef};
-use store_api::storage::ColumnId;
+use store_api::storage::{ColumnId, JsonReadHint};
 
 use crate::cache::CacheStrategy;
-use crate::error::{InvalidRequestSnafu, RecordBatchSnafu, Result};
+use crate::error::{DataTypeMismatchSnafu, InvalidRequestSnafu, RecordBatchSnafu, Result};
+use crate::read::json_schema::{Json2OutputPlan, planned_json2_output_type};
 use crate::read::projection::{read_column_ids_from_projection, repeated_vector_with_cache};
 use crate::read::read_columns::ReadColumns;
 use crate::sst::parquet::flat_format::sst_column_id_indices;
@@ -72,6 +72,8 @@ pub struct FlatProjectionMapper {
     batch_indices: Vec<usize>,
     /// Precomputed Arrow schema for input batches.
     input_arrow_schema: datatypes::arrow::datatypes::SchemaRef,
+    /// JSON2 output handling plan for each output column.
+    json_output_plans: Vec<Json2OutputPlan>,
 }
 
 impl FlatProjectionMapper {
@@ -94,13 +96,14 @@ impl FlatProjectionMapper {
         metadata: &RegionMetadataRef,
         projection: Vec<usize>,
         read_cols: ReadColumns,
-        json_type_hint: Option<&HashMap<String, JsonNativeType>>,
+        json_type_hint: Option<&HashMap<String, JsonReadHint>>,
     ) -> Result<Self> {
         // If the original projection is empty.
         let is_empty_projection = projection.is_empty();
 
         // Output column schemas for the projection.
         let mut col_schemas = Vec::with_capacity(projection.len());
+        let mut json_output_plans = Vec::with_capacity(projection.len());
         // Column ids of the output projection without deduplication.
         let mut output_col_ids = Vec::with_capacity(projection.len());
         for idx in &projection {
@@ -114,17 +117,17 @@ impl FlatProjectionMapper {
             output_col_ids.push(col.column_id);
 
             let mut schema = col.column_schema.clone();
-            if let Some(concretized) = json_type_hint
-                .and_then(|x| x.get(&schema.name))
-                .cloned()
-                .map(ConcreteDataType::json2)
-                && schema
-                    .data_type
-                    .as_json()
-                    .is_some_and(|json_type| json_type.is_json2())
-            {
-                schema.data_type = concretized;
+            let json_read_hint = json_type_hint.and_then(|x| x.get(&schema.name));
+
+            let json_output_plan = planned_json2_output_type(&schema.data_type, json_read_hint)
+                .context(DataTypeMismatchSnafu)?;
+            match &json_output_plan {
+                Json2OutputPlan::AlignTo(data_type) => {
+                    schema.data_type = data_type.clone();
+                }
+                Json2OutputPlan::NonJson2 => {}
             }
+            json_output_plans.push(json_output_plan);
             col_schemas.push(schema);
         }
 
@@ -145,13 +148,21 @@ impl FlatProjectionMapper {
             && !json_type_hint.is_empty()
         {
             for (column_id, data_type) in batch_schema.iter_mut() {
-                if data_type
+                if !data_type
                     .as_json()
                     .is_some_and(|json_type| json_type.is_json2())
-                    && let Some(concretized) = metadata
-                        .column_by_id(*column_id)
-                        .and_then(|x| json_type_hint.get(&x.column_schema.name).cloned())
-                        .map(ConcreteDataType::json2)
+                {
+                    continue;
+                }
+                let Some(col) = metadata.column_by_id(*column_id) else {
+                    continue;
+                };
+                let Some(hint) = json_type_hint.get(&col.column_schema.name) else {
+                    continue;
+                };
+                if let Json2OutputPlan::AlignTo(concretized) =
+                    planned_json2_output_type(data_type, Some(hint))
+                        .context(DataTypeMismatchSnafu)?
                 {
                     *data_type = concretized;
                 }
@@ -205,6 +216,7 @@ impl FlatProjectionMapper {
             is_empty_projection,
             batch_indices,
             input_arrow_schema,
+            json_output_plans,
         })
     }
 
@@ -294,6 +306,7 @@ impl FlatProjectionMapper {
         // Construct output record batch directly from Arrow arrays to avoid
         // Arrow -> Vector -> Arrow roundtrips in the hot path.
         let mut arrays = Vec::with_capacity(self.output_schema.num_columns());
+        let mut output_column_schemas = self.output_schema.column_schemas().to_vec();
         for (output_idx, index) in self.batch_indices.iter().enumerate() {
             let mut array = batch.column(*index).clone();
             // Cast dictionary values to the target type.
@@ -325,22 +338,23 @@ impl FlatProjectionMapper {
                     array = casted;
                 }
             }
-
-            let field = &self.output_schema.arrow_schema().fields()[output_idx];
-            if is_structured_json_field(field) {
-                array = JsonArray::from(&array)
-                    .try_align(field.data_type())
-                    .context(DataTypesSnafu)?;
-            }
-
+            let array = match &self.json_output_plans[output_idx] {
+                Json2OutputPlan::NonJson2 => array,
+                Json2OutputPlan::AlignTo(data_type) => {
+                    output_column_schemas[output_idx].data_type = data_type.clone();
+                    JsonArray::from(&array)
+                        .try_align(&data_type.as_arrow_type())
+                        .context(DataTypesSnafu)?
+                }
+            };
             arrays.push(array);
         }
 
-        let df_record_batch =
-            DfRecordBatch::try_new(self.output_schema.arrow_schema().clone(), arrays)
-                .context(NewDfRecordBatchSnafu)?;
+        let output_schema = Arc::new(Schema::new(output_column_schemas));
+        let df_record_batch = DfRecordBatch::try_new(output_schema.arrow_schema().clone(), arrays)
+            .context(NewDfRecordBatchSnafu)?;
         Ok(RecordBatch::from_df_record_batch(
-            self.output_schema.clone(),
+            output_schema,
             df_record_batch,
         ))
     }
@@ -557,11 +571,15 @@ impl DfBatchAssembler {
 
 #[cfg(test)]
 mod tests {
-    use datatypes::types::json_type::JsonObjectType;
+    use datatypes::arrow::array::{Array, ArrayRef, Int64Array, StructArray};
+    use datatypes::arrow::datatypes::{DataType as ArrowDataType, Field, Schema as ArrowSchema};
+    use datatypes::arrow::record_batch::RecordBatch as ArrowRecordBatch;
+    use datatypes::types::json_type::{JsonNativeType, JsonObjectType};
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
-    use store_api::storage::RegionId;
+    use store_api::storage::{JsonRootReadHint, RegionId};
 
     use super::*;
+    use crate::cache::CacheStrategy;
 
     fn metadata_with_legacy_json() -> RegionMetadataRef {
         let mut builder = RegionMetadataBuilder::new(RegionId::new(1024, 0));
@@ -592,10 +610,10 @@ mod tests {
         let metadata = metadata_with_legacy_json();
         let hint = HashMap::from([(
             "j".to_string(),
-            JsonNativeType::Object(JsonObjectType::from([(
+            JsonReadHint::Paths(JsonNativeType::Object(JsonObjectType::from([(
                 "a".to_string(),
                 JsonNativeType::i64(),
-            )])),
+            )]))),
         )]);
         let mapper = FlatProjectionMapper::new_with_read_columns(
             &metadata,
@@ -608,6 +626,75 @@ mod tests {
         assert_eq!(
             mapper.batch_schema()[0],
             (0, ConcreteDataType::json_datatype())
+        );
+    }
+
+    #[test]
+    fn test_json2_root_read_keeps_struct_schema() {
+        let mut builder = RegionMetadataBuilder::new(RegionId::new(1024, 0));
+        builder
+            .push_column_metadata(ColumnMetadata {
+                column_schema: datatypes::schema::ColumnSchema::new(
+                    "j",
+                    ConcreteDataType::json2(JsonNativeType::Object(JsonObjectType::new())),
+                    true,
+                ),
+                semantic_type: SemanticType::Field,
+                column_id: 0,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: datatypes::schema::ColumnSchema::new(
+                    "ts",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Timestamp,
+                column_id: 1,
+            });
+        let metadata = Arc::new(builder.build().unwrap());
+
+        let json_array = Arc::new(StructArray::from(vec![(
+            Arc::new(Field::new("a", ArrowDataType::Int64, true)),
+            Arc::new(Int64Array::from(vec![Some(1)])) as ArrayRef,
+        )])) as ArrayRef;
+        let batch = ArrowRecordBatch::try_new(
+            Arc::new(ArrowSchema::new(vec![Field::new(
+                "j",
+                json_array.data_type().clone(),
+                true,
+            )])),
+            vec![json_array.clone()],
+        )
+        .unwrap();
+
+        let hint = HashMap::from([(
+            "j".to_string(),
+            JsonReadHint::Root(JsonRootReadHint::Inferred(
+                JsonNativeType::try_from(json_array.data_type()).unwrap(),
+            )),
+        )]);
+        let mapper = FlatProjectionMapper::new_with_read_columns(
+            &metadata,
+            vec![0],
+            ReadColumns::from_deduped_column_ids([0]),
+            Some(&hint),
+        )
+        .unwrap();
+
+        let converted = mapper.convert(&batch, &CacheStrategy::Disabled).unwrap();
+        assert_eq!(
+            converted.df_record_batch().schema().field(0).data_type(),
+            json_array.data_type()
+        );
+
+        assert!(
+            FlatProjectionMapper::new_with_read_columns(
+                &metadata,
+                vec![0],
+                ReadColumns::from_deduped_column_ids([0]),
+                None,
+            )
+            .is_err()
         );
     }
 }

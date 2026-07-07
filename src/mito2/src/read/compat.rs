@@ -99,24 +99,9 @@ impl FlatCompatBatch {
         let actual = read_format.metadata();
         let format_projection = read_format.format_projection();
         let mut actual_schema = flat_projected_columns(actual, format_projection);
-        if read_format
-            .arrow_schema()
-            .fields()
-            .iter()
-            .any(is_structured_json_field)
-        {
-            for field in read_format.arrow_schema().fields() {
-                if is_structured_json_field(field)
-                    && let Some(column_id) =
-                        actual.column_by_name(field.name()).map(|x| x.column_id)
-                    && let Some(i) = actual_schema.iter().position(|x| x.0 == column_id)
-                {
-                    actual_schema[i].1 = ConcreteDataType::from_arrow_type(field.data_type());
-                }
-            }
-        }
+        let mut expect_schema = mapper.batch_schema().to_vec();
+        patch_json2_types_from_sst(read_format, &mut actual_schema, &mut expect_schema);
 
-        let expect_schema = mapper.batch_schema();
         if expect_schema == actual_schema {
             // Although the SST has a different schema, but the schema after projection is the same
             // as expected schema.
@@ -129,7 +114,7 @@ impl FlatCompatBatch {
         }
 
         let (index_or_defaults, fields) =
-            Self::compute_index_and_fields(&actual_schema, expect_schema, mapper.metadata())?;
+            Self::compute_index_and_fields(&actual_schema, &expect_schema, mapper.metadata())?;
 
         let compat_pk = FlatCompatPrimaryKey::new(mapper.metadata(), actual)?;
 
@@ -300,6 +285,52 @@ impl FlatCompatBatch {
 
         // Handles primary keys.
         self.compat_pk.compat(compat_batch)
+    }
+}
+
+/// Patches the concrete types of json2 columns in both `actual_schema` and `expect_schema`
+/// using the arrow schema from the SST file, where the concrete types were known at write time.
+///
+/// The region manifest does not store concrete types for json2 columns, so we recover them
+/// from the SST's arrow schema for `actual_schema`.
+///
+/// `expect_schema` is only patched when a json2 column carries an empty struct type,
+/// which happens when a query reads a json2 root column without explicit type hints.
+fn patch_json2_types_from_sst(
+    read_format: &FlatReadFormat,
+    actual_schema: &mut [(ColumnId, ConcreteDataType)],
+    expect_schema: &mut [(ColumnId, ConcreteDataType)],
+) {
+    if !read_format
+        .arrow_schema()
+        .fields()
+        .iter()
+        .any(is_structured_json_field)
+    {
+        return;
+    }
+    let metadata = read_format.metadata();
+    for field in read_format.arrow_schema().fields() {
+        if !is_structured_json_field(field) {
+            continue;
+        }
+        let Some(col_id) = metadata.column_by_name(field.name()).map(|c| c.column_id) else {
+            continue;
+        };
+        let concrete_type = ConcreteDataType::from_arrow_type(field.data_type());
+
+        if let Some(i) = actual_schema.iter().position(|x| x.0 == col_id) {
+            actual_schema[i].1 = concrete_type.clone();
+        }
+        if let Some(i) = expect_schema.iter().position(|x| x.0 == col_id)
+            && expect_schema[i].1.as_json().is_some_and(|t| t.is_json2())
+            && matches!(
+                expect_schema[i].1.as_arrow_type(),
+                datatypes::arrow::datatypes::DataType::Struct(fields) if fields.is_empty()
+            )
+        {
+            expect_schema[i].1 = concrete_type;
+        }
     }
 }
 

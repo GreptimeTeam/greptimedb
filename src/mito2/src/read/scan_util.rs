@@ -1215,7 +1215,13 @@ pub(crate) fn scan_flat_mem_ranges(
         for range in ranges {
             let build_reader_start = Instant::now();
             let mem_scan_metrics = Some(MemScanMetrics::default());
-            let mut iter = range.build_record_batch_iter(Some(time_range), mem_scan_metrics.clone())?;
+            let iter = range.build_record_batch_iter(Some(time_range), mem_scan_metrics.clone())?;
+            let mut iter = if let Some(aligner) = &stream_ctx.input.json_aligner {
+                aligner.wrap_iter(iter)
+            } else {
+                iter
+            };
+
             part_metrics.inc_build_reader_cost(build_reader_start.elapsed());
 
             while let Some(record_batch) = iter.next().transpose()? {
