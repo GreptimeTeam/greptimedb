@@ -200,6 +200,40 @@ impl ExtensionPlanner for DistExtensionPlanner {
 
         // TODO(ruihang): generate different execution plans for different variant merge operation
         let schema = optimized_plan.schema().as_arrow();
+        let target_partition = session_state.config().target_partitions();
+        let output_ordering = if target_partition >= regions.len() {
+            merge_scan
+                .remote_output_ordering()
+                .map(|sort_exprs| {
+                    sort_exprs
+                        .iter()
+                        .map(|sort_expr| {
+                            let physical_expr = session_state.create_physical_expr(
+                                sort_expr.expr.clone(),
+                                input_plan.schema(),
+                            )?;
+                            Ok(PhysicalSortExpr::new(
+                                physical_expr,
+                                SortOptions {
+                                    descending: !sort_expr.asc,
+                                    nulls_first: sort_expr.nulls_first,
+                                },
+                            ))
+                        })
+                        .collect::<Result<Vec<_>>>()
+                        .and_then(|ordering| {
+                            LexOrdering::new(ordering).ok_or_else(|| {
+                                DataFusionError::Internal(
+                                    "Expect output ordering to have non-empty sort expressions"
+                                        .to_string(),
+                                )
+                            })
+                        })
+                })
+                .transpose()?
+        } else {
+            None
+        };
         let query_ctx = session_state
             .config()
             .get_extension()
@@ -212,10 +246,11 @@ impl ExtensionPlanner for DistExtensionPlanner {
             schema,
             self.region_query_handler.clone(),
             query_ctx,
-            session_state.config().target_partitions(),
+            target_partition,
             merge_scan.partition_cols().clone(),
             merge_scan.remote_dyn_filter_producer_id(),
             self.enable_per_region_metrics,
+            output_ordering,
         )?;
         Ok(Some(Arc::new(merge_scan_plan) as _))
     }

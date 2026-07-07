@@ -724,17 +724,10 @@ impl PlanRewriter {
             self.partition_cols
         );
 
-        // add merge scan as the new root
-        let mut node = MergeScanLogicalPlan::new(
-            on_node.clone(),
-            false,
-            // at this stage, the partition cols should be set
-            // treat it as non-partitioned if None
-            self.partition_cols.clone().unwrap_or_default(),
-        )
-        .into_logical_plan();
+        let mut remote_output_ordering = None;
+        let mut expanded_stages = Vec::with_capacity(self.stage.len());
 
-        // expand stages
+        // Rewrite stages and remember the ordering introduced by the pushed-down Sort.
         for new_stage in self.stage.drain(..) {
             // tracking alias for merge sort's sort exprs
             let new_stage = if let LogicalPlan::Extension(ext) = &new_stage
@@ -745,6 +738,37 @@ impl PlanRewriter {
             } else {
                 new_stage
             };
+
+            // The first MergeSort stage records the ordering that each MergeScan output
+            // partition inherits from the remote input. This metadata is produced when the
+            // distributed rewriter splits Sort into local Sort + frontend MergeSort, so the
+            // physical planner doesn't have to rediscover it from logical plan shape.
+            if remote_output_ordering.is_none()
+                && let LogicalPlan::Extension(ext) = &new_stage
+                && let Some(merge_sort) = ext.node.as_any().downcast_ref::<MergeSortLogicalPlan>()
+            {
+                remote_output_ordering = Some(merge_sort.expr.clone());
+            }
+
+            expanded_stages.push(new_stage);
+        }
+
+        let mut merge_scan = MergeScanLogicalPlan::new(
+            on_node.clone(),
+            false,
+            // at this stage, the partition cols should be set
+            // treat it as non-partitioned if None
+            self.partition_cols.clone().unwrap_or_default(),
+        );
+        if let Some(remote_output_ordering) = remote_output_ordering {
+            merge_scan = merge_scan.with_remote_output_ordering(remote_output_ordering);
+        }
+
+        // add merge scan as the new root
+        let mut node = merge_scan.into_logical_plan();
+
+        // expand stages
+        for new_stage in expanded_stages {
             node = new_stage
                 .with_new_exprs(new_stage.expressions_consider_join(), vec![node.clone()])?;
         }
