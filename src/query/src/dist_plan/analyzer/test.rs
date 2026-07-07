@@ -888,6 +888,39 @@ fn expand_limit_sort_does_not_record_remote_output_ordering() {
 }
 
 #[test]
+fn records_remote_output_ordering_only_from_first_stage() {
+    let merge_scan_input = LogicalPlanBuilder::empty(false)
+        .project(vec![lit(1i64).alias("pk1")])
+        .unwrap()
+        .build()
+        .unwrap();
+    let merge_sort_stage = MergeSortLogicalPlan::new(
+        Arc::new(merge_scan_input.clone()),
+        vec![col("pk1").sort(true, false)],
+        Some(10),
+    )
+    .into_logical_plan();
+    let limit_stage = LogicalPlanBuilder::from(merge_scan_input.clone())
+        .limit(0, Some(10))
+        .unwrap()
+        .build()
+        .unwrap();
+    let mut rewriter = PlanRewriter {
+        stage: vec![limit_stage, merge_sort_stage],
+        ..Default::default()
+    };
+
+    let (_stages, remote_output_ordering) = rewriter
+        .rewrite_stages_and_remote_ordering(&merge_scan_input)
+        .unwrap();
+
+    assert!(
+        remote_output_ordering.is_none(),
+        "only the stage directly attached to MergeScan can provide MergeScan output ordering"
+    );
+}
+
+#[test]
 fn expand_sort_limit_sort() {
     // use logging for better debugging
     init_default_ut_logging();

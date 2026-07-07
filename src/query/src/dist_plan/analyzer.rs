@@ -755,7 +755,7 @@ impl PlanRewriter {
                 stage
             };
 
-            if remote_output_ordering.is_none()
+            if expanded_stages.is_empty()
                 && let Some(merge_sort) = Self::try_as_merge_sort_stage(&stage)
             {
                 remote_output_ordering = Some(merge_sort.expr.clone());
