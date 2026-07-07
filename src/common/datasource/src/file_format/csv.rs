@@ -118,7 +118,7 @@ impl TryFrom<&HashMap<String, String>> for CsvFormat {
         if format.strict_headers && !format.has_header {
             return error::ParseFormatSnafu {
                 key: file_format::FORMAT_STRICT_HEADERS,
-                value: "strict_headers=true requires headers=true".to_string(),
+                value: "strict_headers=true requires headers=true",
             }
             .fail();
         }
