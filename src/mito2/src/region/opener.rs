@@ -76,6 +76,7 @@ use crate::sst::index::puffin_manager::PuffinManagerFactory;
 use crate::sst::location::{self, region_dir_from_table_dir};
 use crate::sst::parquet::metadata::{MetadataLoader, extract_primary_key_range};
 use crate::sst::parquet::reader::MetadataCacheMetrics;
+use crate::sst::parquet::value_encoding::ParquetWritePolicyProviderRef;
 use crate::time_provider::TimeProviderRef;
 use crate::wal::entry_reader::WalEntryReader;
 use crate::wal::{EntryId, Wal};
@@ -125,6 +126,7 @@ pub(crate) struct RegionOpener {
     file_ref_manager: FileReferenceManagerRef,
     partition_expr_fetcher: PartitionExprFetcherRef,
     hook: Option<RegionHookRef>,
+    parquet_write_policy_provider: Option<ParquetWritePolicyProviderRef>,
 }
 
 impl RegionOpener {
@@ -164,12 +166,21 @@ impl RegionOpener {
             file_ref_manager,
             partition_expr_fetcher,
             hook: None,
+            parquet_write_policy_provider: None,
         }
     }
 
     /// Sets the region hook for observing manifest mutations.
     pub(crate) fn hook(mut self, hook: Option<RegionHookRef>) -> Self {
         self.hook = hook;
+        self
+    }
+
+    pub(crate) fn parquet_write_policy_provider(
+        mut self,
+        provider: Option<ParquetWritePolicyProviderRef>,
+    ) -> Self {
+        self.parquet_write_policy_provider = provider;
         self
     }
 
@@ -366,13 +377,15 @@ impl RegionOpener {
             .flushed_entry_id(flushed_entry_id)
             .build();
         let version_control = Arc::new(VersionControl::new(version));
-        let access_layer = Arc::new(AccessLayer::new(
+        let mut access_layer = AccessLayer::new(
             self.table_dir.clone(),
             self.path_type,
             object_store,
             self.puffin_manager_factory,
             self.intermediate_manager,
-        ));
+        );
+        access_layer.parquet_write_policy_provider = self.parquet_write_policy_provider.clone();
+        let access_layer = Arc::new(access_layer);
         let now = self.time_provider.current_time_millis();
 
         Ok(Arc::new(MitoRegion {
@@ -515,13 +528,15 @@ impl RegionOpener {
             region_id, self.table_dir, self.options
         );
 
-        let access_layer = Arc::new(AccessLayer::new(
+        let mut access_layer = AccessLayer::new(
             self.table_dir.clone(),
             self.path_type,
             object_store,
             self.puffin_manager_factory.clone(),
             self.intermediate_manager.clone(),
-        ));
+        );
+        access_layer.parquet_write_policy_provider = self.parquet_write_policy_provider.clone();
+        let access_layer = Arc::new(access_layer);
         let file_purger = create_file_purger(
             config.gc.enable,
             self.path_type,

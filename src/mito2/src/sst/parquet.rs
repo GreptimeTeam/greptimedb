@@ -36,6 +36,7 @@ pub mod reader;
 pub mod row_group;
 pub mod row_selection;
 pub(crate) mod stats;
+pub mod value_encoding;
 pub mod writer;
 
 /// Key of metadata in parquet SST.
@@ -65,6 +66,12 @@ pub struct WriteOptions {
     /// Note: This is not a hard limit as we can only observe the file size when
     /// ArrowWrite writes to underlying writers.
     pub max_file_size: Option<usize>,
+    /// Generic Parquet column write overrides.
+    pub parquet: value_encoding::ParquetWriteOptions,
+    /// Optional generic policy provider for pre-open Parquet options.
+    pub parquet_policy_provider: Option<value_encoding::ParquetWritePolicyProviderRef>,
+    /// Operation kind for the generic policy provider.
+    pub parquet_write_operation: value_encoding::ParquetWriteOperation,
 }
 
 impl Default for WriteOptions {
@@ -73,6 +80,9 @@ impl Default for WriteOptions {
             write_buffer_size: DEFAULT_WRITE_BUFFER_SIZE,
             row_group_size: DEFAULT_ROW_GROUP_SIZE,
             max_file_size: None,
+            parquet: Default::default(),
+            parquet_policy_provider: None,
+            parquet_write_operation: Default::default(),
         }
     }
 }

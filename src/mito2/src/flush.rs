@@ -382,7 +382,6 @@ impl RegionFlushTask {
         if let Some(row_group_size) = self.row_group_size {
             write_opts.row_group_size = row_group_size;
         }
-
         let DoFlushMemtablesResult {
             file_metas,
             flushed_bytes,

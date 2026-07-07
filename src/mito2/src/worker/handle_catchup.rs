@@ -126,6 +126,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         )
         .cache(Some(self.cache_manager.clone()))
         .hook(self.plugins.get())
+        .parquet_write_policy_provider(self.plugins.get())
         .options(region.version().options.clone())?
         .skip_wal_replay(true)
         .open(&self.config, &self.wal)

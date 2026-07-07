@@ -35,9 +35,9 @@ use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::extension::json::is_structured_json_field;
 use object_store::{FuturesAsyncWriter, ObjectStore};
 use parquet::arrow::AsyncArrowWriter;
-use parquet::basic::{Compression, Encoding, ZstdLevel};
+use parquet::basic::{Compression, Encoding};
 use parquet::file::metadata::KeyValue;
-use parquet::file::properties::{WriterProperties, WriterPropertiesBuilder};
+use parquet::file::properties::WriterPropertiesBuilder;
 use parquet::schema::types::ColumnPath;
 use smallvec::smallvec;
 use snafu::ResultExt;
@@ -57,6 +57,10 @@ use crate::sst::file::RegionFileId;
 use crate::sst::index::{IndexOutput, Indexer, IndexerBuilder};
 use crate::sst::parquet::flat_format::{FlatWriteFormat, time_index_column_index};
 use crate::sst::parquet::format::PrimaryKeyWriteFormat;
+use crate::sst::parquet::value_encoding::{
+    ParquetWriteOptions, ParquetWritePolicyContext, ParquetWritePolicyDecision,
+    sst_writer_properties,
+};
 use crate::sst::parquet::{PARQUET_METADATA_KEY, SstInfo, WriteOptions};
 use crate::sst::{
     DEFAULT_WRITE_BUFFER_SIZE, DEFAULT_WRITE_CONCURRENCY, FlatSchemaOptions, SeriesEstimator,
@@ -201,7 +205,7 @@ where
     ) -> Result<()> {
         // maybe_init_writer will re-create a new file.
         if let Some(mut current_writer) = mem::take(&mut self.writer) {
-            let mut stats = mem::take(stats);
+            let mut stats = stats.take_file_stats();
             // At least one row has been written.
             assert!(stats.num_rows > 0);
 
@@ -337,30 +341,65 @@ where
     ) -> Result<SstInfoArray> {
         let mut results = smallvec![];
         let mut stats = SourceStats::default();
+        let mut parquet_options = opts.parquet.clone();
+        let mut policy_session = opts.parquet_policy_provider.as_ref().and_then(|provider| {
+            provider.create_session(ParquetWritePolicyContext {
+                region_id: self.metadata.region_id,
+                metadata: self.metadata.clone(),
+                operation: opts.parquet_write_operation,
+            })
+        });
+        if let Some(session) = policy_session.as_mut()
+            && let Some(options) = session.initial_options()
+        {
+            parquet_options = options;
+            policy_session = None;
+        }
+        let mut buffered = Vec::new();
 
-        while let Some(record_batch) = self
-            .write_next_flat_batch(&mut source, converter, opts)
+        while let Some(next_batch) = self
+            .next_flat_batch(&mut source, converter)
             .await
             .transpose()
         {
-            match record_batch {
-                Ok(batch) => {
-                    stats.update_flat(&batch)?;
-                    if matches!(self.index_config.build_mode, IndexBuildMode::Sync) {
-                        let start = Instant::now();
-                        // safety: self.current_indexer must be set when first batch has been written.
-                        self.current_indexer
-                            .as_mut()
-                            .unwrap()
-                            .update_flat(&batch)
-                            .await;
-                        self.metrics.update_index += start.elapsed();
-                    }
-                    if let Some(max_file_size) = opts.max_file_size
-                        && self.bytes_written.load(Ordering::Relaxed) > max_file_size
+            match next_batch {
+                Ok((record_batch, arrow_batch)) => {
+                    if self.writer.is_none()
+                        && let Some(session) = policy_session.as_mut()
                     {
-                        self.finish_current_file(&mut results, &mut stats).await?;
+                        match session.observe_batch(&arrow_batch) {
+                            ParquetWritePolicyDecision::Pending => {
+                                buffered.push((record_batch, arrow_batch));
+                                continue;
+                            }
+                            ParquetWritePolicyDecision::Ready(options) => {
+                                parquet_options = options;
+                                policy_session = None;
+                                buffered.push((record_batch, arrow_batch));
+                                for (record_batch, arrow_batch) in buffered.drain(..) {
+                                    self.write_processed_flat_batch(
+                                        record_batch,
+                                        arrow_batch,
+                                        opts,
+                                        &parquet_options,
+                                        &mut results,
+                                        &mut stats,
+                                    )
+                                    .await?;
+                                }
+                                continue;
+                            }
+                        }
                     }
+                    self.write_processed_flat_batch(
+                        record_batch,
+                        arrow_batch,
+                        opts,
+                        &parquet_options,
+                        &mut results,
+                        &mut stats,
+                    )
+                    .await?;
                 }
                 Err(e) => {
                     if let Some(indexer) = &mut self.current_indexer {
@@ -369,6 +408,18 @@ where
                     return Err(e);
                 }
             }
+        }
+
+        for (record_batch, arrow_batch) in buffered.drain(..) {
+            self.write_processed_flat_batch(
+                record_batch,
+                arrow_batch,
+                opts,
+                &parquet_options,
+                &mut results,
+                &mut stats,
+            )
+            .await?;
         }
 
         self.finish_current_file(&mut results, &mut stats).await?;
@@ -400,12 +451,11 @@ where
             .set_column_compression(op_type_col, Compression::UNCOMPRESSED)
     }
 
-    async fn write_next_flat_batch(
+    async fn next_flat_batch(
         &mut self,
         source: &mut FlatSource,
         converter: &FlatBatchConverter,
-        opts: &WriteOptions,
-    ) -> Result<Option<RecordBatch>> {
+    ) -> Result<Option<(RecordBatch, RecordBatch)>> {
         let start = Instant::now();
         let Some(record_batch) = source.next_batch().await? else {
             return Ok(None);
@@ -413,22 +463,65 @@ where
         self.metrics.iter_source += start.elapsed();
 
         let arrow_batch = converter.convert_batch(&record_batch)?;
+        Ok(Some((record_batch, arrow_batch)))
+    }
 
+    async fn write_processed_flat_batch(
+        &mut self,
+        record_batch: RecordBatch,
+        arrow_batch: RecordBatch,
+        opts: &WriteOptions,
+        parquet_options: &ParquetWriteOptions,
+        results: &mut SstInfoArray,
+        stats: &mut SourceStats,
+    ) -> Result<()> {
+        self.write_arrow_batch(
+            &arrow_batch,
+            arrow_batch.schema_ref(),
+            opts,
+            parquet_options,
+        )
+        .await?;
+        stats.update_flat(&record_batch)?;
+        if matches!(self.index_config.build_mode, IndexBuildMode::Sync) {
+            let start = Instant::now();
+            self.current_indexer
+                .as_mut()
+                .unwrap()
+                .update_flat(&record_batch)
+                .await;
+            self.metrics.update_index += start.elapsed();
+        }
+        if let Some(max_file_size) = opts.max_file_size
+            && self.bytes_written.load(Ordering::Relaxed) > max_file_size
+        {
+            self.finish_current_file(results, stats).await?;
+        }
+        Ok(())
+    }
+
+    async fn write_arrow_batch(
+        &mut self,
+        arrow_batch: &RecordBatch,
+        schema: &SchemaRef,
+        opts: &WriteOptions,
+        parquet_options: &ParquetWriteOptions,
+    ) -> Result<()> {
         let start = Instant::now();
-        self.maybe_init_writer(arrow_batch.schema_ref(), opts)
+        self.maybe_init_writer(schema, opts, parquet_options)
             .await?
-            .write(&arrow_batch)
+            .write(arrow_batch)
             .await
             .context(WriteParquetSnafu)?;
         self.metrics.write_batch += start.elapsed();
-        // Return original flat batch for stats/indexer which use flat layout.
-        Ok(Some(record_batch))
+        Ok(())
     }
 
     async fn maybe_init_writer(
         &mut self,
         schema: &SchemaRef,
         opts: &WriteOptions,
+        parquet_options: &ParquetWriteOptions,
     ) -> Result<&mut AsyncArrowWriter<SizeAwareWriter<F::Writer>>> {
         if let Some(ref mut w) = self.writer {
             Ok(w)
@@ -437,16 +530,12 @@ where
             let key_value_meta = KeyValue::new(PARQUET_METADATA_KEY.to_string(), json);
 
             // TODO(yingwen): Find and set proper column encoding for internal columns: op type and tsid.
-            let props_builder = WriterProperties::builder()
-                .set_key_value_metadata(Some(vec![key_value_meta]))
-                .set_compression(Compression::ZSTD(ZstdLevel::default()))
-                .set_encoding(Encoding::PLAIN)
-                .set_max_row_group_row_count(Some(opts.row_group_size))
-                .set_column_index_truncate_length(None)
-                .set_statistics_truncate_length(None);
-
-            let props_builder = Self::customize_column_config(props_builder, &self.metadata);
-            let writer_props = props_builder.build();
+            let writer_props = sst_writer_properties(
+                key_value_meta,
+                opts.row_group_size,
+                parquet_options,
+                |props_builder| Self::customize_column_config(props_builder, &self.metadata),
+            );
 
             let sst_file_path = self.path_provider.build_sst_file_path(RegionFileId::new(
                 self.metadata.region_id,
@@ -481,6 +570,14 @@ struct SourceStats {
 }
 
 impl SourceStats {
+    fn take_file_stats(&mut self) -> Self {
+        Self {
+            num_rows: mem::take(&mut self.num_rows),
+            time_range: mem::take(&mut self.time_range),
+            series_estimator: mem::take(&mut self.series_estimator),
+        }
+    }
+
     fn update_flat(&mut self, record_batch: &RecordBatch) -> Result<()> {
         if record_batch.num_rows() == 0 {
             return Ok(());

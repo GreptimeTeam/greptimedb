@@ -44,6 +44,7 @@ use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::{PuffinManagerFactory, SstPuffinManager};
 use crate::sst::location::{self, region_dir_from_table_dir};
 use crate::sst::parquet::reader::ParquetReaderBuilder;
+use crate::sst::parquet::value_encoding::{ParquetWriteOperation, ParquetWritePolicyProviderRef};
 use crate::sst::parquet::writer::ParquetWriter;
 use crate::sst::parquet::{SstInfo, WriteOptions};
 use crate::sst::{DEFAULT_WRITE_BUFFER_SIZE, DEFAULT_WRITE_CONCURRENCY, FormatType};
@@ -152,6 +153,7 @@ pub struct AccessLayer {
     puffin_manager_factory: PuffinManagerFactory,
     /// Intermediate manager for inverted index.
     intermediate_manager: IntermediateManager,
+    pub(crate) parquet_write_policy_provider: Option<ParquetWritePolicyProviderRef>,
 }
 
 impl std::fmt::Debug for AccessLayer {
@@ -177,7 +179,13 @@ impl AccessLayer {
             object_store,
             puffin_manager_factory,
             intermediate_manager,
+            parquet_write_policy_provider: None,
         }
+    }
+
+    pub(crate) fn with_plugins(mut self, plugins: &common_base::Plugins) -> Self {
+        self.parquet_write_policy_provider = plugins.get::<ParquetWritePolicyProviderRef>();
+        self
     }
 
     /// Returns the directory of the table.
@@ -340,6 +348,12 @@ impl AccessLayer {
         let region_id = request.metadata.region_id;
         let region_metadata = request.metadata.clone();
         let cache_manager = request.cache_manager.clone();
+        let mut effective_write_opts = write_opts.clone();
+        effective_write_opts.parquet_policy_provider = self.parquet_write_policy_provider.clone();
+        effective_write_opts.parquet_write_operation = match request.op_type {
+            OperationType::Flush => ParquetWriteOperation::Flush,
+            OperationType::Compact => ParquetWriteOperation::Compaction,
+        };
 
         let sst_info = if let Some(write_cache) = cache_manager.write_cache() {
             // Write to the write cache.
@@ -353,7 +367,7 @@ impl AccessLayer {
                         ),
                         remote_store: self.object_store.clone(),
                     },
-                    write_opts,
+                    &effective_write_opts,
                     metrics,
                 )
                 .await?
@@ -364,7 +378,7 @@ impl AccessLayer {
             let indexer_builder = IndexerBuilderImpl {
                 build_type: request.op_type.into(),
                 metadata: request.metadata.clone(),
-                row_group_size: write_opts.row_group_size,
+                row_group_size: effective_write_opts.row_group_size,
                 puffin_manager: self
                     .puffin_manager_factory
                     .build(store, path_provider.clone()),
@@ -397,13 +411,13 @@ impl AccessLayer {
                         .write_all_flat_as_primary_key(
                             request.source,
                             request.max_sequence,
-                            write_opts,
+                            &effective_write_opts,
                         )
                         .await?
                 }
                 FormatType::Flat => {
                     writer
-                        .write_all_flat(request.source, request.max_sequence, write_opts)
+                        .write_all_flat(request.source, request.max_sequence, &effective_write_opts)
                         .await?
                 }
             }

@@ -157,13 +157,16 @@ pub async fn open_compaction_region(
         let intermediate_manager =
             IntermediateManager::init_fs(mito_config.index.aux_path.clone()).await?;
 
-        Arc::new(AccessLayer::new(
-            &req.table_dir,
-            req.path_type,
-            object_store.clone(),
-            puffin_manager_factory,
-            intermediate_manager,
-        ))
+        Arc::new(
+            AccessLayer::new(
+                &req.table_dir,
+                req.path_type,
+                object_store.clone(),
+                puffin_manager_factory,
+                intermediate_manager,
+            )
+            .with_plugins(&req.plugins),
+        )
     };
 
     let manifest_manager = {

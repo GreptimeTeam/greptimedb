@@ -71,7 +71,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         .metadata_builder(builder)
         .parse_options(request.options)?
         .cache(Some(self.cache_manager.clone()))
-        .hook(self.plugins.get());
+        .hook(self.plugins.get())
+        .parquet_write_policy_provider(self.plugins.get());
 
         opener.ensure_region_requirements(requirements)?;
 

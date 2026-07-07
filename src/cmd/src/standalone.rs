@@ -80,6 +80,8 @@ use crate::{App, create_resource_limit_metrics, error, log_versions, maybe_activ
 
 pub const APP_NAME: &str = "greptime-standalone";
 
+type PluginsCustomizer = Box<dyn Fn(&Plugins) + Send + Sync>;
+
 #[derive(Parser)]
 pub struct Command {
     #[clap(subcommand)]
@@ -407,6 +409,10 @@ impl StartCommand {
         plugins::setup_standalone_plugins(&mut plugins, &plugin_opts, &opts, kv_backend.clone())
             .await
             .context(error::SetupStandalonePluginsSnafu)?;
+
+        for customizer in &creator.plugins_customizers {
+            customizer(&plugins);
+        }
 
         // Builds cache registry
         let layered_cache_builder = LayeredCacheRegistryBuilder::default();
@@ -850,6 +856,7 @@ pub struct InstanceCreator {
     procedure_executor_creator: Box<dyn ProcedureExecutorCreator>,
     leader_services_controller: Box<dyn StandaloneLeaderServicesController>,
     open_regions_writable_override: Option<bool>,
+    plugins_customizers: Vec<PluginsCustomizer>,
 }
 
 impl InstanceCreator {
@@ -865,6 +872,7 @@ impl InstanceCreator {
             procedure_executor_creator,
             leader_services_controller: Box::new(DefaultStandaloneLeaderServicesController),
             open_regions_writable_override: None,
+            plugins_customizers: Vec::new(),
         }
     }
 
@@ -926,6 +934,15 @@ impl InstanceCreator {
         self.open_regions_writable_override = Some(writable);
         self
     }
+
+    /// Adds a runtime plugin customizer before the standalone datanode is built.
+    pub fn with_plugins_customizer<F>(mut self, customizer: F) -> Self
+    where
+        F: Fn(&Plugins) + Send + Sync + 'static,
+    {
+        self.plugins_customizers.push(Box::new(customizer));
+        self
+    }
 }
 
 impl Default for InstanceCreator {
@@ -937,6 +954,7 @@ impl Default for InstanceCreator {
             procedure_executor_creator: Box::new(DefaultProcedureExecutorCreator),
             leader_services_controller: Box::new(DefaultStandaloneLeaderServicesController),
             open_regions_writable_override: None,
+            plugins_customizers: Vec::new(),
         }
     }
 }

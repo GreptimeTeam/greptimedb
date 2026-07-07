@@ -44,7 +44,6 @@ use datatypes::vectors::Helper;
 use mito_codec::key_values::{KeyValue, KeyValues};
 use mito_codec::row_converter::{PrimaryKeyCodec, SortField, build_primary_key_codec_with_fields};
 use parquet::arrow::ArrowWriter;
-use parquet::basic::{Compression, ZstdLevel};
 use parquet::file::metadata::ParquetMetaData;
 use parquet::file::properties::WriterProperties;
 use smallvec::SmallVec;
@@ -68,6 +67,7 @@ use crate::sst::SeriesEstimator;
 use crate::sst::index::IndexOutput;
 use crate::sst::parquet::flat_format::primary_key_column_index;
 use crate::sst::parquet::format::{PrimaryKeyArray, PrimaryKeyArrayBuilder};
+use crate::sst::parquet::value_encoding::{ParquetWriteOptions, sst_writer_properties};
 use crate::sst::parquet::{PARQUET_METADATA_KEY, SstInfo};
 
 const INIT_DICT_VALUE_CAPACITY: usize = 8;
@@ -1144,17 +1144,15 @@ impl BulkPartEncoder {
         let key_value_meta =
             parquet::file::metadata::KeyValue::new(PARQUET_METADATA_KEY.to_string(), json);
 
-        // TODO(yingwen): Do we need compression?
-        let writer_props = Some(
-            WriterProperties::builder()
-                .set_key_value_metadata(Some(vec![key_value_meta]))
-                .set_write_batch_size(row_group_size)
-                .set_max_row_group_row_count(Some(row_group_size))
-                .set_compression(Compression::ZSTD(ZstdLevel::default()))
-                .set_column_index_truncate_length(None)
-                .set_statistics_truncate_length(None)
-                .build(),
-        );
+        // Use the shared MetricEngine value-encoding property helper so bulk
+        // stays consistent with the normal ParquetWriter path for base parquet
+        // settings and generic parquet overrides.
+        let writer_props = Some(sst_writer_properties(
+            key_value_meta,
+            row_group_size,
+            &ParquetWriteOptions::default(),
+            |builder| builder.set_write_batch_size(row_group_size),
+        ));
 
         Ok(Self {
             metadata,
