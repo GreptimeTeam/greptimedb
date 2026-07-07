@@ -3003,7 +3003,7 @@ async fn test_create_table_with_json_datatype(instance: Arc<dyn MockInstance>) {
 CREATE TABLE b (
     j JSON2,
     ts TIMESTAMP TIME INDEX,
-)"#;
+) WITH (append_mode='true')"#;
     let output = execute_sql(&instance, sql).await.data;
     assert!(matches!(output, OutputData::AffectedRows(0)));
 
@@ -3019,7 +3019,9 @@ CREATE TABLE b (
 |       | )                                |
 |       |                                  |
 |       | ENGINE=mito                      |
-|       |                                  |
+|       | WITH(                            |
+|       |   append_mode = 'true'           |
+|       | )                                |
 +-------+----------------------------------+"#;
     check_output_stream(output, expected).await;
 }
