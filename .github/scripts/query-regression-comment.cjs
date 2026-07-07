@@ -49,7 +49,7 @@ function text(value) {
     .replace(/@/g, '@\u200b')
     .replace(/\|/g, '\\|')
     .replace(/\r?\n/g, ' ');
-  return result.length > 512 ? `${result.slice(0, 509)}...` : result;
+  return result;
 }
 
 function statusEmoji(status) {
@@ -251,10 +251,6 @@ module.exports = async function validateQueryRegressionComment({ github, context
   } else {
     const rendered = [];
     for (const reportPath of reportPaths) {
-      const size = fs.statSync(reportPath).size;
-      if (size > 1024 * 1024) {
-        return skip(core, `Report file too large: ${reportPath} (${size} bytes).`);
-      }
       let report;
       try {
         report = JSON.parse(fs.readFileSync(reportPath, 'utf8'));
@@ -266,9 +262,6 @@ module.exports = async function validateQueryRegressionComment({ github, context
     body += rendered.join('\n\n---\n\n') + '\n';
   }
 
-  if (body.length > 59999) {
-    body = `${body.slice(0, 59500)}\n\n…\n\n_Comment truncated because it exceeded 60000 characters._\n`;
-  }
   fs.writeFileSync(summaryPath, body);
 
   core.setOutput('should_post', 'true');

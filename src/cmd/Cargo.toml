@@ -13,6 +13,10 @@ path = "src/bin/greptime.rs"
 name = "query_perf_fixture"
 path = "src/bin/query_perf_fixture.rs"
 
+[[bin]]
+name = "prom_remote_write_fixture"
+path = "src/bin/prom_remote_write_fixture.rs"
+
 [features]
 default = [
     "servers/pprof",

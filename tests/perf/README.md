@@ -34,6 +34,67 @@ counts, time ranges, row groups, and label distributions without spending CI tim
 on ingestion and flush. Ingestion-path cases can be added later for nightly or
 release-level realism.
 
+## Prometheus remote-write scenario
+
+The runner also supports `scenario.kind = "prom_remote_write_then_query"` for a
+bounded write-path smoke/regression flow. This path is explicit and separate from
+the direct-SST fixture path: it starts the base and candidate distributed clusters,
+writes deterministic Prometheus remote-write v1 samples through
+`/v1/prometheus/write`, flushes the configured physical metric table, then runs
+the configured SQL/TQL queries against the logical metric table.
+
+Remote-write cases configure one database, one logical metric, and one physical
+table under `[scenario.remote_write]`:
+
+```toml
+[scenario]
+kind = "prom_remote_write_then_query"
+
+[scenario.remote_write]
+database = "public"
+metric = "prom_remote_write_smoke"
+physical_table = "greptime_physical_table"
+series_count = 8
+samples_per_series = 30
+start_unix_millis = 1_704_067_200_000
+step_millis = 15_000
+chunk_series_count = 4
+visibility_timeout_seconds = 30
+# Optional: split by time so each helper invocation writes only this many samples
+# per series, then periodically flush the physical metric table to produce
+# multiple time-interval SSTs.
+# sample_chunk_size = 300
+# flush_every_sample_chunks = 1
+
+[scenario.remote_write.prom_store]
+pending_rows_flush_interval = "1s"
+```
+
+The runner creates the configured database if needed, writes a per-target
+frontend config enabling `[prom_store]` with metric engine storage and a non-zero
+`pending_rows_flush_interval`, and validates that the logical metric table reaches
+`series_count * samples_per_series` rows before trusting the query measurements.
+Use `--remote-write-generator /path/to/prom_remote_write_fixture` to provide the
+Rust payload helper. `--fixture-only` is rejected for remote-write cases; use
+`--dry-run` for planning.
+
+Large manual remote-write cases can set `sample_chunk_size` to split ingestion by
+time. For each chunk, the runner invokes `prom_remote_write_fixture` with the
+same series cardinality but a shorter `--samples-per-series` and an advanced
+`--start-unix-millis`. `flush_every_sample_chunks` controls periodic
+`ADMIN FLUSH_TABLE('<physical_table>')` calls; with `flush_every_sample_chunks = 1`,
+each time chunk is flushed separately. The final visible SST/file-range layout is
+still determined by the storage engine's normal compaction policy, so cases that
+need multi-window file distribution should span multiple compaction windows. If
+`sample_chunk_size` is omitted, the runner keeps the older single-helper-invocation
+behavior and flushes once at the end.
+
+`tests/perf/query_cases/prom_remote_write_7913/case.toml` is a larger manual
+case for issue #7913. It writes 8192 series × 20160 samples through remote-write
+in 1440-sample daily time chunks, flushing after each chunk before running 1d/7d/14d
+TQL selectors. It is not included in the default case set because ingestion cost
+dominates routine CI validation.
+
 ## Generator contract
 
 The direct-SST generator should accept a case definition with:
@@ -86,9 +147,8 @@ seed = 12345
 # query, warmups, iterations, thresholds
 ```
 
-The runner currently supports only `direct_readable_sst`. The enum-style
-`scenario.kind` is reserved for future scenarios such as `write_then_query` and
-`cache_warm_query`.
+The runner currently supports `direct_readable_sst` and
+`prom_remote_write_then_query`.
 
 ## Metrics
 
@@ -157,6 +217,7 @@ uv run --no-project python tests/perf/query_regression_runner.py \
   --base-bin /path/to/base/greptime \
   --candidate-bin /path/to/candidate/greptime \
   --fixture-generator /path/to/query_perf_fixture \
+  --fixture-cache-dir /mnt/query-regression-fixtures \
   --allow-large-fixture \
   --work-dir /tmp/query-perf-work
 ```
@@ -170,6 +231,17 @@ either target directory already exists with contents. Use `--reuse-work-dir` onl
 when intentionally debugging an existing run directory. SQL HTTP requests default
 to a 120 second timeout; override with `--http-timeout <seconds>` for slow lab
 runs.
+
+For large direct-SST fixtures, pass `--fixture-cache-dir <dir>` to store generated
+fixtures in a persistent content-addressed cache keyed by case name and fixture
+data configuration. Query and threshold edits reuse the same cached data as long
+as the scenario layout and table definitions do not change. Cached fixtures are
+reused automatically when their `summary.json`
+matches the discovered table/region metadata; incompatible entries are
+regenerated instead of reused. Fixture materialization keeps base and candidate
+data directories isolated, but copies files efficiently by trying filesystem
+reflinks first, hardlinks for immutable SST/object files next, and normal copies
+as a fallback. Manifest files are reflinked or copied, not hardlinked.
 
 Fixture generator smoke test:
 
@@ -195,6 +267,18 @@ uv run --no-project python tests/perf/query_regression_runner.py \
 standalone servers, and it materializes the generated fixture into base and
 candidate data directories for plumbing validation.
 
+Remote-write runner dry-run:
+
+```bash
+uv run --no-project python tests/perf/query_regression_runner.py \
+  --case tests/perf/query_cases/prom_remote_write_smoke/case.toml \
+  --base-bin /path/to/base/greptime \
+  --candidate-bin /path/to/candidate/greptime \
+  --remote-write-generator /path/to/prom_remote_write_fixture \
+  --work-dir /tmp/query-perf-remote-write \
+  --dry-run
+```
+
 ## GitHub Actions
 
 `.github/workflows/query-regression.yml` provides an opt-in CI entrypoint for
@@ -217,11 +301,13 @@ comment through the trusted follow-up workflow.
 ## Built-in cases
 
 The `promql_pushdown_7913` case is only one case using the generic fixture
-format. It should generate a metric-like table with a nanosecond time index and
-many SSTs with non-overlapping time ranges. A narrow PromQL/TQL query should
-touch only a small time window. The candidate build is expected to scan
-materially fewer files/ranges/rows than the base build when an optimizer PR
-claims to improve this path.
+format. It generates a high-cardinality metric-like table with a nanosecond time
+index and many SSTs with non-overlapping time ranges. Its `timestamp_major`
+series layout writes one sample for every series at each scrape timestamp, so
+short PromQL/TQL selector windows still scan realistic raw sample volumes. The
+queries should show scan-level time filters, tight SST pruning, and enough raw
+rows to make distributed PromQL pipeline placement meaningful instead of a
+millisecond-scale canary.
 
 Additional SQL optimizer cases:
 

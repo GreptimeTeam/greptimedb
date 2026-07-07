@@ -46,12 +46,6 @@ jobs:
               core.setOutput('found', 'false');
               return;
             }
-            const maxBytes = 1024 * 1024;
-            if (artifact.size_in_bytes > maxBytes) {
-              core.warning(`Comment artifact too large: ${artifact.size_in_bytes} bytes`);
-              core.setOutput('found', 'false');
-              return;
-            }
             core.setOutput('found', 'true');
             core.setOutput('id', String(artifact.id));
 

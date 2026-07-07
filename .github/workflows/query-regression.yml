@@ -119,10 +119,10 @@ jobs:
           git reset --hard FETCH_HEAD
           git clean -ffdx
 
-      - name: Build candidate greptime and fixture generator
+      - name: Build candidate greptime and fixture generators
         working-directory: src
         run: |
-          cargo build --profile "${CARGO_PROFILE}" -p cmd --bin greptime --bin query_perf_fixture
+          cargo build --profile "${CARGO_PROFILE}" -p cmd --bin greptime --bin query_perf_fixture --bin prom_remote_write_fixture
           target_dir="${CARGO_PROFILE}"
           if [[ "${CARGO_PROFILE}" == "dev" ]]; then
             target_dir="debug"
@@ -132,6 +132,8 @@ jobs:
             "${GITHUB_WORKSPACE}/query-regression-bins/candidate/greptime"
           cp "${CARGO_TARGET_DIR}/${target_dir}/query_perf_fixture" \
             "${GITHUB_WORKSPACE}/query-regression-bins/candidate/query_perf_fixture"
+          cp "${CARGO_TARGET_DIR}/${target_dir}/prom_remote_write_fixture" \
+            "${GITHUB_WORKSPACE}/query-regression-bins/candidate/prom_remote_write_fixture"
 
       - name: Run query regression
         id: run
@@ -144,6 +146,7 @@ jobs:
           BASE_BIN: ${{ github.workspace }}/query-regression-bins/base/greptime
           CANDIDATE_BIN: ${{ github.workspace }}/query-regression-bins/candidate/greptime
           FIXTURE_GENERATOR: ${{ github.workspace }}/query-regression-bins/candidate/query_perf_fixture
+          REMOTE_WRITE_GENERATOR: ${{ github.workspace }}/query-regression-bins/candidate/prom_remote_write_fixture
         run: >-
           uv run --no-project python src/.github/scripts/query-regression-run.py
           --base-src src

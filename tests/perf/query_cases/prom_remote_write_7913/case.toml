@@ -1,0 +1,61 @@
+# Manual high-cardinality Prometheus remote-write scenario for validating issue #7913
+# through the normal metric write path. This case is intentionally not part of the
+# default query-regression set; run it explicitly when validating PromQL pipeline
+# placement on realistic metric-engine data.
+
+[case]
+name = "prom_remote_write_7913"
+description = "Multi-day high-cardinality Prometheus remote-write ingestion followed by PromQL/TQL selectors"
+issue = "https://github.com/GreptimeTeam/greptimedb/issues/7913"
+
+[scenario]
+kind = "prom_remote_write_then_query"
+
+[scenario.remote_write]
+database = "public"
+metric = "prom_remote_write_7913"
+physical_table = "greptime_physical_table"
+series_count = 8192
+samples_per_series = 20160
+sample_chunk_size = 1440
+flush_every_sample_chunks = 1
+start_unix_millis = 1_704_067_200_000 # 2024-01-01T00:00:00Z
+step_millis = 60000
+chunk_series_count = 512
+timeout_seconds = 600
+visibility_timeout_seconds = 300
+
+[scenario.remote_write.prom_store]
+pending_rows_flush_interval = "1s"
+max_batch_rows = 1_000_000
+max_concurrent_flushes = 256
+
+[[scenario.queries]]
+name = "selector_1d_remote_write_high_cardinality"
+kind = "tql"
+query = "TQL ANALYZE VERBOSE (1704067200, 1704153600, '5m') prom_remote_write_7913{host=~'host.*'}"
+warmup = 1
+iterations = 2
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 100
+
+[[scenario.queries]]
+name = "selector_7d_remote_write_high_cardinality"
+kind = "tql"
+query = "TQL ANALYZE VERBOSE (1704067200, 1704672000, '1h') prom_remote_write_7913{host=~'host.*'}"
+warmup = 1
+iterations = 2
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 100
+
+[[scenario.queries]]
+name = "selector_14d_remote_write_high_cardinality"
+kind = "tql"
+query = "TQL ANALYZE VERBOSE (1704067200, 1705276800, '1h') prom_remote_write_7913{host=~'host.*'}"
+warmup = 1
+iterations = 2
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 100

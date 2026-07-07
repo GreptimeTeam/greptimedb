@@ -1,0 +1,31 @@
+[case]
+name = "prom_remote_write_smoke"
+description = "Tiny Prometheus remote-write ingestion then TQL query smoke case"
+
+[scenario]
+kind = "prom_remote_write_then_query"
+
+[scenario.remote_write]
+database = "public"
+metric = "prom_remote_write_smoke"
+physical_table = "greptime_physical_table"
+series_count = 8
+samples_per_series = 30
+start_unix_millis = 1_704_067_200_000
+step_millis = 15_000
+chunk_series_count = 4
+timeout_seconds = 30
+
+[scenario.remote_write.prom_store]
+pending_rows_flush_interval = "1s"
+max_batch_rows = 10000
+
+[[scenario.queries]]
+name = "selector_5m_smoke"
+kind = "tql"
+query = "TQL ANALYZE VERBOSE (1704067200, 1704067650, '15s') prom_remote_write_smoke{host=~'host.*'}"
+warmup = 0
+iterations = 2
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 100
