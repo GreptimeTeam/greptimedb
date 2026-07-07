@@ -108,3 +108,14 @@ create table json2_default_null_check (
         a int64 not null default null
     )
 );
+
+create table json2_set_append_mode_false (
+    ts timestamp time index,
+    j json2
+) with (
+    'append_mode' = 'true'
+);
+
+alter table json2_set_append_mode_false set 'append_mode' = 'false';
+
+drop table json2_set_append_mode_false;

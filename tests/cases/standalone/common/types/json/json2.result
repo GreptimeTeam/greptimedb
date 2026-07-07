@@ -284,3 +284,20 @@ create table json2_default_null_check (
 
 Error: 2000(InvalidSyntax), Invalid SQL, error: invalid DEFAULT for JSON2 type hint 'a': Default value should not be null for non null column
 
+create table json2_set_append_mode_false (
+    ts timestamp time index,
+    j json2
+) with (
+    'append_mode' = 'true'
+);
+
+Affected Rows: 0
+
+alter table json2_set_append_mode_false set 'append_mode' = 'false';
+
+Error: 1004(InvalidArguments), Invalid SQL, error: JSON2 column `j` requires append_mode='true'
+
+drop table json2_set_append_mode_false;
+
+Affected Rows: 0
+
