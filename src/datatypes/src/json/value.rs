@@ -25,7 +25,7 @@ use snafu::{OptionExt, ResultExt, ensure};
 
 use crate::Result;
 use crate::data_type::ConcreteDataType;
-use crate::error::{AlignJsonValueSnafu, SerializeSnafu};
+use crate::error::{AlignJsonValueSnafu, InvalidJsonbSnafu};
 use crate::types::json_type::{JsonNativeType, JsonNumberType};
 use crate::types::{JsonType, StructField, StructType};
 use crate::value::{ListValue, ListValueRef, StructValue, StructValueRef, Value, ValueRef};
@@ -480,11 +480,7 @@ impl JsonValue {
                     JsonVariant::Object(object)
                 }
 
-                (v, JsonNativeType::Variant) => {
-                    let json: serde_json::Value =
-                        JsonValue::new(v).try_into().context(SerializeSnafu)?;
-                    JsonVariant::Variant(encode_json_variant(json))
-                }
+                (v, JsonNativeType::Variant) => JsonVariant::Variant(encode_json_variant(v)?),
 
                 (value, expected) => {
                     return AlignJsonValueSnafu {
@@ -562,7 +558,11 @@ impl TryFrom<JsonValue> for serde_json::Value {
     }
 }
 
-pub(crate) fn encode_json_variant(value: serde_json::Value) -> Vec<u8> {
+pub(crate) fn encode_json_variant(value: JsonVariant) -> Result<Vec<u8>> {
+    jsonb::Value::try_from(value).map(|value| value.to_vec())
+}
+
+pub(crate) fn encode_serde_json_as_jsonb(value: serde_json::Value) -> Vec<u8> {
     jsonb::Value::from(value).to_vec()
 }
 
@@ -570,6 +570,52 @@ pub(crate) fn decode_json_variant(
     bytes: &[u8],
 ) -> std::result::Result<serde_json::Value, jsonb::Error> {
     jsonb::from_slice(bytes).map(Into::into)
+}
+
+impl TryFrom<JsonVariant> for jsonb::Value<'static> {
+    type Error = crate::Error;
+
+    fn try_from(value: JsonVariant) -> Result<Self> {
+        Ok(match value {
+            JsonVariant::Null => jsonb::Value::Null,
+            JsonVariant::Bool(value) => jsonb::Value::Bool(value),
+            JsonVariant::Number(value) => match value {
+                JsonNumber::Float(value) if value.0.is_nan() => jsonb::Value::String("NaN".into()),
+                value => jsonb::Value::Number(value.into()),
+            },
+            JsonVariant::String(value) => jsonb::Value::String(value.into()),
+            JsonVariant::Array(values) => jsonb::Value::Array(
+                values
+                    .into_iter()
+                    .map(jsonb::Value::try_from)
+                    .collect::<Result<_>>()?,
+            ),
+            JsonVariant::Object(values) => jsonb::Value::Object(
+                values
+                    .into_iter()
+                    .map(|(key, value)| jsonb::Value::try_from(value).map(|value| (key, value)))
+                    .collect::<Result<_>>()?,
+            ),
+            JsonVariant::Variant(value) => {
+                let value = decode_json_variant(&value)
+                    .map_err(|error| InvalidJsonbSnafu { error }.build())?;
+                jsonb::Value::from(value)
+            }
+        })
+    }
+}
+
+impl From<JsonNumber> for jsonb::Number {
+    fn from(value: JsonNumber) -> Self {
+        match value {
+            JsonNumber::PosInt(value) => jsonb::Number::UInt64(value),
+            JsonNumber::NegInt(value) => jsonb::Number::Int64(value),
+            JsonNumber::Float(value) => {
+                debug_assert!(!value.0.is_nan());
+                jsonb::Number::Float64(value.0)
+            }
+        }
+    }
 }
 
 impl Clone for JsonValue {
@@ -901,7 +947,8 @@ mod tests {
     use crate::types::json_type::JsonObjectType;
 
     fn jsonb_bytes(json: &str) -> Vec<u8> {
-        jsonb::parse_value(json.as_bytes()).unwrap().to_vec()
+        let value: serde_json::Value = serde_json::from_str(json).unwrap();
+        encode_json_variant(value.into()).unwrap()
     }
 
     #[test]

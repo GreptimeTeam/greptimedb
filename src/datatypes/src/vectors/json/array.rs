@@ -35,7 +35,7 @@ use crate::error::{
     AlignJsonArraySnafu, ArrowComputeSnafu, CastTypeSnafu, InvalidJsonSnafu, InvalidJsonbSnafu,
     Result,
 };
-use crate::json::value::{decode_json_variant, encode_json_variant};
+use crate::json::value::{decode_json_variant, encode_serde_json_as_jsonb};
 
 pub struct JsonArray<'a> {
     inner: &'a ArrayRef,
@@ -229,7 +229,7 @@ impl JsonArray<'_> {
             if value.is_null() {
                 encoded.push(None);
             } else {
-                let bytes = encode_json_variant(value);
+                let bytes = encode_serde_json_as_jsonb(value);
                 total_bytes += bytes.len();
                 encoded.push(Some(bytes));
             }

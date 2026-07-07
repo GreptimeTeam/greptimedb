@@ -128,7 +128,6 @@ mod tests {
 
     use super::*;
     use crate::data_type::ConcreteDataType;
-    use crate::json::value::encode_json_variant;
     use crate::types::json_type::JsonObjectType;
     use crate::value::{StructValue, Value, ValueRef};
 
@@ -140,8 +139,7 @@ mod tests {
         }
 
         fn jsonb_bytes(json: &str) -> Bytes {
-            let value: serde_json::Value = serde_json::from_str(json).unwrap();
-            Bytes::from(encode_json_variant(value))
+            Bytes::from(jsonb::parse_value(json.as_bytes()).unwrap().to_vec())
         }
 
         // Object inputs should merge into a superset schema, preserve null rows,
