@@ -230,11 +230,29 @@ drop table json2_table;
 
 Affected Rows: 0
 
+create table json2_without_append_mode (
+    ts timestamp time index,
+    j json2
+);
+
+Error: 1004(InvalidArguments), Invalid SQL, error: JSON2 column `j` requires append_mode='true'
+
+create table json2_append_mode_false (
+    ts timestamp time index,
+    j json2
+) with (
+    'append_mode' = 'false'
+);
+
+Error: 1004(InvalidArguments), Invalid SQL, error: JSON2 column `j` requires append_mode='true'
+
 create table json2_default_null_ok (
     ts timestamp time index,
     j json2(
         a int64 null default null
     )
+) with (
+    'append_mode' = 'true'
 );
 
 Affected Rows: 0

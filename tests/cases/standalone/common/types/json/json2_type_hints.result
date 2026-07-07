@@ -6,6 +6,8 @@ CREATE TABLE json2_type_hints (
         user.active BOOLEAN NULL,
         score DOUBLE NULL DEFAULT 1.5
     )
+) WITH (
+    'append_mode' = 'true'
 );
 
 Affected Rows: 0
@@ -27,7 +29,9 @@ SHOW CREATE TABLE json2_type_hints;
 |                  | )                                                |
 |                  |                                                  |
 |                  | ENGINE=mito                                      |
-|                  |                                                  |
+|                  | WITH(                                            |
+|                  |   append_mode = 'true'                           |
+|                  | )                                                |
 +------------------+--------------------------------------------------+
 
 INSERT INTO json2_type_hints
@@ -64,6 +68,8 @@ CREATE TABLE json2_type_hints_required (
     j JSON2 (
         user.age BIGINT NOT NULL
     )
+) WITH (
+    'append_mode' = 'true'
 );
 
 Affected Rows: 0
