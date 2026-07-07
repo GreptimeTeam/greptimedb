@@ -283,13 +283,10 @@ impl Display for JsonVariant {
                         .join(", ")
                 )
             }
-            Self::Variant(x) => {
-                let result: serde_json::Result<serde_json::Value> = serde_json::from_slice(x);
-                match result {
-                    Ok(v) => write!(f, "{v}"),
-                    Err(_) => write!(f, "{x:?}"),
-                }
-            }
+            Self::Variant(x) => match decode_json_variant(x) {
+                Ok(v) => write!(f, "{v}"),
+                Err(_) => write!(f, "{x:?}"),
+            },
         }
     }
 }
@@ -486,9 +483,7 @@ impl JsonValue {
                 (v, JsonNativeType::Variant) => {
                     let json: serde_json::Value =
                         JsonValue::new(v).try_into().context(SerializeSnafu)?;
-                    serde_json::to_vec(&json)
-                        .map(JsonVariant::Variant)
-                        .context(SerializeSnafu)?
+                    JsonVariant::Variant(encode_json_variant(json))
                 }
 
                 (value, expected) => {
@@ -555,11 +550,26 @@ impl TryFrom<JsonValue> for serde_json::Value {
                     }
                     serde_json::Value::Object(map)
                 }
-                JsonVariant::Variant(x) => serde_json::from_slice(&x)?,
+                JsonVariant::Variant(x) => decode_json_variant(&x).map_err(|err| {
+                    serde_json::Error::io(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        err.to_string(),
+                    ))
+                })?,
             })
         }
         helper(v.json_variant)
     }
+}
+
+pub(crate) fn encode_json_variant(value: serde_json::Value) -> Vec<u8> {
+    jsonb::Value::from(value).to_vec()
+}
+
+pub(crate) fn decode_json_variant(
+    bytes: &[u8],
+) -> std::result::Result<serde_json::Value, jsonb::Error> {
+    jsonb::from_slice(bytes).map(Into::into)
 }
 
 impl Clone for JsonValue {
@@ -890,6 +900,10 @@ mod tests {
     use super::*;
     use crate::types::json_type::JsonObjectType;
 
+    fn jsonb_bytes(json: &str) -> Vec<u8> {
+        jsonb::parse_value(json.as_bytes()).unwrap().to_vec()
+    }
+
     #[test]
     fn test_align_json_value() -> Result<()> {
         fn parse_json_value(json: &str) -> JsonValue {
@@ -935,7 +949,7 @@ mod tests {
                         ("note".to_string(), JsonVariant::Null),
                         (
                             "payload".to_string(),
-                            JsonVariant::Variant(br#"{"k":"v"}"#.to_vec()),
+                            JsonVariant::Variant(jsonb_bytes(r#"{"k":"v"}"#)),
                         ),
                     ]))]),
                 ),
@@ -964,7 +978,9 @@ mod tests {
         value.try_align(&JsonType::new_json2(JsonNativeType::Variant))?;
         assert_eq!(
             value,
-            JsonValue::from(JsonVariant::Variant(br#"{"foo":[1,true,null]}"#.to_vec()))
+            JsonValue::from(JsonVariant::Variant(jsonb_bytes(
+                r#"{"foo":[1,true,null]}"#
+            )))
         );
 
         // Incompatible scalar alignment should fail instead of coercing the value.

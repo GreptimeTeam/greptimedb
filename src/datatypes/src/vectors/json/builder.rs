@@ -128,6 +128,7 @@ mod tests {
 
     use super::*;
     use crate::data_type::ConcreteDataType;
+    use crate::json::value::encode_json_variant;
     use crate::types::json_type::JsonObjectType;
     use crate::value::{StructValue, Value, ValueRef};
 
@@ -136,6 +137,11 @@ mod tests {
         fn parse_json_value(json: &str) -> Value {
             let value: serde_json::Value = serde_json::from_str(json).unwrap();
             Value::Json(Box::new(value.into()))
+        }
+
+        fn jsonb_bytes(json: &str) -> Bytes {
+            let value: serde_json::Value = serde_json::from_str(json).unwrap();
+            Bytes::from(encode_json_variant(value))
         }
 
         // Object inputs should merge into a superset schema, preserve null rows,
@@ -166,7 +172,7 @@ mod tests {
                 vec![
                     Value::Null,
                     Value::Int64(1),
-                    Value::Binary(Bytes::from(br#"{"name":"foo"}"#.to_vec())),
+                    Value::Binary(jsonb_bytes(r#"{"name":"foo"}"#)),
                 ],
                 merged_struct_type.clone(),
             ))
@@ -178,7 +184,7 @@ mod tests {
                 vec![
                     Value::Boolean(true),
                     Value::Int64(2),
-                    Value::Binary(Bytes::from(br#""raw""#.to_vec())),
+                    Value::Binary(jsonb_bytes(r#""raw""#)),
                 ],
                 merged_struct_type,
             ))
