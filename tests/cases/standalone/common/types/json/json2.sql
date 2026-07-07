@@ -83,6 +83,14 @@ create table json2_append_mode_false (
     'append_mode' = 'false'
 );
 
+create table json2_alter_non_append (
+    ts timestamp time index
+);
+
+alter table json2_alter_non_append add column j json2;
+
+drop table json2_alter_non_append;
+
 create table json2_default_null_ok (
     ts timestamp time index,
     j json2(

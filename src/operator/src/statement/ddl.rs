@@ -2274,12 +2274,16 @@ pub fn verify_alter(
         }
     }
 
-    let _ = table_info
+    let new_meta = table_info
         .meta
         .builder_with_alter_kind(table_name, &request.alter_kind)
         .context(error::TableSnafu)?
         .build()
         .context(error::BuildTableMetaSnafu { table_name })?;
+
+    if matches!(request.alter_kind, AlterKind::AddColumns { .. }) {
+        validate_json2_columns_append_mode(&new_meta.schema, &new_meta.options)?;
+    }
 
     Ok(true)
 }
