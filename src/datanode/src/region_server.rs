@@ -1781,7 +1781,14 @@ impl RegionServerInner {
         request: QueryRequest,
         query_ctx: QueryContextRef,
     ) -> Result<SendableRecordBatchStream> {
-        let mut stream = self.handle_read_inner(request, query_ctx).await?;
+        let inner = self.clone();
+        let mut stream = common_runtime::spawn_query(async move {
+            inner.handle_read_inner(request, query_ctx).await
+        })
+        .await
+        .context(RuntimeJoinSnafu {
+            request_type: "read",
+        })??;
         let schema = stream.schema();
         let output_ordering = stream.output_ordering().map(|ordering| ordering.to_vec());
 
@@ -1920,7 +1927,6 @@ impl RegionAttribute {
 
 #[cfg(test)]
 mod tests {
-
     use std::assert_matches;
     use std::collections::HashMap;
     use std::sync::Arc;
