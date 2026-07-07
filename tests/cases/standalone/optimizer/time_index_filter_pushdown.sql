@@ -149,4 +149,31 @@ WHERE
             1
     );
 
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
+-- SQLNESS REPLACE "flat_format":\s\w+, "flat_format": REDACTED,
+-- SQLNESS REPLACE "(file_id|time_range_start|time_range_end)":"[^"]+" "$1":"REDACTED"
+-- SQLNESS REPLACE filter=\[greptime_timestamp@0[^\]]+\] filter=REDACTED
+EXPLAIN ANALYZE SELECT
+    rack,
+    os,
+    greptime_timestamp
+FROM
+    cpu
+WHERE
+    greptime_timestamp = (
+        SELECT
+            greptime_timestamp
+        FROM
+            cpu
+        ORDER BY
+            greptime_timestamp DESC
+        LIMIT
+            1
+    );
+
 drop table cpu;

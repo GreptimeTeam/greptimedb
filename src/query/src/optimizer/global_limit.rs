@@ -106,6 +106,10 @@ impl EnsureGlobalLimitForFetch {
             return Ok(plan);
         };
 
+        if plan.as_any().is::<CoalescePartitionsExec>() {
+            return replace_ordered_coalesce_fetch(plan, fetch);
+        }
+
         if parent
             .global_fetch
             .is_some_and(|parent_fetch| parent_fetch <= fetch)
@@ -122,6 +126,20 @@ impl EnsureGlobalLimitForFetch {
             parent.partitioning_to_restore,
         )
     }
+}
+
+fn replace_ordered_coalesce_fetch(
+    plan: Arc<dyn ExecutionPlan>,
+    fetch: usize,
+) -> DfResult<Arc<dyn ExecutionPlan>> {
+    let child = Arc::clone(plan.children()[0]);
+    let Some(ordering) = child.output_ordering().cloned() else {
+        return Ok(plan);
+    };
+
+    Ok(Arc::new(
+        SortPreservingMergeExec::new(ordering, child).with_fetch(Some(fetch)),
+    ))
 }
 
 #[derive(Clone)]
@@ -375,6 +393,23 @@ mod tests {
         let filter = filter_fetch(input, 1);
 
         let optimized = add_global_fetch(filter, 1, None, None).unwrap();
+        let merge = optimized
+            .as_any()
+            .downcast_ref::<SortPreservingMergeExec>()
+            .unwrap();
+
+        assert_eq!(merge.expr(), &ordering);
+        assert_eq!(merge.fetch(), Some(1));
+    }
+
+    #[test]
+    fn replaces_ordered_coalesce_fetch_with_sort_preserving_merge() {
+        let (input, ordering) = ordered_input();
+        let coalesce = Arc::new(CoalescePartitionsExec::new(input).with_fetch(Some(1)))
+            as Arc<dyn ExecutionPlan>;
+
+        let optimized =
+            EnsureGlobalLimitForFetch::optimize_plan(coalesce, ParentContext::default()).unwrap();
         let merge = optimized
             .as_any()
             .downcast_ref::<SortPreservingMergeExec>()
