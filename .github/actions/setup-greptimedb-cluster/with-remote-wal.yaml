@@ -11,6 +11,8 @@ meta:
     [wal]
     provider = "kafka"
     broker_endpoints = ["kafka.kafka-cluster.svc.cluster.local:9092"]
+    connect_timeout = "10s"
+    timeout = "10s"
     num_topics = 3
     auto_prune_interval = "30s"
     trigger_flush_threshold = 100
@@ -27,6 +29,8 @@ datanode:
     [wal]
     provider = "kafka"
     broker_endpoints = ["kafka.kafka-cluster.svc.cluster.local:9092"]
+    connect_timeout = "10s"
+    timeout = "10s"
     overwrite_entry_start_id = true
 frontend:
   configData: |-
