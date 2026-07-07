@@ -156,12 +156,10 @@ fn provided_global_fetch(plan: &Arc<dyn ExecutionPlan>) -> Option<usize> {
 fn add_global_fetch(
     plan: Arc<dyn ExecutionPlan>,
     fetch: usize,
-    required_ordering: Option<OrderingRequirements>,
+    _required_ordering: Option<OrderingRequirements>,
     partitioning_to_restore: Option<Partitioning>,
 ) -> DfResult<Arc<dyn ExecutionPlan>> {
-    let plan = if required_ordering.is_some()
-        && let Some(ordering) = plan.output_ordering().cloned()
-    {
+    let plan = if let Some(ordering) = plan.output_ordering().cloned() {
         Arc::new(SortPreservingMergeExec::new(ordering, plan).with_fetch(Some(fetch)))
             as Arc<dyn ExecutionPlan>
     } else {
@@ -369,6 +367,21 @@ mod tests {
             .unwrap();
 
         assert_eq!(merge.expr(), &actual_ordering);
+    }
+
+    #[test]
+    fn uses_ordered_global_fetch_without_parent_ordering_requirement() {
+        let (input, ordering) = ordered_input();
+        let filter = filter_fetch(input, 1);
+
+        let optimized = add_global_fetch(filter, 1, None, None).unwrap();
+        let merge = optimized
+            .as_any()
+            .downcast_ref::<SortPreservingMergeExec>()
+            .unwrap();
+
+        assert_eq!(merge.expr(), &ordering);
+        assert_eq!(merge.fetch(), Some(1));
     }
 
     #[test]

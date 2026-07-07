@@ -120,4 +120,33 @@ where
 group by
     os;
 
+SELECT
+    rack,
+    os,
+    greptime_timestamp
+FROM
+    cpu
+ORDER BY
+    greptime_timestamp DESC
+LIMIT
+    1;
+
+SELECT
+    rack,
+    os,
+    greptime_timestamp
+FROM
+    cpu
+WHERE
+    greptime_timestamp = (
+        SELECT
+            greptime_timestamp
+        FROM
+            cpu
+        ORDER BY
+            greptime_timestamp DESC
+        LIMIT
+            1
+    );
+
 drop table cpu;

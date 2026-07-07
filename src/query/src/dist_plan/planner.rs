@@ -17,6 +17,7 @@
 use std::sync::Arc;
 
 use ahash::HashMap;
+use arrow_schema::SortOptions;
 use async_trait::async_trait;
 use catalog::CatalogManagerRef;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
@@ -25,10 +26,12 @@ use datafusion::common::Result;
 use datafusion::datasource::DefaultTableSource;
 use datafusion::execution::context::SessionState;
 use datafusion::physical_plan::ExecutionPlan;
+use datafusion::physical_plan::sorts::sort_preserving_merge::SortPreservingMergeExec;
 use datafusion::physical_planner::{ExtensionPlanner, PhysicalPlanner};
 use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion, TreeNodeVisitor};
 use datafusion_common::{DataFusionError, TableReference};
 use datafusion_expr::{LogicalPlan, UserDefinedLogicalNode};
+use datafusion_physical_expr::{LexOrdering, PhysicalSortExpr};
 use partition::manager::{PartitionRuleManagerRef, create_partitions_from_region_routes};
 use session::context::QueryContext;
 use snafu::{OptionExt, ResultExt};
@@ -87,7 +90,36 @@ impl ExtensionPlanner for MergeSortExtensionPlanner {
                 // and we only need to do a merge sort, otherwise fallback to quick sort
                 let can_merge_sort = partition_cnt >= region_cnt;
                 if can_merge_sort {
-                    // TODO(discord9): use `SortPreservingMergeExec here`
+                    let ordering = merge_sort
+                        .expr
+                        .iter()
+                        .map(|sort_expr| {
+                            let physical_expr = session_state.create_physical_expr(
+                                sort_expr.expr.clone(),
+                                merge_sort.input.schema(),
+                            )?;
+                            Ok(PhysicalSortExpr::new(
+                                physical_expr,
+                                SortOptions {
+                                    descending: !sort_expr.asc,
+                                    nulls_first: sort_expr.nulls_first,
+                                },
+                            ))
+                        })
+                        .collect::<Result<Vec<_>>>()?;
+                    let ordering = LexOrdering::new(ordering).ok_or_else(|| {
+                        DataFusionError::Internal(
+                            "Expect MergeSort to have non-empty sort expressions".to_string(),
+                        )
+                    })?;
+                    let input = physical_inputs.first().cloned().ok_or_else(|| {
+                        DataFusionError::Internal(
+                            "Expect MergeSort to have one physical input".to_string(),
+                        )
+                    })?;
+                    let ret =
+                        SortPreservingMergeExec::new(ordering, input).with_fetch(merge_sort.fetch);
+                    return Ok(Some(Arc::new(ret)));
                 }
                 // for now merge sort only exist in logical plan, and have the same effect as `Sort`
                 // doesn't change the execution plan, this will change in the future

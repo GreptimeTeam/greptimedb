@@ -197,7 +197,47 @@ group by
 | windows | 2        |
 +---------+----------+
 
+SELECT
+    rack,
+    os,
+    greptime_timestamp
+FROM
+    cpu
+ORDER BY
+    greptime_timestamp DESC
+LIMIT
+    1;
+
++------+---------+---------------------+
+| rack | os      | greptime_timestamp  |
++------+---------+---------------------+
+| 8    | windows | 2023-06-12 02:10:00 |
++------+---------+---------------------+
+
+SELECT
+    rack,
+    os,
+    greptime_timestamp
+FROM
+    cpu
+WHERE
+    greptime_timestamp = (
+        SELECT
+            greptime_timestamp
+        FROM
+            cpu
+        ORDER BY
+            greptime_timestamp DESC
+        LIMIT
+            1
+    );
+
++------+---------+---------------------+
+| rack | os      | greptime_timestamp  |
++------+---------+---------------------+
+| 8    | windows | 2023-06-12 02:10:00 |
++------+---------+---------------------+
+
 drop table cpu;
 
 Affected Rows: 0
-
