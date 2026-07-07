@@ -1054,7 +1054,7 @@ mod tests {
             .unwrap_err();
         assert_eq!(
             err.to_string(),
-            "Failed to align JSON value, reason: NaN is not a valid JSON number"
+            "Invalid json value, NaN is not a valid JSON number"
         );
 
         Ok(())
