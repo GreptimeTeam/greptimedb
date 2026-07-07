@@ -24,7 +24,7 @@ use datafusion_common::config::ConfigOptions;
 use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRewriter};
 use datafusion_expr::expr::{Exists, InSubquery};
 use datafusion_expr::utils::expr_to_columns;
-use datafusion_expr::{Expr, LogicalPlan, LogicalPlanBuilder, Subquery, col as col_fn};
+use datafusion_expr::{Expr, LogicalPlan, LogicalPlanBuilder, SortExpr, Subquery, col as col_fn};
 use datafusion_optimizer::analyzer::AnalyzerRule;
 use datafusion_optimizer::decorrelate_lateral_join::DecorrelateLateralJoin;
 use datafusion_optimizer::decorrelate_predicate_subquery::DecorrelatePredicateSubquery;
@@ -700,6 +700,73 @@ impl PlanRewriter {
         self.stack.pop();
     }
 
+    fn try_as_merge_sort_stage(plan: &LogicalPlan) -> Option<&MergeSortLogicalPlan> {
+        let LogicalPlan::Extension(ext) = plan else {
+            return None;
+        };
+
+        ext.node.as_any().downcast_ref::<MergeSortLogicalPlan>()
+    }
+
+    /// Prepares the frontend stages that will be attached above `MergeScan` and returns the
+    /// ordering guaranteed by the pushed-down remote input.
+    ///
+    /// During expansion the distributed rewriter splits an ordered query like:
+    ///
+    /// ```text
+    /// Sort / TopK
+    ///   TableScan
+    /// ```
+    ///
+    /// into two coordinated pieces:
+    ///
+    /// ```text
+    /// MergeSort                  -- frontend stage, merges already-sorted partitions
+    ///   MergeScan                -- receives one stream per frontend partition
+    ///     remote_input = Sort    -- remote stage, sorts within each region
+    /// ```
+    ///
+    /// The `MergeSort` stage is therefore the point where we *know* the remote side is expected
+    /// to produce streams sorted by the same expressions. We record those expressions on
+    /// `MergeScanLogicalPlan` as metadata instead of asking the physical planner to rediscover
+    /// them later by walking arbitrary logical-plan shapes.
+    ///
+    /// Whether this metadata is safe to expose as physical output ordering still depends on the
+    /// runtime region/partition layout. `DistExtensionPlanner` performs that final
+    /// `target_partition >= regions.len()` check before converting the metadata to `LexOrdering`.
+    fn rewrite_stages_and_remote_ordering(
+        &mut self,
+        merge_scan_input: &LogicalPlan,
+    ) -> DfResult<(Vec<LogicalPlan>, Option<Vec<SortExpr>>)> {
+        let mut remote_output_ordering = None;
+        let mut expanded_stages = Vec::with_capacity(self.stage.len());
+
+        for stage in self.stage.drain(..) {
+            // `MergeSort` expressions may need to be rewritten to use aliases visible from the
+            // MergeScan output. Do this before recording the ordering metadata so the physical
+            // planner later receives expressions in MergeScan's output schema.
+            let stage = if let Some(merge_sort) = Self::try_as_merge_sort_stage(&stage) {
+                // The frontend MergeSort will be attached directly above MergeScan, so its sort
+                // expressions must be written against the schema exposed by `merge_scan_input`.
+                // For example, if a pushed-down projection renames `pk1 AS something`, the
+                // frontend MergeSort must sort by `something`, not the original `pk1`.
+                rewrite_merge_sort_exprs(merge_sort, merge_scan_input)?
+            } else {
+                stage
+            };
+
+            if remote_output_ordering.is_none()
+                && let Some(merge_sort) = Self::try_as_merge_sort_stage(&stage)
+            {
+                remote_output_ordering = Some(merge_sort.expr.clone());
+            }
+
+            expanded_stages.push(stage);
+        }
+
+        Ok((expanded_stages, remote_output_ordering))
+    }
+
     fn expand(&mut self, mut on_node: LogicalPlan) -> DfResult<LogicalPlan> {
         // store schema before expand, new child plan might have a different schema, so not using it
         let schema = on_node.schema().clone();
@@ -724,34 +791,8 @@ impl PlanRewriter {
             self.partition_cols
         );
 
-        let mut remote_output_ordering = None;
-        let mut expanded_stages = Vec::with_capacity(self.stage.len());
-
-        // Rewrite stages and remember the ordering introduced by the pushed-down Sort.
-        for new_stage in self.stage.drain(..) {
-            // tracking alias for merge sort's sort exprs
-            let new_stage = if let LogicalPlan::Extension(ext) = &new_stage
-                && let Some(merge_sort) = ext.node.as_any().downcast_ref::<MergeSortLogicalPlan>()
-            {
-                // TODO(discord9): change `on_node` to `node` once alias tracking is supported for merge scan
-                rewrite_merge_sort_exprs(merge_sort, &on_node)?
-            } else {
-                new_stage
-            };
-
-            // The first MergeSort stage records the ordering that each MergeScan output
-            // partition inherits from the remote input. This metadata is produced when the
-            // distributed rewriter splits Sort into local Sort + frontend MergeSort, so the
-            // physical planner doesn't have to rediscover it from logical plan shape.
-            if remote_output_ordering.is_none()
-                && let LogicalPlan::Extension(ext) = &new_stage
-                && let Some(merge_sort) = ext.node.as_any().downcast_ref::<MergeSortLogicalPlan>()
-            {
-                remote_output_ordering = Some(merge_sort.expr.clone());
-            }
-
-            expanded_stages.push(new_stage);
-        }
+        let (expanded_stages, remote_output_ordering) =
+            self.rewrite_stages_and_remote_ordering(&on_node)?;
 
         let mut merge_scan = MergeScanLogicalPlan::new(
             on_node.clone(),

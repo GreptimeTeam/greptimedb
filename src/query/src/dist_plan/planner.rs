@@ -201,39 +201,13 @@ impl ExtensionPlanner for DistExtensionPlanner {
         // TODO(ruihang): generate different execution plans for different variant merge operation
         let schema = optimized_plan.schema().as_arrow();
         let target_partition = session_state.config().target_partitions();
-        let output_ordering = if target_partition >= regions.len() {
-            merge_scan
-                .remote_output_ordering()
-                .map(|sort_exprs| {
-                    sort_exprs
-                        .iter()
-                        .map(|sort_expr| {
-                            let physical_expr = session_state.create_physical_expr(
-                                sort_expr.expr.clone(),
-                                input_plan.schema(),
-                            )?;
-                            Ok(PhysicalSortExpr::new(
-                                physical_expr,
-                                SortOptions {
-                                    descending: !sort_expr.asc,
-                                    nulls_first: sort_expr.nulls_first,
-                                },
-                            ))
-                        })
-                        .collect::<Result<Vec<_>>>()
-                        .and_then(|ordering| {
-                            LexOrdering::new(ordering).ok_or_else(|| {
-                                DataFusionError::Internal(
-                                    "Expect output ordering to have non-empty sort expressions"
-                                        .to_string(),
-                                )
-                            })
-                        })
-                })
-                .transpose()?
-        } else {
-            None
-        };
+        let output_ordering = Self::output_ordering_for_merge_scan(
+            session_state,
+            merge_scan,
+            input_plan,
+            target_partition,
+            regions.len(),
+        )?;
         let query_ctx = session_state
             .config()
             .get_extension()
@@ -262,6 +236,65 @@ impl DistExtensionPlanner {
         let mut extractor = TableNameExtractor::default();
         let _ = plan.visit(&mut extractor)?;
         Ok(extractor.table_name)
+    }
+
+    /// Converts the ordering metadata carried by `MergeScanLogicalPlan` into the physical
+    /// ordering property that `MergeScanExec` can advertise.
+    ///
+    /// The metadata itself is produced earlier by `PlanRewriter::expand`, at the point where the
+    /// distributed planner splits a pushed-down `Sort`/TopK into:
+    ///
+    /// ```text
+    /// MergeSort                  -- frontend merge stage
+    ///   MergeScan                -- receives remote streams
+    ///     remote_input = Sort    -- per-region remote sort/topk
+    /// ```
+    ///
+    /// So this method does **not** inspect logical plan shape to infer ordering. It only performs
+    /// the final physical safety check: a `MergeScan` output partition remains ordered only when it
+    /// reads at most one region stream. With fewer output partitions than regions, one output
+    /// partition may concatenate multiple independently sorted region streams, which is not a
+    /// globally sorted stream. `MergeScanExec::to_stream` assigns regions by
+    /// `skip(partition).step_by(target_partition)`, so `target_partition >= region_count` is the
+    /// condition that guarantees at most one region per output partition.
+    fn output_ordering_for_merge_scan(
+        session_state: &SessionState,
+        merge_scan: &MergeScanLogicalPlan,
+        input_plan: &LogicalPlan,
+        target_partition: usize,
+        region_count: usize,
+    ) -> Result<Option<LexOrdering>> {
+        if target_partition < region_count {
+            return Ok(None);
+        }
+
+        merge_scan
+            .remote_output_ordering()
+            .map(|sort_exprs| {
+                sort_exprs
+                    .iter()
+                    .map(|sort_expr| {
+                        let physical_expr = session_state
+                            .create_physical_expr(sort_expr.expr.clone(), input_plan.schema())?;
+                        Ok(PhysicalSortExpr::new(
+                            physical_expr,
+                            SortOptions {
+                                descending: !sort_expr.asc,
+                                nulls_first: sort_expr.nulls_first,
+                            },
+                        ))
+                    })
+                    .collect::<Result<Vec<_>>>()
+                    .and_then(|ordering| {
+                        LexOrdering::new(ordering).ok_or_else(|| {
+                            DataFusionError::Internal(
+                                "Expect output ordering to have non-empty sort expressions"
+                                    .to_string(),
+                            )
+                        })
+                    })
+            })
+            .transpose()
     }
 
     async fn get_regions(

@@ -238,6 +238,35 @@ WHERE
 | 8    | windows | 2023-06-12T02:10:00 |
 +------+---------+---------------------+
 
+SELECT
+    rack,
+    os,
+    greptime_timestamp
+FROM
+    cpu
+WHERE
+    greptime_timestamp = (
+        SELECT
+            latest_ts
+        FROM
+            (
+                SELECT
+                    greptime_timestamp AS latest_ts
+                FROM
+                    cpu
+            )
+        ORDER BY
+            latest_ts DESC
+        LIMIT
+            1
+    );
+
++------+---------+---------------------+
+| rack | os      | greptime_timestamp  |
++------+---------+---------------------+
+| 8    | windows | 2023-06-12T02:10:00 |
++------+---------+---------------------+
+
 -- SQLNESS REPLACE (-+) -
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE (metrics.*) REDACTED

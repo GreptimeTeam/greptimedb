@@ -149,6 +149,29 @@ WHERE
             1
     );
 
+SELECT
+    rack,
+    os,
+    greptime_timestamp
+FROM
+    cpu
+WHERE
+    greptime_timestamp = (
+        SELECT
+            latest_ts
+        FROM
+            (
+                SELECT
+                    greptime_timestamp AS latest_ts
+                FROM
+                    cpu
+            )
+        ORDER BY
+            latest_ts DESC
+        LIMIT
+            1
+    );
+
 -- SQLNESS REPLACE (-+) -
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE (metrics.*) REDACTED
