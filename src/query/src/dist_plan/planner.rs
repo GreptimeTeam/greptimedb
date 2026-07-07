@@ -499,3 +499,60 @@ impl TreeNodeVisitor<'_> for TableNameExtractor {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use datafusion::prelude::SessionContext;
+    use datafusion_expr::{LogicalPlanBuilder, col, lit};
+
+    use super::*;
+
+    fn merge_scan_with_remote_output_ordering() -> (SessionState, MergeScanLogicalPlan, LogicalPlan)
+    {
+        let session_state = SessionContext::new().state();
+        let input_plan = LogicalPlanBuilder::empty(false)
+            .project(vec![lit(1i64).alias("ts")])
+            .unwrap()
+            .build()
+            .unwrap();
+        let merge_scan = MergeScanLogicalPlan::new(input_plan.clone(), false, Default::default())
+            .with_remote_output_ordering(vec![col("ts").sort(false, true)]);
+
+        (session_state, merge_scan, input_plan)
+    }
+
+    #[test]
+    fn does_not_advertise_ordering_when_partition_may_merge_regions() {
+        let (session_state, merge_scan, input_plan) = merge_scan_with_remote_output_ordering();
+
+        let output_ordering = DistExtensionPlanner::output_ordering_for_merge_scan(
+            &session_state,
+            &merge_scan,
+            &input_plan,
+            2,
+            3,
+        )
+        .unwrap();
+
+        assert!(
+            output_ordering.is_none(),
+            "target_partition < region_count means one output partition may concatenate multiple sorted region streams"
+        );
+    }
+
+    #[test]
+    fn advertises_ordering_when_each_partition_reads_at_most_one_region() {
+        let (session_state, merge_scan, input_plan) = merge_scan_with_remote_output_ordering();
+
+        let output_ordering = DistExtensionPlanner::output_ordering_for_merge_scan(
+            &session_state,
+            &merge_scan,
+            &input_plan,
+            3,
+            3,
+        )
+        .unwrap();
+
+        assert!(output_ordering.is_some());
+    }
+}
