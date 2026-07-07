@@ -91,6 +91,7 @@ pub struct QueryContext {
 #[derive(Debug, Builder, Clone, Default)]
 pub struct QueryContextMutableFields {
     warning: Option<String>,
+    ddl_procedure_ids: Vec<String>,
     // TODO: remove this when format is supported in datafusion
     explain_format: Option<String>,
     /// Explain options to control the verbose analyze output.
@@ -400,6 +401,30 @@ impl QueryContext {
 
     pub fn set_warning(&self, msg: String) {
         self.mutable_query_context_data.write().unwrap().warning = Some(msg);
+    }
+
+    pub fn push_ddl_procedure_id(&self, procedure_id: String) {
+        self.mutable_query_context_data
+            .write()
+            .unwrap()
+            .ddl_procedure_ids
+            .push(procedure_id);
+    }
+
+    pub fn ddl_procedure_ids(&self) -> Vec<String> {
+        self.mutable_query_context_data
+            .read()
+            .unwrap()
+            .ddl_procedure_ids
+            .clone()
+    }
+
+    pub fn clear_ddl_procedure_ids(&self) {
+        self.mutable_query_context_data
+            .write()
+            .unwrap()
+            .ddl_procedure_ids
+            .clear();
     }
 
     pub fn explain_format(&self) -> Option<String> {
@@ -827,5 +852,24 @@ mod test {
             restored.remote_query_id_value().unwrap().to_string(),
             query_id
         );
+    }
+
+    #[test]
+    fn test_query_context_tracks_ddl_procedure_ids_for_current_statement() {
+        let ctx = QueryContext::arc();
+
+        assert!(ctx.ddl_procedure_ids().is_empty());
+
+        ctx.push_ddl_procedure_id("procedure-1".to_string());
+        ctx.push_ddl_procedure_id("procedure-2".to_string());
+
+        assert_eq!(
+            ctx.ddl_procedure_ids(),
+            vec!["procedure-1".to_string(), "procedure-2".to_string()]
+        );
+
+        ctx.clear_ddl_procedure_ids();
+
+        assert!(ctx.ddl_procedure_ids().is_empty());
     }
 }

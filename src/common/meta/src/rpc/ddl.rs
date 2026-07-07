@@ -30,9 +30,9 @@ use api::v1::meta::{
     CreateViewTask as PbCreateViewTask, DdlTaskRequest as PbDdlTaskRequest,
     DdlTaskResponse as PbDdlTaskResponse, DropDatabaseTask as PbDropDatabaseTask,
     DropFlowTask as PbDropFlowTask, DropTableTask as PbDropTableTask,
-    DropTableTasks as PbDropTableTasks, DropViewTask as PbDropViewTask, Partition, ProcedureId,
-    PurgeDroppedTableTask as PbPurgeDroppedTableTask, TruncateTableTask as PbTruncateTableTask,
-    UndropTableTask as PbUndropTableTask,
+    DropTableTasks as PbDropTableTasks, DropViewTask as PbDropViewTask, Partition,
+    ProcedureId as PbProcedureId, PurgeDroppedTableTask as PbPurgeDroppedTableTask,
+    TruncateTableTask as PbTruncateTableTask, UndropTableTask as PbUndropTableTask,
 };
 use api::v1::{
     AlterDatabaseExpr, AlterTableExpr, CommentObjectType as PbCommentObjectType, CommentOnExpr,
@@ -44,6 +44,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose;
 use common_catalog::{format_full_flow_name, format_full_table_name};
 use common_error::ext::BoxedError;
+use common_procedure::ProcedureId as CommonProcedureId;
 use common_time::{DatabaseTimeToLive, Timestamp};
 use prost::Message;
 use serde::{Deserialize, Serialize};
@@ -66,6 +67,27 @@ use crate::key::table_name::{TableNameKey, TableNameManager};
 
 /// Reserved query-context extension key for the frontend peer address that submitted a DDL request.
 pub const ORIGIN_FRONTEND_ADDR_EXTENSION_KEY: &str = "__greptime_origin_frontend.addr";
+
+/// Reserved query-context extension key for the caller-generated DDL procedure id.
+pub const DDL_PROCEDURE_ID_EXTENSION_KEY: &str = "__greptime_ddl.procedure_id";
+
+/// Injects a fresh DDL procedure id into the query context and returns it.
+pub fn inject_ddl_procedure_id(query_context: &mut QueryContext) -> String {
+    let procedure_id = CommonProcedureId::random().to_string();
+    query_context.extensions.insert(
+        DDL_PROCEDURE_ID_EXTENSION_KEY.to_string(),
+        procedure_id.clone(),
+    );
+    procedure_id
+}
+
+/// Returns the caller-generated DDL procedure id from the query context.
+pub fn ddl_procedure_id(query_context: &QueryContext) -> Option<&str> {
+    query_context
+        .extensions
+        .get(DDL_PROCEDURE_ID_EXTENSION_KEY)
+        .map(String::as_str)
+}
 
 /// DDL tasks
 #[derive(Debug, Clone)]
@@ -428,7 +450,7 @@ impl TryFrom<PbDdlTaskResponse> for SubmitDdlTaskResponse {
 impl From<SubmitDdlTaskResponse> for PbDdlTaskResponse {
     fn from(val: SubmitDdlTaskResponse) -> Self {
         Self {
-            pid: Some(ProcedureId { key: val.key }),
+            pid: Some(PbProcedureId { key: val.key }),
             table_ids: val
                 .table_ids
                 .into_iter()

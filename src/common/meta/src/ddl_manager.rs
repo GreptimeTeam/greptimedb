@@ -48,10 +48,10 @@ use crate::ddl::truncate_table::TruncateTableProcedure;
 use crate::ddl::undrop_table::UndropTableProcedure;
 use crate::ddl::{DdlContext, utils};
 use crate::error::{
-    self, CreateRepartitionProcedureSnafu, EmptyDdlTasksSnafu, ProcedureOutputSnafu,
-    RegisterProcedureLoaderSnafu, RegisterRepartitionProcedureLoaderSnafu, Result,
-    SubmitProcedureSnafu, TableInfoNotFoundSnafu, TableNotFoundSnafu, TableRouteNotFoundSnafu,
-    UnexpectedLogicalRouteTableSnafu, WaitProcedureSnafu,
+    self, CreateRepartitionProcedureSnafu, EmptyDdlTasksSnafu, ParseProcedureIdSnafu,
+    ProcedureOutputSnafu, RegisterProcedureLoaderSnafu, RegisterRepartitionProcedureLoaderSnafu,
+    Result, SubmitProcedureSnafu, TableInfoNotFoundSnafu, TableNotFoundSnafu,
+    TableRouteNotFoundSnafu, UnexpectedLogicalRouteTableSnafu, WaitProcedureSnafu,
 };
 use crate::key::table_info::TableInfoValue;
 use crate::key::table_name::TableNameKey;
@@ -205,6 +205,27 @@ pub struct DdlOptions {
     ///
     /// Note: The value of `wait` is independent of the `timeout` option. If a procedure ignores the `timeout` and `wait` is set to true, the operation returns until the procedure completes.
     pub wait: bool,
+    /// The caller-generated procedure id for this DDL, if present.
+    pub procedure_id: Option<ProcedureId>,
+}
+
+fn requested_ddl_procedure_id(query_context: &QueryContext) -> Result<Option<ProcedureId>> {
+    crate::rpc::ddl::ddl_procedure_id(query_context)
+        .map(|procedure_id| {
+            ProcedureId::parse_str(procedure_id)
+                .with_context(|_| ParseProcedureIdSnafu { key: procedure_id })
+        })
+        .transpose()
+}
+
+fn procedure_with_id(
+    procedure: BoxedProcedure,
+    procedure_id: Option<ProcedureId>,
+) -> ProcedureWithId {
+    match procedure_id {
+        Some(id) => ProcedureWithId { id, procedure },
+        None => ProcedureWithId::with_random_id(procedure),
+    }
 }
 
 impl DdlManager {
@@ -304,6 +325,7 @@ impl DdlManager {
         repartition: Repartition,
         wait: bool,
         timeout: Duration,
+        procedure_id: Option<ProcedureId>,
     ) -> Result<(ProcedureId, Option<Output>)> {
         let context = self.create_context();
 
@@ -341,7 +363,7 @@ impl DdlManager {
                 Some(timeout),
             )
             .context(CreateRepartitionProcedureSnafu)?;
-        let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
+        let procedure_with_id = procedure_with_id(Box::new(procedure), procedure_id);
         if wait {
             self.execute_procedure_and_wait(procedure_with_id).await
         } else {
@@ -377,6 +399,7 @@ impl DdlManager {
                     repartition,
                     ddl_options.wait,
                     ddl_options.timeout,
+                    ddl_options.procedure_id,
                 )
                 .await;
         }
@@ -384,7 +407,7 @@ impl DdlManager {
         let context = self.create_context();
         let procedure = AlterTableProcedure::new(table_id, alter_table_task, context)?;
 
-        let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
+        let procedure_with_id = procedure_with_id(Box::new(procedure), ddl_options.procedure_id);
 
         self.execute_procedure_and_wait(procedure_with_id).await
     }
@@ -395,6 +418,7 @@ impl DdlManager {
         &self,
         create_table_task: CreateTableTask,
         query_context: QueryContext,
+        procedure_id: Option<ProcedureId>,
     ) -> Result<(ProcedureId, Option<Output>)> {
         let context = self.create_context();
 
@@ -404,7 +428,7 @@ impl DdlManager {
             context,
         )?;
 
-        let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
+        let procedure_with_id = procedure_with_id(Box::new(procedure), procedure_id);
 
         self.execute_procedure_and_wait(procedure_with_id).await
     }
@@ -414,12 +438,13 @@ impl DdlManager {
     pub async fn submit_create_view_task(
         &self,
         create_view_task: CreateViewTask,
+        procedure_id: Option<ProcedureId>,
     ) -> Result<(ProcedureId, Option<Output>)> {
         let context = self.create_context();
 
         let procedure = CreateViewProcedure::new(create_view_task, context);
 
-        let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
+        let procedure_with_id = procedure_with_id(Box::new(procedure), procedure_id);
 
         self.execute_procedure_and_wait(procedure_with_id).await
     }
@@ -430,13 +455,14 @@ impl DdlManager {
         &self,
         create_table_tasks: Vec<CreateTableTask>,
         physical_table_id: TableId,
+        procedure_id: Option<ProcedureId>,
     ) -> Result<(ProcedureId, Option<Output>)> {
         let context = self.create_context();
 
         let procedure =
             CreateLogicalTablesProcedure::new(create_table_tasks, physical_table_id, context);
 
-        let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
+        let procedure_with_id = procedure_with_id(Box::new(procedure), procedure_id);
 
         self.execute_procedure_and_wait(procedure_with_id).await
     }
@@ -447,13 +473,14 @@ impl DdlManager {
         &self,
         alter_table_tasks: Vec<AlterTableTask>,
         physical_table_id: TableId,
+        procedure_id: Option<ProcedureId>,
     ) -> Result<(ProcedureId, Option<Output>)> {
         let context = self.create_context();
 
         let procedure =
             AlterLogicalTablesProcedure::new(alter_table_tasks, physical_table_id, context);
 
-        let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
+        let procedure_with_id = procedure_with_id(Box::new(procedure), procedure_id);
 
         self.execute_procedure_and_wait(procedure_with_id).await
     }
@@ -463,12 +490,13 @@ impl DdlManager {
     pub async fn submit_drop_table_task(
         &self,
         drop_table_task: DropTableTask,
+        procedure_id: Option<ProcedureId>,
     ) -> Result<(ProcedureId, Option<Output>)> {
         let context = self.create_context();
 
         let procedure = DropTableProcedure::new(drop_table_task, context);
 
-        let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
+        let procedure_with_id = procedure_with_id(Box::new(procedure), procedure_id);
 
         self.execute_procedure_and_wait(procedure_with_id).await
     }
@@ -478,10 +506,11 @@ impl DdlManager {
     pub async fn submit_undrop_table_task(
         &self,
         undrop_table_task: UndropTableTask,
+        procedure_id: Option<ProcedureId>,
     ) -> Result<(ProcedureId, Option<Output>)> {
         let context = self.create_context();
         let procedure = UndropTableProcedure::new(undrop_table_task, context);
-        let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
+        let procedure_with_id = procedure_with_id(Box::new(procedure), procedure_id);
 
         self.execute_procedure_and_wait(procedure_with_id).await
     }
@@ -491,10 +520,11 @@ impl DdlManager {
     pub async fn submit_purge_dropped_table_task(
         &self,
         purge_dropped_table_task: PurgeDroppedTableTask,
+        procedure_id: Option<ProcedureId>,
     ) -> Result<(ProcedureId, Option<Output>)> {
         let context = self.create_context();
         let procedure = PurgeDroppedTableProcedure::new(purge_dropped_table_task, context);
-        let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
+        let procedure_with_id = procedure_with_id(Box::new(procedure), procedure_id);
 
         self.execute_procedure_and_wait(procedure_with_id).await
     }
@@ -509,11 +539,12 @@ impl DdlManager {
             create_if_not_exists,
             options,
         }: CreateDatabaseTask,
+        procedure_id: Option<ProcedureId>,
     ) -> Result<(ProcedureId, Option<Output>)> {
         let context = self.create_context();
         let procedure =
             CreateDatabaseProcedure::new(catalog, schema, create_if_not_exists, options, context);
-        let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
+        let procedure_with_id = procedure_with_id(Box::new(procedure), procedure_id);
 
         self.execute_procedure_and_wait(procedure_with_id).await
     }
@@ -527,10 +558,11 @@ impl DdlManager {
             schema,
             drop_if_exists,
         }: DropDatabaseTask,
+        procedure_id: Option<ProcedureId>,
     ) -> Result<(ProcedureId, Option<Output>)> {
         let context = self.create_context();
         let procedure = DropDatabaseProcedure::new(catalog, schema, drop_if_exists, context);
-        let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
+        let procedure_with_id = procedure_with_id(Box::new(procedure), procedure_id);
 
         self.execute_procedure_and_wait(procedure_with_id).await
     }
@@ -538,10 +570,11 @@ impl DdlManager {
     pub async fn submit_alter_database(
         &self,
         alter_database_task: AlterDatabaseTask,
+        procedure_id: Option<ProcedureId>,
     ) -> Result<(ProcedureId, Option<Output>)> {
         let context = self.create_context();
         let procedure = AlterDatabaseProcedure::new(alter_database_task, context)?;
-        let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
+        let procedure_with_id = procedure_with_id(Box::new(procedure), procedure_id);
 
         self.execute_procedure_and_wait(procedure_with_id).await
     }
@@ -552,10 +585,11 @@ impl DdlManager {
         &self,
         create_flow: CreateFlowTask,
         query_context: QueryContext,
+        procedure_id: Option<ProcedureId>,
     ) -> Result<(ProcedureId, Option<Output>)> {
         let context = self.create_context();
         let procedure = CreateFlowProcedure::new(create_flow, query_context, context);
-        let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
+        let procedure_with_id = procedure_with_id(Box::new(procedure), procedure_id);
 
         self.execute_procedure_and_wait(procedure_with_id).await
     }
@@ -565,10 +599,11 @@ impl DdlManager {
     pub async fn submit_drop_flow_task(
         &self,
         drop_flow: DropFlowTask,
+        procedure_id: Option<ProcedureId>,
     ) -> Result<(ProcedureId, Option<Output>)> {
         let context = self.create_context();
         let procedure = DropFlowProcedure::new(drop_flow, context);
-        let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
+        let procedure_with_id = procedure_with_id(Box::new(procedure), procedure_id);
 
         self.execute_procedure_and_wait(procedure_with_id).await
     }
@@ -578,10 +613,11 @@ impl DdlManager {
     pub async fn submit_drop_view_task(
         &self,
         drop_view: DropViewTask,
+        procedure_id: Option<ProcedureId>,
     ) -> Result<(ProcedureId, Option<Output>)> {
         let context = self.create_context();
         let procedure = DropViewProcedure::new(drop_view, context);
-        let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
+        let procedure_with_id = procedure_with_id(Box::new(procedure), procedure_id);
 
         self.execute_procedure_and_wait(procedure_with_id).await
     }
@@ -592,11 +628,12 @@ impl DdlManager {
         &self,
         truncate_table_task: TruncateTableTask,
         table_info_value: DeserializedValueWithBytes<TableInfoValue>,
+        procedure_id: Option<ProcedureId>,
     ) -> Result<(ProcedureId, Option<Output>)> {
         let context = self.create_context();
         let procedure = TruncateTableProcedure::new(truncate_table_task, table_info_value, context);
 
-        let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
+        let procedure_with_id = procedure_with_id(Box::new(procedure), procedure_id);
 
         self.execute_procedure_and_wait(procedure_with_id).await
     }
@@ -606,6 +643,7 @@ impl DdlManager {
     pub async fn submit_comment_on_task(
         &self,
         mut comment_on_task: CommentOnTask,
+        procedure_id: Option<ProcedureId>,
     ) -> Result<(ProcedureId, Option<Output>)> {
         let context = self.create_context();
         comment_on_task
@@ -615,7 +653,7 @@ impl DdlManager {
             )
             .await?;
         let procedure = CommentOnProcedure::new(comment_on_task, context);
-        let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
+        let procedure_with_id = procedure_with_id(Box::new(procedure), procedure_id);
 
         self.execute_procedure_and_wait(procedure_with_id).await
     }
@@ -663,54 +701,77 @@ impl DdlManager {
             .map(TracingContext::from_w3c)
             .unwrap_or_else(TracingContext::from_current_span)
             .attach(tracing::info_span!("DdlManager::submit_ddl_task"));
+        let procedure_id = requested_ddl_procedure_id(&request.query_context)?;
         let ddl_options = DdlOptions {
             wait: request.wait,
             timeout: request.timeout,
+            procedure_id,
         };
         async move {
             debug!("Submitting Ddl task: {:?}", request.task);
             match request.task {
                 CreateTable(create_table_task) => {
-                    handle_create_table_task(self, create_table_task, request.query_context).await
+                    handle_create_table_task(
+                        self,
+                        create_table_task,
+                        request.query_context,
+                        procedure_id,
+                    )
+                    .await
                 }
-                DropTable(drop_table_task) => handle_drop_table_task(self, drop_table_task).await,
+                DropTable(drop_table_task) => {
+                    handle_drop_table_task(self, drop_table_task, procedure_id).await
+                }
                 UndropTable(undrop_table_task) => {
-                    handle_undrop_table_task(self, undrop_table_task).await
+                    handle_undrop_table_task(self, undrop_table_task, procedure_id).await
                 }
                 PurgeDroppedTable(purge_dropped_table_task) => {
-                    handle_purge_dropped_table_task(self, purge_dropped_table_task).await
+                    handle_purge_dropped_table_task(self, purge_dropped_table_task, procedure_id)
+                        .await
                 }
                 AlterTable(alter_table_task) => {
                     handle_alter_table_task(self, alter_table_task, ddl_options).await
                 }
                 TruncateTable(truncate_table_task) => {
-                    handle_truncate_table_task(self, truncate_table_task).await
+                    handle_truncate_table_task(self, truncate_table_task, procedure_id).await
                 }
                 CreateLogicalTables(create_table_tasks) => {
-                    handle_create_logical_table_tasks(self, create_table_tasks).await
+                    handle_create_logical_table_tasks(self, create_table_tasks, procedure_id).await
                 }
                 AlterLogicalTables(alter_table_tasks) => {
-                    handle_alter_logical_table_tasks(self, alter_table_tasks).await
+                    handle_alter_logical_table_tasks(self, alter_table_tasks, procedure_id).await
                 }
                 DropLogicalTables(_) => todo!(),
                 CreateDatabase(create_database_task) => {
-                    handle_create_database_task(self, create_database_task).await
+                    handle_create_database_task(self, create_database_task, procedure_id).await
                 }
                 DropDatabase(drop_database_task) => {
-                    handle_drop_database_task(self, drop_database_task).await
+                    handle_drop_database_task(self, drop_database_task, procedure_id).await
                 }
                 AlterDatabase(alter_database_task) => {
-                    handle_alter_database_task(self, alter_database_task).await
+                    handle_alter_database_task(self, alter_database_task, procedure_id).await
                 }
                 CreateFlow(create_flow_task) => {
-                    handle_create_flow_task(self, create_flow_task, request.query_context).await
+                    handle_create_flow_task(
+                        self,
+                        create_flow_task,
+                        request.query_context,
+                        procedure_id,
+                    )
+                    .await
                 }
-                DropFlow(drop_flow_task) => handle_drop_flow_task(self, drop_flow_task).await,
+                DropFlow(drop_flow_task) => {
+                    handle_drop_flow_task(self, drop_flow_task, procedure_id).await
+                }
                 CreateView(create_view_task) => {
-                    handle_create_view_task(self, create_view_task).await
+                    handle_create_view_task(self, create_view_task, procedure_id).await
                 }
-                DropView(drop_view_task) => handle_drop_view_task(self, drop_view_task).await,
-                CommentOn(comment_on_task) => handle_comment_on_task(self, comment_on_task).await,
+                DropView(drop_view_task) => {
+                    handle_drop_view_task(self, drop_view_task, procedure_id).await
+                }
+                CommentOn(comment_on_task) => {
+                    handle_comment_on_task(self, comment_on_task, procedure_id).await
+                }
                 #[cfg(feature = "enterprise")]
                 CreateTrigger(create_trigger_task) => {
                     handle_create_trigger_task(self, create_trigger_task, request.query_context)
@@ -730,6 +791,7 @@ impl DdlManager {
 async fn handle_truncate_table_task(
     ddl_manager: &DdlManager,
     truncate_table_task: TruncateTableTask,
+    procedure_id: Option<ProcedureId>,
 ) -> Result<SubmitDdlTaskResponse> {
     let table_id = truncate_table_task.table_id;
     let table_metadata_manager = &ddl_manager.table_metadata_manager();
@@ -754,7 +816,7 @@ async fn handle_truncate_table_task(
     );
 
     let (id, _) = ddl_manager
-        .submit_truncate_table_task(truncate_table_task, table_info_value)
+        .submit_truncate_table_task(truncate_table_task, table_info_value, procedure_id)
         .await?;
 
     info!("Table: {table_id} is truncated via procedure_id {id:?}");
@@ -815,9 +877,12 @@ async fn handle_alter_table_task(
 async fn handle_drop_table_task(
     ddl_manager: &DdlManager,
     drop_table_task: DropTableTask,
+    procedure_id: Option<ProcedureId>,
 ) -> Result<SubmitDdlTaskResponse> {
     let table_id = drop_table_task.table_id;
-    let (id, _) = ddl_manager.submit_drop_table_task(drop_table_task).await?;
+    let (id, _) = ddl_manager
+        .submit_drop_table_task(drop_table_task, procedure_id)
+        .await?;
 
     info!("Table: {table_id} is dropped via procedure_id {id:?}");
 
@@ -830,10 +895,11 @@ async fn handle_drop_table_task(
 async fn handle_undrop_table_task(
     ddl_manager: &DdlManager,
     undrop_table_task: UndropTableTask,
+    procedure_id: Option<ProcedureId>,
 ) -> Result<SubmitDdlTaskResponse> {
     let table_id = undrop_table_task.table_id;
     let (id, _) = ddl_manager
-        .submit_undrop_table_task(undrop_table_task)
+        .submit_undrop_table_task(undrop_table_task, procedure_id)
         .await?;
 
     info!("Table: {table_id} is undropped via procedure_id {id:?}");
@@ -847,9 +913,10 @@ async fn handle_undrop_table_task(
 async fn handle_purge_dropped_table_task(
     ddl_manager: &DdlManager,
     purge_dropped_table_task: PurgeDroppedTableTask,
+    procedure_id: Option<ProcedureId>,
 ) -> Result<SubmitDdlTaskResponse> {
     let (id, _) = ddl_manager
-        .submit_purge_dropped_table_task(purge_dropped_table_task)
+        .submit_purge_dropped_table_task(purge_dropped_table_task, procedure_id)
         .await?;
 
     info!("Dropped table is purged via procedure_id {id:?}");
@@ -864,9 +931,10 @@ async fn handle_create_table_task(
     ddl_manager: &DdlManager,
     create_table_task: CreateTableTask,
     query_context: QueryContext,
+    procedure_id: Option<ProcedureId>,
 ) -> Result<SubmitDdlTaskResponse> {
     let (id, output) = ddl_manager
-        .submit_create_table_task(create_table_task, query_context)
+        .submit_create_table_task(create_table_task, query_context, procedure_id)
         .await?;
 
     let procedure_id = id.to_string();
@@ -889,6 +957,7 @@ async fn handle_create_table_task(
 async fn handle_create_logical_table_tasks(
     ddl_manager: &DdlManager,
     create_table_tasks: Vec<CreateTableTask>,
+    procedure_id: Option<ProcedureId>,
 ) -> Result<SubmitDdlTaskResponse> {
     ensure!(
         !create_table_tasks.is_empty(),
@@ -904,7 +973,7 @@ async fn handle_create_logical_table_tasks(
     let num_logical_tables = create_table_tasks.len();
 
     let (id, output) = ddl_manager
-        .submit_create_logical_table_tasks(create_table_tasks, physical_table_id)
+        .submit_create_logical_table_tasks(create_table_tasks, physical_table_id, procedure_id)
         .await?;
 
     info!(
@@ -933,9 +1002,10 @@ async fn handle_create_logical_table_tasks(
 async fn handle_create_database_task(
     ddl_manager: &DdlManager,
     create_database_task: CreateDatabaseTask,
+    procedure_id: Option<ProcedureId>,
 ) -> Result<SubmitDdlTaskResponse> {
     let (id, _) = ddl_manager
-        .submit_create_database(create_database_task.clone())
+        .submit_create_database(create_database_task.clone(), procedure_id)
         .await?;
 
     let procedure_id = id.to_string();
@@ -953,9 +1023,10 @@ async fn handle_create_database_task(
 async fn handle_drop_database_task(
     ddl_manager: &DdlManager,
     drop_database_task: DropDatabaseTask,
+    procedure_id: Option<ProcedureId>,
 ) -> Result<SubmitDdlTaskResponse> {
     let (id, _) = ddl_manager
-        .submit_drop_database(drop_database_task.clone())
+        .submit_drop_database(drop_database_task.clone(), procedure_id)
         .await?;
 
     let procedure_id = id.to_string();
@@ -973,9 +1044,10 @@ async fn handle_drop_database_task(
 async fn handle_alter_database_task(
     ddl_manager: &DdlManager,
     alter_database_task: AlterDatabaseTask,
+    procedure_id: Option<ProcedureId>,
 ) -> Result<SubmitDdlTaskResponse> {
     let (id, _) = ddl_manager
-        .submit_alter_database(alter_database_task.clone())
+        .submit_alter_database(alter_database_task.clone(), procedure_id)
         .await?;
 
     let procedure_id = id.to_string();
@@ -994,9 +1066,10 @@ async fn handle_alter_database_task(
 async fn handle_drop_flow_task(
     ddl_manager: &DdlManager,
     drop_flow_task: DropFlowTask,
+    procedure_id: Option<ProcedureId>,
 ) -> Result<SubmitDdlTaskResponse> {
     let (id, _) = ddl_manager
-        .submit_drop_flow_task(drop_flow_task.clone())
+        .submit_drop_flow_task(drop_flow_task.clone(), procedure_id)
         .await?;
 
     let procedure_id = id.to_string();
@@ -1038,9 +1111,10 @@ async fn handle_drop_trigger_task(
 async fn handle_drop_view_task(
     ddl_manager: &DdlManager,
     drop_view_task: DropViewTask,
+    procedure_id: Option<ProcedureId>,
 ) -> Result<SubmitDdlTaskResponse> {
     let (id, _) = ddl_manager
-        .submit_drop_view_task(drop_view_task.clone())
+        .submit_drop_view_task(drop_view_task.clone(), procedure_id)
         .await?;
 
     let procedure_id = id.to_string();
@@ -1060,9 +1134,10 @@ async fn handle_create_flow_task(
     ddl_manager: &DdlManager,
     create_flow_task: CreateFlowTask,
     query_context: QueryContext,
+    procedure_id: Option<ProcedureId>,
 ) -> Result<SubmitDdlTaskResponse> {
     let (id, output) = ddl_manager
-        .submit_create_flow_task(create_flow_task.clone(), query_context)
+        .submit_create_flow_task(create_flow_task.clone(), query_context, procedure_id)
         .await?;
 
     let procedure_id = id.to_string();
@@ -1119,6 +1194,7 @@ async fn handle_create_trigger_task(
 async fn handle_alter_logical_table_tasks(
     ddl_manager: &DdlManager,
     alter_table_tasks: Vec<AlterTableTask>,
+    procedure_id: Option<ProcedureId>,
 ) -> Result<SubmitDdlTaskResponse> {
     ensure!(
         !alter_table_tasks.is_empty(),
@@ -1138,7 +1214,7 @@ async fn handle_alter_logical_table_tasks(
     let num_logical_tables = alter_table_tasks.len();
 
     let (id, _) = ddl_manager
-        .submit_alter_logical_table_tasks(alter_table_tasks, physical_table_id)
+        .submit_alter_logical_table_tasks(alter_table_tasks, physical_table_id, procedure_id)
         .await?;
 
     info!(
@@ -1157,9 +1233,10 @@ async fn handle_alter_logical_table_tasks(
 async fn handle_create_view_task(
     ddl_manager: &DdlManager,
     create_view_task: CreateViewTask,
+    procedure_id: Option<ProcedureId>,
 ) -> Result<SubmitDdlTaskResponse> {
     let (id, output) = ddl_manager
-        .submit_create_view_task(create_view_task)
+        .submit_create_view_task(create_view_task, procedure_id)
         .await?;
 
     let procedure_id = id.to_string();
@@ -1182,9 +1259,10 @@ async fn handle_create_view_task(
 async fn handle_comment_on_task(
     ddl_manager: &DdlManager,
     comment_on_task: CommentOnTask,
+    procedure_id: Option<ProcedureId>,
 ) -> Result<SubmitDdlTaskResponse> {
     let (id, _) = ddl_manager
-        .submit_comment_on_task(comment_on_task.clone())
+        .submit_comment_on_task(comment_on_task.clone(), procedure_id)
         .await?;
 
     let procedure_id = id.to_string();
@@ -1207,11 +1285,14 @@ mod tests {
     use common_error::ext::BoxedError;
     use common_procedure::local::LocalManager;
     use common_procedure::test_util::InMemoryPoisonStore;
-    use common_procedure::{BoxedProcedure, ProcedureManagerRef};
+    use common_procedure::{
+        BoxedProcedure, Context, LockKey, PoisonKeys, Procedure, ProcedureId, ProcedureManagerRef,
+        Result as ProcedureResult, Status,
+    };
     use store_api::storage::TableId;
     use table::table_name::TableName;
 
-    use super::DdlManager;
+    use super::{DdlManager, procedure_with_id, requested_ddl_procedure_id};
     use crate::cache_invalidator::DummyCacheInvalidator;
     use crate::ddl::alter_table::AlterTableProcedure;
     use crate::ddl::create_table::CreateTableProcedure;
@@ -1228,6 +1309,7 @@ mod tests {
     use crate::peer::Peer;
     use crate::region_keeper::MemoryRegionKeeper;
     use crate::region_registry::LeaderRegionRegistry;
+    use crate::rpc::ddl::QueryContext;
     use crate::sequence::SequenceBuilder;
     use crate::state_store::KvStateStore;
     use crate::wal_provider::WalProvider;
@@ -1272,6 +1354,68 @@ mod tests {
         ) -> std::result::Result<(), BoxedError> {
             Ok(())
         }
+    }
+
+    struct NoopProcedure;
+
+    #[async_trait::async_trait]
+    impl Procedure for NoopProcedure {
+        fn type_name(&self) -> &str {
+            "NoopProcedure"
+        }
+
+        async fn execute(&mut self, _ctx: &Context) -> ProcedureResult<Status> {
+            Ok(Status::Done { output: None })
+        }
+
+        fn dump(&self) -> ProcedureResult<String> {
+            Ok(String::new())
+        }
+
+        fn lock_key(&self) -> LockKey {
+            LockKey::single_exclusive("noop_procedure")
+        }
+
+        fn poison_keys(&self) -> PoisonKeys {
+            PoisonKeys::default()
+        }
+    }
+
+    #[test]
+    fn test_requested_ddl_procedure_id_parses_query_context_extension() {
+        let expected = ProcedureId::random();
+        let mut query_context = QueryContext::default();
+        query_context.extensions.insert(
+            crate::rpc::ddl::DDL_PROCEDURE_ID_EXTENSION_KEY.to_string(),
+            expected.to_string(),
+        );
+
+        assert_eq!(
+            requested_ddl_procedure_id(&query_context).unwrap(),
+            Some(expected)
+        );
+    }
+
+    #[test]
+    fn test_requested_ddl_procedure_id_rejects_invalid_extension() {
+        let mut query_context = QueryContext::default();
+        query_context.extensions.insert(
+            crate::rpc::ddl::DDL_PROCEDURE_ID_EXTENSION_KEY.to_string(),
+            "not-a-procedure-id".to_string(),
+        );
+
+        let err = requested_ddl_procedure_id(&query_context).unwrap_err();
+
+        assert!(err.to_string().contains("Failed to parse procedure id"));
+    }
+
+    #[test]
+    fn test_procedure_with_id_uses_requested_id() {
+        let expected = ProcedureId::random();
+
+        let procedure = procedure_with_id(Box::new(NoopProcedure), Some(expected));
+
+        assert_eq!(procedure.id, expected);
     }
 
     #[test]
