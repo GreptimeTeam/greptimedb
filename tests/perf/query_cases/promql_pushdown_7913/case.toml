@@ -71,6 +71,16 @@ iterations = 9
 max_candidate_latency_regression_pct = 15
 
 [[scenario.queries]]
+name = "latest_timestamp_equality_subquery"
+kind = "sql"
+query = "SELECT * FROM promql_pushdown_7913 WHERE greptime_timestamp = (SELECT greptime_timestamp FROM promql_pushdown_7913 ORDER BY greptime_timestamp DESC LIMIT 1)"
+warmup = 3
+iterations = 9
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 15
+
+[[scenario.queries]]
 name = "selector_15m_high_cardinality"
 kind = "tql"
 query = "TQL ANALYZE VERBOSE (1704069000, 1704069900, '15s') promql_pushdown_7913{host=~'host.*'}"
