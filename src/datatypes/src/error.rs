@@ -234,18 +234,21 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
     #[snafu(display("Invalid fulltext option: {}", msg))]
     InvalidFulltextOption {
         msg: String,
         #[snafu(implicit)]
         location: Location,
     },
+
     #[snafu(display("Invalid skipping index option: {}", msg))]
     InvalidSkippingIndexOption {
         msg: String,
         #[snafu(implicit)]
         location: Location,
     },
+
     #[snafu(display("Inconsistent struct field count {field_len} and item count {item_len}"))]
     InconsistentStructFieldsAndItems {
         field_len: usize,
@@ -253,9 +256,17 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
     #[snafu(display("Failed to process JSONB value"))]
     InvalidJsonb {
         error: jsonb::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Invalid json value, {}", msg))]
+    InvalidJsonValue {
+        msg: String,
         #[snafu(implicit)]
         location: Location,
     },
@@ -318,6 +329,7 @@ impl ErrorExt for Error {
             | InvalidVector { .. }
             | InvalidFulltextOption { .. }
             | InvalidSkippingIndexOption { .. }
+            | InvalidJsonValue { .. }
             | MergeJsonDatatype { .. } => StatusCode::InvalidArguments,
 
             ValueExceedsPrecision { .. }

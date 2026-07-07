@@ -25,7 +25,7 @@ use snafu::{OptionExt, ResultExt, ensure};
 
 use crate::Result;
 use crate::data_type::ConcreteDataType;
-use crate::error::{AlignJsonValueSnafu, InvalidJsonbSnafu};
+use crate::error::{AlignJsonValueSnafu, InvalidJsonValueSnafu, InvalidJsonbSnafu};
 use crate::types::json_type::{JsonNativeType, JsonNumberType};
 use crate::types::{JsonType, StructField, StructType};
 use crate::value::{ListValue, ListValueRef, StructValue, StructValueRef, Value, ValueRef};
@@ -546,12 +546,9 @@ impl TryFrom<JsonValue> for serde_json::Value {
                     }
                     serde_json::Value::Object(map)
                 }
-                JsonVariant::Variant(x) => decode_json_variant(&x).map_err(|err| {
-                    serde_json::Error::io(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        err.to_string(),
-                    ))
-                })?,
+                JsonVariant::Variant(x) => {
+                    decode_json_variant(&x).map_err(|e| InvalidJsonbSnafu { error: e }.build())?
+                }
             })
         }
         helper(v.json_variant)
@@ -559,17 +556,20 @@ impl TryFrom<JsonValue> for serde_json::Value {
 }
 
 pub(crate) fn encode_json_variant(value: JsonVariant) -> Result<Vec<u8>> {
+    if let JsonVariant::Variant(bytes) = &value {
+        return Ok(bytes.clone());
+    }
     jsonb::Value::try_from(value).map(|value| value.to_vec())
-}
-
-pub(crate) fn encode_serde_json_as_jsonb(value: serde_json::Value) -> Vec<u8> {
-    jsonb::Value::from(value).to_vec()
 }
 
 pub(crate) fn decode_json_variant(
     bytes: &[u8],
 ) -> std::result::Result<serde_json::Value, jsonb::Error> {
     jsonb::from_slice(bytes).map(Into::into)
+}
+
+pub(crate) fn encode_serde_json_as_jsonb(value: serde_json::Value) -> Vec<u8> {
+    jsonb::Value::from(value).to_vec()
 }
 
 impl TryFrom<JsonVariant> for jsonb::Value<'static> {
@@ -579,10 +579,7 @@ impl TryFrom<JsonVariant> for jsonb::Value<'static> {
         Ok(match value {
             JsonVariant::Null => jsonb::Value::Null,
             JsonVariant::Bool(value) => jsonb::Value::Bool(value),
-            JsonVariant::Number(value) => match value {
-                JsonNumber::Float(value) if value.0.is_nan() => jsonb::Value::String("NaN".into()),
-                value => jsonb::Value::Number(value.into()),
-            },
+            JsonVariant::Number(value) => jsonb::Value::Number(value.try_into()?),
             JsonVariant::String(value) => jsonb::Value::String(value.into()),
             JsonVariant::Array(values) => jsonb::Value::Array(
                 values
@@ -596,6 +593,7 @@ impl TryFrom<JsonVariant> for jsonb::Value<'static> {
                     .map(|(key, value)| jsonb::Value::try_from(value).map(|value| (key, value)))
                     .collect::<Result<_>>()?,
             ),
+            // This branch should be unreachable.
             JsonVariant::Variant(value) => {
                 let value = decode_json_variant(&value)
                     .map_err(|error| InvalidJsonbSnafu { error }.build())?;
@@ -605,16 +603,23 @@ impl TryFrom<JsonVariant> for jsonb::Value<'static> {
     }
 }
 
-impl From<JsonNumber> for jsonb::Number {
-    fn from(value: JsonNumber) -> Self {
-        match value {
+impl TryFrom<JsonNumber> for jsonb::Number {
+    type Error = crate::Error;
+
+    fn try_from(value: JsonNumber) -> Result<Self> {
+        Ok(match value {
             JsonNumber::PosInt(value) => jsonb::Number::UInt64(value),
             JsonNumber::NegInt(value) => jsonb::Number::Int64(value),
             JsonNumber::Float(value) => {
-                debug_assert!(!value.0.is_nan());
+                ensure!(
+                    !value.0.is_nan(),
+                    InvalidJsonValueSnafu {
+                        msg: "NaN is not a valid JSON number"
+                    }
+                );
                 jsonb::Number::Float64(value.0)
             }
-        }
+        })
     }
 }
 
@@ -1038,6 +1043,15 @@ mod tests {
         assert_eq!(
             err.to_string(),
             r#"Failed to align JSON value, reason: unable to align 'hello' of type "<String>" to type "<Bool>""#
+        );
+
+        let mut value = JsonValue::from(f64::NAN);
+        let err = value
+            .try_align(&JsonType::new_json2(JsonNativeType::Variant))
+            .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "Failed to align JSON value, reason: NaN is not a valid JSON number"
         );
 
         Ok(())
