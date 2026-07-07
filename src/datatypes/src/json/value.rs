@@ -21,7 +21,7 @@ use num_traits::ToPrimitive;
 use ordered_float::OrderedFloat;
 use serde::{Deserialize, Serialize};
 use serde_json::Number;
-use snafu::{OptionExt, ResultExt, ensure};
+use snafu::{OptionExt, ensure};
 
 use crate::Result;
 use crate::data_type::ConcreteDataType;
@@ -546,9 +546,12 @@ impl TryFrom<JsonValue> for serde_json::Value {
                     }
                     serde_json::Value::Object(map)
                 }
-                JsonVariant::Variant(x) => {
-                    decode_json_variant(&x).map_err(|e| InvalidJsonbSnafu { error: e }.build())?
-                }
+                JsonVariant::Variant(x) => decode_json_variant(&x).map_err(|err| {
+                    serde_json::Error::io(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        err.to_string(),
+                    ))
+                })?,
             })
         }
         helper(v.json_variant)
