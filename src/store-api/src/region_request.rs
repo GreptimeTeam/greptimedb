@@ -14,6 +14,7 @@
 
 use std::collections::HashMap;
 use std::fmt::{self, Display};
+use std::time::Duration;
 
 use api::helper::{ColumnDataTypeWrapper, from_pb_time_ranges};
 use api::v1::add_column_location::LocationType;
@@ -52,8 +53,8 @@ use crate::metadata::{
 use crate::metric_engine_consts::PHYSICAL_TABLE_METADATA_KEY;
 use crate::metrics;
 use crate::mito_engine_options::{
-    APPEND_MODE_KEY, SST_FORMAT_KEY, TTL_KEY, TWCS_MAX_OUTPUT_FILE_SIZE, TWCS_TIME_WINDOW,
-    TWCS_TRIGGER_FILE_NUM,
+    APPEND_MODE_KEY, AUTO_FLUSH_INTERVAL_KEY, SST_FORMAT_KEY, TTL_KEY, TWCS_MAX_OUTPUT_FILE_SIZE,
+    TWCS_TIME_WINDOW, TWCS_TRIGGER_FILE_NUM,
 };
 use crate::path_utils::table_dir;
 use crate::storage::{ColumnId, RegionId, ScanRequest};
@@ -1370,6 +1371,8 @@ pub enum SetRegionOption {
     Format(String),
     // Modifying the append mode.
     AppendMode(bool),
+    // Modifying the per-region auto flush interval override.
+    AutoFlushInterval(Option<Duration>),
 }
 
 impl TryFrom<&PbOption> for SetRegionOption {
@@ -1393,6 +1396,20 @@ impl TryFrom<&PbOption> for SetRegionOption {
                     .parse::<bool>()
                     .map_err(|_| InvalidSetRegionOptionRequestSnafu { key, value }.build())?;
                 Ok(Self::AppendMode(append_mode))
+            }
+            AUTO_FLUSH_INTERVAL_KEY => {
+                if value.is_empty() {
+                    // SET 'auto_flush_interval' = NULL comes through as an empty
+                    // string; treat it as clearing the override (fall back to
+                    // the global default), same as Ttl.
+                    return Ok(Self::AutoFlushInterval(None));
+                }
+                let interval = humantime::parse_duration(value)
+                    .map_err(|_| InvalidSetRegionOptionRequestSnafu { key, value }.build())?;
+                if interval <= Duration::ZERO {
+                    return InvalidSetRegionOptionRequestSnafu { key, value }.fail();
+                }
+                Ok(Self::AutoFlushInterval(Some(interval)))
             }
             _ => InvalidSetRegionOptionRequestSnafu { key, value }.fail(),
         }
@@ -1676,6 +1693,44 @@ mod tests {
             location: None,
         })
         .unwrap_err();
+    }
+
+    #[test]
+    fn test_set_region_option_auto_flush_interval_try_from() {
+        use std::time::Duration;
+
+        // Valid duration
+        let pb = PbOption {
+            key: "auto_flush_interval".to_string(),
+            value: "5m".to_string(),
+        };
+        let opt = SetRegionOption::try_from(&pb).unwrap();
+        assert_eq!(
+            opt,
+            SetRegionOption::AutoFlushInterval(Some(Duration::from_secs(300)))
+        );
+
+        // Empty value clears the override (mirrors Ttl's behaviour for `SET key = NULL`).
+        let pb = PbOption {
+            key: "auto_flush_interval".to_string(),
+            value: String::new(),
+        };
+        let opt = SetRegionOption::try_from(&pb).unwrap();
+        assert_eq!(opt, SetRegionOption::AutoFlushInterval(None));
+
+        // Zero is rejected up front (engine invariant).
+        let pb = PbOption {
+            key: "auto_flush_interval".to_string(),
+            value: "0s".to_string(),
+        };
+        assert!(SetRegionOption::try_from(&pb).is_err());
+
+        // Garbage value is rejected.
+        let pb = PbOption {
+            key: "auto_flush_interval".to_string(),
+            value: "not_a_duration".to_string(),
+        };
+        assert!(SetRegionOption::try_from(&pb).is_err());
     }
 
     #[test]
