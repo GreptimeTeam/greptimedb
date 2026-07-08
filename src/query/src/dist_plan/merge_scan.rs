@@ -1081,6 +1081,13 @@ mod tests {
     }
 
     #[test]
+    fn merge_scan_advertises_ordering_when_partitions_exceed_regions() {
+        let exec = ordered_merge_scan_exec(3, 4);
+
+        assert!(exec.properties().output_ordering().is_some());
+    }
+
+    #[test]
     fn remote_dyn_filter_region_query_context_registers_before_do_get() {
         let registry_manager = Arc::new(DynFilterRegistryManager::default());
         let query_ctx = QueryContext::arc();
