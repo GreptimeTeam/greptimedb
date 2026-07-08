@@ -356,6 +356,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 for bulk_write in bulk_writes {
                     self.flush_scheduler.add_bulk_request_to_pending(bulk_write);
                 }
+                self.listener.on_flush_success(region_id);
                 return;
             }
             // A pending close DDL may have removed the region. Reject queued writes as
