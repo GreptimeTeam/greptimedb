@@ -79,9 +79,9 @@ use crate::request::{
 use crate::schedule::scheduler::{LocalScheduler, SchedulerRef};
 use crate::sst::file::RegionFileId;
 use crate::sst::file_ref::FileReferenceManagerRef;
-use crate::sst::index::IndexBuildScheduler;
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
+use crate::sst::index::{IndexBuildScheduler, PhysicalIndexBuildCoordinator};
 use crate::time_provider::{StdTimeProvider, TimeProviderRef};
 use crate::wal::Wal;
 use crate::worker::handle_manifest::RegionEditQueues;
@@ -190,6 +190,7 @@ impl WorkerGroup {
             .with_buffer_size(Some(config.index.write_buffer_size.as_bytes() as _));
         let index_build_job_pool =
             Arc::new(LocalScheduler::new(config.max_background_index_builds));
+        let physical_index_build_coordinator = Arc::new(PhysicalIndexBuildCoordinator::default());
         let flush_job_pool = Arc::new(LocalScheduler::new(config.max_background_flushes));
         let compact_job_pool = Arc::new(LocalScheduler::new(config.max_background_compactions));
         let flush_semaphore = Arc::new(Semaphore::new(config.max_background_flushes));
@@ -240,6 +241,7 @@ impl WorkerGroup {
                     object_store_manager: object_store_manager.clone(),
                     write_buffer_manager: write_buffer_manager.clone(),
                     index_build_job_pool: index_build_job_pool.clone(),
+                    physical_index_build_coordinator: physical_index_build_coordinator.clone(),
                     flush_job_pool: flush_job_pool.clone(),
                     compact_job_pool: compact_job_pool.clone(),
                     purge_scheduler: purge_scheduler.clone(),
@@ -397,6 +399,7 @@ impl WorkerGroup {
         });
         let index_build_job_pool =
             Arc::new(LocalScheduler::new(config.max_background_index_builds));
+        let physical_index_build_coordinator = Arc::new(PhysicalIndexBuildCoordinator::default());
         let flush_job_pool = Arc::new(LocalScheduler::new(config.max_background_flushes));
         let compact_job_pool = Arc::new(LocalScheduler::new(config.max_background_compactions));
         let flush_semaphore = Arc::new(Semaphore::new(config.max_background_flushes));
@@ -449,6 +452,7 @@ impl WorkerGroup {
                     object_store_manager: object_store_manager.clone(),
                     write_buffer_manager: write_buffer_manager.clone(),
                     index_build_job_pool: index_build_job_pool.clone(),
+                    physical_index_build_coordinator: physical_index_build_coordinator.clone(),
                     flush_job_pool: flush_job_pool.clone(),
                     compact_job_pool: compact_job_pool.clone(),
                     purge_scheduler: purge_scheduler.clone(),
@@ -541,6 +545,7 @@ struct WorkerStarter<S> {
     write_buffer_manager: WriteBufferManagerRef,
     compact_job_pool: SchedulerRef,
     index_build_job_pool: SchedulerRef,
+    physical_index_build_coordinator: Arc<PhysicalIndexBuildCoordinator>,
     flush_job_pool: SchedulerRef,
     purge_scheduler: SchedulerRef,
     listener: WorkerListener,
@@ -592,6 +597,7 @@ impl<S: LogStore> WorkerStarter<S> {
             index_build_scheduler: IndexBuildScheduler::new(
                 self.index_build_job_pool,
                 self.config.max_background_index_builds,
+                self.physical_index_build_coordinator,
             ),
             flush_scheduler: FlushScheduler::new(self.flush_job_pool),
             compaction_scheduler: CompactionScheduler::new(

@@ -27,13 +27,17 @@ use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::num::NonZeroUsize;
 use std::sync::Arc;
+use std::time::Duration;
 
 use bloom_filter::creator::BloomFilterIndexer;
+use common_error::ext::{BoxedError, ErrorExt, PlainError};
+use common_error::status_code::StatusCode;
 use common_telemetry::{debug, error, info, warn};
 use datatypes::arrow::array::BinaryArray;
 use datatypes::arrow::record_batch::RecordBatch;
 use mito_codec::index::IndexValuesCodec;
 use mito_codec::row_converter::CompositeValues;
+use moka::sync::Cache as SyncCache;
 use object_store::ObjectStore;
 use puffin_manager::SstPuffinManager;
 use smallvec::{SmallVec, smallvec};
@@ -43,6 +47,7 @@ use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{ColumnId, FileId, RegionId};
 use strum::IntoStaticStr;
 use tokio::sync::mpsc::Sender;
+use tokio::sync::{Mutex, oneshot};
 #[cfg(feature = "vector_index")]
 use vector_index::creator::VectorIndexer;
 
@@ -53,8 +58,8 @@ use crate::cache::write_cache::{UploadTracker, WriteCacheRef};
 use crate::config::VectorIndexConfig;
 use crate::config::{BloomFilterConfig, FulltextIndexConfig, InvertedIndexConfig};
 use crate::error::{
-    BuildIndexAsyncSnafu, DecodeSnafu, Error, InvalidRecordBatchSnafu, RegionClosedSnafu,
-    RegionDroppedSnafu, RegionTruncatedSnafu, Result,
+    BuildIndexAsyncSnafu, DecodeSnafu, Error, ExternalSnafu, InvalidRecordBatchSnafu, OpenDalSnafu,
+    RegionClosedSnafu, RegionDroppedSnafu, RegionTruncatedSnafu, Result,
 };
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
 use crate::metrics::INDEX_CREATE_MEMORY_USAGE;
@@ -63,8 +68,7 @@ use crate::region::options::IndexOptions;
 use crate::region::version::VersionControlRef;
 use crate::region::{ManifestContextRef, RegionLeaderState};
 use crate::request::{
-    BackgroundNotify, IndexBuildFailed, IndexBuildFinished, IndexBuildStopped, WorkerRequest,
-    WorkerRequestWithTime,
+    BackgroundNotify, IndexBuildFinished, IndexBuildStopped, WorkerRequest, WorkerRequestWithTime,
 };
 use crate::schedule::scheduler::{Job, SchedulerRef};
 use crate::sst::file::{
@@ -306,6 +310,16 @@ impl Indexer {
 pub trait IndexerBuilder {
     /// Builds indexer of given file id to [index_file_path].
     async fn build(&self, file_id: FileId, index_version: u64) -> Indexer;
+
+    /// Builds indexer for a physical region.
+    async fn build_for_region(
+        &self,
+        _region_id: RegionId,
+        file_id: FileId,
+        index_version: u64,
+    ) -> Indexer {
+        self.build(file_id, index_version).await
+    }
 }
 #[derive(Clone)]
 pub(crate) struct IndexerBuilderImpl {
@@ -327,9 +341,19 @@ pub(crate) struct IndexerBuilderImpl {
 impl IndexerBuilder for IndexerBuilderImpl {
     /// Sanity check for arguments and create a new [Indexer] if arguments are valid.
     async fn build(&self, file_id: FileId, index_version: u64) -> Indexer {
+        self.build_for_region(self.metadata.region_id, file_id, index_version)
+            .await
+    }
+
+    async fn build_for_region(
+        &self,
+        region_id: RegionId,
+        file_id: FileId,
+        index_version: u64,
+    ) -> Indexer {
         let mut indexer = Indexer {
             file_id,
-            region_id: self.metadata.region_id,
+            region_id,
             index_version,
             write_cache_enabled: self.write_cache_enabled,
             ..Default::default()
@@ -643,8 +667,205 @@ pub enum IndexBuildOutcome {
 /// Mpsc output result sender.
 pub type ResultMpscSender = Sender<Result<IndexBuildOutcome>>;
 
+const COMPLETED_PHYSICAL_INDEX_PATCH_CACHE_CAPACITY: u64 = 4096;
+const COMPLETED_PHYSICAL_INDEX_PATCH_CACHE_TTL: Duration = Duration::from_secs(10 * 60);
+
+fn plain_external_error(message: String, status_code: StatusCode, context: &str) -> Error {
+    Err::<(), _>(BoxedError::new(PlainError::new(message, status_code)))
+        .context(ExternalSnafu {
+            context: context.to_string(),
+        })
+        .unwrap_err()
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct PhysicalIndexPatch {
+    pub(crate) physical_region_id: RegionId,
+    pub(crate) file_id: FileId,
+    pub(crate) index_version: u64,
+    pub(crate) index_file_size: u64,
+    pub(crate) available_indexes: IndexTypes,
+    pub(crate) indexes: Vec<ColumnIndexMetadata>,
+}
+
+pub(crate) struct PhysicalIndexBuildCoordinator {
+    entries: Mutex<HashMap<RegionFileId, PhysicalIndexBuildState>>,
+    completed: SyncCache<RegionFileId, PhysicalIndexPatch>,
+}
+
+impl Default for PhysicalIndexBuildCoordinator {
+    fn default() -> Self {
+        Self {
+            entries: Mutex::new(HashMap::new()),
+            completed: SyncCache::builder()
+                .max_capacity(COMPLETED_PHYSICAL_INDEX_PATCH_CACHE_CAPACITY)
+                .time_to_live(COMPLETED_PHYSICAL_INDEX_PATCH_CACHE_TTL)
+                .build(),
+        }
+    }
+}
+
+enum PhysicalIndexBuildState {
+    Building {
+        waiters: Vec<oneshot::Sender<std::result::Result<PhysicalIndexBuildSignal, Arc<Error>>>>,
+    },
+    Publishing {
+        patch: PhysicalIndexPatch,
+        applying: usize,
+    },
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum PhysicalIndexBuildSignal {
+    Patch(PhysicalIndexPatch),
+    Promote,
+}
+
+pub(crate) enum JoinPhysicalIndexBuild {
+    Builder,
+    Wait(oneshot::Receiver<std::result::Result<PhysicalIndexBuildSignal, Arc<Error>>>),
+    ApplyPublishing(PhysicalIndexPatch),
+    ApplyCompleted(PhysicalIndexPatch),
+}
+
+impl PhysicalIndexBuildCoordinator {
+    pub(crate) async fn join_or_start(
+        &self,
+        region_file_id: RegionFileId,
+    ) -> JoinPhysicalIndexBuild {
+        let mut entries = self.entries.lock().await;
+        match entries.get_mut(&region_file_id) {
+            Some(PhysicalIndexBuildState::Building { waiters }) => {
+                let (tx, rx) = oneshot::channel();
+                waiters.push(tx);
+                JoinPhysicalIndexBuild::Wait(rx)
+            }
+            Some(PhysicalIndexBuildState::Publishing { patch, applying }) => {
+                *applying += 1;
+                JoinPhysicalIndexBuild::ApplyPublishing(patch.clone())
+            }
+            None => {
+                if let Some(patch) = self.completed.get(&region_file_id) {
+                    return JoinPhysicalIndexBuild::ApplyCompleted(patch);
+                }
+                entries.insert(
+                    region_file_id,
+                    PhysicalIndexBuildState::Building {
+                        waiters: Vec::new(),
+                    },
+                );
+                JoinPhysicalIndexBuild::Builder
+            }
+        }
+    }
+
+    pub(crate) async fn publish_patch(
+        &self,
+        region_file_id: RegionFileId,
+        patch: PhysicalIndexPatch,
+    ) {
+        let waiters = {
+            let mut entries = self.entries.lock().await;
+            let waiters = match entries.remove(&region_file_id) {
+                Some(PhysicalIndexBuildState::Building { waiters }) => waiters,
+                _ => Vec::new(),
+            };
+            let applying = waiters.len() + 1;
+            entries.insert(
+                region_file_id,
+                PhysicalIndexBuildState::Publishing {
+                    patch: patch.clone(),
+                    applying,
+                },
+            );
+            self.completed.insert(region_file_id, patch.clone());
+            waiters
+        };
+        let mut failed_sends = 0;
+        for waiter in waiters {
+            if waiter
+                .send(Ok(PhysicalIndexBuildSignal::Patch(patch.clone())))
+                .is_err()
+            {
+                failed_sends += 1;
+            }
+        }
+        for _ in 0..failed_sends {
+            self.finish_apply(region_file_id).await;
+        }
+    }
+
+    pub(crate) async fn finish_apply(&self, region_file_id: RegionFileId) {
+        let mut entries = self.entries.lock().await;
+        if let Some(PhysicalIndexBuildState::Publishing { applying, .. }) =
+            entries.get_mut(&region_file_id)
+        {
+            *applying = applying.saturating_sub(1);
+            if *applying == 0 {
+                entries.remove(&region_file_id);
+            }
+        }
+    }
+
+    pub(crate) async fn promote_or_remove(&self, region_file_id: RegionFileId) {
+        loop {
+            let waiter = {
+                let mut entries = self.entries.lock().await;
+                match entries.get_mut(&region_file_id) {
+                    Some(PhysicalIndexBuildState::Building { waiters }) if !waiters.is_empty() => {
+                        Some(waiters.remove(0))
+                    }
+                    _ => {
+                        entries.remove(&region_file_id);
+                        None
+                    }
+                }
+            };
+            let Some(waiter) = waiter else {
+                return;
+            };
+            if waiter.send(Ok(PhysicalIndexBuildSignal::Promote)).is_ok() {
+                return;
+            }
+        }
+    }
+
+    pub(crate) async fn is_publishing(&self, region_file_id: RegionFileId) -> bool {
+        matches!(
+            self.entries.lock().await.get(&region_file_id),
+            Some(PhysicalIndexBuildState::Publishing { .. })
+        )
+    }
+
+    pub(crate) async fn forget_completed(&self, region_file_id: RegionFileId) {
+        self.completed.invalidate(&region_file_id);
+    }
+
+    pub(crate) async fn publish_error(&self, region_file_id: RegionFileId, err: Arc<Error>) {
+        let waiters = {
+            let mut entries = self.entries.lock().await;
+            if matches!(
+                entries.get(&region_file_id),
+                Some(PhysicalIndexBuildState::Building { .. })
+            ) {
+                match entries.remove(&region_file_id) {
+                    Some(PhysicalIndexBuildState::Building { waiters }) => waiters,
+                    _ => Vec::new(),
+                }
+            } else {
+                Vec::new()
+            }
+        };
+        for waiter in waiters {
+            let _ = waiter.send(Err(err.clone()));
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct IndexBuildTask {
+    /// The current/referring region whose version/manifest is being rebuilt.
+    pub region_id: RegionId,
     /// The SST file handle to build index for.
     pub file: FileHandle,
     /// The file meta to build index for.
@@ -662,12 +883,14 @@ pub struct IndexBuildTask {
     pub(crate) request_sender: Sender<WorkerRequestWithTime>,
     /// Index build result sender.
     pub(crate) result_sender: ResultMpscSender,
+    pub(crate) physical_coordinator: Arc<PhysicalIndexBuildCoordinator>,
 }
 
 impl std::fmt::Debug for IndexBuildTask {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("IndexBuildTask")
-            .field("region_id", &self.file_meta.region_id)
+            .field("region_id", &self.region_id)
+            .field("physical_region_id", &self.file_meta.region_id)
             .field("file_id", &self.file_meta.file_id)
             .field("reason", &self.reason)
             .finish()
@@ -675,6 +898,10 @@ impl std::fmt::Debug for IndexBuildTask {
 }
 
 impl IndexBuildTask {
+    fn region_file_id(&self) -> RegionFileId {
+        RegionFileId::new(self.file_meta.region_id, self.file_meta.file_id)
+    }
+
     /// Notify the caller the job is success.
     pub async fn on_success(&self, outcome: IndexBuildOutcome) {
         let _ = self.result_sender.send(Ok(outcome)).await;
@@ -685,7 +912,7 @@ impl IndexBuildTask {
         let _ = self
             .result_sender
             .send(Err(err.clone()).context(BuildIndexAsyncSnafu {
-                region_id: self.file_meta.region_id,
+                region_id: self.region_id,
             }))
             .await;
     }
@@ -697,12 +924,6 @@ impl IndexBuildTask {
     }
 
     async fn do_index_build(&mut self, version_control: VersionControlRef) {
-        self.listener
-            .on_index_build_begin(RegionFileId::new(
-                self.file_meta.region_id,
-                self.file_meta.file_id,
-            ))
-            .await;
         match self.index_build(version_control).await {
             Ok(outcome) => self.on_success(outcome).await,
             Err(e) => {
@@ -714,9 +935,10 @@ impl IndexBuildTask {
             }
         }
         let worker_request = WorkerRequest::Background {
-            region_id: self.file_meta.region_id,
+            region_id: self.region_id,
             notify: BackgroundNotify::IndexBuildStopped(IndexBuildStopped {
-                region_id: self.file_meta.region_id,
+                region_id: self.region_id,
+                physical_region_id: self.file_meta.region_id,
                 file_id: self.file_meta.file_id,
             }),
         };
@@ -762,6 +984,163 @@ impl IndexBuildTask {
         &mut self,
         version_control: VersionControlRef,
     ) -> Result<IndexBuildOutcome> {
+        let region_file_id = self.region_file_id();
+        loop {
+            match self
+                .physical_coordinator
+                .join_or_start(region_file_id)
+                .await
+            {
+                JoinPhysicalIndexBuild::Builder => break,
+                JoinPhysicalIndexBuild::ApplyPublishing(patch) => {
+                    if !self.patch_is_consistent(&patch, &version_control) {
+                        self.physical_coordinator.finish_apply(region_file_id).await;
+                        self.physical_coordinator
+                            .forget_completed(region_file_id)
+                            .await;
+                        continue;
+                    }
+                    let result = self
+                        .apply_published_patch_and_notify(patch, &version_control)
+                        .await;
+                    self.physical_coordinator.finish_apply(region_file_id).await;
+                    return result;
+                }
+                JoinPhysicalIndexBuild::ApplyCompleted(patch) => {
+                    if !self.patch_is_consistent(&patch, &version_control) {
+                        self.physical_coordinator
+                            .forget_completed(region_file_id)
+                            .await;
+                        continue;
+                    }
+                    return self
+                        .apply_published_patch_and_notify(patch, &version_control)
+                        .await;
+                }
+                JoinPhysicalIndexBuild::Wait(rx) => match rx.await {
+                    Ok(Ok(PhysicalIndexBuildSignal::Patch(patch))) => {
+                        if !self.patch_is_consistent(&patch, &version_control) {
+                            self.physical_coordinator.finish_apply(region_file_id).await;
+                            self.physical_coordinator
+                                .forget_completed(region_file_id)
+                                .await;
+                            continue;
+                        }
+                        let result = self
+                            .apply_published_patch_and_notify(patch, &version_control)
+                            .await;
+                        self.physical_coordinator.finish_apply(region_file_id).await;
+                        return result;
+                    }
+                    Ok(Ok(PhysicalIndexBuildSignal::Promote)) => break,
+                    Ok(Err(err)) => {
+                        return Err(plain_external_error(
+                            err.to_string(),
+                            err.status_code(),
+                            "physical index build failed",
+                        ));
+                    }
+                    Err(_) => {
+                        return Ok(IndexBuildOutcome::Aborted(
+                            "physical index builder dropped".to_string(),
+                        ));
+                    }
+                },
+            }
+        }
+
+        self.listener
+            .on_index_build_begin(RegionFileId::new(
+                self.file_meta.region_id,
+                self.file_meta.file_id,
+            ))
+            .await;
+        let result = self.do_physical_index_build(version_control).await;
+        match &result {
+            Err(_) => {
+                if !self
+                    .physical_coordinator
+                    .is_publishing(region_file_id)
+                    .await
+                {
+                    let err = result.as_ref().unwrap_err();
+                    self.physical_coordinator
+                        .publish_error(
+                            region_file_id,
+                            Arc::new(plain_external_error(
+                                err.to_string(),
+                                err.status_code(),
+                                "physical index build failed before publishing patch",
+                            )),
+                        )
+                        .await;
+                }
+            }
+            Ok(IndexBuildOutcome::Aborted(_)) => {
+                self.physical_coordinator
+                    .promote_or_remove(region_file_id)
+                    .await;
+            }
+            Ok(IndexBuildOutcome::Finished) => {}
+        }
+        result
+    }
+
+    async fn apply_patch_and_notify(&mut self, patch: PhysicalIndexPatch) -> Result<()> {
+        let edit = self.update_manifest_with_patch(patch).await?;
+        let index_build_finished = IndexBuildFinished {
+            region_id: self.region_id,
+            edit,
+        };
+        let worker_request = WorkerRequest::Background {
+            region_id: self.region_id,
+            notify: BackgroundNotify::IndexBuildFinished(index_build_finished),
+        };
+        let _ = self
+            .request_sender
+            .send(WorkerRequestWithTime::new(worker_request))
+            .await;
+        Ok(())
+    }
+
+    fn patch_is_consistent(
+        &self,
+        patch: &PhysicalIndexPatch,
+        version_control: &VersionControlRef,
+    ) -> bool {
+        let mut file_meta = self.file_meta.clone();
+        file_meta.available_indexes = patch.available_indexes.clone();
+        file_meta.indexes = patch.indexes.clone();
+        file_meta.index_file_size = patch.index_file_size;
+        file_meta.index_version = patch.index_version;
+        file_meta.is_index_consistent_with_region(
+            &version_control.current().version.metadata.column_metadatas,
+        )
+    }
+
+    async fn apply_published_patch_and_notify(
+        &mut self,
+        patch: PhysicalIndexPatch,
+        version_control: &VersionControlRef,
+    ) -> Result<IndexBuildOutcome> {
+        if !self.check_sst_file_exists(version_control).await {
+            self.listener
+                .on_index_build_abort(self.region_file_id())
+                .await;
+            return Ok(IndexBuildOutcome::Aborted(format!(
+                "SST file not found when applying physical index patch, region: {}, file_id: {}",
+                self.file_meta.region_id, self.file_meta.file_id
+            )));
+        }
+
+        self.apply_patch_and_notify(patch).await?;
+        Ok(IndexBuildOutcome::Finished)
+    }
+
+    async fn do_physical_index_build(
+        &mut self,
+        version_control: VersionControlRef,
+    ) -> Result<IndexBuildOutcome> {
         // Determine the new index version
         let new_index_version = if self.file_meta.index_file_size > 0 {
             // Increment version if index file exists to avoid overwrite.
@@ -772,9 +1151,35 @@ impl IndexBuildTask {
 
         // Use the same file_id but with new version for index file
         let index_file_id = self.file_meta.file_id;
+        if self.file_meta.index_file_size == 0 && new_index_version == 0 {
+            let index_id = RegionIndexId::new(
+                RegionFileId::new(self.file_meta.region_id, self.file_meta.file_id),
+                new_index_version,
+            );
+            let puffin_path = RegionFilePathFactory::new(
+                self.access_layer.table_dir().to_string(),
+                self.access_layer.path_type(),
+            )
+            .build_index_file_path_with_version(index_id);
+            if self
+                .access_layer
+                .object_store()
+                .exists(&puffin_path)
+                .await
+                .context(OpenDalSnafu)?
+            {
+                warn!(
+                    "Skip rebuilding existing physical v0 index without cached metadata, region: {}, file_id: {}, path: {}",
+                    self.file_meta.region_id, self.file_meta.file_id, puffin_path
+                );
+                return Ok(IndexBuildOutcome::Aborted(format!(
+                    "physical v0 index already exists at {puffin_path}"
+                )));
+            }
+        }
         let mut indexer = self
             .indexer_builder
-            .build(index_file_id, new_index_version)
+            .build_for_region(self.file_meta.region_id, index_file_id, new_index_version)
             .await;
 
         // Check SST file existence before building index to avoid failure of parquet reader.
@@ -837,29 +1242,25 @@ impl IndexBuildTask {
             self.maybe_upload_index_file(index_output.clone(), index_file_id, new_index_version)
                 .await?;
 
-            let worker_request = match self.update_manifest(index_output, new_index_version).await {
-                Ok(edit) => {
-                    let index_build_finished = IndexBuildFinished {
-                        region_id: self.file_meta.region_id,
-                        edit,
-                    };
-                    WorkerRequest::Background {
-                        region_id: self.file_meta.region_id,
-                        notify: BackgroundNotify::IndexBuildFinished(index_build_finished),
-                    }
-                }
-                Err(e) => {
-                    let err = Arc::new(e);
-                    WorkerRequest::Background {
-                        region_id: self.file_meta.region_id,
-                        notify: BackgroundNotify::IndexBuildFailed(IndexBuildFailed { err }),
-                    }
-                }
+            let patch = PhysicalIndexPatch {
+                physical_region_id: self.file_meta.region_id,
+                file_id: self.file_meta.file_id,
+                index_version: new_index_version,
+                index_file_size: index_output.file_size,
+                available_indexes: index_output.build_available_indexes(),
+                indexes: index_output.build_indexes(),
             };
-
-            let _ = self
-                .request_sender
-                .send(WorkerRequestWithTime::new(worker_request))
+            self.physical_coordinator
+                .publish_patch(self.region_file_id(), patch.clone())
+                .await;
+            let result = self.apply_patch_and_notify(patch).await;
+            self.physical_coordinator
+                .finish_apply(self.region_file_id())
+                .await;
+            result?;
+        } else {
+            self.physical_coordinator
+                .promote_or_remove(self.region_file_id())
                 .await;
         }
         Ok(IndexBuildOutcome::Finished)
@@ -913,15 +1314,16 @@ impl IndexBuildTask {
         Ok(())
     }
 
-    async fn update_manifest(
+    async fn update_manifest_with_patch(
         &mut self,
-        output: IndexOutput,
-        new_index_version: u64,
+        patch: PhysicalIndexPatch,
     ) -> Result<RegionEdit> {
-        self.file_meta.available_indexes = output.build_available_indexes();
-        self.file_meta.indexes = output.build_indexes();
-        self.file_meta.index_file_size = output.file_size;
-        self.file_meta.index_version = new_index_version;
+        self.file_meta.region_id = patch.physical_region_id;
+        self.file_meta.file_id = patch.file_id;
+        self.file_meta.available_indexes = patch.available_indexes;
+        self.file_meta.indexes = patch.indexes;
+        self.file_meta.index_file_size = patch.index_file_size;
+        self.file_meta.index_version = patch.index_version;
         let edit = RegionEdit {
             files_to_add: vec![self.file_meta.clone()],
             files_to_remove: vec![],
@@ -971,23 +1373,37 @@ impl Ord for IndexBuildTask {
 /// Tracks the index build status of a region scheduled by the [IndexBuildScheduler].
 pub struct IndexBuildStatus {
     pub region_id: RegionId,
+    pub(crate) version_control: VersionControlRef,
     pub building_files: HashSet<FileId>,
+    pub pending_physical_files: HashSet<RegionFileId>,
+    pub building_physical_files: HashSet<RegionFileId>,
     pub pending_tasks: BinaryHeap<IndexBuildTask>,
 }
 
 impl IndexBuildStatus {
-    pub fn new(region_id: RegionId) -> Self {
+    pub(crate) fn new(region_id: RegionId, version_control: VersionControlRef) -> Self {
         IndexBuildStatus {
             region_id,
+            version_control,
             building_files: HashSet::new(),
+            pending_physical_files: HashSet::new(),
+            building_physical_files: HashSet::new(),
             pending_tasks: BinaryHeap::new(),
         }
     }
 
-    async fn on_failure(self, err: Arc<Error>) {
-        for task in self.pending_tasks {
+    async fn fail_pending(&mut self, err: Arc<Error>) {
+        self.pending_physical_files.clear();
+        for task in std::mem::take(&mut self.pending_tasks) {
             task.on_failure(err.clone()).await;
         }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.building_files.is_empty()
+            && self.pending_tasks.is_empty()
+            && self.pending_physical_files.is_empty()
+            && self.building_physical_files.is_empty()
     }
 }
 
@@ -998,15 +1414,25 @@ pub struct IndexBuildScheduler {
     region_status: HashMap<RegionId, IndexBuildStatus>,
     /// Limit of files allowed to build index concurrently for a region.
     files_limit: usize,
+    physical_coordinator: Arc<PhysicalIndexBuildCoordinator>,
 }
 
 /// Manager background index build tasks of a worker.
 impl IndexBuildScheduler {
-    pub fn new(scheduler: SchedulerRef, files_limit: usize) -> Self {
+    pub(crate) fn physical_coordinator(&self) -> Arc<PhysicalIndexBuildCoordinator> {
+        self.physical_coordinator.clone()
+    }
+
+    pub(crate) fn new(
+        scheduler: SchedulerRef,
+        files_limit: usize,
+        physical_coordinator: Arc<PhysicalIndexBuildCoordinator>,
+    ) -> Self {
         IndexBuildScheduler {
             scheduler,
             region_status: HashMap::new(),
             files_limit,
+            physical_coordinator,
         }
     }
 
@@ -1015,14 +1441,15 @@ impl IndexBuildScheduler {
         version_control: &VersionControlRef,
         task: IndexBuildTask,
     ) -> Result<()> {
-        let status = self
+        let region_file_id = task.region_file_id();
+        if self
             .region_status
-            .entry(task.file_meta.region_id)
-            .or_insert_with(|| IndexBuildStatus::new(task.file_meta.region_id));
-
-        if status.building_files.contains(&task.file_meta.file_id) {
-            let region_file_id =
-                RegionFileId::new(task.file_meta.region_id, task.file_meta.file_id);
+            .get(&task.region_id)
+            .is_some_and(|status| {
+                status.pending_physical_files.contains(&region_file_id)
+                    || status.building_physical_files.contains(&region_file_id)
+            })
+        {
             debug!(
                 "Aborting index build task since index is already being built for region file {:?}",
                 region_file_id
@@ -1036,31 +1463,53 @@ impl IndexBuildScheduler {
             return Ok(());
         }
 
+        let status = self
+            .region_status
+            .entry(task.region_id)
+            .or_insert_with(|| IndexBuildStatus::new(task.region_id, version_control.clone()));
+
+        status.pending_physical_files.insert(region_file_id);
         status.pending_tasks.push(task);
 
-        self.schedule_next_build_batch(version_control);
+        self.schedule_next_build_batch();
         Ok(())
     }
 
     /// Schedule tasks until reaching the files limit or no more tasks.
-    fn schedule_next_build_batch(&mut self, version_control: &VersionControlRef) {
-        let mut building_count = 0;
-        for status in self.region_status.values() {
-            building_count += status.building_files.len();
-        }
+    fn schedule_next_build_batch(&mut self) {
+        let mut building_count = self
+            .region_status
+            .values()
+            .map(|status| status.building_files.len())
+            .sum::<usize>();
 
         while building_count < self.files_limit {
-            if let Some(task) = self.find_next_task() {
-                let region_id = task.file_meta.region_id;
+            if let Some(mut task) = self.find_next_task() {
+                let region_id = task.region_id;
                 let file_id = task.file_meta.file_id;
-                let job = task.into_index_build_job(version_control.clone());
+                let region_file_id = task.region_file_id();
+                let version_control = self
+                    .region_status
+                    .get(&region_id)
+                    .map(|status| status.version_control.clone());
+                let Some(version_control) = version_control else {
+                    error!(
+                        "Region status not found when scheduling index build task, region: {}",
+                        region_id
+                    );
+                    break;
+                };
+                task.physical_coordinator = self.physical_coordinator.clone();
+                let job = task.into_index_build_job(version_control);
                 if self.scheduler.schedule(job).is_ok() {
                     if let Some(status) = self.region_status.get_mut(&region_id) {
                         status.building_files.insert(file_id);
+                        status.pending_physical_files.remove(&region_file_id);
+                        status.building_physical_files.insert(region_file_id);
                         building_count += 1;
                         status
                             .pending_tasks
-                            .retain(|t| t.file_meta.file_id != file_id);
+                            .retain(|t| t.region_file_id() != region_file_id);
                     } else {
                         error!(
                             "Region status not found when scheduling index build task, region: {}",
@@ -1084,7 +1533,7 @@ impl IndexBuildScheduler {
     fn find_next_task(&self) -> Option<IndexBuildTask> {
         self.region_status
             .values()
-            .filter_map(|status| status.pending_tasks.peek())
+            .flat_map(|status| status.pending_tasks.iter())
             .max()
             .cloned()
     }
@@ -1092,18 +1541,21 @@ impl IndexBuildScheduler {
     pub(crate) fn on_task_stopped(
         &mut self,
         region_id: RegionId,
+        physical_region_id: RegionId,
         file_id: FileId,
-        version_control: &VersionControlRef,
     ) {
         if let Some(status) = self.region_status.get_mut(&region_id) {
             status.building_files.remove(&file_id);
-            if status.building_files.is_empty() && status.pending_tasks.is_empty() {
+            status
+                .building_physical_files
+                .remove(&RegionFileId::new(physical_region_id, file_id));
+            if status.is_empty() {
                 // No more tasks for this region, remove it.
                 self.region_status.remove(&region_id);
             }
         }
 
-        self.schedule_next_build_batch(version_control);
+        self.schedule_next_build_batch();
     }
 
     pub(crate) async fn on_failure(&mut self, region_id: RegionId, err: Arc<Error>) {
@@ -1111,10 +1563,10 @@ impl IndexBuildScheduler {
             err; "Index build scheduler encountered failure for region {}, removing all pending tasks.",
             region_id
         );
-        let Some(status) = self.region_status.remove(&region_id) else {
+        let Some(mut status) = self.region_status.remove(&region_id) else {
             return;
         };
-        status.on_failure(err).await;
+        status.fail_pending(err).await;
     }
 
     /// Notifies the scheduler that the region is dropped.
@@ -1142,10 +1594,10 @@ impl IndexBuildScheduler {
     }
 
     async fn remove_region_on_failure(&mut self, region_id: RegionId, err: Arc<Error>) {
-        let Some(status) = self.region_status.remove(&region_id) else {
+        let Some(mut status) = self.region_status.remove(&region_id) else {
             return;
         };
-        status.on_failure(err).await;
+        status.fail_pending(err).await;
     }
 }
 
@@ -1784,6 +2236,7 @@ mod tests {
 
         // Create mock task.
         let task = IndexBuildTask {
+            region_id,
             file,
             file_meta,
             reason: IndexBuildType::Flush,
@@ -1795,6 +2248,7 @@ mod tests {
             indexer_builder,
             request_sender: tx,
             result_sender: result_tx,
+            physical_coordinator: Default::default(),
         };
 
         // Schedule the build task and check result.
@@ -1842,6 +2296,7 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(4);
         let (result_tx, mut result_rx) = mpsc::channel::<Result<IndexBuildOutcome>>(4);
         let task = IndexBuildTask {
+            region_id,
             file,
             file_meta: file_meta.clone(),
             reason: IndexBuildType::Flush,
@@ -1853,6 +2308,7 @@ mod tests {
             indexer_builder,
             request_sender: tx,
             result_sender: result_tx,
+            physical_coordinator: Default::default(),
         };
 
         scheduler
@@ -1917,6 +2373,7 @@ mod tests {
         let (tx, _rx) = mpsc::channel(4);
         let (result_tx, mut result_rx) = mpsc::channel::<Result<IndexBuildOutcome>>(4);
         let task = IndexBuildTask {
+            region_id,
             file,
             file_meta: file_meta.clone(),
             reason: IndexBuildType::Flush,
@@ -1928,6 +2385,7 @@ mod tests {
             indexer_builder,
             request_sender: tx,
             result_sender: result_tx,
+            physical_coordinator: Default::default(),
         };
 
         scheduler
@@ -2021,6 +2479,7 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(4);
         let (result_tx, mut result_rx) = mpsc::channel::<Result<IndexBuildOutcome>>(4);
         let task = IndexBuildTask {
+            region_id,
             file,
             file_meta: file_meta.clone(),
             reason: IndexBuildType::Flush,
@@ -2032,6 +2491,7 @@ mod tests {
             indexer_builder,
             request_sender: tx,
             result_sender: result_tx,
+            physical_coordinator: Default::default(),
         };
 
         scheduler
@@ -2114,6 +2574,7 @@ mod tests {
         let (tx, mut _rx) = mpsc::channel(4);
         let (result_tx, mut result_rx) = mpsc::channel::<Result<IndexBuildOutcome>>(4);
         let task = IndexBuildTask {
+            region_id,
             file,
             file_meta: file_meta.clone(),
             reason: IndexBuildType::Flush,
@@ -2125,6 +2586,7 @@ mod tests {
             indexer_builder,
             request_sender: tx,
             result_sender: result_tx,
+            physical_coordinator: Default::default(),
         };
 
         scheduler
@@ -2168,6 +2630,19 @@ mod tests {
         region_id: RegionId,
         reason: IndexBuildType,
     ) -> (IndexBuildTask, mpsc::Receiver<Result<IndexBuildOutcome>>) {
+        create_mock_task_for_schedule_with_current_and_physical_region(
+            env, file_id, region_id, region_id, reason,
+        )
+        .await
+    }
+
+    async fn create_mock_task_for_schedule_with_current_and_physical_region(
+        env: &SchedulerEnv,
+        file_id: FileId,
+        region_id: RegionId,
+        physical_region_id: RegionId,
+        reason: IndexBuildType,
+    ) -> (IndexBuildTask, mpsc::Receiver<Result<IndexBuildOutcome>>) {
         let metadata = Arc::new(sst_region_metadata());
         let manifest_ctx = env.mock_manifest_context(metadata.clone()).await;
         let file_purger = Arc::new(NoopFilePurger {});
@@ -2176,7 +2651,7 @@ mod tests {
         let (result_tx, result_rx) = mpsc::channel::<Result<IndexBuildOutcome>>(4);
 
         let file_meta = FileMeta {
-            region_id,
+            region_id: physical_region_id,
             file_id,
             file_size: 100,
             ..Default::default()
@@ -2185,6 +2660,7 @@ mod tests {
         let file = FileHandle::new(file_meta.clone(), file_purger.clone());
 
         let task = IndexBuildTask {
+            region_id,
             file,
             file_meta,
             reason,
@@ -2196,8 +2672,323 @@ mod tests {
             indexer_builder,
             request_sender: tx,
             result_sender: result_tx,
+            physical_coordinator: Default::default(),
         };
         (task, result_rx)
+    }
+
+    #[tokio::test]
+    async fn test_index_build_scheduler_rejects_duplicate_pending_physical_file_in_same_region() {
+        let env = SchedulerEnv::new().await;
+        let mut scheduler = env.mock_index_build_scheduler(0);
+        let metadata = Arc::new(sst_region_metadata());
+        let version_control = mock_version_control(
+            metadata.clone(),
+            Arc::new(NoopFilePurger {}),
+            HashMap::new(),
+        )
+        .await;
+
+        let physical_region_id = metadata.region_id;
+        let file_id = FileId::random();
+        let (task1, _rx1) = create_mock_task_for_schedule_with_current_and_physical_region(
+            &env,
+            file_id,
+            RegionId::new(1, 2),
+            physical_region_id,
+            IndexBuildType::Manual,
+        )
+        .await;
+        let (task2, mut rx2) = create_mock_task_for_schedule_with_current_and_physical_region(
+            &env,
+            file_id,
+            RegionId::new(1, 2),
+            physical_region_id,
+            IndexBuildType::Manual,
+        )
+        .await;
+
+        scheduler
+            .schedule_build(&version_control, task1)
+            .await
+            .unwrap();
+        scheduler
+            .schedule_build(&version_control, task2)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            IndexBuildOutcome::Aborted(format!(
+                "Index is already being built for region file {:?}",
+                RegionFileId::new(physical_region_id, file_id)
+            )),
+            rx2.recv().await.unwrap().unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_physical_coordinator_promotes_next_live_waiter() {
+        let coordinator = PhysicalIndexBuildCoordinator::default();
+        let region_file_id = RegionFileId::new(RegionId::new(1, 1), FileId::random());
+
+        assert!(matches!(
+            coordinator.join_or_start(region_file_id).await,
+            JoinPhysicalIndexBuild::Builder
+        ));
+        let JoinPhysicalIndexBuild::Wait(first) = coordinator.join_or_start(region_file_id).await
+        else {
+            panic!("first waiter should wait");
+        };
+        let JoinPhysicalIndexBuild::Wait(second) = coordinator.join_or_start(region_file_id).await
+        else {
+            panic!("second waiter should wait");
+        };
+        drop(first);
+
+        coordinator.promote_or_remove(region_file_id).await;
+        assert!(matches!(
+            second.await.unwrap().unwrap(),
+            PhysicalIndexBuildSignal::Promote
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_physical_coordinator_late_joiner_counts_active_publishing() {
+        let coordinator = PhysicalIndexBuildCoordinator::default();
+        let region_file_id = RegionFileId::new(RegionId::new(1, 1), FileId::random());
+
+        assert!(matches!(
+            coordinator.join_or_start(region_file_id).await,
+            JoinPhysicalIndexBuild::Builder
+        ));
+        coordinator
+            .publish_patch(
+                region_file_id,
+                PhysicalIndexPatch {
+                    physical_region_id: region_file_id.region_id(),
+                    file_id: region_file_id.file_id(),
+                    index_version: 0,
+                    index_file_size: 42,
+                    available_indexes: Default::default(),
+                    indexes: Vec::new(),
+                },
+            )
+            .await;
+
+        assert!(matches!(
+            coordinator.join_or_start(region_file_id).await,
+            JoinPhysicalIndexBuild::ApplyPublishing(_)
+        ));
+
+        coordinator.finish_apply(region_file_id).await;
+        assert!(coordinator.is_publishing(region_file_id).await);
+
+        coordinator.finish_apply(region_file_id).await;
+        assert!(!coordinator.is_publishing(region_file_id).await);
+    }
+
+    #[tokio::test]
+    async fn test_physical_coordinator_caches_completed_patch_after_publish() {
+        let coordinator = PhysicalIndexBuildCoordinator::default();
+        let region_file_id = RegionFileId::new(RegionId::new(1, 1), FileId::random());
+
+        assert!(matches!(
+            coordinator.join_or_start(region_file_id).await,
+            JoinPhysicalIndexBuild::Builder
+        ));
+        coordinator
+            .publish_patch(
+                region_file_id,
+                PhysicalIndexPatch {
+                    physical_region_id: region_file_id.region_id(),
+                    file_id: region_file_id.file_id(),
+                    index_version: 0,
+                    index_file_size: 42,
+                    available_indexes: Default::default(),
+                    indexes: Vec::new(),
+                },
+            )
+            .await;
+        coordinator.finish_apply(region_file_id).await;
+
+        assert!(matches!(
+            coordinator.join_or_start(region_file_id).await,
+            JoinPhysicalIndexBuild::ApplyCompleted(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_physical_coordinator_completed_cache_returns_uncounted_apply() {
+        let coordinator = PhysicalIndexBuildCoordinator::default();
+        let region_file_id = RegionFileId::new(RegionId::new(1, 1), FileId::random());
+
+        assert!(matches!(
+            coordinator.join_or_start(region_file_id).await,
+            JoinPhysicalIndexBuild::Builder
+        ));
+        coordinator
+            .publish_patch(
+                region_file_id,
+                PhysicalIndexPatch {
+                    physical_region_id: region_file_id.region_id(),
+                    file_id: region_file_id.file_id(),
+                    index_version: 0,
+                    index_file_size: 42,
+                    available_indexes: Default::default(),
+                    indexes: Vec::new(),
+                },
+            )
+            .await;
+        coordinator.finish_apply(region_file_id).await;
+        assert!(!coordinator.is_publishing(region_file_id).await);
+
+        assert!(matches!(
+            coordinator.join_or_start(region_file_id).await,
+            JoinPhysicalIndexBuild::ApplyCompleted(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_index_build_scheduler_serializes_duplicate_building_physical_file_across_current_regions()
+     {
+        let env = SchedulerEnv::new().await;
+        let mut scheduler = env.mock_index_build_scheduler(1);
+        let metadata = Arc::new(sst_region_metadata());
+        let version_control = mock_version_control(
+            metadata.clone(),
+            Arc::new(NoopFilePurger {}),
+            HashMap::new(),
+        )
+        .await;
+
+        let physical_region_id = metadata.region_id;
+        let file_id = FileId::random();
+        let current_region_id = RegionId::new(1, 2);
+        let duplicate_region_id = RegionId::new(1, 3);
+        let (task1, _rx1) = create_mock_task_for_schedule_with_current_and_physical_region(
+            &env,
+            file_id,
+            current_region_id,
+            physical_region_id,
+            IndexBuildType::Manual,
+        )
+        .await;
+        let (task2, mut rx2) = create_mock_task_for_schedule_with_current_and_physical_region(
+            &env,
+            file_id,
+            duplicate_region_id,
+            physical_region_id,
+            IndexBuildType::Manual,
+        )
+        .await;
+
+        scheduler
+            .schedule_build(&version_control, task1)
+            .await
+            .unwrap();
+        scheduler
+            .schedule_build(&version_control, task2)
+            .await
+            .unwrap();
+
+        assert!(rx2.try_recv().is_err());
+
+        scheduler.on_task_stopped(current_region_id, physical_region_id, file_id);
+        let _ = duplicate_region_id;
+        assert!(rx2.recv().await.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_index_build_scheduler_stopped_removes_building_physical_guard() {
+        let env = SchedulerEnv::new().await;
+        let mut scheduler = env.mock_index_build_scheduler(1);
+        let metadata = Arc::new(sst_region_metadata());
+        let version_control = mock_version_control(
+            metadata.clone(),
+            Arc::new(NoopFilePurger {}),
+            HashMap::new(),
+        )
+        .await;
+
+        let physical_region_id = metadata.region_id;
+        let file_id = FileId::random();
+        let current_region_id = RegionId::new(1, 2);
+        let (task1, _rx1) = create_mock_task_for_schedule_with_current_and_physical_region(
+            &env,
+            file_id,
+            current_region_id,
+            physical_region_id,
+            IndexBuildType::Manual,
+        )
+        .await;
+        scheduler
+            .schedule_build(&version_control, task1)
+            .await
+            .unwrap();
+        scheduler.on_task_stopped(current_region_id, physical_region_id, file_id);
+
+        let (task2, _rx2) = create_mock_task_for_schedule_with_current_and_physical_region(
+            &env,
+            file_id,
+            RegionId::new(1, 3),
+            physical_region_id,
+            IndexBuildType::Manual,
+        )
+        .await;
+        scheduler
+            .schedule_build(&version_control, task2)
+            .await
+            .unwrap();
+        assert!(scheduler.region_status.contains_key(&RegionId::new(1, 3)));
+    }
+
+    #[tokio::test]
+    async fn test_index_build_scheduler_region_failure_retains_building_physical_guard() {
+        let env = SchedulerEnv::new().await;
+        let mut scheduler = env.mock_index_build_scheduler(1);
+        let metadata = Arc::new(sst_region_metadata());
+        let version_control = mock_version_control(
+            metadata.clone(),
+            Arc::new(NoopFilePurger {}),
+            HashMap::new(),
+        )
+        .await;
+
+        let physical_region_id = metadata.region_id;
+        let file_id = FileId::random();
+        let current_region_id = RegionId::new(1, 2);
+        let (task1, _rx1) = create_mock_task_for_schedule_with_current_and_physical_region(
+            &env,
+            file_id,
+            current_region_id,
+            physical_region_id,
+            IndexBuildType::Manual,
+        )
+        .await;
+        scheduler
+            .schedule_build(&version_control, task1)
+            .await
+            .unwrap();
+        scheduler.on_region_closed(current_region_id).await;
+
+        let duplicate_region_id = RegionId::new(1, 3);
+        let (task2, mut rx2) = create_mock_task_for_schedule_with_current_and_physical_region(
+            &env,
+            file_id,
+            duplicate_region_id,
+            physical_region_id,
+            IndexBuildType::Manual,
+        )
+        .await;
+        scheduler
+            .schedule_build(&version_control, task2)
+            .await
+            .unwrap();
+        assert!(rx2.try_recv().is_err());
+
+        scheduler.on_task_stopped(current_region_id, physical_region_id, file_id);
+        let _ = duplicate_region_id;
+        assert!(!scheduler.region_status.contains_key(&current_region_id));
     }
 
     #[tokio::test]
@@ -2293,7 +3084,7 @@ mod tests {
         assert_eq!(status.pending_tasks.len(), 3); // Three pending
 
         // Test 5: Task completion triggers scheduling next highest priority task (Manual)
-        scheduler.on_task_stopped(region_id, file_id1, &version_control);
+        scheduler.on_task_stopped(region_id, region_id, file_id1);
         let status = scheduler.region_status.get(&region_id).unwrap();
         assert!(!status.building_files.contains(&file_id1));
         assert_eq!(status.building_files.len(), 2); // Should schedule next task
@@ -2302,22 +3093,22 @@ mod tests {
         assert!(status.building_files.contains(&file_id5));
 
         // Test 6: Complete another task, should schedule SchemaChange (second highest priority)
-        scheduler.on_task_stopped(region_id, file_id2, &version_control);
+        scheduler.on_task_stopped(region_id, region_id, file_id2);
         let status = scheduler.region_status.get(&region_id).unwrap();
         assert_eq!(status.building_files.len(), 2);
         assert_eq!(status.pending_tasks.len(), 1); // One less pending
         assert!(status.building_files.contains(&file_id4)); // SchemaChange should be building
 
         // Test 7: Complete remaining tasks and cleanup
-        scheduler.on_task_stopped(region_id, file_id5, &version_control);
-        scheduler.on_task_stopped(region_id, file_id4, &version_control);
+        scheduler.on_task_stopped(region_id, region_id, file_id5);
+        scheduler.on_task_stopped(region_id, region_id, file_id4);
 
         let status = scheduler.region_status.get(&region_id).unwrap();
         assert_eq!(status.building_files.len(), 1); // Last task (Compact) should be building
         assert_eq!(status.pending_tasks.len(), 0);
         assert!(status.building_files.contains(&file_id3));
 
-        scheduler.on_task_stopped(region_id, file_id3, &version_control);
+        scheduler.on_task_stopped(region_id, region_id, file_id3);
 
         // Region should be removed when all tasks complete
         assert!(!scheduler.region_status.contains_key(&region_id));
@@ -2507,7 +3298,7 @@ mod tests {
 
         // --- on_region_dropped ---
         {
-            let (mut scheduler, mut rx2, mut rx3, version_control, region_id, building_file_id) =
+            let (mut scheduler, mut rx2, mut rx3, _version_control, region_id, building_file_id) =
                 setup_scheduler_with_pending_tasks(&env).await;
 
             scheduler.on_region_dropped(region_id).await;
@@ -2523,13 +3314,13 @@ mod tests {
             recv_lifecycle_error(&mut rx3, "dropped", "on_region_dropped").await;
 
             // on_task_stopped after cleanup is a safe no-op.
-            scheduler.on_task_stopped(region_id, building_file_id, &version_control);
+            scheduler.on_task_stopped(region_id, region_id, building_file_id);
             assert!(!scheduler.region_status.contains_key(&region_id));
         }
 
         // --- on_region_closed ---
         {
-            let (mut scheduler, mut rx2, mut rx3, version_control, region_id, building_file_id) =
+            let (mut scheduler, mut rx2, mut rx3, _version_control, region_id, building_file_id) =
                 setup_scheduler_with_pending_tasks(&env).await;
 
             scheduler.on_region_closed(region_id).await;
@@ -2542,13 +3333,13 @@ mod tests {
             recv_lifecycle_error(&mut rx2, "closed", "on_region_closed").await;
             recv_lifecycle_error(&mut rx3, "closed", "on_region_closed").await;
 
-            scheduler.on_task_stopped(region_id, building_file_id, &version_control);
+            scheduler.on_task_stopped(region_id, region_id, building_file_id);
             assert!(!scheduler.region_status.contains_key(&region_id));
         }
 
         // --- on_region_truncated ---
         {
-            let (mut scheduler, mut rx2, mut rx3, version_control, region_id, building_file_id) =
+            let (mut scheduler, mut rx2, mut rx3, _version_control, region_id, building_file_id) =
                 setup_scheduler_with_pending_tasks(&env).await;
 
             scheduler.on_region_truncated(region_id).await;
@@ -2561,7 +3352,7 @@ mod tests {
             recv_lifecycle_error(&mut rx2, "truncated", "on_region_truncated").await;
             recv_lifecycle_error(&mut rx3, "truncated", "on_region_truncated").await;
 
-            scheduler.on_task_stopped(region_id, building_file_id, &version_control);
+            scheduler.on_task_stopped(region_id, region_id, building_file_id);
             assert!(!scheduler.region_status.contains_key(&region_id));
         }
     }
