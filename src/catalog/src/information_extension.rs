@@ -33,6 +33,7 @@ use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties};
 use datatypes::arrow::datatypes::SchemaRef as ArrowSchemaRef;
 use datatypes::schema::SchemaRef;
+use futures_util::future::try_join_all;
 use meta_client::MetaClientRef;
 use snafu::ResultExt;
 use store_api::storage::RegionId;
@@ -69,19 +70,22 @@ impl DistributedInformationExtension {
             .build_plan()
             .context(crate::error::DatafusionSnafu)?;
 
-        let mut streams = Vec::with_capacity(nodes.len());
-        for node in nodes {
-            let client = datanode_manager.datanode(&node.peer).await;
-            let stream = client
-                .handle_query(QueryRequest {
-                    plan: plan.clone(),
-                    region_id: RegionId::default(),
-                    header: None,
-                })
-                .await
-                .context(crate::error::HandleQuerySnafu)?;
-            streams.push(stream);
-        }
+        let streams = try_join_all(nodes.into_iter().map(|node| {
+            let datanode_manager = datanode_manager.clone();
+            let plan = plan.clone();
+            async move {
+                let client = datanode_manager.datanode(&node.peer).await;
+                client
+                    .handle_query(QueryRequest {
+                        plan,
+                        region_id: RegionId::default(),
+                        header: None,
+                    })
+                    .await
+                    .context(crate::error::HandleQuerySnafu)
+            }
+        }))
+        .await?;
 
         let chained =
             ChainedRecordBatchStream::new(streams).context(crate::error::CreateRecordBatchSnafu)?;
@@ -171,9 +175,16 @@ impl ExecutionPlan for DistributedInspectExec {
 
     fn with_new_children(
         self: Arc<Self>,
-        _children: Vec<Arc<dyn ExecutionPlan>>,
+        children: Vec<Arc<dyn ExecutionPlan>>,
     ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
-        Ok(self)
+        if children.is_empty() {
+            Ok(self)
+        } else {
+            Err(datafusion::error::DataFusionError::Internal(
+                "DistributedInspectExec is a leaf execution plan and cannot accept children"
+                    .to_string(),
+            ))
+        }
     }
 
     fn execute(
