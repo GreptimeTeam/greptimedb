@@ -14,7 +14,7 @@
 
 use std::any::Any;
 use std::collections::BTreeSet;
-use std::sync::{Arc, Weak};
+use std::sync::{Arc, OnceLock, Weak};
 
 use async_stream::try_stream;
 use common_catalog::consts::{
@@ -54,7 +54,8 @@ use crate::error::{
     Result, TableMetadataManagerSnafu,
 };
 use crate::information_schema::{
-    InformationExtensionRef, InformationSchemaProvider, InformationSchemaTableFactoryRef,
+    EntityGraphProviderRef, InformationExtensionRef, InformationSchemaProvider,
+    InformationSchemaTableFactoryRef,
 };
 use crate::kvbackend::TableCacheRef;
 use crate::process_manager::ProcessManagerRef;
@@ -71,6 +72,10 @@ use crate::system_schema::pg_catalog::PGCatalogProvider;
 pub struct KvBackendCatalogManager {
     /// Provides the extension methods for the `information_schema` tables
     pub(super) information_extension: InformationExtensionRef,
+    /// Backs the computed entity-graph tables (`semantic_entities` /
+    /// `semantic_relationships`). Set once, after the query engine is built, to
+    /// break the `catalog -> query` cycle; `None` until then.
+    pub(super) entity_graph_provider: Arc<OnceLock<EntityGraphProviderRef>>,
     /// Manages partition rules.
     pub(super) partition_manager: PartitionRuleManagerRef,
     /// Manages table metadata.
@@ -95,6 +100,19 @@ impl KvBackendCatalogManager {
     /// Returns the [`InformationExtension`].
     pub fn information_extension(&self) -> InformationExtensionRef {
         self.information_extension.clone()
+    }
+
+    /// Returns the entity-graph provider, or `None` if it has not been injected
+    /// yet (before the query engine is built). The computed graph tables stream
+    /// empty until it is set.
+    pub fn entity_graph_provider(&self) -> Option<EntityGraphProviderRef> {
+        self.entity_graph_provider.get().cloned()
+    }
+
+    /// Injects the entity-graph provider once the query engine exists. A second
+    /// call is a no-op (the first binding wins).
+    pub fn set_entity_graph_provider(&self, provider: EntityGraphProviderRef) {
+        let _ = self.entity_graph_provider.set(provider);
     }
 
     pub fn partition_manager(&self) -> PartitionRuleManagerRef {

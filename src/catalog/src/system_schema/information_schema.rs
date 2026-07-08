@@ -25,6 +25,7 @@ mod region_info;
 pub mod region_peers;
 mod region_statistics;
 pub mod schemata;
+mod semantic_graph;
 mod ssts;
 pub mod statistics;
 mod table_constraints;
@@ -40,14 +41,14 @@ use std::collections::HashMap;
 use std::sync::{Arc, Weak};
 
 use common_catalog::consts::{self, DEFAULT_CATALOG_NAME, INFORMATION_SCHEMA_NAME};
-use common_error::ext::ErrorExt;
+use common_error::ext::{BoxedError, ErrorExt};
 use common_meta::cluster::NodeInfo;
 use common_meta::datanode::RegionStat;
 use common_meta::key::flow::FlowMetadataManager;
 use common_meta::key::flow::flow_state::FlowStat;
 use common_meta::kv_backend::KvBackendRef;
 use common_procedure::ProcedureInfo;
-use common_recordbatch::SendableRecordBatchStream;
+use common_recordbatch::{RecordBatch, SendableRecordBatchStream};
 use datafusion::error::DataFusionError;
 use datafusion::logical_expr::LogicalPlan;
 use datafusion::physical_plan::ExecutionPlan;
@@ -79,6 +80,7 @@ use crate::system_schema::information_schema::partitions::InformationSchemaParti
 use crate::system_schema::information_schema::recycle_bin::InformationSchemaRecycleBin;
 use crate::system_schema::information_schema::region_peers::InformationSchemaRegionPeers;
 use crate::system_schema::information_schema::schemata::InformationSchemaSchemata;
+use crate::system_schema::information_schema::semantic_graph::InformationSchemaSemanticGraph;
 use crate::system_schema::information_schema::ssts::{
     InformationSchemaSstsIndexMeta, InformationSchemaSstsManifest, InformationSchemaSstsStorage,
 };
@@ -303,6 +305,14 @@ impl SystemSchemaProviderInner for InformationSchemaProvider {
                 self.catalog_name.clone(),
                 self.catalog_manager.clone(),
             )) as _),
+            SEMANTIC_ENTITIES => Some(Arc::new(InformationSchemaSemanticGraph::entities(
+                self.catalog_name.clone(),
+                self.catalog_manager.clone(),
+            )) as _),
+            SEMANTIC_RELATIONSHIPS => Some(Arc::new(InformationSchemaSemanticGraph::relationships(
+                self.catalog_name.clone(),
+                self.catalog_manager.clone(),
+            )) as _),
             _ => None,
         }
     }
@@ -411,6 +421,14 @@ impl InformationSchemaProvider {
             TABLE_SEMANTICS.to_string(),
             self.build_table(TABLE_SEMANTICS).unwrap(),
         );
+        tables.insert(
+            SEMANTIC_ENTITIES.to_string(),
+            self.build_table(SEMANTIC_ENTITIES).unwrap(),
+        );
+        tables.insert(
+            SEMANTIC_RELATIONSHIPS.to_string(),
+            self.build_table(SEMANTIC_RELATIONSHIPS).unwrap(),
+        );
         if let Some(process_list) = self.build_table(PROCESS_LIST) {
             tables.insert(PROCESS_LIST.to_string(), process_list);
         }
@@ -474,6 +492,39 @@ where
 }
 
 pub type InformationExtensionRef = Arc<dyn InformationExtension<Error = Error> + Send + Sync>;
+
+pub type EntityGraphProviderRef = Arc<dyn EntityGraphProvider>;
+
+/// Produces the rows of the computed entity-graph tables
+/// (`semantic_entities` / `semantic_relationships`) at read time.
+///
+/// The computed `InformationTable`s are thin forwarders to this provider, which is
+/// implemented above the query engine (in the frontend): it enumerates the entity
+/// declarations from `table_semantics`, builds the derivation SQL, and executes it.
+/// It is injected into the catalog manager *after* construction — the provider
+/// needs the engine, which needs the catalog manager — so this late binding breaks
+/// the `catalog -> query` dependency cycle. Keeping derivation out of `catalog`
+/// also respects the crate layering (the SQL builders live in `operator`). See
+/// `docs/rfcs/2026-06-25-entity-relationships-and-graph-query.md`.
+#[async_trait::async_trait]
+pub trait EntityGraphProvider: Send + Sync {
+    /// Produces the entity registry (`semantic_entities`) rows for `catalog`. The
+    /// graph is small relative to raw telemetry, so the provider collects the
+    /// derivation into batches (rather than a live stream), keeping the forwarding
+    /// table trivial.
+    async fn scan_entities(
+        &self,
+        catalog: &str,
+        request: ScanRequest,
+    ) -> std::result::Result<Vec<RecordBatch>, BoxedError>;
+
+    /// Produces the relationship set (`semantic_relationships`) rows for `catalog`.
+    async fn scan_relationships(
+        &self,
+        catalog: &str,
+        request: ScanRequest,
+    ) -> std::result::Result<Vec<RecordBatch>, BoxedError>;
+}
 
 /// The `InformationExtension` trait provides the extension methods for the `information_schema` tables.
 #[async_trait::async_trait]

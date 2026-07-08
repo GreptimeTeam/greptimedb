@@ -120,6 +120,10 @@ pub const INFORMATION_SCHEMA_TABLE_SEMANTICS_TABLE_ID: u32 = 42;
 pub const INFORMATION_SCHEMA_STATISTICS_TABLE_ID: u32 = 43;
 /// id for information_schema.recycle_bin
 pub const INFORMATION_SCHEMA_RECYCLE_BIN_TABLE_ID: u32 = 44;
+/// id for information_schema.semantic_entities (computed entity registry)
+pub const INFORMATION_SCHEMA_SEMANTIC_ENTITIES_TABLE_ID: u32 = 45;
+/// id for information_schema.semantic_relationships (computed edge set)
+pub const INFORMATION_SCHEMA_SEMANTIC_RELATIONSHIPS_TABLE_ID: u32 = 46;
 
 // ----- End of information_schema tables -----
 
@@ -166,3 +170,18 @@ pub fn trace_operations_table_name(trace_table_name: &str) -> String {
     format!("{}_operations", trace_table_name)
 }
 // ---- End of special table and fields ----
+
+// ---- Entity relationship graph tables (live in `greptime_private`) ----
+// The `semantic_` prefix ties them to the semantic layer they derive from
+// (`greptime.semantic.entity.*` declarations, `information_schema.table_semantics`);
+// no `__` prefix is needed since `greptime_private` already scopes them.
+/// Computed entity registry: the node set of the observability graph, derived at
+/// read time from tables that declared `greptime.semantic.entity.*` identities.
+pub const SEMANTIC_ENTITIES_TABLE_NAME: &str = "semantic_entities";
+/// Computed relationship set: the edge set of the observability graph, derived at
+/// read time (`calls`/`runs_on`/... ) and unioned with the declared-edge table.
+pub const SEMANTIC_RELATIONSHIPS_TABLE_NAME: &str = "semantic_relationships";
+/// Physical table holding hand-declared edges (`provenance = 'declared'`), the
+/// only stored part of the OSS graph, bootstrapped in `greptime_private`.
+pub const SEMANTIC_RELATIONSHIPS_DECLARED_TABLE_NAME: &str = "semantic_relationships_declared";
+// ---- End of entity relationship graph tables ----

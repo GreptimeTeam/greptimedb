@@ -17,6 +17,8 @@ use std::sync::atomic::AtomicBool;
 
 use cache::{PARTITION_INFO_CACHE_NAME, TABLE_FLOWNODE_SET_CACHE_NAME, TABLE_ROUTE_CACHE_NAME};
 use catalog::CatalogManagerRef;
+use catalog::information_schema::EntityGraphProviderRef;
+use catalog::kvbackend::KvBackendCatalogManager;
 use catalog::process_manager::ProcessManagerRef;
 use common_base::Plugins;
 use common_event_recorder::EventRecorderImpl;
@@ -52,6 +54,7 @@ use crate::events::EventHandlerImpl;
 use crate::frontend::FrontendOptions;
 use crate::heartbeat::frontend_peer_addr;
 use crate::instance::Instance;
+use crate::instance::entity_graph::EntityGraphProviderImpl;
 use crate::instance::region_query::FrontendRegionQueryHandler;
 
 /// The frontend [`Instance`] builder.
@@ -259,6 +262,21 @@ impl FrontendBuilder {
         )
         .context(DataFusionSnafu)?
         .query_engine();
+
+        // Inject the entity-graph provider now that the query engine exists, so the
+        // computed `information_schema.semantic_*` tables can derive rows. Late
+        // binding here breaks the `catalog -> query` dependency cycle.
+        if let Some(kv_catalog) = self
+            .catalog_manager
+            .as_any()
+            .downcast_ref::<KvBackendCatalogManager>()
+        {
+            let provider: EntityGraphProviderRef = Arc::new(EntityGraphProviderImpl::new(
+                query_engine.clone(),
+                Arc::downgrade(&self.catalog_manager),
+            ));
+            kv_catalog.set_entity_graph_provider(provider);
+        }
 
         let frontend_peer_addr = frontend_peer_addr(&self.options);
         let statement_executor = StatementExecutor::new(
