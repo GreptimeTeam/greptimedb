@@ -21,11 +21,11 @@ use num_traits::ToPrimitive;
 use ordered_float::OrderedFloat;
 use serde::{Deserialize, Serialize};
 use serde_json::Number;
-use snafu::{OptionExt, ResultExt, ensure};
+use snafu::{OptionExt, ensure};
 
 use crate::Result;
 use crate::data_type::ConcreteDataType;
-use crate::error::{AlignJsonValueSnafu, SerializeSnafu};
+use crate::error::{AlignJsonValueSnafu, InvalidJsonSnafu, InvalidJsonbSnafu};
 use crate::types::json_type::{JsonNativeType, JsonNumberType};
 use crate::types::{JsonType, StructField, StructType};
 use crate::value::{ListValue, ListValueRef, StructValue, StructValueRef, Value, ValueRef};
@@ -283,13 +283,10 @@ impl Display for JsonVariant {
                         .join(", ")
                 )
             }
-            Self::Variant(x) => {
-                let result: serde_json::Result<serde_json::Value> = serde_json::from_slice(x);
-                match result {
-                    Ok(v) => write!(f, "{v}"),
-                    Err(_) => write!(f, "{x:?}"),
-                }
-            }
+            Self::Variant(x) => match decode_json_variant(x) {
+                Ok(v) => write!(f, "{v}"),
+                Err(_) => write!(f, "{x:?}"),
+            },
         }
     }
 }
@@ -483,13 +480,7 @@ impl JsonValue {
                     JsonVariant::Object(object)
                 }
 
-                (v, JsonNativeType::Variant) => {
-                    let json: serde_json::Value =
-                        JsonValue::new(v).try_into().context(SerializeSnafu)?;
-                    serde_json::to_vec(&json)
-                        .map(JsonVariant::Variant)
-                        .context(SerializeSnafu)?
-                }
+                (v, JsonNativeType::Variant) => JsonVariant::Variant(encode_json_variant(v)?),
 
                 (value, expected) => {
                     return AlignJsonValueSnafu {
@@ -555,10 +546,82 @@ impl TryFrom<JsonValue> for serde_json::Value {
                     }
                     serde_json::Value::Object(map)
                 }
-                JsonVariant::Variant(x) => serde_json::from_slice(&x)?,
+                JsonVariant::Variant(x) => decode_json_variant(&x).map_err(|err| {
+                    serde_json::Error::io(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        err.to_string(),
+                    ))
+                })?,
             })
         }
         helper(v.json_variant)
+    }
+}
+
+pub(crate) fn encode_json_variant(value: JsonVariant) -> Result<Vec<u8>> {
+    match value {
+        JsonVariant::Variant(bytes) => Ok(bytes),
+        value => jsonb::Value::try_from(value).map(|value| value.to_vec()),
+    }
+}
+
+pub(crate) fn decode_json_variant(
+    bytes: &[u8],
+) -> std::result::Result<serde_json::Value, jsonb::Error> {
+    jsonb::from_slice(bytes).map(Into::into)
+}
+
+pub(crate) fn encode_serde_json_as_jsonb(value: serde_json::Value) -> Vec<u8> {
+    jsonb::Value::from(value).to_vec()
+}
+
+impl TryFrom<JsonVariant> for jsonb::Value<'static> {
+    type Error = crate::Error;
+
+    fn try_from(value: JsonVariant) -> Result<Self> {
+        Ok(match value {
+            JsonVariant::Null => jsonb::Value::Null,
+            JsonVariant::Bool(value) => jsonb::Value::Bool(value),
+            JsonVariant::Number(value) => jsonb::Value::Number(value.try_into()?),
+            JsonVariant::String(value) => jsonb::Value::String(value.into()),
+            JsonVariant::Array(values) => jsonb::Value::Array(
+                values
+                    .into_iter()
+                    .map(jsonb::Value::try_from)
+                    .collect::<Result<_>>()?,
+            ),
+            JsonVariant::Object(values) => jsonb::Value::Object(
+                values
+                    .into_iter()
+                    .map(|(key, value)| jsonb::Value::try_from(value).map(|value| (key, value)))
+                    .collect::<Result<_>>()?,
+            ),
+            JsonVariant::Variant(value) => {
+                let value = decode_json_variant(&value)
+                    .map_err(|error| InvalidJsonbSnafu { error }.build())?;
+                jsonb::Value::from(value)
+            }
+        })
+    }
+}
+
+impl TryFrom<JsonNumber> for jsonb::Number {
+    type Error = crate::Error;
+
+    fn try_from(value: JsonNumber) -> Result<Self> {
+        Ok(match value {
+            JsonNumber::PosInt(value) => jsonb::Number::UInt64(value),
+            JsonNumber::NegInt(value) => jsonb::Number::Int64(value),
+            JsonNumber::Float(value) => {
+                ensure!(
+                    !value.0.is_nan(),
+                    InvalidJsonSnafu {
+                        value: "NaN is not a valid JSON number"
+                    }
+                );
+                jsonb::Number::Float64(value.0)
+            }
+        })
     }
 }
 
@@ -890,6 +953,11 @@ mod tests {
     use super::*;
     use crate::types::json_type::JsonObjectType;
 
+    fn jsonb_bytes(json: &str) -> Vec<u8> {
+        let value: serde_json::Value = serde_json::from_str(json).unwrap();
+        encode_json_variant(value.into()).unwrap()
+    }
+
     #[test]
     fn test_align_json_value() -> Result<()> {
         fn parse_json_value(json: &str) -> JsonValue {
@@ -935,7 +1003,7 @@ mod tests {
                         ("note".to_string(), JsonVariant::Null),
                         (
                             "payload".to_string(),
-                            JsonVariant::Variant(br#"{"k":"v"}"#.to_vec()),
+                            JsonVariant::Variant(jsonb_bytes(r#"{"k":"v"}"#)),
                         ),
                     ]))]),
                 ),
@@ -964,7 +1032,9 @@ mod tests {
         value.try_align(&JsonType::new_json2(JsonNativeType::Variant))?;
         assert_eq!(
             value,
-            JsonValue::from(JsonVariant::Variant(br#"{"foo":[1,true,null]}"#.to_vec()))
+            JsonValue::from(JsonVariant::Variant(jsonb_bytes(
+                r#"{"foo":[1,true,null]}"#
+            )))
         );
 
         // Incompatible scalar alignment should fail instead of coercing the value.
@@ -975,6 +1045,15 @@ mod tests {
         assert_eq!(
             err.to_string(),
             r#"Failed to align JSON value, reason: unable to align 'hello' of type "<String>" to type "<Bool>""#
+        );
+
+        let mut value = JsonValue::from(f64::NAN);
+        let err = value
+            .try_align(&JsonType::new_json2(JsonNativeType::Variant))
+            .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "Invalid JSON: NaN is not a valid JSON number"
         );
 
         Ok(())

@@ -138,6 +138,10 @@ mod tests {
             Value::Json(Box::new(value.into()))
         }
 
+        fn jsonb_bytes(json: &str) -> Bytes {
+            Bytes::from(jsonb::parse_value(json.as_bytes()).unwrap().to_vec())
+        }
+
         // Object inputs should merge into a superset schema, preserve null rows,
         // and align conflicting nested values into Variant payloads.
         let mut builder = JsonVectorBuilder::new(JsonNativeType::Object(Default::default()), 3);
@@ -166,7 +170,7 @@ mod tests {
                 vec![
                     Value::Null,
                     Value::Int64(1),
-                    Value::Binary(Bytes::from(br#"{"name":"foo"}"#.to_vec())),
+                    Value::Binary(jsonb_bytes(r#"{"name":"foo"}"#)),
                 ],
                 merged_struct_type.clone(),
             ))
@@ -178,7 +182,7 @@ mod tests {
                 vec![
                     Value::Boolean(true),
                     Value::Int64(2),
-                    Value::Binary(Bytes::from(br#""raw""#.to_vec())),
+                    Value::Binary(jsonb_bytes(r#""raw""#)),
                 ],
                 merged_struct_type,
             ))
