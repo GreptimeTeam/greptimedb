@@ -16,11 +16,20 @@
 //! `SortPreservingMergeExec` operator in datafusion
 //!
 
+use std::any::Any;
 use std::fmt;
 use std::sync::Arc;
 
+use datafusion::execution::TaskContext;
+use datafusion::physical_plan::metrics::MetricsSet;
+use datafusion::physical_plan::sorts::sort_preserving_merge::SortPreservingMergeExec;
+use datafusion::physical_plan::{
+    DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties, SendableRecordBatchStream,
+    Statistics,
+};
 use datafusion_common::{DataFusionError, Result};
 use datafusion_expr::{Extension, LogicalPlan, SortExpr, UserDefinedLogicalNodeCore};
+use datafusion_physical_expr::{Distribution, LexOrdering, OrderingRequirements};
 
 /// MergeSort Logical Plan, have same field as `Sort`, but indicate it is a merge sort,
 /// which assume each input partition is a sorted stream, and will use `SortPreserveingMergeExec`
@@ -61,6 +70,120 @@ impl MergeSortLogicalPlan {
             expr: self.expr,
             fetch: self.fetch,
         })
+    }
+}
+
+/// An opaque physical execution node for [`MergeSortLogicalPlan`].
+///
+/// It delegates execution and physical properties to DataFusion's
+/// [`SortPreservingMergeExec`], but intentionally does not expose itself as a
+/// `SortPreservingMergeExec`. `EnforceSorting` is allowed to replace a bare
+/// `SortPreservingMergeExec` with `CoalescePartitionsExec` when the parent does
+/// not require ordering. `MergeSortExec` represents the distributed TopK merge
+/// stage itself, so later physical optimizer rules must not rewrite it into an
+/// unordered fetch.
+#[derive(Debug, Clone)]
+pub(crate) struct MergeSortExec {
+    inner: SortPreservingMergeExec,
+}
+
+impl MergeSortExec {
+    pub(crate) fn new(
+        ordering: LexOrdering,
+        input: Arc<dyn ExecutionPlan>,
+        fetch: Option<usize>,
+    ) -> Self {
+        Self {
+            inner: SortPreservingMergeExec::new(ordering, input).with_fetch(fetch),
+        }
+    }
+}
+
+impl DisplayAs for MergeSortExec {
+    fn fmt_as(&self, t: DisplayFormatType, f: &mut fmt::Formatter) -> fmt::Result {
+        match t {
+            DisplayFormatType::Default | DisplayFormatType::Verbose => {
+                write!(f, "MergeSortExec: [{}]", self.inner.expr())?;
+                if let Some(fetch) = self.inner.fetch() {
+                    write!(f, ", fetch={fetch}")?;
+                }
+                Ok(())
+            }
+            DisplayFormatType::TreeRender => self.inner.fmt_as(t, f),
+        }
+    }
+}
+
+impl ExecutionPlan for MergeSortExec {
+    fn name(&self) -> &str {
+        "MergeSortExec"
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn properties(&self) -> &Arc<PlanProperties> {
+        self.inner.properties()
+    }
+
+    fn required_input_distribution(&self) -> Vec<Distribution> {
+        self.inner.required_input_distribution()
+    }
+
+    fn benefits_from_input_partitioning(&self) -> Vec<bool> {
+        self.inner.benefits_from_input_partitioning()
+    }
+
+    fn required_input_ordering(&self) -> Vec<Option<OrderingRequirements>> {
+        self.inner.required_input_ordering()
+    }
+
+    fn maintains_input_order(&self) -> Vec<bool> {
+        self.inner.maintains_input_order()
+    }
+
+    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
+        self.inner.children()
+    }
+
+    fn with_new_children(
+        self: Arc<Self>,
+        mut children: Vec<Arc<dyn ExecutionPlan>>,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        Ok(Arc::new(Self::new(
+            self.inner.expr().clone(),
+            children.swap_remove(0),
+            self.inner.fetch(),
+        )))
+    }
+
+    fn execute(
+        &self,
+        partition: usize,
+        context: Arc<TaskContext>,
+    ) -> Result<SendableRecordBatchStream> {
+        self.inner.execute(partition, context)
+    }
+
+    fn metrics(&self) -> Option<MetricsSet> {
+        self.inner.metrics()
+    }
+
+    fn partition_statistics(&self, partition: Option<usize>) -> Result<Statistics> {
+        self.inner.partition_statistics(partition)
+    }
+
+    fn fetch(&self) -> Option<usize> {
+        self.inner.fetch()
+    }
+
+    fn with_fetch(&self, limit: Option<usize>) -> Option<Arc<dyn ExecutionPlan>> {
+        Some(Arc::new(Self::new(
+            self.inner.expr().clone(),
+            Arc::clone(self.inner.input()),
+            limit,
+        )))
     }
 }
 
@@ -125,5 +248,47 @@ pub fn merge_sort_transformer(plan: &LogicalPlan) -> Option<LogicalPlan> {
         )
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use arrow_schema::{DataType, Field, Schema, SortOptions};
+    use datafusion::physical_plan::empty::EmptyExec;
+    use datafusion_physical_expr::PhysicalSortExpr;
+    use datafusion_physical_expr::expressions::col as physical_col;
+
+    use super::*;
+
+    #[test]
+    fn merge_sort_exec_is_opaque_and_preserves_topk_requirements() {
+        let schema = Arc::new(Schema::new(vec![Field::new("ts", DataType::Int64, false)]));
+        let input = Arc::new(EmptyExec::new(schema.clone()).with_partitions(2)) as _;
+        let ordering = LexOrdering::new([PhysicalSortExpr::new(
+            physical_col("ts", schema.as_ref()).unwrap(),
+            SortOptions {
+                descending: true,
+                nulls_first: false,
+            },
+        )])
+        .unwrap();
+
+        let merge_sort =
+            Arc::new(MergeSortExec::new(ordering, input, Some(1))) as Arc<dyn ExecutionPlan>;
+
+        assert_eq!(merge_sort.name(), "MergeSortExec");
+        assert!(
+            merge_sort
+                .as_any()
+                .downcast_ref::<SortPreservingMergeExec>()
+                .is_none(),
+            "MergeSortExec must stay opaque to EnforceSorting's bare SortPreservingMerge rewrite"
+        );
+        assert_eq!(merge_sort.fetch(), Some(1));
+        assert!(merge_sort.required_input_ordering()[0].is_some());
+
+        let fetched = merge_sort.with_fetch(Some(2)).unwrap();
+        assert!(fetched.as_any().downcast_ref::<MergeSortExec>().is_some());
+        assert_eq!(fetched.fetch(), Some(2));
     }
 }
