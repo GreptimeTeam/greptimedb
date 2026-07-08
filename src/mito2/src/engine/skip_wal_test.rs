@@ -257,12 +257,13 @@ async fn test_close_region_skip_wal_while_flush_in_flight_closes_region() {
             .is_empty()
     );
 
+    let request_count = listener.request_count();
     let engine_cloned = engine.clone();
     let flush_job = tokio::spawn(async move {
         flush_region(&engine_cloned, region_id, None).await;
     });
     listener.wait_flush_begin().await;
-    listener.wait_request_begin().await;
+    listener.wait_request_count(request_count + 1).await;
 
     let engine_cloned = engine.clone();
     let close_job = tokio::spawn(async move {
@@ -271,7 +272,7 @@ async fn test_close_region_skip_wal_while_flush_in_flight_closes_region() {
             .await
             .unwrap();
     });
-    listener.wait_request_begin().await;
+    listener.wait_request_count(request_count + 2).await;
 
     listener.wake_flush();
     tokio::time::timeout(Duration::from_secs(5), flush_job)

@@ -253,6 +253,7 @@ pub struct AlterFlushListener {
     flush_begin_notify: Notify,
     block_flush_notify: Notify,
     request_begin_notify: Notify,
+    request_count: AtomicUsize,
 }
 
 impl AlterFlushListener {
@@ -264,6 +265,18 @@ impl AlterFlushListener {
     /// Waits on request begin.
     pub async fn wait_request_begin(&self) {
         self.request_begin_notify.notified().await;
+    }
+
+    /// Waits until the worker has received at least `times` request batches.
+    pub async fn wait_request_count(&self, times: usize) {
+        while self.request_count.load(Ordering::Relaxed) < times {
+            self.request_begin_notify.notified().await;
+        }
+    }
+
+    /// Returns received request batch count.
+    pub fn request_count(&self) -> usize {
+        self.request_count.load(Ordering::Relaxed)
     }
 
     /// Continue the flush job.
@@ -286,6 +299,7 @@ impl EventListener for AlterFlushListener {
     fn on_recv_requests(&self, request_num: usize) {
         info!("receive {} request", request_num);
 
+        self.request_count.fetch_add(1, Ordering::Relaxed);
         self.request_begin_notify.notify_one();
     }
 }
