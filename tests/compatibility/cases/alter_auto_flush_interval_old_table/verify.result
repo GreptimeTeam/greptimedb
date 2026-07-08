@@ -1,0 +1,111 @@
+SELECT host, ts, cpu
+FROM t_alter_auto_flush_interval_old_table
+ORDER BY host, ts;
+
++-------+---------------------+-----+
+| host  | ts                  | cpu |
++-------+---------------------+-----+
+| host1 | 2026-07-07T00:00:00 | 1.0 |
+| host2 | 2026-07-07T00:01:00 | 2.0 |
++-------+---------------------+-----+
+
+SHOW CREATE TABLE t_alter_auto_flush_interval_old_table;
+
++---------------------------------------+----------------------------------------------------------------------+
+| Table                                 | Create Table                                                         |
++---------------------------------------+----------------------------------------------------------------------+
+| t_alter_auto_flush_interval_old_table | CREATE TABLE IF NOT EXISTS "t_alter_auto_flush_interval_old_table" ( |
+|                                       |   "host" STRING NULL,                                                |
+|                                       |   "ts" TIMESTAMP(3) NOT NULL,                                        |
+|                                       |   "cpu" DOUBLE NULL,                                                 |
+|                                       |   TIME INDEX ("ts"),                                                 |
+|                                       |   PRIMARY KEY ("host")                                               |
+|                                       | )                                                                    |
+|                                       |                                                                      |
+|                                       | ENGINE=mito                                                          |
+|                                       |                                                                      |
++---------------------------------------+----------------------------------------------------------------------+
+
+ALTER TABLE t_alter_auto_flush_interval_old_table SET 'auto_flush_interval' = '5m';
+
+Affected Rows: 0
+
+SHOW CREATE TABLE t_alter_auto_flush_interval_old_table;
+
++---------------------------------------+----------------------------------------------------------------------+
+| Table                                 | Create Table                                                         |
++---------------------------------------+----------------------------------------------------------------------+
+| t_alter_auto_flush_interval_old_table | CREATE TABLE IF NOT EXISTS "t_alter_auto_flush_interval_old_table" ( |
+|                                       |   "host" STRING NULL,                                                |
+|                                       |   "ts" TIMESTAMP(3) NOT NULL,                                        |
+|                                       |   "cpu" DOUBLE NULL,                                                 |
+|                                       |   TIME INDEX ("ts"),                                                 |
+|                                       |   PRIMARY KEY ("host")                                               |
+|                                       | )                                                                    |
+|                                       |                                                                      |
+|                                       | ENGINE=mito                                                          |
+|                                       | WITH(                                                                |
+|                                       |   auto_flush_interval = '5m'                                         |
+|                                       | )                                                                    |
++---------------------------------------+----------------------------------------------------------------------+
+
+INSERT INTO t_alter_auto_flush_interval_old_table VALUES
+  ('host3', '2026-07-07 00:02:00+0000', 3.0);
+
+Affected Rows: 1
+
+SELECT host, ts, cpu
+FROM t_alter_auto_flush_interval_old_table
+ORDER BY host, ts;
+
++-------+---------------------+-----+
+| host  | ts                  | cpu |
++-------+---------------------+-----+
+| host1 | 2026-07-07T00:00:00 | 1.0 |
+| host2 | 2026-07-07T00:01:00 | 2.0 |
+| host3 | 2026-07-07T00:02:00 | 3.0 |
++-------+---------------------+-----+
+
+ALTER TABLE t_alter_auto_flush_interval_old_table SET 'auto_flush_interval' = '10m';
+
+Affected Rows: 0
+
+SHOW CREATE TABLE t_alter_auto_flush_interval_old_table;
+
++---------------------------------------+----------------------------------------------------------------------+
+| Table                                 | Create Table                                                         |
++---------------------------------------+----------------------------------------------------------------------+
+| t_alter_auto_flush_interval_old_table | CREATE TABLE IF NOT EXISTS "t_alter_auto_flush_interval_old_table" ( |
+|                                       |   "host" STRING NULL,                                                |
+|                                       |   "ts" TIMESTAMP(3) NOT NULL,                                        |
+|                                       |   "cpu" DOUBLE NULL,                                                 |
+|                                       |   TIME INDEX ("ts"),                                                 |
+|                                       |   PRIMARY KEY ("host")                                               |
+|                                       | )                                                                    |
+|                                       |                                                                      |
+|                                       | ENGINE=mito                                                          |
+|                                       | WITH(                                                                |
+|                                       |   auto_flush_interval = '10m'                                        |
+|                                       | )                                                                    |
++---------------------------------------+----------------------------------------------------------------------+
+
+ALTER TABLE t_alter_auto_flush_interval_old_table SET 'auto_flush_interval' = NULL;
+
+Affected Rows: 0
+
+SHOW CREATE TABLE t_alter_auto_flush_interval_old_table;
+
++---------------------------------------+----------------------------------------------------------------------+
+| Table                                 | Create Table                                                         |
++---------------------------------------+----------------------------------------------------------------------+
+| t_alter_auto_flush_interval_old_table | CREATE TABLE IF NOT EXISTS "t_alter_auto_flush_interval_old_table" ( |
+|                                       |   "host" STRING NULL,                                                |
+|                                       |   "ts" TIMESTAMP(3) NOT NULL,                                        |
+|                                       |   "cpu" DOUBLE NULL,                                                 |
+|                                       |   TIME INDEX ("ts"),                                                 |
+|                                       |   PRIMARY KEY ("host")                                               |
+|                                       | )                                                                    |
+|                                       |                                                                      |
+|                                       | ENGINE=mito                                                          |
+|                                       |                                                                      |
++---------------------------------------+----------------------------------------------------------------------+
