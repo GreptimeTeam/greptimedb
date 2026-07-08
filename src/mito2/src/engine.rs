@@ -358,13 +358,13 @@ impl MitoEngine {
                 );
             let mut dst_region_to_src_regions = Vec::with_capacity(dst2src.len());
             for (dst_region, srcs) in dst2src {
-                let Some(dst_region) = self.find_region(dst_region) else {
+                let Some(region) = self.find_region(dst_region) else {
                     return RegionNotFoundSnafu {
                         region_id: dst_region,
                     }
                     .fail();
                 };
-                dst_region_to_src_regions.push((dst_region, srcs));
+                dst_region_to_src_regions.push((region, srcs));
             }
             dst_region_to_src_regions
         };
