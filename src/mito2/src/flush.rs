@@ -57,7 +57,7 @@ use crate::region::options::{IndexOptions, MergeMode, RegionOptions};
 use crate::region::version::{VersionControlData, VersionControlRef, VersionRef};
 use crate::region::{ManifestContextRef, RegionLeaderState, RegionRoleState, parse_partition_expr};
 use crate::request::{
-    BackgroundNotify, FlushFailed, FlushFinished, OnFailure, OptionOutputTx, OutputTx,
+    BackgroundNotify, DdlRequest, FlushFailed, FlushFinished, OnFailure, OptionOutputTx, OutputTx,
     SenderBulkRequest, SenderDdlRequest, SenderWriteRequest, WorkerRequest, WorkerRequestWithTime,
 };
 use crate::schedule::scheduler::{Job, SchedulerRef};
@@ -1283,7 +1283,11 @@ impl FlushScheduler {
 
     /// Notifies the scheduler that the region is closed.
     pub(crate) fn on_region_closed(&mut self, region_id: RegionId) {
-        self.remove_region_on_failure(region_id, Arc::new(RegionClosedSnafu { region_id }.build()));
+        let Some(flush_status) = self.region_status.remove(&region_id) else {
+            return;
+        };
+
+        flush_status.on_region_closed(Arc::new(RegionClosedSnafu { region_id }.build()));
     }
 
     /// Notifies the scheduler that the region is truncated.
@@ -1400,6 +1404,34 @@ impl FlushStatus {
                 region_id: self.region_id,
             }));
         }
+        for write_req in self.pending_writes {
+            write_req
+                .sender
+                .send(Err(err.clone()).context(FlushRegionSnafu {
+                    region_id: self.region_id,
+                }));
+        }
+    }
+
+    fn on_region_closed(self, err: Arc<Error>) {
+        if let Some(mut task) = self.pending_task {
+            if task.reason == FlushReason::Closing {
+                task.on_success();
+            } else {
+                task.on_failure(err.clone());
+            }
+        }
+
+        for ddl in self.pending_ddls {
+            if matches!(ddl.request, DdlRequest::Close(_)) {
+                ddl.sender.send(Ok(0));
+            } else {
+                ddl.sender.send(Err(err.clone()).context(FlushRegionSnafu {
+                    region_id: self.region_id,
+                }));
+            }
+        }
+
         for write_req in self.pending_writes {
             write_req
                 .sender

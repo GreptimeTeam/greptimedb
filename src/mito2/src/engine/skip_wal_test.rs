@@ -288,6 +288,66 @@ async fn test_close_region_skip_wal_while_flush_in_flight_closes_region() {
 }
 
 #[tokio::test]
+async fn test_concurrent_close_region_skip_wal_while_flush_in_flight_succeeds() {
+    common_telemetry::init_default_ut_logging();
+    let mut env = TestEnv::with_prefix("concurrent-close-skip-wal-while-flush-in-flight").await;
+    let listener = Arc::new(AlterFlushListener::default());
+    let engine = env
+        .create_engine_with(MitoConfig::default(), None, Some(listener.clone()), None)
+        .await;
+
+    let region_id = RegionId::new(1, 1);
+    let mut request = CreateRequestBuilder::new().build();
+    request.options.insert(
+        WAL_OPTIONS_KEY.to_string(),
+        serde_json::to_string(&WalOptions::Noop).unwrap(),
+    );
+
+    engine
+        .handle_request(region_id, RegionRequest::Create(request.clone()))
+        .await
+        .unwrap();
+
+    let rows = Rows {
+        schema: rows_schema(&request),
+        rows: build_rows(0, 3),
+    };
+    put_rows(&engine, region_id, rows).await;
+
+    let request_count = listener.request_count();
+    let engine_cloned = engine.clone();
+    let first_close = tokio::spawn(async move {
+        engine_cloned
+            .handle_request(region_id, RegionRequest::Close(RegionCloseRequest {}))
+            .await
+            .unwrap();
+    });
+    listener.wait_flush_begin().await;
+    listener.wait_request_count(request_count + 1).await;
+
+    let engine_cloned = engine.clone();
+    let second_close = tokio::spawn(async move {
+        engine_cloned
+            .handle_request(region_id, RegionRequest::Close(RegionCloseRequest {}))
+            .await
+            .unwrap();
+    });
+    listener.wait_request_count(request_count + 2).await;
+
+    listener.wake_flush();
+    tokio::time::timeout(Duration::from_secs(5), first_close)
+        .await
+        .unwrap()
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), second_close)
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert!(!engine.is_region_exists(region_id));
+}
+
+#[tokio::test]
 async fn test_close_region_after_truncate_skip_wal() {
     common_telemetry::init_default_ut_logging();
     let mut env = TestEnv::with_prefix("close-truncate-skip-wal").await;
