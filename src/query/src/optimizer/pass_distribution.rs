@@ -294,7 +294,6 @@ mod tests {
             partition_cols,
             Some(RemoteDynFilterProducerId::new(1)),
             false,
-            None,
         )
         .unwrap()
     }

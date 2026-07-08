@@ -14,6 +14,7 @@
 
 //! [ExtensionPlanner] implementation for distributed planner
 
+use std::any::Any;
 use std::sync::Arc;
 
 use ahash::HashMap;
@@ -24,14 +25,18 @@ use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_telemetry::debug;
 use datafusion::common::Result;
 use datafusion::datasource::DefaultTableSource;
-use datafusion::execution::context::SessionState;
-use datafusion::physical_plan::ExecutionPlan;
+use datafusion::execution::context::{SessionState, TaskContext};
+use datafusion::physical_plan::metrics::MetricsSet;
 use datafusion::physical_plan::sorts::sort_preserving_merge::SortPreservingMergeExec;
+use datafusion::physical_plan::{
+    DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties, SendableRecordBatchStream,
+    Statistics,
+};
 use datafusion::physical_planner::{ExtensionPlanner, PhysicalPlanner};
 use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion, TreeNodeVisitor};
 use datafusion_common::{DataFusionError, TableReference};
 use datafusion_expr::{LogicalPlan, UserDefinedLogicalNode};
-use datafusion_physical_expr::{LexOrdering, PhysicalSortExpr};
+use datafusion_physical_expr::{Distribution, LexOrdering, OrderingRequirements, PhysicalSortExpr};
 use partition::manager::{PartitionRuleManagerRef, create_partitions_from_region_routes};
 use session::context::QueryContext;
 use snafu::{OptionExt, ResultExt};
@@ -57,6 +62,145 @@ use crate::region_query::RegionQueryHandlerRef;
 ///
 /// We should ensure the number of partition is not smaller than the number of region at present. Otherwise this would result in incorrect output.
 pub struct MergeSortExtensionPlanner {}
+
+/// An opaque physical execution node for [`MergeSortLogicalPlan`].
+///
+/// It delegates execution and physical properties to DataFusion's
+/// [`SortPreservingMergeExec`], but intentionally does not expose itself as a
+/// `SortPreservingMergeExec`. `EnforceSorting` is allowed to replace a bare
+/// `SortPreservingMergeExec` with `CoalescePartitionsExec` when the parent does
+/// not require ordering. `MergeSortExec` represents the distributed TopK merge
+/// stage itself, so later physical optimizer rules must not rewrite it into an
+/// unordered fetch.
+#[derive(Debug, Clone)]
+struct MergeSortExec {
+    inner: SortPreservingMergeExec,
+}
+
+impl MergeSortExec {
+    fn new(ordering: LexOrdering, input: Arc<dyn ExecutionPlan>, fetch: Option<usize>) -> Self {
+        Self {
+            inner: SortPreservingMergeExec::new(ordering, input).with_fetch(fetch),
+        }
+    }
+}
+
+impl DisplayAs for MergeSortExec {
+    fn fmt_as(&self, t: DisplayFormatType, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match t {
+            DisplayFormatType::Default | DisplayFormatType::Verbose => {
+                write!(f, "MergeSortExec: [{}]", self.inner.expr())?;
+                if let Some(fetch) = self.inner.fetch() {
+                    write!(f, ", fetch={fetch}")?;
+                }
+                Ok(())
+            }
+            DisplayFormatType::TreeRender => self.inner.fmt_as(t, f),
+        }
+    }
+}
+
+impl ExecutionPlan for MergeSortExec {
+    fn name(&self) -> &str {
+        "MergeSortExec"
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn properties(&self) -> &Arc<PlanProperties> {
+        self.inner.properties()
+    }
+
+    fn required_input_distribution(&self) -> Vec<Distribution> {
+        self.inner.required_input_distribution()
+    }
+
+    fn benefits_from_input_partitioning(&self) -> Vec<bool> {
+        self.inner.benefits_from_input_partitioning()
+    }
+
+    fn required_input_ordering(&self) -> Vec<Option<OrderingRequirements>> {
+        self.inner.required_input_ordering()
+    }
+
+    fn maintains_input_order(&self) -> Vec<bool> {
+        self.inner.maintains_input_order()
+    }
+
+    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
+        self.inner.children()
+    }
+
+    fn with_new_children(
+        self: Arc<Self>,
+        mut children: Vec<Arc<dyn ExecutionPlan>>,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        Ok(Arc::new(Self::new(
+            self.inner.expr().clone(),
+            children.swap_remove(0),
+            self.inner.fetch(),
+        )))
+    }
+
+    fn execute(
+        &self,
+        partition: usize,
+        context: Arc<TaskContext>,
+    ) -> Result<SendableRecordBatchStream> {
+        self.inner.execute(partition, context)
+    }
+
+    fn metrics(&self) -> Option<MetricsSet> {
+        self.inner.metrics()
+    }
+
+    fn partition_statistics(&self, partition: Option<usize>) -> Result<Statistics> {
+        self.inner.partition_statistics(partition)
+    }
+
+    fn fetch(&self) -> Option<usize> {
+        self.inner.fetch()
+    }
+
+    fn with_fetch(&self, limit: Option<usize>) -> Option<Arc<dyn ExecutionPlan>> {
+        Some(Arc::new(Self::new(
+            self.inner.expr().clone(),
+            Arc::clone(self.inner.input()),
+            limit,
+        )))
+    }
+}
+
+impl MergeSortExtensionPlanner {
+    fn ordering(
+        session_state: &SessionState,
+        merge_sort: &MergeSortLogicalPlan,
+    ) -> Result<LexOrdering> {
+        let ordering = merge_sort
+            .expr
+            .iter()
+            .map(|sort_expr| {
+                let physical_expr = session_state
+                    .create_physical_expr(sort_expr.expr.clone(), merge_sort.input.schema())?;
+                Ok(PhysicalSortExpr::new(
+                    physical_expr,
+                    SortOptions {
+                        descending: !sort_expr.asc,
+                        nulls_first: sort_expr.nulls_first,
+                    },
+                ))
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        LexOrdering::new(ordering).ok_or_else(|| {
+            DataFusionError::Internal(
+                "Expect MergeSort to have non-empty sort expressions".to_string(),
+            )
+        })
+    }
+}
 
 #[async_trait]
 impl ExtensionPlanner for MergeSortExtensionPlanner {
@@ -90,36 +234,17 @@ impl ExtensionPlanner for MergeSortExtensionPlanner {
                 // and we only need to do a merge sort, otherwise fallback to quick sort
                 let can_merge_sort = partition_cnt >= region_cnt;
                 if can_merge_sort {
-                    let ordering = merge_sort
-                        .expr
-                        .iter()
-                        .map(|sort_expr| {
-                            let physical_expr = session_state.create_physical_expr(
-                                sort_expr.expr.clone(),
-                                merge_sort.input.schema(),
-                            )?;
-                            Ok(PhysicalSortExpr::new(
-                                physical_expr,
-                                SortOptions {
-                                    descending: !sort_expr.asc,
-                                    nulls_first: sort_expr.nulls_first,
-                                },
-                            ))
-                        })
-                        .collect::<Result<Vec<_>>>()?;
-                    let ordering = LexOrdering::new(ordering).ok_or_else(|| {
-                        DataFusionError::Internal(
-                            "Expect MergeSort to have non-empty sort expressions".to_string(),
-                        )
-                    })?;
+                    let ordering = Self::ordering(session_state, merge_sort)?;
                     let input = physical_inputs.first().cloned().ok_or_else(|| {
                         DataFusionError::Internal(
                             "Expect MergeSort to have one physical input".to_string(),
                         )
                     })?;
-                    let ret =
-                        SortPreservingMergeExec::new(ordering, input).with_fetch(merge_sort.fetch);
-                    return Ok(Some(Arc::new(ret)));
+                    return Ok(Some(Arc::new(MergeSortExec::new(
+                        ordering,
+                        input,
+                        merge_sort.fetch,
+                    ))));
                 }
                 // for now merge sort only exist in logical plan, and have the same effect as `Sort`
                 // doesn't change the execution plan, this will change in the future
@@ -200,14 +325,6 @@ impl ExtensionPlanner for DistExtensionPlanner {
 
         // TODO(ruihang): generate different execution plans for different variant merge operation
         let schema = optimized_plan.schema().as_arrow();
-        let target_partition = session_state.config().target_partitions();
-        let output_ordering = Self::output_ordering_for_merge_scan(
-            session_state,
-            merge_scan,
-            input_plan,
-            target_partition,
-            regions.len(),
-        )?;
         let query_ctx = session_state
             .config()
             .get_extension()
@@ -220,11 +337,10 @@ impl ExtensionPlanner for DistExtensionPlanner {
             schema,
             self.region_query_handler.clone(),
             query_ctx,
-            target_partition,
+            session_state.config().target_partitions(),
             merge_scan.partition_cols().clone(),
             merge_scan.remote_dyn_filter_producer_id(),
             self.enable_per_region_metrics,
-            output_ordering,
         )?;
         Ok(Some(Arc::new(merge_scan_plan) as _))
     }
@@ -236,65 +352,6 @@ impl DistExtensionPlanner {
         let mut extractor = TableNameExtractor::default();
         let _ = plan.visit(&mut extractor)?;
         Ok(extractor.table_name)
-    }
-
-    /// Converts the ordering metadata carried by `MergeScanLogicalPlan` into the physical
-    /// ordering property that `MergeScanExec` can advertise.
-    ///
-    /// The metadata itself is produced earlier by `PlanRewriter::expand`, at the point where the
-    /// distributed planner splits a pushed-down `Sort`/TopK into:
-    ///
-    /// ```text
-    /// MergeSort                  -- frontend merge stage
-    ///   MergeScan                -- receives remote streams
-    ///     remote_input = Sort    -- per-region remote sort/topk
-    /// ```
-    ///
-    /// So this method does **not** inspect logical plan shape to infer ordering. It only performs
-    /// the final physical safety check: a `MergeScan` output partition remains ordered only when it
-    /// reads at most one region stream. With fewer output partitions than regions, one output
-    /// partition may concatenate multiple independently sorted region streams, which is not a
-    /// globally sorted stream. `MergeScanExec::to_stream` assigns regions by
-    /// `skip(partition).step_by(target_partition)`, so `target_partition >= region_count` is the
-    /// condition that guarantees at most one region per output partition.
-    fn output_ordering_for_merge_scan(
-        session_state: &SessionState,
-        merge_scan: &MergeScanLogicalPlan,
-        input_plan: &LogicalPlan,
-        target_partition: usize,
-        region_count: usize,
-    ) -> Result<Option<LexOrdering>> {
-        if target_partition < region_count {
-            return Ok(None);
-        }
-
-        merge_scan
-            .remote_output_ordering()
-            .map(|sort_exprs| {
-                sort_exprs
-                    .iter()
-                    .map(|sort_expr| {
-                        let physical_expr = session_state
-                            .create_physical_expr(sort_expr.expr.clone(), input_plan.schema())?;
-                        Ok(PhysicalSortExpr::new(
-                            physical_expr,
-                            SortOptions {
-                                descending: !sort_expr.asc,
-                                nulls_first: sort_expr.nulls_first,
-                            },
-                        ))
-                    })
-                    .collect::<Result<Vec<_>>>()
-                    .and_then(|ordering| {
-                        LexOrdering::new(ordering).ok_or_else(|| {
-                            DataFusionError::Internal(
-                                "Expect output ordering to have non-empty sort expressions"
-                                    .to_string(),
-                            )
-                        })
-                    })
-            })
-            .transpose()
     }
 
     async fn get_regions(
@@ -502,57 +559,43 @@ impl TreeNodeVisitor<'_> for TableNameExtractor {
 
 #[cfg(test)]
 mod tests {
-    use datafusion::prelude::SessionContext;
-    use datafusion_expr::{LogicalPlanBuilder, col, lit};
+    use std::sync::Arc;
+
+    use datafusion::arrow::datatypes::{DataType, Field, Schema};
+    use datafusion::physical_expr::expressions::col as physical_col;
+    use datafusion::physical_plan::empty::EmptyExec;
 
     use super::*;
 
-    fn merge_scan_with_remote_output_ordering() -> (SessionState, MergeScanLogicalPlan, LogicalPlan)
-    {
-        let session_state = SessionContext::new().state();
-        let input_plan = LogicalPlanBuilder::empty(false)
-            .project(vec![lit(1i64).alias("ts")])
-            .unwrap()
-            .build()
-            .unwrap();
-        let merge_scan = MergeScanLogicalPlan::new(input_plan.clone(), false, Default::default())
-            .with_remote_output_ordering(vec![col("ts").sort(false, true)]);
-
-        (session_state, merge_scan, input_plan)
-    }
-
     #[test]
-    fn does_not_advertise_ordering_when_partition_may_merge_regions() {
-        let (session_state, merge_scan, input_plan) = merge_scan_with_remote_output_ordering();
-
-        let output_ordering = DistExtensionPlanner::output_ordering_for_merge_scan(
-            &session_state,
-            &merge_scan,
-            &input_plan,
-            2,
-            3,
-        )
+    fn merge_sort_exec_is_opaque_and_preserves_topk_requirements() {
+        let schema = Arc::new(Schema::new(vec![Field::new("ts", DataType::Int64, false)]));
+        let input = Arc::new(EmptyExec::new(schema.clone()).with_partitions(2)) as _;
+        let ordering = LexOrdering::new([PhysicalSortExpr::new(
+            physical_col("ts", schema.as_ref()).unwrap(),
+            SortOptions {
+                descending: true,
+                nulls_first: false,
+            },
+        )])
         .unwrap();
 
+        let merge_sort =
+            Arc::new(MergeSortExec::new(ordering, input, Some(1))) as Arc<dyn ExecutionPlan>;
+
+        assert_eq!(merge_sort.name(), "MergeSortExec");
         assert!(
-            output_ordering.is_none(),
-            "target_partition < region_count means one output partition may concatenate multiple sorted region streams"
+            merge_sort
+                .as_any()
+                .downcast_ref::<SortPreservingMergeExec>()
+                .is_none(),
+            "MergeSortExec must stay opaque to EnforceSorting's bare SortPreservingMerge rewrite"
         );
-    }
+        assert_eq!(merge_sort.fetch(), Some(1));
+        assert!(merge_sort.required_input_ordering()[0].is_some());
 
-    #[test]
-    fn advertises_ordering_when_each_partition_reads_at_most_one_region() {
-        let (session_state, merge_scan, input_plan) = merge_scan_with_remote_output_ordering();
-
-        let output_ordering = DistExtensionPlanner::output_ordering_for_merge_scan(
-            &session_state,
-            &merge_scan,
-            &input_plan,
-            3,
-            3,
-        )
-        .unwrap();
-
-        assert!(output_ordering.is_some());
+        let fetched = merge_sort.with_fetch(Some(2)).unwrap();
+        assert!(fetched.as_any().downcast_ref::<MergeSortExec>().is_some());
+        assert_eq!(fetched.fetch(), Some(2));
     }
 }

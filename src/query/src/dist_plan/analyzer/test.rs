@@ -100,47 +100,6 @@ fn collect_merge_scan_remote_dyn_filter_producer_id_list(
         .unwrap();
 }
 
-fn collect_merge_scans<'a>(plan: &'a LogicalPlan, merge_scans: &mut Vec<&'a MergeScanLogicalPlan>) {
-    if let LogicalPlan::Extension(extension) = plan
-        && let Some(merge_scan) = extension
-            .node
-            .as_any()
-            .downcast_ref::<MergeScanLogicalPlan>()
-    {
-        merge_scans.push(merge_scan);
-    }
-
-    for input in plan.inputs() {
-        collect_merge_scans(input, merge_scans);
-    }
-}
-
-fn single_merge_scan(plan: &LogicalPlan) -> &MergeScanLogicalPlan {
-    let mut merge_scans = Vec::new();
-    collect_merge_scans(plan, &mut merge_scans);
-    assert_eq!(
-        1,
-        merge_scans.len(),
-        "expected exactly one MergeScan in plan:\n{plan}"
-    );
-    merge_scans.remove(0)
-}
-
-fn assert_remote_output_ordering(
-    merge_scan: &MergeScanLogicalPlan,
-    expected_expr: &str,
-    expected_asc: bool,
-    expected_nulls_first: bool,
-) {
-    let ordering = merge_scan
-        .remote_output_ordering()
-        .expect("expected MergeScan to carry remote output ordering");
-    assert_eq!(1, ordering.len());
-    assert_eq!(expected_expr, ordering[0].expr.to_string());
-    assert_eq!(expected_asc, ordering[0].asc);
-    assert_eq!(expected_nulls_first, ordering[0].nulls_first);
-}
-
 fn assert_remote_table_scan_filters_are_safe(plan: &LogicalPlan) {
     let mut checked_filters = 0;
     assert_remote_table_scan_filters_are_safe_inner(plan, false, &mut checked_filters);
@@ -658,28 +617,6 @@ fn expand_sort_limit() {
     assert_eq!(expected, result.to_string());
 }
 
-#[test]
-fn expand_sort_limit_records_remote_output_ordering() {
-    init_default_ut_logging();
-    let test_table = TestTable::table_with_name(0, "t".to_string());
-    let table_source = Arc::new(DefaultTableSource::new(Arc::new(
-        DfTableProviderAdapter::new(test_table),
-    )));
-    let plan = LogicalPlanBuilder::scan_with_filters("t", table_source, None, vec![])
-        .unwrap()
-        .sort(vec![col("pk1").sort(true, false)])
-        .unwrap()
-        .limit(0, Some(10))
-        .unwrap()
-        .build()
-        .unwrap();
-
-    let config = ConfigOptions::default();
-    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
-
-    assert_remote_output_ordering(single_merge_scan(&result), "t.pk1", true, false);
-}
-
 /// Test merge sort can apply enforce dist requirement columns correctly and use the aliased column correctly, as there is
 /// a aliased sort column, there is no need to add a duplicate sort column using it's original column name
 #[test]
@@ -717,30 +654,6 @@ fn expand_sort_alias_limit() {
     ]
     .join("\n");
     assert_eq!(expected, result.to_string());
-}
-
-#[test]
-fn expand_sort_alias_limit_records_rewritten_remote_output_ordering() {
-    init_default_ut_logging();
-    let test_table = TestTable::table_with_name(0, "t".to_string());
-    let table_source = Arc::new(DefaultTableSource::new(Arc::new(
-        DfTableProviderAdapter::new(test_table),
-    )));
-    let plan = LogicalPlanBuilder::scan_with_filters("t", table_source, None, vec![])
-        .unwrap()
-        .sort(vec![col("pk1").sort(true, false)])
-        .unwrap()
-        .project(vec![col("pk1").alias("something")])
-        .unwrap()
-        .limit(0, Some(10))
-        .unwrap()
-        .build()
-        .unwrap();
-
-    let config = ConfigOptions::default();
-    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
-
-    assert_remote_output_ordering(single_merge_scan(&result), "something", true, false);
 }
 
 /// FIXME(discord9): alias to same name with col req makes it ambiguous
@@ -858,66 +771,6 @@ fn expand_limit_sort() {
     ]
     .join("\n");
     assert_eq!(expected, result.to_string());
-}
-
-#[test]
-fn expand_limit_sort_does_not_record_remote_output_ordering() {
-    init_default_ut_logging();
-    let test_table = TestTable::table_with_name(0, "t".to_string());
-    let table_source = Arc::new(DefaultTableSource::new(Arc::new(
-        DfTableProviderAdapter::new(test_table),
-    )));
-    let plan = LogicalPlanBuilder::scan_with_filters("t", table_source, None, vec![])
-        .unwrap()
-        .limit(0, Some(10))
-        .unwrap()
-        .sort(vec![col("pk1").sort(true, false)])
-        .unwrap()
-        .build()
-        .unwrap();
-
-    let config = ConfigOptions::default();
-    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
-
-    assert!(
-        single_merge_scan(&result)
-            .remote_output_ordering()
-            .is_none(),
-        "Limit below Sort is not split by a MergeSort stage, so MergeScan should not advertise remote ordering"
-    );
-}
-
-#[test]
-fn records_remote_output_ordering_only_from_first_stage() {
-    let merge_scan_input = LogicalPlanBuilder::empty(false)
-        .project(vec![lit(1i64).alias("pk1")])
-        .unwrap()
-        .build()
-        .unwrap();
-    let merge_sort_stage = MergeSortLogicalPlan::new(
-        Arc::new(merge_scan_input.clone()),
-        vec![col("pk1").sort(true, false)],
-        Some(10),
-    )
-    .into_logical_plan();
-    let limit_stage = LogicalPlanBuilder::from(merge_scan_input.clone())
-        .limit(0, Some(10))
-        .unwrap()
-        .build()
-        .unwrap();
-    let mut rewriter = PlanRewriter {
-        stage: vec![limit_stage, merge_sort_stage],
-        ..Default::default()
-    };
-
-    let (_stages, remote_output_ordering) = rewriter
-        .rewrite_stages_and_remote_ordering(&merge_scan_input)
-        .unwrap();
-
-    assert!(
-        remote_output_ordering.is_none(),
-        "only the stage directly attached to MergeScan can provide MergeScan output ordering"
-    );
 }
 
 #[test]

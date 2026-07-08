@@ -197,23 +197,7 @@ group by
 | windows | 2        |
 +---------+----------+
 
-SELECT
-    rack,
-    os,
-    greptime_timestamp
-FROM
-    cpu
-ORDER BY
-    greptime_timestamp DESC
-LIMIT
-    1;
-
-+------+---------+---------------------+
-| rack | os      | greptime_timestamp  |
-+------+---------+---------------------+
-| 8    | windows | 2023-06-12T02:10:00 |
-+------+---------+---------------------+
-
+-- Query the row at the latest timestamp through a scalar subquery.
 SELECT
     rack,
     os,
@@ -237,110 +221,6 @@ WHERE
 +------+---------+---------------------+
 | 8    | windows | 2023-06-12T02:10:00 |
 +------+---------+---------------------+
-
-SELECT
-    rack,
-    os,
-    greptime_timestamp
-FROM
-    cpu
-WHERE
-    greptime_timestamp = (
-        SELECT
-            latest_ts
-        FROM
-            (
-                SELECT
-                    greptime_timestamp AS latest_ts
-                FROM
-                    cpu
-            )
-        ORDER BY
-            latest_ts DESC
-        LIMIT
-            1
-    );
-
-+------+---------+---------------------+
-| rack | os      | greptime_timestamp  |
-+------+---------+---------------------+
-| 8    | windows | 2023-06-12T02:10:00 |
-+------+---------+---------------------+
-
--- SQLNESS REPLACE (-+) -
--- SQLNESS REPLACE (\s\s+) _
--- SQLNESS REPLACE (metrics.*) REDACTED
--- SQLNESS REPLACE (peers.*) REDACTED
--- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
--- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
--- SQLNESS REPLACE "flat_format":\s\w+, "flat_format": REDACTED,
--- SQLNESS REPLACE "(file_id|time_range_start|time_range_end)":"[^"]+" "$1":"REDACTED"
--- SQLNESS REPLACE filter=\[greptime_timestamp@0[^\]]+\] filter=REDACTED
-EXPLAIN ANALYZE SELECT
-    rack,
-    os,
-    greptime_timestamp
-FROM
-    cpu
-WHERE
-    greptime_timestamp = (
-        SELECT
-            greptime_timestamp
-        FROM
-            cpu
-        ORDER BY
-            greptime_timestamp DESC
-        LIMIT
-            1
-    );
-
-+-+-+-+
-| stage | node | plan_|
-+-+-+-+
-| 0_| 0_|_HashJoinExec: mode=CollectLeft, join_type=Inner, on=[(greptime_timestamp@0, greptime_timestamp@2)], projection=[rack@1, os@2, greptime_timestamp@3] REDACTED
-|_|_|_SortPreservingMergeExec: [greptime_timestamp@0 DESC], fetch=1 REDACTED
-|_|_|_MergeScanExec: REDACTED
-|_|_|_ProjectionExec: expr=[rack@0 as rack, os@1 as os, greptime_timestamp@4 as greptime_timestamp] REDACTED
-|_|_|_CooperativeExec REDACTED
-|_|_|_MergeScanExec: REDACTED
-|_|_|_|
-| 1_| 0_|_SortPreservingMergeExec: [greptime_timestamp@0 DESC], fetch=1 REDACTED
-|_|_|_SortExec: TopK(fetch=1), expr=[greptime_timestamp@0 DESC], preserve_partitioning=[true], filter=REDACTED REDACTED
-|_|_|_UnorderedScan: region=REDACTED, "partition_count":REDACTED REDACTED
-|_|_|_|
-| 1_| 1_|_SortPreservingMergeExec: [greptime_timestamp@0 DESC], fetch=1 REDACTED
-|_|_|_SortExec: TopK(fetch=1), expr=[greptime_timestamp@0 DESC], preserve_partitioning=[true], filter=REDACTED REDACTED
-|_|_|_UnorderedScan: region=REDACTED, "partition_count":REDACTED REDACTED
-|_|_|_|
-| 1_| 2_|_SortPreservingMergeExec: [greptime_timestamp@0 DESC], fetch=1 REDACTED
-|_|_|_SortExec: TopK(fetch=1), expr=[greptime_timestamp@0 DESC], preserve_partitioning=[true], filter=REDACTED REDACTED
-|_|_|_UnorderedScan: region=REDACTED, "partition_count":REDACTED REDACTED
-|_|_|_|
-| 1_| 3_|_SortPreservingMergeExec: [greptime_timestamp@0 DESC], fetch=1 REDACTED
-|_|_|_SortExec: TopK(fetch=1), expr=[greptime_timestamp@0 DESC], preserve_partitioning=[true], filter=REDACTED REDACTED
-|_|_|_UnorderedScan: region=REDACTED, "partition_count":REDACTED REDACTED
-|_|_|_|
-| 1_| 4_|_SortPreservingMergeExec: [greptime_timestamp@0 DESC], fetch=1 REDACTED
-|_|_|_SortExec: TopK(fetch=1), expr=[greptime_timestamp@0 DESC], preserve_partitioning=[true], filter=REDACTED REDACTED
-|_|_|_UnorderedScan: region=REDACTED, "partition_count":REDACTED REDACTED
-|_|_|_|
-| 1_| 0_|_CooperativeExec REDACTED
-|_|_|_UnorderedScan: region=REDACTED, "partition_count":REDACTED REDACTED
-|_|_|_|
-| 1_| 1_|_CooperativeExec REDACTED
-|_|_|_UnorderedScan: region=REDACTED, "partition_count":REDACTED REDACTED
-|_|_|_|
-| 1_| 2_|_CooperativeExec REDACTED
-|_|_|_UnorderedScan: region=REDACTED, "partition_count":REDACTED REDACTED
-|_|_|_|
-| 1_| 3_|_CooperativeExec REDACTED
-|_|_|_UnorderedScan: region=REDACTED, "partition_count":REDACTED REDACTED
-|_|_|_|
-| 1_| 4_|_CooperativeExec REDACTED
-|_|_|_UnorderedScan: region=REDACTED, "partition_count":REDACTED REDACTED
-|_|_|_|
-|_|_| Total rows: 1_|
-+-+-+-+
 
 drop table cpu;
 

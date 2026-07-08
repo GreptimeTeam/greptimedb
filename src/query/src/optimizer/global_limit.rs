@@ -106,10 +106,6 @@ impl EnsureGlobalLimitForFetch {
             return Ok(plan);
         };
 
-        if plan.as_any().is::<CoalescePartitionsExec>() {
-            return replace_ordered_coalesce_fetch(plan, fetch);
-        }
-
         if parent
             .global_fetch
             .is_some_and(|parent_fetch| parent_fetch <= fetch)
@@ -126,20 +122,6 @@ impl EnsureGlobalLimitForFetch {
             parent.partitioning_to_restore,
         )
     }
-}
-
-fn replace_ordered_coalesce_fetch(
-    plan: Arc<dyn ExecutionPlan>,
-    fetch: usize,
-) -> DfResult<Arc<dyn ExecutionPlan>> {
-    let child = Arc::clone(plan.children()[0]);
-    let Some(ordering) = child.output_ordering().cloned() else {
-        return Ok(plan);
-    };
-
-    Ok(Arc::new(
-        SortPreservingMergeExec::new(ordering, child).with_fetch(Some(fetch)),
-    ))
 }
 
 #[derive(Clone)]
@@ -174,10 +156,12 @@ fn provided_global_fetch(plan: &Arc<dyn ExecutionPlan>) -> Option<usize> {
 fn add_global_fetch(
     plan: Arc<dyn ExecutionPlan>,
     fetch: usize,
-    _required_ordering: Option<OrderingRequirements>,
+    required_ordering: Option<OrderingRequirements>,
     partitioning_to_restore: Option<Partitioning>,
 ) -> DfResult<Arc<dyn ExecutionPlan>> {
-    let plan = if let Some(ordering) = plan.output_ordering().cloned() {
+    let plan = if required_ordering.is_some()
+        && let Some(ordering) = plan.output_ordering().cloned()
+    {
         Arc::new(SortPreservingMergeExec::new(ordering, plan).with_fetch(Some(fetch)))
             as Arc<dyn ExecutionPlan>
     } else {
@@ -385,38 +369,6 @@ mod tests {
             .unwrap();
 
         assert_eq!(merge.expr(), &actual_ordering);
-    }
-
-    #[test]
-    fn uses_ordered_global_fetch_without_parent_ordering_requirement() {
-        let (input, ordering) = ordered_input();
-        let filter = filter_fetch(input, 1);
-
-        let optimized = add_global_fetch(filter, 1, None, None).unwrap();
-        let merge = optimized
-            .as_any()
-            .downcast_ref::<SortPreservingMergeExec>()
-            .unwrap();
-
-        assert_eq!(merge.expr(), &ordering);
-        assert_eq!(merge.fetch(), Some(1));
-    }
-
-    #[test]
-    fn replaces_ordered_coalesce_fetch_with_sort_preserving_merge() {
-        let (input, ordering) = ordered_input();
-        let coalesce = Arc::new(CoalescePartitionsExec::new(input).with_fetch(Some(1)))
-            as Arc<dyn ExecutionPlan>;
-
-        let optimized =
-            EnsureGlobalLimitForFetch::optimize_plan(coalesce, ParentContext::default()).unwrap();
-        let merge = optimized
-            .as_any()
-            .downcast_ref::<SortPreservingMergeExec>()
-            .unwrap();
-
-        assert_eq!(merge.expr(), &ordering);
-        assert_eq!(merge.fetch(), Some(1));
     }
 
     #[test]

@@ -626,6 +626,7 @@ EXPLAIN SELECT x FROM (SELECT a AS x FROM t) sq ORDER BY x LIMIT 2;
 |_|_TableScan: t_|
 |_| ]]_|
 | physical_plan | SortPreservingMergeExec: [x@0 ASC NULLS LAST], fetch=2_|
+|_|_SortExec: TopK(fetch=2), expr=[x@0 ASC NULLS LAST], preserve_partitioning=[true]_|
 |_|_MergeScanExec: REDACTED
 |_|_|
 +-+-+

@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use ahash::{HashMap, HashSet};
-use arrow_schema::{Schema as ArrowSchema, SchemaRef as ArrowSchemaRef};
+use arrow_schema::{Schema as ArrowSchema, SchemaRef as ArrowSchemaRef, SortOptions};
 use async_stream::stream;
 use common_catalog::parse_catalog_and_schema_from_db_string;
 use common_plugins::GREPTIME_EXEC_READ_COST;
@@ -38,9 +38,9 @@ use datafusion::physical_plan::{
     SendableRecordBatchStream,
 };
 use datafusion_common::{Column as ColumnExpr, DataFusionError, Result};
-use datafusion_expr::{Expr, Extension, LogicalPlan, SortExpr, UserDefinedLogicalNodeCore};
+use datafusion_expr::{Expr, Extension, LogicalPlan, UserDefinedLogicalNodeCore};
 use datafusion_physical_expr::expressions::Column;
-use datafusion_physical_expr::{Distribution, EquivalenceProperties, LexOrdering};
+use datafusion_physical_expr::{Distribution, EquivalenceProperties, PhysicalSortExpr};
 use futures_util::StreamExt;
 use greptime_proto::v1::region::RegionRequestHeader;
 use meter_core::data::ReadItem;
@@ -115,8 +115,6 @@ pub struct MergeScanLogicalPlan {
     /// If this plan is a placeholder
     is_placeholder: bool,
     partition_cols: AliasMapping,
-    /// Output ordering guaranteed by the remote input of this merge scan.
-    remote_output_ordering: Option<Vec<SortExpr>>,
     /// Assigned after dist-plan rewriting so rewriters only deal with plan shape.
     remote_dyn_filter_producer_id: Option<RemoteDynFilterProducerId>,
 }
@@ -164,17 +162,8 @@ impl MergeScanLogicalPlan {
             input,
             is_placeholder,
             partition_cols,
-            remote_output_ordering: None,
             remote_dyn_filter_producer_id: None,
         }
-    }
-
-    pub(crate) fn with_remote_output_ordering(
-        mut self,
-        remote_output_ordering: Vec<SortExpr>,
-    ) -> Self {
-        self.remote_output_ordering = Some(remote_output_ordering);
-        self
     }
 
     pub(crate) fn with_remote_dyn_filter_producer_id(
@@ -206,10 +195,6 @@ impl MergeScanLogicalPlan {
 
     pub fn partition_cols(&self) -> &AliasMapping {
         &self.partition_cols
-    }
-
-    pub fn remote_output_ordering(&self) -> Option<&[SortExpr]> {
-        self.remote_output_ordering.as_deref()
     }
 
     pub fn remote_dyn_filter_producer_id(&self) -> Option<RemoteDynFilterProducerId> {
@@ -263,15 +248,38 @@ impl MergeScanExec {
         partition_cols: AliasMapping,
         remote_dyn_filter_producer_id: Option<RemoteDynFilterProducerId>,
         enable_per_region_metrics: bool,
-        output_ordering: Option<LexOrdering>,
     ) -> Result<Self> {
         // TODO(CookiePieWw): Initially we removed the metadata from the schema in #2000, but we have to
         // keep it for #4619 to identify json type in src/datatypes/src/schema/column_schema.rs.
         // Reconsider if it's possible to remove it.
         let arrow_schema = Arc::new(arrow_schema.clone());
 
-        let eq_properties = if let Some(output_ordering) = output_ordering {
-            EquivalenceProperties::new_with_orderings(arrow_schema.clone(), vec![output_ordering])
+        // States the output ordering of the plan.
+        //
+        // When the input plan is a sort, we can use the sort ordering as the output ordering
+        // if the target partition is greater than the number of regions, which means we won't
+        // break the ordering on merging (of MergeScan).
+        //
+        // Otherwise, we need to use the default ordering.
+        let eq_properties = if let LogicalPlan::Sort(sort) = &plan
+            && target_partition >= regions.len()
+        {
+            let lex_ordering = sort
+                .expr
+                .iter()
+                .map(|sort_expr| {
+                    let physical_expr = session_state
+                        .create_physical_expr(sort_expr.expr.clone(), plan.schema())?;
+                    Ok(PhysicalSortExpr::new(
+                        physical_expr,
+                        SortOptions {
+                            descending: !sort_expr.asc,
+                            nulls_first: sort_expr.nulls_first,
+                        },
+                    ))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            EquivalenceProperties::new_with_orderings(arrow_schema.clone(), vec![lex_ordering])
         } else {
             EquivalenceProperties::new(arrow_schema.clone())
         };
@@ -1167,7 +1175,6 @@ mod tests {
             partition_cols,
             Some(remote_dyn_filter_producer_id),
             false,
-            None,
         )
         .unwrap();
 
@@ -1222,7 +1229,6 @@ mod tests {
             AliasMapping::new(),
             Some(remote_dyn_filter_producer_id),
             false,
-            None,
         )
         .unwrap();
         let dyn_filter = Arc::new(DynamicFilterPhysicalExpr::new(
@@ -1329,7 +1335,6 @@ mod tests {
             AliasMapping::new(),
             None,
             true,
-            None,
         )
         .unwrap();
 
@@ -1399,7 +1404,6 @@ mod tests {
             AliasMapping::new(),
             None,
             true,
-            None,
         )
         .unwrap();
 
