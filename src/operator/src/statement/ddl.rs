@@ -84,6 +84,7 @@ use sql::statements::create::{
 use sql::statements::statement::Statement;
 use sqlparser::ast::{Expr, Ident, UnaryOperator, Value as ParserValue};
 use store_api::metric_engine_consts::{LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME};
+use store_api::mito_engine_options::APPEND_MODE_KEY;
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use table::TableRef;
 use table::dist_table::DistTable;
@@ -2273,12 +2274,14 @@ pub fn verify_alter(
         }
     }
 
-    let _ = table_info
+    let new_meta = table_info
         .meta
         .builder_with_alter_kind(table_name, &request.alter_kind)
         .context(error::TableSnafu)?
         .build()
         .context(error::BuildTableMetaSnafu { table_name })?;
+
+    validate_json2_columns_append_mode(&new_meta.schema, &new_meta.options)?;
 
     Ok(true)
 }
@@ -2328,6 +2331,8 @@ pub fn create_table_info(
     let mut table_options = TableOptions::try_from_iter(&create_table.table_options)
         .context(UnrecognizedTableOptionSnafu)?;
 
+    validate_json2_columns_append_mode(&schema, &table_options)?;
+
     validate_repartition_column_hint(
         &mut table_options,
         &column_name_to_index_map,
@@ -2368,6 +2373,33 @@ pub fn create_table_info(
         table_type: TableType::Base,
     };
     Ok(table_info)
+}
+
+fn validate_json2_columns_append_mode(schema: &Schema, table_options: &TableOptions) -> Result<()> {
+    let append_mode = table_options
+        .extra_options
+        .get(APPEND_MODE_KEY)
+        .is_some_and(|value| value == "true");
+
+    for column in schema.column_schemas() {
+        if column
+            .data_type
+            .as_json()
+            .is_some_and(|json_type| json_type.is_json2())
+        {
+            ensure!(
+                append_mode,
+                InvalidSqlSnafu {
+                    err_msg: format!(
+                        "JSON2 column `{}` requires {}='true'",
+                        column.name, APPEND_MODE_KEY
+                    ),
+                }
+            );
+        }
+    }
+
+    Ok(())
 }
 
 fn validate_repartition_column_hint(
@@ -2991,6 +3023,29 @@ WITH ('repartition.column.hint' = ' host ')",
                 .get(REPARTITION_COLUMN_HINT_KEY),
             Some(&"host".to_string())
         );
+    }
+
+    #[test]
+    fn test_json2_requires_append_mode() {
+        let cases = [
+            "CREATE TABLE monitor (payload JSON2, ts TIMESTAMP TIME INDEX);",
+            "CREATE TABLE monitor (payload JSON2, ts TIMESTAMP TIME INDEX) WITH (append_mode='false');",
+        ];
+
+        for sql in cases {
+            let expr = create_expr_from_sql(sql);
+            let err = create_table_info(&expr, vec![]).unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains("JSON2 column `payload` requires append_mode='true'"),
+                "{err}"
+            );
+        }
+
+        let expr = create_expr_from_sql(
+            "CREATE TABLE monitor (payload JSON2, ts TIMESTAMP TIME INDEX) WITH (append_mode='true');",
+        );
+        create_table_info(&expr, vec![]).unwrap();
     }
 
     #[test]

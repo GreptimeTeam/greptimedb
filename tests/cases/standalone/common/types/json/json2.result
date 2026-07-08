@@ -230,11 +230,43 @@ drop table json2_table;
 
 Affected Rows: 0
 
+create table json2_without_append_mode (
+    ts timestamp time index,
+    j json2
+);
+
+Error: 1004(InvalidArguments), Invalid SQL, error: JSON2 column `j` requires append_mode='true'
+
+create table json2_append_mode_false (
+    ts timestamp time index,
+    j json2
+) with (
+    'append_mode' = 'false'
+);
+
+Error: 1004(InvalidArguments), Invalid SQL, error: JSON2 column `j` requires append_mode='true'
+
+create table json2_alter_non_append (
+    ts timestamp time index
+);
+
+Affected Rows: 0
+
+alter table json2_alter_non_append add column j json2;
+
+Error: 1004(InvalidArguments), Invalid SQL, error: JSON2 column `j` requires append_mode='true'
+
+drop table json2_alter_non_append;
+
+Affected Rows: 0
+
 create table json2_default_null_ok (
     ts timestamp time index,
     j json2(
         a int64 null default null
     )
+) with (
+    'append_mode' = 'true'
 );
 
 Affected Rows: 0
@@ -251,4 +283,21 @@ create table json2_default_null_check (
 );
 
 Error: 2000(InvalidSyntax), Invalid SQL, error: invalid DEFAULT for JSON2 type hint 'a': Default value should not be null for non null column
+
+create table json2_set_append_mode_false (
+    ts timestamp time index,
+    j json2
+) with (
+    'append_mode' = 'true'
+);
+
+Affected Rows: 0
+
+alter table json2_set_append_mode_false set 'append_mode' = 'false';
+
+Error: 1004(InvalidArguments), Invalid SQL, error: JSON2 column `j` requires append_mode='true'
+
+drop table json2_set_append_mode_false;
+
+Affected Rows: 0
 

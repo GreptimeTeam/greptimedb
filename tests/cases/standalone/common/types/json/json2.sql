@@ -71,11 +71,33 @@ select j.d from json2_table order by ts;
 
 drop table json2_table;
 
+create table json2_without_append_mode (
+    ts timestamp time index,
+    j json2
+);
+
+create table json2_append_mode_false (
+    ts timestamp time index,
+    j json2
+) with (
+    'append_mode' = 'false'
+);
+
+create table json2_alter_non_append (
+    ts timestamp time index
+);
+
+alter table json2_alter_non_append add column j json2;
+
+drop table json2_alter_non_append;
+
 create table json2_default_null_ok (
     ts timestamp time index,
     j json2(
         a int64 null default null
     )
+) with (
+    'append_mode' = 'true'
 );
 
 drop table json2_default_null_ok;
@@ -86,3 +108,14 @@ create table json2_default_null_check (
         a int64 not null default null
     )
 );
+
+create table json2_set_append_mode_false (
+    ts timestamp time index,
+    j json2
+) with (
+    'append_mode' = 'true'
+);
+
+alter table json2_set_append_mode_false set 'append_mode' = 'false';
+
+drop table json2_set_append_mode_false;

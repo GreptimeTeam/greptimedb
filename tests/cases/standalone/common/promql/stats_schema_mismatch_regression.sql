@@ -108,6 +108,8 @@ CREATE TABLE promql_instant_mismatch_nested (
   ts TIMESTAMP(3) TIME INDEX,
   k STRING PRIMARY KEY,
   v JSON2,
+) WITH (
+  'append_mode' = 'true'
 );
 
 -- TODO(LFC): Uncomment the following SQLs and results when JSON2 is ready.
