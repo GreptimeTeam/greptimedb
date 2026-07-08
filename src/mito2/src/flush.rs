@@ -1399,6 +1399,13 @@ impl FlushStatus {
                     region_id: self.region_id,
                 }));
         }
+        for bulk_req in self.pending_bulk_writes {
+            bulk_req
+                .sender
+                .send(Err(err.clone()).context(FlushRegionSnafu {
+                    region_id: self.region_id,
+                }));
+        }
     }
 
     fn on_region_closed(self, err: Arc<Error>) {
@@ -1422,6 +1429,13 @@ impl FlushStatus {
 
         for write_req in self.pending_writes {
             write_req
+                .sender
+                .send(Err(err.clone()).context(FlushRegionSnafu {
+                    region_id: self.region_id,
+                }));
+        }
+        for bulk_req in self.pending_bulk_writes {
+            bulk_req
                 .sender
                 .send(Err(err.clone()).context(FlushRegionSnafu {
                     region_id: self.region_id,
@@ -1485,6 +1499,42 @@ mod tests {
             is_staging: false,
             partition_expr: None,
         }
+    }
+
+    fn new_test_bulk_request(
+        region_id: RegionId,
+    ) -> (
+        SenderBulkRequest,
+        oneshot::Receiver<Result<store_api::region_request::AffectedRows>>,
+    ) {
+        let metadata = metadata_for_test();
+        let schema = to_flat_sst_arrow_schema(
+            &metadata,
+            &FlatSchemaOptions::from_encoding(metadata.primary_key_encoding),
+        );
+        let pk_codec = build_primary_key_codec(&metadata);
+        let mut converter = BulkPartConverter::new(&metadata, schema, 16, pk_codec, true);
+        let kvs = build_key_values_with_ts_seq_values(
+            &metadata,
+            "bulk_key".to_string(),
+            1,
+            std::iter::once(1000i64),
+            std::iter::once(Some(1.0f64)),
+            1,
+        );
+        converter.append_key_values(&kvs).unwrap();
+        let (sender, receiver) = oneshot::channel();
+
+        (
+            SenderBulkRequest {
+                sender: OptionOutputTx::from(sender),
+                region_id,
+                request: converter.convert().unwrap(),
+                region_metadata: Some(metadata),
+                partition_expr_version: None,
+            },
+            receiver,
+        )
     }
 
     #[test]
@@ -1683,6 +1733,52 @@ mod tests {
 
         let output = output_rx.await.expect("waiter must receive explicit error");
         assert!(output.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_flush_failure_notifies_pending_bulk_writes() {
+        let region_id = RegionId::new(1, 1);
+        let version_control = Arc::new(VersionControlBuilder::new().build());
+        let (bulk_req, output_rx) = new_test_bulk_request(region_id);
+        let status = FlushStatus {
+            region_id,
+            version_control,
+            pending_task: None,
+            pending_ddls: Vec::new(),
+            pending_writes: Vec::new(),
+            pending_bulk_writes: vec![bulk_req],
+        };
+
+        status.on_failure(Arc::new(RegionClosedSnafu { region_id }.build()));
+
+        let err = output_rx
+            .await
+            .expect("pending bulk write must receive explicit error")
+            .unwrap_err();
+        assert_eq!(err.status_code(), StatusCode::Cancelled);
+    }
+
+    #[tokio::test]
+    async fn test_region_closed_notifies_pending_bulk_writes() {
+        let region_id = RegionId::new(1, 1);
+        let version_control = Arc::new(VersionControlBuilder::new().build());
+        let (bulk_req, output_rx) = new_test_bulk_request(region_id);
+        let status = FlushStatus {
+            region_id,
+            version_control,
+            pending_task: None,
+            pending_ddls: Vec::new(),
+            pending_writes: Vec::new(),
+            pending_bulk_writes: vec![bulk_req],
+        };
+
+        status.on_region_closed(Arc::new(RegionClosedSnafu { region_id }.build()));
+
+        let err = output_rx
+            .await
+            .expect("pending bulk write must receive explicit error")
+            .unwrap_err();
+        assert_eq!(err.status_code(), StatusCode::Cancelled);
     }
 
     #[tokio::test]
