@@ -70,6 +70,27 @@ visibility_timeout_seconds = 30
 pending_rows_flush_interval = "1s"
 ```
 
+Cases can optionally add `[scenario.remote_write.value]` to control the generated
+sample values without changing label cardinality or the runner lifecycle:
+
+```toml
+[scenario.remote_write.value]
+pattern = "modulo"        # linear, constant, modulo, unique, seeded_random
+base = 0.0
+step = 0.125
+cardinality = 16          # distinct buckets for modulo/seeded_random
+seed = 12345              # deterministic seeded_random input
+```
+
+The default `linear` pattern preserves the helper's historical formula. Use
+`constant` or low-cardinality `modulo`/`seeded_random` values for repeated-value
+data shapes, and `unique` or high-cardinality buckets for broad sample-value
+distributions. This is a generic sample-value control for query/ingestion cases;
+it does not inspect or assert storage encoding, Parquet footers, or storage
+policy choices. For chunked remote-write ingestion, the runner passes the sample
+offset and total sample count to the helper so non-linear value patterns use a
+stable global sample ordinal across chunks.
+
 The runner creates the configured database if needed, writes a per-target
 frontend config enabling `[prom_store]` with metric engine storage and a non-zero
 `pending_rows_flush_interval`, and validates that the logical metric table reaches

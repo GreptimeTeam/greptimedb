@@ -17,7 +17,7 @@
 use std::time::{Duration, Instant};
 
 use api::prom_store::remote::{Label, Sample, TimeSeries, WriteRequest};
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use prost::Message;
 use serde_json::json;
 use servers::prom_store::snappy_compress;
@@ -45,6 +45,42 @@ struct Args {
     chunk_series_count: u64,
     #[arg(long, default_value_t = 60)]
     timeout_seconds: u64,
+    #[arg(long, default_value_t = ValuePattern::Linear)]
+    value_pattern: ValuePattern,
+    #[arg(long, default_value_t = 0.0)]
+    value_base: f64,
+    #[arg(long, default_value_t = 0.125)]
+    value_step: f64,
+    #[arg(long, default_value_t = 97)]
+    value_cardinality: u64,
+    #[arg(long, default_value_t = 0)]
+    value_seed: u64,
+    #[arg(long, default_value_t = 0)]
+    value_sample_offset: u64,
+    #[arg(long)]
+    value_total_samples_per_series: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+#[value(rename_all = "snake_case")]
+enum ValuePattern {
+    Linear,
+    Constant,
+    Modulo,
+    Unique,
+    SeededRandom,
+}
+
+impl std::fmt::Display for ValuePattern {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Linear => write!(f, "linear"),
+            Self::Constant => write!(f, "constant"),
+            Self::Modulo => write!(f, "modulo"),
+            Self::Unique => write!(f, "unique"),
+            Self::SeededRandom => write!(f, "seeded_random"),
+        }
+    }
 }
 
 #[tokio::main]
@@ -105,6 +141,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "batches": batches,
             "elapsed_seconds": started.elapsed().as_secs_f64(),
             "http_statuses": http_statuses,
+            "value": {
+                "pattern": args.value_pattern.to_string(),
+                "base": args.value_base,
+                "step": args.value_step,
+                "cardinality": args.value_cardinality,
+                "seed": args.value_seed,
+                "sample_offset": args.value_sample_offset,
+                "total_samples_per_series": args.value_total_samples_per_series.unwrap_or(args.samples_per_series),
+            },
         })
     );
     Ok(())
@@ -121,7 +166,7 @@ fn make_series(args: &Args, series_idx: u64) -> TimeSeries {
     labels.sort_unstable_by(|left, right| left.name.cmp(&right.name));
     let samples = (0..args.samples_per_series)
         .map(|sample_idx| Sample {
-            value: deterministic_value(series_idx, sample_idx),
+            value: deterministic_value(args, series_idx, sample_idx),
             timestamp: args.start_unix_millis + (sample_idx as i64 * args.step_millis),
         })
         .collect();
@@ -139,6 +184,123 @@ fn label(name: &str, value: &str) -> Label {
     }
 }
 
-fn deterministic_value(series_idx: u64, sample_idx: u64) -> f64 {
-    ((series_idx % 97) as f64) + (sample_idx as f64 * 0.125)
+fn deterministic_value(args: &Args, series_idx: u64, sample_idx: u64) -> f64 {
+    let ordinal = value_ordinal(args, series_idx, sample_idx);
+    match args.value_pattern {
+        ValuePattern::Linear => {
+            args.value_base + (series_idx % 97) as f64 + sample_idx as f64 * args.value_step
+        }
+        ValuePattern::Constant => args.value_base,
+        ValuePattern::Modulo => {
+            args.value_base + (ordinal % args.value_cardinality.max(1)) as f64 * args.value_step
+        }
+        ValuePattern::Unique => args.value_base + ordinal as f64 * args.value_step,
+        ValuePattern::SeededRandom => {
+            let bucket = splitmix64(ordinal ^ args.value_seed) % args.value_cardinality.max(1);
+            args.value_base + bucket as f64 * args.value_step
+        }
+    }
+}
+
+fn value_ordinal(args: &Args, series_idx: u64, sample_idx: u64) -> u64 {
+    let total_samples_per_series = args
+        .value_total_samples_per_series
+        .unwrap_or(args.samples_per_series);
+    series_idx * total_samples_per_series + args.value_sample_offset + sample_idx
+}
+
+fn splitmix64(mut value: u64) -> u64 {
+    value = value.wrapping_add(0x9e3779b97f4a7c15);
+    let mut mixed = value;
+    mixed = (mixed ^ (mixed >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+    mixed = (mixed ^ (mixed >> 27)).wrapping_mul(0x94d049bb133111eb);
+    mixed ^ (mixed >> 31)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(value_pattern: ValuePattern) -> Args {
+        Args {
+            endpoint: "http://127.0.0.1:4000/v1/prometheus/write".to_string(),
+            database: "public".to_string(),
+            metric: "metric".to_string(),
+            physical_table: "greptime_physical_table".to_string(),
+            series_count: 8,
+            samples_per_series: 30,
+            start_unix_millis: 1_704_067_200_000,
+            step_millis: 15_000,
+            chunk_series_count: 8,
+            timeout_seconds: 60,
+            value_pattern,
+            value_base: 0.0,
+            value_step: 0.125,
+            value_cardinality: 97,
+            value_seed: 0,
+            value_sample_offset: 0,
+            value_total_samples_per_series: None,
+        }
+    }
+
+    #[test]
+    fn default_linear_matches_old_formula() {
+        let args = args(ValuePattern::Linear);
+        for series_idx in [0, 1, 96, 97, 194] {
+            for sample_idx in [0, 1, 10, 29] {
+                assert_eq!(
+                    deterministic_value(&args, series_idx, sample_idx),
+                    ((series_idx % 97) as f64) + (sample_idx as f64 * 0.125)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn constant_uses_base() {
+        let mut args = args(ValuePattern::Constant);
+        args.value_base = 42.5;
+        assert_eq!(deterministic_value(&args, 7, 11), 42.5);
+    }
+
+    #[test]
+    fn modulo_uses_global_ordinal_and_cardinality() {
+        let mut args = args(ValuePattern::Modulo);
+        args.samples_per_series = 3;
+        args.value_base = 10.0;
+        args.value_step = 2.0;
+        args.value_cardinality = 4;
+        assert_eq!(deterministic_value(&args, 1, 2), 12.0);
+        assert_eq!(deterministic_value(&args, 2, 0), 14.0);
+    }
+
+    #[test]
+    fn unique_uses_global_ordinal() {
+        let mut args = args(ValuePattern::Unique);
+        args.samples_per_series = 10;
+        args.value_base = 1.0;
+        args.value_step = 0.5;
+        assert_eq!(deterministic_value(&args, 2, 3), 12.5);
+    }
+
+    #[test]
+    fn unique_uses_chunk_offset_and_total_samples() {
+        let mut args = args(ValuePattern::Unique);
+        args.samples_per_series = 3;
+        args.value_total_samples_per_series = Some(10);
+        args.value_sample_offset = 3;
+        args.value_step = 1.0;
+        assert_eq!(deterministic_value(&args, 2, 0), 23.0);
+    }
+
+    #[test]
+    fn seeded_random_is_deterministic() {
+        let mut args = args(ValuePattern::SeededRandom);
+        args.value_cardinality = 5;
+        args.value_seed = 123;
+        let first = deterministic_value(&args, 4, 5);
+        assert_eq!(first, deterministic_value(&args, 4, 5));
+        args.value_seed = 124;
+        assert_ne!(first, deterministic_value(&args, 4, 5));
+    }
 }

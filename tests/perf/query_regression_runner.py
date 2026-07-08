@@ -827,6 +827,22 @@ def run_remote_write(generator: Path | None, target: RunTarget, remote: dict[str
         "--chunk-series-count", str(int(remote.get("chunk_series_count", remote.get("batch_size", 8)))),
         "--timeout-seconds", str(int(remote.get("timeout_seconds", 60))),
     ]
+    value = remote.get("value")
+    if isinstance(value, dict):
+        if "pattern" in value:
+            cmd.extend(["--value-pattern", str(value["pattern"])])
+        if "base" in value:
+            cmd.extend(["--value-base", str(value["base"])])
+        if "step" in value:
+            cmd.extend(["--value-step", str(value["step"])])
+        if "cardinality" in value:
+            cmd.extend(["--value-cardinality", str(int(value["cardinality"]))])
+        if "seed" in value:
+            cmd.extend(["--value-seed", str(int(value["seed"]))])
+        if "sample_offset" in remote:
+            cmd.extend(["--value-sample-offset", str(int(remote["sample_offset"]))])
+        if "total_samples_per_series" in remote:
+            cmd.extend(["--value-total-samples-per-series", str(int(remote["total_samples_per_series"]))])
     if dry_run:
         return {"status": "dry-run", "cmd": cmd}
     result = run_command(cmd)
@@ -889,6 +905,8 @@ def run_remote_write_ingestion(generator: Path | None, target: RunTarget, remote
         chunk_remote = dict(remote)
         chunk_remote["samples_per_series"] = current
         chunk_remote["start_unix_millis"] = start + offset * step
+        chunk_remote["sample_offset"] = offset
+        chunk_remote["total_samples_per_series"] = total_samples
         result = run_remote_write(generator, target, chunk_remote, dry_run=dry_run)
         result["sample_offset"] = offset
         result["samples_per_series"] = current
