@@ -64,3 +64,4 @@ CREATE TABLE row_group_bad (
 ) WITH ('max_row_group_row_count' = '0');
 
 Error: 1004(InvalidArguments), Invalid region options, max_row_group_row_count must be in (0, 10485760], got 0
+
