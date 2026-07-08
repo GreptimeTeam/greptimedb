@@ -351,13 +351,14 @@ async fn test_close_region_skip_wal_rejects_writes_queued_after_close() {
     listener.wait_request_count(request_count + 3).await;
 
     let engine_cloned = engine.clone();
+    let request_cloned = request.clone();
     let write_job = tokio::spawn(async move {
         engine_cloned
             .handle_request(
                 region_id,
                 RegionRequest::Put(RegionPutRequest {
                     rows: Rows {
-                        schema: rows_schema(&request),
+                        schema: rows_schema(&request_cloned),
                         rows: build_rows(4, 5),
                     },
                     hint: None,
@@ -374,6 +375,26 @@ async fn test_close_region_skip_wal_rejects_writes_queued_after_close() {
         .unwrap()
         .unwrap();
     listener.wait_flush_begin().await;
+
+    let engine_cloned = engine.clone();
+    let request_cloned = request.clone();
+    let late_write_job = tokio::spawn(async move {
+        engine_cloned
+            .handle_request(
+                region_id,
+                RegionRequest::Put(RegionPutRequest {
+                    rows: Rows {
+                        schema: rows_schema(&request_cloned),
+                        rows: build_rows(5, 6),
+                    },
+                    hint: None,
+                    partition_expr_version: None,
+                }),
+            )
+            .await
+    });
+    listener.wait_request_count(request_count + 5).await;
+
     listener.wake_flush();
     tokio::time::timeout(Duration::from_secs(5), close_job)
         .await
@@ -383,8 +404,13 @@ async fn test_close_region_skip_wal_rejects_writes_queued_after_close() {
         .await
         .unwrap()
         .unwrap();
+    let late_write_result = tokio::time::timeout(Duration::from_secs(5), late_write_job)
+        .await
+        .unwrap()
+        .unwrap();
 
     assert!(write_result.is_err());
+    assert!(late_write_result.is_err());
     assert!(!engine.is_region_exists(region_id));
 }
 

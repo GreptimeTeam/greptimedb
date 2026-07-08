@@ -1171,12 +1171,13 @@ impl FlushScheduler {
             return Ok(());
         }
 
+        let closing = task.reason == FlushReason::Closing;
         self.schedule_flush_task(version_control, task)?;
 
         // Add this region to status map.
         let _ = self.region_status.insert(
             region_id,
-            FlushStatus::new(region_id, version_control.clone()),
+            FlushStatus::new(region_id, version_control.clone(), closing),
         );
 
         Ok(())
@@ -1329,11 +1330,11 @@ impl FlushScheduler {
         status.pending_bulk_writes.push(request);
     }
 
-    /// Returns true if the region has pending DDLs.
+    /// Returns true if the region has pending DDLs or a close-time flush.
     pub(crate) fn has_pending_ddls(&self, region_id: RegionId) -> bool {
         self.region_status
             .get(&region_id)
-            .map(|status| !status.pending_ddls.is_empty())
+            .map(|status| !status.pending_ddls.is_empty() || status.closing)
             .unwrap_or(false)
     }
 }
@@ -1357,6 +1358,8 @@ struct FlushStatus {
     version_control: VersionControlRef,
     /// Task waiting for next flush.
     pending_task: Option<RegionFlushTask>,
+    /// Whether a close-time flush is in progress or pending.
+    closing: bool,
     /// Pending ddl requests.
     pending_ddls: Vec<SenderDdlRequest>,
     /// Requests waiting to write after altering the region.
@@ -1366,11 +1369,12 @@ struct FlushStatus {
 }
 
 impl FlushStatus {
-    fn new(region_id: RegionId, version_control: VersionControlRef) -> FlushStatus {
+    fn new(region_id: RegionId, version_control: VersionControlRef, closing: bool) -> FlushStatus {
         FlushStatus {
             region_id,
             version_control,
             pending_task: None,
+            closing,
             pending_ddls: Vec::new(),
             pending_writes: Vec::new(),
             pending_bulk_writes: Vec::new(),
@@ -1379,6 +1383,7 @@ impl FlushStatus {
 
     /// Merges the task to pending task.
     fn merge_task(&mut self, task: RegionFlushTask) {
+        self.closing |= task.reason == FlushReason::Closing;
         if let Some(pending) = &mut self.pending_task {
             pending.merge(task);
         } else {
@@ -1746,6 +1751,7 @@ mod tests {
             region_id,
             version_control,
             pending_task: None,
+            closing: false,
             pending_ddls: Vec::new(),
             pending_writes: Vec::new(),
             pending_bulk_writes: vec![bulk_req],
@@ -1769,6 +1775,7 @@ mod tests {
             region_id,
             version_control,
             pending_task: None,
+            closing: false,
             pending_ddls: Vec::new(),
             pending_writes: Vec::new(),
             pending_bulk_writes: vec![bulk_req],
