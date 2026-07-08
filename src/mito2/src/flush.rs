@@ -39,7 +39,7 @@ use crate::cache::CacheManagerRef;
 use crate::config::MitoConfig;
 use crate::engine::region_hook::SstFileInfo;
 use crate::error::{
-    Error, FlushRegionSnafu, InvalidRequestSnafu, JoinSnafu, RegionClosedSnafu, RegionDroppedSnafu,
+    Error, FlushRegionSnafu, JoinSnafu, RegionBusySnafu, RegionClosedSnafu, RegionDroppedSnafu,
     RegionTruncatedSnafu, Result,
 };
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
@@ -1126,13 +1126,7 @@ impl FlushScheduler {
         // If current region doesn't have flush status, we can flush the region directly.
         if let Err(e) = version_control.freeze_mutable() {
             error!(e; "Failed to freeze the mutable memtable for region {}", region_id);
-            task.on_failure(Arc::new(
-                InvalidRequestSnafu {
-                    region_id,
-                    reason: format!("Failed to freeze mutable memtable before flush: {e}"),
-                }
-                .build(),
-            ));
+            task.on_failure(Arc::new(RegionBusySnafu { region_id }.build()));
 
             return Err(e);
         }
@@ -1140,13 +1134,7 @@ impl FlushScheduler {
         let (job, waiters) = task.into_flush_job(version_control);
         if let Err(e) = self.scheduler.schedule(job) {
             error!(e; "Failed to schedule flush job for region {}", region_id);
-            waiters.on_failure(Arc::new(
-                InvalidRequestSnafu {
-                    region_id,
-                    reason: format!("Failed to schedule flush job: {e}"),
-                }
-                .build(),
-            ));
+            waiters.on_failure(Arc::new(RegionBusySnafu { region_id }.build()));
 
             return Err(e);
         }
@@ -1444,6 +1432,8 @@ impl FlushStatus {
 
 #[cfg(test)]
 mod tests {
+    use common_error::ext::ErrorExt;
+    use common_error::status_code::StatusCode;
     use mito_codec::row_converter::build_primary_key_codec;
     use tokio::sync::oneshot;
 
@@ -1630,8 +1620,11 @@ mod tests {
             .schedule_flush(builder.region_id(), &version_control, task)
             .unwrap_err();
 
-        let output = output_rx.await.expect("waiter must receive explicit error");
-        assert!(output.is_err());
+        let err = output_rx
+            .await
+            .expect("waiter must receive explicit error")
+            .unwrap_err();
+        assert_eq!(err.status_code(), StatusCode::RegionBusy);
     }
 
     #[tokio::test]
