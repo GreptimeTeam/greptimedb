@@ -17,10 +17,10 @@
 use common_telemetry::info;
 use store_api::logstore::LogStore;
 use store_api::logstore::provider::Provider;
-use store_api::region_request::{RegionFlushReason, RegionFlushRequest};
+use store_api::region_request::{RegionCloseRequest, RegionFlushReason, RegionFlushRequest};
 use store_api::storage::RegionId;
 
-use crate::request::OptionOutputTx;
+use crate::request::{DdlRequest, OptionOutputTx, SenderDdlRequest};
 use crate::worker::RegionWorkerLoop;
 
 impl<S: LogStore> RegionWorkerLoop<S> {
@@ -48,6 +48,15 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             && region.is_flushable()
         {
             info!("Region {} has pending data, waiting for flush", region_id);
+            if self.flush_scheduler.is_flush_requested(region_id) {
+                self.flush_scheduler
+                    .add_ddl_request_to_pending(SenderDdlRequest {
+                        region_id,
+                        sender,
+                        request: DdlRequest::Close(RegionCloseRequest {}),
+                    });
+                return;
+            }
             self.handle_flush_request(
                 region_id,
                 RegionFlushRequest {

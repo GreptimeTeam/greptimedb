@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
+use std::time::Duration;
+
 use api::v1::Rows;
 use common_wal::options::{WAL_OPTIONS_KEY, WalOptions};
 use store_api::region_engine::{RegionEngine, RegionRole};
@@ -21,7 +24,10 @@ use store_api::region_request::{
 use store_api::storage::{RegionId, ScanRequest};
 
 use crate::config::MitoConfig;
-use crate::test_util::{CreateRequestBuilder, TestEnv, build_rows, put_rows, rows_schema};
+use crate::engine::listener::AlterFlushListener;
+use crate::test_util::{
+    CreateRequestBuilder, TestEnv, build_rows, flush_region, put_rows, rows_schema,
+};
 
 #[tokio::test]
 async fn test_close_region_skip_wal_with_pending_data() {
@@ -210,6 +216,71 @@ async fn test_close_follower_region_skip_wal_with_pending_data() {
     engine
         .handle_request(region_id, RegionRequest::Close(RegionCloseRequest {}))
         .await
+        .unwrap();
+
+    assert!(!engine.is_region_exists(region_id));
+}
+
+#[tokio::test]
+async fn test_close_region_skip_wal_while_flush_in_flight_closes_region() {
+    common_telemetry::init_default_ut_logging();
+    let mut env = TestEnv::with_prefix("close-skip-wal-while-flush-in-flight").await;
+    let listener = Arc::new(AlterFlushListener::default());
+    let engine = env
+        .create_engine_with(MitoConfig::default(), None, Some(listener.clone()), None)
+        .await;
+
+    let region_id = RegionId::new(1, 1);
+    let mut request = CreateRequestBuilder::new().build();
+    let wal_options = WalOptions::Noop;
+    request.options.insert(
+        WAL_OPTIONS_KEY.to_string(),
+        serde_json::to_string(&wal_options).unwrap(),
+    );
+
+    engine
+        .handle_request(region_id, RegionRequest::Create(request.clone()))
+        .await
+        .unwrap();
+
+    let rows = Rows {
+        schema: rows_schema(&request),
+        rows: build_rows(0, 3),
+    };
+    put_rows(&engine, region_id, rows).await;
+    assert!(
+        !engine
+            .get_region(region_id)
+            .unwrap()
+            .version()
+            .memtables
+            .is_empty()
+    );
+
+    let engine_cloned = engine.clone();
+    let flush_job = tokio::spawn(async move {
+        flush_region(&engine_cloned, region_id, None).await;
+    });
+    listener.wait_flush_begin().await;
+    listener.wait_request_begin().await;
+
+    let engine_cloned = engine.clone();
+    let close_job = tokio::spawn(async move {
+        engine_cloned
+            .handle_request(region_id, RegionRequest::Close(RegionCloseRequest {}))
+            .await
+            .unwrap();
+    });
+    listener.wait_request_begin().await;
+
+    listener.wake_flush();
+    tokio::time::timeout(Duration::from_secs(5), flush_job)
+        .await
+        .unwrap()
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), close_job)
+        .await
+        .unwrap()
         .unwrap();
 
     assert!(!engine.is_region_exists(region_id));
