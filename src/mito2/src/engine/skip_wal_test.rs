@@ -19,7 +19,7 @@ use api::v1::Rows;
 use common_wal::options::{WAL_OPTIONS_KEY, WalOptions};
 use store_api::region_engine::{RegionEngine, RegionRole};
 use store_api::region_request::{
-    RegionCloseRequest, RegionOpenRequest, RegionRequest, RegionTruncateRequest,
+    RegionCloseRequest, RegionOpenRequest, RegionPutRequest, RegionRequest, RegionTruncateRequest,
 };
 use store_api::storage::{RegionId, ScanRequest};
 
@@ -284,6 +284,107 @@ async fn test_close_region_skip_wal_while_flush_in_flight_closes_region() {
         .unwrap()
         .unwrap();
 
+    assert!(!engine.is_region_exists(region_id));
+}
+
+#[tokio::test]
+async fn test_close_region_skip_wal_rejects_writes_queued_after_close() {
+    common_telemetry::init_default_ut_logging();
+    let mut env = TestEnv::with_prefix("close-skip-wal-rejects-writes-after-close").await;
+    let listener = Arc::new(AlterFlushListener::default());
+    let engine = env
+        .create_engine_with(MitoConfig::default(), None, Some(listener.clone()), None)
+        .await;
+
+    let region_id = RegionId::new(1, 1);
+    let mut request = CreateRequestBuilder::new().build();
+    request.options.insert(
+        WAL_OPTIONS_KEY.to_string(),
+        serde_json::to_string(&WalOptions::Noop).unwrap(),
+    );
+
+    engine
+        .handle_request(region_id, RegionRequest::Create(request.clone()))
+        .await
+        .unwrap();
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: rows_schema(&request),
+            rows: build_rows(0, 3),
+        },
+    )
+    .await;
+
+    let request_count = listener.request_count();
+    let engine_cloned = engine.clone();
+    let flush_job = tokio::spawn(async move {
+        flush_region(&engine_cloned, region_id, None).await;
+    });
+    listener.wait_flush_begin().await;
+    listener.wait_request_count(request_count + 1).await;
+
+    let pre_close_write = engine
+        .handle_request(
+            region_id,
+            RegionRequest::Put(RegionPutRequest {
+                rows: Rows {
+                    schema: rows_schema(&request),
+                    rows: build_rows(3, 4),
+                },
+                hint: None,
+                partition_expr_version: None,
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(1, pre_close_write.affected_rows);
+
+    let engine_cloned = engine.clone();
+    let close_job = tokio::spawn(async move {
+        engine_cloned
+            .handle_request(region_id, RegionRequest::Close(RegionCloseRequest {}))
+            .await
+            .unwrap();
+    });
+    listener.wait_request_count(request_count + 3).await;
+
+    let engine_cloned = engine.clone();
+    let write_job = tokio::spawn(async move {
+        engine_cloned
+            .handle_request(
+                region_id,
+                RegionRequest::Put(RegionPutRequest {
+                    rows: Rows {
+                        schema: rows_schema(&request),
+                        rows: build_rows(4, 5),
+                    },
+                    hint: None,
+                    partition_expr_version: None,
+                }),
+            )
+            .await
+    });
+    listener.wait_request_count(request_count + 4).await;
+
+    listener.wake_flush();
+    tokio::time::timeout(Duration::from_secs(5), flush_job)
+        .await
+        .unwrap()
+        .unwrap();
+    listener.wait_flush_begin().await;
+    listener.wake_flush();
+    tokio::time::timeout(Duration::from_secs(5), close_job)
+        .await
+        .unwrap()
+        .unwrap();
+    let write_result = tokio::time::timeout(Duration::from_secs(5), write_job)
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert!(write_result.is_err());
     assert!(!engine.is_region_exists(region_id));
 }
 

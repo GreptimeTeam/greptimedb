@@ -342,6 +342,20 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             {
                 // Perform DDLs first because they require empty memtables.
                 self.handle_ddl_requests(&mut ddl_requests).await;
+                if self.flush_scheduler.is_flush_requested(region_id) {
+                    // The DDL may schedule another flush, e.g. a close-time flush after writes
+                    // arrived in the mutable memtable during the previous flush. Keep pending
+                    // writes fenced until that flush reaches its terminal state instead of
+                    // accepting them while the DDL is still in progress.
+                    for write_request in write_requests {
+                        self.flush_scheduler
+                            .add_write_request_to_pending(write_request);
+                    }
+                    for bulk_write in bulk_writes {
+                        self.flush_scheduler.add_bulk_request_to_pending(bulk_write);
+                    }
+                    return;
+                }
                 // Handle pending write requests, we don't stall these requests.
                 self.handle_write_requests(&mut write_requests, &mut bulk_writes, false)
                     .await;
