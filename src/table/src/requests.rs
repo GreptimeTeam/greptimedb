@@ -59,6 +59,19 @@ pub const FILE_TABLE_FORMAT_KEY: &str = "format";
 pub const TABLE_DATA_MODEL: &str = "table_data_model";
 pub const TABLE_DATA_MODEL_TRACE_V1: &str = "greptime_trace_v1";
 
+/// Returns true if the table stores spans in the `greptime_trace_v1` data model
+/// (fixed span columns), the shape the Jaeger query path and the entity-graph
+/// derivation rely on.
+pub fn is_trace_v1_table(table_info: &crate::metadata::TableInfo) -> bool {
+    table_info
+        .meta
+        .options
+        .extra_options
+        .get(TABLE_DATA_MODEL)
+        .map(|v| v == TABLE_DATA_MODEL_TRACE_V1)
+        .unwrap_or(false)
+}
+
 pub const OTLP_METRIC_COMPAT_KEY: &str = "otlp_metric_compat";
 pub const OTLP_METRIC_COMPAT_PROM: &str = "prom";
 

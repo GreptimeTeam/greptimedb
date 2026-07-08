@@ -32,7 +32,7 @@ use table::metadata::TableInfoRef;
 use crate::error::{
     CatalogSnafu, ColumnDataTypeSnafu, ColumnDefaultValueSnafu, ColumnNoneDefaultValueSnafu,
     ColumnNotFoundSnafu, InvalidInsertRequestSnafu, InvalidSqlSnafu, MissingInsertBodySnafu,
-    ParseSqlSnafu, Result, SchemaReadOnlySnafu, TableNotFoundSnafu,
+    ParseSqlSnafu, Result, SchemaReadOnlySnafu, TableNotFoundSnafu, TableReadOnlySnafu,
 };
 use crate::insert::InstantAndNormalInsertRequests;
 use crate::req_convert::common::partitioner::Partitioner;
@@ -72,6 +72,12 @@ impl<'a> StatementToRegion<'a> {
         ensure!(
             !common_catalog::consts::is_readonly_schema(&schema),
             SchemaReadOnlySnafu { name: schema }
+        );
+        // The computed entity-graph tables overlay a writable schema, so the
+        // schema-level check above does not cover them.
+        ensure!(
+            !common_catalog::consts::is_readonly_table(&schema, &table_name),
+            TableReadOnlySnafu { name: table_name }
         );
 
         let column_names = column_names(stmt, &table_schema);

@@ -14,11 +14,12 @@
 
 use std::any::Any;
 use std::collections::BTreeSet;
-use std::sync::{Arc, Weak};
+use std::sync::{Arc, OnceLock, Weak};
 
 use async_stream::try_stream;
 use common_catalog::consts::{
-    DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, INFORMATION_SCHEMA_NAME, PG_CATALOG_NAME,
+    DEFAULT_CATALOG_NAME, DEFAULT_PRIVATE_SCHEMA_NAME, DEFAULT_SCHEMA_NAME,
+    INFORMATION_SCHEMA_NAME, PG_CATALOG_NAME,
 };
 use common_error::ext::BoxedError;
 use common_meta::cache::{
@@ -61,6 +62,7 @@ use crate::process_manager::ProcessManagerRef;
 use crate::system_schema::SystemSchemaProvider;
 use crate::system_schema::numbers_table_provider::NumbersTableProvider;
 use crate::system_schema::pg_catalog::PGCatalogProvider;
+use crate::system_schema::semantic_graph::{EntityGraphProviderRef, SemanticGraphTableProvider};
 
 /// Access all existing catalog, schema and tables.
 ///
@@ -71,6 +73,12 @@ use crate::system_schema::pg_catalog::PGCatalogProvider;
 pub struct KvBackendCatalogManager {
     /// Provides the extension methods for the `information_schema` tables
     pub(super) information_extension: InformationExtensionRef,
+    /// Backs the computed entity-graph tables (`semantic_entities` /
+    /// `semantic_relationships`). Set once, after the query engine is built, to
+    /// break the `catalog -> query` cycle; `None` until then. `Arc` so the cell
+    /// stays shared across `Clone`s of the manager (a plain `OnceLock` would
+    /// fork on clone).
+    pub(super) entity_graph_provider: Arc<OnceLock<EntityGraphProviderRef>>,
     /// Manages partition rules.
     pub(super) partition_manager: PartitionRuleManagerRef,
     /// Manages table metadata.
@@ -95,6 +103,19 @@ impl KvBackendCatalogManager {
     /// Returns the [`InformationExtension`].
     pub fn information_extension(&self) -> InformationExtensionRef {
         self.information_extension.clone()
+    }
+
+    /// Returns the entity-graph provider, or `None` if it has not been injected
+    /// yet (before the query engine is built). The computed graph tables stream
+    /// empty until it is set.
+    pub fn entity_graph_provider(&self) -> Option<EntityGraphProviderRef> {
+        self.entity_graph_provider.get().cloned()
+    }
+
+    /// Injects the entity-graph provider once the query engine exists. A second
+    /// call is a no-op (the first binding wins).
+    pub fn set_entity_graph_provider(&self, provider: EntityGraphProviderRef) {
+        let _ = self.entity_graph_provider.set(provider);
     }
 
     pub fn partition_manager(&self) -> PartitionRuleManagerRef {
@@ -577,6 +598,9 @@ impl SystemCatalog {
                 self.pg_catalog_provider.table_names()
             }
             DEFAULT_SCHEMA_NAME => self.numbers_table_provider.table_names(),
+            // Computed entity-graph tables overlay the physical tables of
+            // `greptime_private` (the caller appends these to the physical list).
+            DEFAULT_PRIVATE_SCHEMA_NAME => SemanticGraphTableProvider::table_names(),
             _ => vec![],
         }
     }
@@ -597,6 +621,8 @@ impl SystemCatalog {
             self.numbers_table_provider.table_exists(table)
         } else if schema == PG_CATALOG_NAME && channel == Channel::Postgres {
             self.pg_catalog_provider.table(table).is_some()
+        } else if schema == DEFAULT_PRIVATE_SCHEMA_NAME {
+            SemanticGraphTableProvider::table_exists(table)
         } else {
             false
         }
@@ -640,6 +666,14 @@ impl SystemCatalog {
             }
         } else if schema == DEFAULT_SCHEMA_NAME {
             self.numbers_table_provider.table(table_name)
+        } else if schema == DEFAULT_PRIVATE_SCHEMA_NAME
+            && SemanticGraphTableProvider::table_exists(table_name)
+        {
+            // Constructed on demand (the provider is a name + a weak ref); the
+            // system catalog is consulted before physical resolution, so the
+            // computed tables shadow same-named physical tables by design.
+            SemanticGraphTableProvider::new(catalog.to_string(), self.catalog_manager.clone())
+                .table(table_name)
         } else {
             None
         }

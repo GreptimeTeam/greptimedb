@@ -123,6 +123,13 @@ pub const INFORMATION_SCHEMA_RECYCLE_BIN_TABLE_ID: u32 = 44;
 
 // ----- End of information_schema tables -----
 
+// Computed system tables under `greptime_private` (same virtual-table id space
+// as the information_schema tables above).
+/// id for greptime_private.semantic_entities (computed entity registry)
+pub const SEMANTIC_ENTITIES_TABLE_ID: u32 = 45;
+/// id for greptime_private.semantic_relationships (computed edge set)
+pub const SEMANTIC_RELATIONSHIPS_TABLE_ID: u32 = 46;
+
 /// ----- Begin of pg_catalog tables -----
 pub const PG_CATALOG_TABLE_ID_START: u32 = 256;
 // Please leave at 128 table ids for Postgres
@@ -146,12 +153,34 @@ pub fn is_readonly_schema(schema: &str) -> bool {
     matches!(schema, INFORMATION_SCHEMA_NAME)
 }
 
+/// Returns true for tables that must reject DDL/DML: everything in a read-only
+/// schema, plus computed system tables overlaid on a writable schema (the
+/// entity-graph tables under `greptime_private`).
+pub fn is_readonly_table(schema: &str, table: &str) -> bool {
+    is_readonly_schema(schema)
+        || (schema == DEFAULT_PRIVATE_SCHEMA_NAME
+            && matches!(
+                table,
+                SEMANTIC_ENTITIES_TABLE_NAME | SEMANTIC_RELATIONSHIPS_TABLE_NAME
+            ))
+}
+
 // ---- special table and fields ----
 pub const TRACE_ID_COLUMN: &str = "trace_id";
 pub const SPAN_ID_COLUMN: &str = "span_id";
 pub const SPAN_NAME_COLUMN: &str = "span_name";
 pub const SERVICE_NAME_COLUMN: &str = "service_name";
 pub const PARENT_SPAN_ID_COLUMN: &str = "parent_span_id";
+// More fixed columns/values of the `greptime_trace_v1` data model, shared by
+// the ingest side (`servers::otlp::trace` re-exports them) and the read-time
+// graph derivation so the two cannot silently drift.
+pub const TRACE_TIMESTAMP_COLUMN: &str = "timestamp";
+pub const SPAN_KIND_COLUMN: &str = "span_kind";
+pub const SPAN_STATUS_CODE_COLUMN: &str = "span_status_code";
+pub const DURATION_NANO_COLUMN: &str = "duration_nano";
+pub const SPAN_KIND_CLIENT: &str = "SPAN_KIND_CLIENT";
+pub const SPAN_KIND_SERVER: &str = "SPAN_KIND_SERVER";
+pub const SPAN_STATUS_ERROR: &str = "STATUS_CODE_ERROR";
 pub const TRACE_TABLE_NAME: &str = "opentelemetry_traces";
 pub const TRACE_TABLE_NAME_SESSION_KEY: &str = "trace_table_name";
 // ---- End of special table and fields ----
@@ -166,3 +195,15 @@ pub fn trace_operations_table_name(trace_table_name: &str) -> String {
     format!("{}_operations", trace_table_name)
 }
 // ---- End of special table and fields ----
+
+// ---- Entity relationship graph tables (live in `greptime_private`) ----
+// The `semantic_` prefix ties them to the semantic layer they derive from
+// (`greptime.semantic.entity.*` declarations, `information_schema.table_semantics`);
+// no `__` prefix is needed since `greptime_private` already scopes them.
+/// Computed entity registry: the node set of the observability graph, derived at
+/// read time from tables that declared `greptime.semantic.entity.*` identities.
+pub const SEMANTIC_ENTITIES_TABLE_NAME: &str = "semantic_entities";
+/// Computed relationship set: the edge set of the observability graph, derived at
+/// read time (`calls`/`runs_on`/... ) and unioned with the declared-edge table.
+pub const SEMANTIC_RELATIONSHIPS_TABLE_NAME: &str = "semantic_relationships";
+// ---- End of entity relationship graph tables ----
