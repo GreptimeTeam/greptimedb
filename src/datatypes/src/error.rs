@@ -264,13 +264,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Invalid json value, {}", msg))]
-    InvalidJsonValue {
-        msg: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Failed to merge JSON datatype: {reason}"))]
     MergeJsonDatatype {
         reason: String,
@@ -329,7 +322,6 @@ impl ErrorExt for Error {
             | InvalidVector { .. }
             | InvalidFulltextOption { .. }
             | InvalidSkippingIndexOption { .. }
-            | InvalidJsonValue { .. }
             | MergeJsonDatatype { .. } => StatusCode::InvalidArguments,
 
             ValueExceedsPrecision { .. }

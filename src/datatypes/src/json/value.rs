@@ -25,7 +25,7 @@ use snafu::{OptionExt, ensure};
 
 use crate::Result;
 use crate::data_type::ConcreteDataType;
-use crate::error::{AlignJsonValueSnafu, InvalidJsonValueSnafu, InvalidJsonbSnafu};
+use crate::error::{AlignJsonValueSnafu, InvalidJsonSnafu, InvalidJsonbSnafu};
 use crate::types::json_type::{JsonNativeType, JsonNumberType};
 use crate::types::{JsonType, StructField, StructType};
 use crate::value::{ListValue, ListValueRef, StructValue, StructValueRef, Value, ValueRef};
@@ -559,10 +559,10 @@ impl TryFrom<JsonValue> for serde_json::Value {
 }
 
 pub(crate) fn encode_json_variant(value: JsonVariant) -> Result<Vec<u8>> {
-    if let JsonVariant::Variant(bytes) = &value {
-        return Ok(bytes.clone());
+    match value {
+        JsonVariant::Variant(bytes) => Ok(bytes),
+        value => jsonb::Value::try_from(value).map(|value| value.to_vec()),
     }
-    jsonb::Value::try_from(value).map(|value| value.to_vec())
 }
 
 pub(crate) fn decode_json_variant(
@@ -596,7 +596,6 @@ impl TryFrom<JsonVariant> for jsonb::Value<'static> {
                     .map(|(key, value)| jsonb::Value::try_from(value).map(|value| (key, value)))
                     .collect::<Result<_>>()?,
             ),
-            // This branch should be unreachable.
             JsonVariant::Variant(value) => {
                 let value = decode_json_variant(&value)
                     .map_err(|error| InvalidJsonbSnafu { error }.build())?;
@@ -616,8 +615,8 @@ impl TryFrom<JsonNumber> for jsonb::Number {
             JsonNumber::Float(value) => {
                 ensure!(
                     !value.0.is_nan(),
-                    InvalidJsonValueSnafu {
-                        msg: "NaN is not a valid JSON number"
+                    InvalidJsonSnafu {
+                        value: "NaN is not a valid JSON number"
                     }
                 );
                 jsonb::Number::Float64(value.0)
@@ -1054,7 +1053,7 @@ mod tests {
             .unwrap_err();
         assert_eq!(
             err.to_string(),
-            "Invalid json value, NaN is not a valid JSON number"
+            "Invalid JSON: NaN is not a valid JSON number"
         );
 
         Ok(())
