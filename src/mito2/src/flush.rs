@@ -306,6 +306,17 @@ impl FlushTaskWaiters {
     }
 }
 
+impl Drop for FlushTaskWaiters {
+    fn drop(&mut self) {
+        self.on_failure(Arc::new(
+            RegionClosedSnafu {
+                region_id: self.region_id,
+            }
+            .build(),
+        ));
+    }
+}
+
 impl RegionFlushTask {
     /// Push the sender if it is not none.
     pub(crate) fn push_sender(&mut self, mut sender: OptionOutputTx) {
@@ -1632,6 +1643,18 @@ mod tests {
         };
 
         task.send_worker_request(request).await;
+
+        let output = output_rx.await.expect("waiter must receive explicit error");
+        assert!(output.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_flush_waiters_drop_notifies_waiter() {
+        let region_id = RegionId::new(1, 1);
+        let (output_tx, output_rx) = oneshot::channel();
+        let waiters = FlushTaskWaiters::new(region_id, vec![OutputTx::new(output_tx)]);
+
+        drop(waiters);
 
         let output = output_rx.await.expect("waiter must receive explicit error");
         assert!(output.is_err());
