@@ -17,9 +17,10 @@
 use common_telemetry::info;
 use store_api::logstore::LogStore;
 use store_api::logstore::provider::Provider;
-use store_api::region_request::{RegionCloseRequest, RegionFlushReason, RegionFlushRequest};
+use store_api::region_request::RegionCloseRequest;
 use store_api::storage::RegionId;
 
+use crate::flush::FlushReason;
 use crate::request::{DdlRequest, OptionOutputTx, SenderDdlRequest};
 use crate::worker::RegionWorkerLoop;
 
@@ -57,14 +58,27 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     });
                 return;
             }
-            self.handle_flush_request(
-                region_id,
-                RegionFlushRequest {
-                    reason: Some(RegionFlushReason::Closing),
-                    ..Default::default()
-                },
-                sender,
-            );
+            let task = self.new_flush_task(&region, FlushReason::Manual, None, self.config.clone());
+            if let Err(err) =
+                self.flush_scheduler
+                    .schedule_flush(region_id, &region.version_control, task)
+            {
+                sender.send(Err(err));
+                return;
+            }
+
+            if self.flush_scheduler.is_flush_requested(region_id) {
+                self.flush_scheduler
+                    .add_ddl_request_to_pending(SenderDdlRequest {
+                        region_id,
+                        sender,
+                        request: DdlRequest::Close(RegionCloseRequest {}),
+                    });
+            } else {
+                self.remove_region(region_id).await;
+                info!("Region {} closed, worker: {}", region_id, self.id);
+                sender.send(Ok(0));
+            }
             return;
         }
 
