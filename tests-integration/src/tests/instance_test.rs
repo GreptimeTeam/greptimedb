@@ -174,11 +174,11 @@ WHERE greptime_timestamp = (
             .await;
     assert!(
         explain.contains("SortExec"),
-        "query_parallelism=1 with five regions should use the Sort fallback; explain:\n{explain}"
+        "query_parallelism=1 with five regions should insert SortExec below MergeSortExec; explain:\n{explain}"
     );
     assert!(
-        !explain.contains("MergeSortExec"),
-        "query_parallelism=1 with five regions must not use MergeSortExec; explain:\n{explain}"
+        explain.contains("MergeSortExec"),
+        "query_parallelism=1 with five regions should keep the distributed merge stage stable; explain:\n{explain}"
     );
 }
 

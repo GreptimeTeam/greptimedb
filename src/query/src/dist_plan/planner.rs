@@ -46,15 +46,13 @@ use crate::dist_plan::region_pruner::ConstraintPruner;
 use crate::error::{CatalogSnafu, PartitionRuleManagerSnafu, TableNotFoundSnafu};
 use crate::region_query::RegionQueryHandlerRef;
 
-/// Planner for convert merge sort logical plan to physical plan
+/// Planner for converting merge sort logical plan to physical plan.
 ///
-/// it is currently a fallback to sort, and doesn't change the execution plan:
-/// `MergeSort(MergeScan) -> Sort(MergeScan) - to physical plan -> ...`
-/// It should be applied after `DistExtensionPlanner`
-///
-/// (Later when actually impl this merge sort)
-///
-/// We should ensure the number of partition is not smaller than the number of region at present. Otherwise this would result in incorrect output.
+/// `MergeSortExec` always represents the distributed merge stage. It declares
+/// the required input ordering to DataFusion, so `EnforceSorting` inserts a
+/// `SortExec` below it when the input `MergeScanExec` cannot preserve per-region
+/// ordering, for example when one output partition may merge multiple region
+/// streams.
 pub struct MergeSortExtensionPlanner {}
 
 impl MergeSortExtensionPlanner {
@@ -90,7 +88,7 @@ impl MergeSortExtensionPlanner {
 impl ExtensionPlanner for MergeSortExtensionPlanner {
     async fn plan_extension(
         &self,
-        planner: &dyn PhysicalPlanner,
+        _planner: &dyn PhysicalPlanner,
         node: &dyn UserDefinedLogicalNode,
         _logical_inputs: &[&LogicalPlan],
         physical_inputs: &[Arc<dyn ExecutionPlan>],
@@ -104,38 +102,24 @@ impl ExtensionPlanner for MergeSortExtensionPlanner {
                     .downcast_ref::<MergeScanLogicalPlan>()
                     .is_some()
             {
-                let merge_scan_exec = physical_inputs
-                    .first()
-                    .and_then(|p| p.as_any().downcast_ref::<MergeScanExec>())
-                    .ok_or(DataFusionError::Internal(format!(
+                let input = physical_inputs.first().cloned().ok_or_else(|| {
+                    DataFusionError::Internal(
+                        "Expect MergeSort to have one physical input".to_string(),
+                    )
+                })?;
+                if input.as_any().downcast_ref::<MergeScanExec>().is_none() {
+                    return Err(DataFusionError::Internal(format!(
                         "Expect MergeSort's input is a MergeScanExec, found {:?}",
                         physical_inputs
-                    )))?;
-
-                let partition_cnt = merge_scan_exec.partition_count();
-                let region_cnt = merge_scan_exec.region_count();
-                // if partition >= region, we know that every partition stream of merge scan is ordered
-                // and we only need to do a merge sort, otherwise fallback to quick sort
-                let can_merge_sort = partition_cnt >= region_cnt;
-                if can_merge_sort {
-                    let ordering = Self::ordering(session_state, merge_sort)?;
-                    let input = physical_inputs.first().cloned().ok_or_else(|| {
-                        DataFusionError::Internal(
-                            "Expect MergeSort to have one physical input".to_string(),
-                        )
-                    })?;
-                    return Ok(Some(Arc::new(MergeSortExec::new(
-                        ordering,
-                        input,
-                        merge_sort.fetch,
-                    ))));
+                    )));
                 }
-                // for now merge sort only exist in logical plan, and have the same effect as `Sort`
-                // doesn't change the execution plan, this will change in the future
-                let ret = planner
-                    .create_physical_plan(&merge_sort.clone().into_sort(), session_state)
-                    .await?;
-                Ok(Some(ret))
+
+                let ordering = Self::ordering(session_state, merge_sort)?;
+                Ok(Some(Arc::new(MergeSortExec::new(
+                    ordering,
+                    input,
+                    merge_sort.fetch,
+                ))))
             } else {
                 Ok(None)
             }

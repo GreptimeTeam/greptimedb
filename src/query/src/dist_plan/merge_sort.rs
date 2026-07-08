@@ -62,15 +62,6 @@ impl MergeSortLogicalPlan {
             node: Arc::new(self),
         })
     }
-
-    /// Convert self to a [`Sort`] logical plan with same input and expressions
-    pub fn into_sort(self) -> LogicalPlan {
-        LogicalPlan::Sort(datafusion::logical_expr::Sort {
-            input: self.input.clone(),
-            expr: self.expr,
-            fetch: self.fetch,
-        })
-    }
 }
 
 /// An opaque physical execution node for [`MergeSortLogicalPlan`].
@@ -102,14 +93,15 @@ impl MergeSortExec {
 impl DisplayAs for MergeSortExec {
     fn fmt_as(&self, t: DisplayFormatType, f: &mut fmt::Formatter) -> fmt::Result {
         match t {
-            DisplayFormatType::Default | DisplayFormatType::Verbose => {
+            DisplayFormatType::Default
+            | DisplayFormatType::Verbose
+            | DisplayFormatType::TreeRender => {
                 write!(f, "MergeSortExec: [{}]", self.inner.expr())?;
                 if let Some(fetch) = self.inner.fetch() {
                     write!(f, ", fetch={fetch}")?;
                 }
                 Ok(())
             }
-            DisplayFormatType::TreeRender => self.inner.fmt_as(t, f),
         }
     }
 }
@@ -120,6 +112,27 @@ impl ExecutionPlan for MergeSortExec {
     }
 
     fn as_any(&self) -> &dyn Any {
+        // Keep this node intentionally opaque.
+        //
+        // `MergeSortExec` delegates most behavior to DataFusion's
+        // `SortPreservingMergeExec`, but it must NOT expose itself as that type.
+        // Some DataFusion physical optimizer rules recognize a bare
+        // `SortPreservingMergeExec` via `as_any().downcast_ref::<...>()` and may
+        // replace it with an unordered `CoalescePartitionsExec(fetch)` when the
+        // parent does not require sorted output.
+        //
+        // That rewrite is valid for an ordinary SPM used only to satisfy parent
+        // ordering, but not for GreptimeDB's distributed TopK merge stage. In a
+        // scalar-subquery shape like `ORDER BY ts DESC LIMIT 1`, this node is the
+        // operator that merges region-local TopK streams into the global TopK.
+        // Replacing it with unordered coalescing can return a partial/latest row
+        // from one region instead of the global latest row.
+        //
+        // `required_input_ordering()` below separately tells DataFusion what
+        // ordering this node needs from its child, so `EnforceSorting` can insert
+        // a `SortExec` below `MergeSortExec` when `MergeScanExec` cannot preserve
+        // per-partition ordering. This opacity is specifically about protecting
+        // the merge stage itself from type-specialized optimizer rewrites.
         self
     }
 
@@ -135,8 +148,15 @@ impl ExecutionPlan for MergeSortExec {
         self.inner.benefits_from_input_partitioning()
     }
 
+    /// Tells DataFusion that `MergeSortExec` requires each input partition to be
+    /// ordered. This is the contract that makes `EnforceSorting` insert a
+    /// `SortExec` below `MergeSortExec` when the input cannot preserve ordering.
+    ///
+    /// The opacity of `MergeSortExec::as_any`, not this requirement, is what
+    /// prevents DataFusion from rewriting the merge stage itself as a bare
+    /// `SortPreservingMergeExec`.
     fn required_input_ordering(&self) -> Vec<Option<OrderingRequirements>> {
-        self.inner.required_input_ordering()
+        vec![Some(OrderingRequirements::from(self.inner.expr().clone()))]
     }
 
     fn maintains_input_order(&self) -> Vec<bool> {
@@ -254,6 +274,7 @@ pub fn merge_sort_transformer(plan: &LogicalPlan) -> Option<LogicalPlan> {
 #[cfg(test)]
 mod tests {
     use arrow_schema::{DataType, Field, Schema, SortOptions};
+    use datafusion::physical_plan::displayable;
     use datafusion::physical_plan::empty::EmptyExec;
     use datafusion_physical_expr::PhysicalSortExpr;
     use datafusion_physical_expr::expressions::col as physical_col;
@@ -286,6 +307,10 @@ mod tests {
         );
         assert_eq!(merge_sort.fetch(), Some(1));
         assert!(merge_sort.required_input_ordering()[0].is_some());
+
+        let tree = displayable(merge_sort.as_ref()).tree_render().to_string();
+        assert!(tree.contains("MergeSortExec"));
+        assert!(!tree.contains("SortPreservingMergeExec"));
 
         let fetched = merge_sort.with_fetch(Some(2)).unwrap();
         assert!(fetched.as_any().downcast_ref::<MergeSortExec>().is_some());
