@@ -221,8 +221,6 @@ pub enum FlushReason {
     Downgrading,
     /// Enter staging mode.
     EnterStaging,
-    /// Flush when region is closing.
-    Closing,
     /// Flush triggered before region migration.
     RegionMigration,
     /// Flush triggered by repartition procedure.
@@ -244,7 +242,10 @@ impl From<RegionFlushReason> for FlushReason {
             RegionFlushReason::RegionMigration => FlushReason::RegionMigration,
             RegionFlushReason::Repartition => FlushReason::Repartition,
             RegionFlushReason::RemoteWalPrune => FlushReason::RemoteWalPrune,
-            RegionFlushReason::Closing => FlushReason::Closing,
+            // Close requests enqueue a normal flush and then close the region through
+            // the pending DDL path. Keep the external reason compatible but don't let
+            // a flush completion close the region by itself.
+            RegionFlushReason::Closing => FlushReason::Manual,
             RegionFlushReason::Downgrading => FlushReason::Downgrading,
         }
     }
@@ -389,7 +390,6 @@ impl RegionFlushTask {
                     edit,
                     memtables_to_remove,
                     is_staging: self.is_staging,
-                    flush_reason: self.reason,
                 };
                 WorkerRequest::Background {
                     region_id: self.region_id,
@@ -1410,11 +1410,7 @@ impl FlushStatus {
 
     fn on_region_closed(self, err: Arc<Error>) {
         if let Some(mut task) = self.pending_task {
-            if task.reason == FlushReason::Closing {
-                task.on_success();
-            } else {
-                task.on_failure(err.clone());
-            }
+            task.on_failure(err.clone());
         }
 
         for ddl in self.pending_ddls {
@@ -1660,7 +1656,7 @@ mod tests {
         let mut task = new_test_flush_task(
             &env,
             builder.region_id(),
-            FlushReason::Closing,
+            FlushReason::Manual,
             tx,
             manifest_ctx,
         );
@@ -1690,7 +1686,7 @@ mod tests {
         let task = new_test_flush_task(
             &env,
             builder.region_id(),
-            FlushReason::Closing,
+            FlushReason::Manual,
             tx,
             manifest_ctx,
         );
@@ -1713,7 +1709,6 @@ mod tests {
                 },
                 memtables_to_remove: smallvec![],
                 is_staging: false,
-                flush_reason: FlushReason::Closing,
             }),
         };
 
