@@ -50,6 +50,7 @@ use crate::error::{
     Error, FillDefaultSnafu, FlushRegionSnafu, InvalidPartitionExprSnafu, InvalidRequestSnafu,
     MissingPartitionExprSnafu, Result, UnexpectedSnafu,
 };
+use crate::flush::FlushReason;
 use crate::manifest::action::{RegionEdit, TruncateKind};
 use crate::memtable::MemtableId;
 use crate::memtable::bulk::part::BulkPart;
@@ -920,6 +921,8 @@ pub(crate) enum BackgroundNotify {
 pub(crate) struct FlushFinished {
     /// Region id.
     pub(crate) region_id: RegionId,
+    /// Reason to flush.
+    pub(crate) flush_reason: FlushReason,
     /// Entry id of flushed data.
     pub(crate) flushed_entry_id: EntryId,
     /// Flush result senders.

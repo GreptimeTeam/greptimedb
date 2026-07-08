@@ -227,6 +227,8 @@ pub enum FlushReason {
     Repartition,
     /// Flush triggered by remote WAL pruning.
     RemoteWalPrune,
+    /// Flush before closing a Noop WAL region.
+    Closing,
 }
 
 impl FlushReason {
@@ -242,10 +244,7 @@ impl From<RegionFlushReason> for FlushReason {
             RegionFlushReason::RegionMigration => FlushReason::RegionMigration,
             RegionFlushReason::Repartition => FlushReason::Repartition,
             RegionFlushReason::RemoteWalPrune => FlushReason::RemoteWalPrune,
-            // Close requests enqueue a normal flush and then close the region through
-            // the pending DDL path. Keep the external reason compatible but don't let
-            // a flush completion close the region by itself.
-            RegionFlushReason::Closing => FlushReason::Manual,
+            RegionFlushReason::Closing => FlushReason::Closing,
             RegionFlushReason::Downgrading => FlushReason::Downgrading,
         }
     }
@@ -310,7 +309,7 @@ impl FlushTaskWaiters {
 impl Drop for FlushTaskWaiters {
     fn drop(&mut self) {
         self.on_failure(Arc::new(
-            RegionClosedSnafu {
+            RegionBusySnafu {
                 region_id: self.region_id,
             }
             .build(),
@@ -383,6 +382,7 @@ impl RegionFlushTask {
                     .collect();
                 let flush_finished = FlushFinished {
                     region_id: self.region_id,
+                    flush_reason: self.reason,
                     // The last entry has been flushed.
                     flushed_entry_id: version_data.last_entry_id,
                     senders: std::mem::take(&mut self.senders),
@@ -1695,6 +1695,7 @@ mod tests {
             region_id: builder.region_id(),
             notify: BackgroundNotify::FlushFinished(FlushFinished {
                 region_id: builder.region_id(),
+                flush_reason: FlushReason::Manual,
                 flushed_entry_id: 0,
                 senders: vec![OutputTx::new(output_tx)],
                 _timer: FLUSH_ELAPSED.with_label_values(&["total"]).start_timer(),
@@ -1726,8 +1727,11 @@ mod tests {
 
         drop(waiters);
 
-        let output = output_rx.await.expect("waiter must receive explicit error");
-        assert!(output.is_err());
+        let err = output_rx
+            .await
+            .expect("waiter must receive explicit error")
+            .unwrap_err();
+        assert_eq!(err.status_code(), StatusCode::RegionBusy);
     }
 
     #[tokio::test]

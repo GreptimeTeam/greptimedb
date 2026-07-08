@@ -311,6 +311,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             return;
         }
 
+        let flush_on_close = request.flush_reason == FlushReason::Closing;
+
         let index_build_file_metas = std::mem::take(&mut request.edit.files_to_add);
 
         // In async mode, create indexes after flush.
@@ -324,6 +326,14 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 OptionOutputTx::new(None),
             )
             .await;
+        }
+
+        if flush_on_close {
+            self.remove_region(region_id).await;
+            info!("Region {} closed after flush", region_id);
+            request.on_success();
+            self.listener.on_flush_success(region_id);
+            return;
         }
 
         // Notifies waiters and observes the flush timer.
@@ -414,7 +424,7 @@ mod tests {
         );
         assert_eq!(
             resolve_flush_reason(Some(RegionFlushReason::Closing), false),
-            FlushReason::Manual
+            FlushReason::Closing
         );
         assert_eq!(
             resolve_flush_reason(Some(RegionFlushReason::Downgrading), false),
