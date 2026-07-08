@@ -1241,6 +1241,9 @@ impl FlushScheduler {
                 err;
                 "Flush succeeded for region {region_id}, but failed to schedule next flush for it."
             );
+            let flush_status = self.region_status.remove(&region_id).unwrap();
+            flush_status.on_failure(Arc::new(RegionBusySnafu { region_id }.build()));
+            return None;
         }
         // We can flush the region again, keep it in the region status.
         None
@@ -2052,5 +2055,78 @@ mod tests {
                 .pending_task
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn test_schedule_pending_request_failure_drains_pending_ddls() {
+        common_telemetry::init_default_ut_logging();
+        let job_scheduler = Arc::new(VecScheduler::default());
+        let env = SchedulerEnv::new().await.scheduler(job_scheduler.clone());
+        let (tx, _rx) = mpsc::channel(4);
+        let mut scheduler = env.mock_flush_scheduler();
+        let mut builder = VersionControlBuilder::new();
+        builder.set_memtable_builder(Arc::new(TimeSeriesMemtableBuilder::default()));
+        let version_control = Arc::new(builder.build());
+
+        let version_data = version_control.current();
+        write_rows_to_version(&version_data.version, "host0", 0, 10);
+        let manifest_ctx = env
+            .mock_manifest_context(version_data.version.metadata.clone())
+            .await;
+
+        let task = new_test_flush_task(
+            &env,
+            builder.region_id(),
+            FlushReason::Manual,
+            tx.clone(),
+            manifest_ctx.clone(),
+        );
+        scheduler
+            .schedule_flush(builder.region_id(), &version_control, task)
+            .unwrap();
+
+        let task = new_test_flush_task(
+            &env,
+            builder.region_id(),
+            FlushReason::Closing,
+            tx,
+            manifest_ctx,
+        );
+        scheduler
+            .schedule_flush(builder.region_id(), &version_control, task)
+            .unwrap();
+
+        let (sender, receiver) = oneshot::channel();
+        scheduler.add_ddl_request_to_pending(SenderDdlRequest {
+            sender: OptionOutputTx::from(sender),
+            region_id: builder.region_id(),
+            request: DdlRequest::Close(store_api::region_request::RegionCloseRequest {}),
+        });
+
+        let version_data = version_control.current();
+        version_control.apply_edit(
+            Some(RegionEdit {
+                files_to_add: Vec::new(),
+                files_to_remove: Vec::new(),
+                timestamp_ms: None,
+                compaction_time_window: None,
+                flushed_entry_id: None,
+                flushed_sequence: None,
+                committed_sequence: None,
+            }),
+            &[0],
+            builder.file_purger(),
+        );
+        write_rows_to_version(&version_data.version, "host1", 0, 10);
+
+        scheduler.scheduler = Arc::new(FailingScheduler);
+        scheduler.on_flush_success(builder.region_id());
+
+        assert!(scheduler.region_status.is_empty());
+        let err = receiver
+            .await
+            .expect("pending DDL must be notified")
+            .unwrap_err();
+        assert_eq!(err.status_code(), StatusCode::RegionBusy);
     }
 }
