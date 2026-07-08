@@ -16,7 +16,6 @@ use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 use std::time::Instant;
 
-use common_base::cancellation::CancellableFuture;
 use common_memory_manager::OnExhaustedPolicy;
 use common_telemetry::{error, info, warn};
 use itertools::Itertools;
@@ -316,24 +315,20 @@ impl CompactionTask for CompactionTaskImpl {
         self.mark_files_compacting(true);
         self.handle_expiration().await;
 
-        let cancel_handle = self.state.cancel_handle();
-        // Run compaction with cooperative cancellation.
-        let notify = match CancellableFuture::new(
-            async { self.handle_compaction().await },
-            cancel_handle,
-        )
-        .await
-        {
-            Ok(Ok(merge_output)) => {
-                self.invoke_sst_hook(&merge_output).await;
+        let notify = match self.handle_compaction().await {
+            Ok(merge_output) => {
                 // Stop accepting cancellation once we are about to publish the compaction edit.
-                if !self.state.mark_commit_started() {
+                if merge_output.files_to_add.is_empty() && !self.state.mark_commit_started() {
                     let senders = std::mem::take(&mut self.waiters);
                     BackgroundNotify::CompactionCancelled(CompactionCancelled {
                         region_id: self.compaction_region.region_id,
                         senders,
                     })
                 } else {
+                    if !merge_output.files_to_add.is_empty() {
+                        self.state.mark_commit_started_after_output();
+                    }
+                    self.invoke_sst_hook(&merge_output).await;
                     match self.update_manifest(merge_output).await {
                         Ok((edit, _manifest_version)) => {
                             let senders = std::mem::take(&mut self.waiters);
@@ -356,18 +351,7 @@ impl CompactionTask for CompactionTaskImpl {
                     }
                 }
             }
-            Err(_) => {
-                info!(
-                    "Compaction cancelled, region id: {}",
-                    self.compaction_region.region_id
-                );
-                let senders = std::mem::take(&mut self.waiters);
-                BackgroundNotify::CompactionCancelled(CompactionCancelled {
-                    region_id: self.compaction_region.region_id,
-                    senders,
-                })
-            }
-            Ok(Err(e)) => {
+            Err(e) => {
                 error!(e; "Failed to compact region, region id: {}", self.compaction_region.region_id);
                 let err = Arc::new(e);
                 // notify compaction waiters
@@ -389,10 +373,40 @@ impl CompactionTask for CompactionTaskImpl {
 
 #[cfg(test)]
 mod tests {
-    use store_api::storage::FileId;
+    use std::fmt;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
 
-    use crate::compaction::picker::PickerOutput;
+    use common_base::Plugins;
+    use common_base::cancellation::CancellationHandle;
+    use common_memory_manager::OnExhaustedPolicy;
+    use store_api::ManifestVersion;
+    use store_api::metadata::RegionMetadataRef;
+    use store_api::storage::{FileId, RegionId};
+    use tokio::sync::{Notify, mpsc};
+    use tokio::time::timeout;
+
+    use super::CompactionTaskImpl;
+    use crate::cache::CacheManager;
+    use crate::compaction::compactor::{
+        CompactionRegion, CompactionVersion, Compactor, MergeOutput,
+    };
+    use crate::compaction::memory_manager::new_compaction_memory_manager;
+    use crate::compaction::picker::{CompactionTask, PickerOutput};
     use crate::compaction::test_util::new_file_handle;
+    use crate::compaction::{LocalCompactionState, RequestCancelResult};
+    use crate::config::MitoConfig;
+    use crate::engine::region_hook::{RegionHook, RegionHookRef, SstFileInfo};
+    use crate::error::Result;
+    use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
+    use crate::region::options::RegionOptions;
+    use crate::request::{BackgroundNotify, WorkerRequest};
+    use crate::sst::file::FileMeta;
+    use crate::sst::version::SstVersion;
+    use crate::test_util::memtable_util::metadata_for_test;
+    use crate::test_util::scheduler_util::SchedulerEnv;
+    use crate::worker::WorkerListener;
 
     #[test]
     fn test_picker_output_with_expired_ssts() {
@@ -437,6 +451,347 @@ mod tests {
 
         // Verify empty expired_ssts
         assert!(picker_output.expired_ssts.is_empty());
+    }
+
+    fn dummy_file_meta(region_id: RegionId) -> FileMeta {
+        FileMeta {
+            region_id,
+            file_id: FileId::random(),
+            file_size: 1024,
+            ..Default::default()
+        }
+    }
+
+    async fn new_test_compaction_region(hook: RegionHookRef) -> CompactionRegion {
+        let env = SchedulerEnv::new().await;
+        let metadata = metadata_for_test();
+        let manifest_ctx = env.mock_manifest_context(metadata.clone()).await;
+        let plugins = Plugins::new();
+        plugins.insert(hook);
+
+        CompactionRegion {
+            region_id: metadata.region_id,
+            region_options: RegionOptions::default(),
+            engine_config: Arc::new(MitoConfig::default()),
+            region_metadata: metadata.clone(),
+            cache_manager: Arc::new(CacheManager::default()),
+            access_layer: env.access_layer.clone(),
+            manifest_ctx,
+            current_version: CompactionVersion {
+                metadata,
+                options: RegionOptions::default(),
+                ssts: Arc::new(SstVersion::new()),
+                compaction_time_window: None,
+            },
+            file_purger: None,
+            ttl: None,
+            max_parallelism: 1,
+            plugins,
+        }
+    }
+
+    struct PausingSstHook {
+        reached: Arc<Notify>,
+        release: Arc<Notify>,
+        observed_files: Arc<Mutex<Vec<FileId>>>,
+    }
+
+    impl fmt::Debug for PausingSstHook {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.debug_struct("PausingSstHook").finish()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl RegionHook for PausingSstHook {
+        async fn on_sst_files_written(
+            &self,
+            _region_id: RegionId,
+            _region_metadata: &RegionMetadataRef,
+            files: &[SstFileInfo<'_>],
+        ) {
+            self.observed_files
+                .lock()
+                .unwrap()
+                .extend(files.iter().map(|file| file.file_meta.file_id));
+            self.reached.notify_one();
+            self.release.notified().await;
+        }
+    }
+
+    struct NoopRegionHook;
+
+    impl fmt::Debug for NoopRegionHook {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.debug_struct("NoopRegionHook").finish()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl RegionHook for NoopRegionHook {}
+
+    struct WrittenOutputCompactor {
+        output_file: FileMeta,
+        update_manifest_calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl Compactor for WrittenOutputCompactor {
+        async fn merge_ssts(
+            &self,
+            _compaction_region: &CompactionRegion,
+            _picker_output: PickerOutput,
+        ) -> Result<MergeOutput> {
+            Ok(MergeOutput {
+                files_to_add: vec![self.output_file.clone()],
+                files_to_remove: Vec::new(),
+                compaction_time_window: Some(3600),
+                sst_infos: Vec::new(),
+            })
+        }
+
+        async fn update_manifest(
+            &self,
+            compaction_region: &CompactionRegion,
+            merge_output: MergeOutput,
+        ) -> Result<(RegionEdit, ManifestVersion)> {
+            self.update_manifest_calls.fetch_add(1, Ordering::SeqCst);
+
+            let edit = RegionEdit {
+                files_to_add: merge_output.files_to_add,
+                files_to_remove: merge_output.files_to_remove,
+                timestamp_ms: Some(chrono::Utc::now().timestamp_millis()),
+                compaction_time_window: None,
+                flushed_entry_id: None,
+                flushed_sequence: None,
+                committed_sequence: None,
+            };
+            let action_list =
+                RegionMetaActionList::with_action(RegionMetaAction::Edit(edit.clone()));
+            let manifest_version = compaction_region
+                .manifest_ctx
+                .update_manifest_for_compaction(action_list)
+                .await?;
+
+            Ok((edit, manifest_version))
+        }
+    }
+
+    struct PausingOutputCompactor {
+        output_file: FileMeta,
+        output_ready: Arc<Notify>,
+        release_output: Arc<Notify>,
+        update_manifest_calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl Compactor for PausingOutputCompactor {
+        async fn merge_ssts(
+            &self,
+            _compaction_region: &CompactionRegion,
+            _picker_output: PickerOutput,
+        ) -> Result<MergeOutput> {
+            self.output_ready.notify_one();
+            self.release_output.notified().await;
+
+            Ok(MergeOutput {
+                files_to_add: vec![self.output_file.clone()],
+                files_to_remove: Vec::new(),
+                compaction_time_window: Some(3600),
+                sst_infos: Vec::new(),
+            })
+        }
+
+        async fn update_manifest(
+            &self,
+            compaction_region: &CompactionRegion,
+            merge_output: MergeOutput,
+        ) -> Result<(RegionEdit, ManifestVersion)> {
+            self.update_manifest_calls.fetch_add(1, Ordering::SeqCst);
+
+            let edit = RegionEdit {
+                files_to_add: merge_output.files_to_add,
+                files_to_remove: merge_output.files_to_remove,
+                timestamp_ms: Some(chrono::Utc::now().timestamp_millis()),
+                compaction_time_window: None,
+                flushed_entry_id: None,
+                flushed_sequence: None,
+                committed_sequence: None,
+            };
+            let action_list =
+                RegionMetaActionList::with_action(RegionMetaAction::Edit(edit.clone()));
+            let manifest_version = compaction_region
+                .manifest_ctx
+                .update_manifest_for_compaction(action_list)
+                .await?;
+
+            Ok((edit, manifest_version))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_cancel_after_merge_output_is_too_late_and_commits_manifest() {
+        common_telemetry::init_default_ut_logging();
+
+        let hook_reached = Arc::new(Notify::new());
+        let hook_release = Arc::new(Notify::new());
+        let observed_files = Arc::new(Mutex::new(Vec::new()));
+        let hook: RegionHookRef = Arc::new(PausingSstHook {
+            reached: hook_reached.clone(),
+            release: hook_release.clone(),
+            observed_files: observed_files.clone(),
+        });
+
+        let compaction_region = new_test_compaction_region(hook).await;
+        let region_id = compaction_region.region_id;
+        let manifest_ctx = compaction_region.manifest_ctx.clone();
+        let output_file = dummy_file_meta(region_id);
+        let output_file_id = output_file.file_id;
+        let update_manifest_calls = Arc::new(AtomicUsize::new(0));
+        let state = LocalCompactionState::new(Arc::new(CancellationHandle::default()));
+        let (request_sender, mut request_receiver) = mpsc::channel(4);
+        let mut task = CompactionTaskImpl {
+            state: state.clone(),
+            compaction_region,
+            request_sender,
+            waiters: Vec::new(),
+            start_time: Instant::now(),
+            listener: WorkerListener::default(),
+            compactor: Arc::new(WrittenOutputCompactor {
+                output_file,
+                update_manifest_calls: update_manifest_calls.clone(),
+            }),
+            picker_output: PickerOutput {
+                outputs: Vec::new(),
+                expired_ssts: Vec::new(),
+                time_window_size: 3600,
+                max_file_size: None,
+            },
+            memory_manager: Arc::new(new_compaction_memory_manager(1024 * 1024)),
+            memory_policy: OnExhaustedPolicy::Fail,
+            estimated_memory_bytes: 1,
+        };
+
+        let runner = tokio::spawn(async move {
+            task.run().await;
+        });
+
+        timeout(Duration::from_secs(5), hook_reached.notified())
+            .await
+            .expect("compaction should pause after observing written SST files");
+
+        assert_eq!(observed_files.lock().unwrap().clone(), vec![output_file_id]);
+        assert_eq!(state.request_cancel(), RequestCancelResult::TooLateToCancel);
+        hook_release.notify_one();
+
+        let worker_request = timeout(Duration::from_secs(5), request_receiver.recv())
+            .await
+            .expect("compaction should notify the worker after manifest commit")
+            .expect("worker request sender should stay open");
+
+        match worker_request.request {
+            WorkerRequest::Background {
+                region_id: notified_region,
+                notify: BackgroundNotify::CompactionFinished(finished),
+            } => {
+                assert_eq!(notified_region, region_id);
+                assert_eq!(finished.region_id, region_id);
+                assert_eq!(finished.edit.files_to_add.len(), 1);
+                assert_eq!(finished.edit.files_to_add[0].file_id, output_file_id);
+            }
+            other => panic!("expected finished compaction notification, got {other:?}"),
+        }
+
+        runner
+            .await
+            .expect("compaction task should finish after committing manifest");
+
+        assert_eq!(update_manifest_calls.load(Ordering::SeqCst), 1);
+        let manifest = manifest_ctx.manifest_manager.read().await.manifest();
+        assert!(
+            manifest.files.contains_key(&output_file_id),
+            "compaction output should be manifest-owned after cancellation is too late"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cancel_while_merge_holds_output_still_commits_manifest() {
+        common_telemetry::init_default_ut_logging();
+
+        let hook: RegionHookRef = Arc::new(NoopRegionHook);
+        let compaction_region = new_test_compaction_region(hook).await;
+        let region_id = compaction_region.region_id;
+        let manifest_ctx = compaction_region.manifest_ctx.clone();
+        let output_file = dummy_file_meta(region_id);
+        let output_file_id = output_file.file_id;
+        let output_ready = Arc::new(Notify::new());
+        let release_output = Arc::new(Notify::new());
+        let update_manifest_calls = Arc::new(AtomicUsize::new(0));
+        let state = LocalCompactionState::new(Arc::new(CancellationHandle::default()));
+        let (request_sender, mut request_receiver) = mpsc::channel(4);
+        let mut task = CompactionTaskImpl {
+            state: state.clone(),
+            compaction_region,
+            request_sender,
+            waiters: Vec::new(),
+            start_time: Instant::now(),
+            listener: WorkerListener::default(),
+            compactor: Arc::new(PausingOutputCompactor {
+                output_file,
+                output_ready: output_ready.clone(),
+                release_output: release_output.clone(),
+                update_manifest_calls: update_manifest_calls.clone(),
+            }),
+            picker_output: PickerOutput {
+                outputs: Vec::new(),
+                expired_ssts: Vec::new(),
+                time_window_size: 3600,
+                max_file_size: None,
+            },
+            memory_manager: Arc::new(new_compaction_memory_manager(1024 * 1024)),
+            memory_policy: OnExhaustedPolicy::Fail,
+            estimated_memory_bytes: 1,
+        };
+
+        let runner = tokio::spawn(async move {
+            task.run().await;
+        });
+
+        timeout(Duration::from_secs(5), output_ready.notified())
+            .await
+            .expect("compaction should pause while holding a written output");
+
+        assert_eq!(state.request_cancel(), RequestCancelResult::CancelIssued);
+        release_output.notify_one();
+
+        let worker_request = timeout(Duration::from_secs(5), request_receiver.recv())
+            .await
+            .expect("compaction should notify the worker after manifest commit")
+            .expect("worker request sender should stay open");
+
+        match worker_request.request {
+            WorkerRequest::Background {
+                region_id: notified_region,
+                notify: BackgroundNotify::CompactionFinished(finished),
+            } => {
+                assert_eq!(notified_region, region_id);
+                assert_eq!(finished.region_id, region_id);
+                assert_eq!(finished.edit.files_to_add.len(), 1);
+                assert_eq!(finished.edit.files_to_add[0].file_id, output_file_id);
+            }
+            other => panic!("expected finished compaction notification, got {other:?}"),
+        }
+
+        runner
+            .await
+            .expect("compaction task should finish after committing manifest");
+
+        assert_eq!(update_manifest_calls.load(Ordering::SeqCst), 1);
+        let manifest = manifest_ctx.manifest_manager.read().await.manifest();
+        assert!(
+            manifest.files.contains_key(&output_file_id),
+            "compaction output should be manifest-owned even if cancellation was issued first"
+        );
     }
 
     // Note: Testing remove_expired() directly requires extensive mocking of:

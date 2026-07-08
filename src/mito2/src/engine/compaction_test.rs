@@ -18,8 +18,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use api::v1::{ColumnSchema, Rows};
-use common_error::ext::ErrorExt;
-use common_error::status_code::StatusCode;
 use common_recordbatch::{RecordBatches, SendableRecordBatchStream};
 use datatypes::arrow::array::AsArray;
 use datatypes::arrow::datatypes::TimestampMillisecondType;
@@ -646,7 +644,7 @@ async fn test_readonly_during_compaction_with_format(flat_format: bool) {
 }
 
 #[tokio::test]
-async fn test_enter_staging_cancels_inflight_local_compaction_before_commit() {
+async fn test_enter_staging_waits_for_inflight_local_compaction_after_outputs_written() {
     common_telemetry::init_default_ut_logging();
     let mut env = TestEnv::new().await;
     let listener = Arc::new(CompactionListener::default());
@@ -705,13 +703,16 @@ async fn test_enter_staging_cancels_inflight_local_compaction_before_commit() {
     });
 
     tokio::time::sleep(Duration::from_millis(100)).await;
-    // The enter staging should finished, and the compaction should be cancelled.
-    assert!(enter_staging.is_finished());
+    // The compaction has already produced outputs, so enter-staging must wait
+    // until those outputs are committed instead of cancelling and dropping them.
+    assert!(!enter_staging.is_finished());
+    listener.wake();
+
     let _ = enter_staging.await.unwrap().unwrap();
 }
 
 #[tokio::test]
-async fn test_manual_compaction_returns_cancelled_when_enter_staging_cancels_it() {
+async fn test_manual_compaction_succeeds_when_enter_staging_waits_after_outputs_written() {
     common_telemetry::init_default_ut_logging();
     let mut env = TestEnv::new().await;
     let listener = Arc::new(CompactionListener::default());
@@ -780,13 +781,16 @@ async fn test_manual_compaction_returns_cancelled_when_enter_staging_cancels_it(
     });
 
     tokio::time::sleep(Duration::from_millis(100)).await;
-    assert!(compact.is_finished());
-    assert!(enter_staging.is_finished());
+    // The compaction has already produced outputs, so cancellation is too late.
+    // It should finish successfully and then let the pending enter-staging run.
+    assert!(!compact.is_finished());
+    assert!(!enter_staging.is_finished());
+    listener.wake();
 
-    let err = compact.await.unwrap().unwrap_err();
-    assert_eq!(err.status_code(), StatusCode::Cancelled);
+    let result = compact.await.unwrap().unwrap();
+    assert_eq!(0, result.affected_rows);
 
-    let _ = enter_staging.await.unwrap();
+    let _ = enter_staging.await.unwrap().unwrap();
 }
 
 #[tokio::test]
