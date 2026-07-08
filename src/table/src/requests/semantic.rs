@@ -92,7 +92,23 @@ pub const SEMANTIC_ENTITY_SERVICE_ID: &str = "greptime.semantic.entity.service.i
 
 /// The role a set of columns plays for an entity: `id` (identifying attributes,
 /// must be tag columns — enforced at DDL time), `descriptive`, or `scope`.
-const ENTITY_ROLES: [&str; 3] = ["id", "descriptive", "scope"];
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EntityRole {
+    Id,
+    Descriptive,
+    Scope,
+}
+
+impl EntityRole {
+    fn parse(role: &str) -> Option<Self> {
+        match role {
+            "id" => Some(EntityRole::Id),
+            "descriptive" => Some(EntityRole::Descriptive),
+            "scope" => Some(EntityRole::Scope),
+            _ => None,
+        }
+    }
+}
 
 // ---- Value constants ----
 
@@ -147,17 +163,34 @@ fn is_valid_entity_type(ty: &str) -> bool {
         })
 }
 
-/// Returns true if `key` is a well-formed entity-identity option key of the shape
-/// `greptime.semantic.entity.<type>.{id|descriptive|scope}`. The `<type>` may
-/// itself contain dots; the role is the final dot-separated segment.
+/// Parses a well-formed entity-identity option key of the shape
+/// `greptime.semantic.entity.<type>.{id|descriptive|scope}` into
+/// `(entity_type, role)`. The `<type>` may itself contain dots; the role is the
+/// final dot-separated segment. This is the single parser of the key format —
+/// DDL validation and the read-time derivation both go through it.
+pub fn parse_entity_option_key(key: &str) -> Option<(&str, EntityRole)> {
+    let rest = key.strip_prefix(SEMANTIC_ENTITY_PREFIX)?;
+    let (ty, role) = rest.rsplit_once('.')?;
+    if !is_valid_entity_type(ty) {
+        return None;
+    }
+    Some((ty, EntityRole::parse(role)?))
+}
+
+/// Returns true if `key` is a well-formed entity-identity option key.
 pub fn is_entity_option_key(key: &str) -> bool {
-    let Some(rest) = key.strip_prefix(SEMANTIC_ENTITY_PREFIX) else {
-        return false;
-    };
-    let Some((ty, role)) = rest.rsplit_once('.') else {
-        return false;
-    };
-    is_valid_entity_type(ty) && ENTITY_ROLES.contains(&role)
+    parse_entity_option_key(key).is_some()
+}
+
+/// Tokenizes an entity option's comma-separated column list (trimmed, empty
+/// tokens dropped). [`validate_semantic_option`] rejects empty tokens at DDL
+/// time, so readers only ever drop what validation already refused.
+pub fn parse_entity_columns(value: &str) -> Vec<String> {
+    value
+        .split(',')
+        .map(|c| c.trim().to_string())
+        .filter(|c| !c.is_empty())
+        .collect()
 }
 
 /// Returns true if `key` is a recognised semantic table-option key.

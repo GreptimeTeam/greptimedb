@@ -23,6 +23,7 @@ pub mod ddl;
 mod describe;
 mod dml;
 mod kill;
+pub mod semantic_graph;
 mod set;
 mod show;
 mod tql;

@@ -20,6 +20,12 @@ pub mod v1;
 use std::collections::HashSet;
 
 use api::v1::RowInsertRequests;
+// Column names. The `greptime_trace_v1` fixed columns are canonically defined
+// in `common_catalog::consts` (shared with the read-time graph derivation).
+pub use common_catalog::consts::{
+    DURATION_NANO_COLUMN, SERVICE_NAME_COLUMN, SPAN_KIND_COLUMN,
+    SPAN_STATUS_CODE_COLUMN as SPAN_STATUS_CODE, TRACE_TIMESTAMP_COLUMN as TIMESTAMP_COLUMN,
+};
 pub use common_catalog::consts::{
     PARENT_SPAN_ID_COLUMN, SPAN_ID_COLUMN, SPAN_NAME_COLUMN, TRACE_ID_COLUMN,
 };
@@ -30,12 +36,6 @@ use crate::error::{NotSupportedSnafu, Result};
 use crate::otlp::trace::span::TraceSpan;
 use crate::query_handler::PipelineHandlerRef;
 
-// column names
-pub const SERVICE_NAME_COLUMN: &str = "service_name";
-pub const TIMESTAMP_COLUMN: &str = "timestamp";
-pub const DURATION_NANO_COLUMN: &str = "duration_nano";
-pub const SPAN_KIND_COLUMN: &str = "span_kind";
-pub const SPAN_STATUS_CODE: &str = "span_status_code";
 pub const SPAN_STATUS_MESSAGE_COLUMN: &str = "span_status_message";
 pub const SPAN_ATTRIBUTES_COLUMN: &str = "span_attributes";
 pub const SPAN_EVENTS_COLUMN: &str = "span_events";
@@ -64,7 +64,7 @@ pub const SPAN_KIND_PREFIX: &str = "SPAN_KIND_";
 // The span status code prefix in the database.
 pub const SPAN_STATUS_PREFIX: &str = "STATUS_CODE_";
 pub const SPAN_STATUS_UNSET: &str = "STATUS_CODE_UNSET";
-pub const SPAN_STATUS_ERROR: &str = "STATUS_CODE_ERROR";
+pub use common_catalog::consts::SPAN_STATUS_ERROR;
 
 /// Deduplicated auxiliary trace entities derived from successfully ingested
 /// spans.
