@@ -59,4 +59,23 @@ where
 group by
     os;
 
+-- Query the row at the latest timestamp through a scalar subquery.
+SELECT
+    rack,
+    os,
+    greptime_timestamp
+FROM
+    cpu
+WHERE
+    greptime_timestamp = (
+        SELECT
+            greptime_timestamp
+        FROM
+            cpu
+        ORDER BY
+            greptime_timestamp DESC
+        LIMIT
+            1
+    );
+
 drop table cpu;
