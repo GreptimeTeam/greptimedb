@@ -224,7 +224,7 @@ enable = true
 ## Whether to enable OpenTelemetry protocol in HTTP API.
 enable = true
 ## Maximum spans per trace ingest chunk. Set to 0 to disable splitting.
-trace_ingest_chunk_size = 64
+trace_ingest_chunk_size = 128
 
 ## Prometheus remote storage options
 [prom_store]

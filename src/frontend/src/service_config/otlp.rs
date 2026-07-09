@@ -14,7 +14,7 @@
 
 use serde::{Deserialize, Serialize};
 
-const DEFAULT_TRACE_INGEST_CHUNK_SIZE: usize = 64;
+const DEFAULT_TRACE_INGEST_CHUNK_SIZE: usize = 128;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
