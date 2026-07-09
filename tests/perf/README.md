@@ -40,8 +40,9 @@ The runner also supports `scenario.kind = "prom_remote_write_then_query"` for a
 bounded write-path smoke/regression flow. This path is explicit and separate from
 the direct-SST fixture path: it starts the base and candidate distributed clusters,
 writes deterministic Prometheus remote-write v1 samples through
-`/v1/prometheus/write`, flushes the configured physical metric table, then runs
-the configured SQL/TQL queries against the logical metric table.
+`/v1/prometheus/write`, flushes the configured physical metric table, optionally
+inspects the landed SST/Parquet footer, encoding, and size, then runs the
+configured SQL/TQL queries against the logical metric table.
 
 Remote-write cases configure one database, one logical metric, and one physical
 table under `[scenario.remote_write]`:
@@ -101,13 +102,52 @@ ingestion, the runner passes the sample offset and total sample count to the
 helper so non-linear value patterns use a stable global/per-series ordinal across
 chunks.
 
+Remote-write cases that need to validate storage output can add
+`[scenario.remote_write.storage]`. When present, the scenario body becomes:
+remote-write → flush → visibility check → Parquet footer/size/encoding inspection
+→ query. The inspector is a small Rust helper (`parquet_footer_inspector`) that
+reads local Parquet footers directly; it does not require Python `pyarrow`.
+
+```toml
+[scenario.remote_write.storage]
+inspect = true
+column = "greptime_value"
+include_metadata_files = false
+# Optional: inspect below datanode data home instead of the whole fresh data dir.
+# root_suffix = "greptime/public/<table_id>"
+min_files = 1
+min_files_with_column = 1
+require_encodings = ["BYTE_STREAM_SPLIT"]
+forbid_encodings = ["PLAIN_DICTIONARY"]
+max_total_file_size_bytes = 104857600
+max_column_compressed_size_bytes = 52428800
+max_column_uncompressed_size_bytes = 209715200
+max_candidate_total_file_size_regression_pct = 10.0
+max_candidate_column_compressed_size_regression_pct = 10.0
+max_candidate_column_uncompressed_size_regression_pct = 10.0
+```
+
+The `*_pct` storage thresholds are percent regression limits comparing candidate
+against base; `pct` means percent, not percentile. Per-target storage checks
+(`min_files`, `min_files_with_column`, required/forbidden encodings, and absolute
+`max_*_bytes`) run for both base and candidate. Comparative
+`max_candidate_*_regression_pct` checks remain base-vs-candidate. These checks
+are generic footer and byte-size assertions and do not encode product-specific
+heuristics. When storage inspection is enabled, `min_files` and
+`min_files_with_column` default to `1` even if omitted, so dry-runs show these
+planned checks and an empty flush or missing target column fails the scenario.
+By default the inspector root is the target datanode data home, which is suitable
+for a fresh single-case data directory. For reused or more complex data homes, set
+`root_suffix` to a path relative to the datanode data home to narrow inspection.
+
 The runner creates the configured database if needed, writes a per-target
 frontend config enabling `[prom_store]` with metric engine storage and a non-zero
 `pending_rows_flush_interval`, and validates that the logical metric table reaches
 `series_count * samples_per_series` rows before trusting the query measurements.
 Use `--remote-write-generator /path/to/prom_remote_write_fixture` to provide the
-Rust payload helper. `--fixture-only` is rejected for remote-write cases; use
-`--dry-run` for planning.
+Rust payload helper. Use `--storage-inspector /path/to/parquet_footer_inspector`
+when `[scenario.remote_write.storage]` is enabled. `--fixture-only` is rejected
+for remote-write cases; use `--dry-run` for planning.
 
 Large manual remote-write cases can set `sample_chunk_size` to split ingestion by
 time. For each chunk, the runner invokes `prom_remote_write_fixture` with the

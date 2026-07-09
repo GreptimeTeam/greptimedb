@@ -67,6 +67,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--candidate-bin", required=True, type=Path)
     p.add_argument("--fixture-generator", type=Path)
     p.add_argument("--remote-write-generator", type=Path, help="prom_remote_write_fixture helper binary")
+    p.add_argument("--storage-inspector", type=Path, help="parquet_footer_inspector helper binary")
     p.add_argument("--work-dir", required=True, type=Path)
     p.add_argument("--fixture-cache-dir", type=Path, help="persistent directory for generated fixtures, keyed by case content")
     p.add_argument("--reuse-fixture", action="store_true")
@@ -777,6 +778,130 @@ def enforce_thresholds(case: dict[str, Any], base: dict[str, Any], candidate: di
     return results
 
 
+def storage_config(remote: dict[str, Any]) -> dict[str, Any] | None:
+    value = remote.get("storage")
+    if not isinstance(value, dict):
+        return None
+    if value.get("inspect", True) is False:
+        return None
+    return value
+
+
+def run_storage_inspection(inspector: Path | None, target: RunTarget, storage: dict[str, Any], *, dry_run: bool) -> dict[str, Any]:
+    if inspector is None:
+        if not dry_run:
+            raise ValueError("--storage-inspector is required when scenario.remote_write.storage.inspect is enabled")
+        inspector = Path("parquet_footer_inspector")
+    root = target.datanode_data_dir
+    if storage.get("root_suffix"):
+        root = root / str(storage["root_suffix"])
+    cmd = [
+        str(inspector),
+        "--root", str(root),
+        "--column", str(storage.get("column", "greptime_value")),
+    ]
+    if storage.get("include_metadata_files", False):
+        cmd.append("--include-metadata-files")
+    if dry_run:
+        return {"status": "dry-run", "cmd": cmd, "root": str(root)}
+    result = run_command(cmd)
+    result["status"] = "ok" if result["returncode"] == 0 else "failed"
+    if result["returncode"] != 0:
+        raise RuntimeError(f"storage inspector failed for {target.name}: {result['stderr'][:2000]}")
+    try:
+        result["summary"] = json.loads(result["stdout"])
+    except json.JSONDecodeError:
+        result["summary_parse_error"] = result["stdout"]
+        result["status"] = "failed"
+    return result
+
+
+def storage_summary(inspection: dict[str, Any]) -> dict[str, Any]:
+    summary = inspection.get("summary")
+    if isinstance(summary, dict):
+        nested = summary.get("summary")
+        if isinstance(nested, dict):
+            return nested
+    return {}
+
+
+def enforce_storage_thresholds(storage: dict[str, Any] | None, base: dict[str, Any] | None, candidate: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not storage:
+        return []
+    results: list[dict[str, Any]] = []
+    target_summaries = [("base", storage_summary(base or {})), ("candidate", storage_summary(candidate or {}))]
+    cand = target_summaries[1][1]
+    base_summary = storage_summary(base or {})
+
+    def add_abs(name: str, field: str) -> None:
+        limit = storage.get(name)
+        if limit is None:
+            return
+        for target_name, summary in target_summaries:
+            actual = summary.get(field)
+            ok = actual is not None and float(actual) <= float(limit)
+            results.append({"target": target_name, "threshold": name, "status": "passed" if ok else "failed", "actual": actual, "limit": limit})
+
+    def add_min(name: str, field: str) -> None:
+        limit = storage.get(name, 1 if name in ("min_files", "min_files_with_column") else None)
+        if limit is None:
+            return
+        for target_name, summary in target_summaries:
+            actual = summary.get(field)
+            ok = actual is not None and int(actual) >= int(limit)
+            results.append({"target": target_name, "threshold": name, "status": "passed" if ok else "failed", "actual": actual, "limit": limit})
+
+    def add_cmp(name: str, field: str) -> None:
+        limit = storage.get(name)
+        if limit is None:
+            return
+        base_value = base_summary.get(field)
+        candidate_value = cand.get(field)
+        if base_value in (None, 0) or candidate_value is None:
+            results.append({"threshold": name, "status": "failed", "reason": "missing or zero base/candidate value", "base": base_value, "candidate": candidate_value})
+            return
+        actual = (float(candidate_value) - float(base_value)) / float(base_value) * 100.0
+        results.append({"threshold": name, "status": "passed" if actual <= float(limit) else "failed", "actual_pct": actual, "limit_pct": limit, "base": base_value, "candidate": candidate_value})
+
+    add_min("min_files", "file_count")
+    add_min("min_files_with_column", "files_with_column")
+    add_abs("max_total_file_size_bytes", "total_file_size")
+    add_abs("max_column_compressed_size_bytes", "column_compressed_size")
+    add_abs("max_column_uncompressed_size_bytes", "column_uncompressed_size")
+    for target_name, summary in target_summaries:
+        encodings = set(summary.get("unique_encodings") or [])
+        for required in storage.get("require_encodings", []):
+            results.append({"target": target_name, "threshold": "require_encodings", "encoding": required, "status": "passed" if required in encodings else "failed"})
+        for forbidden in storage.get("forbid_encodings", []):
+            results.append({"target": target_name, "threshold": "forbid_encodings", "encoding": forbidden, "status": "passed" if forbidden not in encodings else "failed"})
+    add_cmp("max_candidate_total_file_size_regression_pct", "total_file_size")
+    add_cmp("max_candidate_column_compressed_size_regression_pct", "column_compressed_size")
+    add_cmp("max_candidate_column_uncompressed_size_regression_pct", "column_uncompressed_size")
+    return results
+
+
+def planned_storage_thresholds(storage: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not storage:
+        return []
+    keys = [
+        "min_files",
+        "min_files_with_column",
+        "require_encodings",
+        "forbid_encodings",
+        "max_total_file_size_bytes",
+        "max_column_compressed_size_bytes",
+        "max_column_uncompressed_size_bytes",
+        "max_candidate_total_file_size_regression_pct",
+        "max_candidate_column_compressed_size_regression_pct",
+        "max_candidate_column_uncompressed_size_regression_pct",
+    ]
+    planned = []
+    for key in keys:
+        if key in storage or key in ("min_files", "min_files_with_column"):
+            planned.append({"threshold": key, "status": "planned", "value": storage.get(key, 1)})
+    return planned
+
+
 def write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
@@ -1000,8 +1125,14 @@ def run_remote_write_scenario(args: argparse.Namespace, case: dict[str, Any], ca
         require_binary(args.remote_write_generator, "remote-write generator", dry_run=args.dry_run)
     elif not args.dry_run:
         raise ValueError("--remote-write-generator is required for prom_remote_write_then_query")
+    storage = storage_config(remote)
+    if storage and args.storage_inspector is not None:
+        require_binary(args.storage_inspector, "storage inspector", dry_run=args.dry_run)
+    elif storage and not args.dry_run:
+        raise ValueError("--storage-inspector is required when scenario.remote_write.storage.inspect is enabled")
     clusters: list[DistributedCluster] = []
     target_results = []
+    storage_results = []
     try:
         for target in targets:
             target.work_dir.mkdir(parents=True, exist_ok=True)
@@ -1015,23 +1146,32 @@ def run_remote_write_scenario(args: argparse.Namespace, case: dict[str, Any], ca
             if not args.dry_run:
                 create_database = http_post_sql(target.http_port, f"CREATE DATABASE IF NOT EXISTS {sql_ident(db)}", "public", args.http_timeout)
             rw, flushes = run_remote_write_ingestion(args.remote_write_generator, target, remote, args, dry_run=args.dry_run)
-            physical = remote.get("physical_table", "greptime_physical_table")
             visibility = {"status": "dry-run"}
             query_result = {"validation": [], "validation_errors": [], "measurements": [], "status": "planned"}
             if not args.dry_run:
                 visibility = poll_expected_count(target, tables[0]["name"], db, expected_remote_write_rows(remote), float(remote.get("visibility_timeout_seconds", 30)), args.http_timeout)
+            storage_inspection = None
+            if storage:
+                storage_inspection = run_storage_inspection(args.storage_inspector, target, storage, dry_run=args.dry_run)
+                storage_results.append(storage_inspection)
+            if not args.dry_run:
                 query_result = run_queries(target, case, tables, args.http_timeout)
             tr = {"name": target.name, "binary": str(target.binary), "work_dir": str(target.work_dir), "components": cluster.component_report(), "frontend_config": str(config_path), "create_database": create_database, "remote_write": rw, "flushes": flushes, "flush": flushes[-1] if flushes else None, "visibility": visibility, **query_result}
+            if storage_inspection is not None:
+                tr["storage_inspection"] = storage_inspection
             flushes_ok = all(flush.get("ok") for flush in flushes)
-            remote_checks_ok = args.dry_run or (create_database.get("ok") and flushes_ok and visibility.get("ok") and visibility.get("row_count_ok"))
+            storage_ok = storage_inspection is None or args.dry_run or storage_inspection.get("status") == "ok"
+            remote_checks_ok = args.dry_run or (create_database.get("ok") and flushes_ok and visibility.get("ok") and visibility.get("row_count_ok") and storage_ok)
             if not remote_checks_ok:
-                tr.setdefault("validation_errors", []).append({"phase": "remote_write_visibility", "create_database_ok": create_database.get("ok"), "flushes_ok": flushes_ok, "visibility_ok": visibility.get("ok"), "row_count_ok": visibility.get("row_count_ok"), "create_database": create_database, "flushes": flushes, "visibility": visibility})
+                tr.setdefault("validation_errors", []).append({"phase": "remote_write_visibility_storage", "create_database_ok": create_database.get("ok"), "flushes_ok": flushes_ok, "visibility_ok": visibility.get("ok"), "row_count_ok": visibility.get("row_count_ok"), "storage_ok": storage_ok, "create_database": create_database, "flushes": flushes, "visibility": visibility})
             tr["status"] = "planned" if args.dry_run else ("measured" if remote_checks_ok and query_result["status"] == "ok" else "failed")
             write_json(target.report_path, tr)
             report["targets"].append(tr)
             target_results.append(query_result)
         if not args.dry_run:
-            report["thresholds"] = enforce_thresholds(case, target_results[0], target_results[1])
+            report["thresholds"] = enforce_thresholds(case, target_results[0], target_results[1]) + enforce_storage_thresholds(storage, storage_results[0] if storage_results else None, storage_results[1] if len(storage_results) > 1 else None)
+        elif storage:
+            report["thresholds"] = planned_storage_thresholds(storage)
         report["status"] = "planned" if args.dry_run else ("failed" if any(t["status"] == "failed" for t in report["thresholds"]) or any(t.get("status") == "failed" for t in report["targets"]) else "ok")
     finally:
         for cluster in reversed(clusters):
