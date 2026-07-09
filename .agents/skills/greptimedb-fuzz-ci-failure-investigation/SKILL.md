@@ -23,8 +23,10 @@ are the CI jobs that use `.github/actions/fuzz-test`:
 - `distributed-fuzztest` — distributed cluster fuzz targets.
 - `distributed-fuzztest-with-chaos` — distributed fuzz targets with Chaos Mesh.
 
-Standalone fuzz jobs usually only provide the GitHub Actions job log. Distributed
-fuzz jobs additionally export cluster artifacts on failure.
+Standalone fuzz jobs usually only provide the GitHub Actions job log, except
+`unstable-fuzztest`, which uploads the `unstable-fuzz-logs` artifact from
+`/tmp/unstable-greptime/` on failure. Distributed fuzz jobs additionally export
+cluster artifacts on failure.
 
 The reusable action `.github/actions/fuzz-test/action.yaml` runs:
 
@@ -134,8 +136,8 @@ jq -r '
 For a known `JOB_ID`, capture job name and step outcomes:
 
 ```bash
-jq -r --argjson id "$JOB_ID" '
-  .jobs[] | select(.id == $id) |
+jq -r --arg id "$JOB_ID" '
+  .jobs[] | select((.id | tostring) == $id) |
   "job=\(.name) conclusion=\(.conclusion) url=\(.html_url)",
   (.steps[]? | [.number, .name, .status, .conclusion, .started_at, .completed_at] | @tsv)
 ' jobs.json > job-summary.txt
@@ -163,7 +165,8 @@ Download the full workflow log only when setup/build context matters:
 gh run view "$RUN_ID" --repo "$REPO" --log > run-$RUN_ID.log
 ```
 
-Fallback if `gh run view --log` is incomplete:
+Fallback if `gh run view --log` is incomplete. The job logs endpoint returns a
+plain text stream, while the full run logs endpoint returns a zip archive:
 
 ```bash
 gh api "repos/$REPO/actions/jobs/$JOB_ID/logs" > job-$JOB_ID.log
@@ -374,7 +377,7 @@ if [ -z "$HEAD_SHA" ]; then
 fi
 
 UPSTREAM_REMOTE=$(git remote -v \
-  | awk '/GreptimeTeam\/greptimedb(\.git)?[[:space:]]/ { print $1; exit }')
+  | awk '/GreptimeTeam\/greptimedb(\.git)?\/?([[:space:]])/ { print $1; exit }')
 UPSTREAM_REMOTE=${UPSTREAM_REMOTE:-origin}
 
 git rev-parse --verify "$HEAD_SHA^{commit}" >/dev/null 2>&1 \
@@ -387,8 +390,8 @@ If local `HEAD` differs, inspect files at that SHA or create a temporary worktre
 git worktree add --detach /tmp/greptimedb-fuzz-ci/$RUN_ID/source "$HEAD_SHA"
 ```
 
-Remove temporary worktrees after investigation. Never overwrite the user's current
-branch.
+Remove temporary worktrees after investigation with `git worktree remove <path>`.
+Never overwrite the user's current branch.
 
 ## 8. Map logs to GreptimeDB code
 
