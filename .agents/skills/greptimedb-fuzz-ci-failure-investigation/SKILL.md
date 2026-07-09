@@ -115,7 +115,9 @@ gh run view "$RUN_ID" --repo "$REPO" \
 Fetch all jobs through the REST API:
 
 ```bash
-gh api "repos/$REPO/actions/runs/$RUN_ID/jobs?per_page=100" --paginate > jobs.json
+gh api "repos/$REPO/actions/runs/$RUN_ID/jobs?per_page=100" \
+  --paginate --jq '.jobs[]' \
+  | jq -s '{jobs: .}' > jobs.json
 ```
 
 List failed fuzz-like jobs:
@@ -164,7 +166,8 @@ gh run view "$RUN_ID" --repo "$REPO" --log > run-$RUN_ID.log
 Fallback if `gh run view --log` is incomplete:
 
 ```bash
-gh api "repos/$REPO/actions/jobs/$JOB_ID/logs" > job-$JOB_ID.raw.log
+gh api "repos/$REPO/actions/jobs/$JOB_ID/logs" > job-$JOB_ID-logs.zip
+unzip -q job-$JOB_ID-logs.zip -d job-logs
 gh api "repos/$REPO/actions/runs/$RUN_ID/logs" > run-$RUN_ID-logs.zip
 unzip -q run-$RUN_ID-logs.zip -d run-logs
 ```
@@ -182,7 +185,9 @@ In the job log, inspect the `Run Fuzz Test` step first. Capture:
 List artifacts:
 
 ```bash
-gh api "repos/$REPO/actions/runs/$RUN_ID/artifacts?per_page=100" --paginate > artifacts.json
+gh api "repos/$REPO/actions/runs/$RUN_ID/artifacts?per_page=100" \
+  --paginate --jq '.artifacts[]' \
+  | jq -s '{artifacts: .}' > artifacts.json
 jq -r '.artifacts[] | [.id, .name, .expired, .size_in_bytes] | @tsv' artifacts.json
 ```
 
@@ -359,8 +364,18 @@ Avoid common mistakes:
 Read the tested SHA:
 
 ```bash
-HEAD_SHA=$(jq -r '.headSha' run.json)
-git rev-parse --verify "$HEAD_SHA^{commit}" >/dev/null 2>&1 || git fetch origin "$HEAD_SHA"
+HEAD_SHA=$(jq -r '.headSha // empty' run.json)
+if [ -z "$HEAD_SHA" ]; then
+  echo "Error: HEAD_SHA is empty or null"
+  exit 1
+fi
+
+UPSTREAM_REMOTE=$(git remote -v \
+  | awk '/GreptimeTeam\/greptimedb(\.git)?[[:space:]]/ { print $1; exit }')
+UPSTREAM_REMOTE=${UPSTREAM_REMOTE:-origin}
+
+git rev-parse --verify "$HEAD_SHA^{commit}" >/dev/null 2>&1 \
+  || git fetch "$UPSTREAM_REMOTE" "$HEAD_SHA"
 ```
 
 If local `HEAD` differs, inspect files at that SHA or create a temporary worktree:
