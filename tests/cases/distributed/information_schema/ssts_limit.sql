@@ -35,4 +35,12 @@ FROM (
   LIMIT 1
 );
 
+EXPLAIN SELECT COUNT(*) AS filtered_limited_rows
+FROM (
+  SELECT region_id
+  FROM information_schema.ssts_manifest
+  WHERE table_id > 0
+  LIMIT 1
+);
+
 DROP TABLE ssts_limit_case;

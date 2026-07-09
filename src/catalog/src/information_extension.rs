@@ -146,8 +146,8 @@ impl DisplayAs for DistributedInspectExec {
     fn fmt_as(&self, _t: DisplayFormatType, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "DistributedInspectExec: kind={:?}, schema={:?}",
-            self.request.kind, self.arrow_schema
+            "DistributedInspectExec: kind={:?}, scan={}, schema={:?}",
+            self.request.kind, self.request.scan, self.arrow_schema
         )
     }
 }
