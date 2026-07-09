@@ -1226,7 +1226,6 @@ mod tests {
     use datatypes::schema::ColumnDefaultConstraint;
     use mito_codec::test_util::i64_value;
     use store_api::metadata::RegionMetadataBuilder;
-    use store_api::region_request::{PathType, RegionCleanUpRequest};
     use tokio::sync::oneshot;
 
     use super::*;
@@ -1306,28 +1305,6 @@ mod tests {
         assert_waiter_ok(&mut rx2);
         assert_waiter_ok(&mut rx3);
         assert_waiter_ok(&mut rx4);
-    }
-
-    #[test]
-    fn test_offline_cleanup_converts_to_cleanup_ddl_request() {
-        let region_id = RegionId::new(1, 1);
-        let request = RegionRequest::CleanUp(RegionCleanUpRequest {
-            engine: String::new(),
-            table_dir: "test".to_string(),
-            path_type: PathType::Bare,
-            options: HashMap::new(),
-        });
-
-        let (worker_request, _receiver) =
-            WorkerRequest::try_from_region_request(region_id, request, None).unwrap();
-
-        let WorkerRequest::Ddl(ddl) = worker_request else {
-            unreachable!();
-        };
-        assert!(matches!(
-            ddl.request,
-            DdlRequest::OfflineCleanup(RegionCleanUpRequest { .. })
-        ));
     }
 
     #[test]

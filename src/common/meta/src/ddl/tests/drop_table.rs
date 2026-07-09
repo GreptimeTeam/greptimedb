@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use api::v1::region::{RegionRequest, region_request};
 use async_trait::async_trait;
-use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, FILE_ENGINE};
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_procedure::{Procedure, StringKey};
@@ -732,6 +732,34 @@ async fn test_soft_drop_metric_logical_table_fails() {
 
     let mut procedure = DropTableProcedure::new(
         new_drop_table_task("foo", logical_table_id, false),
+        ddl_context,
+    );
+    let err = procedure.on_prepare().await.unwrap_err();
+
+    assert_eq!(err.status_code(), StatusCode::Unsupported);
+}
+
+#[tokio::test]
+async fn test_soft_drop_file_engine_table_fails() {
+    let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
+    let mut ddl_context = new_ddl_context(node_manager);
+    ddl_context.soft_drop_enabled = true;
+    let table_id = 1024;
+    let table_name = "foo";
+    let mut task = test_create_table_task(table_name, table_id);
+    task.table_info.meta.engine = FILE_ENGINE.to_string();
+    ddl_context
+        .table_metadata_manager
+        .create_table_metadata(
+            task.table_info.clone(),
+            TableRouteValue::physical(vec![]),
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+
+    let mut procedure = DropTableProcedure::new(
+        new_drop_table_task(table_name, table_id, false),
         ddl_context,
     );
     let err = procedure.on_prepare().await.unwrap_err();
