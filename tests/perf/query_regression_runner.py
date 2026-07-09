@@ -964,7 +964,7 @@ def parse_sst_bench_target(target: RunTarget, inspection: dict[str, Any], file: 
     }
 
 
-def run_read_bench(target: RunTarget, read_bench: dict[str, Any] | None, storage_inspection: dict[str, Any] | None, *, dry_run: bool) -> dict[str, Any]:
+def run_read_bench(bench_binary: Path, target: RunTarget, read_bench: dict[str, Any] | None, storage_inspection: dict[str, Any] | None, *, dry_run: bool) -> dict[str, Any]:
     if not read_bench or read_bench["enabled"] is False:
         return {"status": "skipped", "reason": "read_bench disabled"}
     run_parquetbench = read_bench["parquetbench"]
@@ -992,7 +992,7 @@ def run_read_bench(target: RunTarget, read_bench: dict[str, Any] | None, storage
     iterations = str(int(read_bench["iterations"]))
     if run_parquetbench:
         for bench_target in bench_targets:
-            cmd = [str(target.binary), "datanode", "parquetbench", "--config", str(config_toml), "--region-id", bench_target["region_id"], "--table-dir", bench_target["table_dir"], "--file-id", bench_target["file_id"], "--scan-config", str(scan_json), "--path-type", bench_target["path_type"], "--iterations", iterations, "--reader", str(read_bench["parquet_reader"])]
+            cmd = [str(bench_binary), "datanode", "parquetbench", "--config", str(config_toml), "--region-id", bench_target["region_id"], "--table-dir", bench_target["table_dir"], "--file-id", bench_target["file_id"], "--scan-config", str(scan_json), "--path-type", bench_target["path_type"], "--iterations", iterations, "--reader", str(read_bench["parquet_reader"])]
             commands.append(cmd)
             parquet_runs.append({**bench_target, "cmd": cmd, "status": "dry-run" if dry_run else "planned"})
     regions: dict[tuple[str, str, str], list[str]] = {}
@@ -1000,7 +1000,7 @@ def run_read_bench(target: RunTarget, read_bench: dict[str, Any] | None, storage
         for bench_target in bench_targets:
             regions.setdefault((bench_target["table_dir"], bench_target["region_id"], bench_target["path_type"]), []).append(bench_target["relative_path"])
     for (table_dir, region_id, path_type), region_files in regions.items():
-        cmd = [str(target.binary), "datanode", "scanbench", "--config", str(config_toml), "--region-id", region_id, "--table-dir", table_dir, "--scan-config", str(scan_json), "--path-type", path_type, "--scanner", str(read_bench["scan_scanner"]), "--parallelism", str(int(read_bench["parallelism"])), "--iterations", iterations]
+        cmd = [str(bench_binary), "datanode", "scanbench", "--config", str(config_toml), "--region-id", region_id, "--table-dir", table_dir, "--scan-config", str(scan_json), "--path-type", path_type, "--scanner", str(read_bench["scan_scanner"]), "--parallelism", str(int(read_bench["parallelism"])), "--iterations", iterations]
         commands.append(cmd)
         scan_runs.append({"table_dir": table_dir, "region_id": region_id, "path_type": path_type, "files": region_files, "cmd": cmd, "status": "dry-run" if dry_run else "planned"})
     if dry_run:
@@ -1265,7 +1265,7 @@ def run_remote_write_scenario(args: argparse.Namespace, case: dict[str, Any], ca
             if storage:
                 storage_inspection = run_storage_inspection(helper or args.storage_inspector, target, storage, dry_run=args.dry_run)
                 storage_results.append(storage_inspection)
-            read_bench_result = run_read_bench(target, remote["read_bench"], storage_inspection, dry_run=args.dry_run)
+            read_bench_result = run_read_bench(args.candidate_bin, target, remote["read_bench"], storage_inspection, dry_run=args.dry_run)
             if not args.dry_run:
                 query_result = run_queries(target, case, tables, args.http_timeout)
             tr = {"name": target.name, "binary": str(target.binary), "work_dir": str(target.work_dir), "components": cluster.component_report(), "frontend_config": str(config_path), "create_database": create_database, "remote_write": rw, "flushes": flushes, "flush": flushes[-1] if flushes else None, "visibility": visibility, **query_result}

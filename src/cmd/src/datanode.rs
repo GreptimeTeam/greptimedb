@@ -15,11 +15,10 @@
 pub mod builder;
 #[allow(clippy::print_stdout)]
 pub(crate) mod objbench;
-#[cfg(feature = "dev-tools")]
 #[allow(clippy::print_stdout)]
-mod parquetbench;
+pub mod parquetbench;
 #[allow(clippy::print_stdout)]
-mod scanbench;
+pub mod scanbench;
 
 use std::path::Path;
 use std::time::Duration;
@@ -40,7 +39,6 @@ use tracing_appender::non_blocking::WorkerGuard;
 use crate::App;
 use crate::datanode::builder::InstanceBuilder;
 use crate::datanode::objbench::ObjbenchCommand;
-#[cfg(feature = "dev-tools")]
 use crate::datanode::parquetbench::ParquetbenchCommand;
 use crate::datanode::scanbench::ScanbenchCommand;
 use crate::error::{
@@ -115,7 +113,6 @@ impl Command {
             SubCommand::Start(cmd) => cmd.load_options(global_options),
             // Bench commands are standalone utilities and don't need to load DatanodeOptions.
             SubCommand::Objbench(_) | SubCommand::Scanbench(_) => Self::default_bench_options(),
-            #[cfg(feature = "dev-tools")]
             SubCommand::Parquetbench(_) => Self::default_bench_options(),
         }
     }
@@ -141,7 +138,6 @@ pub enum SubCommand {
     /// Scan benchmark tool - benchmarks scanning a region directly from storage
     Scanbench(ScanbenchCommand),
     /// Benchmark scanning a single parquet SST.
-    #[cfg(feature = "dev-tools")]
     Parquetbench(ParquetbenchCommand),
 }
 
@@ -160,7 +156,6 @@ impl SubCommand {
                 cmd.run().await?;
                 std::process::exit(0);
             }
-            #[cfg(feature = "dev-tools")]
             SubCommand::Parquetbench(cmd) => {
                 cmd.run().await?;
                 std::process::exit(0);

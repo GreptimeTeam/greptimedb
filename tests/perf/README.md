@@ -391,9 +391,10 @@ query regression runs. It builds its own binaries for now:
   candidate checkout
 - runner and summary formatter from the candidate checkout
 
-The workflow builds `cmd` binaries with the `dev-tools` feature so the helper
-binary and the datanode `parquetbench`/`scanbench` subcommands stay out of normal
-release builds but remain available to this opt-in perf job.
+The workflow builds base and candidate `greptime` as normal release-equivalent
+binaries. Candidate `query_perf_fixture` is the extra head-side helper binary;
+the runner uses candidate `greptime datanode parquetbench/scanbench` as the
+read-bench tool against each target's data directory.
 
 The workflow runs automatically only for non-draft PRs labeled
 `query-regression` (on label/ready-for-review/reopen events, not every push).
