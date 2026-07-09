@@ -263,6 +263,13 @@ macro_rules! define_node_ast_extension {
             fn children(&self) -> &[Expr] {
                 std::slice::from_ref(&self.expr)
             }
+
+            fn with_new_children(&self, children: Vec<Expr>) -> Arc<dyn ExtensionExpr> {
+                match children.as_slice() {
+                    [expr] => Arc::new($name_expr { expr: expr.clone() }),
+                    _ => Arc::new(self.clone()),
+                }
+            }
         }
 
         #[allow(rustdoc::broken_intra_doc_links)]
@@ -312,6 +319,15 @@ impl ExtensionExpr for AliasExpr {
     }
     fn children(&self) -> &[Expr] {
         std::slice::from_ref(&self.expr)
+    }
+    fn with_new_children(&self, children: Vec<Expr>) -> Arc<dyn ExtensionExpr> {
+        match children.as_slice() {
+            [expr] => Arc::new(Self {
+                expr: expr.clone(),
+                alias: self.alias.clone(),
+            }),
+            _ => Arc::new(self.clone()),
+        }
     }
 }
 #[derive(Debug, Clone)]
