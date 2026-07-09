@@ -1982,7 +1982,7 @@ apply_on_query = "auto"
 mem_threshold_on_create = "auto"
 {vector_index_config}[region_engine.mito.gc]
 enable = false
-lingering_time = "1m"
+lingering_time = "1h"
 unknown_file_lingering_time = "1day"
 max_concurrent_lister_per_gc_job = 32
 max_concurrent_gc_job = 4

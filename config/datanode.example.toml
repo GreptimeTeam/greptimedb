@@ -678,7 +678,7 @@ enable = false
 ## Lingering time before deleting files.
 ## Should be long enough to allow long running queries to finish.
 ## If set to None, then unused files will be deleted immediately.
-lingering_time = "1m"
+lingering_time = "1h"
 
 ## Lingering time before deleting unknown files (files with undetermined expel time).
 ## Only applies during full file listing GC.

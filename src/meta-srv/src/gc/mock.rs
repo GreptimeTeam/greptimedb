@@ -344,6 +344,7 @@ impl TestEnv {
 
         let scheduler = GcScheduler {
             ctx: ctx.clone(),
+            runtime_switch_manager: crate::gc::scheduler::new_test_runtime_switch_manager(),
             receiver: rx,
             config,
             region_gc_tracker: Arc::new(tokio::sync::Mutex::new(HashMap::new())),

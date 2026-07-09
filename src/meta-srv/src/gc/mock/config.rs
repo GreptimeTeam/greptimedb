@@ -59,6 +59,7 @@ async fn test_different_gc_weights() {
 
     let scheduler1 = GcScheduler {
         ctx: ctx.clone(),
+        runtime_switch_manager: crate::gc::scheduler::new_test_runtime_switch_manager(),
         receiver: GcScheduler::channel().1,
         config: config1,
         region_gc_tracker: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
@@ -83,6 +84,7 @@ async fn test_different_gc_weights() {
 
     let scheduler2 = GcScheduler {
         ctx: ctx.clone(),
+        runtime_switch_manager: crate::gc::scheduler::new_test_runtime_switch_manager(),
         receiver: GcScheduler::channel().1,
         config: config2,
         region_gc_tracker: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
@@ -161,6 +163,7 @@ async fn test_regions_per_table_threshold() {
 
     let scheduler = GcScheduler {
         ctx: ctx.clone(),
+        runtime_switch_manager: crate::gc::scheduler::new_test_runtime_switch_manager(),
         receiver: GcScheduler::channel().1,
         config,
         region_gc_tracker: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
