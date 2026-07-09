@@ -16,8 +16,9 @@ use std::sync::Arc;
 
 use datafusion::config::ConfigOptions;
 use datafusion::physical_optimizer::PhysicalOptimizerRule;
-use datafusion::physical_plan::ExecutionPlan;
 use datafusion::physical_plan::projection::ProjectionExec;
+use datafusion::physical_plan::repartition::RepartitionExec;
+use datafusion::physical_plan::{ExecutionPlan, Partitioning};
 use datafusion_common::Result as DfResult;
 use datafusion_physical_expr::Distribution;
 use datafusion_physical_expr::utils::map_columns_before_projection;
@@ -68,11 +69,26 @@ impl PassDistribution {
     ) -> DfResult<Arc<dyn ExecutionPlan>> {
         // If this is a MergeScanExec, try to apply the current requirement.
         if let Some(merge_scan) = plan.as_any().downcast_ref::<MergeScanExec>()
-            && let Some(distribution) = current_req.as_ref()
-            && let Some(new_plan) = merge_scan.try_with_new_distribution(distribution.clone())
+            && let Some(Distribution::HashPartitioned(hash_exprs)) = current_req.as_ref()
         {
-            // Leaf node; no children to process
-            return Ok(Arc::new(new_plan) as _);
+            if let Partitioning::Hash(current_hash_exprs, _) = &merge_scan.properties().partitioning
+                && *current_hash_exprs == *hash_exprs
+            {
+                return Ok(plan);
+            }
+
+            if let Some(new_plan) = merge_scan
+                .try_with_new_distribution(Distribution::HashPartitioned(hash_exprs.clone()))
+            {
+                // Leaf node; no children to process
+                return Ok(Arc::new(new_plan) as _);
+            }
+
+            let partitioning = Partitioning::Hash(
+                hash_exprs.clone(),
+                merge_scan.properties().partitioning.partition_count(),
+            );
+            return Ok(Arc::new(RepartitionExec::try_new(plan, partitioning)?) as _);
         }
 
         // Compute per-child requirements from the current node.
@@ -263,6 +279,20 @@ mod tests {
         assert_eq!(
             column_names(right_exprs),
             vec![DATA_SCHEMA_TSID_COLUMN_NAME, "greptime_timestamp"]
+        );
+    }
+
+    #[test]
+    fn merge_scan_rejects_hash_requirement_on_partition_key_subset() {
+        let merge_scan = test_merge_scan_exec(test_schema());
+
+        let new_plan = merge_scan.try_with_new_distribution(Distribution::HashPartitioned(vec![
+            partition_column(DATA_SCHEMA_TSID_COLUMN_NAME, 1),
+        ]));
+
+        assert!(
+            new_plan.is_none(),
+            "partitioning by a subset of multi-column partition keys is not sufficient"
         );
     }
 
