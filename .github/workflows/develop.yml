@@ -457,6 +457,11 @@ jobs:
         name: Port forward Kafka WAL helper
         run: |
           kubectl port-forward service/kafka-wal-helper 8080:8080 -n kafka-cluster&
+      - if: matrix.mode.kafka
+        name: Check Kafka readiness
+        shell: bash
+        run: |
+          .github/scripts/wait-kafka-ready.sh
       - name: Fuzz Test
         uses: ./.github/actions/fuzz-test
         env:
@@ -648,6 +653,11 @@ jobs:
       - name: Port forward (mysql)
         run: |
           kubectl port-forward service/my-greptimedb-frontend 4002:4002 -n my-greptimedb&
+      - if: matrix.mode.kafka
+        name: Check Kafka readiness
+        shell: bash
+        run: |
+          .github/scripts/wait-kafka-ready.sh
       - name: Fuzz Test
         uses: ./.github/actions/fuzz-test
         env:
