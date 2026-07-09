@@ -48,8 +48,9 @@ use store_api::path_utils::region_name;
 use store_api::region_request::PathType;
 use store_api::storage::{FileId, RegionId};
 
-use super::util::case_name_from_path;
-use super::*;
+use crate::query_perf_fixture::DirectArgs;
+use crate::query_perf_fixture::case::*;
+use crate::query_perf_fixture::util::case_name_from_path;
 
 struct NoopIndexBuilder;
 

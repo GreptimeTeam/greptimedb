@@ -17,7 +17,7 @@ use prost::Message;
 use serde_json::json;
 use servers::prom_store::snappy_compress;
 
-use super::ValuePattern;
+use crate::query_perf_fixture::case::ValuePattern;
 
 #[derive(Debug, ClapArgs)]
 pub(super) struct PromRemoteWriteArgs {
