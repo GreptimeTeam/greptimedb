@@ -39,6 +39,7 @@ use strum::EnumString;
 use crate::error::{InvalidRegionOptionsSnafu, JsonOptionsSnafu, Result};
 use crate::memtable::bulk::BulkMemtableConfig;
 use crate::sst::FormatType;
+use crate::sst::parquet::value_encoding::MetricValueEncodingMode;
 
 const DEFAULT_INDEX_SEGMENT_ROW_COUNT: usize = 1024;
 const COMPACTION_TWCS_PREFIX: &str = "compaction.twcs.";
@@ -107,6 +108,8 @@ pub struct RegionOptions {
     /// Internal primary key encoding override used by metric-engine.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub primary_key_encoding: Option<PrimaryKeyEncoding>,
+    /// Experimental metric engine greptime_value Parquet encoding mode.
+    pub experimental_metric_engine_value_encoding: MetricValueEncodingMode,
 }
 
 impl RegionOptions {
@@ -256,6 +259,8 @@ impl RegionOptions {
             merge_mode: options.merge_mode,
             sst_format,
             primary_key_encoding,
+            experimental_metric_engine_value_encoding: options
+                .experimental_metric_engine_value_encoding,
         };
         opts.validate()?;
 
@@ -365,6 +370,7 @@ struct RegionOptionsWithoutEnum {
     merge_mode: Option<MergeMode>,
     #[serde_as(as = "NoneAsEmptyString")]
     sst_format: Option<FormatType>,
+    experimental_metric_engine_value_encoding: MetricValueEncodingMode,
 }
 
 impl Default for RegionOptionsWithoutEnum {
@@ -377,6 +383,8 @@ impl Default for RegionOptionsWithoutEnum {
             append_mode: options.append_mode,
             merge_mode: options.merge_mode,
             sst_format: options.sst_format,
+            experimental_metric_engine_value_encoding: options
+                .experimental_metric_engine_value_encoding,
         }
     }
 }
@@ -535,6 +543,33 @@ mod tests {
         let map = make_map(&[]);
         let options = RegionOptions::try_from_options(RegionId::new(0, 0), &map).unwrap();
         assert_eq!(RegionOptions::default(), options);
+        assert_eq!(
+            MetricValueEncodingMode::Disabled,
+            options.experimental_metric_engine_value_encoding
+        );
+    }
+
+    #[test]
+    fn test_metric_value_encoding_modes() {
+        for (raw, expected) in [
+            ("disabled", MetricValueEncodingMode::Disabled),
+            ("auto", MetricValueEncodingMode::Auto),
+            ("plain", MetricValueEncodingMode::Plain),
+            (
+                "byte_stream_split",
+                MetricValueEncodingMode::ByteStreamSplit,
+            ),
+        ] {
+            let map = make_map(&[("experimental_metric_engine_value_encoding", raw)]);
+            let options = RegionOptions::try_from_options(RegionId::new(0, 0), &map).unwrap();
+            assert_eq!(expected, options.experimental_metric_engine_value_encoding);
+        }
+    }
+
+    #[test]
+    fn test_invalid_metric_value_encoding_mode() {
+        let map = make_map(&[("experimental_metric_engine_value_encoding", "bss")]);
+        assert!(RegionOptions::try_from_options(RegionId::new(0, 0), &map).is_err());
     }
 
     #[test]
@@ -898,6 +933,7 @@ mod tests {
             merge_mode: Some(MergeMode::LastNonNull),
             sst_format: Some(FormatType::Flat),
             primary_key_encoding: None,
+            experimental_metric_engine_value_encoding: MetricValueEncodingMode::Disabled,
         };
         assert_eq!(expect, options);
     }
@@ -928,6 +964,7 @@ mod tests {
             merge_mode: Some(MergeMode::LastNonNull),
             sst_format: None,
             primary_key_encoding: None,
+            experimental_metric_engine_value_encoding: MetricValueEncodingMode::Disabled,
         };
         let region_options_json_str = serde_json::to_string(&options).unwrap();
         let got: RegionOptions = serde_json::from_str(&region_options_json_str).unwrap();
@@ -985,6 +1022,7 @@ mod tests {
             merge_mode: Some(MergeMode::LastNonNull),
             sst_format: None,
             primary_key_encoding: None,
+            experimental_metric_engine_value_encoding: MetricValueEncodingMode::Disabled,
         };
         assert_eq!(options, got);
     }

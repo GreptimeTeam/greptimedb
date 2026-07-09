@@ -44,8 +44,7 @@ use datatypes::vectors::Helper;
 use mito_codec::key_values::{KeyValue, KeyValues};
 use mito_codec::row_converter::{PrimaryKeyCodec, SortField, build_primary_key_codec_with_fields};
 use parquet::arrow::ArrowWriter;
-use parquet::basic::{Compression, ZstdLevel};
-use parquet::file::metadata::ParquetMetaData;
+use parquet::file::metadata::{KeyValue as ParquetKeyValue, ParquetMetaData};
 use parquet::file::properties::WriterProperties;
 use smallvec::SmallVec;
 use snafu::{OptionExt, ResultExt};
@@ -68,6 +67,10 @@ use crate::sst::SeriesEstimator;
 use crate::sst::index::IndexOutput;
 use crate::sst::parquet::flat_format::primary_key_column_index;
 use crate::sst::parquet::format::{PrimaryKeyArray, PrimaryKeyArrayBuilder};
+use crate::sst::parquet::value_encoding::{
+    MetricValueEncodingMode, ParquetWriteOptions, metric_engine_value_column_encoding,
+    metric_value_encoding_plan_for_batch, parquet_options_for_plan, sst_writer_properties,
+};
 use crate::sst::parquet::{PARQUET_METADATA_KEY, SstInfo};
 
 const INIT_DICT_VALUE_CAPACITY: usize = 8;
@@ -1134,32 +1137,59 @@ pub struct BulkPartEncodeMetrics {
 
 pub struct BulkPartEncoder {
     metadata: RegionMetadataRef,
-    writer_props: Option<WriterProperties>,
+    key_value_meta: ParquetKeyValue,
+    row_group_size: usize,
+    metric_value_encoding_mode: MetricValueEncodingMode,
 }
 
 impl BulkPartEncoder {
     pub fn new(metadata: RegionMetadataRef, row_group_size: usize) -> Result<BulkPartEncoder> {
+        Self::new_with_metric_value_encoding_mode(
+            metadata,
+            row_group_size,
+            MetricValueEncodingMode::Disabled,
+        )
+    }
+
+    pub fn new_with_metric_value_encoding_mode(
+        metadata: RegionMetadataRef,
+        row_group_size: usize,
+        metric_value_encoding_mode: MetricValueEncodingMode,
+    ) -> Result<BulkPartEncoder> {
         // TODO(yingwen): Skip arrow schema if needed.
         let json = metadata.to_json().context(InvalidMetadataSnafu)?;
-        let key_value_meta =
-            parquet::file::metadata::KeyValue::new(PARQUET_METADATA_KEY.to_string(), json);
-
-        // TODO(yingwen): Do we need compression?
-        let writer_props = Some(
-            WriterProperties::builder()
-                .set_key_value_metadata(Some(vec![key_value_meta]))
-                .set_write_batch_size(row_group_size)
-                .set_max_row_group_row_count(Some(row_group_size))
-                .set_compression(Compression::ZSTD(ZstdLevel::default()))
-                .set_column_index_truncate_length(None)
-                .set_statistics_truncate_length(None)
-                .build(),
-        );
+        let key_value_meta = ParquetKeyValue::new(PARQUET_METADATA_KEY.to_string(), json);
 
         Ok(Self {
             metadata,
-            writer_props,
+            key_value_meta,
+            row_group_size,
+            metric_value_encoding_mode,
         })
+    }
+
+    fn writer_props(&self, parquet_options: ParquetWriteOptions) -> Option<WriterProperties> {
+        Some(sst_writer_properties(
+            self.key_value_meta.clone(),
+            self.row_group_size,
+            &parquet_options,
+            |builder| builder.set_write_batch_size(self.row_group_size),
+        ))
+    }
+
+    fn initial_parquet_options(&self) -> (ParquetWriteOptions, bool) {
+        let mut parquet_options = ParquetWriteOptions::default();
+        if let Some(plan) =
+            metric_engine_value_column_encoding(&self.metadata, self.metric_value_encoding_mode)
+        {
+            parquet_options = parquet_options.overlay(parquet_options_for_plan(plan));
+            (parquet_options, false)
+        } else {
+            (
+                parquet_options,
+                self.metric_value_encoding_mode == MetricValueEncodingMode::Auto,
+            )
+        }
     }
 }
 
@@ -1167,7 +1197,7 @@ impl BulkPartEncoder {
     /// Encodes [BoxedRecordBatchIterator] into [EncodedBulkPart] with min/max timestamps.
     pub fn encode_record_batch_iter(
         &self,
-        iter: BoxedRecordBatchIterator,
+        mut iter: BoxedRecordBatchIterator,
         arrow_schema: SchemaRef,
         min_timestamp: i64,
         max_timestamp: i64,
@@ -1175,21 +1205,59 @@ impl BulkPartEncoder {
         metrics: &mut BulkPartEncodeMetrics,
     ) -> Result<Option<EncodedBulkPart>> {
         let mut buf = Vec::with_capacity(4096);
-        let mut writer =
-            ArrowWriter::try_new(&mut buf, arrow_schema.clone(), self.writer_props.clone())
-                .context(EncodeMemtableSnafu)?;
+        let (mut parquet_options, sample_metric_value_encoding) = self.initial_parquet_options();
         let mut total_rows = 0;
         let mut series_estimator = SeriesEstimator::default();
 
-        // Process each batch from the iterator
+        // Find the first non-empty batch before opening ArrowWriter so `auto` can decide
+        // writer properties without unbounded buffering.
         let mut iter_start = Instant::now();
+        let first_batch = loop {
+            let Some(batch_result) = iter.next() else {
+                metrics.iter_cost += iter_start.elapsed();
+                return Ok(None);
+            };
+            metrics.iter_cost += iter_start.elapsed();
+            let batch = batch_result?;
+            if batch.num_rows() == 0 {
+                iter_start = Instant::now();
+                continue;
+            }
+            break batch;
+        };
+
+        if sample_metric_value_encoding {
+            if let Some(plan) = metric_value_encoding_plan_for_batch(
+                &self.metadata,
+                self.metric_value_encoding_mode,
+                &first_batch,
+            ) {
+                parquet_options = parquet_options.overlay(parquet_options_for_plan(plan));
+            }
+        }
+        let mut writer = ArrowWriter::try_new(
+            &mut buf,
+            arrow_schema.clone(),
+            self.writer_props(parquet_options),
+        )
+        .context(EncodeMemtableSnafu)?;
+
+        let write_start = Instant::now();
+        series_estimator.update_flat(&first_batch);
+        metrics.raw_size += record_batch_estimated_size(&first_batch);
+        writer.write(&first_batch).context(EncodeMemtableSnafu)?;
+        metrics.write_cost += write_start.elapsed();
+        total_rows += first_batch.num_rows();
+
+        // Process remaining batches from the iterator.
+        iter_start = Instant::now();
         for batch_result in iter {
             metrics.iter_cost += iter_start.elapsed();
             let batch = batch_result?;
             if batch.num_rows() == 0 {
+                iter_start = Instant::now();
                 continue;
             }
-
             series_estimator.update_flat(&batch);
             metrics.raw_size += record_batch_estimated_size(&batch);
             let write_start = Instant::now();
@@ -1199,10 +1267,6 @@ impl BulkPartEncoder {
             iter_start = Instant::now();
         }
         metrics.iter_cost += iter_start.elapsed();
-
-        if total_rows == 0 {
-            return Ok(None);
-        }
 
         let close_start = Instant::now();
         let file_metadata = writer.close().context(EncodeMemtableSnafu)?;
@@ -1237,11 +1301,24 @@ impl BulkPartEncoder {
 
         let mut buf = Vec::with_capacity(4096);
         let arrow_schema = part.batch.schema();
+        let (mut parquet_options, sample_metric_value_encoding) = self.initial_parquet_options();
+        if sample_metric_value_encoding
+            && let Some(plan) = metric_value_encoding_plan_for_batch(
+                &self.metadata,
+                self.metric_value_encoding_mode,
+                &part.batch,
+            )
+        {
+            parquet_options = parquet_options.overlay(parquet_options_for_plan(plan));
+        }
 
         let file_metadata = {
-            let mut writer =
-                ArrowWriter::try_new(&mut buf, arrow_schema.clone(), self.writer_props.clone())
-                    .context(EncodeMemtableSnafu)?;
+            let mut writer = ArrowWriter::try_new(
+                &mut buf,
+                arrow_schema.clone(),
+                self.writer_props(parquet_options),
+            )
+            .context(EncodeMemtableSnafu)?;
             writer.write(&part.batch).context(EncodeMemtableSnafu)?;
             writer.finish().context(EncodeMemtableSnafu)?
         };

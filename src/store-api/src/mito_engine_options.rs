@@ -66,6 +66,9 @@ pub const MEMTABLE_PARTITION_TREE_FORK_DICTIONARY_BYTES: &str =
 pub const SKIP_WAL_KEY: &str = "skip_wal";
 /// Option key for sst format.
 pub const SST_FORMAT_KEY: &str = "sst_format";
+/// Option key for experimental metric engine greptime_value Parquet encoding.
+pub const EXPERIMENTAL_METRIC_ENGINE_VALUE_ENCODING: &str =
+    "experimental_metric_engine_value_encoding";
 // Note: Adding new options here should also check if this option should be removed in [metric_engine::engine::create::region_options_for_metadata_region].
 
 /// Returns true if the `key` is a valid option key for the mito engine.
@@ -96,6 +99,7 @@ pub fn is_mito_engine_option_key(key: &str) -> bool {
         APPEND_MODE_KEY,
         MERGE_MODE_KEY,
         SST_FORMAT_KEY,
+        EXPERIMENTAL_METRIC_ENGINE_VALUE_ENCODING,
     ]
     .contains(&key)
 }

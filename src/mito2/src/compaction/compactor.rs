@@ -591,6 +591,9 @@ where
             let write_opts = WriteOptions {
                 write_buffer_size: compaction_region.engine_config.sst_write_buffer_size,
                 max_file_size: picker_output.max_file_size,
+                metric_value_encoding_mode: compaction_region
+                    .region_options
+                    .experimental_metric_engine_value_encoding,
                 ..Default::default()
             };
             let merger = self.merger.clone();

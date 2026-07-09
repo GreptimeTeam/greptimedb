@@ -24,7 +24,10 @@ use store_api::metric_engine_consts::{
     METRIC_ENGINE_INDEX_SKIPPING_INDEX_GRANULARITY_OPTION_DEFAULT, METRIC_ENGINE_INDEX_TYPE_OPTION,
     PRIMARY_KEY_ENCODING,
 };
-use store_api::mito_engine_options::{COMPACTION_TYPE, COMPACTION_TYPE_TWCS, TWCS_TIME_WINDOW};
+use store_api::mito_engine_options::{
+    COMPACTION_TYPE, COMPACTION_TYPE_TWCS, EXPERIMENTAL_METRIC_ENGINE_VALUE_ENCODING,
+    TWCS_TIME_WINDOW,
+};
 
 /// Prefix for legacy `memtable.partition_tree.*` option keys. These keys are
 /// silently dropped by the metric engine; the partition tree memtable is gone.
@@ -60,9 +63,10 @@ pub enum IndexOptions {
 }
 
 /// Sets data region specific options.
-pub fn set_data_region_options(
+fn set_data_region_options_inner(
     options: &mut HashMap<String, String>,
     sparse_primary_key_encoding_if_absent: bool,
+    insert_value_encoding_default: bool,
 ) {
     options.remove(METRIC_ENGINE_INDEX_TYPE_OPTION);
     options.remove(METRIC_ENGINE_INDEX_SKIPPING_INDEX_GRANULARITY_OPTION);
@@ -102,6 +106,40 @@ pub fn set_data_region_options(
             DEFAULT_DATA_REGION_COMPACTION_TIME_WINDOW.to_string(),
         );
     }
+
+    if insert_value_encoding_default
+        && !options.contains_key(EXPERIMENTAL_METRIC_ENGINE_VALUE_ENCODING)
+    {
+        options.insert(
+            EXPERIMENTAL_METRIC_ENGINE_VALUE_ENCODING.to_string(),
+            "auto".to_string(),
+        );
+    }
+}
+
+/// Sets data region specific options when creating a physical data region.
+pub fn set_data_region_options_for_create(
+    options: &mut HashMap<String, String>,
+    sparse_primary_key_encoding_if_absent: bool,
+) {
+    set_data_region_options_inner(options, sparse_primary_key_encoding_if_absent, true);
+}
+
+/// Sets data region specific options when opening a physical data region.
+pub fn set_data_region_options_for_open(
+    options: &mut HashMap<String, String>,
+    sparse_primary_key_encoding_if_absent: bool,
+) {
+    set_data_region_options_inner(options, sparse_primary_key_encoding_if_absent, false);
+}
+
+/// Sets data region specific options.
+#[allow(dead_code)]
+pub fn set_data_region_options(
+    options: &mut HashMap<String, String>,
+    sparse_primary_key_encoding_if_absent: bool,
+) {
+    set_data_region_options_for_create(options, sparse_primary_key_encoding_if_absent);
 }
 
 impl TryFrom<&HashMap<String, String>> for PhysicalRegionOptions {
@@ -236,6 +274,33 @@ mod tests {
             Some(&COMPACTION_TYPE_TWCS.to_string())
         );
         assert_eq!(options.get(TWCS_TIME_WINDOW), Some(&"1d".to_string()));
+        assert_eq!(
+            options.get(EXPERIMENTAL_METRIC_ENGINE_VALUE_ENCODING),
+            Some(&"auto".to_string())
+        );
+    }
+
+    #[test]
+    fn test_set_data_region_options_for_open_preserves_missing_value_encoding() {
+        let mut options = HashMap::new();
+        set_data_region_options_for_open(&mut options, false);
+
+        assert!(!options.contains_key(EXPERIMENTAL_METRIC_ENGINE_VALUE_ENCODING));
+    }
+
+    #[test]
+    fn test_set_data_region_options_for_create_preserves_user_value_encoding() {
+        let mut options = HashMap::new();
+        options.insert(
+            EXPERIMENTAL_METRIC_ENGINE_VALUE_ENCODING.to_string(),
+            "plain".to_string(),
+        );
+        set_data_region_options_for_create(&mut options, false);
+
+        assert_eq!(
+            options.get(EXPERIMENTAL_METRIC_ENGINE_VALUE_ENCODING),
+            Some(&"plain".to_string())
+        );
     }
 
     #[test]

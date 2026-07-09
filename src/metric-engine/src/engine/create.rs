@@ -42,7 +42,7 @@ use store_api::storage::consts::ReservedColumnId;
 
 use crate::engine::MetricEngineInner;
 use crate::engine::create::extract_new_columns::extract_new_columns;
-use crate::engine::options::{PhysicalRegionOptions, set_data_region_options};
+use crate::engine::options::{PhysicalRegionOptions, set_data_region_options_for_create};
 use crate::error::{
     ColumnTypeMismatchSnafu, ConflictRegionOptionSnafu, CreateMitoRegionSnafu,
     InternalColumnOccupiedSnafu, InvalidMetadataSnafu, MissingRegionOptionSnafu,
@@ -554,7 +554,7 @@ impl MetricEngineInner {
         data_region_request.primary_key = primary_key;
 
         // set data region options
-        set_data_region_options(
+        set_data_region_options_for_create(
             &mut data_region_request.options,
             self.config.sparse_primary_key_encoding,
         );

@@ -601,6 +601,9 @@ async fn main() {
             write_buffer_size: DEFAULT_WRITE_BUFFER_SIZE,
             row_group_size: scenario.layout.row_group_size,
             max_file_size: None,
+            parquet: Default::default(),
+            parquet_write_operation: Default::default(),
+            metric_value_encoding_mode: Default::default(),
         };
         let infos = match format {
             FormatType::Flat => writer.write_all_flat(source, Some(sequence), &opts).await,

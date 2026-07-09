@@ -27,7 +27,7 @@ use store_api::storage::RegionId;
 
 use crate::engine::MetricEngineInner;
 use crate::engine::create::region_options_for_metadata_region;
-use crate::engine::options::{PhysicalRegionOptions, set_data_region_options};
+use crate::engine::options::{PhysicalRegionOptions, set_data_region_options_for_open};
 use crate::error::{
     BatchOpenMitoRegionSnafu, NoOpenRegionResultSnafu, OpenMitoRegionSnafu,
     PhysicalRegionNotFoundSnafu, Result,
@@ -226,7 +226,7 @@ impl MetricEngineInner {
         };
 
         let mut data_region_options = request.options;
-        set_data_region_options(
+        set_data_region_options_for_open(
             &mut data_region_options,
             self.config.sparse_primary_key_encoding,
         );

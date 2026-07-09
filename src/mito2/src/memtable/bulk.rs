@@ -63,6 +63,7 @@ use crate::read::flat_dedup::{FlatDedupIterator, FlatLastNonNull, FlatLastRow};
 use crate::read::flat_merge::FlatMergeIterator;
 use crate::region::options::MergeMode;
 use crate::sst::parquet::flat_format::field_column_start;
+use crate::sst::parquet::value_encoding::MetricValueEncodingMode;
 use crate::sst::parquet::{DEFAULT_READ_BATCH_SIZE, DEFAULT_ROW_GROUP_SIZE};
 
 /// Default merge threshold for triggering compaction.
@@ -393,6 +394,8 @@ pub struct BulkMemtable {
     append_mode: bool,
     /// Mode to handle duplicate rows while merging
     merge_mode: MergeMode,
+    /// MetricEngine greptime_value Parquet encoding mode.
+    metric_value_encoding_mode: MetricValueEncodingMode,
 }
 
 impl std::fmt::Debug for BulkMemtable {
@@ -635,6 +638,7 @@ impl Memtable for BulkMemtable {
             compact_dispatcher: self.compact_dispatcher.clone(),
             append_mode: self.append_mode,
             merge_mode: self.merge_mode,
+            metric_value_encoding_mode: self.metric_value_encoding_mode,
         })
     }
 
@@ -657,6 +661,7 @@ impl Memtable for BulkMemtable {
                 &self.metadata,
                 !self.append_mode,
                 self.merge_mode,
+                self.metric_value_encoding_mode,
             )?;
         }
 
@@ -675,6 +680,29 @@ impl BulkMemtable {
         append_mode: bool,
         merge_mode: MergeMode,
     ) -> Self {
+        Self::new_with_metric_value_encoding_mode(
+            id,
+            config,
+            metadata,
+            write_buffer_manager,
+            compact_dispatcher,
+            append_mode,
+            merge_mode,
+            MetricValueEncodingMode::Disabled,
+        )
+    }
+
+    /// Creates a new BulkMemtable with MetricEngine value encoding mode.
+    pub fn new_with_metric_value_encoding_mode(
+        id: MemtableId,
+        config: BulkMemtableConfig,
+        metadata: RegionMetadataRef,
+        write_buffer_manager: Option<WriteBufferManagerRef>,
+        compact_dispatcher: Option<Arc<CompactDispatcher>>,
+        append_mode: bool,
+        merge_mode: MergeMode,
+        metric_value_encoding_mode: MetricValueEncodingMode,
+    ) -> Self {
         let config = config.sanitize();
         let region_id = metadata.region_id;
         Self {
@@ -691,6 +719,7 @@ impl BulkMemtable {
             compact_dispatcher,
             append_mode,
             merge_mode,
+            metric_value_encoding_mode,
         }
     }
 
@@ -756,6 +785,7 @@ impl BulkMemtable {
                 compactor: self.compactor.clone(),
                 append_mode: self.append_mode,
                 merge_mode: self.merge_mode,
+                metric_value_encoding_mode: self.metric_value_encoding_mode,
             };
 
             dispatcher.dispatch_compact(task);
@@ -1079,6 +1109,7 @@ impl MemtableCompactor {
         metadata: &RegionMetadataRef,
         dedup: bool,
         merge_mode: MergeMode,
+        metric_value_encoding_mode: MetricValueEncodingMode,
     ) -> Result<()> {
         let start = Instant::now();
 
@@ -1117,6 +1148,7 @@ impl MemtableCompactor {
                     metadata,
                     dedup,
                     merge_mode,
+                    metric_value_encoding_mode,
                     encode_row_threshold,
                     encode_bytes_threshold,
                 )
@@ -1150,6 +1182,7 @@ impl MemtableCompactor {
         metadata: &RegionMetadataRef,
         dedup: bool,
         merge_mode: MergeMode,
+        metric_value_encoding_mode: MetricValueEncodingMode,
         encode_row_threshold: usize,
         encode_bytes_threshold: usize,
     ) -> Result<Option<MergedPart>> {
@@ -1230,7 +1263,11 @@ impl MemtableCompactor {
         if estimated_total_rows > encode_row_threshold
             || estimated_total_bytes > encode_bytes_threshold
         {
-            let encoder = BulkPartEncoder::new(metadata.clone(), DEFAULT_ROW_GROUP_SIZE)?;
+            let encoder = BulkPartEncoder::new_with_metric_value_encoding_mode(
+                metadata.clone(),
+                DEFAULT_ROW_GROUP_SIZE,
+                metric_value_encoding_mode,
+            )?;
             let mut metrics = BulkPartEncodeMetrics::default();
             let encoded_part = encoder.encode_record_batch_iter(
                 boxed_iter,
@@ -1291,6 +1328,8 @@ struct MemCompactTask {
     append_mode: bool,
     /// Mode to handle duplicate rows while merging
     merge_mode: MergeMode,
+    /// MetricEngine greptime_value Parquet encoding mode.
+    metric_value_encoding_mode: MetricValueEncodingMode,
 }
 
 impl MemCompactTask {
@@ -1308,6 +1347,7 @@ impl MemCompactTask {
                 &self.metadata,
                 !self.append_mode,
                 self.merge_mode,
+                self.metric_value_encoding_mode,
             )?;
         }
 
@@ -1355,6 +1395,7 @@ pub struct BulkMemtableBuilder {
     compact_dispatcher: Option<Arc<CompactDispatcher>>,
     append_mode: bool,
     merge_mode: MergeMode,
+    metric_value_encoding_mode: MetricValueEncodingMode,
 }
 
 impl BulkMemtableBuilder {
@@ -1370,12 +1411,19 @@ impl BulkMemtableBuilder {
             compact_dispatcher: None,
             append_mode,
             merge_mode,
+            metric_value_encoding_mode: MetricValueEncodingMode::Disabled,
         }
     }
 
     /// Sets the bulk memtable config.
     pub fn with_config(mut self, config: BulkMemtableConfig) -> Self {
         self.config = config;
+        self
+    }
+
+    /// Sets MetricEngine greptime_value Parquet encoding mode.
+    pub fn with_metric_value_encoding_mode(mut self, mode: MetricValueEncodingMode) -> Self {
+        self.metric_value_encoding_mode = mode;
         self
     }
 
@@ -1393,7 +1441,7 @@ impl BulkMemtableBuilder {
 
 impl MemtableBuilder for BulkMemtableBuilder {
     fn build(&self, id: MemtableId, metadata: &RegionMetadataRef) -> MemtableRef {
-        Arc::new(BulkMemtable::new(
+        Arc::new(BulkMemtable::new_with_metric_value_encoding_mode(
             id,
             self.config.clone(),
             metadata.clone(),
@@ -1401,6 +1449,7 @@ impl MemtableBuilder for BulkMemtableBuilder {
             self.compact_dispatcher.clone(),
             self.append_mode,
             self.merge_mode,
+            self.metric_value_encoding_mode,
         ))
     }
 

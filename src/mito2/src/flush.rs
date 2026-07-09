@@ -424,12 +424,12 @@ impl RegionFlushTask {
 
         let mut write_opts = WriteOptions {
             write_buffer_size: self.engine_config.sst_write_buffer_size,
+            metric_value_encoding_mode: version.options.experimental_metric_engine_value_encoding,
             ..Default::default()
         };
         if let Some(row_group_size) = self.row_group_size {
             write_opts.row_group_size = row_group_size;
         }
-
         let DoFlushMemtablesResult {
             file_metas,
             flushed_bytes,
