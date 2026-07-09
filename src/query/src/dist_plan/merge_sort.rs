@@ -335,6 +335,10 @@ pub fn merge_sort_transformer(plan: &LogicalPlan) -> Option<LogicalPlan> {
 #[cfg(test)]
 mod tests {
     use arrow_schema::{DataType, Field, Schema, SortOptions};
+    use datafusion::physical_optimizer::enforce_sorting::replace_with_order_preserving_variants::{
+        OrderPreservationContext, plan_with_order_breaking_variants,
+    };
+    use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
     use datafusion::physical_plan::displayable;
     use datafusion::physical_plan::empty::EmptyExec;
     use datafusion_physical_expr::PhysicalSortExpr;
@@ -342,18 +346,22 @@ mod tests {
 
     use super::*;
 
-    #[test]
-    fn merge_sort_exec_is_opaque_and_preserves_topk_requirements() {
-        let schema = Arc::new(Schema::new(vec![Field::new("ts", DataType::Int64, false)]));
-        let input = Arc::new(EmptyExec::new(schema.clone()).with_partitions(2)) as _;
-        let ordering = LexOrdering::new([PhysicalSortExpr::new(
-            physical_col("ts", schema.as_ref()).unwrap(),
+    fn test_ordering(schema: &Schema) -> LexOrdering {
+        LexOrdering::new([PhysicalSortExpr::new(
+            physical_col("ts", schema).unwrap(),
             SortOptions {
                 descending: true,
                 nulls_first: false,
             },
         )])
-        .unwrap();
+        .unwrap()
+    }
+
+    #[test]
+    fn merge_sort_exec_is_opaque_and_preserves_topk_requirements() {
+        let schema = Arc::new(Schema::new(vec![Field::new("ts", DataType::Int64, false)]));
+        let input = Arc::new(EmptyExec::new(schema.clone()).with_partitions(2)) as _;
+        let ordering = test_ordering(schema.as_ref());
 
         let merge_sort =
             Arc::new(MergeSortExec::new(ordering, input, Some(1))) as Arc<dyn ExecutionPlan>;
@@ -376,5 +384,64 @@ mod tests {
         let fetched = merge_sort.with_fetch(Some(2)).unwrap();
         assert!(fetched.as_any().downcast_ref::<MergeSortExec>().is_some());
         assert_eq!(fetched.fetch(), Some(2));
+    }
+
+    #[test]
+    fn enforce_sorting_rewrite_keeps_merge_sort_exec_opaque() {
+        let schema = Arc::new(Schema::new(vec![Field::new("ts", DataType::Int64, false)]));
+        let input = Arc::new(EmptyExec::new(schema.clone()).with_partitions(2)) as _;
+        let ordering = test_ordering(schema.as_ref());
+
+        let bare_spm = Arc::new(
+            SortPreservingMergeExec::new(ordering.clone(), Arc::clone(&input)).with_fetch(Some(1)),
+        ) as Arc<dyn ExecutionPlan>;
+        let optimized_spm = plan_with_order_breaking_variants(OrderPreservationContext::new(
+            bare_spm,
+            false,
+            vec![OrderPreservationContext::new(
+                Arc::clone(&input),
+                false,
+                vec![],
+            )],
+        ))
+        .unwrap()
+        .plan;
+        assert!(
+            optimized_spm
+                .as_any()
+                .downcast_ref::<CoalescePartitionsExec>()
+                .is_some(),
+            "this regression test must exercise EnforceSorting's bare SPM -> CoalescePartitionsExec rewrite"
+        );
+
+        let merge_sort =
+            Arc::new(MergeSortExec::new(ordering, input, Some(1))) as Arc<dyn ExecutionPlan>;
+        let optimized_merge_sort =
+            plan_with_order_breaking_variants(OrderPreservationContext::new(
+                Arc::clone(&merge_sort),
+                false,
+                vec![OrderPreservationContext::new(
+                    Arc::clone(merge_sort.children()[0]),
+                    false,
+                    vec![],
+                )],
+            ))
+            .unwrap()
+            .plan;
+        assert!(
+            optimized_merge_sort
+                .as_any()
+                .downcast_ref::<MergeSortExec>()
+                .is_some(),
+            "MergeSortExec must stay opaque to the bare SPM rewrite"
+        );
+        assert!(
+            optimized_merge_sort
+                .as_any()
+                .downcast_ref::<CoalescePartitionsExec>()
+                .is_none(),
+            "MergeSortExec(fetch) is the required distributed TopK merge stage, not an unordered coalesce"
+        );
+        assert_eq!(optimized_merge_sort.fetch(), Some(1));
     }
 }
