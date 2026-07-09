@@ -167,9 +167,9 @@ Fallback if `gh run view --log` is incomplete:
 
 ```bash
 gh api "repos/$REPO/actions/jobs/$JOB_ID/logs" > job-$JOB_ID-logs.zip
-unzip -q job-$JOB_ID-logs.zip -d job-logs
+unzip -oq job-$JOB_ID-logs.zip -d job-logs
 gh api "repos/$REPO/actions/runs/$RUN_ID/logs" > run-$RUN_ID-logs.zip
-unzip -q run-$RUN_ID-logs.zip -d run-logs
+unzip -oq run-$RUN_ID-logs.zip -d run-logs
 ```
 
 In the job log, inspect the `Run Fuzz Test` step first. Capture:
@@ -214,9 +214,13 @@ Fallback by artifact id:
 
 ```bash
 ARTIFACT_ID=$(jq -r --arg name "$ARTIFACT" '.artifacts[] | select(.name == $name and (.expired | not)) | .id' artifacts.json | head -n 1)
+if [ -z "$ARTIFACT_ID" ]; then
+  echo "Artifact not found or expired: $ARTIFACT"
+  exit 1
+fi
 gh api "repos/$REPO/actions/artifacts/$ARTIFACT_ID/zip" > artifact-$ARTIFACT_ID.zip
 mkdir -p artifacts/"$ARTIFACT"
-unzip -q artifact-$ARTIFACT_ID.zip -d artifacts/"$ARTIFACT"
+unzip -oq artifact-$ARTIFACT_ID.zip -d artifacts/"$ARTIFACT"
 ```
 
 For distributed fuzz failures, download at least the matching kind logs. Also
