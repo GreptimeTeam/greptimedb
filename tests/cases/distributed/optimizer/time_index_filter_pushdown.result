@@ -85,6 +85,57 @@ group by
 +---------+----------+
 
 -- Query the row at the latest timestamp through a scalar subquery.
+-- Keep the distributed merge sort visible, but redact the optional local SortExec
+-- that appears when query parallelism is lower than the region count.
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (?m)^\|_\|_SortExec:.*\n
+EXPLAIN SELECT
+    rack,
+    os,
+    greptime_timestamp
+FROM
+    cpu
+WHERE
+    greptime_timestamp = (
+        SELECT
+            greptime_timestamp
+        FROM
+            cpu
+        ORDER BY
+            greptime_timestamp DESC
+        LIMIT
+            1
+    );
+
++-+-+
+| plan_type_| plan_|
++-+-+
+| logical_plan_| Projection: cpu.rack, cpu.os, cpu.greptime_timestamp_|
+|_|_Inner Join: cpu.greptime_timestamp = __scalar_sq_1.greptime_timestamp_|
+|_|_Projection: cpu.rack, cpu.os, cpu.greptime_timestamp_|
+|_|_MergeScan [is_placeholder=false, remote_input=[_|
+|_| TableScan: cpu_|
+|_| ]]_|
+|_|_SubqueryAlias: __scalar_sq_1_|
+|_|_Limit: skip=0, fetch=1_|
+|_|_MergeSort: cpu.greptime_timestamp DESC NULLS FIRST_|
+|_|_MergeScan [is_placeholder=false, remote_input=[_|
+|_| Limit: skip=0, fetch=1_|
+|_|_Sort: cpu.greptime_timestamp DESC NULLS FIRST_|
+|_|_Projection: cpu.greptime_timestamp_|
+|_|_TableScan: cpu_|
+|_| ]]_|
+| physical_plan | HashJoinExec: mode=CollectLeft, join_type=Inner, on=[(greptime_timestamp@0, greptime_timestamp@2)], projection=[rack@1, os@2, greptime_timestamp@3]_|
+|_|_MergeSortExec: [greptime_timestamp@0 DESC], fetch=1_|
+|_|_MergeScanExec: REDACTED
+|_|_ProjectionExec: expr=[rack@0 as rack, os@1 as os, greptime_timestamp@3 as greptime_timestamp]_|
+|_|_CooperativeExec_|
+|_|_MergeScanExec: REDACTED
+|_|_|
++-+-+
+
 SELECT
     rack,
     os,
