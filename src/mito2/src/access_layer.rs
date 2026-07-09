@@ -364,7 +364,6 @@ impl AccessLayer {
             let indexer_builder = IndexerBuilderImpl {
                 build_type: request.op_type.into(),
                 metadata: request.metadata.clone(),
-                row_group_size: write_opts.row_group_size,
                 puffin_manager: self
                     .puffin_manager_factory
                     .build(store, path_provider.clone()),
