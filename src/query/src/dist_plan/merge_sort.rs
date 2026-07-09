@@ -228,6 +228,13 @@ impl ExecutionPlan for MergeSortExec {
         self.inner.partition_statistics(partition)
     }
 
+    // Do not mirror `SortPreservingMergeExec::supports_limit_pushdown()` here.
+    // DataFusion's limit pushdown rules know how to treat a bare SPM as a
+    // partition-combining node, but `MergeSortExec` is intentionally opaque to
+    // those SPM-specific downcasts. Enabling generic limit pushdown without also
+    // teaching the optimizer about this wrapper could push a limit below the
+    // required distributed TopK merge and return partition-local rows.
+
     fn fetch(&self) -> Option<usize> {
         self.inner.fetch()
     }
