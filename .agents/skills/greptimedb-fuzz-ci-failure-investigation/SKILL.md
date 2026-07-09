@@ -125,7 +125,7 @@ List failed fuzz-like jobs:
 ```bash
 jq -r '
   .jobs[]
-  | select(.conclusion != "success")
+  | select(.conclusion != null and .conclusion != "success")
   | select(.name | test("Fuzz Test|fuzz"; "i"))
   | [.id, .name, .status, .conclusion, .html_url] | @tsv
 ' jobs.json
@@ -213,7 +213,7 @@ gh run download "$RUN_ID" --repo "$REPO" --name "$ARTIFACT" --dir artifacts/"$AR
 Fallback by artifact id:
 
 ```bash
-ARTIFACT_ID=$(jq -r --arg name "$ARTIFACT" '.artifacts[] | select(.name == $name) | .id' artifacts.json)
+ARTIFACT_ID=$(jq -r --arg name "$ARTIFACT" '.artifacts[] | select(.name == $name and (.expired | not)) | .id' artifacts.json | head -n 1)
 gh api "repos/$REPO/actions/artifacts/$ARTIFACT_ID/zip" > artifact-$ARTIFACT_ID.zip
 mkdir -p artifacts/"$ARTIFACT"
 unzip -q artifact-$ARTIFACT_ID.zip -d artifacts/"$ARTIFACT"
@@ -340,7 +340,7 @@ Extract high-signal lines from job logs and artifacts:
 
 ```bash
 grep -RInE '(^|[^[:alpha:]])(ERROR|Error|WARN|panic|panicked|FAILED|failure|timeout|Timeout|assert|backtrace|SIG[A-Z]+|OOMKilled|CrashLoopBackOff|ImagePullBackOff|libFuzzer|AddressSanitizer|UndefinedBehaviorSanitizer)' \
-  job-$JOB_ID.log run-logs artifacts 2>/dev/null > signals.txt
+  job-$JOB_ID.log run-$RUN_ID.log job-logs run-logs artifacts 2>/dev/null > signals.txt
 ```
 
 Then identify the first causal failure, not the last cleanup error. A typical order:
