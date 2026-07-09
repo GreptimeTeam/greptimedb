@@ -25,8 +25,8 @@ use api::v1::region::bulk_insert_request::Body;
 use api::v1::region::{
     AlterRequest, AlterRequests, BuildIndexRequest, BulkInsertRequest, CloseRequest,
     CompactRequest, CreateRequest, CreateRequests, DeleteRequests, DropRequest, DropRequests,
-    FlushRequest, InsertRequests, OpenRequest, TruncateRequest, alter_request, compact_request,
-    region_request, truncate_request,
+    FlushRequest, InsertRequests, OpenRequest, RegionCleanUpRequest as PbRegionCleanUpRequest,
+    TruncateRequest, alter_request, compact_request, region_request, truncate_request,
 };
 use api::v1::{
     self, Analyzer, ArrowIpc, FulltextBackend as PbFulltextBackend, Option as PbOption, Rows,
@@ -145,6 +145,7 @@ pub enum RegionRequest {
     Create(RegionCreateRequest),
     Drop(RegionDropRequest),
     Open(RegionOpenRequest),
+    CleanUp(RegionCleanUpRequest),
     Close(RegionCloseRequest),
     Alter(RegionAlterRequest),
     Flush(RegionFlushRequest),
@@ -167,6 +168,7 @@ impl RegionRequest {
             region_request::Body::Create(create) => make_region_create(create),
             region_request::Body::Drop(drop) => make_region_drop(drop),
             region_request::Body::Open(open) => make_region_open(open),
+            region_request::Body::CleanUp(clean_up) => make_region_clean_up(clean_up),
             region_request::Body::Close(close) => make_region_close(close),
             region_request::Body::Alter(alter) => make_region_alter(alter),
             region_request::Body::Flush(flush) => make_region_flush(flush),
@@ -325,6 +327,22 @@ fn make_region_open(open: OpenRequest) -> Result<Vec<(RegionId, RegionRequest)>>
             skip_wal_replay: false,
             checkpoint: None,
             requirements: Default::default(),
+        }),
+    )])
+}
+
+fn make_region_clean_up(
+    clean_up: PbRegionCleanUpRequest,
+) -> Result<Vec<(RegionId, RegionRequest)>> {
+    let region_id = RegionId::from(clean_up.region_id);
+    let table_dir = table_dir(&clean_up.path, region_id.table_id());
+    Ok(vec![(
+        region_id,
+        RegionRequest::CleanUp(RegionCleanUpRequest {
+            engine: clean_up.engine,
+            table_dir,
+            path_type: PathType::Bare,
+            options: clean_up.options,
         }),
     )])
 }
@@ -646,6 +664,26 @@ pub struct ReplayCheckpoint {
 }
 
 impl RegionOpenRequest {
+    /// Returns true when the region belongs to the metric engine's physical table.
+    pub fn is_physical_table(&self) -> bool {
+        self.options.contains_key(PHYSICAL_TABLE_METADATA_KEY)
+    }
+}
+
+/// Offline region cleanup request.
+#[derive(Debug, Clone)]
+pub struct RegionCleanUpRequest {
+    /// Region engine name
+    pub engine: String,
+    /// Directory for table's data home. Usually is composed by catalog and table id
+    pub table_dir: String,
+    /// Path type for generating paths
+    pub path_type: PathType,
+    /// Options of the cleaned region.
+    pub options: HashMap<String, String>,
+}
+
+impl RegionCleanUpRequest {
     /// Returns true when the region belongs to the metric engine's physical table.
     pub fn is_physical_table(&self) -> bool {
         self.options.contains_key(PHYSICAL_TABLE_METADATA_KEY)
@@ -1642,6 +1680,7 @@ impl fmt::Display for RegionRequest {
             RegionRequest::Create(_) => write!(f, "Create"),
             RegionRequest::Drop(_) => write!(f, "Drop"),
             RegionRequest::Open(_) => write!(f, "Open"),
+            RegionRequest::CleanUp(_) => write!(f, "CleanUp"),
             RegionRequest::Close(_) => write!(f, "Close"),
             RegionRequest::Alter(_) => write!(f, "Alter"),
             RegionRequest::Flush(_) => write!(f, "Flush"),
@@ -2201,6 +2240,28 @@ mod tests {
         };
 
         assert_eq!(request.requirements, RegionRequirements::object_storage());
+    }
+
+    #[test]
+    fn test_parse_region_cleanup_from_proto() {
+        let clean_up = api::v1::region::RegionCleanUpRequest {
+            region_id: RegionId::new(42, 3).as_u64(),
+            engine: "mito".to_string(),
+            path: "test".to_string(),
+            options: HashMap::from([("k".to_string(), "v".to_string())]),
+        };
+
+        let requests =
+            RegionRequest::try_from_request_body(region_request::Body::CleanUp(clean_up)).unwrap();
+        let RegionRequest::CleanUp(request) = &requests[0].1 else {
+            unreachable!()
+        };
+
+        assert_eq!(requests[0].0, RegionId::new(42, 3));
+        assert_eq!(request.engine, "mito");
+        assert_eq!(request.table_dir, "data/test/42/");
+        assert_eq!(request.path_type, PathType::Bare);
+        assert_eq!(request.options.get("k"), Some(&"v".to_string()));
     }
 
     #[test]

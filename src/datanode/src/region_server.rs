@@ -1214,6 +1214,24 @@ impl RegionServerInner {
                     })?
                     .clone(),
             },
+            RegionChange::OfflineCleanup(attribute) => match current_region_status {
+                Some(status) => match status.clone() {
+                    RegionEngineWithStatus::Registering(_)
+                    | RegionEngineWithStatus::Deregistering(_) => {
+                        return error::RegionBusySnafu { region_id }.fail();
+                    }
+                    RegionEngineWithStatus::Ready(_) => status.clone().into_engine(),
+                },
+                None => self
+                    .engines
+                    .read()
+                    .unwrap()
+                    .get(attribute.engine())
+                    .with_context(|| RegionEngineNotFoundSnafu {
+                        name: attribute.engine(),
+                    })?
+                    .clone(),
+            },
             RegionChange::Deregisters => match current_region_status {
                 Some(status) => match status.clone() {
                     RegionEngineWithStatus::Registering(_) => {
@@ -1559,6 +1577,10 @@ impl RegionServerInner {
                 let attribute = parse_region_attribute(&open.engine, &open.options)?;
                 RegionChange::Register(attribute)
             }
+            RegionRequest::CleanUp(clean_up) => {
+                let attribute = parse_region_attribute(&clean_up.engine, &clean_up.options)?;
+                RegionChange::OfflineCleanup(attribute)
+            }
             RegionRequest::Close(_) | RegionRequest::Drop(_) => RegionChange::Deregisters,
             RegionRequest::Put(_) | RegionRequest::Delete(_) | RegionRequest::BulkInserts(_) => {
                 RegionChange::Ingest
@@ -1678,7 +1700,7 @@ impl RegionServerInner {
         region_change: RegionChange,
     ) {
         match region_change {
-            RegionChange::None | RegionChange::Ingest => {}
+            RegionChange::None | RegionChange::Ingest | RegionChange::OfflineCleanup(_) => {}
             RegionChange::Register(_) => {
                 self.region_map.remove(&region_id);
             }
@@ -1698,7 +1720,7 @@ impl RegionServerInner {
     ) -> Result<()> {
         let engine_type = engine.name();
         match region_change {
-            RegionChange::None | RegionChange::Ingest => {}
+            RegionChange::None | RegionChange::Ingest | RegionChange::OfflineCleanup(_) => {}
             RegionChange::Register(attribute) => {
                 info!(
                     "Region {region_id} is registered to engine {}",
@@ -1883,6 +1905,7 @@ impl RegionServerInner {
 enum RegionChange {
     None,
     Register(RegionAttribute),
+    OfflineCleanup(RegionAttribute),
     Deregisters,
     Catchup,
     Ingest,
@@ -1947,8 +1970,8 @@ mod tests {
     use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataBuilder};
     use store_api::region_engine::RegionEngine;
     use store_api::region_request::{
-        PathType, RegionCompactRequest, RegionDeleteRequest, RegionDropRequest, RegionOpenRequest,
-        RegionPutRequest, RegionTruncateRequest,
+        PathType, RegionCleanUpRequest, RegionCompactRequest, RegionDeleteRequest,
+        RegionDropRequest, RegionOpenRequest, RegionPutRequest, RegionTruncateRequest,
     };
     use store_api::storage::RegionId;
 
@@ -2117,6 +2140,39 @@ mod tests {
         while pinned.next().await.is_some() {}
 
         assert!(pinned.as_ref().get_ref().metrics().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_offline_cleanup_does_not_register_region() {
+        let mut mock_region_server = mock_region_server();
+        let (engine, mut receiver) = MockRegionEngine::new(MITO_ENGINE_NAME);
+        mock_region_server.register_engine(engine);
+
+        let region_id = RegionId::new(1, 1);
+        let response = mock_region_server
+            .handle_request(
+                region_id,
+                RegionRequest::CleanUp(RegionCleanUpRequest {
+                    engine: MITO_ENGINE_NAME.to_string(),
+                    table_dir: String::new(),
+                    path_type: PathType::Bare,
+                    options: HashMap::new(),
+                }),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.affected_rows, 0);
+        let (handled_region_id, handled_request) = receiver.try_recv().unwrap();
+        assert_eq!(handled_region_id, region_id);
+        assert_matches!(handled_request, RegionRequest::CleanUp(_));
+        assert!(
+            mock_region_server
+                .inner
+                .region_map
+                .get(&region_id)
+                .is_none()
+        );
     }
 
     #[tokio::test]

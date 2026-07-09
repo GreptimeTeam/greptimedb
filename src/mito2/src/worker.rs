@@ -1148,6 +1148,10 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                         .await;
                     continue;
                 }
+                DdlRequest::OfflineCleanup(req) => {
+                    self.handle_offline_cleanup_request(ddl.region_id, req)
+                        .await
+                }
                 DdlRequest::Close(req) => {
                     self.handle_close_request(ddl.region_id, req, ddl.sender)
                         .await;

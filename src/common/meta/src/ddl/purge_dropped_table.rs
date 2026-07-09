@@ -87,24 +87,15 @@ impl PurgeDroppedTableProcedure {
         Ok(Status::executing(true))
     }
 
-    async fn on_open_regions(&mut self) -> Result<Status> {
-        // Compatibility with procedure states dumped by the old reopen-then-drop purge flow.
-        // A purged soft-dropped table has already closed its regions, so purge must not reopen
-        // those tombstoned regions just to issue the final drop.
-        self.data.state = PurgeDroppedTableState::DropRegions;
-        Ok(Status::executing(true))
-    }
-
     async fn on_drop_regions(&mut self) -> Result<Status> {
         if let Some(region_routes) = self.data.physical_region_routes() {
             self.executor()
-                .on_drop_regions(
+                .on_cleanup_regions_offline(
                     &self.context.node_manager,
                     &self.context.leader_region_registry,
+                    self.data.table_info(),
                     region_routes,
-                    false,
-                    false,
-                    false,
+                    &self.data.region_wal_options,
                 )
                 .await?;
             self.context
@@ -148,7 +139,6 @@ impl Procedure for PurgeDroppedTableProcedure {
     async fn execute(&mut self, _: &ProcedureContext) -> ProcedureResult<Status> {
         match self.data.state {
             PurgeDroppedTableState::Prepare => self.on_prepare().await,
-            PurgeDroppedTableState::OpenRegions => self.on_open_regions().await,
             PurgeDroppedTableState::DropRegions => self.on_drop_regions().await,
             PurgeDroppedTableState::DeleteTombstone => self.on_delete_tombstone().await,
         }
@@ -201,6 +191,10 @@ impl PurgeDroppedTableData {
         self.table_route_value.as_ref().unwrap()
     }
 
+    fn table_info(&self) -> &TableInfo {
+        self.table_info.as_ref().unwrap()
+    }
+
     fn physical_region_routes(&self) -> Option<&[RegionRoute]> {
         match self.table_route_value() {
             TableRouteValue::Physical(route) => Some(&route.region_routes),
@@ -212,9 +206,6 @@ impl PurgeDroppedTableData {
 #[derive(Debug, Serialize, Deserialize, AsRefStr, PartialEq)]
 enum PurgeDroppedTableState {
     Prepare,
-    // Kept only so procedures persisted by the old reopen-then-drop implementation can resume
-    // without deserialization failures. New procedures transition from Prepare to DropRegions.
-    OpenRegions,
     DropRegions,
     DeleteTombstone,
 }

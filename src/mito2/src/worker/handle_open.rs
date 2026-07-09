@@ -17,18 +17,21 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use common_telemetry::info;
-use object_store::util::join_path;
+use common_telemetry::{info, warn};
+use object_store::util::{join_path, normalize_dir};
 use snafu::{OptionExt, ResultExt};
 use store_api::logstore::LogStore;
-use store_api::region_request::RegionOpenRequest;
+use store_api::region_request::{AffectedRows, RegionCleanUpRequest, RegionOpenRequest};
 use store_api::storage::RegionId;
 use table::requests::STORAGE_KEY;
 
 use crate::error::{
     ObjectStoreNotFoundSnafu, OpenDalSnafu, OpenRegionSnafu, RegionNotFoundSnafu, Result,
 };
-use crate::region::opener::{RegionOpener, sanitize_open_request_options};
+use crate::region::opener::{
+    RegionOpener, get_object_store, provider_from_wal_options, sanitize_open_request_options,
+};
+use crate::region::options::RegionOptions;
 use crate::request::OptionOutputTx;
 use crate::sst::location::region_dir_from_table_dir;
 use crate::wal::entry_distributor::WalEntryReceiver;
@@ -36,6 +39,51 @@ use crate::worker::handle_drop::remove_region_dir_once;
 use crate::worker::{DROPPING_MARKER_FILE, RegionWorkerLoop};
 
 impl<S: LogStore> RegionWorkerLoop<S> {
+    pub(crate) async fn handle_offline_cleanup_request(
+        &mut self,
+        region_id: RegionId,
+        mut request: RegionCleanUpRequest,
+    ) -> Result<AffectedRows> {
+        info!(
+            "Try to clean region {} offline, worker: {}",
+            region_id, self.id
+        );
+
+        if self.regions.is_region_exists(region_id) {
+            return self.handle_drop_request(region_id, false).await;
+        }
+
+        sanitize_open_request_options(&mut request.options);
+
+        let options = RegionOptions::try_from_options(region_id, &request.options)?;
+        let object_store = get_object_store(&options.storage, &self.object_store_manager)?;
+        let provider = provider_from_wal_options::<S>(region_id, &options.wal_options)?;
+        self.wal.obsolete_all(region_id, &provider).await?;
+
+        let table_dir = normalize_dir(&request.table_dir);
+        let region_dir = region_dir_from_table_dir(&table_dir, region_id, request.path_type);
+        remove_region_dir_once(&region_dir, &object_store, true).await?;
+
+        self.flush_scheduler.on_region_dropped(region_id);
+        self.compaction_scheduler.on_region_dropped(region_id);
+        self.index_build_scheduler
+            .on_region_dropped(region_id)
+            .await;
+        self.dropping_regions.remove_region(region_id);
+
+        if let Err(err) = self.intermediate_manager.prune_region_dir(&region_id).await {
+            warn!(err; "Failed to prune intermediate region directory, region_id: {}", region_id);
+        }
+
+        if let Some(write_cache) = self.cache_manager.write_cache()
+            && let Some(manifest_cache) = write_cache.manifest_cache()
+        {
+            manifest_cache.clean_manifests(&table_dir).await;
+        }
+
+        Ok(0)
+    }
+
     async fn check_and_cleanup_region(
         &self,
         region_id: RegionId,
