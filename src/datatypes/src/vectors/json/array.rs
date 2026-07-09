@@ -56,10 +56,13 @@ impl NullArrayCache {
     }
 
     fn get(&mut self, data_type: &DataType) -> ArrayRef {
-        self.arrays
-            .entry(data_type.clone())
-            .or_insert_with(|| new_null_array(data_type, self.len))
-            .clone()
+        if let Some(array) = self.arrays.get(data_type) {
+            array.clone()
+        } else {
+            let array = new_null_array(data_type, self.len);
+            self.arrays.insert(data_type.clone(), array.clone());
+            array
+        }
     }
 }
 
