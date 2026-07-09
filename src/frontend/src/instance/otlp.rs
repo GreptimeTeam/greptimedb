@@ -26,7 +26,6 @@ use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_query::prelude::GREPTIME_PHYSICAL_TABLE;
 use common_telemetry::{tracing, warn};
-use itertools::Itertools;
 use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
 use otel_arrow_rust::proto::opentelemetry::collector::metrics::v1::ExportMetricsServiceRequest;
@@ -845,12 +844,12 @@ fn chunk_owned<T>(items: Vec<T>, chunk_size: usize) -> Vec<Vec<T>> {
         return vec![items];
     }
 
-    items
-        .into_iter()
-        .chunks(chunk_size)
-        .into_iter()
-        .map(|chunk| chunk.collect::<Vec<_>>())
-        .collect()
+    let mut chunks = Vec::with_capacity(items.len().div_ceil(chunk_size));
+    let mut iter = items.into_iter();
+    while iter.len() > 0 {
+        chunks.push(iter.by_ref().take(chunk_size).collect());
+    }
+    chunks
 }
 
 /// Preserve the original alter failure status so chunk retry behavior stays correct.
