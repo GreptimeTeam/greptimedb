@@ -22,6 +22,7 @@ use std::sync::Arc;
 
 use datafusion::execution::TaskContext;
 use datafusion::physical_plan::metrics::MetricsSet;
+use datafusion::physical_plan::projection::{ProjectionExec, make_with_child, update_ordering};
 use datafusion::physical_plan::sorts::sort_preserving_merge::SortPreservingMergeExec;
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties, SendableRecordBatchStream,
@@ -93,13 +94,25 @@ impl MergeSortExec {
 impl DisplayAs for MergeSortExec {
     fn fmt_as(&self, t: DisplayFormatType, f: &mut fmt::Formatter) -> fmt::Result {
         match t {
-            DisplayFormatType::Default
-            | DisplayFormatType::Verbose
-            | DisplayFormatType::TreeRender => {
+            DisplayFormatType::Default | DisplayFormatType::Verbose => {
                 write!(f, "MergeSortExec: [{}]", self.inner.expr())?;
                 if let Some(fetch) = self.inner.fetch() {
                     write!(f, ", fetch={fetch}")?;
                 }
+                Ok(())
+            }
+            DisplayFormatType::TreeRender => {
+                if let Some(fetch) = self.inner.fetch() {
+                    writeln!(f, "limit={fetch}")?;
+                }
+
+                for (i, expr) in self.inner.expr().iter().enumerate() {
+                    expr.fmt_sql(f)?;
+                    if i != self.inner.expr().len() - 1 {
+                        write!(f, ", ")?;
+                    }
+                }
+
                 Ok(())
             }
         }
@@ -111,33 +124,47 @@ impl ExecutionPlan for MergeSortExec {
         "MergeSortExec"
     }
 
+    /// Keeps this node intentionally opaque to DataFusion's type-specialized
+    /// optimizer rewrites.
+    ///
+    /// `MergeSortExec` delegates most behavior to DataFusion's
+    /// `SortPreservingMergeExec`, but it must not expose itself as that type.
+    /// DataFusion's `EnforceSorting` optimizer recognizes a bare
+    /// `SortPreservingMergeExec` via `as_any().downcast_ref::<...>()` and may
+    /// replace it with an unordered `CoalescePartitionsExec(fetch)` when the
+    /// parent does not require sorted output.
+    ///
+    /// That rewrite is valid for an ordinary SPM used only to satisfy parent
+    /// ordering, but not for GreptimeDB's distributed TopK merge stage. In a
+    /// scalar-subquery shape like `ORDER BY ts DESC LIMIT 1`, this node is the
+    /// operator that merges region-local TopK streams into the global TopK.
+    /// Replacing it with unordered coalescing can return a partial/latest row
+    /// from one region instead of the global latest row.
+    ///
+    /// `required_input_ordering()` separately tells DataFusion what ordering this
+    /// node needs from its child, so `EnforceSorting` can insert a `SortExec`
+    /// below `MergeSortExec` when `MergeScanExec` cannot preserve per-partition
+    /// ordering. This opacity is specifically about protecting the merge stage
+    /// itself from the `EnforceSorting` rewrite above.
     fn as_any(&self) -> &dyn Any {
-        // Keep this node intentionally opaque.
-        //
-        // `MergeSortExec` delegates most behavior to DataFusion's
-        // `SortPreservingMergeExec`, but it must NOT expose itself as that type.
-        // Some DataFusion physical optimizer rules recognize a bare
-        // `SortPreservingMergeExec` via `as_any().downcast_ref::<...>()` and may
-        // replace it with an unordered `CoalescePartitionsExec(fetch)` when the
-        // parent does not require sorted output.
-        //
-        // That rewrite is valid for an ordinary SPM used only to satisfy parent
-        // ordering, but not for GreptimeDB's distributed TopK merge stage. In a
-        // scalar-subquery shape like `ORDER BY ts DESC LIMIT 1`, this node is the
-        // operator that merges region-local TopK streams into the global TopK.
-        // Replacing it with unordered coalescing can return a partial/latest row
-        // from one region instead of the global latest row.
-        //
-        // `required_input_ordering()` below separately tells DataFusion what
-        // ordering this node needs from its child, so `EnforceSorting` can insert
-        // a `SortExec` below `MergeSortExec` when `MergeScanExec` cannot preserve
-        // per-partition ordering. This opacity is specifically about protecting
-        // the merge stage itself from type-specialized optimizer rewrites.
         self
     }
 
     fn properties(&self) -> &Arc<PlanProperties> {
         self.inner.properties()
+    }
+
+    fn with_preserve_order(&self, preserve_order: bool) -> Option<Arc<dyn ExecutionPlan>> {
+        self.inner
+            .input()
+            .with_preserve_order(preserve_order)
+            .map(|new_input| {
+                Arc::new(Self::new(
+                    self.inner.expr().clone(),
+                    new_input,
+                    self.inner.fetch(),
+                )) as Arc<dyn ExecutionPlan>
+            })
     }
 
     fn required_input_distribution(&self) -> Vec<Distribution> {
@@ -171,6 +198,13 @@ impl ExecutionPlan for MergeSortExec {
         self: Arc<Self>,
         mut children: Vec<Arc<dyn ExecutionPlan>>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
+        if children.len() != 1 {
+            return Err(DataFusionError::Internal(format!(
+                "MergeSortExec expects exactly one child, got {}",
+                children.len()
+            )));
+        }
+
         Ok(Arc::new(Self::new(
             self.inner.expr().clone(),
             children.swap_remove(0),
@@ -204,6 +238,26 @@ impl ExecutionPlan for MergeSortExec {
             Arc::clone(self.inner.input()),
             limit,
         )))
+    }
+
+    fn try_swapping_with_projection(
+        &self,
+        projection: &ProjectionExec,
+    ) -> Result<Option<Arc<dyn ExecutionPlan>>> {
+        if projection.expr().len() >= projection.input().schema().fields().len() {
+            return Ok(None);
+        }
+
+        let Some(updated_exprs) = update_ordering(self.inner.expr().clone(), projection.expr())?
+        else {
+            return Ok(None);
+        };
+
+        Ok(Some(Arc::new(Self::new(
+            updated_exprs,
+            make_with_child(projection, self.inner.input())?,
+            self.inner.fetch(),
+        ))))
     }
 }
 
