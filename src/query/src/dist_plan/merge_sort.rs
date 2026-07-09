@@ -23,6 +23,7 @@ use std::sync::Arc;
 use datafusion::execution::TaskContext;
 use datafusion::physical_plan::metrics::MetricsSet;
 use datafusion::physical_plan::projection::{ProjectionExec, make_with_child, update_ordering};
+use datafusion::physical_plan::sorts::sort::SortExec;
 use datafusion::physical_plan::sorts::sort_preserving_merge::SortPreservingMergeExec;
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties, SendableRecordBatchStream,
@@ -87,6 +88,23 @@ impl MergeSortExec {
     ) -> Self {
         Self {
             inner: SortPreservingMergeExec::new(ordering, input).with_fetch(fetch),
+        }
+    }
+
+    fn input_with_fetch(&self, fetch: Option<usize>) -> Arc<dyn ExecutionPlan> {
+        let input = Arc::clone(self.inner.input());
+        if let Some(sort) = input.as_any().downcast_ref::<SortExec>()
+            && sort.preserve_partitioning()
+            && sort.expr() == self.inner.expr()
+        {
+            // Mirror DataFusion's bare SPM plan quality for distributed TopK:
+            // keep the parent `MergeSortExec(fetch)` as the global merge, and
+            // bound the partition-preserving child sort to the same local TopK.
+            // Local top-K is safe because every global top-K row must be within
+            // the top-K rows of its own input partition.
+            Arc::new(sort.with_fetch(fetch))
+        } else {
+            input
         }
     }
 }
@@ -256,7 +274,7 @@ impl ExecutionPlan for MergeSortExec {
     fn with_fetch(&self, limit: Option<usize>) -> Option<Arc<dyn ExecutionPlan>> {
         Some(Arc::new(Self::new(
             self.inner.expr().clone(),
-            Arc::clone(self.inner.input()),
+            self.input_with_fetch(limit),
             limit,
         )))
     }
@@ -508,6 +526,28 @@ mod tests {
             merge_sort.maintains_input_order(),
             bare_spm.maintains_input_order()
         );
+    }
+
+    #[test]
+    fn merge_sort_exec_with_fetch_pushes_fetch_to_child_sort() {
+        let schema = Arc::new(Schema::new(vec![Field::new("ts", DataType::Int64, false)]));
+        let input = Arc::new(EmptyExec::new(schema.clone()).with_partitions(2)) as _;
+        let ordering = test_ordering(schema.as_ref());
+        let child_sort =
+            Arc::new(SortExec::new(ordering.clone(), input).with_preserve_partitioning(true))
+                as Arc<dyn ExecutionPlan>;
+        let merge_sort = MergeSortExec::new(ordering, child_sort, None);
+
+        let fetched = merge_sort.with_fetch(Some(2)).unwrap();
+
+        assert!(fetched.as_any().downcast_ref::<MergeSortExec>().is_some());
+        assert_eq!(fetched.fetch(), Some(2));
+        let child_sort = fetched.children()[0]
+            .as_any()
+            .downcast_ref::<SortExec>()
+            .unwrap();
+        assert_eq!(child_sort.fetch(), Some(2));
+        assert!(child_sort.preserve_partitioning());
     }
 
     #[test]
