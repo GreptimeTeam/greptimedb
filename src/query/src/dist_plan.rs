@@ -27,6 +27,7 @@ mod remote_dyn_filter_registry;
 pub use analyzer::{DistPlannerAnalyzer, DistPlannerOptions};
 pub use filter_id::{FilterFingerprint, FilterId, ParseFilterIdError, RemoteDynFilterProducerId};
 pub use merge_scan::{MergeScanExec, MergeScanLogicalPlan};
+pub(crate) use merge_sort::MergeSortExec;
 pub use planner::{DistExtensionPlanner, MergeSortExtensionPlanner};
 pub use predicate_extractor::PredicateExtractor;
 pub use region_pruner::ConstraintPruner;
