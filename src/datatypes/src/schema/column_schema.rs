@@ -1230,6 +1230,7 @@ mod tests {
     use arrow::datatypes::{DataType as ArrowDataType, TimeUnit};
 
     use super::*;
+    use crate::types::{StructField, StructType};
     use crate::value::Value;
     use crate::vectors::Int32Vector;
 
@@ -1339,6 +1340,24 @@ mod tests {
             .with_default_constraint(Some(ColumnDefaultConstraint::null_value()))
             .unwrap();
         let v = column_schema.create_default_vector(5).unwrap().unwrap();
+        assert_eq!(5, v.len());
+        assert!(v.only_null());
+    }
+
+    #[test]
+    fn test_column_schema_create_default_null_struct_with_list() {
+        let list_type =
+            ConcreteDataType::list_datatype(Arc::new(ConcreteDataType::int32_datatype()));
+        let struct_type =
+            ConcreteDataType::struct_datatype(StructType::new(Arc::new(vec![StructField::new(
+                "values".to_string(),
+                list_type,
+                true,
+            )])));
+        let column_schema = ColumnSchema::new("test", struct_type, true);
+
+        let v = column_schema.create_default_vector(5).unwrap().unwrap();
+
         assert_eq!(5, v.len());
         assert!(v.only_null());
     }

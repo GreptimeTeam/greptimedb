@@ -34,6 +34,7 @@ use common_catalog::parse_catalog_and_schema_from_db_string;
 use common_decimal::Decimal128;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
+use common_query::native_histogram::is_native_histogram_value_type;
 use common_query::{Output, OutputData};
 use common_recordbatch::{RecordBatch, RecordBatches};
 use common_telemetry::{debug, tracing};
@@ -63,6 +64,8 @@ use snafu::{Location, OptionExt, ResultExt};
 use store_api::metric_engine_consts::{
     DATA_SCHEMA_TABLE_ID_COLUMN_NAME, DATA_SCHEMA_TSID_COLUMN_NAME, LOGICAL_TABLE_METADATA_KEY,
 };
+use table::metadata::TableInfo;
+use table::requests::{SEMANTIC_METRIC_TYPE, SEMANTIC_METRIC_UNIT};
 use table::TableRef;
 
 pub use super::result::prometheus_resp::PrometheusJsonResponse;
@@ -128,6 +131,14 @@ pub struct PromData {
     pub result: PromQueryResult,
 }
 
+#[derive(Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PromMetadata {
+    #[serde(rename = "type")]
+    pub metric_type: String,
+    pub unit: String,
+    pub help: String,
+}
+
 /// A "holder" for the reference([Arc]) to a column name,
 /// to help avoiding cloning [String]s when used as a [HashMap] key.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -145,6 +156,7 @@ pub enum PrometheusResponse {
     PromData(PromData),
     Labels(Vec<String>),
     Series(Vec<HashMap<Column, String>>),
+    Metadata(BTreeMap<String, Vec<PromMetadata>>),
     LabelValues(Vec<String>),
     FormatQuery(String),
     BuildInfo(OwnedBuildInfo),
@@ -201,6 +213,14 @@ pub struct FormatQuery {
     query: Option<String>,
 }
 
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct MetadataQuery {
+    db: Option<String>,
+    limit: Option<usize>,
+    limit_per_metric: Option<usize>,
+    metric: Option<String>,
+}
+
 #[axum_macros::debug_handler]
 #[tracing::instrument(
     skip_all,
@@ -236,6 +256,31 @@ pub struct BuildInfoQuery {}
 pub async fn build_info_query() -> PrometheusJsonResponse {
     let build_info = common_version::build_info().clone();
     PrometheusJsonResponse::success(PrometheusResponse::BuildInfo(build_info.into()))
+}
+
+#[axum_macros::debug_handler]
+#[tracing::instrument(
+    skip_all,
+    fields(protocol = "prometheus", request_type = "metadata_query")
+)]
+pub async fn metadata_query(
+    State(handler): State<PrometheusHandlerRef>,
+    Query(params): Query<MetadataQuery>,
+    Extension(mut query_ctx): Extension<QueryContext>,
+) -> PrometheusJsonResponse {
+    let (catalog, schema) = get_catalog_schema(&params.db, &query_ctx);
+    try_update_catalog_schema(&mut query_ctx, &catalog, &schema);
+
+    let metadata = match retrieve_metric_metadata(&query_ctx, handler.catalog_manager(), &params)
+        .await
+    {
+        Ok(metadata) => metadata,
+        Err(err) => {
+            return PrometheusJsonResponse::error(StatusCode::InvalidArguments, err.to_string());
+        }
+    };
+
+    PrometheusJsonResponse::success(PrometheusResponse::Metadata(metadata))
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -1157,15 +1202,15 @@ fn record_batches_to_labels_name(
     labels: &mut HashSet<String>,
 ) -> Result<()> {
     let mut column_indices = Vec::new();
-    let mut field_column_indices = Vec::new();
+    let mut value_column_indices = Vec::new();
     for (i, column) in batches.schema().column_schemas().iter().enumerate() {
-        if let ConcreteDataType::Float64(_) = column.data_type {
-            field_column_indices.push(i);
+        if is_prometheus_value_column(&column.data_type) {
+            value_column_indices.push(i);
         }
         column_indices.push(i);
     }
 
-    if field_column_indices.is_empty() {
+    if value_column_indices.is_empty() {
         return Err(Error::Internal {
             err_msg: "no value column found".to_string(),
         });
@@ -1177,21 +1222,18 @@ fn record_batches_to_labels_name(
             .map(|c| batches.schema().column_name_by_index(*c).to_string())
             .collect::<Vec<_>>();
 
-        let field_columns = field_column_indices
+        let value_columns = value_column_indices
             .iter()
-            .map(|i| {
-                let column = batch.column(*i);
-                column.as_primitive::<Float64Type>()
-            })
+            .map(|i| batch.column(*i))
             .collect::<Vec<_>>();
 
         for row_index in 0..batch.num_rows() {
-            // if all field columns are null, skip this row
-            if field_columns.iter().all(|c| c.is_null(row_index)) {
+            // if all value columns are null, skip this row
+            if value_columns.iter().all(|c| c.is_null(row_index)) {
                 continue;
             }
 
-            // if a field is not null, record the tag name and return
+            // if a value is not null, record the tag name and return
             names.iter().for_each(|name| {
                 let _ = labels.insert(name.clone());
             });
@@ -1199,6 +1241,10 @@ fn record_batches_to_labels_name(
         }
     }
     Ok(())
+}
+
+fn is_prometheus_value_column(data_type: &ConcreteDataType) -> bool {
+    matches!(data_type, ConcreteDataType::Float64(_)) || is_native_histogram_value_type(data_type)
 }
 
 pub(crate) fn retrieve_metric_name_and_result_type(
@@ -1861,6 +1907,83 @@ async fn retrieve_table_names(
     Ok(table_names)
 }
 
+async fn retrieve_metric_metadata(
+    query_ctx: &QueryContext,
+    manager: CatalogManagerRef,
+    params: &MetadataQuery,
+) -> Result<BTreeMap<String, Vec<PromMetadata>>> {
+    let mut metadata = BTreeMap::new();
+    if params.limit == Some(0) {
+        return Ok(metadata);
+    }
+
+    let catalog = query_ctx.current_catalog();
+    let schema = query_ctx.current_schema();
+    let mut tables_stream = manager.tables(catalog, &schema, Some(query_ctx));
+
+    while let Some(table) = tables_stream.next().await {
+        let table = table?;
+        let table_info = table.table_info();
+        if !is_prometheus_metric_table(table_info.as_ref()) {
+            continue;
+        }
+
+        if let Some(metric) = &params.metric
+            && table_info.name.as_str() != metric
+        {
+            continue;
+        }
+
+        metadata.insert(
+            table_info.name.clone(),
+            vec![prometheus_metadata_from_table(table_info.as_ref())],
+        );
+        if let Some(limit) = params.limit
+            && metadata.len() >= limit
+        {
+            break;
+        }
+    }
+
+    Ok(metadata)
+}
+
+fn is_prometheus_metric_table(table_info: &TableInfo) -> bool {
+    table_info
+        .meta
+        .options
+        .extra_options
+        .contains_key(LOGICAL_TABLE_METADATA_KEY)
+}
+
+fn prometheus_metadata_from_table(table_info: &TableInfo) -> PromMetadata {
+    let options = &table_info.meta.options.extra_options;
+    let metric_type = options
+        .get(SEMANTIC_METRIC_TYPE)
+        .cloned()
+        .or_else(|| table_has_native_histogram_value(table_info).then_some("histogram".to_string()))
+        .unwrap_or_default();
+    let unit = options
+        .get(SEMANTIC_METRIC_UNIT)
+        .cloned()
+        .unwrap_or_default();
+
+    PromMetadata {
+        metric_type,
+        unit,
+        help: String::new(),
+    }
+}
+
+fn table_has_native_histogram_value(table_info: &TableInfo) -> bool {
+    table_info
+        .meta
+        .schema
+        .column_schemas()
+        .iter()
+        .any(|column| is_native_histogram_value_type(&column.data_type))
+}
+
 async fn retrieve_field_names(
     query_ctx: &QueryContext,
     manager: CatalogManagerRef,
@@ -2162,11 +2285,12 @@ mod tests {
     use catalog::memory::MemoryCatalogManager;
     use catalog::{RegisterSchemaRequest, RegisterTableRequest};
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+    use common_query::native_histogram::native_histogram_value_type;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, Schema};
     use promql_parser::parser::value::ValueType;
     use table::metadata::{TableInfoBuilder, TableMetaBuilder, TableType, TableVersion};
-    use table::requests::TableOptions;
+    use table::requests::{SEMANTIC_METRIC_TYPE, SEMANTIC_METRIC_UNIT, TableOptions};
     use table::test_util::EmptyTable;
     use table::test_util::table_info::test_table_info;
 
@@ -3136,6 +3260,84 @@ mod tests {
         assert_eq!(
             static_promql_targets(&expr, &ctx).unwrap(),
             (PermissionTableTargets::resolved(Vec::new()), 2)
+        );
+    }
+
+    #[test]
+    fn test_record_batches_to_labels_name_accepts_native_histogram_value() {
+        let schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new("host", ConcreteDataType::string_datatype(), false),
+            ColumnSchema::new(
+                "greptime_native_histogram",
+                native_histogram_value_type().clone(),
+                true,
+            ),
+        ]));
+        let batch = RecordBatch::new_empty(schema.clone());
+        let batches = RecordBatches::try_new(schema, vec![batch]).unwrap();
+        let mut labels = HashSet::new();
+
+        record_batches_to_labels_name(batches, &mut labels).unwrap();
+
+        assert!(labels.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_retrieve_metric_metadata_uses_semantic_options() {
+        let schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new(
+                "greptime_timestamp",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
+            ColumnSchema::new("host", ConcreteDataType::string_datatype(), false),
+            ColumnSchema::new("value", ConcreteDataType::float64_datatype(), true),
+        ]));
+        let mut options = TableOptions::default();
+        options.extra_options.insert(
+            LOGICAL_TABLE_METADATA_KEY.to_string(),
+            "greptime_physical_table".to_string(),
+        );
+        options
+            .extra_options
+            .insert(SEMANTIC_METRIC_TYPE.to_string(), "counter".to_string());
+        options
+            .extra_options
+            .insert(SEMANTIC_METRIC_UNIT.to_string(), "By".to_string());
+        let meta = TableMetaBuilder::empty()
+            .schema(schema)
+            .primary_key_indices(vec![1])
+            .engine("metric".to_string())
+            .next_column_id(3)
+            .options(options)
+            .build()
+            .unwrap();
+        let table_info = TableInfoBuilder::default()
+            .table_id(1025)
+            .table_version(0 as TableVersion)
+            .name("http_requests_total")
+            .catalog_name(DEFAULT_CATALOG_NAME)
+            .schema_name(DEFAULT_SCHEMA_NAME)
+            .table_type(TableType::Base)
+            .meta(meta)
+            .build()
+            .unwrap();
+        let manager: CatalogManagerRef =
+            MemoryCatalogManager::new_with_table(EmptyTable::from_table_info(&table_info));
+        let query_ctx = QueryContext::with(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME);
+
+        let metadata = retrieve_metric_metadata(&query_ctx, manager, &MetadataQuery::default())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            metadata.get("http_requests_total"),
+            Some(&vec![PromMetadata {
+                metric_type: "counter".to_string(),
+                unit: "By".to_string(),
+                help: String::new(),
+            }])
         );
     }
 }

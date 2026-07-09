@@ -16,6 +16,7 @@ use crate::prelude::*;
 pub(crate) use crate::vectors::decimal::replicate_decimal128;
 pub(crate) use crate::vectors::null::replicate_null;
 pub(crate) use crate::vectors::primitive::replicate_primitive;
+use crate::vectors::{ListVector, ListVectorBuilder};
 
 pub(crate) fn replicate_scalar<C: ScalarVector>(c: &C, offsets: &[usize]) -> VectorRef {
     assert_eq!(offsets.len(), c.len());
@@ -24,6 +25,26 @@ pub(crate) fn replicate_scalar<C: ScalarVector>(c: &C, offsets: &[usize]) -> Vec
         return c.slice(0, 0);
     }
     let mut builder = <<C as ScalarVector>::Builder>::with_capacity(c.len());
+
+    let mut previous_offset = 0;
+    for (i, offset) in offsets.iter().enumerate() {
+        let data = c.get_data(i);
+        for _ in previous_offset..*offset {
+            builder.push(data.clone());
+        }
+        previous_offset = *offset;
+    }
+    builder.to_vector()
+}
+
+pub(crate) fn replicate_list(c: &ListVector, offsets: &[usize]) -> VectorRef {
+    assert_eq!(offsets.len(), c.len());
+
+    if offsets.is_empty() {
+        return c.slice(0, 0);
+    }
+    let mut builder =
+        ListVectorBuilder::with_type_capacity(c.item_type(), *offsets.last().unwrap());
 
     let mut previous_offset = 0;
     for (i, offset) in offsets.iter().enumerate() {
@@ -45,8 +66,11 @@ mod tests {
     use paste::paste;
 
     use super::*;
+    use crate::value::{ListValue, ListValueRef};
     use crate::vectors::constant::ConstantVector;
-    use crate::vectors::{Decimal128Vector, Int32Vector, NullVector, StringVector, VectorOp};
+    use crate::vectors::{
+        Decimal128Vector, Int32Vector, ListVectorBuilder, NullVector, StringVector, VectorOp,
+    };
 
     #[test]
     fn test_replicate_primitive() {
@@ -90,6 +114,26 @@ mod tests {
         assert_eq!(6, v.len());
 
         let expect: VectorRef = Arc::new(StringVector::from_slice(&["0", "1", "1", "2", "2", "3"]));
+        assert_eq!(expect, v);
+    }
+
+    #[test]
+    fn test_replicate_list() {
+        let item_type = Arc::new(ConcreteDataType::int32_datatype());
+        let first = ListValue::new(vec![Value::Int32(1), Value::Int32(2)], item_type.clone());
+        let second = ListValue::new(vec![Value::Int32(3)], item_type.clone());
+        let mut builder = ListVectorBuilder::with_type_capacity(item_type, 2);
+        builder.push(Some(ListValueRef::Ref { val: &first }));
+        builder.push(Some(ListValueRef::Ref { val: &second }));
+        let v = builder.finish();
+
+        let v = v.replicate(&[1, 3]);
+        let mut expect_builder =
+            ListVectorBuilder::with_type_capacity(Arc::new(ConcreteDataType::int32_datatype()), 3);
+        expect_builder.push(Some(ListValueRef::Ref { val: &first }));
+        expect_builder.push(Some(ListValueRef::Ref { val: &second }));
+        expect_builder.push(Some(ListValueRef::Ref { val: &second }));
+        let expect = expect_builder.to_vector();
         assert_eq!(expect, v);
     }
 
