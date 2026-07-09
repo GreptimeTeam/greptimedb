@@ -154,6 +154,13 @@ impl ExecutionPlan for MergeSortExec {
         self.inner.properties()
     }
 
+    /// Forwards DataFusion's order-preserving scan hint through this wrapper.
+    ///
+    /// This mirrors `SortPreservingMergeExec::with_preserve_order()`: if the
+    /// child can produce an order-preserving variant, rebuild the same merge
+    /// stage on top of that child. The returned plan must stay a
+    /// `MergeSortExec`, not a bare SPM, so the distributed TopK merge remains
+    /// opaque to `EnforceSorting`'s SPM-specific rewrite.
     fn with_preserve_order(&self, preserve_order: bool) -> Option<Arc<dyn ExecutionPlan>> {
         self.inner
             .input()
@@ -228,12 +235,19 @@ impl ExecutionPlan for MergeSortExec {
         self.inner.partition_statistics(partition)
     }
 
-    // Do not mirror `SortPreservingMergeExec::supports_limit_pushdown()` here.
-    // DataFusion's limit pushdown rules know how to treat a bare SPM as a
-    // partition-combining node, but `MergeSortExec` is intentionally opaque to
-    // those SPM-specific downcasts. Enabling generic limit pushdown without also
-    // teaching the optimizer about this wrapper could push a limit below the
-    // required distributed TopK merge and return partition-local rows.
+    /// Intentionally keeps DataFusion's generic limit pushdown disabled.
+    ///
+    /// `MergeSortExec` still supports its own global fetch through
+    /// `with_fetch()`. What we must not allow is pushing an external limit below
+    /// this required distributed TopK merge. DataFusion's limit pushdown rules
+    /// know how to treat a bare `SortPreservingMergeExec` as a
+    /// partition-combining node, but `MergeSortExec` is intentionally opaque to
+    /// those SPM-specific downcasts. Enabling generic limit pushdown without also
+    /// teaching the optimizer about this wrapper could return partition-local
+    /// rows instead of the global TopK.
+    fn supports_limit_pushdown(&self) -> bool {
+        false
+    }
 
     fn fetch(&self) -> Option<usize> {
         self.inner.fetch()
@@ -247,6 +261,12 @@ impl ExecutionPlan for MergeSortExec {
         )))
     }
 
+    /// Lets DataFusion push a projection below this merge when it can rewrite
+    /// the ordering expressions safely.
+    ///
+    /// This mirrors `SortPreservingMergeExec::try_swapping_with_projection()`
+    /// for plan quality, but re-wraps the result as `MergeSortExec` so the
+    /// distributed merge stage keeps its type identity and opacity.
     fn try_swapping_with_projection(
         &self,
         projection: &ProjectionExec,
@@ -375,6 +395,7 @@ mod tests {
             "MergeSortExec must stay opaque to EnforceSorting's bare SortPreservingMerge rewrite"
         );
         assert_eq!(merge_sort.fetch(), Some(1));
+        assert!(!merge_sort.supports_limit_pushdown());
         assert!(merge_sort.required_input_ordering()[0].is_some());
 
         let tree = displayable(merge_sort.as_ref()).tree_render().to_string();
