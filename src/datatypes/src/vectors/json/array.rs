@@ -361,6 +361,7 @@ impl<'a> From<&'a ArrayRef> for JsonArray<'a> {
 
 #[cfg(test)]
 mod test {
+    use arrow::buffer::OffsetBuffer;
     use arrow_array::types::Int64Type;
     use arrow_array::{
         BinaryArray, BooleanArray, Float64Array, Int32Array, Int64Array, ListArray, StringArray,
@@ -589,6 +590,61 @@ mod test {
                 ])),
                 Arc::new(StringArray::from(vec!["a", "b", "c"])),
             ]),
+        )
+        .test()?;
+
+        // Test list item alignment. The outer struct has 3 rows, while the list values
+        // contain 4 struct items. Missing item fields must use the values length.
+        let input_item_fields = Fields::from(vec![Field::new("id", DataType::Int64, true)]);
+        let expected_item_fields = Fields::from(vec![
+            Field::new("id", DataType::Int64, true),
+            Field::new("name", DataType::Utf8, true),
+        ]);
+        let input_item_type = DataType::Struct(input_item_fields.clone());
+        let expected_item_type = DataType::Struct(expected_item_fields.clone());
+        let offsets = OffsetBuffer::from_lengths([2, 0, 2]);
+        TestCase::new(
+            StructArray::from(vec![(
+                Arc::new(Field::new_list(
+                    "items",
+                    Field::new_list_field(input_item_type.clone(), true),
+                    true,
+                )),
+                Arc::new(
+                    ListArray::try_new(
+                        Arc::new(Field::new_list_field(input_item_type, true)),
+                        offsets.clone(),
+                        Arc::new(StructArray::new(
+                            input_item_fields,
+                            vec![Arc::new(Int64Array::from(vec![1, 2, 3, 4])) as ArrayRef],
+                            None,
+                        )),
+                        None,
+                    )
+                    .unwrap(),
+                ) as ArrayRef,
+            )]),
+            Fields::from(vec![Field::new_list(
+                "items",
+                Field::new_list_field(expected_item_type.clone(), true),
+                true,
+            )]),
+            Ok(vec![Arc::new(
+                ListArray::try_new(
+                    Arc::new(Field::new_list_field(expected_item_type, true)),
+                    offsets,
+                    Arc::new(StructArray::new(
+                        expected_item_fields,
+                        vec![
+                            Arc::new(Int64Array::from(vec![1, 2, 3, 4])) as ArrayRef,
+                            Arc::new(StringArray::new_null(4)),
+                        ],
+                        None,
+                    )),
+                    None,
+                )
+                .unwrap(),
+            )]),
         )
         .test()?;
 
