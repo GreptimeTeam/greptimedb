@@ -16,13 +16,15 @@ comment on PRs, or delete artifacts unless the user explicitly asks.
 ## Scope
 
 Use this skill for fuzz CI only. In `.github/workflows/develop.yml`, fuzz failures
-are the CI jobs that use `.github/actions/fuzz-test` and upload fuzz-specific
-artifacts on failure:
+are the CI jobs that use `.github/actions/fuzz-test`:
 
 - `fuzztest` — standalone fuzz targets.
 - `unstable-fuzztest` — unstable standalone fuzz target.
 - `distributed-fuzztest` — distributed cluster fuzz targets.
 - `distributed-fuzztest-with-chaos` — distributed fuzz targets with Chaos Mesh.
+
+Standalone fuzz jobs usually only provide the GitHub Actions job log. Distributed
+fuzz jobs additionally export cluster artifacts on failure.
 
 The reusable action `.github/actions/fuzz-test/action.yaml` runs:
 
@@ -59,8 +61,6 @@ https://github.com/GreptimeTeam/greptimedb/actions/runs/29000666156/job/86062894
 
 Also accept these fallback inputs:
 
-- A GitHub Actions job URL, e.g.
-  `https://github.com/GreptimeTeam/greptimedb/actions/runs/29000666156/job/86062894741`.
 - A workflow run URL, e.g.
   `https://github.com/GreptimeTeam/greptimedb/actions/runs/29000666156`.
 - A run id plus a fuzz target, mode name, artifact name, PR, branch, or commit SHA.
@@ -166,8 +166,7 @@ gh run view "$RUN_ID" --repo "$REPO" --log > run-$RUN_ID.log
 Fallback if `gh run view --log` is incomplete:
 
 ```bash
-gh api "repos/$REPO/actions/jobs/$JOB_ID/logs" > job-$JOB_ID-logs.zip
-unzip -oq job-$JOB_ID-logs.zip -d job-logs
+gh api "repos/$REPO/actions/jobs/$JOB_ID/logs" > job-$JOB_ID.log
 gh api "repos/$REPO/actions/runs/$RUN_ID/logs" > run-$RUN_ID-logs.zip
 unzip -oq run-$RUN_ID-logs.zip -d run-logs
 ```
