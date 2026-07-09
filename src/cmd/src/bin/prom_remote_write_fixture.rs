@@ -55,6 +55,14 @@ struct Args {
     value_cardinality: u64,
     #[arg(long, default_value_t = 0)]
     value_seed: u64,
+    #[arg(long, default_value_t = 8)]
+    value_run_length: u64,
+    #[arg(long, default_value_t = 100)]
+    value_stall_every: u64,
+    #[arg(long, default_value_t = 16)]
+    value_stall_length: u64,
+    #[arg(long, default_value_t = 5)]
+    value_mixed_every: u64,
     #[arg(long, default_value_t = 0)]
     value_sample_offset: u64,
     #[arg(long)]
@@ -69,6 +77,10 @@ enum ValuePattern {
     Modulo,
     Unique,
     SeededRandom,
+    RunLength,
+    QuantizedSignal,
+    SignalWithSporadicStalls,
+    MixedSignalRepeated,
 }
 
 impl std::fmt::Display for ValuePattern {
@@ -79,6 +91,10 @@ impl std::fmt::Display for ValuePattern {
             Self::Modulo => write!(f, "modulo"),
             Self::Unique => write!(f, "unique"),
             Self::SeededRandom => write!(f, "seeded_random"),
+            Self::RunLength => write!(f, "run_length"),
+            Self::QuantizedSignal => write!(f, "quantized_signal"),
+            Self::SignalWithSporadicStalls => write!(f, "signal_with_sporadic_stalls"),
+            Self::MixedSignalRepeated => write!(f, "mixed_signal_repeated"),
         }
     }
 }
@@ -147,6 +163,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "step": args.value_step,
                 "cardinality": args.value_cardinality,
                 "seed": args.value_seed,
+                "run_length": args.value_run_length,
+                "stall_every": args.value_stall_every,
+                "stall_length": args.value_stall_length,
+                "mixed_every": args.value_mixed_every,
                 "sample_offset": args.value_sample_offset,
                 "total_samples_per_series": args.value_total_samples_per_series.unwrap_or(args.samples_per_series),
             },
@@ -186,10 +206,9 @@ fn label(name: &str, value: &str) -> Label {
 
 fn deterministic_value(args: &Args, series_idx: u64, sample_idx: u64) -> f64 {
     let ordinal = value_ordinal(args, series_idx, sample_idx);
+    let series_sample_ordinal = value_series_sample_ordinal(args, sample_idx);
     match args.value_pattern {
-        ValuePattern::Linear => {
-            args.value_base + (series_idx % 97) as f64 + sample_idx as f64 * args.value_step
-        }
+        ValuePattern::Linear => linear_value(args, series_idx, series_sample_ordinal),
         ValuePattern::Constant => args.value_base,
         ValuePattern::Modulo => {
             args.value_base + (ordinal % args.value_cardinality.max(1)) as f64 * args.value_step
@@ -199,7 +218,38 @@ fn deterministic_value(args: &Args, series_idx: u64, sample_idx: u64) -> f64 {
             let bucket = splitmix64(ordinal ^ args.value_seed) % args.value_cardinality.max(1);
             args.value_base + bucket as f64 * args.value_step
         }
+        ValuePattern::RunLength => {
+            let bucket = (ordinal / args.value_run_length.max(1)) % args.value_cardinality.max(1);
+            args.value_base + bucket as f64 * args.value_step
+        }
+        ValuePattern::QuantizedSignal => {
+            let bucket = ((series_idx % args.value_cardinality.max(1))
+                + (series_sample_ordinal / args.value_run_length.max(1)))
+                % args.value_cardinality.max(1);
+            args.value_base + bucket as f64 * args.value_step
+        }
+        ValuePattern::SignalWithSporadicStalls => {
+            let stall_every = args.value_stall_every.max(1);
+            let stall_length = args.value_stall_length.min(stall_every);
+            let phase = series_sample_ordinal % stall_every;
+            if phase < stall_length {
+                linear_value(args, series_idx, series_sample_ordinal - phase)
+            } else {
+                linear_value(args, series_idx, series_sample_ordinal)
+            }
+        }
+        ValuePattern::MixedSignalRepeated => {
+            if series_sample_ordinal.is_multiple_of(args.value_mixed_every.max(1)) {
+                args.value_base
+            } else {
+                linear_value(args, series_idx, series_sample_ordinal)
+            }
+        }
     }
+}
+
+fn linear_value(args: &Args, series_idx: u64, series_sample_ordinal: u64) -> f64 {
+    args.value_base + (series_idx % 97) as f64 + series_sample_ordinal as f64 * args.value_step
 }
 
 fn value_ordinal(args: &Args, series_idx: u64, sample_idx: u64) -> u64 {
@@ -207,6 +257,10 @@ fn value_ordinal(args: &Args, series_idx: u64, sample_idx: u64) -> u64 {
         .value_total_samples_per_series
         .unwrap_or(args.samples_per_series);
     series_idx * total_samples_per_series + args.value_sample_offset + sample_idx
+}
+
+fn value_series_sample_ordinal(args: &Args, sample_idx: u64) -> u64 {
+    args.value_sample_offset + sample_idx
 }
 
 fn splitmix64(mut value: u64) -> u64 {
@@ -238,6 +292,10 @@ mod tests {
             value_step: 0.125,
             value_cardinality: 97,
             value_seed: 0,
+            value_run_length: 8,
+            value_stall_every: 100,
+            value_stall_length: 16,
+            value_mixed_every: 5,
             value_sample_offset: 0,
             value_total_samples_per_series: None,
         }
@@ -302,5 +360,67 @@ mod tests {
         assert_eq!(first, deterministic_value(&args, 4, 5));
         args.value_seed = 124;
         assert_ne!(first, deterministic_value(&args, 4, 5));
+    }
+
+    #[test]
+    fn run_length_repeats_each_bucket_for_configured_window() {
+        let mut args = args(ValuePattern::RunLength);
+        args.samples_per_series = 10;
+        args.value_step = 1.0;
+        args.value_cardinality = 4;
+        args.value_run_length = 3;
+        assert_eq!(deterministic_value(&args, 0, 0), 0.0);
+        assert_eq!(deterministic_value(&args, 0, 2), 0.0);
+        assert_eq!(deterministic_value(&args, 0, 3), 1.0);
+        assert_eq!(deterministic_value(&args, 1, 0), 3.0);
+    }
+
+    #[test]
+    fn quantized_signal_uses_series_local_quantized_steps() {
+        let mut args = args(ValuePattern::QuantizedSignal);
+        args.value_base = 10.0;
+        args.value_step = 2.0;
+        args.value_cardinality = 5;
+        args.value_run_length = 4;
+        assert_eq!(deterministic_value(&args, 2, 0), 14.0);
+        assert_eq!(deterministic_value(&args, 2, 3), 14.0);
+        assert_eq!(deterministic_value(&args, 2, 4), 16.0);
+    }
+
+    #[test]
+    fn quantized_signal_respects_chunk_offset() {
+        let mut args = args(ValuePattern::QuantizedSignal);
+        args.value_step = 1.0;
+        args.value_cardinality = 8;
+        args.value_run_length = 4;
+        args.value_sample_offset = 4;
+        assert_eq!(deterministic_value(&args, 0, 0), 1.0);
+        assert_eq!(deterministic_value(&args, 0, 3), 1.0);
+        assert_eq!(deterministic_value(&args, 0, 4), 2.0);
+    }
+
+    #[test]
+    fn sporadic_stalls_hold_value_within_stall_window() {
+        let mut args = args(ValuePattern::SignalWithSporadicStalls);
+        args.value_step = 1.0;
+        args.value_stall_every = 5;
+        args.value_stall_length = 2;
+        assert_eq!(deterministic_value(&args, 0, 0), 0.0);
+        assert_eq!(deterministic_value(&args, 0, 1), 0.0);
+        assert_eq!(deterministic_value(&args, 0, 2), 2.0);
+        assert_eq!(deterministic_value(&args, 0, 5), 5.0);
+        assert_eq!(deterministic_value(&args, 0, 6), 5.0);
+    }
+
+    #[test]
+    fn mixed_signal_repeated_inserts_periodic_base_value() {
+        let mut args = args(ValuePattern::MixedSignalRepeated);
+        args.value_base = 100.0;
+        args.value_step = 1.0;
+        args.value_mixed_every = 3;
+        assert_eq!(deterministic_value(&args, 0, 0), 100.0);
+        assert_eq!(deterministic_value(&args, 0, 1), 101.0);
+        assert_eq!(deterministic_value(&args, 0, 2), 102.0);
+        assert_eq!(deterministic_value(&args, 0, 3), 100.0);
     }
 }

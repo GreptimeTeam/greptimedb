@@ -839,6 +839,14 @@ def run_remote_write(generator: Path | None, target: RunTarget, remote: dict[str
             cmd.extend(["--value-cardinality", str(int(value["cardinality"]))])
         if "seed" in value:
             cmd.extend(["--value-seed", str(int(value["seed"]))])
+        if "run_length" in value:
+            cmd.extend(["--value-run-length", str(int(value["run_length"]))])
+        if "stall_every" in value:
+            cmd.extend(["--value-stall-every", str(int(value["stall_every"]))])
+        if "stall_length" in value:
+            cmd.extend(["--value-stall-length", str(int(value["stall_length"]))])
+        if "mixed_every" in value:
+            cmd.extend(["--value-mixed-every", str(int(value["mixed_every"]))])
         if "sample_offset" in remote:
             cmd.extend(["--value-sample-offset", str(int(remote["sample_offset"]))])
         if "total_samples_per_series" in remote:

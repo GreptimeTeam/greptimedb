@@ -75,21 +75,31 @@ sample values without changing label cardinality or the runner lifecycle:
 
 ```toml
 [scenario.remote_write.value]
-pattern = "modulo"        # linear, constant, modulo, unique, seeded_random
+pattern = "quantized_signal" # linear, constant, modulo, unique, seeded_random,
+                              # run_length, quantized_signal,
+                              # signal_with_sporadic_stalls, mixed_signal_repeated
 base = 0.0
 step = 0.125
-cardinality = 16          # distinct buckets for modulo/seeded_random
-seed = 12345              # deterministic seeded_random input
+cardinality = 4096           # buckets for modulo/seeded_random/quantized_signal/run_length
+seed = 12345                 # deterministic seeded_random input
+run_length = 8               # adjacent samples per bucket for run_length/quantized_signal
+stall_every = 100            # interval for signal_with_sporadic_stalls
+stall_length = 16            # held samples inside each stall interval
+mixed_every = 5              # every Nth sample becomes the repeated base value
 ```
 
 The default `linear` pattern preserves the helper's historical formula. Use
 `constant` or low-cardinality `modulo`/`seeded_random` values for repeated-value
-data shapes, and `unique` or high-cardinality buckets for broad sample-value
-distributions. This is a generic sample-value control for query/ingestion cases;
-it does not inspect or assert storage encoding, Parquet footers, or storage
-policy choices. For chunked remote-write ingestion, the runner passes the sample
-offset and total sample count to the helper so non-linear value patterns use a
-stable global sample ordinal across chunks.
+data shapes, `run_length` for run-heavy low-cardinality series, `quantized_signal`
+for signal-like values collapsed into a finite bucket set, `signal_with_sporadic_stalls`
+for mostly continuous signals with periodic flat spots, and `mixed_signal_repeated`
+for signal-plus-periodic-default mixtures. `unique` or high-cardinality buckets
+still work for broad sample-value distributions. This is a generic sample-value
+control for query/ingestion cases; it does not inspect or assert storage
+encoding, Parquet footers, or storage policy choices. For chunked remote-write
+ingestion, the runner passes the sample offset and total sample count to the
+helper so non-linear value patterns use a stable global/per-series ordinal across
+chunks.
 
 The runner creates the configured database if needed, writes a per-target
 frontend config enabling `[prom_store]` with metric engine storage and a non-zero
