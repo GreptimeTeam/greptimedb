@@ -1217,10 +1217,10 @@ impl RegionServerInner {
             RegionChange::OfflineCleanup(attribute) => match current_region_status {
                 Some(status) => match status.clone() {
                     RegionEngineWithStatus::Registering(_)
-                    | RegionEngineWithStatus::Deregistering(_) => {
+                    | RegionEngineWithStatus::Deregistering(_)
+                    | RegionEngineWithStatus::Ready(_) => {
                         return error::RegionBusySnafu { region_id }.fail();
                     }
-                    RegionEngineWithStatus::Ready(_) => status.clone().into_engine(),
                 },
                 None => self
                     .engines
@@ -2176,6 +2176,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_offline_cleanup_rejects_registered_region() {
+        let mut mock_region_server = mock_region_server();
+        let (engine, mut receiver) = MockRegionEngine::new(MITO_ENGINE_NAME);
+        mock_region_server.register_engine(engine.clone());
+
+        let region_id = RegionId::new(1, 1);
+        mock_region_server
+            .inner
+            .region_map
+            .insert(region_id, RegionEngineWithStatus::Ready(engine));
+
+        let err = mock_region_server
+            .handle_request(
+                region_id,
+                RegionRequest::CleanUp(RegionCleanUpRequest {
+                    engine: MITO_ENGINE_NAME.to_string(),
+                    table_dir: String::new(),
+                    path_type: PathType::Bare,
+                    options: HashMap::new(),
+                }),
+            )
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.status_code(), StatusCode::RegionBusy);
+        assert!(receiver.try_recv().is_err());
+        assert!(matches!(
+            mock_region_server
+                .inner
+                .region_map
+                .get(&region_id)
+                .unwrap()
+                .clone(),
+            RegionEngineWithStatus::Ready(_)
+        ));
+    }
+
+    #[tokio::test]
     async fn test_region_registering() {
         common_telemetry::init_default_ut_logging();
 
@@ -2584,6 +2622,43 @@ mod tests {
                 assert: Box::new(|result| {
                     let current_engine = result.unwrap();
                     assert_matches!(current_engine, CurrentEngine::Engine(_));
+                }),
+            },
+            // RegionChange::OfflineCleanup
+            CurrentEngineTest {
+                region_id,
+                current_region_status: None,
+                region_change: RegionChange::OfflineCleanup(RegionAttribute::Mito),
+                assert: Box::new(|result| {
+                    let current_engine = result.unwrap();
+                    assert_matches!(current_engine, CurrentEngine::Engine(_));
+                }),
+            },
+            CurrentEngineTest {
+                region_id,
+                current_region_status: Some(RegionEngineWithStatus::Registering(engine.clone())),
+                region_change: RegionChange::OfflineCleanup(RegionAttribute::Mito),
+                assert: Box::new(|result| {
+                    let err = result.unwrap_err();
+                    assert_eq!(err.status_code(), StatusCode::RegionBusy);
+                }),
+            },
+            CurrentEngineTest {
+                region_id,
+                current_region_status: Some(RegionEngineWithStatus::Deregistering(engine.clone())),
+                region_change: RegionChange::OfflineCleanup(RegionAttribute::Mito),
+                assert: Box::new(|result| {
+                    let err = result.unwrap_err();
+                    assert_eq!(err.status_code(), StatusCode::RegionBusy);
+                }),
+            },
+            CurrentEngineTest {
+                region_id,
+                current_region_status: Some(RegionEngineWithStatus::Ready(engine.clone())),
+                region_change: RegionChange::OfflineCleanup(RegionAttribute::Mito),
+                assert: Box::new(|result| {
+                    let err = result.unwrap_err();
+                    assert_eq!(err.status_code(), StatusCode::RegionBusy);
                 }),
             },
         ];
