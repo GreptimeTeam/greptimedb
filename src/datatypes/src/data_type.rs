@@ -685,7 +685,7 @@ impl ConcreteDataType {
     }
 
     pub fn json2(native_type: JsonNativeType) -> ConcreteDataType {
-        ConcreteDataType::Json(JsonType::new_json2(native_type))
+        ConcreteDataType::Json(JsonType::json2(Arc::new(native_type)))
     }
 }
 

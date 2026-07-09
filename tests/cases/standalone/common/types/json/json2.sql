@@ -16,6 +16,8 @@ insert into json2_table (ts, j) values (104, 'true');
 
 insert into json2_table (ts, j) values (105, 'null');
 
+insert into json2_table (ts, j) values (1, '{}');
+
 insert into json2_table (ts, j)
 values (1, '{"a": {"b": 1}, "c": "s1", "d": [{"e": {"f": 0.1}}]}'),
        (2, '{"a": {"b": -2}, "c": "s2", "d": [{"e": {"f": 0.2}}]}');

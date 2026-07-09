@@ -264,13 +264,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to merge JSON datatype: {reason}"))]
-    MergeJsonDatatype {
-        reason: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Failed to parse or serialize arrow metadata"))]
     ArrowMetadata {
         #[snafu(source)]
@@ -298,6 +291,13 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("unexpected: {reason}"))]
+    Unexpected {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 impl ErrorExt for Error {
@@ -321,8 +321,7 @@ impl ErrorExt for Error {
             | InvalidJsonb { .. }
             | InvalidVector { .. }
             | InvalidFulltextOption { .. }
-            | InvalidSkippingIndexOption { .. }
-            | MergeJsonDatatype { .. } => StatusCode::InvalidArguments,
+            | InvalidSkippingIndexOption { .. } => StatusCode::InvalidArguments,
 
             ValueExceedsPrecision { .. }
             | CastType { .. }
@@ -344,6 +343,8 @@ impl ErrorExt for Error {
             | ArrowMetadata { .. }
             | AlignJsonValue { .. }
             | AlignJsonArray { .. } => StatusCode::Internal,
+
+            Unexpected { .. } => StatusCode::Unexpected,
         }
     }
 

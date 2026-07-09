@@ -17,9 +17,8 @@ use std::sync::Arc;
 
 use datatypes::arrow::datatypes::{DataType as ArrowDataType, Schema, SchemaRef};
 use datatypes::arrow::record_batch::RecordBatch;
-use datatypes::data_type::DataType;
 use datatypes::extension::json::is_structured_json_field;
-use datatypes::types::JsonType;
+use datatypes::types::json_type::JsonNativeType;
 use datatypes::vectors::json::array::JsonArray;
 use snafu::{OptionExt, ResultExt};
 
@@ -57,13 +56,17 @@ impl Json2Aligner {
         })?;
 
         // Init merged types from base schema.
-        let mut merged_types: HashMap<usize, JsonType> = base_schema
+        let mut merged_types = base_schema
             .fields()
             .iter()
             .enumerate()
             .filter(|&(_idx, field)| is_structured_json_field(field))
-            .map(|(idx, field)| (idx, JsonType::from(field.data_type())))
-            .collect();
+            .map(|(idx, field)| {
+                let json_type =
+                    JsonNativeType::try_from(field.data_type()).context(DataTypeMismatchSnafu)?;
+                Ok((idx, json_type))
+            })
+            .collect::<Result<HashMap<usize, JsonNativeType>>>()?;
 
         // No JSON2 columns, no alignment needed.
         if merged_types.is_empty() {
@@ -83,9 +86,9 @@ impl Json2Aligner {
                 if *idx >= schema.fields().len() {
                     continue;
                 }
-                merged
-                    .merge(&JsonType::from(schema.field(*idx).data_type()))
+                let json_type = JsonNativeType::try_from(schema.field(*idx).data_type())
                     .context(DataTypeMismatchSnafu)?;
+                merged.merge(&json_type);
             }
         }
 

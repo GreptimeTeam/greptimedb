@@ -317,6 +317,37 @@ impl StructVectorBuilder {
         Ok(())
     }
 
+    pub(crate) fn push_struct_value_ref(&mut self, struct_value: StructValueRef<'_>) -> Result<()> {
+        match struct_value {
+            StructValueRef::Indexed { vector, idx } => match vector.get(idx).as_struct()? {
+                Some(struct_value) => self.push_struct_value(struct_value)?,
+                None => self.push_null_struct_value(),
+            },
+            StructValueRef::Ref(value) => self.push_struct_value(value)?,
+            StructValueRef::RefList { val, fields } => {
+                ensure!(
+                    val.len() == self.value_builders.len(),
+                    InconsistentStructFieldsAndItemsSnafu {
+                        field_len: self.value_builders.len(),
+                        item_len: val.len(),
+                    }
+                );
+                ensure!(
+                    fields.fields().len() == self.value_builders.len(),
+                    InconsistentStructFieldsAndItemsSnafu {
+                        field_len: self.value_builders.len(),
+                        item_len: fields.fields().len(),
+                    }
+                );
+                for (builder, value) in self.value_builders.iter_mut().zip(val) {
+                    builder.try_push_value_ref(&value)?;
+                }
+                self.null_buffer.append_non_null();
+            }
+        }
+        Ok(())
+    }
+
     fn push_null_struct_value(&mut self) {
         for builder in &mut self.value_builders {
             builder.push_null();
@@ -352,18 +383,7 @@ impl MutableVector for StructVectorBuilder {
 
     fn try_push_value_ref(&mut self, value: &ValueRef) -> Result<()> {
         if let Some(struct_ref) = value.try_into_struct()? {
-            match struct_ref {
-                StructValueRef::Indexed { vector, idx } => match vector.get(idx).as_struct()? {
-                    Some(struct_value) => self.push_struct_value(struct_value)?,
-                    None => self.push_null(),
-                },
-                StructValueRef::Ref(val) => self.push_struct_value(val)?,
-                StructValueRef::RefList { val, fields } => {
-                    let struct_value =
-                        StructValue::try_new(val.into_iter().map(Value::from).collect(), fields)?;
-                    self.push_struct_value(&struct_value)?;
-                }
-            }
+            self.push_struct_value_ref(struct_ref)?;
         } else {
             self.push_null();
         }
@@ -488,6 +508,38 @@ mod tests {
         } else {
             panic!("Expected a struct value");
         }
+    }
+
+    #[test]
+    fn test_struct_vector_builder_push_ref_list() {
+        let struct_type = StructType::new(Arc::new(vec![
+            StructField::new("id".to_string(), ConcreteDataType::int64_datatype(), true),
+            StructField::new(
+                "name".to_string(),
+                ConcreteDataType::string_datatype(),
+                true,
+            ),
+        ]));
+        let mut builder = StructVectorBuilder::with_type_and_capacity(struct_type.clone(), 2);
+        builder
+            .push_struct_value_ref(StructValueRef::RefList {
+                val: vec![ValueRef::Int64(1), ValueRef::String("foo")],
+                fields: struct_type.clone(),
+            })
+            .unwrap();
+        builder.push_null();
+
+        let vector = builder.finish();
+        assert_eq!(vector.len(), 2);
+        assert_eq!(vector.null_count(), 1);
+        assert_eq!(
+            vector.get(0),
+            Value::Struct(StructValue::new(
+                vec![Value::Int64(1), Value::String("foo".into())],
+                struct_type,
+            ))
+        );
+        assert_eq!(vector.get(1), Value::Null);
     }
 
     #[test]
