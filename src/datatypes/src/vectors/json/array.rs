@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::cmp::Ordering;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use arrow::compute;
@@ -39,6 +40,27 @@ use crate::json::value::{decode_json_variant, encode_serde_json_as_jsonb};
 
 pub struct JsonArray<'a> {
     inner: &'a ArrayRef,
+}
+
+struct NullArrayCache {
+    len: usize,
+    arrays: HashMap<DataType, ArrayRef>,
+}
+
+impl NullArrayCache {
+    fn new(len: usize) -> Self {
+        Self {
+            len,
+            arrays: HashMap::new(),
+        }
+    }
+
+    fn get(&mut self, data_type: &DataType) -> ArrayRef {
+        self.arrays
+            .entry(data_type.clone())
+            .or_insert_with(|| new_null_array(data_type, self.len))
+            .clone()
+    }
 }
 
 impl JsonArray<'_> {
@@ -125,6 +147,7 @@ impl JsonArray<'_> {
             .fail();
         };
         let mut aligned = Vec::with_capacity(expect_fields.len());
+        let mut null_arrays = NullArrayCache::new(struct_array.len());
 
         // Compare the fields in the JSON array and the to-be-aligned schema, amending with null
         // arrays on the way. It's very important to note that fields in the JSON array and those
@@ -161,7 +184,7 @@ impl JsonArray<'_> {
                     j += 1;
                 }
                 Ordering::Less => {
-                    aligned.push(new_null_array(expect_field.data_type(), struct_array.len()));
+                    aligned.push(null_arrays.get(expect_field.data_type()));
                     i += 1;
                 }
                 Ordering::Greater => {
@@ -171,7 +194,7 @@ impl JsonArray<'_> {
         }
         if i < expect_fields.len() {
             for field in &expect_fields[i..] {
-                aligned.push(new_null_array(field.data_type(), struct_array.len()));
+                aligned.push(null_arrays.get(field.data_type()));
             }
         }
 

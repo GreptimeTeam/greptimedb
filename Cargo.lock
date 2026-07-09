@@ -4447,6 +4447,7 @@ dependencies = [
  "common-macro",
  "common-telemetry",
  "common-time",
+ "criterion 0.7.0",
  "datafusion-common",
  "enum_dispatch",
  "jsonb",

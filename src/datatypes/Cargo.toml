@@ -34,3 +34,10 @@ serde_json.workspace = true
 snafu.workspace = true
 sqlparser.workspace = true
 sqlparser_derive = "0.1"
+
+[dev-dependencies]
+criterion.workspace = true
+
+[[bench]]
+name = "json_array_align"
+harness = false
