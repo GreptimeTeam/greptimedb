@@ -26,7 +26,8 @@ use store_api::storage::RegionId;
 use table::requests::STORAGE_KEY;
 
 use crate::error::{
-    ObjectStoreNotFoundSnafu, OpenDalSnafu, OpenRegionSnafu, RegionNotFoundSnafu, Result,
+    ObjectStoreNotFoundSnafu, OpenDalSnafu, OpenRegionSnafu, RegionBusySnafu, RegionNotFoundSnafu,
+    Result,
 };
 use crate::region::opener::{
     RegionOpener, get_object_store, provider_from_wal_options, sanitize_open_request_options,
@@ -50,7 +51,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         );
 
         if self.regions.is_region_exists(region_id) {
-            return self.handle_drop_request(region_id, false).await;
+            return RegionBusySnafu { region_id }.fail();
         }
 
         sanitize_open_request_options(&mut request.options);

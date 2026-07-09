@@ -126,6 +126,42 @@ async fn test_engine_offline_cleanup_closed_region() {
 }
 
 #[tokio::test]
+async fn test_engine_offline_cleanup_rejects_opened_region() {
+    let mut env = TestEnv::with_prefix("offline-cleanup-opened").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+    let table_dir = request.table_dir.clone();
+    let path_type = request.path_type;
+    let options = request.options.clone();
+    let region_dir = region_dir_from_table_dir(&table_dir, region_id, path_type);
+    let object_store = env.get_object_store().unwrap();
+
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    let err = engine
+        .handle_request(
+            region_id,
+            RegionRequest::CleanUp(RegionCleanUpRequest {
+                engine: String::new(),
+                table_dir,
+                path_type,
+                options,
+            }),
+        )
+        .await
+        .unwrap_err();
+
+    assert_eq!(StatusCode::RegionBusy, err.status_code());
+    assert!(engine.is_region_exists(region_id));
+    assert!(object_store.exists(&region_dir).await.unwrap());
+}
+
+#[tokio::test]
 async fn test_engine_open_existing() {
     test_engine_open_existing_with_format(false).await;
     test_engine_open_existing_with_format(true).await;
