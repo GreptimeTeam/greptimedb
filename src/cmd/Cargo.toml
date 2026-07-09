@@ -12,14 +12,7 @@ path = "src/bin/greptime.rs"
 [[bin]]
 name = "query_perf_fixture"
 path = "src/bin/query_perf_fixture.rs"
-
-[[bin]]
-name = "prom_remote_write_fixture"
-path = "src/bin/prom_remote_write_fixture.rs"
-
-[[bin]]
-name = "parquet_footer_inspector"
-path = "src/bin/parquet_footer_inspector.rs"
+required-features = ["dev-tools"]
 
 [features]
 default = [

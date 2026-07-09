@@ -66,8 +66,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--base-bin", required=True, type=Path)
     p.add_argument("--candidate-bin", required=True, type=Path)
     p.add_argument("--fixture-generator", type=Path)
-    p.add_argument("--remote-write-generator", type=Path, help="prom_remote_write_fixture helper binary")
-    p.add_argument("--storage-inspector", type=Path, help="parquet_footer_inspector helper binary")
+    p.add_argument("--remote-write-generator", type=Path, help="deprecated: use --fixture-generator query_perf_fixture")
+    p.add_argument("--storage-inspector", type=Path, help="deprecated: use --fixture-generator query_perf_fixture")
     p.add_argument("--work-dir", required=True, type=Path)
     p.add_argument("--fixture-cache-dir", type=Path, help="persistent directory for generated fixtures, keyed by case content")
     p.add_argument("--reuse-fixture", action="store_true")
@@ -82,6 +82,16 @@ def parse_args() -> argparse.Namespace:
 def load_case(path: Path) -> dict[str, Any]:
     with path.open("rb") as f:
         return tomllib.load(f)
+
+
+def load_normalized_case(case_path: Path, fixture_generator: Path | None) -> dict[str, Any]:
+    if fixture_generator is None:
+        raise ValueError("--fixture-generator query_perf_fixture is required for Rust-owned case planning")
+    result = run_command([str(fixture_generator), "plan", "--case", str(case_path)])
+    if result["returncode"] != 0:
+        raise RuntimeError(f"query_perf_fixture plan failed: {result['stderr'][:2000]}")
+    plan = json.loads(result["stdout"])
+    return {"case": load_case(case_path).get("case", {}), "scenario": plan["scenario"], "schema_version": plan.get("schema_version")}
 
 
 def require_binary(path: Path, name: str, *, dry_run: bool) -> None:
@@ -158,11 +168,9 @@ def scenario(case: dict[str, Any]) -> dict[str, Any]:
 def case_tables(case: dict[str, Any]) -> list[dict[str, Any]]:
     value = scenario(case)
     if value.get("kind") == "prom_remote_write_then_query":
-        remote = value.get("remote_write") or {}
-        metric = remote.get("metric") or remote.get("metric_name")
-        database = remote.get("database", "public")
-        if not metric:
-            raise ValueError("remote-write scenario requires scenario.remote_write.metric")
+        remote = value["remote_write"]
+        metric = remote["metric"]
+        database = remote["database"]
         return [{"database": database, "name": metric, "engine": "metric", "validate_show_create_engine": False}]
     tables = value.get("tables") or []
     if not tables or value.get("layout", {}).get("regions") != 1:
@@ -549,7 +557,7 @@ def generate_fixture(generator: Path | None, case_path: Path, fixture_dir: Path,
     if fixture_dir.exists() and not reuse_fixture:
         shutil.rmtree(fixture_dir)
     fixture_dir.mkdir(parents=True, exist_ok=True)
-    cmd = [str(generator), "--case", str(case_path), "--out-dir", str(fixture_dir)]
+    cmd = [str(generator), "direct-sst", "--case", str(case_path), "--out-dir", str(fixture_dir)]
     if table_name is not None:
         cmd += ["--table", table_name]
     if region_id is not None:
@@ -779,28 +787,29 @@ def enforce_thresholds(case: dict[str, Any], base: dict[str, Any], candidate: di
 
 
 def storage_config(remote: dict[str, Any]) -> dict[str, Any] | None:
-    value = remote.get("storage")
+    value = remote["storage"]
     if not isinstance(value, dict):
         return None
-    if value.get("inspect", True) is False:
+    if value["inspect"] is False:
         return None
     return value
 
 
-def run_storage_inspection(inspector: Path | None, target: RunTarget, storage: dict[str, Any], *, dry_run: bool) -> dict[str, Any]:
-    if inspector is None:
+def run_storage_inspection(helper: Path | None, target: RunTarget, storage: dict[str, Any], *, dry_run: bool) -> dict[str, Any]:
+    if helper is None:
         if not dry_run:
-            raise ValueError("--storage-inspector is required when scenario.remote_write.storage.inspect is enabled")
-        inspector = Path("parquet_footer_inspector")
+            raise ValueError("--fixture-generator query_perf_fixture is required when storage inspection is enabled")
+        helper = Path("query_perf_fixture")
     root = target.datanode_data_dir
     if storage.get("root_suffix"):
         root = root / str(storage["root_suffix"])
     cmd = [
-        str(inspector),
+        str(helper),
+        "inspect-footer",
         "--root", str(root),
-        "--column", str(storage.get("column", "greptime_value")),
+        "--column", str(storage["column"]),
     ]
-    if storage.get("include_metadata_files", False):
+    if storage["include_metadata_files"]:
         cmd.append("--include-metadata-files")
     if dry_run:
         return {"status": "dry-run", "cmd": cmd, "root": str(root)}
@@ -843,7 +852,7 @@ def enforce_storage_thresholds(storage: dict[str, Any] | None, base: dict[str, A
             results.append({"target": target_name, "threshold": name, "status": "passed" if ok else "failed", "actual": actual, "limit": limit})
 
     def add_min(name: str, field: str) -> None:
-        limit = storage.get(name, 1 if name in ("min_files", "min_files_with_column") else None)
+        limit = storage[name]
         if limit is None:
             return
         for target_name, summary in target_summaries:
@@ -870,9 +879,9 @@ def enforce_storage_thresholds(storage: dict[str, Any] | None, base: dict[str, A
     add_abs("max_column_uncompressed_size_bytes", "column_uncompressed_size")
     for target_name, summary in target_summaries:
         encodings = set(summary.get("unique_encodings") or [])
-        for required in storage.get("require_encodings", []):
+        for required in storage["require_encodings"]:
             results.append({"target": target_name, "threshold": "require_encodings", "encoding": required, "status": "passed" if required in encodings else "failed"})
-        for forbidden in storage.get("forbid_encodings", []):
+        for forbidden in storage["forbid_encodings"]:
             results.append({"target": target_name, "threshold": "forbid_encodings", "encoding": forbidden, "status": "passed" if forbidden not in encodings else "failed"})
     add_cmp("max_candidate_total_file_size_regression_pct", "total_file_size")
     add_cmp("max_candidate_column_compressed_size_regression_pct", "column_compressed_size")
@@ -883,23 +892,135 @@ def enforce_storage_thresholds(storage: dict[str, Any] | None, base: dict[str, A
 def planned_storage_thresholds(storage: dict[str, Any] | None) -> list[dict[str, Any]]:
     if not storage:
         return []
-    keys = [
-        "min_files",
-        "min_files_with_column",
-        "require_encodings",
-        "forbid_encodings",
-        "max_total_file_size_bytes",
-        "max_column_compressed_size_bytes",
-        "max_column_uncompressed_size_bytes",
-        "max_candidate_total_file_size_regression_pct",
-        "max_candidate_column_compressed_size_regression_pct",
-        "max_candidate_column_uncompressed_size_regression_pct",
-    ]
-    planned = []
-    for key in keys:
-        if key in storage or key in ("min_files", "min_files_with_column"):
-            planned.append({"threshold": key, "status": "planned", "value": storage.get(key, 1)})
-    return planned
+    return list(storage["planned_thresholds"])
+
+
+REGION_DIR_RE = re.compile(r"^(\d+)_(\d{10})$")
+
+
+def inspection_report(inspection: dict[str, Any] | None) -> dict[str, Any]:
+    if not inspection:
+        return {}
+    report = inspection.get("summary")
+    return report if isinstance(report, dict) else {}
+
+
+def inspected_relative_path(target: RunTarget, inspection: dict[str, Any], relative_path: str) -> Path:
+    report = inspection_report(inspection)
+    root_text = report.get("root") or inspection.get("root")
+    if not root_text:
+        return Path(relative_path)
+    root = Path(root_text).resolve(strict=False)
+    data_home = target.datanode_data_dir.resolve(strict=False)
+    try:
+        root_suffix = root.relative_to(data_home)
+    except ValueError as e:
+        raise RuntimeError(f"storage inspection root {root} is not under datanode data home {data_home}") from e
+    return root_suffix / relative_path
+
+
+def parse_sst_bench_target(target: RunTarget, inspection: dict[str, Any], file: dict[str, Any], *, dry_run: bool) -> dict[str, str] | None:
+    relative_path = str(file.get("relative_path") or "")
+    if dry_run and (not relative_path or "<" in relative_path):
+        return {
+            "relative_path": relative_path or "<table-dir>/<table-id>_<region-seq>/data/<file-id>.parquet",
+            "table_dir": "<table-dir>/",
+            "region_id": "<table-id>:<region-seq>",
+            "path_type": "data",
+            "file_id": "<file-id>",
+        }
+    if not relative_path:
+        return None
+    full_relative = inspected_relative_path(target, inspection, relative_path)
+    parts = full_relative.parts
+    if not parts or not parts[-1].endswith(".parquet"):
+        return None
+    region_index = next((idx for idx, part in enumerate(parts) if REGION_DIR_RE.match(part)), None)
+    if region_index is None or region_index == 0:
+        if dry_run:
+            return {
+                "relative_path": relative_path,
+                "table_dir": "<table-dir>/",
+                "region_id": "<table-id>:<region-seq>",
+                "path_type": "data",
+                "file_id": Path(parts[-1]).stem,
+            }
+        return None
+    region_match = REGION_DIR_RE.match(parts[region_index])
+    assert region_match is not None
+    file_index = len(parts) - 1
+    path_type = "bare"
+    if region_index + 1 < file_index and parts[region_index + 1] in ("data", "metadata"):
+        path_type = parts[region_index + 1]
+    if path_type == "metadata":
+        return None
+    table_dir = "/".join(parts[:region_index]).rstrip("/") + "/"
+    return {
+        "relative_path": str(full_relative),
+        "table_dir": table_dir,
+        "region_id": f"{int(region_match.group(1))}:{int(region_match.group(2))}",
+        "path_type": path_type,
+        "file_id": Path(parts[-1]).stem,
+    }
+
+
+def run_read_bench(target: RunTarget, read_bench: dict[str, Any] | None, storage_inspection: dict[str, Any] | None, *, dry_run: bool) -> dict[str, Any]:
+    if not read_bench or read_bench["enabled"] is False:
+        return {"status": "skipped", "reason": "read_bench disabled"}
+    run_parquetbench = read_bench["parquetbench"]
+    run_scanbench = read_bench["scanbench"]
+    if not run_parquetbench and not run_scanbench:
+        return {"status": "skipped", "reason": "parquetbench and scanbench disabled"}
+    if storage_inspection is None:
+        raise ValueError("read_bench requires storage inspection")
+    bench_dir = target.work_dir / "read_bench"
+    config_toml = bench_dir / "bench.toml"
+    scan_json = bench_dir / "scan.json"
+    files = inspection_report(storage_inspection).get("files") or []
+    ssts = [f for f in files if f.get("relative_path", "").endswith(".parquet") and f.get("columns")]
+    if dry_run and not ssts:
+        ssts = [{"relative_path": "<landed-sst>.parquet"}]
+    if read_bench["max_files"] is not None:
+        ssts = ssts[: int(read_bench["max_files"])]
+    bench_targets = [parsed for f in ssts if (parsed := parse_sst_bench_target(target, storage_inspection, f, dry_run=dry_run)) is not None]
+    if not bench_targets:
+        return {"status": "failed", "reason": "no inspected data SST files available for read_bench"}
+    config_text = f'[storage]\ndata_home = "{target.datanode_data_dir}"\ntype = "File"\n\n[[region_engine]]\n[region_engine.mito]\n'
+    commands = []
+    parquet_runs = []
+    scan_runs = []
+    iterations = str(int(read_bench["iterations"]))
+    if run_parquetbench:
+        for bench_target in bench_targets:
+            cmd = [str(target.binary), "datanode", "parquetbench", "--config", str(config_toml), "--region-id", bench_target["region_id"], "--table-dir", bench_target["table_dir"], "--file-id", bench_target["file_id"], "--scan-config", str(scan_json), "--path-type", bench_target["path_type"], "--iterations", iterations, "--reader", str(read_bench["parquet_reader"])]
+            commands.append(cmd)
+            parquet_runs.append({**bench_target, "cmd": cmd, "status": "dry-run" if dry_run else "planned"})
+    regions: dict[tuple[str, str, str], list[str]] = {}
+    if run_scanbench:
+        for bench_target in bench_targets:
+            regions.setdefault((bench_target["table_dir"], bench_target["region_id"], bench_target["path_type"]), []).append(bench_target["relative_path"])
+    for (table_dir, region_id, path_type), region_files in regions.items():
+        cmd = [str(target.binary), "datanode", "scanbench", "--config", str(config_toml), "--region-id", region_id, "--table-dir", table_dir, "--scan-config", str(scan_json), "--path-type", path_type, "--scanner", str(read_bench["scan_scanner"]), "--parallelism", str(int(read_bench["parallelism"])), "--iterations", iterations]
+        commands.append(cmd)
+        scan_runs.append({"table_dir": table_dir, "region_id": region_id, "path_type": path_type, "files": region_files, "cmd": cmd, "status": "dry-run" if dry_run else "planned"})
+    if dry_run:
+        return {"status": "dry-run", "config_path": str(config_toml), "scan_config_path": str(scan_json), "commands": commands, "parquetbench": parquet_runs, "scanbench": scan_runs}
+    bench_dir.mkdir(parents=True, exist_ok=True)
+    config_toml.write_text(config_text)
+    scan_json.write_text(json.dumps({"projection_names": read_bench["projection"]}, indent=2) + "\n")
+    avg_re = re.compile(r"Average duration[^0-9]*([0-9.]+)\s*ms", re.I)
+    for runs in (parquet_runs, scan_runs):
+        for run in runs:
+            result = run_command(run["cmd"])
+            run.update(result)
+            run["status"] = "ok" if result["returncode"] == 0 else "failed"
+            m = avg_re.search(result.get("stdout", ""))
+            if m:
+                run["average_ms"] = float(m.group(1))
+    def median(runs: list[dict[str, Any]]) -> float | None:
+        vals = [r["average_ms"] for r in runs if "average_ms" in r]
+        return statistics.median(vals) if vals else None
+    return {"status": "ok" if all(r.get("status") == "ok" for r in parquet_runs + scan_runs) else "failed", "config_path": str(config_toml), "scan_config_path": str(scan_json), "parquetbench": parquet_runs, "scanbench": scan_runs, "aggregate": {"parquetbench_median_average_ms": median(parquet_runs), "scanbench_median_average_ms": median(scan_runs)}}
 
 
 def write_json(path: Path, payload: dict[str, Any]) -> None:
@@ -916,18 +1037,18 @@ def require_fresh_work_dirs(targets: list[RunTarget], *, reuse_work_dir: bool, d
 
 
 def write_frontend_prom_config(target: RunTarget, remote: dict[str, Any]) -> Path:
-    prom = remote.get("prom_store") or {}
+    prom = remote["prom_store"]
     path = target.work_dir / "frontend-prom-store.toml"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         "[prom_store]\n"
         "enable = true\n"
         "with_metric_engine = true\n"
-        f"pending_rows_flush_interval = {json.dumps(str(prom.get('pending_rows_flush_interval', '1s')))}\n"
-        f"max_batch_rows = {int(prom.get('max_batch_rows', 100000))}\n"
-        f"max_concurrent_flushes = {int(prom.get('max_concurrent_flushes', 256))}\n"
-        f"worker_channel_capacity = {int(prom.get('worker_channel_capacity', 65526))}\n"
-        f"max_inflight_requests = {int(prom.get('max_inflight_requests', 3000))}\n"
+        f"pending_rows_flush_interval = {json.dumps(str(prom['pending_rows_flush_interval']))}\n"
+        f"max_batch_rows = {int(prom['max_batch_rows'])}\n"
+        f"max_concurrent_flushes = {int(prom['max_concurrent_flushes'])}\n"
+        f"worker_channel_capacity = {int(prom['worker_channel_capacity'])}\n"
+        f"max_inflight_requests = {int(prom['max_inflight_requests'])}\n"
     )
     return path
 
@@ -935,47 +1056,38 @@ def write_frontend_prom_config(target: RunTarget, remote: dict[str, Any]) -> Pat
 def run_remote_write(generator: Path | None, target: RunTarget, remote: dict[str, Any], *, dry_run: bool) -> dict[str, Any]:
     if generator is None:
         if not dry_run:
-            raise ValueError("--remote-write-generator is required for prom_remote_write_then_query unless --dry-run is set")
-        generator = Path("prom_remote_write_fixture")
-    metric = remote.get("metric") or remote.get("metric_name")
-    physical_table = remote.get("physical_table", "greptime_physical_table")
+            raise ValueError("--fixture-generator query_perf_fixture is required for prom_remote_write_then_query")
+        generator = Path("query_perf_fixture")
+    metric = remote["metric"]
+    physical_table = remote["physical_table"]
     cmd = [
         str(generator),
+        "prom-remote-write",
         "--endpoint", f"http://127.0.0.1:{target.http_port}/v1/prometheus/write",
-        "--database", remote.get("database", "public"),
+        "--database", remote["database"],
         "--metric", metric,
         "--physical-table", physical_table,
-        "--series-count", str(int(remote.get("series_count", 8))),
-        "--samples-per-series", str(int(remote.get("samples_per_series", 30))),
-        "--start-unix-millis", str(int(remote.get("start_unix_millis", 1_704_067_200_000))),
-        "--step-millis", str(int(remote.get("step_millis", 15_000))),
-        "--chunk-series-count", str(int(remote.get("chunk_series_count", remote.get("batch_size", 8)))),
-        "--timeout-seconds", str(int(remote.get("timeout_seconds", 60))),
+        "--series-count", str(int(remote["series_count"])),
+        "--samples-per-series", str(int(remote["samples_per_series"])),
+        "--start-unix-millis", str(int(remote["start_unix_millis"])),
+        "--step-millis", str(int(remote["step_millis"])),
+        "--chunk-series-count", str(int(remote["chunk_series_count"])),
+        "--timeout-seconds", str(int(remote["timeout_seconds"])),
     ]
-    value = remote.get("value")
-    if isinstance(value, dict):
-        if "pattern" in value:
-            cmd.extend(["--value-pattern", str(value["pattern"])])
-        if "base" in value:
-            cmd.extend(["--value-base", str(value["base"])])
-        if "step" in value:
-            cmd.extend(["--value-step", str(value["step"])])
-        if "cardinality" in value:
-            cmd.extend(["--value-cardinality", str(int(value["cardinality"]))])
-        if "seed" in value:
-            cmd.extend(["--value-seed", str(int(value["seed"]))])
-        if "run_length" in value:
-            cmd.extend(["--value-run-length", str(int(value["run_length"]))])
-        if "stall_every" in value:
-            cmd.extend(["--value-stall-every", str(int(value["stall_every"]))])
-        if "stall_length" in value:
-            cmd.extend(["--value-stall-length", str(int(value["stall_length"]))])
-        if "mixed_every" in value:
-            cmd.extend(["--value-mixed-every", str(int(value["mixed_every"]))])
-        if "sample_offset" in remote:
-            cmd.extend(["--value-sample-offset", str(int(remote["sample_offset"]))])
-        if "total_samples_per_series" in remote:
-            cmd.extend(["--value-total-samples-per-series", str(int(remote["total_samples_per_series"]))])
+    value = remote["value"]
+    cmd.extend(["--value-pattern", str(value["pattern"])])
+    cmd.extend(["--value-base", str(value["base"])])
+    cmd.extend(["--value-step", str(value["step"])])
+    cmd.extend(["--value-cardinality", str(int(value["cardinality"]))])
+    cmd.extend(["--value-seed", str(int(value["seed"]))])
+    cmd.extend(["--value-run-length", str(int(value["run_length"]))])
+    cmd.extend(["--value-stall-every", str(int(value["stall_every"]))])
+    cmd.extend(["--value-stall-length", str(int(value["stall_length"]))])
+    cmd.extend(["--value-mixed-every", str(int(value["mixed_every"]))])
+    if "sample_offset" in remote:
+        cmd.extend(["--value-sample-offset", str(int(remote["sample_offset"]))])
+    if "total_samples_per_series" in remote:
+        cmd.extend(["--value-total-samples-per-series", str(int(remote["total_samples_per_series"]))])
     if dry_run:
         return {"status": "dry-run", "cmd": cmd}
     result = run_command(cmd)
@@ -1011,23 +1123,23 @@ def flush_remote_physical_table(target: RunTarget, db: str, physical_table: str,
 
 
 def run_remote_write_ingestion(generator: Path | None, target: RunTarget, remote: dict[str, Any], args: argparse.Namespace, *, dry_run: bool) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    sample_chunk_size = remote.get("sample_chunk_size")
-    db = remote.get("database", "public")
-    physical_table = remote.get("physical_table", "greptime_physical_table")
+    sample_chunk_size = remote["sample_chunk_size"]
+    db = remote["database"]
+    physical_table = remote["physical_table"]
     if sample_chunk_size is None:
         rw = run_remote_write(generator, target, remote, dry_run=dry_run)
         flush = flush_remote_physical_table(target, db, physical_table, args, dry_run=dry_run, reason="final")
         return rw, [flush]
 
-    total_samples = int(remote.get("samples_per_series", 30))
+    total_samples = int(remote["samples_per_series"])
     chunk_samples = int(sample_chunk_size)
     if chunk_samples <= 0:
         raise ValueError("scenario.remote_write.sample_chunk_size must be positive")
-    flush_every = int(remote.get("flush_every_sample_chunks", 1))
+    flush_every = int(remote["flush_every_sample_chunks"])
     if flush_every <= 0:
         raise ValueError("scenario.remote_write.flush_every_sample_chunks must be positive")
-    start = int(remote.get("start_unix_millis", 1_704_067_200_000))
-    step = int(remote.get("step_millis", 15_000))
+    start = int(remote["start_unix_millis"])
+    step = int(remote["step_millis"])
     chunks: list[dict[str, Any]] = []
     flushes: list[dict[str, Any]] = []
     chunk_index = 0
@@ -1052,8 +1164,8 @@ def run_remote_write_ingestion(generator: Path | None, target: RunTarget, remote
         flushes.append(flush_remote_physical_table(target, db, physical_table, args, dry_run=dry_run, reason="final", chunk_index=chunk_index))
     aggregate = summarize_remote_write_chunks(chunks)
     if dry_run:
-        series_count = int(remote.get("series_count", 8))
-        chunk_series_count = int(remote.get("chunk_series_count", remote.get("batch_size", 8)))
+        series_count = int(remote["series_count"])
+        chunk_series_count = int(remote["chunk_series_count"])
         aggregate["rows"] = series_count * total_samples
         aggregate["samples_written"] = aggregate["rows"]
         aggregate["batches"] = chunk_index * ((series_count + chunk_series_count - 1) // chunk_series_count)
@@ -1068,7 +1180,7 @@ def run_remote_write_ingestion(generator: Path | None, target: RunTarget, remote
 
 
 def expected_remote_write_rows(remote: dict[str, Any]) -> int:
-    return int(remote.get("series_count", 8)) * int(remote.get("samples_per_series", 30))
+    return int(remote["series_count"]) * int(remote["samples_per_series"])
 
 
 def extract_count_value(result: dict[str, Any]) -> int | None:
@@ -1117,19 +1229,18 @@ def poll_expected_count(target: RunTarget, table_name: str, db: str, expected_ro
 
 
 def run_remote_write_scenario(args: argparse.Namespace, case: dict[str, Any], case_path: Path, targets: list[RunTarget], report: dict[str, Any]) -> None:
-    remote = scenario(case).get("remote_write") or {}
+    remote = scenario(case)["remote_write"]
     tables = case_tables(case)
     if args.fixture_only:
         raise ValueError("--fixture-only is not supported for prom_remote_write_then_query; use --dry-run for planning")
-    if args.remote_write_generator is not None:
-        require_binary(args.remote_write_generator, "remote-write generator", dry_run=args.dry_run)
+    helper = args.fixture_generator or args.remote_write_generator
+    if helper is not None:
+        require_binary(helper, "query_perf_fixture", dry_run=args.dry_run)
     elif not args.dry_run:
-        raise ValueError("--remote-write-generator is required for prom_remote_write_then_query")
+        raise ValueError("--fixture-generator is required for prom_remote_write_then_query")
     storage = storage_config(remote)
-    if storage and args.storage_inspector is not None:
-        require_binary(args.storage_inspector, "storage inspector", dry_run=args.dry_run)
-    elif storage and not args.dry_run:
-        raise ValueError("--storage-inspector is required when scenario.remote_write.storage.inspect is enabled")
+    if storage and helper is None and not args.dry_run:
+        raise ValueError("--fixture-generator is required when scenario.remote_write.storage.inspect is enabled")
     clusters: list[DistributedCluster] = []
     target_results = []
     storage_results = []
@@ -1141,29 +1252,32 @@ def run_remote_write_scenario(args: argparse.Namespace, case: dict[str, Any], ca
             clusters.append(cluster)
             if not args.dry_run:
                 cluster.start_all(config_path)
-            db = remote.get("database", "public")
+            db = remote["database"]
             create_database = {"status": "dry-run", "database": db}
             if not args.dry_run:
                 create_database = http_post_sql(target.http_port, f"CREATE DATABASE IF NOT EXISTS {sql_ident(db)}", "public", args.http_timeout)
-            rw, flushes = run_remote_write_ingestion(args.remote_write_generator, target, remote, args, dry_run=args.dry_run)
+            rw, flushes = run_remote_write_ingestion(helper, target, remote, args, dry_run=args.dry_run)
             visibility = {"status": "dry-run"}
             query_result = {"validation": [], "validation_errors": [], "measurements": [], "status": "planned"}
             if not args.dry_run:
-                visibility = poll_expected_count(target, tables[0]["name"], db, expected_remote_write_rows(remote), float(remote.get("visibility_timeout_seconds", 30)), args.http_timeout)
+                visibility = poll_expected_count(target, tables[0]["name"], db, expected_remote_write_rows(remote), float(remote["visibility_timeout_seconds"]), args.http_timeout)
             storage_inspection = None
             if storage:
-                storage_inspection = run_storage_inspection(args.storage_inspector, target, storage, dry_run=args.dry_run)
+                storage_inspection = run_storage_inspection(helper or args.storage_inspector, target, storage, dry_run=args.dry_run)
                 storage_results.append(storage_inspection)
+            read_bench_result = run_read_bench(target, remote["read_bench"], storage_inspection, dry_run=args.dry_run)
             if not args.dry_run:
                 query_result = run_queries(target, case, tables, args.http_timeout)
             tr = {"name": target.name, "binary": str(target.binary), "work_dir": str(target.work_dir), "components": cluster.component_report(), "frontend_config": str(config_path), "create_database": create_database, "remote_write": rw, "flushes": flushes, "flush": flushes[-1] if flushes else None, "visibility": visibility, **query_result}
             if storage_inspection is not None:
                 tr["storage_inspection"] = storage_inspection
+            tr["read_bench"] = read_bench_result
             flushes_ok = all(flush.get("ok") for flush in flushes)
             storage_ok = storage_inspection is None or args.dry_run or storage_inspection.get("status") == "ok"
-            remote_checks_ok = args.dry_run or (create_database.get("ok") and flushes_ok and visibility.get("ok") and visibility.get("row_count_ok") and storage_ok)
+            read_bench_ok = args.dry_run or read_bench_result.get("status") in ("ok", "skipped")
+            remote_checks_ok = args.dry_run or (create_database.get("ok") and flushes_ok and visibility.get("ok") and visibility.get("row_count_ok") and storage_ok and read_bench_ok)
             if not remote_checks_ok:
-                tr.setdefault("validation_errors", []).append({"phase": "remote_write_visibility_storage", "create_database_ok": create_database.get("ok"), "flushes_ok": flushes_ok, "visibility_ok": visibility.get("ok"), "row_count_ok": visibility.get("row_count_ok"), "storage_ok": storage_ok, "create_database": create_database, "flushes": flushes, "visibility": visibility})
+                tr.setdefault("validation_errors", []).append({"phase": "remote_write_visibility_storage", "create_database_ok": create_database.get("ok"), "flushes_ok": flushes_ok, "visibility_ok": visibility.get("ok"), "row_count_ok": visibility.get("row_count_ok"), "storage_ok": storage_ok, "read_bench_ok": read_bench_ok, "create_database": create_database, "flushes": flushes, "visibility": visibility, "read_bench": read_bench_result})
             tr["status"] = "planned" if args.dry_run else ("measured" if remote_checks_ok and query_result["status"] == "ok" else "failed")
             write_json(target.report_path, tr)
             report["targets"].append(tr)
@@ -1181,7 +1295,9 @@ def run_remote_write_scenario(args: argparse.Namespace, case: dict[str, Any], ca
 def main() -> int:
     args = parse_args()
     case_path = args.case.resolve()
-    case = load_case(case_path)
+    if args.fixture_generator is not None:
+        require_binary(args.fixture_generator, "fixture generator", dry_run=False)
+    case = load_normalized_case(case_path, args.fixture_generator)
     scenario_config = scenario(case)
     scenario_kind = scenario_config.get("kind")
     tables = case_tables(case)
@@ -1191,9 +1307,6 @@ def main() -> int:
     require_binary(args.candidate_bin, "candidate", dry_run=args.dry_run or args.fixture_only)
     if scenario_kind == "direct_readable_sst" and not args.dry_run and args.fixture_generator is None:
         raise ValueError("--fixture-generator is required unless --dry-run is set")
-    if args.fixture_generator is not None:
-        require_binary(args.fixture_generator, "fixture generator", dry_run=args.dry_run)
-
     ports = allocate_ports(16)
     targets = [make_target("base", args.base_bin.resolve(), work_root, ports[:8]), make_target("candidate", args.candidate_bin.resolve(), work_root, ports[8:])]
     require_fresh_work_dirs(targets, reuse_work_dir=args.reuse_work_dir, dry_run=args.dry_run, fixture_only=args.fixture_only)

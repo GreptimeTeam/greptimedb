@@ -55,20 +55,22 @@ kind = "prom_remote_write_then_query"
 database = "public"
 metric = "prom_remote_write_smoke"
 physical_table = "greptime_physical_table"
-series_count = 8
-samples_per_series = 30
+series_count = 512
+samples_per_series = 1440
+sample_chunk_size = 480
+flush_every_sample_chunks = 1
 start_unix_millis = 1_704_067_200_000
-step_millis = 15_000
-chunk_series_count = 4
-visibility_timeout_seconds = 30
+step_millis = 60_000
+chunk_series_count = 128
+timeout_seconds = 180
+visibility_timeout_seconds = 120
 # Optional: split by time so each helper invocation writes only this many samples
 # per series, then periodically flush the physical metric table to produce
 # multiple time-interval SSTs.
-# sample_chunk_size = 300
-# flush_every_sample_chunks = 1
 
 [scenario.remote_write.prom_store]
 pending_rows_flush_interval = "1s"
+max_batch_rows = 100000
 ```
 
 Cases can optionally add `[scenario.remote_write.value]` to control the generated
@@ -102,11 +104,19 @@ ingestion, the runner passes the sample offset and total sample count to the
 helper so non-linear value patterns use a stable global/per-series ordinal across
 chunks.
 
+Case schema, value distribution defaults, storage defaults, and read-bench
+defaults are owned by Rust. The Python runner calls
+`query_perf_fixture plan --case <case.toml>` and orchestrates the normalized JSON.
+The same helper exposes `direct-sst`, `prom-remote-write`, and `inspect-footer`
+subcommands; the old direct invocation (`query_perf_fixture --case ... --out-dir
+...`) remains compatible.
+
 Remote-write cases that need to validate storage output can add
 `[scenario.remote_write.storage]`. When present, the scenario body becomes:
 remote-write → flush → visibility check → Parquet footer/size/encoding inspection
-→ query. The inspector is a small Rust helper (`parquet_footer_inspector`) that
-reads local Parquet footers directly; it does not require Python `pyarrow`.
+→ optional read-bench → query. Footer inspection is handled by
+`query_perf_fixture inspect-footer`, which reads local Parquet footers directly;
+it does not require Python `pyarrow`.
 
 ```toml
 [scenario.remote_write.storage]
@@ -140,17 +150,24 @@ By default the inspector root is the target datanode data home, which is suitabl
 for a fresh single-case data directory. For reused or more complex data homes, set
 `root_suffix` to a path relative to the datanode data home to narrow inspection.
 
+When storage inspection is enabled, `[scenario.remote_write.read_bench]` defaults
+to enabled with both datanode `parquetbench` and `scanbench`. Disable it with
+`enabled = false`. `parquetbench` measures per-SST reader cost, `scanbench`
+measures region scan cost, and query measurements still exercise the SQL/TQL
+frontend path. Treat all performance conclusions as release-only; debug builds
+are suitable only for command wiring and correctness checks.
+
 The runner creates the configured database if needed, writes a per-target
 frontend config enabling `[prom_store]` with metric engine storage and a non-zero
 `pending_rows_flush_interval`, and validates that the logical metric table reaches
 `series_count * samples_per_series` rows before trusting the query measurements.
-Use `--remote-write-generator /path/to/prom_remote_write_fixture` to provide the
-Rust payload helper. Use `--storage-inspector /path/to/parquet_footer_inspector`
-when `[scenario.remote_write.storage]` is enabled. `--fixture-only` is rejected
-for remote-write cases; use `--dry-run` for planning.
+Use `--fixture-generator /path/to/query_perf_fixture` to provide the Rust helper.
+Deprecated `--remote-write-generator` and `--storage-inspector` options are kept
+only for CLI compatibility. `--fixture-only` is rejected for remote-write cases;
+use `--dry-run` for planning.
 
 Large manual remote-write cases can set `sample_chunk_size` to split ingestion by
-time. For each chunk, the runner invokes `prom_remote_write_fixture` with the
+time. For each chunk, the runner invokes `query_perf_fixture prom-remote-write` with the
 same series cardinality but a shorter `--samples-per-series` and an advanced
 `--start-unix-millis`. `flush_every_sample_chunks` controls periodic
 `ADMIN FLUSH_TABLE('<physical_table>')` calls; with `flush_every_sample_chunks = 1`,
@@ -159,6 +176,12 @@ still determined by the storage engine's normal compaction policy, so cases that
 need multi-window file distribution should span multiple compaction windows. If
 `sample_chunk_size` is omitted, the runner keeps the older single-helper-invocation
 behavior and flushes once at the end.
+
+`tests/perf/query_cases/prom_remote_write_smoke/case.toml` is the default
+remote-write coverage case. It writes 512 series × 1440 samples, splits the day
+into three flushed chunks, and requires multiple landed SSTs so storage
+inspection and the read-bench supplement have enough data to reduce incidental
+query noise while staying much smaller than the manual 7913 case.
 
 `tests/perf/query_cases/prom_remote_write_7913/case.toml` is a larger manual
 case for issue #7913. It writes 8192 series × 20160 samples through remote-write
@@ -317,7 +340,8 @@ as a fallback. Manifest files are reflinked or copied, not hardlinked.
 Fixture generator smoke test:
 
 ```bash
-cargo run -p cmd --bin query_perf_fixture -- \
+cargo run -p cmd --bin query_perf_fixture --features dev-tools -- \
+  direct-sst \
   --case tests/perf/query_cases/smoke_direct_sst/case.toml \
   --out-dir /tmp/query-perf-smoke
 ```
@@ -345,7 +369,7 @@ uv run --no-project python tests/perf/query_regression_runner.py \
   --case tests/perf/query_cases/prom_remote_write_smoke/case.toml \
   --base-bin /path/to/base/greptime \
   --candidate-bin /path/to/candidate/greptime \
-  --remote-write-generator /path/to/prom_remote_write_fixture \
+  --fixture-generator /path/to/query_perf_fixture \
   --work-dir /tmp/query-perf-remote-write \
   --dry-run
 ```
@@ -359,6 +383,10 @@ query regression runs. It builds its own binaries for now:
 - candidate `greptime` and `query_perf_fixture` from the PR merge ref/current
   candidate checkout
 - runner and summary formatter from the candidate checkout
+
+The workflow builds `cmd` binaries with the `dev-tools` feature so the helper
+binary and the datanode `parquetbench`/`scanbench` subcommands stay out of normal
+release builds but remain available to this opt-in perf job.
 
 The workflow runs automatically only for non-draft PRs labeled
 `query-regression` (on label/ready-for-review/reopen events, not every push).
