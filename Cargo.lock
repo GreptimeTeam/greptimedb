@@ -5500,7 +5500,6 @@ dependencies = [
  "humantime",
  "humantime-serde",
  "hyper-util",
- "itertools 0.14.0",
  "lazy_static",
  "log-query",
  "meta-client",
