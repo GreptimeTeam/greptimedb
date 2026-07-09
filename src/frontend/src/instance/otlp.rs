@@ -26,7 +26,6 @@ use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_query::prelude::GREPTIME_PHYSICAL_TABLE;
 use common_telemetry::{tracing, warn};
-use itertools::Itertools;
 use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
 use otel_arrow_rust::proto::opentelemetry::collector::metrics::v1::ExportMetricsServiceRequest;
@@ -63,7 +62,6 @@ use crate::metrics::{
 pub mod trace_semconv;
 pub mod trace_types;
 
-const TRACE_INGEST_CHUNK_SIZE: usize = 64;
 const TRACE_FAILURE_MESSAGE_LIMIT: usize = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -311,13 +309,7 @@ impl Instance {
         };
 
         for group in groups {
-            let chunks = group
-                .spans
-                .into_iter()
-                .chunks(TRACE_INGEST_CHUNK_SIZE)
-                .into_iter()
-                .map(|chunk| chunk.collect::<Vec<_>>())
-                .collect::<Vec<_>>();
+            let chunks = chunk_owned(group.spans, self.trace_ingest_chunk_size);
             for chunk in chunks {
                 self.ingest_trace_chunk(&ingest_ctx, chunk, main_ctx.clone(), &mut ingest_state)
                     .await?;
@@ -838,6 +830,23 @@ impl Instance {
     }
 }
 
+fn chunk_owned<T>(items: Vec<T>, chunk_size: usize) -> Vec<Vec<T>> {
+    if items.is_empty() {
+        return Vec::new();
+    }
+
+    if chunk_size == 0 {
+        return vec![items];
+    }
+
+    let mut chunks = Vec::with_capacity(items.len().div_ceil(chunk_size));
+    let mut iter = items.into_iter();
+    while iter.len() > 0 {
+        chunks.push(iter.by_ref().take(chunk_size).collect());
+    }
+    chunks
+}
+
 /// Preserve the original alter failure status so chunk retry behavior stays correct.
 fn wrap_trace_alter_failure<E>(err: E) -> servers::error::Error
 where
@@ -893,8 +902,20 @@ mod tests {
     use common_error::status_code::StatusCode;
     use servers::query_handler::TraceIngestOutcome;
 
-    use super::{ChunkFailureReaction, Instance, wrap_trace_alter_failure};
+    use super::{ChunkFailureReaction, Instance, chunk_owned, wrap_trace_alter_failure};
     use crate::metrics::OTLP_TRACES_FAILURE_COUNT;
+
+    #[test]
+    fn test_chunk_owned() {
+        let chunks = chunk_owned(vec![1, 2, 3], 2);
+        assert_eq!(chunks.iter().map(Vec::len).collect::<Vec<_>>(), vec![2, 1]);
+
+        let chunks = chunk_owned(vec![1, 2, 3], 0);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].len(), 3);
+
+        assert!(chunk_owned::<i32>(Vec::new(), 0).is_empty());
+    }
 
     #[test]
     fn test_classify_trace_chunk_failure() {
