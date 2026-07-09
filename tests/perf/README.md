@@ -178,10 +178,14 @@ need multi-window file distribution should span multiple compaction windows. If
 behavior and flushes once at the end.
 
 `tests/perf/query_cases/prom_remote_write_smoke/case.toml` is the default
-remote-write coverage case. It writes 512 series × 1440 samples, splits the day
-into three flushed chunks, and requires multiple landed SSTs so storage
-inspection and the read-bench supplement have enough data to reduce incidental
-query noise while staying much smaller than the manual 7913 case.
+remote-write coverage case. It writes 4096 series × 28,800 samples (117,964,800
+rows per target), uses high-cardinality seeded-random values, splits twenty days
+into ten flushed chunks, and requires multiple landed SSTs so storage inspection
+and the read-bench supplement have enough data to reduce incidental query noise
+while staying smaller than the manual 7913 case. The read-bench supplement
+samples six files for per-SST `parquetbench` coverage while `scanbench` still
+covers the whole landed region. The TQL selector runs 100 measured iterations so
+the latency threshold is less sensitive to single-query jitter.
 
 `tests/perf/query_cases/prom_remote_write_7913/case.toml` is a larger manual
 case for issue #7913. It writes 8192 series × 20160 samples through remote-write

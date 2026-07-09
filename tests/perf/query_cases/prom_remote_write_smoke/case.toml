@@ -1,6 +1,6 @@
 [case]
 name = "prom_remote_write_smoke"
-description = "Moderate Prometheus remote-write storage/read-bench case with multiple flushed SSTs"
+description = "Moderate Prometheus remote-write storage/read-bench case with multi-million rows and multiple flushed SSTs"
 
 [scenario]
 kind = "prom_remote_write_then_query"
@@ -9,15 +9,23 @@ kind = "prom_remote_write_then_query"
 database = "public"
 metric = "prom_remote_write_smoke"
 physical_table = "greptime_physical_table"
-series_count = 512
-samples_per_series = 1440
-sample_chunk_size = 480
+series_count = 4096
+samples_per_series = 28800
+sample_chunk_size = 2880
 flush_every_sample_chunks = 1
 start_unix_millis = 1_704_067_200_000
 step_millis = 60_000
-chunk_series_count = 128
-timeout_seconds = 180
-visibility_timeout_seconds = 120
+chunk_series_count = 256
+timeout_seconds = 600
+visibility_timeout_seconds = 300
+
+[scenario.remote_write.value]
+pattern = "seeded_random"
+cardinality = 117_964_800
+seed = 8444
+
+[scenario.remote_write.read_bench]
+max_files = 6
 
 [scenario.remote_write.prom_store]
 pending_rows_flush_interval = "1s"
@@ -25,15 +33,15 @@ max_batch_rows = 100000
 
 [scenario.remote_write.storage]
 column = "greptime_value"
-min_files = 2
-min_files_with_column = 2
+min_files = 10
+min_files_with_column = 10
 
 [[scenario.queries]]
-name = "selector_1d_storage_smoke"
+name = "selector_20d_storage_smoke"
 kind = "tql"
-query = "TQL ANALYZE VERBOSE (1704067200, 1704153600, '5m') prom_remote_write_smoke{host=~'host.*'}"
+query = "TQL ANALYZE VERBOSE (1704067200, 1705795200, '1h') prom_remote_write_smoke{host=~'host.*'}"
 warmup = 1
-iterations = 2
+iterations = 100
 
 [scenario.queries.thresholds]
 max_candidate_latency_regression_pct = 100
