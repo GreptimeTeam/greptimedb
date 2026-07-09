@@ -1,3 +1,5 @@
+-- SQLNESS REPLACE (RoundRobinBatch\(\d+\)) RoundRobinBatch(REDACTED)
+
 CREATE TABLE ssts_limit_case (
   a INT PRIMARY KEY INVERTED INDEX,
   b STRING SKIPPING INDEX,
