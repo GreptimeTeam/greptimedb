@@ -1,0 +1,68 @@
+# Heavy default Prometheus remote-write storage/read-bench scenario.
+#
+# This case intentionally exercises the normal metric write path at a size large
+# enough to land dozens of SSTs and make base query/read costs visible on the
+# self-hosted query-regression runners.
+
+[case]
+name = "prom_remote_write_heavy_storage"
+description = "Heavy Prometheus remote-write storage/read-bench case with dozens of flushed SSTs"
+
+[scenario]
+kind = "prom_remote_write_then_query"
+
+[scenario.remote_write]
+database = "public"
+metric = "prom_remote_write_heavy_storage"
+physical_table = "greptime_physical_table"
+series_count = 16_384
+samples_per_series = 43_200
+sample_chunk_size = 1_440
+flush_every_sample_chunks = 1
+start_unix_millis = 1_704_067_200_000 # 2024-01-01T00:00:00Z
+step_millis = 60_000
+chunk_series_count = 128
+timeout_seconds = 900
+visibility_timeout_seconds = 900
+
+[scenario.remote_write.prom_store]
+pending_rows_flush_interval = "1s"
+max_batch_rows = 1_000_000
+max_concurrent_flushes = 256
+worker_channel_capacity = 65526
+max_inflight_requests = 3000
+
+[scenario.remote_write.storage]
+column = "greptime_value"
+min_files = 20
+min_files_with_column = 20
+
+[[scenario.queries]]
+name = "selector_1d_remote_write_heavy"
+kind = "tql"
+query = "TQL ANALYZE VERBOSE (1704067200, 1704153600, '5m') prom_remote_write_heavy_storage{host=~'host.*'}"
+warmup = 1
+iterations = 2
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 100
+
+[[scenario.queries]]
+name = "selector_7d_remote_write_heavy"
+kind = "tql"
+query = "TQL ANALYZE VERBOSE (1704067200, 1704672000, '1h') prom_remote_write_heavy_storage{host=~'host.*'}"
+warmup = 1
+iterations = 2
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 100
+
+[[scenario.queries]]
+name = "selector_30d_remote_write_heavy"
+kind = "tql"
+query = "TQL ANALYZE VERBOSE (1704067200, 1706659200, '1h') prom_remote_write_heavy_storage{host=~'host.*'}"
+warmup = 1
+iterations = 2
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 100

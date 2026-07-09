@@ -183,6 +183,13 @@ into three flushed chunks, and requires multiple landed SSTs so storage
 inspection and the read-bench supplement have enough data to reduce incidental
 query noise while staying much smaller than the manual 7913 case.
 
+`tests/perf/query_cases/prom_remote_write_heavy_storage/case.toml` is also in
+the default self-hosted query-regression case set. It writes 16,384 series ×
+43,200 samples (30 days at 1-minute resolution), flushes once per day, and
+requires at least 20 landed SSTs with `greptime_value`. This heavy case is meant
+to make storage/read/query costs visible enough that baseline queries can take
+tens of seconds on release-equivalent perf runners.
+
 `tests/perf/query_cases/prom_remote_write_7913/case.toml` is a larger manual
 case for issue #7913. It writes 8192 series × 20160 samples through remote-write
 in 1440-sample daily time chunks, flushing after each chunk before running 1d/7d/14d

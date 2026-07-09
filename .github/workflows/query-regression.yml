@@ -58,7 +58,7 @@ jobs:
             contains(github.event.pull_request.labels.*.name, 'query-regression') &&
             (github.event.action != 'labeled' || github.event.label.name == 'query-regression')) }}
     runs-on: ${{ github.event_name == 'workflow_dispatch' && inputs.runner || 'perf-regression-8-cores' }}
-    timeout-minutes: 180
+    timeout-minutes: 480
     env:
       CARGO_PROFILE: ${{ github.event_name == 'pull_request' && 'nightly' || inputs.cargo_profile }}
       CARGO_TARGET_DIR: ${{ github.workspace }}/query-regression-target
