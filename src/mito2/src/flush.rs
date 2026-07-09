@@ -16,8 +16,8 @@
 
 use std::collections::HashMap;
 use std::num::NonZeroU64;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use bytes::Bytes;
@@ -39,7 +39,7 @@ use crate::cache::CacheManagerRef;
 use crate::config::MitoConfig;
 use crate::engine::region_hook::SstFileInfo;
 use crate::error::{
-    Error, FlushRegionSnafu, JoinSnafu, RegionClosedSnafu, RegionDroppedSnafu,
+    Error, FlushRegionSnafu, JoinSnafu, RegionBusySnafu, RegionClosedSnafu, RegionDroppedSnafu,
     RegionTruncatedSnafu, Result,
 };
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
@@ -57,8 +57,8 @@ use crate::region::options::{IndexOptions, MergeMode, RegionOptions};
 use crate::region::version::{VersionControlData, VersionControlRef, VersionRef};
 use crate::region::{ManifestContextRef, RegionLeaderState, RegionRoleState, parse_partition_expr};
 use crate::request::{
-    BackgroundNotify, FlushFailed, FlushFinished, OptionOutputTx, OutputTx, SenderBulkRequest,
-    SenderDdlRequest, SenderWriteRequest, WorkerRequest, WorkerRequestWithTime,
+    BackgroundNotify, DdlRequest, FlushFailed, FlushFinished, OnFailure, OptionOutputTx, OutputTx,
+    SenderBulkRequest, SenderDdlRequest, SenderWriteRequest, WorkerRequest, WorkerRequestWithTime,
 };
 use crate::schedule::scheduler::{Job, SchedulerRef};
 use crate::sst::file::FileMeta;
@@ -221,14 +221,14 @@ pub enum FlushReason {
     Downgrading,
     /// Enter staging mode.
     EnterStaging,
-    /// Flush when region is closing.
-    Closing,
     /// Flush triggered before region migration.
     RegionMigration,
     /// Flush triggered by repartition procedure.
     Repartition,
     /// Flush triggered by remote WAL pruning.
     RemoteWalPrune,
+    /// Flush before closing a Noop WAL region.
+    Closing,
 }
 
 impl FlushReason {
@@ -280,6 +280,43 @@ pub(crate) struct RegionFlushTask {
     pub(crate) partition_expr: Option<String>,
 }
 
+struct FlushTaskWaiters {
+    region_id: RegionId,
+    senders: Mutex<Vec<OutputTx>>,
+}
+
+impl FlushTaskWaiters {
+    fn new(region_id: RegionId, senders: Vec<OutputTx>) -> Self {
+        Self {
+            region_id,
+            senders: Mutex::new(senders),
+        }
+    }
+
+    fn take(&self) -> Vec<OutputTx> {
+        std::mem::take(&mut *self.senders.lock().unwrap())
+    }
+
+    fn on_failure(&self, err: Arc<Error>) {
+        for sender in self.take() {
+            sender.send(Err(err.clone()).context(FlushRegionSnafu {
+                region_id: self.region_id,
+            }));
+        }
+    }
+}
+
+impl Drop for FlushTaskWaiters {
+    fn drop(&mut self) {
+        self.on_failure(Arc::new(
+            RegionBusySnafu {
+                region_id: self.region_id,
+            }
+            .build(),
+        ));
+    }
+}
+
 impl RegionFlushTask {
     /// Push the sender if it is not none.
     pub(crate) fn push_sender(&mut self, mut sender: OptionOutputTx) {
@@ -307,16 +344,26 @@ impl RegionFlushTask {
     /// Converts the flush task into a background job.
     ///
     /// We must call this in the region worker.
-    fn into_flush_job(mut self, version_control: &VersionControlRef) -> Job {
+    fn into_flush_job(
+        mut self,
+        version_control: &VersionControlRef,
+    ) -> (Job, Arc<FlushTaskWaiters>) {
         // Get a version of this region before creating a job to get current
         // wal entry id, sequence and immutable memtables.
         let version_data = version_control.current();
+        let waiters = Arc::new(FlushTaskWaiters::new(
+            self.region_id,
+            std::mem::take(&mut self.senders),
+        ));
+        let job_waiters = waiters.clone();
 
-        Box::pin(async move {
+        let job = Box::pin(async move {
+            self.senders = job_waiters.take();
             INFLIGHT_FLUSH_COUNT.inc();
             self.do_flush(version_data).await;
             INFLIGHT_FLUSH_COUNT.dec();
-        })
+        });
+        (job, waiters)
     }
 
     /// Runs the flush task.
@@ -335,6 +382,7 @@ impl RegionFlushTask {
                     .collect();
                 let flush_finished = FlushFinished {
                     region_id: self.region_id,
+                    flush_reason: self.reason,
                     // The last entry has been flushed.
                     flushed_entry_id: version_data.last_entry_id,
                     senders: std::mem::take(&mut self.senders),
@@ -342,7 +390,6 @@ impl RegionFlushTask {
                     edit,
                     memtables_to_remove,
                     is_staging: self.is_staging,
-                    flush_reason: self.reason,
                 };
                 WorkerRequest::Background {
                     region_id: self.region_id,
@@ -719,10 +766,23 @@ impl RegionFlushTask {
             .send(WorkerRequestWithTime::new(request))
             .await
         {
+            let request = e.0.request;
             error!(
                 "Failed to notify flush job status for region {}, request: {:?}",
-                self.region_id, e.0
+                self.region_id, request
             );
+            if let WorkerRequest::Background {
+                notify: BackgroundNotify::FlushFinished(mut finished),
+                ..
+            } = request
+            {
+                finished.on_failure(
+                    RegionClosedSnafu {
+                        region_id: self.region_id,
+                    }
+                    .build(),
+                );
+            }
         }
     }
 
@@ -1059,22 +1119,22 @@ impl FlushScheduler {
     fn schedule_flush_task(
         &mut self,
         version_control: &VersionControlRef,
-        task: RegionFlushTask,
+        mut task: RegionFlushTask,
     ) -> Result<()> {
         let region_id = task.region_id;
 
         // If current region doesn't have flush status, we can flush the region directly.
         if let Err(e) = version_control.freeze_mutable() {
             error!(e; "Failed to freeze the mutable memtable for region {}", region_id);
+            task.on_failure(Arc::new(RegionBusySnafu { region_id }.build()));
 
             return Err(e);
         }
         // Submit a flush job.
-        let job = task.into_flush_job(version_control);
+        let (job, waiters) = task.into_flush_job(version_control);
         if let Err(e) = self.scheduler.schedule(job) {
-            // If scheduler returns error, senders in the job will be dropped and waiters
-            // can get recv errors.
             error!(e; "Failed to schedule flush job for region {}", region_id);
+            waiters.on_failure(Arc::new(RegionBusySnafu { region_id }.build()));
 
             return Err(e);
         }
@@ -1111,12 +1171,13 @@ impl FlushScheduler {
             return Ok(());
         }
 
+        let closing = task.reason == FlushReason::Closing;
         self.schedule_flush_task(version_control, task)?;
 
         // Add this region to status map.
         let _ = self.region_status.insert(
             region_id,
-            FlushStatus::new(region_id, version_control.clone()),
+            FlushStatus::new(region_id, version_control.clone(), closing),
         );
 
         Ok(())
@@ -1181,6 +1242,9 @@ impl FlushScheduler {
                 err;
                 "Flush succeeded for region {region_id}, but failed to schedule next flush for it."
             );
+            let flush_status = self.region_status.remove(&region_id).unwrap();
+            flush_status.on_failure(Arc::new(RegionBusySnafu { region_id }.build()));
+            return None;
         }
         // We can flush the region again, keep it in the region status.
         None
@@ -1211,7 +1275,11 @@ impl FlushScheduler {
 
     /// Notifies the scheduler that the region is closed.
     pub(crate) fn on_region_closed(&mut self, region_id: RegionId) {
-        self.remove_region_on_failure(region_id, Arc::new(RegionClosedSnafu { region_id }.build()));
+        let Some(flush_status) = self.region_status.remove(&region_id) else {
+            return;
+        };
+
+        flush_status.on_region_closed(Arc::new(RegionClosedSnafu { region_id }.build()));
     }
 
     /// Notifies the scheduler that the region is truncated.
@@ -1262,11 +1330,11 @@ impl FlushScheduler {
         status.pending_bulk_writes.push(request);
     }
 
-    /// Returns true if the region has pending DDLs.
+    /// Returns true if the region has pending DDLs or a close-time flush.
     pub(crate) fn has_pending_ddls(&self, region_id: RegionId) -> bool {
         self.region_status
             .get(&region_id)
-            .map(|status| !status.pending_ddls.is_empty())
+            .map(|status| !status.pending_ddls.is_empty() || status.closing)
             .unwrap_or(false)
     }
 }
@@ -1290,6 +1358,8 @@ struct FlushStatus {
     version_control: VersionControlRef,
     /// Task waiting for next flush.
     pending_task: Option<RegionFlushTask>,
+    /// Whether a close-time flush is in progress or pending.
+    closing: bool,
     /// Pending ddl requests.
     pending_ddls: Vec<SenderDdlRequest>,
     /// Requests waiting to write after altering the region.
@@ -1299,11 +1369,12 @@ struct FlushStatus {
 }
 
 impl FlushStatus {
-    fn new(region_id: RegionId, version_control: VersionControlRef) -> FlushStatus {
+    fn new(region_id: RegionId, version_control: VersionControlRef, closing: bool) -> FlushStatus {
         FlushStatus {
             region_id,
             version_control,
             pending_task: None,
+            closing,
             pending_ddls: Vec::new(),
             pending_writes: Vec::new(),
             pending_bulk_writes: Vec::new(),
@@ -1312,6 +1383,7 @@ impl FlushStatus {
 
     /// Merges the task to pending task.
     fn merge_task(&mut self, task: RegionFlushTask) {
+        self.closing |= task.reason == FlushReason::Closing;
         if let Some(pending) = &mut self.pending_task {
             pending.merge(task);
         } else {
@@ -1335,23 +1407,139 @@ impl FlushStatus {
                     region_id: self.region_id,
                 }));
         }
+        for bulk_req in self.pending_bulk_writes {
+            bulk_req
+                .sender
+                .send(Err(err.clone()).context(FlushRegionSnafu {
+                    region_id: self.region_id,
+                }));
+        }
+    }
+
+    fn on_region_closed(self, err: Arc<Error>) {
+        if let Some(mut task) = self.pending_task {
+            task.on_failure(err.clone());
+        }
+
+        for ddl in self.pending_ddls {
+            if matches!(ddl.request, DdlRequest::Close(_)) {
+                ddl.sender.send(Ok(0));
+            } else {
+                ddl.sender.send(Err(err.clone()).context(FlushRegionSnafu {
+                    region_id: self.region_id,
+                }));
+            }
+        }
+
+        for write_req in self.pending_writes {
+            write_req
+                .sender
+                .send(Err(err.clone()).context(FlushRegionSnafu {
+                    region_id: self.region_id,
+                }));
+        }
+        for bulk_req in self.pending_bulk_writes {
+            bulk_req
+                .sender
+                .send(Err(err.clone()).context(FlushRegionSnafu {
+                    region_id: self.region_id,
+                }));
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use common_error::ext::ErrorExt;
+    use common_error::status_code::StatusCode;
     use mito_codec::row_converter::build_primary_key_codec;
     use tokio::sync::oneshot;
 
     use super::*;
     use crate::cache::CacheManager;
+    use crate::error::InvalidSchedulerStateSnafu;
     use crate::memtable::bulk::part::BulkPartConverter;
     use crate::memtable::time_series::TimeSeriesMemtableBuilder;
     use crate::memtable::{Memtable, RangesOptions};
+    use crate::schedule::scheduler::Scheduler;
     use crate::sst::{FlatSchemaOptions, to_flat_sst_arrow_schema};
     use crate::test_util::memtable_util::{build_key_values_with_ts_seq_values, metadata_for_test};
     use crate::test_util::scheduler_util::{SchedulerEnv, VecScheduler};
     use crate::test_util::version_util::{VersionControlBuilder, write_rows_to_version};
+
+    struct FailingScheduler;
+
+    #[async_trait::async_trait]
+    impl Scheduler for FailingScheduler {
+        fn schedule(&self, _job: Job) -> Result<()> {
+            InvalidSchedulerStateSnafu.fail()
+        }
+
+        async fn stop(&self, _await_termination: bool) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    fn new_test_flush_task(
+        env: &SchedulerEnv,
+        region_id: RegionId,
+        reason: FlushReason,
+        request_sender: mpsc::Sender<WorkerRequestWithTime>,
+        manifest_ctx: ManifestContextRef,
+    ) -> RegionFlushTask {
+        RegionFlushTask {
+            region_id,
+            reason,
+            senders: Vec::new(),
+            request_sender,
+            access_layer: env.access_layer.clone(),
+            listener: WorkerListener::default(),
+            engine_config: Arc::new(MitoConfig::default()),
+            row_group_size: None,
+            cache_manager: Arc::new(CacheManager::default()),
+            manifest_ctx,
+            index_options: IndexOptions::default(),
+            flush_semaphore: Arc::new(Semaphore::new(2)),
+            is_staging: false,
+            partition_expr: None,
+        }
+    }
+
+    fn new_test_bulk_request(
+        region_id: RegionId,
+    ) -> (
+        SenderBulkRequest,
+        oneshot::Receiver<Result<store_api::region_request::AffectedRows>>,
+    ) {
+        let metadata = metadata_for_test();
+        let schema = to_flat_sst_arrow_schema(
+            &metadata,
+            &FlatSchemaOptions::from_encoding(metadata.primary_key_encoding),
+        );
+        let pk_codec = build_primary_key_codec(&metadata);
+        let mut converter = BulkPartConverter::new(&metadata, schema, 16, pk_codec, true);
+        let kvs = build_key_values_with_ts_seq_values(
+            &metadata,
+            "bulk_key".to_string(),
+            1,
+            std::iter::once(1000i64),
+            std::iter::once(Some(1.0f64)),
+            1,
+        );
+        converter.append_key_values(&kvs).unwrap();
+        let (sender, receiver) = oneshot::channel();
+
+        (
+            SenderBulkRequest {
+                sender: OptionOutputTx::from(sender),
+                region_id,
+                request: converter.convert().unwrap(),
+                region_metadata: Some(metadata),
+                partition_expr_version: None,
+            },
+            receiver,
+        )
+    }
 
     #[test]
     fn test_get_mutable_limit() {
@@ -1455,6 +1643,151 @@ mod tests {
         let output = output_rx.await.unwrap().unwrap();
         assert_eq!(output, 0);
         assert!(scheduler.region_status.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_schedule_flush_failure_notifies_waiter() {
+        let env = SchedulerEnv::new()
+            .await
+            .scheduler(Arc::new(FailingScheduler));
+        let (tx, _rx) = mpsc::channel(4);
+        let mut scheduler = env.mock_flush_scheduler();
+        let mut builder = VersionControlBuilder::new();
+        builder.set_memtable_builder(Arc::new(TimeSeriesMemtableBuilder::default()));
+        let version_control = Arc::new(builder.build());
+        let version_data = version_control.current();
+        write_rows_to_version(&version_data.version, "host0", 0, 10);
+        let manifest_ctx = env
+            .mock_manifest_context(version_data.version.metadata.clone())
+            .await;
+        let (output_tx, output_rx) = oneshot::channel();
+        let mut task = new_test_flush_task(
+            &env,
+            builder.region_id(),
+            FlushReason::Manual,
+            tx,
+            manifest_ctx,
+        );
+        task.push_sender(OptionOutputTx::from(output_tx));
+
+        scheduler
+            .schedule_flush(builder.region_id(), &version_control, task)
+            .unwrap_err();
+
+        let err = output_rx
+            .await
+            .expect("waiter must receive explicit error")
+            .unwrap_err();
+        assert_eq!(err.status_code(), StatusCode::RegionBusy);
+    }
+
+    #[tokio::test]
+    async fn test_send_worker_request_failure_notifies_flush_finished_waiter() {
+        let env = SchedulerEnv::new().await;
+        let (tx, rx) = mpsc::channel(1);
+        drop(rx);
+        let builder = VersionControlBuilder::new();
+        let version_control = Arc::new(builder.build());
+        let manifest_ctx = env
+            .mock_manifest_context(version_control.current().version.metadata.clone())
+            .await;
+        let task = new_test_flush_task(
+            &env,
+            builder.region_id(),
+            FlushReason::Manual,
+            tx,
+            manifest_ctx,
+        );
+        let (output_tx, output_rx) = oneshot::channel();
+        let request = WorkerRequest::Background {
+            region_id: builder.region_id(),
+            notify: BackgroundNotify::FlushFinished(FlushFinished {
+                region_id: builder.region_id(),
+                flush_reason: FlushReason::Manual,
+                flushed_entry_id: 0,
+                senders: vec![OutputTx::new(output_tx)],
+                _timer: FLUSH_ELAPSED.with_label_values(&["total"]).start_timer(),
+                edit: RegionEdit {
+                    files_to_add: Vec::new(),
+                    files_to_remove: Vec::new(),
+                    timestamp_ms: None,
+                    compaction_time_window: None,
+                    flushed_entry_id: None,
+                    flushed_sequence: None,
+                    committed_sequence: None,
+                },
+                memtables_to_remove: smallvec![],
+                is_staging: false,
+            }),
+        };
+
+        task.send_worker_request(request).await;
+
+        let output = output_rx.await.expect("waiter must receive explicit error");
+        assert!(output.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_flush_waiters_drop_notifies_waiter() {
+        let region_id = RegionId::new(1, 1);
+        let (output_tx, output_rx) = oneshot::channel();
+        let waiters = FlushTaskWaiters::new(region_id, vec![OutputTx::new(output_tx)]);
+
+        drop(waiters);
+
+        let err = output_rx
+            .await
+            .expect("waiter must receive explicit error")
+            .unwrap_err();
+        assert_eq!(err.status_code(), StatusCode::RegionBusy);
+    }
+
+    #[tokio::test]
+    async fn test_flush_failure_notifies_pending_bulk_writes() {
+        let region_id = RegionId::new(1, 1);
+        let version_control = Arc::new(VersionControlBuilder::new().build());
+        let (bulk_req, output_rx) = new_test_bulk_request(region_id);
+        let status = FlushStatus {
+            region_id,
+            version_control,
+            pending_task: None,
+            closing: false,
+            pending_ddls: Vec::new(),
+            pending_writes: Vec::new(),
+            pending_bulk_writes: vec![bulk_req],
+        };
+
+        status.on_failure(Arc::new(RegionClosedSnafu { region_id }.build()));
+
+        let err = output_rx
+            .await
+            .expect("pending bulk write must receive explicit error")
+            .unwrap_err();
+        assert_eq!(err.status_code(), StatusCode::Cancelled);
+    }
+
+    #[tokio::test]
+    async fn test_region_closed_notifies_pending_bulk_writes() {
+        let region_id = RegionId::new(1, 1);
+        let version_control = Arc::new(VersionControlBuilder::new().build());
+        let (bulk_req, output_rx) = new_test_bulk_request(region_id);
+        let status = FlushStatus {
+            region_id,
+            version_control,
+            pending_task: None,
+            closing: false,
+            pending_ddls: Vec::new(),
+            pending_writes: Vec::new(),
+            pending_bulk_writes: vec![bulk_req],
+        };
+
+        status.on_region_closed(Arc::new(RegionClosedSnafu { region_id }.build()));
+
+        let err = output_rx
+            .await
+            .expect("pending bulk write must receive explicit error")
+            .unwrap_err();
+        assert_eq!(err.status_code(), StatusCode::Cancelled);
     }
 
     #[tokio::test]
@@ -1729,5 +2062,78 @@ mod tests {
                 .pending_task
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn test_schedule_pending_request_failure_drains_pending_ddls() {
+        common_telemetry::init_default_ut_logging();
+        let job_scheduler = Arc::new(VecScheduler::default());
+        let env = SchedulerEnv::new().await.scheduler(job_scheduler.clone());
+        let (tx, _rx) = mpsc::channel(4);
+        let mut scheduler = env.mock_flush_scheduler();
+        let mut builder = VersionControlBuilder::new();
+        builder.set_memtable_builder(Arc::new(TimeSeriesMemtableBuilder::default()));
+        let version_control = Arc::new(builder.build());
+
+        let version_data = version_control.current();
+        write_rows_to_version(&version_data.version, "host0", 0, 10);
+        let manifest_ctx = env
+            .mock_manifest_context(version_data.version.metadata.clone())
+            .await;
+
+        let task = new_test_flush_task(
+            &env,
+            builder.region_id(),
+            FlushReason::Manual,
+            tx.clone(),
+            manifest_ctx.clone(),
+        );
+        scheduler
+            .schedule_flush(builder.region_id(), &version_control, task)
+            .unwrap();
+
+        let task = new_test_flush_task(
+            &env,
+            builder.region_id(),
+            FlushReason::Closing,
+            tx,
+            manifest_ctx,
+        );
+        scheduler
+            .schedule_flush(builder.region_id(), &version_control, task)
+            .unwrap();
+
+        let (sender, receiver) = oneshot::channel();
+        scheduler.add_ddl_request_to_pending(SenderDdlRequest {
+            sender: OptionOutputTx::from(sender),
+            region_id: builder.region_id(),
+            request: DdlRequest::Close(store_api::region_request::RegionCloseRequest {}),
+        });
+
+        let version_data = version_control.current();
+        version_control.apply_edit(
+            Some(RegionEdit {
+                files_to_add: Vec::new(),
+                files_to_remove: Vec::new(),
+                timestamp_ms: None,
+                compaction_time_window: None,
+                flushed_entry_id: None,
+                flushed_sequence: None,
+                committed_sequence: None,
+            }),
+            &[0],
+            builder.file_purger(),
+        );
+        write_rows_to_version(&version_data.version, "host1", 0, 10);
+
+        scheduler.scheduler = Arc::new(FailingScheduler);
+        scheduler.on_flush_success(builder.region_id());
+
+        assert!(scheduler.region_status.is_empty());
+        let err = receiver
+            .await
+            .expect("pending DDL must be notified")
+            .unwrap_err();
+        assert_eq!(err.status_code(), StatusCode::RegionBusy);
     }
 }

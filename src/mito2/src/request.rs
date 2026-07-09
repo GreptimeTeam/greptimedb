@@ -921,6 +921,8 @@ pub(crate) enum BackgroundNotify {
 pub(crate) struct FlushFinished {
     /// Region id.
     pub(crate) region_id: RegionId,
+    /// Reason to flush.
+    pub(crate) flush_reason: FlushReason,
     /// Entry id of flushed data.
     pub(crate) flushed_entry_id: EntryId,
     /// Flush result senders.
@@ -933,8 +935,6 @@ pub(crate) struct FlushFinished {
     pub(crate) memtables_to_remove: SmallVec<[MemtableId; 2]>,
     /// Whether the region is in staging mode.
     pub(crate) is_staging: bool,
-    /// Reason for flush.
-    pub(crate) flush_reason: FlushReason,
 }
 
 impl FlushFinished {

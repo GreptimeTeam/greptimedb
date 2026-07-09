@@ -312,6 +312,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         }
 
         let flush_on_close = request.flush_reason == FlushReason::Closing;
+
         let index_build_file_metas = std::mem::take(&mut request.edit.files_to_add);
 
         // In async mode, create indexes after flush.
@@ -328,31 +329,54 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         }
 
         if flush_on_close {
-            // Remove region from server for flush on closing,
-            // no need to handle requests and schedule compactions.
             self.remove_region(region_id).await;
             info!("Region {} closed after flush", region_id);
             request.on_success();
-        } else {
-            // Notifies waiters and observes the flush timer.
-            request.on_success();
-            // Handle pending requests for the region.
-            if let Some((mut ddl_requests, mut write_requests, mut bulk_writes)) =
-                self.flush_scheduler.on_flush_success(region_id)
-            {
-                // Perform DDLs first because they require empty memtables.
-                self.handle_ddl_requests(&mut ddl_requests).await;
-                // Handle pending write requests, we don't stall these requests.
+            self.listener.on_flush_success(region_id);
+            return;
+        }
+
+        // Notifies waiters and observes the flush timer.
+        request.on_success();
+        // Handle pending requests for the region.
+        if let Some((mut ddl_requests, mut write_requests, mut bulk_writes)) =
+            self.flush_scheduler.on_flush_success(region_id)
+        {
+            // Perform DDLs first because they require empty memtables.
+            self.handle_ddl_requests(&mut ddl_requests).await;
+            if self.flush_scheduler.is_flush_requested(region_id) {
+                // The DDL may schedule another flush, e.g. a close-time flush after writes
+                // arrived in the mutable memtable during the previous flush. Keep pending
+                // writes fenced until that flush reaches its terminal state instead of
+                // accepting them while the DDL is still in progress.
+                for write_request in write_requests {
+                    self.flush_scheduler
+                        .add_write_request_to_pending(write_request);
+                }
+                for bulk_write in bulk_writes {
+                    self.flush_scheduler.add_bulk_request_to_pending(bulk_write);
+                }
+                self.listener.on_flush_success(region_id);
+                return;
+            }
+            // A pending close DDL may have removed the region. Reject queued writes as
+            // not found, then stop instead of scheduling compaction for a closed region.
+            if !self.regions.is_region_exists(region_id) {
                 self.handle_write_requests(&mut write_requests, &mut bulk_writes, false)
                     .await;
+                self.listener.on_flush_success(region_id);
+                return;
             }
-            // Maybe flush worker again.
-            self.maybe_flush_worker();
-            // Handle stalled requests.
-            self.handle_stalled_requests().await;
-            // Schedules compaction.
-            self.schedule_compaction(&region).await;
+            // Handle pending write requests, we don't stall these requests.
+            self.handle_write_requests(&mut write_requests, &mut bulk_writes, false)
+                .await;
         }
+        // Maybe flush worker again.
+        self.maybe_flush_worker();
+        // Handle stalled requests.
+        self.handle_stalled_requests().await;
+        // Schedules compaction.
+        self.schedule_compaction(&region).await;
 
         self.listener.on_flush_success(region_id);
     }
