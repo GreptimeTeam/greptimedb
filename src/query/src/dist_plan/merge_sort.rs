@@ -366,6 +366,83 @@ mod tests {
 
     use super::*;
 
+    /// Test double that records DataFusion's preserve-order signal while
+    /// otherwise behaving like a transparent wrapper around its child.
+    #[derive(Debug, Clone)]
+    struct PreserveOrderProbeExec {
+        inner: Arc<dyn ExecutionPlan>,
+        preserve_order: bool,
+    }
+
+    impl PreserveOrderProbeExec {
+        fn new(inner: Arc<dyn ExecutionPlan>) -> Self {
+            Self {
+                inner,
+                preserve_order: false,
+            }
+        }
+    }
+
+    impl DisplayAs for PreserveOrderProbeExec {
+        fn fmt_as(&self, _t: DisplayFormatType, f: &mut fmt::Formatter) -> fmt::Result {
+            write!(
+                f,
+                "PreserveOrderProbeExec: preserve_order={}",
+                self.preserve_order
+            )
+        }
+    }
+
+    impl ExecutionPlan for PreserveOrderProbeExec {
+        fn name(&self) -> &str {
+            "PreserveOrderProbeExec"
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+
+        fn properties(&self) -> &Arc<PlanProperties> {
+            self.inner.properties()
+        }
+
+        fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
+            vec![&self.inner]
+        }
+
+        fn with_new_children(
+            self: Arc<Self>,
+            mut children: Vec<Arc<dyn ExecutionPlan>>,
+        ) -> Result<Arc<dyn ExecutionPlan>> {
+            if children.len() != 1 {
+                return Err(DataFusionError::Internal(format!(
+                    "PreserveOrderProbeExec expects exactly one child, got {}",
+                    children.len()
+                )));
+            }
+
+            Ok(Arc::new(Self {
+                inner: children.swap_remove(0),
+                preserve_order: self.preserve_order,
+            }))
+        }
+
+        fn execute(
+            &self,
+            partition: usize,
+            context: Arc<TaskContext>,
+        ) -> Result<SendableRecordBatchStream> {
+            self.inner.execute(partition, context)
+        }
+
+        fn with_preserve_order(&self, preserve_order: bool) -> Option<Arc<dyn ExecutionPlan>> {
+            Some(Arc::new(Self {
+                inner: Arc::clone(&self.inner),
+                preserve_order,
+            }))
+        }
+    }
+
     fn test_ordering(schema: &Schema) -> LexOrdering {
         LexOrdering::new([PhysicalSortExpr::new(
             physical_col("ts", schema).unwrap(),
@@ -405,6 +482,209 @@ mod tests {
         let fetched = merge_sort.with_fetch(Some(2)).unwrap();
         assert!(fetched.as_any().downcast_ref::<MergeSortExec>().is_some());
         assert_eq!(fetched.fetch(), Some(2));
+    }
+
+    #[test]
+    fn merge_sort_exec_required_input_ordering_matches_spm() {
+        let schema = Arc::new(Schema::new(vec![Field::new("ts", DataType::Int64, false)]));
+        let input = Arc::new(EmptyExec::new(schema.clone()).with_partitions(2)) as _;
+        let ordering = test_ordering(schema.as_ref());
+
+        let merge_sort = MergeSortExec::new(ordering.clone(), Arc::clone(&input), Some(1));
+        let bare_spm =
+            SortPreservingMergeExec::new(ordering.clone(), Arc::clone(&input)).with_fetch(Some(1));
+
+        assert_eq!(
+            merge_sort.required_input_ordering(),
+            vec![Some(OrderingRequirements::from(ordering))],
+            "MergeSortExec must require locally sorted input partitions for the merge key"
+        );
+        assert_eq!(
+            merge_sort.required_input_ordering(),
+            bare_spm.required_input_ordering(),
+            "MergeSortExec's child ordering contract should mirror SortPreservingMergeExec"
+        );
+        assert_eq!(
+            merge_sort.maintains_input_order(),
+            bare_spm.maintains_input_order()
+        );
+    }
+
+    #[test]
+    fn merge_sort_exec_with_preserve_order_matches_spm_but_keeps_wrapper() {
+        let schema = Arc::new(Schema::new(vec![Field::new("ts", DataType::Int64, false)]));
+        let input = Arc::new(PreserveOrderProbeExec::new(Arc::new(
+            EmptyExec::new(schema.clone()).with_partitions(2),
+        ))) as _;
+        let ordering = test_ordering(schema.as_ref());
+
+        let bare_spm =
+            SortPreservingMergeExec::new(ordering.clone(), Arc::clone(&input)).with_fetch(Some(1));
+        let preserved_spm = bare_spm.with_preserve_order(true).unwrap();
+        assert!(
+            preserved_spm
+                .as_any()
+                .downcast_ref::<SortPreservingMergeExec>()
+                .is_some(),
+            "bare SPM should rebuild as bare SPM"
+        );
+        assert!(
+            preserved_spm.children()[0]
+                .as_any()
+                .downcast_ref::<PreserveOrderProbeExec>()
+                .unwrap()
+                .preserve_order
+        );
+
+        let merge_sort = MergeSortExec::new(ordering, input, Some(1));
+        let preserved_merge_sort = merge_sort.with_preserve_order(true).unwrap();
+        assert!(
+            preserved_merge_sort
+                .as_any()
+                .downcast_ref::<MergeSortExec>()
+                .is_some(),
+            "MergeSortExec must rewrap the preserve-order child as MergeSortExec"
+        );
+        assert!(
+            preserved_merge_sort
+                .as_any()
+                .downcast_ref::<SortPreservingMergeExec>()
+                .is_none(),
+            "MergeSortExec must not expose a bare SPM after with_preserve_order"
+        );
+        assert_eq!(preserved_merge_sort.fetch(), Some(1));
+        assert_eq!(
+            preserved_merge_sort.required_input_ordering(),
+            preserved_spm.required_input_ordering(),
+            "preserve-order rewrite should keep the same SPM child-ordering contract"
+        );
+        assert!(
+            preserved_merge_sort.children()[0]
+                .as_any()
+                .downcast_ref::<PreserveOrderProbeExec>()
+                .unwrap()
+                .preserve_order
+        );
+    }
+
+    #[test]
+    fn merge_sort_exec_projection_swap_matches_spm_but_keeps_wrapper() -> Result<()> {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("value", DataType::Int64, false),
+            Field::new("ts", DataType::Int64, false),
+            Field::new("tag", DataType::Utf8, false),
+        ]));
+        let input = Arc::new(EmptyExec::new(schema.clone()).with_partitions(2)) as _;
+        let ordering = test_ordering(schema.as_ref());
+
+        let bare_spm = Arc::new(
+            SortPreservingMergeExec::new(ordering.clone(), Arc::clone(&input)).with_fetch(Some(1)),
+        ) as Arc<dyn ExecutionPlan>;
+        let spm_projection = ProjectionExec::try_new(
+            vec![
+                (physical_col("ts", schema.as_ref())?, "ts".to_string()),
+                (physical_col("tag", schema.as_ref())?, "tag".to_string()),
+            ],
+            Arc::clone(&bare_spm),
+        )?;
+        let swapped_spm = bare_spm
+            .try_swapping_with_projection(&spm_projection)?
+            .expect("SPM should accept a narrowing projection that preserves the sort key");
+        assert!(
+            swapped_spm
+                .as_any()
+                .downcast_ref::<SortPreservingMergeExec>()
+                .is_some(),
+            "bare SPM should rebuild as bare SPM"
+        );
+
+        let merge_sort =
+            Arc::new(MergeSortExec::new(ordering, input, Some(1))) as Arc<dyn ExecutionPlan>;
+        let merge_projection = ProjectionExec::try_new(
+            vec![
+                (physical_col("ts", schema.as_ref())?, "ts".to_string()),
+                (physical_col("tag", schema.as_ref())?, "tag".to_string()),
+            ],
+            Arc::clone(&merge_sort),
+        )?;
+        let swapped_merge_sort = merge_sort
+            .try_swapping_with_projection(&merge_projection)?
+            .expect("MergeSortExec should accept the same projection swap as SPM");
+
+        assert!(
+            swapped_merge_sort
+                .as_any()
+                .downcast_ref::<MergeSortExec>()
+                .is_some(),
+            "MergeSortExec must rewrap projection swaps as MergeSortExec"
+        );
+        assert!(
+            swapped_merge_sort
+                .as_any()
+                .downcast_ref::<SortPreservingMergeExec>()
+                .is_none(),
+            "MergeSortExec must not expose a bare SPM after projection swap"
+        );
+        assert_eq!(swapped_merge_sort.fetch(), Some(1));
+        assert!(
+            swapped_merge_sort.children()[0]
+                .as_any()
+                .downcast_ref::<ProjectionExec>()
+                .is_some(),
+            "the projection should move below MergeSortExec"
+        );
+        let swapped_schema = swapped_merge_sort.schema();
+        assert_eq!(
+            swapped_schema
+                .fields()
+                .iter()
+                .map(|field| field.name().as_str())
+                .collect::<Vec<_>>(),
+            vec!["ts", "tag"],
+            "swapped MergeSortExec should expose the projected schema"
+        );
+
+        let projected_ordering = LexOrdering::new([PhysicalSortExpr::new(
+            physical_col("ts", swapped_merge_sort.children()[0].schema().as_ref())?,
+            SortOptions {
+                descending: true,
+                nulls_first: false,
+            },
+        )])
+        .unwrap();
+        assert_eq!(
+            swapped_merge_sort.required_input_ordering(),
+            vec![Some(OrderingRequirements::from(projected_ordering))],
+            "projection swap must rewrite the ordering to the child projection's schema"
+        );
+        assert_eq!(
+            swapped_merge_sort.required_input_ordering(),
+            swapped_spm.required_input_ordering(),
+            "MergeSortExec projection swap should mirror SPM's ordering rewrite"
+        );
+
+        let spm_projection_without_sort_key = ProjectionExec::try_new(
+            vec![(physical_col("tag", schema.as_ref())?, "tag".to_string())],
+            Arc::clone(&bare_spm),
+        )?;
+        let merge_projection_without_sort_key = ProjectionExec::try_new(
+            vec![(physical_col("tag", schema.as_ref())?, "tag".to_string())],
+            Arc::clone(&merge_sort),
+        )?;
+        assert!(
+            bare_spm
+                .try_swapping_with_projection(&spm_projection_without_sort_key)?
+                .is_none(),
+            "SPM must reject projection swaps that drop the sort key"
+        );
+        assert!(
+            merge_sort
+                .try_swapping_with_projection(&merge_projection_without_sort_key)?
+                .is_none(),
+            "MergeSortExec should reject the same projection swap as SPM"
+        );
+
+        Ok(())
     }
 
     #[test]
