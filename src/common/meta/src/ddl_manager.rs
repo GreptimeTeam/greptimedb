@@ -484,11 +484,14 @@ impl DdlManager {
             .table_metadata_manager
             .get_dropped_table_by_id(undrop_table_task.table_id)
             .await?
-            .map(|dropped_table| dropped_table.table_name);
+            .with_context(|| TableNotFoundSnafu {
+                table_name: undrop_table_task.table_id.to_string(),
+            })?
+            .table_name;
         let procedure = UndropTableProcedure::new_with_original_table_name(
             undrop_table_task,
             context,
-            original_table_name,
+            Some(original_table_name),
         );
         let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
 
@@ -1213,7 +1216,8 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use common_error::ext::BoxedError;
+    use common_error::ext::{BoxedError, ErrorExt};
+    use common_error::status_code::StatusCode;
     use common_procedure::local::LocalManager;
     use common_procedure::test_util::InMemoryPoisonStore;
     use common_procedure::{BoxedProcedure, ProcedureManagerRef};
@@ -1237,6 +1241,7 @@ mod tests {
     use crate::peer::Peer;
     use crate::region_keeper::MemoryRegionKeeper;
     use crate::region_registry::LeaderRegionRegistry;
+    use crate::rpc::ddl::UndropTableTask;
     use crate::sequence::SequenceBuilder;
     use crate::state_store::KvStateStore;
     use crate::wal_provider::WalProvider;
@@ -1334,5 +1339,56 @@ mod tests {
         for loader in expected_loaders {
             assert!(procedure_manager.contains_loader(loader));
         }
+    }
+
+    #[tokio::test]
+    async fn test_submit_undrop_missing_tombstone_returns_table_not_found_directly() {
+        let kv_backend = Arc::new(MemoryKvBackend::new());
+        let table_metadata_manager = Arc::new(TableMetadataManager::new(kv_backend.clone()));
+        let table_metadata_allocator = Arc::new(TableMetadataAllocator::new(
+            Arc::new(SequenceBuilder::new("test", kv_backend.clone()).build()),
+            Arc::new(WalProvider::default()),
+        ));
+        let flow_metadata_manager = Arc::new(FlowMetadataManager::new(kv_backend.clone()));
+        let flow_metadata_allocator = Arc::new(FlowMetadataAllocator::with_noop_peer_allocator(
+            Arc::new(SequenceBuilder::new("flow-test", kv_backend.clone()).build()),
+        ));
+
+        let state_store = Arc::new(KvStateStore::new(kv_backend.clone()));
+        let poison_manager = Arc::new(InMemoryPoisonStore::default());
+        let procedure_manager = Arc::new(LocalManager::new(
+            Default::default(),
+            state_store,
+            poison_manager,
+            None,
+            None,
+        ));
+
+        let ddl_manager = DdlManager::try_new(
+            DdlContext {
+                node_manager: Arc::new(DummyDatanodeManager),
+                cache_invalidator: Arc::new(DummyCacheInvalidator),
+                table_metadata_manager,
+                table_metadata_allocator,
+                flow_metadata_manager,
+                flow_metadata_allocator,
+                memory_region_keeper: Arc::new(MemoryRegionKeeper::default()),
+                leader_region_registry: Arc::new(LeaderRegionRegistry::default()),
+                region_failure_detector_controller: Arc::new(NoopRegionFailureDetectorControl),
+                soft_drop_enabled: true,
+            },
+            procedure_manager,
+            Arc::new(DummyRepartitionProcedureFactory),
+            true,
+        )
+        .unwrap();
+
+        let err = ddl_manager
+            .submit_undrop_table_task(UndropTableTask { table_id: 1024 })
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.status_code(), StatusCode::TableNotFound);
+        assert!(matches!(err, crate::error::Error::TableNotFound { .. }));
     }
 }
