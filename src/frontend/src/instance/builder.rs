@@ -314,6 +314,7 @@ impl FrontendBuilder {
             otlp_metrics_table_legacy_cache: DashMap::new(),
             slow_query_options: self.options.slow_query.clone(),
             influxdb_default_merge_mode: self.options.influxdb.default_merge_mode,
+            trace_ingest_chunk_size: self.options.otlp.trace_ingest_chunk_size,
             suspend: Arc::new(AtomicBool::new(false)),
         })
     }

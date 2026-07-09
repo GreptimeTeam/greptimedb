@@ -71,6 +71,9 @@
 | `influxdb.default_merge_mode` | String | `last_non_null` | Default merge mode for tables automatically created by InfluxDB protocol.<br/>Available values: "last_non_null", "last_row". |
 | `jaeger` | -- | -- | Jaeger protocol options. |
 | `jaeger.enable` | Bool | `true` | Whether to enable Jaeger protocol in HTTP API. |
+| `otlp` | -- | -- | OpenTelemetry protocol options. |
+| `otlp.enable` | Bool | `true` | Whether to enable OpenTelemetry protocol in HTTP API. |
+| `otlp.trace_ingest_chunk_size` | Integer | `64` | Maximum spans per trace ingest chunk. Set to 0 to disable splitting. |
 | `prom_store` | -- | -- | Prometheus remote storage options |
 | `prom_store.enable` | Bool | `true` | Whether to enable Prometheus remote write and read in HTTP API. |
 | `prom_store.with_metric_engine` | Bool | `true` | Whether to store the data from Prometheus remote write in metric engine. |
@@ -300,6 +303,9 @@
 | `influxdb.default_merge_mode` | String | `last_non_null` | Default merge mode for tables automatically created by InfluxDB protocol.<br/>Available values: "last_non_null", "last_row". |
 | `jaeger` | -- | -- | Jaeger protocol options. |
 | `jaeger.enable` | Bool | `true` | Whether to enable Jaeger protocol in HTTP API. |
+| `otlp` | -- | -- | OpenTelemetry protocol options. |
+| `otlp.enable` | Bool | `true` | Whether to enable OpenTelemetry protocol in HTTP API. |
+| `otlp.trace_ingest_chunk_size` | Integer | `64` | Maximum spans per trace ingest chunk. Set to 0 to disable splitting. |
 | `prom_store` | -- | -- | Prometheus remote storage options |
 | `prom_store.enable` | Bool | `true` | Whether to enable Prometheus remote write and read in HTTP API. |
 | `prom_store.with_metric_engine` | Bool | `true` | Whether to store the data from Prometheus remote write in metric engine. |
