@@ -516,6 +516,7 @@ impl MetasrvBuilder {
                 meta_peer_client.clone(),
                 mailbox.clone(),
                 options.grpc.server_addr.clone(),
+                runtime_switch_manager.clone(),
                 options.gc.clone(),
             )?;
             gc_scheduler.try_start()?;

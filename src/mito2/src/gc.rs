@@ -173,7 +173,7 @@ impl Default for GcConfig {
         Self {
             enable: false,
             // expect long running queries to be finished(or at least be able to notify it's using a deleted file) within a reasonable time
-            lingering_time: Some(Duration::from_secs(60)),
+            lingering_time: Some(Duration::from_secs(60 * 60)),
             // 1 day, for unknown expel time, which is when this file get removed from manifest.
             // Only applies to full-listing GC for active/open regions. A long default avoids
             // accidentally deleting pre-manifest files (e.g. compaction/flush still in progress).
@@ -1133,6 +1133,14 @@ mod tests {
                 "78", "80", "88", "90", "98", "a0", "a8", "b0", "b8", "c0", "c8", "d0", "d8", "e0",
                 "e8", "f0", "f8",
             ]
+        );
+    }
+
+    #[test]
+    fn test_gc_config_default_lingering_time() {
+        assert_eq!(
+            GcConfig::default().lingering_time,
+            Some(Duration::from_secs(60 * 60))
         );
     }
 }

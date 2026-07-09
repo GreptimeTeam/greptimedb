@@ -18,16 +18,18 @@ use std::time::{Duration, Instant};
 
 use common_meta::DatanodeId;
 use common_meta::key::TableMetadataManagerRef;
+use common_meta::key::runtime_switch::RuntimeSwitchManagerRef;
 use common_procedure::ProcedureManagerRef;
 use common_telemetry::tracing::Instrument as _;
 use common_telemetry::{error, info};
+use snafu::ResultExt;
 use store_api::storage::{GcReport, RegionId};
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::{Mutex, oneshot};
 
 use crate::cluster::MetaPeerClientRef;
 use crate::define_ticker;
-use crate::error::{Error, Result};
+use crate::error::{self, Error, Result};
 use crate::gc::Region2Peers;
 use crate::gc::ctx::{DefaultGcSchedulerCtx, SchedulerCtx};
 use crate::gc::dropped::DroppedRegionCollector;
@@ -115,6 +117,8 @@ define_ticker!(
 /// [`GcScheduler`] is used to periodically trigger garbage collection on datanodes.
 pub struct GcScheduler {
     pub(crate) ctx: Arc<dyn SchedulerCtx>,
+    /// Runtime switch manager to check maintenance mode.
+    pub(crate) runtime_switch_manager: RuntimeSwitchManagerRef,
     /// The receiver of events.
     pub(crate) receiver: Receiver<Event>,
     /// GC configuration.
@@ -133,6 +137,7 @@ impl GcScheduler {
         meta_peer_client: MetaPeerClientRef,
         mailbox: MailboxRef,
         server_addr: String,
+        runtime_switch_manager: RuntimeSwitchManagerRef,
         config: GcSchedulerOptions,
     ) -> Result<(Self, GcTicker)> {
         // Validate configuration before creating the scheduler
@@ -148,6 +153,7 @@ impl GcScheduler {
                 mailbox,
                 server_addr,
             )?),
+            runtime_switch_manager,
             receiver: rx,
             config,
             region_gc_tracker: Arc::new(Mutex::new(HashMap::new())),
@@ -192,7 +198,11 @@ impl GcScheduler {
                         .instrument(span)
                         .await;
                     if let Err(e) = &result {
-                        error!(e; "Failed to handle manual gc");
+                        if matches!(e, Error::ManualGcRejectedByMaintenanceMode { .. }) {
+                            info!("Rejected manual gc request: {}", e);
+                        } else {
+                            error!(e; "Failed to handle manual gc");
+                        }
                     }
                     let _ = sender.send(result);
                 }
@@ -204,6 +214,10 @@ impl GcScheduler {
         METRIC_META_GC_SCHEDULER_CYCLES_TOTAL.inc();
         let _timer = METRIC_META_GC_SCHEDULER_DURATION_SECONDS.start_timer();
         info!("Start to trigger gc");
+        if self.is_maintenance_mode_enabled().await? {
+            info!("Skip gc trigger because maintenance mode is enabled");
+            return Ok(GcJobReport::default());
+        }
         let span = common_telemetry::tracing::info_span!("meta_gc_handle_tick");
         let report = self.trigger_gc().instrument(span).await?;
 
@@ -226,6 +240,11 @@ impl GcScheduler {
         timeout: Option<Duration>,
     ) -> Result<GcJobReport> {
         info!("Start to handle manual gc request");
+
+        if self.is_maintenance_mode_enabled().await? {
+            info!("Skip manual gc request because maintenance mode is enabled");
+            return error::ManualGcRejectedByMaintenanceModeSnafu {}.fail();
+        }
 
         // No specific regions, use default tick behavior
         let Some(regions) = region_ids else {
@@ -294,11 +313,26 @@ impl GcScheduler {
         info!("Finished manual gc request");
         Ok(report)
     }
+
+    pub(crate) async fn is_maintenance_mode_enabled(&self) -> Result<bool> {
+        self.runtime_switch_manager
+            .maintenance_mode()
+            .await
+            .context(error::RuntimeSwitchManagerSnafu)
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn new_test_runtime_switch_manager() -> RuntimeSwitchManagerRef {
+    Arc::new(common_meta::key::runtime_switch::RuntimeSwitchManager::new(
+        Arc::new(common_meta::kv_backend::memory::MemoryKvBackend::new()),
+    ))
 }
 
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
     use common_meta::datanode::RegionStat;
@@ -308,6 +342,72 @@ mod tests {
     use table::metadata::TableId;
 
     use super::*;
+
+    #[derive(Default)]
+    struct CountingSchedulerCtx {
+        get_table_to_region_stats_calls: AtomicUsize,
+        get_table_reparts_calls: AtomicUsize,
+        gc_regions_calls: AtomicUsize,
+    }
+
+    impl CountingSchedulerCtx {
+        fn assert_no_scheduler_work(&self) {
+            assert_eq!(
+                0,
+                self.get_table_to_region_stats_calls.load(Ordering::Relaxed),
+                "get_table_to_region_stats should not be called"
+            );
+            assert_eq!(
+                0,
+                self.get_table_reparts_calls.load(Ordering::Relaxed),
+                "get_table_reparts should not be called"
+            );
+            assert_eq!(
+                0,
+                self.gc_regions_calls.load(Ordering::Relaxed),
+                "gc_regions should not be called"
+            );
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl SchedulerCtx for CountingSchedulerCtx {
+        async fn get_table_to_region_stats(&self) -> Result<HashMap<TableId, Vec<RegionStat>>> {
+            self.get_table_to_region_stats_calls
+                .fetch_add(1, Ordering::Relaxed);
+            panic!("get_table_to_region_stats should not be called in maintenance mode")
+        }
+
+        async fn get_table_reparts(&self) -> Result<Vec<(TableId, TableRepartValue)>> {
+            self.get_table_reparts_calls.fetch_add(1, Ordering::Relaxed);
+            panic!("get_table_reparts should not be called in maintenance mode")
+        }
+
+        async fn get_table_route(
+            &self,
+            _table_id: TableId,
+        ) -> Result<(TableId, PhysicalTableRouteValue)> {
+            unreachable!("get_table_route should not be called in this test")
+        }
+
+        async fn batch_get_table_route(
+            &self,
+            _table_ids: &[TableId],
+        ) -> Result<HashMap<TableId, PhysicalTableRouteValue>> {
+            unreachable!("batch_get_table_route should not be called in this test")
+        }
+
+        async fn gc_regions(
+            &self,
+            _region_ids: &[RegionId],
+            _full_file_listing: bool,
+            _timeout: Duration,
+            _region_routes_override: Region2Peers,
+        ) -> Result<GcReport> {
+            self.gc_regions_calls.fetch_add(1, Ordering::Relaxed);
+            panic!("gc_regions should not be called in maintenance mode")
+        }
+    }
 
     struct ErrorMockSchedulerCtx;
 
@@ -356,6 +456,7 @@ mod tests {
 
         let scheduler = GcScheduler {
             ctx: Arc::new(ErrorMockSchedulerCtx),
+            runtime_switch_manager: new_test_runtime_switch_manager(),
             receiver: rx,
             config: GcSchedulerOptions::default(),
             region_gc_tracker: Arc::new(Mutex::new(HashMap::new())),
@@ -371,5 +472,62 @@ mod tests {
             .await;
 
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_maintenance_mode_skips_manual_gc() {
+        let (tx, rx) = GcScheduler::channel();
+        drop(tx);
+        let runtime_switch_manager = new_test_runtime_switch_manager();
+        runtime_switch_manager.set_maintenance_mode().await.unwrap();
+
+        let ctx = Arc::new(CountingSchedulerCtx::default());
+        let scheduler = GcScheduler {
+            ctx: ctx.clone(),
+            runtime_switch_manager,
+            receiver: rx,
+            config: GcSchedulerOptions::default(),
+            region_gc_tracker: Arc::new(Mutex::new(HashMap::new())),
+            last_tracker_cleanup: Arc::new(Mutex::new(Instant::now())),
+        };
+
+        let result = scheduler
+            .handle_manual_gc(
+                Some(vec![RegionId::new(1, 0)]),
+                Some(false),
+                Some(Duration::from_secs(1)),
+            )
+            .await;
+
+        let err = result.unwrap_err();
+        assert!(matches!(
+            err,
+            error::Error::ManualGcRejectedByMaintenanceMode { .. }
+        ));
+        assert!(err.to_string().contains("maintenance mode is enabled"));
+        ctx.assert_no_scheduler_work();
+    }
+
+    #[tokio::test]
+    async fn test_maintenance_mode_skips_tick_gc() {
+        let (tx, rx) = GcScheduler::channel();
+        drop(tx);
+        let runtime_switch_manager = new_test_runtime_switch_manager();
+        runtime_switch_manager.set_maintenance_mode().await.unwrap();
+
+        let ctx = Arc::new(CountingSchedulerCtx::default());
+        let scheduler = GcScheduler {
+            ctx: ctx.clone(),
+            runtime_switch_manager,
+            receiver: rx,
+            config: GcSchedulerOptions::default(),
+            region_gc_tracker: Arc::new(Mutex::new(HashMap::new())),
+            last_tracker_cleanup: Arc::new(Mutex::new(Instant::now())),
+        };
+
+        let result = scheduler.handle_tick().await;
+
+        assert!(result.is_ok());
+        ctx.assert_no_scheduler_work();
     }
 }
