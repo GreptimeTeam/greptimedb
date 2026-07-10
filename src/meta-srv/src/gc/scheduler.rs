@@ -31,7 +31,9 @@ use crate::cluster::MetaPeerClientRef;
 use crate::define_ticker;
 use crate::error::{self, Error, Result};
 use crate::gc::Region2Peers;
-use crate::gc::ctx::{DefaultGcSchedulerCtx, SchedulerCtx};
+#[cfg(test)]
+use crate::gc::ctx::PurgeReservation;
+use crate::gc::ctx::{DefaultGcSchedulerCtx, PurgeOutcome, SchedulerCtx};
 use crate::gc::dropped::DroppedRegionCollector;
 use crate::gc::options::{GcSchedulerOptions, TICKER_INTERVAL};
 use crate::gc::tracker::RegionGcTracker;
@@ -253,30 +255,24 @@ impl GcScheduler {
                 .and_then(|dropped_at| dropped_at.checked_add(retention_millis))
                 .is_some_and(|expires_at| expires_at <= now_millis)
         }) {
-            if !self
+            let Some(reservation) = self
                 .ctx
                 .try_reserve_purge(table.table_id, self.config.max_concurrent_tables)
-                .await
-            {
+            else {
                 continue;
-            }
+            };
             METRIC_META_GC_SOFT_DROP_PURGES_TOTAL
                 .with_label_values(&["submitted"])
                 .inc();
             let ctx = self.ctx.clone();
             common_runtime::spawn_global(async move {
                 match ctx.purge_dropped_table(table.table_id).await {
-                    Ok(()) => METRIC_META_GC_SOFT_DROP_PURGES_TOTAL
-                        .with_label_values(&["succeeded"])
-                        .inc(),
+                    Ok(()) => reservation.record_outcome(PurgeOutcome::Succeeded),
                     Err(error) => {
-                        METRIC_META_GC_SOFT_DROP_PURGES_TOTAL
-                            .with_label_values(&["failed"])
-                            .inc();
+                        reservation.record_outcome(PurgeOutcome::Failed);
                         error!(error; "Failed to purge expired soft-dropped table {}", table.table_id);
                     }
                 }
-                ctx.finish_purge(table.table_id).await;
             });
         }
     }
@@ -487,12 +483,12 @@ mod tests {
             panic!("purge_dropped_table should not be called in maintenance mode")
         }
 
-        async fn try_reserve_purge(&self, _table_id: TableId, _max_in_flight: usize) -> bool {
+        fn try_reserve_purge(
+            &self,
+            _table_id: TableId,
+            _max_in_flight: usize,
+        ) -> Option<PurgeReservation> {
             panic!("try_reserve_purge should not be called in maintenance mode")
-        }
-
-        async fn finish_purge(&self, _table_id: TableId) {
-            panic!("finish_purge should not be called in maintenance mode")
         }
     }
 
@@ -502,7 +498,7 @@ mod tests {
         purge_attempts: StdMutex<Vec<TableId>>,
         failed_table: StdMutex<Option<TableId>>,
         never_complete_tables: StdMutex<HashSet<TableId>>,
-        in_flight_purges: Mutex<HashSet<TableId>>,
+        in_flight_purges: Arc<StdMutex<HashSet<TableId>>>,
         region_gc_calls: AtomicUsize,
     }
 
@@ -564,16 +560,12 @@ mod tests {
             Ok(())
         }
 
-        async fn try_reserve_purge(&self, table_id: TableId, max_in_flight: usize) -> bool {
-            let mut in_flight = self.in_flight_purges.lock().await;
-            if in_flight.len() >= max_in_flight || in_flight.contains(&table_id) {
-                return false;
-            }
-            in_flight.insert(table_id)
-        }
-
-        async fn finish_purge(&self, table_id: TableId) {
-            self.in_flight_purges.lock().await.remove(&table_id);
+        fn try_reserve_purge(
+            &self,
+            table_id: TableId,
+            max_in_flight: usize,
+        ) -> Option<PurgeReservation> {
+            PurgeReservation::try_new(self.in_flight_purges.clone(), table_id, max_in_flight)
         }
     }
 
@@ -697,7 +689,7 @@ mod tests {
             .unwrap();
         wait_for_purge_attempts(&ctx, 2).await;
         tokio::time::timeout(Duration::from_secs(1), async {
-            while ctx.in_flight_purges.lock().await.contains(&2) {
+            while ctx.in_flight_purges.lock().unwrap().contains(&2) {
                 tokio::task::yield_now().await;
             }
         })
@@ -798,11 +790,17 @@ mod tests {
             Ok(())
         }
 
-        async fn try_reserve_purge(&self, _table_id: TableId, _max_in_flight: usize) -> bool {
-            true
+        fn try_reserve_purge(
+            &self,
+            table_id: TableId,
+            max_in_flight: usize,
+        ) -> Option<PurgeReservation> {
+            PurgeReservation::try_new(
+                Arc::new(StdMutex::new(HashSet::new())),
+                table_id,
+                max_in_flight,
+            )
         }
-
-        async fn finish_purge(&self, _table_id: TableId) {}
     }
 
     #[tokio::test]

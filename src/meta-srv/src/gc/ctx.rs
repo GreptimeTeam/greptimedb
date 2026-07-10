@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use common_meta::datanode::RegionStat;
@@ -27,12 +27,12 @@ use common_telemetry::debug;
 use snafu::{OptionExt as _, ResultExt as _};
 use store_api::storage::{GcReport, RegionId};
 use table::metadata::TableId;
-use tokio::sync::Mutex;
 
 use crate::cluster::MetaPeerClientRef;
 use crate::error::{self, Result, TableMetadataManagerSnafu};
 use crate::gc::Region2Peers;
 use crate::gc::procedure::BatchGcProcedure;
+use crate::metrics::METRIC_META_GC_SOFT_DROP_PURGES_TOTAL;
 use crate::service::mailbox::MailboxRef;
 
 #[async_trait::async_trait]
@@ -63,9 +63,68 @@ pub(crate) trait SchedulerCtx: Send + Sync {
 
     async fn purge_dropped_table(&self, table_id: TableId) -> Result<()>;
 
-    async fn try_reserve_purge(&self, table_id: TableId, max_in_flight: usize) -> bool;
+    fn try_reserve_purge(
+        &self,
+        table_id: TableId,
+        max_in_flight: usize,
+    ) -> Option<PurgeReservation>;
+}
 
-    async fn finish_purge(&self, table_id: TableId);
+pub(crate) enum PurgeOutcome {
+    Succeeded,
+    Failed,
+}
+
+pub(crate) struct PurgeReservation {
+    table_id: TableId,
+    in_flight: Arc<Mutex<HashSet<TableId>>>,
+    outcome_recorded: bool,
+}
+
+impl PurgeReservation {
+    pub(crate) fn try_new(
+        in_flight: Arc<Mutex<HashSet<TableId>>>,
+        table_id: TableId,
+        max_in_flight: usize,
+    ) -> Option<Self> {
+        let mut tables = in_flight
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if tables.len() >= max_in_flight || !tables.insert(table_id) {
+            return None;
+        }
+        drop(tables);
+        Some(Self {
+            table_id,
+            in_flight,
+            outcome_recorded: false,
+        })
+    }
+
+    pub(crate) fn record_outcome(mut self, outcome: PurgeOutcome) {
+        let status = match outcome {
+            PurgeOutcome::Succeeded => "succeeded",
+            PurgeOutcome::Failed => "failed",
+        };
+        METRIC_META_GC_SOFT_DROP_PURGES_TOTAL
+            .with_label_values(&[status])
+            .inc();
+        self.outcome_recorded = true;
+    }
+}
+
+impl Drop for PurgeReservation {
+    fn drop(&mut self) {
+        if !self.outcome_recorded {
+            METRIC_META_GC_SOFT_DROP_PURGES_TOTAL
+                .with_label_values(&["cancelled"])
+                .inc();
+        }
+        self.in_flight
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&self.table_id);
+    }
 }
 
 pub(crate) struct DefaultGcSchedulerCtx {
@@ -104,6 +163,51 @@ impl DefaultGcSchedulerCtx {
             mailbox,
             server_addr,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+
+    use super::*;
+    use crate::metrics::METRIC_META_GC_SOFT_DROP_PURGES_TOTAL;
+
+    #[test]
+    fn test_purge_reservation_releases_slot_on_panic() {
+        let in_flight = Arc::new(std::sync::Mutex::new(HashSet::new()));
+        let cancelled = METRIC_META_GC_SOFT_DROP_PURGES_TOTAL.with_label_values(&["cancelled"]);
+        let before = cancelled.get();
+        let reservation = PurgeReservation::try_new(in_flight.clone(), 1, 1).unwrap();
+
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            let _reservation = reservation;
+            panic!("mock purge panic");
+        }));
+
+        assert!(result.is_err());
+        assert!(PurgeReservation::try_new(in_flight, 2, 1).is_some());
+        assert!(cancelled.get() > before);
+    }
+
+    #[tokio::test]
+    async fn test_purge_reservation_releases_slot_on_task_abort() {
+        let in_flight = Arc::new(std::sync::Mutex::new(HashSet::new()));
+        let cancelled = METRIC_META_GC_SOFT_DROP_PURGES_TOTAL.with_label_values(&["cancelled"]);
+        let before = cancelled.get();
+        let reservation = PurgeReservation::try_new(in_flight.clone(), 1, 1).unwrap();
+        let handle = tokio::spawn(async move {
+            let _reservation = reservation;
+            std::future::pending::<()>().await;
+        });
+        tokio::task::yield_now().await;
+
+        handle.abort();
+        let error = handle.await.unwrap_err();
+
+        assert!(error.is_cancelled());
+        assert!(PurgeReservation::try_new(in_flight, 2, 1).is_some());
+        assert!(cancelled.get() > before);
     }
 }
 
@@ -190,16 +294,12 @@ impl SchedulerCtx for DefaultGcSchedulerCtx {
         Ok(())
     }
 
-    async fn try_reserve_purge(&self, table_id: TableId, max_in_flight: usize) -> bool {
-        let mut in_flight = self.in_flight_purges.lock().await;
-        if in_flight.len() >= max_in_flight || in_flight.contains(&table_id) {
-            return false;
-        }
-        in_flight.insert(table_id)
-    }
-
-    async fn finish_purge(&self, table_id: TableId) {
-        self.in_flight_purges.lock().await.remove(&table_id);
+    fn try_reserve_purge(
+        &self,
+        table_id: TableId,
+        max_in_flight: usize,
+    ) -> Option<PurgeReservation> {
+        PurgeReservation::try_new(self.in_flight_purges.clone(), table_id, max_in_flight)
     }
 }
 

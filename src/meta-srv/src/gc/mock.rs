@@ -335,11 +335,17 @@ impl SchedulerCtx for MockSchedulerCtx {
         Ok(())
     }
 
-    async fn try_reserve_purge(&self, _table_id: TableId, _max_in_flight: usize) -> bool {
-        true
+    fn try_reserve_purge(
+        &self,
+        table_id: TableId,
+        max_in_flight: usize,
+    ) -> Option<crate::gc::ctx::PurgeReservation> {
+        crate::gc::ctx::PurgeReservation::try_new(
+            Arc::new(std::sync::Mutex::new(HashSet::new())),
+            table_id,
+            max_in_flight,
+        )
     }
-
-    async fn finish_purge(&self, _table_id: TableId) {}
 }
 
 pub struct TestEnv {
