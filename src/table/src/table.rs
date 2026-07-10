@@ -19,6 +19,7 @@ use common_recordbatch::SendableRecordBatchStream;
 use datafusion::execution::FunctionRegistry;
 use datafusion::logical_expr::Cast;
 use datafusion::logical_expr::expr::ScalarFunction;
+use datafusion::physical_plan::ExecutionPlan;
 use datafusion::prelude::SessionContext;
 use datafusion_expr::expr::Expr;
 use datatypes::data_type::DataType;
@@ -139,6 +140,12 @@ impl Table {
     pub async fn scan_to_stream(&self, request: ScanRequest) -> Result<SendableRecordBatchStream> {
         self.data_source
             .get_stream(request)
+            .context(TablesRecordBatchSnafu)
+    }
+
+    pub fn scan_to_plan(&self, request: ScanRequest) -> Result<Option<Arc<dyn ExecutionPlan>>> {
+        self.data_source
+            .get_physical_plan(request)
             .context(TablesRecordBatchSnafu)
     }
 
