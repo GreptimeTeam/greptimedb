@@ -45,10 +45,6 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
-  cancel-in-progress: true
-
 jobs:
   query-regression:
     if: >-
@@ -59,10 +55,17 @@ jobs:
             (github.event.action != 'labeled' || github.event.label.name == 'query-regression')) }}
     runs-on: ${{ github.event_name == 'workflow_dispatch' && inputs.runner || 'perf-regression-8-cores' }}
     timeout-minutes: 180
+    concurrency:
+      group: query-regression-persistent-cache-v1
+      queue: max
+      cancel-in-progress: false
     env:
       CARGO_PROFILE: ${{ github.event_name == 'pull_request' && 'nightly' || inputs.cargo_profile }}
-      CARGO_TARGET_DIR: ${{ github.workspace }}/query-regression-target
-      CARGO_BUILD_RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
+      CARGO_HOME: /home/runner/.cargo
+      RUSTUP_HOME: /home/runner/.rustup
+      CARGO_TARGET_DIR: /home/runner/query-regression-target
+      QUERY_REGRESSION_CACHE_META: /home/runner/query-regression-cache-meta
+      QUERY_REGRESSION_CACHE_EPOCH: "1"
       BASE_REF: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || inputs.base_ref }}
       CANDIDATE_REF: ${{ github.event_name == 'pull_request' && format('refs/pull/{0}/merge', github.event.pull_request.number) || inputs.candidate_ref || github.ref }}
     steps:
@@ -82,28 +85,213 @@ jobs:
           cp src/.github/scripts/query-regression-summary.py \
             query-regression-trusted-scripts/query-regression-summary.py
 
-      - uses: arduino/setup-protoc@v3
-        with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Verify runner image tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$(id -u)" == "1001" ]]
+          [[ "$(id -g)" == "1001" ]]
+          [[ "$(protoc --version)" == "libprotoc 3.21.12" ]]
+          [[ "$(uv --version)" =~ ^uv[[:space:]]0\.11\.26([[:space:]]|$) ]]
+          mold_version="$(mold --version)"
+          [[ "${mold_version}" =~ ^mold[[:space:]]2\.30\.0([[:space:]]|$) ]]
+          [[ "$(python3 --version)" == "Python 3.12.3" ]]
+          printf '%s\n' "${CARGO_HOME}/bin" >> "${GITHUB_PATH}"
 
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
+          rust-src-dir: src
           cache: false
+          rustflags: -D warnings -C link-arg=-fuse-ld=mold
 
-      - uses: astral-sh/setup-uv@v5
+      - name: Verify Rust toolchain
+        shell: bash
+        working-directory: src
+        run: |
+          set -euo pipefail
+          command -v rustup
+          command -v rustc
+          command -v cargo
+          rustup --version
+          rustc -Vv
+          if cargo -Vv >/dev/null 2>&1; then
+            cargo -Vv
+          else
+            cargo -V
+          fi
 
-      - name: Rust cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: src
-          shared-key: query-regression
-          cache-all-crates: "true"
-          save-if: false
+      - name: Prepare persistent query regression cache
+        shell: bash
+        working-directory: src
+        run: |
+          set -euo pipefail
+
+          readonly EXPECTED_CARGO_HOME="/home/runner/.cargo"
+          readonly EXPECTED_RUSTUP_HOME="/home/runner/.rustup"
+          readonly EXPECTED_TARGET_DIR="/home/runner/query-regression-target"
+          readonly EXPECTED_CACHE_META="/home/runner/query-regression-cache-meta"
+          readonly RUNNER_IMAGE_DIGEST="sha256:108b7357532e5cf3329853373f561b0c674e954d6307b53d37075df5a189b0b2"
+          readonly RUNNER_IMAGE_EPOCH="1"
+
+          require_expected_root() {
+            local name="$1"
+            local actual="$2"
+            local expected="$3"
+            [[ "${actual}" == /* && "${actual}" == "${expected}" ]] || {
+              printf 'Refusing unexpected %s root: %s\n' "${name}" "${actual}" >&2
+              exit 1
+            }
+          }
+
+          clear_directory() {
+            local root="$1"
+            [[ "${root}" == /* && "${root}" != "/" ]] || {
+              printf 'Refusing to clear non-absolute or root path: %s\n' "${root}" >&2
+              exit 1
+            }
+            case "${root}" in
+              "${EXPECTED_TARGET_DIR}"|"${EXPECTED_TARGET_DIR}/debug"|"${EXPECTED_TARGET_DIR}/release"|"${EXPECTED_TARGET_DIR}/nightly") ;;
+              *)
+                printf 'Refusing to clear unexpected cache path: %s\n' "${root}" >&2
+                exit 1
+                ;;
+            esac
+            find "${root}" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
+          }
+
+          clear_cargo_extracted_trees() {
+            require_expected_root CARGO_HOME "${CARGO_HOME}" "${EXPECTED_CARGO_HOME}"
+            rm -rf -- "${CARGO_HOME}/registry/src" "${CARGO_HOME}/git/checkouts"
+          }
+
+          cargo_size_kib() {
+            du -sk -- "${CARGO_HOME}" | cut -f1
+          }
+
+          target_size_kib() {
+            du -sk -- "${CARGO_TARGET_DIR}" | cut -f1
+          }
+
+          free_kib() {
+            df -Pk "${CARGO_TARGET_DIR}" | awk 'NR == 2 { print $4 }'
+          }
+
+          report_cache_usage() {
+            du -sh -- "${CARGO_HOME}" "${RUSTUP_HOME}" "${CARGO_TARGET_DIR}" "${QUERY_REGRESSION_CACHE_META}"
+            df -P "${CARGO_TARGET_DIR}"
+            df -hP "${CARGO_TARGET_DIR}"
+            df -Pi "${CARGO_TARGET_DIR}"
+          }
+
+          require_expected_root CARGO_HOME "${CARGO_HOME}" "${EXPECTED_CARGO_HOME}"
+          require_expected_root RUSTUP_HOME "${RUSTUP_HOME}" "${EXPECTED_RUSTUP_HOME}"
+          require_expected_root CARGO_TARGET_DIR "${CARGO_TARGET_DIR}" "${EXPECTED_TARGET_DIR}"
+          require_expected_root QUERY_REGRESSION_CACHE_META "${QUERY_REGRESSION_CACHE_META}" "${EXPECTED_CACHE_META}"
+          mkdir -p "${CARGO_HOME}" "${RUSTUP_HOME}" "${CARGO_TARGET_DIR}" "${QUERY_REGRESSION_CACHE_META}"
+          for root in "${CARGO_HOME}" "${RUSTUP_HOME}" "${CARGO_TARGET_DIR}" "${QUERY_REGRESSION_CACHE_META}"; do
+            test -w "${root}"
+            touch "${root}/.query-regression-write-test"
+            rm -f "${root}/.query-regression-write-test"
+          done
+
+          case "${CARGO_PROFILE}" in
+            dev) target_profile="debug" ;;
+            release|nightly) target_profile="${CARGO_PROFILE}" ;;
+            *) printf 'Unsupported CARGO_PROFILE: %s\n' "${CARGO_PROFILE}" >&2; exit 1 ;;
+          esac
+
+          rustc_vv="$(rustc -vV)"
+          if cargo -Vv >/dev/null 2>&1; then
+            cargo_vv="$(cargo -Vv)"
+          else
+            cargo_vv="$(cargo -V)"
+          fi
+          host_triple="$(printf '%s\n' "${rustc_vv}" | grep '^host: ' | cut -d' ' -f2-)"
+          cc_version="$(cc --version)"
+          mold_version="$(mold --version | grep -m1 .)"
+          protoc_version="$(protoc --version)"
+          profile_target_dir="${CARGO_TARGET_DIR}/${target_profile}"
+          marker="${QUERY_REGRESSION_CACHE_META}/target-${target_profile}.abi"
+          new_marker="$(mktemp "${QUERY_REGRESSION_CACHE_META}/.${target_profile}.abi.XXXXXX")"
+          {
+            printf 'cache_epoch=%s\n' "${QUERY_REGRESSION_CACHE_EPOCH}"
+            printf 'runner_image_digest=%s\n' "${RUNNER_IMAGE_DIGEST}"
+            printf 'runner_image_epoch=%s\n' "${RUNNER_IMAGE_EPOCH}"
+            printf 'host_triple=%s\n' "${host_triple}"
+            printf 'architecture=%s\n' "$(uname -m)"
+            printf 'cargo_profile=%s\n' "${CARGO_PROFILE}"
+            printf 'target_profile=%s\n' "${target_profile}"
+            printf 'RUSTFLAGS=%s\n' "${RUSTFLAGS-}"
+            printf 'CARGO_ENCODED_RUSTFLAGS=%s\n' "${CARGO_ENCODED_RUSTFLAGS-}"
+            printf 'CARGO_INCREMENTAL=%s\n' "${CARGO_INCREMENTAL-}"
+            printf '%s\n' "rustc_vV=${rustc_vv}"
+            printf '%s\n' "cargo_vV=${cargo_vv}"
+            printf '%s\n' "cc_version=${cc_version}"
+            printf '%s\n' "mold_version=${mold_version}"
+            printf '%s\n' "protoc_version=${protoc_version}"
+          } > "${new_marker}"
+
+          if ! cmp -s "${marker}" "${new_marker}"; then
+            printf 'Cache ABI marker mismatch; invalidating target profile: %s\n' "${target_profile}"
+            mkdir -p "${profile_target_dir}"
+            clear_directory "${profile_target_dir}"
+          else
+            printf 'Cache ABI marker match; reusing target profile: %s\n' "${target_profile}"
+          fi
+          mv -f "${new_marker}" "${marker}"
+
+          report_cache_usage
+
+          target_size="$(target_size_kib)"
+          if (( target_size >= 400 * 1024 * 1024 )); then
+            printf 'Warning: target cache is at least 400 GiB (%s KiB)\n' "${target_size}" >&2
+          fi
+          if (( target_size >= 450 * 1024 * 1024 )); then
+            printf 'Target cache is at least 450 GiB; clearing complete target root\n' >&2
+            clear_directory "${CARGO_TARGET_DIR}"
+          fi
+
+          cargo_size="$(cargo_size_kib)"
+          if (( cargo_size >= 60 * 1024 * 1024 )); then
+            printf 'Warning: Cargo cache is at least 60 GiB (%s KiB)\n' "${cargo_size}" >&2
+          fi
+          if (( cargo_size >= 80 * 1024 * 1024 )); then
+            printf 'Cargo cache is at least 80 GiB; removing extracted sources and checkouts\n' >&2
+            clear_cargo_extracted_trees
+            cargo_size="$(cargo_size_kib)"
+            if (( cargo_size >= 80 * 1024 * 1024 )); then
+              printf 'Cargo cache remains at least 80 GiB after cleanup (%s KiB)\n' "${cargo_size}" >&2
+              exit 1
+            fi
+          fi
+
+          free_space="$(free_kib)"
+          if (( free_space < 300 * 1024 * 1024 )); then
+            printf 'Free space is below 300 GiB; clearing complete target root\n' >&2
+            clear_directory "${CARGO_TARGET_DIR}"
+            free_space="$(free_kib)"
+            if (( free_space < 300 * 1024 * 1024 )); then
+              printf 'Free space remains below 300 GiB; removing Cargo extracted sources and checkouts\n' >&2
+              clear_cargo_extracted_trees
+              free_space="$(free_kib)"
+              if (( free_space < 300 * 1024 * 1024 )); then
+                printf 'Free space remains below 300 GiB after cleanup (%s KiB)\n' "${free_space}" >&2
+                exit 1
+              fi
+            fi
+          fi
+
+          report_cache_usage
 
       - name: Build base greptime
         working-directory: src
         run: |
+          set -euo pipefail
+          SECONDS=0
           cargo build --profile "${CARGO_PROFILE}" -p cmd --bin greptime
+          base_build_elapsed="${SECONDS}"
+          printf 'Base greptime cargo build elapsed: %s seconds\n' "${base_build_elapsed}"
+          printf -- '- Base greptime cargo build: %s seconds\n' "${base_build_elapsed}" >> "${GITHUB_STEP_SUMMARY}"
           target_dir="${CARGO_PROFILE}"
           if [[ "${CARGO_PROFILE}" == "dev" ]]; then
             target_dir="debug"
@@ -126,8 +314,13 @@ jobs:
       - name: Build candidate greptime and fixture generators
         working-directory: src
         run: |
+          set -euo pipefail
+          SECONDS=0
           cargo build --profile "${CARGO_PROFILE}" -p cmd --bin greptime
           cargo build --profile "${CARGO_PROFILE}" -p cmd --bin query_perf_fixture --features dev-tools
+          candidate_build_elapsed="${SECONDS}"
+          printf 'Candidate greptime and fixture generator cargo builds elapsed: %s seconds\n' "${candidate_build_elapsed}"
+          printf -- '- Candidate greptime and fixture generator cargo builds: %s seconds\n' "${candidate_build_elapsed}" >> "${GITHUB_STEP_SUMMARY}"
           target_dir="${CARGO_PROFILE}"
           if [[ "${CARGO_PROFILE}" == "dev" ]]; then
             target_dir="debug"
@@ -191,6 +384,31 @@ jobs:
             query-regression-work/**/query-regression-report.json
           if-no-files-found: warn
           retention-days: 7
+
+      - name: Report persistent cache usage
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          for root in \
+            /home/runner/.cargo \
+            /home/runner/.rustup \
+            /home/runner/query-regression-target \
+            /home/runner/query-regression-cache-meta; do
+            if [[ -e "${root}" ]]; then
+              du -sh -- "${root}"
+            else
+              printf 'Missing cache path (report only): %s\n' "${root}"
+            fi
+          done
+          report_root=/home/runner/query-regression-target
+          if [[ ! -e "${report_root}" ]]; then
+            report_root=/home/runner
+            printf 'Target cache path is missing; reporting its filesystem through %s\n' "${report_root}"
+          fi
+          df -P "${report_root}"
+          df -hP "${report_root}"
+          df -Pi "${report_root}"
 
       - name: Fail on regression failure
         if: ${{ steps.run.outputs.status != '0' }}
