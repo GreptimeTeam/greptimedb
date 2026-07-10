@@ -23,6 +23,8 @@ use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_recordbatch::RecordBatches;
 use either::Either;
+use store_api::logstore::LogStore;
+use store_api::logstore::provider::Provider;
 use store_api::region_engine::{RegionEngine, RegionRole, SettableRegionRoleState};
 use store_api::region_request::{
     PathType, RegionCleanUpRequest, RegionCloseRequest, RegionOpenRequest, RegionPutRequest,
@@ -40,7 +42,8 @@ use crate::region::opener::{PartitionExprFetcher, PartitionExprFetcherRef};
 use crate::region::options::RegionOptions;
 use crate::sst::location::region_dir_from_table_dir;
 use crate::test_util::{
-    CreateRequestBuilder, TestEnv, build_rows, flush_region, put_rows, reopen_region, rows_schema,
+    CreateRequestBuilder, LogStoreImpl, TestEnv, build_rows, flush_region, put_rows, reopen_region,
+    rows_schema,
 };
 
 #[tokio::test]
@@ -97,32 +100,51 @@ async fn test_engine_offline_cleanup_closed_region() {
     let object_store = env.get_object_store().unwrap();
 
     engine
-        .handle_request(region_id, RegionRequest::Create(request))
+        .handle_request(region_id, RegionRequest::Create(request.clone()))
         .await
         .unwrap();
     assert!(object_store.exists(&region_dir).await.unwrap());
 
-    engine
-        .handle_request(region_id, RegionRequest::Close(RegionCloseRequest {}))
-        .await
-        .unwrap();
-    assert!(!engine.is_region_exists(region_id));
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: rows_schema(&request),
+            rows: build_rows(0, 3),
+        },
+    )
+    .await;
+    let Some(LogStoreImpl::RaftEngine(log_store)) = env.get_log_store() else {
+        unreachable!()
+    };
+    let provider = Provider::raft_engine_provider(region_id.as_u64());
+    assert!(log_store.latest_entry_id(&provider).unwrap() > 0);
 
     engine
         .handle_request(
             region_id,
-            RegionRequest::CleanUp(RegionCleanUpRequest {
-                engine: String::new(),
-                table_dir,
-                path_type,
-                options,
-            }),
+            RegionRequest::Close(RegionCloseRequest::default()),
         )
         .await
         .unwrap();
+    assert!(!engine.is_region_exists(region_id));
+
+    let cleanup_request = RegionCleanUpRequest {
+        engine: String::new(),
+        table_dir,
+        path_type,
+        options,
+    };
+    for _ in 0..2 {
+        engine
+            .handle_request(region_id, RegionRequest::CleanUp(cleanup_request.clone()))
+            .await
+            .unwrap();
+    }
 
     assert!(!engine.is_region_exists(region_id));
     assert!(!object_store.exists(&region_dir).await.unwrap());
+    assert_eq!(0, log_store.latest_entry_id(&provider).unwrap());
 }
 
 #[tokio::test]

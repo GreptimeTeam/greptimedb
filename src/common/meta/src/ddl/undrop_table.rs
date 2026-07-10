@@ -195,6 +195,7 @@ impl UndropTableProcedure {
                     &self.context.node_manager,
                     &self.context.leader_region_registry,
                     &region_routes,
+                    false,
                 )
                 .await
         } else {

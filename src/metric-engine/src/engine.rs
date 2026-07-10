@@ -672,7 +672,7 @@ mod test {
         engine
             .handle_request(
                 physical_region_id,
-                RegionRequest::Close(RegionCloseRequest {}),
+                RegionRequest::Close(RegionCloseRequest::default()),
             )
             .await
             .unwrap();
