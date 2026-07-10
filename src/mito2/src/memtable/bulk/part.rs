@@ -1226,14 +1226,14 @@ impl BulkPartEncoder {
             break batch;
         };
 
-        if sample_metric_value_encoding {
-            if let Some(plan) = metric_value_encoding_plan_for_batch(
+        if sample_metric_value_encoding
+            && let Some(plan) = metric_value_encoding_plan_for_batch(
                 &self.metadata,
                 self.metric_value_encoding_mode,
                 &first_batch,
-            ) {
-                parquet_options = parquet_options.overlay(parquet_options_for_plan(plan));
-            }
+            )
+        {
+            parquet_options = parquet_options.overlay(parquet_options_for_plan(plan));
         }
         let mut writer = ArrowWriter::try_new(
             &mut buf,

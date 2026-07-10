@@ -69,6 +69,8 @@ pub const SST_FORMAT_KEY: &str = "sst_format";
 /// Option key for experimental metric engine greptime_value Parquet encoding.
 pub const EXPERIMENTAL_METRIC_ENGINE_VALUE_ENCODING: &str =
     "experimental_metric_engine_value_encoding";
+/// Value encoding default for newly submitted physical metric tables.
+pub const METRIC_ENGINE_VALUE_ENCODING_AUTO: &str = "auto";
 // Note: Adding new options here should also check if this option should be removed in [metric_engine::engine::create::region_options_for_metadata_region].
 
 /// Returns true if the `key` is a valid option key for the mito engine.

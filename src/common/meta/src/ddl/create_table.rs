@@ -27,6 +27,10 @@ use common_telemetry::info;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::ColumnMetadata;
+use store_api::metric_engine_consts::{METRIC_ENGINE_NAME, PHYSICAL_TABLE_METADATA_KEY};
+use store_api::mito_engine_options::{
+    EXPERIMENTAL_METRIC_ENGINE_VALUE_ENCODING, METRIC_ENGINE_VALUE_ENCODING_AUTO,
+};
 use strum::AsRefStr;
 use table::metadata::{TableId, TableInfo};
 use table::table_name::TableName;
@@ -77,6 +81,37 @@ fn build_executor_from_create_table_data(
     Ok(executor)
 }
 
+/// Normalizes new submissions only; recovered procedures retain their original options for compatibility.
+fn normalize_new_physical_metric_table_value_encoding(
+    mut task: CreateTableTask,
+) -> CreateTableTask {
+    let create_table = &mut task.create_table;
+    if create_table.engine != METRIC_ENGINE_NAME
+        || !create_table
+            .table_options
+            .contains_key(PHYSICAL_TABLE_METADATA_KEY)
+    {
+        return task;
+    }
+
+    // The create expression is canonical when its options disagree with TableInfo.
+    let value_encoding = create_table
+        .table_options
+        .get(EXPERIMENTAL_METRIC_ENGINE_VALUE_ENCODING)
+        .cloned()
+        .unwrap_or_else(|| METRIC_ENGINE_VALUE_ENCODING_AUTO.to_string());
+    create_table.table_options.insert(
+        EXPERIMENTAL_METRIC_ENGINE_VALUE_ENCODING.to_string(),
+        value_encoding.clone(),
+    );
+    task.table_info.meta.options.extra_options.insert(
+        EXPERIMENTAL_METRIC_ENGINE_VALUE_ENCODING.to_string(),
+        value_encoding,
+    );
+
+    task
+}
+
 impl CreateTableProcedure {
     pub const TYPE_NAME: &'static str = "metasrv-procedure::CreateTable";
 
@@ -89,6 +124,7 @@ impl CreateTableProcedure {
         query_context: QueryContext,
         context: DdlContext,
     ) -> Result<Self> {
+        let task = normalize_new_physical_metric_table_value_encoding(task);
         let executor = build_executor_from_create_table_data(&task.create_table)?;
 
         Ok(Self {

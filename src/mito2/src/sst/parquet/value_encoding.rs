@@ -14,7 +14,7 @@
 
 //! Parquet per-column write overrides and MetricEngine value encoding policy.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use common_query::prelude::greptime_value;
 use datatypes::arrow::array::{Array, Float32Array, Float64Array};
@@ -149,7 +149,10 @@ impl MetricValueEncodingProfileBuilder {
                 run = 1;
             }
         }
-        let distinct = self.samples.iter().copied().collect::<HashSet<_>>().len();
+        let mut distinct_samples = self.samples.clone();
+        distinct_samples.sort_unstable();
+        distinct_samples.dedup();
+        let distinct = distinct_samples.len();
         Some(MetricValueEncodingProfile {
             valid_count,
             adjacent_equal_ratio: if valid_count > 1 {
@@ -215,9 +218,7 @@ pub fn metric_value_encoding_plan_for_batch(
     if mode != MetricValueEncodingMode::Auto {
         return metric_engine_value_column_encoding(metadata, mode);
     }
-    if metric_engine_value_column_encoding(metadata, MetricValueEncodingMode::Plain).is_none() {
-        return None;
-    }
+    metric_engine_value_column_encoding(metadata, MetricValueEncodingMode::Plain)?;
     let mut builder = MetricValueEncodingProfileBuilder::default();
     builder.update_batch(batch);
     builder.finish().map(|profile| decide_profile(&profile))

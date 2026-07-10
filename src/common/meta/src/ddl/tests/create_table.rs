@@ -30,7 +30,13 @@ use common_wal::options::{KafkaWalOptions, WalOptions};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::ColumnSchema;
 use store_api::metadata::ColumnMetadata;
-use store_api::metric_engine_consts::TABLE_COLUMN_METADATA_EXTENSION_KEY;
+use store_api::metric_engine_consts::{
+    LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME, PHYSICAL_TABLE_METADATA_KEY,
+    TABLE_COLUMN_METADATA_EXTENSION_KEY,
+};
+use store_api::mito_engine_options::{
+    EXPERIMENTAL_METRIC_ENGINE_VALUE_ENCODING, METRIC_ENGINE_VALUE_ENCODING_AUTO,
+};
 use store_api::region_engine::RegionRole;
 use store_api::storage::RegionId;
 use tokio::sync::mpsc;
@@ -44,8 +50,12 @@ use crate::ddl::test_util::datanode_handler::{
     DatanodeWatcher, NaiveDatanodeHandler, RetryErrorDatanodeHandler,
     UnexpectedErrorDatanodeHandler,
 };
-use crate::ddl::test_util::{assert_column_name, get_raw_table_info, put_datanode_address};
+use crate::ddl::test_util::{
+    assert_column_name, get_raw_table_info, put_datanode_address, test_create_logical_table_task,
+    test_create_physical_table_task,
+};
 use crate::error::{Error, Result};
+use crate::key::datanode_table::DatanodeTableKey;
 use crate::key::table_route::TableRouteValue;
 use crate::kv_backend::memory::MemoryKvBackend;
 use crate::rpc::ddl::CreateTableTask;
@@ -171,6 +181,229 @@ pub(crate) fn test_create_table_task(name: &str) -> CreateTableTask {
         partitions: vec![Partition::default()],
         table_info,
     }
+}
+
+fn test_physical_metric_table_task(name: &str) -> CreateTableTask {
+    let mut task = test_create_physical_table_task(name);
+    task.create_table
+        .table_options
+        .insert(PHYSICAL_TABLE_METADATA_KEY.to_string(), String::new());
+    task.table_info
+        .meta
+        .options
+        .extra_options
+        .insert(PHYSICAL_TABLE_METADATA_KEY.to_string(), String::new());
+    task
+}
+
+#[test]
+fn test_new_physical_metric_table_defaults_value_encoding_in_task_and_template() {
+    let task = test_physical_metric_table_task("physical");
+    let context = new_ddl_context(Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler)));
+
+    let procedure = CreateTableProcedure::new(task, context).unwrap();
+
+    assert_eq!(
+        procedure
+            .data
+            .task
+            .create_table
+            .table_options
+            .get(EXPERIMENTAL_METRIC_ENGINE_VALUE_ENCODING),
+        Some(&METRIC_ENGINE_VALUE_ENCODING_AUTO.to_string())
+    );
+    assert_eq!(
+        procedure
+            .data
+            .task
+            .table_info
+            .meta
+            .options
+            .extra_options
+            .get(EXPERIMENTAL_METRIC_ENGINE_VALUE_ENCODING),
+        Some(&METRIC_ENGINE_VALUE_ENCODING_AUTO.to_string())
+    );
+    assert_eq!(
+        procedure
+            .executor
+            .builder()
+            .template()
+            .options
+            .get(EXPERIMENTAL_METRIC_ENGINE_VALUE_ENCODING),
+        Some(&METRIC_ENGINE_VALUE_ENCODING_AUTO.to_string())
+    );
+}
+
+#[test]
+fn test_new_physical_metric_table_expression_value_encoding_wins() {
+    let mut task = test_physical_metric_table_task("physical");
+    task.create_table.table_options.insert(
+        EXPERIMENTAL_METRIC_ENGINE_VALUE_ENCODING.to_string(),
+        "plain".to_string(),
+    );
+    task.table_info.meta.options.extra_options.insert(
+        EXPERIMENTAL_METRIC_ENGINE_VALUE_ENCODING.to_string(),
+        "mismatched".to_string(),
+    );
+    let context = new_ddl_context(Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler)));
+
+    let procedure = CreateTableProcedure::new(task, context).unwrap();
+
+    assert_eq!(
+        procedure
+            .data
+            .task
+            .create_table
+            .table_options
+            .get(EXPERIMENTAL_METRIC_ENGINE_VALUE_ENCODING),
+        Some(&"plain".to_string())
+    );
+    assert_eq!(
+        procedure
+            .data
+            .task
+            .table_info
+            .meta
+            .options
+            .extra_options
+            .get(EXPERIMENTAL_METRIC_ENGINE_VALUE_ENCODING),
+        Some(&"plain".to_string())
+    );
+}
+
+#[test]
+fn test_value_encoding_normalization_only_applies_to_physical_metric_tables() {
+    let logical_task = test_create_logical_table_task("logical");
+    assert_eq!(logical_task.create_table.engine, METRIC_ENGINE_NAME);
+    assert!(
+        logical_task
+            .create_table
+            .table_options
+            .contains_key(LOGICAL_TABLE_METADATA_KEY)
+    );
+
+    let mut non_metric_task = test_create_table_task("non_metric");
+    non_metric_task
+        .create_table
+        .table_options
+        .insert(PHYSICAL_TABLE_METADATA_KEY.to_string(), String::new());
+
+    for task in [logical_task, non_metric_task] {
+        let context = new_ddl_context(Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler)));
+        let procedure = CreateTableProcedure::new(task, context).unwrap();
+        assert!(
+            !procedure
+                .data
+                .task
+                .create_table
+                .table_options
+                .contains_key(EXPERIMENTAL_METRIC_ENGINE_VALUE_ENCODING)
+        );
+        assert!(
+            !procedure
+                .data
+                .task
+                .table_info
+                .meta
+                .options
+                .extra_options
+                .contains_key(EXPERIMENTAL_METRIC_ENGINE_VALUE_ENCODING)
+        );
+    }
+}
+
+#[test]
+fn test_recover_legacy_physical_metric_table_keeps_missing_value_encoding() {
+    let task = test_physical_metric_table_task("legacy_physical");
+    let data = CreateTableData::new(task, Default::default());
+    let json = serde_json::to_string(&data).unwrap();
+    let context = new_ddl_context(Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler)));
+
+    let procedure = CreateTableProcedure::from_json(&json, context).unwrap();
+
+    assert!(
+        !procedure
+            .data
+            .task
+            .create_table
+            .table_options
+            .contains_key(EXPERIMENTAL_METRIC_ENGINE_VALUE_ENCODING)
+    );
+    assert!(
+        !procedure
+            .data
+            .task
+            .table_info
+            .meta
+            .options
+            .extra_options
+            .contains_key(EXPERIMENTAL_METRIC_ENGINE_VALUE_ENCODING)
+    );
+    assert!(
+        !procedure
+            .executor
+            .builder()
+            .template()
+            .options
+            .contains_key(EXPERIMENTAL_METRIC_ENGINE_VALUE_ENCODING)
+    );
+}
+
+#[test]
+fn test_recover_new_physical_metric_table_retains_value_encoding() {
+    let task = test_physical_metric_table_task("physical");
+    let context = new_ddl_context(Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler)));
+    let procedure = CreateTableProcedure::new(task, context.clone()).unwrap();
+    let json = procedure.dump().unwrap();
+
+    let mut recovered = CreateTableProcedure::from_json(&json, context).unwrap();
+    recovered.recover().unwrap();
+
+    assert_eq!(
+        recovered
+            .data
+            .task
+            .create_table
+            .table_options
+            .get(EXPERIMENTAL_METRIC_ENGINE_VALUE_ENCODING),
+        Some(&METRIC_ENGINE_VALUE_ENCODING_AUTO.to_string())
+    );
+    assert_eq!(
+        recovered
+            .data
+            .task
+            .table_info
+            .meta
+            .options
+            .extra_options
+            .get(EXPERIMENTAL_METRIC_ENGINE_VALUE_ENCODING),
+        Some(&METRIC_ENGINE_VALUE_ENCODING_AUTO.to_string())
+    );
+}
+
+#[tokio::test]
+async fn test_physical_metric_table_persists_default_value_encoding_in_region_options() {
+    let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
+    let context = new_ddl_context(node_manager);
+    let task = test_physical_metric_table_task("physical");
+    let mut procedure = CreateTableProcedure::new(task, context.clone()).unwrap();
+
+    execute_procedure_until_done(&mut procedure).await;
+
+    let datanode_table = context
+        .table_metadata_manager
+        .datanode_table_manager()
+        .get(&DatanodeTableKey::new(0, procedure.table_id()))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        datanode_table
+            .region_info
+            .region_options
+            .get(EXPERIMENTAL_METRIC_ENGINE_VALUE_ENCODING),
+        Some(&METRIC_ENGINE_VALUE_ENCODING_AUTO.to_string())
+    );
 }
 
 #[tokio::test]

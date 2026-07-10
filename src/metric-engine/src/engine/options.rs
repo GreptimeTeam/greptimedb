@@ -26,7 +26,7 @@ use store_api::metric_engine_consts::{
 };
 use store_api::mito_engine_options::{
     COMPACTION_TYPE, COMPACTION_TYPE_TWCS, EXPERIMENTAL_METRIC_ENGINE_VALUE_ENCODING,
-    TWCS_TIME_WINDOW,
+    METRIC_ENGINE_VALUE_ENCODING_AUTO, TWCS_TIME_WINDOW,
 };
 
 /// Prefix for legacy `memtable.partition_tree.*` option keys. These keys are
@@ -112,7 +112,7 @@ fn set_data_region_options_inner(
     {
         options.insert(
             EXPERIMENTAL_METRIC_ENGINE_VALUE_ENCODING.to_string(),
-            "auto".to_string(),
+            METRIC_ENGINE_VALUE_ENCODING_AUTO.to_string(),
         );
     }
 }
@@ -276,7 +276,7 @@ mod tests {
         assert_eq!(options.get(TWCS_TIME_WINDOW), Some(&"1d".to_string()));
         assert_eq!(
             options.get(EXPERIMENTAL_METRIC_ENGINE_VALUE_ENCODING),
-            Some(&"auto".to_string())
+            Some(&METRIC_ENGINE_VALUE_ENCODING_AUTO.to_string())
         );
     }
 

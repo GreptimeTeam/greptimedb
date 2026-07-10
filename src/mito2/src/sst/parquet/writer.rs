@@ -352,8 +352,6 @@ where
         {
             sample_metric_value_encoding = true;
         }
-        let mut buffered = Vec::with_capacity(1);
-
         while let Some(next_batch) = self
             .next_flat_batch(&mut source, converter)
             .await
@@ -371,18 +369,15 @@ where
                                 parquet_options.overlay(parquet_options_for_plan(plan));
                         }
                         sample_metric_value_encoding = false;
-                        buffered.push((record_batch, arrow_batch));
-                        for (record_batch, arrow_batch) in buffered.drain(..) {
-                            self.write_processed_flat_batch(
-                                record_batch,
-                                arrow_batch,
-                                opts,
-                                &parquet_options,
-                                &mut results,
-                                &mut stats,
-                            )
-                            .await?;
-                        }
+                        self.write_processed_flat_batch(
+                            record_batch,
+                            arrow_batch,
+                            opts,
+                            &parquet_options,
+                            &mut results,
+                            &mut stats,
+                        )
+                        .await?;
                         continue;
                     }
                     self.write_processed_flat_batch(
@@ -402,18 +397,6 @@ where
                     return Err(e);
                 }
             }
-        }
-
-        for (record_batch, arrow_batch) in buffered.drain(..) {
-            self.write_processed_flat_batch(
-                record_batch,
-                arrow_batch,
-                opts,
-                &parquet_options,
-                &mut results,
-                &mut stats,
-            )
-            .await?;
         }
 
         self.finish_current_file(&mut results, &mut stats).await?;

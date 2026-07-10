@@ -693,6 +693,7 @@ impl BulkMemtable {
     }
 
     /// Creates a new BulkMemtable with MetricEngine value encoding mode.
+    #[allow(clippy::too_many_arguments)]
     pub fn new_with_metric_value_encoding_mode(
         id: MemtableId,
         config: BulkMemtableConfig,
