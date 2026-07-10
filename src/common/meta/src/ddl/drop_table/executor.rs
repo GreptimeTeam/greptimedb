@@ -15,9 +15,8 @@
 use std::collections::{HashMap, HashSet};
 
 use api::v1::region::{
-    CloseRequest as PbCloseRegionRequest, DropRequest as PbDropRegionRequest,
-    RegionCleanUpRequest as PbRegionCleanUpRequest, RegionRequest, RegionRequestHeader,
-    region_request,
+    CleanUpRequest as PbCleanUpRequest, CloseRequest as PbCloseRegionRequest,
+    DropRequest as PbDropRegionRequest, RegionRequest, RegionRequestHeader, region_request,
 };
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
@@ -388,7 +387,7 @@ impl DropTableExecutor {
                         tracing_context: TracingContext::from_current_span().to_w3c(),
                         ..Default::default()
                     }),
-                    body: Some(region_request::Body::CleanUp(PbRegionCleanUpRequest {
+                    body: Some(region_request::Body::CleanUp(PbCleanUpRequest {
                         region_id: create_request.region_id,
                         engine: create_request.engine,
                         path: create_request.path,

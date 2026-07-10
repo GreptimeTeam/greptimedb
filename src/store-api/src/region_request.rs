@@ -23,10 +23,10 @@ use api::v1::column_def::{
 };
 use api::v1::region::bulk_insert_request::Body;
 use api::v1::region::{
-    AlterRequest, AlterRequests, BuildIndexRequest, BulkInsertRequest, CloseRequest,
-    CompactRequest, CreateRequest, CreateRequests, DeleteRequests, DropRequest, DropRequests,
-    FlushRequest, InsertRequests, OpenRequest, RegionCleanUpRequest as PbRegionCleanUpRequest,
-    TruncateRequest, alter_request, compact_request, region_request, truncate_request,
+    AlterRequest, AlterRequests, BuildIndexRequest, BulkInsertRequest,
+    CleanUpRequest as PbCleanUpRequest, CloseRequest, CompactRequest, CreateRequest,
+    CreateRequests, DeleteRequests, DropRequest, DropRequests, FlushRequest, InsertRequests,
+    OpenRequest, TruncateRequest, alter_request, compact_request, region_request, truncate_request,
 };
 use api::v1::{
     self, Analyzer, ArrowIpc, FulltextBackend as PbFulltextBackend, Option as PbOption, Rows,
@@ -331,9 +331,7 @@ fn make_region_open(open: OpenRequest) -> Result<Vec<(RegionId, RegionRequest)>>
     )])
 }
 
-fn make_region_clean_up(
-    clean_up: PbRegionCleanUpRequest,
-) -> Result<Vec<(RegionId, RegionRequest)>> {
+fn make_region_clean_up(clean_up: PbCleanUpRequest) -> Result<Vec<(RegionId, RegionRequest)>> {
     let region_id = RegionId::from(clean_up.region_id);
     let table_dir = table_dir(&clean_up.path, region_id.table_id());
     Ok(vec![(
@@ -2244,7 +2242,7 @@ mod tests {
 
     #[test]
     fn test_parse_region_cleanup_from_proto() {
-        let clean_up = api::v1::region::RegionCleanUpRequest {
+        let clean_up = api::v1::region::CleanUpRequest {
             region_id: RegionId::new(42, 3).as_u64(),
             engine: "mito".to_string(),
             path: "test".to_string(),
