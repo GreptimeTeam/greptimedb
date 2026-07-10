@@ -23,6 +23,7 @@ use api::v1::SemanticType;
 use async_trait::async_trait;
 use catalog::error::Result as CatalogResult;
 use catalog::{CatalogManager, CatalogManagerRef};
+use common_catalog::consts::{METRIC_ENGINE, MITO_ENGINE, MITO2_ENGINE};
 use common_recordbatch::OrderOption;
 use common_recordbatch::filter::SimpleFilterEvaluator;
 use datafusion::catalog::{CatalogProvider, CatalogProviderList, SchemaProvider, Session};
@@ -30,7 +31,7 @@ use datafusion::datasource::TableProvider;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion_common::DataFusionError;
 use datafusion_expr::{Expr, TableProviderFilterPushDown, TableType};
-use datatypes::arrow::datatypes::SchemaRef;
+use datatypes::arrow::datatypes::{DataType, Schema, SchemaRef};
 use datatypes::types::json_type::JsonNativeType;
 use futures::stream::BoxStream;
 use session::context::{QueryContext, QueryContextRef};
@@ -166,7 +167,30 @@ impl TableProvider for DummyTableProvider {
     }
 
     fn schema(&self) -> SchemaRef {
-        self.metadata.schema.arrow_schema().clone()
+        let schema = self.metadata.schema.arrow_schema();
+        if !matches!(
+            self.engine.name(),
+            MITO_ENGINE | MITO2_ENGINE | METRIC_ENGINE
+        ) {
+            return schema.clone();
+        }
+        let fields = schema
+            .fields()
+            .iter()
+            .zip(&self.metadata.column_metadatas)
+            .map(|(field, column)| {
+                if column.semantic_type == SemanticType::Tag && field.data_type() == &DataType::Utf8
+                {
+                    Arc::new(field.as_ref().clone().with_data_type(DataType::Dictionary(
+                        Box::new(DataType::UInt32),
+                        Box::new(DataType::Utf8),
+                    )))
+                } else {
+                    field.clone()
+                }
+            })
+            .collect::<Vec<_>>();
+        Arc::new(Schema::new_with_metadata(fields, schema.metadata().clone()))
     }
 
     fn table_type(&self) -> TableType {

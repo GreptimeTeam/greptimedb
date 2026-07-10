@@ -15,9 +15,10 @@
 use std::any::Any;
 use std::sync::{Arc, Mutex};
 
+use common_catalog::consts::{METRIC_ENGINE, MITO_ENGINE, MITO2_ENGINE};
 use common_query::stream::StreamScanAdapter;
 use common_recordbatch::OrderOption;
-use datafusion::arrow::datatypes::SchemaRef as DfSchemaRef;
+use datafusion::arrow::datatypes::{DataType, Schema, SchemaRef as DfSchemaRef};
 use datafusion::catalog::Session;
 use datafusion::datasource::{TableProvider, TableType as DfTableType};
 use datafusion::error::Result as DfResult;
@@ -61,6 +62,35 @@ impl DfTableProviderAdapter {
         self.scan_req.lock().unwrap().vector_search.clone()
     }
 
+    fn physical_schema(&self) -> DfSchemaRef {
+        let table_schema = self.table.schema();
+        let table_info = self.table.table_info();
+        let schema = table_schema.arrow_schema();
+        if !matches!(
+            table_info.meta.engine.as_str(),
+            MITO_ENGINE | MITO2_ENGINE | METRIC_ENGINE
+        ) {
+            return schema.clone();
+        }
+        let primary_keys = &table_info.meta.primary_key_indices;
+        let fields = schema
+            .fields()
+            .iter()
+            .enumerate()
+            .map(|(index, field)| {
+                if primary_keys.contains(&index) && field.data_type() == &DataType::Utf8 {
+                    Arc::new(field.as_ref().clone().with_data_type(DataType::Dictionary(
+                        Box::new(DataType::UInt32),
+                        Box::new(DataType::Utf8),
+                    )))
+                } else {
+                    field.clone()
+                }
+            })
+            .collect::<Vec<_>>();
+        Arc::new(Schema::new_with_metadata(fields, schema.metadata().clone()))
+    }
+
     #[cfg(feature = "testing")]
     pub fn get_scan_req(&self) -> ScanRequest {
         self.scan_req.lock().unwrap().clone()
@@ -82,7 +112,7 @@ impl TableProvider for DfTableProviderAdapter {
     }
 
     fn schema(&self) -> DfSchemaRef {
-        self.table.schema().arrow_schema().clone()
+        self.physical_schema()
     }
 
     fn table_type(&self) -> DfTableType {

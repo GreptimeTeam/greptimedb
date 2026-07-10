@@ -222,6 +222,15 @@ where
                 DataType::Struct(_) => {
                     encode_struct(query_ctx, Default::default(), encoder, pg_field)?;
                 }
+                DataType::Dictionary(_, value_type)
+                    if matches!(
+                        value_type.as_ref(),
+                        DataType::Utf8 | DataType::Utf8View | DataType::LargeUtf8
+                    ) =>
+                {
+                    let value = datatypes::arrow_array::string_array_value(column, i);
+                    encoder.encode_field(&value, pg_field)?;
+                }
                 _ => {
                     // Encode value using arrow-pg
                     let arrow_field = arrow_schema.field(j);
@@ -280,11 +289,7 @@ pub(super) fn type_gt_to_pg(origin: &ConcreteDataType) -> Result<Type> {
             }
             .fail(),
         },
-        &ConcreteDataType::Dictionary(_) => server_error::UnsupportedDataTypeSnafu {
-            data_type: origin,
-            reason: "not implemented",
-        }
-        .fail(),
+        ConcreteDataType::Dictionary(dictionary) => type_gt_to_pg(dictionary.value_type()),
         &ConcreteDataType::Duration(_) => Ok(Type::INTERVAL),
         &ConcreteDataType::Struct(_) => Ok(Type::JSON),
     }

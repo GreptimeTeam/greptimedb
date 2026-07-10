@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use arrow::array::{ArrayRef, AsArray};
+use arrow::array::{ArrayRef, AsArray, DictionaryArray};
 use arrow::datatypes::{
     DataType, DurationMicrosecondType, DurationMillisecondType, DurationNanosecondType,
     DurationSecondType, Int8Type, Int16Type, Int32Type, Int64Type, Time32MillisecondType,
@@ -134,7 +134,7 @@ pub fn duration_array_value(array: &ArrayRef, i: usize) -> Duration {
     Duration::new(v, time_unit.into())
 }
 
-/// Get the string value at index `i` for `Utf8`, `LargeUtf8`, or `Utf8View` arrays.
+/// Get the string value at index `i` for string or dictionary-encoded string arrays.
 ///
 /// Returns `None` when the array type is not a string type or the value is null.
 ///
@@ -155,11 +155,23 @@ pub fn string_array_value_at_index(array: &ArrayRef, i: usize) -> Option<&str> {
             let array = array.as_string_view();
             array.is_valid(i).then(|| array.value(i))
         }
+        DataType::Dictionary(key_type, value_type)
+            if key_type.as_ref() == &DataType::UInt32
+                && matches!(
+                    value_type.as_ref(),
+                    DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View
+                ) =>
+        {
+            let array = array
+                .as_any()
+                .downcast_ref::<DictionaryArray<UInt32Type>>()?;
+            string_array_value_at_index(array.values(), array.key(i)?)
+        }
         _ => None,
     }
 }
 
-/// Get the string value at index `i` for `Utf8`, `LargeUtf8`, or `Utf8View` arrays.
+/// Get the string value at index `i` for string or dictionary-encoded string arrays.
 ///
 /// Note: This method does not check for nulls and the value is arbitrary
 /// if [`is_null`](arrow::array::Array::is_null) returns true for the index.
@@ -172,6 +184,19 @@ pub fn string_array_value(array: &ArrayRef, i: usize) -> &str {
         DataType::Utf8 => array.as_string::<i32>().value(i),
         DataType::LargeUtf8 => array.as_string::<i64>().value(i),
         DataType::Utf8View => array.as_string_view().value(i),
+        DataType::Dictionary(key_type, value_type)
+            if key_type.as_ref() == &DataType::UInt32
+                && matches!(
+                    value_type.as_ref(),
+                    DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View
+                ) =>
+        {
+            let array = array
+                .as_any()
+                .downcast_ref::<DictionaryArray<UInt32Type>>()
+                .unwrap();
+            string_array_value(array.values(), array.key(i).unwrap())
+        }
         _ => unreachable!(),
     }
 }
@@ -249,5 +274,30 @@ pub fn int_array_value_at_index(array: &ArrayRef, i: usize) -> Option<i64> {
                 .flatten()
         }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use arrow::array::StringDictionaryBuilder;
+
+    use super::*;
+
+    #[test]
+    fn reads_dictionary_encoded_strings() {
+        let mut builder = StringDictionaryBuilder::<UInt32Type>::new();
+        builder.append("foo").unwrap();
+        builder.append("bar").unwrap();
+        builder.append("foo").unwrap();
+        builder.append_null();
+        let array: ArrayRef = Arc::new(builder.finish());
+
+        assert_eq!(Some("foo"), string_array_value_at_index(&array, 0));
+        assert_eq!(Some("bar"), string_array_value_at_index(&array, 1));
+        assert_eq!(Some("foo"), string_array_value_at_index(&array, 2));
+        assert_eq!(None, string_array_value_at_index(&array, 3));
+        assert_eq!("bar", string_array_value(&array, 1));
     }
 }

@@ -18,9 +18,9 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use datafusion::arrow::array::{
-    Array, LargeStringArray, StringArray, StringViewArray, UInt64Array,
+    Array, DictionaryArray, LargeStringArray, StringArray, StringViewArray, UInt64Array,
 };
-use datafusion::arrow::datatypes::{DataType, SchemaRef};
+use datafusion::arrow::datatypes::{DataType, SchemaRef, UInt32Type};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::{DFSchema, DFSchemaRef};
 use datafusion::error::Result as DataFusionResult;
@@ -127,6 +127,7 @@ enum RawTagColumn<'a> {
     Utf8(&'a StringArray),
     LargeUtf8(&'a LargeStringArray),
     Utf8View(&'a StringViewArray),
+    Dictionary(&'a DictionaryArray<UInt32Type>, &'a StringArray),
 }
 
 impl<'a> RawTagColumn<'a> {
@@ -159,6 +160,28 @@ impl<'a> RawTagColumn<'a> {
                         "Failed to downcast tag column to StringViewArray".to_string(),
                     )
                 }),
+            DataType::Dictionary(key, value)
+                if key.as_ref() == &DataType::UInt32 && value.as_ref() == &DataType::Utf8 =>
+            {
+                let dictionary = array
+                    .as_any()
+                    .downcast_ref::<DictionaryArray<UInt32Type>>()
+                    .ok_or_else(|| {
+                        datafusion::error::DataFusionError::Internal(
+                            "Failed to downcast tag column to DictionaryArray<UInt32>".to_string(),
+                        )
+                    })?;
+                let values = dictionary
+                    .values()
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .ok_or_else(|| {
+                        datafusion::error::DataFusionError::Internal(
+                            "Failed to downcast dictionary values to StringArray".to_string(),
+                        )
+                    })?;
+                Ok(Self::Dictionary(dictionary, values))
+            }
             other => Err(datafusion::error::DataFusionError::Internal(format!(
                 "Unsupported tag column type: {other:?}"
             ))),
@@ -170,6 +193,7 @@ impl<'a> RawTagColumn<'a> {
             Self::Utf8(array) => array.is_null(row),
             Self::LargeUtf8(array) => array.is_null(row),
             Self::Utf8View(array) => array.is_null(row),
+            Self::Dictionary(array, _) => array.is_null(row),
         }
     }
 
@@ -178,6 +202,7 @@ impl<'a> RawTagColumn<'a> {
             Self::Utf8(array) => array.value(row),
             Self::LargeUtf8(array) => array.value(row),
             Self::Utf8View(array) => array.value(row),
+            Self::Dictionary(array, values) => values.value(array.key(row).unwrap()),
         }
     }
 

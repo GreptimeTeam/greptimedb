@@ -32,10 +32,11 @@ use datafusion::physical_plan::{
 use datafusion::prelude::Expr;
 use datafusion::sql::TableReference;
 use datafusion_expr::col;
-use datatypes::arrow::array::{Array, Float64Array, StringArray, TimestampMillisecondArray};
+use datatypes::arrow::array::{Array, ArrayRef, Float64Array, TimestampMillisecondArray};
 use datatypes::arrow::compute::{CastOptions, cast_with_options, concat_batches};
 use datatypes::arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
 use datatypes::arrow::record_batch::RecordBatch;
+use datatypes::arrow_array::string_array_value_at_index;
 use futures::{Stream, StreamExt, ready};
 use greptime_proto::substrait_extension as pb;
 use prost::Message;
@@ -519,7 +520,7 @@ struct ScalarCalculateStream {
     have_multi_series: bool,
     done: bool,
     batch: Option<RecordBatch>,
-    tag_value: Option<Vec<String>>,
+    tag_value: Option<Vec<Option<String>>>,
 }
 
 impl RecordBatchStream for ScalarCalculateStream {
@@ -540,12 +541,8 @@ impl ScalarCalculateStream {
             self.append_batch(batch)?;
             return Ok(());
         }
-        let all_same = |val: Option<&str>, array: &StringArray| -> bool {
-            if let Some(v) = val {
-                array.iter().all(|s| s == Some(v))
-            } else {
-                array.is_empty() || array.iter().skip(1).all(|s| s == Some(array.value(0)))
-            }
+        let all_same = |val: Option<&str>, array: &ArrayRef| -> bool {
+            (0..array.len()).all(|i| string_array_value_at_index(array, i) == val)
         };
         // assert the entire batch belong to the same series
         let all_tag_columns_same = if let Some(tags) = &self.tag_value {
@@ -553,16 +550,16 @@ impl ScalarCalculateStream {
                 .zip(self.tag_indices.iter())
                 .all(|(value, index)| {
                     let array = batch.column(*index);
-                    let string_array = array.as_any().downcast_ref::<StringArray>().unwrap();
-                    all_same(Some(value), string_array)
+                    all_same(value.as_deref(), array)
                 })
         } else {
             let mut tag_values = Vec::with_capacity(self.tag_indices.len());
             let is_same = self.tag_indices.iter().all(|index| {
                 let array = batch.column(*index);
-                let string_array = array.as_any().downcast_ref::<StringArray>().unwrap();
-                tag_values.push(string_array.value(0).to_string());
-                all_same(None, string_array)
+                let value = string_array_value_at_index(array, 0).map(str::to_string);
+                let is_same = all_same(value.as_deref(), array);
+                tag_values.push(value);
+                is_same
             });
             self.tag_value = Some(tag_values);
             is_same
@@ -643,8 +640,11 @@ mod test {
     use datafusion::datasource::source::DataSourceExec;
     use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
     use datafusion::prelude::SessionContext;
-    use datatypes::arrow::array::{Float64Array, TimestampMillisecondArray};
-    use datatypes::arrow::datatypes::TimeUnit;
+    use datatypes::arrow::array::{
+        ArrayRef, DictionaryArray, Float64Array, StringArray, TimestampMillisecondArray,
+        UInt32Array,
+    };
+    use datatypes::arrow::datatypes::{TimeUnit, UInt32Type};
 
     use super::*;
 
@@ -752,14 +752,16 @@ mod test {
     }
 
     fn prepare_test_data(series: Vec<RecordBatch>) -> DataSourceExec {
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("ts", DataType::Timestamp(TimeUnit::Millisecond, None), true),
-            Field::new("tag1", DataType::Utf8, true),
-            Field::new("tag2", DataType::Utf8, true),
-            Field::new("val", DataType::Float64, true),
-        ]));
+        let schema = series.first().unwrap().schema();
         DataSourceExec::new(Arc::new(
             MemorySourceConfig::try_new(&[series], schema, None).unwrap(),
+        ))
+    }
+
+    fn dictionary(values: &[&str], keys: Vec<u32>) -> ArrayRef {
+        Arc::new(DictionaryArray::<UInt32Type>::new(
+            UInt32Array::from(keys),
+            Arc::new(StringArray::from(values.to_vec())),
         ))
     }
 
@@ -822,6 +824,51 @@ mod test {
                         Arc::new(TimestampMillisecondArray::from(vec![10_000, 15_000])),
                         Arc::new(StringArray::from(vec!["foo", "foo"])),
                         Arc::new(StringArray::from(vec!["🥺", "🥺"])),
+                        Arc::new(Float64Array::from(vec![3.0, 4.0])),
+                    ],
+                )
+                .unwrap(),
+            ],
+            "+---------------------+-----+\
+            \n| ts                  | val |\
+            \n+---------------------+-----+\
+            \n| 1970-01-01T00:00:00 | 1.0 |\
+            \n| 1970-01-01T00:00:05 | 2.0 |\
+            \n| 1970-01-01T00:00:10 | 3.0 |\
+            \n| 1970-01-01T00:00:15 | 4.0 |\
+            \n+---------------------+-----+",
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn same_series_with_dictionary_tags() {
+        let dictionary_type =
+            DataType::Dictionary(Box::new(DataType::UInt32), Box::new(DataType::Utf8));
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("ts", DataType::Timestamp(TimeUnit::Millisecond, None), true),
+            Field::new("tag1", dictionary_type.clone(), true),
+            Field::new("tag2", dictionary_type, true),
+            Field::new("val", DataType::Float64, true),
+        ]));
+        run_test(
+            vec![
+                RecordBatch::try_new(
+                    schema.clone(),
+                    vec![
+                        Arc::new(TimestampMillisecondArray::from(vec![0, 5_000])),
+                        dictionary(&["foo"], vec![0, 0]),
+                        dictionary(&["unused", "bar"], vec![1, 1]),
+                        Arc::new(Float64Array::from(vec![1.0, 2.0])),
+                    ],
+                )
+                .unwrap(),
+                RecordBatch::try_new(
+                    schema,
+                    vec![
+                        Arc::new(TimestampMillisecondArray::from(vec![10_000, 15_000])),
+                        dictionary(&["other", "foo"], vec![1, 1]),
+                        dictionary(&["bar"], vec![0, 0]),
                         Arc::new(Float64Array::from(vec![3.0, 4.0])),
                     ],
                 )

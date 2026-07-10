@@ -114,6 +114,12 @@ impl FlatProjectionMapper {
             output_col_ids.push(col.column_id);
 
             let mut schema = col.column_schema.clone();
+            if col.semantic_type == SemanticType::Tag && schema.data_type.is_string() {
+                schema.data_type = ConcreteDataType::dictionary_datatype(
+                    ConcreteDataType::uint32_datatype(),
+                    schema.data_type.clone(),
+                );
+            }
             if let Some(concretized) = json_type_hint
                 .and_then(|x| x.get(&schema.name))
                 .cloned()
@@ -297,7 +303,12 @@ impl FlatProjectionMapper {
         for (output_idx, index) in self.batch_indices.iter().enumerate() {
             let mut array = batch.column(*index).clone();
             // Cast dictionary values to the target type.
-            if let ArrowDataType::Dictionary(_key_type, value_type) = array.data_type() {
+            if let ArrowDataType::Dictionary(_key_type, value_type) = array.data_type()
+                && !matches!(
+                    self.output_schema.arrow_schema().fields()[output_idx].data_type(),
+                    ArrowDataType::Dictionary(_, _)
+                )
+            {
                 // When a string dictionary column contains only a single value, reuse a cached
                 // repeated vector to avoid repeatedly expanding the dictionary.
                 if let Some(dict_array) = single_value_string_dictionary(
@@ -557,6 +568,7 @@ impl DfBatchAssembler {
 
 #[cfg(test)]
 mod tests {
+    use datatypes::schema::ColumnSchema;
     use datatypes::types::json_type::JsonObjectType;
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
     use store_api::storage::RegionId;
@@ -585,6 +597,37 @@ mod tests {
                 column_id: 1,
             });
         Arc::new(builder.build().unwrap())
+    }
+
+    #[test]
+    fn test_tag_projection_preserves_dictionary() {
+        let mut builder = RegionMetadataBuilder::new(RegionId::new(1024, 0));
+        builder
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new("tag", ConcreteDataType::string_datatype(), true),
+                semantic_type: SemanticType::Tag,
+                column_id: 0,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "ts",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Timestamp,
+                column_id: 1,
+            })
+            .primary_key(vec![0]);
+        let metadata = Arc::new(builder.build().unwrap());
+
+        let mapper = FlatProjectionMapper::new(&metadata, [0, 1]).unwrap();
+        assert_eq!(
+            &ArrowDataType::Dictionary(
+                Box::new(ArrowDataType::UInt32),
+                Box::new(ArrowDataType::Utf8),
+            ),
+            mapper.output_schema().arrow_schema().field(0).data_type()
+        );
     }
 
     #[test]

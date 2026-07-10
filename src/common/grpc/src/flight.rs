@@ -23,9 +23,9 @@ use arrow_flight::{FlightData, SchemaAsIpc};
 use common_base::bytes::Bytes;
 use common_recordbatch::DfRecordBatch;
 use datatypes::arrow;
-use datatypes::arrow::array::ArrayRef;
+use datatypes::arrow::array::{Array, ArrayRef, DictionaryArray, StringArray, UInt32Array};
 use datatypes::arrow::buffer::Buffer;
-use datatypes::arrow::datatypes::{DataType, Schema as ArrowSchema, SchemaRef};
+use datatypes::arrow::datatypes::{DataType, Schema as ArrowSchema, SchemaRef, UInt32Type};
 use datatypes::arrow::error::ArrowError;
 use datatypes::arrow::ipc::{MessageHeader, convert, reader, root_as_message, writer};
 use flatbuffers::FlatBufferBuilder;
@@ -57,18 +57,87 @@ pub struct FlightEncoder {
     write_options: writer::IpcWriteOptions,
     data_gen: writer::IpcDataGenerator,
     dictionary_tracker: writer::DictionaryTracker,
+    string_dictionaries: HashMap<usize, StringDictionaryState>,
+}
+
+#[derive(Default)]
+struct StringDictionaryState {
+    indices: HashMap<Option<String>, u32>,
+    values: Vec<Option<String>>,
+    array: Option<ArrayRef>,
+    disabled: bool,
+}
+
+impl StringDictionaryState {
+    fn normalize(&mut self, dictionary: &DictionaryArray<UInt32Type>) -> ArrayRef {
+        const MAX_CUMULATIVE_VALUES: usize = 4096;
+
+        if self.disabled {
+            return Arc::new(dictionary.clone());
+        }
+        let values = dictionary
+            .values()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        if self.values.len() + values.len() > MAX_CUMULATIVE_VALUES {
+            self.disabled = true;
+            self.indices.clear();
+            self.values.clear();
+            self.array = None;
+            return Arc::new(dictionary.clone());
+        }
+        let mut remap = Vec::with_capacity(values.len());
+        let mut changed = false;
+        for index in 0..values.len() {
+            let value = values
+                .is_valid(index)
+                .then(|| values.value(index).to_string());
+            let key = if let Some(key) = self.indices.get(&value) {
+                *key
+            } else {
+                let key = self.values.len() as u32;
+                self.indices.insert(value.clone(), key);
+                self.values.push(value);
+                changed = true;
+                key
+            };
+            remap.push(key);
+        }
+
+        if changed || self.array.is_none() {
+            self.array = Some(Arc::new(StringArray::from(self.values.clone())));
+        }
+
+        let keys = if remap
+            .iter()
+            .enumerate()
+            .all(|(index, key)| index == *key as usize)
+        {
+            dictionary.keys().clone()
+        } else {
+            dictionary
+                .keys()
+                .iter()
+                .map(|key| key.map(|key| remap[key as usize]))
+                .collect::<UInt32Array>()
+        };
+        Arc::new(DictionaryArray::new(keys, self.array.clone().unwrap()))
+    }
 }
 
 impl Default for FlightEncoder {
     fn default() -> Self {
         let write_options = writer::IpcWriteOptions::default()
             .try_with_compression(Some(arrow::ipc::CompressionType::LZ4_FRAME))
-            .unwrap();
+            .unwrap()
+            .with_dictionary_handling(writer::DictionaryHandling::Delta);
 
         Self {
             write_options,
             data_gen: writer::IpcDataGenerator::default(),
             dictionary_tracker: writer::DictionaryTracker::new(false),
+            string_dictionaries: HashMap::new(),
         }
     }
 }
@@ -78,12 +147,45 @@ impl FlightEncoder {
     pub fn with_compression_disabled() -> Self {
         let write_options = writer::IpcWriteOptions::default()
             .try_with_compression(None)
-            .unwrap();
+            .unwrap()
+            .with_dictionary_handling(writer::DictionaryHandling::Delta);
 
         Self {
             write_options,
             data_gen: writer::IpcDataGenerator::default(),
             dictionary_tracker: writer::DictionaryTracker::new(false),
+            string_dictionaries: HashMap::new(),
+        }
+    }
+
+    fn normalize_dictionaries(&mut self, record_batch: DfRecordBatch) -> DfRecordBatch {
+        let mut changed = false;
+        let columns = record_batch
+            .columns()
+            .iter()
+            .enumerate()
+            .map(|(index, column)| match column.data_type() {
+                DataType::Dictionary(key, value)
+                    if key.as_ref() == &DataType::UInt32 && value.as_ref() == &DataType::Utf8 =>
+                {
+                    changed = true;
+                    let dictionary = column
+                        .as_any()
+                        .downcast_ref::<DictionaryArray<UInt32Type>>()
+                        .unwrap();
+                    self.string_dictionaries
+                        .entry(index)
+                        .or_default()
+                        .normalize(dictionary)
+                }
+                _ => column.clone(),
+            })
+            .collect();
+
+        if changed {
+            DfRecordBatch::try_new(record_batch.schema(), columns).unwrap()
+        } else {
+            record_batch
         }
     }
 
@@ -109,6 +211,7 @@ impl FlightEncoder {
                 vec1![self.encode_schema(schema.as_ref())]
             }
             FlightMessage::RecordBatch(record_batch) => {
+                let record_batch = self.normalize_dictionaries(record_batch);
                 let (encoded_dictionaries, encoded_batch) = self
                     .data_gen
                     .encode(
@@ -396,7 +499,6 @@ mod test {
             vec![Arc::new(Int32Array::from(vec![None, Some(5)])) as _],
         )
         .unwrap();
-
         let flight_data =
             batches_to_flight_data(&schema, vec![batch1.clone(), batch2.clone()]).unwrap();
         assert_eq!(flight_data.len(), 3);
@@ -551,21 +653,36 @@ mod test {
             ],
         )
         .unwrap();
+        let batch3 = DfRecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(UInt8Array::from_iter_values(vec![9, 10])) as _,
+                Arc::new(DictionaryArray::new(
+                    UInt32Array::from_iter_values([0, 1]),
+                    Arc::new(StringArray::from_iter_values(["o", "x"])),
+                )) as _,
+            ],
+        )
+        .unwrap();
 
         let message_1 = FlightMessage::Schema(schema.clone());
         let message_2 = FlightMessage::RecordBatch(batch1);
         let message_3 = FlightMessage::RecordBatch(batch2);
+        let message_4 = FlightMessage::RecordBatch(batch3);
 
         let mut encoder = FlightEncoder::default();
         let encoded_1 = encoder.encode(message_1);
         let encoded_2 = encoder.encode(message_2);
         let encoded_3 = encoder.encode(message_3);
+        let encoded_4 = encoder.encode(message_4);
         // message 1 is Arrow Schema, should be encoded to one FlightData:
         assert_eq!(encoded_1.len(), 1);
         // message 2 and 3 are Arrow RecordBatch with dictionary arrays, should be encoded to
         // multiple FlightData:
         assert_eq!(encoded_2.len(), 2);
         assert_eq!(encoded_3.len(), 2);
+        // The fourth message only uses values already sent by the cumulative dictionary.
+        assert_eq!(encoded_4.len(), 1);
 
         let mut decoder = FlightDecoder::default();
         let decoded_1 = decoder.try_decode(encoded_1.first())?;
@@ -585,22 +702,27 @@ mod test {
         let Some(FlightMessage::RecordBatch(decoded_3)) = decoder.try_decode(&encoded_3[1])? else {
             unreachable!()
         };
-        let actual = arrow::util::pretty::pretty_format_batches(&[decoded_2, decoded_3])
+        let Some(FlightMessage::RecordBatch(decoded_4)) = decoder.try_decode(&encoded_4[0])? else {
+            unreachable!()
+        };
+        let actual = arrow::util::pretty::pretty_format_batches(&[decoded_2, decoded_3, decoded_4])
             .unwrap()
             .to_string();
         let expected = r"
-+---+---+
-| i | s |
-+---+---+
-| 1 | x |
-| 2 | x |
-| 3 | x |
-| 4 | h |
-| 5 | e |
-| 6 | l |
-| 7 | l |
-| 8 | o |
-+---+---+";
++----+---+
+| i  | s |
++----+---+
+| 1  | x |
+| 2  | x |
+| 3  | x |
+| 4  | h |
+| 5  | e |
+| 6  | l |
+| 7  | l |
+| 8  | o |
+| 9  | o |
+| 10 | x |
++----+---+";
         assert_eq!(actual, expected.trim());
         Ok(())
     }

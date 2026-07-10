@@ -51,7 +51,7 @@ pub use boolean::{BooleanVector, BooleanVectorBuilder};
 pub use constant::ConstantVector;
 pub use date::{DateVector, DateVectorBuilder};
 pub use decimal::{Decimal128Vector, Decimal128VectorBuilder};
-pub use dictionary::{DictionaryIter, DictionaryVector};
+pub use dictionary::{DictionaryIter, DictionaryVector, StringDictionaryVectorBuilder};
 pub use duration::{
     DurationMicrosecondVector, DurationMicrosecondVectorBuilder, DurationMillisecondVector,
     DurationMillisecondVectorBuilder, DurationNanosecondVector, DurationNanosecondVectorBuilder,

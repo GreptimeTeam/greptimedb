@@ -228,6 +228,12 @@ impl PrometheusJsonResponse {
                     tag_column_indices.push(i);
                     num_label_columns += 1;
                 }
+                ConcreteDataType::Dictionary(ref dictionary)
+                    if matches!(dictionary.value_type(), ConcreteDataType::String(_)) =>
+                {
+                    tag_column_indices.push(i);
+                    num_label_columns += 1;
+                }
                 _ => {}
             }
         }
@@ -248,7 +254,7 @@ impl PrometheusJsonResponse {
             // prepare things...
             let tag_columns = tag_column_indices
                 .iter()
-                .map(|i| batch.column(*i).as_string::<i32>())
+                .map(|i| batch.column(*i))
                 .collect::<Vec<_>>();
             let tag_names = tag_column_indices
                 .iter()
@@ -280,8 +286,10 @@ impl PrometheusJsonResponse {
                     }
                     for (tag_column, tag_name) in tag_columns.iter().zip(tag_names.iter()) {
                         // TODO(ruihang): add test for NULL tag
-                        if tag_column.is_valid(row_index) {
-                            tags.push((tag_name, tag_column.value(row_index)));
+                        if let Some(value) = datatypes::arrow_array::string_array_value_at_index(
+                            tag_column, row_index,
+                        ) {
+                            tags.push((tag_name, value));
                         }
                     }
 
