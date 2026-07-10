@@ -63,7 +63,7 @@ FROM (
 | 1                     |
 +-----------------------+
 
--- SQLNESS REPLACE (RoundRobinBatch\(\d+\)) RoundRobinBatch(REDACTED)
+-- SQLNESS REPLACE (RepartitionExec:.*) RepartitionExec: REDACTED
 EXPLAIN SELECT COUNT(*) AS filtered_limited_rows
 FROM (
   SELECT region_id
@@ -89,7 +89,7 @@ FROM (
 |               |       AggregateExec: mode=Partial, gby=[], aggr=[count(Int64(1))]                                                                                                                                                                                                                               |
 |               |         CoalescePartitionsExec: fetch=1                                                                                                                                                                                                                                                         |
 |               |           FilterExec: table_id@0 > 0, projection=[], fetch=1                                                                                                                                                                                                                                    |
-|               |             RepartitionExec: partitioning=RoundRobinBatch(REDACTED), input_partitions=1                                                                                                                                                                                                               |
+|               |             RepartitionExec: REDACTED
 |               |               DistributedInspectExec: kind=SstManifest, scan=ScanRequest { projection: ProjectionInput { projection: [2], nested_paths: [] }, filters: [table_id > UInt32(0)] }, schema=Schema { fields: [Field { name: "table_id", data_type: UInt32 }], metadata: {"greptime:version": "0"} } |
 |               |                                                                                                                                                                                                                                                                                                 |
 +---------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+

@@ -35,7 +35,7 @@ FROM (
   LIMIT 1
 );
 
--- SQLNESS REPLACE (RoundRobinBatch\(\d+\)) RoundRobinBatch(REDACTED)
+-- SQLNESS REPLACE (RepartitionExec:.*) RepartitionExec: REDACTED
 EXPLAIN SELECT COUNT(*) AS filtered_limited_rows
 FROM (
   SELECT region_id
