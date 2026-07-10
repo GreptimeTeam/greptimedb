@@ -1,5 +1,3 @@
--- SQLNESS REPLACE (RoundRobinBatch\(\d+\)) RoundRobinBatch(REDACTED)
-
 CREATE TABLE ssts_limit_case (
   a INT PRIMARY KEY INVERTED INDEX,
   b STRING SKIPPING INDEX,
@@ -37,6 +35,7 @@ FROM (
   LIMIT 1
 );
 
+-- SQLNESS REPLACE (RoundRobinBatch\(\d+\)) RoundRobinBatch(REDACTED)
 EXPLAIN SELECT COUNT(*) AS filtered_limited_rows
 FROM (
   SELECT region_id
