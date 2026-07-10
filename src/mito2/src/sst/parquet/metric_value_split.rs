@@ -18,6 +18,7 @@ use api::v1::SemanticType;
 use datatypes::arrow::array::{
     Array, ArrayRef, Float64Array, Float64Builder, Int64Array, Int64Builder,
 };
+use datatypes::arrow::buffer::{BooleanBuffer, Buffer, NullBuffer, ScalarBuffer};
 use datatypes::arrow::datatypes::SchemaRef;
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::prelude::ConcreteDataType;
@@ -130,6 +131,10 @@ fn split_one_value_column(
     float_array: &Float64Array,
     int_array: &Int64Array,
 ) -> (ArrayRef, ArrayRef) {
+    if int_array.null_count() == int_array.len() {
+        return split_float_only_column(float_array);
+    }
+
     let mut float_builder = Float64Builder::with_capacity(float_array.len());
     let mut int_builder = Int64Builder::with_capacity(float_array.len());
 
@@ -153,6 +158,69 @@ fn split_one_value_column(
         Arc::new(float_builder.finish()),
         Arc::new(int_builder.finish()),
     )
+}
+
+fn split_float_only_column(float_array: &Float64Array) -> (ArrayRef, ArrayRef) {
+    let mut float_validity = Vec::with_capacity(float_array.len().div_ceil(8));
+    let mut int_validity = Vec::with_capacity(float_array.len().div_ceil(8));
+    let mut int_values = vec![0; float_array.len()];
+
+    if float_array.null_count() == 0 {
+        for (chunk, int_chunk) in float_array.values().chunks(8).zip(int_values.chunks_mut(8)) {
+            let mut int_mask = 0u8;
+            for (bit, (value, int_output)) in
+                chunk.iter().copied().zip(int_chunk.iter_mut()).enumerate()
+            {
+                if let Some(int_value) = integer_value(value) {
+                    int_mask |= 1 << bit;
+                    *int_output = int_value;
+                }
+            }
+            let valid_mask = u8::MAX >> (8 - chunk.len());
+            float_validity.push(valid_mask & !int_mask);
+            int_validity.push(int_mask);
+        }
+    } else {
+        for (chunk_index, (chunk, int_chunk)) in float_array
+            .values()
+            .chunks(8)
+            .zip(int_values.chunks_mut(8))
+            .enumerate()
+        {
+            let mut float_mask = 0u8;
+            let mut int_mask = 0u8;
+            for (bit, (value, int_output)) in
+                chunk.iter().copied().zip(int_chunk.iter_mut()).enumerate()
+            {
+                let row = chunk_index * 8 + bit;
+                if float_array.is_valid(row) {
+                    if let Some(int_value) = integer_value(value) {
+                        int_mask |= 1 << bit;
+                        *int_output = int_value;
+                    } else {
+                        float_mask |= 1 << bit;
+                    }
+                }
+            }
+            float_validity.push(float_mask);
+            int_validity.push(int_mask);
+        }
+    }
+
+    let null_buffer = |validity, len| {
+        let buffer = NullBuffer::new(BooleanBuffer::new(Buffer::from(validity), 0, len));
+        (buffer.null_count() > 0).then_some(buffer)
+    };
+    let float_output = Float64Array::new(
+        float_array.values().clone(),
+        null_buffer(float_validity, float_array.len()),
+    );
+    let int_output = Int64Array::new(
+        ScalarBuffer::from(int_values),
+        null_buffer(int_validity, float_array.len()),
+    );
+
+    (Arc::new(float_output), Arc::new(int_output))
 }
 
 fn logical_value(float_array: &Float64Array, int_array: &Int64Array, row: usize) -> Option<f64> {
@@ -237,12 +305,17 @@ mod tests {
                     Some(2.0),
                     Some(1.5),
                     Some(2.0),
+                    None,
+                    Some(3.5),
+                    Some(4.0),
+                    Some(5.5),
+                    Some(6.0),
                 ])) as ArrayRef,
                 true,
             ),
             (
                 "greptime_value__metric_int",
-                Arc::new(Int64Array::from(vec![None, None, None, None])) as ArrayRef,
+                Arc::new(Int64Array::from(vec![None; 9])) as ArrayRef,
                 true,
             ),
         ])
@@ -270,11 +343,53 @@ mod tests {
 
         assert_eq!(
             float_values.iter().collect::<Vec<_>>(),
-            vec![None, None, Some(1.5), None]
+            vec![
+                None,
+                None,
+                Some(1.5),
+                None,
+                None,
+                Some(3.5),
+                None,
+                Some(5.5),
+                None,
+            ]
         );
         assert_eq!(
             int_values.iter().collect::<Vec<_>>(),
-            vec![Some(1), Some(2), None, Some(2)]
+            vec![
+                Some(1),
+                Some(2),
+                None,
+                Some(2),
+                None,
+                None,
+                Some(4),
+                None,
+                Some(6),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_split_existing_integer_values() {
+        let float_values = Float64Array::from(vec![None, Some(1.5), Some(2.0)]);
+        let int_values = Int64Array::from(vec![Some(1), None, Some(3)]);
+
+        let (float_output, int_output) = split_one_value_column(&float_values, &int_values);
+        let float_output = float_output
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+        let int_output = int_output.as_any().downcast_ref::<Int64Array>().unwrap();
+
+        assert_eq!(
+            float_output.iter().collect::<Vec<_>>(),
+            vec![None, Some(1.5), None]
+        );
+        assert_eq!(
+            int_output.iter().collect::<Vec<_>>(),
+            vec![Some(1), None, Some(3)]
         );
     }
 
