@@ -192,10 +192,6 @@ impl RegionRequest {
                 reason: "RemoteDynFilter request should be handled separately by RegionServer",
             }
             .fail(),
-            region_request::Body::CleanUp(_) => UnexpectedSnafu {
-                reason: "CleanUp request should be handled separately by RegionServer",
-            }
-            .fail(),
             region_request::Body::ApplyStagingManifest(apply) => {
                 make_region_apply_staging_manifest(apply)
             }
