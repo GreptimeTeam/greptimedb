@@ -27,7 +27,7 @@
 //!   (file additions/removals, schema changes, truncation, partition expression changes, etc.).
 //!
 //! - [`on_region_closed`] / [`on_region_dropped`] / [`on_region_files_removed`]:
-//!   Region **lifecycle** callbacks for close, logical drop, and physical file removal.
+//!   Region **lifecycle** callbacks for open, close, logical drop, and physical file removal.
 //!   See [Region lifecycle](#region-lifecycle) below.
 //!
 //! Hook implementations are registered via the [`Plugins`](common_base::Plugins) system:
@@ -72,19 +72,21 @@
 //!
 //! | Event | Method | When |
 //! |-------|--------|------|
+//! | Open | [`on_region_opened`] | A create or open request registers the region as active (the counterpart to close/drop). Does not fire for the compactor's transient regions or the catch-up reopen. |
 //! | Close | [`on_region_closed`] | A close request (or a close-after-flush) removes the region from the active set. Data files, manifest and WAL state are **preserved**; the region may be reopened. |
 //! | Logical drop | [`on_region_dropped`] | A drop request has been handled: the region leaves the active set and its WAL entries are marked obsolete. Data files are **not yet deleted**. |
 //! | Physical file removal | [`on_region_files_removed`] | The drop GC worker has deleted the region directory. Terminal file-lifecycle event. |
 //!
 //! Notes:
-//! - `on_region_closed` / `on_region_dropped` run **inline in the region worker loop**, so
-//!   implementations must be fast (same contract as `on_manifest_updated`).
+//! - `on_region_opened` / `on_region_closed` / `on_region_dropped` run **inline in the
+//!   region worker loop**, so implementations must be fast (same contract as `on_manifest_updated`).
 //! - `on_region_files_removed` runs on the background drop GC task, outside the worker loop.
 //! - When global GC is enabled and a normal table region is dropped with `partial_drop`, its
 //!   directory is left for global reclamation and `on_region_files_removed` is **not** fired
 //!   by the drop worker (observe it via the global GC path instead).
-//!
-//! Region **open** is not yet observed by a hook.
+//! - Logical file removal (compaction, region edit, truncate) is already observable via
+//!   [`on_manifest_updated`] (`Edit.files_to_remove` / `Truncate` action); only the drop
+//!   worker's physical directory deletion needs a dedicated file hook.
 //!
 //! ## Invocation points
 //!
@@ -107,11 +109,13 @@
 //!
 //! `on_region_files_removed` currently covers only the **drop** GC worker's physical
 //! directory removal. A broader per-file `on_files_removed` hook covering compaction
-//! removal, truncate, and the global GC reclamation path is not yet implemented.
-//! A `on_region_opened` hook may also be added to complete the active-region lifecycle.
+//! removal, truncate, and the global GC reclamation path is not yet implemented
+//! (though logical file removal is already observable via `on_manifest_updated`).
+//! Role/leadership transitions (`on_region_role_changed`) are also not hooked.
 //!
 //! [`on_sst_files_written`]: RegionHook::on_sst_files_written
 //! [`on_manifest_updated`]: RegionHook::on_manifest_updated
+//! [`on_region_opened`]: RegionHook::on_region_opened
 //! [`on_region_closed`]: RegionHook::on_region_closed
 //! [`on_region_dropped`]: RegionHook::on_region_dropped
 //! [`on_region_files_removed`]: RegionHook::on_region_files_removed
@@ -260,6 +264,23 @@ pub trait RegionHook: Send + Sync + Debug {
         manifest_version: ManifestVersion,
     ) {
         let _ = (region_id, action_list, manifest_version);
+    }
+
+    /// Called after a region is **opened** (created or reopened) and registered
+    /// as an active region in the engine.
+    ///
+    /// Fires once when a region becomes active via a create or open request —
+    /// the natural counterpart to [`on_region_closed`] / [`on_region_dropped`].
+    /// It does **not** fire for the compactor's transient compaction regions
+    /// (`open_compaction_region`), nor for the internal reopen performed during
+    /// follower catch-up / leadership promotion.
+    ///
+    /// Runs inline in the region worker loop; implementations should be fast.
+    ///
+    /// [`on_region_closed`]: RegionHook::on_region_closed
+    /// [`on_region_dropped`]: RegionHook::on_region_dropped
+    async fn on_region_opened(&self, region_id: RegionId, region_metadata: &RegionMetadataRef) {
+        let _ = (region_id, region_metadata);
     }
 
     /// Called after a region is **closed** via a close request.

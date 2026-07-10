@@ -149,6 +149,13 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     );
                     region_count.inc();
 
+                    // Notify the region hook that the region has been opened.
+                    // Fires before registration; allocates nothing when no hook
+                    // is registered.
+                    if let Some(hook) = region.manifest_ctx.hook() {
+                        hook.on_region_opened(region_id, &region.metadata()).await;
+                    }
+
                     // Insert the Region into the RegionMap.
                     regions.insert_region(region);
 

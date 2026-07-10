@@ -348,7 +348,8 @@ async fn test_region_hook_on_drop() {
     };
     put_rows(&engine, region_id, rows).await;
 
-    // Sanity: nothing fired yet.
+    // Sanity: nothing fired yet besides the open from create.
+    assert_eq!(hook.opened_count.load(Ordering::Relaxed), 1);
     assert_eq!(hook.dropped_count.load(Ordering::Relaxed), 0);
     assert_eq!(hook.closed_count.load(Ordering::Relaxed), 0);
 

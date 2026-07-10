@@ -87,7 +87,8 @@ async fn test_region_hook_on_close() {
         .await
         .unwrap();
 
-    // Sanity: no lifecycle events before closing.
+    // Sanity: no lifecycle events before closing besides the create open.
+    assert_eq!(hook.opened_count.load(Ordering::Relaxed), 1);
     assert_eq!(hook.closed_count.load(Ordering::Relaxed), 0);
     assert_eq!(hook.dropped_count.load(Ordering::Relaxed), 0);
 

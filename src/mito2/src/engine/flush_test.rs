@@ -898,6 +898,7 @@ async fn test_update_topic_latest_entry_id(factory: Option<LogStoreFactory>) {
 pub(super) struct MockRegionHook {
     pub(super) sst_written_count: AtomicUsize,
     pub(super) manifest_updated_count: AtomicUsize,
+    pub(super) opened_count: AtomicUsize,
     pub(super) closed_count: AtomicUsize,
     pub(super) dropped_count: AtomicUsize,
     pub(super) files_removed_count: AtomicUsize,
@@ -911,6 +912,7 @@ impl MockRegionHook {
         Self {
             sst_written_count: AtomicUsize::new(0),
             manifest_updated_count: AtomicUsize::new(0),
+            opened_count: AtomicUsize::new(0),
             closed_count: AtomicUsize::new(0),
             dropped_count: AtomicUsize::new(0),
             files_removed_count: AtomicUsize::new(0),
@@ -985,6 +987,11 @@ impl RegionHook for MockRegionHook {
             files_added,
         );
         self.notify.notify_one();
+    }
+
+    async fn on_region_opened(&self, region_id: RegionId, _region_metadata: &RegionMetadataRef) {
+        self.opened_count.fetch_add(1, Ordering::Relaxed);
+        common_telemetry::info!("MockRegionHook::on_region_opened: region={}", region_id);
     }
 
     async fn on_region_closed(&self, region_id: RegionId, _region_metadata: &RegionMetadataRef) {
