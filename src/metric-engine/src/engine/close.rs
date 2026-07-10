@@ -29,7 +29,7 @@ impl MetricEngineInner {
     pub async fn close_region(
         &self,
         region_id: RegionId,
-        _req: RegionCloseRequest,
+        req: RegionCloseRequest,
     ) -> Result<AffectedRows> {
         let data_region_id = utils::to_data_region_id(region_id);
         if self
@@ -38,7 +38,8 @@ impl MetricEngineInner {
             .unwrap()
             .exist_physical_region(data_region_id)
         {
-            self.close_physical_region(data_region_id).await?;
+            self.close_physical_region(data_region_id, req.flush_on_close)
+                .await?;
             self.state
                 .write()
                 .unwrap()
@@ -59,18 +60,25 @@ impl MetricEngineInner {
         }
     }
 
-    pub(crate) async fn close_physical_region(&self, region_id: RegionId) -> Result<AffectedRows> {
+    pub(crate) async fn close_physical_region(
+        &self,
+        region_id: RegionId,
+        flush_on_close: bool,
+    ) -> Result<AffectedRows> {
         let data_region_id = utils::to_data_region_id(region_id);
         let metadata_region_id = utils::to_metadata_region_id(region_id);
 
         self.mito
-            .handle_request(data_region_id, RegionRequest::Close(RegionCloseRequest {}))
+            .handle_request(
+                data_region_id,
+                RegionRequest::Close(RegionCloseRequest { flush_on_close }),
+            )
             .await
             .with_context(|_| CloseMitoRegionSnafu { region_id })?;
         self.mito
             .handle_request(
                 metadata_region_id,
-                RegionRequest::Close(RegionCloseRequest {}),
+                RegionRequest::Close(RegionCloseRequest { flush_on_close }),
             )
             .await
             .with_context(|_| CloseMitoRegionSnafu { region_id })?;

@@ -293,16 +293,16 @@ async fn test_soft_drop_closes_regions_and_keeps_tombstone() {
         let Some(region_request::Body::Close(req)) = request.body else {
             unreachable!();
         };
-        requests.push((peer.id, req.region_id));
+        requests.push((peer.id, req.region_id, req.flush_on_close));
     }
     requests.sort_unstable();
     assert_eq!(
         requests,
         vec![
-            (1, RegionId::new(table_id, 1).as_u64()),
-            (1, RegionId::new(table_id, 2).as_u64()),
-            (2, RegionId::new(table_id, 1).as_u64()),
-            (2, RegionId::new(table_id, 2).as_u64()),
+            (1, RegionId::new(table_id, 1).as_u64(), true),
+            (1, RegionId::new(table_id, 2).as_u64(), false),
+            (2, RegionId::new(table_id, 1).as_u64(), false),
+            (2, RegionId::new(table_id, 2).as_u64(), true),
         ]
     );
     assert!(rx.try_recv().is_err());

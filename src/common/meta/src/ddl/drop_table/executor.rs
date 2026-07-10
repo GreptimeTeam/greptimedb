@@ -313,6 +313,7 @@ impl DropTableExecutor {
                     }),
                     body: Some(region_request::Body::Close(PbCloseRegionRequest {
                         region_id: region_id.as_u64(),
+                        flush_on_close: false,
                     })),
                 };
 
@@ -348,11 +349,13 @@ impl DropTableExecutor {
     }
 
     /// Closes all table regions on datanodes without deleting region files or metadata tombstones.
+    /// When `flush_leaders_on_close` is set, only leader regions are flushed before close.
     pub async fn on_close_regions(
         &self,
         node_manager: &NodeManagerRef,
         leader_region_registry: &LeaderRegionRegistryRef,
         region_routes: &[RegionRoute],
+        flush_leaders_on_close: bool,
     ) -> Result<()> {
         let table_id = self.table_id;
         let mut seen_peer_ids = HashSet::new();
@@ -366,10 +369,19 @@ impl DropTableExecutor {
             let requester = node_manager.datanode(&datanode).await;
             let region_ids = find_leader_regions(region_routes, &datanode)
                 .into_iter()
-                .chain(find_follower_regions(region_routes, &datanode))
-                .map(|region_number| RegionId::new(table_id, region_number));
+                .map(|region_number| {
+                    (
+                        RegionId::new(table_id, region_number),
+                        flush_leaders_on_close,
+                    )
+                })
+                .chain(
+                    find_follower_regions(region_routes, &datanode)
+                        .into_iter()
+                        .map(|region_number| (RegionId::new(table_id, region_number), false)),
+                );
 
-            for region_id in region_ids {
+            for (region_id, flush_on_close) in region_ids {
                 debug!("Closing region {region_id} on Datanode {datanode:?}");
                 let request = RegionRequest {
                     header: Some(RegionRequestHeader {
@@ -378,6 +390,7 @@ impl DropTableExecutor {
                     }),
                     body: Some(region_request::Body::Close(PbCloseRegionRequest {
                         region_id: region_id.as_u64(),
+                        flush_on_close,
                     })),
                 };
 
