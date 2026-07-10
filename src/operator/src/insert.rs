@@ -507,6 +507,36 @@ impl Inserter {
         Ok(self.auto_create_disabled_reason(ctx)?.is_none())
     }
 
+    /// Ensures a trace table exists with the request-global schema without
+    /// requiring a padded data row to drive auto-creation.
+    pub async fn ensure_trace_table_on_demand(
+        &self,
+        table_name: &str,
+        request_schema: &[ColumnSchema],
+        ctx: &QueryContextRef,
+        statement_executor: &StatementExecutor,
+    ) -> Result<()> {
+        let mut requests = RowInsertRequests {
+            inserts: vec![RowInsertRequest {
+                table_name: table_name.to_string(),
+                rows: Some(api::v1::Rows {
+                    schema: request_schema.to_vec(),
+                    rows: Vec::new(),
+                }),
+            }],
+        };
+        self.create_or_alter_tables_on_demand(
+            &mut requests,
+            ctx,
+            AutoCreateTableType::Trace,
+            statement_executor,
+            false,
+            false,
+        )
+        .await?;
+        Ok(())
+    }
+
     /// Creates or alter tables on demand:
     /// - if table does not exist, create table by inferred CreateExpr
     /// - if table exist, check if schema matches. If any new column found, alter table by inferred `AlterExpr`

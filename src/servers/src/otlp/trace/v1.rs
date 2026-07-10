@@ -12,10 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use api::v1::value::ValueData;
-use api::v1::{ColumnDataType, ColumnSchema, RowInsertRequests, SemanticType, Value};
+use api::v1::{ColumnDataType, RowInsertRequests, Value};
 use common_catalog::consts::{trace_operations_table_name, trace_services_table_name};
 use common_grpc::precision::Precision;
 use opentelemetry_proto::tonic::common::v1::any_value::Value as OtlpValue;
@@ -26,11 +26,10 @@ use crate::error::Result;
 use crate::otlp::trace::attributes::Attributes;
 use crate::otlp::trace::span::TraceSpan;
 use crate::otlp::trace::{
-    DURATION_NANO_COLUMN, KEY_SERVICE_NAME, NoopTraceSchemaObserver, PARENT_SPAN_ID_COLUMN,
-    SCOPE_NAME_COLUMN, SCOPE_VERSION_COLUMN, SERVICE_NAME_COLUMN, SPAN_EVENTS_COLUMN,
-    SPAN_ID_COLUMN, SPAN_KIND_COLUMN, SPAN_NAME_COLUMN, SPAN_STATUS_CODE,
-    SPAN_STATUS_MESSAGE_COLUMN, TIMESTAMP_COLUMN, TRACE_ID_COLUMN, TRACE_STATE_COLUMN,
-    TraceAuxData, TraceSchemaObserver,
+    DURATION_NANO_COLUMN, KEY_SERVICE_NAME, PARENT_SPAN_ID_COLUMN, SCOPE_NAME_COLUMN,
+    SCOPE_VERSION_COLUMN, SERVICE_NAME_COLUMN, SPAN_EVENTS_COLUMN, SPAN_ID_COLUMN,
+    SPAN_KIND_COLUMN, SPAN_NAME_COLUMN, SPAN_STATUS_CODE, SPAN_STATUS_MESSAGE_COLUMN,
+    TIMESTAMP_COLUMN, TRACE_ID_COLUMN, TRACE_STATE_COLUMN, TraceAuxData,
 };
 use crate::otlp::utils::{any_value_to_jsonb, make_column_data, make_string_column_data};
 use crate::query_handler::PipelineHandlerRef;
@@ -41,81 +40,76 @@ const APPROXIMATE_COLUMN_COUNT: usize = 30;
 // Use a timestamp(2100-01-01 00:00:00) as large as possible.
 const MAX_TIMESTAMP: i64 = 4102444800000000000;
 
+#[derive(Default)]
+pub struct TraceBatchSchema {
+    pub value_types: HashMap<String, Vec<ColumnDataType>>,
+}
+
+impl TraceBatchSchema {
+    fn observe_value_type(&mut self, name: &str, value_type: ColumnDataType) {
+        if let Some(types) = self.value_types.get_mut(name) {
+            if !types.contains(&value_type) {
+                types.push(value_type);
+            }
+        } else {
+            self.value_types.insert(name.to_string(), vec![value_type]);
+        }
+    }
+}
+
 /// Converts trace spans into row insert requests for the main v1 trace table.
 ///
 /// Auxiliary service and operation table writes are built separately so the
 /// caller can update them only after the main span write succeeds.
 pub fn v1_to_grpc_main_insert_requests(
     spans: &[TraceSpan],
-    pipeline: &PipelineWay,
-    pipeline_params: &GreptimePipelineParams,
-    table_name: &str,
-    query_ctx: &QueryContextRef,
-    pipeline_handler: PipelineHandlerRef,
-) -> Result<(RowInsertRequests, usize)> {
-    let mut schema_observer = NoopTraceSchemaObserver;
-    v1_to_grpc_main_insert_requests_with_schema_observer(
-        spans,
-        pipeline,
-        pipeline_params,
-        table_name,
-        query_ctx,
-        pipeline_handler,
-        0,
-        &mut schema_observer,
-    )
-}
-
-pub fn v1_to_grpc_main_insert_requests_with_schema_observer(
-    spans: &[TraceSpan],
     _pipeline: &PipelineWay,
     _pipeline_params: &GreptimePipelineParams,
     table_name: &str,
     _query_ctx: &QueryContextRef,
     _pipeline_handler: PipelineHandlerRef,
-    batch_index: usize,
-    schema_observer: &mut impl TraceSchemaObserver,
 ) -> Result<(RowInsertRequests, usize)> {
+    let (requests, _) =
+        v1_to_grpc_main_insert_requests_from_iter(spans.iter().cloned(), table_name)?;
+    Ok((requests, spans.len()))
+}
+
+pub fn v1_to_grpc_main_insert_requests_with_schema(
+    spans: Vec<TraceSpan>,
+    table_name: &str,
+) -> Result<(RowInsertRequests, TraceBatchSchema)> {
+    v1_to_grpc_main_insert_requests_from_iter(spans.into_iter(), table_name)
+}
+
+fn v1_to_grpc_main_insert_requests_from_iter(
+    spans: impl ExactSizeIterator<Item = TraceSpan>,
+    table_name: &str,
+) -> Result<(RowInsertRequests, TraceBatchSchema)> {
     let mut multi_table_writer = MultiTableData::default();
-    let trace_writer = build_trace_table_data_with_schema_observer(
-        spans,
-        table_name,
-        batch_index,
-        schema_observer,
-    )?;
+    let (trace_writer, batch_schema) = build_trace_table_data_with_schema(spans)?;
     multi_table_writer.add_table_data(table_name, trace_writer);
 
-    Ok(multi_table_writer.into_row_insert_requests())
+    Ok((
+        multi_table_writer.into_row_insert_requests().0,
+        batch_schema,
+    ))
 }
 
 /// Builds the row-oriented payload for the main v1 trace table.
 pub fn build_trace_table_data(spans: &[TraceSpan]) -> Result<TableData> {
-    let mut schema_observer = NoopTraceSchemaObserver;
-    build_trace_table_data_with_schema_observer(spans, "", 0, &mut schema_observer)
+    build_trace_table_data_with_schema(spans.iter().cloned()).map(|(table_data, _)| table_data)
 }
 
-fn build_trace_table_data_with_schema_observer(
-    spans: &[TraceSpan],
-    table_name: &str,
-    batch_index: usize,
-    schema_observer: &mut impl TraceSchemaObserver,
-) -> Result<TableData> {
+fn build_trace_table_data_with_schema(
+    spans: impl ExactSizeIterator<Item = TraceSpan>,
+) -> Result<(TableData, TraceBatchSchema)> {
     let mut trace_writer = TableData::new(APPROXIMATE_COLUMN_COUNT, spans.len());
-    for span in spans.iter().cloned() {
-        write_span_to_row_with_schema_observer(
-            &mut trace_writer,
-            span,
-            table_name,
-            batch_index,
-            schema_observer,
-        )?;
+    let mut batch_schema = TraceBatchSchema::default();
+    for span in spans {
+        write_span_to_row_with_schema(&mut trace_writer, span, &mut batch_schema)?;
     }
 
-    for schema in trace_writer.columns() {
-        schema_observer.observe_trace_column(table_name, batch_index, schema, None);
-    }
-
-    Ok(trace_writer)
+    Ok((trace_writer, batch_schema))
 }
 
 /// Builds row insert requests for the v1 trace auxiliary tables.
@@ -140,16 +134,13 @@ pub fn build_aux_table_requests(
 }
 
 pub fn write_span_to_row(writer: &mut TableData, span: TraceSpan) -> Result<()> {
-    let mut schema_observer = NoopTraceSchemaObserver;
-    write_span_to_row_with_schema_observer(writer, span, "", 0, &mut schema_observer)
+    write_span_to_row_with_schema(writer, span, &mut TraceBatchSchema::default())
 }
 
-fn write_span_to_row_with_schema_observer(
+fn write_span_to_row_with_schema(
     writer: &mut TableData,
     span: TraceSpan,
-    table_name: &str,
-    batch_index: usize,
-    schema_observer: &mut impl TraceSchemaObserver,
+    batch_schema: &mut TraceBatchSchema,
 ) -> Result<()> {
     let mut row = writer.alloc_one_row();
 
@@ -199,32 +190,26 @@ fn write_span_to_row_with_schema_observer(
         )?;
     }
 
-    write_attributes_with_schema_observer(
+    write_attributes_with_schema(
         writer,
         "span_attributes",
         span.span_attributes,
         &mut row,
-        table_name,
-        batch_index,
-        schema_observer,
+        batch_schema,
     )?;
-    write_attributes_with_schema_observer(
+    write_attributes_with_schema(
         writer,
         "scope_attributes",
         span.scope_attributes,
         &mut row,
-        table_name,
-        batch_index,
-        schema_observer,
+        batch_schema,
     )?;
-    write_attributes_with_schema_observer(
+    write_attributes_with_schema(
         writer,
         "resource_attributes",
         span.resource_attributes,
         &mut row,
-        table_name,
-        batch_index,
-        schema_observer,
+        batch_schema,
     )?;
 
     row_writer::write_json(
@@ -303,26 +288,21 @@ pub(crate) fn write_attributes(
     attributes: Attributes,
     row: &mut Vec<Value>,
 ) -> Result<()> {
-    let mut schema_observer = NoopTraceSchemaObserver;
-    write_attributes_with_schema_observer(
+    write_attributes_with_schema(
         writer,
         prefix,
         attributes,
         row,
-        "",
-        0,
-        &mut schema_observer,
+        &mut TraceBatchSchema::default(),
     )
 }
 
-fn write_attributes_with_schema_observer(
+fn write_attributes_with_schema(
     writer: &mut TableData,
     prefix: &str,
     attributes: Attributes,
     row: &mut Vec<Value>,
-    table_name: &str,
-    batch_index: usize,
-    schema_observer: &mut impl TraceSchemaObserver,
+    batch_schema: &mut TraceBatchSchema,
 ) -> Result<()> {
     for attr in attributes.take().into_iter() {
         let key_suffix = attr.key;
@@ -335,13 +315,7 @@ fn write_attributes_with_schema_observer(
         let key = format!("{}.{}", prefix, key_suffix);
         match attr.value.and_then(|v| v.value) {
             Some(OtlpValue::StringValue(v)) => {
-                observe_field(
-                    table_name,
-                    batch_index,
-                    &key,
-                    ColumnDataType::String,
-                    schema_observer,
-                );
+                batch_schema.observe_value_type(&key, ColumnDataType::String);
                 // Keep the raw request value here. Mixed trace types are reconciled later
                 // in the frontend once we can also see the existing table schema.
                 writer.write_field_unchecked(
@@ -352,13 +326,7 @@ fn write_attributes_with_schema_observer(
                 );
             }
             Some(OtlpValue::BoolValue(v)) => {
-                observe_field(
-                    table_name,
-                    batch_index,
-                    &key,
-                    ColumnDataType::Boolean,
-                    schema_observer,
-                );
+                batch_schema.observe_value_type(&key, ColumnDataType::Boolean);
                 // Do not coerce or promote types while building the request-local rows.
                 writer.write_field_unchecked(
                     &key,
@@ -368,13 +336,7 @@ fn write_attributes_with_schema_observer(
                 );
             }
             Some(OtlpValue::IntValue(v)) => {
-                observe_field(
-                    table_name,
-                    batch_index,
-                    &key,
-                    ColumnDataType::Int64,
-                    schema_observer,
-                );
+                batch_schema.observe_value_type(&key, ColumnDataType::Int64);
                 // Preserving the original value avoids order-dependent behavior inside one batch.
                 writer.write_field_unchecked(
                     &key,
@@ -384,13 +346,7 @@ fn write_attributes_with_schema_observer(
                 );
             }
             Some(OtlpValue::DoubleValue(v)) => {
-                observe_field(
-                    table_name,
-                    batch_index,
-                    &key,
-                    ColumnDataType::Float64,
-                    schema_observer,
-                );
+                batch_schema.observe_value_type(&key, ColumnDataType::Float64);
                 writer.write_field_unchecked(
                     &key,
                     ColumnDataType::Float64,
@@ -398,32 +354,19 @@ fn write_attributes_with_schema_observer(
                     row,
                 );
             }
-            Some(OtlpValue::ArrayValue(v)) => {
-                observe_json_field(table_name, batch_index, &key, schema_observer);
-                row_writer::write_json(
-                    writer,
-                    key,
-                    any_value_to_jsonb(OtlpValue::ArrayValue(v)),
-                    row,
-                )?
-            }
-            Some(OtlpValue::KvlistValue(v)) => {
-                observe_json_field(table_name, batch_index, &key, schema_observer);
-                row_writer::write_json(
-                    writer,
-                    key,
-                    any_value_to_jsonb(OtlpValue::KvlistValue(v)),
-                    row,
-                )?
-            }
+            Some(OtlpValue::ArrayValue(v)) => row_writer::write_json(
+                writer,
+                key,
+                any_value_to_jsonb(OtlpValue::ArrayValue(v)),
+                row,
+            )?,
+            Some(OtlpValue::KvlistValue(v)) => row_writer::write_json(
+                writer,
+                key,
+                any_value_to_jsonb(OtlpValue::KvlistValue(v)),
+                row,
+            )?,
             Some(OtlpValue::BytesValue(v)) => {
-                observe_field(
-                    table_name,
-                    batch_index,
-                    &key,
-                    ColumnDataType::Binary,
-                    schema_observer,
-                );
                 row_writer::write_fields(
                     writer,
                     std::iter::once(make_column_data(
@@ -441,48 +384,6 @@ fn write_attributes_with_schema_observer(
     Ok(())
 }
 
-fn observe_field(
-    table_name: &str,
-    batch_index: usize,
-    name: &str,
-    datatype: ColumnDataType,
-    schema_observer: &mut impl TraceSchemaObserver,
-) {
-    schema_observer.observe_trace_column(
-        table_name,
-        batch_index,
-        &column_schema(name, datatype, SemanticType::Field),
-        Some(datatype),
-    );
-}
-
-fn observe_json_field(
-    table_name: &str,
-    batch_index: usize,
-    name: &str,
-    schema_observer: &mut impl TraceSchemaObserver,
-) {
-    schema_observer.observe_trace_column(
-        table_name,
-        batch_index,
-        &row_writer::build_json_column_schema(name),
-        Some(ColumnDataType::Binary),
-    );
-}
-
-fn column_schema(
-    name: &str,
-    datatype: ColumnDataType,
-    semantic_type: SemanticType,
-) -> ColumnSchema {
-    ColumnSchema {
-        column_name: name.to_string(),
-        datatype: datatype as i32,
-        semantic_type: semantic_type as i32,
-        ..Default::default()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use api::v1::value::ValueData;
@@ -494,28 +395,6 @@ mod tests {
     use crate::otlp::trace::attributes::Attributes;
     use crate::otlp::trace::span::{SpanEvents, SpanLinks};
     use crate::row_writer::TableData;
-
-    #[derive(Default)]
-    struct RecordingSchemaObserver {
-        observed: Vec<(usize, String, ColumnDataType, Option<ColumnDataType>)>,
-    }
-
-    impl TraceSchemaObserver for RecordingSchemaObserver {
-        fn observe_trace_column(
-            &mut self,
-            _table_name: &str,
-            batch_index: usize,
-            schema: &ColumnSchema,
-            value_type: Option<ColumnDataType>,
-        ) {
-            self.observed.push((
-                batch_index,
-                schema.column_name.clone(),
-                ColumnDataType::try_from(schema.datatype).unwrap(),
-                value_type,
-            ));
-        }
-    }
 
     fn make_kv(key: &str, value: OtlpValue) -> KeyValue {
         KeyValue {
@@ -548,36 +427,30 @@ mod tests {
     }
 
     #[test]
-    fn test_schema_observer_records_attribute_types_during_conversion() {
-        let mut observer = RecordingSchemaObserver::default();
+    fn test_batch_schema_preserves_column_order_and_attribute_types() {
         let mut span1 = make_span("svc-a", "trace-a", "span-a");
         span1.span_attributes = Attributes::from(vec![make_kv("val", OtlpValue::IntValue(10))]);
         let mut span2 = make_span("svc-a", "trace-a", "span-b");
         span2.span_attributes = Attributes::from(vec![make_kv("val", OtlpValue::DoubleValue(1.5))]);
 
-        build_trace_table_data_with_schema_observer(&[span1, span2], "traces", 7, &mut observer)
-            .unwrap();
+        let (table_data, batch_schema) =
+            build_trace_table_data_with_schema(vec![span1, span2].into_iter()).unwrap();
 
-        assert!(observer.observed.contains(&(
-            7,
-            "span_attributes.val".to_string(),
-            ColumnDataType::Int64,
-            Some(ColumnDataType::Int64)
-        )));
-        assert!(observer.observed.contains(&(
-            7,
-            "span_attributes.val".to_string(),
-            ColumnDataType::Float64,
-            Some(ColumnDataType::Float64)
-        )));
         assert_eq!(
-            observer
-                .observed
-                .iter()
-                .filter(|(_, name, _, _)| name == TIMESTAMP_COLUMN)
-                .count(),
-            1
+            batch_schema.value_types["span_attributes.val"],
+            [ColumnDataType::Int64, ColumnDataType::Float64]
         );
+        let timestamp_index = table_data
+            .columns()
+            .iter()
+            .position(|column| column.column_name == TIMESTAMP_COLUMN)
+            .unwrap();
+        let attribute_index = table_data
+            .columns()
+            .iter()
+            .position(|column| column.column_name == "span_attributes.val")
+            .unwrap();
+        assert!(timestamp_index < attribute_index);
     }
 
     #[test]

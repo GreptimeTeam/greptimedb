@@ -235,7 +235,7 @@ pub fn write_f64(
     )
 }
 
-pub(crate) fn build_json_column_schema(name: impl ToString) -> ColumnSchema {
+fn build_json_column_schema(name: impl ToString) -> ColumnSchema {
     ColumnSchema {
         column_name: name.to_string(),
         datatype: ColumnDataType::Binary as i32,

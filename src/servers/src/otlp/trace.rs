@@ -19,7 +19,7 @@ pub mod v1;
 
 use std::collections::HashSet;
 
-use api::v1::{ColumnDataType, ColumnSchema, RowInsertRequests};
+use api::v1::RowInsertRequests;
 pub use common_catalog::consts::{
     PARENT_SPAN_ID_COLUMN, SPAN_ID_COLUMN, SPAN_NAME_COLUMN, TRACE_ID_COLUMN,
 };
@@ -78,30 +78,6 @@ pub struct TraceAuxData {
     pub operations: HashSet<(String, String, String)>,
 }
 
-/// Receives trace request schema observations while trace rows are built.
-pub trait TraceSchemaObserver {
-    fn observe_trace_column(
-        &mut self,
-        table_name: &str,
-        batch_index: usize,
-        schema: &ColumnSchema,
-        value_type: Option<ColumnDataType>,
-    );
-}
-
-pub(crate) struct NoopTraceSchemaObserver;
-
-impl TraceSchemaObserver for NoopTraceSchemaObserver {
-    fn observe_trace_column(
-        &mut self,
-        _table_name: &str,
-        _batch_index: usize,
-        _schema: &ColumnSchema,
-        _value_type: Option<ColumnDataType>,
-    ) {
-    }
-}
-
 impl TraceAuxData {
     /// Records the auxiliary service and operation rows implied by one accepted
     /// span.
@@ -152,39 +128,6 @@ pub fn to_grpc_insert_requests_from_spans(
             feat: "Unsupported pipeline for trace",
         }
         .fail(),
-    }
-}
-
-/// Convert trace spans and report v1 request schema observations while rows are built.
-pub fn to_grpc_insert_requests_from_spans_with_schema_observer(
-    spans: &[TraceSpan],
-    pipeline: &PipelineWay,
-    pipeline_params: &GreptimePipelineParams,
-    table_name: &str,
-    query_ctx: &QueryContextRef,
-    pipeline_handler: PipelineHandlerRef,
-    batch_index: usize,
-    schema_observer: &mut impl TraceSchemaObserver,
-) -> Result<(RowInsertRequests, usize)> {
-    match pipeline {
-        PipelineWay::OtlpTraceDirectV1 => v1::v1_to_grpc_main_insert_requests_with_schema_observer(
-            spans,
-            pipeline,
-            pipeline_params,
-            table_name,
-            query_ctx,
-            pipeline_handler,
-            batch_index,
-            schema_observer,
-        ),
-        _ => to_grpc_insert_requests_from_spans(
-            spans,
-            pipeline,
-            pipeline_params,
-            table_name,
-            query_ctx,
-            pipeline_handler,
-        ),
     }
 }
 
