@@ -1274,7 +1274,7 @@ mod tests {
             physical_rows,
             vec![
                 ("float".to_string(), 0, Some(1.5), None),
-                ("float".to_string(), 1, Some(2.0), None),
+                ("float".to_string(), 1, None, Some(2)),
                 ("integer".to_string(), 0, None, Some(1)),
                 ("integer".to_string(), 1, None, Some(2)),
             ]

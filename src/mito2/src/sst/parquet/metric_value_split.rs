@@ -12,18 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use api::v1::SemanticType;
 use datatypes::arrow::array::{
-    Array, ArrayRef, BinaryArray, DictionaryArray, Float64Array, Float64Builder, Int64Array,
-    Int64Builder,
+    Array, ArrayRef, Float64Array, Float64Builder, Int64Array, Int64Builder,
 };
-use datatypes::arrow::datatypes::{SchemaRef, UInt32Type};
+use datatypes::arrow::datatypes::SchemaRef;
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::prelude::ConcreteDataType;
-use snafu::{OptionExt, ResultExt, ensure};
+use snafu::{OptionExt, ResultExt};
 use store_api::metadata::RegionMetadata;
 use store_api::metric_engine_consts::{
     DATA_SCHEMA_TABLE_ID_COLUMN_NAME, DATA_SCHEMA_TSID_COLUMN_NAME,
@@ -32,7 +30,6 @@ use store_api::metric_engine_consts::{
 use store_api::storage::consts::ReservedColumnId;
 
 use crate::error::{InvalidRecordBatchSnafu, NewRecordBatchSnafu, Result};
-use crate::sst::parquet::flat_format::primary_key_column_index;
 
 #[derive(Debug, Clone)]
 pub(crate) struct MetricValueSplitColumn {
@@ -95,7 +92,6 @@ pub(crate) fn split_metric_value_columns(
         return Ok(batch.clone());
     }
 
-    let (series_ids, num_series) = primary_key_series_ids(batch)?;
     let mut columns = batch.columns().to_vec();
     for split_column in split_columns {
         let float_array = batch
@@ -122,9 +118,7 @@ pub(crate) fn split_metric_value_columns(
                 ),
             })?;
 
-        let integer_series = integer_series_flags(&series_ids, num_series, float_array, int_array);
-        let (float_output, int_output) =
-            split_one_value_column(&series_ids, &integer_series, float_array, int_array);
+        let (float_output, int_output) = split_one_value_column(float_array, int_array);
         columns[split_column.float_index] = float_output;
         columns[split_column.int_index] = int_output;
     }
@@ -132,40 +126,23 @@ pub(crate) fn split_metric_value_columns(
     RecordBatch::try_new(batch.schema(), columns).context(NewRecordBatchSnafu)
 }
 
-fn integer_series_flags(
-    series_ids: &[usize],
-    num_series: usize,
-    float_array: &Float64Array,
-    int_array: &Int64Array,
-) -> Vec<bool> {
-    let mut integer_series = vec![true; num_series];
-    for (row, series_id) in series_ids.iter().copied().enumerate() {
-        let is_integer = logical_value(float_array, int_array, row)
-            .is_none_or(|value| integer_value(value).is_some());
-        integer_series[series_id] &= is_integer;
-    }
-    integer_series
-}
-
 fn split_one_value_column(
-    series_ids: &[usize],
-    integer_series: &[bool],
     float_array: &Float64Array,
     int_array: &Int64Array,
 ) -> (ArrayRef, ArrayRef) {
     let mut float_builder = Float64Builder::with_capacity(float_array.len());
     let mut int_builder = Int64Builder::with_capacity(float_array.len());
 
-    for (row, series_id) in series_ids.iter().copied().enumerate() {
+    for row in 0..float_array.len() {
         let Some(value) = logical_value(float_array, int_array, row) else {
             float_builder.append_null();
             int_builder.append_null();
             continue;
         };
 
-        if integer_series[series_id] {
+        if let Some(int_value) = integer_value(value) {
             float_builder.append_null();
-            int_builder.append_value(integer_value(value).unwrap());
+            int_builder.append_value(int_value);
         } else {
             float_builder.append_value(value);
             int_builder.append_null();
@@ -200,83 +177,12 @@ fn integer_value(value: f64) -> Option<i64> {
     ((int_value as f64) == value).then_some(int_value)
 }
 
-fn primary_key_series_ids(batch: &RecordBatch) -> Result<(Vec<usize>, usize)> {
-    let primary_key_column = batch.column(primary_key_column_index(batch.num_columns()));
-    if let Some(dict) = primary_key_column
-        .as_any()
-        .downcast_ref::<DictionaryArray<UInt32Type>>()
-    {
-        let values = dict
-            .values()
-            .as_any()
-            .downcast_ref::<BinaryArray>()
-            .with_context(|| InvalidRecordBatchSnafu {
-                reason: "primary key dictionary values are not binary".to_string(),
-            })?;
-        ensure!(
-            dict.null_count() == 0 && values.null_count() == 0,
-            InvalidRecordBatchSnafu {
-                reason: "primary key dictionary contains null".to_string(),
-            }
-        );
-        let series_ids = dict
-            .keys()
-            .values()
-            .iter()
-            .map(|key| *key as usize)
-            .collect::<Vec<_>>();
-        ensure!(
-            series_ids.iter().all(|series_id| *series_id < values.len()),
-            InvalidRecordBatchSnafu {
-                reason: "primary key dictionary key is out of bounds".to_string(),
-            }
-        );
-        return Ok((series_ids, values.len()));
-    }
-
-    let binary = primary_key_column
-        .as_any()
-        .downcast_ref::<BinaryArray>()
-        .with_context(|| InvalidRecordBatchSnafu {
-            reason: format!(
-                "primary key column is not dictionary or binary, got {:?}",
-                primary_key_column.data_type()
-            ),
-        })?;
-    ensure!(
-        binary.null_count() == 0,
-        InvalidRecordBatchSnafu {
-            reason: "primary key binary column contains null".to_string(),
-        }
-    );
-    let mut series_by_key = HashMap::<&[u8], usize>::new();
-    let mut series_ids = Vec::with_capacity(binary.len());
-    for key in binary.iter().flatten() {
-        let series_id = match series_by_key.get(key) {
-            Some(series_id) => *series_id,
-            None => {
-                let series_id = series_by_key.len();
-                series_by_key.insert(key, series_id);
-                series_id
-            }
-        };
-        series_ids.push(series_id);
-    }
-    Ok((series_ids, series_by_key.len()))
-}
-
 #[cfg(test)]
 mod tests {
-    use datatypes::arrow::array::{
-        BinaryArray, DictionaryArray, Float64Array, Int64Array, TimestampMillisecondArray,
-        UInt8Array, UInt32Array, UInt64Array,
-    };
+    use datatypes::arrow::array::{Float64Array, Int64Array};
     use datatypes::schema::ColumnSchema;
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
     use store_api::storage::RegionId;
-    use store_api::storage::consts::{
-        OP_TYPE_COLUMN_NAME, PRIMARY_KEY_COLUMN_NAME, SEQUENCE_COLUMN_NAME,
-    };
 
     use super::*;
 
@@ -322,7 +228,7 @@ mod tests {
     }
 
     #[test]
-    fn test_split_metric_value_columns_by_series() {
+    fn test_split_metric_value_columns_by_value() {
         let batch = RecordBatch::try_from_iter_with_nullable([
             (
                 "greptime_value",
@@ -338,29 +244,6 @@ mod tests {
                 "greptime_value__metric_int",
                 Arc::new(Int64Array::from(vec![None, None, None, None])) as ArrayRef,
                 true,
-            ),
-            (
-                "greptime_timestamp",
-                Arc::new(TimestampMillisecondArray::from(vec![0, 1, 0, 1])) as ArrayRef,
-                false,
-            ),
-            (
-                PRIMARY_KEY_COLUMN_NAME,
-                Arc::new(DictionaryArray::<UInt32Type>::new(
-                    UInt32Array::from(vec![0, 0, 1, 1]),
-                    Arc::new(BinaryArray::from_iter_values([b"a", b"b"])),
-                )) as ArrayRef,
-                false,
-            ),
-            (
-                SEQUENCE_COLUMN_NAME,
-                Arc::new(UInt64Array::from(vec![1, 2, 3, 4])) as ArrayRef,
-                false,
-            ),
-            (
-                OP_TYPE_COLUMN_NAME,
-                Arc::new(UInt8Array::from(vec![0, 0, 0, 0])) as ArrayRef,
-                false,
             ),
         ])
         .unwrap();
@@ -387,11 +270,11 @@ mod tests {
 
         assert_eq!(
             float_values.iter().collect::<Vec<_>>(),
-            vec![None, None, Some(1.5), Some(2.0)]
+            vec![None, None, Some(1.5), None]
         );
         assert_eq!(
             int_values.iter().collect::<Vec<_>>(),
-            vec![Some(1), Some(2), None, None]
+            vec![Some(1), Some(2), None, Some(2)]
         );
     }
 
