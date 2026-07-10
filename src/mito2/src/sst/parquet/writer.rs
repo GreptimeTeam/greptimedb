@@ -57,6 +57,7 @@ use crate::sst::file::RegionFileId;
 use crate::sst::index::{IndexOutput, Indexer, IndexerBuilder};
 use crate::sst::parquet::flat_format::{FlatWriteFormat, time_index_column_index};
 use crate::sst::parquet::format::PrimaryKeyWriteFormat;
+use crate::sst::parquet::metric_value_split::metric_value_split_columns;
 use crate::sst::parquet::{PARQUET_METADATA_KEY, SstInfo, WriteOptions};
 use crate::sst::{
     DEFAULT_WRITE_BUFFER_SIZE, DEFAULT_WRITE_CONCURRENCY, FlatSchemaOptions, SeriesEstimator,
@@ -381,6 +382,7 @@ where
     fn customize_column_config(
         builder: WriterPropertiesBuilder,
         region_metadata: &RegionMetadataRef,
+        schema: &SchemaRef,
     ) -> WriterPropertiesBuilder {
         let ts_col = ColumnPath::new(vec![
             region_metadata
@@ -392,12 +394,22 @@ where
         let seq_col = ColumnPath::new(vec![SEQUENCE_COLUMN_NAME.to_string()]);
         let op_type_col = ColumnPath::new(vec![OP_TYPE_COLUMN_NAME.to_string()]);
 
-        builder
+        let builder = builder
             .set_column_encoding(seq_col.clone(), Encoding::DELTA_BINARY_PACKED)
             .set_column_dictionary_enabled(seq_col, false)
             .set_column_encoding(ts_col.clone(), Encoding::DELTA_BINARY_PACKED)
             .set_column_dictionary_enabled(ts_col, false)
-            .set_column_compression(op_type_col, Compression::UNCOMPRESSED)
+            .set_column_compression(op_type_col, Compression::UNCOMPRESSED);
+
+        metric_value_split_columns(region_metadata, schema)
+            .into_iter()
+            .fold(builder, |builder, split_column| {
+                let int_col =
+                    ColumnPath::new(vec![schema.field(split_column.int_index).name().clone()]);
+                builder
+                    .set_column_encoding(int_col.clone(), Encoding::DELTA_BINARY_PACKED)
+                    .set_column_dictionary_enabled(int_col, false)
+            })
     }
 
     async fn write_next_flat_batch(
@@ -445,7 +457,8 @@ where
                 .set_column_index_truncate_length(None)
                 .set_statistics_truncate_length(None);
 
-            let props_builder = Self::customize_column_config(props_builder, &self.metadata);
+            let props_builder =
+                Self::customize_column_config(props_builder, &self.metadata, schema);
             let writer_props = props_builder.build();
 
             let sst_file_path = self.path_provider.build_sst_file_path(RegionFileId::new(

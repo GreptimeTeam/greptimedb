@@ -57,6 +57,9 @@ use crate::sst::parquet::format::{
     FIXED_POS_COLUMN_NUM, FormatProjection, INTERNAL_COLUMN_NUM, PrimaryKeyArray,
     PrimaryKeyReadFormat, StatValues, column_null_counts, column_values,
 };
+use crate::sst::parquet::metric_value_split::{
+    MetricValueSplitColumn, metric_value_split_columns, split_metric_value_columns,
+};
 use crate::sst::parquet::read_columns::ParquetReadColumns;
 use crate::sst::{
     FlatSchemaOptions, flat_sst_arrow_schema_column_num, tag_maybe_to_dictionary_field,
@@ -68,15 +71,18 @@ pub(crate) struct FlatWriteFormat {
     /// SST file schema.
     arrow_schema: SchemaRef,
     override_sequence: Option<SequenceNumber>,
+    metric_value_split_columns: Vec<MetricValueSplitColumn>,
 }
 
 impl FlatWriteFormat {
     /// Creates a new helper.
     pub(crate) fn new(metadata: RegionMetadataRef, options: &FlatSchemaOptions) -> FlatWriteFormat {
         let arrow_schema = to_flat_sst_arrow_schema(&metadata, options);
+        let metric_value_split_columns = metric_value_split_columns(&metadata, &arrow_schema);
         FlatWriteFormat {
             arrow_schema,
             override_sequence: None,
+            metric_value_split_columns,
         }
     }
 
@@ -99,8 +105,10 @@ impl FlatWriteFormat {
     pub(crate) fn convert_batch(&self, batch: &RecordBatch) -> Result<RecordBatch> {
         debug_assert_eq!(batch.num_columns(), self.arrow_schema.fields().len());
 
+        let batch = split_metric_value_columns(batch, &self.metric_value_split_columns)?;
+
         let Some(override_sequence) = self.override_sequence else {
-            return Ok(batch.clone());
+            return Ok(batch);
         };
 
         let mut columns = batch.columns().to_vec();
