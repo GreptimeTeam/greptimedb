@@ -512,17 +512,17 @@ impl LogStore for KafkaLogStore {
     }
 
     async fn obsolete_all(&self, provider: &Provider, region_id: RegionId) -> Result<()> {
-        let provider = Arc::new(
-            provider
-                .as_kafka_provider()
-                .with_context(|| InvalidProviderSnafu {
-                    expected: KafkaProvider::type_name(),
-                    actual: provider.type_name(),
-                })?
-                .clone(),
-        );
-        let _ = self.client_manager.get_or_insert(&provider).await?;
         if let Some(collector) = self.client_manager.global_index_collector() {
+            let provider = Arc::new(
+                provider
+                    .as_kafka_provider()
+                    .with_context(|| InvalidProviderSnafu {
+                        expected: KafkaProvider::type_name(),
+                        actual: provider.type_name(),
+                    })?
+                    .clone(),
+            );
+            let _ = self.client_manager.get_or_insert(&provider).await?;
             collector.truncate_all(&provider, region_id).await?;
         }
         Ok(())
