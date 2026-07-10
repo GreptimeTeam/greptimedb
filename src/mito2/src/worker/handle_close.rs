@@ -55,7 +55,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     .add_ddl_request_to_pending(SenderDdlRequest {
                         region_id,
                         sender,
-                        request: DdlRequest::Close(RegionCloseRequest {}),
+                        request: DdlRequest::Close(request),
                     });
                 return;
             }
