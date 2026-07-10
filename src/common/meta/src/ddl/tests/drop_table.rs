@@ -923,13 +923,26 @@ async fn test_soft_drop_metric_logical_table_fails() {
     let logical_table_id =
         create_logical_table(ddl_context.clone(), physical_table_id, "foo").await;
 
-    let mut procedure = DropTableProcedure::new(
+    let procedure = DropTableProcedure::new(
         new_drop_table_task("foo", logical_table_id, false),
-        ddl_context,
+        ddl_context.clone(),
     );
-    let err = procedure.on_prepare().await.unwrap_err();
+    let persisted_soft_drop = procedure.dump().unwrap();
+    ddl_context.soft_drop_enabled = false;
+    let mut recovered =
+        DropTableProcedure::from_json(&persisted_soft_drop, ddl_context.clone()).unwrap();
+    let err = recovered.on_prepare().await.unwrap_err();
 
     assert_eq!(err.status_code(), StatusCode::Unsupported);
+
+    let procedure = DropTableProcedure::new(
+        new_drop_table_task("foo", logical_table_id, false),
+        ddl_context.clone(),
+    );
+    let persisted_hard_drop = procedure.dump().unwrap();
+    ddl_context.soft_drop_enabled = true;
+    let mut recovered = DropTableProcedure::from_json(&persisted_hard_drop, ddl_context).unwrap();
+    recovered.on_prepare().await.unwrap();
 }
 
 #[tokio::test]
@@ -951,13 +964,26 @@ async fn test_soft_drop_file_engine_table_fails() {
         .await
         .unwrap();
 
-    let mut procedure = DropTableProcedure::new(
+    let procedure = DropTableProcedure::new(
         new_drop_table_task(table_name, table_id, false),
-        ddl_context,
+        ddl_context.clone(),
     );
-    let err = procedure.on_prepare().await.unwrap_err();
+    let persisted_soft_drop = procedure.dump().unwrap();
+    ddl_context.soft_drop_enabled = false;
+    let mut recovered =
+        DropTableProcedure::from_json(&persisted_soft_drop, ddl_context.clone()).unwrap();
+    let err = recovered.on_prepare().await.unwrap_err();
 
     assert_eq!(err.status_code(), StatusCode::Unsupported);
+
+    let procedure = DropTableProcedure::new(
+        new_drop_table_task(table_name, table_id, false),
+        ddl_context.clone(),
+    );
+    let persisted_hard_drop = procedure.dump().unwrap();
+    ddl_context.soft_drop_enabled = true;
+    let mut recovered = DropTableProcedure::from_json(&persisted_hard_drop, ddl_context).unwrap();
+    recovered.on_prepare().await.unwrap();
 }
 
 #[tokio::test]
@@ -1532,7 +1558,8 @@ async fn test_purge_dropped_table_by_id_selects_tombstone_when_live_table_exists
 async fn test_on_rollback() {
     let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
     let kv_backend = Arc::new(MemoryKvBackend::new());
-    let ddl_context = new_ddl_context_with_kv_backend(node_manager, kv_backend.clone());
+    let mut ddl_context = new_ddl_context_with_kv_backend(node_manager, kv_backend.clone());
+    ddl_context.soft_drop_enabled = true;
     // Prepares physical table metadata.
     let mut create_physical_table_task = test_create_physical_table_task("phy_table");
     let TableMetadata {
@@ -1573,8 +1600,22 @@ async fn test_on_rollback() {
         procedure.on_prepare().await.unwrap();
         assert!(procedure.rollback_supported());
         procedure.on_delete_metadata().await.unwrap();
+        assert!(
+            kv_backend
+                .get(dropped_at_marker_key(physical_table_id).as_bytes())
+                .await
+                .unwrap()
+                .is_some()
+        );
         assert!(procedure.rollback_supported());
         procedure.rollback(&ctx).await.unwrap();
+        assert!(
+            kv_backend
+                .get(dropped_at_marker_key(physical_table_id).as_bytes())
+                .await
+                .unwrap()
+                .is_none()
+        );
         // Rollback again
         assert!(procedure.rollback_supported());
         procedure.rollback(&ctx).await.unwrap();
@@ -1583,6 +1624,7 @@ async fn test_on_rollback() {
     }
 
     // Drops the logical table
+    ddl_context.soft_drop_enabled = false;
     let task = new_drop_table_task("foo", table_ids[0], false);
     let mut procedure = DropTableProcedure::new(task, ddl_context.clone());
     procedure.on_prepare().await.unwrap();

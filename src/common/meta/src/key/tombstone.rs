@@ -214,6 +214,9 @@ impl TombstoneManager {
             .into_iter()
             .map(|kv| (kv.key, kv.value))
             .collect::<HashMap<_, _>>();
+        if results.is_empty() && extra_op.is_none() {
+            return Ok(0);
+        }
 
         const MAX_RETRIES: usize = 8;
         for _ in 0..MAX_RETRIES {
@@ -481,10 +484,12 @@ mod tests {
 
     use std::any::Any;
     use std::collections::HashMap;
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
 
     use crate::error::{Error, Result};
-    use crate::key::tombstone::TombstoneManager;
+    use crate::key::tombstone::{
+        MOVE_VALUE_TXN_OPS_PER_KEY, RESTORE_VALUE_TXN_OPS_PER_KEY, TombstoneManager,
+    };
     use crate::kv_backend::memory::MemoryKvBackend;
     use crate::kv_backend::txn::{Txn, TxnRequest, TxnResponse};
     use crate::kv_backend::{KvBackend, TxnService};
@@ -497,6 +502,7 @@ mod tests {
     struct TxnOpLimitKvBackend {
         inner: Arc<MemoryKvBackend<Error>>,
         max_txn_ops: usize,
+        txn_op_counts: Mutex<Vec<usize>>,
     }
 
     #[async_trait::async_trait]
@@ -515,6 +521,7 @@ mod tests {
                 "txn ops {txn_ops} exceeds limit {}",
                 self.max_txn_ops
             );
+            self.txn_op_counts.lock().unwrap().push(txn_ops);
             self.inner.txn(txn).await
         }
 
@@ -835,6 +842,7 @@ mod tests {
         let kv_backend = Arc::new(TxnOpLimitKvBackend {
             inner: inner.clone(),
             max_txn_ops: 6,
+            txn_op_counts: Mutex::new(Vec::new()),
         });
         let tombstone_manager = TombstoneManager::new(kv_backend);
         let kvs = HashMap::from([
@@ -867,6 +875,7 @@ mod tests {
         let kv_backend = Arc::new(TxnOpLimitKvBackend {
             inner: inner.clone(),
             max_txn_ops: 5,
+            txn_op_counts: Mutex::new(Vec::new()),
         });
         let tombstone_manager = TombstoneManager::new(kv_backend);
         let key = b"foo".to_vec();
@@ -894,6 +903,7 @@ mod tests {
         let kv_backend = Arc::new(TxnOpLimitKvBackend {
             inner: inner.clone(),
             max_txn_ops: 4,
+            txn_op_counts: Mutex::new(Vec::new()),
         });
         let tombstone_manager = TombstoneManager::new(kv_backend);
         let kvs = HashMap::from([
@@ -918,6 +928,141 @@ mod tests {
             .unwrap();
 
         assert_eq!(kvs.len(), moved);
+    }
+
+    #[tokio::test]
+    async fn test_create_with_marker_uses_final_transaction_at_exact_limit() {
+        let inner = Arc::new(MemoryKvBackend::default());
+        let kv_backend = Arc::new(TxnOpLimitKvBackend {
+            inner: inner.clone(),
+            max_txn_ops: MOVE_VALUE_TXN_OPS_PER_KEY,
+            txn_op_counts: Mutex::new(Vec::new()),
+        });
+        let tombstone_manager = TombstoneManager::new(kv_backend.clone());
+        for (key, value) in [(b"bar".as_slice(), b"baz".as_slice()), (b"foo", b"hi")] {
+            inner
+                .put(PutRequest::new().with_key(key).with_value(value))
+                .await
+                .unwrap();
+        }
+
+        tombstone_manager
+            .create_with_marker(
+                vec![b"bar".to_vec(), b"foo".to_vec()],
+                b"__dropped_at/42".to_vec(),
+                b"1234".to_vec(),
+            )
+            .await
+            .unwrap();
+        tombstone_manager
+            .create_with_marker(
+                vec![b"bar".to_vec(), b"foo".to_vec()],
+                b"__dropped_at/42".to_vec(),
+                b"1234".to_vec(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            kv_backend.txn_op_counts.lock().unwrap().as_slice(),
+            &[4, 4, 1, 1]
+        );
+        assert_eq!(
+            inner
+                .get(&tombstone_manager.to_tombstone(b"__dropped_at/42"))
+                .await
+                .unwrap()
+                .unwrap()
+                .value,
+            b"1234"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_restore_with_marker_uses_final_transaction_at_exact_limit() {
+        let inner = Arc::new(MemoryKvBackend::default());
+        let kv_backend = Arc::new(TxnOpLimitKvBackend {
+            inner: inner.clone(),
+            max_txn_ops: RESTORE_VALUE_TXN_OPS_PER_KEY,
+            txn_op_counts: Mutex::new(Vec::new()),
+        });
+        let tombstone_manager = TombstoneManager::new(kv_backend.clone());
+        for (key, value) in [(b"bar".as_slice(), b"baz".as_slice()), (b"foo", b"hi")] {
+            inner
+                .put(
+                    PutRequest::new()
+                        .with_key(tombstone_manager.to_tombstone(key))
+                        .with_value(value),
+                )
+                .await
+                .unwrap();
+        }
+        inner
+            .put(
+                PutRequest::new()
+                    .with_key(tombstone_manager.to_tombstone(b"__dropped_at/42"))
+                    .with_value(b"1234"),
+            )
+            .await
+            .unwrap();
+
+        tombstone_manager
+            .restore_with_marker(
+                vec![b"bar".to_vec(), b"foo".to_vec()],
+                b"__dropped_at/42".to_vec(),
+            )
+            .await
+            .unwrap();
+        tombstone_manager
+            .restore_with_marker(
+                vec![b"bar".to_vec(), b"foo".to_vec()],
+                b"__dropped_at/42".to_vec(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            kv_backend.txn_op_counts.lock().unwrap().as_slice(),
+            &[6, 6, 1, 1]
+        );
+        assert!(
+            inner
+                .get(&tombstone_manager.to_tombstone(b"__dropped_at/42"))
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_delete_with_marker_removes_marker_with_limited_backend() {
+        let inner = Arc::new(MemoryKvBackend::default());
+        let kv_backend = Arc::new(TxnOpLimitKvBackend {
+            inner: inner.clone(),
+            max_txn_ops: MOVE_VALUE_TXN_OPS_PER_KEY,
+            txn_op_counts: Mutex::new(Vec::new()),
+        });
+        let tombstone_manager = TombstoneManager::new(kv_backend);
+        for key in [b"bar".as_slice(), b"foo", b"__dropped_at/42"] {
+            inner
+                .put(
+                    PutRequest::new()
+                        .with_key(tombstone_manager.to_tombstone(key))
+                        .with_value(b"value"),
+                )
+                .await
+                .unwrap();
+        }
+
+        tombstone_manager
+            .delete_with_marker(
+                vec![b"bar".to_vec(), b"foo".to_vec()],
+                b"__dropped_at/42".to_vec(),
+            )
+            .await
+            .unwrap();
+
+        assert!(inner.is_empty());
     }
 
     #[tokio::test]
