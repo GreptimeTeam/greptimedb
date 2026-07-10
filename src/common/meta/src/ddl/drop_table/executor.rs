@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use api::v1::region::{
     CleanUpRequest as PbCleanUpRequest, CloseRequest as PbCloseRegionRequest,
@@ -363,7 +363,7 @@ impl DropTableExecutor {
         let builder = CreateRequestBuilder::new(template, None);
         let storage_path = region_storage_path(&self.table.catalog_name, &self.table.schema_name);
 
-        let mut replicas_by_peer = HashMap::new();
+        let mut replicas_by_peer = BTreeMap::new();
         for route in region_routes {
             for peer in route.leader_peer.iter().chain(route.follower_peers.iter()) {
                 replicas_by_peer
