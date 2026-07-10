@@ -22,9 +22,13 @@
 //!   Provides per-file [`SstInfo`] + [`FileMeta`]; metadata richness varies by path
 //!   (see [`SstFileInfo`] and the coverage footnote).
 //!
-//! - [`on_manifest_updated`]: Fires after **any** manifest write is successfully committed.
-//!   Receives the full [`RegionMetaActionList`] so consumers can inspect what changed
-//!   (file additions/removals, schema changes, truncation, partition expression changes, etc.).
+//! - [`on_manifest_updated`]: Fires after a manifest write is committed to the **live**
+//!   (normal) manifest directory. Writes to the staging directory (enter staging,
+//!   operations during staging, the intermediate apply-staging edit) are suppressed —
+//!   their effects are accumulated and delivered in a single notification when the
+//!   staged actions are promoted to the live manifest. Receives the full
+//!   [`RegionMetaActionList`] so consumers can inspect what changed (file additions/
+//!   removals, schema changes, truncation, partition expression changes, etc.).
 //!
 //! Hook implementations are registered via the [`Plugins`](common_base::Plugins) system:
 //! ```ignore
@@ -33,6 +37,12 @@
 //!
 //! ## Coverage
 //!
+//! Only manifest writes to the **normal** (live) manifest directory trigger
+//! `on_manifest_updated`. Writes to the staging manifest directory (operations
+//! that happen while the region is in staging mode) are intentionally suppressed:
+//! their effects are accumulated and delivered in a single notification when
+//! the staged actions are promoted to the live manifest via `exit_staging_on_success`.
+//!
 //! | Scenario                     | `on_sst_files_written` | `on_manifest_updated` |
 //! |------------------------------|:----------------------:|:---------------------:|
 //! | Flush (memtable → SST)       | ✅ Yes                 | ✅ Yes                |
@@ -40,19 +50,21 @@
 //! | Remote compaction            | ✅ (compactor node) ¹     | ✅ (compactor node) ¹    |
 //! | RegionEdit / bulk ingestion  | ❌ (files pre-written)  | ✅ Yes                |
 //! | Copy region                  | ❌ (object-store copy)  | ✅ Yes                |
-//! | Apply staging                | ❌ (delegates to edit)  | ✅ Yes ²               |
+//! | Apply staging (promote)      | ❌ (delegates to edit)  | ✅ Yes ²               |
 //! | Alter (schema change)        | ❌ (no SST files)       | ✅ Yes                |
 //! | Truncate                     | ❌ (removes files)      | ✅ Yes                |
-//! | Enter staging                | ❌ (no SST files)       | ✅ Yes                |
+//! | Enter staging                | ❌ (no SST files)       | ❌ (staging dir)      |
+//! | Operations during staging    | N/A                    | ❌ (staging dir)      |
 //! | Async index build            | ❌ (index files only)   | ✅ Yes                |
 //!
 //! ¹ Remote compaction runs on a dedicated compactor node via `open_compaction_region()`;
 //!   pass plugins via `OpenCompactionRegionRequest` to enable hooks there. `sst_infos` is
 //!   `#[serde(skip)]` over the wire, so each [`SstInfo`] is rebuilt from [`FileMeta`] with
 //!   empty footer/index — see [`SstFileInfo`] for field-level detail.
-//! ² Apply staging fires `on_manifest_updated` twice: once when the staging SST files are
-//!   committed via `RegionEdit`, and once when `exit_staging_on_success` merges all staged
-//!   manifest actions into the live manifest.
+//! ² Apply staging fires `on_manifest_updated` once when `exit_staging_on_success` promotes
+//!   all staged manifest actions (including the SST file additions) into the live manifest.
+//!   The intermediate staging `RegionEdit` is written to the staging directory and does not
+//!   fire the hook — its file list is included in the promote notification.
 //!
 //! The following paths do **not** trigger any hook:
 //! - Follower region sync / catchup (manifest read-only; followers don't author changes)
@@ -103,6 +115,13 @@ use crate::sst::parquet::SstInfo;
 ///
 /// Must be [`fire`](Self::fire)d **after** the manifest write lock is released
 /// (the hook may read the manifest). `#[must_use]` so a forgotten receipt warns.
+///
+/// ## Staging suppression
+///
+/// When `is_staging` is `true`, [`fire`](Self::fire) is a no-op — the write went to
+/// the staging manifest directory. The hook only observes writes to the live (normal)
+/// manifest directory. Staging actions are accumulated and delivered in a single
+/// notification when `exit_staging_on_success` promotes them (`is_staging = false`).
 #[must_use = "the region hook must be fired after releasing the manifest write lock"]
 pub(crate) struct PendingManifestHook {
     region_id: RegionId,
@@ -110,6 +129,9 @@ pub(crate) struct PendingManifestHook {
     action_list: Option<RegionMetaActionList>,
     version: ManifestVersion,
     hook: Option<RegionHookRef>,
+    /// Whether the manifest write went to the staging directory.
+    /// When `true`, `fire()` is suppressed — the hook only observes live manifest writes.
+    is_staging: bool,
 }
 
 impl PendingManifestHook {
@@ -118,12 +140,14 @@ impl PendingManifestHook {
         action_list: Option<RegionMetaActionList>,
         version: ManifestVersion,
         hook: Option<RegionHookRef>,
+        is_staging: bool,
     ) -> Self {
         Self {
             region_id,
             action_list,
             version,
             hook,
+            is_staging,
         }
     }
 
@@ -132,9 +156,13 @@ impl PendingManifestHook {
         self.version
     }
 
-    /// Fires the hook if one is registered. Safe to call unconditionally: it is
-    /// a no-op when no hook is registered.
+    /// Fires the hook if one is registered, **unless** the write went to the staging
+    /// manifest directory (`is_staging = true`). Safe to call unconditionally:
+    /// it is a no-op when no hook is registered or when the write is staging-only.
     pub(crate) async fn fire(self) {
+        if self.is_staging {
+            return;
+        }
         if let (Some(hook), Some(action_list)) = (self.hook, self.action_list) {
             hook.on_manifest_updated(self.region_id, &action_list, self.version)
                 .await;
@@ -146,6 +174,9 @@ impl PendingManifestHook {
     /// keeps `self`'s actions followed by `other`'s, and the *later* manifest
     /// version wins. Used when a sequence of writes (e.g. staging-exit followed
     /// by metadata backfill) should notify the hook exactly once.
+    ///
+    /// `is_staging` is `true` only if **both** sides are staging; if either side
+    /// is a live write, the merged result is also live.
     pub(crate) fn merge(self, other: PendingManifestHook) -> PendingManifestHook {
         debug_assert_eq!(
             self.region_id, other.region_id,
@@ -164,6 +195,7 @@ impl PendingManifestHook {
             },
             version: self.version.max(other.version),
             hook: self.hook.or(other.hook),
+            is_staging: self.is_staging && other.is_staging,
         }
     }
 }
@@ -211,10 +243,14 @@ pub trait RegionHook: Send + Sync + Debug {
         let _ = (region_id, region_metadata, files);
     }
 
-    /// Called after the region manifest is successfully committed.
+    /// Called after the region manifest is successfully committed to the **live**
+    /// (normal) manifest directory.
     ///
-    /// Fires for **all** manifest write paths: flush, compaction, region edit,
-    /// copy region, alter, truncate, enter staging, index build, etc.
+    /// Fires for: flush, compaction, region edit, copy region, alter, truncate,
+    /// async index build, and apply-staging promote. Does **not** fire for writes
+    /// to the staging manifest directory (enter staging, operations during staging,
+    /// the intermediate apply-staging edit) — those are suppressed because their
+    /// effects are accumulated and delivered in a single promote notification.
     ///
     /// Does **not** fire for:
     /// - Manifest reads / follower sync (no write)
