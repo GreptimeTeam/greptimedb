@@ -503,6 +503,10 @@ impl Inserter {
         })
     }
 
+    pub fn auto_create_table_enabled(&self, ctx: &QueryContextRef) -> Result<bool> {
+        Ok(self.auto_create_disabled_reason(ctx)?.is_none())
+    }
+
     /// Creates or alter tables on demand:
     /// - if table does not exist, create table by inferred CreateExpr
     /// - if table exist, check if schema matches. If any new column found, alter table by inferred `AlterExpr`
@@ -1473,6 +1477,15 @@ mod tests {
             )),
             true,
         );
+        assert!(inserter.auto_create_table_enabled(&ctx).unwrap());
+        let mut disabled_ctx = QueryContext::with(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME);
+        disabled_ctx.set_extension(AUTO_CREATE_TABLE_KEY, "false");
+        assert!(
+            !inserter
+                .auto_create_table_enabled(&Arc::new(disabled_ctx))
+                .unwrap()
+        );
+
         let alter_expr = inserter
             .get_alter_table_expr_on_demand(&mut req, &table, &ctx, true, true)
             .unwrap();
