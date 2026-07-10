@@ -206,3 +206,128 @@ fn splitmix64(mut value: u64) -> u64 {
     mixed = (mixed ^ (mixed >> 27)).wrapping_mul(0x94d049bb133111eb);
     mixed ^ (mixed >> 31)
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+
+    use super::*;
+
+    fn args(pattern: ValuePattern) -> PromRemoteWriteArgs {
+        PromRemoteWriteArgs {
+            endpoint: "http://127.0.0.1:4000/v1/prometheus/write".to_string(),
+            database: "public".to_string(),
+            metric: "test_metric".to_string(),
+            physical_table: "greptime_physical_table".to_string(),
+            series_count: 2,
+            samples_per_series: 64,
+            start_unix_millis: 1_704_067_200_000,
+            step_millis: 60_000,
+            chunk_series_count: 2,
+            timeout_seconds: 60,
+            value_pattern: pattern,
+            value_base: 0.0,
+            value_step: 1.0,
+            value_cardinality: 1_024,
+            value_seed: 8_444,
+            value_run_length: 16,
+            value_stall_every: 100,
+            value_stall_length: 16,
+            value_mixed_every: 5,
+            value_sample_offset: 0,
+            value_total_samples_per_series: None,
+        }
+    }
+
+    #[test]
+    fn seeded_random_is_deterministic_in_range_and_highly_distinct() {
+        let mut args = args(ValuePattern::SeededRandom);
+        args.samples_per_series = 4_096;
+        args.value_cardinality = 29_491_200;
+
+        let values = (0..args.samples_per_series)
+            .map(|sample_idx| deterministic_prom_value(&args, 0, sample_idx))
+            .collect::<Vec<_>>();
+        let repeated = (0..args.samples_per_series)
+            .map(|sample_idx| deterministic_prom_value(&args, 0, sample_idx))
+            .collect::<Vec<_>>();
+
+        assert_eq!(values, repeated);
+        assert!(values.iter().all(|value| {
+            (args.value_base..=args.value_base + (args.value_cardinality - 1) as f64)
+                .contains(value)
+        }));
+        assert!(
+            values
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<HashSet<_>>()
+                .len()
+                > 4_000
+        );
+    }
+
+    #[test]
+    fn run_length_values_have_exact_sixteen_sample_runs() {
+        let args = args(ValuePattern::RunLength);
+
+        for sample_idx in 0..64 {
+            assert_eq!(
+                deterministic_prom_value(&args, 0, sample_idx),
+                (sample_idx / 16) as f64
+            );
+        }
+    }
+
+    #[test]
+    fn mixed_every_five_repeats_only_the_expected_positions() {
+        let mut args = args(ValuePattern::MixedSignalRepeated);
+        args.value_step = 0.125;
+
+        for sample_idx in 0..20 {
+            let expected = if sample_idx % 5 == 0 {
+                0.0
+            } else {
+                1.0 + sample_idx as f64 * 0.125
+            };
+            assert_eq!(deterministic_prom_value(&args, 1, sample_idx), expected);
+        }
+    }
+
+    #[test]
+    fn chunked_values_match_monolithic_values_through_offsets() {
+        let mut monolithic = args(ValuePattern::SeededRandom);
+        monolithic.samples_per_series = 14_400;
+        monolithic.value_total_samples_per_series = Some(14_400);
+
+        for series_idx in 0..2 {
+            let expected = (0..monolithic.samples_per_series)
+                .map(|sample_idx| deterministic_prom_value(&monolithic, series_idx, sample_idx))
+                .collect::<Vec<_>>();
+            for chunk_idx in 0..10 {
+                let mut chunk = args(ValuePattern::SeededRandom);
+                chunk.samples_per_series = 1_440;
+                chunk.value_sample_offset = chunk_idx * 1_440;
+                chunk.value_total_samples_per_series = Some(14_400);
+                for sample_idx in 0..chunk.samples_per_series {
+                    assert_eq!(
+                        deterministic_prom_value(&chunk, series_idx, sample_idx),
+                        expected[(chunk.value_sample_offset + sample_idx) as usize]
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn values_continue_across_series_boundaries() {
+        let mut args = args(ValuePattern::Unique);
+        args.samples_per_series = 16;
+        args.value_total_samples_per_series = Some(16);
+        args.value_base = 1.0;
+        args.value_step = 0.5;
+
+        assert_eq!(deterministic_prom_value(&args, 0, 15), 8.5);
+        assert_eq!(deterministic_prom_value(&args, 1, 0), 9.0);
+    }
+}

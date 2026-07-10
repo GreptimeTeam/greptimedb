@@ -119,6 +119,10 @@ jobs:
           git reset --hard FETCH_HEAD
           git clean -ffdx
 
+      - name: Test query regression runner lifecycle
+        working-directory: src
+        run: uv run --no-project python tests/perf/test_query_regression_runner_compaction_toctou.py
+
       - name: Build candidate greptime and fixture generators
         working-directory: src
         run: |
@@ -169,9 +173,13 @@ jobs:
         with:
           name: query-regression-report
           path: |
-            query-regression-work/**
+            query-regression-work/**/query-regression-report.json
+            query-regression-work/**/base/report.json
+            query-regression-work/**/candidate/report.json
+            query-regression-work/**/logs/**
             query-regression-summary.md
           if-no-files-found: warn
+          retention-days: 7
 
       - name: Upload trusted comment artifact
         if: ${{ always() && github.event_name == 'pull_request' }}

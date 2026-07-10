@@ -26,7 +26,9 @@ from pathlib import Path
 
 DEFAULT_CASES = [
     "tests/perf/query_cases/smoke_direct_sst/case.toml",
-    "tests/perf/query_cases/prom_remote_write_smoke/case.toml",
+    "tests/perf/query_cases/prom_remote_write_seeded_random/case.toml",
+    "tests/perf/query_cases/prom_remote_write_run_heavy/case.toml",
+    "tests/perf/query_cases/prom_remote_write_mixed_every/case.toml",
     "tests/perf/query_cases/promql_pushdown_7913/case.toml",
     "tests/perf/query_cases/sql_topk_order_by/case.toml",
     "tests/perf/query_cases/sql_aggregate_order_by/case.toml",

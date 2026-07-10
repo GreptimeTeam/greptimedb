@@ -4,6 +4,11 @@ This directory is for query performance cases that compare a base build with a
 candidate build. It is not a replacement for sqlness: the goal is to measure the
 effect of optimizer/query-engine changes on realistic scan work.
 
+The Prometheus remote-write cases are end-to-end regression coverage for the
+automatic write, flush, SST, and query path. They do not replace controlled
+encoding experiments that explicitly compare `plain`/dictionary,
+`no_dictionary`, BYTE_STREAM_SPLIT, or Auto policies.
+
 ## Phase 1: direct readable SST fixtures
 
 Phase 1 should generate data by writing readable Mito SST files and matching
@@ -40,9 +45,10 @@ The runner also supports `scenario.kind = "prom_remote_write_then_query"` for a
 bounded write-path smoke/regression flow. This path is explicit and separate from
 the direct-SST fixture path: it starts the base and candidate distributed clusters,
 writes deterministic Prometheus remote-write v1 samples through
-`/v1/prometheus/write`, flushes the configured physical metric table, optionally
-inspects the landed SST/Parquet footer, encoding, and size, then runs the
-configured SQL/TQL queries against the logical metric table.
+`/v1/prometheus/write`, flushes the configured physical metric table, checks
+visibility, runs the configured SQL/TQL queries, stops and awaits the datanode,
+then optionally inspects the landed SST/Parquet footer, encoding, and size and
+runs the read-bench against the quiescent data directory.
 
 Remote-write cases configure one database, one logical metric, and one physical
 table under `[scenario.remote_write]`:
@@ -53,7 +59,7 @@ kind = "prom_remote_write_then_query"
 
 [scenario.remote_write]
 database = "public"
-metric = "prom_remote_write_smoke"
+metric = "prom_remote_write_seeded_random"
 physical_table = "greptime_physical_table"
 series_count = 512
 samples_per_series = 1440
@@ -113,10 +119,10 @@ subcommands; the old direct invocation (`query_perf_fixture --case ... --out-dir
 
 Remote-write cases that need to validate storage output can add
 `[scenario.remote_write.storage]`. When present, the scenario body becomes:
-remote-write → flush → visibility check → Parquet footer/size/encoding inspection
-→ optional read-bench → query. Footer inspection is handled by
-`query_perf_fixture inspect-footer`, which reads local Parquet footers directly;
-it does not require Python `pyarrow`.
+remote-write → flush → visibility check → query measurement → stop and await
+datanode → Parquet footer/size/encoding inspection → optional read-bench. Footer
+inspection is handled by `query_perf_fixture inspect-footer`, which reads local
+Parquet footers directly; it does not require Python `pyarrow`.
 
 ```toml
 [scenario.remote_write.storage]
@@ -177,15 +183,22 @@ need multi-window file distribution should span multiple compaction windows. If
 `sample_chunk_size` is omitted, the runner keeps the older single-helper-invocation
 behavior and flushes once at the end.
 
-`tests/perf/query_cases/prom_remote_write_smoke/case.toml` is the default
-remote-write coverage case. It writes 4096 series × 28,800 samples (117,964,800
-rows per target), uses high-cardinality seeded-random values, splits twenty days
-into ten flushed chunks, and requires multiple landed SSTs so storage inspection
-and the read-bench supplement have enough data to reduce incidental query noise
-while staying smaller than the manual 7913 case. The read-bench supplement
-samples six files for per-SST `parquetbench` coverage while `scanbench` still
-covers the whole landed region. The TQL selector runs 100 measured iterations so
-the latency threshold is less sensitive to single-query jitter.
+The default remote-write coverage set contains three cases with the same 2048
+series × 14,400 samples (29,491,200 rows per target) shape. Each writes ten
+one-day chunks, flushes every chunk, requires at least two visible SSTs with the
+value column, runs seven read-bench iterations with `parquetbench` capped at
+four SSTs while `scanbench` covers the landed region, and measures one ten-day
+TQL selector with two warmups and 15 iterations:
+
+- `prom_remote_write_seeded_random`: high-distinct seeded-random values with
+  cardinality 29,491,200 and seed 8444.
+- `prom_remote_write_run_heavy`: low-cardinality values in exact 16-sample runs.
+- `prom_remote_write_mixed_every`: continuous signal values with every fifth
+  sample repeated at the base value.
+
+These cases record normal storage/footer and read-bench results but do not gate
+specific value encodings or storage-size outcomes. Use the controlled encoding
+experiment matrix for those policy comparisons.
 
 `tests/perf/query_cases/prom_remote_write_7913/case.toml` is a larger manual
 case for issue #7913. It writes 8192 series × 20160 samples through remote-write
@@ -370,7 +383,7 @@ Remote-write runner dry-run:
 
 ```bash
 uv run --no-project python tests/perf/query_regression_runner.py \
-  --case tests/perf/query_cases/prom_remote_write_smoke/case.toml \
+  --case tests/perf/query_cases/prom_remote_write_seeded_random/case.toml \
   --base-bin /path/to/base/greptime \
   --candidate-bin /path/to/candidate/greptime \
   --fixture-generator /path/to/query_perf_fixture \
@@ -393,14 +406,17 @@ binaries. Candidate `query_perf_fixture` is the extra head-side helper binary;
 the runner uses candidate `greptime datanode parquetbench/scanbench` as the
 read-bench tool against each target's data directory.
 
-The workflow runs automatically only for non-draft PRs labeled
-`query-regression` (on label/ready-for-review/reopen events, not every push).
+The workflow runs automatically only when `query-regression` is added to a
+non-draft PR; it does not rerun on pushes, ready-for-review, or reopen events.
 PR runs build base/candidate once and then run the default case set with
 `--allow-large-fixture`. Manual `workflow_dispatch` runs can pass `all`, one case
 path, or a comma/whitespace-separated list of case paths, and can override refs.
-It always uploads `query-regression-work/**` and `query-regression-summary.md`,
-writes the Markdown summary to the workflow step summary, and updates a sticky PR
-comment through the trusted follow-up workflow.
+The main report artifact uploads only aggregate/per-target JSON reports,
+component logs, and `query-regression-summary.md` with seven-day retention;
+fixture data, SSTs, and cluster state are excluded. PR runs also upload a
+separate trusted-comment artifact containing PR metadata and aggregate reports.
+The workflow writes the Markdown summary to the workflow step summary and
+updates a sticky PR comment through the trusted follow-up workflow.
 
 ## Built-in cases
 

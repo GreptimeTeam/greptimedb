@@ -1261,13 +1261,13 @@ def run_remote_write_scenario(args: argparse.Namespace, case: dict[str, Any], ca
             query_result = {"validation": [], "validation_errors": [], "measurements": [], "status": "planned"}
             if not args.dry_run:
                 visibility = poll_expected_count(target, tables[0]["name"], db, expected_remote_write_rows(remote), float(remote["visibility_timeout_seconds"]), args.http_timeout)
+                query_result = run_queries(target, case, tables, args.http_timeout)
+                cluster.stop_component("datanode")
             storage_inspection = None
             if storage:
                 storage_inspection = run_storage_inspection(helper or args.storage_inspector, target, storage, dry_run=args.dry_run)
                 storage_results.append(storage_inspection)
             read_bench_result = run_read_bench(args.candidate_bin, target, remote["read_bench"], storage_inspection, dry_run=args.dry_run)
-            if not args.dry_run:
-                query_result = run_queries(target, case, tables, args.http_timeout)
             tr = {"name": target.name, "binary": str(target.binary), "work_dir": str(target.work_dir), "components": cluster.component_report(), "frontend_config": str(config_path), "create_database": create_database, "remote_write": rw, "flushes": flushes, "flush": flushes[-1] if flushes else None, "visibility": visibility, **query_result}
             if storage_inspection is not None:
                 tr["storage_inspection"] = storage_inspection
