@@ -18,7 +18,7 @@ runs:
       uses: actions/download-artifact@v4
 
     - name: Create git tag for release
-      if: ${{ github.event_name != 'push' }} # Meaning this is a scheduled or manual workflow.
+      if: ${{ github.event_name != 'push' && github.ref_type != 'tag' }} # Scheduled and manual branch workflows need a new tag.
       shell: bash
       run: |
         git tag ${{ inputs.version }}

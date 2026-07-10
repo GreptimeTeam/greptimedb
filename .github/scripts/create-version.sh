@@ -2,12 +2,27 @@
 
 set -e
 
-# - If it's a tag push release, the version is the tag name(${{ github.ref_name }});
+# - If it's a tag push release or manual dispatch on a tag with REUSE_EXISTING_RELEASE_TAG=true, the version is the tag name(${{ github.ref_name }});
 # - If it's a scheduled release, the version is '${{ env.NEXT_RELEASE_VERSION }}-nightly-$buildTime', like 'v0.2.0-nightly-20230313';
-# - If it's a manual release, the version is '${{ env.NEXT_RELEASE_VERSION }}-$(git rev-parse --short HEAD)-YYYYMMDDSS', like 'v0.2.0-e5b243c-2023071245';
+# - If it's a manual non-tag release, the version is '${{ env.NEXT_RELEASE_VERSION }}-$(git rev-parse --short HEAD)-YYYYMMDDSS', like 'v0.2.0-e5b243c-2023071245';
 # - If it's a nightly build, the version is 'nightly-YYYYMMDD-$(git rev-parse --short HEAD)', like 'nightly-20230712-e5b243c'.
 # create_version ${GIHUB_EVENT_NAME} ${NEXT_RELEASE_VERSION} ${NIGHTLY_RELEASE_PREFIX}
 function create_version() {
+  validate_formal_tag() {
+    if [ -z "$GITHUB_REF_NAME" ]; then
+      echo "GITHUB_REF_NAME is empty in formal tag release" >&2
+      exit 1
+    fi
+
+    CARGO_VERSION=$(grep '^version = ' Cargo.toml | cut -d '"' -f 2 | head -n 1)
+    EXPECTED_REF_NAME="v${CARGO_VERSION}"
+    if [ "$GITHUB_REF_NAME" != "$EXPECTED_REF_NAME" ]; then
+      echo "Error: GITHUB_REF_NAME '$GITHUB_REF_NAME' does not match Cargo.toml version 'v${CARGO_VERSION}'" >&2
+      echo "Expected tag name: '$EXPECTED_REF_NAME'" >&2
+      exit 1
+    fi
+  }
+
   # Read from environment variables.
   if [ -z "$GITHUB_EVENT_NAME" ]; then
       echo "GITHUB_EVENT_NAME is empty" >&2
@@ -23,6 +38,13 @@ function create_version() {
   if [ -z "$NIGHTLY_RELEASE_PREFIX" ]; then
       echo "NIGHTLY_RELEASE_PREFIX is empty" >&2
       exit 1
+  fi
+
+  if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ] && [ "${GITHUB_REF_TYPE:-}" = tag ] && \
+    [ "${REUSE_EXISTING_RELEASE_TAG:-}" = true ]; then
+    validate_formal_tag
+    echo "$GITHUB_REF_NAME"
+    exit 0
   fi
 
   # Reuse $NEXT_RELEASE_VERSION to identify whether it's a nightly build.
@@ -45,21 +67,7 @@ function create_version() {
 
   # Note: Only output 'version=xxx' to stdout when everything is ok, so that it can be used in GitHub Actions Outputs.
   if [ "$GITHUB_EVENT_NAME" = push ]; then
-    if [ -z "$GITHUB_REF_NAME" ]; then
-      echo "GITHUB_REF_NAME is empty in push event" >&2
-      exit 1
-    fi
-    
-    # For tag releases, ensure GITHUB_REF_NAME matches the version in Cargo.toml
-    CARGO_VERSION=$(grep '^version = ' Cargo.toml | cut -d '"' -f 2 | head -n 1)
-    EXPECTED_REF_NAME="v${CARGO_VERSION}"
-    
-    if [ "$GITHUB_REF_NAME" != "$EXPECTED_REF_NAME" ]; then
-      echo "Error: GITHUB_REF_NAME '$GITHUB_REF_NAME' does not match Cargo.toml version 'v${CARGO_VERSION}'" >&2
-      echo "Expected tag name: '$EXPECTED_REF_NAME'" >&2
-      exit 1
-    fi
-    
+    validate_formal_tag
     echo "$GITHUB_REF_NAME"
   elif [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
     echo "$NEXT_RELEASE_VERSION-$(git rev-parse --short HEAD)-$(date "+%Y%m%d-%s")"
@@ -73,6 +81,7 @@ function create_version() {
 
 # You can run as following examples:
 #  GITHUB_EVENT_NAME=push NEXT_RELEASE_VERSION=v0.4.0 NIGHTLY_RELEASE_PREFIX=nightly GITHUB_REF_NAME=v0.3.0 ./create-version.sh
+#  GITHUB_EVENT_NAME=workflow_dispatch GITHUB_REF_TYPE=tag REUSE_EXISTING_RELEASE_TAG=true GITHUB_REF_NAME=v0.3.0 NEXT_RELEASE_VERSION=v0.4.0 NIGHTLY_RELEASE_PREFIX=nightly ./create-version.sh
 #  GITHUB_EVENT_NAME=workflow_dispatch NEXT_RELEASE_VERSION=v0.4.0 NIGHTLY_RELEASE_PREFIX=nightly ./create-version.sh
 #  GITHUB_EVENT_NAME=schedule NEXT_RELEASE_VERSION=v0.4.0 NIGHTLY_RELEASE_PREFIX=nightly ./create-version.sh
 #  GITHUB_EVENT_NAME=schedule NEXT_RELEASE_VERSION=nightly NIGHTLY_RELEASE_PREFIX=nightly ./create-version.sh
