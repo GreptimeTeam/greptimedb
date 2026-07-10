@@ -105,7 +105,7 @@ impl MetricEngineInner {
             utils::to_metadata_region_id(physical_region_id),
             utils::to_data_region_id(physical_region_id)
         );
-        if let Err(err) = self.close_physical_region(physical_region_id).await {
+        if let Err(err) = self.close_physical_region(physical_region_id, false).await {
             error!(err; "Failed to close physical region {}", physical_region_id);
         }
     }
