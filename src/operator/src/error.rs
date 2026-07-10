@@ -589,6 +589,22 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display(
+        "CSV header mismatch in path: {}, unknown columns: {:?}, missing columns: {:?}, duplicate columns: {:?}",
+        path,
+        unknown_columns,
+        missing_columns,
+        duplicate_columns
+    ))]
+    CsvHeaderMismatch {
+        path: String,
+        unknown_columns: Vec<String>,
+        missing_columns: Vec<String>,
+        duplicate_columns: Vec<String>,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to project schema"))]
     ProjectSchema {
         #[snafu(source)]
@@ -936,6 +952,7 @@ impl ErrorExt for Error {
             | Error::ColumnNotFound { .. }
             | Error::BuildRegex { .. }
             | Error::InvalidSchema { .. }
+            | Error::CsvHeaderMismatch { .. }
             | Error::ProjectSchema { .. }
             | Error::UnsupportedFormat { .. }
             | Error::ColumnNoneDefaultValue { .. }
