@@ -177,7 +177,8 @@ async fn test_recovered_hard_drop_ignores_soft_runtime_context() {
 #[tokio::test]
 async fn test_on_prepare_table_not_exists_err() {
     let node_manager = Arc::new(MockDatanodeManager::new(()));
-    let ddl_context = new_ddl_context(node_manager);
+    let mut ddl_context = new_ddl_context(node_manager);
+    ddl_context.soft_drop_enabled = true;
     let table_name = "foo";
     let table_id = 1024;
     let task = test_create_table_task(table_name, table_id);
@@ -194,8 +195,10 @@ async fn test_on_prepare_table_not_exists_err() {
 
     let task = new_drop_table_task("bar", table_id, false);
     let mut procedure = DropTableProcedure::new(task, ddl_context);
+    assert_eq!(procedure.data.dropped_at, None);
     let err = procedure.on_prepare().await.unwrap_err();
     assert_eq!(err.status_code(), StatusCode::TableNotFound);
+    assert_eq!(procedure.data.dropped_at, None);
 }
 
 #[tokio::test]
@@ -482,13 +485,18 @@ async fn test_soft_drop_timestamp_is_stable_across_retry_and_recovery() {
         new_drop_table_task("foo", table_id, false),
         ddl_context.clone(),
     );
-    assert!(procedure.data.dropped_at.is_some());
+    assert_eq!(procedure.data.dropped_at, None);
+    let mut procedure = procedure;
+    procedure.on_prepare().await.unwrap();
+    let dropped_at = procedure.data.dropped_at.unwrap();
+    let persisted = procedure.dump().unwrap();
+    let recovered = DropTableProcedure::from_json(&persisted, ddl_context.clone()).unwrap();
+    assert_eq!(recovered.data.dropped_at, Some(dropped_at));
     let mut data: serde_json::Value = serde_json::from_str(&procedure.dump().unwrap()).unwrap();
     data["dropped_at"] = 1_234_567_890_i64.into();
     let mut recovered =
         DropTableProcedure::from_json(&data.to_string(), ddl_context.clone()).unwrap();
 
-    recovered.on_prepare().await.unwrap();
     recovered.on_delete_metadata().await.unwrap();
     recovered.on_delete_metadata().await.unwrap();
     let persisted = recovered.dump().unwrap();

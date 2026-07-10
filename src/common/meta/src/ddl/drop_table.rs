@@ -93,6 +93,9 @@ impl DropTableProcedure {
             return Ok(Status::done());
         }
         self.fill_table_metadata().await?;
+        if self.data.soft_drop_enabled && self.data.dropped_at.is_none() {
+            self.data.dropped_at = Some(current_time_millis());
+        }
         self.data.state = DropTableState::DeleteMetadata;
 
         Ok(Status::executing(true))
@@ -352,7 +355,7 @@ impl DropTableData {
             region_wal_options: HashMap::new(),
             allow_rollback: false,
             soft_drop_enabled,
-            dropped_at: soft_drop_enabled.then(current_time_millis),
+            dropped_at: None,
         }
     }
 

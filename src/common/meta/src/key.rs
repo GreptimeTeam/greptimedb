@@ -164,6 +164,7 @@ use crate::key::topic_region::TopicRegionValue;
 use crate::key::txn_helper::TxnOpGetResponseSet;
 use crate::kv_backend::KvBackendRef;
 use crate::kv_backend::txn::{Txn, TxnOp};
+use crate::rpc::KeyValue;
 use crate::rpc::router::{LeaderState, RegionRoute, region_distribution};
 use crate::rpc::store::BatchDeleteRequest;
 use crate::state_store::PoisonValue;
@@ -1038,8 +1039,23 @@ impl TableMetadataManager {
             dropped_tables.push(DroppedTableName {
                 table_id,
                 table_name,
-                dropped_at: self.dropped_at(table_id).await?,
+                dropped_at: None,
             });
+        }
+        if dropped_tables.is_empty() {
+            return Ok(dropped_tables);
+        }
+
+        let dropped_at_keys = dropped_tables
+            .iter()
+            .map(|table| dropped_at_key(table.table_id))
+            .collect::<Vec<_>>();
+        let dropped_at_values = self.tombstone_manager.batch_get(&dropped_at_keys).await?;
+        for table in &mut dropped_tables {
+            table.dropped_at = Self::parse_dropped_at(
+                table.table_id,
+                dropped_at_values.get(&dropped_at_key(table.table_id)),
+            )?;
         }
 
         Ok(dropped_tables)
@@ -1177,11 +1193,15 @@ impl TableMetadataManager {
     }
 
     async fn dropped_at(&self, table_id: TableId) -> Result<Option<i64>> {
-        let Some(kv) = self
+        let kv = self
             .tombstone_manager
             .get(&dropped_at_key(table_id))
-            .await?
-        else {
+            .await?;
+        Self::parse_dropped_at(table_id, kv.as_ref())
+    }
+
+    fn parse_dropped_at(table_id: TableId, kv: Option<&KeyValue>) -> Result<Option<i64>> {
+        let Some(kv) = kv else {
             return Ok(None);
         };
         let value = String::from_utf8_lossy(&kv.value);
@@ -1680,6 +1700,7 @@ impl_optional_metadata_value! {
 mod tests {
     use std::collections::{BTreeMap, HashMap, HashSet};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use bytes::Bytes;
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
@@ -1709,9 +1730,10 @@ mod tests {
     use crate::kv_backend::KvBackend;
     use crate::kv_backend::memory::MemoryKvBackend;
     use crate::kv_backend::read_only::ReadOnlyKvBackend;
+    use crate::kv_backend::test_util::MockKvBackend;
     use crate::peer::Peer;
     use crate::rpc::router::{LeaderState, Region, RegionRoute, region_distribution};
-    use crate::rpc::store::{PutRequest, RangeRequest};
+    use crate::rpc::store::{BatchGetResponse, PutRequest, RangeRequest, RangeResponse};
     use crate::wal_provider::{RegionWalOptions, WalProvider};
 
     #[test]
@@ -3044,6 +3066,92 @@ mod tests {
             &region_routes,
             &options,
         );
+    }
+
+    #[tokio::test]
+    async fn test_list_dropped_tables_batches_timestamp_lookup() {
+        let mem_kv = Arc::new(MemoryKvBackend::default());
+        let table_metadata_manager = TableMetadataManager::new(mem_kv.clone());
+        for (table_id, table_name, dropped_at) in
+            [(1025, "legacy", None), (1026, "marked", Some(1234))]
+        {
+            let task = test_create_table_task(table_name, table_id);
+            let table_name = task.table_name();
+            let table_route = TableRouteValue::physical(vec![]);
+            table_metadata_manager
+                .create_table_metadata(task.table_info, table_route.clone(), HashMap::new())
+                .await
+                .unwrap();
+            table_metadata_manager
+                .delete_table_metadata(
+                    table_id,
+                    &table_name,
+                    &table_route,
+                    &HashMap::new(),
+                    dropped_at,
+                )
+                .await
+                .unwrap();
+        }
+        let all_tombstones = mem_kv
+            .range(RangeRequest::new().with_prefix("__tombstone/"))
+            .await
+            .unwrap()
+            .kvs;
+        let range_calls = Arc::new(AtomicUsize::new(0));
+        let batch_get_calls = Arc::new(AtomicUsize::new(0));
+        let mock = MockKvBackend {
+            range_fn: Some({
+                let all_tombstones = all_tombstones.clone();
+                let range_calls = range_calls.clone();
+                Arc::new(move |req| {
+                    range_calls.fetch_add(1, Ordering::Relaxed);
+                    let kvs = all_tombstones
+                        .iter()
+                        .filter(|kv| {
+                            if req.range_end.is_empty() {
+                                kv.key == req.key
+                            } else {
+                                kv.key >= req.key && kv.key < req.range_end
+                            }
+                        })
+                        .cloned()
+                        .collect();
+                    Ok(RangeResponse { kvs, more: false })
+                })
+            }),
+            batch_get_fn: Some({
+                let batch_get_calls = batch_get_calls.clone();
+                Arc::new(move |req| {
+                    batch_get_calls.fetch_add(1, Ordering::Relaxed);
+                    let kvs = all_tombstones
+                        .iter()
+                        .filter(|kv| req.keys.contains(&kv.key))
+                        .cloned()
+                        .collect();
+                    Ok(BatchGetResponse { kvs })
+                })
+            }),
+            put_fn: None,
+            batch_put_fn: None,
+            delete_range_fn: None,
+            batch_delete_fn: None,
+            txn: None,
+            max_txn_ops: None,
+        };
+        let table_metadata_manager = TableMetadataManager::new(Arc::new(mock));
+
+        let dropped_tables = table_metadata_manager.list_dropped_tables().await.unwrap();
+
+        assert_eq!(
+            dropped_tables
+                .iter()
+                .map(|table| (table.table_id, table.dropped_at))
+                .collect::<Vec<_>>(),
+            vec![(1025, None), (1026, Some(1234))]
+        );
+        assert_eq!(range_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(batch_get_calls.load(Ordering::Relaxed), 1);
     }
 
     #[tokio::test]
