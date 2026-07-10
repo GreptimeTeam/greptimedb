@@ -150,6 +150,8 @@ impl RowGroupSelection {
     ///
     /// # Arguments
     /// * `row_group_size` - The number of rows in each row group (except possibly the last one)
+    /// * `num_row_groups` - Total number of row groups in the Parquet file
+    /// * `total_row_count` - Total number of rows in the Parquet file
     /// * `apply_output` - The output from applying the inverted index
     ///
     /// # Assumptions
@@ -158,6 +160,7 @@ impl RowGroupSelection {
     pub fn from_inverted_index_apply_output(
         row_group_size: usize,
         num_row_groups: usize,
+        total_row_count: usize,
         apply_output: ApplyOutput,
     ) -> Self {
         // Step 1: Convert segment IDs to row ranges within row groups.
@@ -165,9 +168,6 @@ impl RowGroupSelection {
         // of `segment_row_count`, so we split each matched segment's global row range across
         // every row group it overlaps instead of dropping the overflow.
         let segment_row_count = apply_output.segment_row_count;
-        // Nominal total row count. Clamping to it ensures we never reference a row group beyond
-        // `num_row_groups` (the last segment may extend past the end of the file).
-        let total_row_count = num_row_groups * row_group_size;
         let row_group_ranges = apply_output
             .matched_segment_ids
             .iter_ones()
@@ -193,7 +193,7 @@ impl RowGroupSelection {
             });
 
         // Step 2: Group ranges by row group ID and create row selections
-        let mut total_row_count = 0;
+        let mut selected_row_count = 0;
         let mut total_selector_len = 0;
         let mut selection_in_rg = row_group_ranges
             .chunk_by(|(row_group_id, _)| *row_group_id)
@@ -209,7 +209,7 @@ impl RowGroupSelection {
                 let selection = row_selection_from_row_ranges(ranges, row_group_size);
                 let row_count = selection.row_count();
                 let selector_len = selector_len(&selection);
-                total_row_count += row_count;
+                selected_row_count += row_count;
                 total_selector_len += selector_len;
                 (
                     row_group_id,
@@ -226,7 +226,7 @@ impl RowGroupSelection {
 
         Self {
             selection_in_rg,
-            row_count: total_row_count,
+            row_count: selected_row_count,
             selector_len: total_selector_len,
         }
     }
@@ -729,14 +729,18 @@ mod tests {
         assert_eq!(selection, expected);
     }
 
-    fn apply_output(matched: &[usize], segment_row_count: usize) -> ApplyOutput {
+    fn apply_output(
+        matched: &[usize],
+        segment_row_count: usize,
+        total_row_count: usize,
+    ) -> ApplyOutput {
         let mut matched_segment_ids = Bitmap::new_bitvec();
         for &seg_id in matched {
             matched_segment_ids.insert_range(seg_id..=seg_id);
         }
         ApplyOutput {
             matched_segment_ids,
-            total_row_count: 0,
+            total_row_count,
             segment_row_count,
         }
     }
@@ -745,8 +749,12 @@ mod tests {
     fn test_from_inverted_index_segment_within_row_group() {
         // segment_row_count (4) divides row_group_size (8): each segment maps to one row group.
         // segment 1 -> rows [4, 8) in row group 0; segment 2 -> rows [8, 12) in row group 1.
-        let selection =
-            RowGroupSelection::from_inverted_index_apply_output(8, 2, apply_output(&[1, 2], 4));
+        let selection = RowGroupSelection::from_inverted_index_apply_output(
+            8,
+            2,
+            16,
+            apply_output(&[1, 2], 4, 16),
+        );
         assert_eq!(selection.row_count(), 8);
         assert_eq!(
             selection.get(0),
@@ -766,8 +774,12 @@ mod tests {
         // row_group_size (10) is not a multiple of segment_row_count (4): segment 2 covers global
         // rows [8, 12), straddling row group 0 (rows [8, 10)) and row group 1 (rows [0, 2)).
         // Both halves must be selected; the old code dropped the row group 1 half.
-        let selection =
-            RowGroupSelection::from_inverted_index_apply_output(10, 2, apply_output(&[2], 4));
+        let selection = RowGroupSelection::from_inverted_index_apply_output(
+            10,
+            2,
+            20,
+            apply_output(&[2], 4, 20),
+        );
         assert_eq!(selection.row_count(), 4);
         assert_eq!(
             selection.get(0),
@@ -784,17 +796,21 @@ mod tests {
 
     #[test]
     fn test_from_inverted_index_last_segment_clamped_to_end() {
-        // Last segment 4 covers global rows [16, 20) but only 18 rows exist (num_row_groups=2,
-        // row_group_size=9). The overflow rows [18, 20) must be clamped, never referencing a
-        // third row group.
-        let selection =
-            RowGroupSelection::from_inverted_index_apply_output(9, 2, apply_output(&[4], 4));
+        // Last segment 4 covers global rows [16, 20), but the last row group is partial and only
+        // 18 rows exist. The overflow rows [18, 20) must be clamped.
+        let selection = RowGroupSelection::from_inverted_index_apply_output(
+            10,
+            2,
+            18,
+            apply_output(&[4], 4, 18),
+        );
+        assert_eq!(selection.row_count(), 2);
         assert_eq!(selection.get(2), None);
-        // Rows [16, 18) land in row group 1 at offset [7, 9).
+        // Rows [16, 18) land in row group 1 at offset [6, 8).
         assert_eq!(
             selection.get(1),
             Some(&RowSelection::from(vec![
-                RowSelector::skip(7),
+                RowSelector::skip(6),
                 RowSelector::select(2),
             ]))
         );
