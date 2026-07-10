@@ -279,7 +279,9 @@ mod test {
     use common_meta::ddl::test_util::assert_column_name_and_id;
     use common_meta::ddl::utils::{parse_column_metadatas, parse_manifest_infos_from_extensions};
     use common_query::prelude::{greptime_timestamp, greptime_value};
-    use store_api::metric_engine_consts::ALTER_PHYSICAL_EXTENSION_KEY;
+    use store_api::metric_engine_consts::{
+        ALTER_PHYSICAL_EXTENSION_KEY, metric_engine_value_int_column_name,
+    };
     use store_api::region_engine::RegionEngine;
     use store_api::region_request::{
         AlterKind, BatchRegionDdlRequest, RegionAlterRequest, SetRegionOption,
@@ -357,15 +359,17 @@ mod test {
         assert_eq!(timestamp_index, SemanticType::Timestamp);
         let column_metadatas =
             parse_column_metadatas(&response.extensions, ALTER_PHYSICAL_EXTENSION_KEY).unwrap();
+        let value_int_name = metric_engine_value_int_column_name(greptime_value());
         assert_column_name_and_id(
             &column_metadatas,
             &[
                 (greptime_timestamp(), 0),
                 (greptime_value(), 1),
+                (value_int_name.as_str(), 2),
                 ("__table_id", ReservedColumnId::table_id()),
                 ("__tsid", ReservedColumnId::tsid()),
-                ("job", 2),
-                ("tag1", 3),
+                ("job", 3),
+                ("tag1", 4),
             ],
         );
     }
@@ -416,15 +420,17 @@ mod test {
 
         let column_metadatas =
             parse_column_metadatas(&response.extensions, ALTER_PHYSICAL_EXTENSION_KEY).unwrap();
+        let value_int_name = metric_engine_value_int_column_name(greptime_value());
         assert_column_name_and_id(
             &column_metadatas,
             &[
                 (greptime_timestamp(), 0),
                 (greptime_value(), 1),
+                (value_int_name.as_str(), 2),
                 ("__table_id", ReservedColumnId::table_id()),
                 ("__tsid", ReservedColumnId::tsid()),
-                ("job", 2),
-                ("tag1", 3),
+                ("job", 3),
+                ("tag1", 4),
             ],
         );
     }

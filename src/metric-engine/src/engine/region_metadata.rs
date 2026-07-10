@@ -79,37 +79,4 @@ impl MetricEngineInner {
 
         Ok(dedup_columns)
     }
-
-    /// Load logical column names of a logical region.
-    ///
-    /// The return value is ordered on column name alphabetically.
-    pub async fn load_logical_column_names(
-        &self,
-        physical_region_id: RegionId,
-        logical_region_id: RegionId,
-    ) -> Result<Vec<String>> {
-        // First try to load from state cache
-        if let Some(columns) = self
-            .state
-            .read()
-            .unwrap()
-            .logical_columns()
-            .get(&logical_region_id)
-        {
-            return Ok(columns
-                .iter()
-                .map(|c| c.column_schema.name.clone())
-                .collect());
-        }
-
-        // Else load from metadata region
-        let columns = self
-            .load_logical_columns(physical_region_id, logical_region_id)
-            .await?
-            .into_iter()
-            .map(|c| c.column_schema.name)
-            .collect::<Vec<_>>();
-
-        Ok(columns)
-    }
 }

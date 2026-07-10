@@ -51,16 +51,17 @@ Affected Rows: 0
 
 DESC TABLE phy;
 
-+------------+----------------------+-----+------+---------+---------------+
-| Column     | Type                 | Key | Null | Default | Semantic Type |
-+------------+----------------------+-----+------+---------+---------------+
-| ts         | TimestampMillisecond | PRI | NO   |         | TIMESTAMP     |
-| val        | Float64              |     | YES  |         | FIELD         |
-| __table_id | UInt32               | PRI | NO   |         | TAG           |
-| __tsid     | UInt64               | PRI | NO   |         | TAG           |
-| host       | String               | PRI | YES  |         | TAG           |
-| job        | String               | PRI | YES  |         | TAG           |
-+------------+----------------------+-----+------+---------+---------------+
++-----------------+----------------------+-----+------+---------+---------------+
+| Column          | Type                 | Key | Null | Default | Semantic Type |
++-----------------+----------------------+-----+------+---------+---------------+
+| ts              | TimestampMillisecond | PRI | NO   |         | TIMESTAMP     |
+| val             | Float64              |     | YES  |         | FIELD         |
+| val__metric_int | Int64                |     | YES  |         | FIELD         |
+| __table_id      | UInt32               | PRI | NO   |         | TAG           |
+| __tsid          | UInt64               | PRI | NO   |         | TAG           |
+| host            | String               | PRI | YES  |         | TAG           |
+| job             | String               | PRI | YES  |         | TAG           |
++-----------------+----------------------+-----+------+---------+---------------+
 
 SELECT ts, val, __tsid, host, job FROM phy;
 
@@ -204,16 +205,17 @@ Affected Rows: 0
 
 DESC TABLE phy;
 
-+------------+----------------------+-----+------+---------+---------------+
-| Column     | Type                 | Key | Null | Default | Semantic Type |
-+------------+----------------------+-----+------+---------+---------------+
-| ts         | TimestampMillisecond | PRI | NO   |         | TIMESTAMP     |
-| val        | Float64              |     | YES  |         | FIELD         |
-| __table_id | UInt32               | PRI | NO   |         | TAG           |
-| __tsid     | UInt64               | PRI | NO   |         | TAG           |
-| host       | String               | PRI | YES  |         | TAG           |
-| job        | String               | PRI | YES  |         | TAG           |
-+------------+----------------------+-----+------+---------+---------------+
++-----------------+----------------------+-----+------+---------+---------------+
+| Column          | Type                 | Key | Null | Default | Semantic Type |
++-----------------+----------------------+-----+------+---------+---------------+
+| ts              | TimestampMillisecond | PRI | NO   |         | TIMESTAMP     |
+| val             | Float64              |     | YES  |         | FIELD         |
+| val__metric_int | Int64                |     | YES  |         | FIELD         |
+| __table_id      | UInt32               | PRI | NO   |         | TAG           |
+| __tsid          | UInt64               | PRI | NO   |         | TAG           |
+| host            | String               | PRI | YES  |         | TAG           |
+| job             | String               | PRI | YES  |         | TAG           |
++-----------------+----------------------+-----+------+---------+---------------+
 
 DROP TABLE phy;
 

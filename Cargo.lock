@@ -8332,6 +8332,7 @@ dependencies = [
  "common-wal",
  "criterion 0.7.0",
  "datafusion",
+ "datafusion-physical-expr",
  "datatypes",
  "futures-util",
  "fxhash",

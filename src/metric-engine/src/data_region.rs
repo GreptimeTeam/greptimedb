@@ -312,11 +312,14 @@ mod test {
         let column_names = new_metadata
             .column_metadatas
             .iter()
-            .map(|c| &c.column_schema.name)
+            .map(|c| c.column_schema.name.as_str())
             .collect::<Vec<_>>();
+        let value_int_name =
+            store_api::metric_engine_consts::metric_engine_value_int_column_name(greptime_value());
         let expected = vec![
             greptime_timestamp(),
             greptime_value(),
+            value_int_name.as_str(),
             "__table_id",
             "__tsid",
             "job",

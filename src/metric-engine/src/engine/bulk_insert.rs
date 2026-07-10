@@ -13,17 +13,22 @@
 // limitations under the License.
 
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use api::v1::{ArrowIpc, SemanticType};
 use bytes::Bytes;
 use common_grpc::flight::{FlightEncoder, FlightMessage};
+use datatypes::arrow::array::new_null_array;
+use datatypes::arrow::datatypes::{Field as ArrowField, Schema as ArrowSchema};
 use datatypes::arrow::record_batch::RecordBatch;
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::RegionMetadataRef;
+use store_api::metric_engine_consts::is_metric_engine_value_int_column;
 use store_api::region_engine::RegionEngine;
 use store_api::region_request::{AffectedRows, RegionBulkInsertsRequest, RegionRequest};
 use store_api::storage::RegionId;
+use store_api::storage::consts::PRIMARY_KEY_COLUMN_NAME;
 
 use crate::batch_modifier::{TagColumnInfo, modify_batch_sparse};
 use crate::engine::MetricEngineInner;
@@ -74,6 +79,15 @@ impl MetricEngineInner {
         region_id: RegionId,
         mut request: RegionBulkInsertsRequest,
     ) -> Result<AffectedRows> {
+        request.payload = self
+            .append_missing_metric_value_int_fields(region_id, request.payload)
+            .await?;
+        let (schema, data_header, payload) = record_batch_to_ipc(&request.payload)?;
+        request.raw_data = ArrowIpc {
+            schema,
+            data_header,
+            payload,
+        };
         // Simply set the aligned schema to the data region schema version to avoid filling missing columns
         // because that schema should be constant and callers have ensured request has the same schema.
         request.aligned_schema_version = Some(self.physical_schema_version(region_id).await?);
@@ -118,6 +132,9 @@ impl MetricEngineInner {
             &tag_columns,
             &non_tag_indices,
         )?;
+        let modified_batch = self
+            .append_missing_metric_value_int_fields(data_region_id, modified_batch)
+            .await?;
         let (schema, data_header, payload) = record_batch_to_ipc(&modified_batch)?;
 
         let partition_expr_version = request.partition_expr_version;
@@ -137,6 +154,69 @@ impl MetricEngineInner {
         self.data_region
             .write_data(data_region_id, RegionRequest::BulkInserts(request))
             .await
+    }
+
+    async fn append_missing_metric_value_int_fields(
+        &self,
+        data_region_id: RegionId,
+        batch: RecordBatch,
+    ) -> Result<RecordBatch> {
+        let metadata = self
+            .mito
+            .get_metadata(data_region_id)
+            .await
+            .context(error::MitoReadOperationSnafu)?;
+        let batch_schema = batch.schema();
+        let existing_names = batch_schema
+            .fields()
+            .iter()
+            .map(|field| field.name().as_str())
+            .collect::<HashSet<_>>();
+
+        let missing_columns = metadata
+            .field_columns()
+            .filter(|column| is_metric_engine_value_int_column(&column.column_schema.name))
+            .filter(|column| !existing_names.contains(column.column_schema.name.as_str()))
+            .collect::<Vec<_>>();
+        if missing_columns.is_empty() {
+            return Ok(batch);
+        }
+
+        let mut fields = batch
+            .schema()
+            .fields()
+            .iter()
+            .map(|field| field.as_ref().clone())
+            .collect::<Vec<_>>();
+        let insert_index = batch_schema
+            .index_of(PRIMARY_KEY_COLUMN_NAME)
+            .unwrap_or(fields.len());
+        let mut columns = batch.columns().to_vec();
+        for (offset, column) in missing_columns.into_iter().enumerate() {
+            let field = ArrowField::try_from(&column.column_schema).map_err(|err| {
+                error::InvalidRequestSnafu {
+                    region_id: data_region_id,
+                    reason: format!(
+                        "failed to build Arrow field for column {}: {err}",
+                        column.column_schema.name
+                    ),
+                }
+                .build()
+            })?;
+            columns.insert(
+                insert_index + offset,
+                new_null_array(field.data_type(), batch.num_rows()),
+            );
+            fields.insert(insert_index + offset, field);
+        }
+
+        RecordBatch::try_new(Arc::new(ArrowSchema::new(fields)), columns).map_err(|err| {
+            error::InvalidRequestSnafu {
+                region_id: data_region_id,
+                reason: format!("failed to append metric value companion columns: {err}"),
+            }
+            .build()
+        })
     }
 
     async fn physical_schema_version(&self, region_id: RegionId) -> Result<u64> {
@@ -302,6 +382,25 @@ mod tests {
         })
     }
 
+    fn collect_metric_values(batches: &RecordBatches) -> Vec<f64> {
+        let mut values = batches
+            .iter()
+            .flat_map(|batch| {
+                batch
+                    .column_by_name(greptime_value())
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<Float64Array>()
+                    .unwrap()
+                    .iter()
+                    .map(Option::unwrap)
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        values.sort_by(f64::total_cmp);
+        values
+    }
+
     async fn init_dense_metric_region(env: &TestEnv) -> RegionId {
         let physical_region_id = env.default_physical_region_id();
         env.create_physical_region(
@@ -374,7 +473,7 @@ mod tests {
         let tag_columns = vec![TagColumnInfo {
             name: "job".to_string(),
             index: 2,
-            column_id: 2, // column_id for "job" in the physical table
+            column_id: 3, // column_id for "job" in the physical table
         }];
         let non_tag_indices = vec![0, 1]; // timestamp, value
         let second_batch = build_logical_batch(3, 3);
@@ -401,6 +500,26 @@ mod tests {
             .unwrap();
         let batches = RecordBatches::try_collect(stream).await.unwrap();
         assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 6);
+        assert_eq!(
+            collect_metric_values(&batches),
+            vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0]
+        );
+
+        env.metric()
+            .handle_request(physical_region_id, RegionRequest::Flush(Default::default()))
+            .await
+            .unwrap();
+        let stream = env
+            .metric()
+            .scan_to_stream(logical_region_id, ScanRequest::default())
+            .await
+            .unwrap();
+        let batches = RecordBatches::try_collect(stream).await.unwrap();
+        assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 6);
+        assert_eq!(
+            collect_metric_values(&batches),
+            vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0]
+        );
     }
 
     #[tokio::test]
