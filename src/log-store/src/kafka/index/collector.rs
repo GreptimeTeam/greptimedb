@@ -79,7 +79,7 @@ pub struct CollectionTask {
 impl CollectionTask {
     async fn read_index(&self) -> Result<DatanodeWalIndexes> {
         match self.operator.read(&self.path).await {
-            Ok(bytes) => DatanodeWalIndexes::decode(&bytes.to_vec()),
+            Ok(bytes) => DatanodeWalIndexes::decode(bytes.to_bytes().as_ref()),
             Err(err) if err.kind() == ErrorKind::NotFound => Ok(DatanodeWalIndexes::default()),
             Err(err) => Err(err).context(error::ReadIndexSnafu {
                 path: self.path.clone(),
