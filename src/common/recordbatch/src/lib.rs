@@ -22,6 +22,7 @@ pub mod filter;
 pub mod recordbatch;
 pub mod util;
 
+use std::collections::HashMap;
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
@@ -571,6 +572,11 @@ struct StreamMemoryTracker {
 
 type MemoryAcquireResult = std::result::Result<(), common_memory_manager::Error>;
 
+fn aligned_tracked_bytes(bytes: usize) -> usize {
+    PermitGranularity::Kilobyte
+        .permits_to_bytes(PermitGranularity::Kilobyte.bytes_to_permits(bytes as u64)) as usize
+}
+
 impl StreamMemoryTracker {
     fn inc_rejected(&self) {
         self.tracker.inc_rejected();
@@ -594,6 +600,17 @@ impl StreamMemoryTracker {
             self.tracked_bytes = self.tracked_bytes.saturating_add(additional);
         }
         (self, result)
+    }
+
+    fn release(&mut self, bytes: usize) {
+        if bytes == 0 {
+            return;
+        }
+        if self.guard.release_partial(bytes as u64) {
+            self.tracked_bytes = self.tracked_bytes.saturating_sub(bytes);
+        } else {
+            debug_assert!(false, "released bytes must not exceed tracked scan memory");
+        }
     }
 
     fn reject_error(&self, additional: usize) -> error::Error {
@@ -627,7 +644,17 @@ impl StreamMemoryTracker {
 }
 
 type PendingTrackFuture = Pin<
-    Box<dyn Future<Output = (StreamMemoryTracker, RecordBatch, usize, MemoryAcquireResult)> + Send>,
+    Box<
+        dyn Future<
+                Output = (
+                    StreamMemoryTracker,
+                    RecordBatch,
+                    usize,
+                    Vec<TrackedBuffer>,
+                    MemoryAcquireResult,
+                ),
+            > + Send,
+    >,
 >;
 
 #[derive(Clone)]
@@ -695,34 +722,47 @@ impl MemoryMetrics for CallbackMemoryMetrics {
     }
 }
 
-/// Tracks Arrow backing buffers shared by consecutive batches.
-///
-/// The Mito read path splits batches into consecutive zero-copy slices to enforce timestamp
-/// ordering. Each slice reports the full capacity of its shared buffers, so summing
-/// `buffer_memory_size()` directly can multiply one allocation by the number of slices.
-#[derive(Default)]
-struct ConsecutiveBatchBufferTracker {
-    previous: Vec<Buffer>,
+struct TrackedBuffer {
+    buffer: Buffer,
+    charged_bytes: usize,
 }
 
-impl ConsecutiveBatchBufferTracker {
-    fn prepare(&self, batch: &RecordBatch) -> (usize, Vec<Buffer>) {
+/// Tracks live Arrow backing allocations across all batches in a stream.
+///
+/// Mito can split a batch into zero-copy slices before merging multiple inputs. The merge may
+/// interleave those slices, so batches sharing one allocation are not necessarily consecutive.
+/// Keeping one reference here both identifies the allocation and prevents its address from being
+/// reused. Once this is the only remaining reference, the allocation and its quota can be released.
+#[derive(Default)]
+struct LiveBufferTracker {
+    buffers: HashMap<usize, TrackedBuffer>,
+}
+
+impl LiveBufferTracker {
+    fn prepare(&self, batch: &RecordBatch, limited: bool) -> (usize, Vec<TrackedBuffer>) {
         let mut current = Vec::new();
         for array in batch.columns() {
             Self::collect_unique_buffers(&array.to_data(), &mut current);
         }
 
-        let additional = current
+        let new_buffers = current
             .iter()
-            .filter(|buffer| {
-                !self
-                    .previous
-                    .iter()
-                    .any(|previous| previous.data_ptr() == buffer.data_ptr())
+            .filter(|buffer| !self.buffers.contains_key(&Self::key(buffer)))
+            .map(|buffer| {
+                let capacity = buffer.capacity();
+                let charged_bytes = if limited {
+                    aligned_tracked_bytes(capacity)
+                } else {
+                    capacity
+                };
+                TrackedBuffer {
+                    buffer: buffer.clone(),
+                    charged_bytes,
+                }
             })
-            .map(Buffer::capacity)
-            .sum();
-        (additional, current)
+            .collect::<Vec<_>>();
+        let additional = new_buffers.iter().map(|buffer| buffer.charged_bytes).sum();
+        (additional, new_buffers)
     }
 
     fn collect_unique_buffers(data: &ArrayData, buffers: &mut Vec<Buffer>) {
@@ -749,12 +789,26 @@ impl ConsecutiveBatchBufferTracker {
         }
     }
 
-    fn commit(&mut self, current: Vec<Buffer>) {
-        self.previous = current;
+    fn key(buffer: &Buffer) -> usize {
+        buffer.data_ptr().as_ptr() as usize
     }
 
-    fn clear(&mut self) {
-        self.previous.clear();
+    fn commit(&mut self, new_buffers: Vec<TrackedBuffer>) {
+        for tracked in new_buffers {
+            self.buffers.insert(Self::key(&tracked.buffer), tracked);
+        }
+    }
+
+    fn release_unused(&mut self) -> usize {
+        let mut released = 0;
+        self.buffers.retain(|_, tracked| {
+            let retain = tracked.buffer.strong_count() > 1;
+            if !retain {
+                released += tracked.charged_bytes;
+            }
+            retain
+        });
+        released
     }
 }
 
@@ -762,7 +816,7 @@ impl ConsecutiveBatchBufferTracker {
 pub struct MemoryTrackedStream {
     inner: SendableRecordBatchStream,
     tracker: Option<StreamMemoryTracker>,
-    buffer_tracker: ConsecutiveBatchBufferTracker,
+    buffer_tracker: LiveBufferTracker,
     // Waiting stores a batch that has already been pulled from the inner stream but has not yet
     // acquired additional quota. This keeps `poll_next()` non-blocking and allows bounded waits,
     // at the cost of temporarily holding one untracked batch per blocked stream in memory.
@@ -774,7 +828,7 @@ impl MemoryTrackedStream {
         Self {
             inner,
             tracker: Some(tracker.new_stream_tracker()),
-            buffer_tracker: ConsecutiveBatchBufferTracker::default(),
+            buffer_tracker: LiveBufferTracker::default(),
             waiting: None,
         }
     }
@@ -787,7 +841,17 @@ impl MemoryTrackedStream {
         self.tracker.as_mut().unwrap()
     }
 
-    fn enter_waiting(&mut self, batch: RecordBatch, additional: usize) {
+    fn release_unused_buffers(&mut self) {
+        let released = self.buffer_tracker.release_unused();
+        self.ready_tracker_mut().release(released);
+    }
+
+    fn enter_waiting(
+        &mut self,
+        batch: RecordBatch,
+        additional: usize,
+        new_buffers: Vec<TrackedBuffer>,
+    ) {
         debug_assert!(
             self.waiting.is_none(),
             "enter_waiting should only be called from the ready state"
@@ -797,28 +861,28 @@ impl MemoryTrackedStream {
             "enter_waiting requires a tracker in the ready state"
         );
         let tracker = self.tracker.take().unwrap();
-        self.waiting = Some(Self::start_waiting(tracker, batch, additional));
+        self.waiting = Some(Self::start_waiting(tracker, batch, additional, new_buffers));
     }
 
     fn start_waiting(
         tracker: StreamMemoryTracker,
         batch: RecordBatch,
         additional: usize,
+        new_buffers: Vec<TrackedBuffer>,
     ) -> PendingTrackFuture {
         Box::pin(async move {
             let (tracker, result) = tracker.track_with_policy(additional).await;
-            (tracker, batch, additional, result)
+            (tracker, batch, additional, new_buffers, result)
         })
     }
 
     fn poll_waiting(&mut self, cx: &mut Context<'_>) -> Poll<Option<Result<RecordBatch>>> {
         let future = self.waiting.as_mut().unwrap();
         match future.as_mut().poll(cx) {
-            Poll::Ready((tracker, batch, additional, result)) => {
+            Poll::Ready((tracker, batch, additional, new_buffers, result)) => {
                 let output = match result {
                     Ok(()) => {
-                        let (_, buffers) = self.buffer_tracker.prepare(&batch);
-                        self.buffer_tracker.commit(buffers);
+                        self.buffer_tracker.commit(new_buffers);
                         Ok(batch)
                     }
                     Err(error) => {
@@ -839,7 +903,8 @@ impl MemoryTrackedStream {
         batch: RecordBatch,
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<RecordBatch>>> {
-        let (additional, buffers) = self.buffer_tracker.prepare(&batch);
+        let limited = self.ready_tracker_mut().tracker.limit() > 0;
+        let (additional, new_buffers) = self.buffer_tracker.prepare(&batch, limited);
         let tracker = self.ready_tracker_mut();
 
         if let Err(error) = tracker.try_track(additional) {
@@ -853,13 +918,13 @@ impl MemoryTrackedStream {
                 // contention, real memory usage can therefore exceed `scan_memory_limit` by up to
                 // one buffered batch per blocked stream.
                 OnExhaustedPolicy::Wait { .. } => {
-                    self.enter_waiting(batch, additional);
+                    self.enter_waiting(batch, additional, new_buffers);
                     return self.poll_waiting(cx);
                 }
             }
         }
 
-        self.buffer_tracker.commit(buffers);
+        self.buffer_tracker.commit(new_buffers);
         Poll::Ready(Some(Ok(batch)))
     }
 }
@@ -872,11 +937,12 @@ impl Stream for MemoryTrackedStream {
             return self.poll_waiting(cx);
         }
 
+        self.release_unused_buffers();
         match Pin::new(&mut self.inner).poll_next(cx) {
             Poll::Ready(Some(Ok(batch))) => self.poll_batch(batch, cx),
             Poll::Ready(Some(Err(error))) => Poll::Ready(Some(Err(error))),
             Poll::Ready(None) => {
-                self.buffer_tracker.clear();
+                self.release_unused_buffers();
                 Poll::Ready(None)
             }
             Poll::Pending => Poll::Pending,
@@ -908,7 +974,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
-    use common_memory_manager::{OnExhaustedPolicy, PermitGranularity};
+    use common_memory_manager::OnExhaustedPolicy;
     use datatypes::arrow::array::{BinaryViewArray, StringViewArray};
     use datatypes::prelude::{ConcreteDataType, VectorRef};
     use datatypes::schema::{ColumnSchema, Schema};
@@ -929,10 +995,9 @@ mod tests {
         RecordBatch::new(schema, vec![vector]).unwrap()
     }
 
-    fn aligned_tracked_bytes(bytes: usize) -> usize {
-        PermitGranularity::Kilobyte
-            .permits_to_bytes(PermitGranularity::Kilobyte.bytes_to_permits(bytes as u64))
-            as usize
+    fn consuming_stream(schema: SchemaRef, batches: Vec<RecordBatch>) -> SendableRecordBatchStream {
+        let stream = futures::stream::iter(batches.into_iter().map(Ok));
+        Box::pin(RecordBatchStreamWrapper::new(schema, stream))
     }
 
     #[test]
@@ -1243,30 +1308,49 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_memory_tracked_stream_counts_shared_buffers_once() {
-        let rows = 128;
+    async fn test_memory_tracked_stream_counts_interleaved_shared_buffers_once() {
+        let rows = 64;
         let bytes_per_row = 16 * 1024;
         let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
             "payload",
             ConcreteDataType::binary_datatype(),
             false,
         )]));
-        let payload = vec![b'x'; bytes_per_row];
-        let values = vec![payload.as_slice(); rows];
-        let vector: VectorRef = Arc::new(BinaryVector::from(values));
-        let batch = RecordBatch::new(schema.clone(), vec![vector]).unwrap();
-        let slices = (0..rows)
-            .map(|offset| batch.slice(offset, 1).unwrap())
-            .collect::<Vec<_>>();
+        let payload_a = vec![b'a'; bytes_per_row];
+        let payload_b = vec![b'b'; bytes_per_row];
+        let batch_a = RecordBatch::new(
+            schema.clone(),
+            vec![Arc::new(BinaryVector::from(vec![payload_a.as_slice(); rows])) as VectorRef],
+        )
+        .unwrap();
+        let batch_b = RecordBatch::new(
+            schema.clone(),
+            vec![Arc::new(BinaryVector::from(vec![payload_b.as_slice(); rows])) as VectorRef],
+        )
+        .unwrap();
+        let unique_buffer_bytes = batch_a.buffer_memory_size() + batch_b.buffer_memory_size();
+        let mut expected_tracker = LiveBufferTracker::default();
+        let (batch_a_charge, batch_a_buffers) = expected_tracker.prepare(&batch_a, true);
+        expected_tracker.commit(batch_a_buffers);
+        let (batch_b_charge, _) = expected_tracker.prepare(&batch_b, true);
+        let expected_charge = batch_a_charge + batch_b_charge;
+        let mut slices = Vec::with_capacity(rows * 2);
+        for offset in 0..rows {
+            slices.push(batch_a.slice(offset, 1).unwrap());
+            slices.push(batch_b.slice(offset, 1).unwrap());
+        }
+        drop(batch_a);
+        drop(batch_b);
 
-        // Every zero-copy slice reports the entire shared allocation as buffer memory.
+        // Every zero-copy slice reports the entire shared allocation as buffer memory. The two
+        // source batches are deliberately interleaved to model the non-append-only merge path.
         let repeated_buffer_bytes = slices
             .iter()
             .map(RecordBatch::buffer_memory_size)
             .sum::<usize>();
-        let unique_buffer_bytes = batch.buffer_memory_size();
-        assert!(repeated_buffer_bytes > unique_buffer_bytes * 100);
+        assert!(repeated_buffer_bytes > unique_buffer_bytes * 50);
         assert!(unique_buffer_bytes < 3 * MB);
+        assert!(unique_buffer_bytes + unique_buffer_bytes / 2 > 3 * MB);
 
         let tracker = QueryMemoryTracker::builder(3 * MB, OnExhaustedPolicy::Fail).build();
         let mut stream = MemoryTrackedStream::new(
@@ -1279,28 +1363,47 @@ mod tests {
             collected += 1;
         }
 
-        assert_eq!(collected, rows);
-        assert_eq!(
-            tracker.current(),
-            aligned_tracked_bytes(unique_buffer_bytes)
-        );
+        assert_eq!(collected, rows * 2);
+        assert_eq!(tracker.current(), expected_charge);
     }
 
     #[tokio::test]
-    async fn test_memory_tracked_stream_counts_distinct_buffers() {
+    async fn test_memory_tracked_stream_releases_unused_buffers() {
+        let first = large_string_batch(700 * 1024);
+        let second = large_string_batch(700 * 1024);
+        let first_size = first.buffer_memory_size();
+        let second_size = second.buffer_memory_size();
+        let schema = first.schema.clone();
+        let tracker = QueryMemoryTracker::builder(MB, OnExhaustedPolicy::Fail).build();
+        let mut stream = MemoryTrackedStream::new(
+            consuming_stream(schema, vec![first, second]),
+            tracker.clone(),
+        );
+
+        let first = stream.next().await.unwrap().unwrap();
+        assert_eq!(tracker.current(), aligned_tracked_bytes(first_size));
+        drop(first);
+
+        let second = stream.next().await.unwrap().unwrap();
+        assert_eq!(tracker.current(), aligned_tracked_bytes(second_size));
+        drop(second);
+
+        assert!(stream.next().await.is_none());
+        assert_eq!(tracker.current(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_memory_tracked_stream_keeps_live_distinct_buffers_charged() {
         let first = large_string_batch(700 * 1024);
         let second = large_string_batch(700 * 1024);
         let schema = first.schema.clone();
         let tracker = QueryMemoryTracker::builder(MB, OnExhaustedPolicy::Fail).build();
-        let mut stream = MemoryTrackedStream::new(
-            RecordBatches::try_new(schema, vec![first, second])
-                .unwrap()
-                .as_stream(),
-            tracker,
-        );
+        let mut stream =
+            MemoryTrackedStream::new(consuming_stream(schema, vec![first, second]), tracker);
 
-        assert!(stream.next().await.unwrap().is_ok());
+        let first = stream.next().await.unwrap().unwrap();
         assert!(stream.next().await.unwrap().is_err());
+        drop(first);
     }
 
     #[test]
@@ -1345,8 +1448,8 @@ mod tests {
                 .sum::<usize>();
             assert!(variadic_bytes >= rows * bytes_per_row);
 
-            let tracker = ConsecutiveBatchBufferTracker::default();
-            let (tracked_bytes, _) = tracker.prepare(&batch);
+            let tracker = LiveBufferTracker::default();
+            let (tracked_bytes, _) = tracker.prepare(&batch, false);
             assert_eq!(tracked_bytes, batch.buffer_memory_size());
             assert!(tracked_bytes >= rows * bytes_per_row);
         }
