@@ -17,6 +17,7 @@
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
+use common_base::readable_size::ReadableSize;
 use common_telemetry::{debug, error, info};
 use store_api::logstore::LogStore;
 use store_api::region_request::{RegionFlushReason, RegionFlushRequest};
@@ -164,7 +165,10 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 // Already flushing or not writable.
                 continue;
             }
-            if !should_flush_region(&region.version()) {
+            if !should_flush_region(
+                &region.version(),
+                self.config.default_region_write_buffer_size,
+            ) {
                 continue;
             }
 
@@ -210,15 +214,24 @@ pub(crate) fn region_memtable_usage(version: &VersionRef) -> usize {
     version.memtables.mutable_usage() + version.memtables.immutables_usage()
 }
 
-pub(crate) fn region_write_buffer_size(version: &VersionRef) -> Option<usize> {
-    version
+pub(crate) fn region_write_buffer_size(
+    version: &VersionRef,
+    default_region_write_buffer_size: ReadableSize,
+) -> Option<usize> {
+    let size = version
         .options
         .write_buffer_size
-        .map(|size| size.as_bytes() as usize)
+        .unwrap_or(default_region_write_buffer_size);
+    (size.as_bytes() > 0).then_some(size.as_bytes() as usize)
 }
 
-fn should_flush_region(version: &VersionRef) -> bool {
-    let Some(write_buffer_size) = region_write_buffer_size(version) else {
+fn should_flush_region(
+    version: &VersionRef,
+    default_region_write_buffer_size: ReadableSize,
+) -> bool {
+    let Some(write_buffer_size) =
+        region_write_buffer_size(version, default_region_write_buffer_size)
+    else {
         return false;
     };
 

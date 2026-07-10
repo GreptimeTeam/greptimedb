@@ -595,7 +595,9 @@ impl<S> RegionWorkerLoop<S> {
             return false;
         };
         let version = region.version();
-        let Some(write_buffer_size) = region_write_buffer_size(&version) else {
+        let Some(write_buffer_size) =
+            region_write_buffer_size(&version, self.config.default_region_write_buffer_size)
+        else {
             return false;
         };
 

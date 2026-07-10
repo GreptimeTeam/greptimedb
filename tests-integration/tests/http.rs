@@ -1939,6 +1939,7 @@ compress_manifest = false
 experimental_compaction_memory_limit = "unlimited"
 experimental_compaction_on_exhausted = "wait"
 auto_flush_interval = "30m"
+default_region_write_buffer_size = "0KiB"
 enable_write_cache = false
 write_cache_path = ""
 write_cache_size = "5GiB"

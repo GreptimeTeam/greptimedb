@@ -22,6 +22,7 @@ use std::time::Duration;
 use api::v1::Rows;
 use async_trait::async_trait;
 use common_base::Plugins;
+use common_base::readable_size::ReadableSize;
 use common_recordbatch::RecordBatches;
 use common_time::util::current_time_millis;
 use common_wal::options::{KafkaWalOptions, WAL_OPTIONS_KEY, WalOptions};
@@ -279,7 +280,15 @@ async fn test_region_write_buffer_limit_flushes_hot_region() {
     let mut env = TestEnv::new().await;
     let listener = Arc::new(FlushListener::default());
     let engine = env
-        .create_engine_with(MitoConfig::default(), None, Some(listener.clone()), None)
+        .create_engine_with(
+            MitoConfig {
+                default_region_write_buffer_size: ReadableSize(1),
+                ..Default::default()
+            },
+            None,
+            Some(listener.clone()),
+            None,
+        )
         .await;
 
     let hot_region_id = RegionId::new(1, 1);
@@ -316,16 +325,19 @@ async fn test_region_write_buffer_limit_flushes_hot_region() {
         )
         .await;
 
-    let hot_request = CreateRequestBuilder::new()
-        .insert_option(WRITE_BUFFER_SIZE_KEY, "1B")
-        .build();
+    // The hot region uses the engine-level default.
+    let hot_request = CreateRequestBuilder::new().build();
     let hot_schema = rows_schema(&hot_request);
     engine
         .handle_request(hot_region_id, RegionRequest::Create(hot_request))
         .await
         .unwrap();
 
-    let normal_request = CreateRequestBuilder::new().table_dir("normal").build();
+    // An explicit table option takes precedence over the engine-level default.
+    let normal_request = CreateRequestBuilder::new()
+        .table_dir("normal")
+        .insert_option(WRITE_BUFFER_SIZE_KEY, "1GiB")
+        .build();
     let normal_schema = rows_schema(&normal_request);
     engine
         .handle_request(normal_region_id, RegionRequest::Create(normal_request))
@@ -407,7 +419,15 @@ async fn test_region_write_buffer_stall_does_not_block_other_region() {
     let mut env = TestEnv::new().await;
     let listener = Arc::new(StallListener::default());
     let engine = env
-        .create_engine_with(MitoConfig::default(), None, Some(listener.clone()), None)
+        .create_engine_with(
+            MitoConfig {
+                default_region_write_buffer_size: ReadableSize(1),
+                ..Default::default()
+            },
+            None,
+            Some(listener.clone()),
+            None,
+        )
         .await;
 
     let stalled_region_id = RegionId::new(1, 1);
@@ -433,16 +453,17 @@ async fn test_region_write_buffer_stall_does_not_block_other_region() {
         )
         .await;
 
-    let stalled_request = CreateRequestBuilder::new()
-        .insert_option(WRITE_BUFFER_SIZE_KEY, "1B")
-        .build();
+    let stalled_request = CreateRequestBuilder::new().build();
     let stalled_schema = rows_schema(&stalled_request);
     engine
         .handle_request(stalled_region_id, RegionRequest::Create(stalled_request))
         .await
         .unwrap();
 
-    let normal_request = CreateRequestBuilder::new().table_dir("normal").build();
+    let normal_request = CreateRequestBuilder::new()
+        .table_dir("normal")
+        .insert_option(WRITE_BUFFER_SIZE_KEY, "1GiB")
+        .build();
     let normal_schema = rows_schema(&normal_request);
     engine
         .handle_request(normal_region_id, RegionRequest::Create(normal_request))
