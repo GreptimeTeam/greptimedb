@@ -14,7 +14,6 @@
 
 use std::collections::HashSet;
 
-use api::v1::helper::time_index_column_schema;
 use api::v1::value::ValueData;
 use api::v1::{ColumnDataType, ColumnSchema, RowInsertRequests, SemanticType, Value};
 use common_catalog::consts::{trace_operations_table_name, trace_services_table_name};
@@ -112,6 +111,10 @@ fn build_trace_table_data_with_schema_observer(
         )?;
     }
 
+    for schema in trace_writer.columns() {
+        schema_observer.observe_trace_column(table_name, batch_index, schema, None);
+    }
+
     Ok(trace_writer)
 }
 
@@ -151,12 +154,6 @@ fn write_span_to_row_with_schema_observer(
     let mut row = writer.alloc_one_row();
 
     // write ts
-    schema_observer.observe_trace_column(
-        table_name,
-        batch_index,
-        &time_index_column_schema(TIMESTAMP_COLUMN, ColumnDataType::TimestampNanosecond),
-        Some(ColumnDataType::TimestampNanosecond),
-    );
     row_writer::write_ts_to_nanos(
         writer,
         TIMESTAMP_COLUMN,
@@ -192,20 +189,9 @@ fn write_span_to_row_with_schema_observer(
         make_string_column_data(SCOPE_NAME_COLUMN, Some(span.scope_name)),
         make_string_column_data(SCOPE_VERSION_COLUMN, Some(span.scope_version)),
     ];
-    observe_fields(table_name, batch_index, &fields, schema_observer);
     row_writer::write_fields(writer, fields.into_iter(), &mut row)?;
 
     if let Some(service_name) = span.service_name {
-        schema_observer.observe_trace_column(
-            table_name,
-            batch_index,
-            &column_schema(
-                SERVICE_NAME_COLUMN,
-                ColumnDataType::String,
-                SemanticType::Tag,
-            ),
-            Some(ColumnDataType::String),
-        );
         row_writer::write_tags(
             writer,
             std::iter::once((SERVICE_NAME_COLUMN.to_string(), service_name)),
@@ -241,14 +227,12 @@ fn write_span_to_row_with_schema_observer(
         schema_observer,
     )?;
 
-    observe_json_field(table_name, batch_index, SPAN_EVENTS_COLUMN, schema_observer);
     row_writer::write_json(
         writer,
         SPAN_EVENTS_COLUMN,
         span.span_events.into(),
         &mut row,
     )?;
-    observe_json_field(table_name, batch_index, "span_links", schema_observer);
     row_writer::write_json(writer, "span_links", span.span_links.into(), &mut row)?;
 
     writer.add_row(row);
@@ -457,22 +441,6 @@ fn write_attributes_with_schema_observer(
     Ok(())
 }
 
-fn observe_fields(
-    table_name: &str,
-    batch_index: usize,
-    fields: &[(String, ColumnDataType, Option<ValueData>)],
-    schema_observer: &mut impl TraceSchemaObserver,
-) {
-    for (name, datatype, value) in fields {
-        schema_observer.observe_trace_column(
-            table_name,
-            batch_index,
-            &column_schema(name, *datatype, SemanticType::Field),
-            value.as_ref().map(|_| *datatype),
-        );
-    }
-}
-
 fn observe_field(
     table_name: &str,
     batch_index: usize,
@@ -581,16 +549,13 @@ mod tests {
 
     #[test]
     fn test_schema_observer_records_attribute_types_during_conversion() {
-        let mut writer = TableData::new(4, 2);
         let mut observer = RecordingSchemaObserver::default();
         let mut span1 = make_span("svc-a", "trace-a", "span-a");
         span1.span_attributes = Attributes::from(vec![make_kv("val", OtlpValue::IntValue(10))]);
         let mut span2 = make_span("svc-a", "trace-a", "span-b");
         span2.span_attributes = Attributes::from(vec![make_kv("val", OtlpValue::DoubleValue(1.5))]);
 
-        write_span_to_row_with_schema_observer(&mut writer, span1, "traces", 7, &mut observer)
-            .unwrap();
-        write_span_to_row_with_schema_observer(&mut writer, span2, "traces", 7, &mut observer)
+        build_trace_table_data_with_schema_observer(&[span1, span2], "traces", 7, &mut observer)
             .unwrap();
 
         assert!(observer.observed.contains(&(
@@ -605,6 +570,14 @@ mod tests {
             ColumnDataType::Float64,
             Some(ColumnDataType::Float64)
         )));
+        assert_eq!(
+            observer
+                .observed
+                .iter()
+                .filter(|(_, name, _, _)| name == TIMESTAMP_COLUMN)
+                .count(),
+            1
+        );
     }
 
     #[test]

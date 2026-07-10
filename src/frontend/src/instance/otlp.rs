@@ -299,11 +299,8 @@ impl TraceTableRequestSchema {
         for row in &mut rows.rows {
             let old_values = std::mem::take(&mut row.values);
             let mut new_values = vec![Value { value_data: None }; self.columns.len()];
-            for (old_idx, global_idx) in old_to_global_indexes.iter().enumerate() {
+            for (mut value, global_idx) in old_values.into_iter().zip(&old_to_global_indexes) {
                 let Some(global_idx) = global_idx else {
-                    continue;
-                };
-                let Some(mut value) = old_values.get(old_idx).cloned() else {
                     continue;
                 };
                 if let Some(target_type) = self.columns[*global_idx].target_type() {
@@ -777,7 +774,6 @@ impl Instance {
                         chunk,
                         ctx.clone(),
                         ingest_state,
-                        None,
                     )
                     .await?;
                 }
@@ -822,10 +818,9 @@ impl Instance {
         chunk: Vec<TraceSpan>,
         ctx: QueryContextRef,
         ingest_state: &mut TraceIngestState,
-        request_schema: Option<(&TraceRequestSchema, usize)>,
     ) -> ServerResult<()> {
         for span in chunk {
-            let (mut requests, rows) = otlp::trace::to_grpc_insert_requests_from_spans(
+            let (requests, rows) = otlp::trace::to_grpc_insert_requests_from_spans(
                 std::slice::from_ref(&span),
                 ingest_ctx.pipeline,
                 ingest_ctx.pipeline_params,
@@ -834,17 +829,9 @@ impl Instance {
                 ingest_ctx.pipeline_handler.clone(),
             )?;
 
-            if let Some((request_schema, batch_index)) = request_schema {
-                request_schema.apply_to_requests(batch_index, &mut requests)?;
-            }
-
-            let result = if request_schema.is_some() {
-                self.insert_prepared_trace_requests(requests, ctx.clone())
-                    .await
-            } else {
-                self.insert_trace_requests(requests, ingest_ctx.is_trace_v1_model, ctx.clone())
-                    .await
-            };
+            let result = self
+                .insert_trace_requests(requests, ingest_ctx.is_trace_v1_model, ctx.clone())
+                .await;
 
             match result {
                 Ok(output) => {
@@ -909,7 +896,6 @@ impl Instance {
                         chunk_insert,
                         ctx.clone(),
                         ingest_state,
-                        &request_schema,
                     )
                     .await?;
                 }
@@ -942,13 +928,12 @@ impl Instance {
         chunk_insert: TraceChunkInsert,
         ctx: QueryContextRef,
         ingest_state: &mut TraceIngestState,
-        request_schema: &TraceRequestSchema,
     ) -> ServerResult<()> {
         let TraceChunkInsert {
-            batch_index,
             spans,
             requests,
             rows,
+            ..
         } = chunk_insert;
 
         match self
@@ -974,7 +959,6 @@ impl Instance {
                         spans,
                         ctx.clone(),
                         ingest_state,
-                        Some((request_schema, batch_index)),
                     )
                     .await?;
                 }
