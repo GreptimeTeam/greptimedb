@@ -17,7 +17,7 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use common_telemetry::{info, warn};
+use common_telemetry::info;
 use object_store::util::{join_path, normalize_dir};
 use snafu::{OptionExt, ResultExt};
 use store_api::logstore::LogStore;
@@ -36,7 +36,9 @@ use crate::region::options::RegionOptions;
 use crate::request::OptionOutputTx;
 use crate::sst::location::region_dir_from_table_dir;
 use crate::wal::entry_distributor::WalEntryReceiver;
-use crate::worker::handle_drop::remove_region_dir_once;
+use crate::worker::handle_drop::{
+    cleanup_region_file_artifacts, remove_region_dir_for_full_drop, remove_region_dir_once,
+};
 use crate::worker::{DROPPING_MARKER_FILE, RegionWorkerLoop};
 
 impl<S: LogStore> RegionWorkerLoop<S> {
@@ -63,24 +65,17 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
         let table_dir = normalize_dir(&request.table_dir);
         let region_dir = region_dir_from_table_dir(&table_dir, region_id, request.path_type);
-        remove_region_dir_once(&region_dir, &object_store, true).await?;
+        remove_region_dir_for_full_drop(&region_dir, &object_store).await?;
 
-        self.flush_scheduler.on_region_dropped(region_id);
-        self.compaction_scheduler.on_region_dropped(region_id);
-        self.index_build_scheduler
-            .on_region_dropped(region_id)
-            .await;
+        self.cleanup_dropped_region_runtime_state(region_id).await;
         self.dropping_regions.remove_region(region_id);
-
-        if let Err(err) = self.intermediate_manager.prune_region_dir(&region_id).await {
-            warn!(err; "Failed to prune intermediate region directory, region_id: {}", region_id);
-        }
-
-        if let Some(write_cache) = self.cache_manager.write_cache()
-            && let Some(manifest_cache) = write_cache.manifest_cache()
-        {
-            manifest_cache.clean_manifests(&table_dir).await;
-        }
+        cleanup_region_file_artifacts(
+            region_id,
+            &table_dir,
+            &self.intermediate_manager,
+            &self.cache_manager,
+        )
+        .await;
 
         Ok(0)
     }
