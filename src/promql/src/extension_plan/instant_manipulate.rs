@@ -243,7 +243,7 @@ impl InstantManipulate {
     }
 
     pub fn to_execution_plan(&self, exec_input: Arc<dyn ExecutionPlan>) -> Arc<dyn ExecutionPlan> {
-        let reuse_tsid_column = matches!(self.tag_columns.as_slice(), [tag] if tag == "__tsid");
+        let reuse_tsid_column = self.tag_columns.iter().any(|tag| tag == "__tsid");
 
         Arc::new(InstantManipulateExec {
             start: self.start,
