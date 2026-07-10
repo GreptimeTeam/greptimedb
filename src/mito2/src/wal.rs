@@ -159,7 +159,6 @@ impl<S: LogStore> Wal<S> {
             .map_err(BoxedError::new)
             .context(DeleteWalSnafu { region_id })
     }
-
     /// Deletes all WAL entries in the namespace represented by `provider`.
     pub async fn delete_namespace(&self, region_id: RegionId, provider: &Provider) -> Result<()> {
         if let Provider::Noop = provider {
