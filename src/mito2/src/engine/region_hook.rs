@@ -78,8 +78,14 @@
 //! | Physical file removal | [`on_region_files_removed`] | The drop GC worker has deleted the region directory. Terminal file-lifecycle event. |
 //!
 //! Notes:
-//! - `on_region_opened` / `on_region_closed` / `on_region_dropped` run **inline in the
-//!   region worker loop**, so implementations must be fast (same contract as `on_manifest_updated`).
+//! - `on_region_closed` / `on_region_dropped` run **inline in the region worker loop**,
+//!   so implementations must be fast (same contract as `on_manifest_updated`).
+//! - `on_region_opened` runs inline in the worker loop on the **create** path, but on the
+//!   **open** path it fires inside the spawned open task (`common_runtime::spawn_global`),
+//!   i.e. concurrently with the worker loop — after WAL replay, before the region is
+//!   registered and its open request is acknowledged. Implementations must still be fast
+//!   and must not assume worker-loop-thread affinity or strict ordering against concurrent
+//!   requests to other regions.
 //! - `on_region_files_removed` runs on the background drop GC task, outside the worker loop.
 //! - When global GC is enabled and a normal table region is dropped with `partial_drop`, its
 //!   directory is left for global reclamation and `on_region_files_removed` is **not** fired
@@ -275,7 +281,12 @@ pub trait RegionHook: Send + Sync + Debug {
     /// (`open_compaction_region`), nor for the internal reopen performed during
     /// follower catch-up / leadership promotion.
     ///
-    /// Runs inline in the region worker loop; implementations should be fast.
+    /// On the **create** path it runs inline in the region worker loop; on the
+    /// **open** path it runs inside the spawned open task
+    /// (`common_runtime::spawn_global`), concurrently with the worker loop
+    /// (after WAL replay, before the region is registered/acknowledged).
+    /// Implementations must be fast and must **not** assume worker-loop-thread
+    /// affinity or strict ordering against concurrent requests to other regions.
     ///
     /// [`on_region_closed`]: RegionHook::on_region_closed
     /// [`on_region_dropped`]: RegionHook::on_region_dropped
