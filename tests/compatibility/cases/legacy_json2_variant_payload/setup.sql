@@ -14,3 +14,16 @@ INSERT INTO t_legacy_json2_variant_payload (ts, j) VALUES
   ('2026-07-08 00:05:00+0000', '{"a": {"b": 6}}');
 
 ADMIN FLUSH_TABLE('t_legacy_json2_variant_payload');
+
+CREATE TABLE t_legacy_json2_variant_payload_object_d (
+  ts TIMESTAMP TIME INDEX,
+  j JSON2
+) WITH (
+  'append_mode' = 'true'
+);
+
+INSERT INTO t_legacy_json2_variant_payload_object_d (ts, j) VALUES
+  ('2026-07-08 01:00:00+0000', '{"d": {"e": true}}'),
+  ('2026-07-08 01:01:00+0000', '{"d": {"e": false}}');
+
+ADMIN FLUSH_TABLE('t_legacy_json2_variant_payload_object_d');

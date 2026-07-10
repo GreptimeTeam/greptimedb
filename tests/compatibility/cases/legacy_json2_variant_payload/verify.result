@@ -13,6 +13,20 @@ ORDER BY ts;
 | 2026-07-08T00:05:00 | 6   |     |
 +---------------------+-----+-----+
 
+SELECT
+  ts,
+  j.d.e AS d_e
+FROM t_legacy_json2_variant_payload_object_d
+ORDER BY ts;
+
++---------------------+-------+
+| ts                  | d_e   |
++---------------------+-------+
+| 2026-07-08T01:00:00 | true  |
+| 2026-07-08T01:01:00 | false |
++---------------------+-------+
+
+-- JSON2 projection rendering is a user-visible compatibility contract.
 SELECT ts, j.d AS d
 FROM t_legacy_json2_variant_payload
 ORDER BY ts;
