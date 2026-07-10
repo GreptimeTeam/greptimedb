@@ -38,6 +38,7 @@ use crate::gc::options::{GcSchedulerOptions, TICKER_INTERVAL};
 use crate::gc::tracker::RegionGcTracker;
 use crate::metrics::{
     METRIC_META_GC_SCHEDULER_CYCLES_TOTAL, METRIC_META_GC_SCHEDULER_DURATION_SECONDS,
+    METRIC_META_GC_SOFT_DROP_PURGES_TOTAL,
 };
 use crate::service::mailbox::MailboxRef;
 
@@ -237,13 +238,8 @@ impl GcScheduler {
     }
 
     async fn purge_expired_soft_dropped_tables(&self, now_millis: i64) {
-        let retention_millis = match i64::try_from(self.config.soft_drop.retention.as_millis()) {
-            Ok(retention_millis) => retention_millis,
-            Err(error) => {
-                error!(error; "Soft-drop retention exceeds the supported millisecond range");
-                return;
-            }
-        };
+        // The scheduler is only constructed after GcSchedulerOptions::validate().
+        let retention_millis = self.config.soft_drop.retention.as_millis() as i64;
         let dropped_tables = match self.ctx.list_dropped_tables().await {
             Ok(dropped_tables) => dropped_tables,
             Err(error) => {
@@ -252,15 +248,42 @@ impl GcScheduler {
             }
         };
 
-        stream::iter(dropped_tables.into_iter().filter(|table| {
-            table
-                .dropped_at
-                .and_then(|dropped_at| dropped_at.checked_add(retention_millis))
-                .is_some_and(|expires_at| expires_at <= now_millis)
-        }))
+        stream::iter(
+            dropped_tables
+                .into_iter()
+                .filter(|table| {
+                    table
+                        .dropped_at
+                        .and_then(|dropped_at| dropped_at.checked_add(retention_millis))
+                        .is_some_and(|expires_at| expires_at <= now_millis)
+                })
+                .take(self.config.max_concurrent_tables),
+        )
         .for_each_concurrent(self.config.max_concurrent_tables, |table| async move {
-            if let Err(error) = self.ctx.purge_dropped_table(table.table_id).await {
-                error!(error; "Failed to purge expired soft-dropped table {}", table.table_id);
+            METRIC_META_GC_SOFT_DROP_PURGES_TOTAL
+                .with_label_values(&["submitted"])
+                .inc();
+            match tokio::time::timeout(
+                self.config.mailbox_timeout,
+                self.ctx.purge_dropped_table(table.table_id),
+            )
+            .await
+            {
+                Ok(Ok(())) => METRIC_META_GC_SOFT_DROP_PURGES_TOTAL
+                    .with_label_values(&["succeeded"])
+                    .inc(),
+                Ok(Err(error)) => {
+                    METRIC_META_GC_SOFT_DROP_PURGES_TOTAL
+                        .with_label_values(&["failed"])
+                        .inc();
+                    error!(error; "Failed to purge expired soft-dropped table {}", table.table_id);
+                }
+                Err(error) => {
+                    METRIC_META_GC_SOFT_DROP_PURGES_TOTAL
+                        .with_label_values(&["timed_out"])
+                        .inc();
+                    error!(error; "Timed out waiting for expired soft-dropped table purge {}", table.table_id);
+                }
             }
         })
         .await;
@@ -478,6 +501,7 @@ mod tests {
         dropped_tables: StdMutex<Vec<DroppedTableName>>,
         purge_attempts: StdMutex<Vec<TableId>>,
         failed_table: StdMutex<Option<TableId>>,
+        never_complete_table: StdMutex<Option<TableId>>,
         region_gc_calls: AtomicUsize,
     }
 
@@ -522,6 +546,9 @@ mod tests {
 
         async fn purge_dropped_table(&self, table_id: TableId) -> Result<()> {
             self.purge_attempts.lock().unwrap().push(table_id);
+            if *self.never_complete_table.lock().unwrap() == Some(table_id) {
+                std::future::pending().await
+            }
             if *self.failed_table.lock().unwrap() == Some(table_id) {
                 return crate::error::UnexpectedSnafu {
                     violated: format!("mock purge failure for table {table_id}"),
@@ -618,6 +645,40 @@ mod tests {
         scheduler.handle_tick().await.unwrap();
 
         assert!(ctx.purge_attempts.lock().unwrap().is_empty());
+        assert_eq!(1, ctx.region_gc_calls.load(Ordering::Relaxed));
+    }
+
+    #[tokio::test]
+    async fn test_tick_times_out_stuck_purge_and_continues_region_gc() {
+        let ctx = Arc::new(SoftDropSchedulerCtx::default());
+        *ctx.dropped_tables.lock().unwrap() = vec![dropped_table(1, Some(i64::MIN))];
+        *ctx.never_complete_table.lock().unwrap() = Some(1);
+        let mut scheduler = soft_drop_scheduler(ctx.clone());
+        scheduler.config.mailbox_timeout = Duration::from_millis(10);
+
+        tokio::time::timeout(Duration::from_millis(100), scheduler.handle_tick())
+            .await
+            .expect("tick should not wait indefinitely for a purge")
+            .unwrap();
+
+        assert_eq!(vec![1], *ctx.purge_attempts.lock().unwrap());
+        assert_eq!(1, ctx.region_gc_calls.load(Ordering::Relaxed));
+    }
+
+    #[tokio::test]
+    async fn test_tick_caps_purge_submissions() {
+        let ctx = Arc::new(SoftDropSchedulerCtx::default());
+        *ctx.dropped_tables.lock().unwrap() = vec![
+            dropped_table(1, Some(i64::MIN)),
+            dropped_table(2, Some(i64::MIN)),
+            dropped_table(3, Some(i64::MIN)),
+        ];
+        let mut scheduler = soft_drop_scheduler(ctx.clone());
+        scheduler.config.max_concurrent_tables = 2;
+
+        scheduler.handle_tick().await.unwrap();
+
+        assert_eq!(2, ctx.purge_attempts.lock().unwrap().len());
         assert_eq!(1, ctx.region_gc_calls.load(Ordering::Relaxed));
     }
 

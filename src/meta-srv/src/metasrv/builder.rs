@@ -724,7 +724,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("soft_drop.retention must be greater than 0")
+                .contains("soft_drop.retention must be at least 1ms")
         );
     }
 }

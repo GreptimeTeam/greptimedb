@@ -127,4 +127,12 @@ lazy_static! {
         "Total regions that failed GC",
     )
     .unwrap();
+
+    /// Soft-drop purge submissions by status.
+    pub static ref METRIC_META_GC_SOFT_DROP_PURGES_TOTAL: IntCounterVec = register_int_counter_vec!(
+        "greptime_metasrv_gc_soft_drop_purges_total",
+        "Soft-drop purge submissions by status",
+        &["status"],
+    )
+    .unwrap();
 }

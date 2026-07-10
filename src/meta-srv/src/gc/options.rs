@@ -125,9 +125,16 @@ impl GcSchedulerOptions {
         );
 
         ensure!(
-            !self.soft_drop.retention.is_zero(),
+            self.soft_drop.retention >= Duration::from_millis(1),
             error::InvalidArgumentsSnafu {
-                err_msg: "soft_drop.retention must be greater than 0",
+                err_msg: "soft_drop.retention must be at least 1ms",
+            }
+        );
+
+        ensure!(
+            self.soft_drop.retention.as_millis() <= i64::MAX as u128,
+            error::InvalidArgumentsSnafu {
+                err_msg: "soft_drop.retention milliseconds must fit in i64",
             }
         );
 
@@ -270,7 +277,43 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("soft_drop.retention must be greater than 0")
+                .contains("soft_drop.retention must be at least 1ms")
+        );
+    }
+
+    #[test]
+    fn test_soft_drop_retention_must_be_at_least_one_millisecond() {
+        let options = GcSchedulerOptions {
+            soft_drop: SoftDropGcOptions {
+                retention: Duration::from_nanos(1),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let error = options.validate().unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("soft_drop.retention must be at least 1ms")
+        );
+    }
+
+    #[test]
+    fn test_soft_drop_retention_milliseconds_must_fit_i64() {
+        let options = GcSchedulerOptions {
+            soft_drop: SoftDropGcOptions {
+                retention: Duration::from_millis(i64::MAX as u64 + 1),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let error = options.validate().unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("soft_drop.retention milliseconds must fit in i64")
         );
     }
 }

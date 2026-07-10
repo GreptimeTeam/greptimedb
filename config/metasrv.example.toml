@@ -331,7 +331,7 @@ gc_cooldown_period = "5m"
 ## Requires `gc.enable = true`.
 enable = false
 ## How long a soft-dropped table is retained before it can be purged.
-## Must be greater than zero.
+## Must be at least 1ms and fit in a signed 64-bit millisecond value.
 retention = "7d"
 
 ## The logging options.
