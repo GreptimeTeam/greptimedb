@@ -12,7 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::time::Duration;
 
 use common_meta::datanode::RegionStat;
@@ -26,6 +27,7 @@ use common_telemetry::debug;
 use snafu::{OptionExt as _, ResultExt as _};
 use store_api::storage::{GcReport, RegionId};
 use table::metadata::TableId;
+use tokio::sync::Mutex;
 
 use crate::cluster::MetaPeerClientRef;
 use crate::error::{self, Result, TableMetadataManagerSnafu};
@@ -60,6 +62,10 @@ pub(crate) trait SchedulerCtx: Send + Sync {
     async fn list_dropped_tables(&self) -> Result<Vec<DroppedTableName>>;
 
     async fn purge_dropped_table(&self, table_id: TableId) -> Result<()>;
+
+    async fn try_reserve_purge(&self, table_id: TableId, max_in_flight: usize) -> bool;
+
+    async fn finish_purge(&self, table_id: TableId);
 }
 
 pub(crate) struct DefaultGcSchedulerCtx {
@@ -69,6 +75,9 @@ pub(crate) struct DefaultGcSchedulerCtx {
     pub(crate) procedure_manager: ProcedureManagerRef,
     /// DDL manager used to submit the existing purge procedure.
     pub(crate) ddl_manager: DdlManagerRef,
+    /// Process-local reservations for purge procedures submitted by this scheduler.
+    /// Procedure recovery after a metasrv restart may outlive this set.
+    in_flight_purges: Arc<Mutex<HashSet<TableId>>>,
     /// For getting `RegionStats`.
     pub(crate) meta_peer_client: MetaPeerClientRef,
     /// The mailbox to send messages.
@@ -90,6 +99,7 @@ impl DefaultGcSchedulerCtx {
             table_metadata_manager,
             procedure_manager,
             ddl_manager,
+            in_flight_purges: Arc::new(Mutex::new(HashSet::new())),
             meta_peer_client,
             mailbox,
             server_addr,
@@ -178,6 +188,18 @@ impl SchedulerCtx for DefaultGcSchedulerCtx {
             .await
             .context(error::SubmitDdlTaskSnafu)?;
         Ok(())
+    }
+
+    async fn try_reserve_purge(&self, table_id: TableId, max_in_flight: usize) -> bool {
+        let mut in_flight = self.in_flight_purges.lock().await;
+        if in_flight.len() >= max_in_flight || in_flight.contains(&table_id) {
+            return false;
+        }
+        in_flight.insert(table_id)
+    }
+
+    async fn finish_purge(&self, table_id: TableId) {
+        self.in_flight_purges.lock().await.remove(&table_id);
     }
 }
 

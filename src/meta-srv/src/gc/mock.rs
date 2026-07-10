@@ -334,6 +334,12 @@ impl SchedulerCtx for MockSchedulerCtx {
     async fn purge_dropped_table(&self, _table_id: TableId) -> Result<()> {
         Ok(())
     }
+
+    async fn try_reserve_purge(&self, _table_id: TableId, _max_in_flight: usize) -> bool {
+        true
+    }
+
+    async fn finish_purge(&self, _table_id: TableId) {}
 }
 
 pub struct TestEnv {

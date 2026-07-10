@@ -22,7 +22,6 @@ use common_meta::key::runtime_switch::RuntimeSwitchManagerRef;
 use common_procedure::ProcedureManagerRef;
 use common_telemetry::tracing::Instrument as _;
 use common_telemetry::{error, info};
-use futures::{StreamExt, stream};
 use snafu::ResultExt;
 use store_api::storage::{GcReport, RegionId};
 use tokio::sync::mpsc::{Receiver, Sender};
@@ -248,45 +247,38 @@ impl GcScheduler {
             }
         };
 
-        stream::iter(
-            dropped_tables
-                .into_iter()
-                .filter(|table| {
-                    table
-                        .dropped_at
-                        .and_then(|dropped_at| dropped_at.checked_add(retention_millis))
-                        .is_some_and(|expires_at| expires_at <= now_millis)
-                })
-                .take(self.config.max_concurrent_tables),
-        )
-        .for_each_concurrent(self.config.max_concurrent_tables, |table| async move {
+        for table in dropped_tables.into_iter().filter(|table| {
+            table
+                .dropped_at
+                .and_then(|dropped_at| dropped_at.checked_add(retention_millis))
+                .is_some_and(|expires_at| expires_at <= now_millis)
+        }) {
+            if !self
+                .ctx
+                .try_reserve_purge(table.table_id, self.config.max_concurrent_tables)
+                .await
+            {
+                continue;
+            }
             METRIC_META_GC_SOFT_DROP_PURGES_TOTAL
                 .with_label_values(&["submitted"])
                 .inc();
-            match tokio::time::timeout(
-                self.config.mailbox_timeout,
-                self.ctx.purge_dropped_table(table.table_id),
-            )
-            .await
-            {
-                Ok(Ok(())) => METRIC_META_GC_SOFT_DROP_PURGES_TOTAL
-                    .with_label_values(&["succeeded"])
-                    .inc(),
-                Ok(Err(error)) => {
-                    METRIC_META_GC_SOFT_DROP_PURGES_TOTAL
-                        .with_label_values(&["failed"])
-                        .inc();
-                    error!(error; "Failed to purge expired soft-dropped table {}", table.table_id);
+            let ctx = self.ctx.clone();
+            common_runtime::spawn_global(async move {
+                match ctx.purge_dropped_table(table.table_id).await {
+                    Ok(()) => METRIC_META_GC_SOFT_DROP_PURGES_TOTAL
+                        .with_label_values(&["succeeded"])
+                        .inc(),
+                    Err(error) => {
+                        METRIC_META_GC_SOFT_DROP_PURGES_TOTAL
+                            .with_label_values(&["failed"])
+                            .inc();
+                        error!(error; "Failed to purge expired soft-dropped table {}", table.table_id);
+                    }
                 }
-                Err(error) => {
-                    METRIC_META_GC_SOFT_DROP_PURGES_TOTAL
-                        .with_label_values(&["timed_out"])
-                        .inc();
-                    error!(error; "Timed out waiting for expired soft-dropped table purge {}", table.table_id);
-                }
-            }
-        })
-        .await;
+                ctx.finish_purge(table.table_id).await;
+            });
+        }
     }
 
     /// Handles a manual GC request with optional specific parameters.
@@ -494,6 +486,14 @@ mod tests {
                 .fetch_add(1, Ordering::Relaxed);
             panic!("purge_dropped_table should not be called in maintenance mode")
         }
+
+        async fn try_reserve_purge(&self, _table_id: TableId, _max_in_flight: usize) -> bool {
+            panic!("try_reserve_purge should not be called in maintenance mode")
+        }
+
+        async fn finish_purge(&self, _table_id: TableId) {
+            panic!("finish_purge should not be called in maintenance mode")
+        }
     }
 
     #[derive(Default)]
@@ -501,7 +501,8 @@ mod tests {
         dropped_tables: StdMutex<Vec<DroppedTableName>>,
         purge_attempts: StdMutex<Vec<TableId>>,
         failed_table: StdMutex<Option<TableId>>,
-        never_complete_table: StdMutex<Option<TableId>>,
+        never_complete_tables: StdMutex<HashSet<TableId>>,
+        in_flight_purges: Mutex<HashSet<TableId>>,
         region_gc_calls: AtomicUsize,
     }
 
@@ -546,7 +547,12 @@ mod tests {
 
         async fn purge_dropped_table(&self, table_id: TableId) -> Result<()> {
             self.purge_attempts.lock().unwrap().push(table_id);
-            if *self.never_complete_table.lock().unwrap() == Some(table_id) {
+            if self
+                .never_complete_tables
+                .lock()
+                .unwrap()
+                .contains(&table_id)
+            {
                 std::future::pending().await
             }
             if *self.failed_table.lock().unwrap() == Some(table_id) {
@@ -556,6 +562,18 @@ mod tests {
                 .fail();
             }
             Ok(())
+        }
+
+        async fn try_reserve_purge(&self, table_id: TableId, max_in_flight: usize) -> bool {
+            let mut in_flight = self.in_flight_purges.lock().await;
+            if in_flight.len() >= max_in_flight || in_flight.contains(&table_id) {
+                return false;
+            }
+            in_flight.insert(table_id)
+        }
+
+        async fn finish_purge(&self, table_id: TableId) {
+            self.in_flight_purges.lock().await.remove(&table_id);
         }
     }
 
@@ -587,6 +605,16 @@ mod tests {
         }
     }
 
+    async fn wait_for_purge_attempts(ctx: &SoftDropSchedulerCtx, expected: usize) {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while ctx.purge_attempts.lock().unwrap().len() < expected {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("purge tasks should be scheduled");
+    }
+
     #[tokio::test]
     async fn test_purge_expired_soft_dropped_tables_filters_by_retention_and_timestamp() {
         let ctx = Arc::new(SoftDropSchedulerCtx::default());
@@ -600,6 +628,7 @@ mod tests {
         let scheduler = soft_drop_scheduler(ctx.clone());
 
         scheduler.purge_expired_soft_dropped_tables(1_000).await;
+        wait_for_purge_attempts(&ctx, 2).await;
 
         let mut attempts = ctx.purge_attempts.lock().unwrap().clone();
         attempts.sort_unstable();
@@ -618,6 +647,7 @@ mod tests {
         let scheduler = soft_drop_scheduler(ctx.clone());
 
         scheduler.purge_expired_soft_dropped_tables(1_000).await;
+        wait_for_purge_attempts(&ctx, 3).await;
 
         let mut attempts = ctx.purge_attempts.lock().unwrap().clone();
         attempts.sort_unstable();
@@ -632,6 +662,7 @@ mod tests {
         let scheduler = soft_drop_scheduler(ctx.clone());
 
         scheduler.handle_tick().await.unwrap();
+        wait_for_purge_attempts(&ctx, 1).await;
 
         assert_eq!(vec![1], *ctx.purge_attempts.lock().unwrap());
         assert_eq!(1, ctx.region_gc_calls.load(Ordering::Relaxed));
@@ -649,20 +680,45 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_tick_times_out_stuck_purge_and_continues_region_gc() {
+    async fn test_multiple_ticks_do_not_duplicate_in_flight_purges() {
         let ctx = Arc::new(SoftDropSchedulerCtx::default());
-        *ctx.dropped_tables.lock().unwrap() = vec![dropped_table(1, Some(i64::MIN))];
-        *ctx.never_complete_table.lock().unwrap() = Some(1);
+        *ctx.dropped_tables.lock().unwrap() = vec![
+            dropped_table(1, Some(i64::MIN)),
+            dropped_table(2, Some(i64::MIN)),
+        ];
+        ctx.never_complete_tables.lock().unwrap().insert(1);
+        *ctx.failed_table.lock().unwrap() = Some(2);
         let mut scheduler = soft_drop_scheduler(ctx.clone());
-        scheduler.config.mailbox_timeout = Duration::from_millis(10);
+        scheduler.config.max_concurrent_tables = 2;
 
         tokio::time::timeout(Duration::from_millis(100), scheduler.handle_tick())
             .await
-            .expect("tick should not wait indefinitely for a purge")
+            .expect("first tick should not wait for purge completion")
             .unwrap();
+        wait_for_purge_attempts(&ctx, 2).await;
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while ctx.in_flight_purges.lock().await.contains(&2) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("terminal failure should release its in-flight slot");
+        tokio::time::timeout(Duration::from_millis(100), scheduler.handle_tick())
+            .await
+            .expect("second tick should not wait for purge completion")
+            .unwrap();
+        wait_for_purge_attempts(&ctx, 3).await;
 
-        assert_eq!(vec![1], *ctx.purge_attempts.lock().unwrap());
-        assert_eq!(1, ctx.region_gc_calls.load(Ordering::Relaxed));
+        let attempts = ctx.purge_attempts.lock().unwrap().clone();
+        assert_eq!(
+            1,
+            attempts.iter().filter(|&&table_id| table_id == 1).count()
+        );
+        assert_eq!(
+            2,
+            attempts.iter().filter(|&&table_id| table_id == 2).count()
+        );
+        assert_eq!(2, ctx.region_gc_calls.load(Ordering::Relaxed));
     }
 
     #[tokio::test]
@@ -675,8 +731,10 @@ mod tests {
         ];
         let mut scheduler = soft_drop_scheduler(ctx.clone());
         scheduler.config.max_concurrent_tables = 2;
+        ctx.never_complete_tables.lock().unwrap().extend([1, 2]);
 
         scheduler.handle_tick().await.unwrap();
+        wait_for_purge_attempts(&ctx, 2).await;
 
         assert_eq!(2, ctx.purge_attempts.lock().unwrap().len());
         assert_eq!(1, ctx.region_gc_calls.load(Ordering::Relaxed));
@@ -739,6 +797,12 @@ mod tests {
         async fn purge_dropped_table(&self, _table_id: TableId) -> Result<()> {
             Ok(())
         }
+
+        async fn try_reserve_purge(&self, _table_id: TableId, _max_in_flight: usize) -> bool {
+            true
+        }
+
+        async fn finish_purge(&self, _table_id: TableId) {}
     }
 
     #[tokio::test]
