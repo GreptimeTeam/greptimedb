@@ -3782,18 +3782,13 @@ impl PromPlanner {
                 operator: SCALAR_FUNCTION
             },
         );
-        let scalar_tags = if self.ctx.use_tsid {
-            Vec::new()
-        } else {
-            self.ctx
-                .tag_columns
-                .iter()
-                .filter(|tag| {
-                    Self::qualified_column_if_available(input.schema(), None, tag).is_some()
-                })
-                .cloned()
-                .collect()
-        };
+        let scalar_tags = self
+            .ctx
+            .tag_columns
+            .iter()
+            .filter(|tag| Self::qualified_column_if_available(input.schema(), None, tag).is_some())
+            .cloned()
+            .collect::<Vec<_>>();
         let scalar_plan = LogicalPlan::Extension(Extension {
             node: Arc::new(
                 ScalarCalculate::new(
@@ -5646,7 +5641,7 @@ mod test {
         assert!(plan_str.contains("PromSeriesDivide: tags=[\"__tsid\"]"));
         assert!(plan_str.contains("TableScan: phy"));
         assert!(!plan_str.contains("TableScan: some_metric"));
-        assert!(!plan_str.contains("field_0__metric_int"));
+        assert!(!plan_str.contains("__metric_int_field_0"));
         assert!(!plan_str.contains("coalesce"));
     }
 
@@ -6516,6 +6511,16 @@ mod test {
         assert!(plan_str.contains("ScalarCalculate: tags=[]"));
         assert!(plan_str.contains("PromInstantManipulate: range=[0..100000000]"));
         assert!(!plan_str.contains("PromInstantManipulate: range=[99999000..99999000]"));
+    }
+
+    #[tokio::test]
+    async fn scalar_tsid_input_preserves_available_series_labels() {
+        let plan_str = build_optimized_tsid_plan("scalar(some_metric)", 2, 1, 100_000, 1).await;
+
+        assert!(
+            plan_str.contains("ScalarCalculate: tags=[\"tag_0\", \"tag_1\"]"),
+            "{plan_str}"
+        );
     }
 
     #[tokio::test]

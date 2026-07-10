@@ -314,7 +314,7 @@ mod tests {
                 true,
             ),
             (
-                "greptime_value__metric_int",
+                "__metric_int_greptime_value",
                 Arc::new(Int64Array::from(vec![None; 9])) as ArrayRef,
                 true,
             ),

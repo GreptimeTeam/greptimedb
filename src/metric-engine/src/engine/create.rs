@@ -28,14 +28,14 @@ use snafu::{OptionExt, ResultExt, ensure};
 use store_api::metadata::ColumnMetadata;
 use store_api::metric_engine_consts::{
     ALTER_PHYSICAL_EXTENSION_KEY, DATA_REGION_SUBDIR, DATA_SCHEMA_TABLE_ID_COLUMN_NAME,
-    DATA_SCHEMA_TSID_COLUMN_NAME, DATA_SCHEMA_VALUE_INT_COLUMN_SUFFIX, LOGICAL_TABLE_METADATA_KEY,
+    DATA_SCHEMA_TSID_COLUMN_NAME, DATA_SCHEMA_VALUE_INT_COLUMN_PREFIX, LOGICAL_TABLE_METADATA_KEY,
     METADATA_REGION_SUBDIR, METADATA_SCHEMA_KEY_COLUMN_INDEX, METADATA_SCHEMA_KEY_COLUMN_NAME,
     METADATA_SCHEMA_TIMESTAMP_COLUMN_INDEX, METADATA_SCHEMA_TIMESTAMP_COLUMN_NAME,
     METADATA_SCHEMA_VALUE_COLUMN_INDEX, METADATA_SCHEMA_VALUE_COLUMN_NAME,
     is_metric_engine_internal_column, is_metric_engine_value_int_column,
     metric_engine_value_int_column_name,
 };
-use store_api::mito_engine_options::{TTL_KEY, WAL_OPTIONS_KEY};
+use store_api::mito_engine_options::{MERGE_MODE_KEY, TTL_KEY, WAL_OPTIONS_KEY};
 use store_api::region_engine::RegionEngine;
 use store_api::region_request::{AffectedRows, PathType, RegionCreateRequest, RegionRequest};
 use store_api::storage::RegionId;
@@ -553,7 +553,14 @@ impl MetricEngineInner {
 
         let table_id_col_def = request.column_metadatas.iter().any(is_metric_name_col);
         let tsid_col_def = request.column_metadatas.iter().any(is_tsid_col);
-        append_metric_value_int_columns(&mut data_region_request.column_metadatas);
+        let value_split_enabled = request
+            .options
+            .get(MERGE_MODE_KEY)
+            .is_none_or(|mode| mode != "last_non_null");
+        configure_metric_value_int_columns(
+            &mut data_region_request.column_metadatas,
+            value_split_enabled,
+        );
 
         // change nullability for tag columns
         data_region_request
@@ -593,7 +600,7 @@ fn is_valid_physical_metric_value_int_column(request: &RegionCreateRequest, name
         return false;
     }
 
-    let Some(value_name) = name.strip_suffix(DATA_SCHEMA_VALUE_INT_COLUMN_SUFFIX) else {
+    let Some(value_name) = name.strip_prefix(DATA_SCHEMA_VALUE_INT_COLUMN_PREFIX) else {
         return false;
     };
     let find_column = |name| {
@@ -615,7 +622,15 @@ fn is_valid_physical_metric_value_int_column(request: &RegionCreateRequest, name
         && int_column.column_schema.data_type == ConcreteDataType::int64_datatype()
 }
 
-fn append_metric_value_int_columns(column_metadatas: &mut Vec<ColumnMetadata>) {
+fn configure_metric_value_int_columns(
+    column_metadatas: &mut Vec<ColumnMetadata>,
+    value_split_enabled: bool,
+) {
+    if !value_split_enabled {
+        column_metadatas
+            .retain(|metadata| !is_metric_engine_value_int_column(&metadata.column_schema.name));
+    }
+
     let mut next_column_id = column_metadatas
         .iter()
         .map(|metadata| metadata.column_id)
@@ -641,6 +656,10 @@ fn append_metric_value_int_columns(column_metadatas: &mut Vec<ColumnMetadata>) {
         }
 
         metadata.column_schema.set_nullable();
+
+        if !value_split_enabled {
+            continue;
+        }
 
         let int_column_name = metric_engine_value_int_column_name(&metadata.column_schema.name);
         if existing_names.contains(&int_column_name) {
@@ -873,7 +892,7 @@ mod test {
             requirements: Default::default(),
         };
         MetricEngineInner::verify_region_create_request(&request).unwrap();
-        append_metric_value_int_columns(&mut request.column_metadatas);
+        configure_metric_value_int_columns(&mut request.column_metadatas, true);
         assert!(request.column_metadatas[2].column_schema.is_nullable());
         assert!(request.column_metadatas[3].column_schema.is_nullable());
 
@@ -1243,6 +1262,28 @@ mod test {
             ConcreteDataType::int64_datatype()
         );
         assert!(value_int_metadata.column_schema.is_nullable());
+
+        let mut last_non_null_request = request.clone();
+        last_non_null_request
+            .options
+            .insert(MERGE_MODE_KEY.to_string(), "last_non_null".to_string());
+        let last_non_null_data_region_request =
+            engine_inner.create_request_for_data_region(&last_non_null_request);
+        assert!(
+            last_non_null_data_region_request
+                .column_metadatas
+                .iter()
+                .all(|metadata| !is_metric_engine_value_int_column(&metadata.column_schema.name))
+        );
+        assert!(
+            last_non_null_data_region_request
+                .column_metadatas
+                .iter()
+                .find(|metadata| metadata.column_schema.name == "value")
+                .unwrap()
+                .column_schema
+                .is_nullable()
+        );
 
         let table_id_metadata = data_region_request
             .column_metadatas
