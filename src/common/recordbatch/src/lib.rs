@@ -726,6 +726,8 @@ impl ConsecutiveBatchBufferTracker {
     }
 
     fn collect_unique_buffers(data: &ArrayData, buffers: &mut Vec<Buffer>) {
+        // Arrow 58 includes StringView/BinaryView variadic data buffers in this slice after the
+        // views buffer. There is no separate ArrayData::variadic_buffers() API in this version.
         for buffer in data.buffers() {
             Self::push_unique_buffer(buffer, buffers);
         }
@@ -907,6 +909,7 @@ mod tests {
     use std::time::Duration;
 
     use common_memory_manager::{OnExhaustedPolicy, PermitGranularity};
+    use datatypes::arrow::array::{BinaryViewArray, StringViewArray};
     use datatypes::prelude::{ConcreteDataType, VectorRef};
     use datatypes::schema::{ColumnSchema, Schema};
     use datatypes::vectors::{BinaryVector, BooleanVector, Int32Vector, StringVector};
@@ -1298,5 +1301,54 @@ mod tests {
 
         assert!(stream.next().await.unwrap().is_ok());
         assert!(stream.next().await.unwrap().is_err());
+    }
+
+    #[test]
+    fn test_buffer_tracker_counts_view_array_data_buffers() {
+        let rows = 16;
+        let bytes_per_row = 1024;
+        let string_payload = "x".repeat(bytes_per_row);
+        let string_values = vec![string_payload.as_str(); rows];
+        let string_vector: VectorRef =
+            Arc::new(StringVector::from(StringViewArray::from(string_values)));
+        let string_batch = RecordBatch::new(
+            Arc::new(Schema::new(vec![ColumnSchema::new(
+                "payload",
+                ConcreteDataType::utf8_view_datatype(),
+                false,
+            )])),
+            vec![string_vector],
+        )
+        .unwrap();
+
+        let binary_payload = vec![b'x'; bytes_per_row];
+        let binary_values = vec![binary_payload.as_slice(); rows];
+        let binary_vector: VectorRef =
+            Arc::new(BinaryVector::from(BinaryViewArray::from(binary_values)));
+        let binary_batch = RecordBatch::new(
+            Arc::new(Schema::new(vec![ColumnSchema::new(
+                "payload",
+                ConcreteDataType::binary_view_datatype(),
+                false,
+            )])),
+            vec![binary_vector],
+        )
+        .unwrap();
+
+        for batch in [string_batch, binary_batch] {
+            let data = batch.column(0).to_data();
+            // Arrow 58 stores the views buffer first and the variadic data buffers after it in
+            // ArrayData::buffers(). Verify the out-of-line payload is present there.
+            let variadic_bytes = data.buffers()[1..]
+                .iter()
+                .map(Buffer::capacity)
+                .sum::<usize>();
+            assert!(variadic_bytes >= rows * bytes_per_row);
+
+            let tracker = ConsecutiveBatchBufferTracker::default();
+            let (tracked_bytes, _) = tracker.prepare(&batch);
+            assert_eq!(tracked_bytes, batch.buffer_memory_size());
+            assert!(tracked_bytes >= rows * bytes_per_row);
+        }
     }
 }
