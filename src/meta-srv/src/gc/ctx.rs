@@ -16,9 +16,11 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use common_meta::datanode::RegionStat;
-use common_meta::key::TableMetadataManagerRef;
+use common_meta::ddl_manager::DdlManagerRef;
 use common_meta::key::table_repart::TableRepartValue;
 use common_meta::key::table_route::PhysicalTableRouteValue;
+use common_meta::key::{DroppedTableName, TableMetadataManagerRef};
+use common_meta::rpc::ddl::PurgeDroppedTableTask;
 use common_procedure::{ProcedureManagerRef, ProcedureWithId, watcher};
 use common_telemetry::debug;
 use snafu::{OptionExt as _, ResultExt as _};
@@ -54,6 +56,10 @@ pub(crate) trait SchedulerCtx: Send + Sync {
         timeout: Duration,
         region_routes_override: Region2Peers,
     ) -> Result<GcReport>;
+
+    async fn list_dropped_tables(&self) -> Result<Vec<DroppedTableName>>;
+
+    async fn purge_dropped_table(&self, table_id: TableId) -> Result<()>;
 }
 
 pub(crate) struct DefaultGcSchedulerCtx {
@@ -61,6 +67,8 @@ pub(crate) struct DefaultGcSchedulerCtx {
     pub(crate) table_metadata_manager: TableMetadataManagerRef,
     /// Procedure manager.
     pub(crate) procedure_manager: ProcedureManagerRef,
+    /// DDL manager used to submit the existing purge procedure.
+    pub(crate) ddl_manager: DdlManagerRef,
     /// For getting `RegionStats`.
     pub(crate) meta_peer_client: MetaPeerClientRef,
     /// The mailbox to send messages.
@@ -73,6 +81,7 @@ impl DefaultGcSchedulerCtx {
     pub fn try_new(
         table_metadata_manager: TableMetadataManagerRef,
         procedure_manager: ProcedureManagerRef,
+        ddl_manager: DdlManagerRef,
         meta_peer_client: MetaPeerClientRef,
         mailbox: MailboxRef,
         server_addr: String,
@@ -80,6 +89,7 @@ impl DefaultGcSchedulerCtx {
         Ok(Self {
             table_metadata_manager,
             procedure_manager,
+            ddl_manager,
             meta_peer_client,
             mailbox,
             server_addr,
@@ -153,6 +163,21 @@ impl SchedulerCtx for DefaultGcSchedulerCtx {
             region_routes_override,
         )
         .await
+    }
+
+    async fn list_dropped_tables(&self) -> Result<Vec<DroppedTableName>> {
+        self.table_metadata_manager
+            .list_dropped_tables()
+            .await
+            .context(TableMetadataManagerSnafu)
+    }
+
+    async fn purge_dropped_table(&self, table_id: TableId) -> Result<()> {
+        self.ddl_manager
+            .submit_purge_dropped_table_task(PurgeDroppedTableTask { table_id })
+            .await
+            .context(error::SubmitDdlTaskSnafu)?;
+        Ok(())
     }
 }
 

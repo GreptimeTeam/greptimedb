@@ -22,6 +22,7 @@ use common_meta::key::runtime_switch::RuntimeSwitchManagerRef;
 use common_procedure::ProcedureManagerRef;
 use common_telemetry::tracing::Instrument as _;
 use common_telemetry::{error, info};
+use futures::{StreamExt, stream};
 use snafu::ResultExt;
 use store_api::storage::{GcReport, RegionId};
 use tokio::sync::mpsc::{Receiver, Sender};
@@ -134,6 +135,7 @@ impl GcScheduler {
     pub(crate) fn new_with_config(
         table_metadata_manager: TableMetadataManagerRef,
         procedure_manager: ProcedureManagerRef,
+        ddl_manager: common_meta::ddl_manager::DdlManagerRef,
         meta_peer_client: MetaPeerClientRef,
         mailbox: MailboxRef,
         server_addr: String,
@@ -149,6 +151,7 @@ impl GcScheduler {
             ctx: Arc::new(DefaultGcSchedulerCtx::try_new(
                 table_metadata_manager,
                 procedure_manager,
+                ddl_manager,
                 meta_peer_client,
                 mailbox,
                 server_addr,
@@ -218,6 +221,10 @@ impl GcScheduler {
             info!("Skip gc trigger because maintenance mode is enabled");
             return Ok(GcJobReport::default());
         }
+        if self.config.soft_drop.enable {
+            self.purge_expired_soft_dropped_tables(common_time::util::current_time_millis())
+                .await;
+        }
         let span = common_telemetry::tracing::info_span!("meta_gc_handle_tick");
         let report = self.trigger_gc().instrument(span).await?;
 
@@ -227,6 +234,36 @@ impl GcScheduler {
         info!("Finished gc trigger");
 
         Ok(report)
+    }
+
+    async fn purge_expired_soft_dropped_tables(&self, now_millis: i64) {
+        let retention_millis = match i64::try_from(self.config.soft_drop.retention.as_millis()) {
+            Ok(retention_millis) => retention_millis,
+            Err(error) => {
+                error!(error; "Soft-drop retention exceeds the supported millisecond range");
+                return;
+            }
+        };
+        let dropped_tables = match self.ctx.list_dropped_tables().await {
+            Ok(dropped_tables) => dropped_tables,
+            Err(error) => {
+                error!(error; "Failed to list soft-dropped tables for GC");
+                return;
+            }
+        };
+
+        stream::iter(dropped_tables.into_iter().filter(|table| {
+            table
+                .dropped_at
+                .and_then(|dropped_at| dropped_at.checked_add(retention_millis))
+                .is_some_and(|expires_at| expires_at <= now_millis)
+        }))
+        .for_each_concurrent(self.config.max_concurrent_tables, |table| async move {
+            if let Err(error) = self.ctx.purge_dropped_table(table.table_id).await {
+                error!(error; "Failed to purge expired soft-dropped table {}", table.table_id);
+            }
+        })
+        .await;
     }
 
     /// Handles a manual GC request with optional specific parameters.
@@ -332,14 +369,17 @@ pub(crate) fn new_test_runtime_switch_manager() -> RuntimeSwitchManagerRef {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::sync::Mutex as StdMutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
     use common_meta::datanode::RegionStat;
+    use common_meta::key::DroppedTableName;
     use common_meta::key::table_repart::TableRepartValue;
     use common_meta::key::table_route::PhysicalTableRouteValue;
     use store_api::storage::RegionId;
     use table::metadata::TableId;
+    use table::table_name::TableName;
 
     use super::*;
 
@@ -348,6 +388,8 @@ mod tests {
         get_table_to_region_stats_calls: AtomicUsize,
         get_table_reparts_calls: AtomicUsize,
         gc_regions_calls: AtomicUsize,
+        list_dropped_tables_calls: AtomicUsize,
+        purge_dropped_table_calls: AtomicUsize,
     }
 
     impl CountingSchedulerCtx {
@@ -366,6 +408,16 @@ mod tests {
                 0,
                 self.gc_regions_calls.load(Ordering::Relaxed),
                 "gc_regions should not be called"
+            );
+            assert_eq!(
+                0,
+                self.list_dropped_tables_calls.load(Ordering::Relaxed),
+                "list_dropped_tables should not be called"
+            );
+            assert_eq!(
+                0,
+                self.purge_dropped_table_calls.load(Ordering::Relaxed),
+                "purge_dropped_table should not be called"
             );
         }
     }
@@ -407,6 +459,177 @@ mod tests {
             self.gc_regions_calls.fetch_add(1, Ordering::Relaxed);
             panic!("gc_regions should not be called in maintenance mode")
         }
+
+        async fn list_dropped_tables(&self) -> Result<Vec<DroppedTableName>> {
+            self.list_dropped_tables_calls
+                .fetch_add(1, Ordering::Relaxed);
+            panic!("list_dropped_tables should not be called in maintenance mode")
+        }
+
+        async fn purge_dropped_table(&self, _table_id: TableId) -> Result<()> {
+            self.purge_dropped_table_calls
+                .fetch_add(1, Ordering::Relaxed);
+            panic!("purge_dropped_table should not be called in maintenance mode")
+        }
+    }
+
+    #[derive(Default)]
+    struct SoftDropSchedulerCtx {
+        dropped_tables: StdMutex<Vec<DroppedTableName>>,
+        purge_attempts: StdMutex<Vec<TableId>>,
+        failed_table: StdMutex<Option<TableId>>,
+        region_gc_calls: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl SchedulerCtx for SoftDropSchedulerCtx {
+        async fn get_table_to_region_stats(&self) -> Result<HashMap<TableId, Vec<RegionStat>>> {
+            self.region_gc_calls.fetch_add(1, Ordering::Relaxed);
+            Ok(HashMap::new())
+        }
+
+        async fn get_table_reparts(&self) -> Result<Vec<(TableId, TableRepartValue)>> {
+            Ok(vec![])
+        }
+
+        async fn get_table_route(
+            &self,
+            _table_id: TableId,
+        ) -> Result<(TableId, PhysicalTableRouteValue)> {
+            unreachable!()
+        }
+
+        async fn batch_get_table_route(
+            &self,
+            _table_ids: &[TableId],
+        ) -> Result<HashMap<TableId, PhysicalTableRouteValue>> {
+            Ok(HashMap::new())
+        }
+
+        async fn gc_regions(
+            &self,
+            _region_ids: &[RegionId],
+            _full_file_listing: bool,
+            _timeout: Duration,
+            _region_routes_override: Region2Peers,
+        ) -> Result<GcReport> {
+            Ok(GcReport::default())
+        }
+
+        async fn list_dropped_tables(&self) -> Result<Vec<DroppedTableName>> {
+            Ok(self.dropped_tables.lock().unwrap().clone())
+        }
+
+        async fn purge_dropped_table(&self, table_id: TableId) -> Result<()> {
+            self.purge_attempts.lock().unwrap().push(table_id);
+            if *self.failed_table.lock().unwrap() == Some(table_id) {
+                return crate::error::UnexpectedSnafu {
+                    violated: format!("mock purge failure for table {table_id}"),
+                }
+                .fail();
+            }
+            Ok(())
+        }
+    }
+
+    fn dropped_table(table_id: TableId, dropped_at: Option<i64>) -> DroppedTableName {
+        DroppedTableName {
+            table_id,
+            table_name: TableName::new("greptime", "public", format!("table_{table_id}")),
+            dropped_at,
+        }
+    }
+
+    fn soft_drop_scheduler(ctx: Arc<dyn SchedulerCtx>) -> GcScheduler {
+        let (tx, rx) = GcScheduler::channel();
+        drop(tx);
+        GcScheduler {
+            ctx,
+            runtime_switch_manager: new_test_runtime_switch_manager(),
+            receiver: rx,
+            config: GcSchedulerOptions {
+                enable: true,
+                soft_drop: crate::gc::options::SoftDropGcOptions {
+                    enable: true,
+                    retention: Duration::from_millis(100),
+                },
+                ..Default::default()
+            },
+            region_gc_tracker: Arc::new(Mutex::new(HashMap::new())),
+            last_tracker_cleanup: Arc::new(Mutex::new(Instant::now())),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_purge_expired_soft_dropped_tables_filters_by_retention_and_timestamp() {
+        let ctx = Arc::new(SoftDropSchedulerCtx::default());
+        *ctx.dropped_tables.lock().unwrap() = vec![
+            dropped_table(1, Some(899)),
+            dropped_table(2, Some(900)),
+            dropped_table(3, Some(901)),
+            dropped_table(4, None),
+            dropped_table(5, Some(i64::MAX)),
+        ];
+        let scheduler = soft_drop_scheduler(ctx.clone());
+
+        scheduler.purge_expired_soft_dropped_tables(1_000).await;
+
+        let mut attempts = ctx.purge_attempts.lock().unwrap().clone();
+        attempts.sort_unstable();
+        assert_eq!(vec![1, 2], attempts);
+    }
+
+    #[tokio::test]
+    async fn test_purge_failure_does_not_prevent_other_purges() {
+        let ctx = Arc::new(SoftDropSchedulerCtx::default());
+        *ctx.dropped_tables.lock().unwrap() = vec![
+            dropped_table(1, Some(0)),
+            dropped_table(2, Some(0)),
+            dropped_table(3, Some(0)),
+        ];
+        *ctx.failed_table.lock().unwrap() = Some(2);
+        let scheduler = soft_drop_scheduler(ctx.clone());
+
+        scheduler.purge_expired_soft_dropped_tables(1_000).await;
+
+        let mut attempts = ctx.purge_attempts.lock().unwrap().clone();
+        attempts.sort_unstable();
+        assert_eq!(vec![1, 2, 3], attempts);
+    }
+
+    #[tokio::test]
+    async fn test_tick_purges_tombstones_and_still_runs_region_gc() {
+        let ctx = Arc::new(SoftDropSchedulerCtx::default());
+        *ctx.dropped_tables.lock().unwrap() = vec![dropped_table(1, Some(i64::MIN))];
+        *ctx.failed_table.lock().unwrap() = Some(1);
+        let scheduler = soft_drop_scheduler(ctx.clone());
+
+        scheduler.handle_tick().await.unwrap();
+
+        assert_eq!(vec![1], *ctx.purge_attempts.lock().unwrap());
+        assert_eq!(1, ctx.region_gc_calls.load(Ordering::Relaxed));
+    }
+
+    #[tokio::test]
+    async fn test_tick_with_no_tombstones_makes_no_purge_submissions() {
+        let ctx = Arc::new(SoftDropSchedulerCtx::default());
+        let scheduler = soft_drop_scheduler(ctx.clone());
+
+        scheduler.handle_tick().await.unwrap();
+
+        assert!(ctx.purge_attempts.lock().unwrap().is_empty());
+        assert_eq!(1, ctx.region_gc_calls.load(Ordering::Relaxed));
+    }
+
+    #[tokio::test]
+    async fn test_manual_gc_does_not_purge_soft_dropped_tables() {
+        let ctx = Arc::new(SoftDropSchedulerCtx::default());
+        *ctx.dropped_tables.lock().unwrap() = vec![dropped_table(1, Some(i64::MIN))];
+        let scheduler = soft_drop_scheduler(ctx.clone());
+
+        scheduler.handle_manual_gc(None, None, None).await.unwrap();
+
+        assert!(ctx.purge_attempts.lock().unwrap().is_empty());
     }
 
     struct ErrorMockSchedulerCtx;
@@ -446,6 +669,14 @@ mod tests {
                 violated: "mock gc failure".to_string(),
             }
             .fail()
+        }
+
+        async fn list_dropped_tables(&self) -> Result<Vec<DroppedTableName>> {
+            Ok(vec![])
+        }
+
+        async fn purge_dropped_table(&self, _table_id: TableId) -> Result<()> {
+            Ok(())
         }
     }
 

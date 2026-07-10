@@ -437,6 +437,9 @@
 | `gc` | -- | -- | -- |
 | `gc.enable` | Bool | `false` | Whether GC is enabled. Default to false. Need to be the same with datanode's `mito.gc.enable`<br/>If set to false, no GC will be performed |
 | `gc.gc_cooldown_period` | String | `5m` | Cooldown period between GC operations on the same region. |
+| `gc.soft_drop` | -- | -- | -- |
+| `gc.soft_drop.enable` | Bool | `false` | Whether soft drop and automatic purging of expired dropped tables are enabled.<br/>Requires `gc.enable = true`. |
+| `gc.soft_drop.retention` | String | `7d` | How long a soft-dropped table is retained before it can be purged.<br/>Must be greater than zero. |
 | `logging` | -- | -- | The logging options. |
 | `logging.dir` | String | `./greptimedb_data/logs` | The directory to store the log files. If set to empty, logs will not be written to files. |
 | `logging.level` | String | Unset | The log level. Can be `info`/`debug`/`warn`/`error`. |

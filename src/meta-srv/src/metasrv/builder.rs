@@ -219,6 +219,7 @@ impl MetasrvBuilder {
         } = self;
 
         let options = options.unwrap_or_default();
+        options.gc.validate()?;
 
         let kv_backend = kv_backend.unwrap_or_else(|| Arc::new(MemoryKvBackend::new()));
         let in_memory = in_memory.unwrap_or_else(|| Arc::new(MemoryKvBackend::new()));
@@ -524,6 +525,7 @@ impl MetasrvBuilder {
             let (gc_scheduler, gc_ticker) = GcScheduler::new_with_config(
                 table_metadata_manager.clone(),
                 procedure_manager.clone(),
+                ddl_manager.clone(),
                 meta_peer_client.clone(),
                 mailbox.clone(),
                 options.grpc.server_addr.clone(),
@@ -687,10 +689,44 @@ fn build_procedure_manager(
 }
 
 /// Resolves if soft-drop is enabled from metasrv options.
-fn ddl_soft_drop_enabled(_options: &MetasrvOptions) -> bool {
-    // TODO(hl): add a dedicated soft-drop cluster config
-    // when wiring the user-facing option.
-    false
+fn ddl_soft_drop_enabled(options: &MetasrvOptions) -> bool {
+    options.gc.soft_drop.enable
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_ddl_soft_drop_uses_metasrv_gc_config() {
+        let mut options = MetasrvOptions::default();
+        options.gc.enable = true;
+        options.gc.soft_drop.enable = true;
+
+        assert!(ddl_soft_drop_enabled(&options));
+    }
+
+    #[test]
+    fn test_ddl_soft_drop_is_disabled_by_default() {
+        assert!(!ddl_soft_drop_enabled(&MetasrvOptions::default()));
+    }
+
+    #[tokio::test]
+    async fn test_builder_validates_gc_before_skipping_disabled_gc() {
+        let mut options = MetasrvOptions::default();
+        options.gc.soft_drop.retention = Duration::ZERO;
+
+        let error = match MetasrvBuilder::new().options(options).build().await {
+            Ok(_) => panic!("invalid GC options should fail before building metasrv"),
+            Err(error) => error,
+        };
+
+        assert!(
+            error
+                .to_string()
+                .contains("soft_drop.retention must be greater than 0")
+        );
+    }
 }
 
 impl Default for MetasrvBuilder {

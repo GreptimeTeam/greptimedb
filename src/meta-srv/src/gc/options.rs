@@ -23,6 +23,26 @@ use crate::error::{self, Result};
 #[allow(unused)]
 pub(crate) const TICKER_INTERVAL: Duration = Duration::from_secs(60 * 5);
 
+/// Configuration for garbage collecting soft-dropped tables.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SoftDropGcOptions {
+    /// Whether soft drop and automatic purging are enabled.
+    pub enable: bool,
+    /// How long a soft-dropped table is retained before it can be purged.
+    #[serde(with = "humantime_serde")]
+    pub retention: Duration,
+}
+
+impl Default for SoftDropGcOptions {
+    fn default() -> Self {
+        Self {
+            enable: false,
+            retention: Duration::from_days(7),
+        }
+    }
+}
+
 /// Configuration for GC operations.
 ///
 /// TODO(discord9): not expose most config to users for now, until GC scheduler is fully stable.
@@ -33,6 +53,8 @@ pub struct GcSchedulerOptions {
     /// If set to false, no GC will be performed, and potentially some
     /// files from datanodes will never be deleted.
     pub enable: bool,
+    /// Soft-drop garbage collection options.
+    pub soft_drop: SoftDropGcOptions,
     /// Maximum number of tables to process concurrently.
     pub max_concurrent_tables: usize,
     /// Maximum number of retries per region when GC fails.
@@ -73,6 +95,7 @@ impl Default for GcSchedulerOptions {
     fn default() -> Self {
         Self {
             enable: false,
+            soft_drop: SoftDropGcOptions::default(),
             max_concurrent_tables: 10,
             max_retries_per_region: 3,
             retry_backoff_duration: Duration::from_secs(5),
@@ -94,6 +117,20 @@ impl Default for GcSchedulerOptions {
 impl GcSchedulerOptions {
     /// Validates the configuration options.
     pub fn validate(&self) -> Result<()> {
+        ensure!(
+            !self.soft_drop.enable || self.enable,
+            error::InvalidArgumentsSnafu {
+                err_msg: "soft_drop.enable requires gc.enable",
+            }
+        );
+
+        ensure!(
+            !self.soft_drop.retention.is_zero(),
+            error::InvalidArgumentsSnafu {
+                err_msg: "soft_drop.retention must be greater than 0",
+            }
+        );
+
         ensure!(
             self.max_concurrent_tables > 0,
             error::InvalidArgumentsSnafu {
@@ -172,5 +209,68 @@ impl GcSchedulerOptions {
         );
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_soft_drop_defaults() {
+        let options = GcSchedulerOptions::default();
+
+        assert!(!options.soft_drop.enable);
+        assert_eq!(Duration::from_days(7), options.soft_drop.retention);
+    }
+
+    #[test]
+    fn test_soft_drop_valid_when_both_gc_and_soft_drop_are_enabled() {
+        let options = GcSchedulerOptions {
+            enable: true,
+            soft_drop: SoftDropGcOptions {
+                enable: true,
+                retention: Duration::from_days(1),
+            },
+            ..Default::default()
+        };
+
+        assert!(options.validate().is_ok());
+    }
+
+    #[test]
+    fn test_soft_drop_requires_gc() {
+        let options = GcSchedulerOptions {
+            soft_drop: SoftDropGcOptions {
+                enable: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let error = options.validate().unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("soft_drop.enable requires gc.enable")
+        );
+    }
+
+    #[test]
+    fn test_soft_drop_retention_must_be_non_zero_even_when_disabled() {
+        let options = GcSchedulerOptions {
+            soft_drop: SoftDropGcOptions {
+                retention: Duration::ZERO,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let error = options.validate().unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("soft_drop.retention must be greater than 0")
+        );
     }
 }
