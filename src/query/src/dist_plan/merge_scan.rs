@@ -554,6 +554,24 @@ impl MergeScanExec {
             return None;
         }
 
+        let hash_expr_col_names: HashSet<_> = hash_exprs
+            .iter()
+            .filter_map(|expr| {
+                expr.as_any()
+                    .downcast_ref::<Column>()
+                    .map(|col_expr| col_expr.name())
+            })
+            .collect();
+
+        let covers_all_partition_cols = self.partition_cols.values().all(|aliases| {
+            aliases
+                .iter()
+                .any(|col| hash_expr_col_names.contains(col.name()))
+        });
+        if !covers_all_partition_cols {
+            return None;
+        }
+
         let all_partition_col_aliases: HashSet<_> = self
             .partition_cols
             .values()
