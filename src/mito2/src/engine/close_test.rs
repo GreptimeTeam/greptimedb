@@ -12,11 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
+
+use common_base::Plugins;
 use store_api::region_engine::RegionEngine;
 use store_api::region_request::{RegionCloseRequest, RegionRequest};
 use store_api::storage::RegionId;
 
 use crate::config::MitoConfig;
+use crate::engine::flush_test::MockRegionHook;
+use crate::engine::region_hook::RegionHookRef;
 use crate::test_util::{CreateRequestBuilder, TestEnv};
 
 #[tokio::test]
@@ -59,4 +65,40 @@ async fn test_engine_close_region_with_format(flat_format: bool) {
         .handle_request(region_id, RegionRequest::Close(RegionCloseRequest {}))
         .await
         .unwrap();
+}
+
+#[tokio::test]
+async fn test_region_hook_on_close() {
+    common_telemetry::init_default_ut_logging();
+    let mut env = TestEnv::new().await;
+
+    let hook = Arc::new(MockRegionHook::new());
+    let plugins = Plugins::new();
+    plugins.insert(hook.clone() as RegionHookRef);
+
+    let engine = env
+        .create_engine_with_plugins(MitoConfig::default(), plugins)
+        .await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    // Sanity: no lifecycle events before closing.
+    assert_eq!(hook.closed_count.load(Ordering::Relaxed), 0);
+    assert_eq!(hook.dropped_count.load(Ordering::Relaxed), 0);
+
+    engine
+        .handle_request(region_id, RegionRequest::Close(RegionCloseRequest {}))
+        .await
+        .unwrap();
+
+    // Closing fires on_region_closed exactly once.
+    assert_eq!(hook.closed_count.load(Ordering::Relaxed), 1);
+    // Close must not be confused with drop.
+    assert_eq!(hook.dropped_count.load(Ordering::Relaxed), 0);
+    assert_eq!(hook.files_removed_count.load(Ordering::Relaxed), 0);
 }

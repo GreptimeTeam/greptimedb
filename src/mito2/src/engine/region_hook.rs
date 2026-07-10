@@ -26,6 +26,10 @@
 //!   Receives the full [`RegionMetaActionList`] so consumers can inspect what changed
 //!   (file additions/removals, schema changes, truncation, partition expression changes, etc.).
 //!
+//! - [`on_region_closed`] / [`on_region_dropped`] / [`on_region_files_removed`]:
+//!   Region **lifecycle** callbacks for close, logical drop, and physical file removal.
+//!   See [Region lifecycle](#region-lifecycle) below.
+//!
 //! Hook implementations are registered via the [`Plugins`](common_base::Plugins) system:
 //! ```ignore
 //! plugins.insert(Arc::new(MyHook) as RegionHookRef);
@@ -56,7 +60,31 @@
 //!
 //! The following paths do **not** trigger any hook:
 //! - Follower region sync / catchup (manifest read-only; followers don't author changes)
-//! - GC / checkpoint / drop / remap (internal bookkeeping, not logical state changes)
+//! - GC / checkpoint / remap (internal bookkeeping, not logical state changes)
+//!
+//! An explicit region **drop** does fire lifecycle hooks — see
+//! [Region lifecycle](#region-lifecycle).
+//!
+//! ## Region lifecycle
+//!
+//! Beyond manifest/SST observation, the hook observes the high-level lifecycle of an
+//! active region:
+//!
+//! | Event | Method | When |
+//! |-------|--------|------|
+//! | Close | [`on_region_closed`] | A close request (or a close-after-flush) removes the region from the active set. Data files, manifest and WAL state are **preserved**; the region may be reopened. |
+//! | Logical drop | [`on_region_dropped`] | A drop request has been handled: the region leaves the active set and its WAL entries are marked obsolete. Data files are **not yet deleted**. |
+//! | Physical file removal | [`on_region_files_removed`] | The drop GC worker has deleted the region directory. Terminal file-lifecycle event. |
+//!
+//! Notes:
+//! - `on_region_closed` / `on_region_dropped` run **inline in the region worker loop**, so
+//!   implementations must be fast (same contract as `on_manifest_updated`).
+//! - `on_region_files_removed` runs on the background drop GC task, outside the worker loop.
+//! - When global GC is enabled and a normal table region is dropped with `partial_drop`, its
+//!   directory is left for global reclamation and `on_region_files_removed` is **not** fired
+//!   by the drop worker (observe it via the global GC path instead).
+//!
+//! Region **open** is not yet observed by a hook.
 //!
 //! ## Invocation points
 //!
@@ -77,11 +105,16 @@
 //!
 //! ## Future work
 //!
-//! A future `on_files_removed` hook may be added to observe file lifecycle end
-//! (GC, drop, truncate, compaction removal). This is not yet implemented.
+//! `on_region_files_removed` currently covers only the **drop** GC worker's physical
+//! directory removal. A broader per-file `on_files_removed` hook covering compaction
+//! removal, truncate, and the global GC reclamation path is not yet implemented.
+//! A `on_region_opened` hook may also be added to complete the active-region lifecycle.
 //!
 //! [`on_sst_files_written`]: RegionHook::on_sst_files_written
 //! [`on_manifest_updated`]: RegionHook::on_manifest_updated
+//! [`on_region_closed`]: RegionHook::on_region_closed
+//! [`on_region_dropped`]: RegionHook::on_region_dropped
+//! [`on_region_files_removed`]: RegionHook::on_region_files_removed
 //! [`RegionManifestManager::update`]: crate::manifest::manager::RegionManifestManager::update
 //! [`ManifestContext::update_locked`]: crate::region::ManifestContext::update_locked
 //! [`ManifestContext::update_manifest`]: crate::region::ManifestContext::update_manifest
@@ -227,6 +260,57 @@ pub trait RegionHook: Send + Sync + Debug {
         manifest_version: ManifestVersion,
     ) {
         let _ = (region_id, action_list, manifest_version);
+    }
+
+    /// Called after a region is **closed** via a close request.
+    ///
+    /// The region is removed from the engine's active set, but its data files,
+    /// manifest, and WAL state are **preserved**; the region may be reopened
+    /// later. Fires once per successful close, after the region's background
+    /// tasks (flush/compaction) have been stopped.
+    ///
+    /// Does **not** fire when a region is dropped (see [`on_region_dropped`])
+    /// or for follower/catchup regions.
+    ///
+    /// Runs inline in the region worker loop; implementations should be fast.
+    ///
+    /// [`on_region_dropped`]: RegionHook::on_region_dropped
+    async fn on_region_closed(&self, region_id: RegionId, region_metadata: &RegionMetadataRef) {
+        let _ = (region_id, region_metadata);
+    }
+
+    /// Called after a region is **logically dropped** (a drop request has been
+    /// handled).
+    ///
+    /// The region is removed from the active set and its WAL entries are marked
+    /// obsolete. Its data files are **not yet deleted** — they are scheduled for
+    /// asynchronous removal by the GC worker. Observe physical deletion via
+    /// [`on_region_files_removed`].
+    ///
+    /// Runs inline in the region worker loop; implementations should be fast.
+    ///
+    /// [`on_region_files_removed`]: RegionHook::on_region_files_removed
+    async fn on_region_dropped(&self, region_id: RegionId, region_metadata: &RegionMetadataRef) {
+        let _ = (region_id, region_metadata);
+    }
+
+    /// Called after a dropped region's data files are **physically removed** by
+    /// the drop GC worker (the region directory has been deleted).
+    ///
+    /// This is the terminal event in a region's file lifecycle; no further
+    /// callbacks fire for this region id afterwards. Fires only when the drop
+    /// worker itself deletes the directory. When global GC is enabled and the
+    /// region is a normal table region dropped with `partial_drop`, the
+    /// directory is left for global reclamation and this hook is **not** fired
+    /// by the drop worker.
+    ///
+    /// Runs on a background task, outside the region worker loop.
+    async fn on_region_files_removed(
+        &self,
+        region_id: RegionId,
+        region_metadata: &RegionMetadataRef,
+    ) {
+        let _ = (region_id, region_metadata);
     }
 }
 

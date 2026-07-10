@@ -895,23 +895,43 @@ async fn test_update_topic_latest_entry_id(factory: Option<LogStoreFactory>) {
 }
 
 #[derive(Debug)]
-struct MockRegionHook {
-    sst_written_count: AtomicUsize,
-    manifest_updated_count: AtomicUsize,
+pub(super) struct MockRegionHook {
+    pub(super) sst_written_count: AtomicUsize,
+    pub(super) manifest_updated_count: AtomicUsize,
+    pub(super) closed_count: AtomicUsize,
+    pub(super) dropped_count: AtomicUsize,
+    pub(super) files_removed_count: AtomicUsize,
     notify: Notify,
+    dropped_notify: Notify,
+    files_removed_notify: Notify,
 }
 
 impl MockRegionHook {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self {
             sst_written_count: AtomicUsize::new(0),
             manifest_updated_count: AtomicUsize::new(0),
+            closed_count: AtomicUsize::new(0),
+            dropped_count: AtomicUsize::new(0),
+            files_removed_count: AtomicUsize::new(0),
             notify: Notify::new(),
+            dropped_notify: Notify::new(),
+            files_removed_notify: Notify::new(),
         }
     }
 
     async fn wait_for_manifest_update(&self) {
         self.notify.notified().await;
+    }
+
+    /// Waits until `on_region_dropped` has fired at least once.
+    pub(super) async fn wait_for_dropped(&self) {
+        self.dropped_notify.notified().await;
+    }
+
+    /// Waits until `on_region_files_removed` has fired at least once.
+    pub(super) async fn wait_for_files_removed(&self) {
+        self.files_removed_notify.notified().await;
     }
 }
 
@@ -965,6 +985,30 @@ impl RegionHook for MockRegionHook {
             files_added,
         );
         self.notify.notify_one();
+    }
+
+    async fn on_region_closed(&self, region_id: RegionId, _region_metadata: &RegionMetadataRef) {
+        self.closed_count.fetch_add(1, Ordering::Relaxed);
+        common_telemetry::info!("MockRegionHook::on_region_closed: region={}", region_id);
+    }
+
+    async fn on_region_dropped(&self, region_id: RegionId, _region_metadata: &RegionMetadataRef) {
+        self.dropped_count.fetch_add(1, Ordering::Relaxed);
+        common_telemetry::info!("MockRegionHook::on_region_dropped: region={}", region_id);
+        self.dropped_notify.notify_one();
+    }
+
+    async fn on_region_files_removed(
+        &self,
+        region_id: RegionId,
+        _region_metadata: &RegionMetadataRef,
+    ) {
+        self.files_removed_count.fetch_add(1, Ordering::Relaxed);
+        common_telemetry::info!(
+            "MockRegionHook::on_region_files_removed: region={}",
+            region_id
+        );
+        self.files_removed_notify.notify_one();
     }
 }
 
