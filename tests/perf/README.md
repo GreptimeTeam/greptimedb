@@ -183,7 +183,7 @@ need multi-window file distribution should span multiple compaction windows. If
 `sample_chunk_size` is omitted, the runner keeps the older single-helper-invocation
 behavior and flushes once at the end.
 
-The default remote-write coverage set contains three cases with the same 2048
+The default remote-write coverage set contains four cases with the same 2048
 series × 14,400 samples (29,491,200 rows per target) shape. Each writes ten
 one-day chunks, flushes every chunk, requires at least two visible SSTs with the
 value column, runs seven read-bench iterations with `parquetbench` capped at
@@ -195,6 +195,8 @@ TQL selector with two warmups and 15 iterations:
 - `prom_remote_write_run_heavy`: low-cardinality values in exact 16-sample runs.
 - `prom_remote_write_mixed_every`: continuous signal values with every fifth
   sample repeated at the base value.
+- `prom_remote_write_integer_counter`: strictly increasing integer counter
+  values, with disjoint ranges for each series.
 
 These cases record normal storage/footer and read-bench results but do not gate
 specific value encodings or storage-size outcomes. Use the controlled encoding
