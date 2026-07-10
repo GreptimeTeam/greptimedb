@@ -182,6 +182,13 @@ default_merge_mode = "last_non_null"
 ## Whether to enable Jaeger protocol in HTTP API.
 enable = true
 
+## OpenTelemetry protocol options.
+[otlp]
+## Whether to enable OpenTelemetry protocol in HTTP API.
+enable = true
+## Maximum spans per trace ingest chunk. Set to 0 to disable splitting.
+trace_ingest_chunk_size = 128
+
 ## Prometheus remote storage options
 [prom_store]
 ## Whether to enable Prometheus remote write and read in HTTP API.

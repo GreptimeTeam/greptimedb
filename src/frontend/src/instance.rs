@@ -124,6 +124,7 @@ pub struct Instance {
     process_manager: ProcessManagerRef,
     slow_query_options: SlowQueryOptions,
     influxdb_default_merge_mode: InfluxdbMergeMode,
+    trace_ingest_chunk_size: usize,
     suspend: Arc<AtomicBool>,
 
     // cache for otlp metrics
