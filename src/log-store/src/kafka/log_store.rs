@@ -511,6 +511,23 @@ impl LogStore for KafkaLogStore {
         Ok(())
     }
 
+    async fn obsolete_all(&self, provider: &Provider, region_id: RegionId) -> Result<()> {
+        let provider = Arc::new(
+            provider
+                .as_kafka_provider()
+                .with_context(|| InvalidProviderSnafu {
+                    expected: KafkaProvider::type_name(),
+                    actual: provider.type_name(),
+                })?
+                .clone(),
+        );
+        let _ = self.client_manager.get_or_insert(&provider).await?;
+        if let Some(collector) = self.client_manager.global_index_collector() {
+            collector.truncate_all(&provider, region_id).await?;
+        }
+        Ok(())
+    }
+
     /// Returns the highest entry id of the specified topic in remote WAL.
     fn latest_entry_id(&self, provider: &Provider) -> Result<EntryId> {
         let provider = provider

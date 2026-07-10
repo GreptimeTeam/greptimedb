@@ -266,6 +266,14 @@ pub enum Error {
         error: tokio::sync::oneshot::error::RecvError,
     },
 
+    #[snafu(display("Failed to wait for result of TruncateAllIndex"))]
+    WaitTruncateAllIndex {
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        error: tokio::sync::oneshot::error::RecvError,
+    },
+
     #[snafu(display("Failed to create writer"))]
     CreateWriter {
         #[snafu(implicit)]
@@ -351,6 +359,7 @@ impl ErrorExt for Error {
             | OrderedBatchProducerStopped { .. }
             | WaitProduceResultReceiver { .. }
             | WaitDumpIndex { .. }
+            | WaitTruncateAllIndex { .. }
             | MetaLengthExceededLimit { .. } => StatusCode::Internal,
 
             // Object store related errors
