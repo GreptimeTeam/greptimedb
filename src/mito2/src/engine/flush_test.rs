@@ -447,7 +447,10 @@ async fn test_skip_remote_wal_replay_sets_topic_latest_entry_id(factory: Option<
     assert_eq!(1, region.topic_latest_entry_id.load(Ordering::Relaxed));
 
     engine
-        .handle_request(region_id, RegionRequest::Close(RegionCloseRequest {}))
+        .handle_request(
+            region_id,
+            RegionRequest::Close(RegionCloseRequest::default()),
+        )
         .await
         .unwrap();
 
@@ -589,7 +592,10 @@ async fn test_remote_wal_open_without_replayed_memtable_sets_topic_latest_entry_
     // The empty flush updates `topic_latest_entry_id` from KafkaLogStore's topic stats.
     flush_region(&engine, region_id, None).await;
     engine
-        .handle_request(region_id, RegionRequest::Close(RegionCloseRequest {}))
+        .handle_request(
+            region_id,
+            RegionRequest::Close(RegionCloseRequest::default()),
+        )
         .await
         .unwrap();
 

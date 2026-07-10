@@ -1148,8 +1148,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                         .await;
                     continue;
                 }
-                DdlRequest::Close(_) => {
-                    self.handle_close_request(ddl.region_id, ddl.sender).await;
+                DdlRequest::Close(req) => {
+                    self.handle_close_request(ddl.region_id, req, ddl.sender)
+                        .await;
                     continue;
                 }
                 DdlRequest::Alter(req) => {
