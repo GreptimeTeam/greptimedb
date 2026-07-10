@@ -440,6 +440,8 @@ pub struct DroppedTableName {
     pub table_id: TableId,
     /// Original fully qualified table name.
     pub table_name: TableName,
+    /// Unix timestamp in milliseconds when this table was soft-dropped.
+    pub dropped_at: Option<i64>,
 }
 
 #[derive(Debug, Clone)]
@@ -454,6 +456,14 @@ pub struct DroppedTableMetadata {
     pub table_route_value: TableRouteValue,
     /// Per-region WAL options recovered from tombstoned datanode metadata.
     pub region_wal_options: HashMap<RegionNumber, WalOptions>,
+    /// Unix timestamp in milliseconds when this table was soft-dropped.
+    pub dropped_at: Option<i64>,
+}
+
+const DROPPED_AT_KEY_PREFIX: &str = "__dropped_at";
+
+fn dropped_at_key(table_id: TableId) -> Vec<u8> {
+    format!("{DROPPED_AT_KEY_PREFIX}/{table_id}").into_bytes()
 }
 
 impl<T: DeserializeOwned + Serialize> Deref for DeserializedValueWithBytes<T> {
@@ -998,10 +1008,22 @@ impl TableMetadataManager {
         table_name: &TableName,
         table_route_value: &TableRouteValue,
         region_wal_options: &HashMap<RegionNumber, WalOptions>,
+        dropped_at: Option<i64>,
     ) -> Result<()> {
         let keys =
             self.table_metadata_keys(table_id, table_name, table_route_value, region_wal_options)?;
-        self.tombstone_manager.create(keys).await.map(|_| ())
+        if let Some(dropped_at) = dropped_at {
+            self.tombstone_manager
+                .create_with_marker(
+                    keys,
+                    dropped_at_key(table_id),
+                    dropped_at.to_string().into_bytes(),
+                )
+                .await
+                .map(|_| ())
+        } else {
+            self.tombstone_manager.create(keys).await.map(|_| ())
+        }
     }
 
     /// Lists dropped tables from tombstoned table-name entries.
@@ -1016,6 +1038,7 @@ impl TableMetadataManager {
             dropped_tables.push(DroppedTableName {
                 table_id,
                 table_name,
+                dropped_at: self.dropped_at(table_id).await?,
             });
         }
 
@@ -1061,7 +1084,7 @@ impl TableMetadataManager {
         let table_metadata_keys =
             self.table_metadata_keys(table_id, table_name, table_route_value, region_wal_options)?;
         self.tombstone_manager
-            .delete(table_metadata_keys)
+            .delete_with_marker(table_metadata_keys, dropped_at_key(table_id))
             .await
             .map(|_| ())
     }
@@ -1077,7 +1100,10 @@ impl TableMetadataManager {
     ) -> Result<()> {
         let keys =
             self.table_metadata_keys(table_id, table_name, table_route_value, region_wal_options)?;
-        self.tombstone_manager.restore(keys).await.map(|_| ())
+        self.tombstone_manager
+            .restore_with_marker(keys, dropped_at_key(table_id))
+            .await
+            .map(|_| ())
     }
 
     /// Deletes metadata for table **permanently**.
@@ -1138,6 +1164,7 @@ impl TableMetadataManager {
         let region_wal_options = self
             .dropped_region_wal_options(table_id, &table_route_value)
             .await?;
+        let dropped_at = self.dropped_at(table_id).await?;
 
         Ok(Some(DroppedTableMetadata {
             table_id,
@@ -1145,7 +1172,27 @@ impl TableMetadataManager {
             table_info_value,
             table_route_value,
             region_wal_options,
+            dropped_at,
         }))
+    }
+
+    async fn dropped_at(&self, table_id: TableId) -> Result<Option<i64>> {
+        let Some(kv) = self
+            .tombstone_manager
+            .get(&dropped_at_key(table_id))
+            .await?
+        else {
+            return Ok(None);
+        };
+        let value = String::from_utf8_lossy(&kv.value);
+        value.parse().map(Some).map_err(|err| {
+            error::UnexpectedSnafu {
+                err_msg: format!(
+                    "Invalid dropped timestamp '{value}' for table id {table_id}: {err}"
+                ),
+            }
+            .build()
+        })
     }
 
     /// Rebuilds region WAL options from tombstoned datanode-table entries.
@@ -1837,6 +1884,7 @@ mod tests {
                 &table_name,
                 &table_route_value,
                 &region_wal_options,
+                None,
             )
             .await
             .unwrap();
@@ -2188,6 +2236,7 @@ mod tests {
                 &table_name,
                 table_route_value,
                 &region_wal_options,
+                None,
             )
             .await
             .unwrap();
@@ -2198,6 +2247,7 @@ mod tests {
                 &table_name,
                 table_route_value,
                 &region_wal_options,
+                None,
             )
             .await
             .unwrap();
@@ -2927,7 +2977,7 @@ mod tests {
         let table_name = TableName::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, table_name);
         let table_route_value = TableRouteValue::physical(region_routes.clone());
         table_metadata_manager
-            .delete_table_metadata(table_id, &table_name, &table_route_value, &options)
+            .delete_table_metadata(table_id, &table_name, &table_route_value, &options, None)
             .await
             .unwrap();
         table_metadata_manager

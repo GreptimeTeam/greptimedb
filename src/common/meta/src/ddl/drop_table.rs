@@ -26,6 +26,7 @@ use common_procedure::{
 };
 use common_telemetry::info;
 use common_telemetry::tracing::warn;
+use common_time::util::current_time_millis;
 use common_wal::options::WalOptions;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
@@ -60,7 +61,7 @@ impl DropTableProcedure {
     pub const TYPE_NAME: &'static str = "metasrv-procedure::DropTable";
 
     pub fn new(task: DropTableTask, context: DdlContext) -> Self {
-        let data = DropTableData::new(task);
+        let data = DropTableData::new(task, context.soft_drop_enabled);
         let executor = data.build_executor();
         Self {
             context,
@@ -83,7 +84,12 @@ impl DropTableProcedure {
     }
 
     pub(crate) async fn on_prepare(&mut self) -> Result<Status> {
-        if self.executor.on_prepare(&self.context).await?.stop() {
+        if self
+            .executor
+            .on_prepare(&self.context, self.data.soft_drop_enabled)
+            .await?
+            .stop()
+        {
             return Ok(Status::done());
         }
         self.fill_table_metadata().await?;
@@ -139,6 +145,7 @@ impl DropTableProcedure {
                 &self.context,
                 table_route_value,
                 &self.data.region_wal_options,
+                self.data.dropped_at,
             )
             .await?;
         info!("Deleted table metadata for table {table_id}");
@@ -173,7 +180,7 @@ impl DropTableProcedure {
                 .await?;
         }
 
-        if self.context.soft_drop_enabled {
+        if self.data.soft_drop_enabled {
             self.executor
                 .on_close_regions(
                     &self.context.node_manager,
@@ -329,10 +336,14 @@ pub struct DropTableData {
     pub region_wal_options: HashMap<RegionNumber, WalOptions>,
     #[serde(default)]
     pub allow_rollback: bool,
+    #[serde(default)]
+    pub soft_drop_enabled: bool,
+    #[serde(default)]
+    pub dropped_at: Option<i64>,
 }
 
 impl DropTableData {
-    pub fn new(task: DropTableTask) -> Self {
+    pub fn new(task: DropTableTask, soft_drop_enabled: bool) -> Self {
         Self {
             state: DropTableState::Prepare,
             task,
@@ -340,6 +351,8 @@ impl DropTableData {
             physical_table_id: None,
             region_wal_options: HashMap::new(),
             allow_rollback: false,
+            soft_drop_enabled,
+            dropped_at: soft_drop_enabled.then(current_time_millis),
         }
     }
 
