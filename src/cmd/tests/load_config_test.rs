@@ -108,6 +108,7 @@ fn test_load_datanode_example_config() {
                 level: Some("info".to_string()),
                 dir: format!("{}/{}", DEFAULT_DATA_HOME, DEFAULT_LOGGING_DIR),
                 otlp_endpoint: Some(DEFAULT_OTLP_HTTP_ENDPOINT.to_string()),
+                otlp_export_protocol: Some(common_telemetry::logging::OtlpExportProtocol::Http),
                 tracing_sample_ratio: Some(Default::default()),
                 ..Default::default()
             },
@@ -147,6 +148,7 @@ fn test_load_frontend_example_config() {
                 level: Some("info".to_string()),
                 dir: format!("{}/{}", DEFAULT_DATA_HOME, DEFAULT_LOGGING_DIR),
                 otlp_endpoint: Some(DEFAULT_OTLP_HTTP_ENDPOINT.to_string()),
+                otlp_export_protocol: Some(common_telemetry::logging::OtlpExportProtocol::Http),
                 tracing_sample_ratio: Some(Default::default()),
                 ..Default::default()
             },
@@ -197,6 +199,7 @@ fn test_load_metasrv_example_config() {
                 dir: format!("{}/{}", DEFAULT_DATA_HOME, DEFAULT_LOGGING_DIR),
                 level: Some("info".to_string()),
                 otlp_endpoint: Some(DEFAULT_OTLP_HTTP_ENDPOINT.to_string()),
+                otlp_export_protocol: Some(common_telemetry::logging::OtlpExportProtocol::Http),
                 tracing_sample_ratio: Some(Default::default()),
                 ..Default::default()
             },
@@ -314,6 +317,7 @@ fn test_load_standalone_example_config() {
                 level: Some("info".to_string()),
                 dir: format!("{}/{}", DEFAULT_DATA_HOME, DEFAULT_LOGGING_DIR),
                 otlp_endpoint: Some(DEFAULT_OTLP_HTTP_ENDPOINT.to_string()),
+                otlp_export_protocol: Some(common_telemetry::logging::OtlpExportProtocol::Http),
                 tracing_sample_ratio: Some(Default::default()),
                 ..Default::default()
             },
