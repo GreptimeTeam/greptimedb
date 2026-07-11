@@ -393,6 +393,7 @@ impl ParquetReaderBuilder {
             )
             .await?;
         let mut parquet_meta = sst_meta.parquet_metadata();
+        let mut parquet_metadata_size = sst_meta.parquet_metadata_size();
         let region_meta = sst_meta.region_metadata();
         let region_partition_expr_str = self
             .expected_metadata
@@ -504,6 +505,7 @@ impl ParquetReaderBuilder {
                 )
                 .await?;
             parquet_meta = sst_meta.parquet_metadata();
+            parquet_metadata_size = sst_meta.parquet_metadata_size();
             cache_miss |= page_index_cache_miss;
         }
 
@@ -551,6 +553,7 @@ impl ParquetReaderBuilder {
             file_handle: self.file_handle.clone(),
             file_path,
             parquet_meta,
+            parquet_metadata_size,
             arrow_metadata,
             output_schema,
             object_store: self.object_store.clone(),
@@ -1735,6 +1738,8 @@ pub(crate) struct RowGroupReaderBuilder {
     file_path: String,
     /// Metadata of the parquet file.
     parquet_meta: Arc<ParquetMetaData>,
+    /// Immutable metadata size, computed once when the footer is decoded.
+    parquet_metadata_size: usize,
     /// Arrow reader metadata for building async stream.
     arrow_metadata: ArrowReaderMetadata,
     /// Projected output schema aligned with `projection.projected_root_presence`.
@@ -1775,6 +1780,10 @@ impl RowGroupReaderBuilder {
 
     pub(crate) fn parquet_metadata(&self) -> &Arc<ParquetMetaData> {
         &self.parquet_meta
+    }
+
+    pub(crate) fn parquet_metadata_size(&self) -> usize {
+        self.parquet_metadata_size
     }
 
     pub(crate) fn cache_strategy(&self) -> &CacheStrategy {

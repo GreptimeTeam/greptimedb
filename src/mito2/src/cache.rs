@@ -152,6 +152,7 @@ impl RangeResultMemoryLimiter {
 #[derive(Debug)]
 pub(crate) struct CachedSstMeta {
     parquet_metadata: Arc<ParquetMetaData>,
+    parquet_metadata_size: usize,
     region_metadata: RegionMetadataRef,
     region_metadata_weight: usize,
     page_index_policy: PageIndexPolicy,
@@ -215,9 +216,11 @@ impl CachedSstMeta {
         // Keep the previous JSON-byte floor and charge the decoded structures as well.
         let region_metadata_weight = region_metadata.estimated_size().max(json.len());
         let parquet_metadata = Arc::new(strip_region_metadata_from_parquet(parquet_metadata));
+        let parquet_metadata_size = parquet_meta_size(&parquet_metadata);
 
         Ok(Self {
             parquet_metadata,
+            parquet_metadata_size,
             region_metadata,
             region_metadata_weight,
             page_index_policy,
@@ -226,6 +229,11 @@ impl CachedSstMeta {
 
     pub(crate) fn parquet_metadata(&self) -> Arc<ParquetMetaData> {
         self.parquet_metadata.clone()
+    }
+
+    /// Returns the immutable parquet metadata size computed when it was decoded.
+    pub(crate) fn parquet_metadata_size(&self) -> usize {
+        self.parquet_metadata_size
     }
 
     pub(crate) fn region_metadata(&self) -> RegionMetadataRef {
@@ -1297,8 +1305,7 @@ impl CacheManagerBuilder {
 
 fn meta_cache_weight(k: &SstMetaKey, v: &Arc<CachedSstMeta>) -> u32 {
     // We ignore the size of `Arc`.
-    let size =
-        k.estimated_size() + parquet_meta_size(&v.parquet_metadata) + v.region_metadata_weight;
+    let size = k.estimated_size() + v.parquet_metadata_size + v.region_metadata_weight;
     u32::try_from(size).unwrap_or(u32::MAX)
 }
 
@@ -1880,9 +1887,11 @@ mod tests {
         assert!(cached.region_metadata_weight > json_len);
         assert_eq!(
             meta_cache_weight(&key, &cached) as usize,
-            key.estimated_size()
-                + parquet_meta_size(&cached.parquet_metadata)
-                + cached.region_metadata_weight
+            key.estimated_size() + cached.parquet_metadata_size + cached.region_metadata_weight
+        );
+        assert_eq!(
+            cached.parquet_metadata_size,
+            parquet_meta_size(&cached.parquet_metadata)
         );
     }
 
