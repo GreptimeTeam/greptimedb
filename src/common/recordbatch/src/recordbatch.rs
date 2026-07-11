@@ -282,10 +282,8 @@ impl RecordBatch {
             .iter()
             .fold(0, |total, array| {
                 let data = array.to_data();
-                let array_size = data
-                    .get_slice_memory_size()
-                    .map(|slice_size| slice_size.saturating_add(view_payload_size(&data)))
-                    .unwrap_or_else(|_| array.get_buffer_memory_size());
+                let array_size =
+                    logical_array_size(&data).unwrap_or_else(|_| array.get_buffer_memory_size());
                 total.saturating_add(array_size)
             })
     }
@@ -361,6 +359,40 @@ impl Serialize for RecordBatch {
 
 /// Arrow ByteView stores values up to this length inline in the 128-bit view record.
 const MAX_INLINE_VIEW_LEN: usize = 12;
+
+fn logical_array_size(
+    data: &ArrayData,
+) -> std::result::Result<usize, datatypes::arrow::error::ArrowError> {
+    let Some(child) = data.child_data().first() else {
+        return data
+            .get_slice_memory_size()
+            .map(|size| size.saturating_add(view_payload_size(data)));
+    };
+
+    let child_range = match data.data_type() {
+        ArrowDataType::List(_) | ArrowDataType::Map(_, _) => {
+            let offsets = data.buffer::<i32>(0);
+            Some((offsets[0] as usize, offsets[data.len()] as usize))
+        }
+        ArrowDataType::LargeList(_) => {
+            let offsets = data.buffer::<i64>(0);
+            Some((offsets[0] as usize, offsets[data.len()] as usize))
+        }
+        _ => None,
+    };
+
+    let Some((start, end)) = child_range else {
+        return data
+            .get_slice_memory_size()
+            .map(|size| size.saturating_add(view_payload_size(data)));
+    };
+
+    let container_size = data
+        .get_slice_memory_size()?
+        .saturating_sub(child.get_slice_memory_size()?);
+    let child_size = logical_array_size(&child.slice(start, end.saturating_sub(start)))?;
+    Ok(container_size.saturating_add(child_size))
+}
 
 /// Returns out-of-line payload bytes omitted by Arrow's slice memory calculation.
 fn view_payload_size(data: &ArrayData) -> usize {
@@ -444,11 +476,13 @@ mod tests {
     use std::sync::Arc;
 
     use datatypes::arrow::array::{
-        AsArray, BinaryArray, BinaryViewArray, StringViewArray, StructArray, UInt32Array,
+        AsArray, BinaryArray, BinaryViewArray, LargeListArray, ListArray, MapArray, StringArray,
+        StringViewArray, StructArray, UInt32Array,
     };
-    use datatypes::arrow::buffer::NullBuffer;
-    use datatypes::arrow::datatypes::{DataType, Field, Schema as ArrowSchema, UInt32Type};
-    use datatypes::arrow_array::StringArray;
+    use datatypes::arrow::buffer::{NullBuffer, OffsetBuffer};
+    use datatypes::arrow::datatypes::{
+        DataType, Field, Int32Type, Schema as ArrowSchema, UInt32Type,
+    };
     use datatypes::data_type::ConcreteDataType;
     use datatypes::extension::json::{JsonExtensionType, JsonMetadata};
     use datatypes::schema::{ColumnSchema, Schema};
@@ -652,6 +686,103 @@ mod tests {
             arrow_slice_size + visible.len(),
             batch.logical_slice_memory_size()
         );
+    }
+
+    fn batch_with_array(array: ArrayRef) -> RecordBatch {
+        let arrow_schema = Arc::new(ArrowSchema::new(vec![Field::new(
+            "nested",
+            array.data_type().clone(),
+            true,
+        )]));
+        let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
+            "nested",
+            ConcreteDataType::uint32_datatype(),
+            true,
+        )]));
+        RecordBatch::from_df_record_batch(
+            schema,
+            DfRecordBatch::try_new(arrow_schema, vec![array]).unwrap(),
+        )
+    }
+
+    #[test]
+    fn test_logical_slice_memory_size_slices_list_values() {
+        let array = ListArray::from_iter_primitive::<Int32Type, _, _>(
+            (0..100).map(|value| Some(vec![Some(value); 10])),
+        );
+        let batch = batch_with_array(Arc::new(array)).slice(50, 1).unwrap();
+
+        assert_eq!(4 + 10 * 4, batch.logical_slice_memory_size());
+    }
+
+    #[test]
+    fn test_logical_slice_memory_size_slices_large_list_values() {
+        let array = LargeListArray::from_iter_primitive::<Int32Type, _, _>(
+            (0..100).map(|value| Some(vec![Some(value); 10])),
+        );
+        let batch = batch_with_array(Arc::new(array)).slice(50, 1).unwrap();
+
+        assert_eq!(8 + 10 * 4, batch.logical_slice_memory_size());
+    }
+
+    #[test]
+    fn test_logical_slice_memory_size_slices_list_view_payload() {
+        let invisible = "invisible nested string view payload";
+        let visible = "visible nested string view payload";
+        let values = Arc::new(StringViewArray::from(vec![invisible, visible, invisible]));
+        let field = Arc::new(Field::new_list_field(DataType::Utf8View, false));
+        let array = ListArray::new(field, OffsetBuffer::from_lengths([1, 1, 1]), values, None);
+        let batch = batch_with_array(Arc::new(array)).slice(1, 1).unwrap();
+
+        assert_eq!(4 + 16 + visible.len(), batch.logical_slice_memory_size());
+    }
+
+    #[test]
+    fn test_logical_slice_memory_size_slices_map_entries() {
+        let keys = Arc::new(StringArray::from_iter_values(
+            (0..100).map(|value| format!("key-{value}")),
+        ));
+        let values = Arc::new(UInt32Array::from_iter_values(0..100));
+        let key_field = Arc::new(Field::new("key", DataType::Utf8, false));
+        let value_field = Arc::new(Field::new("value", DataType::UInt32, false));
+        let entries = StructArray::from(vec![
+            (key_field.clone(), keys as ArrayRef),
+            (value_field.clone(), values as ArrayRef),
+        ]);
+        let entries_field = Arc::new(Field::new(
+            "entries",
+            DataType::Struct(vec![key_field, value_field].into()),
+            false,
+        ));
+        let array = MapArray::new(
+            entries_field,
+            OffsetBuffer::from_lengths(std::iter::repeat_n(1, 100)),
+            entries,
+            None,
+            false,
+        );
+        let batch = batch_with_array(Arc::new(array)).slice(50, 1).unwrap();
+
+        assert_eq!(
+            4 + 4 + "key-50".len() + 4,
+            batch.logical_slice_memory_size()
+        );
+    }
+
+    #[test]
+    fn test_logical_slice_memory_size_handles_empty_and_null_list_ranges() {
+        let values = Arc::new(UInt32Array::from_iter_values([1, 2]));
+        let field = Arc::new(Field::new_list_field(DataType::UInt32, false));
+        let array = ListArray::new(
+            field,
+            OffsetBuffer::from_lengths([1, 0, 1]),
+            values,
+            Some(NullBuffer::from(vec![true, false, true])),
+        );
+        let batch = batch_with_array(Arc::new(array));
+
+        assert_eq!(5, batch.slice(1, 1).unwrap().logical_slice_memory_size());
+        assert_eq!(0, batch.slice(1, 0).unwrap().logical_slice_memory_size());
     }
 
     #[test]
