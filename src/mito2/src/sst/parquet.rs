@@ -121,14 +121,15 @@ mod tests {
     use common_function::function_factory::ScalarFunctionFactory;
     use common_function::scalars::matches::MatchesFunction;
     use common_function::scalars::matches_term::MatchesTermFunction;
+    use common_query::prelude::greptime_value;
     use common_time::Timestamp;
     use datafusion_common::{Column, ScalarValue};
     use datafusion_expr::expr::ScalarFunction;
     use datafusion_expr::{BinaryExpr, Expr, Literal, Operator, col, lit};
     use datatypes::arrow;
     use datatypes::arrow::array::{
-        ArrayRef, BinaryDictionaryBuilder, RecordBatch, StringArray, StringDictionaryBuilder,
-        TimestampMillisecondArray, UInt8Array, UInt64Array,
+        ArrayRef, BinaryDictionaryBuilder, Float64Array, RecordBatch, StringArray,
+        StringDictionaryBuilder, TimestampMillisecondArray, UInt8Array, UInt32Array, UInt64Array,
     };
     use datatypes::arrow::datatypes::{DataType, Field, Schema, UInt32Type};
     use datatypes::arrow::util::pretty::pretty_format_batches;
@@ -141,7 +142,11 @@ mod tests {
     use parquet::file::properties::WriterProperties;
     use store_api::codec::PrimaryKeyEncoding;
     use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataBuilder};
+    use store_api::metric_engine_consts::{
+        DATA_SCHEMA_TABLE_ID_COLUMN_NAME, DATA_SCHEMA_TSID_COLUMN_NAME, METRIC_DATA_REGION_GROUP,
+    };
     use store_api::region_request::PathType;
+    use store_api::storage::consts::ReservedColumnId;
     use store_api::storage::{ColumnSchema, RegionId};
     use table::predicate::Predicate;
     use tokio_util::compat::FuturesAsyncWriteCompatExt;
@@ -1287,6 +1292,323 @@ mod tests {
             .await
             .unwrap()
             .remove(0)
+    }
+
+    fn metric_data_region_metadata() -> Arc<RegionMetadata> {
+        let mut builder = RegionMetadataBuilder::new(RegionId::with_group_and_seq(
+            1,
+            METRIC_DATA_REGION_GROUP,
+            1,
+        ));
+        builder
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    DATA_SCHEMA_TABLE_ID_COLUMN_NAME,
+                    ConcreteDataType::uint32_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Tag,
+                column_id: ReservedColumnId::table_id(),
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    DATA_SCHEMA_TSID_COLUMN_NAME,
+                    ConcreteDataType::uint64_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Tag,
+                column_id: ReservedColumnId::tsid(),
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    greptime_value(),
+                    ConcreteDataType::float64_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Field,
+                column_id: 1,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "ts",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Timestamp,
+                column_id: 0,
+            })
+            .primary_key(vec![ReservedColumnId::table_id(), ReservedColumnId::tsid()]);
+        Arc::new(builder.build().unwrap())
+    }
+
+    fn metric_value_record_batch(metadata: &RegionMetadata) -> RecordBatch {
+        const ROWS: usize = 1_024;
+
+        metric_value_record_batch_with_values(
+            metadata,
+            &(0..ROWS).map(|value| value as f64).collect::<Vec<_>>(),
+            0,
+        )
+    }
+
+    fn metric_value_record_batch_with_values(
+        metadata: &RegionMetadata,
+        values: &[f64],
+        timestamp_start: i64,
+    ) -> RecordBatch {
+        metric_value_record_batch_with_values_and_primary_key_size(
+            metadata,
+            values,
+            timestamp_start,
+            None,
+        )
+    }
+
+    fn metric_value_record_batch_with_values_and_primary_key_size(
+        metadata: &RegionMetadata,
+        values: &[f64],
+        timestamp_start: i64,
+        primary_key_size: Option<usize>,
+    ) -> RecordBatch {
+        let rows = values.len();
+
+        let schema = to_flat_sst_arrow_schema(metadata, &FlatSchemaOptions::default());
+        let mut primary_key = BinaryDictionaryBuilder::<UInt32Type>::new();
+        for row in 0..rows {
+            if let Some(primary_key_size) = primary_key_size {
+                let mut state = row as u64 + 1;
+                let primary_key_value = (0..primary_key_size)
+                    .map(|_| {
+                        state ^= state << 13;
+                        state ^= state >> 7;
+                        state ^= state << 17;
+                        state as u8
+                    })
+                    .collect::<Vec<_>>();
+                primary_key.append(&primary_key_value).unwrap();
+            } else {
+                primary_key.append(b"metric-series").unwrap();
+            }
+        }
+
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(UInt32Array::from_value(1, rows)) as ArrayRef,
+                Arc::new(UInt64Array::from_value(1, rows)) as ArrayRef,
+                Arc::new(Float64Array::from(values.to_vec())) as ArrayRef,
+                Arc::new(TimestampMillisecondArray::from_iter_values(
+                    (0..rows).map(|value| timestamp_start + value as i64),
+                )) as ArrayRef,
+                Arc::new(primary_key.finish()) as ArrayRef,
+                Arc::new(UInt64Array::from_value(1, rows)) as ArrayRef,
+                Arc::new(UInt8Array::from_value(OpType::Put as u8, rows)) as ArrayRef,
+            ],
+        )
+        .unwrap()
+    }
+
+    async fn write_metric_value_sst_with_auto_encoding(
+        operation: value_encoding::ParquetWriteOperation,
+    ) -> SstInfo {
+        let mut env = TestEnv::new().await;
+        let object_store = env.init_object_store_manager();
+        let metadata = metric_data_region_metadata();
+        let mut metrics = Metrics::new(match operation {
+            value_encoding::ParquetWriteOperation::Flush => WriteType::Flush,
+            value_encoding::ParquetWriteOperation::Compaction => WriteType::Compaction,
+            value_encoding::ParquetWriteOperation::Other => unreachable!(),
+        });
+        let mut writer = ParquetWriter::new_with_object_store(
+            object_store,
+            metadata.clone(),
+            IndexConfig::default(),
+            NoopIndexBuilder,
+            RegionFilePathFactory::new(FILE_DIR.to_string(), PathType::Bare),
+            &mut metrics,
+        )
+        .await;
+        let write_opts = WriteOptions {
+            row_group_size: 1_024,
+            parquet_write_operation: operation,
+            metric_value_encoding_mode: value_encoding::MetricValueEncodingMode::Auto,
+            ..Default::default()
+        };
+
+        writer
+            .write_all_flat(
+                new_flat_source_from_record_batches(vec![metric_value_record_batch(&metadata)]),
+                None,
+                &write_opts,
+            )
+            .await
+            .unwrap()
+            .remove(0)
+    }
+
+    fn assert_metric_value_uses_byte_stream_split(
+        operation: value_encoding::ParquetWriteOperation,
+        info: &SstInfo,
+    ) {
+        let metadata = info.file_metadata.as_ref().unwrap_or_else(|| {
+            panic!(
+                "operation {operation:?}, file {:?}: missing Parquet file metadata",
+                info.file_id
+            )
+        });
+        let value_chunks = metadata
+            .row_groups()
+            .iter()
+            .flat_map(|row_group| {
+                (0..row_group.num_columns()).map(move |index| row_group.column(index))
+            })
+            .filter(|chunk| {
+                chunk.column_path().parts().len() == 1
+                    && chunk.column_path().parts()[0] == greptime_value()
+            });
+
+        let mut found = false;
+        for chunk in value_chunks {
+            found = true;
+            let encodings = chunk.encodings().collect::<Vec<_>>();
+            assert!(
+                encodings.contains(&Encoding::BYTE_STREAM_SPLIT),
+                "operation {operation:?}, file {:?}: {} column lacks BYTE_STREAM_SPLIT; encodings: {encodings:?}",
+                info.file_id,
+                greptime_value(),
+            );
+            assert!(
+                !encodings.contains(&Encoding::RLE_DICTIONARY),
+                "operation {operation:?}, file {:?}: {} column uses dictionary encoding; encodings: {encodings:?}",
+                info.file_id,
+                greptime_value(),
+            );
+        }
+        assert!(
+            found,
+            "operation {operation:?}, file {:?}: {} column chunk not found",
+            info.file_id,
+            greptime_value(),
+        );
+    }
+
+    fn assert_metric_value_uses_dictionary_plain(
+        operation: value_encoding::ParquetWriteOperation,
+        info: &SstInfo,
+    ) {
+        let metadata = info.file_metadata.as_ref().unwrap_or_else(|| {
+            panic!(
+                "operation {operation:?}, file {:?}: missing Parquet file metadata",
+                info.file_id
+            )
+        });
+        let value_chunks = metadata
+            .row_groups()
+            .iter()
+            .flat_map(|row_group| {
+                (0..row_group.num_columns()).map(move |index| row_group.column(index))
+            })
+            .filter(|chunk| {
+                chunk.column_path().parts().len() == 1
+                    && chunk.column_path().parts()[0] == greptime_value()
+            });
+
+        let mut found = false;
+        for chunk in value_chunks {
+            found = true;
+            let encodings = chunk.encodings().collect::<Vec<_>>();
+            assert!(
+                !encodings.contains(&Encoding::BYTE_STREAM_SPLIT),
+                "operation {operation:?}, file {:?}: {} column uses BYTE_STREAM_SPLIT; encodings: {encodings:?}",
+                info.file_id,
+                greptime_value(),
+            );
+            assert!(
+                encodings.contains(&Encoding::RLE_DICTIONARY),
+                "operation {operation:?}, file {:?}: {} column lacks dictionary encoding; encodings: {encodings:?}",
+                info.file_id,
+                greptime_value(),
+            );
+        }
+        assert!(
+            found,
+            "operation {operation:?}, file {:?}: {} column chunk not found",
+            info.file_id,
+            greptime_value(),
+        );
+    }
+
+    #[tokio::test]
+    async fn test_auto_metric_value_encoding_uses_byte_stream_split_for_flush_and_compaction() {
+        for operation in [
+            value_encoding::ParquetWriteOperation::Flush,
+            value_encoding::ParquetWriteOperation::Compaction,
+        ] {
+            let info = write_metric_value_sst_with_auto_encoding(operation).await;
+            assert_metric_value_uses_byte_stream_split(operation, &info);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_auto_metric_value_encoding_reselects_after_rollover() {
+        const ROWS: usize = 1_024;
+
+        let mut env = TestEnv::new().await;
+        let object_store = env.init_object_store_manager();
+        let metadata = metric_data_region_metadata();
+        let mut metrics = Metrics::new(WriteType::Compaction);
+        let mut writer = ParquetWriter::new_with_object_store(
+            object_store,
+            metadata.clone(),
+            IndexConfig::default(),
+            NoopIndexBuilder,
+            RegionFilePathFactory::new(FILE_DIR.to_string(), PathType::Bare),
+            &mut metrics,
+        )
+        .await;
+        let write_opts = WriteOptions {
+            row_group_size: 64,
+            max_file_size: Some(1),
+            parquet: value_encoding::ParquetWriteOptions::default().with_column_options(
+                greptime_value(),
+                value_encoding::ParquetColumnWriteOptions::default()
+                    .with_encoding(Encoding::BYTE_STREAM_SPLIT)
+                    .with_dictionary_enabled(false),
+            ),
+            parquet_write_operation: value_encoding::ParquetWriteOperation::Other,
+            metric_value_encoding_mode: value_encoding::MetricValueEncodingMode::Auto,
+            ..Default::default()
+        };
+        let ssts = writer
+            .write_all_flat(
+                new_flat_source_from_record_batches(vec![
+                    metric_value_record_batch_with_values_and_primary_key_size(
+                        &metadata,
+                        &(0..ROWS).map(|value| value as f64).collect::<Vec<_>>(),
+                        0,
+                        Some(12 * 1024),
+                    ),
+                    metric_value_record_batch_with_values(
+                        &metadata,
+                        &vec![42.0; ROWS],
+                        ROWS as i64,
+                    ),
+                ]),
+                None,
+                &write_opts,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(2, ssts.len(), "expected one SST for each input batch");
+        assert_metric_value_uses_byte_stream_split(
+            value_encoding::ParquetWriteOperation::Other,
+            &ssts[0],
+        );
+        assert_metric_value_uses_dictionary_plain(
+            value_encoding::ParquetWriteOperation::Other,
+            &ssts[1],
+        );
     }
 
     /// Helper function to create FileHandle from SstInfo.

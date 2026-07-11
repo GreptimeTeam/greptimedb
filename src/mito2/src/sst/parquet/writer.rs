@@ -58,8 +58,8 @@ use crate::sst::index::{IndexOutput, Indexer, IndexerBuilder};
 use crate::sst::parquet::flat_format::{FlatWriteFormat, time_index_column_index};
 use crate::sst::parquet::format::PrimaryKeyWriteFormat;
 use crate::sst::parquet::value_encoding::{
-    ParquetWriteOperation, ParquetWriteOptions, metric_engine_value_column_encoding,
-    metric_value_encoding_plan_for_batch, parquet_options_for_plan, sst_writer_properties,
+    ParquetWriteOptions, metric_engine_value_column_encoding, metric_value_encoding_plan_for_batch,
+    parquet_options_for_plan, sst_writer_properties,
 };
 use crate::sst::parquet::{PARQUET_METADATA_KEY, SstInfo, WriteOptions};
 use crate::sst::{
@@ -341,17 +341,18 @@ where
     ) -> Result<SstInfoArray> {
         let mut results = smallvec![];
         let mut stats = SourceStats::default();
-        let mut parquet_options = opts.parquet.clone();
-        let mut sample_metric_value_encoding = false;
+        let mut base_parquet_options = opts.parquet.clone();
         if let Some(plan) =
             metric_engine_value_column_encoding(&self.metadata, opts.metric_value_encoding_mode)
         {
-            parquet_options = parquet_options.overlay(parquet_options_for_plan(plan));
-        } else if opts.metric_value_encoding_mode.is_auto()
-            && opts.parquet_write_operation == ParquetWriteOperation::Flush
-        {
-            sample_metric_value_encoding = true;
+            base_parquet_options = base_parquet_options.overlay(parquet_options_for_plan(plan));
         }
+        let sample_metric_value_encoding = opts.metric_value_encoding_mode.is_auto()
+            && metric_engine_value_column_encoding(
+                &self.metadata,
+                crate::sst::parquet::value_encoding::MetricValueEncodingMode::Plain,
+            )
+            .is_some();
         while let Some(next_batch) = self
             .next_flat_batch(&mut source, converter)
             .await
@@ -359,7 +360,11 @@ where
         {
             match next_batch {
                 Ok((record_batch, arrow_batch)) => {
+                    let mut parquet_options = base_parquet_options.clone();
                     if self.writer.is_none() && sample_metric_value_encoding {
+                        // The first batch of each output file selects that file's encoding.
+                        // Empty or all-NULL batches deliberately keep the default plain plan
+                        // rather than buffering later rows or changing their write order.
                         if let Some(plan) = metric_value_encoding_plan_for_batch(
                             &self.metadata,
                             opts.metric_value_encoding_mode,
@@ -368,17 +373,6 @@ where
                             parquet_options =
                                 parquet_options.overlay(parquet_options_for_plan(plan));
                         }
-                        sample_metric_value_encoding = false;
-                        self.write_processed_flat_batch(
-                            record_batch,
-                            arrow_batch,
-                            opts,
-                            &parquet_options,
-                            &mut results,
-                            &mut stats,
-                        )
-                        .await?;
-                        continue;
                     }
                     self.write_processed_flat_batch(
                         record_batch,

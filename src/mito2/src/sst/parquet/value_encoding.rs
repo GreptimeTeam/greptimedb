@@ -304,7 +304,13 @@ pub fn parquet_options_for_plan(plan: MetricValueEncodingPlan) -> ParquetWriteOp
                     .with_encoding(Encoding::BYTE_STREAM_SPLIT)
                     .with_dictionary_enabled(false),
             ),
-        MetricValueEncodingDecision::DictionaryPlain => ParquetWriteOptions::default(),
+        MetricValueEncodingDecision::DictionaryPlain => ParquetWriteOptions::default()
+            .with_column_options(
+                greptime_value(),
+                ParquetColumnWriteOptions::default()
+                    .with_encoding(Encoding::PLAIN)
+                    .with_dictionary_enabled(true),
+            ),
     }
 }
 
@@ -352,4 +358,29 @@ pub fn sst_writer_properties_with_metadata(
         parquet_options,
     ))
     .build()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_dictionary_plain_plan_overrides_byte_stream_split_option() {
+        let byte_stream_split = parquet_options_for_plan(MetricValueEncodingPlan {
+            decision: MetricValueEncodingDecision::ByteStreamSplit,
+        });
+        let dictionary_plain = parquet_options_for_plan(MetricValueEncodingPlan {
+            decision: MetricValueEncodingDecision::DictionaryPlain,
+        });
+
+        let options = byte_stream_split.overlay(dictionary_plain);
+        assert_eq!(
+            options.column_options.get(greptime_value()),
+            Some(
+                &ParquetColumnWriteOptions::default()
+                    .with_encoding(Encoding::PLAIN)
+                    .with_dictionary_enabled(true),
+            ),
+        );
+    }
 }
