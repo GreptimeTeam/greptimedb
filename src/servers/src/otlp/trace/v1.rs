@@ -14,8 +14,12 @@
 
 use std::collections::{HashMap, HashSet};
 
+use api::v1::column_data_type_extension::TypeExt;
 use api::v1::value::ValueData;
-use api::v1::{ColumnDataType, RowInsertRequests, Value};
+use api::v1::{
+    ColumnDataType, ColumnDataTypeExtension, ColumnSchema, JsonTypeExtension, RowInsertRequests,
+    Value,
+};
 use common_catalog::consts::{trace_operations_table_name, trace_services_table_name};
 use common_grpc::precision::Precision;
 use opentelemetry_proto::tonic::common::v1::any_value::Value as OtlpValue;
@@ -40,20 +44,125 @@ const APPROXIMATE_COLUMN_COUNT: usize = 30;
 // Use a timestamp(2100-01-01 00:00:00) as large as possible.
 const MAX_TIMESTAMP: i64 = 4102444800000000000;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TraceBinaryType {
+    Binary,
+    Json,
+}
+
+impl TraceBinaryType {
+    pub fn apply_to_schema(self, schema: &mut ColumnSchema) {
+        schema.datatype = ColumnDataType::Binary as i32;
+        schema.datatype_extension = match self {
+            Self::Binary => None,
+            Self::Json => Some(ColumnDataTypeExtension {
+                type_ext: Some(TypeExt::JsonType(JsonTypeExtension::JsonBinary.into())),
+            }),
+        };
+    }
+}
+
+#[derive(Default)]
+struct TraceBatchColumnSchema {
+    value_types: Vec<ColumnDataType>,
+    present_rows: Vec<usize>,
+    binary_types: Vec<(usize, TraceBinaryType)>,
+}
+
+impl TraceBatchColumnSchema {
+    fn observe_row(&mut self, row_index: usize) {
+        if self.present_rows.last() != Some(&row_index) {
+            self.present_rows.push(row_index);
+        }
+    }
+
+    fn has_incompatible_logical_types(&self) -> bool {
+        let Some((_, first_type)) = self.binary_types.first() else {
+            return false;
+        };
+        self.binary_types
+            .iter()
+            .any(|(_, binary_type)| binary_type != first_type)
+    }
+}
+
+pub struct TraceRetryColumn {
+    pub present_rows: Vec<usize>,
+    pub binary_types: Vec<(usize, TraceBinaryType)>,
+}
+
+pub type TraceRetryColumns = HashMap<String, TraceRetryColumn>;
+
 #[derive(Default)]
 pub struct TraceBatchSchema {
-    pub value_types: HashMap<String, Vec<ColumnDataType>>,
+    columns: HashMap<String, TraceBatchColumnSchema>,
 }
 
 impl TraceBatchSchema {
-    fn observe_value_type(&mut self, name: &str, value_type: ColumnDataType) {
-        if let Some(types) = self.value_types.get_mut(name) {
-            if !types.contains(&value_type) {
-                types.push(value_type);
-            }
-        } else {
-            self.value_types.insert(name.to_string(), vec![value_type]);
+    fn observe_value_type(&mut self, name: &str, row_index: usize, value_type: ColumnDataType) {
+        let column = self.columns.entry(name.to_string()).or_default();
+        column.observe_row(row_index);
+        if !column.value_types.contains(&value_type) {
+            column.value_types.push(value_type);
         }
+    }
+
+    fn observe_binary_type(&mut self, name: &str, row_index: usize, binary_type: TraceBinaryType) {
+        let column = self.columns.entry(name.to_string()).or_default();
+        column.observe_row(row_index);
+        if let Some((last_row_index, last_type)) = column.binary_types.last_mut()
+            && *last_row_index == row_index
+        {
+            *last_type = binary_type;
+        } else {
+            column.binary_types.push((row_index, binary_type));
+        }
+    }
+
+    fn observe_present_column(&mut self, name: &str, row_index: usize) {
+        self.columns
+            .entry(name.to_string())
+            .or_default()
+            .observe_row(row_index);
+    }
+
+    pub fn value_types(&self, name: &str) -> Option<&[ColumnDataType]> {
+        self.columns
+            .get(name)
+            .map(|column| column.value_types.as_slice())
+    }
+
+    pub fn has_incompatible_logical_types(&self) -> bool {
+        self.columns
+            .values()
+            .any(TraceBatchColumnSchema::has_incompatible_logical_types)
+    }
+
+    pub fn has_incompatible_logical_types_for(&self, name: &str) -> bool {
+        self.columns
+            .get(name)
+            .is_some_and(TraceBatchColumnSchema::has_incompatible_logical_types)
+    }
+
+    pub fn into_retry_columns(self) -> TraceRetryColumns {
+        self.columns
+            .into_iter()
+            .filter(|(_, column)| !column.present_rows.is_empty())
+            .map(|(name, column)| {
+                let binary_types = if column.has_incompatible_logical_types() {
+                    column.binary_types
+                } else {
+                    Vec::new()
+                };
+                (
+                    name,
+                    TraceRetryColumn {
+                        present_rows: column.present_rows,
+                        binary_types,
+                    },
+                )
+            })
+            .collect()
     }
 }
 
@@ -69,8 +178,7 @@ pub fn v1_to_grpc_main_insert_requests(
     _query_ctx: &QueryContextRef,
     _pipeline_handler: PipelineHandlerRef,
 ) -> Result<(RowInsertRequests, usize)> {
-    let (requests, _) =
-        v1_to_grpc_main_insert_requests_from_iter(spans.iter().cloned(), table_name)?;
+    let requests = v1_to_grpc_main_insert_requests_from_iter(spans.iter().cloned(), table_name)?;
     Ok((requests, spans.len()))
 }
 
@@ -78,38 +186,54 @@ pub fn v1_to_grpc_main_insert_requests_with_schema(
     spans: Vec<TraceSpan>,
     table_name: &str,
 ) -> Result<(RowInsertRequests, TraceBatchSchema)> {
-    v1_to_grpc_main_insert_requests_from_iter(spans.into_iter(), table_name)
-}
-
-fn v1_to_grpc_main_insert_requests_from_iter(
-    spans: impl ExactSizeIterator<Item = TraceSpan>,
-    table_name: &str,
-) -> Result<(RowInsertRequests, TraceBatchSchema)> {
     let mut multi_table_writer = MultiTableData::default();
-    let (trace_writer, batch_schema) = build_trace_table_data_with_schema(spans)?;
+    let (trace_writer, batch_schema) = build_trace_table_data_with_schema(spans.into_iter())?;
     multi_table_writer.add_table_data(table_name, trace_writer);
-
     Ok((
         multi_table_writer.into_row_insert_requests().0,
         batch_schema,
     ))
 }
 
+fn v1_to_grpc_main_insert_requests_from_iter(
+    spans: impl ExactSizeIterator<Item = TraceSpan>,
+    table_name: &str,
+) -> Result<RowInsertRequests> {
+    let mut multi_table_writer = MultiTableData::default();
+    let trace_writer = build_trace_table_data_from_iter(spans, None)?;
+    multi_table_writer.add_table_data(table_name, trace_writer);
+
+    Ok(multi_table_writer.into_row_insert_requests().0)
+}
+
 /// Builds the row-oriented payload for the main v1 trace table.
 pub fn build_trace_table_data(spans: &[TraceSpan]) -> Result<TableData> {
-    build_trace_table_data_with_schema(spans.iter().cloned()).map(|(table_data, _)| table_data)
+    build_trace_table_data_from_iter(spans.iter().cloned(), None)
 }
 
 fn build_trace_table_data_with_schema(
     spans: impl ExactSizeIterator<Item = TraceSpan>,
 ) -> Result<(TableData, TraceBatchSchema)> {
-    let mut trace_writer = TableData::new(APPROXIMATE_COLUMN_COUNT, spans.len());
     let mut batch_schema = TraceBatchSchema::default();
-    for span in spans {
-        write_span_to_row_with_schema(&mut trace_writer, span, &mut batch_schema)?;
-    }
-
+    let trace_writer = build_trace_table_data_from_iter(spans, Some(&mut batch_schema))?;
     Ok((trace_writer, batch_schema))
+}
+
+fn build_trace_table_data_from_iter(
+    spans: impl ExactSizeIterator<Item = TraceSpan>,
+    mut batch_schema: Option<&mut TraceBatchSchema>,
+) -> Result<TableData> {
+    let mut trace_writer = TableData::new(APPROXIMATE_COLUMN_COUNT, spans.len());
+    for span in spans {
+        let row_index = trace_writer.num_rows();
+        write_span_to_row_inner(
+            &mut trace_writer,
+            span,
+            row_index,
+            batch_schema.as_deref_mut(),
+        )?;
+    }
+    Ok(trace_writer)
 }
 
 /// Builds row insert requests for the v1 trace auxiliary tables.
@@ -134,13 +258,15 @@ pub fn build_aux_table_requests(
 }
 
 pub fn write_span_to_row(writer: &mut TableData, span: TraceSpan) -> Result<()> {
-    write_span_to_row_with_schema(writer, span, &mut TraceBatchSchema::default())
+    let row_index = writer.num_rows();
+    write_span_to_row_inner(writer, span, row_index, None)
 }
 
-fn write_span_to_row_with_schema(
+fn write_span_to_row_inner(
     writer: &mut TableData,
     span: TraceSpan,
-    batch_schema: &mut TraceBatchSchema,
+    row_index: usize,
+    mut batch_schema: Option<&mut TraceBatchSchema>,
 ) -> Result<()> {
     let mut row = writer.alloc_one_row();
 
@@ -183,6 +309,9 @@ fn write_span_to_row_with_schema(
     row_writer::write_fields(writer, fields.into_iter(), &mut row)?;
 
     if let Some(service_name) = span.service_name {
+        if let Some(batch_schema) = batch_schema.as_deref_mut() {
+            batch_schema.observe_present_column(SERVICE_NAME_COLUMN, row_index);
+        }
         row_writer::write_tags(
             writer,
             std::iter::once((SERVICE_NAME_COLUMN.to_string(), service_name)),
@@ -195,20 +324,23 @@ fn write_span_to_row_with_schema(
         "span_attributes",
         span.span_attributes,
         &mut row,
-        batch_schema,
+        row_index,
+        batch_schema.as_deref_mut(),
     )?;
     write_attributes_with_schema(
         writer,
         "scope_attributes",
         span.scope_attributes,
         &mut row,
-        batch_schema,
+        row_index,
+        batch_schema.as_deref_mut(),
     )?;
     write_attributes_with_schema(
         writer,
         "resource_attributes",
         span.resource_attributes,
         &mut row,
+        row_index,
         batch_schema,
     )?;
 
@@ -288,13 +420,8 @@ pub(crate) fn write_attributes(
     attributes: Attributes,
     row: &mut Vec<Value>,
 ) -> Result<()> {
-    write_attributes_with_schema(
-        writer,
-        prefix,
-        attributes,
-        row,
-        &mut TraceBatchSchema::default(),
-    )
+    let row_index = writer.num_rows();
+    write_attributes_with_schema(writer, prefix, attributes, row, row_index, None)
 }
 
 fn write_attributes_with_schema(
@@ -302,7 +429,8 @@ fn write_attributes_with_schema(
     prefix: &str,
     attributes: Attributes,
     row: &mut Vec<Value>,
-    batch_schema: &mut TraceBatchSchema,
+    row_index: usize,
+    mut batch_schema: Option<&mut TraceBatchSchema>,
 ) -> Result<()> {
     for attr in attributes.take().into_iter() {
         let key_suffix = attr.key;
@@ -315,7 +443,9 @@ fn write_attributes_with_schema(
         let key = format!("{}.{}", prefix, key_suffix);
         match attr.value.and_then(|v| v.value) {
             Some(OtlpValue::StringValue(v)) => {
-                batch_schema.observe_value_type(&key, ColumnDataType::String);
+                if let Some(batch_schema) = batch_schema.as_deref_mut() {
+                    batch_schema.observe_value_type(&key, row_index, ColumnDataType::String);
+                }
                 // Keep the raw request value here. Mixed trace types are reconciled later
                 // in the frontend once we can also see the existing table schema.
                 writer.write_field_unchecked(
@@ -326,7 +456,9 @@ fn write_attributes_with_schema(
                 );
             }
             Some(OtlpValue::BoolValue(v)) => {
-                batch_schema.observe_value_type(&key, ColumnDataType::Boolean);
+                if let Some(batch_schema) = batch_schema.as_deref_mut() {
+                    batch_schema.observe_value_type(&key, row_index, ColumnDataType::Boolean);
+                }
                 // Do not coerce or promote types while building the request-local rows.
                 writer.write_field_unchecked(
                     &key,
@@ -336,7 +468,9 @@ fn write_attributes_with_schema(
                 );
             }
             Some(OtlpValue::IntValue(v)) => {
-                batch_schema.observe_value_type(&key, ColumnDataType::Int64);
+                if let Some(batch_schema) = batch_schema.as_deref_mut() {
+                    batch_schema.observe_value_type(&key, row_index, ColumnDataType::Int64);
+                }
                 // Preserving the original value avoids order-dependent behavior inside one batch.
                 writer.write_field_unchecked(
                     &key,
@@ -346,7 +480,9 @@ fn write_attributes_with_schema(
                 );
             }
             Some(OtlpValue::DoubleValue(v)) => {
-                batch_schema.observe_value_type(&key, ColumnDataType::Float64);
+                if let Some(batch_schema) = batch_schema.as_deref_mut() {
+                    batch_schema.observe_value_type(&key, row_index, ColumnDataType::Float64);
+                }
                 writer.write_field_unchecked(
                     &key,
                     ColumnDataType::Float64,
@@ -354,19 +490,32 @@ fn write_attributes_with_schema(
                     row,
                 );
             }
-            Some(OtlpValue::ArrayValue(v)) => row_writer::write_json(
-                writer,
-                key,
-                any_value_to_jsonb(OtlpValue::ArrayValue(v)),
-                row,
-            )?,
-            Some(OtlpValue::KvlistValue(v)) => row_writer::write_json(
-                writer,
-                key,
-                any_value_to_jsonb(OtlpValue::KvlistValue(v)),
-                row,
-            )?,
+            Some(OtlpValue::ArrayValue(v)) => {
+                if let Some(batch_schema) = batch_schema.as_deref_mut() {
+                    batch_schema.observe_binary_type(&key, row_index, TraceBinaryType::Json);
+                }
+                row_writer::write_json(
+                    writer,
+                    key,
+                    any_value_to_jsonb(OtlpValue::ArrayValue(v)),
+                    row,
+                )?;
+            }
+            Some(OtlpValue::KvlistValue(v)) => {
+                if let Some(batch_schema) = batch_schema.as_deref_mut() {
+                    batch_schema.observe_binary_type(&key, row_index, TraceBinaryType::Json);
+                }
+                row_writer::write_json(
+                    writer,
+                    key,
+                    any_value_to_jsonb(OtlpValue::KvlistValue(v)),
+                    row,
+                )?;
+            }
             Some(OtlpValue::BytesValue(v)) => {
+                if let Some(batch_schema) = batch_schema.as_deref_mut() {
+                    batch_schema.observe_binary_type(&key, row_index, TraceBinaryType::Binary);
+                }
                 row_writer::write_fields(
                     writer,
                     std::iter::once(make_column_data(
@@ -437,7 +586,7 @@ mod tests {
             build_trace_table_data_with_schema(vec![span1, span2].into_iter()).unwrap();
 
         assert_eq!(
-            batch_schema.value_types["span_attributes.val"],
+            batch_schema.value_types("span_attributes.val").unwrap(),
             [ColumnDataType::Int64, ColumnDataType::Float64]
         );
         let timestamp_index = table_data
@@ -451,6 +600,60 @@ mod tests {
             .position(|column| column.column_name == "span_attributes.val")
             .unwrap();
         assert!(timestamp_index < attribute_index);
+    }
+
+    #[test]
+    fn test_optional_batch_schema_observation_preserves_rows() {
+        let mut span = make_span("svc-a", "trace-a", "span-a");
+        span.span_attributes = Attributes::from(vec![make_kv("val", OtlpValue::IntValue(10))]);
+
+        let without_schema = build_trace_table_data(std::slice::from_ref(&span)).unwrap();
+        let (with_schema, batch_schema) =
+            build_trace_table_data_with_schema(vec![span].into_iter()).unwrap();
+
+        assert_eq!(
+            without_schema.into_schema_and_rows(),
+            with_schema.into_schema_and_rows()
+        );
+        assert_eq!(
+            batch_schema.value_types("span_attributes.val").unwrap(),
+            [ColumnDataType::Int64]
+        );
+        let retry_columns = batch_schema.into_retry_columns();
+        let retry_column = &retry_columns["span_attributes.val"];
+        assert_eq!(retry_column.present_rows, [0]);
+        assert!(retry_column.binary_types.is_empty());
+    }
+
+    #[test]
+    fn test_batch_schema_tracks_binary_and_json_rows() {
+        let mut binary_span = make_span("svc-a", "trace-a", "span-a");
+        binary_span.span_attributes = Attributes::from(vec![make_kv(
+            "val",
+            OtlpValue::BytesValue(vec![1_u8, 2, 3]),
+        )]);
+        let mut json_span = make_span("svc-a", "trace-a", "span-b");
+        json_span.span_attributes = Attributes::from(vec![make_kv(
+            "val",
+            OtlpValue::ArrayValue(ArrayValue {
+                values: vec![AnyValue {
+                    value: Some(OtlpValue::IntValue(1)),
+                }],
+            }),
+        )]);
+
+        let (_, batch_schema) =
+            build_trace_table_data_with_schema(vec![binary_span, json_span].into_iter()).unwrap();
+
+        assert!(batch_schema.has_incompatible_logical_types());
+        assert!(batch_schema.has_incompatible_logical_types_for("span_attributes.val"));
+        let retry_columns = batch_schema.into_retry_columns();
+        let retry_column = &retry_columns["span_attributes.val"];
+        assert_eq!(retry_column.present_rows, [0, 1]);
+        assert_eq!(
+            retry_column.binary_types,
+            [(0, TraceBinaryType::Binary), (1, TraceBinaryType::Json)]
+        );
     }
 
     #[test]
