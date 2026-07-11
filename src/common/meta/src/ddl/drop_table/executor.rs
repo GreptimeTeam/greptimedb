@@ -363,7 +363,7 @@ impl DropTableExecutor {
         Ok(())
     }
 
-    /// Cleans all region replicas on datanodes without reopening them as live regions.
+    /// Cleans leader regions on datanodes without reopening them as live regions.
     pub async fn on_cleanup_regions_offline(
         &self,
         node_manager: &NodeManagerRef,
@@ -376,21 +376,12 @@ impl DropTableExecutor {
         let builder = CreateRequestBuilder::new(template, None);
         let storage_path = region_storage_path(&self.table.catalog_name, &self.table.schema_name);
 
-        let mut replicas_by_peer = HashMap::new();
-        for route in region_routes {
-            for peer in route.leader_peer.iter().chain(route.follower_peers.iter()) {
-                replicas_by_peer
-                    .entry(peer.id)
-                    .or_insert_with(|| (peer.clone(), Vec::new()))
-                    .1
-                    .push(route.region.id.region_number());
-            }
-        }
-
-        let mut cleanup_region_tasks = Vec::with_capacity(replicas_by_peer.len());
+        let leaders = find_leaders(region_routes);
+        let mut cleanup_region_tasks = Vec::with_capacity(leaders.len());
         let table_id = self.table_id;
-        for (_, (datanode, regions)) in replicas_by_peer {
+        for datanode in leaders {
             let requester = node_manager.datanode(&datanode).await;
+            let regions = find_leader_regions(region_routes, &datanode);
             let region_ids = regions
                 .iter()
                 .map(|region_number| RegionId::new(table_id, *region_number))
