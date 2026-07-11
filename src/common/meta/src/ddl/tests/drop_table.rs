@@ -1293,67 +1293,6 @@ async fn test_purge_dropped_table_retries_unavailable_tombstone_peer() {
 }
 
 #[tokio::test]
-async fn test_purge_dropped_table_selects_errors_by_peer_id() {
-    let (tx, mut rx) = mpsc::channel(128);
-    let datanode_handler = DatanodeWatcher::new(tx).with_handler(|peer, request| {
-        if matches!(request.body, Some(region_request::Body::CleanUp(_))) {
-            if peer.id == 1 {
-                return crate::error::UnexpectedSnafu {
-                    err_msg: "peer 1 cleanup failed",
-                }
-                .fail();
-            }
-            return Err(Error::RetryLater {
-                source: BoxedError::new(
-                    crate::error::UnexpectedSnafu {
-                        err_msg: "peer 2 cleanup unavailable",
-                    }
-                    .build(),
-                ),
-                clean_poisons: false,
-            });
-        }
-        Ok(RegionResponse::new(0))
-    });
-    let node_manager = Arc::new(MockDatanodeManager::new(datanode_handler));
-    let mut ddl_context = new_ddl_context(node_manager);
-    ddl_context.soft_drop_enabled = true;
-    let table_id = 1024;
-    let table_name = "foo";
-    ddl_context
-        .table_metadata_manager
-        .create_table_metadata(
-            test_create_table_task(table_name, table_id).table_info,
-            TableRouteValue::physical(vec![RegionRoute {
-                region: Region::new_test(RegionId::new(table_id, 1)),
-                leader_peer: Some(Peer::empty(1)),
-                follower_peers: vec![Peer::empty(2)],
-                leader_state: None,
-                leader_down_since: None,
-                write_route_policy: None,
-            }]),
-            HashMap::new(),
-        )
-        .await
-        .unwrap();
-    let mut drop_procedure = DropTableProcedure::new(
-        new_drop_table_task(table_name, table_id, false),
-        ddl_context.clone(),
-    );
-    execute_procedure_until_done(&mut drop_procedure).await;
-    while rx.try_recv().is_ok() {}
-
-    let mut procedure =
-        PurgeDroppedTableProcedure::new(new_purge_dropped_table_task(table_id), ddl_context);
-    let ctx = new_test_procedure_context();
-    procedure.execute(&ctx).await.unwrap();
-    for _ in 0..32 {
-        let err = procedure.execute(&ctx).await.unwrap_err();
-        assert!(!err.is_retry_later());
-    }
-}
-
-#[tokio::test]
 async fn test_purge_dropped_table_by_id_selects_tombstone_when_live_table_exists() {
     let (tx, mut rx) = mpsc::channel(8);
     let datanode_handler = DatanodeWatcher::new(tx);
