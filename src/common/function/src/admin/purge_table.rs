@@ -34,7 +34,8 @@ use crate::handlers::ProcedureServiceHandlerRef;
     name = PurgeTableFunction,
     display_name = purge_table,
     sig_fn = purge_table_signature,
-    ret = uint64
+    ret = uint64,
+    single_row
 )]
 pub(crate) async fn purge_table(
     procedure_service_handler: &ProcedureServiceHandlerRef,
@@ -82,7 +83,8 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use api::v1::meta::ReconcileRequest;
-    use arrow::datatypes::DataType as ArrowDataType;
+    use arrow::array::StringArray;
+    use arrow::datatypes::{DataType as ArrowDataType, Field};
     use async_trait::async_trait;
     use catalog::CatalogManagerRef;
     use common_meta::rpc::procedure::{
@@ -90,15 +92,16 @@ mod tests {
         MigrateRegionRequest, ProcedureStateResponse,
     };
     use common_query::error::{InvalidFuncArgsSnafu, Result};
-    use datafusion_expr::{Signature, TypeSignature, Volatility};
+    use datafusion_expr::{ColumnarValue, Signature, TypeSignature, Volatility};
     use datatypes::prelude::{Value, ValueRef};
     use session::context::{QueryContext, QueryContextBuilder, QueryContextRef};
     use table::table_name::TableName;
 
     use super::{PurgeTableFunction, purge_table};
     use crate::function_factory::ScalarFunctionFactory;
-    use crate::function_registry::FUNCTION_REGISTRY;
+    use crate::function_registry::{FUNCTION_REGISTRY, get_admin_function};
     use crate::handlers::{ProcedureServiceHandler, ProcedureServiceHandlerRef};
+    use crate::state::FunctionState;
 
     #[derive(Default)]
     struct RecordingHandler {
@@ -147,8 +150,44 @@ mod tests {
     }
 
     #[test]
-    fn test_purge_table_is_registered() {
-        assert!(FUNCTION_REGISTRY.get_function("purge_table").is_some());
+    fn test_purge_table_is_admin_only() {
+        assert!(get_admin_function("purge_table").is_some());
+        assert!(FUNCTION_REGISTRY.get_function("purge_table").is_none());
+    }
+
+    #[tokio::test]
+    async fn test_admin_only_factory_executes_without_registry_leak() {
+        let handler = Arc::new(RecordingHandler::default());
+        let state = FunctionState {
+            procedure_service_handler: Some(handler.clone()),
+            ..Default::default()
+        };
+        let function =
+            get_admin_function("purge_table")
+                .unwrap()
+                .provide(crate::function::FunctionContext {
+                    query_ctx: QueryContext::arc(),
+                    state: Arc::new(state),
+                });
+        let args = datafusion_expr::ScalarFunctionArgs {
+            args: vec![ColumnarValue::Array(Arc::new(StringArray::from(vec![
+                "foo",
+            ])))],
+            arg_fields: vec![Arc::new(Field::new("arg_0", ArrowDataType::Utf8, false))],
+            return_field: Arc::new(Field::new("result", ArrowDataType::UInt64, false)),
+            number_rows: 1,
+            config_options: Arc::new(datafusion_common::config::ConfigOptions::default()),
+        };
+
+        function
+            .as_async()
+            .unwrap()
+            .invoke_async_with_args(args)
+            .await
+            .unwrap();
+
+        assert_eq!(1, handler.calls.lock().unwrap().len());
+        assert!(FUNCTION_REGISTRY.get_function("purge_table").is_none());
     }
 
     #[test]
@@ -162,6 +201,40 @@ mod tests {
             Signature { type_signature: TypeSignature::Uniform(1, types), volatility: Volatility::Immutable, .. }
                 if types == &vec![ArrowDataType::Utf8]
         ));
+    }
+
+    #[tokio::test]
+    async fn test_purge_table_rejects_multi_row_before_handler_call() {
+        let handler = Arc::new(RecordingHandler::default());
+        let state = FunctionState {
+            procedure_service_handler: Some(handler.clone()),
+            ..Default::default()
+        };
+        let factory: ScalarFunctionFactory = PurgeTableFunction::factory().into();
+        let function = factory.provide(crate::function::FunctionContext {
+            query_ctx: QueryContext::arc(),
+            state: Arc::new(state),
+        });
+        let args = datafusion_expr::ScalarFunctionArgs {
+            args: vec![ColumnarValue::Array(Arc::new(StringArray::from(vec![
+                Some("foo"),
+                None,
+            ])))],
+            arg_fields: vec![Arc::new(Field::new("arg_0", ArrowDataType::Utf8, true))],
+            return_field: Arc::new(Field::new("result", ArrowDataType::UInt64, true)),
+            number_rows: 2,
+            config_options: Arc::new(datafusion_common::config::ConfigOptions::default()),
+        };
+
+        assert!(
+            function
+                .as_async()
+                .unwrap()
+                .invoke_async_with_args(args)
+                .await
+                .is_err()
+        );
+        assert!(handler.calls.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -196,7 +269,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_purge_table_rejects_invalid_arguments() {
-        let handler: ProcedureServiceHandlerRef = Arc::new(RecordingHandler::default());
+        let recording_handler = Arc::new(RecordingHandler::default());
+        let handler: ProcedureServiceHandlerRef = recording_handler.clone();
         for params in [vec![], vec![ValueRef::String("a"), ValueRef::String("b")]] {
             assert!(
                 purge_table(&handler, &QueryContext::arc(), &params)
@@ -210,6 +284,11 @@ mod tests {
                 .is_err()
         );
         assert!(
+            purge_table(&handler, &QueryContext::arc(), &[ValueRef::Null])
+                .await
+                .is_err()
+        );
+        assert!(
             purge_table(
                 &handler,
                 &QueryContext::arc(),
@@ -218,6 +297,7 @@ mod tests {
             .await
             .is_err()
         );
+        assert!(recording_handler.calls.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

@@ -45,6 +45,7 @@ pub(crate) fn process_admin_fn(args: TokenStream, input: TokenStream) -> TokenSt
     let mut sig_fn: Option<Ident> = None;
     let mut ret: Option<Ident> = None;
     let mut user_path: Option<Path> = None;
+    let mut single_row = false;
 
     let parser = syn::meta::parser(|meta| {
         if meta.path.is_ident("name") {
@@ -61,6 +62,9 @@ pub(crate) fn process_admin_fn(args: TokenStream, input: TokenStream) -> TokenSt
             Ok(())
         } else if meta.path.is_ident("user_path") {
             user_path = Some(meta.value()?.parse()?);
+            Ok(())
+        } else if meta.path.is_ident("single_row") {
+            single_row = true;
             Ok(())
         } else {
             Err(meta.error("unsupported property"))
@@ -113,6 +117,7 @@ pub(crate) fn process_admin_fn(args: TokenStream, input: TokenStream) -> TokenSt
             handler_type,
             display_name,
             user_path.expect("user_path required"),
+            single_row,
         );
         result.extend(struct_code);
     }
@@ -158,10 +163,20 @@ fn build_struct(
     handler_type: &Ident,
     display_name_ident: Ident,
     user_path: Path,
+    single_row: bool,
 ) -> TokenStream {
     let display_name = display_name_ident.to_string();
     let ret = Ident::new(&format!("{ret}_datatype"), ret.span());
     let uppcase_display_name = display_name.to_uppercase();
+    let validate_rows = single_row.then(|| {
+        quote! {
+            if rows_num != 1 {
+                return Err(datafusion_common::DataFusionError::Execution(
+                    format!("{} expects exactly one row, received {}", #display_name, rows_num)
+                ));
+            }
+        }
+    });
     // Get the handler name in function state by the argument ident
     // TODO(discord9): consider simple depend injection if more handlers are needed
     let (handler, snafu_type) = match handler_type.to_string().as_str() {
@@ -306,6 +321,7 @@ fn build_struct(
                 } else {
                     columns[0].len()
                 };
+                #validate_rows
 
                 use snafu::{OptionExt, ResultExt};
                 use datatypes::data_type::DataType;

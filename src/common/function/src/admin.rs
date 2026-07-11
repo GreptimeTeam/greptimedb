@@ -42,7 +42,6 @@ impl AdminFunction {
     /// Register all admin functions to [`FunctionRegistry`].
     pub fn register(registry: &FunctionRegistry) {
         registry.register(MigrateRegionFunction::factory());
-        registry.register(PurgeTableFunction::factory());
         registry.register(FlushRegionFunction::factory());
         registry.register(CompactRegionFunction::factory());
         registry.register(FlushTableFunction::factory());
@@ -54,5 +53,10 @@ impl AdminFunction {
         registry.register(ReconcileCatalogFunction::factory());
         registry.register(ReconcileDatabaseFunction::factory());
         registry.register(ReconcileTableFunction::factory());
+    }
+
+    /// Register functions that must only be resolved by an ADMIN statement.
+    pub fn register_admin_only(registry: &FunctionRegistry) {
+        registry.register(PurgeTableFunction::factory());
     }
 }

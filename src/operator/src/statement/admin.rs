@@ -15,7 +15,7 @@
 use std::sync::Arc;
 
 use common_function::function::FunctionContext;
-use common_function::function_registry::FUNCTION_REGISTRY;
+use common_function::function_registry::{FUNCTION_REGISTRY, get_admin_function};
 use common_query::Output;
 use common_recordbatch::{RecordBatch, RecordBatches};
 use common_sql::convert::sql_value_to_value;
@@ -49,11 +49,11 @@ impl StatementExecutor {
         let Admin::Func(func) = &stmt;
         // the function name should be in lower case.
         let func_name = func.name.to_string().to_lowercase();
-        let factory = FUNCTION_REGISTRY.get_function(&func_name).context(
-            error::AdminFunctionNotFoundSnafu {
+        let factory = get_admin_function(&func_name)
+            .or_else(|| FUNCTION_REGISTRY.get_function(&func_name))
+            .context(error::AdminFunctionNotFoundSnafu {
                 name: func_name.clone(),
-            },
-        )?;
+            })?;
 
         let func_ctx = FunctionContext {
             query_ctx: query_ctx.clone(),
