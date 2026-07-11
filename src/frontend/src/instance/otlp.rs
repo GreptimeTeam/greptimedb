@@ -1940,7 +1940,7 @@ mod tests {
     use api::v1::value::ValueData;
     use api::v1::{
         ColumnDataType, ColumnDataTypeExtension, ColumnSchema, JsonTypeExtension, Row,
-        RowInsertRequest, RowInsertRequests, Rows, SemanticType, Value,
+        RowInsertRequest, Rows, SemanticType, Value,
     };
     use common_error::ext::ErrorExt;
     use common_error::status_code::StatusCode;
