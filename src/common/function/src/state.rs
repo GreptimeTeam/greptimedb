@@ -57,6 +57,14 @@ impl FunctionState {
 
         #[async_trait]
         impl ProcedureServiceHandler for MockProcedureServiceHandler {
+            async fn purge_table(
+                &self,
+                _table_name: table::table_name::TableName,
+                _query_ctx: QueryContextRef,
+            ) -> Result<()> {
+                Ok(())
+            }
+
             async fn migrate_region(
                 &self,
                 _request: MigrateRegionRequest,

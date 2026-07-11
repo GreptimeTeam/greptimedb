@@ -17,7 +17,9 @@ use async_trait::async_trait;
 use catalog::CatalogManagerRef;
 use common_error::ext::BoxedError;
 use common_function::handlers::ProcedureServiceHandler;
+use common_meta::key::TableMetadataManagerRef;
 use common_meta::procedure_executor::{ExecutorContext, ProcedureExecutorRef};
+use common_meta::rpc::ddl::{DdlTask, SubmitDdlTaskRequest};
 use common_meta::rpc::procedure::{
     GcRegionsRequest as MetaGcRegionsRequest, GcResponse as MetaGcResponse,
     GcTableRequest as MetaGcTableRequest, ManageRegionFollowerRequest, MigrateRegionRequest,
@@ -26,28 +28,66 @@ use common_meta::rpc::procedure::{
 use common_query::error as query_error;
 use common_query::error::Result as QueryResult;
 use snafu::ResultExt;
+use table::table_name::TableName;
+
+use crate::error;
+use crate::utils::to_meta_query_context;
 
 /// The operator for procedures which implements [`ProcedureServiceHandler`].
 #[derive(Clone)]
 pub struct ProcedureServiceOperator {
     procedure_executor: ProcedureExecutorRef,
     catalog_manager: CatalogManagerRef,
+    table_metadata_manager: TableMetadataManagerRef,
 }
 
 impl ProcedureServiceOperator {
     pub fn new(
         procedure_executor: ProcedureExecutorRef,
         catalog_manager: CatalogManagerRef,
+        table_metadata_manager: TableMetadataManagerRef,
     ) -> Self {
         Self {
             procedure_executor,
             catalog_manager,
+            table_metadata_manager,
         }
     }
 }
 
 #[async_trait]
 impl ProcedureServiceHandler for ProcedureServiceOperator {
+    async fn purge_table(
+        &self,
+        table_name: TableName,
+        query_ctx: session::context::QueryContextRef,
+    ) -> QueryResult<()> {
+        let dropped = self
+            .table_metadata_manager
+            .get_dropped_table(&table_name)
+            .await
+            .map_err(BoxedError::new)
+            .context(query_error::ProcedureServiceSnafu)?
+            .ok_or_else(|| {
+                error::TableNotFoundSnafu {
+                    table_name: table_name.to_string(),
+                }
+                .build()
+            })
+            .map_err(BoxedError::new)
+            .context(query_error::ProcedureServiceSnafu)?;
+        let request = SubmitDdlTaskRequest::new(
+            to_meta_query_context(query_ctx),
+            DdlTask::new_purge_dropped_table(dropped.table_id),
+        );
+        self.procedure_executor
+            .submit_ddl_task(&ExecutorContext::default(), request)
+            .await
+            .map_err(BoxedError::new)
+            .context(query_error::ProcedureServiceSnafu)?;
+        Ok(())
+    }
+
     async fn migrate_region(&self, request: MigrateRegionRequest) -> QueryResult<Option<String>> {
         Ok(self
             .procedure_executor
@@ -107,5 +147,184 @@ impl ProcedureServiceHandler for ProcedureServiceOperator {
             .await
             .map_err(BoxedError::new)
             .context(query_error::ProcedureServiceSnafu)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+
+    use api::v1::meta::{ProcedureDetailResponse, ReconcileResponse};
+    use common_meta::key::TableMetadataManager;
+    use common_meta::key::table_route::TableRouteValue;
+    use common_meta::key::test_utils::new_test_table_info_with_name;
+    use common_meta::kv_backend::memory::MemoryKvBackend;
+    use common_meta::procedure_executor::{ProcedureExecutor, ProcedureExecutorRef};
+    use common_meta::rpc::ddl::{DdlTask, SubmitDdlTaskRequest, SubmitDdlTaskResponse};
+    use common_meta::rpc::procedure::{MigrateRegionResponse, ProcedureStateResponse};
+    use session::context::QueryContextBuilder;
+    use table::table_name::TableName;
+
+    use super::*;
+
+    #[derive(Default)]
+    struct RecordingProcedureExecutor {
+        requests: Mutex<Vec<SubmitDdlTaskRequest>>,
+        fail: bool,
+    }
+
+    #[async_trait]
+    impl ProcedureExecutor for RecordingProcedureExecutor {
+        async fn submit_ddl_task(
+            &self,
+            _: &ExecutorContext,
+            request: SubmitDdlTaskRequest,
+        ) -> common_meta::error::Result<SubmitDdlTaskResponse> {
+            self.requests.lock().unwrap().push(request);
+            if self.fail {
+                return common_meta::error::UnsupportedSnafu {
+                    operation: "test purge failure",
+                }
+                .fail();
+            }
+            Ok(SubmitDdlTaskResponse::default())
+        }
+        async fn migrate_region(
+            &self,
+            _: &ExecutorContext,
+            _: MigrateRegionRequest,
+        ) -> common_meta::error::Result<MigrateRegionResponse> {
+            unimplemented!()
+        }
+        async fn reconcile(
+            &self,
+            _: &ExecutorContext,
+            _: ReconcileRequest,
+        ) -> common_meta::error::Result<ReconcileResponse> {
+            unimplemented!()
+        }
+        async fn query_procedure_state(
+            &self,
+            _: &ExecutorContext,
+            _: &str,
+        ) -> common_meta::error::Result<ProcedureStateResponse> {
+            unimplemented!()
+        }
+        async fn list_procedures(
+            &self,
+            _: &ExecutorContext,
+        ) -> common_meta::error::Result<ProcedureDetailResponse> {
+            unimplemented!()
+        }
+    }
+
+    async fn operator_with_tombstone(
+        table_id: u32,
+        name: &TableName,
+        fail: bool,
+    ) -> (ProcedureServiceOperator, Arc<RecordingProcedureExecutor>) {
+        let manager = Arc::new(TableMetadataManager::new(Arc::new(
+            MemoryKvBackend::default(),
+        )));
+        let mut info = new_test_table_info_with_name(table_id, &name.table_name);
+        info.catalog_name = name.catalog_name.clone();
+        info.schema_name = name.schema_name.clone();
+        let route = TableRouteValue::physical(vec![]);
+        manager
+            .create_table_metadata(info, route.clone(), HashMap::new())
+            .await
+            .unwrap();
+        manager
+            .delete_table_metadata(table_id, name, &route, &HashMap::new(), None)
+            .await
+            .unwrap();
+        let executor = Arc::new(RecordingProcedureExecutor {
+            fail,
+            ..Default::default()
+        });
+        let operator = ProcedureServiceOperator::new(
+            executor.clone() as ProcedureExecutorRef,
+            catalog::memory::MemoryCatalogManager::new(),
+            manager,
+        );
+        (operator, executor)
+    }
+
+    #[tokio::test]
+    async fn test_purge_table_submits_tombstone_id_and_query_context() {
+        let name = TableName::new("catalog", "schema", "metrics");
+        let (operator, executor) = operator_with_tombstone(42, &name, false).await;
+        let manager = operator.table_metadata_manager.clone();
+        let mut live = new_test_table_info_with_name(99, "metrics");
+        live.catalog_name = "catalog".to_string();
+        live.schema_name = "schema".to_string();
+        manager
+            .create_table_metadata(live, TableRouteValue::physical(vec![]), HashMap::new())
+            .await
+            .unwrap();
+        let query_ctx = QueryContextBuilder::default()
+            .current_catalog("catalog".to_string())
+            .current_schema("schema".to_string())
+            .build()
+            .into();
+
+        operator.purge_table(name, query_ctx).await.unwrap();
+
+        let requests = executor.requests.lock().unwrap();
+        assert!(
+            matches!(&requests[0].task, DdlTask::PurgeDroppedTable(task) if task.table_id == 42)
+        );
+        assert_eq!(requests[0].query_context.current_catalog, "catalog");
+        assert_eq!(requests[0].query_context.current_schema, "schema");
+    }
+
+    #[tokio::test]
+    async fn test_purge_table_missing_tombstone_is_table_not_found() {
+        let manager = Arc::new(TableMetadataManager::new(Arc::new(
+            MemoryKvBackend::default(),
+        )));
+        let executor = Arc::new(RecordingProcedureExecutor::default());
+        let operator = ProcedureServiceOperator::new(
+            executor.clone(),
+            catalog::memory::MemoryCatalogManager::new(),
+            manager,
+        );
+        let error = operator
+            .purge_table(
+                TableName::new("catalog", "schema", "missing"),
+                QueryContextBuilder::default()
+                    .current_catalog("catalog".to_string())
+                    .current_schema("schema".to_string())
+                    .build()
+                    .into(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(
+            common_error::status_code::StatusCode::TableNotFound,
+            common_error::ext::ErrorExt::status_code(&error)
+        );
+        assert!(executor.requests.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_purge_table_propagates_submission_failure() {
+        let name = TableName::new("catalog", "schema", "metrics");
+        let (operator, executor) = operator_with_tombstone(42, &name, true).await;
+        assert!(
+            operator
+                .purge_table(
+                    name,
+                    QueryContextBuilder::default()
+                        .current_catalog("catalog".to_string())
+                        .current_schema("schema".to_string())
+                        .build()
+                        .into()
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(1, executor.requests.lock().unwrap().len());
     }
 }
