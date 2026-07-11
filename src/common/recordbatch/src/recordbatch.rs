@@ -272,10 +272,11 @@ impl RecordBatch {
     /// Returns the logical memory size of this batch's array slices.
     ///
     /// This estimates the bytes represented by each slice rather than the capacity of its shared
-    /// backing buffers. For view arrays, this includes each visible 16-byte view record and the
-    /// visible out-of-line payload bytes, but not unrelated payloads in shared backing buffers. It
-    /// is not an exact measure of live physical memory. If Arrow cannot calculate a slice's size,
-    /// the full buffer size is used conservatively.
+    /// backing buffers. For top-level view columns, this includes each visible 16-byte view record
+    /// and the visible out-of-line payload bytes, but not unrelated payloads in shared backing
+    /// buffers. Nested view arrays include only their view records, not their out-of-line payloads.
+    /// It is not an exact measure of live physical memory. If Arrow cannot calculate a slice's
+    /// size, the full buffer size is used conservatively.
     pub fn logical_slice_memory_size(&self) -> usize {
         self.df_record_batch
             .columns()
