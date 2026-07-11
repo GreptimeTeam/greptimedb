@@ -133,6 +133,73 @@ async fn test_recovered_soft_drop_ignores_hard_runtime_context() {
 }
 
 #[tokio::test]
+async fn test_legacy_soft_drop_prepare_recovers_after_runtime_disable() {
+    let node_manager = Arc::new(MockDatanodeManager::new(()));
+    let mut context = new_ddl_context(node_manager);
+    context.soft_drop_enabled = false;
+    context.soft_drop_retention = Some(Duration::from_millis(100));
+    let table_id = 1024;
+    let task = test_create_table_task("foo", table_id);
+    context
+        .table_metadata_manager
+        .create_table_metadata(
+            task.table_info,
+            TableRouteValue::physical(vec![]),
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+
+    let mut persisted: serde_json::Value = serde_json::from_str(
+        &DropTableProcedure::new(new_drop_table_task("foo", table_id, false), context.clone())
+            .dump()
+            .unwrap(),
+    )
+    .unwrap();
+    persisted["soft_drop_enabled"] = true.into();
+    persisted
+        .as_object_mut()
+        .unwrap()
+        .remove("soft_drop_retention_millis");
+    persisted
+        .as_object_mut()
+        .unwrap()
+        .remove("retention_expires_at");
+
+    let mut recovered =
+        DropTableProcedure::from_json(&persisted.to_string(), context.clone()).unwrap();
+    recovered.on_prepare().await.unwrap();
+
+    let dropped_at = recovered.data.dropped_at.unwrap();
+    assert_eq!(Some(dropped_at + 100), recovered.data.retention_expires_at);
+    recovered.on_delete_metadata().await.unwrap();
+    assert_eq!(
+        Some(dropped_at + 100),
+        context
+            .table_metadata_manager
+            .get_dropped_table_by_id(table_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .retention_expires_at
+    );
+}
+
+#[tokio::test]
+async fn test_disabled_soft_drop_creates_hard_drop_procedure() {
+    let node_manager = Arc::new(MockDatanodeManager::new(()));
+    let mut context = new_ddl_context(node_manager);
+    context.soft_drop_enabled = false;
+    context.soft_drop_retention = Some(Duration::from_millis(100));
+
+    let procedure = DropTableProcedure::new(new_drop_table_task("foo", 1024, false), context);
+
+    assert!(!procedure.data.soft_drop_enabled);
+    assert_eq!(None, procedure.data.dropped_at);
+    assert_eq!(None, procedure.data.retention_expires_at);
+}
+
+#[tokio::test]
 async fn test_recovered_hard_drop_ignores_soft_runtime_context() {
     let (tx, mut rx) = mpsc::channel(8);
     let node_manager = Arc::new(MockDatanodeManager::new(DatanodeWatcher::new(tx)));

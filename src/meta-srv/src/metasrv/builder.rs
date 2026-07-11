@@ -431,8 +431,7 @@ impl MetasrvBuilder {
             flow_metadata_allocator: flow_metadata_allocator.clone(),
             region_failure_detector_controller,
             soft_drop_enabled: ddl_soft_drop_enabled(&options),
-            soft_drop_retention: ddl_soft_drop_enabled(&options)
-                .then_some(options.gc.soft_drop.retention),
+            soft_drop_retention: ddl_soft_drop_retention(&options),
         };
         let procedure_manager_c = procedure_manager.clone();
         let repartition_procedure_factory: RepartitionProcedureFactoryRef = if options.gc.enable {
@@ -698,6 +697,11 @@ fn ddl_soft_drop_enabled(options: &MetasrvOptions) -> bool {
     options.gc.soft_drop.enable
 }
 
+/// Returns validated soft-drop retention for new procedures and recovery.
+fn ddl_soft_drop_retention(options: &MetasrvOptions) -> Option<Duration> {
+    Some(options.gc.soft_drop.retention)
+}
+
 impl Default for MetasrvBuilder {
     fn default() -> Self {
         Self::new()
@@ -726,6 +730,17 @@ mod tests {
     #[test]
     fn test_ddl_soft_drop_is_disabled_by_default() {
         assert!(!ddl_soft_drop_enabled(&MetasrvOptions::default()));
+    }
+
+    #[test]
+    fn test_disabled_soft_drop_still_provides_retention_for_recovery() {
+        let mut options = MetasrvOptions::default();
+        options.gc.soft_drop.enable = false;
+        options.gc.soft_drop.retention = Duration::from_secs(123);
+
+        let retention = ddl_soft_drop_retention(&options);
+
+        assert_eq!(Some(Duration::from_secs(123)), retention);
     }
 
     #[tokio::test]
