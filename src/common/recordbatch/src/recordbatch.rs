@@ -369,19 +369,23 @@ fn logical_array_size(
             .map(|size| size.saturating_add(view_payload_size(data)));
     };
 
-    let child_range = match data.data_type() {
+    let child_size = match data.data_type() {
         ArrowDataType::List(_) | ArrowDataType::Map(_, _) => {
             let offsets = data.buffer::<i32>(0);
-            Some((offsets[0] as usize, offsets[data.len()] as usize))
+            Some(logical_visible_child_size(data, child, |index| {
+                offsets[index] as usize
+            })?)
         }
         ArrowDataType::LargeList(_) => {
             let offsets = data.buffer::<i64>(0);
-            Some((offsets[0] as usize, offsets[data.len()] as usize))
+            Some(logical_visible_child_size(data, child, |index| {
+                offsets[index] as usize
+            })?)
         }
         _ => None,
     };
 
-    let Some((start, end)) = child_range else {
+    let Some(child_size) = child_size else {
         return data
             .get_slice_memory_size()
             .map(|size| size.saturating_add(view_payload_size(data)));
@@ -390,8 +394,49 @@ fn logical_array_size(
     let container_size = data
         .get_slice_memory_size()?
         .saturating_sub(child.get_slice_memory_size()?);
-    let child_size = logical_array_size(&child.slice(start, end.saturating_sub(start)))?;
     Ok(container_size.saturating_add(child_size))
+}
+
+fn logical_visible_child_size(
+    data: &ArrayData,
+    child: &ArrayData,
+    offset: impl Fn(usize) -> usize,
+) -> std::result::Result<usize, datatypes::arrow::error::ArrowError> {
+    let Some(nulls) = data.nulls() else {
+        let start = offset(0);
+        let end = offset(data.len());
+        return logical_array_size(&child.slice(start, end.saturating_sub(start)));
+    };
+
+    let mut size = 0usize;
+    let mut visible_range: Option<(usize, usize)> = None;
+    for index in nulls.valid_indices() {
+        let start = offset(index);
+        let end = offset(index + 1);
+        if start == end {
+            continue;
+        }
+
+        match visible_range {
+            Some((range_start, range_end)) if range_end == start => {
+                visible_range = Some((range_start, end));
+            }
+            Some((range_start, range_end)) => {
+                size = size.saturating_add(logical_array_size(
+                    &child.slice(range_start, range_end.saturating_sub(range_start)),
+                )?);
+                visible_range = Some((start, end));
+            }
+            None => visible_range = Some((start, end)),
+        }
+    }
+
+    if let Some((start, end)) = visible_range {
+        size = size.saturating_add(logical_array_size(
+            &child.slice(start, end.saturating_sub(start)),
+        )?);
+    }
+    Ok(size)
 }
 
 /// Returns out-of-line payload bytes omitted by Arrow's slice memory calculation.
@@ -479,7 +524,7 @@ mod tests {
         AsArray, BinaryArray, BinaryViewArray, LargeListArray, ListArray, MapArray, StringArray,
         StringViewArray, StructArray, UInt32Array,
     };
-    use datatypes::arrow::buffer::{NullBuffer, OffsetBuffer};
+    use datatypes::arrow::buffer::{NullBuffer, OffsetBuffer, ScalarBuffer};
     use datatypes::arrow::datatypes::{
         DataType, Field, Int32Type, Schema as ArrowSchema, UInt32Type,
     };
@@ -783,6 +828,105 @@ mod tests {
 
         assert_eq!(5, batch.slice(1, 1).unwrap().logical_slice_memory_size());
         assert_eq!(0, batch.slice(1, 0).unwrap().logical_slice_memory_size());
+    }
+
+    #[test]
+    fn test_logical_slice_memory_size_ignores_null_list_child_range() {
+        let values = Arc::new(UInt32Array::from_iter_values(0..1002));
+        let field = Arc::new(Field::new_list_field(DataType::UInt32, false));
+        let array = ListArray::new(
+            field,
+            OffsetBuffer::new(ScalarBuffer::from(vec![0, 1, 1001, 1002])),
+            values,
+            Some(NullBuffer::from(vec![true, false, true])),
+        );
+        let batch = batch_with_array(Arc::new(array)).slice(1, 1).unwrap();
+
+        assert_eq!(5, batch.logical_slice_memory_size());
+    }
+
+    #[test]
+    fn test_logical_slice_memory_size_handles_discontiguous_valid_list_ranges() {
+        let values = Arc::new(UInt32Array::from_iter_values(0..1002));
+        let field = Arc::new(Field::new_list_field(DataType::UInt32, false));
+        let array = ListArray::new(
+            field,
+            OffsetBuffer::new(ScalarBuffer::from(vec![0, 1, 1001, 1002])),
+            values,
+            Some(NullBuffer::from(vec![true, false, true])),
+        );
+        let batch = batch_with_array(Arc::new(array));
+
+        assert_eq!(3 * 4 + 1 + 2 * 4, batch.logical_slice_memory_size());
+    }
+
+    #[test]
+    fn test_logical_slice_memory_size_handles_all_null_and_contiguous_valid_ranges() {
+        let values = Arc::new(UInt32Array::from_iter_values(0..1003));
+        let field = Arc::new(Field::new_list_field(DataType::UInt32, false));
+        let all_null = ListArray::new(
+            field.clone(),
+            OffsetBuffer::new(ScalarBuffer::from(vec![0, 1000, 1001])),
+            values.clone(),
+            Some(NullBuffer::from(vec![false, false])),
+        );
+        let contiguous = ListArray::new(
+            field,
+            OffsetBuffer::new(ScalarBuffer::from(vec![0, 1000, 1001, 1003])),
+            values,
+            Some(NullBuffer::from(vec![false, true, true])),
+        );
+
+        assert_eq!(
+            2 * 4 + 1,
+            batch_with_array(Arc::new(all_null)).logical_slice_memory_size()
+        );
+        assert_eq!(
+            3 * 4 + 1 + 3 * 4,
+            batch_with_array(Arc::new(contiguous)).logical_slice_memory_size()
+        );
+    }
+
+    #[test]
+    fn test_logical_slice_memory_size_handles_discontiguous_valid_large_list_ranges() {
+        let values = Arc::new(UInt32Array::from_iter_values(0..1002));
+        let field = Arc::new(Field::new_list_field(DataType::UInt32, false));
+        let array = LargeListArray::new(
+            field,
+            OffsetBuffer::new(ScalarBuffer::from(vec![0_i64, 1, 1001, 1002])),
+            values,
+            Some(NullBuffer::from(vec![true, false, true])),
+        );
+        let batch = batch_with_array(Arc::new(array));
+
+        assert_eq!(3 * 8 + 1 + 2 * 4, batch.logical_slice_memory_size());
+    }
+
+    #[test]
+    fn test_logical_slice_memory_size_handles_discontiguous_valid_map_ranges() {
+        let keys = Arc::new(UInt32Array::from_iter_values(0..1002));
+        let values = Arc::new(UInt32Array::from_iter_values(0..1002));
+        let key_field = Arc::new(Field::new("key", DataType::UInt32, false));
+        let value_field = Arc::new(Field::new("value", DataType::UInt32, false));
+        let entries = StructArray::from(vec![
+            (key_field.clone(), keys as ArrayRef),
+            (value_field.clone(), values as ArrayRef),
+        ]);
+        let entries_field = Arc::new(Field::new(
+            "entries",
+            DataType::Struct(vec![key_field, value_field].into()),
+            false,
+        ));
+        let array = MapArray::new(
+            entries_field,
+            OffsetBuffer::new(ScalarBuffer::from(vec![0, 1, 1001, 1002])),
+            entries,
+            Some(NullBuffer::from(vec![true, false, true])),
+            false,
+        );
+        let batch = batch_with_array(Arc::new(array));
+
+        assert_eq!(3 * 4 + 1 + 2 * 8, batch.logical_slice_memory_size());
     }
 
     #[test]
