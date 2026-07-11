@@ -363,38 +363,54 @@ const MAX_INLINE_VIEW_LEN: usize = 12;
 fn logical_array_size(
     data: &ArrayData,
 ) -> std::result::Result<usize, datatypes::arrow::error::ArrowError> {
-    let Some(child) = data.child_data().first() else {
+    if data.child_data().is_empty() {
         return data
             .get_slice_memory_size()
             .map(|size| size.saturating_add(view_payload_size(data)));
-    };
+    }
 
-    let child_size = match data.data_type() {
+    let child_sizes = match data.data_type() {
         ArrowDataType::List(_) | ArrowDataType::Map(_, _) => {
+            let child = &data.child_data()[0];
             let offsets = data.buffer::<i32>(0);
-            Some(logical_visible_child_size(data, child, |index| {
+            Some(vec![logical_visible_child_size(data, child, |index| {
                 offsets[index] as usize
-            })?)
+            })?])
         }
         ArrowDataType::LargeList(_) => {
+            let child = &data.child_data()[0];
             let offsets = data.buffer::<i64>(0);
-            Some(logical_visible_child_size(data, child, |index| {
+            Some(vec![logical_visible_child_size(data, child, |index| {
                 offsets[index] as usize
-            })?)
+            })?])
+        }
+        ArrowDataType::Struct(_) if data.nulls().is_some() => {
+            let mut sizes = Vec::with_capacity(data.child_data().len());
+            for child in data.child_data() {
+                sizes.push(logical_visible_child_size(data, child, |index| index)?);
+            }
+            Some(sizes)
         }
         _ => None,
     };
 
-    let Some(child_size) = child_size else {
+    let Some(child_sizes) = child_sizes else {
         return data
             .get_slice_memory_size()
             .map(|size| size.saturating_add(view_payload_size(data)));
     };
 
-    let container_size = data
-        .get_slice_memory_size()?
-        .saturating_sub(child.get_slice_memory_size()?);
-    Ok(container_size.saturating_add(child_size))
+    let container_size =
+        data.child_data()
+            .iter()
+            .try_fold(data.get_slice_memory_size()?, |size, child| {
+                child
+                    .get_slice_memory_size()
+                    .map(|child_size| size.saturating_sub(child_size))
+            })?;
+    Ok(child_sizes
+        .into_iter()
+        .fold(container_size, usize::saturating_add))
 }
 
 fn logical_visible_child_size(
@@ -729,6 +745,84 @@ mod tests {
 
         assert_eq!(
             arrow_slice_size + visible.len(),
+            batch.logical_slice_memory_size()
+        );
+    }
+
+    #[test]
+    fn test_logical_slice_memory_size_ignores_children_of_null_struct_rows() {
+        let visible_0 = "visible struct string view payload zero";
+        let hidden = "hidden struct string view payload".repeat(100);
+        let visible_2 = "visible struct string view payload two";
+        let view_field = Arc::new(Field::new("view", DataType::Utf8View, false));
+        let fixed_field = Arc::new(Field::new("fixed", DataType::UInt32, false));
+        let array = Arc::new(StructArray::new(
+            vec![view_field.clone(), fixed_field.clone()].into(),
+            vec![
+                Arc::new(StringViewArray::from(vec![
+                    visible_0,
+                    hidden.as_str(),
+                    visible_2,
+                ])),
+                Arc::new(UInt32Array::from_iter_values([1, 2, 3])),
+            ],
+            Some(NullBuffer::from(vec![true, false, true])),
+        ));
+        let arrow_schema = Arc::new(ArrowSchema::new(vec![Field::new(
+            "struct",
+            DataType::Struct(vec![view_field, fixed_field].into()),
+            true,
+        )]));
+        let schema = Arc::new(Schema::try_from(arrow_schema.clone()).unwrap());
+        let batch = RecordBatch::from_df_record_batch(
+            schema,
+            DfRecordBatch::try_new(arrow_schema, vec![array]).unwrap(),
+        );
+
+        assert_eq!(1, batch.slice(1, 1).unwrap().logical_slice_memory_size());
+        assert_eq!(0, batch.slice(1, 0).unwrap().logical_slice_memory_size());
+        assert_eq!(
+            1 + 2 * 16 + visible_0.len() + visible_2.len() + 2 * 4,
+            batch.logical_slice_memory_size()
+        );
+    }
+
+    #[test]
+    fn test_logical_slice_memory_size_handles_nested_list_in_nullable_struct() {
+        let visible_0 = "visible nested struct list payload zero";
+        let hidden = "hidden nested struct list payload".repeat(100);
+        let visible_2 = "visible nested struct list payload two";
+        let value_field = Arc::new(Field::new_list_field(DataType::Utf8View, false));
+        let values = Arc::new(StringViewArray::from(vec![
+            visible_0,
+            hidden.as_str(),
+            visible_2,
+        ]));
+        let lists = Arc::new(ListArray::new(
+            value_field,
+            OffsetBuffer::from_lengths([1, 1, 1]),
+            values,
+            None,
+        ));
+        let list_field = Arc::new(Field::new("list", lists.data_type().clone(), false));
+        let array = Arc::new(StructArray::new(
+            vec![list_field.clone()].into(),
+            vec![lists],
+            Some(NullBuffer::from(vec![true, false, true])),
+        ));
+        let arrow_schema = Arc::new(ArrowSchema::new(vec![Field::new(
+            "struct",
+            DataType::Struct(vec![list_field].into()),
+            true,
+        )]));
+        let schema = Arc::new(Schema::try_from(arrow_schema.clone()).unwrap());
+        let batch = RecordBatch::from_df_record_batch(
+            schema,
+            DfRecordBatch::try_new(arrow_schema, vec![array]).unwrap(),
+        );
+
+        assert_eq!(
+            1 + 2 * 4 + 2 * 16 + visible_0.len() + visible_2.len(),
             batch.logical_slice_memory_size()
         );
     }
