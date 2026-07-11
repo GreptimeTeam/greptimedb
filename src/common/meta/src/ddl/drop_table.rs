@@ -61,7 +61,7 @@ impl DropTableProcedure {
     pub const TYPE_NAME: &'static str = "metasrv-procedure::DropTable";
 
     pub fn new(task: DropTableTask, context: DdlContext) -> Self {
-        let data = DropTableData::new(task, context.soft_drop_enabled);
+        let data = DropTableData::new(task, context.soft_drop_enabled, context.soft_drop_retention);
         let executor = data.build_executor();
         Self {
             context,
@@ -72,7 +72,16 @@ impl DropTableProcedure {
     }
 
     pub fn from_json(json: &str, context: DdlContext) -> ProcedureResult<Self> {
-        let data: DropTableData = serde_json::from_str(json).context(FromJsonSnafu)?;
+        let mut data: DropTableData = serde_json::from_str(json).context(FromJsonSnafu)?;
+        if data.state == DropTableState::Prepare
+            && data.soft_drop_enabled
+            && data.dropped_at.is_none()
+            && data.soft_drop_retention_millis.is_none()
+        {
+            data.soft_drop_retention_millis = context
+                .soft_drop_retention
+                .and_then(|retention| i64::try_from(retention.as_millis()).ok());
+        }
         let executor = data.build_executor();
 
         Ok(Self {
@@ -94,7 +103,22 @@ impl DropTableProcedure {
         }
         self.fill_table_metadata().await?;
         if self.data.soft_drop_enabled && self.data.dropped_at.is_none() {
-            self.data.dropped_at = Some(current_time_millis());
+            let dropped_at = current_time_millis();
+            let retention_millis =
+                self.data
+                    .soft_drop_retention_millis
+                    .context(error::UnexpectedSnafu {
+                        err_msg: "Soft-drop retention is missing from the procedure".to_string(),
+                    })?;
+            let retention_expires_at = dropped_at.checked_add(retention_millis).context(
+                error::UnexpectedSnafu {
+                    err_msg: format!(
+                        "Soft-drop retention deadline overflows i64: dropped_at={dropped_at}, retention_millis={retention_millis}"
+                    ),
+                },
+            )?;
+            self.data.dropped_at = Some(dropped_at);
+            self.data.retention_expires_at = Some(retention_expires_at);
         }
         self.data.state = DropTableState::DeleteMetadata;
 
@@ -149,6 +173,7 @@ impl DropTableProcedure {
                 table_route_value,
                 &self.data.region_wal_options,
                 self.data.dropped_at,
+                self.data.retention_expires_at,
             )
             .await?;
         info!("Deleted table metadata for table {table_id}");
@@ -343,10 +368,18 @@ pub struct DropTableData {
     pub soft_drop_enabled: bool,
     #[serde(default)]
     pub dropped_at: Option<i64>,
+    #[serde(default)]
+    pub retention_expires_at: Option<i64>,
+    #[serde(default)]
+    pub soft_drop_retention_millis: Option<i64>,
 }
 
 impl DropTableData {
-    pub fn new(task: DropTableTask, soft_drop_enabled: bool) -> Self {
+    pub fn new(
+        task: DropTableTask,
+        soft_drop_enabled: bool,
+        soft_drop_retention: Option<std::time::Duration>,
+    ) -> Self {
         Self {
             state: DropTableState::Prepare,
             task,
@@ -356,6 +389,9 @@ impl DropTableData {
             allow_rollback: false,
             soft_drop_enabled,
             dropped_at: None,
+            retention_expires_at: None,
+            soft_drop_retention_millis: soft_drop_retention
+                .and_then(|retention| i64::try_from(retention.as_millis()).ok()),
         }
     }
 

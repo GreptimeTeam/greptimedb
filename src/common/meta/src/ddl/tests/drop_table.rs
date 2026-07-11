@@ -15,6 +15,7 @@
 use std::assert_matches;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::Duration;
 
 use api::v1::region::{RegionRequest, region_request};
 use async_trait::async_trait;
@@ -54,6 +55,10 @@ use crate::test_util::{MockDatanodeManager, new_ddl_context, new_ddl_context_wit
 
 fn dropped_at_marker_key(table_id: TableId) -> String {
     format!("__tombstone/__dropped_at/{table_id}")
+}
+
+fn retention_expires_at_marker_key(table_id: TableId) -> String {
+    format!("__tombstone/__retention_expires_at/{table_id}")
 }
 
 #[test]
@@ -179,6 +184,7 @@ async fn test_on_prepare_table_not_exists_err() {
     let node_manager = Arc::new(MockDatanodeManager::new(()));
     let mut ddl_context = new_ddl_context(node_manager);
     ddl_context.soft_drop_enabled = true;
+    ddl_context.soft_drop_retention = Some(Duration::from_millis(100));
     let table_name = "foo";
     let table_id = 1024;
     let task = test_create_table_task(table_name, table_id);
@@ -196,9 +202,85 @@ async fn test_on_prepare_table_not_exists_err() {
     let task = new_drop_table_task("bar", table_id, false);
     let mut procedure = DropTableProcedure::new(task, ddl_context);
     assert_eq!(procedure.data.dropped_at, None);
+    assert_eq!(procedure.data.retention_expires_at, None);
     let err = procedure.on_prepare().await.unwrap_err();
     assert_eq!(err.status_code(), StatusCode::TableNotFound);
     assert_eq!(procedure.data.dropped_at, None);
+    assert_eq!(procedure.data.retention_expires_at, None);
+}
+
+#[tokio::test]
+async fn test_soft_drop_prepare_assigns_stable_deadline_and_recovers_it() {
+    let node_manager = Arc::new(MockDatanodeManager::new(()));
+    let mut ddl_context = new_ddl_context(node_manager);
+    ddl_context.soft_drop_enabled = true;
+    ddl_context.soft_drop_retention = Some(Duration::from_millis(100));
+    let table_id = 1024;
+    let task = test_create_table_task("foo", table_id);
+    ddl_context
+        .table_metadata_manager
+        .create_table_metadata(
+            task.table_info,
+            TableRouteValue::physical(vec![]),
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+    let mut procedure = DropTableProcedure::new(
+        new_drop_table_task("foo", table_id, false),
+        ddl_context.clone(),
+    );
+
+    procedure.on_prepare().await.unwrap();
+    let dropped_at = procedure.data.dropped_at.unwrap();
+    let deadline = procedure.data.retention_expires_at.unwrap();
+    assert_eq!(deadline, dropped_at + 100);
+
+    let mut changed_context = ddl_context;
+    changed_context.soft_drop_retention = Some(Duration::from_secs(10));
+    let recovered =
+        DropTableProcedure::from_json(&procedure.dump().unwrap(), changed_context).unwrap();
+    assert_eq!(recovered.data.dropped_at, Some(dropped_at));
+    assert_eq!(recovered.data.retention_expires_at, Some(deadline));
+}
+
+#[tokio::test]
+async fn test_soft_drop_prepare_rejects_deadline_overflow_before_metadata_delete() {
+    let node_manager = Arc::new(MockDatanodeManager::new(()));
+    let mut ddl_context = new_ddl_context(node_manager);
+    ddl_context.soft_drop_enabled = true;
+    ddl_context.soft_drop_retention = Some(Duration::from_millis(i64::MAX as u64));
+    let table_id = 1024;
+    let task = test_create_table_task("foo", table_id);
+    ddl_context
+        .table_metadata_manager
+        .create_table_metadata(
+            task.table_info,
+            TableRouteValue::physical(vec![]),
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+    let mut procedure = DropTableProcedure::new(
+        new_drop_table_task("foo", table_id, false),
+        ddl_context.clone(),
+    );
+
+    let error = procedure.on_prepare().await.unwrap_err();
+    assert!(error.to_string().contains("retention deadline"), "{error}");
+    assert!(
+        ddl_context
+            .table_metadata_manager
+            .table_name_manager()
+            .get(TableNameKey::new(
+                DEFAULT_CATALOG_NAME,
+                DEFAULT_SCHEMA_NAME,
+                "foo",
+            ))
+            .await
+            .unwrap()
+            .is_some()
+    );
 }
 
 #[tokio::test]
@@ -372,6 +454,7 @@ async fn test_soft_drop_closes_regions_and_keeps_tombstone() {
     let detector_controller = Arc::new(RecordingRegionFailureDetectorController::default());
     let mut ddl_context = new_ddl_context(node_manager);
     ddl_context.soft_drop_enabled = true;
+    ddl_context.soft_drop_retention = Some(Duration::from_millis(100));
     ddl_context.region_failure_detector_controller = detector_controller.clone();
     let table_id = 1024;
     let table_name = "foo";
@@ -448,12 +531,27 @@ async fn test_soft_drop_closes_regions_and_keeps_tombstone() {
         .unwrap()
         .unwrap();
     assert_eq!(dropped_table.dropped_at, Some(dropped_at));
+    assert_eq!(dropped_table.retention_expires_at, Some(dropped_at + 100));
     let dropped_tables = ddl_context
         .table_metadata_manager
         .list_dropped_tables()
         .await
         .unwrap();
     assert_eq!(dropped_tables[0].dropped_at, Some(dropped_at));
+    assert_eq!(
+        dropped_tables[0].retention_expires_at,
+        Some(dropped_at + 100)
+    );
+
+    assert!(
+        ddl_context
+            .table_metadata_manager
+            .kv_backend()
+            .get(retention_expires_at_marker_key(table_id).as_bytes(),)
+            .await
+            .unwrap()
+            .is_some()
+    );
 
     assert_eq!(
         detector_controller.deregistered().await,
@@ -510,6 +608,20 @@ async fn test_soft_drop_timestamp_is_stable_across_retry_and_recovery() {
         .unwrap()
         .unwrap();
     assert_eq!(marker.value, b"1234567890");
+    let deadline_marker = kv_backend
+        .get(retention_expires_at_marker_key(table_id).as_bytes())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        deadline_marker.value,
+        recovered_again
+            .data
+            .retention_expires_at
+            .unwrap()
+            .to_string()
+            .as_bytes()
+    );
     assert_eq!(recovered_again.data.dropped_at, Some(1_234_567_890));
 }
 
@@ -773,6 +885,13 @@ async fn test_undrop_table_restores_metadata_and_reopens_regions() {
     assert!(
         kv_backend
             .get(dropped_at_marker_key(table_id).as_bytes())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        kv_backend
+            .get(retention_expires_at_marker_key(table_id).as_bytes())
             .await
             .unwrap()
             .is_none()
@@ -1411,6 +1530,13 @@ async fn test_purge_dropped_table_cleans_regions_offline_and_deletes_tombstone()
             .unwrap()
             .is_none()
     );
+    assert!(
+        kv_backend
+            .get(retention_expires_at_marker_key(table_id).as_bytes())
+            .await
+            .unwrap()
+            .is_none()
+    );
 
     assert_eq!(
         detector_controller.deregistered().await,
@@ -1615,11 +1741,25 @@ async fn test_on_rollback() {
                 .unwrap()
                 .is_some()
         );
+        assert!(
+            kv_backend
+                .get(retention_expires_at_marker_key(physical_table_id).as_bytes())
+                .await
+                .unwrap()
+                .is_some()
+        );
         assert!(procedure.rollback_supported());
         procedure.rollback(&ctx).await.unwrap();
         assert!(
             kv_backend
                 .get(dropped_at_marker_key(physical_table_id).as_bytes())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            kv_backend
+                .get(retention_expires_at_marker_key(physical_table_id).as_bytes())
                 .await
                 .unwrap()
                 .is_none()

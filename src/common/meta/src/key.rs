@@ -443,6 +443,8 @@ pub struct DroppedTableName {
     pub table_name: TableName,
     /// Unix timestamp in milliseconds when this table was soft-dropped.
     pub dropped_at: Option<i64>,
+    /// Fixed automatic-GC deadline in Unix milliseconds.
+    pub retention_expires_at: Option<i64>,
 }
 
 #[derive(Debug, Clone)]
@@ -459,12 +461,19 @@ pub struct DroppedTableMetadata {
     pub region_wal_options: HashMap<RegionNumber, WalOptions>,
     /// Unix timestamp in milliseconds when this table was soft-dropped.
     pub dropped_at: Option<i64>,
+    /// Fixed automatic-GC deadline in Unix milliseconds.
+    pub retention_expires_at: Option<i64>,
 }
 
 const DROPPED_AT_KEY_PREFIX: &str = "__dropped_at";
+const RETENTION_EXPIRES_AT_KEY_PREFIX: &str = "__retention_expires_at";
 
 fn dropped_at_key(table_id: TableId) -> Vec<u8> {
     format!("{DROPPED_AT_KEY_PREFIX}/{table_id}").into_bytes()
+}
+
+fn retention_expires_at_key(table_id: TableId) -> Vec<u8> {
+    format!("{RETENTION_EXPIRES_AT_KEY_PREFIX}/{table_id}").into_bytes()
 }
 
 impl<T: DeserializeOwned + Serialize> Deref for DeserializedValueWithBytes<T> {
@@ -1011,15 +1020,42 @@ impl TableMetadataManager {
         region_wal_options: &HashMap<RegionNumber, WalOptions>,
         dropped_at: Option<i64>,
     ) -> Result<()> {
+        self.delete_table_metadata_with_retention(
+            table_id,
+            table_name,
+            table_route_value,
+            region_wal_options,
+            dropped_at,
+            None,
+        )
+        .await
+    }
+
+    /// Deletes metadata logically and stores fixed soft-drop lifecycle markers.
+    pub async fn delete_table_metadata_with_retention(
+        &self,
+        table_id: TableId,
+        table_name: &TableName,
+        table_route_value: &TableRouteValue,
+        region_wal_options: &HashMap<RegionNumber, WalOptions>,
+        dropped_at: Option<i64>,
+        retention_expires_at: Option<i64>,
+    ) -> Result<()> {
         let keys =
             self.table_metadata_keys(table_id, table_name, table_route_value, region_wal_options)?;
         if let Some(dropped_at) = dropped_at {
+            let mut markers = vec![(
+                dropped_at_key(table_id),
+                dropped_at.to_string().into_bytes(),
+            )];
+            if let Some(retention_expires_at) = retention_expires_at {
+                markers.push((
+                    retention_expires_at_key(table_id),
+                    retention_expires_at.to_string().into_bytes(),
+                ));
+            }
             self.tombstone_manager
-                .create_with_marker(
-                    keys,
-                    dropped_at_key(table_id),
-                    dropped_at.to_string().into_bytes(),
-                )
+                .create_with_markers(keys, markers)
                 .await
                 .map(|_| ())
         } else {
@@ -1040,21 +1076,31 @@ impl TableMetadataManager {
                 table_id,
                 table_name,
                 dropped_at: None,
+                retention_expires_at: None,
             });
         }
         if dropped_tables.is_empty() {
             return Ok(dropped_tables);
         }
 
-        let dropped_at_keys = dropped_tables
+        let marker_keys = dropped_tables
             .iter()
-            .map(|table| dropped_at_key(table.table_id))
+            .flat_map(|table| {
+                [
+                    dropped_at_key(table.table_id),
+                    retention_expires_at_key(table.table_id),
+                ]
+            })
             .collect::<Vec<_>>();
-        let dropped_at_values = self.tombstone_manager.batch_get(&dropped_at_keys).await?;
+        let marker_values = self.tombstone_manager.batch_get(&marker_keys).await?;
         for table in &mut dropped_tables {
             table.dropped_at = Self::parse_dropped_at(
                 table.table_id,
-                dropped_at_values.get(&dropped_at_key(table.table_id)),
+                marker_values.get(&dropped_at_key(table.table_id)),
+            )?;
+            table.retention_expires_at = Self::parse_retention_expires_at(
+                table.table_id,
+                marker_values.get(&retention_expires_at_key(table.table_id)),
             )?;
         }
 
@@ -1100,7 +1146,10 @@ impl TableMetadataManager {
         let table_metadata_keys =
             self.table_metadata_keys(table_id, table_name, table_route_value, region_wal_options)?;
         self.tombstone_manager
-            .delete_with_marker(table_metadata_keys, dropped_at_key(table_id))
+            .delete_with_markers(
+                table_metadata_keys,
+                vec![dropped_at_key(table_id), retention_expires_at_key(table_id)],
+            )
             .await
             .map(|_| ())
     }
@@ -1117,7 +1166,10 @@ impl TableMetadataManager {
         let keys =
             self.table_metadata_keys(table_id, table_name, table_route_value, region_wal_options)?;
         self.tombstone_manager
-            .restore_with_marker(keys, dropped_at_key(table_id))
+            .restore_with_markers(
+                keys,
+                vec![dropped_at_key(table_id), retention_expires_at_key(table_id)],
+            )
             .await
             .map(|_| ())
     }
@@ -1180,7 +1232,17 @@ impl TableMetadataManager {
         let region_wal_options = self
             .dropped_region_wal_options(table_id, &table_route_value)
             .await?;
-        let dropped_at = self.dropped_at(table_id).await?;
+        let dropped_at_key = dropped_at_key(table_id);
+        let retention_expires_at_key = retention_expires_at_key(table_id);
+        let marker_values = self
+            .tombstone_manager
+            .batch_get(&[dropped_at_key.clone(), retention_expires_at_key.clone()])
+            .await?;
+        let dropped_at = Self::parse_dropped_at(table_id, marker_values.get(&dropped_at_key))?;
+        let retention_expires_at = Self::parse_retention_expires_at(
+            table_id,
+            marker_values.get(&retention_expires_at_key),
+        )?;
 
         Ok(Some(DroppedTableMetadata {
             table_id,
@@ -1189,27 +1251,30 @@ impl TableMetadataManager {
             table_route_value,
             region_wal_options,
             dropped_at,
+            retention_expires_at,
         }))
     }
 
-    async fn dropped_at(&self, table_id: TableId) -> Result<Option<i64>> {
-        let kv = self
-            .tombstone_manager
-            .get(&dropped_at_key(table_id))
-            .await?;
-        Self::parse_dropped_at(table_id, kv.as_ref())
+    fn parse_dropped_at(table_id: TableId, kv: Option<&KeyValue>) -> Result<Option<i64>> {
+        Self::parse_timestamp_marker(table_id, "dropped timestamp", kv)
     }
 
-    fn parse_dropped_at(table_id: TableId, kv: Option<&KeyValue>) -> Result<Option<i64>> {
+    fn parse_retention_expires_at(table_id: TableId, kv: Option<&KeyValue>) -> Result<Option<i64>> {
+        Self::parse_timestamp_marker(table_id, "retention deadline", kv)
+    }
+
+    fn parse_timestamp_marker(
+        table_id: TableId,
+        description: &str,
+        kv: Option<&KeyValue>,
+    ) -> Result<Option<i64>> {
         let Some(kv) = kv else {
             return Ok(None);
         };
         let value = String::from_utf8_lossy(&kv.value);
         value.parse().map(Some).map_err(|err| {
             error::UnexpectedSnafu {
-                err_msg: format!(
-                    "Invalid dropped timestamp '{value}' for table id {table_id}: {err}"
-                ),
+                err_msg: format!("Invalid {description} '{value}' for table id {table_id}: {err}"),
             }
             .build()
         })

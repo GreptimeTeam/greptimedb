@@ -235,8 +235,12 @@ impl GcScheduler {
 
         for table in dropped_tables.into_iter().filter(|table| {
             table
-                .dropped_at
-                .and_then(|dropped_at| dropped_at.checked_add(retention_millis))
+                .retention_expires_at
+                .or_else(|| {
+                    table
+                        .dropped_at
+                        .and_then(|dropped_at| dropped_at.checked_add(retention_millis))
+                })
                 .is_some_and(|expires_at| expires_at <= now_millis)
         }) {
             let Some(reservation) = self
@@ -558,6 +562,14 @@ mod tests {
             table_id,
             table_name: TableName::new("greptime", "public", format!("table_{table_id}")),
             dropped_at,
+            retention_expires_at: None,
+        }
+    }
+
+    fn dropped_table_with_deadline(table_id: TableId, deadline: i64) -> DroppedTableName {
+        DroppedTableName {
+            retention_expires_at: Some(deadline),
+            ..dropped_table(table_id, Some(i64::MAX))
         }
     }
 
@@ -609,6 +621,24 @@ mod tests {
         let mut attempts = ctx.purge_attempts.lock().unwrap().clone();
         attempts.sort_unstable();
         assert_eq!(vec![1, 2], attempts);
+    }
+
+    #[tokio::test]
+    async fn test_purge_uses_fixed_deadline_before_legacy_retention_fallback() {
+        let ctx = Arc::new(SoftDropSchedulerCtx::default());
+        *ctx.dropped_tables.lock().unwrap() = vec![
+            dropped_table_with_deadline(1, 1_000),
+            dropped_table_with_deadline(2, 1_001),
+            dropped_table(3, Some(900)),
+        ];
+        let scheduler = soft_drop_scheduler(ctx.clone());
+
+        scheduler.purge_expired_soft_dropped_tables(1_000).await;
+        wait_for_purge_attempts(&ctx, 2).await;
+
+        let mut attempts = ctx.purge_attempts.lock().unwrap().clone();
+        attempts.sort_unstable();
+        assert_eq!(vec![1, 3], attempts);
     }
 
     #[tokio::test]

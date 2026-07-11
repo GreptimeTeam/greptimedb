@@ -139,14 +139,16 @@ impl DropTableExecutor {
         table_route_value: &TableRouteValue,
         region_wal_options: &HashMap<RegionNumber, WalOptions>,
         dropped_at: Option<i64>,
+        retention_expires_at: Option<i64>,
     ) -> Result<()> {
         ctx.table_metadata_manager
-            .delete_table_metadata(
+            .delete_table_metadata_with_retention(
                 self.table_id,
                 &self.table,
                 table_route_value,
                 region_wal_options,
                 dropped_at,
+                retention_expires_at,
             )
             .await
     }

@@ -190,7 +190,7 @@ impl TombstoneManager {
         keys: &[Vec<u8>],
         dest_keys: &[Vec<u8>],
         require_dest_not_exists: bool,
-        extra_op: Option<TxnOp>,
+        extra_ops: Vec<TxnOp>,
     ) -> Result<usize> {
         ensure!(
             keys.len() == dest_keys.len(),
@@ -214,7 +214,7 @@ impl TombstoneManager {
             .into_iter()
             .map(|kv| (kv.key, kv.value))
             .collect::<HashMap<_, _>>();
-        if results.is_empty() && extra_op.is_none() {
+        if results.is_empty() && extra_ops.is_empty() {
             return Ok(0);
         }
 
@@ -233,8 +233,8 @@ impl TombstoneManager {
                 })
                 .unzip();
             let mut txns = txns;
-            if let Some(extra_op) = extra_op.clone() {
-                txns.push(Txn::new().and_then(vec![extra_op]));
+            if !extra_ops.is_empty() {
+                txns.push(Txn::new().and_then(extra_ops.clone()));
             }
             let mut resp = self.kv_backend.txn(Txn::merge_all(txns)).await?;
             if resp.succeeded {
@@ -288,7 +288,7 @@ impl TombstoneManager {
         keys: Vec<Vec<u8>>,
         dest_keys: Vec<Vec<u8>>,
         require_dest_not_exists: bool,
-        mut extra_op: Option<TxnOp>,
+        mut extra_ops: Vec<TxnOp>,
     ) -> Result<usize> {
         ensure!(
             keys.len() == dest_keys.len(),
@@ -301,9 +301,9 @@ impl TombstoneManager {
             }
         );
         if keys.is_empty() {
-            if extra_op.is_some() {
+            if !extra_ops.is_empty() {
                 return self
-                    .move_values_inner(&[], &[], require_dest_not_exists, extra_op)
+                    .move_values_inner(&[], &[], require_dest_not_exists, extra_ops)
                     .await;
             }
             return Ok(0);
@@ -322,8 +322,9 @@ impl TombstoneManager {
                 )
             }
         );
-        let merge_extra_op = extra_op.is_some() && max_txn_ops > txn_ops_per_key;
-        let reserved_ops = usize::from(merge_extra_op);
+        let merge_extra_ops =
+            !extra_ops.is_empty() && max_txn_ops.saturating_sub(txn_ops_per_key) >= extra_ops.len();
+        let reserved_ops = if merge_extra_ops { extra_ops.len() } else { 0 };
         let chunk_size = (max_txn_ops - reserved_ops) / txn_ops_per_key;
         if keys.len() > chunk_size {
             debug!(
@@ -338,22 +339,22 @@ impl TombstoneManager {
             for (index, (keys, dest_keys)) in
                 keys_chunks.into_iter().zip(dest_keys_chunks).enumerate()
             {
-                let extra_op = if merge_extra_op && index + 1 == num_chunks {
-                    extra_op.take()
+                let chunk_extra_ops = if merge_extra_ops && index + 1 == num_chunks {
+                    std::mem::take(&mut extra_ops)
                 } else {
-                    None
+                    vec![]
                 };
                 moved_keys += self
-                    .move_values_inner(keys, dest_keys, require_dest_not_exists, extra_op)
+                    .move_values_inner(keys, dest_keys, require_dest_not_exists, chunk_extra_ops)
                     .await?;
             }
-            if extra_op.is_some() {
-                self.move_values_inner(&[], &[], require_dest_not_exists, extra_op)
+            if !extra_ops.is_empty() {
+                self.move_values_inner(&[], &[], require_dest_not_exists, extra_ops)
                     .await?;
             }
             Ok(moved_keys)
         } else {
-            self.move_values_inner(&keys, &dest_keys, require_dest_not_exists, extra_op)
+            self.move_values_inner(&keys, &dest_keys, require_dest_not_exists, extra_ops)
                 .await
         }
     }
@@ -364,7 +365,7 @@ impl TombstoneManager {
         dest_keys: Vec<Vec<u8>>,
         require_dest_not_exists: bool,
     ) -> Result<usize> {
-        self.move_values_with_extra(keys, dest_keys, require_dest_not_exists, None)
+        self.move_values_with_extra(keys, dest_keys, require_dest_not_exists, vec![])
             .await
     }
 
@@ -394,6 +395,16 @@ impl TombstoneManager {
         marker_key: Vec<u8>,
         marker_value: Vec<u8>,
     ) -> Result<usize> {
+        self.create_with_markers(keys, vec![(marker_key, marker_value)])
+            .await
+    }
+
+    /// Creates tombstones and stores additional markers in the tombstone namespace.
+    pub async fn create_with_markers(
+        &self,
+        keys: Vec<Vec<u8>>,
+        markers: Vec<(Vec<u8>, Vec<u8>)>,
+    ) -> Result<usize> {
         let (keys, dest_keys): (Vec<_>, Vec<_>) = keys
             .into_iter()
             .map(|key| {
@@ -401,15 +412,13 @@ impl TombstoneManager {
                 (key, tombstone_key)
             })
             .unzip();
-        let marker_key = self.to_tombstone(&marker_key);
+        let marker_ops = markers
+            .into_iter()
+            .map(|(key, value)| TxnOp::Put(self.to_tombstone(&key), value))
+            .collect();
 
-        self.move_values_with_extra(
-            keys,
-            dest_keys,
-            false,
-            Some(TxnOp::Put(marker_key, marker_value)),
-        )
-        .await
+        self.move_values_with_extra(keys, dest_keys, false, marker_ops)
+            .await
     }
 
     /// Restores tombstones for keys.
@@ -446,7 +455,28 @@ impl TombstoneManager {
             .unzip();
         let marker_key = self.to_tombstone(&marker_key);
 
-        self.move_values_with_extra(keys, dest_keys, true, Some(TxnOp::Delete(marker_key)))
+        self.move_values_with_extra(keys, dest_keys, true, vec![TxnOp::Delete(marker_key)])
+            .await
+    }
+
+    /// Restores tombstones and deletes associated markers.
+    pub async fn restore_with_markers(
+        &self,
+        keys: Vec<Vec<u8>>,
+        marker_keys: Vec<Vec<u8>>,
+    ) -> Result<usize> {
+        let (keys, dest_keys): (Vec<_>, Vec<_>) = keys
+            .into_iter()
+            .map(|key| {
+                let tombstone_key = self.to_tombstone(&key);
+                (tombstone_key, key)
+            })
+            .unzip();
+        let marker_ops = marker_keys
+            .into_iter()
+            .map(|key| TxnOp::Delete(self.to_tombstone(&key)))
+            .collect();
+        self.move_values_with_extra(keys, dest_keys, true, marker_ops)
             .await
     }
 
@@ -475,6 +505,16 @@ impl TombstoneManager {
         marker_key: Vec<u8>,
     ) -> Result<usize> {
         keys.push(marker_key);
+        self.delete(keys).await
+    }
+
+    /// Deletes tombstones and associated markers.
+    pub async fn delete_with_markers(
+        &self,
+        mut keys: Vec<Vec<u8>>,
+        marker_keys: Vec<Vec<u8>>,
+    ) -> Result<usize> {
+        keys.extend(marker_keys);
         self.delete(keys).await
     }
 }

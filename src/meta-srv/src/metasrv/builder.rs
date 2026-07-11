@@ -431,6 +431,8 @@ impl MetasrvBuilder {
             flow_metadata_allocator: flow_metadata_allocator.clone(),
             region_failure_detector_controller,
             soft_drop_enabled: ddl_soft_drop_enabled(&options),
+            soft_drop_retention: ddl_soft_drop_enabled(&options)
+                .then_some(options.gc.soft_drop.retention),
         };
         let procedure_manager_c = procedure_manager.clone();
         let repartition_procedure_factory: RepartitionProcedureFactoryRef = if options.gc.enable {
