@@ -17,8 +17,8 @@ use std::collections::{HashMap, HashSet};
 use api::v1::column_data_type_extension::TypeExt;
 use api::v1::value::ValueData;
 use api::v1::{
-    ColumnDataType, ColumnDataTypeExtension, ColumnSchema, JsonTypeExtension, RowInsertRequests,
-    Value,
+    ColumnDataType, ColumnDataTypeExtension, ColumnSchema, JsonTypeExtension, RowInsertRequest,
+    RowInsertRequests, Value,
 };
 use common_catalog::consts::{trace_operations_table_name, trace_services_table_name};
 use common_grpc::precision::Precision;
@@ -185,12 +185,16 @@ pub fn v1_to_grpc_main_insert_requests(
 pub fn v1_to_grpc_main_insert_requests_with_schema(
     spans: Vec<TraceSpan>,
     table_name: &str,
-) -> Result<(RowInsertRequests, TraceBatchSchema)> {
+) -> Result<(RowInsertRequest, TraceBatchSchema)> {
     let mut multi_table_writer = MultiTableData::default();
     let (trace_writer, batch_schema) = build_trace_table_data_with_schema(spans.into_iter())?;
     multi_table_writer.add_table_data(table_name, trace_writer);
+    let (mut requests, _) = multi_table_writer.into_row_insert_requests();
     Ok((
-        multi_table_writer.into_row_insert_requests().0,
+        requests
+            .inserts
+            .pop()
+            .expect("v1 trace conversion added one main table"),
         batch_schema,
     ))
 }

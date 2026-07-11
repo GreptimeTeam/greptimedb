@@ -503,16 +503,12 @@ impl Inserter {
         })
     }
 
-    pub fn auto_create_table_enabled(&self, ctx: &QueryContextRef) -> Result<bool> {
-        Ok(self.auto_create_disabled_reason(ctx)?.is_none())
-    }
-
-    /// Ensures a trace table exists with the request-global schema without
-    /// requiring a padded data row to drive auto-creation.
+    /// Ensures a trace table has the request-global schema without requiring a
+    /// padded data row to drive on-demand creation or alteration.
     pub async fn ensure_trace_table_on_demand(
         &self,
         table_name: &str,
-        request_schema: &[ColumnSchema],
+        request_schema: Vec<ColumnSchema>,
         ctx: &QueryContextRef,
         statement_executor: &StatementExecutor,
     ) -> Result<()> {
@@ -520,7 +516,7 @@ impl Inserter {
             inserts: vec![RowInsertRequest {
                 table_name: table_name.to_string(),
                 rows: Some(api::v1::Rows {
-                    schema: request_schema.to_vec(),
+                    schema: request_schema,
                     rows: Vec::new(),
                 }),
             }],
@@ -1507,15 +1503,6 @@ mod tests {
             )),
             true,
         );
-        assert!(inserter.auto_create_table_enabled(&ctx).unwrap());
-        let mut disabled_ctx = QueryContext::with(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME);
-        disabled_ctx.set_extension(AUTO_CREATE_TABLE_KEY, "false");
-        assert!(
-            !inserter
-                .auto_create_table_enabled(&Arc::new(disabled_ctx))
-                .unwrap()
-        );
-
         let alter_expr = inserter
             .get_alter_table_expr_on_demand(&mut req, &table, &ctx, true, true)
             .unwrap();
