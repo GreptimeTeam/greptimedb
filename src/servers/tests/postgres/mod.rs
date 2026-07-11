@@ -35,7 +35,7 @@ use table::TableRef;
 use table::test_util::MemTable;
 use tokio_postgres::{Client, Error as PgError, NoTls, SimpleQueryMessage};
 
-use crate::create_testing_instance;
+use crate::{create_testing_instance, dictionary_child_null_table};
 
 fn create_postgres_server(
     table: TableRef,
@@ -73,6 +73,35 @@ fn create_postgres_server(
         user_provider,
         None,
     )))
+}
+
+#[tokio::test]
+async fn test_postgres_dictionary_child_null() -> Result<()> {
+    let mut postgres_server = create_postgres_server(
+        dictionary_child_null_table(),
+        false,
+        Default::default(),
+        None,
+    )?;
+    postgres_server
+        .start("127.0.0.1:0".parse::<SocketAddr>().unwrap())
+        .await
+        .unwrap();
+    let server_port = postgres_server.bind_addr().unwrap().port();
+    let client = create_plain_connection(server_port, false).await.unwrap();
+
+    let rows = client
+        .query("SELECT host FROM dictionary_values", &[])
+        .await
+        .unwrap();
+    let values = rows
+        .iter()
+        .map(|row| row.get::<_, Option<String>>(0))
+        .collect::<Vec<_>>();
+    assert_eq!(vec![None, Some("host-b".to_string())], values);
+
+    postgres_server.shutdown().await.unwrap();
+    Ok(())
 }
 
 #[tokio::test]

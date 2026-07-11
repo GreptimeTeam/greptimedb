@@ -228,7 +228,7 @@ where
                         DataType::Utf8 | DataType::Utf8View | DataType::LargeUtf8
                     ) =>
                 {
-                    let value = datatypes::arrow_array::string_array_value(column, i);
+                    let value = datatypes::arrow_array::string_array_value_at_index(column, i);
                     encoder.encode_field(&value, pg_field)?;
                 }
                 _ => {

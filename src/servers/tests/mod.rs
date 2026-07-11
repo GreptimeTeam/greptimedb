@@ -16,13 +16,19 @@ use std::sync::Arc;
 
 use api::v1::greptime_request::Request;
 use api::v1::query_request::Query;
+use arrow::array::{DictionaryArray, StringArray, UInt32Array};
+use arrow::datatypes::UInt32Type;
 use async_trait::async_trait;
 use catalog::memory::MemoryCatalogManager;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::ext::BoxedError;
 use common_grpc::flight::do_put::DoPutResponse;
 use common_query::Output;
+use common_recordbatch::RecordBatch;
 use datafusion_expr::LogicalPlan;
+use datatypes::prelude::{ConcreteDataType, VectorRef};
+use datatypes::schema::{ColumnSchema, Schema};
+use datatypes::vectors::DictionaryVector;
 use futures_util::TryFutureExt;
 use query::options::QueryOptions;
 use query::parser::{PromQuery, QueryStatement};
@@ -36,12 +42,30 @@ use snafu::{ResultExt, ensure};
 use sql::parser::{ParseOptions, ParserContext};
 use sql::statements::statement::Statement;
 use table::TableRef;
+use table::test_util::MemTable;
 
 mod http;
 mod interceptor;
 mod mysql;
 mod postgres;
 mod prom_remote_write_v2_test;
+
+fn dictionary_child_null_table() -> TableRef {
+    let data_type = ConcreteDataType::dictionary_datatype(
+        ConcreteDataType::uint32_datatype(),
+        ConcreteDataType::string_datatype(),
+    );
+    let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
+        "host", data_type, true,
+    )]));
+    let dictionary = DictionaryArray::<UInt32Type>::new(
+        UInt32Array::from(vec![0, 1]),
+        Arc::new(StringArray::from(vec![None, Some("host-b")])),
+    );
+    let vector = Arc::new(DictionaryVector::try_from(dictionary).unwrap()) as VectorRef;
+    let record_batch = RecordBatch::new(schema, vec![vector]).unwrap();
+    MemTable::table("dictionary_values", record_batch)
+}
 
 pub struct DummyInstance {
     query_engine: QueryEngineRef,

@@ -255,8 +255,13 @@ impl MysqlResultWriter {
                             DataType::Utf8 | DataType::Utf8View | DataType::LargeUtf8
                         ) =>
                     {
-                        let v = datatypes::arrow_array::string_array_value(column, i);
-                        row_writer.write_col(v)?;
+                        if let Some(v) =
+                            datatypes::arrow_array::string_array_value_at_index(column, i)
+                        {
+                            row_writer.write_col(v)?;
+                        } else {
+                            row_writer.write_col(None::<u8>)?;
+                        }
                     }
                     DataType::Binary | DataType::BinaryView | DataType::LargeBinary => {
                         let v = datatypes::arrow_array::binary_array_value(column, i);
