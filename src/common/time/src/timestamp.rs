@@ -484,6 +484,11 @@ impl Timestamp {
         self.value = -self.value;
         self
     }
+
+    pub fn checked_negative(mut self) -> Option<Self> {
+        self.value = self.value.checked_neg()?;
+        Some(self)
+    }
 }
 
 impl Timestamp {
