@@ -269,6 +269,43 @@ impl RecordBatch {
             .sum()
     }
 
+    /// Returns the logical memory size of this batch's array slices.
+    ///
+    /// This estimates the bytes represented by each slice rather than the capacity of its shared
+    /// backing buffers. For view arrays, this includes each visible 16-byte view record and the
+    /// visible out-of-line payload bytes, but not unrelated payloads in shared backing buffers. It
+    /// is not an exact measure of live physical memory. If Arrow cannot calculate a slice's size,
+    /// the full buffer size is used conservatively.
+    pub fn logical_slice_memory_size(&self) -> usize {
+        self.df_record_batch
+            .columns()
+            .iter()
+            .fold(0, |total, array| {
+                let slice_size = array
+                    .to_data()
+                    .get_slice_memory_size()
+                    .unwrap_or_else(|_| array.get_buffer_memory_size());
+                // Arrow's slice size includes the 16-byte view records but omits variadic payload
+                // buffers. Inline values (at most 12 bytes) are already stored in those records.
+                let view_payload_size = match array.data_type() {
+                    ArrowDataType::Utf8View => array
+                        .as_string_view()
+                        .iter()
+                        .flatten()
+                        .filter(|value| value.len() > 12)
+                        .fold(0usize, |size, value| size.saturating_add(value.len())),
+                    ArrowDataType::BinaryView => array
+                        .as_binary_view()
+                        .iter()
+                        .flatten()
+                        .filter(|value| value.len() > 12)
+                        .fold(0usize, |size, value| size.saturating_add(value.len())),
+                    _ => 0,
+                };
+                total.saturating_add(slice_size.saturating_add(view_payload_size))
+            })
+    }
+
     /// Iterate the values as strings in the column at index `i`.
     ///
     /// Note that if the underlying array is not a valid GreptimeDB vector, an empty iterator is
@@ -382,13 +419,15 @@ fn maybe_align_json_array_with_schema(
 mod tests {
     use std::sync::Arc;
 
-    use datatypes::arrow::array::{AsArray, BinaryArray, UInt32Array};
+    use datatypes::arrow::array::{
+        AsArray, BinaryArray, BinaryViewArray, StringViewArray, UInt32Array,
+    };
     use datatypes::arrow::datatypes::{DataType, Field, Schema as ArrowSchema, UInt32Type};
     use datatypes::arrow_array::StringArray;
     use datatypes::data_type::ConcreteDataType;
     use datatypes::extension::json::{JsonExtensionType, JsonMetadata};
     use datatypes::schema::{ColumnSchema, Schema};
-    use datatypes::vectors::{StringVector, UInt32Vector};
+    use datatypes::vectors::{BinaryVector, StringVector, UInt32Vector};
 
     use super::*;
 
@@ -473,6 +512,74 @@ mod tests {
         assert_eq!(expected, actual);
 
         assert!(recordbatch.slice(1, 5).is_err());
+    }
+
+    #[test]
+    fn test_logical_slice_memory_size_excludes_unsliced_buffer_capacity() {
+        let schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new("numbers", ConcreteDataType::uint32_datatype(), false),
+            ColumnSchema::new("strings", ConcreteDataType::string_datatype(), false),
+        ]));
+        let numbers: Vec<_> = (0..1024).collect();
+        let strings: Vec<_> = (0..1024).map(|value| format!("value-{value}")).collect();
+        let columns: Vec<VectorRef> = vec![
+            Arc::new(UInt32Vector::from_slice(numbers)),
+            Arc::new(StringVector::from(strings)),
+        ];
+        let batch = RecordBatch::new(schema, columns).unwrap();
+        let slice = batch.slice(512, 1).unwrap();
+
+        assert!(slice.logical_slice_memory_size() < slice.buffer_memory_size());
+        assert_eq!(
+            slice.logical_slice_memory_size(),
+            slice
+                .columns()
+                .iter()
+                .map(|column| column.to_data().get_slice_memory_size().unwrap())
+                .sum::<usize>()
+        );
+    }
+
+    #[test]
+    fn test_logical_slice_memory_size_includes_string_view_payload() {
+        let visible = "visible string view payload";
+        let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
+            "strings",
+            ConcreteDataType::utf8_view_datatype(),
+            false,
+        )]));
+        let columns: Vec<VectorRef> =
+            vec![Arc::new(StringVector::from(StringViewArray::from(vec![
+                "unrelated backing payload",
+                visible,
+            ])))];
+        let batch = RecordBatch::new(schema, columns)
+            .unwrap()
+            .slice(1, 1)
+            .unwrap();
+
+        assert_eq!(16 + visible.len(), batch.logical_slice_memory_size());
+    }
+
+    #[test]
+    fn test_logical_slice_memory_size_includes_binary_view_payload() {
+        let unrelated = b"unrelated backing payload".as_slice();
+        let visible = b"visible binary view payload".as_slice();
+        let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
+            "binary",
+            ConcreteDataType::binary_view_datatype(),
+            false,
+        )]));
+        let columns: Vec<VectorRef> =
+            vec![Arc::new(BinaryVector::from(BinaryViewArray::from(vec![
+                unrelated, visible,
+            ])))];
+        let batch = RecordBatch::new(schema, columns)
+            .unwrap()
+            .slice(1, 1)
+            .unwrap();
+
+        assert_eq!(16 + visible.len(), batch.logical_slice_memory_size());
     }
 
     #[test]
