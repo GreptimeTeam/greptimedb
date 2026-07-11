@@ -65,6 +65,7 @@ fn mock_harness_flow_node_manager() {}
 #[test]
 fn test_expire_after_secs_to_millis() {
     assert_eq!(expire_after_secs_to_millis(300).unwrap(), 300_000);
+    assert_eq!(expire_after_secs_to_millis(0).unwrap(), 0);
 
     let max_secs = i64::MAX / 1_000;
     assert_eq!(
@@ -74,11 +75,11 @@ fn test_expire_after_secs_to_millis() {
 }
 
 #[test]
-fn test_expire_after_secs_to_millis_overflow() {
-    let overflow_values = [i64::MAX / 1_000 + 1, i64::MIN / 1_000 - 1];
+fn test_expire_after_secs_to_millis_invalid() {
+    let invalid_values = [i64::MAX / 1_000 + 1, -1];
 
-    for overflow_secs in overflow_values {
-        let error = expire_after_secs_to_millis(overflow_secs).unwrap_err();
+    for invalid_secs in invalid_values {
+        let error = expire_after_secs_to_millis(invalid_secs).unwrap_err();
         assert!(matches!(error, Error::InvalidQuery { .. }));
     }
 }

@@ -77,6 +77,13 @@ use crate::FrontendInvoker;
 use crate::error::Error;
 
 fn expire_after_secs_to_millis(expire_after_secs: i64) -> Result<repr::Duration, Error> {
+    ensure!(
+        expire_after_secs >= 0,
+        InvalidQuerySnafu {
+            reason: format!("EXPIRE AFTER must be non-negative, got {expire_after_secs} seconds"),
+        }
+    );
+
     expire_after_secs
         .checked_mul(1_000)
         .with_context(|| InvalidQuerySnafu {
