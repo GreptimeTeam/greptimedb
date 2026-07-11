@@ -347,6 +347,14 @@ impl StatementExecutor {
                 self.drop_tables(&table_names[..], stmt.drop_if_exists(), query_ctx.clone())
                     .await
             }
+            Statement::UndropTable(stmt) => {
+                let (catalog, schema, table) =
+                    table_idents_to_full_name(stmt.table_name(), &query_ctx)
+                        .map_err(BoxedError::new)
+                        .context(ExternalSnafu)?;
+                self.undrop_table(TableName::new(catalog, schema, table), query_ctx)
+                    .await
+            }
             Statement::DropDatabase(stmt) => {
                 self.drop_database(
                     query_ctx.current_catalog().to_string(),

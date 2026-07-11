@@ -1403,6 +1403,51 @@ impl StatementExecutor {
     }
 
     #[tracing::instrument(skip_all)]
+    pub async fn undrop_table(
+        &self,
+        table_name: TableName,
+        query_context: QueryContextRef,
+    ) -> Result<Output> {
+        ensure!(
+            !is_readonly_schema(&table_name.schema_name),
+            SchemaReadOnlySnafu {
+                name: table_name.schema_name.clone()
+            }
+        );
+
+        let dropped = self
+            .table_metadata_manager
+            .get_dropped_table(&table_name)
+            .await
+            .context(TableMetadataManagerSnafu)?
+            .with_context(|| TableNotFoundSnafu {
+                table_name: table_name.to_string(),
+            })?;
+
+        let request = SubmitDdlTaskRequest::new(
+            to_meta_query_context(query_context),
+            DdlTask::new_undrop_table(dropped.table_id),
+        );
+        self.procedure_executor
+            .submit_ddl_task(&ExecutorContext::default(), request)
+            .await
+            .context(error::ExecuteDdlSnafu)?;
+
+        self.cache_invalidator
+            .invalidate(
+                &Context::default(),
+                &[
+                    CacheIdent::TableId(dropped.table_id),
+                    CacheIdent::TableName(table_name),
+                ],
+            )
+            .await
+            .context(error::InvalidateTableCacheSnafu)?;
+
+        Ok(Output::new_with_affected_rows(0))
+    }
+
+    #[tracing::instrument(skip_all)]
     pub async fn drop_database(
         &self,
         catalog: String,
