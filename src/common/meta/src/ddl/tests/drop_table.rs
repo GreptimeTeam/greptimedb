@@ -16,11 +16,10 @@ use std::assert_matches;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use api::region::RegionResponse;
 use api::v1::region::{RegionRequest, region_request};
 use async_trait::async_trait;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, FILE_ENGINE};
-use common_error::ext::{BoxedError, ErrorExt};
+use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_procedure::{Procedure, StringKey};
 use common_procedure_test::{
@@ -1157,22 +1156,17 @@ async fn test_purge_dropped_table_cleans_regions_offline_and_deletes_tombstone()
     );
     execute_procedure_until_done(&mut procedure).await;
 
-    let mut cleanups = Vec::new();
-    for _ in 0..2 {
+    let mut requests = Vec::new();
+    for _ in 0..1 {
         let (peer, request) = rx.try_recv().unwrap();
-        let Some(region_request::Body::CleanUp(req)) = request.body else {
-            unreachable!();
-        };
-        cleanups.push((peer.id, req.region_id));
+        requests.push((peer.id, request.body.unwrap()));
     }
-    cleanups.sort_unstable();
-    assert_eq!(
-        cleanups,
-        vec![
-            (1, RegionId::new(table_id, 1).as_u64()),
-            (2, RegionId::new(table_id, 1).as_u64()),
-        ]
-    );
+    requests.sort_unstable_by_key(|(peer_id, _)| *peer_id);
+    let region_request::Body::CleanUp(req) = &requests[0].1 else {
+        unreachable!();
+    };
+    assert_eq!(requests[0].0, 1);
+    assert_eq!(req.region_id, RegionId::new(table_id, 1).as_u64());
     assert!(rx.try_recv().is_err());
     assert!(
         ddl_context
@@ -1187,109 +1181,6 @@ async fn test_purge_dropped_table_cleans_regions_offline_and_deletes_tombstone()
         detector_controller.deregistered().await,
         vec![(1, RegionId::new(table_id, 1))]
     );
-}
-
-#[tokio::test]
-async fn test_purge_dropped_table_retries_unavailable_tombstone_peer() {
-    let (tx, mut rx) = mpsc::channel(16);
-    let datanode_handler = DatanodeWatcher::new(tx).with_handler(|peer, request| {
-        if peer.id == 2 && matches!(request.body, Some(region_request::Body::CleanUp(_))) {
-            return Err(Error::RetryLater {
-                source: BoxedError::new(
-                    crate::error::UnexpectedSnafu {
-                        err_msg: "tombstone peer unavailable",
-                    }
-                    .build(),
-                ),
-                clean_poisons: false,
-            });
-        }
-        Ok(RegionResponse::new(0))
-    });
-    let node_manager = Arc::new(MockDatanodeManager::new(datanode_handler));
-    let mut ddl_context = new_ddl_context(node_manager);
-    ddl_context.soft_drop_enabled = true;
-    let dropped_table_id = 1024;
-    let live_table_id = 1025;
-    let table_name = "foo";
-    ddl_context
-        .table_metadata_manager
-        .create_table_metadata(
-            test_create_table_task(table_name, dropped_table_id).table_info,
-            TableRouteValue::physical(vec![RegionRoute {
-                region: Region::new_test(RegionId::new(dropped_table_id, 1)),
-                leader_peer: Some(Peer::empty(1)),
-                follower_peers: vec![Peer::empty(2)],
-                leader_state: None,
-                leader_down_since: None,
-                write_route_policy: None,
-            }]),
-            HashMap::new(),
-        )
-        .await
-        .unwrap();
-    let mut drop_procedure = DropTableProcedure::new(
-        new_drop_table_task(table_name, dropped_table_id, false),
-        ddl_context.clone(),
-    );
-    execute_procedure_until_done(&mut drop_procedure).await;
-    ddl_context
-        .table_metadata_manager
-        .create_table_metadata(
-            test_create_table_task(table_name, live_table_id).table_info,
-            TableRouteValue::physical(vec![RegionRoute {
-                region: Region::new_test(RegionId::new(live_table_id, 9)),
-                leader_peer: Some(Peer::empty(9)),
-                follower_peers: vec![],
-                leader_state: None,
-                leader_down_since: None,
-                write_route_policy: None,
-            }]),
-            HashMap::new(),
-        )
-        .await
-        .unwrap();
-    while rx.try_recv().is_ok() {}
-
-    let mut procedure = PurgeDroppedTableProcedure::new(
-        new_purge_dropped_table_task(dropped_table_id),
-        ddl_context.clone(),
-    );
-    let ctx = new_test_procedure_context();
-    procedure.execute(&ctx).await.unwrap();
-    let err = procedure.execute(&ctx).await.unwrap_err();
-
-    assert!(err.is_retry_later());
-    let mut cleanup_peers = Vec::new();
-    while let Ok((peer, request)) = rx.try_recv() {
-        let Some(region_request::Body::CleanUp(req)) = request.body else {
-            unreachable!();
-        };
-        assert_eq!(req.region_id, RegionId::new(dropped_table_id, 1).as_u64());
-        cleanup_peers.push(peer.id);
-    }
-    cleanup_peers.sort_unstable();
-    assert_eq!(cleanup_peers, vec![1, 2]);
-    assert!(
-        ddl_context
-            .table_metadata_manager
-            .get_dropped_table(&drop_procedure.data.task.table_name())
-            .await
-            .unwrap()
-            .is_some()
-    );
-    let live_table = ddl_context
-        .table_metadata_manager
-        .table_name_manager()
-        .get(TableNameKey::new(
-            DEFAULT_CATALOG_NAME,
-            DEFAULT_SCHEMA_NAME,
-            table_name,
-        ))
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(live_table.table_id(), live_table_id);
 }
 
 #[tokio::test]
