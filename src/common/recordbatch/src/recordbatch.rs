@@ -359,6 +359,9 @@ impl Serialize for RecordBatch {
     }
 }
 
+/// Arrow ByteView stores values up to this length inline in the 128-bit view record.
+const MAX_INLINE_VIEW_LEN: usize = 12;
+
 /// Returns out-of-line payload bytes omitted by Arrow's slice memory calculation.
 fn view_payload_size(data: &ArrayData) -> usize {
     let own_payload_size = match data.data_type() {
@@ -371,7 +374,7 @@ fn view_payload_size(data: &ArrayData) -> usize {
                 .enumerate()
                 .filter(|(index, _)| array.is_valid(*index))
                 .map(|(_, view)| *view as u32 as usize)
-                .filter(|length| *length > 12)
+                .filter(|length| *length > MAX_INLINE_VIEW_LEN)
                 .fold(0usize, usize::saturating_add)
         }
         ArrowDataType::BinaryView => {
@@ -383,7 +386,7 @@ fn view_payload_size(data: &ArrayData) -> usize {
                 .enumerate()
                 .filter(|(index, _)| array.is_valid(*index))
                 .map(|(_, view)| *view as u32 as usize)
-                .filter(|length| *length > 12)
+                .filter(|length| *length > MAX_INLINE_VIEW_LEN)
                 .fold(0usize, usize::saturating_add)
         }
         _ => 0,
