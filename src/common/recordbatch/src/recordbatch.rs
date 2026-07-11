@@ -20,7 +20,7 @@ use datafusion::arrow::util::pretty::pretty_format_batches;
 use datafusion_common::arrow::array::ArrayRef;
 use datafusion_common::arrow::compute;
 use datafusion_common::arrow::datatypes::{DataType as ArrowDataType, SchemaRef as ArrowSchemaRef};
-use datatypes::arrow::array::{Array, AsArray, RecordBatchOptions};
+use datatypes::arrow::array::{Array, ArrayData, AsArray, RecordBatchOptions, make_array};
 use datatypes::extension::json::is_structured_json_field;
 use datatypes::prelude::DataType;
 use datatypes::schema::SchemaRef;
@@ -281,28 +281,12 @@ impl RecordBatch {
             .columns()
             .iter()
             .fold(0, |total, array| {
-                let slice_size = array
-                    .to_data()
+                let data = array.to_data();
+                let array_size = data
                     .get_slice_memory_size()
+                    .map(|slice_size| slice_size.saturating_add(view_payload_size(&data)))
                     .unwrap_or_else(|_| array.get_buffer_memory_size());
-                // Arrow's slice size includes the 16-byte view records but omits variadic payload
-                // buffers. Inline values (at most 12 bytes) are already stored in those records.
-                let view_payload_size = match array.data_type() {
-                    ArrowDataType::Utf8View => array
-                        .as_string_view()
-                        .iter()
-                        .flatten()
-                        .filter(|value| value.len() > 12)
-                        .fold(0usize, |size, value| size.saturating_add(value.len())),
-                    ArrowDataType::BinaryView => array
-                        .as_binary_view()
-                        .iter()
-                        .flatten()
-                        .filter(|value| value.len() > 12)
-                        .fold(0usize, |size, value| size.saturating_add(value.len())),
-                    _ => 0,
-                };
-                total.saturating_add(slice_size.saturating_add(view_payload_size))
+                total.saturating_add(array_size)
             })
     }
 
@@ -375,6 +359,43 @@ impl Serialize for RecordBatch {
     }
 }
 
+/// Returns out-of-line payload bytes omitted by Arrow's slice memory calculation.
+fn view_payload_size(data: &ArrayData) -> usize {
+    let own_payload_size = match data.data_type() {
+        ArrowDataType::Utf8View => {
+            let array = make_array(data.clone());
+            let array = array.as_string_view();
+            array
+                .views()
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| array.is_valid(*index))
+                .map(|(_, view)| *view as u32 as usize)
+                .filter(|length| *length > 12)
+                .fold(0usize, usize::saturating_add)
+        }
+        ArrowDataType::BinaryView => {
+            let array = make_array(data.clone());
+            let array = array.as_binary_view();
+            array
+                .views()
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| array.is_valid(*index))
+                .map(|(_, view)| *view as u32 as usize)
+                .filter(|length| *length > 12)
+                .fold(0usize, usize::saturating_add)
+        }
+        _ => 0,
+    };
+
+    data.child_data()
+        .iter()
+        .fold(own_payload_size, |size, child| {
+            size.saturating_add(view_payload_size(child))
+        })
+}
+
 /// merge multiple recordbatch into a single
 pub fn merge_record_batches(schema: SchemaRef, batches: &[RecordBatch]) -> Result<RecordBatch> {
     let batches_len = batches.len();
@@ -420,8 +441,9 @@ mod tests {
     use std::sync::Arc;
 
     use datatypes::arrow::array::{
-        AsArray, BinaryArray, BinaryViewArray, StringViewArray, UInt32Array,
+        AsArray, BinaryArray, BinaryViewArray, StringViewArray, StructArray, UInt32Array,
     };
+    use datatypes::arrow::buffer::NullBuffer;
     use datatypes::arrow::datatypes::{DataType, Field, Schema as ArrowSchema, UInt32Type};
     use datatypes::arrow_array::StringArray;
     use datatypes::data_type::ConcreteDataType;
@@ -562,6 +584,23 @@ mod tests {
     }
 
     #[test]
+    fn test_logical_slice_memory_size_ignores_null_string_view_payload() {
+        let payload = "null string view payload";
+        let (views, buffers, _) = StringViewArray::from(vec![payload]).into_parts();
+        let array = StringViewArray::new(views, buffers, Some(NullBuffer::new_null(1)));
+        let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
+            "strings",
+            ConcreteDataType::utf8_view_datatype(),
+            true,
+        )]));
+        let columns: Vec<VectorRef> = vec![Arc::new(StringVector::from(array))];
+        let batch = RecordBatch::new(schema, columns).unwrap();
+        let arrow_slice_size = batch.column(0).to_data().get_slice_memory_size().unwrap();
+
+        assert_eq!(arrow_slice_size, batch.logical_slice_memory_size());
+    }
+
+    #[test]
     fn test_logical_slice_memory_size_includes_binary_view_payload() {
         let unrelated = b"unrelated backing payload".as_slice();
         let visible = b"visible binary view payload".as_slice();
@@ -580,6 +619,36 @@ mod tests {
             .unwrap();
 
         assert_eq!(16 + visible.len(), batch.logical_slice_memory_size());
+    }
+
+    #[test]
+    fn test_logical_slice_memory_size_includes_nested_string_view_payload() {
+        let unrelated = "unrelated backing payload";
+        let visible = "visible nested string view payload";
+        let field = Arc::new(Field::new("value", DataType::Utf8View, false));
+        let array = Arc::new(StructArray::new(
+            vec![field.clone()].into(),
+            vec![Arc::new(StringViewArray::from(vec![unrelated, visible]))],
+            None,
+        ));
+        let arrow_schema = Arc::new(ArrowSchema::new(vec![Field::new(
+            "struct",
+            DataType::Struct(vec![field].into()),
+            false,
+        )]));
+        let schema = Arc::new(Schema::try_from(arrow_schema.clone()).unwrap());
+        let batch = RecordBatch::from_df_record_batch(
+            schema,
+            DfRecordBatch::try_new(arrow_schema, vec![array]).unwrap(),
+        )
+        .slice(1, 1)
+        .unwrap();
+        let arrow_slice_size = batch.column(0).to_data().get_slice_memory_size().unwrap();
+
+        assert_eq!(
+            arrow_slice_size + visible.len(),
+            batch.logical_slice_memory_size()
+        );
     }
 
     #[test]
