@@ -166,51 +166,6 @@ impl DefaultGcSchedulerCtx {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use std::panic::{AssertUnwindSafe, catch_unwind};
-
-    use super::*;
-    use crate::metrics::METRIC_META_GC_SOFT_DROP_PURGES_TOTAL;
-
-    #[test]
-    fn test_purge_reservation_releases_slot_on_panic() {
-        let in_flight = Arc::new(std::sync::Mutex::new(HashSet::new()));
-        let cancelled = METRIC_META_GC_SOFT_DROP_PURGES_TOTAL.with_label_values(&["cancelled"]);
-        let before = cancelled.get();
-        let reservation = PurgeReservation::try_new(in_flight.clone(), 1, 1).unwrap();
-
-        let result = catch_unwind(AssertUnwindSafe(|| {
-            let _reservation = reservation;
-            panic!("mock purge panic");
-        }));
-
-        assert!(result.is_err());
-        assert!(PurgeReservation::try_new(in_flight, 2, 1).is_some());
-        assert!(cancelled.get() > before);
-    }
-
-    #[tokio::test]
-    async fn test_purge_reservation_releases_slot_on_task_abort() {
-        let in_flight = Arc::new(std::sync::Mutex::new(HashSet::new()));
-        let cancelled = METRIC_META_GC_SOFT_DROP_PURGES_TOTAL.with_label_values(&["cancelled"]);
-        let before = cancelled.get();
-        let reservation = PurgeReservation::try_new(in_flight.clone(), 1, 1).unwrap();
-        let handle = tokio::spawn(async move {
-            let _reservation = reservation;
-            std::future::pending::<()>().await;
-        });
-        tokio::task::yield_now().await;
-
-        handle.abort();
-        let error = handle.await.unwrap_err();
-
-        assert!(error.is_cancelled());
-        assert!(PurgeReservation::try_new(in_flight, 2, 1).is_some());
-        assert!(cancelled.get() > before);
-    }
-}
-
 #[async_trait::async_trait]
 impl SchedulerCtx for DefaultGcSchedulerCtx {
     async fn get_table_to_region_stats(&self) -> Result<HashMap<TableId, Vec<RegionStat>>> {
@@ -347,5 +302,50 @@ impl DefaultGcSchedulerCtx {
         let gc_report = BatchGcProcedure::cast_result(res)?;
 
         Ok(gc_report)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+
+    use super::*;
+    use crate::metrics::METRIC_META_GC_SOFT_DROP_PURGES_TOTAL;
+
+    #[test]
+    fn test_purge_reservation_releases_slot_on_panic() {
+        let in_flight = Arc::new(std::sync::Mutex::new(HashSet::new()));
+        let cancelled = METRIC_META_GC_SOFT_DROP_PURGES_TOTAL.with_label_values(&["cancelled"]);
+        let before = cancelled.get();
+        let reservation = PurgeReservation::try_new(in_flight.clone(), 1, 1).unwrap();
+
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            let _reservation = reservation;
+            panic!("mock purge panic");
+        }));
+
+        assert!(result.is_err());
+        assert!(PurgeReservation::try_new(in_flight, 2, 1).is_some());
+        assert!(cancelled.get() > before);
+    }
+
+    #[tokio::test]
+    async fn test_purge_reservation_releases_slot_on_task_abort() {
+        let in_flight = Arc::new(std::sync::Mutex::new(HashSet::new()));
+        let cancelled = METRIC_META_GC_SOFT_DROP_PURGES_TOTAL.with_label_values(&["cancelled"]);
+        let before = cancelled.get();
+        let reservation = PurgeReservation::try_new(in_flight.clone(), 1, 1).unwrap();
+        let handle = tokio::spawn(async move {
+            let _reservation = reservation;
+            std::future::pending::<()>().await;
+        });
+        tokio::task::yield_now().await;
+
+        handle.abort();
+        let error = handle.await.unwrap_err();
+
+        assert!(error.is_cancelled());
+        assert!(PurgeReservation::try_new(in_flight, 2, 1).is_some());
+        assert!(cancelled.get() > before);
     }
 }

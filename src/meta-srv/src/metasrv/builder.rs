@@ -58,7 +58,7 @@ use crate::cache_invalidator::MetasrvCacheInvalidator;
 use crate::cluster::MetaPeerClientRef;
 use crate::error::{self, BuildWalProviderSnafu, OtherSnafu, Result};
 use crate::events::EventHandlerImpl;
-use crate::gc::GcScheduler;
+use crate::gc::{DefaultGcSchedulerCtx, GcScheduler};
 use crate::greptimedb_telemetry::get_greptimedb_telemetry_task;
 use crate::handler::failure_handler::RegionFailureHandler;
 use crate::handler::flow_state_handler::FlowStateHandler;
@@ -522,13 +522,16 @@ impl MetasrvBuilder {
         };
 
         let gc_ticker = if options.gc.enable {
-            let (gc_scheduler, gc_ticker) = GcScheduler::new_with_config(
+            let gc_scheduler_ctx = DefaultGcSchedulerCtx::try_new(
                 table_metadata_manager.clone(),
                 procedure_manager.clone(),
                 ddl_manager.clone(),
                 meta_peer_client.clone(),
                 mailbox.clone(),
                 options.grpc.server_addr.clone(),
+            )?;
+            let (gc_scheduler, gc_ticker) = GcScheduler::new_with_config(
+                gc_scheduler_ctx,
                 runtime_switch_manager.clone(),
                 options.gc.clone(),
             )?;
@@ -693,6 +696,18 @@ fn ddl_soft_drop_enabled(options: &MetasrvOptions) -> bool {
     options.gc.soft_drop.enable
 }
 
+impl Default for MetasrvBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// The context for [`DdlManagerConfiguratorRef`].
+pub struct DdlManagerConfigureContext {
+    pub kv_backend: KvBackendRef,
+    pub meta_peer_client: MetaPeerClientRef,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -727,16 +742,4 @@ mod tests {
                 .contains("soft_drop.retention must be at least 1ms")
         );
     }
-}
-
-impl Default for MetasrvBuilder {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// The context for [`DdlManagerConfiguratorRef`].
-pub struct DdlManagerConfigureContext {
-    pub kv_backend: KvBackendRef,
-    pub meta_peer_client: MetaPeerClientRef,
 }

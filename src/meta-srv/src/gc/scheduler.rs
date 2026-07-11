@@ -17,9 +17,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use common_meta::DatanodeId;
-use common_meta::key::TableMetadataManagerRef;
 use common_meta::key::runtime_switch::RuntimeSwitchManagerRef;
-use common_procedure::ProcedureManagerRef;
 use common_telemetry::tracing::Instrument as _;
 use common_telemetry::{error, info};
 use snafu::ResultExt;
@@ -27,13 +25,12 @@ use store_api::storage::{GcReport, RegionId};
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::{Mutex, oneshot};
 
-use crate::cluster::MetaPeerClientRef;
 use crate::define_ticker;
 use crate::error::{self, Error, Result};
 use crate::gc::Region2Peers;
 #[cfg(test)]
 use crate::gc::ctx::PurgeReservation;
-use crate::gc::ctx::{DefaultGcSchedulerCtx, PurgeOutcome, SchedulerCtx};
+use crate::gc::ctx::{PurgeOutcome, SchedulerCtx};
 use crate::gc::dropped::DroppedRegionCollector;
 use crate::gc::options::{GcSchedulerOptions, TICKER_INTERVAL};
 use crate::gc::tracker::RegionGcTracker;
@@ -41,7 +38,6 @@ use crate::metrics::{
     METRIC_META_GC_SCHEDULER_CYCLES_TOTAL, METRIC_META_GC_SCHEDULER_DURATION_SECONDS,
     METRIC_META_GC_SOFT_DROP_PURGES_TOTAL,
 };
-use crate::service::mailbox::MailboxRef;
 
 /// Report for a GC job.
 #[derive(Debug)]
@@ -135,12 +131,7 @@ pub struct GcScheduler {
 impl GcScheduler {
     /// Creates a new [`GcScheduler`] with custom configuration.
     pub(crate) fn new_with_config(
-        table_metadata_manager: TableMetadataManagerRef,
-        procedure_manager: ProcedureManagerRef,
-        ddl_manager: common_meta::ddl_manager::DdlManagerRef,
-        meta_peer_client: MetaPeerClientRef,
-        mailbox: MailboxRef,
-        server_addr: String,
+        ctx: impl SchedulerCtx + 'static,
         runtime_switch_manager: RuntimeSwitchManagerRef,
         config: GcSchedulerOptions,
     ) -> Result<(Self, GcTicker)> {
@@ -150,14 +141,7 @@ impl GcScheduler {
         let (tx, rx) = Self::channel();
         let gc_ticker = GcTicker::new(TICKER_INTERVAL, tx);
         let gc_trigger = Self {
-            ctx: Arc::new(DefaultGcSchedulerCtx::try_new(
-                table_metadata_manager,
-                procedure_manager,
-                ddl_manager,
-                meta_peer_client,
-                mailbox,
-                server_addr,
-            )?),
+            ctx: Arc::new(ctx),
             runtime_switch_manager,
             receiver: rx,
             config,
