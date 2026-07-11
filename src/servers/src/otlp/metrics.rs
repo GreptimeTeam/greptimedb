@@ -15,7 +15,9 @@
 use ahash::HashSet;
 use api::v1::{RowInsertRequests, Value};
 use common_grpc::precision::Precision;
-use common_query::prelude::{GREPTIME_COUNT, greptime_timestamp, greptime_value};
+use common_query::prelude::{
+    greptime_count, greptime_summary_quantile, greptime_timestamp, greptime_value,
+};
 use lazy_static::lazy_static;
 use otel_arrow_rust::proto::opentelemetry::collector::metrics::v1::ExportMetricsServiceRequest;
 use otel_arrow_rust::proto::opentelemetry::common::v1::{AnyValue, KeyValue, any_value};
@@ -750,13 +752,13 @@ fn encode_summary(
             for quantile in &data_point.quantile_values {
                 row_writer::write_f64(
                     table,
-                    format!("greptime_p{:02}", quantile.quantile * 100f64),
+                    greptime_summary_quantile(quantile.quantile),
                     quantile.value,
                     &mut row,
                 )?;
             }
 
-            row_writer::write_f64(table, GREPTIME_COUNT, data_point.count as f64, &mut row)?;
+            row_writer::write_f64(table, greptime_count(), data_point.count as f64, &mut row)?;
             table.add_row(row);
         }
     } else {
