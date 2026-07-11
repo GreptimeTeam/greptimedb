@@ -767,8 +767,7 @@ mod tests {
     use common_error::ext::ErrorExt;
     use common_error::status_code::StatusCode;
     use common_function::utils::partition_expr_version;
-    use common_query::native_histogram::NATIVE_HISTOGRAM_FIELD;
-    use common_query::prelude::{greptime_timestamp, greptime_value};
+    use common_query::prelude::{greptime_native_histogram, greptime_timestamp, greptime_value};
     use common_recordbatch::RecordBatches;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema};
@@ -1014,7 +1013,7 @@ mod tests {
             options: None,
         };
         let histogram = PbColumnSchema {
-            column_name: NATIVE_HISTOGRAM_FIELD.to_string(),
+            column_name: greptime_native_histogram().to_string(),
             datatype: ColumnDataType::Struct as i32,
             semantic_type: SemanticType::Field as _,
             datatype_extension: None,
@@ -1066,7 +1065,7 @@ mod tests {
         };
 
         let value_idx = column_index(&merged_request, greptime_value());
-        let histogram_idx = column_index(&merged_request, NATIVE_HISTOGRAM_FIELD);
+        let histogram_idx = column_index(&merged_request, greptime_native_histogram());
         assert!(matches!(
             merged_request.rows[0].values[value_idx].value_data,
             Some(ValueData::F64Value(_))

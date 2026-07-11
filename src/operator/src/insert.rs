@@ -38,9 +38,9 @@ use common_meta::node_manager::{AffectedRows, NodeManagerRef};
 use common_meta::peer::Peer;
 use common_query::Output;
 use common_query::native_histogram::{
-    NATIVE_HISTOGRAM_FIELD, is_native_histogram_value_schema, native_histogram_value_type,
+    is_native_histogram_value_schema, native_histogram_value_type,
 };
-use common_query::prelude::{greptime_timestamp, greptime_value};
+use common_query::prelude::{greptime_native_histogram, greptime_timestamp, greptime_value};
 use common_telemetry::tracing_context::TracingContext;
 use common_telemetry::{error, info, warn};
 use datatypes::schema::SkippingIndexOptions;
@@ -1143,7 +1143,7 @@ fn request_is_native_histogram(request_schema: &[ColumnSchema]) -> bool {
     };
 
     fields.next().is_none()
-        && col.column_name == NATIVE_HISTOGRAM_FIELD
+        && col.column_name == greptime_native_histogram()
         && api::helper::is_column_type_value_eq(
             col.datatype,
             col.datatype_extension.clone(),

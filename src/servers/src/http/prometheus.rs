@@ -2286,6 +2286,7 @@ mod tests {
     use catalog::{RegisterSchemaRequest, RegisterTableRequest};
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use common_query::native_histogram::native_histogram_value_type;
+    use common_query::prelude::greptime_native_histogram;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, Schema};
     use promql_parser::parser::value::ValueType;
@@ -3268,7 +3269,7 @@ mod tests {
         let schema = Arc::new(Schema::new(vec![
             ColumnSchema::new("host", ConcreteDataType::string_datatype(), false),
             ColumnSchema::new(
-                "greptime_native_histogram",
+                greptime_native_histogram(),
                 native_histogram_value_type().clone(),
                 true,
             ),

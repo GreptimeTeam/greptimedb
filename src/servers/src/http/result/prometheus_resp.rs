@@ -456,9 +456,9 @@ mod tests {
     use std::sync::Arc;
 
     use common_query::native_histogram::{
-        NATIVE_HISTOGRAM_FIELD, NativeHistogram, Span, build_histogram_array,
-        native_histogram_value_type,
+        NativeHistogram, Span, build_histogram_array, native_histogram_value_type,
     };
+    use common_query::prelude::greptime_native_histogram;
     use common_query::{Output, OutputData, OutputMeta};
     use common_recordbatch::{RecordBatch, RecordBatches};
     use datatypes::data_type::ConcreteDataType;
@@ -636,7 +636,7 @@ mod tests {
             ColumnSchema::new("job", ConcreteDataType::string_datatype(), false),
             ColumnSchema::new("value", ConcreteDataType::float64_datatype(), true),
             ColumnSchema::new(
-                NATIVE_HISTOGRAM_FIELD,
+                greptime_native_histogram(),
                 native_histogram_value_type().clone(),
                 true,
             ),
@@ -682,7 +682,7 @@ mod tests {
             ColumnSchema::new("job", ConcreteDataType::string_datatype(), false),
             ColumnSchema::new("value", ConcreteDataType::float64_datatype(), true),
             ColumnSchema::new(
-                NATIVE_HISTOGRAM_FIELD,
+                greptime_native_histogram(),
                 native_histogram_value_type().clone(),
                 true,
             ),
@@ -728,7 +728,7 @@ mod tests {
             .with_time_index(true),
             ColumnSchema::new("job", ConcreteDataType::string_datatype(), false),
             ColumnSchema::new(
-                NATIVE_HISTOGRAM_FIELD,
+                greptime_native_histogram(),
                 native_histogram_value_type().clone(),
                 true,
             ),

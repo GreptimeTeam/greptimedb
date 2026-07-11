@@ -660,8 +660,8 @@ pub(crate) fn region_options_for_metadata_region(
 mod test {
     use common_meta::ddl::test_util::assert_column_name_and_id;
     use common_meta::ddl::utils::{parse_column_metadatas, parse_manifest_infos_from_extensions};
-    use common_query::native_histogram::{NATIVE_HISTOGRAM_FIELD, native_histogram_value_type};
-    use common_query::prelude::{greptime_timestamp, greptime_value};
+    use common_query::native_histogram::native_histogram_value_type;
+    use common_query::prelude::{greptime_native_histogram, greptime_timestamp, greptime_value};
     use store_api::metric_engine_consts::{METRIC_ENGINE_NAME, PHYSICAL_TABLE_METADATA_KEY};
     use store_api::region_request::{BatchRegionDdlRequest, RegionRequirements};
 
@@ -874,7 +874,7 @@ mod test {
                 column_id: 2,
                 semantic_type: SemanticType::Field,
                 column_schema: ColumnSchema::new(
-                    NATIVE_HISTOGRAM_FIELD,
+                    greptime_native_histogram(),
                     native_histogram_value_type().clone(),
                     true,
                 ),

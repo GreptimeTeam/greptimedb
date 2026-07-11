@@ -5591,8 +5591,7 @@ mod test {
     use catalog::memory::{MemoryCatalogManager, new_memory_catalog_manager};
     use common_base::Plugins;
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
-    use common_query::native_histogram::NATIVE_HISTOGRAM_FIELD;
-    use common_query::prelude::greptime_timestamp;
+    use common_query::prelude::{greptime_native_histogram, greptime_timestamp};
     use common_query::test_util::DummyDecoder;
     use datafusion::arrow::array::{
         Array, Float64Array, Int64Array, StringArray, TimestampMillisecondArray,
@@ -6081,7 +6080,7 @@ mod test {
             )
             .with_time_index(true),
             ColumnSchema::new(
-                NATIVE_HISTOGRAM_FIELD.to_string(),
+                greptime_native_histogram().to_string(),
                 native_histogram_value_type().clone(),
                 true,
             ),

@@ -18,10 +18,10 @@ use api::v1::value::ValueData;
 use api::v1::{ColumnSchema, Rows};
 use bytes::Bytes;
 use common_query::native_histogram::{
-    COUNT_U64_FIELD, NATIVE_HISTOGRAM_FIELD, NATIVE_HISTOGRAM_FIELD_NAMES,
-    POSITIVE_BUCKETS_F64_FIELD, POSITIVE_BUCKETS_I64_FIELD, POSITIVE_SPAN_OFFSETS_FIELD,
-    SCHEMA_FIELD,
+    COUNT_U64_FIELD, NATIVE_HISTOGRAM_FIELD_NAMES, POSITIVE_BUCKETS_F64_FIELD,
+    POSITIVE_BUCKETS_I64_FIELD, POSITIVE_SPAN_OFFSETS_FIELD, SCHEMA_FIELD,
 };
+use common_query::prelude::greptime_native_histogram;
 use servers::prom_remote_write::v2::test_util as remote_write_v2;
 
 #[test]
@@ -126,7 +126,7 @@ fn column_index(schema: &[ColumnSchema], column_name: &str) -> usize {
 }
 
 fn histogram_field_value(rows: &Rows, row_idx: usize, field_name: &str) -> Option<ValueData> {
-    let histogram_idx = column_index(&rows.schema, NATIVE_HISTOGRAM_FIELD);
+    let histogram_idx = column_index(&rows.schema, greptime_native_histogram());
     let Some(ValueData::StructValue(histogram)) =
         &rows.rows[row_idx].values[histogram_idx].value_data
     else {

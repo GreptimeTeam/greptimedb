@@ -26,6 +26,9 @@ static GREPTIME_TIMESTAMP_CELL: OnceCell<String> = OnceCell::new();
 /// Default value column name.
 static GREPTIME_VALUE_CELL: OnceCell<String> = OnceCell::new();
 
+/// Default native histogram column name.
+static GREPTIME_NATIVE_HISTOGRAM_CELL: OnceCell<String> = OnceCell::new();
+
 pub fn set_default_prefix(prefix: Option<&str>) -> Result<()> {
     // Strip surrounding double quotes as a defensive measure against upstream
     // sources (scripts, CI, template engines, incorrect shell escaping) that may
@@ -41,11 +44,13 @@ pub fn set_default_prefix(prefix: Option<&str>) -> Result<()> {
             // use default greptime prefix
             GREPTIME_TIMESTAMP_CELL.get_or_init(|| GREPTIME_TIMESTAMP.to_string());
             GREPTIME_VALUE_CELL.get_or_init(|| GREPTIME_VALUE.to_string());
+            GREPTIME_NATIVE_HISTOGRAM_CELL.get_or_init(|| GREPTIME_NATIVE_HISTOGRAM.to_string());
         }
         Some(s) if s.trim().is_empty() => {
             // use "" to disable prefix
             GREPTIME_TIMESTAMP_CELL.get_or_init(|| "timestamp".to_string());
             GREPTIME_VALUE_CELL.get_or_init(|| "value".to_string());
+            GREPTIME_NATIVE_HISTOGRAM_CELL.get_or_init(|| "native_histogram".to_string());
         }
         Some(x) => {
             ensure!(
@@ -54,6 +59,7 @@ pub fn set_default_prefix(prefix: Option<&str>) -> Result<()> {
             );
             GREPTIME_TIMESTAMP_CELL.get_or_init(|| format!("{}_timestamp", x));
             GREPTIME_VALUE_CELL.get_or_init(|| format!("{}_value", x));
+            GREPTIME_NATIVE_HISTOGRAM_CELL.get_or_init(|| format!("{}_native_histogram", x));
         }
     }
     Ok(())
@@ -71,10 +77,18 @@ pub fn greptime_value() -> &'static str {
     GREPTIME_VALUE_CELL.get_or_init(|| GREPTIME_VALUE.to_string())
 }
 
+/// Get the default native histogram column name.
+/// Returns the configured value, or `greptime_native_histogram` if not set.
+pub fn greptime_native_histogram() -> &'static str {
+    GREPTIME_NATIVE_HISTOGRAM_CELL.get_or_init(|| GREPTIME_NATIVE_HISTOGRAM.to_string())
+}
+
 /// Default timestamp column name constant for backward compatibility.
 const GREPTIME_TIMESTAMP: &str = "greptime_timestamp";
 /// Default value column name constant for backward compatibility.
 const GREPTIME_VALUE: &str = "greptime_value";
+/// Default native histogram column name.
+const GREPTIME_NATIVE_HISTOGRAM: &str = "greptime_native_histogram";
 /// Default counter column name for OTLP metrics (legacy mode).
 pub const GREPTIME_COUNT: &str = "greptime_count";
 /// Default physical table name
@@ -92,6 +106,7 @@ mod tests {
         set_default_prefix(None).unwrap();
         assert_eq!(greptime_timestamp(), "greptime_timestamp");
         assert_eq!(greptime_value(), "greptime_value");
+        assert_eq!(greptime_native_histogram(), "greptime_native_histogram");
     }
 
     #[test]
@@ -99,6 +114,7 @@ mod tests {
         set_default_prefix(Some("")).unwrap();
         assert_eq!(greptime_timestamp(), "timestamp");
         assert_eq!(greptime_value(), "value");
+        assert_eq!(greptime_native_histogram(), "native_histogram");
     }
 
     #[test]
@@ -107,6 +123,7 @@ mod tests {
         set_default_prefix(Some("\"\"")).unwrap();
         assert_eq!(greptime_timestamp(), "timestamp");
         assert_eq!(greptime_value(), "value");
+        assert_eq!(greptime_native_histogram(), "native_histogram");
     }
 
     #[test]
@@ -114,6 +131,11 @@ mod tests {
         set_default_prefix(Some("mydb")).unwrap();
         assert_eq!(greptime_timestamp(), "mydb_timestamp");
         assert_eq!(greptime_value(), "mydb_value");
+        assert_eq!(greptime_native_histogram(), "mydb_native_histogram");
+        assert!(crate::native_histogram::is_native_histogram_value_schema(
+            greptime_native_histogram(),
+            crate::native_histogram::native_histogram_value_type(),
+        ));
     }
 
     #[test]
