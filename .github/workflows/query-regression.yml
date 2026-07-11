@@ -65,6 +65,10 @@ jobs:
       RUSTUP_HOME: /home/runner/.rustup
       CARGO_TARGET_DIR: /home/runner/query-regression-target
       QUERY_REGRESSION_CACHE_META: /home/runner/query-regression-cache-meta
+      RUSTC_WRAPPER: /usr/local/bin/sccache
+      SCCACHE_DIR: /home/runner/.cache/sccache
+      SCCACHE_CACHE_SIZE: 40G
+      CARGO_INCREMENTAL: "0"
       QUERY_REGRESSION_CACHE_EPOCH: "1"
       BASE_REF: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || inputs.base_ref }}
       CANDIDATE_REF: ${{ github.event_name == 'pull_request' && format('refs/pull/{0}/merge', github.event.pull_request.number) || inputs.candidate_ref || github.ref }}
@@ -96,6 +100,8 @@ jobs:
           mold_version="$(mold --version)"
           [[ "${mold_version}" =~ ^mold[[:space:]]2\.30\.0([[:space:]]|$) ]]
           [[ "$(python3 --version)" == "Python 3.12.3" ]]
+          sccache_version="$(sccache --version)"
+          [[ "${sccache_version}" =~ ^sccache[[:space:]]0\.16\.0([[:space:]]|$) ]]
           printf '%s\n' "${CARGO_HOME}/bin" >> "${GITHUB_PATH}"
 
       - uses: actions-rust-lang/setup-rust-toolchain@v1
@@ -130,8 +136,10 @@ jobs:
           readonly EXPECTED_RUSTUP_HOME="/home/runner/.rustup"
           readonly EXPECTED_TARGET_DIR="/home/runner/query-regression-target"
           readonly EXPECTED_CACHE_META="/home/runner/query-regression-cache-meta"
-          readonly RUNNER_IMAGE_DIGEST="sha256:108b7357532e5cf3329853373f561b0c674e954d6307b53d37075df5a189b0b2"
-          readonly RUNNER_IMAGE_EPOCH="1"
+          readonly EXPECTED_SCCACHE_DIR="/home/runner/.cache/sccache"
+          readonly EXPECTED_RUSTC_WRAPPER="/usr/local/bin/sccache"
+          readonly RUNNER_IMAGE_DIGEST="sha256:c6a171ea47e44c001109833d67ff947b04e9e2b879ec222e4c07a9987158ee4c"
+          readonly RUNNER_IMAGE_EPOCH="2"
 
           require_expected_root() {
             local name="$1"
@@ -177,7 +185,7 @@ jobs:
           }
 
           report_cache_usage() {
-            du -sh -- "${CARGO_HOME}" "${RUSTUP_HOME}" "${CARGO_TARGET_DIR}" "${QUERY_REGRESSION_CACHE_META}"
+            du -sh -- "${CARGO_HOME}" "${RUSTUP_HOME}" "${CARGO_TARGET_DIR}" "${QUERY_REGRESSION_CACHE_META}" "${SCCACHE_DIR}"
             df -P "${CARGO_TARGET_DIR}"
             df -hP "${CARGO_TARGET_DIR}"
             df -Pi "${CARGO_TARGET_DIR}"
@@ -187,8 +195,21 @@ jobs:
           require_expected_root RUSTUP_HOME "${RUSTUP_HOME}" "${EXPECTED_RUSTUP_HOME}"
           require_expected_root CARGO_TARGET_DIR "${CARGO_TARGET_DIR}" "${EXPECTED_TARGET_DIR}"
           require_expected_root QUERY_REGRESSION_CACHE_META "${QUERY_REGRESSION_CACHE_META}" "${EXPECTED_CACHE_META}"
-          mkdir -p "${CARGO_HOME}" "${RUSTUP_HOME}" "${CARGO_TARGET_DIR}" "${QUERY_REGRESSION_CACHE_META}"
-          for root in "${CARGO_HOME}" "${RUSTUP_HOME}" "${CARGO_TARGET_DIR}" "${QUERY_REGRESSION_CACHE_META}"; do
+          require_expected_root SCCACHE_DIR "${SCCACHE_DIR}" "${EXPECTED_SCCACHE_DIR}"
+          [[ "${RUSTC_WRAPPER}" == "${EXPECTED_RUSTC_WRAPPER}" ]] || {
+            printf 'Refusing unexpected RUSTC_WRAPPER: %s\n' "${RUSTC_WRAPPER}" >&2
+            exit 1
+          }
+          [[ "${SCCACHE_CACHE_SIZE}" == "40G" ]] || {
+            printf 'Refusing unexpected SCCACHE_CACHE_SIZE: %s\n' "${SCCACHE_CACHE_SIZE}" >&2
+            exit 1
+          }
+          [[ "${CARGO_INCREMENTAL}" == "0" ]] || {
+            printf 'Refusing unexpected CARGO_INCREMENTAL: %s\n' "${CARGO_INCREMENTAL}" >&2
+            exit 1
+          }
+          mkdir -p "${CARGO_HOME}" "${RUSTUP_HOME}" "${CARGO_TARGET_DIR}" "${QUERY_REGRESSION_CACHE_META}" "${SCCACHE_DIR}"
+          for root in "${CARGO_HOME}" "${RUSTUP_HOME}" "${CARGO_TARGET_DIR}" "${QUERY_REGRESSION_CACHE_META}" "${SCCACHE_DIR}"; do
             test -w "${root}"
             touch "${root}/.query-regression-write-test"
             rm -f "${root}/.query-regression-write-test"
@@ -210,6 +231,7 @@ jobs:
           cc_version="$(cc --version)"
           mold_version="$(mold --version | grep -m1 .)"
           protoc_version="$(protoc --version)"
+          sccache_version="$(sccache --version)"
           profile_target_dir="${CARGO_TARGET_DIR}/${target_profile}"
           marker="${QUERY_REGRESSION_CACHE_META}/target-${target_profile}.abi"
           new_marker="$(mktemp "${QUERY_REGRESSION_CACHE_META}/.${target_profile}.abi.XXXXXX")"
@@ -224,11 +246,15 @@ jobs:
             printf 'RUSTFLAGS=%s\n' "${RUSTFLAGS-}"
             printf 'CARGO_ENCODED_RUSTFLAGS=%s\n' "${CARGO_ENCODED_RUSTFLAGS-}"
             printf 'CARGO_INCREMENTAL=%s\n' "${CARGO_INCREMENTAL-}"
+            printf 'RUSTC_WRAPPER=%s\n' "${RUSTC_WRAPPER-}"
+            printf 'SCCACHE_DIR=%s\n' "${SCCACHE_DIR-}"
+            printf 'SCCACHE_CACHE_SIZE=%s\n' "${SCCACHE_CACHE_SIZE-}"
             printf '%s\n' "rustc_vV=${rustc_vv}"
             printf '%s\n' "cargo_vV=${cargo_vv}"
             printf '%s\n' "cc_version=${cc_version}"
             printf '%s\n' "mold_version=${mold_version}"
             printf '%s\n' "protoc_version=${protoc_version}"
+            printf '%s\n' "sccache_version=${sccache_version}"
           } > "${new_marker}"
 
           if ! cmp -s "${marker}" "${new_marker}"; then
@@ -283,6 +309,10 @@ jobs:
 
           report_cache_usage
 
+          sccache --start-server
+          sccache --zero-stats
+          sccache --show-stats
+
       - name: Build base greptime
         working-directory: src
         run: |
@@ -292,6 +322,8 @@ jobs:
           base_build_elapsed="${SECONDS}"
           printf 'Base greptime cargo build elapsed: %s seconds\n' "${base_build_elapsed}"
           printf -- '- Base greptime cargo build: %s seconds\n' "${base_build_elapsed}" >> "${GITHUB_STEP_SUMMARY}"
+          sccache --show-stats
+          sccache --zero-stats
           target_dir="${CARGO_PROFILE}"
           if [[ "${CARGO_PROFILE}" == "dev" ]]; then
             target_dir="debug"
@@ -321,6 +353,7 @@ jobs:
           candidate_build_elapsed="${SECONDS}"
           printf 'Candidate greptime and fixture generator cargo builds elapsed: %s seconds\n' "${candidate_build_elapsed}"
           printf -- '- Candidate greptime and fixture generator cargo builds: %s seconds\n' "${candidate_build_elapsed}" >> "${GITHUB_STEP_SUMMARY}"
+          sccache --show-stats
           target_dir="${CARGO_PROFILE}"
           if [[ "${CARGO_PROFILE}" == "dev" ]]; then
             target_dir="debug"
@@ -394,7 +427,8 @@ jobs:
             /home/runner/.cargo \
             /home/runner/.rustup \
             /home/runner/query-regression-target \
-            /home/runner/query-regression-cache-meta; do
+            /home/runner/query-regression-cache-meta \
+            /home/runner/.cache/sccache; do
             if [[ -e "${root}" ]]; then
               du -sh -- "${root}"
             else
@@ -409,6 +443,11 @@ jobs:
           df -P "${report_root}"
           df -hP "${report_root}"
           df -Pi "${report_root}"
+          if command -v sccache >/dev/null 2>&1; then
+            sccache --show-stats || printf 'Unable to show sccache statistics (report only)\n' >&2
+          else
+            printf 'sccache is unavailable (report only)\n' >&2
+          fi
 
       - name: Fail on regression failure
         if: ${{ steps.run.outputs.status != '0' }}

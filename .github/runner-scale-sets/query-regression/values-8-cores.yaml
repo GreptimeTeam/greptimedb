@@ -25,14 +25,14 @@ template:
           claimName: query-regression-build-cache
     initContainers:
       - name: initialize-build-cache
-        image: greptime-registry.cn-hangzhou.cr.aliyuncs.com/greptime/greptimedb-query-regression-runner@sha256:108b7357532e5cf3329853373f561b0c674e954d6307b53d37075df5a189b0b2
+        image: greptime-registry.cn-hangzhou.cr.aliyuncs.com/greptime/greptimedb-query-regression-runner@sha256:c6a171ea47e44c001109833d67ff947b04e9e2b879ec222e4c07a9987158ee4c
         imagePullPolicy: Always
         command:
           - /bin/sh
           - -ec
           - |
             umask 0002
-            for directory in cargo-home-v1 rustup-home-v1 query-regression-target-v1 meta-v1; do
+            for directory in cargo-home-v1 rustup-home-v1 query-regression-target-v1 meta-v1 sccache-v1; do
               cache_directory="/cache/${directory}"
               mkdir -p "${cache_directory}"
               test -w "${cache_directory}"
@@ -63,7 +63,7 @@ template:
             mountPath: /cache
     containers:
       - name: runner
-        image: greptime-registry.cn-hangzhou.cr.aliyuncs.com/greptime/greptimedb-query-regression-runner@sha256:108b7357532e5cf3329853373f561b0c674e954d6307b53d37075df5a189b0b2
+        image: greptime-registry.cn-hangzhou.cr.aliyuncs.com/greptime/greptimedb-query-regression-runner@sha256:c6a171ea47e44c001109833d67ff947b04e9e2b879ec222e4c07a9987158ee4c
         imagePullPolicy: Always
         command: ["/home/runner/run.sh"]
         env:
@@ -75,6 +75,14 @@ template:
             value: /home/runner/query-regression-target
           - name: QUERY_REGRESSION_CACHE_META
             value: /home/runner/query-regression-cache-meta
+          - name: RUSTC_WRAPPER
+            value: /usr/local/bin/sccache
+          - name: SCCACHE_DIR
+            value: /home/runner/.cache/sccache
+          - name: SCCACHE_CACHE_SIZE
+            value: 40G
+          - name: CARGO_INCREMENTAL
+            value: "0"
         securityContext:
           runAsNonRoot: true
           runAsUser: 1001
@@ -105,3 +113,6 @@ template:
           - name: build-cache
             mountPath: /home/runner/query-regression-cache-meta
             subPath: meta-v1
+          - name: build-cache
+            mountPath: /home/runner/.cache/sccache
+            subPath: sccache-v1

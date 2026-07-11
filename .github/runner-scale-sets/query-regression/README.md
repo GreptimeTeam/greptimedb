@@ -73,7 +73,8 @@ rebuild. If the registry is private, use a dedicated read-only pull secret only
 as `imagePullSecrets`; never expose registry credentials to runner containers.
 
 Before Rust setup, the workflow asserts UID/GID 1001 and exact image tool
-versions: `libprotoc 3.21.12`, `uv 0.11.26`, `mold 2.30.0`, and `Python 3.12.3`.
+versions: `libprotoc 3.21.12`, `uv 0.11.26`, `mold 2.30.0`, `Python 3.12.3`,
+and `sccache 0.16.0`.
 Rustup is intentionally absent from the base image. The workflow adds
 `${CARGO_HOME}/bin` to `GITHUB_PATH`, then keeps
 `actions-rust-lang/setup-rust-toolchain@v1` with `rust-src-dir: src`,
@@ -109,12 +110,25 @@ versioned subpaths as non-root UID/GID 1001, and the runner mounts them as:
 | Rustup home | `rustup-home-v1` | `/home/runner/.rustup` |
 | Cargo target | `query-regression-target-v1` | `/home/runner/query-regression-target` |
 | Cache metadata | `meta-v1` | `/home/runner/query-regression-cache-meta` |
+| sccache local disk cache | `sccache-v1` | `/home/runner/.cache/sccache` |
 
 The Pod security context uses UID/GID and `fsGroup` 1001 with
 `fsGroupChangePolicy: OnRootMismatch`; no privileged `chown` or raw `hostPath`
-is used. `CARGO_HOME`, `RUSTUP_HOME`, `CARGO_TARGET_DIR`, and cache metadata
-are persistent absolute paths. Base and candidate builds share the target; Cargo
-fingerprints invalidate source and dependency changes.
+is used. `CARGO_HOME`, `RUSTUP_HOME`, `CARGO_TARGET_DIR`, cache metadata, and
+`SCCACHE_DIR` are persistent absolute paths. The runner sets
+`RUSTC_WRAPPER=/usr/local/bin/sccache`,
+`SCCACHE_DIR=/home/runner/.cache/sccache`, `SCCACHE_CACHE_SIZE=40G`, and
+`CARGO_INCREMENTAL=0`. sccache uses its local PVC disk backend and self-evicts
+at 40G; do not add runtime downloads, object storage, or a shared backend.
+
+The local disk backend has a one-server constraint. `maxRunners=1` and the
+unchanged `query-regression-persistent-cache-v1` workflow concurrency group
+serialize runs; do not increase runner capacity or relax that serialization
+while this backend is in use. Base and candidate builds share the target; Cargo
+fingerprints invalidate source and dependency changes. The workflow records the
+sccache version and relevant environment in the target ABI marker, starts and
+zeros sccache after cache and toolchain checks, shows initial/base/candidate
+statistics, and resets statistics between base and candidate builds.
 
 ### Disk preflight and cleanup contract
 
@@ -137,7 +151,7 @@ and non-destructive:
   remeasure, then remove only those Cargo extracted trees and checkouts; abort
   if free space is still below 300GiB;
 - never automatically remove Cargo registry cache/index, Git database, Cargo
-  bin, Rustup, cache metadata, or the PVC.
+  bin, Rustup, cache metadata, the self-evicting sccache directory, or the PVC.
 
 The target clear uses fixed absolute roots and removes all entries, including
 dotfiles. Remove old versioned subpaths only in explicit maintenance while ARC
@@ -220,7 +234,8 @@ With explicit approval, run two identical `workflow_dispatch` canaries on
 `perf-regression-8-cores`, using immutable full base and candidate commit SHAs
 and `cargo_profile=nightly`. The first is the cold fill; the second verifies warm
 reuse. Record the workflow's base/candidate build elapsed logs and cache
-ABI-marker output. Obtain dependency and tool network byte counters from the
+ABI-marker output, initial/base/candidate sccache statistics, and cache report.
+Obtain dependency and tool network byte counters from the
 identified `.2` counter source, filtered to `minipc-3` and the dependency/tool
 destinations.
 
@@ -228,7 +243,8 @@ Accept the canary only when all of the following hold:
 
 - exactly one runner Pod runs on `minipc-3`, and both jobs use the same bound PV;
 - UID/GID 1001 cache mounts are writable; the warm run does not invalidate the
-  target or bulk-redownload crates or toolchains;
+  target or bulk-redownload crates or toolchains; sccache reports separate base
+  and candidate build statistics without server or cache-path errors;
 - warm base build time is at most 50% of cold base build time;
 - warm dependency/tool network bytes are at most 10% of cold fill bytes;
 - cache sizes remain below soft watermarks, node free space remains at least
@@ -244,8 +260,8 @@ automatically; preserve it for diagnosis unless intentionally discarding cache.
 
 ## Future optional phases
 
-The first phase does not require a new image or shared cache service. Optional
-follow-ups are a digest-pinned image seeded with the exact Rust toolchain,
-protoc, uv, sccache, and `cargo fetch --locked`; and an internal read/write
+The current phase uses a digest-pinned image with sccache 0.16.0 and no shared
+cache service. Optional follow-ups are an image additionally seeded with the
+exact Rust toolchain and `cargo fetch --locked`; or an internal read/write
 sccache backend or Cargo/Git mirror. Evaluate them only if persistent PVC reuse
 is insufficient.
