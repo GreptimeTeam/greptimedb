@@ -1081,7 +1081,7 @@ mod tests {
         })
         .build();
         let batch = large_string_batch(700 * 1024);
-        let expected_bytes = aligned_tracked_bytes(batch.buffer_memory_size());
+        let expected_bytes = aligned_tracked_bytes(batch.logical_slice_memory_size());
 
         let mut stream1 = MemoryTrackedStream::new(
             RecordBatches::try_new(batch.schema.clone(), vec![batch.clone()])
