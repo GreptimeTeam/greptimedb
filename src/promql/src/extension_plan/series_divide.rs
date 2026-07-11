@@ -193,7 +193,7 @@ impl<'a> RawTagColumn<'a> {
             Self::Utf8(array) => array.is_null(row),
             Self::LargeUtf8(array) => array.is_null(row),
             Self::Utf8View(array) => array.is_null(row),
-            Self::Dictionary(array, _) => array.is_null(row),
+            Self::Dictionary(array, values) => array.key(row).is_none_or(|key| values.is_null(key)),
         }
     }
 
@@ -695,6 +695,7 @@ impl SeriesDivideStream {
 
 #[cfg(test)]
 mod test {
+    use datafusion::arrow::array::UInt32Array;
     use datafusion::arrow::datatypes::{DataType, Field, Schema};
     use datafusion::common::ToDFSchema;
     use datafusion::datasource::memory::MemorySourceConfig;
@@ -703,6 +704,19 @@ mod test {
     use datafusion::prelude::SessionContext;
 
     use super::*;
+
+    #[test]
+    fn test_dictionary_tag_child_null_comparison() {
+        let dictionary = DictionaryArray::<UInt32Type>::new(
+            UInt32Array::from(vec![Some(0), None, Some(1)]),
+            Arc::new(StringArray::from(vec![None, Some("")])),
+        );
+        let tags = RawTagColumn::try_new(&dictionary).unwrap();
+
+        assert!(tags.equal_at(0, &tags, 1).unwrap());
+        assert!(!tags.equal_at(0, &tags, 2).unwrap());
+        assert!(!tags.equal_at(1, &tags, 2).unwrap());
+    }
 
     fn prepare_test_data() -> DataSourceExec {
         let schema = Arc::new(Schema::new(vec![
