@@ -384,6 +384,17 @@ fn logical_array_size(
                 offsets[index] as usize
             })?])
         }
+        ArrowDataType::FixedSizeList(_, size) => {
+            let child = &data.child_data()[0];
+            let size = usize::try_from(*size).map_err(|_| {
+                datatypes::arrow::error::ArrowError::InvalidArgumentError(format!(
+                    "FixedSizeList size cannot be negative, got {size}"
+                ))
+            })?;
+            Some(vec![logical_visible_child_size(data, child, |index| {
+                data.offset().saturating_add(index).saturating_mul(size)
+            })?])
+        }
         ArrowDataType::Struct(_) if data.nulls().is_some() => {
             let mut sizes = Vec::with_capacity(data.child_data().len());
             for child in data.child_data() {
@@ -537,8 +548,8 @@ mod tests {
     use std::sync::Arc;
 
     use datatypes::arrow::array::{
-        AsArray, BinaryArray, BinaryViewArray, LargeListArray, ListArray, MapArray, StringArray,
-        StringViewArray, StructArray, UInt32Array,
+        AsArray, BinaryArray, BinaryViewArray, FixedSizeListArray, LargeListArray, ListArray,
+        MapArray, StringArray, StringViewArray, StructArray, UInt32Array,
     };
     use datatypes::arrow::buffer::{NullBuffer, OffsetBuffer, ScalarBuffer};
     use datatypes::arrow::datatypes::{
@@ -862,6 +873,119 @@ mod tests {
         let batch = batch_with_array(Arc::new(array)).slice(50, 1).unwrap();
 
         assert_eq!(8 + 10 * 4, batch.logical_slice_memory_size());
+    }
+
+    #[test]
+    fn test_logical_slice_memory_size_slices_fixed_size_list_values() {
+        let array = FixedSizeListArray::from_iter_primitive::<UInt32Type, _, _>(
+            (0..100).map(|value| Some(vec![Some(value); 10])),
+            10,
+        );
+        let batch = batch_with_array(Arc::new(array)).slice(50, 1).unwrap();
+
+        assert_eq!(10 * 4, batch.logical_slice_memory_size());
+    }
+
+    #[test]
+    fn test_logical_slice_memory_size_slices_fixed_size_list_view_payload() {
+        let invisible = "invisible fixed size list string view payload";
+        let visible = "visible fixed size list string view payload";
+        let values = Arc::new(StringViewArray::from(vec![
+            invisible, invisible, visible, invisible,
+        ]));
+        let field = Arc::new(Field::new_list_field(DataType::Utf8View, false));
+        let array = FixedSizeListArray::new(field, 2, values, None);
+        let batch = batch_with_array(Arc::new(array)).slice(1, 1).unwrap();
+
+        assert_eq!(
+            2 * 16 + visible.len() + invisible.len(),
+            batch.logical_slice_memory_size()
+        );
+    }
+
+    #[test]
+    fn test_logical_slice_memory_size_ignores_null_fixed_size_list_child_values() {
+        let values = Arc::new(UInt32Array::from_iter_values(0..3000));
+        let field = Arc::new(Field::new_list_field(DataType::UInt32, false));
+        let array = FixedSizeListArray::new(
+            field.clone(),
+            1000,
+            values,
+            Some(NullBuffer::from(vec![true, false, true])),
+        );
+        let batch = batch_with_array(Arc::new(array));
+
+        assert_eq!(1 + 2 * 1000 * 4, batch.logical_slice_memory_size());
+        assert_eq!(1, batch.slice(1, 1).unwrap().logical_slice_memory_size());
+        assert_eq!(0, batch.slice(1, 0).unwrap().logical_slice_memory_size());
+
+        let all_null = FixedSizeListArray::new(
+            field.clone(),
+            2,
+            Arc::new(UInt32Array::from_iter_values(0..4)),
+            Some(NullBuffer::new_null(2)),
+        );
+        let contiguous = FixedSizeListArray::new(
+            field,
+            2,
+            Arc::new(UInt32Array::from_iter_values(0..6)),
+            Some(NullBuffer::from(vec![true, true, false])),
+        );
+
+        assert_eq!(
+            1,
+            batch_with_array(Arc::new(all_null)).logical_slice_memory_size()
+        );
+        assert_eq!(
+            1 + 4 * 4,
+            batch_with_array(Arc::new(contiguous)).logical_slice_memory_size()
+        );
+    }
+
+    #[test]
+    fn test_logical_slice_memory_size_ignores_null_fixed_size_list_view_payload() {
+        let visible_0 = "visible fixed size list string view payload zero";
+        let hidden = "hidden fixed size list string view payload".repeat(100);
+        let visible_2 = "visible fixed size list string view payload two";
+        let values = Arc::new(StringViewArray::from(vec![
+            visible_0,
+            hidden.as_str(),
+            visible_2,
+        ]));
+        let field = Arc::new(Field::new_list_field(DataType::Utf8View, false));
+        let array = FixedSizeListArray::new(
+            field,
+            1,
+            values,
+            Some(NullBuffer::from(vec![true, false, true])),
+        );
+        let batch = batch_with_array(Arc::new(array));
+
+        assert_eq!(
+            1 + 2 * 16 + visible_0.len() + visible_2.len(),
+            batch.logical_slice_memory_size()
+        );
+    }
+
+    #[test]
+    fn test_logical_slice_memory_size_handles_nullable_offset_fixed_size_list() {
+        let unrelated = "unrelated fixed size list payload before slice".repeat(100);
+        let visible = "visible offset fixed size list payload";
+        let hidden = "hidden null fixed size list payload after slice".repeat(100);
+        let value_field = Arc::new(Field::new_list_field(DataType::Utf8View, false));
+        let fixed = FixedSizeListArray::new(
+            value_field,
+            1,
+            Arc::new(StringViewArray::from(vec![
+                unrelated.as_str(),
+                hidden.as_str(),
+                visible,
+            ])),
+            Some(NullBuffer::from(vec![true, false, true])),
+        );
+        let sliced = fixed.to_data().slice(1, 2);
+
+        assert_eq!(1 + 16 + visible.len(), logical_array_size(&sliced).unwrap());
     }
 
     #[test]
