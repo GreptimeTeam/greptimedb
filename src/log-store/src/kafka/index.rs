@@ -17,6 +17,8 @@ mod encoder;
 mod iterator;
 
 pub use collector::GlobalIndexCollector;
+#[cfg(test)]
+pub(crate) use collector::RegionIndexes;
 pub(crate) use collector::{IndexCollector, NoopCollector};
 pub(crate) use encoder::{IndexEncoder, JsonIndexEncoder};
 pub(crate) use iterator::{

@@ -568,7 +568,7 @@ fn check_termination(offset: i64, end_offset: i64) -> bool {
 mod tests {
 
     use std::assert_matches;
-    use std::collections::HashMap;
+    use std::collections::{BTreeSet, HashMap};
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -578,6 +578,8 @@ mod tests {
     use common_telemetry::tracing::warn;
     use common_wal::config::kafka::DatanodeKafkaConfig;
     use common_wal::config::kafka::common::KafkaConnectionConfig;
+    use common_wal::maybe_skip_kafka_integration_test;
+    use common_wal::test_util::get_kafka_endpoints;
     use dashmap::DashMap;
     use futures::TryStreamExt;
     use rand::Rng;
@@ -589,7 +591,82 @@ mod tests {
     use store_api::storage::RegionId;
 
     use super::build_entry;
+    use crate::kafka::index::{
+        GlobalIndexCollector, IndexEncoder, JsonIndexEncoder, RegionIndexes, default_index_file,
+    };
     use crate::kafka::log_store::{KafkaLogStore, PeriodicTopicStatsReporter, TopicStat};
+
+    #[tokio::test]
+    async fn test_obsolete_all_persists_before_return_and_survives_next_dump() {
+        maybe_skip_kafka_integration_test!();
+        let operator = object_store::ObjectStore::new(object_store::services::Memory::default())
+            .unwrap()
+            .finish();
+        let path = default_index_file(0);
+        let topic = format!("obsolete-all-{}", uuid::Uuid::new_v4());
+        let provider = Provider::kafka_provider(topic.clone());
+        let kafka_provider = provider.as_kafka_provider().unwrap();
+        let removed = RegionId::new(1, 1);
+        let sibling = RegionId::new(1, 2);
+        let encoder = JsonIndexEncoder::default();
+        encoder.encode(
+            kafka_provider,
+            &RegionIndexes {
+                regions: HashMap::from([
+                    (removed, BTreeSet::from([1, 5])),
+                    (sibling, BTreeSet::from([2, 6])),
+                ]),
+                latest_entry_id: 7,
+                ..Default::default()
+            },
+        );
+        let mut writer = operator.writer(&path).await.unwrap();
+        writer.write(encoder.finish().unwrap()).await.unwrap();
+        writer.close().await.unwrap();
+
+        let collector = GlobalIndexCollector::new(Duration::from_millis(50), operator, path);
+        let config = DatanodeKafkaConfig {
+            connection: KafkaConnectionConfig {
+                broker_endpoints: get_kafka_endpoints(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let logstore = KafkaLogStore::try_new(&config, Some(collector))
+            .await
+            .unwrap();
+        prepare_topic(&logstore, &topic).await;
+
+        logstore.obsolete_all(&provider, removed).await.unwrap();
+
+        let collector = logstore.client_manager.global_index_collector().unwrap();
+        let (removed_indexes, _) = collector
+            .read_remote_region_index(0, kafka_provider, removed, 0)
+            .await
+            .unwrap()
+            .unwrap();
+        let (sibling_indexes, _) = collector
+            .read_remote_region_index(0, kafka_provider, sibling, 0)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(removed_indexes.is_empty());
+        assert_eq!(sibling_indexes, BTreeSet::from([2, 6]));
+
+        collector.dump_index_for_test().await.unwrap();
+        let (removed_indexes, _) = collector
+            .read_remote_region_index(0, kafka_provider, removed, 0)
+            .await
+            .unwrap()
+            .unwrap();
+        let (sibling_indexes, _) = collector
+            .read_remote_region_index(0, kafka_provider, sibling, 0)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(removed_indexes.is_empty());
+        assert_eq!(sibling_indexes, BTreeSet::from([2, 6]));
+    }
 
     #[test]
     fn test_build_naive_entry() {
