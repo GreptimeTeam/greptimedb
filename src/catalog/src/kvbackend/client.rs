@@ -322,11 +322,6 @@ impl KvCacheInvalidator for CachedKvBackend {
         self.cache.invalidate(key).await;
         debug!("invalidated cache key: {}", String::from_utf8_lossy(key));
     }
-
-    fn invalidate_all(&self) {
-        self.create_new_version();
-        self.cache.invalidate_all();
-    }
 }
 
 impl CachedKvBackend {
@@ -489,7 +484,6 @@ mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
 
     use async_trait::async_trait;
-    use common_meta::cache_invalidator::KvCacheInvalidator;
     use common_meta::kv_backend::memory::MemoryKvBackend;
     use common_meta::kv_backend::read_only::ReadOnlyKvBackend;
     use common_meta::kv_backend::txn::{Txn, TxnOp};
@@ -606,23 +600,6 @@ mod tests {
 
             assert_eq!(get_execute_times.load(Ordering::SeqCst), 3);
         }
-    }
-
-    #[tokio::test]
-    async fn test_cached_kv_backend_invalidate_all() {
-        let simple_kv = Arc::new(SimpleKvBackend::default());
-        let get_execute_times = simple_kv.get_execute_times.clone();
-        let cached_kv = CachedKvBackend::wrap(simple_kv);
-        add_some_vals(&cached_kv).await;
-
-        assert!(cached_kv.get(b"k1").await.unwrap().is_some());
-        assert!(cached_kv.get(b"k1").await.unwrap().is_some());
-        assert_eq!(1, get_execute_times.load(Ordering::SeqCst));
-
-        KvCacheInvalidator::invalidate_all(&cached_kv);
-
-        assert!(cached_kv.get(b"k1").await.unwrap().is_some());
-        assert_eq!(2, get_execute_times.load(Ordering::SeqCst));
     }
 
     #[tokio::test]

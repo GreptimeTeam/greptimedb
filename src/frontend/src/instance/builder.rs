@@ -236,7 +236,6 @@ impl FrontendBuilder {
             self.procedure_executor.clone(),
             self.catalog_manager.clone(),
             table_metadata_manager.clone(),
-            local_cache_invalidator.clone(),
         ));
 
         let flow_metadata_manager: Arc<FlowMetadataManager> =
