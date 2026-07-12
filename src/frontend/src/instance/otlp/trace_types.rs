@@ -187,12 +187,10 @@ pub(super) fn prepare_trace_column_rewrites(
                 continue;
             }
 
-            let value_data = coerce_value_data(
-                &value.value_data,
-                pending_rewrite.target_type,
-                request_type,
-            )
-            .map_err(|_| TraceColumnRewriteError {
+            let value_data =
+                coerce_value_data(&value.value_data, pending_rewrite.target_type, request_type)
+                    .map_err(|_| {
+                        TraceColumnRewriteError {
                 error: error::InvalidParameterSnafu {
                     reason: format!(
                         "failed to coerce trace column '{}' in table '{}' from {:?} to {:?}",
@@ -204,7 +202,8 @@ pub(super) fn prepare_trace_column_rewrites(
                 }
                 .build(),
                 column_name: pending_rewrite.column_name.clone(),
-            })?;
+            }
+                    })?;
             values.push(PreparedTraceValueRewrite {
                 row_idx,
                 col_idx: pending_rewrite.col_idx,
