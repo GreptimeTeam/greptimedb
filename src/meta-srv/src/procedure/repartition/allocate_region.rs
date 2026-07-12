@@ -1,0 +1,872 @@
+// Copyright 2023 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+use std::any::Any;
+use std::collections::{HashMap, HashSet};
+
+use common_meta::ddl::create_table::executor::CreateTableExecutor;
+use common_meta::ddl::create_table::template::{
+    CreateRequestBuilder, build_template_from_raw_table_info_for_physical_table,
+};
+use common_meta::lock_key::TableLock;
+use common_meta::node_manager::NodeManagerRef;
+use common_meta::peer::PeerAllocContext;
+use common_meta::rpc::router::RegionRoute;
+use common_meta::wal_provider::{
+    RegionWalOptions, acquire_remote_wal_read_locks, refresh_initial_pruned_entry_ids,
+};
+use common_procedure::{Context as ProcedureContext, Status};
+use common_telemetry::{debug, info};
+use serde::{Deserialize, Deserializer, Serialize};
+use snafu::{OptionExt, ResultExt};
+use store_api::region_request::RegionRequirements;
+use store_api::storage::{RegionId, RegionNumber, TableId};
+use table::metadata::TableInfo;
+use table::table_reference::TableReference;
+use tokio::time::Instant;
+
+use crate::error::{self, Result};
+use crate::procedure::repartition::dispatch::Dispatch;
+use crate::procedure::repartition::plan::{
+    AllocationPlanEntry, RepartitionPlanEntry, TargetRegionDescriptor,
+    convert_allocation_plan_to_repartition_plan,
+};
+use crate::procedure::repartition::{Context, State};
+
+#[derive(Debug, Clone, Serialize)]
+pub enum AllocateRegion {
+    Build(BuildPlan),
+    Execute(ExecutePlan),
+}
+
+impl<'de> Deserialize<'de> for AllocateRegion {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        enum CurrentAllocateRegion {
+            Build(BuildPlan),
+            Execute(ExecutePlan),
+        }
+
+        #[derive(Deserialize)]
+        struct LegacyAllocateRegion {
+            plan_entries: Vec<AllocationPlanEntry>,
+        }
+
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum AllocateRegionRepr {
+            Current(CurrentAllocateRegion),
+            Legacy(LegacyAllocateRegion),
+        }
+
+        match AllocateRegionRepr::deserialize(deserializer)? {
+            AllocateRegionRepr::Current(CurrentAllocateRegion::Build(build_plan)) => {
+                Ok(Self::Build(build_plan))
+            }
+            AllocateRegionRepr::Current(CurrentAllocateRegion::Execute(execute_plan)) => {
+                Ok(Self::Execute(execute_plan))
+            }
+            AllocateRegionRepr::Legacy(legacy) => Ok(Self::Build(BuildPlan {
+                plan_entries: legacy.plan_entries,
+            })),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BuildPlan {
+    plan_entries: Vec<AllocationPlanEntry>,
+}
+
+impl BuildPlan {
+    async fn next(
+        &mut self,
+        ctx: &mut Context,
+        _procedure_ctx: &ProcedureContext,
+    ) -> Result<(Box<dyn State>, Status)> {
+        let timer = Instant::now();
+        let table_id = ctx.persistent_ctx.table_id;
+        let table_route_value = ctx.get_table_route_value().await?;
+        let mut next_region_number =
+            AllocateRegion::get_next_region_number(table_route_value.max_region_number().unwrap());
+
+        // Converts allocation plan to repartition plan.
+        let repartition_plan_entries = AllocateRegion::convert_to_repartition_plans(
+            table_id,
+            &mut next_region_number,
+            &self.plan_entries,
+            table_route_value.region_routes().unwrap(),
+        )?;
+        let plan_count = repartition_plan_entries.len();
+        let to_allocate = AllocateRegion::count_regions_to_allocate(&repartition_plan_entries);
+        info!(
+            "Repartition allocate regions start, table_id: {}, groups: {}, regions_to_allocate: {}",
+            table_id, plan_count, to_allocate
+        );
+
+        // If no region to allocate, directly dispatch the plan.
+        if AllocateRegion::count_regions_to_allocate(&repartition_plan_entries) == 0 {
+            ctx.persistent_ctx.plans = repartition_plan_entries;
+            ctx.update_allocate_region_elapsed(timer.elapsed());
+            return Ok((Box::new(Dispatch), Status::executing(true)));
+        }
+
+        ctx.persistent_ctx.plans = repartition_plan_entries;
+        debug!(
+            "Repartition allocate regions build plan completed, table_id: {}, elapsed: {:?}",
+            table_id,
+            timer.elapsed()
+        );
+        Ok((
+            Box::new(AllocateRegion::Execute(ExecutePlan)),
+            Status::executing(true),
+        ))
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExecutePlan;
+
+impl ExecutePlan {
+    async fn next(
+        &mut self,
+        ctx: &mut Context,
+        procedure_ctx: &ProcedureContext,
+    ) -> Result<(Box<dyn State>, Status)> {
+        let timer = Instant::now();
+        let table_id = ctx.persistent_ctx.table_id;
+        let allocate_regions = AllocateRegion::collect_allocate_regions(&ctx.persistent_ctx.plans);
+        let region_number_and_partition_exprs =
+            AllocateRegion::prepare_region_allocation_data(&allocate_regions)?;
+        let table_info_value = ctx.get_table_info_value().await?;
+        let new_allocated_region_routes = ctx
+            .region_routes_allocator
+            .allocate(
+                table_id,
+                &region_number_and_partition_exprs
+                    .iter()
+                    .map(|(n, p)| (*n, p.as_str()))
+                    .collect::<Vec<_>>(),
+                &PeerAllocContext::default(),
+            )
+            .await
+            .context(error::AllocateRegionRoutesSnafu { table_id })?;
+        let mut wal_options = ctx
+            .wal_options_allocator
+            .allocate(
+                &allocate_regions
+                    .iter()
+                    .map(|r| r.region_id.region_number())
+                    .collect::<Vec<_>>(),
+                table_info_value.table_info.meta.options.skip_wal,
+            )
+            .await
+            .context(error::AllocateWalOptionsSnafu { table_id })?;
+        let _remote_wal_lock_guards =
+            acquire_remote_wal_read_locks(procedure_ctx, &wal_options).await;
+        refresh_initial_pruned_entry_ids(&ctx.table_metadata_manager, &mut wal_options)
+            .await
+            .context(error::AllocateWalOptionsSnafu { table_id })?;
+
+        let new_region_count = new_allocated_region_routes.len();
+        let new_regions_brief: Vec<_> = new_allocated_region_routes
+            .iter()
+            .map(|route| {
+                let region_id = route.region.id;
+                let peer = route.leader_peer.as_ref().map(|p| p.id).unwrap_or_default();
+                format!("region_id: {}, peer: {}", region_id, peer)
+            })
+            .collect();
+        info!(
+            "Allocated regions for repartition, table_id: {}, new_region_count: {}, new_regions: {:?}",
+            table_id, new_region_count, new_regions_brief
+        );
+
+        // The table route metadata is not updated yet; register it in memory for region lease renewal.
+        let _operating_guards = Context::register_operating_regions(
+            &ctx.memory_region_keeper,
+            &new_allocated_region_routes,
+        )?;
+        // Allocates the regions on datanodes.
+        AllocateRegion::allocate_regions(
+            &ctx.node_manager,
+            &table_info_value.table_info,
+            &new_allocated_region_routes,
+            &wal_options,
+        )
+        .await?;
+
+        // Updates the table routes.
+        let table_lock = TableLock::Write(table_id).into();
+        let _guard = procedure_ctx.provider.acquire_lock(&table_lock).await;
+        // MUST refresh the table route value after acquiring the lock to avoid lost update.
+        // Otherwise, the new allocated regions might be overridden by concurrent repartition procedures.
+        let table_route_value = ctx.get_table_route_value().await?;
+        // Safety: it is physical table route value.
+        let region_routes = table_route_value.region_routes().unwrap();
+        let new_region_routes =
+            AllocateRegion::generate_region_routes(region_routes, &new_allocated_region_routes);
+        ctx.update_table_route(&table_route_value, new_region_routes, wal_options)
+            .await?;
+        ctx.invalidate_table_cache().await?;
+
+        ctx.update_allocate_region_elapsed(timer.elapsed());
+        Ok((Box::new(Dispatch), Status::executing(true)))
+    }
+}
+
+#[async_trait::async_trait]
+#[typetag::serde]
+impl State for AllocateRegion {
+    async fn next(
+        &mut self,
+        ctx: &mut Context,
+        procedure_ctx: &ProcedureContext,
+    ) -> Result<(Box<dyn State>, Status)> {
+        match self {
+            AllocateRegion::Build(build_plan) => build_plan.next(ctx, procedure_ctx).await,
+            AllocateRegion::Execute(execute_plan) => execute_plan.next(ctx, procedure_ctx).await,
+        }
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+impl AllocateRegion {
+    pub fn new(plan_entries: Vec<AllocationPlanEntry>) -> Self {
+        AllocateRegion::Build(BuildPlan { plan_entries })
+    }
+
+    fn generate_region_routes(
+        region_routes: &[RegionRoute],
+        new_allocated_region_ids: &[RegionRoute],
+    ) -> Vec<RegionRoute> {
+        let region_ids = region_routes
+            .iter()
+            .map(|r| r.region.id)
+            .collect::<HashSet<_>>();
+        let mut new_region_routes = region_routes.to_vec();
+        for new_allocated_region_id in new_allocated_region_ids {
+            if !region_ids.contains(&new_allocated_region_id.region.id) {
+                new_region_routes.push(new_allocated_region_id.clone());
+            }
+        }
+        new_region_routes
+    }
+
+    /// Converts allocation plan entries to repartition plan entries.
+    ///
+    /// This method converts allocation intents into concrete repartition plans,
+    /// updates `next_region_number` for newly allocated regions, and captures
+    /// each plan's `original_target_routes` from the current table-route view.
+    ///
+    /// This also persists each plan's pre-staging target routes for rollback.
+    fn convert_to_repartition_plans(
+        table_id: TableId,
+        next_region_number: &mut RegionNumber,
+        plan_entries: &[AllocationPlanEntry],
+        current_region_routes: &[RegionRoute],
+    ) -> Result<Vec<RepartitionPlanEntry>> {
+        let region_routes_map = current_region_routes
+            .iter()
+            .map(|route| (route.region.id, route))
+            .collect::<HashMap<_, _>>();
+
+        plan_entries
+            .iter()
+            .map(|plan_entry| {
+                let mut plan = convert_allocation_plan_to_repartition_plan(
+                    table_id,
+                    next_region_number,
+                    plan_entry,
+                );
+                Self::capture_plan_original_target_routes(&mut plan, &region_routes_map)?;
+                Ok(plan)
+            })
+            .collect()
+    }
+
+    fn capture_plan_original_target_routes(
+        plan: &mut RepartitionPlanEntry,
+        region_routes_map: &HashMap<RegionId, &RegionRoute>,
+    ) -> Result<()> {
+        // Persist the pre-staging target-route view on the parent plan.
+        // Newly allocated targets are skipped because rollback deletes their
+        // route metadata rather than restoring an original target route.
+        let mut original_target_routes = Vec::with_capacity(plan.target_regions.len());
+        for target in &plan.target_regions {
+            if plan.allocated_region_ids.contains(&target.region_id) {
+                // This target region is to be allocated, so it doesn't exist in current routes.
+                continue;
+            }
+            let route = region_routes_map.get(&target.region_id).context(
+                error::RepartitionTargetRegionMissingSnafu {
+                    group_id: plan.group_id,
+                    region_id: target.region_id,
+                },
+            )?;
+            {
+                original_target_routes.push((*route).clone());
+            }
+        }
+
+        plan.original_target_routes = original_target_routes;
+        Ok(())
+    }
+
+    /// Collects all regions that need to be allocated from the repartition plan entries.
+    fn collect_allocate_regions(
+        repartition_plan_entries: &[RepartitionPlanEntry],
+    ) -> Vec<&TargetRegionDescriptor> {
+        repartition_plan_entries
+            .iter()
+            .flat_map(|p| p.allocate_regions())
+            .collect()
+    }
+
+    /// Prepares region allocation data: region numbers and their partition expressions.
+    fn prepare_region_allocation_data(
+        allocate_regions: &[&TargetRegionDescriptor],
+    ) -> Result<Vec<(RegionNumber, String)>> {
+        allocate_regions
+            .iter()
+            .map(|r| {
+                Ok((
+                    r.region_id.region_number(),
+                    r.partition_expr
+                        .as_json_str()
+                        .context(error::SerializePartitionExprSnafu)?,
+                ))
+            })
+            .collect()
+    }
+
+    /// Calculates the total number of regions that need to be allocated.
+    fn count_regions_to_allocate(repartition_plan_entries: &[RepartitionPlanEntry]) -> usize {
+        repartition_plan_entries
+            .iter()
+            .map(|p| p.allocated_region_ids.len())
+            .sum()
+    }
+
+    /// Gets the next region number from the physical table route.
+    fn get_next_region_number(max_region_number: RegionNumber) -> RegionNumber {
+        max_region_number + 1
+    }
+
+    async fn allocate_regions(
+        node_manager: &NodeManagerRef,
+        raw_table_info: &TableInfo,
+        region_routes: &[RegionRoute],
+        wal_options: &RegionWalOptions,
+    ) -> Result<()> {
+        let table_ref = TableReference::full(
+            &raw_table_info.catalog_name,
+            &raw_table_info.schema_name,
+            &raw_table_info.name,
+        );
+        let table_id = raw_table_info.ident.table_id;
+        // Repartition allocation targets physical regions, so exclude metric internal columns
+        // and derive primary keys from tag semantics.
+        let request = build_template_from_raw_table_info_for_physical_table(raw_table_info)
+            .context(error::BuildCreateRequestSnafu { table_id })?;
+        common_telemetry::debug!(
+            "Allocating regions request, table_id: {}, request: {:?}",
+            table_id,
+            request
+        );
+        let builder = CreateRequestBuilder::new(request, None)
+            .with_requirements(RegionRequirements::object_storage());
+        let region_count = region_routes.len();
+        let wal_region_count = wal_options.len();
+        info!(
+            "Allocating regions on datanodes, table_id: {}, region_count: {}, wal_regions: {}",
+            table_id, region_count, wal_region_count
+        );
+        let executor = CreateTableExecutor::new(table_ref.into(), false, builder);
+        executor
+            .on_create_regions(node_manager, table_id, region_routes, wal_options)
+            .await
+            .context(error::AllocateRegionsSnafu { table_id })?;
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use api::v1::region::region_request::Body;
+    use common_meta::ddl::test_util::datanode_handler::DatanodeWatcher;
+    use common_meta::key::TableMetadataManagerRef;
+    use common_meta::key::datanode_table::DatanodeTableKey;
+    use common_meta::peer::Peer;
+    use common_meta::rpc::router::{Region, RegionRoute};
+    use common_meta::test_util::MockDatanodeManager;
+    use common_procedure::{ContextProvider, ProcedureId, ProcedureState};
+    use common_procedure_test::MockContextProvider;
+    use store_api::storage::RegionId;
+    use tokio::sync::{mpsc, watch};
+    use uuid::Uuid;
+
+    use super::*;
+    use crate::procedure::repartition::State;
+    use crate::procedure::repartition::plan::SourceRegionDescriptor;
+    use crate::procedure::repartition::test_util::{
+        TestingEnv, current_parent_region_routes, new_parent_context, range_expr,
+        test_region_wal_options,
+    };
+
+    fn create_region_descriptor(
+        table_id: TableId,
+        region_number: u32,
+        col: &str,
+        start: i64,
+        end: i64,
+    ) -> SourceRegionDescriptor {
+        SourceRegionDescriptor::partitioned(
+            RegionId::new(table_id, region_number),
+            range_expr(col, start, end),
+        )
+    }
+
+    fn create_target_region_descriptor(
+        table_id: TableId,
+        region_number: u32,
+        col: &str,
+        start: i64,
+        end: i64,
+    ) -> TargetRegionDescriptor {
+        TargetRegionDescriptor {
+            region_id: RegionId::new(table_id, region_number),
+            partition_expr: range_expr(col, start, end),
+        }
+    }
+
+    fn create_allocation_plan_entry(
+        table_id: TableId,
+        source_region_numbers: &[u32],
+        target_ranges: &[(i64, i64)],
+    ) -> AllocationPlanEntry {
+        let source_regions = source_region_numbers
+            .iter()
+            .enumerate()
+            .map(|(i, &n)| {
+                let start = i as i64 * 100;
+                let end = (i + 1) as i64 * 100;
+                create_region_descriptor(table_id, n, "x", start, end)
+            })
+            .collect();
+
+        let target_partition_exprs = target_ranges
+            .iter()
+            .map(|&(start, end)| range_expr("x", start, end))
+            .collect();
+
+        AllocationPlanEntry {
+            group_id: Uuid::new_v4(),
+            source_regions,
+            target_partition_exprs,
+            transition_map: vec![],
+        }
+    }
+
+    fn create_current_region_routes(table_id: TableId, region_numbers: &[u32]) -> Vec<RegionRoute> {
+        region_numbers
+            .iter()
+            .map(|region_number| RegionRoute {
+                region: Region {
+                    id: RegionId::new(table_id, *region_number),
+                    ..Default::default()
+                },
+                leader_peer: Some(Peer::empty(1)),
+                ..Default::default()
+            })
+            .collect()
+    }
+
+    struct ConcurrentTableRouteUpdateProvider {
+        inner: MockContextProvider,
+        table_metadata_manager: TableMetadataManagerRef,
+        table_id: TableId,
+        concurrent_region_route: RegionRoute,
+        region_wal_options: RegionWalOptions,
+    }
+
+    #[async_trait::async_trait]
+    impl ContextProvider for ConcurrentTableRouteUpdateProvider {
+        async fn procedure_state(
+            &self,
+            procedure_id: ProcedureId,
+        ) -> common_procedure::Result<Option<ProcedureState>> {
+            self.inner.procedure_state(procedure_id).await
+        }
+
+        async fn procedure_state_receiver(
+            &self,
+            procedure_id: ProcedureId,
+        ) -> common_procedure::Result<Option<watch::Receiver<ProcedureState>>> {
+            self.inner.procedure_state_receiver(procedure_id).await
+        }
+
+        async fn try_put_poison(
+            &self,
+            key: &common_procedure::PoisonKey,
+            procedure_id: ProcedureId,
+        ) -> common_procedure::Result<()> {
+            self.inner.try_put_poison(key, procedure_id).await
+        }
+
+        async fn acquire_lock(
+            &self,
+            key: &common_procedure::StringKey,
+        ) -> common_procedure::local::DynamicKeyLockGuard {
+            let current_table_route_value = self
+                .table_metadata_manager
+                .table_route_manager()
+                .table_route_storage()
+                .get_with_raw_bytes(self.table_id)
+                .await
+                .unwrap()
+                .unwrap();
+            let mut region_routes = current_table_route_value.region_routes().unwrap().clone();
+
+            if !region_routes
+                .iter()
+                .any(|route| route.region.id == self.concurrent_region_route.region.id)
+            {
+                region_routes.push(self.concurrent_region_route.clone());
+                let datanode_id = current_table_route_value.region_routes().unwrap()[0]
+                    .leader_peer
+                    .as_ref()
+                    .unwrap()
+                    .id;
+                let datanode_table_value = self
+                    .table_metadata_manager
+                    .datanode_table_manager()
+                    .get(&DatanodeTableKey::new(datanode_id, self.table_id))
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let region_options = &datanode_table_value.region_info.region_options;
+
+                self.table_metadata_manager
+                    .update_table_route(
+                        self.table_id,
+                        datanode_table_value.region_info.clone(),
+                        &current_table_route_value,
+                        region_routes,
+                        region_options,
+                        &self.region_wal_options,
+                    )
+                    .await
+                    .unwrap();
+            }
+
+            self.inner.acquire_lock(key).await
+        }
+    }
+
+    #[test]
+    fn test_convert_to_repartition_plans_no_allocation() {
+        let table_id = 1024;
+        let mut next_region_number = 10;
+
+        // 2 source -> 2 target (no allocation needed)
+        let plan_entries = vec![create_allocation_plan_entry(
+            table_id,
+            &[1, 2],
+            &[(0, 50), (50, 200)],
+        )];
+
+        let result = AllocateRegion::convert_to_repartition_plans(
+            table_id,
+            &mut next_region_number,
+            &plan_entries,
+            &create_current_region_routes(table_id, &[1, 2]),
+        )
+        .unwrap();
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].target_regions.len(), 2);
+        assert!(result[0].allocated_region_ids.is_empty());
+        // next_region_number should not change
+        assert_eq!(next_region_number, 10);
+    }
+
+    #[test]
+    fn test_convert_to_repartition_plans_with_allocation() {
+        let table_id = 1024;
+        let mut next_region_number = 10;
+
+        // 2 source -> 4 target (need to allocate 2 regions)
+        let plan_entries = vec![create_allocation_plan_entry(
+            table_id,
+            &[1, 2],
+            &[(0, 50), (50, 100), (100, 150), (150, 200)],
+        )];
+
+        let result = AllocateRegion::convert_to_repartition_plans(
+            table_id,
+            &mut next_region_number,
+            &plan_entries,
+            &create_current_region_routes(table_id, &[1, 2]),
+        )
+        .unwrap();
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].target_regions.len(), 4);
+        assert_eq!(result[0].allocated_region_ids.len(), 2);
+        assert_eq!(
+            result[0].allocated_region_ids[0],
+            RegionId::new(table_id, 10)
+        );
+        assert_eq!(
+            result[0].allocated_region_ids[1],
+            RegionId::new(table_id, 11)
+        );
+        // next_region_number should be incremented by 2
+        assert_eq!(next_region_number, 12);
+    }
+
+    #[test]
+    fn test_convert_to_repartition_plans_multiple_entries() {
+        let table_id = 1024;
+        let mut next_region_number = 10;
+
+        // Multiple plan entries with different allocation needs
+        let plan_entries = vec![
+            create_allocation_plan_entry(table_id, &[1], &[(0, 50), (50, 100)]), // need 1 allocation
+            create_allocation_plan_entry(table_id, &[2, 3], &[(100, 150), (150, 200)]), // no allocation
+            create_allocation_plan_entry(table_id, &[4], &[(200, 250), (250, 300), (300, 400)]), // need 2 allocations
+        ];
+
+        let result = AllocateRegion::convert_to_repartition_plans(
+            table_id,
+            &mut next_region_number,
+            &plan_entries,
+            &create_current_region_routes(table_id, &[1, 2, 3, 4]),
+        )
+        .unwrap();
+
+        assert_eq!(result.len(), 3);
+        assert_eq!(result[0].allocated_region_ids.len(), 1);
+        assert_eq!(result[1].allocated_region_ids.len(), 0);
+        assert_eq!(result[2].allocated_region_ids.len(), 2);
+        // next_region_number should be incremented by 3 total
+        assert_eq!(next_region_number, 13);
+    }
+
+    #[test]
+    fn test_count_regions_to_allocate() {
+        let table_id = 1024;
+        let mut next_region_number = 10;
+
+        let plan_entries = vec![
+            create_allocation_plan_entry(table_id, &[1], &[(0, 50), (50, 100)]), // 1 allocation
+            create_allocation_plan_entry(table_id, &[2, 3], &[(100, 200)]), // 0 allocation (deallocate)
+            create_allocation_plan_entry(table_id, &[4], &[(200, 250), (250, 300)]), // 1 allocation
+        ];
+
+        let repartition_plans = AllocateRegion::convert_to_repartition_plans(
+            table_id,
+            &mut next_region_number,
+            &plan_entries,
+            &create_current_region_routes(table_id, &[1, 2, 3, 4]),
+        )
+        .unwrap();
+
+        let count = AllocateRegion::count_regions_to_allocate(&repartition_plans);
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn test_collect_allocate_regions() {
+        let table_id = 1024;
+        let mut next_region_number = 10;
+
+        let plan_entries = vec![
+            create_allocation_plan_entry(table_id, &[1], &[(0, 50), (50, 100)]), // 1 allocation
+            create_allocation_plan_entry(table_id, &[2], &[(100, 150), (150, 200)]), // 1 allocation
+        ];
+
+        let repartition_plans = AllocateRegion::convert_to_repartition_plans(
+            table_id,
+            &mut next_region_number,
+            &plan_entries,
+            &create_current_region_routes(table_id, &[1, 2]),
+        )
+        .unwrap();
+
+        let allocate_regions = AllocateRegion::collect_allocate_regions(&repartition_plans);
+        assert_eq!(allocate_regions.len(), 2);
+        assert_eq!(allocate_regions[0].region_id, RegionId::new(table_id, 10));
+        assert_eq!(allocate_regions[1].region_id, RegionId::new(table_id, 11));
+    }
+
+    #[test]
+    fn test_prepare_region_allocation_data() {
+        let table_id = 1024;
+        let regions = [
+            create_target_region_descriptor(table_id, 10, "x", 0, 50),
+            create_target_region_descriptor(table_id, 11, "x", 50, 100),
+        ];
+        let region_refs: Vec<&TargetRegionDescriptor> = regions.iter().collect();
+
+        let result = AllocateRegion::prepare_region_allocation_data(&region_refs).unwrap();
+
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].0, 10);
+        assert_eq!(result[1].0, 11);
+        // Verify partition expressions are serialized
+        assert!(!result[0].1.is_empty());
+        assert!(!result[1].1.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_execute_plan_uses_latest_table_route_after_lock() {
+        let env = TestingEnv::new();
+        let table_id = 1024;
+        let original_region_routes = create_current_region_routes(table_id, &[1]);
+        env.create_physical_table_metadata_for_repartition(
+            table_id,
+            original_region_routes,
+            test_region_wal_options(&[1]),
+        )
+        .await;
+
+        let (sender, mut receiver) = mpsc::channel(1);
+        let node_manager = Arc::new(MockDatanodeManager::new(DatanodeWatcher::new(sender)));
+        let mut ctx = new_parent_context(&env, node_manager, table_id);
+        ctx.persistent_ctx.plans = vec![RepartitionPlanEntry {
+            group_id: Uuid::new_v4(),
+            source_regions: vec![],
+            target_regions: vec![create_target_region_descriptor(table_id, 3, "x", 0, 100)],
+            allocated_region_ids: vec![RegionId::new(table_id, 3)],
+            pending_deallocate_region_ids: vec![],
+            transition_map: vec![],
+            original_target_routes: vec![],
+        }];
+        let concurrent_region_route = create_current_region_routes(table_id, &[2])
+            .into_iter()
+            .next()
+            .unwrap();
+        let procedure_ctx = ProcedureContext {
+            procedure_id: ProcedureId::random(),
+            provider: Arc::new(ConcurrentTableRouteUpdateProvider {
+                inner: MockContextProvider::default(),
+                table_metadata_manager: env.table_metadata_manager.clone(),
+                table_id,
+                concurrent_region_route,
+                region_wal_options: test_region_wal_options(&[1, 2]),
+            }),
+        };
+        let mut state = ExecutePlan;
+
+        state.next(&mut ctx, &procedure_ctx).await.unwrap();
+
+        let (_, request) = receiver.recv().await.unwrap();
+        let Some(Body::Create(create)) = request.body else {
+            unreachable!()
+        };
+        assert!(create.requirements.unwrap().object_storage);
+
+        let region_ids = current_parent_region_routes(&ctx)
+            .await
+            .into_iter()
+            .map(|route| route.region.id)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            region_ids,
+            vec![
+                RegionId::new(table_id, 1),
+                RegionId::new(table_id, 2),
+                RegionId::new(table_id, 3),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_allocate_region_state_backward_compatibility() {
+        // Arrange
+        let serialized = r#"{"repartition_state":"AllocateRegion","plan_entries":[]}"#;
+
+        // Act
+        let state: Box<dyn State> = serde_json::from_str(serialized).unwrap();
+
+        // Assert
+        let allocate_region = state
+            .as_any()
+            .downcast_ref::<AllocateRegion>()
+            .expect("expected AllocateRegion state");
+        match allocate_region {
+            AllocateRegion::Build(build_plan) => assert!(build_plan.plan_entries.is_empty()),
+            AllocateRegion::Execute(_) => panic!("expected build plan"),
+        }
+    }
+
+    #[test]
+    fn test_allocate_region_state_round_trip() {
+        // Arrange
+        let state: Box<dyn State> = Box::new(AllocateRegion::new(vec![]));
+
+        // Act
+        let serialized = serde_json::to_string(&state).unwrap();
+        let deserialized: Box<dyn State> = serde_json::from_str(&serialized).unwrap();
+
+        // Assert
+        assert_eq!(
+            serialized,
+            r#"{"repartition_state":"AllocateRegion","Build":{"plan_entries":[]}}"#
+        );
+        let allocate_region = deserialized
+            .as_any()
+            .downcast_ref::<AllocateRegion>()
+            .expect("expected AllocateRegion state");
+        match allocate_region {
+            AllocateRegion::Build(build_plan) => assert!(build_plan.plan_entries.is_empty()),
+            AllocateRegion::Execute(_) => panic!("expected build plan"),
+        }
+    }
+
+    #[test]
+    fn test_allocate_region_execute_state_round_trip() {
+        // Arrange
+        let state: Box<dyn State> = Box::new(AllocateRegion::Execute(ExecutePlan));
+
+        // Act
+        let serialized = serde_json::to_string(&state).unwrap();
+        let deserialized: Box<dyn State> = serde_json::from_str(&serialized).unwrap();
+
+        // Assert
+        assert_eq!(
+            serialized,
+            r#"{"repartition_state":"AllocateRegion","Execute":null}"#
+        );
+        let allocate_region = deserialized
+            .as_any()
+            .downcast_ref::<AllocateRegion>()
+            .expect("expected AllocateRegion state");
+        match allocate_region {
+            AllocateRegion::Execute(_) => {}
+            AllocateRegion::Build(_) => panic!("expected execute plan"),
+        }
+    }
+}

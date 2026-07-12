@@ -1,0 +1,113 @@
+-- Migrated from DuckDB test: test/sql/join/right_outer/ pattern tests
+-- Tests right join patterns
+CREATE TABLE inventory(item_id INTEGER, item_name VARCHAR, stock_quantity INTEGER, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+CREATE TABLE purchase_orders(po_id INTEGER, item_id INTEGER, ordered_qty INTEGER, order_date DATE, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+INSERT INTO inventory VALUES
+(1, 'Widget A', 100, 1000), (2, 'Widget B', 50, 2000), (3, 'Widget C', 0, 3000);
+
+Affected Rows: 3
+
+INSERT INTO purchase_orders VALUES
+(1, 1, 25, '2023-01-01', 1000), (2, 2, 30, '2023-01-02', 2000),
+(3, 4, 15, '2023-01-03', 3000), (4, 5, 40, '2023-01-04', 4000),
+(5, 1, 10, '2023-01-05', 5000);
+
+Affected Rows: 5
+
+-- Right join to show all orders (including for non-inventory items)
+SELECT
+  po.po_id, po.ordered_qty, po.order_date,
+  COALESCE(i.item_name, 'Unknown Item') as item_name,
+  COALESCE(i.stock_quantity, 0) as current_stock
+FROM inventory i
+RIGHT JOIN purchase_orders po ON i.item_id = po.item_id
+ORDER BY po.order_date, po.po_id;
+
++-------+-------------+------------+--------------+---------------+
+| po_id | ordered_qty | order_date | item_name    | current_stock |
++-------+-------------+------------+--------------+---------------+
+| 1     | 25          | 2023-01-01 | Widget A     | 100           |
+| 2     | 30          | 2023-01-02 | Widget B     | 50            |
+| 3     | 15          | 2023-01-03 | Unknown Item | 0             |
+| 4     | 40          | 2023-01-04 | Unknown Item | 0             |
+| 5     | 10          | 2023-01-05 | Widget A     | 100           |
++-------+-------------+------------+--------------+---------------+
+
+-- Right join with aggregation
+SELECT
+  po.item_id,
+  COUNT(po.po_id) as order_count,
+  SUM(po.ordered_qty) as total_ordered,
+  COALESCE(MAX(i.stock_quantity), 0) as stock_level,
+  CASE WHEN i.item_id IS NULL THEN 'Not In Inventory' ELSE 'In Stock' END as inventory_status
+FROM inventory i
+RIGHT JOIN purchase_orders po ON i.item_id = po.item_id
+GROUP BY po.item_id, i.item_id
+ORDER BY order_count DESC, po.item_id ASC;
+
++---------+-------------+---------------+-------------+------------------+
+| item_id | order_count | total_ordered | stock_level | inventory_status |
++---------+-------------+---------------+-------------+------------------+
+| 1       | 2           | 35            | 100         | In Stock         |
+| 2       | 1           | 30            | 50          | In Stock         |
+| 4       | 1           | 15            | 0           | Not In Inventory |
+| 5       | 1           | 40            | 0           | Not In Inventory |
++---------+-------------+---------------+-------------+------------------+
+
+-- Right join to identify missing inventory records
+SELECT
+  po.item_id as missing_item_id,
+  COUNT(*) as orders_for_missing_item,
+  SUM(po.ordered_qty) as total_qty_ordered
+FROM inventory i
+RIGHT JOIN purchase_orders po ON i.item_id = po.item_id
+WHERE i.item_id IS NULL
+GROUP BY po.item_id
+ORDER BY total_qty_ordered DESC, po.item_id ASC;
+
++-----------------+-------------------------+-------------------+
+| missing_item_id | orders_for_missing_item | total_qty_ordered |
++-----------------+-------------------------+-------------------+
+| 5               | 1                       | 40                |
+| 4               | 1                       | 15                |
++-----------------+-------------------------+-------------------+
+
+-- Right join with filtering and conditions
+SELECT
+  po.po_id,
+  po.item_id,
+  po.ordered_qty,
+  COALESCE(i.item_name, 'Missing from inventory') as item_description,
+  CASE
+    WHEN i.item_id IS NULL THEN 'Order for unknown item'
+    WHEN i.stock_quantity < po.ordered_qty THEN 'Insufficient stock'
+    ELSE 'Can fulfill'
+  END as fulfillment_status
+FROM inventory i
+RIGHT JOIN purchase_orders po ON i.item_id = po.item_id
+ORDER BY po.order_date;
+
++-------+---------+-------------+------------------------+------------------------+
+| po_id | item_id | ordered_qty | item_description       | fulfillment_status     |
++-------+---------+-------------+------------------------+------------------------+
+| 1     | 1       | 25          | Widget A               | Can fulfill            |
+| 2     | 2       | 30          | Widget B               | Can fulfill            |
+| 3     | 4       | 15          | Missing from inventory | Order for unknown item |
+| 4     | 5       | 40          | Missing from inventory | Order for unknown item |
+| 5     | 1       | 10          | Widget A               | Can fulfill            |
++-------+---------+-------------+------------------------+------------------------+
+
+DROP TABLE inventory;
+
+Affected Rows: 0
+
+DROP TABLE purchase_orders;
+
+Affected Rows: 0
+

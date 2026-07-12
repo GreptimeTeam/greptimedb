@@ -1,0 +1,591 @@
+// Copyright 2023 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+use std::assert_matches;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
+
+use common_datasource::compression::CompressionType;
+use object_store::layers::mock::{
+    Error as MockError, ErrorKind, MockLayerBuilder, OpDelete, Result as MockResult, oio,
+};
+use store_api::storage::{FileId, RegionId};
+use strum::IntoEnumIterator;
+
+use crate::error::Error::ChecksumMismatch;
+use crate::manifest::action::{
+    RegionCheckpoint, RegionEdit, RegionMetaAction, RegionMetaActionList,
+};
+use crate::manifest::manager::RegionManifestManager;
+use crate::manifest::storage::checkpoint::CheckpointMetadata;
+use crate::manifest::storage::is_delta_file;
+use crate::manifest::tests::utils::basic_region_metadata;
+use crate::sst::file::FileMeta;
+use crate::test_util::TestEnv;
+
+async fn build_manager(
+    checkpoint_distance: u64,
+    compress_type: CompressionType,
+) -> (TestEnv, RegionManifestManager) {
+    let metadata = Arc::new(basic_region_metadata());
+    let env = TestEnv::new().await;
+    let manager = env
+        .create_manifest_manager(compress_type, checkpoint_distance, Some(metadata.clone()))
+        .await
+        .unwrap()
+        .unwrap();
+
+    (env, manager)
+}
+
+async fn build_manager_with_initial_metadata(
+    env: &TestEnv,
+    checkpoint_distance: u64,
+    compress_type: CompressionType,
+) -> RegionManifestManager {
+    let metadata = Arc::new(basic_region_metadata());
+    env.create_manifest_manager(compress_type, checkpoint_distance, Some(metadata.clone()))
+        .await
+        .unwrap()
+        .unwrap()
+}
+
+async fn reopen_manager(
+    env: &TestEnv,
+    checkpoint_distance: u64,
+    compress_type: CompressionType,
+) -> RegionManifestManager {
+    env.create_manifest_manager(compress_type, checkpoint_distance, None)
+        .await
+        .unwrap()
+        .unwrap()
+}
+
+fn nop_action() -> RegionMetaActionList {
+    RegionMetaActionList::new(vec![RegionMetaAction::Edit(RegionEdit {
+        files_to_add: vec![],
+        files_to_remove: vec![],
+        timestamp_ms: None,
+        compaction_time_window: None,
+        flushed_entry_id: None,
+        flushed_sequence: None,
+        committed_sequence: None,
+    })])
+}
+
+#[tokio::test]
+async fn manager_without_checkpoint() {
+    let (_env, mut manager) = build_manager(0, CompressionType::Uncompressed).await;
+
+    // apply 10 actions
+    for _ in 0..10 {
+        manager.update(nop_action(), false).await.unwrap();
+    }
+
+    // no checkpoint
+    assert!(
+        manager
+            .store()
+            .load_last_checkpoint()
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    // check files
+    let mut expected = vec![
+        "/",
+        "00000000000000000010.json",
+        "00000000000000000009.json",
+        "00000000000000000008.json",
+        "00000000000000000007.json",
+        "00000000000000000006.json",
+        "00000000000000000005.json",
+        "00000000000000000004.json",
+        "00000000000000000003.json",
+        "00000000000000000002.json",
+        "00000000000000000001.json",
+        "00000000000000000000.json",
+    ];
+    expected.sort_unstable();
+    let mut paths = manager
+        .store()
+        .delta_storage()
+        .get_paths(None, |e| Some(e.name().to_string()))
+        .await
+        .unwrap();
+    paths.sort_unstable();
+    assert_eq!(expected, paths);
+}
+
+#[tokio::test]
+async fn manager_with_checkpoint_distance_1() {
+    common_telemetry::init_default_ut_logging();
+    let (env, mut manager) = build_manager(1, CompressionType::Uncompressed).await;
+
+    // apply 10 actions
+    for _ in 0..10 {
+        manager.update(nop_action(), false).await.unwrap();
+
+        while manager.checkpointer().is_doing_checkpoint() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    // has checkpoint
+    assert!(
+        manager
+            .store()
+            .load_last_checkpoint()
+            .await
+            .unwrap()
+            .is_some()
+    );
+
+    // check files
+    let mut expected = vec![
+        "/",
+        "00000000000000000009.checkpoint",
+        "00000000000000000010.checkpoint",
+        "00000000000000000010.json",
+        "_last_checkpoint",
+    ];
+    expected.sort_unstable();
+    let mut paths = manager
+        .store()
+        .delta_storage()
+        .get_paths(None, |e| Some(e.name().to_string()))
+        .await
+        .unwrap();
+    paths.sort_unstable();
+    assert_eq!(expected, paths);
+
+    // check content in `_last_checkpoint`
+    let raw_bytes = manager
+        .store()
+        .read_file(&manager.store().checkpoint_storage().last_checkpoint_path())
+        .await
+        .unwrap();
+    let raw_json = std::str::from_utf8(&raw_bytes).unwrap();
+    let checkpoint_metadata: CheckpointMetadata =
+        serde_json::from_str(raw_json).expect("Failed to parse checkpoint metadata");
+
+    // size and checksum vary due to different machine time, so we only check version
+    assert_eq!(checkpoint_metadata.version, 10);
+
+    // reopen the manager
+    manager.stop().await;
+    let manager = reopen_manager(&env, 1, CompressionType::Uncompressed).await;
+    assert_eq!(10, manager.manifest().manifest_version);
+}
+
+#[tokio::test]
+async fn test_corrupted_data_causing_checksum_error() {
+    // Initialize manager
+    common_telemetry::init_default_ut_logging();
+    let (_env, mut manager) = build_manager(1, CompressionType::Uncompressed).await;
+
+    // Apply actions
+    for _ in 0..10 {
+        manager.update(nop_action(), false).await.unwrap();
+    }
+
+    // Wait for the checkpoint to finish.
+    while manager.checkpointer().is_doing_checkpoint() {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    // Check if there is a checkpoint
+    assert!(
+        manager
+            .store()
+            .load_last_checkpoint()
+            .await
+            .unwrap()
+            .is_some()
+    );
+
+    // Corrupt the last checkpoint data
+    let mut corrupted_bytes = manager
+        .store()
+        .read_file(&manager.store().checkpoint_storage().last_checkpoint_path())
+        .await
+        .unwrap();
+    corrupted_bytes[0] ^= 1;
+
+    // Overwrite the latest checkpoint data
+    manager
+        .store()
+        .checkpoint_storage()
+        .write_last_checkpoint(9, &corrupted_bytes)
+        .await
+        .unwrap();
+
+    // Attempt to load the corrupted checkpoint
+    let load_corrupted_result = manager.store().load_last_checkpoint().await;
+
+    // Check if the result is an error and if it's of type VerifyChecksum
+    assert_matches!(load_corrupted_result, Err(ChecksumMismatch { .. }));
+}
+
+#[tokio::test]
+async fn checkpoint_with_different_compression_types() {
+    common_telemetry::init_default_ut_logging();
+
+    let mut actions = vec![];
+    for _ in 0..10 {
+        let file_meta = FileMeta {
+            region_id: RegionId::new(123, 456),
+            file_id: FileId::random(),
+            time_range: (0.into(), 10000000.into()),
+            level: 0,
+            file_size: 1024000,
+            max_row_group_uncompressed_size: 1024000,
+            available_indexes: Default::default(),
+            indexes: Default::default(),
+            index_file_size: 0,
+            index_version: 0,
+            num_rows: 0,
+            num_row_groups: 0,
+            sequence: None,
+            partition_expr: None,
+            num_series: 0,
+            ..Default::default()
+        };
+        let action = RegionMetaActionList::new(vec![RegionMetaAction::Edit(RegionEdit {
+            files_to_add: vec![file_meta],
+            files_to_remove: vec![],
+            timestamp_ms: None,
+            compaction_time_window: None,
+            flushed_entry_id: None,
+            flushed_sequence: None,
+            committed_sequence: None,
+        })]);
+        actions.push(action);
+    }
+
+    // collect and check all compression types
+    let mut checkpoints = vec![];
+    for compress_type in CompressionType::iter() {
+        checkpoints
+            .push(generate_checkpoint_with_compression_types(compress_type, actions.clone()).await);
+    }
+    let last = checkpoints.last().unwrap().clone();
+    assert!(checkpoints.into_iter().all(|ckpt| last.eq(&ckpt)));
+}
+
+async fn generate_checkpoint_with_compression_types(
+    compress_type: CompressionType,
+    actions: Vec<RegionMetaActionList>,
+) -> RegionCheckpoint {
+    let (_env, mut manager) = build_manager(1, compress_type).await;
+
+    for action in actions {
+        manager.update(action, false).await.unwrap();
+
+        while manager.checkpointer().is_doing_checkpoint() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    RegionManifestManager::last_checkpoint(&mut manager.store())
+        .await
+        .unwrap()
+        .unwrap()
+        .0
+}
+
+fn generate_action_lists(num: usize) -> (Vec<FileId>, Vec<RegionMetaActionList>) {
+    let mut files = vec![];
+    let mut actions = vec![];
+    for _ in 0..num {
+        let file_id = FileId::random();
+        files.push(file_id);
+        let file_meta = FileMeta {
+            region_id: RegionId::new(123, 456),
+            file_id,
+            time_range: (0.into(), 10000000.into()),
+            level: 0,
+            file_size: 1024000,
+            max_row_group_uncompressed_size: 1024000,
+            available_indexes: Default::default(),
+            indexes: Default::default(),
+            index_file_size: 0,
+            index_version: 0,
+            num_rows: 0,
+            num_row_groups: 0,
+            sequence: None,
+            partition_expr: None,
+            num_series: 0,
+            ..Default::default()
+        };
+        let action = RegionMetaActionList::new(vec![RegionMetaAction::Edit(RegionEdit {
+            files_to_add: vec![file_meta],
+            files_to_remove: vec![],
+            timestamp_ms: None,
+            compaction_time_window: None,
+            flushed_entry_id: None,
+            flushed_sequence: None,
+            committed_sequence: None,
+        })]);
+        actions.push(action);
+    }
+    (files, actions)
+}
+
+#[tokio::test]
+async fn manifest_install_manifest_to() {
+    common_telemetry::init_default_ut_logging();
+    let (env, mut manager) = build_manager(0, CompressionType::Uncompressed).await;
+    let (files, actions) = generate_action_lists(10);
+    for action in actions {
+        manager.update(action, false).await.unwrap();
+    }
+
+    // Nothing to install
+    let target_version = manager.manifest().manifest_version;
+    let installed_version = manager.install_manifest_to(target_version).await.unwrap();
+    assert_eq!(target_version, installed_version);
+
+    let mut another_manager =
+        build_manager_with_initial_metadata(&env, 0, CompressionType::Uncompressed).await;
+
+    // install manifest changes
+    let target_version = manager.manifest().manifest_version;
+    let installed_version = another_manager
+        .install_manifest_to(target_version - 1)
+        .await
+        .unwrap();
+    assert_eq!(target_version - 1, installed_version);
+    for file_id in files[0..9].iter() {
+        assert!(another_manager.manifest().files.contains_key(file_id));
+    }
+
+    let installed_version = another_manager
+        .install_manifest_to(target_version)
+        .await
+        .unwrap();
+    assert_eq!(target_version, installed_version);
+    for file_id in files.iter() {
+        assert!(another_manager.manifest().files.contains_key(file_id));
+    }
+}
+
+#[tokio::test]
+async fn manifest_install_manifest_to_with_checkpoint() {
+    common_telemetry::init_default_ut_logging();
+    let (env, mut manager) = build_manager(3, CompressionType::Uncompressed).await;
+    let (files, actions) = generate_action_lists(10);
+    for action in actions {
+        manager.update(action, false).await.unwrap();
+
+        while manager.checkpointer().is_doing_checkpoint() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    // has checkpoint
+    assert!(
+        manager
+            .store()
+            .load_last_checkpoint()
+            .await
+            .unwrap()
+            .is_some()
+    );
+
+    // check files
+    let mut expected = vec![
+        "/",
+        "00000000000000000006.checkpoint",
+        "00000000000000000007.json",
+        "00000000000000000008.json",
+        "00000000000000000009.checkpoint",
+        "00000000000000000009.json",
+        "00000000000000000010.json",
+        "_last_checkpoint",
+    ];
+    expected.sort_unstable();
+    let mut paths = manager
+        .store()
+        .delta_storage()
+        .get_paths(None, |e| Some(e.name().to_string()))
+        .await
+        .unwrap();
+
+    paths.sort_unstable();
+    assert_eq!(expected, paths);
+
+    let mut another_manager =
+        build_manager_with_initial_metadata(&env, 0, CompressionType::Uncompressed).await;
+
+    // Install 9 manifests
+    let target_version = manager.manifest().manifest_version;
+    let installed_version = another_manager
+        .install_manifest_to(target_version - 1)
+        .await
+        .unwrap();
+    assert_eq!(target_version - 1, installed_version);
+    for file_id in files[0..9].iter() {
+        assert!(another_manager.manifest().files.contains_key(file_id));
+    }
+
+    // Install all manifests
+    let target_version = manager.manifest().manifest_version;
+    let installed_version = another_manager
+        .install_manifest_to(target_version)
+        .await
+        .unwrap();
+    assert_eq!(target_version, installed_version);
+    for file_id in files.iter() {
+        assert!(another_manager.manifest().files.contains_key(file_id));
+    }
+    assert!(another_manager.store().total_manifest_size() > 4000);
+}
+
+#[tokio::test]
+async fn test_checkpoint_bypass_in_staging_mode() {
+    common_telemetry::init_default_ut_logging();
+    let (_env, mut manager) = build_manager(1, CompressionType::Uncompressed).await;
+
+    // Apply actions in staging mode - checkpoint should be bypassed
+    for _ in 0..15 {
+        manager.update(nop_action(), true).await.unwrap();
+    }
+    assert!(!manager.checkpointer().is_doing_checkpoint());
+
+    // Verify no checkpoint was created in staging mode
+    assert!(
+        manager
+            .store()
+            .load_last_checkpoint()
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    // Now switch to normal mode and apply one more action
+    manager.update(nop_action(), false).await.unwrap();
+
+    // Wait for potential checkpoint
+    while manager.checkpointer().is_doing_checkpoint() {
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+
+    // Now checkpoint should exist because we switched to writable mode
+    let checkpoint_result = manager.store().load_last_checkpoint().await.unwrap();
+
+    assert!(
+        checkpoint_result.is_some(),
+        "Checkpoint should exist after switching to writable mode"
+    );
+    let (last_version, _checkpoint_data) = checkpoint_result.unwrap();
+
+    // Checkpoint should include all 16 actions (15 from staging + 1 from writable)
+    assert_eq!(last_version, 16);
+}
+
+/// A deleter that fails on `close`, simulating the S3 batch-delete failure
+/// described in issue #7986.
+struct FailingDeleter {
+    inner: oio::Deleter,
+    close_calls: Arc<AtomicUsize>,
+}
+
+impl oio::Delete for FailingDeleter {
+    async fn delete(&mut self, path: &str, args: OpDelete) -> MockResult<()> {
+        self.inner.delete(path, args).await
+    }
+
+    async fn close(&mut self) -> MockResult<()> {
+        self.close_calls.fetch_add(1, Ordering::Relaxed);
+        Err(MockError::new(
+            ErrorKind::Unexpected,
+            "mock manifest delete close failure",
+        ))
+    }
+}
+
+#[tokio::test]
+async fn checkpoint_advances_and_recovery_works_when_delete_fails() {
+    common_telemetry::init_default_ut_logging();
+
+    let close_calls = Arc::new(AtomicUsize::new(0));
+    let factory_close_calls = close_calls.clone();
+    let mock_layer = MockLayerBuilder::default()
+        .deleter_factory(Arc::new(move |inner| {
+            Box::new(FailingDeleter {
+                inner,
+                close_calls: factory_close_calls.clone(),
+            })
+        }))
+        .build()
+        .unwrap();
+
+    let env = TestEnv::new().await.with_mock_layer(mock_layer);
+    let metadata = Arc::new(basic_region_metadata());
+    let mut manager = env
+        .create_manifest_manager(CompressionType::Uncompressed, 1, Some(metadata))
+        .await
+        .unwrap()
+        .unwrap();
+
+    for _ in 0..10 {
+        manager.update(nop_action(), false).await.unwrap();
+        while manager.checkpointer().is_doing_checkpoint() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    // The checkpointer must have attempted to delete stale files at least once.
+    assert!(close_calls.load(Ordering::Relaxed) > 0);
+
+    // Despite delete failures, the in-memory checkpoint marker advances so
+    // subsequent `maybe_do_checkpoint` calls compute correct ranges.
+    assert_eq!(manager.checkpointer().last_checkpoint_version(), 10);
+
+    // And the durable `_last_checkpoint` metadata reflects the latest version.
+    let (last_version, _) = manager
+        .store()
+        .load_last_checkpoint()
+        .await
+        .unwrap()
+        .expect("checkpoint should be durable");
+    assert_eq!(last_version, 10);
+
+    // Stale deltas below the checkpoint version must still be present because
+    // the mocked deleter refused them.
+    let file_names: Vec<String> = manager
+        .store()
+        .delta_storage()
+        .get_paths(None, |e| Some(e.name().to_string()))
+        .await
+        .unwrap();
+    let stale_delta_count = file_names.iter().filter(|name| is_delta_file(name)).count();
+    assert!(
+        stale_delta_count > 0,
+        "expected leftover delta files after failed delete, got {:?}",
+        file_names,
+    );
+
+    // Recovery must succeed despite the leftover deltas.
+    manager.stop().await;
+    let reopened = env
+        .create_manifest_manager(CompressionType::Uncompressed, 1, None)
+        .await
+        .unwrap()
+        .expect("manifest should be recoverable");
+    assert_eq!(reopened.manifest().manifest_version, 10);
+}

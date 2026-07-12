@@ -1,0 +1,28 @@
+use public;
+
+Affected Rows: 0
+
+select database();
+
++------------+
+| database() |
++------------+
+| public     |
++------------+
+
+use information_schema;
+
+Affected Rows: 0
+
+select database();
+
++--------------------+
+| database()         |
++--------------------+
+| information_schema |
++--------------------+
+
+use public;
+
+Affected Rows: 0
+

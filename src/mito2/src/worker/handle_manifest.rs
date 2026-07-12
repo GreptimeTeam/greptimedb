@@ -1,0 +1,684 @@
+// Copyright 2023 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//! Handles manifest.
+//!
+//! It updates the manifest and applies the changes to the region in background.
+
+use std::collections::{HashMap, VecDeque};
+use std::num::NonZeroU64;
+use std::sync::Arc;
+
+use common_telemetry::{debug, info, warn};
+use parquet::file::metadata::PageIndexPolicy;
+use snafu::ResultExt;
+use store_api::logstore::LogStore;
+use store_api::metadata::RegionMetadataRef;
+use store_api::storage::RegionId;
+
+use crate::cache::CacheManagerRef;
+use crate::cache::file_cache::{FileType, IndexKey};
+use crate::config::IndexBuildMode;
+use crate::error::{EditRegionSnafu, RegionBusySnafu, RegionNotFoundSnafu, Result};
+use crate::manifest::action::{
+    RegionChange, RegionEdit, RegionMetaAction, RegionMetaActionList, RegionTruncate,
+};
+use crate::memtable::MemtableBuilderProvider;
+use crate::metrics::WRITE_CACHE_INFLIGHT_DOWNLOAD;
+use crate::region::opener::{sanitize_region_options, version_builder_from_manifest};
+use crate::region::options::RegionOptions;
+use crate::region::version::VersionControlRef;
+use crate::region::{MitoRegionRef, RegionLeaderState, RegionRoleState};
+use crate::request::{
+    BackgroundNotify, BuildIndexRequest, OptionOutputTx, RegionChangeResult, RegionEditRequest,
+    RegionEditResult, RegionSyncRequest, TruncateResult, WorkerRequest, WorkerRequestWithTime,
+};
+use crate::sst::index::IndexBuildType;
+use crate::sst::location;
+use crate::worker::{RegionWorkerLoop, WorkerListener};
+
+pub(crate) type RegionEditQueues = HashMap<RegionId, RegionEditQueue>;
+
+/// A queue for region edit requests received while the region is already `Editing`.
+///
+/// Normal writes and bulk inserts that arrive during `Editing` use the stalled-write queue instead.
+/// When an edit completes, those writes are handled before the next queued edit starts, preserving
+/// sequence ordering between direct SST edits and WAL/memtable writes unless global reject
+/// backpressure rejects them first.
+/// Everything is done in the region worker loop.
+pub(crate) struct RegionEditQueue {
+    region_id: RegionId,
+    requests: VecDeque<RegionEditRequest>,
+}
+
+impl RegionEditQueue {
+    const QUEUE_MAX_LEN: usize = 128;
+
+    fn new(region_id: RegionId) -> Self {
+        Self {
+            region_id,
+            requests: VecDeque::new(),
+        }
+    }
+
+    fn enqueue(&mut self, request: RegionEditRequest) {
+        if self.requests.len() > Self::QUEUE_MAX_LEN {
+            request.waiters.reply_with(|| {
+                RegionBusySnafu {
+                    region_id: self.region_id,
+                }
+                .fail()
+            });
+            return;
+        };
+        self.requests.push_back(request);
+    }
+
+    fn dequeue(&mut self) -> Option<RegionEditRequest> {
+        fn can_merge(edit: &RegionEdit) -> bool {
+            // Only the `RegionEdit`:
+            // 1. contains the "raw" (file without a sequence) files to add,
+            // 2. and no `committed_sequence`,
+            // 3. and all other fields are empty,
+            // can it be merged.
+            //
+            // However, merging them means they will all share a same sequence, and if there are
+            // overlapping data in the files, the dedup is uncertain. This is a caution that must
+            // be noticed for editing region.
+            edit.files_to_add.iter().all(|f| f.sequence.is_none())
+                && edit.files_to_remove.is_empty()
+                && edit.timestamp_ms.is_none()
+                && edit.compaction_time_window.is_none()
+                && edit.flushed_entry_id.is_none()
+                && edit.flushed_sequence.is_none()
+                && edit.committed_sequence.is_none()
+        }
+
+        let mut merged = self.requests.pop_front()?;
+        if !can_merge(&merged.edit) {
+            return Some(merged);
+        }
+
+        while let Some(request) = self
+            .requests
+            .pop_front_if(|request| can_merge(&request.edit))
+        {
+            merged.edit.files_to_add.extend(request.edit.files_to_add);
+            merged.waiters.merge(request.waiters);
+        }
+        debug!(
+            "the files to add: [{}] are merged in one edit",
+            merged
+                .edit
+                .files_to_add
+                .iter()
+                .map(|x| x.file_id.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        Some(merged)
+    }
+
+    fn is_empty(&self) -> bool {
+        self.requests.is_empty()
+    }
+
+    fn reject_all_as_not_found(mut self) {
+        while let Some(request) = self.requests.pop_front() {
+            request.waiters.reply_with(|| {
+                RegionNotFoundSnafu {
+                    region_id: self.region_id,
+                }
+                .fail()
+            });
+        }
+    }
+}
+
+impl<S: LogStore> RegionWorkerLoop<S> {
+    /// Rejects queued region edit requests as region not found.
+    pub(crate) fn reject_region_edit_queue_as_not_found(&mut self, region_id: RegionId) {
+        if let Some(edit_queue) = self.region_edit_queues.remove(&region_id) {
+            edit_queue.reject_all_as_not_found();
+        }
+    }
+
+    /// Handles region change result.
+    pub(crate) async fn handle_manifest_region_change_result(
+        &mut self,
+        change_result: RegionChangeResult,
+    ) {
+        let region = match self.regions.get_region(change_result.region_id) {
+            Some(region) => region,
+            None => {
+                self.reject_region_stalled_requests(&change_result.region_id);
+                change_result.sender.send(
+                    RegionNotFoundSnafu {
+                        region_id: change_result.region_id,
+                    }
+                    .fail(),
+                );
+                return;
+            }
+        };
+
+        if change_result.result.is_ok() {
+            // Updates the region metadata and format.
+            Self::update_region_version(
+                &region.version_control,
+                change_result.new_meta,
+                change_result.new_options,
+                &self.memtable_builder_provider,
+            );
+        }
+
+        // Sets the region as writable.
+        region.switch_state_to_writable(RegionLeaderState::Altering);
+        // Sends the result.
+        change_result.sender.send(change_result.result.map(|_| 0));
+
+        // In async mode, rebuild index after index metadata changed.
+        if self.config.index.build_mode == IndexBuildMode::Async && change_result.need_index {
+            self.handle_rebuild_index(
+                BuildIndexRequest {
+                    region_id: region.region_id,
+                    build_type: IndexBuildType::SchemaChange,
+                    file_metas: Vec::new(),
+                },
+                OptionOutputTx::new(None),
+            )
+            .await;
+        }
+        // Handles the stalled requests.
+        self.handle_region_stalled_requests(&change_result.region_id, true)
+            .await;
+    }
+
+    /// Handles region sync request.
+    ///
+    /// Updates the manifest to at least the given version.
+    /// **Note**: The installed version may be greater than the given version.
+    pub(crate) async fn handle_region_sync(&mut self, request: RegionSyncRequest) {
+        let region_id = request.region_id;
+        let sender = request.sender;
+        let region = match self.regions.follower_region(region_id) {
+            Ok(region) => region,
+            Err(e) => {
+                let _ = sender.send(Err(e));
+                return;
+            }
+        };
+
+        let original_manifest_version = region.manifest_ctx.manifest_version().await;
+        let manifest = match region
+            .manifest_ctx
+            .install_manifest_to(request.manifest_version)
+            .await
+        {
+            Ok(manifest) => manifest,
+            Err(e) => {
+                let _ = sender.send(Err(e));
+                return;
+            }
+        };
+        let version = region.version();
+        let mut region_options = version.options.clone();
+        let old_format = region_options.sst_format.unwrap_or_default();
+        // Updates the region options with the manifest.
+        sanitize_region_options(&manifest, &mut region_options);
+        if !version.memtables.is_empty() {
+            let current = region.version_control.current();
+            warn!(
+                "Region {} memtables is not empty, which should not happen, manifest version: {}, last entry id: {}",
+                region.region_id, manifest.manifest_version, current.last_entry_id
+            );
+        }
+
+        // We should sanitize the region options before creating a new memtable.
+        let memtable_builder = if old_format != region_options.sst_format.unwrap_or_default() {
+            // Format changed, also needs to replace the memtable builder.
+            Some(
+                self.memtable_builder_provider
+                    .builder_for_options(&region_options),
+            )
+        } else {
+            None
+        };
+        let new_mutable = Arc::new(
+            region
+                .version()
+                .memtables
+                .mutable
+                .new_with_part_duration(version.compaction_time_window, memtable_builder),
+        );
+        // Here it assumes the leader has backfilled the partition_expr of the metadata.
+        let metadata = manifest.metadata.clone();
+
+        let version_builder = version_builder_from_manifest(
+            &manifest,
+            metadata,
+            region.file_purger.clone(),
+            new_mutable,
+            region_options,
+        );
+        let version = version_builder.build();
+        region.version_control.overwrite_current(Arc::new(version));
+
+        let updated = manifest.manifest_version > original_manifest_version;
+        let _ = sender.send(Ok((manifest.manifest_version, updated)));
+    }
+}
+
+impl<S: LogStore> RegionWorkerLoop<S> {
+    /// Handles region edit request.
+    pub(crate) fn handle_region_edit(&mut self, request: RegionEditRequest) {
+        let region_id = request.region_id;
+        let Some(region) = self.regions.get_region(region_id) else {
+            request
+                .waiters
+                .reply_with(|| RegionNotFoundSnafu { region_id }.fail());
+            return;
+        };
+
+        if !region.is_writable() {
+            if region.state() == RegionRoleState::Leader(RegionLeaderState::Editing) {
+                self.region_edit_queues
+                    .entry(region_id)
+                    .or_insert_with(|| RegionEditQueue::new(region_id))
+                    .enqueue(request);
+            } else {
+                request
+                    .waiters
+                    .reply_with(|| RegionBusySnafu { region_id }.fail());
+            }
+            return;
+        }
+
+        let RegionEditRequest {
+            region_id: _,
+            mut edit,
+            waiters,
+            preload_sst_cache,
+        } = request;
+        let file_sequence = region.version_control.committed_sequence() + 1;
+        edit.committed_sequence = Some(file_sequence);
+
+        // For every file added through region edit, we should fill the file sequence
+        for file in &mut edit.files_to_add {
+            file.sequence = NonZeroU64::new(file_sequence);
+        }
+
+        // Allow retrieving `is_staging` before spawn the edit region task.
+        let is_staging = region.is_staging();
+        let expect_state = if is_staging {
+            RegionLeaderState::Staging
+        } else {
+            RegionLeaderState::Writable
+        };
+        // Marks the region as editing.
+        if let Err(e) = region.set_editing(expect_state) {
+            let e = Arc::new(e);
+            waiters.reply_with(|| Err(e.clone()).context(EditRegionSnafu { region_id }));
+            return;
+        }
+
+        let request_sender = self.sender.clone();
+        let cache_manager = self.cache_manager.clone();
+        let listener = self.listener.clone();
+        // Now the region is in editing state.
+        // Updates manifest in background.
+        common_runtime::spawn_global(async move {
+            let result = edit_region(
+                &region,
+                edit.clone(),
+                cache_manager,
+                listener,
+                is_staging,
+                preload_sst_cache,
+            )
+            .await
+            .map_err(Arc::new);
+            let notify = WorkerRequest::Background {
+                region_id,
+                notify: BackgroundNotify::RegionEdit(RegionEditResult {
+                    region_id,
+                    waiters,
+                    edit,
+                    result,
+                    // we always need to restore region state after region edit
+                    update_region_state: true,
+                    is_staging,
+                }),
+            };
+
+            // We don't set state back as the worker loop is already exited.
+            if let Err(res) = request_sender
+                .send(WorkerRequestWithTime::new(notify))
+                .await
+            {
+                warn!(
+                    "Failed to send region edit result back to the worker, region_id: {}, res: {:?}",
+                    region_id, res
+                );
+            }
+        });
+    }
+
+    /// Handles region edit result.
+    pub(crate) async fn handle_region_edit_result(&mut self, edit_result: RegionEditResult) {
+        let region = match self.regions.get_region(edit_result.region_id) {
+            Some(region) => region,
+            None => {
+                // Fail writes stalled behind this edit if the region was removed before the
+                // edit-completion notification reached the worker.
+                self.fail_region_stalled_requests_as_not_found(&edit_result.region_id);
+                self.reject_region_edit_queue_as_not_found(edit_result.region_id);
+
+                edit_result.waiters.reply_with(|| {
+                    RegionNotFoundSnafu {
+                        region_id: edit_result.region_id,
+                    }
+                    .fail()
+                });
+                return;
+            }
+        };
+
+        let need_compaction = if edit_result.is_staging {
+            if edit_result.update_region_state {
+                // For staging regions, edits are not applied immediately,
+                // as they remain invisible until the region exits the staging state.
+                region.switch_state_to_staging(RegionLeaderState::Editing);
+            }
+
+            false
+        } else {
+            let need_compaction = self.config.schedule_compaction_after_edit
+                && edit_result.result.is_ok()
+                && !edit_result.edit.files_to_add.is_empty();
+
+            // Only apply the edit if the result is ok and region is not in staging state.
+            if edit_result.result.is_ok() {
+                // Applies the edit to the region.
+                region.version_control.apply_edit(
+                    Some(edit_result.edit),
+                    &[],
+                    region.file_purger.clone(),
+                );
+            }
+            if edit_result.update_region_state {
+                region.switch_state_to_writable(RegionLeaderState::Editing);
+            }
+
+            need_compaction
+        };
+
+        edit_result
+            .waiters
+            .reply_with(|| match &edit_result.result {
+                Ok(()) => Ok(()),
+                Err(e) => Err(e.clone()).context(EditRegionSnafu {
+                    region_id: edit_result.region_id,
+                }),
+            });
+
+        if edit_result.update_region_state {
+            // Writes stalled specifically by this edit are handled before the next queued edit.
+            // Otherwise the next edit could reserve a committed sequence before those writes.
+            self.handle_region_stalled_requests(&edit_result.region_id, false)
+                .await;
+        }
+
+        let next_request =
+            if let Some(edit_queue) = self.region_edit_queues.get_mut(&edit_result.region_id) {
+                let request = edit_queue.dequeue();
+                if edit_queue.is_empty() {
+                    self.region_edit_queues.remove(&edit_result.region_id);
+                }
+                request
+            } else {
+                None
+            };
+        if let Some(request) = next_request {
+            self.handle_region_edit(request);
+        }
+
+        if need_compaction {
+            self.schedule_compaction(&region).await;
+        }
+    }
+
+    /// Writes truncate action to the manifest and then applies it to the region in background.
+    pub(crate) fn handle_manifest_truncate_action(
+        &self,
+        region: MitoRegionRef,
+        truncate: RegionTruncate,
+        sender: OptionOutputTx,
+    ) {
+        // Marks the region as truncating.
+        // This prevents the region from being accessed by other write requests.
+        if let Err(e) = region.set_truncating() {
+            sender.send(Err(e));
+            return;
+        }
+        // Now the region is in truncating state.
+
+        let request_sender = self.sender.clone();
+        let manifest_ctx = region.manifest_ctx.clone();
+        let is_staging = region.is_staging();
+
+        // Updates manifest in background.
+        common_runtime::spawn_global(async move {
+            // Write region truncated to manifest.
+            let action_list =
+                RegionMetaActionList::with_action(RegionMetaAction::Truncate(truncate.clone()));
+
+            let result = manifest_ctx
+                .update_manifest(RegionLeaderState::Truncating, action_list, is_staging)
+                .await
+                .map(|_| ());
+
+            // Sends the result back to the request sender.
+            let truncate_result = TruncateResult {
+                region_id: truncate.region_id,
+                sender,
+                result,
+                kind: truncate.kind,
+            };
+            let _ = request_sender
+                .send(WorkerRequestWithTime::new(WorkerRequest::Background {
+                    region_id: truncate.region_id,
+                    notify: BackgroundNotify::Truncate(truncate_result),
+                }))
+                .await
+                .inspect_err(|_| warn!("failed to send truncate result"));
+        });
+    }
+
+    /// Writes region change action to the manifest and then applies it to the region in background.
+    pub(crate) fn handle_manifest_region_change(
+        &self,
+        region: MitoRegionRef,
+        change: RegionChange,
+        need_index: bool,
+        new_options: Option<RegionOptions>,
+        sender: OptionOutputTx,
+    ) {
+        // Marks the region as altering.
+        if let Err(e) = region.set_altering() {
+            sender.send(Err(e));
+            return;
+        }
+        let listener = self.listener.clone();
+        let request_sender = self.sender.clone();
+        let is_staging = region.is_staging();
+        // Now the region is in altering state.
+        common_runtime::spawn_global(async move {
+            let new_meta = change.metadata.clone();
+            let action_list = RegionMetaActionList::with_action(RegionMetaAction::Change(change));
+
+            let result = region
+                .manifest_ctx
+                .update_manifest(RegionLeaderState::Altering, action_list, is_staging)
+                .await
+                .map(|_| ());
+            let notify = WorkerRequest::Background {
+                region_id: region.region_id,
+                notify: BackgroundNotify::RegionChange(RegionChangeResult {
+                    region_id: region.region_id,
+                    sender,
+                    result,
+                    new_meta,
+                    need_index,
+                    new_options,
+                }),
+            };
+            listener
+                .on_notify_region_change_result_begin(region.region_id)
+                .await;
+
+            if let Err(res) = request_sender
+                .send(WorkerRequestWithTime::new(notify))
+                .await
+            {
+                warn!(
+                    "Failed to send region change result back to the worker, region_id: {}, res: {:?}",
+                    region.region_id, res
+                );
+            }
+        });
+    }
+
+    fn update_region_version(
+        version_control: &VersionControlRef,
+        new_meta: RegionMetadataRef,
+        new_options: Option<RegionOptions>,
+        memtable_builder_provider: &MemtableBuilderProvider,
+    ) {
+        let options_changed = new_options.is_some();
+        let region_id = new_meta.region_id;
+        if let Some(new_options) = new_options {
+            // Needs to update the region with new format and memtables.
+            // Creates a new memtable builder for the new options as it may change the memtable type.
+            let new_memtable_builder = memtable_builder_provider.builder_for_options(&new_options);
+            version_control.alter_schema_and_format(new_meta, new_options, new_memtable_builder);
+        } else {
+            // Only changes the schema.
+            version_control.alter_schema(new_meta);
+        }
+
+        let version_data = version_control.current();
+        let version = version_data.version;
+        info!(
+            "Region {} is altered, metadata is {:?}, options: {:?}, options_changed: {}",
+            region_id, version.metadata, version.options, options_changed,
+        );
+    }
+}
+
+/// Checks the edit, writes and applies it.
+async fn edit_region(
+    region: &MitoRegionRef,
+    edit: RegionEdit,
+    cache_manager: CacheManagerRef,
+    listener: WorkerListener,
+    is_staging: bool,
+    preload_sst_cache: bool,
+) -> Result<()> {
+    let region_id = region.region_id;
+    if let Some(write_cache) = cache_manager.write_cache()
+        && preload_sst_cache
+    {
+        for file_meta in &edit.files_to_add {
+            let write_cache = write_cache.clone();
+            let layer = region.access_layer.clone();
+            let listener = listener.clone();
+
+            let index_key = IndexKey::new(region_id, file_meta.file_id, FileType::Parquet);
+            let remote_path =
+                location::sst_file_path(layer.table_dir(), file_meta.file_id(), layer.path_type());
+
+            let is_index_exist = file_meta.exists_index();
+            let index_file_size = file_meta.index_file_size();
+
+            let index_file_index_key = IndexKey::new(
+                region_id,
+                file_meta.index_id().file_id.file_id(),
+                FileType::Puffin(file_meta.index_version),
+            );
+            let index_remote_path = location::index_file_path(
+                layer.table_dir(),
+                file_meta.index_id(),
+                layer.path_type(),
+            );
+
+            let file_size = file_meta.file_size;
+            common_runtime::spawn_global(async move {
+                WRITE_CACHE_INFLIGHT_DOWNLOAD.add(1);
+
+                let parquet_cached = write_cache
+                    .download_if_absent(index_key, &remote_path, layer.object_store(), file_size)
+                    .await;
+
+                if parquet_cached.is_ok() {
+                    // Triggers the filling of the parquet metadata cache.
+                    // The parquet file is already downloaded.
+                    let mut cache_metrics = Default::default();
+                    let _ = write_cache
+                        .file_cache()
+                        .get_parquet_meta_data(
+                            index_key,
+                            &mut cache_metrics,
+                            PageIndexPolicy::Optional,
+                        )
+                        .await;
+
+                    if matches!(parquet_cached, Ok(true)) {
+                        listener.on_file_cache_filled(index_key.file_id);
+                    }
+                }
+                if is_index_exist {
+                    // also download puffin file
+                    if let Err(err) = write_cache
+                        .download(
+                            index_file_index_key,
+                            &index_remote_path,
+                            layer.object_store(),
+                            index_file_size,
+                        )
+                        .await
+                    {
+                        common_telemetry::error!(
+                            err; "Failed to download puffin file, region_id: {}, index_file_index_key: {:?}, index_remote_path: {}", region_id, index_file_index_key, index_remote_path
+                        );
+                    }
+                }
+
+                WRITE_CACHE_INFLIGHT_DOWNLOAD.sub(1);
+            });
+        }
+    }
+
+    info!(
+        "Applying {edit:?} to region {}, is_staging: {}",
+        region_id, is_staging
+    );
+
+    let action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(edit));
+    region
+        .manifest_ctx
+        .update_manifest(RegionLeaderState::Editing, action_list, is_staging)
+        .await
+        .map(|_| ())
+}

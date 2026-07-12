@@ -1,0 +1,273 @@
+-- description: Test casting of NaN and inf values
+-- to integer/decimal casts
+SELECT 'nan'::FLOAT;
+
++-------------+
+| Utf8("nan") |
++-------------+
+| NaN         |
++-------------+
+
+-- cannot cast nan, inf or -inf to these types
+SELECT 'nan'::FLOAT::INT;
+
+Error: 3001(EngineExecuteQuery), Cast error: Can't cast value NaN to type Int32
+
+SELECT 'nan'::FLOAT::DECIMAL(4,1);
+
+Error: 3001(EngineExecuteQuery), Cast error: Cannot cast to Decimal128(4, 1). Overflowing on NaN
+
+SELECT 'nan'::FLOAT::DECIMAL(9,1);
+
+Error: 3001(EngineExecuteQuery), Cast error: Cannot cast to Decimal128(9, 1). Overflowing on NaN
+
+SELECT 'nan'::FLOAT::DECIMAL(18,1);
+
+Error: 3001(EngineExecuteQuery), Cast error: Cannot cast to Decimal128(18, 1). Overflowing on NaN
+
+SELECT 'nan'::FLOAT::DECIMAL(38,1);
+
+Error: 3001(EngineExecuteQuery), Cast error: Cannot cast to Decimal128(38, 1). Overflowing on NaN
+
+SELECT 'inf'::FLOAT;
+
++-------------+
+| Utf8("inf") |
++-------------+
+| inf         |
++-------------+
+
+-- cannot cast nan, inf or -inf to these types
+SELECT 'inf'::FLOAT::INT;
+
+Error: 3001(EngineExecuteQuery), Cast error: Can't cast value inf to type Int32
+
+SELECT 'inf'::FLOAT::DECIMAL(4,1);
+
+Error: 3001(EngineExecuteQuery), Cast error: Cannot cast to Decimal128(4, 1). Overflowing on inf
+
+SELECT 'inf'::FLOAT::DECIMAL(9,1);
+
+Error: 3001(EngineExecuteQuery), Cast error: Cannot cast to Decimal128(9, 1). Overflowing on inf
+
+SELECT 'inf'::FLOAT::DECIMAL(18,1);
+
+Error: 3001(EngineExecuteQuery), Cast error: Cannot cast to Decimal128(18, 1). Overflowing on inf
+
+SELECT 'inf'::FLOAT::DECIMAL(38,1);
+
+Error: 3001(EngineExecuteQuery), Cast error: Cannot cast to Decimal128(38, 1). Overflowing on inf
+
+SELECT '-inf'::FLOAT;
+
++--------------+
+| Utf8("-inf") |
++--------------+
+| -inf         |
++--------------+
+
+-- cannot cast nan, inf or -inf to these types
+SELECT '-inf'::FLOAT::INT;
+
+Error: 3001(EngineExecuteQuery), Cast error: Can't cast value -inf to type Int32
+
+SELECT '-inf'::FLOAT::DECIMAL(4,1);
+
+Error: 3001(EngineExecuteQuery), Cast error: Cannot cast to Decimal128(4, 1). Overflowing on -inf
+
+SELECT '-inf'::FLOAT::DECIMAL(9,1);
+
+Error: 3001(EngineExecuteQuery), Cast error: Cannot cast to Decimal128(9, 1). Overflowing on -inf
+
+SELECT '-inf'::FLOAT::DECIMAL(18,1);
+
+Error: 3001(EngineExecuteQuery), Cast error: Cannot cast to Decimal128(18, 1). Overflowing on -inf
+
+SELECT '-inf'::FLOAT::DECIMAL(38,1);
+
+Error: 3001(EngineExecuteQuery), Cast error: Cannot cast to Decimal128(38, 1). Overflowing on -inf
+
+SELECT 'nan'::DOUBLE;
+
++-------------+
+| Utf8("nan") |
++-------------+
+| NaN         |
++-------------+
+
+-- cannot cast nan, inf or -inf to these types
+SELECT 'nan'::DOUBLE::INT;
+
+Error: 3001(EngineExecuteQuery), Cast error: Can't cast value NaN to type Int32
+
+SELECT 'nan'::DOUBLE::DECIMAL(4,1);
+
+Error: 3001(EngineExecuteQuery), Cast error: Cannot cast to Decimal128(4, 1). Overflowing on NaN
+
+SELECT 'nan'::DOUBLE::DECIMAL(9,1);
+
+Error: 3001(EngineExecuteQuery), Cast error: Cannot cast to Decimal128(9, 1). Overflowing on NaN
+
+SELECT 'nan'::DOUBLE::DECIMAL(18,1);
+
+Error: 3001(EngineExecuteQuery), Cast error: Cannot cast to Decimal128(18, 1). Overflowing on NaN
+
+SELECT 'nan'::DOUBLE::DECIMAL(38,1);
+
+Error: 3001(EngineExecuteQuery), Cast error: Cannot cast to Decimal128(38, 1). Overflowing on NaN
+
+SELECT 'inf'::DOUBLE;
+
++-------------+
+| Utf8("inf") |
++-------------+
+| inf         |
++-------------+
+
+-- cannot cast nan, inf or -inf to these types
+SELECT 'inf'::DOUBLE::INT;
+
+Error: 3001(EngineExecuteQuery), Cast error: Can't cast value inf to type Int32
+
+SELECT 'inf'::DOUBLE::DECIMAL(4,1);
+
+Error: 3001(EngineExecuteQuery), Cast error: Cannot cast to Decimal128(4, 1). Overflowing on inf
+
+SELECT 'inf'::DOUBLE::DECIMAL(9,1);
+
+Error: 3001(EngineExecuteQuery), Cast error: Cannot cast to Decimal128(9, 1). Overflowing on inf
+
+SELECT 'inf'::DOUBLE::DECIMAL(18,1);
+
+Error: 3001(EngineExecuteQuery), Cast error: Cannot cast to Decimal128(18, 1). Overflowing on inf
+
+SELECT 'inf'::DOUBLE::DECIMAL(38,1);
+
+Error: 3001(EngineExecuteQuery), Cast error: Cannot cast to Decimal128(38, 1). Overflowing on inf
+
+SELECT '-inf'::DOUBLE;
+
++--------------+
+| Utf8("-inf") |
++--------------+
+| -inf         |
++--------------+
+
+-- cannot cast nan, inf or -inf to these types
+SELECT '-inf'::DOUBLE::INT;
+
+Error: 3001(EngineExecuteQuery), Cast error: Can't cast value -inf to type Int32
+
+SELECT '-inf'::DOUBLE::DECIMAL(4,1);
+
+Error: 3001(EngineExecuteQuery), Cast error: Cannot cast to Decimal128(4, 1). Overflowing on -inf
+
+SELECT '-inf'::DOUBLE::DECIMAL(9,1);
+
+Error: 3001(EngineExecuteQuery), Cast error: Cannot cast to Decimal128(9, 1). Overflowing on -inf
+
+SELECT '-inf'::DOUBLE::DECIMAL(18,1);
+
+Error: 3001(EngineExecuteQuery), Cast error: Cannot cast to Decimal128(18, 1). Overflowing on -inf
+
+SELECT '-inf'::DOUBLE::DECIMAL(38,1);
+
+Error: 3001(EngineExecuteQuery), Cast error: Cannot cast to Decimal128(38, 1). Overflowing on -inf
+
+-- we can cast nan, inf and -inf between floats and doubles, as well as to/from strings
+SELECT 'nan'::FLOAT::VARCHAR;
+
++-------------+
+| Utf8("nan") |
++-------------+
+| NaN         |
++-------------+
+
+SELECT 'nan'::DOUBLE::VARCHAR;
+
++-------------+
+| Utf8("nan") |
++-------------+
+| NaN         |
++-------------+
+
+SELECT 'nan'::VARCHAR::FLOAT;
+
++-------------+
+| Utf8("nan") |
++-------------+
+| NaN         |
++-------------+
+
+SELECT 'nan'::VARCHAR::DOUBLE;
+
++-------------+
+| Utf8("nan") |
++-------------+
+| NaN         |
++-------------+
+
+SELECT 'inf'::FLOAT::VARCHAR;
+
++-------------+
+| Utf8("inf") |
++-------------+
+| inf         |
++-------------+
+
+SELECT 'inf'::DOUBLE::VARCHAR;
+
++-------------+
+| Utf8("inf") |
++-------------+
+| inf         |
++-------------+
+
+SELECT 'inf'::VARCHAR::FLOAT;
+
++-------------+
+| Utf8("inf") |
++-------------+
+| inf         |
++-------------+
+
+SELECT 'inf'::VARCHAR::DOUBLE;
+
++-------------+
+| Utf8("inf") |
++-------------+
+| inf         |
++-------------+
+
+SELECT '-inf'::FLOAT::VARCHAR;
+
++--------------+
+| Utf8("-inf") |
++--------------+
+| -inf         |
++--------------+
+
+SELECT '-inf'::DOUBLE::VARCHAR;
+
++--------------+
+| Utf8("-inf") |
++--------------+
+| -inf         |
++--------------+
+
+SELECT '-inf'::VARCHAR::FLOAT;
+
++--------------+
+| Utf8("-inf") |
++--------------+
+| -inf         |
++--------------+
+
+SELECT '-inf'::VARCHAR::DOUBLE;
+
++--------------+
+| Utf8("-inf") |
++--------------+
+| -inf         |
++--------------+
+

@@ -1,0 +1,137 @@
+-- Migrated from DuckDB test: test/sql/order/test_order_by_expressions.test
+-- Test ORDER BY with expressions
+CREATE TABLE test(a INTEGER, b INTEGER, s VARCHAR, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+INSERT INTO test VALUES
+    (1, 10, 'apple', 1000),
+    (2, 20, 'banana', 2000),
+    (3, 15, 'cherry', 3000),
+    (4, 25, 'date', 4000);
+
+Affected Rows: 4
+
+-- ORDER BY with arithmetic expressions
+SELECT a, b, a + b as sum FROM test ORDER BY a + b;
+
++---+----+-----+
+| a | b  | sum |
++---+----+-----+
+| 1 | 10 | 11  |
+| 3 | 15 | 18  |
+| 2 | 20 | 22  |
+| 4 | 25 | 29  |
++---+----+-----+
+
+SELECT a, b, a * b as product FROM test ORDER BY a * b DESC;
+
++---+----+---------+
+| a | b  | product |
++---+----+---------+
+| 4 | 25 | 100     |
+| 3 | 15 | 45      |
+| 2 | 20 | 40      |
+| 1 | 10 | 10      |
++---+----+---------+
+
+-- ORDER BY with string functions
+SELECT s, LENGTH(s) as len FROM test ORDER BY LENGTH(s);
+
++--------+-----+
+| s      | len |
++--------+-----+
+| date   | 4   |
+| apple  | 5   |
+| banana | 6   |
+| cherry | 6   |
++--------+-----+
+
+SELECT s, UPPER(s) as upper_s FROM test ORDER BY UPPER(s);
+
++--------+---------+
+| s      | upper_s |
++--------+---------+
+| apple  | APPLE   |
+| banana | BANANA  |
+| cherry | CHERRY  |
+| date   | DATE    |
++--------+---------+
+
+-- ORDER BY with CASE expressions
+SELECT a, b,
+    CASE
+        WHEN a % 2 = 0 THEN 'even'
+        ELSE 'odd'
+    END as parity
+FROM test
+ORDER BY
+    CASE
+        WHEN a % 2 = 0 THEN 1
+        ELSE 2
+    END, a;
+
++---+----+--------+
+| a | b  | parity |
++---+----+--------+
+| 2 | 20 | even   |
+| 4 | 25 | even   |
+| 1 | 10 | odd    |
+| 3 | 15 | odd    |
++---+----+--------+
+
+-- ORDER BY with conditional expressions
+SELECT a, b FROM test ORDER BY GREATEST(a, b) DESC;
+
++---+----+
+| a | b  |
++---+----+
+| 4 | 25 |
+| 2 | 20 |
+| 3 | 15 |
+| 1 | 10 |
++---+----+
+
+SELECT a, b FROM test ORDER BY LEAST(a, b);
+
++---+----+
+| a | b  |
++---+----+
+| 1 | 10 |
+| 2 | 20 |
+| 3 | 15 |
+| 4 | 25 |
++---+----+
+
+-- ORDER BY with NULL-related expressions
+INSERT INTO test VALUES (NULL, NULL, NULL, 5000);
+
+Affected Rows: 1
+
+SELECT a, b, COALESCE(a, 999) as a_or_999
+FROM test
+ORDER BY COALESCE(a, 999);
+
++---+----+----------+
+| a | b  | a_or_999 |
++---+----+----------+
+| 1 | 10 | 1        |
+| 2 | 20 | 2        |
+| 3 | 15 | 3        |
+| 4 | 25 | 4        |
+|   |    | 999      |
++---+----+----------+
+
+-- ORDER BY with subqueries in expressions
+SELECT a, b,
+    a - (SELECT MIN(a) FROM test WHERE a IS NOT NULL) as diff_from_min
+FROM test
+WHERE a IS NOT NULL
+ORDER BY a - (SELECT MIN(a) FROM test WHERE a IS NOT NULL);
+
+Error: 1001(Unsupported), This feature is not implemented: Physical plan does not support logical expression ScalarSubquery(<subquery>)
+
+DROP TABLE test;
+
+Affected Rows: 0
+

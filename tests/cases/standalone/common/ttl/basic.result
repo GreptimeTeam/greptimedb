@@ -1,0 +1,43 @@
+CREATE TABLE test_ttl(ts TIMESTAMP TIME INDEX, val INT) WITH (ttl = '1 second');
+
+Affected Rows: 0
+
+INSERT INTO test_ttl VALUES
+       (now(), 1);
+
+Affected Rows: 1
+
+SELECT val from test_ttl;
+
++-----+
+| val |
++-----+
+| 1   |
++-----+
+
+-- SQLNESS SLEEP 2s
+ADMIN flush_table('test_ttl');
+
++-------------------------------+
+| ADMIN flush_table('test_ttl') |
++-------------------------------+
+| 0                             |
++-------------------------------+
+
+ADMIN compact_table('test_ttl');
+
++---------------------------------+
+| ADMIN compact_table('test_ttl') |
++---------------------------------+
+| 0                               |
++---------------------------------+
+
+SELECT val from test_ttl;
+
+++
+++
+
+DROP TABLE test_ttl;
+
+Affected Rows: 0
+

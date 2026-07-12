@@ -1,0 +1,83 @@
+name: Query Regression Comment
+
+on:
+  workflow_run:
+    workflows: ["Query Regression"]
+    types: [completed]
+
+permissions:
+  contents: read
+  actions: read
+  pull-requests: write
+
+jobs:
+  comment:
+    if: >-
+      ${{ github.event.workflow_run.event == 'pull_request' &&
+          github.event.workflow_run.conclusion != 'cancelled' &&
+          github.event.workflow_run.conclusion != 'skipped' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout trusted scripts
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+
+      - name: Locate query regression comment artifact
+        id: artifact
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const run_id = context.payload.workflow_run.id;
+            const { data } = await github.rest.actions.listWorkflowRunArtifacts({
+              owner,
+              repo,
+              run_id,
+              per_page: 100,
+            });
+            const artifact = data.artifacts.find(
+              item => item.name === 'query-regression-comment' && !item.expired
+            );
+            if (!artifact) {
+              core.info('No query-regression-comment artifact found; skipping.');
+              core.setOutput('found', 'false');
+              return;
+            }
+            core.setOutput('found', 'true');
+            core.setOutput('id', String(artifact.id));
+
+      - name: Download query regression comment artifact
+        id: download
+        if: ${{ steps.artifact.outputs.found == 'true' }}
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          artifact-ids: ${{ steps.artifact.outputs.id }}
+          path: query-regression-comment
+          repository: ${{ github.repository }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ github.event.workflow_run.id }}
+          merge-multiple: true
+
+      - name: Validate PR metadata and prepare comment
+        id: validate
+        if: ${{ steps.download.outcome == 'success' }}
+        uses: actions/github-script@v7
+        env:
+          WORKFLOW_RUN_ID: ${{ github.event.workflow_run.id }}
+          WORKFLOW_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+        with:
+          script: |
+            const validate = require('./.github/scripts/query-regression-comment.cjs');
+            await validate({ github, context, core });
+
+      - name: Post sticky PR comment
+        if: ${{ steps.validate.outputs.should_post == 'true' }}
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: query-regression-report
+          number: ${{ steps.validate.outputs.pr_number }}
+          path: ${{ steps.validate.outputs.summary_path }}

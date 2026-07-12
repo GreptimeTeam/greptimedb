@@ -1,0 +1,41 @@
+[package]
+name = "common-query"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+testing = []
+
+[lints]
+workspace = true
+
+[dependencies]
+api.workspace = true
+async-trait.workspace = true
+base64.workspace = true
+bytes.workspace = true
+common-base.workspace = true
+common-error.workspace = true
+common-macro.workspace = true
+common-recordbatch.workspace = true
+common-time.workspace = true
+datafusion.workspace = true
+datafusion-common.workspace = true
+datafusion-expr.workspace = true
+datafusion-proto.workspace = true
+datatypes.workspace = true
+once_cell.workspace = true
+prost.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+snafu.workspace = true
+sqlparser.workspace = true
+sqlparser_derive = "0.1"
+store-api.workspace = true
+
+[dev-dependencies]
+common-base.workspace = true
+futures-util.workspace = true
+serde_json.workspace = true
+tokio.workspace = true

@@ -1,0 +1,13 @@
+CREATE TABLE foo(ts TIMESTAMP TIME INDEX, s STRING PRIMARY KEY, i INT);
+
+INSERT INTO foo VALUES
+("2024-02-02 01:00:00+0800", "my_tag_1", 1),
+("2024-02-02 02:00:00+0800", "my_tag_2", 2),
+("2024-02-02 03:00:00+0800", "my_tag_3", 3);
+
+ALTER TABLE foo ADD COLUMN f FLOAT;
+
+INSERT INTO foo VALUES
+("2024-02-02 04:00:00+0800", "my_tag_4", 4, 4.4),
+("2024-02-02 05:00:00+0800", "my_tag_5", 5, 5.5),
+("2024-02-02 06:00:00+0800", "my_tag_6", 6, 6.6);

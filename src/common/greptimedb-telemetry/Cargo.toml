@@ -1,0 +1,23 @@
+[package]
+name = "common-greptimedb-telemetry"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+async-trait.workspace = true
+common-runtime.workspace = true
+common-telemetry.workspace = true
+common-version.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+tokio.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+common-test-util.workspace = true
+hyper = { version = "0.14", features = ["full"] }
+tempfile.workspace = true

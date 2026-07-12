@@ -1,0 +1,72 @@
+CREATE TABLE test (
+    ts TIMESTAMP TIME INDEX,
+    msg TEXT,
+);
+
+Affected Rows: 0
+
+INSERT INTO test VALUES 
+(1,"The quick brown fox jumps over the lazy dog"), 
+(2,"The quick brown fox jumps over the lazy cat"), 
+(3,"The quick brown fox jumps over the lazy mouse"), 
+(4,"The quick brown fox jumps over the lazy rabbit"), 
+(5,"The quick brown fox jumps over the lazy turtle");
+
+Affected Rows: 5
+
+SELECT * FROM test;
+
++-------------------------+------------------------------------------------+
+| ts                      | msg                                            |
++-------------------------+------------------------------------------------+
+| 1970-01-01T00:00:00.001 | The quick brown fox jumps over the lazy dog    |
+| 1970-01-01T00:00:00.002 | The quick brown fox jumps over the lazy cat    |
+| 1970-01-01T00:00:00.003 | The quick brown fox jumps over the lazy mouse  |
+| 1970-01-01T00:00:00.004 | The quick brown fox jumps over the lazy rabbit |
+| 1970-01-01T00:00:00.005 | The quick brown fox jumps over the lazy turtle |
++-------------------------+------------------------------------------------+
+
+ADMIN FLUSH_TABLE('test');
+
++---------------------------+
+| ADMIN FLUSH_TABLE('test') |
++---------------------------+
+| 0                         |
++---------------------------+
+
+-- SQLNESS SLEEP 1s
+-- No fulltext index yet
+SELECT index_size FROM INFORMATION_SCHEMA.REGION_STATISTICS;
+
++------------+
+| index_size |
++------------+
+| 0          |
++------------+
+
+ALTER TABLE test MODIFY COLUMN msg SET FULLTEXT INDEX;
+
+Affected Rows: 0
+
+ADMIN BUILD_INDEX('test');
+
++---------------------------+
+| ADMIN BUILD_INDEX('test') |
++---------------------------+
+| 0                         |
++---------------------------+
+
+-- SQLNESS SLEEP 1s
+-- Fulltext index built
+SELECT index_size FROM INFORMATION_SCHEMA.REGION_STATISTICS;
+
++------------+
+| index_size |
++------------+
+| 318        |
++------------+
+
+DROP TABLE test;
+
+Affected Rows: 0
+

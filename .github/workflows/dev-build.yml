@@ -1,0 +1,385 @@
+# Development build only build the debug version of the artifacts manually.
+name: GreptimeDB Development Build
+
+on:
+  workflow_dispatch: # Allows you to run this workflow manually.
+    inputs:
+      large-page-size:
+        description: Build GreptimeDB with large page size (65536).
+        type: boolean
+        required: false
+        default: false
+      commit: # Note: We only pull the source code and use the current workflow to build the artifacts.
+        description: The commit to build
+        required: true
+      linux_amd64_runner:
+        type: choice
+        description: The runner uses to build linux-amd64 artifacts
+        default: ec2-c6i.4xlarge-amd64
+        options:
+          - ubuntu-22.04
+          - ubuntu-22.04-8-cores
+          - ubuntu-22.04-16-cores
+          - ubuntu-22.04-32-cores
+          - ubuntu-22.04-64-cores
+          - ec2-c6i.xlarge-amd64 # 4C8G
+          - ec2-c6i.2xlarge-amd64 # 8C16G
+          - ec2-c6i.4xlarge-amd64 # 16C32G
+          - ec2-c6i.8xlarge-amd64 # 32C64G
+          - ec2-c6i.16xlarge-amd64 # 64C128G
+      linux_arm64_runner:
+        type: choice
+        description: The runner uses to build linux-arm64 artifacts
+        default: ec2-c6g.4xlarge-arm64
+        options:
+          - ec2-c6g.xlarge-arm64 # 4C8G
+          - ec2-c6g.2xlarge-arm64 # 8C16G
+          - ec2-c6g.4xlarge-arm64 # 16C32G
+          - ec2-c6g.8xlarge-arm64 # 32C64G
+          - ec2-c6g.16xlarge-arm64 # 64C128G
+      skip_test:
+        description: Do not run integration tests during the build
+        type: boolean
+        default: true
+      build_linux_amd64_artifacts:
+        type: boolean
+        description: Build linux-amd64 artifacts
+        required: false
+        default: true
+      build_linux_arm64_artifacts:
+        type: boolean
+        description: Build linux-arm64 artifacts
+        required: false
+        default: true
+      release_images:
+        type: boolean
+        description: Build and push images to DockerHub and ACR
+        required: false
+        default: true
+      upload_artifacts_to_s3:
+        type: boolean
+        description: Whether upload artifacts to s3
+        required: false
+        default: false
+      cargo_profile:
+        type: choice
+        description: The cargo profile to use in building GreptimeDB.
+        default: nightly
+        options:
+          - dev
+          - release
+          - nightly
+
+# Use env variables to control all the release process.
+env:
+  CARGO_PROFILE: ${{ inputs.cargo_profile }}
+
+  # Controls whether to run tests, include unit-test, integration-test and sqlness.
+  DISABLE_RUN_TESTS: ${{ inputs.skip_test || vars.DEFAULT_SKIP_TEST }}
+
+  # Always use 'dev' to indicate it's the dev build.
+  NEXT_RELEASE_VERSION: dev
+
+  NIGHTLY_RELEASE_PREFIX: nightly
+
+  # The source code will check out in the following path: '${WORKING_DIR}/dev/greptime'.
+  CHECKOUT_GREPTIMEDB_PATH: dev/greptimedb
+
+jobs:
+  allocate-runners:
+    name: Allocate runners
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
+    runs-on: ubuntu-latest
+    outputs:
+      linux-amd64-runner: ${{ steps.start-linux-amd64-runner.outputs.label }}
+      linux-arm64-runner: ${{ steps.start-linux-arm64-runner.outputs.label }}
+
+      # The following EC2 resource id will be used for resource releasing.
+      linux-amd64-ec2-runner-label: ${{ steps.start-linux-amd64-runner.outputs.label }}
+      linux-amd64-ec2-runner-instance-id: ${{ steps.start-linux-amd64-runner.outputs.ec2-instance-id }}
+      linux-arm64-ec2-runner-label: ${{ steps.start-linux-arm64-runner.outputs.label }}
+      linux-arm64-ec2-runner-instance-id: ${{ steps.start-linux-arm64-runner.outputs.ec2-instance-id }}
+
+      # The 'version' use as the global tag name of the release workflow.
+      version: ${{ steps.create-version.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Create version
+        id: create-version
+        run: |
+          version=$(./.github/scripts/create-version.sh) && \
+          echo $version && \
+          echo "version=$version" >> $GITHUB_OUTPUT
+        env:
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+          COMMIT_SHA: ${{ inputs.commit }}
+          NEXT_RELEASE_VERSION: ${{ env.NEXT_RELEASE_VERSION }}
+          NIGHTLY_RELEASE_PREFIX: ${{ env.NIGHTLY_RELEASE_PREFIX }}
+
+      - name: Allocate linux-amd64 runner
+        if: ${{ inputs.build_linux_amd64_artifacts || github.event_name == 'schedule' }}
+        uses: ./.github/actions/start-runner
+        id: start-linux-amd64-runner
+        with:
+          runner: ${{ inputs.linux_amd64_runner || vars.DEFAULT_AMD64_RUNNER }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ vars.EC2_RUNNER_REGION }}
+          github-token: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
+          image-id: ${{ vars.EC2_RUNNER_LINUX_AMD64_IMAGE_ID }}
+          security-group-id: ${{ vars.EC2_RUNNER_SECURITY_GROUP_ID }}
+          subnet-id: ${{ vars.EC2_RUNNER_SUBNET_ID }}
+
+      - name: Allocate linux-arm64 runner
+        if: ${{ inputs.build_linux_arm64_artifacts || github.event_name == 'schedule' }}
+        uses: ./.github/actions/start-runner
+        id: start-linux-arm64-runner
+        with:
+          runner: ${{ inputs.linux_arm64_runner || vars.DEFAULT_ARM64_RUNNER }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ vars.EC2_RUNNER_REGION }}
+          github-token: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
+          image-id: ${{ vars.EC2_RUNNER_LINUX_ARM64_IMAGE_ID }}
+          security-group-id: ${{ vars.EC2_RUNNER_SECURITY_GROUP_ID }}
+          subnet-id: ${{ vars.EC2_RUNNER_SUBNET_ID }}
+
+  build-linux-amd64-artifacts:
+    name: Build linux-amd64 artifacts
+    if: ${{ inputs.build_linux_amd64_artifacts || github.event_name == 'schedule' }}
+    needs: [
+      allocate-runners,
+    ]
+    runs-on: ${{ needs.allocate-runners.outputs.linux-amd64-runner }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Checkout greptimedb
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.repository }}
+          ref: ${{ inputs.commit }}
+          path: ${{ env.CHECKOUT_GREPTIMEDB_PATH }}
+          persist-credentials: true
+
+      - uses: ./.github/actions/build-linux-artifacts
+        with:
+          arch: amd64
+          cargo-profile: ${{ env.CARGO_PROFILE }}
+          version: ${{ needs.allocate-runners.outputs.version }}
+          disable-run-tests: ${{ env.DISABLE_RUN_TESTS }}
+          dev-mode: true # Only build the standard greptime binary.
+          working-dir: ${{ env.CHECKOUT_GREPTIMEDB_PATH }}
+          image-registry: ${{ vars.ECR_IMAGE_REGISTRY }}
+          image-namespace: ${{ vars.ECR_IMAGE_NAMESPACE }}
+          large-page-size: ${{ inputs.large-page-size }}
+
+  build-linux-arm64-artifacts:
+    name: Build linux-arm64 artifacts
+    if: ${{ inputs.build_linux_arm64_artifacts || github.event_name == 'schedule' }}
+    needs: [
+      allocate-runners,
+    ]
+    runs-on: ${{ needs.allocate-runners.outputs.linux-arm64-runner }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Checkout greptimedb
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.repository }}
+          ref: ${{ inputs.commit }}
+          path: ${{ env.CHECKOUT_GREPTIMEDB_PATH }}
+          persist-credentials: true
+
+      - uses: ./.github/actions/build-linux-artifacts
+        with:
+          arch: arm64
+          cargo-profile: ${{ env.CARGO_PROFILE }}
+          version: ${{ needs.allocate-runners.outputs.version }}
+          disable-run-tests: ${{ env.DISABLE_RUN_TESTS }}
+          dev-mode: true # Only build the standard greptime binary.
+          working-dir: ${{ env.CHECKOUT_GREPTIMEDB_PATH }}
+          image-registry: ${{ vars.ECR_IMAGE_REGISTRY }}
+          image-namespace: ${{ vars.ECR_IMAGE_NAMESPACE }}
+          large-page-size: ${{ inputs.large-page-size }}
+
+  release-images-to-dockerhub:
+    name: Build and push images to DockerHub
+    if: ${{ inputs.release_images || github.event_name == 'schedule' }}
+    needs: [
+      allocate-runners,
+      build-linux-amd64-artifacts,
+      build-linux-arm64-artifacts,
+    ]
+    runs-on: ubuntu-latest
+    outputs:
+      build-result: ${{ steps.set-build-result.outputs.build-result }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Build and push images to dockerhub
+        uses: ./.github/actions/build-images
+        with:
+          image-registry: docker.io
+          image-namespace: ${{ vars.IMAGE_NAMESPACE }}
+          image-name: ${{ vars.DEV_BUILD_IMAGE_NAME }}
+          image-registry-username: ${{ secrets.DOCKERHUB_USERNAME }}
+          image-registry-password: ${{ secrets.DOCKERHUB_TOKEN }}
+          version: ${{ needs.allocate-runners.outputs.version }}
+          push-latest-tag: false # Don't push the latest tag to registry.
+          dev-mode: true # Only build the standard images.
+
+      - name: Echo Docker image tag to step summary
+        run: |
+          echo "## Docker Image Tag" >> $GITHUB_STEP_SUMMARY
+          echo "Image Tag: \`${{ needs.allocate-runners.outputs.version }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "Full Image Name: \`docker.io/${{ vars.IMAGE_NAMESPACE }}/${{ vars.DEV_BUILD_IMAGE_NAME }}:${{ needs.allocate-runners.outputs.version }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "Pull Command: \`docker pull docker.io/${{ vars.IMAGE_NAMESPACE }}/${{ vars.DEV_BUILD_IMAGE_NAME }}:${{ needs.allocate-runners.outputs.version }}\`" >> $GITHUB_STEP_SUMMARY
+
+      - name: Set build result
+        id: set-build-result
+        run: |
+          echo "build-result=success" >> $GITHUB_OUTPUT
+
+  release-cn-artifacts:
+    name: Release artifacts to CN region
+    if: ${{ inputs.release_images || github.event_name == 'schedule' }}
+    needs: [
+      allocate-runners,
+      release-images-to-dockerhub,
+    ]
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Release artifacts to CN region
+        uses: ./.github/actions/release-cn-artifacts
+        with:
+          src-image-registry: docker.io
+          src-image-namespace: ${{ vars.IMAGE_NAMESPACE }}
+          src-image-name: ${{ vars.DEV_BUILD_IMAGE_NAME }}
+          dst-image-registry-username: ${{ secrets.ALICLOUD_USERNAME }}
+          dst-image-registry-password: ${{ secrets.ALICLOUD_PASSWORD }}
+          dst-image-registry: ${{ vars.ACR_IMAGE_REGISTRY }}
+          dst-image-namespace: ${{ vars.IMAGE_NAMESPACE }}
+          version: ${{ needs.allocate-runners.outputs.version }}
+          proxy-url: ${{ secrets.PROXY_URL }}
+          proxy-username: ${{ secrets.PROXY_USERNAME }}
+          proxy-password: ${{ secrets.PROXY_PASSWORD }}
+          upload-to-s3: ${{ inputs.upload_artifacts_to_s3 }}
+          dev-mode: true                     # Only build the standard images(exclude centos images).
+          push-latest-tag: false             # Don't push the latest tag to registry.
+          update-version-info: false         # Don't update the version info in S3.
+
+  stop-linux-amd64-runner: # It's always run as the last job in the workflow to make sure that the runner is released.
+    name: Stop linux-amd64 runner
+    # Only run this job when the runner is allocated.
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    needs: [
+      allocate-runners,
+      build-linux-amd64-artifacts,
+    ]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Stop EC2 runner
+        uses: ./.github/actions/stop-runner
+        with:
+          label: ${{ needs.allocate-runners.outputs.linux-amd64-ec2-runner-label }}
+          ec2-instance-id: ${{ needs.allocate-runners.outputs.linux-amd64-ec2-runner-instance-id }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ vars.EC2_RUNNER_REGION }}
+          github-token: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
+
+  stop-linux-arm64-runner: # It's always run as the last job in the workflow to make sure that the runner is released.
+    name: Stop linux-arm64 runner
+    # Only run this job when the runner is allocated.
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    needs: [
+      allocate-runners,
+      build-linux-arm64-artifacts,
+    ]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Stop EC2 runner
+        uses: ./.github/actions/stop-runner
+        with:
+          label: ${{ needs.allocate-runners.outputs.linux-arm64-ec2-runner-label }}
+          ec2-instance-id: ${{ needs.allocate-runners.outputs.linux-arm64-ec2-runner-instance-id }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ vars.EC2_RUNNER_REGION }}
+          github-token: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
+
+  notification:
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && always() }} # Not requiring successful dependent jobs, always run.
+    name: Send notification to Greptime team
+    needs: [
+      release-images-to-dockerhub
+    ]
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+
+    env:
+      SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL_DEVELOP_CHANNEL }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: ./.github/actions/setup-cyborg
+      - name: Report CI status
+        id: report-ci-status
+        working-directory: cyborg
+        run: pnpm tsx bin/report-ci-failure.ts
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CI_REPORT_STATUS: ${{ needs.release-images-to-dockerhub.outputs.build-result == 'success' }}
+      - name: Notify dev build successful result
+        uses: slackapi/slack-github-action@v1.23.0
+        if: ${{ needs.release-images-to-dockerhub.outputs.build-result == 'success' }}
+        with:
+          payload: |
+            {"text": "GreptimeDB's ${{ env.NEXT_RELEASE_VERSION }} build has completed successfully."}
+
+      - name: Notify dev build failed result
+        uses: slackapi/slack-github-action@v1.23.0
+        if: ${{ needs.release-images-to-dockerhub.outputs.build-result != 'success' }}
+        with:
+          payload: |
+            {"text": "GreptimeDB's ${{ env.NEXT_RELEASE_VERSION }} build has failed, please check ${{ steps.report-ci-status.outputs.html_url }}."}

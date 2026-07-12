@@ -1,0 +1,56 @@
+START NOTE
+GreptimeDB is an open-core project. The core of GreptimeDB is permissively
+licensed under the Apache License, Version 2.0. Certain peripheral features are
+commercially licensed and governed by this Enterprise License.
+
+For the avoidance of doubt, this license does NOT apply to the core of
+GreptimeDB as defined by its license in the repository root file "/LICENSE"
+(as opposed to this file "/LICENSE-ENTERPRISE"). The core can be used and run
+without infringing the license and licensed materials described below.
+
+Source files governed by this Enterprise License carry an explicit Enterprise
+License header and are gated behind the `enterprise` Cargo feature; they are not
+compiled into the default open-source build.
+END NOTE
+
+START OF LICENSE
+GreptimeDB Enterprise License (the "Enterprise License" or "EE License")
+
+Copyright (c) 2023-2026 GrepTime Inc.
+
+With regard to the GreptimeDB Enterprise Software:
+
+This software and associated documentation files (the "Software") may only be
+used if you (and any entity that you represent) have entered into, and are in
+compliance with, a separate written commercial agreement with GrepTime Inc.
+governing the use of the Software (the "Enterprise Agreement"), and otherwise
+have a valid GreptimeDB Enterprise License. The terms of each Enterprise
+Agreement are negotiated and executed individually; to obtain one, contact
+GrepTime Inc. at https://greptime.com/contactus.
+
+Subject to the foregoing sentence, you are free to modify this Software and
+publish patches to the Software. You agree that GrepTime and/or its licensors
+(as applicable) retain all right, title and interest in and to all such
+modifications and/or patches, and all such modifications and/or patches may only
+be used, copied, modified, displayed, distributed, or otherwise exploited with a
+valid GreptimeDB Enterprise License. Notwithstanding the foregoing, you may copy
+and modify the Software for development and testing purposes, without requiring a
+subscription. You agree that GrepTime Inc. and/or its licensors (as applicable)
+retain all right, title and interest in and to all such modifications. You are
+not granted any other rights beyond what is expressly stated herein. Subject to
+the foregoing, it is forbidden to copy, merge, publish, distribute, sublicense,
+and/or sell the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+For all third party components incorporated into the GreptimeDB Software, those
+components are licensed under the original license provided by the owner of the
+applicable component.
+
+END OF LICENSE

@@ -1,0 +1,376 @@
+## The default timezone of the server.
+## @toml2docs:none-default
+default_timezone = "UTC"
+
+## The default column prefix for auto-created time index and value columns.
+## @toml2docs:none-default
+default_column_prefix = "greptime"
+
+## Server-side global switch for auto table creation on write.
+## When `false`, a missing table is never auto-created even if the request sets the `auto_create_table` hint to `true`. Default: `true`.
+#+ auto_create_table = true
+
+## The user provider for authentication.
+## Examples: "static_user_provider:file:/path/to/users", "static_user_provider:cmd:greptime_user=greptime_pwd"
+## Password verifier formats: "plain:<password>", "pbkdf2_sha256:<iterations>:<hex_salt>:<hex_hash>",
+## "mysql_native_password:<hex_sha1_sha1_password>"
+## "pbkdf2_sha256" protects passwords at rest but is not compatible with mysql_native_password.
+## @toml2docs:none-default
+#+ user_provider = "static_user_provider:file:/path/to/users"
+
+## Maximum total memory for all concurrent write request bodies and messages (HTTP, gRPC, Flight).
+## Set to 0 to disable the limit. Default: "0" (unlimited)
+## @toml2docs:none-default
+#+ max_in_flight_write_bytes = "1GB"
+
+## Policy when write bytes quota is exhausted.
+## Options: "wait" (default, 10s timeout), "wait(<duration>)" (e.g., "wait(30s)"), "fail"
+## @toml2docs:none-default
+#+ write_bytes_exhausted_policy = "wait"
+
+## The runtime options.
+#+ [runtime]
+## The number of threads to execute the runtime for global read operations.
+#+ global_rt_size = 8
+## The number of threads to execute the runtime for global write operations.
+#+ compact_rt_size = 4
+
+## The HTTP server options.
+[http]
+## The address to bind the HTTP server.
+addr = "127.0.0.1:4000"
+## HTTP request timeout. Set to 0 to disable timeout.
+timeout = "0s"
+## HTTP request body limit.
+## The following units are supported: `B`, `KB`, `KiB`, `MB`, `MiB`, `GB`, `GiB`, `TB`, `TiB`, `PB`, `PiB`.
+## Set to 0 to disable limit.
+body_limit = "64MB"
+## HTTP CORS support, it's turned on by default
+## This allows browser to access http APIs without CORS restrictions
+enable_cors = true
+## Customize allowed origins for HTTP CORS.
+## @toml2docs:none-default
+cors_allowed_origins = ["https://example.com"]
+## Whether to enable validation for Prometheus remote write requests.
+## Available options:
+## - strict: deny invalid UTF-8 strings (default).
+## - lossy: allow invalid UTF-8 strings, replace invalid characters with REPLACEMENT_CHARACTER(U+FFFD).
+## - unchecked: do not valid strings.
+prom_validation_mode = "strict"
+## Experimental: enable Prometheus remote write v2 native histogram ingestion.
+experimental_enable_prometheus_native_histogram = false
+## Experimental: enable POST /v1/sql/analyze/stream for streaming EXPLAIN ANALYZE VERBOSE metrics.
+experimental_enable_explain_analyze_stream = false
+
+## The gRPC server options.
+[grpc]
+## The address to bind the gRPC server.
+bind_addr = "127.0.0.1:4001"
+## The address advertised to the metasrv, and used for connections from outside the host.
+## If left empty or unset, the server will automatically use the IP address of the first network interface
+## on the host, with the same port number as the one specified in `grpc.bind_addr`.
+server_addr = "127.0.0.1:4001"
+## The number of server worker threads.
+runtime_size = 8
+## Compression mode for frontend side Arrow IPC service. Available options:
+## - `none`: disable all compression
+## - `transport`: only enable gRPC transport compression (zstd)
+## - `arrow_ipc`: only enable Arrow IPC compression (lz4)
+## - `all`: enable all compression.
+## Default to `none`
+flight_compression = "arrow_ipc"
+## The maximum connection age for gRPC connection.
+## The value can be a human-readable time string. For example: `10m` for ten minutes or `1h` for one hour.
+## Refer to https://grpc.io/docs/guides/keepalive/ for more details.
+## @toml2docs:none-default
+#+ max_connection_age = "10m"
+
+## gRPC server TLS options, see `mysql.tls` section.
+[grpc.tls]
+## TLS mode.
+mode = "disable"
+
+## Certificate file path.
+## @toml2docs:none-default
+cert_path = ""
+
+## Private key file path.
+## @toml2docs:none-default
+key_path = ""
+
+## Watch for Certificate and key file change and auto reload.
+## For now, gRPC tls config does not support auto reload.
+watch = false
+
+## The internal gRPC server options. Internal gRPC port for nodes inside cluster to access frontend.
+[internal_grpc]
+## The address to bind the gRPC server.
+bind_addr = "127.0.0.1:4010"
+## The address advertised to the metasrv, and used for connections from outside the host.
+## If left empty or unset, the server will automatically use the IP address of the first network interface
+## on the host, with the same port number as the one specified in `internal_grpc.bind_addr`.
+server_addr = "127.0.0.1:4010"
+## The number of server worker threads.
+runtime_size = 8
+## Compression mode for frontend side Arrow IPC service. Available options:
+## - `none`: disable all compression
+## - `transport`: only enable gRPC transport compression (zstd)
+## - `arrow_ipc`: only enable Arrow IPC compression (lz4)
+## - `all`: enable all compression.
+## Default to `none`
+flight_compression = "arrow_ipc"
+
+## internal gRPC server TLS options, see `mysql.tls` section.
+[internal_grpc.tls]
+## TLS mode.
+mode = "disable"
+
+## Certificate file path.
+## @toml2docs:none-default
+cert_path = ""
+
+## Private key file path.
+## @toml2docs:none-default
+key_path = ""
+
+## Watch for Certificate and key file change and auto reload.
+## For now, gRPC tls config does not support auto reload.
+watch = false
+
+## MySQL server options.
+[mysql]
+## Whether to enable.
+enable = true
+## The addr to bind the MySQL server.
+addr = "127.0.0.1:4002"
+## The number of server worker threads.
+runtime_size = 2
+## Server-side keep-alive time.
+## Set to 0 (default) to disable.
+keep_alive = "0s"
+## Maximum entries in the MySQL prepared statement cache; default is 10,000.
+prepared_stmt_cache_size = 10000
+
+# MySQL server TLS options.
+[mysql.tls]
+
+## TLS mode, refer to https://www.postgresql.org/docs/current/libpq-ssl.html
+## - `disable` (default value)
+## - `prefer`
+## - `require`
+## - `verify-ca`
+## - `verify-full`
+mode = "disable"
+
+## Certificate file path.
+## @toml2docs:none-default
+cert_path = ""
+
+## Private key file path.
+## @toml2docs:none-default
+key_path = ""
+
+## Watch for Certificate and key file change and auto reload
+watch = false
+
+## PostgresSQL server options.
+[postgres]
+## Whether to enable
+enable = true
+## The addr to bind the PostgresSQL server.
+addr = "127.0.0.1:4003"
+## The number of server worker threads.
+runtime_size = 2
+## Server-side keep-alive time.
+## Set to 0 (default) to disable.
+keep_alive = "0s"
+
+## PostgresSQL server TLS options, see `mysql.tls` section.
+[postgres.tls]
+## TLS mode.
+mode = "disable"
+
+## Certificate file path.
+## @toml2docs:none-default
+cert_path = ""
+
+## Private key file path.
+## @toml2docs:none-default
+key_path = ""
+
+## Watch for Certificate and key file change and auto reload
+watch = false
+
+## OpenTSDB protocol options.
+[opentsdb]
+## Whether to enable OpenTSDB put in HTTP API.
+enable = true
+
+## InfluxDB protocol options.
+[influxdb]
+## Whether to enable InfluxDB protocol in HTTP API.
+enable = true
+## Default merge mode for tables automatically created by InfluxDB protocol.
+## Available values: "last_non_null", "last_row".
+default_merge_mode = "last_non_null"
+
+## Jaeger protocol options.
+[jaeger]
+## Whether to enable Jaeger protocol in HTTP API.
+enable = true
+
+## OpenTelemetry protocol options.
+[otlp]
+## Whether to enable OpenTelemetry protocol in HTTP API.
+enable = true
+## Maximum spans per trace ingest chunk. Set to 0 to disable splitting.
+trace_ingest_chunk_size = 128
+
+## Prometheus remote storage options
+[prom_store]
+## Whether to enable Prometheus remote write and read in HTTP API.
+enable = true
+## Whether to store the data from Prometheus remote write in metric engine.
+with_metric_engine = true
+## Interval to flush pending rows batcher.
+## Set to "0s" to disable batching mode in Prometheus Remote Write endpoint
+#+pending_rows_flush_interval = "0s"
+## Max rows per pending batch before triggering a flush.
+#+max_batch_rows = 100000
+## Max number of concurrent batch flushes.
+#+max_concurrent_flushes = 256
+## Capacity of the pending batch worker channel.
+#+worker_channel_capacity = 65526
+## Max inflight write requests before backpressure.
+#+max_inflight_requests = 3000
+
+## The metasrv client options.
+[meta_client]
+## The addresses of the metasrv.
+metasrv_addrs = ["127.0.0.1:3002"]
+
+## Operation timeout.
+timeout = "3s"
+
+## DDL timeout.
+ddl_timeout = "10s"
+
+## Connect server timeout.
+connect_timeout = "1s"
+
+## `TCP_NODELAY` option for accepted connections.
+tcp_nodelay = true
+
+## The configuration about the cache of the metadata.
+metadata_cache_max_capacity = 100000
+
+## TTL of the metadata cache.
+metadata_cache_ttl = "10m"
+
+# TTI of the metadata cache.
+metadata_cache_tti = "5m"
+
+## The query engine options.
+[query]
+## Parallelism of the query engine.
+## Default to 0, which means the number of CPU cores.
+parallelism = 0
+## Whether to allow query fallback when push down optimize fails.
+## Default to false, meaning when push down optimize failed, return error msg
+allow_query_fallback = false
+
+## Memory pool size for query execution operators (aggregation, sorting, join).
+## Supports absolute size (e.g., "4GB", "8GB") or percentage of system memory (e.g., "30%").
+## Setting it to 0 disables the limit (unbounded, default behavior).
+## When this limit is reached, queries will fail with ResourceExhausted error.
+## NOTE: This does NOT limit memory used by table scans (only applies to datanodes).
+memory_pool_size = "50%"
+
+## Datanode options.
+[datanode]
+## Datanode client options.
+[datanode.client]
+connect_timeout = "10s"
+tcp_nodelay = true
+
+## The logging options.
+[logging]
+## The directory to store the log files. If set to empty, logs will not be written to files.
+dir = "./greptimedb_data/logs"
+
+## The log level. Can be `info`/`debug`/`warn`/`error`.
+## @toml2docs:none-default
+level = "info"
+
+## Enable OTLP tracing.
+enable_otlp_tracing = false
+
+## The OTLP tracing endpoint.
+otlp_endpoint = "http://localhost:4318/v1/traces"
+
+## Whether to append logs to stdout.
+append_stdout = true
+
+## The log format. Can be `text`/`json`.
+log_format = "text"
+
+## The maximum amount of log files.
+max_log_files = 720
+
+## Whether to enable per-region metrics.
+## Default to false.
+enable_per_region_metrics = false
+
+## The OTLP tracing export protocol. Can be `grpc`/`http`.
+otlp_export_protocol = "http"
+
+## Additional OTLP headers, only valid when using OTLP http
+[logging.otlp_headers]
+## @toml2docs:none-default
+#Authorization = "Bearer my-token"
+## @toml2docs:none-default
+#Database = "My database"
+
+## The percentage of tracing will be sampled and exported.
+## Valid range `[0, 1]`, 1 means all traces are sampled, 0 means all traces are not sampled, the default value is 1.
+## ratio > 1 are treated as 1. Fractions < 0 are treated as 0
+[logging.tracing_sample_ratio]
+default_ratio = 1.0
+
+## The slow query log options.
+[slow_query]
+## Whether to enable slow query log.
+enable = true
+
+## The record type of slow queries. It can be `system_table` or `log`.
+## If `system_table` is selected, the slow queries will be recorded in a system table `greptime_private.slow_queries`.
+## If `log` is selected, the slow queries will be logged in a log file `greptimedb-slow-queries.*`.
+record_type = "system_table"
+
+## The threshold of slow query. It can be human readable time string, for example: `10s`, `100ms`, `1s`.
+threshold = "30s"
+
+## The sampling ratio of slow query log. The value should be in the range of (0, 1]. For example, `0.1` means 10% of the slow queries will be logged and `1.0` means all slow queries will be logged.
+sample_ratio = 1.0
+
+## The TTL of the `slow_queries` system table. Default is `90d` when `record_type` is `system_table`.
+ttl = "90d"
+
+## The tracing options. Only effect when compiled with `tokio-console` feature.
+#+ [tracing]
+## The tokio console address.
+## @toml2docs:none-default
+#+ tokio_console_addr = "127.0.0.1"
+
+## The memory options.
+[memory]
+## Whether to enable heap profiling activation during startup.
+## When enabled, heap profiling will be activated if the `MALLOC_CONF` environment variable
+## is set to "prof:true,prof_active:false". The official image adds this env variable.
+## Default is true.
+enable_heap_profiling = true
+
+## Configuration options for the event recorder.
+[event_recorder]
+## TTL for the events table that will be used to store the events. Default is `90d`.
+ttl = "90d"

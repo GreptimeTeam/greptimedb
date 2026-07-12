@@ -1,0 +1,224 @@
+CREATE TABLE t1 (n INT, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+INSERT INTO t1 VALUES (1, 1), (2, 2), (3, 3), (4, 4), (5, 5), (6, 6), (7, 7), (8, 8), (9, 9), (10, 10);
+
+Affected Rows: 10
+
+CREATE VIEW IF NOT EXISTS v1 (a) AS SELECT * FROM t1;
+
+Error: 1004(InvalidArguments), Expect 2 columns for view v1, but found 1
+
+CREATE VIEW IF NOT EXISTS v1 (a) AS SELECT n FROM t1;
+
+Affected Rows: 0
+
+SHOW CREATE VIEW v1;
+
++------+------------------------------------------------------+
+| View | Create View                                          |
++------+------------------------------------------------------+
+| v1   | CREATE VIEW IF NOT EXISTS v1 (a) AS SELECT n FROM t1 |
++------+------------------------------------------------------+
+
+SELECT * FROM v1;
+
++----+
+| a  |
++----+
+| 1  |
+| 2  |
+| 3  |
+| 4  |
+| 5  |
+| 6  |
+| 7  |
+| 8  |
+| 9  |
+| 10 |
++----+
+
+SELECT a FROM v1;
+
++----+
+| a  |
++----+
+| 1  |
+| 2  |
+| 3  |
+| 4  |
+| 5  |
+| 6  |
+| 7  |
+| 8  |
+| 9  |
+| 10 |
++----+
+
+SELECT n FROM v1;
+
+Error: 3000(PlanQuery), Failed to plan SQL: No field named n. Valid fields are v1.a.
+
+CREATE OR REPLACE VIEW v1 (a, b) AS SELECT n, n+1 FROM t1;
+
+Affected Rows: 0
+
+SHOW CREATE VIEW v1;
+
++------+-------------------------------------------------------------+
+| View | Create View                                                 |
++------+-------------------------------------------------------------+
+| v1   | CREATE OR REPLACE VIEW v1 (a, b) AS SELECT n, n + 1 FROM t1 |
++------+-------------------------------------------------------------+
+
+SELECT * FROM v1;
+
++----+----+
+| a  | b  |
++----+----+
+| 1  | 2  |
+| 2  | 3  |
+| 3  | 4  |
+| 4  | 5  |
+| 5  | 6  |
+| 6  | 7  |
+| 7  | 8  |
+| 8  | 9  |
+| 9  | 10 |
+| 10 | 11 |
++----+----+
+
+SELECT * FROM v1 WHERE a > 5;
+
++----+----+
+| a  | b  |
++----+----+
+| 6  | 7  |
+| 7  | 8  |
+| 8  | 9  |
+| 9  | 10 |
+| 10 | 11 |
++----+----+
+
+SELECT * FROM v1 WHERE b > 5;
+
++----+----+
+| a  | b  |
++----+----+
+| 5  | 6  |
+| 6  | 7  |
+| 7  | 8  |
+| 8  | 9  |
+| 9  | 10 |
+| 10 | 11 |
++----+----+
+
+SELECT a FROM v1;
+
++----+
+| a  |
++----+
+| 1  |
+| 2  |
+| 3  |
+| 4  |
+| 5  |
+| 6  |
+| 7  |
+| 8  |
+| 9  |
+| 10 |
++----+
+
+SELECT b FROM v1;
+
++----+
+| b  |
++----+
+| 2  |
+| 3  |
+| 4  |
+| 5  |
+| 6  |
+| 7  |
+| 8  |
+| 9  |
+| 10 |
+| 11 |
++----+
+
+SELECT a,b FROM v1;
+
++----+----+
+| a  | b  |
++----+----+
+| 1  | 2  |
+| 2  | 3  |
+| 3  | 4  |
+| 4  | 5  |
+| 5  | 6  |
+| 6  | 7  |
+| 7  | 8  |
+| 8  | 9  |
+| 9  | 10 |
+| 10 | 11 |
++----+----+
+
+SELECT n FROM v1;
+
+Error: 3000(PlanQuery), Failed to plan SQL: No field named n. Valid fields are v1.a, v1.b.
+
+SELECT * FROM v1 WHERE n > 5;
+
+Error: 3000(PlanQuery), Failed to plan SQL: No field named n. Valid fields are v1.a, v1.b.
+
+-- test view after altering table t1 --
+CREATE OR REPLACE VIEW v1 AS SELECT n, ts FROM t1 LIMIT 5;
+
+Affected Rows: 0
+
+SELECT * FROM v1;
+
++---+-------------------------+
+| n | ts                      |
++---+-------------------------+
+| 1 | 1970-01-01T00:00:00.001 |
+| 2 | 1970-01-01T00:00:00.002 |
+| 3 | 1970-01-01T00:00:00.003 |
+| 4 | 1970-01-01T00:00:00.004 |
+| 5 | 1970-01-01T00:00:00.005 |
++---+-------------------------+
+
+ALTER TABLE t1 ADD COLUMN s STRING DEFAULT '';
+
+Affected Rows: 0
+
+SELECT * FROM v1;
+
++---+-------------------------+
+| n | ts                      |
++---+-------------------------+
+| 1 | 1970-01-01T00:00:00.001 |
+| 2 | 1970-01-01T00:00:00.002 |
+| 3 | 1970-01-01T00:00:00.003 |
+| 4 | 1970-01-01T00:00:00.004 |
+| 5 | 1970-01-01T00:00:00.005 |
++---+-------------------------+
+
+ALTER TABLE t1 DROP COLUMN n;
+
+Affected Rows: 0
+
+SELECT * FROM v1;
+
+Error: 1002(Unexpected), Failed to decode DataFusion plan: No field named n. Valid fields are greptime.public.t1.ts, greptime.public.t1.s.
+
+DROP VIEW v1;
+
+Affected Rows: 0
+
+DROP TABLE t1;
+
+Affected Rows: 0
+

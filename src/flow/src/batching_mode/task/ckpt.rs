@@ -1,0 +1,346 @@
+// Copyright 2023 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+use std::error::Error as StdError;
+use std::time::Duration;
+
+use client::OutputWithMetrics;
+use common_error::ext::ErrorExt;
+use common_error::status_code::StatusCode;
+use common_telemetry::tracing::warn;
+use common_telemetry::{debug, info};
+
+use crate::batching_mode::checkpoint::{
+    FlowCheckpointDecision, FlowQueryFallbackReason, checkpoint_mode_label,
+};
+use crate::batching_mode::state::{CheckpointMode, TaskState};
+use crate::batching_mode::task::{BatchingTask, QueryCoverage};
+use crate::metrics::{
+    METRIC_FLOW_BATCHING_ENGINE_CHECKPOINT_DECISION_CNT, METRIC_FLOW_BATCHING_ENGINE_QUERY_MODE_CNT,
+};
+use crate::{Error, FlowId};
+
+/// Liveness guard: when a fenced repair query fails with a wrapped error whose
+/// text indicates a stale snapshot fence (even when `StatusCode::RequestOutdated`
+/// was lost through client layers), classify it as `SnapshotFenceExpired` to
+/// break the retry loop and force a rebind of the fence high `H`.
+///
+/// Long-term the structured `StatusCode` / retry hint path should be preserved
+/// end-to-end; this text fallback is a narrow safety measure.
+fn matches_stale_snapshot_fence_text(err: &Error) -> bool {
+    let markers = [
+        "STALE_SNAPSHOT_FENCE",
+        "REBIND_SNAPSHOT_FENCE",
+        "snapshot upper bound stale",
+    ];
+    // Check the top-level error Display and Debug.
+    let debug_str = format!("{:?}", err);
+    let display_str = err.to_string();
+    for marker in &markers {
+        if debug_str.contains(marker) || display_str.contains(marker) {
+            return true;
+        }
+    }
+    // Walk the error source chain.
+    let mut source = err.source();
+    while let Some(s) = source {
+        let debug_str = format!("{:?}", s);
+        let display_str = s.to_string();
+        for marker in &markers {
+            if debug_str.contains(marker) || display_str.contains(marker) {
+                return true;
+            }
+        }
+        source = s.source();
+    }
+    false
+}
+
+impl BatchingTask {
+    /// Classify execution errors into checkpoint fallback reasons. A stale
+    /// snapshot fence is special only for fenced repair chunks.
+    pub(super) fn query_failure_reason(
+        err: &Error,
+        coverage: &QueryCoverage,
+    ) -> FlowQueryFallbackReason {
+        if err.status_code() == StatusCode::RequestOutdated {
+            if matches!(coverage, QueryCoverage::FencedRepairChunk { .. }) {
+                FlowQueryFallbackReason::SnapshotFenceExpired
+            } else {
+                FlowQueryFallbackReason::StaleCursor
+            }
+        } else if matches!(coverage, QueryCoverage::FencedRepairChunk { .. })
+            && matches_stale_snapshot_fence_text(err)
+        {
+            // Narrow text-based fallback for wrapped errors where the
+            // structured StatusCode::RequestOutdated was lost through
+            // frontend/client layers. Without this fenced repair will
+            // retry the same stale `given_seq` every refresh tick.
+            FlowQueryFallbackReason::SnapshotFenceExpired
+        } else if matches!(coverage, QueryCoverage::IncrementalDelta) {
+            FlowQueryFallbackReason::IncrementalQueryFailure
+        } else {
+            FlowQueryFallbackReason::QueryFailure
+        }
+    }
+
+    /// Apply the conservative state transition for a failed query. This never
+    /// advances checkpoints; it only decides whether to abandon repair state or
+    /// fall back from incremental mode.
+    pub(super) fn apply_query_failure_to_state(
+        state: &mut TaskState,
+        elapsed: Duration,
+        coverage: &QueryCoverage,
+        reason: FlowQueryFallbackReason,
+    ) -> Option<FlowCheckpointDecision> {
+        state.after_query_exec(elapsed, false);
+        let checkpoint_mode = state.checkpoint_mode();
+        if matches!(coverage, QueryCoverage::FencedRepairChunk { .. })
+            && matches!(reason, FlowQueryFallbackReason::SnapshotFenceExpired)
+        {
+            // `abandon_fenced_repair()` restores the not-yet-in-flight pending
+            // windows from the stale repair back to live dirty windows. The
+            // currently executing chunk is restored separately by the outer
+            // failure path (`handle_executed_query_failure`), after this state
+            // transition has removed `pending_fenced_repair`, so it also lands
+            // in live dirty windows for the next scoped base repair.
+            state.abandon_fenced_repair();
+            return Some(FlowCheckpointDecision::FallbackToFullSnapshot {
+                previous_mode: checkpoint_mode,
+                reason,
+            });
+        }
+
+        if checkpoint_mode == CheckpointMode::Incremental {
+            state.mark_full_snapshot();
+        }
+        Some(FlowCheckpointDecision::FallbackToFullSnapshot {
+            previous_mode: checkpoint_mode,
+            reason,
+        })
+    }
+
+    /// Apply checkpoint transitions for a successfully executed query using its
+    /// terminal watermark proof and declared coverage.
+    pub(super) fn apply_query_result_to_state(
+        state: &mut TaskState,
+        res: &OutputWithMetrics,
+        elapsed: Duration,
+        coverage: &QueryCoverage,
+    ) -> FlowCheckpointDecision {
+        state.after_query_exec(elapsed, true);
+        let checkpoint_mode = state.checkpoint_mode();
+        if let (Some(participating_regions), Some(watermark_map)) =
+            (res.participating_regions(), res.region_watermark_map())
+        {
+            let participating_region_count = participating_regions.len();
+            let watermark_count = watermark_map.len();
+            match coverage {
+                QueryCoverage::ScopedBaseRepair => {
+                    if !state.can_advance_full_snapshot_checkpoints(
+                        &participating_regions,
+                        &watermark_map,
+                    ) {
+                        return FlowCheckpointDecision::FallbackToFullSnapshot {
+                            previous_mode: checkpoint_mode,
+                            reason: FlowQueryFallbackReason::IncompleteRegionWatermark,
+                        };
+                    }
+
+                    if state.is_incremental_disabled() {
+                        return FlowCheckpointDecision::FallbackToFullSnapshot {
+                            previous_mode: CheckpointMode::FullSnapshot,
+                            reason: FlowQueryFallbackReason::IncrementalDisabled,
+                        };
+                    }
+
+                    if state.dirty_time_windows.is_empty() {
+                        state.advance_checkpoints(watermark_map);
+                        FlowCheckpointDecision::AdvancedFromFullSnapshot {
+                            participating_regions: participating_region_count,
+                            watermarks: watermark_count,
+                        }
+                    } else if let Some(repair) =
+                        state.start_fenced_repair(watermark_map.into_iter().collect())
+                    {
+                        FlowCheckpointDecision::ContinuedFencedRepair {
+                            pending_windows: repair.pending_windows().len(),
+                            watermarks: repair.high().len(),
+                        }
+                    } else {
+                        FlowCheckpointDecision::FallbackToFullSnapshot {
+                            previous_mode: checkpoint_mode,
+                            reason: FlowQueryFallbackReason::DirtyBacklogPending,
+                        }
+                    }
+                }
+                QueryCoverage::FencedRepairChunk { .. } => {
+                    if !state
+                        .fenced_repair_watermarks_match_high(&participating_regions, &watermark_map)
+                    {
+                        // A successful repair chunk whose terminal watermark
+                        // differs from the frozen fence `H` cannot prove that
+                        // continuing the same repair is safe. The pre-`H`
+                        // repair work item already executed under the snapshot
+                        // fence, so do not requeue it; restore only
+                        // not-yet-in-flight pending windows, then start over
+                        // with a fresh H. Later/post-`H` writes still rely on
+                        // live dirty notifications.
+                        state.abandon_fenced_repair();
+                        return FlowCheckpointDecision::FallbackToFullSnapshot {
+                            previous_mode: checkpoint_mode,
+                            reason: FlowQueryFallbackReason::IncompleteRegionWatermark,
+                        };
+                    }
+
+                    if state.fenced_repair_pending_is_empty() {
+                        state.finish_fenced_repair();
+                        if state.is_incremental_disabled() {
+                            FlowCheckpointDecision::FallbackToFullSnapshot {
+                                previous_mode: CheckpointMode::FullSnapshot,
+                                reason: FlowQueryFallbackReason::IncrementalDisabled,
+                            }
+                        } else {
+                            FlowCheckpointDecision::AdvancedFromFullSnapshot {
+                                participating_regions: participating_region_count,
+                                watermarks: watermark_count,
+                            }
+                        }
+                    } else {
+                        let repair = state
+                            .pending_fenced_repair()
+                            .expect("fenced repair exists after matching repair chunk watermark");
+                        FlowCheckpointDecision::ContinuedFencedRepair {
+                            pending_windows: repair.pending_windows().len(),
+                            watermarks: repair.high().len(),
+                        }
+                    }
+                }
+                QueryCoverage::UnfilteredFull => {
+                    if state.can_advance_full_snapshot_checkpoints(
+                        &participating_regions,
+                        &watermark_map,
+                    ) {
+                        state.advance_checkpoints(watermark_map);
+                        if state.is_incremental_disabled() {
+                            FlowCheckpointDecision::FallbackToFullSnapshot {
+                                previous_mode: CheckpointMode::FullSnapshot,
+                                reason: FlowQueryFallbackReason::IncrementalDisabled,
+                            }
+                        } else {
+                            FlowCheckpointDecision::AdvancedFromFullSnapshot {
+                                participating_regions: participating_region_count,
+                                watermarks: watermark_count,
+                            }
+                        }
+                    } else {
+                        debug_assert_ne!(checkpoint_mode, CheckpointMode::Incremental);
+                        FlowCheckpointDecision::FallbackToFullSnapshot {
+                            previous_mode: checkpoint_mode,
+                            reason: FlowQueryFallbackReason::IncompleteRegionWatermark,
+                        }
+                    }
+                }
+                QueryCoverage::IncrementalDelta => {
+                    if state.can_advance_incremental_checkpoints_with_participation(
+                        &participating_regions,
+                        &watermark_map,
+                    ) {
+                        state.advance_incremental_checkpoints_with_participation(
+                            &participating_regions,
+                            watermark_map,
+                        );
+                        FlowCheckpointDecision::AdvancedIncremental {
+                            participating_regions: participating_region_count,
+                            watermarks: watermark_count,
+                        }
+                    } else {
+                        state.mark_full_snapshot();
+                        FlowCheckpointDecision::FallbackToFullSnapshot {
+                            previous_mode: checkpoint_mode,
+                            reason: FlowQueryFallbackReason::IncompleteRegionWatermark,
+                        }
+                    }
+                }
+            }
+        } else {
+            if matches!(coverage, QueryCoverage::FencedRepairChunk { .. }) {
+                state.abandon_fenced_repair();
+            }
+            if matches!(checkpoint_mode, CheckpointMode::Incremental) {
+                state.mark_full_snapshot();
+            }
+            FlowCheckpointDecision::FallbackToFullSnapshot {
+                previous_mode: checkpoint_mode,
+                reason: FlowQueryFallbackReason::MissingRegionWatermark,
+            }
+        }
+    }
+
+    pub(super) fn record_checkpoint_decision(flow_id: FlowId, decision: FlowCheckpointDecision) {
+        let flow_id = flow_id.to_string();
+        METRIC_FLOW_BATCHING_ENGINE_CHECKPOINT_DECISION_CNT
+            .with_label_values(&[
+                flow_id.as_str(),
+                decision.mode_label(),
+                decision.decision_label(),
+                decision.reason_label(),
+            ])
+            .inc();
+
+        match decision {
+            FlowCheckpointDecision::AdvancedFromFullSnapshot {
+                participating_regions,
+                watermarks,
+            } => {
+                info!(
+                    "Flow {flow_id} switched to incremental mode after full snapshot, participating_regions={participating_regions}, watermarks={watermarks}"
+                );
+            }
+            FlowCheckpointDecision::AdvancedIncremental {
+                participating_regions,
+                watermarks,
+            } => {
+                debug!(
+                    "Flow {flow_id} advanced incremental checkpoints, participating_regions={participating_regions}, watermarks={watermarks}"
+                );
+            }
+            FlowCheckpointDecision::ContinuedFencedRepair {
+                pending_windows,
+                watermarks,
+            } => {
+                debug!(
+                    "Flow {flow_id} continued fenced repair, pending_windows={pending_windows}, watermarks={watermarks}"
+                );
+            }
+            FlowCheckpointDecision::FallbackToFullSnapshot {
+                previous_mode,
+                reason,
+            } => {
+                warn!(
+                    "Flow {flow_id} switched to full snapshot mode, previous_mode={}, reason={}",
+                    checkpoint_mode_label(previous_mode),
+                    reason.as_label()
+                );
+            }
+        }
+    }
+
+    pub(super) fn record_query_mode(flow_id: FlowId, mode: CheckpointMode) {
+        let flow_id = flow_id.to_string();
+        METRIC_FLOW_BATCHING_ENGINE_QUERY_MODE_CNT
+            .with_label_values(&[flow_id.as_str(), checkpoint_mode_label(mode)])
+            .inc();
+    }
+}

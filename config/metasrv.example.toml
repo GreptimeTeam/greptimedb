@@ -1,0 +1,382 @@
+## The working home directory.
+data_home = "./greptimedb_data"
+
+## Store server address(es). The format depends on the selected backend.
+##
+## For etcd: a list of "host:port" endpoints.
+## e.g. ["192.168.1.1:2379", "192.168.1.2:2379"]
+##
+## For PostgreSQL: a connection string in libpq format or URI.
+## e.g.
+## - "host=localhost port=5432 user=postgres password=<PASSWORD> dbname=postgres"
+## - "postgresql://user:password@localhost:5432/mydb?connect_timeout=10"
+## The detail see: https://docs.rs/tokio-postgres/latest/tokio_postgres/config/struct.Config.html
+##
+## For mysql store, the format is a MySQL connection URL.
+## e.g. "mysql://user:password@localhost:3306/greptime_meta?ssl-mode=VERIFY_CA&ssl-ca=/path/to/ca.pem"
+store_addrs = ["127.0.0.1:2379"]
+
+## If it's not empty, the metasrv will store all data with this key prefix.
+store_key_prefix = ""
+
+## The datastore for meta server.
+## Available values:
+## - `etcd_store` (default value)
+## - `memory_store`
+## - `postgres_store`
+## - `mysql_store`
+backend = "etcd_store"
+
+## Table name in RDS to store metadata. Effect when using a RDS kvbackend.
+## **Only used when backend is `postgres_store`.**
+meta_table_name = "greptime_metakv"
+
+## Optional PostgreSQL schema for metadata table and election table name qualification.
+## When PostgreSQL public schema is not writable (e.g., PostgreSQL 15+ with restricted public),
+## set this to a writable schema. GreptimeDB will use `meta_schema_name`.`meta_table_name`.
+## **Only used when backend is `postgres_store`.**
+meta_schema_name = "greptime_schema"
+
+## Automatically create PostgreSQL schema if it doesn't exist.
+## When enabled, the system will execute `CREATE SCHEMA IF NOT EXISTS <schema_name>`
+## before creating metadata tables. This is useful in production environments where
+## manual schema creation may be restricted.
+## Default is true.
+## Note: The PostgreSQL user must have CREATE SCHEMA permission for this to work.
+## **Only used when backend is `postgres_store`.**
+auto_create_schema = true
+
+## Advisory lock id in PostgreSQL for election. Effect when using PostgreSQL as kvbackend
+## Only used when backend is `postgres_store`.
+meta_election_lock_id = 1
+
+## Datanode selector type.
+## - `round_robin` (default value)
+## - `lease_based`
+## - `load_based`
+## For details, please see "https://docs.greptime.com/developer-guide/metasrv/selector".
+selector = "round_robin"
+
+## Whether to enable region failover.
+## This feature is only available on GreptimeDB running on cluster mode and
+## - Using Remote WAL
+## - Using shared storage (e.g., s3).
+enable_region_failover = false
+
+## The delay before starting region failure detection.
+## This delay helps prevent Metasrv from triggering unnecessary region failovers before all Datanodes are fully started.
+## Especially useful when the cluster is not deployed with GreptimeDB Operator and maintenance mode is not enabled.
+region_failure_detector_initialization_delay = '10m'
+
+## Whether to allow region failover on local WAL.
+## **This option is not recommended to be set to true, because it may lead to data loss during failover.**
+allow_region_failover_on_local_wal = false
+
+## Max allowed idle time before removing node info from metasrv memory.
+node_max_idle_time = "24hours"
+
+## Base heartbeat interval for calculating distributed time constants.
+## The frontend heartbeat interval is 6 times of the base heartbeat interval.
+## The flownode/datanode heartbeat interval is 1 times of the base heartbeat interval.
+## e.g., If the base heartbeat interval is 3s, the frontend heartbeat interval is 18s, the flownode/datanode heartbeat interval is 3s.
+## Heartbeat intervals are negotiated from metasrv during handshake; local node configs do not override this.
+#+ heartbeat_interval = "3s"
+
+## Whether to enable greptimedb telemetry. Enabled by default.
+#+ enable_telemetry = true
+
+## The runtime options.
+#+ [runtime]
+## The number of threads to execute the runtime for global read operations.
+#+ global_rt_size = 8
+## The number of threads to execute the runtime for global write operations.
+#+ compact_rt_size = 4
+
+## TLS configuration for kv store backend (applicable for etcd, PostgreSQL, and MySQL backends)
+## When using etcd, PostgreSQL, or MySQL as metadata store, you can configure TLS here
+##
+## Note: if TLS is configured in both this section and the `store_addrs` connection string, the
+## settings here will override the TLS settings in `store_addrs`.
+[backend_tls]
+## TLS mode, refer to https://www.postgresql.org/docs/current/libpq-ssl.html
+## - "disable" - No TLS
+## - "prefer" (default) - Try TLS, fallback to plain
+## - "require" - Require TLS
+## - "verify_ca" - Require TLS and verify CA
+## - "verify_full" - Require TLS and verify hostname
+mode = "prefer"
+
+## Path to client certificate file (for client authentication)
+## Like "/path/to/client.crt"
+cert_path = ""
+
+## Path to client private key file (for client authentication)
+## Like "/path/to/client.key"
+key_path = ""
+
+## Path to CA certificate file (for server certificate verification)
+## Required when using custom CAs or self-signed certificates
+## Leave empty to use system root certificates only
+## Like "/path/to/ca.crt"
+ca_cert_path = ""
+
+## The backend client options.
+## Currently, only applicable when using etcd as the metadata store.
+#+ [backend_client]
+## The keep alive timeout for backend client.
+#+ keep_alive_timeout = "3s"
+## The keep alive interval for backend client.
+#+ keep_alive_interval = "10s"
+## The connect timeout for backend client.
+#+ connect_timeout = "3s"
+
+## The gRPC server options.
+[grpc]
+## The address to bind the gRPC server.
+bind_addr = "127.0.0.1:3002"
+## The communication server address for the frontend and datanode to connect to metasrv.
+## If left empty or unset, the server will automatically use the IP address of the first network interface
+## on the host, with the same port number as the one specified in `grpc.bind_addr`.
+server_addr = "127.0.0.1:3002"
+## The number of server worker threads.
+runtime_size = 8
+## The maximum receive message size for gRPC server.
+max_recv_message_size = "512MB"
+## The maximum send message size for gRPC server.
+max_send_message_size = "512MB"
+## The server side HTTP/2 keep-alive interval
+#+ http2_keep_alive_interval = "10s"
+## The server side HTTP/2 keep-alive timeout.
+#+ http2_keep_alive_timeout = "3s"
+
+## The HTTP server options.
+[http]
+## The address to bind the HTTP server.
+addr = "127.0.0.1:4000"
+## HTTP request timeout. Set to 0 to disable timeout.
+timeout = "0s"
+## HTTP request body limit.
+## The following units are supported: `B`, `KB`, `KiB`, `MB`, `MiB`, `GB`, `GiB`, `TB`, `TiB`, `PB`, `PiB`.
+## Set to 0 to disable limit.
+body_limit = "64MB"
+
+## Procedure storage options.
+[procedure]
+
+## Procedure max retry time.
+max_retry_times = 12
+
+## Initial retry delay of procedures, increases exponentially
+retry_delay = "500ms"
+
+## Auto split large value
+## GreptimeDB procedure uses etcd as the default metadata storage backend.
+## The etcd the maximum size of any request is 1.5 MiB
+## 1500KiB = 1536KiB (1.5MiB) - 36KiB (reserved size of key)
+## Comments out the `max_metadata_value_size`, for don't split large value (no limit).
+max_metadata_value_size = "1500KiB"
+
+## Max running procedures.
+## The maximum number of procedures that can be running at the same time.
+## If the number of running procedures exceeds this limit, the procedure will be rejected.
+max_running_procedures = 128
+
+# Failure detectors options.
+# GreptimeDB uses the Phi Accrual Failure Detector algorithm to detect datanode failures.
+[failure_detector]
+## Maximum acceptable φ before the peer is treated as failed.
+## Lower values react faster but yield more false positives.
+threshold = 8.0
+## The minimum standard deviation of the heartbeat intervals.
+## So tiny variations don’t make φ explode. Prevents hypersensitivity when heartbeat intervals barely vary.
+min_std_deviation = "100ms"
+## The acceptable pause duration between heartbeats.
+## Additional extra grace period to the learned mean interval before φ rises, absorbing temporary network hiccups or GC pauses.
+acceptable_heartbeat_pause = "10000ms"
+
+## Datanode options.
+[datanode]
+
+## Datanode client options.
+[datanode.client]
+
+## Operation timeout.
+timeout = "10s"
+
+## Connect server timeout.
+connect_timeout = "10s"
+
+## `TCP_NODELAY` option for accepted connections.
+tcp_nodelay = true
+
+[wal]
+# Available wal providers:
+# - `raft_engine` (default): there're none raft-engine wal config since metasrv only involves in remote wal currently.
+# - `kafka`: metasrv **have to be** configured with kafka wal config when using kafka wal provider in datanode.
+provider = "raft_engine"
+
+## The broker endpoints of the Kafka cluster.
+##
+## **It's only used when the provider is `kafka`**.
+broker_endpoints = ["127.0.0.1:9092"]
+
+## Automatically create topics for WAL.
+## Set to `true` to automatically create topics for WAL.
+## Otherwise, use topics named `topic_name_prefix_[0..num_topics)`
+## **It's only used when the provider is `kafka`**.
+auto_create_topics = true
+
+## Interval of automatically WAL pruning.
+## Set to `0s` to disable automatically WAL pruning which delete unused remote WAL entries periodically.
+## **It's only used when the provider is `kafka`**.
+auto_prune_interval = "30m"
+
+## Whether automatically WAL pruning only updates the metadata marker and skips Kafka DeleteRecords.
+## Set to `true` for Kafka deployments that do not support DeleteRecords.
+## **It's only used when the provider is `kafka`**.
+auto_prune_logical_delete = false
+
+## Estimated size threshold to trigger a flush when using Kafka remote WAL.
+## Since multiple regions may share a Kafka topic, the estimated size is calculated as:
+##   (latest_entry_id - flushed_entry_id) * avg_record_size
+## MetaSrv triggers a flush for a region when this estimated size exceeds `flush_trigger_size`.
+## - `latest_entry_id`: The latest entry ID in the topic.
+## - `flushed_entry_id`: The last flushed entry ID for the region.
+## Set to "0" to let the system decide the flush trigger size.
+## **It's only used when the provider is `kafka`**.
+flush_trigger_size = "512MB"
+
+## Estimated size threshold to trigger a checkpoint when using Kafka remote WAL.
+## The estimated size is calculated as:
+##   (latest_entry_id - last_checkpoint_entry_id) * avg_record_size
+## MetaSrv triggers a checkpoint for a region when this estimated size exceeds `checkpoint_trigger_size`.
+## Set to "0" to let the system decide the checkpoint trigger size.
+## **It's only used when the provider is `kafka`**.
+checkpoint_trigger_size = "128MB"
+
+## Concurrent task limit for automatically WAL pruning.
+## **It's only used when the provider is `kafka`**.
+auto_prune_parallelism = 10
+
+## Number of topics used for remote WAL.
+## **It's only used when the provider is `kafka`**.
+num_topics = 64
+
+## Topic selector type.
+## Available selector types:
+## - `round_robin` (default)
+## **It's only used when the provider is `kafka`**.
+selector_type = "round_robin"
+
+
+## A Kafka topic is constructed by concatenating `topic_name_prefix` and `topic_id`.
+## Only accepts strings that match the following regular expression pattern:
+## [a-zA-Z_:-][a-zA-Z0-9_:\-\.@#]*
+## i.g., greptimedb_wal_topic_0, greptimedb_wal_topic_1.
+## **It's only used when the provider is `kafka`**.
+topic_name_prefix = "greptimedb_wal_topic"
+
+## Expected number of replicas of each partition.
+## **It's only used when the provider is `kafka`**.
+replication_factor = 1
+
+## The timeout for creating a Kafka topic.
+## **It's only used when the provider is `kafka`**.
+create_topic_timeout = "30s"
+
+# The Kafka SASL configuration.
+# **It's only used when the provider is `kafka`**.
+# Available SASL mechanisms:
+# - `PLAIN`
+# - `SCRAM-SHA-256`
+# - `SCRAM-SHA-512`
+# [wal.sasl]
+# type = "SCRAM-SHA-512"
+# username = "user_kafka"
+# password = "secret"
+
+# The Kafka TLS configuration.
+# **It's only used when the provider is `kafka`**.
+# [wal.tls]
+# server_ca_cert_path = "/path/to/server_cert"
+# client_cert_path = "/path/to/client_cert"
+# client_key_path = "/path/to/key"
+
+## Configuration options for the event recorder.
+[event_recorder]
+## TTL for the events table that will be used to store the events. Default is `90d`.
+ttl = "90d"
+
+## Configuration options for the stats persistence.
+[stats_persistence]
+## TTL for the stats table that will be used to store the stats.
+## Set to `0s` to disable stats persistence.
+## Default is `0s`.
+## If you want to enable stats persistence, set the TTL to a value greater than 0.
+## It is recommended to set a small value, e.g., `3h`.
+ttl = "0s"
+## The interval to persist the stats. Default is `10m`.
+## The minimum value is `10m`, if the value is less than `10m`, it will be overridden to `10m`.
+interval = "10m"
+
+[gc]
+## Whether GC is enabled. Default to false. Need to be the same with datanode's `mito.gc.enable`
+## If set to false, no GC will be performed
+enable = false
+## Cooldown period between GC operations on the same region.
+gc_cooldown_period = "5m"
+
+## The logging options.
+[logging]
+## The directory to store the log files. If set to empty, logs will not be written to files.
+dir = "./greptimedb_data/logs"
+
+## The log level. Can be `info`/`debug`/`warn`/`error`.
+## @toml2docs:none-default
+level = "info"
+
+## Enable OTLP tracing.
+enable_otlp_tracing = false
+
+## The OTLP tracing endpoint.
+otlp_endpoint = "http://localhost:4318/v1/traces"
+
+## Whether to append logs to stdout.
+append_stdout = true
+
+## The log format. Can be `text`/`json`.
+log_format = "text"
+
+## The maximum amount of log files.
+max_log_files = 720
+
+## The OTLP tracing export protocol. Can be `grpc`/`http`.
+otlp_export_protocol = "http"
+
+## Additional OTLP headers, only valid when using OTLP http
+[logging.otlp_headers]
+## @toml2docs:none-default
+#Authorization = "Bearer my-token"
+## @toml2docs:none-default
+#Database = "My database"
+
+
+## The percentage of tracing will be sampled and exported.
+## Valid range `[0, 1]`, 1 means all traces are sampled, 0 means all traces are not sampled, the default value is 1.
+## ratio > 1 are treated as 1. Fractions < 0 are treated as 0
+[logging.tracing_sample_ratio]
+default_ratio = 1.0
+
+## The tracing options. Only effect when compiled with `tokio-console` feature.
+#+ [tracing]
+## The tokio console address.
+## @toml2docs:none-default
+#+ tokio_console_addr = "127.0.0.1"
+
+## The memory options.
+[memory]
+## Whether to enable heap profiling activation during startup.
+## When enabled, heap profiling will be activated if the `MALLOC_CONF` environment variable
+## is set to "prof:true,prof_active:false". The official image adds this env variable.
+## Default is true.
+enable_heap_profiling = true

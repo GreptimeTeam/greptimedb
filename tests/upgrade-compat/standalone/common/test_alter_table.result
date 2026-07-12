@@ -1,0 +1,54 @@
+-- SQLNESS ARG version=v0.9.5
+CREATE TABLE alter_test (
+    id INT,
+    val STRING,
+    ts TIMESTAMP TIME INDEX,
+    PRIMARY KEY(id)
+);
+
+Affected Rows: 0
+
+INSERT INTO alter_test(id, val, ts) VALUES (1, 'a', 1672531200000);
+
+Affected Rows: 1
+
+-- SQLNESS ARG version=latest
+ALTER TABLE alter_test ADD COLUMN new_col INT;
+
+Affected Rows: 0
+
+SHOW CREATE TABLE alter_test;
+
++------------+-------------------------------------------+
+| Table      | Create Table                              |
++------------+-------------------------------------------+
+| alter_test | CREATE TABLE IF NOT EXISTS "alter_test" ( |
+|            |   "id" INT NULL,                          |
+|            |   "val" STRING NULL,                      |
+|            |   "ts" TIMESTAMP(3) NOT NULL,             |
+|            |   "new_col" INT NULL,                     |
+|            |   TIME INDEX ("ts"),                      |
+|            |   PRIMARY KEY ("id")                      |
+|            | )                                         |
+|            |                                           |
+|            | ENGINE=mito                               |
+|            |                                           |
++------------+-------------------------------------------+
+
+INSERT INTO alter_test(id, val, ts, new_col) VALUES (2, 'b', 1672531201000, 100);
+
+Affected Rows: 1
+
+SELECT * FROM alter_test ORDER BY id;
+
++----+-----+---------------------+---------+
+| id | val | ts                  | new_col |
++----+-----+---------------------+---------+
+| 1  | a   | 2023-01-01T00:00:00 |         |
+| 2  | b   | 2023-01-01T00:00:01 | 100     |
++----+-----+---------------------+---------+
+
+DROP TABLE alter_test;
+
+Affected Rows: 0
+

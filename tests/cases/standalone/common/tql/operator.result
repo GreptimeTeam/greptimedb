@@ -1,0 +1,133 @@
+-- Port from operators.test L607 - L630, commit 001ee2620e094970e5657ce39275b2fccdbd1359
+-- Include atan2
+-- load 5m
+--     trigy{} 10
+--     trigx{} 20
+--     trigNaN{} NaN
+create table trigy (ts timestamp(3) time index, val double);
+
+Affected Rows: 0
+
+insert into trigy values (0,10);
+
+Affected Rows: 1
+
+create table trigx (ts timestamp(3) time index, val double);
+
+Affected Rows: 0
+
+insert into trigx values (0,20);
+
+Affected Rows: 1
+
+create table trignan (ts timestamp(3) time index, val double);
+
+Affected Rows: 0
+
+insert into trignan values (0, 'NaN'::double);
+
+Affected Rows: 1
+
+-- eval instant at 1m trigy atan2 trigx
+--     trigy{} 0.4636476090008061
+tql eval (60, 60, '1s') trigy atan2 trigx;
+
++---------------------+----------------------------+
+| ts                  | atan2(trigy.val,trigx.val) |
++---------------------+----------------------------+
+| 1970-01-01T00:01:00 | 0.4636476090008061         |
++---------------------+----------------------------+
+
+-- eval instant at 1m trigy atan2 trigNaN
+--     trigy{} NaN
+-- This query doesn't have result because `trignan` is NaN and will be filtered out.
+tql eval (60, 60, '1s') trigy atan2 trignan;
+
+++
+++
+
+-- eval instant at 1m 10 atan2 20
+--     0.4636476090008061
+tql eval (60, 60, '1s') 10 atan2 20;
+
++---------------------+--------------------+
+| time                | value              |
++---------------------+--------------------+
+| 1970-01-01T00:01:00 | 0.4636476090008061 |
++---------------------+--------------------+
+
+-- eval instant at 1m 10 atan2 NaN
+--     NaN
+tql eval (60, 60, '1s') 10 atan2 NaN;
+
++---------------------+-------+
+| time                | value |
++---------------------+-------+
+| 1970-01-01T00:01:00 | NaN   |
++---------------------+-------+
+
+drop table trigx;
+
+Affected Rows: 0
+
+drop table trigy;
+
+Affected Rows: 0
+
+drop table trignan;
+
+Affected Rows: 0
+
+-- About irate. Related to issue https://github.com/GreptimeTeam/greptimedb/issues/5880
+CREATE TABLE t(
+   greptime_timestamp TIMESTAMP(9) TIME INDEX,
+   greptime_value DOUBLE
+);
+
+Affected Rows: 0
+
+INSERT INTO t(greptime_timestamp, greptime_value)
+VALUES
+   ('2025-04-01T00:00:00.5Z', 1),
+   ('2025-04-01T00:00:01Z', 2),
+   ('2025-04-01T00:00:01.5Z', 3),
+   ('2025-04-01T00:00:02Z', 4),
+   ('2025-04-01T00:00:02.5Z', 5),
+   ('2025-04-01T00:00:03Z', 6),
+   ('2025-04-01T00:00:03.5Z', 7),
+   ('2025-04-01T00:00:04Z', 8),
+   ('2025-04-01T00:00:04.5Z', 9),
+   ('2025-04-01T00:00:05Z', 10),
+   ('2025-04-01T00:00:05.5Z', 11),
+   ('2025-04-01T00:00:06Z', 12),
+   ('2025-04-01T00:00:06.5Z', 13),
+   ('2025-04-01T00:00:07Z', 14),
+   ('2025-04-01T00:00:07.5Z', 15),
+   ('2025-04-01T00:00:08Z', 16),
+   ('2025-04-01T00:00:08.5Z', 17),
+   ('2025-04-01T00:00:09Z', 18),
+   ('2025-04-01T00:00:09.5Z', 19),
+   ('2025-04-01T00:00:10Z', 20);
+
+Affected Rows: 20
+
+tql eval (1743465600.5, 1743465610, '1s') irate(t[2s]);
+
++-------------------------+-----------------------------------------------------+
+| greptime_timestamp      | prom_irate(greptime_timestamp_range,greptime_value) |
++-------------------------+-----------------------------------------------------+
+| 2025-04-01T00:00:01.500 | 2.0                                                 |
+| 2025-04-01T00:00:02.500 | 2.0                                                 |
+| 2025-04-01T00:00:03.500 | 2.0                                                 |
+| 2025-04-01T00:00:04.500 | 2.0                                                 |
+| 2025-04-01T00:00:05.500 | 2.0                                                 |
+| 2025-04-01T00:00:06.500 | 2.0                                                 |
+| 2025-04-01T00:00:07.500 | 2.0                                                 |
+| 2025-04-01T00:00:08.500 | 2.0                                                 |
+| 2025-04-01T00:00:09.500 | 2.0                                                 |
++-------------------------+-----------------------------------------------------+
+
+drop table t;
+
+Affected Rows: 0
+

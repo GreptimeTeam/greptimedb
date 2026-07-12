@@ -1,0 +1,95 @@
+-- Migrated from DuckDB test: test/sql/cast/string_to_integer_decimal_cast.test
+-- Description: String to number casts
+-- Note: GreptimeDB doesn't support decimal string to integer conversion
+-- Valid integer string conversions
+SELECT '0'::INT;
+
++-----------+
+| Utf8("0") |
++-----------+
+| 0         |
++-----------+
+
+SELECT '1'::INT;
+
++-----------+
+| Utf8("1") |
++-----------+
+| 1         |
++-----------+
+
+SELECT '1000000'::INT;
+
++-----------------+
+| Utf8("1000000") |
++-----------------+
+| 1000000         |
++-----------------+
+
+SELECT '-1'::INT;
+
++------------+
+| Utf8("-1") |
++------------+
+| -1         |
++------------+
+
+SELECT '-1000'::INT;
+
++---------------+
+| Utf8("-1000") |
++---------------+
+| -1000         |
++---------------+
+
+-- Test with BIGINT
+SELECT '0'::BIGINT;
+
++-----------+
+| Utf8("0") |
++-----------+
+| 0         |
++-----------+
+
+SELECT '1000000'::BIGINT;
+
++-----------------+
+| Utf8("1000000") |
++-----------------+
+| 1000000         |
++-----------------+
+
+-- Convert decimal strings to DOUBLE first, then to INT if needed
+SELECT '0.5'::DOUBLE;
+
++-------------+
+| Utf8("0.5") |
++-------------+
+| 0.5         |
++-------------+
+
+SELECT '1.50004'::DOUBLE;
+
++-----------------+
+| Utf8("1.50004") |
++-----------------+
+| 1.50004         |
++-----------------+
+
+SELECT '-0.5'::DOUBLE;
+
++--------------+
+| Utf8("-0.5") |
++--------------+
+| -0.5         |
++--------------+
+
+-- Test invalid cases (should error)
+SELECT '0.5'::INT;
+
+Error: 3001(EngineExecuteQuery), Cast error: Cannot cast string '0.5' to value of Int32 type
+
+SELECT 'abc'::INT;
+
+Error: 3001(EngineExecuteQuery), Cast error: Cannot cast string 'abc' to value of Int32 type
+

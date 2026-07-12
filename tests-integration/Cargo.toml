@@ -1,0 +1,126 @@
+[package]
+name = "tests-integration"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+autotests = false
+
+[[test]]
+name = "main"
+path = "tests/main.rs"
+
+[features]
+dashboard = ["servers/dashboard"]
+vector_index = []
+
+[lints]
+workspace = true
+
+[dependencies]
+api.workspace = true
+arrow-flight.workspace = true
+async-stream.workspace = true
+async-trait.workspace = true
+auth.workspace = true
+axum.workspace = true
+base64.workspace = true
+cache.workspace = true
+catalog.workspace = true
+chrono.workspace = true
+clap.workspace = true
+client = { workspace = true, features = ["testing"] }
+cmd.workspace = true
+common-base.workspace = true
+common-catalog.workspace = true
+common-config.workspace = true
+common-error.workspace = true
+common-event-recorder.workspace = true
+common-frontend.workspace = true
+common-grpc.workspace = true
+common-memory-manager.workspace = true
+common-meta = { workspace = true, features = ["testing"] }
+common-options.workspace = true
+common-procedure.workspace = true
+common-query.workspace = true
+common-recordbatch.workspace = true
+common-runtime.workspace = true
+common-stat.workspace = true
+common-telemetry.workspace = true
+common-test-util.workspace = true
+common-time.workspace = true
+common-wal.workspace = true
+datanode = { workspace = true }
+datatypes.workspace = true
+dotenv.workspace = true
+flate2 = "1.0"
+flow.workspace = true
+frontend = { workspace = true, features = ["testing"] }
+futures.workspace = true
+futures-util.workspace = true
+http.workspace = true
+hyper-util = { workspace = true, features = ["tokio"] }
+log-query = { workspace = true }
+loki-proto.workspace = true
+meta-client.workspace = true
+meta-srv = { workspace = true, features = ["mock"] }
+mito2 = { workspace = true, features = ["test-shared-fs-region-migration"] }
+object-store.workspace = true
+operator = { workspace = true, features = ["testing"] }
+plugins.workspace = true
+prost.workspace = true
+query.workspace = true
+rand.workspace = true
+serde_json.workspace = true
+servers = { workspace = true, features = ["testing"] }
+session.workspace = true
+snafu.workspace = true
+sql.workspace = true
+sqlx = { workspace = true, features = [
+    "mysql",
+    "postgres",
+    "chrono",
+] }
+standalone.workspace = true
+store-api.workspace = true
+substrait.workspace = true
+table.workspace = true
+tempfile.workspace = true
+time = "0.3"
+tokio.workspace = true
+tokio-stream = { workspace = true, features = ["net"] }
+tonic.workspace = true
+tower.workspace = true
+uuid.workspace = true
+zstd.workspace = true
+
+[dev-dependencies]
+common-procedure-test.workspace = true
+common-wal = { workspace = true, features = ["testing"] }
+datafusion.workspace = true
+datafusion-expr.workspace = true
+either.workspace = true
+hex.workspace = true
+http.workspace = true
+itertools.workspace = true
+jsonb.workspace = true
+mysql_async = { version = "0.35", default-features = false, features = [
+    "time",
+    "default-rustls-ring",
+] }
+opentelemetry-proto.workspace = true
+otel-arrow-rust.workspace = true
+partition.workspace = true
+paste.workspace = true
+pipeline.workspace = true
+prost.workspace = true
+rand.workspace = true
+rstest.workspace = true
+rstest_reuse.workspace = true
+sea-query.workspace = true
+session = { workspace = true, features = ["testing"] }
+similar-asserts.workspace = true
+store-api.workspace = true
+tokio-postgres = { workspace = true }
+url = "2.3"
+urlencoding = "2.1"
+yaml-rust = "0.4"

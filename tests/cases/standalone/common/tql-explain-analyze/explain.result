@@ -1,0 +1,560 @@
+CREATE TABLE test(i DOUBLE, j TIMESTAMP TIME INDEX, k STRING PRIMARY KEY);
+
+Affected Rows: 0
+
+-- insert two points at 1ms and one point at 2ms
+INSERT INTO test VALUES (1, 1, "a"), (1, 1, "b"), (2, 2, "a");
+
+Affected Rows: 3
+
+-- explain at 0s, 5s and 10s. No point at 0s.
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+TQL EXPLAIN (0, 10, '5s') test;
+
++---------------+---------------------------------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                                                  |
++---------------+---------------------------------------------------------------------------------------------------------------------------------------+
+| logical_plan  | MergeScan [is_placeholder=false, remote_input=[                                                                                       |
+|               | PromInstantManipulate: range=[0..10000], lookback=[300000], interval=[5000], time index=[j]                                           |
+|               |   PromSeriesDivide: tags=["k"]                                                                                                        |
+|               |     Sort: test.k ASC NULLS FIRST, test.j ASC NULLS FIRST                                                                              |
+|               |       Filter: test.j >= TimestampMillisecond(-299999, None) AND test.j <= TimestampMillisecond(10000, None)                           |
+|               |         TableScan: test, partial_filters=[test.j >= TimestampMillisecond(-299999, None), test.j <= TimestampMillisecond(10000, None)] |
+|               | ]]                                                                                                                                    |
+| physical_plan | CooperativeExec                                                                                                                       |
+|               |   MergeScanExec: REDACTED
+|               |                                                                                                                                       |
++---------------+---------------------------------------------------------------------------------------------------------------------------------------+
+
+-- 'lookback' parameter is not fully supported, the test has to be updated
+-- explain at 0s, 5s and 10s. No point at 0s.
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+TQL EXPLAIN (0, 10, '1s', '2s') test;
+
++---------------+-------------------------------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                                                |
++---------------+-------------------------------------------------------------------------------------------------------------------------------------+
+| logical_plan  | MergeScan [is_placeholder=false, remote_input=[                                                                                     |
+|               | PromInstantManipulate: range=[0..10000], lookback=[2000], interval=[1000], time index=[j]                                           |
+|               |   PromSeriesDivide: tags=["k"]                                                                                                      |
+|               |     Sort: test.k ASC NULLS FIRST, test.j ASC NULLS FIRST                                                                            |
+|               |       Filter: test.j >= TimestampMillisecond(-1999, None) AND test.j <= TimestampMillisecond(10000, None)                           |
+|               |         TableScan: test, partial_filters=[test.j >= TimestampMillisecond(-1999, None), test.j <= TimestampMillisecond(10000, None)] |
+|               | ]]                                                                                                                                  |
+| physical_plan | CooperativeExec                                                                                                                     |
+|               |   MergeScanExec: REDACTED
+|               |                                                                                                                                     |
++---------------+-------------------------------------------------------------------------------------------------------------------------------------+
+
+-- explain at 0s, 5s and 10s. No point at 0s.
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+TQL EXPLAIN ('1970-01-01T00:00:00'::timestamp, '1970-01-01T00:00:00'::timestamp + '10 seconds'::interval, '5s') test;
+
++---------------+---------------------------------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                                                  |
++---------------+---------------------------------------------------------------------------------------------------------------------------------------+
+| logical_plan  | MergeScan [is_placeholder=false, remote_input=[                                                                                       |
+|               | PromInstantManipulate: range=[0..10000], lookback=[300000], interval=[5000], time index=[j]                                           |
+|               |   PromSeriesDivide: tags=["k"]                                                                                                        |
+|               |     Sort: test.k ASC NULLS FIRST, test.j ASC NULLS FIRST                                                                              |
+|               |       Filter: test.j >= TimestampMillisecond(-299999, None) AND test.j <= TimestampMillisecond(10000, None)                           |
+|               |         TableScan: test, partial_filters=[test.j >= TimestampMillisecond(-299999, None), test.j <= TimestampMillisecond(10000, None)] |
+|               | ]]                                                                                                                                    |
+| physical_plan | CooperativeExec                                                                                                                       |
+|               |   MergeScanExec: REDACTED
+|               |                                                                                                                                       |
++---------------+---------------------------------------------------------------------------------------------------------------------------------------+
+
+-- explain verbose at 0s, 5s and 10s. No point at 0s.
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (elapsed_compute.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (RepartitionExec:.*) RepartitionExec: REDACTED
+TQL EXPLAIN VERBOSE (0, 10, '5s') test;
+
++-+-+
+| plan_type_| plan_|
++-+-+
+| initial_logical_plan_| PromInstantManipulate: range=[0..10000], lookback=[300000], interval=[5000], time index=[j]_|
+|_|_PromSeriesDivide: tags=["k"]_|
+|_|_Sort: test.k ASC NULLS FIRST, test.j ASC NULLS FIRST_|
+|_|_Filter: test.j >= TimestampMillisecond(-299999, None) AND test.j <= TimestampMillisecond(10000, None)_|
+|_|_TableScan: test_|
+| logical_plan after apply_function_rewrites_| SAME TEXT AS ABOVE_|
+| logical_plan after count_wildcard_to_time_index_rule_| SAME TEXT AS ABOVE_|
+| logical_plan after StringNormalizationRule_| SAME TEXT AS ABOVE_|
+| logical_plan after TranscribeAtatRule_| SAME TEXT AS ABOVE_|
+| logical_plan after resolve_grouping_function_| SAME TEXT AS ABOVE_|
+| logical_plan after type_coercion_| SAME TEXT AS ABOVE_|
+| logical_plan after ConstNormalizationRule_| SAME TEXT AS ABOVE_|
+| logical_plan after DistPlannerAnalyzer_| Projection: test.i, test.j, test.k_|
+|_|_MergeScan [is_placeholder=false, remote_input=[_|
+|_| PromInstantManipulate: range=[0..10000], lookback=[300000], interval=[5000], time index=[j]_|
+|_|_PromSeriesDivide: tags=["k"]_|
+|_|_Sort: test.k ASC NULLS FIRST, test.j ASC NULLS FIRST_|
+|_|_Filter: test.j >= TimestampMillisecond(-299999, None) AND test.j <= TimestampMillisecond(10000, None)_|
+|_|_TableScan: test, partial_filters=[test.j >= TimestampMillisecond(-299999, None), test.j <= TimestampMillisecond(10000, None)] |
+|_| ]]_|
+| logical_plan after FixStateUdafOrderingAnalyzer_| SAME TEXT AS ABOVE_|
+| analyzed_logical_plan_| SAME TEXT AS ABOVE_|
+| logical_plan after rewrite_set_comparison_| SAME TEXT AS ABOVE_|
+| logical_plan after optimize_unions_| SAME TEXT AS ABOVE_|
+| logical_plan after simplify_expressions_| SAME TEXT AS ABOVE_|
+| logical_plan after replace_distinct_aggregate_| SAME TEXT AS ABOVE_|
+| logical_plan after eliminate_join_| SAME TEXT AS ABOVE_|
+| logical_plan after decorrelate_predicate_subquery_| SAME TEXT AS ABOVE_|
+| logical_plan after scalar_subquery_to_join_| SAME TEXT AS ABOVE_|
+| logical_plan after decorrelate_lateral_join_| SAME TEXT AS ABOVE_|
+| logical_plan after extract_equijoin_predicate_| SAME TEXT AS ABOVE_|
+| logical_plan after eliminate_duplicated_expr_| SAME TEXT AS ABOVE_|
+| logical_plan after eliminate_filter_| SAME TEXT AS ABOVE_|
+| logical_plan after eliminate_cross_join_| SAME TEXT AS ABOVE_|
+| logical_plan after eliminate_limit_| SAME TEXT AS ABOVE_|
+| logical_plan after propagate_empty_relation_| SAME TEXT AS ABOVE_|
+| logical_plan after filter_null_join_keys_| SAME TEXT AS ABOVE_|
+| logical_plan after eliminate_outer_join_| SAME TEXT AS ABOVE_|
+| logical_plan after push_down_limit_| SAME TEXT AS ABOVE_|
+| logical_plan after push_down_filter_| SAME TEXT AS ABOVE_|
+| logical_plan after single_distinct_aggregation_to_group_by | SAME TEXT AS ABOVE_|
+| logical_plan after eliminate_group_by_constant_| SAME TEXT AS ABOVE_|
+| logical_plan after common_sub_expression_eliminate_| SAME TEXT AS ABOVE_|
+| logical_plan after extract_leaf_expressions_| SAME TEXT AS ABOVE_|
+| logical_plan after push_down_leaf_projections_| SAME TEXT AS ABOVE_|
+| logical_plan after optimize_projections_| MergeScan [is_placeholder=false, remote_input=[_|
+|_| PromInstantManipulate: range=[0..10000], lookback=[300000], interval=[5000], time index=[j]_|
+|_|_PromSeriesDivide: tags=["k"]_|
+|_|_Sort: test.k ASC NULLS FIRST, test.j ASC NULLS FIRST_|
+|_|_Filter: test.j >= TimestampMillisecond(-299999, None) AND test.j <= TimestampMillisecond(10000, None)_|
+|_|_TableScan: test, partial_filters=[test.j >= TimestampMillisecond(-299999, None), test.j <= TimestampMillisecond(10000, None)] |
+|_| ]]_|
+| logical_plan after ScanHintRule_| SAME TEXT AS ABOVE_|
+| logical_plan after JsonTypeConcretizeRule_| SAME TEXT AS ABOVE_|
+| logical_plan after rewrite_set_comparison_| SAME TEXT AS ABOVE_|
+| logical_plan after optimize_unions_| SAME TEXT AS ABOVE_|
+| logical_plan after simplify_expressions_| SAME TEXT AS ABOVE_|
+| logical_plan after replace_distinct_aggregate_| SAME TEXT AS ABOVE_|
+| logical_plan after eliminate_join_| SAME TEXT AS ABOVE_|
+| logical_plan after decorrelate_predicate_subquery_| SAME TEXT AS ABOVE_|
+| logical_plan after scalar_subquery_to_join_| SAME TEXT AS ABOVE_|
+| logical_plan after decorrelate_lateral_join_| SAME TEXT AS ABOVE_|
+| logical_plan after extract_equijoin_predicate_| SAME TEXT AS ABOVE_|
+| logical_plan after eliminate_duplicated_expr_| SAME TEXT AS ABOVE_|
+| logical_plan after eliminate_filter_| SAME TEXT AS ABOVE_|
+| logical_plan after eliminate_cross_join_| SAME TEXT AS ABOVE_|
+| logical_plan after eliminate_limit_| SAME TEXT AS ABOVE_|
+| logical_plan after propagate_empty_relation_| SAME TEXT AS ABOVE_|
+| logical_plan after filter_null_join_keys_| SAME TEXT AS ABOVE_|
+| logical_plan after eliminate_outer_join_| SAME TEXT AS ABOVE_|
+| logical_plan after push_down_limit_| SAME TEXT AS ABOVE_|
+| logical_plan after push_down_filter_| SAME TEXT AS ABOVE_|
+| logical_plan after single_distinct_aggregation_to_group_by | SAME TEXT AS ABOVE_|
+| logical_plan after eliminate_group_by_constant_| SAME TEXT AS ABOVE_|
+| logical_plan after common_sub_expression_eliminate_| SAME TEXT AS ABOVE_|
+| logical_plan after extract_leaf_expressions_| SAME TEXT AS ABOVE_|
+| logical_plan after push_down_leaf_projections_| SAME TEXT AS ABOVE_|
+| logical_plan after optimize_projections_| SAME TEXT AS ABOVE_|
+| logical_plan after ScanHintRule_| SAME TEXT AS ABOVE_|
+| logical_plan after JsonTypeConcretizeRule_| SAME TEXT AS ABOVE_|
+| logical_plan_| MergeScan [is_placeholder=false, remote_input=[_|
+|_| PromInstantManipulate: range=[0..10000], lookback=[300000], interval=[5000], time index=[j]_|
+|_|_PromSeriesDivide: tags=["k"]_|
+|_|_Sort: test.k ASC NULLS FIRST, test.j ASC NULLS FIRST_|
+|_|_Filter: test.j >= TimestampMillisecond(-299999, None) AND test.j <= TimestampMillisecond(10000, None)_|
+|_|_TableScan: test, partial_filters=[test.j >= TimestampMillisecond(-299999, None), test.j <= TimestampMillisecond(10000, None)] |
+|_| ]]_|
+| initial_physical_plan_| MergeScanExec: REDACTED
+|_|_|
+| initial_physical_plan_with_stats_| MergeScanExec: REDACTED
+|_|_|
+| initial_physical_plan_with_schema_| MergeScanExec: REDACTED
+|_|_|
+| physical_plan after OutputRequirements_| OutputRequirementExec: order_by=[], dist_by=Unspecified_|
+|_|_MergeScanExec: REDACTED
+|_|_|
+| physical_plan after aggregate_statistics_| SAME TEXT AS ABOVE_|
+| physical_plan after join_selection_| SAME TEXT AS ABOVE_|
+| physical_plan after LimitedDistinctAggregation_| SAME TEXT AS ABOVE_|
+| physical_plan after FilterPushdown_| SAME TEXT AS ABOVE_|
+| physical_plan after parallelize_scan_| SAME TEXT AS ABOVE_|
+| physical_plan after PassDistributionRule_| SAME TEXT AS ABOVE_|
+| physical_plan after PromqlTsidNarrowJoin_| SAME TEXT AS ABOVE_|
+| physical_plan after EnforceSorting_| SAME TEXT AS ABOVE_|
+| physical_plan after EnforceDistribution_| SAME TEXT AS ABOVE_|
+| physical_plan after CombinePartialFinalAggregate_| SAME TEXT AS ABOVE_|
+| physical_plan after EnforceSorting_| SAME TEXT AS ABOVE_|
+| physical_plan after OptimizeAggregateOrder_| SAME TEXT AS ABOVE_|
+| physical_plan after ProjectionPushdown_| SAME TEXT AS ABOVE_|
+| physical_plan after OutputRequirements_| MergeScanExec: REDACTED
+|_|_|
+| physical_plan after LimitAggregation_| SAME TEXT AS ABOVE_|
+| physical_plan after LimitPushPastWindows_| SAME TEXT AS ABOVE_|
+| physical_plan after LimitPushdown_| SAME TEXT AS ABOVE_|
+| physical_plan after ProjectionPushdown_| SAME TEXT AS ABOVE_|
+| physical_plan after PushdownSort_| SAME TEXT AS ABOVE_|
+| physical_plan after EnsureCooperative_| CooperativeExec_|
+|_|_MergeScanExec: REDACTED
+|_|_|
+| physical_plan after FilterPushdown(Post)_| SAME TEXT AS ABOVE_|
+| physical_plan after WindowedSortRule_| SAME TEXT AS ABOVE_|
+| physical_plan after MatchesConstantTerm_| SAME TEXT AS ABOVE_|
+| physical_plan after EnsureGlobalLimitForFetch_| SAME TEXT AS ABOVE_|
+| physical_plan after RemoveDuplicateRule_| SAME TEXT AS ABOVE_|
+| physical_plan after SanityCheckPlan_| SAME TEXT AS ABOVE_|
+| physical_plan_| CooperativeExec_|
+|_|_MergeScanExec: REDACTED
+|_|_|
+| physical_plan_with_stats_| CooperativeExec, statistics=[Rows=Absent, Bytes=Absent, [(Col[0]:),(Col[1]:),(Col[2]:)]]_|
+|_|_MergeScanExec: REDACTED
+|_|_|
+| physical_plan_with_schema_| CooperativeExec, schema=[i:Float64;N, j:Timestamp(ms), k:Utf8;N]_|
+|_|_MergeScanExec: REDACTED
+|_|_|
++-+-+
+
+-- explain verbose at 0s, 5s and 10s. No point at 0s.
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (elapsed_compute.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (RepartitionExec:.*) RepartitionExec: REDACTED
+TQL EXPLAIN VERBOSE (0, 10, '5s') test AS series;
+
++-+-+
+| plan_type_| plan_|
++-+-+
+| initial_logical_plan_| Projection: test.i AS series, test.k, test.j_|
+|_|_PromInstantManipulate: range=[0..10000], lookback=[300000], interval=[5000], time index=[j]_|
+|_|_PromSeriesDivide: tags=["k"]_|
+|_|_Sort: test.k ASC NULLS FIRST, test.j ASC NULLS FIRST_|
+|_|_Filter: test.j >= TimestampMillisecond(-299999, None) AND test.j <= TimestampMillisecond(10000, None)_|
+|_|_TableScan: test_|
+| logical_plan after apply_function_rewrites_| SAME TEXT AS ABOVE_|
+| logical_plan after count_wildcard_to_time_index_rule_| SAME TEXT AS ABOVE_|
+| logical_plan after StringNormalizationRule_| SAME TEXT AS ABOVE_|
+| logical_plan after TranscribeAtatRule_| SAME TEXT AS ABOVE_|
+| logical_plan after resolve_grouping_function_| SAME TEXT AS ABOVE_|
+| logical_plan after type_coercion_| SAME TEXT AS ABOVE_|
+| logical_plan after ConstNormalizationRule_| SAME TEXT AS ABOVE_|
+| logical_plan after DistPlannerAnalyzer_| Projection: series, test.k, test.j_|
+|_|_MergeScan [is_placeholder=false, remote_input=[_|
+|_| Projection: test.i AS series, test.k, test.j_|
+|_|_PromInstantManipulate: range=[0..10000], lookback=[300000], interval=[5000], time index=[j]_|
+|_|_PromSeriesDivide: tags=["k"]_|
+|_|_Sort: test.k ASC NULLS FIRST, test.j ASC NULLS FIRST_|
+|_|_Filter: test.j >= TimestampMillisecond(-299999, None) AND test.j <= TimestampMillisecond(10000, None)_|
+|_|_TableScan: test, partial_filters=[test.j >= TimestampMillisecond(-299999, None), test.j <= TimestampMillisecond(10000, None)] |
+|_| ]]_|
+| logical_plan after FixStateUdafOrderingAnalyzer_| SAME TEXT AS ABOVE_|
+| analyzed_logical_plan_| SAME TEXT AS ABOVE_|
+| logical_plan after rewrite_set_comparison_| SAME TEXT AS ABOVE_|
+| logical_plan after optimize_unions_| SAME TEXT AS ABOVE_|
+| logical_plan after simplify_expressions_| SAME TEXT AS ABOVE_|
+| logical_plan after replace_distinct_aggregate_| SAME TEXT AS ABOVE_|
+| logical_plan after eliminate_join_| SAME TEXT AS ABOVE_|
+| logical_plan after decorrelate_predicate_subquery_| SAME TEXT AS ABOVE_|
+| logical_plan after scalar_subquery_to_join_| SAME TEXT AS ABOVE_|
+| logical_plan after decorrelate_lateral_join_| SAME TEXT AS ABOVE_|
+| logical_plan after extract_equijoin_predicate_| SAME TEXT AS ABOVE_|
+| logical_plan after eliminate_duplicated_expr_| SAME TEXT AS ABOVE_|
+| logical_plan after eliminate_filter_| SAME TEXT AS ABOVE_|
+| logical_plan after eliminate_cross_join_| SAME TEXT AS ABOVE_|
+| logical_plan after eliminate_limit_| SAME TEXT AS ABOVE_|
+| logical_plan after propagate_empty_relation_| SAME TEXT AS ABOVE_|
+| logical_plan after filter_null_join_keys_| SAME TEXT AS ABOVE_|
+| logical_plan after eliminate_outer_join_| SAME TEXT AS ABOVE_|
+| logical_plan after push_down_limit_| SAME TEXT AS ABOVE_|
+| logical_plan after push_down_filter_| SAME TEXT AS ABOVE_|
+| logical_plan after single_distinct_aggregation_to_group_by | SAME TEXT AS ABOVE_|
+| logical_plan after eliminate_group_by_constant_| SAME TEXT AS ABOVE_|
+| logical_plan after common_sub_expression_eliminate_| SAME TEXT AS ABOVE_|
+| logical_plan after extract_leaf_expressions_| SAME TEXT AS ABOVE_|
+| logical_plan after push_down_leaf_projections_| SAME TEXT AS ABOVE_|
+| logical_plan after optimize_projections_| MergeScan [is_placeholder=false, remote_input=[_|
+|_| Projection: test.i AS series, test.k, test.j_|
+|_|_PromInstantManipulate: range=[0..10000], lookback=[300000], interval=[5000], time index=[j]_|
+|_|_PromSeriesDivide: tags=["k"]_|
+|_|_Sort: test.k ASC NULLS FIRST, test.j ASC NULLS FIRST_|
+|_|_Filter: test.j >= TimestampMillisecond(-299999, None) AND test.j <= TimestampMillisecond(10000, None)_|
+|_|_TableScan: test, partial_filters=[test.j >= TimestampMillisecond(-299999, None), test.j <= TimestampMillisecond(10000, None)] |
+|_| ]]_|
+| logical_plan after ScanHintRule_| SAME TEXT AS ABOVE_|
+| logical_plan after JsonTypeConcretizeRule_| SAME TEXT AS ABOVE_|
+| logical_plan after rewrite_set_comparison_| SAME TEXT AS ABOVE_|
+| logical_plan after optimize_unions_| SAME TEXT AS ABOVE_|
+| logical_plan after simplify_expressions_| SAME TEXT AS ABOVE_|
+| logical_plan after replace_distinct_aggregate_| SAME TEXT AS ABOVE_|
+| logical_plan after eliminate_join_| SAME TEXT AS ABOVE_|
+| logical_plan after decorrelate_predicate_subquery_| SAME TEXT AS ABOVE_|
+| logical_plan after scalar_subquery_to_join_| SAME TEXT AS ABOVE_|
+| logical_plan after decorrelate_lateral_join_| SAME TEXT AS ABOVE_|
+| logical_plan after extract_equijoin_predicate_| SAME TEXT AS ABOVE_|
+| logical_plan after eliminate_duplicated_expr_| SAME TEXT AS ABOVE_|
+| logical_plan after eliminate_filter_| SAME TEXT AS ABOVE_|
+| logical_plan after eliminate_cross_join_| SAME TEXT AS ABOVE_|
+| logical_plan after eliminate_limit_| SAME TEXT AS ABOVE_|
+| logical_plan after propagate_empty_relation_| SAME TEXT AS ABOVE_|
+| logical_plan after filter_null_join_keys_| SAME TEXT AS ABOVE_|
+| logical_plan after eliminate_outer_join_| SAME TEXT AS ABOVE_|
+| logical_plan after push_down_limit_| SAME TEXT AS ABOVE_|
+| logical_plan after push_down_filter_| SAME TEXT AS ABOVE_|
+| logical_plan after single_distinct_aggregation_to_group_by | SAME TEXT AS ABOVE_|
+| logical_plan after eliminate_group_by_constant_| SAME TEXT AS ABOVE_|
+| logical_plan after common_sub_expression_eliminate_| SAME TEXT AS ABOVE_|
+| logical_plan after extract_leaf_expressions_| SAME TEXT AS ABOVE_|
+| logical_plan after push_down_leaf_projections_| SAME TEXT AS ABOVE_|
+| logical_plan after optimize_projections_| SAME TEXT AS ABOVE_|
+| logical_plan after ScanHintRule_| SAME TEXT AS ABOVE_|
+| logical_plan after JsonTypeConcretizeRule_| SAME TEXT AS ABOVE_|
+| logical_plan_| MergeScan [is_placeholder=false, remote_input=[_|
+|_| Projection: test.i AS series, test.k, test.j_|
+|_|_PromInstantManipulate: range=[0..10000], lookback=[300000], interval=[5000], time index=[j]_|
+|_|_PromSeriesDivide: tags=["k"]_|
+|_|_Sort: test.k ASC NULLS FIRST, test.j ASC NULLS FIRST_|
+|_|_Filter: test.j >= TimestampMillisecond(-299999, None) AND test.j <= TimestampMillisecond(10000, None)_|
+|_|_TableScan: test, partial_filters=[test.j >= TimestampMillisecond(-299999, None), test.j <= TimestampMillisecond(10000, None)] |
+|_| ]]_|
+| initial_physical_plan_| MergeScanExec: REDACTED
+|_|_|
+| initial_physical_plan_with_stats_| MergeScanExec: REDACTED
+|_|_|
+| initial_physical_plan_with_schema_| MergeScanExec: REDACTED
+|_|_|
+| physical_plan after OutputRequirements_| OutputRequirementExec: order_by=[], dist_by=Unspecified_|
+|_|_MergeScanExec: REDACTED
+|_|_|
+| physical_plan after aggregate_statistics_| SAME TEXT AS ABOVE_|
+| physical_plan after join_selection_| SAME TEXT AS ABOVE_|
+| physical_plan after LimitedDistinctAggregation_| SAME TEXT AS ABOVE_|
+| physical_plan after FilterPushdown_| SAME TEXT AS ABOVE_|
+| physical_plan after parallelize_scan_| SAME TEXT AS ABOVE_|
+| physical_plan after PassDistributionRule_| SAME TEXT AS ABOVE_|
+| physical_plan after PromqlTsidNarrowJoin_| SAME TEXT AS ABOVE_|
+| physical_plan after EnforceSorting_| SAME TEXT AS ABOVE_|
+| physical_plan after EnforceDistribution_| SAME TEXT AS ABOVE_|
+| physical_plan after CombinePartialFinalAggregate_| SAME TEXT AS ABOVE_|
+| physical_plan after EnforceSorting_| SAME TEXT AS ABOVE_|
+| physical_plan after OptimizeAggregateOrder_| SAME TEXT AS ABOVE_|
+| physical_plan after ProjectionPushdown_| SAME TEXT AS ABOVE_|
+| physical_plan after OutputRequirements_| MergeScanExec: REDACTED
+|_|_|
+| physical_plan after LimitAggregation_| SAME TEXT AS ABOVE_|
+| physical_plan after LimitPushPastWindows_| SAME TEXT AS ABOVE_|
+| physical_plan after LimitPushdown_| SAME TEXT AS ABOVE_|
+| physical_plan after ProjectionPushdown_| SAME TEXT AS ABOVE_|
+| physical_plan after PushdownSort_| SAME TEXT AS ABOVE_|
+| physical_plan after EnsureCooperative_| CooperativeExec_|
+|_|_MergeScanExec: REDACTED
+|_|_|
+| physical_plan after FilterPushdown(Post)_| SAME TEXT AS ABOVE_|
+| physical_plan after WindowedSortRule_| SAME TEXT AS ABOVE_|
+| physical_plan after MatchesConstantTerm_| SAME TEXT AS ABOVE_|
+| physical_plan after EnsureGlobalLimitForFetch_| SAME TEXT AS ABOVE_|
+| physical_plan after RemoveDuplicateRule_| SAME TEXT AS ABOVE_|
+| physical_plan after SanityCheckPlan_| SAME TEXT AS ABOVE_|
+| physical_plan_| CooperativeExec_|
+|_|_MergeScanExec: REDACTED
+|_|_|
+| physical_plan_with_stats_| CooperativeExec, statistics=[Rows=Absent, Bytes=Absent, [(Col[0]:),(Col[1]:),(Col[2]:)]]_|
+|_|_MergeScanExec: REDACTED
+|_|_|
+| physical_plan_with_schema_| CooperativeExec, schema=[series:Float64;N, k:Utf8;N, j:Timestamp(ms)]_|
+|_|_MergeScanExec: REDACTED
+|_|_|
++-+-+
+
+CREATE TABLE test_nano(i DOUBLE, j TIMESTAMP(9) TIME INDEX, k STRING PRIMARY KEY);
+
+Affected Rows: 0
+
+INSERT INTO test_nano VALUES (1, 1000000, "a"), (1, 1000000, "b"), (2, 2000000, "a");
+
+Affected Rows: 3
+
+-- explain at 0s, 5s and 10s for a nanosecond time index.
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (RepartitionExec:.*) RepartitionExec: REDACTED
+TQL EXPLAIN (0, 10, '5s') test_nano;
+
++---------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                                                                            |
++---------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| logical_plan  | MergeScan [is_placeholder=false, remote_input=[                                                                                                                 |
+|               | PromInstantManipulate: range=[0..10000], lookback=[300000], interval=[5000], time index=[j]                                                                     |
+|               |   PromSeriesDivide: tags=["k"]                                                                                                                                  |
+|               |     Sort: test_nano.k ASC NULLS FIRST, test_nano.j ASC NULLS FIRST                                                                                              |
+|               |       Projection: test_nano.i, test_nano.k, CAST(test_nano.j AS Timestamp(ms)) AS j                                                                             |
+|               |         Filter: test_nano.j >= TimestampNanosecond(-299999999999, None) AND test_nano.j < TimestampNanosecond(10001000000, None)                                |
+|               |           TableScan: test_nano, partial_filters=[test_nano.j >= TimestampNanosecond(-299999999999, None), test_nano.j < TimestampNanosecond(10001000000, None)] |
+|               | ]]                                                                                                                                                              |
+| physical_plan | CooperativeExec                                                                                                                                                 |
+|               |   MergeScanExec: REDACTED
+|               |                                                                                                                                                                 |
++---------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------+
+
+-- explain verbose at 0s, 5s and 10s for a nanosecond time index.
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (elapsed_compute.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (RepartitionExec:.*) RepartitionExec: REDACTED
+TQL EXPLAIN VERBOSE (0, 10, '5s') test_nano;
+
++-+-+
+| plan_type_| plan_|
++-+-+
+| initial_logical_plan_| PromInstantManipulate: range=[0..10000], lookback=[300000], interval=[5000], time index=[j]_|
+|_|_PromSeriesDivide: tags=["k"]_|
+|_|_Sort: test_nano.k ASC NULLS FIRST, test_nano.j ASC NULLS FIRST_|
+|_|_Filter: test_nano.j >= TimestampMillisecond(-299999, None) AND test_nano.j <= TimestampMillisecond(10000, None)_|
+|_|_Projection: test_nano.i, test_nano.k, CAST(test_nano.j AS Timestamp(ms)) AS j_|
+|_|_TableScan: test_nano_|
+| logical_plan after apply_function_rewrites_| SAME TEXT AS ABOVE_|
+| logical_plan after count_wildcard_to_time_index_rule_| SAME TEXT AS ABOVE_|
+| logical_plan after StringNormalizationRule_| SAME TEXT AS ABOVE_|
+| logical_plan after TranscribeAtatRule_| SAME TEXT AS ABOVE_|
+| logical_plan after resolve_grouping_function_| SAME TEXT AS ABOVE_|
+| logical_plan after type_coercion_| SAME TEXT AS ABOVE_|
+| logical_plan after ConstNormalizationRule_| SAME TEXT AS ABOVE_|
+| logical_plan after DistPlannerAnalyzer_| Projection: test_nano.i, test_nano.k, test_nano.j_|
+|_|_MergeScan [is_placeholder=false, remote_input=[_|
+|_| PromInstantManipulate: range=[0..10000], lookback=[300000], interval=[5000], time index=[j]_|
+|_|_PromSeriesDivide: tags=["k"]_|
+|_|_Sort: test_nano.k ASC NULLS FIRST, test_nano.j ASC NULLS FIRST_|
+|_|_Projection: test_nano.i, test_nano.k, CAST(test_nano.j AS Timestamp(ms)) AS j_|
+|_|_Filter: test_nano.j >= TimestampNanosecond(-299999999999, None) AND test_nano.j < TimestampNanosecond(10001000000, None)_|
+|_|_TableScan: test_nano, partial_filters=[test_nano.j >= TimestampNanosecond(-299999999999, None), test_nano.j < TimestampNanosecond(10001000000, None)] |
+|_| ]]_|
+| logical_plan after FixStateUdafOrderingAnalyzer_| SAME TEXT AS ABOVE_|
+| analyzed_logical_plan_| SAME TEXT AS ABOVE_|
+| logical_plan after rewrite_set_comparison_| SAME TEXT AS ABOVE_|
+| logical_plan after optimize_unions_| SAME TEXT AS ABOVE_|
+| logical_plan after simplify_expressions_| SAME TEXT AS ABOVE_|
+| logical_plan after replace_distinct_aggregate_| SAME TEXT AS ABOVE_|
+| logical_plan after eliminate_join_| SAME TEXT AS ABOVE_|
+| logical_plan after decorrelate_predicate_subquery_| SAME TEXT AS ABOVE_|
+| logical_plan after scalar_subquery_to_join_| SAME TEXT AS ABOVE_|
+| logical_plan after decorrelate_lateral_join_| SAME TEXT AS ABOVE_|
+| logical_plan after extract_equijoin_predicate_| SAME TEXT AS ABOVE_|
+| logical_plan after eliminate_duplicated_expr_| SAME TEXT AS ABOVE_|
+| logical_plan after eliminate_filter_| SAME TEXT AS ABOVE_|
+| logical_plan after eliminate_cross_join_| SAME TEXT AS ABOVE_|
+| logical_plan after eliminate_limit_| SAME TEXT AS ABOVE_|
+| logical_plan after propagate_empty_relation_| SAME TEXT AS ABOVE_|
+| logical_plan after filter_null_join_keys_| SAME TEXT AS ABOVE_|
+| logical_plan after eliminate_outer_join_| SAME TEXT AS ABOVE_|
+| logical_plan after push_down_limit_| SAME TEXT AS ABOVE_|
+| logical_plan after push_down_filter_| SAME TEXT AS ABOVE_|
+| logical_plan after single_distinct_aggregation_to_group_by | SAME TEXT AS ABOVE_|
+| logical_plan after eliminate_group_by_constant_| SAME TEXT AS ABOVE_|
+| logical_plan after common_sub_expression_eliminate_| SAME TEXT AS ABOVE_|
+| logical_plan after extract_leaf_expressions_| SAME TEXT AS ABOVE_|
+| logical_plan after push_down_leaf_projections_| SAME TEXT AS ABOVE_|
+| logical_plan after optimize_projections_| MergeScan [is_placeholder=false, remote_input=[_|
+|_| PromInstantManipulate: range=[0..10000], lookback=[300000], interval=[5000], time index=[j]_|
+|_|_PromSeriesDivide: tags=["k"]_|
+|_|_Sort: test_nano.k ASC NULLS FIRST, test_nano.j ASC NULLS FIRST_|
+|_|_Projection: test_nano.i, test_nano.k, CAST(test_nano.j AS Timestamp(ms)) AS j_|
+|_|_Filter: test_nano.j >= TimestampNanosecond(-299999999999, None) AND test_nano.j < TimestampNanosecond(10001000000, None)_|
+|_|_TableScan: test_nano, partial_filters=[test_nano.j >= TimestampNanosecond(-299999999999, None), test_nano.j < TimestampNanosecond(10001000000, None)] |
+|_| ]]_|
+| logical_plan after ScanHintRule_| SAME TEXT AS ABOVE_|
+| logical_plan after JsonTypeConcretizeRule_| SAME TEXT AS ABOVE_|
+| logical_plan after rewrite_set_comparison_| SAME TEXT AS ABOVE_|
+| logical_plan after optimize_unions_| SAME TEXT AS ABOVE_|
+| logical_plan after simplify_expressions_| SAME TEXT AS ABOVE_|
+| logical_plan after replace_distinct_aggregate_| SAME TEXT AS ABOVE_|
+| logical_plan after eliminate_join_| SAME TEXT AS ABOVE_|
+| logical_plan after decorrelate_predicate_subquery_| SAME TEXT AS ABOVE_|
+| logical_plan after scalar_subquery_to_join_| SAME TEXT AS ABOVE_|
+| logical_plan after decorrelate_lateral_join_| SAME TEXT AS ABOVE_|
+| logical_plan after extract_equijoin_predicate_| SAME TEXT AS ABOVE_|
+| logical_plan after eliminate_duplicated_expr_| SAME TEXT AS ABOVE_|
+| logical_plan after eliminate_filter_| SAME TEXT AS ABOVE_|
+| logical_plan after eliminate_cross_join_| SAME TEXT AS ABOVE_|
+| logical_plan after eliminate_limit_| SAME TEXT AS ABOVE_|
+| logical_plan after propagate_empty_relation_| SAME TEXT AS ABOVE_|
+| logical_plan after filter_null_join_keys_| SAME TEXT AS ABOVE_|
+| logical_plan after eliminate_outer_join_| SAME TEXT AS ABOVE_|
+| logical_plan after push_down_limit_| SAME TEXT AS ABOVE_|
+| logical_plan after push_down_filter_| SAME TEXT AS ABOVE_|
+| logical_plan after single_distinct_aggregation_to_group_by | SAME TEXT AS ABOVE_|
+| logical_plan after eliminate_group_by_constant_| SAME TEXT AS ABOVE_|
+| logical_plan after common_sub_expression_eliminate_| SAME TEXT AS ABOVE_|
+| logical_plan after extract_leaf_expressions_| SAME TEXT AS ABOVE_|
+| logical_plan after push_down_leaf_projections_| SAME TEXT AS ABOVE_|
+| logical_plan after optimize_projections_| SAME TEXT AS ABOVE_|
+| logical_plan after ScanHintRule_| SAME TEXT AS ABOVE_|
+| logical_plan after JsonTypeConcretizeRule_| SAME TEXT AS ABOVE_|
+| logical_plan_| MergeScan [is_placeholder=false, remote_input=[_|
+|_| PromInstantManipulate: range=[0..10000], lookback=[300000], interval=[5000], time index=[j]_|
+|_|_PromSeriesDivide: tags=["k"]_|
+|_|_Sort: test_nano.k ASC NULLS FIRST, test_nano.j ASC NULLS FIRST_|
+|_|_Projection: test_nano.i, test_nano.k, CAST(test_nano.j AS Timestamp(ms)) AS j_|
+|_|_Filter: test_nano.j >= TimestampNanosecond(-299999999999, None) AND test_nano.j < TimestampNanosecond(10001000000, None)_|
+|_|_TableScan: test_nano, partial_filters=[test_nano.j >= TimestampNanosecond(-299999999999, None), test_nano.j < TimestampNanosecond(10001000000, None)] |
+|_| ]]_|
+| initial_physical_plan_| MergeScanExec: REDACTED
+|_|_|
+| initial_physical_plan_with_stats_| MergeScanExec: REDACTED
+|_|_|
+| initial_physical_plan_with_schema_| MergeScanExec: REDACTED
+|_|_|
+| physical_plan after OutputRequirements_| OutputRequirementExec: order_by=[], dist_by=Unspecified_|
+|_|_MergeScanExec: REDACTED
+|_|_|
+| physical_plan after aggregate_statistics_| SAME TEXT AS ABOVE_|
+| physical_plan after join_selection_| SAME TEXT AS ABOVE_|
+| physical_plan after LimitedDistinctAggregation_| SAME TEXT AS ABOVE_|
+| physical_plan after FilterPushdown_| SAME TEXT AS ABOVE_|
+| physical_plan after parallelize_scan_| SAME TEXT AS ABOVE_|
+| physical_plan after PassDistributionRule_| SAME TEXT AS ABOVE_|
+| physical_plan after PromqlTsidNarrowJoin_| SAME TEXT AS ABOVE_|
+| physical_plan after EnforceSorting_| SAME TEXT AS ABOVE_|
+| physical_plan after EnforceDistribution_| SAME TEXT AS ABOVE_|
+| physical_plan after CombinePartialFinalAggregate_| SAME TEXT AS ABOVE_|
+| physical_plan after EnforceSorting_| SAME TEXT AS ABOVE_|
+| physical_plan after OptimizeAggregateOrder_| SAME TEXT AS ABOVE_|
+| physical_plan after ProjectionPushdown_| SAME TEXT AS ABOVE_|
+| physical_plan after OutputRequirements_| MergeScanExec: REDACTED
+|_|_|
+| physical_plan after LimitAggregation_| SAME TEXT AS ABOVE_|
+| physical_plan after LimitPushPastWindows_| SAME TEXT AS ABOVE_|
+| physical_plan after LimitPushdown_| SAME TEXT AS ABOVE_|
+| physical_plan after ProjectionPushdown_| SAME TEXT AS ABOVE_|
+| physical_plan after PushdownSort_| SAME TEXT AS ABOVE_|
+| physical_plan after EnsureCooperative_| CooperativeExec_|
+|_|_MergeScanExec: REDACTED
+|_|_|
+| physical_plan after FilterPushdown(Post)_| SAME TEXT AS ABOVE_|
+| physical_plan after WindowedSortRule_| SAME TEXT AS ABOVE_|
+| physical_plan after MatchesConstantTerm_| SAME TEXT AS ABOVE_|
+| physical_plan after EnsureGlobalLimitForFetch_| SAME TEXT AS ABOVE_|
+| physical_plan after RemoveDuplicateRule_| SAME TEXT AS ABOVE_|
+| physical_plan after SanityCheckPlan_| SAME TEXT AS ABOVE_|
+| physical_plan_| CooperativeExec_|
+|_|_MergeScanExec: REDACTED
+|_|_|
+| physical_plan_with_stats_| CooperativeExec, statistics=[Rows=Absent, Bytes=Absent, [(Col[0]:),(Col[1]:),(Col[2]:)]]_|
+|_|_MergeScanExec: REDACTED
+|_|_|
+| physical_plan_with_schema_| CooperativeExec, schema=[i:Float64;N, k:Utf8;N, j:Timestamp(ms)]_|
+|_|_MergeScanExec: REDACTED
+|_|_|
++-+-+
+
+DROP TABLE test_nano;
+
+Affected Rows: 0
+
+DROP TABLE test;
+
+Affected Rows: 0
+

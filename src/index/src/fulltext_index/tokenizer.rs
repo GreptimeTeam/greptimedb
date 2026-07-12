@@ -1,0 +1,594 @@
+// Copyright 2023 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+use crate::Bytes;
+use crate::fulltext_index::error::Result;
+
+lazy_static::lazy_static! {
+    static ref JIEBA: jieba_rs::Jieba = jieba_rs::Jieba::new();
+}
+
+/// A-Z, a-z, 0-9, and '_' are true
+const VALID_ASCII_TOKEN: [bool; 256] = [
+    false, false, false, false, false, false, false, false, false, false, false, false, false,
+    false, false, false, false, false, false, false, false, false, false, false, false, false,
+    false, false, false, false, false, false, false, false, false, false, false, false, false,
+    false, false, false, false, false, false, false, false, false, true, true, true, true, true,
+    true, true, true, true, true, false, false, false, false, false, false, false, true, true,
+    true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true,
+    true, true, true, true, true, true, true, true, false, false, false, false, true, false, true,
+    true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true,
+    true, true, true, true, true, true, true, true, true, false, false, false, false, false, false,
+    false, false, false, false, false, false, false, false, false, false, false, false, false,
+    false, false, false, false, false, false, false, false, false, false, false, false, false,
+    false, false, false, false, false, false, false, false, false, false, false, false, false,
+    false, false, false, false, false, false, false, false, false, false, false, false, false,
+    false, false, false, false, false, false, false, false, false, false, false, false, false,
+    false, false, false, false, false, false, false, false, false, false, false, false, false,
+    false, false, false, false, false, false, false, false, false, false, false, false, false,
+    false, false, false, false, false, false, false, false, false, false, false, false, false,
+    false, false, false, false, false, false, false, false, false, false, false, false, false,
+    false, false, false, false, false, false, false, false, false, false,
+];
+
+/// `Tokenizer` tokenizes a text into a list of tokens.
+pub trait Tokenizer: Send {
+    fn tokenize<'a>(&self, text: &'a str) -> Vec<&'a str>;
+}
+
+/// `EnglishTokenizer` tokenizes an English text.
+///
+/// It splits the text by non-alphabetic characters.
+#[derive(Debug, Default)]
+pub struct EnglishTokenizer;
+
+impl Tokenizer for EnglishTokenizer {
+    fn tokenize<'a>(&self, text: &'a str) -> Vec<&'a str> {
+        if text.is_ascii() {
+            let mut tokens = Vec::new();
+            let mut start = 0;
+            for (i, &byte) in text.as_bytes().iter().enumerate() {
+                if !VALID_ASCII_TOKEN[byte as usize] {
+                    if start < i {
+                        tokens.push(&text[start..i]);
+                    }
+                    start = i + 1;
+                }
+            }
+
+            if start < text.len() {
+                tokens.push(&text[start..]);
+            }
+
+            tokens
+        } else {
+            text.split(|c: char| !c.is_alphanumeric() && c != '_')
+                .filter(|s| !s.is_empty())
+                .collect()
+        }
+    }
+}
+
+/// `ChineseTokenizer` tokenizes a Chinese text.
+///
+/// It uses Jieba search-mode tokenization to improve recall for Chinese fulltext search.
+/// Enabling HMM also helps merge some unknown fragments into larger tokens, which can reduce
+/// token cardinality versus a fully fragmented output.
+#[derive(Debug, Default)]
+pub struct ChineseTokenizer;
+
+impl Tokenizer for ChineseTokenizer {
+    fn tokenize<'a>(&self, text: &'a str) -> Vec<&'a str> {
+        if text.is_ascii() {
+            EnglishTokenizer {}.tokenize(text)
+        } else {
+            // Search-mode tokenization emits finer-grained searchable terms, while HMM helps
+            // merge some unknown fragments and avoid excessive token fragmentation.
+            let mut tokens = JIEBA
+                .cut_for_search(text, true)
+                .into_iter()
+                .map(|token| token.word)
+                .filter(|token| is_indexable_token(token))
+                .collect::<Vec<_>>();
+
+            let english = EnglishTokenizer {};
+            tokens.extend(
+                english
+                    .tokenize(text)
+                    .into_iter()
+                    .filter(|token| is_ascii_underscore_token(token)),
+            );
+
+            tokens
+        }
+    }
+}
+
+fn is_indexable_token(token: &str) -> bool {
+    token.chars().any(|c| c.is_alphanumeric() || c == '_')
+}
+
+fn is_ascii_underscore_token(token: &str) -> bool {
+    token.is_ascii() && token.chars().any(|c| c == '_')
+}
+
+/// `Analyzer` analyzes a text into a list of tokens.
+///
+/// It uses a `Tokenizer` to tokenize the text and optionally lowercases the tokens.
+pub struct Analyzer {
+    tokenizer: Box<dyn Tokenizer>,
+    case_sensitive: bool,
+}
+
+impl Analyzer {
+    /// Creates a new `Analyzer` with the given `Tokenizer` and case sensitivity.
+    pub fn new(tokenizer: Box<dyn Tokenizer>, case_sensitive: bool) -> Self {
+        Self {
+            tokenizer,
+            case_sensitive,
+        }
+    }
+
+    /// Analyzes the given text into a list of tokens.
+    pub fn analyze_text(&self, text: &str) -> Result<Vec<Bytes>> {
+        let res = self
+            .tokenizer
+            .tokenize(text)
+            .iter()
+            .map(|s| {
+                if self.case_sensitive {
+                    s.as_bytes().to_vec()
+                } else {
+                    s.to_lowercase().as_bytes().to_vec()
+                }
+            })
+            .collect();
+        Ok(res)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_english_tokenizer() {
+        let tokenizer = EnglishTokenizer;
+        let text = "Hello, world!!! This is a----++   test012_345+67890 ship_ship ship__ship _ __ __IDENTIFIER__ _ship ship_";
+        let tokens = tokenizer.tokenize(text);
+        assert_eq!(
+            tokens,
+            vec![
+                "Hello",
+                "world",
+                "This",
+                "is",
+                "a",
+                "test012_345",
+                "67890",
+                "ship_ship",
+                "ship__ship",
+                "_",
+                "__",
+                "__IDENTIFIER__",
+                "_ship",
+                "ship_"
+            ]
+        );
+    }
+
+    #[test]
+    fn test_english_tokenizer_with_utf8() {
+        let tokenizer = EnglishTokenizer;
+        let text = "💸unfold the 纸巾😣and gently 清洁表😭面";
+        let tokens = tokenizer.tokenize(text);
+        assert_eq!(
+            tokens,
+            // Don't care what happens to non-ASCII characters.
+            // It's kind of a misconfiguration to use EnglishTokenizer on non-ASCII text.
+            vec!["unfold", "the", "纸巾", "and", "gently", "清洁表", "面"]
+        );
+    }
+
+    #[test]
+    fn test_chinese_tokenizer() {
+        let tokenizer = ChineseTokenizer;
+        let text = "我喜欢苹果";
+        let tokens = tokenizer.tokenize(text);
+        assert_eq!(tokens, vec!["我", "喜欢", "苹果"]);
+    }
+
+    #[test]
+    fn test_chinese_tokenizer_issue_7943_sample() {
+        let tokenizer = ChineseTokenizer;
+        let text = "[2026/04/09/ 13:56:11.031]2026-04-09 13:56:11.031 - [ trace_id=340a6a44b0bd8e37bb7697ss7da61ff0 span_id=085ff5ttf1e0a23b trace_flags=01] - [http-nio-8081-exec-16] INFO c.h.p.xx.web.service.impl.CCCXForwardKKKServiceImpl.pushout(188) - 登录手机号18888888888的动态key：829889AC8 ship_ship ship__ship _ __ __IDENTIFIER__ _ship ship_ EOF";
+        let tokens = tokenizer.tokenize(text);
+
+        assert_eq!(
+            tokens,
+            vec![
+                "2026",
+                "04",
+                "09",
+                "13",
+                "56",
+                "11.031",
+                "2026-04",
+                "09",
+                "13",
+                "56",
+                "11.031",
+                "trace",
+                "_",
+                "id",
+                "340a6a44b0bd8e37bb7697ss7da61ff0",
+                "span",
+                "_",
+                "id",
+                "085ff5ttf1e0a23b",
+                "trace",
+                "_",
+                "flags",
+                "01",
+                "http",
+                "nio-8081",
+                "exec-16",
+                "INFO",
+                "c",
+                "h",
+                "p",
+                "xx",
+                "web",
+                "service",
+                "impl",
+                "CCCXForwardKKKServiceImpl",
+                "pushout",
+                "188",
+                "登录",
+                "手机",
+                "手机号",
+                "18888888888",
+                "的",
+                "动态",
+                "key",
+                "829889AC8",
+                "ship",
+                "_",
+                "ship",
+                "ship",
+                "__",
+                "ship",
+                "_",
+                "__",
+                "__",
+                "IDENTIFIER",
+                "__",
+                "_",
+                "ship",
+                "ship",
+                "_",
+                "EOF",
+                "trace_id",
+                "span_id",
+                "trace_flags",
+                "ship_ship",
+                "ship__ship",
+                "_",
+                "__",
+                "__IDENTIFIER__",
+                "_ship",
+                "ship_"
+            ]
+        );
+    }
+
+    #[test]
+    fn test_chinese_tokenizer_keeps_ascii_underscore_compounds() {
+        let tokenizer = ChineseTokenizer;
+        let text = "trace_id=abc 登录手机号 dynamic_key=xyz";
+
+        let tokens = tokenizer.tokenize(text);
+
+        assert!(tokens.contains(&"trace_id"));
+        assert!(tokens.contains(&"dynamic_key"));
+        assert!(tokens.contains(&"登录"));
+        assert!(tokens.contains(&"手机号"));
+    }
+
+    #[test]
+    fn test_chinese_tokenizer_skips_non_ascii_underscore_tokens() {
+        let tokenizer = ChineseTokenizer;
+        let text = "登录_id trace_id 手机号_trace";
+
+        let tokens = tokenizer.tokenize(text);
+
+        assert_eq!(
+            tokens,
+            [
+                "登录",
+                "_",
+                "id",
+                "trace",
+                "_",
+                "id",
+                "手机",
+                "手机号",
+                "_",
+                "trace",
+                "trace_id"
+            ]
+        );
+    }
+
+    #[test]
+    fn test_chinese_tokenizer_aggressive_tokenization_probe() {
+        let tokenizer = ChineseTokenizer;
+        let text = "哈基米哦南北绿豆，噢马自立曼波。登录手机号。中国农业银行。装电视台，中国中央广播电视台。压不缩，笑不活。";
+
+        let default_tokens = tokenizer.tokenize(text);
+        let cut_hmm_false = JIEBA
+            .cut(text, false)
+            .into_iter()
+            .map(|token| token.word)
+            .collect::<Vec<_>>();
+        let cut_hmm_true = JIEBA
+            .cut(text, true)
+            .into_iter()
+            .map(|token| token.word)
+            .collect::<Vec<_>>();
+        let cut_for_search_hmm_false = JIEBA
+            .cut_for_search(text, false)
+            .into_iter()
+            .map(|token| token.word)
+            .collect::<Vec<_>>();
+        let cut_for_search_hmm_true = JIEBA
+            .cut_for_search(text, true)
+            .into_iter()
+            .map(|token| token.word)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            default_tokens,
+            [
+                "哈基米",
+                "哦",
+                "南北",
+                "绿豆",
+                "噢",
+                "马",
+                "自立",
+                "曼波",
+                "登录",
+                "手机",
+                "手机号",
+                "中国",
+                "农业",
+                "银行",
+                "中国农业银行",
+                "装",
+                "电视",
+                "电视台",
+                "中国",
+                "中央",
+                "广播",
+                "电视",
+                "电视台",
+                "不缩",
+                "压不缩",
+                "笑",
+                "不活",
+            ]
+        );
+        assert_eq!(
+            cut_hmm_false,
+            [
+                "哈",
+                "基",
+                "米",
+                "哦",
+                "南北",
+                "绿豆",
+                "，",
+                "噢",
+                "马",
+                "自立",
+                "曼",
+                "波",
+                "。",
+                "登录",
+                "手机号",
+                "。",
+                "中国农业银行",
+                "。",
+                "装",
+                "电视台",
+                "，",
+                "中国",
+                "中央",
+                "广播",
+                "电视台",
+                "。",
+                "压",
+                "不",
+                "缩",
+                "，",
+                "笑",
+                "不",
+                "活",
+                "。"
+            ]
+        );
+        assert_eq!(
+            cut_hmm_true,
+            [
+                "哈基米",
+                "哦",
+                "南北",
+                "绿豆",
+                "，",
+                "噢",
+                "马",
+                "自立",
+                "曼波",
+                "。",
+                "登录",
+                "手机号",
+                "。",
+                "中国农业银行",
+                "。",
+                "装",
+                "电视台",
+                "，",
+                "中国",
+                "中央",
+                "广播",
+                "电视台",
+                "。",
+                "压不缩",
+                "，",
+                "笑",
+                "不活",
+                "。"
+            ]
+        );
+        assert_eq!(
+            cut_for_search_hmm_false,
+            [
+                "哈",
+                "基",
+                "米",
+                "哦",
+                "南北",
+                "绿豆",
+                "，",
+                "噢",
+                "马",
+                "自立",
+                "曼",
+                "波",
+                "。",
+                "登录",
+                "手机",
+                "手机号",
+                "。",
+                "中国",
+                "农业",
+                "银行",
+                "中国农业银行",
+                "。",
+                "装",
+                "电视",
+                "电视台",
+                "，",
+                "中国",
+                "中央",
+                "广播",
+                "电视",
+                "电视台",
+                "。",
+                "压",
+                "不",
+                "缩",
+                "，",
+                "笑",
+                "不",
+                "活",
+                "。"
+            ]
+        );
+
+        assert_eq!(
+            cut_for_search_hmm_true,
+            [
+                "哈基米",
+                "哦",
+                "南北",
+                "绿豆",
+                "，",
+                "噢",
+                "马",
+                "自立",
+                "曼波",
+                "。",
+                "登录",
+                "手机",
+                "手机号",
+                "。",
+                "中国",
+                "农业",
+                "银行",
+                "中国农业银行",
+                "。",
+                "装",
+                "电视",
+                "电视台",
+                "，",
+                "中国",
+                "中央",
+                "广播",
+                "电视",
+                "电视台",
+                "。",
+                "不缩",
+                "压不缩",
+                "，",
+                "笑",
+                "不活",
+                "。"
+            ]
+        );
+    }
+
+    #[test]
+    fn test_valid_ascii_token_lookup_table() {
+        // Test all ASCII values in a single loop
+        for c in 0u8..=255u8 {
+            let is_valid = VALID_ASCII_TOKEN[c as usize];
+            let should_be_valid = (c as char).is_ascii_alphanumeric() || c == b'_';
+
+            assert_eq!(
+                is_valid,
+                should_be_valid,
+                "Character '{}' (byte {}) validity mismatch: expected {}, got {}",
+                if c.is_ascii() && !c.is_ascii_control() {
+                    c as char
+                } else {
+                    '?'
+                },
+                c,
+                should_be_valid,
+                is_valid
+            );
+        }
+    }
+
+    #[test]
+    fn test_analyzer() {
+        let tokenizer = EnglishTokenizer;
+        let analyzer = Analyzer::new(Box::new(tokenizer), false);
+        let text = "Hello, world! This is a test.";
+        let tokens = analyzer.analyze_text(text).unwrap();
+        assert_eq!(
+            tokens,
+            vec![
+                b"hello".to_vec(),
+                b"world".to_vec(),
+                b"this".to_vec(),
+                b"is".to_vec(),
+                b"a".to_vec(),
+                b"test".to_vec()
+            ]
+        );
+    }
+}

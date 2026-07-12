@@ -1,0 +1,15 @@
+ci:
+  - changed-files:
+      - any-glob-to-any-file: .github/**
+
+docker:
+  - changed-files:
+      - any-glob-to-any-file: docker/**
+
+documentation:
+  - changed-files:
+      - any-glob-to-any-file: docs/**
+
+dashboard:
+  - changed-files:
+      - any-glob-to-any-file: grafana/**

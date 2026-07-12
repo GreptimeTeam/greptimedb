@@ -1,0 +1,44 @@
+CREATE TABLE different_order(k0 STRING, k1 STRING, v0 INTEGER, v1 INTEGER, t TIMESTAMP, time index(t), primary key(k0, k1));
+
+Affected Rows: 0
+
+INSERT INTO different_order (v1, k1, k0, t, v0) VALUES (11, 'b0', 'a0', 1, 1);
+
+Affected Rows: 1
+
+INSERT INTO different_order (v1, v0, k0, t) VALUES (12, 2, 'a1', 2);
+
+Affected Rows: 1
+
+INSERT INTO different_order (t, v1, k0, k1) VALUES (3, 13, 'a2', 'b1');
+
+Affected Rows: 1
+
+INSERT INTO different_order (t, k0, k1) VALUES (4, 'a2', 'b1');
+
+Affected Rows: 1
+
+SELECT * from different_order order by t;
+
++----+----+----+----+-------------------------+
+| k0 | k1 | v0 | v1 | t                       |
++----+----+----+----+-------------------------+
+| a0 | b0 | 1  | 11 | 1970-01-01T00:00:00.001 |
+| a1 |    | 2  | 12 | 1970-01-01T00:00:00.002 |
+| a2 | b1 |    | 13 | 1970-01-01T00:00:00.003 |
+| a2 | b1 |    |    | 1970-01-01T00:00:00.004 |
++----+----+----+----+-------------------------+
+
+SELECT * from different_order WHERE k0 = 'a2' order by t;
+
++----+----+----+----+-------------------------+
+| k0 | k1 | v0 | v1 | t                       |
++----+----+----+----+-------------------------+
+| a2 | b1 |    | 13 | 1970-01-01T00:00:00.003 |
+| a2 | b1 |    |    | 1970-01-01T00:00:00.004 |
++----+----+----+----+-------------------------+
+
+DROP TABLE different_order;
+
+Affected Rows: 0
+

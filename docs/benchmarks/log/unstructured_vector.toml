@@ -1,0 +1,43 @@
+# Please note we use patched branch to build vector
+# https://github.com/shuiyisong/vector/tree/chore/greptime_log_ingester_ft
+
+[sources.demo_logs]
+type = "demo_logs"
+format = "apache_common"
+# interval value = 1 / rps
+# say you want to insert at 20k/s, that is 1 / 20000 = 0.00005
+# set to 0 to run as fast as possible
+interval = 0
+# total rows to insert
+count = 100000000
+lines = [ "line1" ]
+
+[sinks.sink_greptime_logs]
+type = "greptimedb_logs"
+# The table to insert into
+table = "test_table"
+pipeline_name = "demo_pipeline"
+compression = "none"
+inputs = [ "demo_logs" ]
+endpoint = "http://127.0.0.1:4000"
+# Batch size for each insertion
+batch.max_events = 500
+
+[sinks.clickhouse]
+type = "clickhouse"
+inputs = [ "demo_logs" ]
+database = "default"
+endpoint = "http://127.0.0.1:8123"
+format = "json_each_row"
+# The table to insert into
+table = "test_table"
+
+[sinks.sink_elasticsearch]
+type = "elasticsearch"
+inputs = [ "demo_logs" ]
+api_version = "auto"
+compression = "none"
+doc_type = "_doc"
+endpoints = [ "http://127.0.0.1:9200" ]
+id_key = "id"
+mode = "bulk"

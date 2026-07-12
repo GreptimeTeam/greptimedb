@@ -1,0 +1,41 @@
+CREATE TABLE multi_partitions_test_table (
+    host STRING,
+    ts TIMESTAMP,
+    cpu DOUBLE NULL,
+    memory DOUBLE NULL,
+    disk_util DOUBLE DEFAULT 9.9,
+    TIME INDEX (ts),
+    PRIMARY KEY(host)
+)
+PARTITION ON COLUMNS (host) (
+    host < '550-A',
+    host >= '550-A' AND host < '550-W',
+    host >= '550-W'
+);
+
+Affected Rows: 0
+
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (peers.*) REDACTED
+explain SELECT * FROM multi_partitions_test_table WHERE ts > cast(1000000000 as timestamp) ORDER BY host;
+
++-+-+
+| plan_type_| plan_|
++-+-+
+| logical_plan_| MergeSort: multi_partitions_test_table.host ASC NULLS LAST_|
+|_|_MergeScan [is_placeholder=false, remote_input=[_|
+|_| Sort: multi_partitions_test_table.host ASC NULLS LAST_|
+|_|_Projection: multi_partitions_test_table.host, multi_partitions_test_table.ts, multi_partitions_test_table.cpu, multi_partitions_test_table.memory, multi_partitions_test_table.disk_util |
+|_|_Filter: multi_partitions_test_table.ts > TimestampMillisecond(1000000000, None)_|
+|_|_TableScan: multi_partitions_test_table, partial_filters=[multi_partitions_test_table.ts > TimestampMillisecond(1000000000, None)]_|
+|_| ]]_|
+| physical_plan | SortPreservingMergeExec: [host@0 ASC NULLS LAST]_|
+|_|_MergeScanExec: REDACTED
+|_|_|
++-+-+
+
+drop table multi_partitions_test_table;
+
+Affected Rows: 0
+

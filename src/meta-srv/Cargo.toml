@@ -1,0 +1,104 @@
+[package]
+name = "meta-srv"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+mock = []
+pg_kvbackend = ["dep:tokio-postgres", "common-meta/pg_kvbackend", "dep:deadpool-postgres", "dep:deadpool"]
+mysql_kvbackend = ["dep:sqlx", "common-meta/mysql_kvbackend"]
+testing = ["common-wal/testing"]
+enterprise = ["common-meta/enterprise"]
+
+[lints]
+workspace = true
+
+[target.'cfg(not(target_os = "android"))'.dependencies]
+local-ip-address.workspace = true
+
+[dependencies]
+api.workspace = true
+async-trait.workspace = true
+axum.workspace = true
+axum-extra.workspace = true
+axum-macros.workspace = true
+bytes.workspace = true
+chrono.workspace = true
+clap.workspace = true
+client.workspace = true
+common-base.workspace = true
+common-catalog.workspace = true
+common-config.workspace = true
+common-error.workspace = true
+common-event-recorder.workspace = true
+common-greptimedb-telemetry.workspace = true
+common-grpc.workspace = true
+common-macro.workspace = true
+common-meta.workspace = true
+common-options.workspace = true
+common-procedure.workspace = true
+common-runtime.workspace = true
+common-stat.workspace = true
+common-telemetry.workspace = true
+common-time.workspace = true
+common-version.workspace = true
+common-wal.workspace = true
+common-workload.workspace = true
+dashmap.workspace = true
+datatypes.workspace = true
+deadpool = { workspace = true, optional = true }
+deadpool-postgres = { workspace = true, optional = true }
+derive_builder.workspace = true
+either.workspace = true
+etcd-client.workspace = true
+futures.workspace = true
+h2 = "0.3"
+hostname.workspace = true
+http-body-util = "0.1"
+humantime.workspace = true
+humantime-serde.workspace = true
+hyper-util = { workspace = true, features = ["tokio"] }
+itertools.workspace = true
+lazy_static.workspace = true
+once_cell.workspace = true
+ordered-float.workspace = true
+parking_lot.workspace = true
+partition.workspace = true
+prometheus.workspace = true
+prost.workspace = true
+rand.workspace = true
+regex.workspace = true
+rskafka.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+servers.workspace = true
+snafu.workspace = true
+sqlx = { workspace = true, features = [
+    "mysql",
+    "chrono",
+], optional = true }
+store-api.workspace = true
+strum.workspace = true
+table.workspace = true
+tokio.workspace = true
+tokio-postgres = { workspace = true, optional = true, features = ["with-chrono-0_4"] }
+tokio-stream = { workspace = true, features = ["net"] }
+toml.workspace = true
+tonic.workspace = true
+tower.workspace = true
+tower-http.workspace = true
+tracing.workspace = true
+typetag.workspace = true
+url = "2.3"
+uuid.workspace = true
+
+[dev-dependencies]
+chrono.workspace = true
+client = { workspace = true, features = ["testing"] }
+common-meta = { workspace = true, features = ["testing"] }
+common-procedure-test.workspace = true
+common-wal = { workspace = true, features = ["testing"] }
+session.workspace = true
+tracing = "0.1"
+tracing-subscriber.workspace = true

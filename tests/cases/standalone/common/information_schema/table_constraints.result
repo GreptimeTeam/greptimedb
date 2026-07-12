@@ -1,0 +1,66 @@
+--- test information_schema.table_constraints ----
+USE INFORMATION_SCHEMA;
+
+Affected Rows: 0
+
+DESC TABLE TABLE_CONSTRAINTS;
+
++--------------------+--------+-----+------+---------+---------------+
+| Column             | Type   | Key | Null | Default | Semantic Type |
++--------------------+--------+-----+------+---------+---------------+
+| constraint_catalog | String |     | NO   |         | FIELD         |
+| constraint_schema  | String |     | NO   |         | FIELD         |
+| constraint_name    | String |     | NO   |         | FIELD         |
+| table_schema       | String |     | NO   |         | FIELD         |
+| table_name         | String |     | NO   |         | FIELD         |
+| constraint_type    | String |     | NO   |         | FIELD         |
+| enforced           | String |     | NO   |         | FIELD         |
++--------------------+--------+-----+------+---------+---------------+
+
+SELECT * FROM TABLE_CONSTRAINTS ORDER BY TABLE_NAME, CONSTRAINT_NAME;
+
++--------------------+-------------------+-----------------+--------------+------------+-----------------+----------+
+| constraint_catalog | constraint_schema | constraint_name | table_schema | table_name | constraint_type | enforced |
++--------------------+-------------------+-----------------+--------------+------------+-----------------+----------+
+| def                | public            | PRIMARY         | public       | numbers    | PRIMARY KEY     | YES      |
++--------------------+-------------------+-----------------+--------------+------------+-----------------+----------+
+
+use public;
+
+Affected Rows: 0
+
+CREATE TABLE test(i double, j string, ts timestamp time index, primary key(j));
+
+Affected Rows: 0
+
+use INFORMATION_SCHEMA;
+
+Affected Rows: 0
+
+SELECT * FROM TABLE_CONSTRAINTS ORDER BY TABLE_NAME, CONSTRAINT_NAME;
+
++--------------------+-------------------+-----------------+--------------+------------+-----------------+----------+
+| constraint_catalog | constraint_schema | constraint_name | table_schema | table_name | constraint_type | enforced |
++--------------------+-------------------+-----------------+--------------+------------+-----------------+----------+
+| def                | public            | PRIMARY         | public       | numbers    | PRIMARY KEY     | YES      |
+| def                | public            | PRIMARY         | public       | test       | PRIMARY KEY     | YES      |
+| def                | public            | TIME INDEX      | public       | test       | TIME INDEX      | YES      |
++--------------------+-------------------+-----------------+--------------+------------+-----------------+----------+
+
+SELECT * FROM TABLE_CONSTRAINTS WHERE TABLE_NAME = 'test' ORDER BY TABLE_NAME, CONSTRAINT_NAME;
+
++--------------------+-------------------+-----------------+--------------+------------+-----------------+----------+
+| constraint_catalog | constraint_schema | constraint_name | table_schema | table_name | constraint_type | enforced |
++--------------------+-------------------+-----------------+--------------+------------+-----------------+----------+
+| def                | public            | PRIMARY         | public       | test       | PRIMARY KEY     | YES      |
+| def                | public            | TIME INDEX      | public       | test       | TIME INDEX      | YES      |
++--------------------+-------------------+-----------------+--------------+------------+-----------------+----------+
+
+use public;
+
+Affected Rows: 0
+
+DROP TABLE test;
+
+Affected Rows: 0
+

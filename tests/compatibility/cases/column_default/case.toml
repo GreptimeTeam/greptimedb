@@ -1,0 +1,8 @@
+name = "column_default"
+reason = "Verify column DEFAULT metadata created by old binaries still works for inserts after upgrade."
+introduced_by = "PR #8376 follow-up"
+topologies = ["distributed"]
+from_range = ["*"]
+to_range = ["*"]
+features = ["table", "default"]
+owner = "query"

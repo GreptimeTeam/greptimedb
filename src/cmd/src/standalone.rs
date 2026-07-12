@@ -1,0 +1,1273 @@
+// Copyright 2023 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+use std::fmt::Debug;
+use std::net::SocketAddr;
+use std::path::Path;
+use std::sync::Arc;
+use std::{fs, path};
+
+use async_trait::async_trait;
+use cache::{build_fundamental_cache_registry, with_default_composite_cache_registry};
+use catalog::CatalogManagerRef;
+use catalog::information_schema::InformationExtensionRef;
+use catalog::kvbackend::{CatalogManagerConfiguratorRef, KvBackendCatalogManagerBuilder};
+use catalog::process_manager::ProcessManager;
+use clap::Parser;
+use common_base::Plugins;
+use common_catalog::consts::{MIN_USER_FLOW_ID, MIN_USER_TABLE_ID};
+use common_config::{Configurable, metadata_store_dir};
+use common_error::ext::BoxedError;
+use common_meta::DatanodeId;
+use common_meta::cache::{LayeredCacheRegistryBuilder, LayeredCacheRegistryRef};
+use common_meta::ddl::flow_meta::FlowMetadataAllocator;
+use common_meta::ddl::table_meta::TableMetadataAllocator;
+use common_meta::ddl::{DdlContext, NoopRegionFailureDetectorControl};
+use common_meta::ddl_manager::{DdlManager, DdlManagerConfiguratorRef, DdlManagerRef};
+use common_meta::key::flow::FlowMetadataManager;
+use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
+use common_meta::kv_backend::KvBackendRef;
+use common_meta::node_manager::{FlownodeRef, NodeManagerRef};
+use common_meta::procedure_executor::{LocalProcedureExecutor, ProcedureExecutorRef};
+use common_meta::region_keeper::MemoryRegionKeeper;
+use common_meta::region_registry::LeaderRegionRegistry;
+use common_meta::sequence::{Sequence, SequenceBuilder};
+use common_meta::wal_provider::{WalProviderRef, build_wal_provider};
+use common_options::plugin_options::StandaloneFlag;
+use common_procedure::ProcedureManagerRef;
+use common_query::prelude::set_default_prefix;
+use common_telemetry::info;
+use common_telemetry::logging::{DEFAULT_LOGGING_DIR, TracingOptions};
+use common_time::timezone::set_default_timezone;
+use common_version::{short_version, verbose_version};
+use datanode::config::DatanodeOptions;
+use datanode::datanode::{Datanode, DatanodeBuilder};
+use datanode::region_server::RegionServer;
+use flow::{
+    FlowDualEngineRef, FlownodeBuilder, FlownodeInstance, FlownodeOptions, FrontendClient,
+    FrontendInvoker, GrpcQueryHandlerWithBoxedError,
+};
+use frontend::frontend::Frontend;
+use frontend::instance::StandaloneDatanodeManager;
+use frontend::instance::builder::FrontendBuilder;
+use frontend::server::Services;
+use meta_srv::metasrv::{FLOW_ID_SEQ, TABLE_ID_SEQ};
+use plugins::PluginOptions;
+use plugins::frontend::context::{
+    CatalogManagerConfigureContext, StandaloneCatalogManagerConfigureContext,
+};
+use plugins::standalone::context::DdlManagerConfigureContext;
+use servers::tls::{TlsMode, TlsOption, merge_tls_option};
+use snafu::ResultExt;
+use standalone::options::StandaloneOptions;
+use standalone::{StandaloneInformationExtension, StandaloneRepartitionProcedureFactory};
+use tracing_appender::non_blocking::WorkerGuard;
+
+use crate::error::{OtherSnafu, Result, StartFlownodeSnafu};
+use crate::options::{GlobalOptions, GreptimeOptions};
+use crate::{App, create_resource_limit_metrics, error, log_versions, maybe_activate_heap_profile};
+
+pub const APP_NAME: &str = "greptime-standalone";
+
+#[derive(Parser)]
+pub struct Command {
+    #[clap(subcommand)]
+    subcmd: SubCommand,
+}
+
+impl Command {
+    pub async fn build(&self, opts: GreptimeOptions<StandaloneOptions>) -> Result<Instance> {
+        self.subcmd.build(opts).await
+    }
+
+    pub fn load_options(
+        &self,
+        global_options: &GlobalOptions,
+    ) -> Result<GreptimeOptions<StandaloneOptions>> {
+        self.subcmd.load_options(global_options)
+    }
+}
+
+#[derive(Parser)]
+enum SubCommand {
+    Start(StartCommand),
+}
+
+impl SubCommand {
+    async fn build(&self, opts: GreptimeOptions<StandaloneOptions>) -> Result<Instance> {
+        match self {
+            SubCommand::Start(cmd) => cmd.build(opts).await,
+        }
+    }
+
+    fn load_options(
+        &self,
+        global_options: &GlobalOptions,
+    ) -> Result<GreptimeOptions<StandaloneOptions>> {
+        match self {
+            SubCommand::Start(cmd) => cmd.load_options(global_options),
+        }
+    }
+}
+
+pub struct Instance {
+    datanode: Datanode,
+    frontend: Frontend,
+    flownode: FlownodeInstance,
+    procedure_manager: ProcedureManagerRef,
+    leader_services_controller: Box<dyn StandaloneLeaderServicesController>,
+    leader_services_context: LeaderServicesContext,
+    // Keep the logging guard to prevent the worker from being dropped.
+    _guard: Vec<WorkerGuard>,
+}
+
+impl Instance {
+    /// Find the socket addr of a server by its `name`.
+    pub fn server_addr(&self, name: &str) -> Option<SocketAddr> {
+        self.frontend.server_handlers().addr(name)
+    }
+
+    /// Get the mutable Frontend component of this Standalone instance for externally modification
+    /// by others (might not be in this code base, so don't delete this function).
+    pub fn mut_frontend(&mut self) -> &mut Frontend {
+        &mut self.frontend
+    }
+
+    /// Get the Datanode component of this Standalone instance for externally usage
+    /// by others (might not be in this code base, so don't delete this function).
+    pub fn datanode(&self) -> &Datanode {
+        &self.datanode
+    }
+}
+
+#[async_trait]
+impl App for Instance {
+    fn name(&self) -> &str {
+        APP_NAME
+    }
+
+    async fn start(&mut self) -> Result<()> {
+        self.datanode.start_telemetry();
+
+        self.leader_services_controller
+            .start(self.leader_services_context.clone())
+            .await?;
+
+        plugins::start_frontend_plugins(&self.frontend.instance)
+            .await
+            .context(error::StartFrontendSnafu)?;
+
+        self.frontend
+            .start()
+            .await
+            .context(error::StartFrontendSnafu)?;
+
+        self.flownode.start().await.context(StartFlownodeSnafu)?;
+
+        Ok(())
+    }
+
+    async fn stop(&mut self) -> Result<()> {
+        self.frontend
+            .shutdown()
+            .await
+            .context(error::ShutdownFrontendSnafu)?;
+
+        self.leader_services_controller
+            .stop(
+                self.procedure_manager.clone(),
+                self.datanode.region_server(),
+            )
+            .await?;
+
+        self.datanode
+            .shutdown()
+            .await
+            .context(error::ShutdownDatanodeSnafu)?;
+
+        self.flownode
+            .shutdown()
+            .await
+            .context(error::ShutdownFlownodeSnafu)?;
+
+        info!("Datanode instance stopped.");
+
+        Ok(())
+    }
+}
+
+#[derive(Debug, Default, Parser)]
+pub struct StartCommand {
+    #[clap(long)]
+    http_addr: Option<String>,
+    #[clap(long = "grpc-bind-addr", alias = "rpc-bind-addr", alias = "rpc-addr")]
+    grpc_bind_addr: Option<String>,
+    #[clap(long)]
+    mysql_addr: Option<String>,
+    #[clap(long)]
+    postgres_addr: Option<String>,
+    #[clap(short, long)]
+    influxdb_enable: bool,
+    #[clap(short, long)]
+    pub config_file: Option<String>,
+    #[clap(long)]
+    tls_mode: Option<TlsMode>,
+    #[clap(long)]
+    tls_cert_path: Option<String>,
+    #[clap(long)]
+    tls_key_path: Option<String>,
+    #[clap(long)]
+    tls_watch: bool,
+    #[clap(long)]
+    user_provider: Option<String>,
+    #[clap(long, default_value = "GREPTIMEDB_STANDALONE")]
+    pub env_prefix: String,
+    /// The working home directory of this standalone instance.
+    #[clap(long)]
+    data_home: Option<String>,
+}
+
+impl StartCommand {
+    /// Load the GreptimeDB options from various sources (command line, config file or env).
+    pub fn load_options(
+        &self,
+        global_options: &GlobalOptions,
+    ) -> Result<GreptimeOptions<StandaloneOptions>> {
+        let mut opts = GreptimeOptions::<StandaloneOptions>::load_layered_options(
+            self.config_file.as_deref(),
+            self.env_prefix.as_ref(),
+        )
+        .context(error::LoadLayeredConfigSnafu)?;
+
+        self.merge_with_cli_options(global_options, &mut opts.component)?;
+        opts.component.sanitize();
+
+        Ok(opts)
+    }
+
+    // The precedence order is: cli > config file > environment variables > default values.
+    pub fn merge_with_cli_options(
+        &self,
+        global_options: &GlobalOptions,
+        opts: &mut StandaloneOptions,
+    ) -> Result<()> {
+        if let Some(dir) = &global_options.log_dir {
+            opts.logging.dir.clone_from(dir);
+        }
+
+        if global_options.log_level.is_some() {
+            opts.logging.level.clone_from(&global_options.log_level);
+        }
+
+        opts.tracing = TracingOptions {
+            #[cfg(feature = "tokio-console")]
+            tokio_console_addr: global_options.tokio_console_addr.clone(),
+        };
+
+        let tls_opts = TlsOption::new(
+            self.tls_mode,
+            self.tls_cert_path.clone(),
+            self.tls_key_path.clone(),
+            self.tls_watch,
+        );
+
+        if let Some(addr) = &self.http_addr {
+            opts.http.addr.clone_from(addr);
+        }
+
+        if let Some(data_home) = &self.data_home {
+            opts.storage.data_home.clone_from(data_home);
+        }
+
+        // If the logging dir is not set, use the default logs dir in the data home.
+        if opts.logging.dir.is_empty() {
+            opts.logging.dir = Path::new(&opts.storage.data_home)
+                .join(DEFAULT_LOGGING_DIR)
+                .to_string_lossy()
+                .to_string();
+        }
+
+        if let Some(addr) = &self.grpc_bind_addr {
+            // frontend grpc addr conflict with datanode default grpc addr
+            let datanode_grpc_addr = DatanodeOptions::default().grpc.bind_addr;
+            if addr.eq(&datanode_grpc_addr) {
+                return error::IllegalConfigSnafu {
+                    msg: format!(
+                        "gRPC listen address conflicts with datanode reserved gRPC addr: {datanode_grpc_addr}",
+                    ),
+                }.fail();
+            }
+            opts.grpc.bind_addr.clone_from(addr);
+            opts.grpc.tls = merge_tls_option(&opts.grpc.tls, tls_opts.clone());
+        }
+
+        if let Some(addr) = &self.mysql_addr {
+            opts.mysql.enable = true;
+            opts.mysql.addr.clone_from(addr);
+            opts.mysql.tls = merge_tls_option(&opts.mysql.tls, tls_opts.clone());
+        }
+
+        if let Some(addr) = &self.postgres_addr {
+            opts.postgres.enable = true;
+            opts.postgres.addr.clone_from(addr);
+            opts.postgres.tls = merge_tls_option(&opts.postgres.tls, tls_opts.clone());
+        }
+
+        if self.influxdb_enable {
+            opts.influxdb.enable = self.influxdb_enable;
+        }
+
+        if let Some(user_provider) = &self.user_provider {
+            opts.user_provider = Some(user_provider.clone());
+        }
+
+        Ok(())
+    }
+
+    #[allow(unreachable_code)]
+    #[allow(unused_variables)]
+    #[allow(clippy::diverging_sub_expression)]
+    /// Build GreptimeDB instance with the loaded options.
+    pub async fn build(&self, opts: GreptimeOptions<StandaloneOptions>) -> Result<Instance> {
+        common_runtime::init_global_runtimes(&opts.runtime);
+
+        let guard = common_telemetry::init_global_logging(
+            APP_NAME,
+            &opts.component.logging,
+            &opts.component.tracing,
+            None,
+            Some(&opts.component.slow_query),
+        );
+
+        log_versions(verbose_version(), short_version(), APP_NAME);
+        maybe_activate_heap_profile(&opts.component.memory);
+        create_resource_limit_metrics(APP_NAME);
+
+        info!("Standalone start command: {:#?}", self);
+        info!("Standalone options: {opts:#?}");
+
+        let (mut instance, _) =
+            Self::build_with(opts.component, opts.plugins, InstanceCreator::default()).await?;
+        instance._guard.extend(guard);
+        Ok(instance)
+    }
+
+    pub async fn build_with(
+        mut opts: StandaloneOptions,
+        plugin_opts: Vec<PluginOptions>,
+        creator: InstanceCreator,
+    ) -> Result<(Instance, InstanceCreatorResult)> {
+        let mut plugins = Plugins::new();
+        plugins.insert(StandaloneFlag);
+        set_default_prefix(opts.default_column_prefix.as_deref())
+            .map_err(BoxedError::new)
+            .context(error::BuildCliSnafu)?;
+
+        opts.grpc.detect_server_addr();
+        let fe_opts = opts.frontend_options();
+        let dn_opts = opts.datanode_options();
+        let node_id = dn_opts.node_id;
+        let init_regions_parallelism = dn_opts.init_regions_parallelism;
+
+        plugins::setup_frontend_plugins_pre_build(&mut plugins, &plugin_opts, &fe_opts, None)
+            .await
+            .context(error::StartFrontendSnafu)?;
+
+        plugins::setup_datanode_plugins_pre_build(&mut plugins, &plugin_opts, &dn_opts)
+            .await
+            .context(error::StartDatanodeSnafu)?;
+
+        set_default_timezone(fe_opts.default_timezone.as_deref())
+            .context(error::InitTimezoneSnafu)?;
+
+        let data_home = &dn_opts.storage.data_home;
+        // Ensure the data_home directory exists.
+        fs::create_dir_all(path::Path::new(data_home))
+            .context(error::CreateDirSnafu { dir: data_home })?;
+
+        let metadata_dir = metadata_store_dir(data_home);
+        let kv_backend = creator
+            .metadata_kv_backend_creator
+            .create(metadata_dir, &opts)
+            .await?;
+        let procedure_manager =
+            standalone::build_procedure_manager(kv_backend.clone(), opts.procedure);
+
+        plugins::setup_standalone_plugins(&mut plugins, &plugin_opts, &opts, kv_backend.clone())
+            .await
+            .context(error::SetupStandalonePluginsSnafu)?;
+
+        // Builds cache registry
+        let layered_cache_builder = LayeredCacheRegistryBuilder::default();
+        let fundamental_cache_registry = build_fundamental_cache_registry(kv_backend.clone());
+        let mut layered_cache_builder = with_default_composite_cache_registry(
+            layered_cache_builder.add_cache_registry(fundamental_cache_registry),
+        )
+        .context(error::BuildCacheRegistrySnafu)?;
+
+        if let Some(plugin_cache_builder) = plugins::standalone::configure_cache_registry(&plugins)
+        {
+            layered_cache_builder =
+                layered_cache_builder.add_cache_registry(plugin_cache_builder.build());
+        }
+
+        let layered_cache_registry = Arc::new(layered_cache_builder.build());
+
+        let mut builder = DatanodeBuilder::new(dn_opts, plugins.clone(), kv_backend.clone());
+        builder.with_cache_registry(layered_cache_registry.clone());
+        if let Some(writable) = creator.open_regions_writable_override {
+            builder.with_open_regions_writable_override(writable);
+        }
+
+        plugins::setup_datanode_plugins_post_build(&mut plugins, &plugin_opts, &builder)
+            .await
+            .context(error::StartDatanodeSnafu)?;
+        builder.set_plugins(plugins.clone());
+
+        let datanode = builder.build().await.context(error::StartDatanodeSnafu)?;
+
+        let information_extension = Arc::new(StandaloneInformationExtension::new(
+            datanode.region_server(),
+            procedure_manager.clone(),
+        ));
+
+        plugins.insert::<InformationExtensionRef>(information_extension.clone());
+
+        let process_manager = Arc::new(ProcessManager::new(opts.grpc.server_addr.clone(), None));
+
+        // for standalone not use grpc, but get a handler to frontend grpc client without
+        // actually make a connection
+        let (frontend_client, frontend_instance_handler) =
+            FrontendClient::from_empty_grpc_handler(opts.query.clone());
+        let frontend_client = Arc::new(frontend_client);
+
+        let builder = KvBackendCatalogManagerBuilder::new(
+            information_extension.clone(),
+            kv_backend.clone(),
+            layered_cache_registry.clone(),
+        )
+        .with_procedure_manager(procedure_manager.clone())
+        .with_process_manager(process_manager.clone());
+        let builder = if let Some(configurator) =
+            plugins.get::<CatalogManagerConfiguratorRef<CatalogManagerConfigureContext>>()
+        {
+            let ctx = StandaloneCatalogManagerConfigureContext {
+                fe_client: frontend_client.clone(),
+            };
+            let ctx = CatalogManagerConfigureContext::Standalone(ctx);
+            configurator
+                .configure(builder, ctx)
+                .await
+                .context(OtherSnafu)?
+        } else {
+            builder
+        };
+        let catalog_manager = builder.build();
+
+        let table_metadata_manager =
+            Self::create_table_metadata_manager(kv_backend.clone()).await?;
+
+        let flow_metadata_manager = Arc::new(FlowMetadataManager::new(kv_backend.clone()));
+        let flownode_options = FlownodeOptions {
+            flow: opts.flow.clone(),
+            ..Default::default()
+        };
+
+        let mut flow_builder = FlownodeBuilder::new(
+            flownode_options,
+            plugins.clone(),
+            table_metadata_manager.clone(),
+            catalog_manager.clone(),
+            flow_metadata_manager.clone(),
+            frontend_client.clone(),
+        );
+
+        plugins::setup_flownode_plugins_post_build(&mut plugins, &plugin_opts, &flow_builder)
+            .await
+            .context(error::StartFlownodeSnafu)?;
+        flow_builder.set_plugins(plugins.clone());
+
+        let flownode = flow_builder
+            .build()
+            .await
+            .map_err(BoxedError::new)
+            .context(error::OtherSnafu)?;
+        let flow_engine = flownode.flow_engine();
+
+        // set the ref to query for the local flow state
+        {
+            information_extension
+                .set_flow_engine(flow_engine.clone())
+                .await;
+        }
+
+        let node_manager = creator
+            .node_manager_creator
+            .create(&kv_backend, datanode.region_server(), flow_engine.clone())
+            .await?;
+
+        let table_id_allocator = creator.table_id_allocator_creator.create(&kv_backend);
+        let flow_id_sequence = Arc::new(
+            SequenceBuilder::new(FLOW_ID_SEQ, kv_backend.clone())
+                .initial(MIN_USER_FLOW_ID as u64)
+                .step(10)
+                .build(),
+        );
+        let kafka_options = opts
+            .wal
+            .clone()
+            .try_into()
+            .context(error::InvalidWalProviderSnafu)?;
+        let wal_provider = build_wal_provider(&kafka_options, kv_backend.clone())
+            .await
+            .context(error::BuildWalProviderSnafu)?;
+        let wal_provider = Arc::new(wal_provider);
+        let table_metadata_allocator = Arc::new(TableMetadataAllocator::new(
+            table_id_allocator.clone(),
+            wal_provider.clone(),
+        ));
+        let flow_metadata_allocator = Arc::new(FlowMetadataAllocator::with_noop_peer_allocator(
+            flow_id_sequence,
+        ));
+
+        let ddl_context = DdlContext {
+            node_manager: node_manager.clone(),
+            cache_invalidator: layered_cache_registry.clone(),
+            memory_region_keeper: Arc::new(MemoryRegionKeeper::default()),
+            leader_region_registry: Arc::new(LeaderRegionRegistry::default()),
+            table_metadata_manager: table_metadata_manager.clone(),
+            table_metadata_allocator: table_metadata_allocator.clone(),
+            flow_metadata_manager: flow_metadata_manager.clone(),
+            flow_metadata_allocator: flow_metadata_allocator.clone(),
+            region_failure_detector_controller: Arc::new(NoopRegionFailureDetectorControl),
+            soft_drop_enabled: false,
+        };
+
+        let ddl_manager = DdlManager::try_new(
+            ddl_context,
+            procedure_manager.clone(),
+            Arc::new(StandaloneRepartitionProcedureFactory),
+            true,
+        )
+        .context(error::InitDdlManagerSnafu)?;
+
+        let ddl_manager = if let Some(configurator) =
+            plugins.get::<DdlManagerConfiguratorRef<DdlManagerConfigureContext>>()
+        {
+            let ctx = DdlManagerConfigureContext {
+                kv_backend: kv_backend.clone(),
+                fe_client: frontend_client.clone(),
+                catalog_manager: catalog_manager.clone(),
+            };
+            configurator
+                .configure(ddl_manager, ctx)
+                .await
+                .context(OtherSnafu)?
+        } else {
+            ddl_manager
+        };
+
+        let procedure_executor = creator
+            .procedure_executor_creator
+            .create(Arc::new(ddl_manager), procedure_manager.clone())
+            .await?;
+
+        let fe_instance = FrontendBuilder::new(
+            fe_opts.clone(),
+            kv_backend.clone(),
+            layered_cache_registry.clone(),
+            catalog_manager.clone(),
+            node_manager.clone(),
+            procedure_executor.clone(),
+            process_manager,
+        );
+
+        plugins::setup_frontend_plugins_post_build(&mut plugins, &plugin_opts, &fe_instance)
+            .await
+            .context(error::StartFrontendSnafu)?;
+
+        let fe_instance = fe_instance
+            .with_plugin(plugins.clone())
+            .try_build()
+            .await
+            .context(error::StartFrontendSnafu)?;
+        let fe_instance = Arc::new(fe_instance);
+
+        // set the frontend client for flownode
+        let grpc_handler = fe_instance.clone() as Arc<dyn GrpcQueryHandlerWithBoxedError>;
+        let weak_grpc_handler = Arc::downgrade(&grpc_handler);
+        frontend_instance_handler
+            .set_handler(weak_grpc_handler)
+            .await;
+
+        // set the frontend invoker for flownode
+        let flow_streaming_engine = flow_engine.streaming_engine();
+        // flow server need to be able to use frontend to write insert requests back
+        let invoker = FrontendInvoker::build_from(
+            flow_streaming_engine.clone(),
+            catalog_manager.clone(),
+            kv_backend.clone(),
+            layered_cache_registry.clone(),
+            procedure_executor,
+            node_manager.clone(),
+            fe_instance.frontend_peer_addr().to_string(),
+        )
+        .await
+        .context(StartFlownodeSnafu)?;
+        flow_streaming_engine.set_frontend_invoker(invoker).await;
+
+        let servers = Services::new(opts, fe_instance.clone(), plugins.clone())
+            .build()
+            .context(error::StartFrontendSnafu)?;
+
+        let frontend = Frontend {
+            instance: fe_instance,
+            servers,
+            heartbeat_task: None,
+        };
+        let leader_services_context = LeaderServicesContext {
+            procedure_manager: procedure_manager.clone(),
+            wal_provider: wal_provider.clone(),
+            region_server: datanode.region_server(),
+            kv_backend: kv_backend.clone(),
+            cache_registry: layered_cache_registry,
+            catalog_manager,
+            flow_engine,
+            frontend_client,
+            node_id,
+            init_regions_parallelism,
+            plugin_options: plugin_opts,
+        };
+
+        let instance = Instance {
+            datanode,
+            frontend,
+            flownode,
+            procedure_manager,
+            leader_services_controller: creator.leader_services_controller,
+            leader_services_context,
+            _guard: vec![],
+        };
+        let result = InstanceCreatorResult {
+            kv_backend,
+            node_manager,
+            table_id_allocator,
+        };
+        Ok((instance, result))
+    }
+
+    pub async fn create_table_metadata_manager(
+        kv_backend: KvBackendRef,
+    ) -> Result<TableMetadataManagerRef> {
+        let table_metadata_manager = Arc::new(TableMetadataManager::new(kv_backend));
+
+        table_metadata_manager
+            .init()
+            .await
+            .context(error::InitMetadataSnafu)?;
+
+        Ok(table_metadata_manager)
+    }
+}
+
+#[async_trait]
+pub trait NodeManagerCreator: Send + Sync {
+    async fn create(
+        &self,
+        kv_backend: &KvBackendRef,
+        region_server: RegionServer,
+        flow_server: FlownodeRef,
+    ) -> Result<NodeManagerRef>;
+}
+
+pub struct DefaultNodeManagerCreator;
+
+#[async_trait]
+impl NodeManagerCreator for DefaultNodeManagerCreator {
+    async fn create(
+        &self,
+        _: &KvBackendRef,
+        region_server: RegionServer,
+        flow_server: FlownodeRef,
+    ) -> Result<NodeManagerRef> {
+        Ok(Arc::new(StandaloneDatanodeManager {
+            region_server,
+            flow_server,
+        }))
+    }
+}
+
+/// Customizes how standalone opens its metadata KV backend.
+///
+/// The default implementation preserves the built-in raft-engine path. Other
+/// callers can provide a custom implementation without changing standalone
+/// configuration types.
+#[async_trait]
+pub trait MetadataKvBackendCreator: Send + Sync {
+    async fn create(&self, metadata_dir: String, opts: &StandaloneOptions) -> Result<KvBackendRef>;
+}
+
+pub struct DefaultMetadataKvBackendCreator;
+
+#[async_trait]
+impl MetadataKvBackendCreator for DefaultMetadataKvBackendCreator {
+    async fn create(&self, metadata_dir: String, opts: &StandaloneOptions) -> Result<KvBackendRef> {
+        standalone::build_metadata_kvbackend(metadata_dir, opts.metadata_store)
+            .context(error::BuildMetadataKvbackendSnafu)
+    }
+}
+
+pub trait TableIdAllocatorCreator: Send + Sync {
+    fn create(&self, kv_backend: &KvBackendRef) -> Arc<Sequence>;
+}
+
+struct DefaultTableIdAllocatorCreator;
+
+impl TableIdAllocatorCreator for DefaultTableIdAllocatorCreator {
+    fn create(&self, kv_backend: &KvBackendRef) -> Arc<Sequence> {
+        Arc::new(
+            SequenceBuilder::new(TABLE_ID_SEQ, kv_backend.clone())
+                .initial(MIN_USER_TABLE_ID as u64)
+                .step(10)
+                .build(),
+        )
+    }
+}
+
+#[async_trait]
+pub trait ProcedureExecutorCreator: Send + Sync {
+    async fn create(
+        &self,
+        ddl_manager: DdlManagerRef,
+        procedure_manager: ProcedureManagerRef,
+    ) -> Result<ProcedureExecutorRef>;
+}
+
+pub struct DefaultProcedureExecutorCreator;
+
+#[async_trait]
+impl ProcedureExecutorCreator for DefaultProcedureExecutorCreator {
+    async fn create(
+        &self,
+        ddl_manager: DdlManagerRef,
+        procedure_manager: ProcedureManagerRef,
+    ) -> Result<ProcedureExecutorRef> {
+        Ok(Arc::new(LocalProcedureExecutor::new(
+            ddl_manager,
+            procedure_manager,
+        )))
+    }
+}
+
+#[async_trait]
+pub trait StandaloneLeaderServicesController: Send + Sync {
+    /// Starts leader services that manage standalone metadata or WAL state.
+    ///
+    /// The default implementation starts the procedure manager and WAL provider
+    /// during instance startup.
+    async fn start(&self, context: LeaderServicesContext) -> Result<()>;
+
+    /// Stops services started by [`StandaloneLeaderServicesController::start`].
+    async fn stop(
+        &self,
+        procedure_manager: ProcedureManagerRef,
+        region_server: RegionServer,
+    ) -> Result<()>;
+}
+
+#[derive(Clone)]
+/// Additional runtime handles for custom leader-service controllers.
+///
+/// The default standalone startup only needs to start/stop the procedure
+/// manager and WAL provider. Some embedders need to do more work around
+/// leader-service startup, for example reconciling metadata-backed runtime
+/// state before publishing writable leadership. Grouping those handles here
+/// keeps `Instance` small and avoids expanding
+/// [`StandaloneLeaderServicesController::start`] every time a custom lifecycle
+/// needs one more standalone component.
+pub struct LeaderServicesContext {
+    pub procedure_manager: ProcedureManagerRef,
+    pub wal_provider: WalProviderRef,
+    pub region_server: RegionServer,
+    pub kv_backend: KvBackendRef,
+    pub cache_registry: LayeredCacheRegistryRef,
+    pub catalog_manager: CatalogManagerRef,
+    pub flow_engine: FlowDualEngineRef,
+    pub frontend_client: Arc<FrontendClient>,
+    pub node_id: Option<DatanodeId>,
+    pub init_regions_parallelism: usize,
+    pub plugin_options: Vec<PluginOptions>,
+}
+
+pub struct DefaultStandaloneLeaderServicesController;
+
+#[async_trait]
+impl StandaloneLeaderServicesController for DefaultStandaloneLeaderServicesController {
+    async fn start(&self, context: LeaderServicesContext) -> Result<()> {
+        context
+            .procedure_manager
+            .start()
+            .await
+            .context(error::StartProcedureManagerSnafu)?;
+        context
+            .wal_provider
+            .start()
+            .await
+            .context(error::StartWalProviderSnafu)
+    }
+
+    async fn stop(
+        &self,
+        procedure_manager: ProcedureManagerRef,
+        _region_server: RegionServer,
+    ) -> Result<()> {
+        procedure_manager
+            .stop()
+            .await
+            .context(error::StopProcedureManagerSnafu)
+    }
+}
+
+/// `InstanceCreator` is used for grouping various component creators for building the
+/// Standalone instance, suitable for customizing how the instance can be built.
+pub struct InstanceCreator {
+    /// Hook for replacing metadata KV construction while reusing the rest of the
+    /// standalone build flow.
+    metadata_kv_backend_creator: Box<dyn MetadataKvBackendCreator>,
+    node_manager_creator: Box<dyn NodeManagerCreator>,
+    table_id_allocator_creator: Box<dyn TableIdAllocatorCreator>,
+    procedure_executor_creator: Box<dyn ProcedureExecutorCreator>,
+    leader_services_controller: Box<dyn StandaloneLeaderServicesController>,
+    open_regions_writable_override: Option<bool>,
+}
+
+impl InstanceCreator {
+    pub fn new(
+        node_manager_creator: Box<dyn NodeManagerCreator>,
+        table_id_allocator_creator: Box<dyn TableIdAllocatorCreator>,
+        procedure_executor_creator: Box<dyn ProcedureExecutorCreator>,
+    ) -> Self {
+        Self {
+            metadata_kv_backend_creator: Box::new(DefaultMetadataKvBackendCreator),
+            node_manager_creator,
+            table_id_allocator_creator,
+            procedure_executor_creator,
+            leader_services_controller: Box::new(DefaultStandaloneLeaderServicesController),
+            open_regions_writable_override: None,
+        }
+    }
+
+    pub fn with_metadata_kv_backend_creator(
+        mut self,
+        metadata_kv_backend_creator: Box<dyn MetadataKvBackendCreator>,
+    ) -> Self {
+        self.metadata_kv_backend_creator = metadata_kv_backend_creator;
+        self
+    }
+
+    /// Wraps the metadata backend creator while retaining the default creator.
+    ///
+    /// This is useful for callers that need to add runtime behavior around
+    /// metadata access without reimplementing backend selection.
+    pub fn map_metadata_kv_backend_creator<F>(mut self, f: F) -> Self
+    where
+        F: FnOnce(Box<dyn MetadataKvBackendCreator>) -> Box<dyn MetadataKvBackendCreator>,
+    {
+        self.metadata_kv_backend_creator = f(self.metadata_kv_backend_creator);
+        self
+    }
+
+    /// Wraps node-manager creation while preserving the selected standalone node manager.
+    pub fn map_node_manager_creator<F>(mut self, f: F) -> Self
+    where
+        F: FnOnce(Box<dyn NodeManagerCreator>) -> Box<dyn NodeManagerCreator>,
+    {
+        self.node_manager_creator = f(self.node_manager_creator);
+        self
+    }
+
+    /// Wraps procedure-executor creation while preserving the current setup.
+    pub fn map_procedure_executor_creator<F>(mut self, f: F) -> Self
+    where
+        F: FnOnce(Box<dyn ProcedureExecutorCreator>) -> Box<dyn ProcedureExecutorCreator>,
+    {
+        self.procedure_executor_creator = f(self.procedure_executor_creator);
+        self
+    }
+
+    /// Replaces startup/shutdown ownership for procedure manager and WAL provider.
+    pub fn with_leader_services_controller(
+        mut self,
+        leader_services_controller: Box<dyn StandaloneLeaderServicesController>,
+    ) -> Self {
+        self.leader_services_controller = leader_services_controller;
+        self
+    }
+
+    /// Overrides whether regions opened during startup should become writable.
+    ///
+    /// `None` keeps the default startup behavior (regions open writable).
+    ///
+    /// Warning: setting this to `false` in standalone mode will leave reopened regions
+    /// permanently read-only. Standalone has no metasrv heartbeat or region-role
+    /// reconciliation, so there is no path to promote regions to Leader after startup.
+    pub fn with_open_regions_writable_override(mut self, writable: bool) -> Self {
+        self.open_regions_writable_override = Some(writable);
+        self
+    }
+}
+
+impl Default for InstanceCreator {
+    fn default() -> Self {
+        Self {
+            metadata_kv_backend_creator: Box::new(DefaultMetadataKvBackendCreator),
+            node_manager_creator: Box::new(DefaultNodeManagerCreator),
+            table_id_allocator_creator: Box::new(DefaultTableIdAllocatorCreator),
+            procedure_executor_creator: Box::new(DefaultProcedureExecutorCreator),
+            leader_services_controller: Box::new(DefaultStandaloneLeaderServicesController),
+            open_regions_writable_override: None,
+        }
+    }
+}
+
+/// `InstanceCreatorResult` is expected to be used paired with [InstanceCreator].
+/// It stores the created and other important components for further reusing.
+pub struct InstanceCreatorResult {
+    pub kv_backend: KvBackendRef,
+    pub node_manager: NodeManagerRef,
+    pub table_id_allocator: Arc<Sequence>,
+}
+
+#[cfg(test)]
+mod tests {
+    use std::default::Default;
+    use std::io::Write;
+    use std::time::Duration;
+
+    use auth::{Identity, Password, UserProviderRef};
+    use clap::{CommandFactory, Parser};
+    use common_base::readable_size::ReadableSize;
+    use common_config::ENV_VAR_SEP;
+    use common_options::plugin_options::StandaloneFlag;
+    use common_test_util::temp_dir::create_named_temp_file;
+    use common_wal::config::DatanodeWalConfig;
+    use frontend::frontend::FrontendOptions;
+    use object_store::config::{FileConfig, GcsConfig};
+    use servers::grpc::GrpcOptions;
+
+    use super::*;
+    use crate::options::GlobalOptions;
+
+    #[tokio::test]
+    async fn test_try_from_start_command_to_anymap() {
+        let fe_opts = FrontendOptions {
+            user_provider: Some("static_user_provider:cmd:test=test".to_string()),
+            ..Default::default()
+        };
+
+        let mut plugins = Plugins::new();
+        plugins.insert(StandaloneFlag);
+        plugins::setup_frontend_plugins_pre_build(&mut plugins, &[], &fe_opts, None)
+            .await
+            .unwrap();
+
+        let provider = plugins.get::<UserProviderRef>().unwrap();
+        let result = provider
+            .authenticate(
+                Identity::UserId("test", None),
+                Password::PlainText("test".to_string().into()),
+            )
+            .await;
+        let _ = result.unwrap();
+    }
+
+    #[test]
+    fn test_toml() {
+        let opts = StandaloneOptions::default();
+        let toml_string = toml::to_string(&opts).unwrap();
+        let _parsed: StandaloneOptions = toml::from_str(&toml_string).unwrap();
+    }
+
+    #[test]
+    fn test_read_from_config_file() {
+        let mut file = create_named_temp_file();
+        let toml_str = r#"
+            enable_memory_catalog = true
+
+            [wal]
+            provider = "raft_engine"
+            dir = "./greptimedb_data/test/wal"
+            file_size = "1GB"
+            purge_threshold = "50GB"
+            purge_interval = "10m"
+            read_batch_size = 128
+            sync_write = false
+
+            [storage]
+            data_home = "./greptimedb_data/"
+            type = "File"
+
+            [[storage.providers]]
+            type = "Gcs"
+            bucket = "foo"
+            endpoint = "bar"
+
+            [[storage.providers]]
+            type = "S3"
+            access_key_id = "access_key_id"
+            secret_access_key = "secret_access_key"
+
+            [storage.compaction]
+            max_inflight_tasks = 3
+            max_files_in_level0 = 7
+            max_purge_tasks = 32
+
+            [storage.manifest]
+            checkpoint_margin = 9
+            gc_duration = '7s'
+
+            [http]
+            addr = "127.0.0.1:4000"
+            timeout = "33s"
+            body_limit = "128MB"
+
+            [opentsdb]
+            enable = true
+
+            [logging]
+            level = "debug"
+            dir = "./greptimedb_data/test/logs"
+        "#;
+        write!(file, "{}", toml_str).unwrap();
+        let cmd = StartCommand {
+            config_file: Some(file.path().to_str().unwrap().to_string()),
+            user_provider: Some("static_user_provider:cmd:test=test".to_string()),
+            ..Default::default()
+        };
+
+        let options = cmd
+            .load_options(&GlobalOptions::default())
+            .unwrap()
+            .component;
+        let fe_opts = options.frontend_options();
+        let dn_opts = options.datanode_options();
+        let logging_opts = options.logging;
+        assert_eq!("127.0.0.1:4000".to_string(), fe_opts.http.addr);
+        assert_eq!(Duration::from_secs(33), fe_opts.http.timeout);
+        assert_eq!(ReadableSize::mb(128), fe_opts.http.body_limit);
+        assert_eq!("127.0.0.1:4001".to_string(), fe_opts.grpc.bind_addr);
+        assert!(fe_opts.mysql.enable);
+        assert_eq!("127.0.0.1:4002", fe_opts.mysql.addr);
+        assert_eq!(2, fe_opts.mysql.runtime_size);
+        assert_eq!(None, fe_opts.mysql.reject_no_database);
+        assert!(fe_opts.influxdb.enable);
+        assert!(fe_opts.opentsdb.enable);
+
+        let DatanodeWalConfig::RaftEngine(raft_engine_config) = dn_opts.wal else {
+            unreachable!()
+        };
+        assert_eq!(
+            "./greptimedb_data/test/wal",
+            raft_engine_config.dir.unwrap()
+        );
+
+        assert!(matches!(
+            &dn_opts.storage.store,
+            object_store::config::ObjectStoreConfig::File(FileConfig { .. })
+        ));
+        assert_eq!(dn_opts.storage.providers.len(), 2);
+        assert!(matches!(
+            dn_opts.storage.providers[0],
+            object_store::config::ObjectStoreConfig::Gcs(GcsConfig { .. })
+        ));
+        match &dn_opts.storage.providers[1] {
+            object_store::config::ObjectStoreConfig::S3(s3_config) => {
+                assert_eq!(
+                    "SecretBox<alloc::string::String>([REDACTED])".to_string(),
+                    format!("{:?}", s3_config.connection.access_key_id)
+                );
+            }
+            _ => {
+                unreachable!()
+            }
+        }
+
+        assert_eq!("debug", logging_opts.level.as_ref().unwrap());
+        assert_eq!("./greptimedb_data/test/logs".to_string(), logging_opts.dir);
+    }
+
+    #[test]
+    fn test_load_log_options_from_cli() {
+        let cmd = StartCommand {
+            user_provider: Some("static_user_provider:cmd:test=test".to_string()),
+            mysql_addr: Some("127.0.0.1:4002".to_string()),
+            postgres_addr: Some("127.0.0.1:4003".to_string()),
+            ..Default::default()
+        };
+
+        let opts = cmd
+            .load_options(&GlobalOptions {
+                log_dir: Some("./greptimedb_data/test/logs".to_string()),
+                log_level: Some("debug".to_string()),
+
+                #[cfg(feature = "tokio-console")]
+                tokio_console_addr: None,
+            })
+            .unwrap()
+            .component;
+
+        assert_eq!("./greptimedb_data/test/logs", opts.logging.dir);
+        assert_eq!("debug", opts.logging.level.unwrap());
+    }
+
+    #[test]
+    fn test_config_precedence_order() {
+        let mut file = create_named_temp_file();
+        let toml_str = r#"
+            [http]
+            addr = "127.0.0.1:4000"
+
+            [logging]
+            level = "debug"
+        "#;
+        write!(file, "{}", toml_str).unwrap();
+
+        let env_prefix = "STANDALONE_UT";
+        temp_env::with_vars(
+            [
+                (
+                    // logging.dir = /other/log/dir
+                    [
+                        env_prefix.to_string(),
+                        "logging".to_uppercase(),
+                        "dir".to_uppercase(),
+                    ]
+                    .join(ENV_VAR_SEP),
+                    Some("/other/log/dir"),
+                ),
+                (
+                    // logging.level = info
+                    [
+                        env_prefix.to_string(),
+                        "logging".to_uppercase(),
+                        "level".to_uppercase(),
+                    ]
+                    .join(ENV_VAR_SEP),
+                    Some("info"),
+                ),
+                (
+                    // http.addr = 127.0.0.1:24000
+                    [
+                        env_prefix.to_string(),
+                        "http".to_uppercase(),
+                        "addr".to_uppercase(),
+                    ]
+                    .join(ENV_VAR_SEP),
+                    Some("127.0.0.1:24000"),
+                ),
+            ],
+            || {
+                let command = StartCommand {
+                    config_file: Some(file.path().to_str().unwrap().to_string()),
+                    http_addr: Some("127.0.0.1:14000".to_string()),
+                    env_prefix: env_prefix.to_string(),
+                    ..Default::default()
+                };
+
+                let opts = command.load_options(&Default::default()).unwrap().component;
+
+                // Should be read from env, env > default values.
+                assert_eq!(opts.logging.dir, "/other/log/dir");
+
+                // Should be read from config file, config file > env > default values.
+                assert_eq!(opts.logging.level.as_ref().unwrap(), "debug");
+
+                // Should be read from cli, cli > config file > env > default values.
+                let fe_opts = opts.frontend_options();
+                assert_eq!(fe_opts.http.addr, "127.0.0.1:14000");
+                assert_eq!(ReadableSize::mb(64), fe_opts.http.body_limit);
+
+                // Should be default value.
+                assert_eq!(fe_opts.grpc.bind_addr, GrpcOptions::default().bind_addr);
+            },
+        );
+    }
+
+    #[test]
+    fn test_parse_grpc_bind_addr_aliases() {
+        let command =
+            StartCommand::try_parse_from(["standalone", "--grpc-bind-addr", "127.0.0.1:14001"])
+                .unwrap();
+        assert_eq!(command.grpc_bind_addr.as_deref(), Some("127.0.0.1:14001"));
+
+        let command =
+            StartCommand::try_parse_from(["standalone", "--rpc-bind-addr", "127.0.0.1:24001"])
+                .unwrap();
+        assert_eq!(command.grpc_bind_addr.as_deref(), Some("127.0.0.1:24001"));
+
+        let command =
+            StartCommand::try_parse_from(["standalone", "--rpc-addr", "127.0.0.1:34001"]).unwrap();
+        assert_eq!(command.grpc_bind_addr.as_deref(), Some("127.0.0.1:34001"));
+    }
+
+    #[test]
+    fn test_help_uses_grpc_option_names() {
+        let mut cmd = StartCommand::command();
+        let mut help = Vec::new();
+        cmd.write_long_help(&mut help).unwrap();
+        let help = String::from_utf8(help).unwrap();
+
+        assert!(help.contains("--grpc-bind-addr"));
+        assert!(!help.contains("--rpc-bind-addr"));
+        assert!(!help.contains("--rpc-addr"));
+    }
+
+    #[test]
+    fn test_load_default_standalone_options() {
+        let options =
+            StandaloneOptions::load_layered_options(None, "GREPTIMEDB_STANDALONE").unwrap();
+        let default_options = StandaloneOptions::default();
+        assert_eq!(options.enable_telemetry, default_options.enable_telemetry);
+        assert_eq!(options.http, default_options.http);
+        assert_eq!(options.grpc, default_options.grpc);
+        assert_eq!(options.mysql, default_options.mysql);
+        assert_eq!(options.postgres, default_options.postgres);
+        assert_eq!(options.opentsdb, default_options.opentsdb);
+        assert_eq!(options.influxdb, default_options.influxdb);
+        assert_eq!(options.prom_store, default_options.prom_store);
+        assert_eq!(options.wal, default_options.wal);
+        assert_eq!(options.metadata_store, default_options.metadata_store);
+        assert_eq!(options.procedure, default_options.procedure);
+        assert_eq!(options.logging, default_options.logging);
+        assert_eq!(options.region_engine, default_options.region_engine);
+    }
+
+    #[test]
+    fn test_cache_config() {
+        let toml_str = r#"
+            [storage]
+            data_home = "test_data_home"
+            type = "S3"
+            [storage.cache_config]
+            enable_read_cache = true
+        "#;
+        let mut opts: StandaloneOptions = toml::from_str(toml_str).unwrap();
+        opts.sanitize();
+        assert!(opts.storage.store.cache_config().unwrap().enable_read_cache);
+        assert_eq!(
+            opts.storage.store.cache_config().unwrap().cache_path,
+            "test_data_home"
+        );
+    }
+}

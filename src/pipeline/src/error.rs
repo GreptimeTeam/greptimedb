@@ -1,0 +1,1013 @@
+// Copyright 2023 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+use std::any::Any;
+
+use common_error::ext::ErrorExt;
+use common_error::status_code::StatusCode;
+use common_macro::stack_trace_debug;
+use datatypes::timestamp::TimestampNanosecond;
+use snafu::{Location, Snafu};
+use vrl::value::Kind;
+
+#[derive(Snafu)]
+#[snafu(visibility(pub))]
+#[stack_trace_debug]
+pub enum Error {
+    #[snafu(display("Empty input field"))]
+    EmptyInputField {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Missing input field"))]
+    MissingInputField {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Field renaming must be a string pair of 'key' and 'rename_to', got: {value:?}"
+    ))]
+    InvalidFieldRename {
+        value: yaml_rust::Yaml,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Processor must be a map"))]
+    ProcessorMustBeMap {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Processor {processor}: missing field: {field}"))]
+    ProcessorMissingField {
+        processor: String,
+        field: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Processor {processor}: expect string value, but got {v:?}"))]
+    ProcessorExpectString {
+        processor: String,
+        v: vrl::value::Value,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Processor {processor}: unsupported value {val}"))]
+    ProcessorUnsupportedValue {
+        processor: String,
+        val: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Processor key must be a string"))]
+    ProcessorKeyMustBeString {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Processor {kind}: failed to parse {value}"))]
+    ProcessorFailedToParseString {
+        kind: String,
+        value: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Processor must have a string key"))]
+    ProcessorMustHaveStringKey {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Unsupported {processor} processor"))]
+    UnsupportedProcessor {
+        processor: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Field {field} must be a {ty}"))]
+    FieldMustBeType {
+        field: String,
+        ty: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Field parse from string failed: {field}"))]
+    FailedParseFieldFromString {
+        #[snafu(source)]
+        error: Box<dyn std::error::Error + Send + Sync>,
+        field: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to parse {key} as int: {value}"))]
+    FailedToParseIntKey {
+        key: String,
+        value: String,
+        #[snafu(source)]
+        error: std::num::ParseIntError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to parse {value} to int"))]
+    FailedToParseInt {
+        value: String,
+        #[snafu(source)]
+        error: std::num::ParseIntError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display("Failed to parse {key} as float: {value}"))]
+    FailedToParseFloatKey {
+        key: String,
+        value: String,
+        #[snafu(source)]
+        error: std::num::ParseFloatError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Processor {kind}: {key} not found in intermediate keys"))]
+    IntermediateKeyIndex {
+        kind: String,
+        key: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Cmcd {k} missing value in {s}"))]
+    CmcdMissingValue {
+        k: String,
+        s: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display("Part: {part} missing key in {s}"))]
+    CmcdMissingKey {
+        part: String,
+        s: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display("Key must be a string, but got {k:?}"))]
+    KeyMustBeString {
+        k: yaml_rust::Yaml,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Csv read error"))]
+    CsvRead {
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        error: csv::Error,
+    },
+    #[snafu(display("Expected at least one record from csv format, but got none"))]
+    CsvNoRecord {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Separator '{separator}' must be a single character, but got '{value}'"))]
+    CsvSeparatorName {
+        separator: String,
+        value: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Quote '{quote}' must be a single character, but got '{value}'"))]
+    CsvQuoteName {
+        quote: String,
+        value: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Parse date timezone error {value}"))]
+    DateParseTimezone {
+        value: String,
+        #[snafu(source)]
+        error: chrono_tz::ParseError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Parse date error {value}"))]
+    DateParse {
+        value: String,
+        #[snafu(source)]
+        error: chrono::ParseError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to get local timezone"))]
+    DateFailedToGetLocalTimezone {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Invalid Pattern: '{s}'. {detail}"))]
+    DissectInvalidPattern {
+        s: String,
+        detail: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Empty pattern is not allowed"))]
+    DissectEmptyPattern {
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display("Split: '{split}' exceeds the input"))]
+    DissectSplitExceedsInput {
+        split: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display("Split: '{split}' does not match the input '{input}'"))]
+    DissectSplitNotMatchInput {
+        split: String,
+        input: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display("Consecutive names are not allowed: '{name1}' '{name2}'"))]
+    DissectConsecutiveNames {
+        name1: String,
+        name2: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display("No matching pattern found"))]
+    DissectNoMatchingPattern {
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display("Modifier '{m}' already set, but found {modifier}"))]
+    DissectModifierAlreadySet {
+        m: String,
+        modifier: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Append Order modifier is already set to '{n}', cannot be set to {order}"))]
+    DissectAppendOrderAlreadySet {
+        n: String,
+        order: u32,
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display("Order can only be set to Append Modifier, current modifier is {m}"))]
+    DissectOrderOnlyAppend {
+        m: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Order can only be set to Append Modifier"))]
+    DissectOrderOnlyAppendModifier {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("End modifier already set: '{m}'"))]
+    DissectEndModifierAlreadySet {
+        m: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display("Invalid resolution: {resolution}"))]
+    EpochInvalidResolution {
+        resolution: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display("Pattern is required"))]
+    GsubPatternRequired {
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display("Replacement is required"))]
+    GsubReplacementRequired {
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display("Invalid regex pattern: {pattern}"))]
+    Regex {
+        #[snafu(source)]
+        error: regex::Error,
+        pattern: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display("Separator is required"))]
+    JoinSeparatorRequired {
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display("Invalid method: {method}"))]
+    LetterInvalidMethod {
+        method: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display("No named group found in regex {origin}"))]
+    RegexNamedGroupNotFound {
+        origin: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display("No valid field found in {processor} processor"))]
+    RegexNoValidField {
+        processor: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display("No valid pattern found in {processor} processor"))]
+    RegexNoValidPattern {
+        processor: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display("Invalid method: {s}"))]
+    UrlEncodingInvalidMethod {
+        s: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display("Wrong digest pattern: {pattern}"))]
+    DigestPatternInvalid {
+        pattern: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display("Invalid transform on_failure value: {value}"))]
+    TransformOnFailureInvalidValue {
+        value: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display("Transform element must be a map"))]
+    TransformElementMustBeMap {
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display("Transform fields must be set."))]
+    TransformFieldMustBeSet {
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display("Transform {fields:?} type MUST BE set."))]
+    TransformTypeMustBeSet {
+        fields: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display("Transform index `type` must be set."))]
+    TransformIndexTypeMustBeSet {
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display("Unsupported field in transform index config: {field}"))]
+    TransformIndexUnsupportedField {
+        field: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display(
+        "Transform index option `{field}` must be a string, boolean, integer, or real scalar"
+    ))]
+    TransformIndexOptionMustBeScalar {
+        field: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display("Index type `{index}` does not support options in pipeline config"))]
+    TransformIndexOptionsUnsupported {
+        index: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display("Unsupported option `{key}` for `{index}` index"))]
+    TransformIndexOptionUnsupported {
+        index: String,
+        key: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display("Index `{index}` only supports {expected} columns, but got {actual}"))]
+    TransformIndexTypeMismatch {
+        index: String,
+        expected: String,
+        actual: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display("Invalid options for `{index}` index"))]
+    TransformIndexOption {
+        index: String,
+        #[snafu(source)]
+        source: datatypes::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display("Transform index `{index}` does not match options declared for `{options}`"))]
+    TransformIndexStateMismatch {
+        index: String,
+        options: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display("Column name must be unique, but got duplicated: {duplicates}"))]
+    TransformColumnNameMustBeUnique {
+        duplicates: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display(
+        "Illegal to set multiple timestamp Index columns, please set only one: {columns}"
+    ))]
+    TransformMultipleTimestampIndex {
+        columns: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display(
+        "Transform must have exactly one field specified as timestamp Index, but got {count}: {columns}"
+    ))]
+    TransformTimestampIndexCount {
+        count: usize,
+        columns: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display(
+        "Exactly one time-related processor and one timestamp value is required to use auto transform. `ignore_missing` can not be set to true."
+    ))]
+    AutoTransformOneTimestamp {
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display("Invalid Pipeline doc version number: {}", version))]
+    InvalidVersionNumber {
+        version: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display("Type: {ty} value not supported for Epoch"))]
+    CoerceUnsupportedEpochType {
+        ty: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display("Failed to coerce string value '{s}' to type '{ty}'"))]
+    CoerceStringToType {
+        s: String,
+        ty: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display("Can not coerce json type to {ty}"))]
+    CoerceJsonTypeTo {
+        ty: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display(
+        "Can not coerce {ty} to json type. we only consider object and array to be json types."
+    ))]
+    CoerceTypeToJson {
+        ty: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display("Failed to coerce value: {msg}"))]
+    CoerceIncompatibleTypes {
+        msg: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display(
+        "Invalid resolution: '{resolution}'. Available resolutions: {valid_resolution}"
+    ))]
+    ValueInvalidResolution {
+        resolution: String,
+        valid_resolution: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to parse type: '{t}'"))]
+    ValueParseType {
+        t: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to parse {ty}: {v}"))]
+    ValueParseInt {
+        ty: String,
+        v: String,
+        #[snafu(source)]
+        error: std::num::ParseIntError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to parse {ty}: {v}"))]
+    ValueParseFloat {
+        ty: String,
+        v: String,
+        #[snafu(source)]
+        error: std::num::ParseFloatError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to parse {ty}: {v}"))]
+    ValueParseBoolean {
+        ty: String,
+        v: String,
+        #[snafu(source)]
+        error: std::str::ParseBoolError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display("Default value not unsupported for type {value}"))]
+    ValueDefaultValueUnsupported {
+        value: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Unsupported yaml type: {value:?}"))]
+    ValueUnsupportedYamlType {
+        value: yaml_rust::Yaml,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("key in Hash must be a string, but got {value:?}"))]
+    ValueYamlKeyMustBeString {
+        value: yaml_rust::Yaml,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Yaml load error."))]
+    YamlLoad {
+        #[snafu(source)]
+        error: yaml_rust::ScanError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display("Yaml parse error."))]
+    YamlParse {
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display("Column options error"))]
+    ColumnOptions {
+        #[snafu(source)]
+        source: api::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display("Unsupported index type: {value}"))]
+    UnsupportedIndexType {
+        value: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display("Failed to parse json"))]
+    JsonParse {
+        #[snafu(source)]
+        error: serde_json::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display(
+        "Column datatype mismatch. For column: {column}, expected datatype: {expected}, actual datatype: {actual}"
+    ))]
+    IdentifyPipelineColumnTypeMismatch {
+        column: String,
+        expected: String,
+        actual: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display("Parse json path error"))]
+    JsonPathParse {
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        error: jsonpath_rust::JsonPathParserError,
+    },
+    #[snafu(display("Json path result index not number"))]
+    JsonPathParseResultIndex {
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display("Field is required for dispatcher"))]
+    FieldRequiredForDispatcher,
+    #[snafu(display("Table_suffix is required for dispatcher rule"))]
+    TableSuffixRequiredForDispatcherRule,
+    #[snafu(display("Value is required for dispatcher rule"))]
+    ValueRequiredForDispatcherRule,
+
+    #[snafu(display("Pipeline table not found"))]
+    PipelineTableNotFound {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to insert pipeline to pipelines table"))]
+    InsertPipeline {
+        #[snafu(source)]
+        source: operator::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Pipeline not found, name: {}, version: {}", name, version.map(|ts| ts.0.to_iso8601_string()).unwrap_or("latest".to_string())))]
+    PipelineNotFound {
+        name: String,
+        version: Option<TimestampNanosecond>,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Multiple pipelines with different schemas found, but none under current schema. Please replicate one of them or delete until only one schema left. name: {}, current_schema: {}, schemas: {}",
+        name,
+        current_schema,
+        schemas,
+    ))]
+    MultiPipelineWithDiffSchema {
+        name: String,
+        current_schema: String,
+        schemas: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "The return value's length of the record batch does not match, see debug log for details"
+    ))]
+    RecordBatchLenNotMatch {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to collect record batch"))]
+    CollectRecords {
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        source: common_recordbatch::error::Error,
+    },
+
+    #[snafu(display("A valid table suffix template is required for tablesuffix section"))]
+    RequiredTableSuffixTemplate,
+
+    #[snafu(display("Invalid table suffix template, input: {}", input))]
+    InvalidTableSuffixTemplate {
+        input: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to compile VRL, {}", msg))]
+    CompileVrl {
+        msg: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to execute VRL, {}", msg))]
+    ExecuteVrl {
+        msg: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display("Invalid timestamp value: {}", input))]
+    InvalidTimestamp {
+        input: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Invalid epoch value '{}' for resolution '{}'", value, resolution))]
+    InvalidEpochForResolution {
+        value: i64,
+        resolution: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display("Please don't use regex in Vrl script"))]
+    VrlRegexValue {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Vrl script should return object or array in the end, got `{:?}`",
+        result_kind
+    ))]
+    VrlReturnValue {
+        result_kind: Kind,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to cast type, msg: {}", msg))]
+    CastType {
+        msg: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Top level value must be map"))]
+    ValueMustBeMap {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Array element at index {index} must be an object for one-to-many transformation, got {actual_type}"
+    ))]
+    ArrayElementMustBeObject {
+        index: usize,
+        actual_type: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to transform array element at index {index}: {source}"))]
+    TransformArrayElement {
+        index: usize,
+        #[snafu(source)]
+        source: Box<Error>,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to build DataFusion logical plan"))]
+    BuildDfLogicalPlan {
+        #[snafu(source)]
+        error: datafusion_common::DataFusionError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to execute internal statement"))]
+    ExecuteInternalStatement {
+        #[snafu(source)]
+        source: query::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to create dataframe"))]
+    DataFrame {
+        #[snafu(source)]
+        source: query::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("General catalog error"))]
+    Catalog {
+        #[snafu(source)]
+        source: catalog::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to create table"))]
+    CreateTable {
+        #[snafu(source)]
+        source: operator::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Invalid pipeline version format: {}", version))]
+    InvalidPipelineVersion {
+        version: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Invalid custom time index config: {}, reason: {}", config, reason))]
+    InvalidCustomTimeIndex {
+        config: String,
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Pipeline is required for this API."))]
+    PipelineMissing {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Time index must be non null."))]
+    TimeIndexMustBeNonNull {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Float is NaN"))]
+    FloatIsNan {
+        #[snafu(source)]
+        error: ordered_float::FloatIsNan,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Unsupported type in pipeline: {}", ty))]
+    UnsupportedTypeInPipeline {
+        ty: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(transparent)]
+    GreptimeProto {
+        source: api::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(transparent)]
+    Datatypes {
+        source: datatypes::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+}
+
+pub type Result<T> = std::result::Result<T, Error>;
+
+impl ErrorExt for Error {
+    fn status_code(&self) -> StatusCode {
+        use Error::*;
+        match self {
+            CastType { .. } => StatusCode::Unexpected,
+            PipelineTableNotFound { .. } => StatusCode::TableNotFound,
+            InsertPipeline { source, .. } => source.status_code(),
+            CollectRecords { source, .. } => source.status_code(),
+            PipelineNotFound { .. }
+            | InvalidPipelineVersion { .. }
+            | InvalidCustomTimeIndex { .. }
+            | TimeIndexMustBeNonNull { .. } => StatusCode::InvalidArguments,
+            MultiPipelineWithDiffSchema { .. }
+            | ValueMustBeMap { .. }
+            | ArrayElementMustBeObject { .. } => StatusCode::IllegalState,
+            TransformArrayElement { source, .. } => source.status_code(),
+            BuildDfLogicalPlan { .. } | RecordBatchLenNotMatch { .. } => StatusCode::Internal,
+            ExecuteInternalStatement { source, .. } => source.status_code(),
+            DataFrame { source, .. } => source.status_code(),
+            Catalog { source, .. } => source.status_code(),
+            CreateTable { source, .. } => source.status_code(),
+
+            EmptyInputField { .. }
+            | MissingInputField { .. }
+            | InvalidFieldRename { .. }
+            | ProcessorMustBeMap { .. }
+            | ProcessorMissingField { .. }
+            | ProcessorExpectString { .. }
+            | ProcessorUnsupportedValue { .. }
+            | ProcessorKeyMustBeString { .. }
+            | ProcessorFailedToParseString { .. }
+            | ProcessorMustHaveStringKey { .. }
+            | UnsupportedProcessor { .. }
+            | FieldMustBeType { .. }
+            | FailedParseFieldFromString { .. }
+            | FailedToParseIntKey { .. }
+            | FailedToParseInt { .. }
+            | FailedToParseFloatKey { .. }
+            | IntermediateKeyIndex { .. }
+            | CmcdMissingValue { .. }
+            | CmcdMissingKey { .. }
+            | KeyMustBeString { .. }
+            | CsvRead { .. }
+            | CsvNoRecord { .. }
+            | CsvSeparatorName { .. }
+            | CsvQuoteName { .. }
+            | DateParseTimezone { .. }
+            | DateParse { .. }
+            | DateFailedToGetLocalTimezone { .. }
+            | DissectInvalidPattern { .. }
+            | DissectEmptyPattern { .. }
+            | DissectSplitExceedsInput { .. }
+            | DissectSplitNotMatchInput { .. }
+            | DissectConsecutiveNames { .. }
+            | DissectNoMatchingPattern { .. }
+            | DissectModifierAlreadySet { .. }
+            | DissectAppendOrderAlreadySet { .. }
+            | DissectOrderOnlyAppend { .. }
+            | DissectOrderOnlyAppendModifier { .. }
+            | DissectEndModifierAlreadySet { .. }
+            | EpochInvalidResolution { .. }
+            | GsubPatternRequired { .. }
+            | GsubReplacementRequired { .. }
+            | Regex { .. }
+            | JoinSeparatorRequired { .. }
+            | LetterInvalidMethod { .. }
+            | RegexNamedGroupNotFound { .. }
+            | RegexNoValidField { .. }
+            | RegexNoValidPattern { .. }
+            | UrlEncodingInvalidMethod { .. }
+            | DigestPatternInvalid { .. }
+            | TransformOnFailureInvalidValue { .. }
+            | TransformElementMustBeMap { .. }
+            | TransformFieldMustBeSet { .. }
+            | TransformTypeMustBeSet { .. }
+            | TransformIndexTypeMustBeSet { .. }
+            | TransformIndexUnsupportedField { .. }
+            | TransformIndexOptionMustBeScalar { .. }
+            | TransformIndexOptionsUnsupported { .. }
+            | TransformIndexOptionUnsupported { .. }
+            | TransformIndexTypeMismatch { .. }
+            | TransformIndexOption { .. }
+            | TransformIndexStateMismatch { .. }
+            | TransformColumnNameMustBeUnique { .. }
+            | TransformMultipleTimestampIndex { .. }
+            | TransformTimestampIndexCount { .. }
+            | AutoTransformOneTimestamp { .. }
+            | InvalidVersionNumber { .. }
+            | CoerceUnsupportedEpochType { .. }
+            | CoerceStringToType { .. }
+            | CoerceJsonTypeTo { .. }
+            | CoerceTypeToJson { .. }
+            | CoerceIncompatibleTypes { .. }
+            | ValueInvalidResolution { .. }
+            | ValueParseType { .. }
+            | ValueParseInt { .. }
+            | ValueParseFloat { .. }
+            | ValueParseBoolean { .. }
+            | ValueDefaultValueUnsupported { .. }
+            | ValueUnsupportedYamlType { .. }
+            | ValueYamlKeyMustBeString { .. }
+            | YamlLoad { .. }
+            | YamlParse { .. }
+            | ColumnOptions { .. }
+            | UnsupportedIndexType { .. }
+            | IdentifyPipelineColumnTypeMismatch { .. }
+            | JsonParse { .. }
+            | JsonPathParse { .. }
+            | JsonPathParseResultIndex { .. }
+            | FieldRequiredForDispatcher
+            | TableSuffixRequiredForDispatcherRule
+            | ValueRequiredForDispatcherRule
+            | RequiredTableSuffixTemplate
+            | InvalidTableSuffixTemplate { .. }
+            | CompileVrl { .. }
+            | ExecuteVrl { .. }
+            | InvalidTimestamp { .. }
+            | VrlRegexValue { .. }
+            | VrlReturnValue { .. }
+            | PipelineMissing { .. } => StatusCode::InvalidArguments,
+
+            FloatIsNan { .. }
+            | InvalidEpochForResolution { .. }
+            | UnsupportedTypeInPipeline { .. } => StatusCode::InvalidArguments,
+
+            GreptimeProto { source, .. } => source.status_code(),
+            Datatypes { source, .. } => source.status_code(),
+        }
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}

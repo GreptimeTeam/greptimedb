@@ -1,0 +1,26 @@
+name: Schedule Management
+on:
+  schedule:
+    - cron: '4 2 * * *'
+  workflow_dispatch:
+
+
+jobs:
+  maintenance:
+    name: Periodic Maintenance
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-cyborg
+      - name: Do Maintenance
+        working-directory: cyborg
+        run: pnpm tsx bin/schedule.ts
+        env:
+          GITHUB_TOKEN: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}

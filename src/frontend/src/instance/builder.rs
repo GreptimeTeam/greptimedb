@@ -1,0 +1,321 @@
+// Copyright 2023 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+
+use cache::{PARTITION_INFO_CACHE_NAME, TABLE_FLOWNODE_SET_CACHE_NAME, TABLE_ROUTE_CACHE_NAME};
+use catalog::CatalogManagerRef;
+use catalog::process_manager::ProcessManagerRef;
+use common_base::Plugins;
+use common_event_recorder::EventRecorderImpl;
+use common_meta::cache::{LayeredCacheRegistryRef, TableRouteCacheRef};
+use common_meta::cache_invalidator::{CacheInvalidatorRef, DummyCacheInvalidator};
+use common_meta::key::TableMetadataManager;
+use common_meta::key::flow::FlowMetadataManager;
+use common_meta::kv_backend::KvBackendRef;
+use common_meta::node_manager::NodeManagerRef;
+use common_meta::procedure_executor::ProcedureExecutorRef;
+use dashmap::DashMap;
+use operator::delete::Deleter;
+use operator::flow::FlowServiceOperator;
+use operator::insert::Inserter;
+use operator::procedure::ProcedureServiceOperator;
+use operator::request::Requester;
+use operator::statement::{
+    ExecutorConfigureContext, StatementExecutor, StatementExecutorConfiguratorRef,
+    StatementExecutorRef,
+};
+use operator::table::TableMutationOperator;
+use partition::cache::PartitionInfoCacheRef;
+use partition::manager::PartitionRuleManager;
+use pipeline::pipeline_operator::PipelineOperator;
+use query::QueryEngineFactory;
+use query::region_query::RegionQueryHandlerFactoryRef;
+use snafu::{OptionExt, ResultExt};
+
+use crate::error::{self, DataFusionSnafu, ExternalSnafu, Result};
+use crate::events::EventHandlerImpl;
+use crate::frontend::FrontendOptions;
+use crate::heartbeat::frontend_peer_addr;
+use crate::instance::Instance;
+use crate::instance::region_query::FrontendRegionQueryHandler;
+
+/// The frontend [`Instance`] builder.
+pub struct FrontendBuilder {
+    options: FrontendOptions,
+    kv_backend: KvBackendRef,
+    layered_cache_registry: LayeredCacheRegistryRef,
+    local_cache_invalidator: Option<CacheInvalidatorRef>,
+    catalog_manager: CatalogManagerRef,
+    node_manager: NodeManagerRef,
+    plugins: Option<Plugins>,
+    procedure_executor: ProcedureExecutorRef,
+    process_manager: ProcessManagerRef,
+}
+
+impl FrontendBuilder {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        options: FrontendOptions,
+        kv_backend: KvBackendRef,
+        layered_cache_registry: LayeredCacheRegistryRef,
+        catalog_manager: CatalogManagerRef,
+        node_manager: NodeManagerRef,
+        procedure_executor: ProcedureExecutorRef,
+        process_manager: ProcessManagerRef,
+    ) -> Self {
+        Self {
+            options,
+            kv_backend,
+            layered_cache_registry,
+            local_cache_invalidator: None,
+            catalog_manager,
+            node_manager,
+            plugins: None,
+            procedure_executor,
+            process_manager,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_test(
+        options: &FrontendOptions,
+        meta_client: meta_client::MetaClientRef,
+    ) -> Self {
+        use cache::{build_fundamental_cache_registry, with_default_composite_cache_registry};
+        use common_meta::cache::LayeredCacheRegistryBuilder;
+        use common_meta::kv_backend::memory::MemoryKvBackend;
+
+        let kv_backend = Arc::new(MemoryKvBackend::new());
+
+        // Builds cache registry
+        let layered_cache_builder = LayeredCacheRegistryBuilder::default();
+        let fundamental_cache_registry = build_fundamental_cache_registry(kv_backend.clone());
+        let layered_cache_registry = Arc::new(
+            with_default_composite_cache_registry(
+                layered_cache_builder.add_cache_registry(fundamental_cache_registry),
+            )
+            .unwrap()
+            .build(),
+        );
+
+        Self::new(
+            options.clone(),
+            kv_backend,
+            layered_cache_registry,
+            catalog::memory::MemoryCatalogManager::with_default_setup(),
+            Arc::new(client::client_manager::NodeClients::default()),
+            meta_client,
+            Arc::new(catalog::process_manager::ProcessManager::new(
+                "".to_string(),
+                None,
+            )),
+        )
+    }
+
+    pub fn with_local_cache_invalidator(self, cache_invalidator: CacheInvalidatorRef) -> Self {
+        Self {
+            local_cache_invalidator: Some(cache_invalidator),
+            ..self
+        }
+    }
+
+    pub fn options(&self) -> &FrontendOptions {
+        &self.options
+    }
+
+    pub fn kv_backend(&self) -> &KvBackendRef {
+        &self.kv_backend
+    }
+
+    pub fn layered_cache_registry(&self) -> &LayeredCacheRegistryRef {
+        &self.layered_cache_registry
+    }
+
+    pub fn catalog_manager(&self) -> &CatalogManagerRef {
+        &self.catalog_manager
+    }
+
+    pub fn node_manager(&self) -> &NodeManagerRef {
+        &self.node_manager
+    }
+
+    pub fn procedure_executor(&self) -> &ProcedureExecutorRef {
+        &self.procedure_executor
+    }
+
+    pub fn process_manager(&self) -> &ProcessManagerRef {
+        &self.process_manager
+    }
+
+    pub fn with_plugin(self, plugins: Plugins) -> Self {
+        Self {
+            plugins: Some(plugins),
+            ..self
+        }
+    }
+
+    pub async fn try_build(self) -> Result<Instance> {
+        let kv_backend = self.kv_backend;
+        let node_manager = self.node_manager;
+        let plugins = self.plugins.unwrap_or_default();
+        let process_manager = self.process_manager;
+        let table_route_cache: TableRouteCacheRef =
+            self.layered_cache_registry
+                .get()
+                .context(error::CacheRequiredSnafu {
+                    name: TABLE_ROUTE_CACHE_NAME,
+                })?;
+        let partition_info_cache: PartitionInfoCacheRef = self
+            .layered_cache_registry
+            .get()
+            .context(error::CacheRequiredSnafu {
+                name: PARTITION_INFO_CACHE_NAME,
+            })?;
+        let partition_manager = Arc::new(PartitionRuleManager::new(
+            kv_backend.clone(),
+            table_route_cache.clone(),
+            partition_info_cache.clone(),
+        ));
+
+        let local_cache_invalidator = self
+            .local_cache_invalidator
+            .unwrap_or_else(|| Arc::new(DummyCacheInvalidator));
+
+        let region_query_handler =
+            if let Some(factory) = plugins.get::<RegionQueryHandlerFactoryRef>() {
+                factory.build(partition_manager.clone(), node_manager.clone())
+            } else {
+                FrontendRegionQueryHandler::arc(partition_manager.clone(), node_manager.clone())
+            };
+
+        let table_flownode_cache =
+            self.layered_cache_registry
+                .get()
+                .context(error::CacheRequiredSnafu {
+                    name: TABLE_FLOWNODE_SET_CACHE_NAME,
+                })?;
+
+        let inserter = Arc::new(Inserter::new(
+            self.catalog_manager.clone(),
+            partition_manager.clone(),
+            node_manager.clone(),
+            table_flownode_cache,
+            self.options.auto_create_table,
+        ));
+        let deleter = Arc::new(Deleter::new(
+            self.catalog_manager.clone(),
+            partition_manager.clone(),
+            node_manager.clone(),
+        ));
+        let requester = Arc::new(Requester::new(
+            self.catalog_manager.clone(),
+            partition_manager.clone(),
+            node_manager.clone(),
+        ));
+        let table_mutation_handler = Arc::new(TableMutationOperator::new(
+            inserter.clone(),
+            deleter.clone(),
+            requester,
+        ));
+
+        let procedure_service_handler = Arc::new(ProcedureServiceOperator::new(
+            self.procedure_executor.clone(),
+            self.catalog_manager.clone(),
+        ));
+
+        let flow_metadata_manager: Arc<FlowMetadataManager> =
+            Arc::new(FlowMetadataManager::new(kv_backend.clone()));
+        let flow_service = FlowServiceOperator::new(flow_metadata_manager, node_manager.clone());
+
+        let mut query_options = self.options.query.clone();
+        query_options.enable_per_region_metrics = self.options.logging.enable_per_region_metrics;
+        let query_engine = QueryEngineFactory::try_new_with_plugins(
+            self.catalog_manager.clone(),
+            Some(partition_manager.clone()),
+            Some(region_query_handler.clone()),
+            Some(table_mutation_handler),
+            Some(procedure_service_handler),
+            Some(Arc::new(flow_service)),
+            true,
+            plugins.clone(),
+            query_options,
+        )
+        .context(DataFusionSnafu)?
+        .query_engine();
+
+        let frontend_peer_addr = frontend_peer_addr(&self.options);
+        let statement_executor = StatementExecutor::new(
+            self.catalog_manager.clone(),
+            query_engine.clone(),
+            self.procedure_executor,
+            kv_backend.clone(),
+            local_cache_invalidator,
+            inserter.clone(),
+            partition_manager,
+            Some(process_manager.clone()),
+            frontend_peer_addr.clone(),
+        );
+
+        let statement_executor =
+            if let Some(configurator) = plugins.get::<StatementExecutorConfiguratorRef>() {
+                let ctx = ExecutorConfigureContext {
+                    kv_backend: kv_backend.clone(),
+                };
+                configurator
+                    .configure(statement_executor, ctx)
+                    .await
+                    .context(ExternalSnafu)?
+            } else {
+                statement_executor
+            };
+
+        let statement_executor = Arc::new(statement_executor);
+
+        let pipeline_operator = Arc::new(PipelineOperator::new(
+            inserter.clone(),
+            statement_executor.clone(),
+            self.catalog_manager.clone(),
+            query_engine.clone(),
+        ));
+
+        plugins.insert::<StatementExecutorRef>(statement_executor.clone());
+
+        let event_recorder = Arc::new(EventRecorderImpl::new(Box::new(EventHandlerImpl::new(
+            statement_executor.clone(),
+            self.options.slow_query.ttl,
+            self.options.event_recorder.ttl,
+        ))));
+
+        Ok(Instance {
+            frontend_peer_addr,
+            catalog_manager: self.catalog_manager,
+            pipeline_operator,
+            statement_executor,
+            query_engine,
+            plugins,
+            inserter,
+            deleter,
+            table_metadata_manager: Arc::new(TableMetadataManager::new(kv_backend)),
+            event_recorder: Some(event_recorder),
+            process_manager,
+            otlp_metrics_table_legacy_cache: DashMap::new(),
+            slow_query_options: self.options.slow_query.clone(),
+            influxdb_default_merge_mode: self.options.influxdb.default_merge_mode,
+            trace_ingest_chunk_size: self.options.otlp.trace_ingest_chunk_size,
+            suspend: Arc::new(AtomicBool::new(false)),
+        })
+    }
+}

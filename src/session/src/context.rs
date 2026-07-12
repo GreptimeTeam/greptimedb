@@ -1,0 +1,831 @@
+// Copyright 2023 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+use std::collections::HashMap;
+use std::fmt::{Display, Formatter};
+use std::net::SocketAddr;
+use std::sync::{Arc, RwLock};
+use std::time::Duration;
+
+use api::v1::ExplainOptions;
+use api::v1::region::RegionRequestHeader;
+use arc_swap::ArcSwap;
+use auth::UserInfoRef;
+use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use common_catalog::{build_db_string, parse_catalog_and_schema_from_db_string};
+use common_recordbatch::cursor::RecordBatchStreamCursor;
+use common_telemetry::warn;
+use common_time::Timezone;
+use common_time::timezone::parse_timezone;
+use datafusion_common::config::ConfigOptions;
+use derive_builder::Builder;
+use sql::dialect::{Dialect, GenericDialect, GreptimeDbDialect, MySqlDialect, PostgreSqlDialect};
+
+pub use crate::hints::REMOTE_QUERY_ID_EXTENSION_KEY;
+use crate::protocol_ctx::ProtocolCtx;
+use crate::query_id::QueryId;
+use crate::session_config::{PGByteaOutputValue, PGDateOrder, PGDateTimeStyle, PGIntervalStyle};
+use crate::{MutableInner, ReadPreference};
+
+pub type QueryContextRef = Arc<QueryContext>;
+pub type ConnInfoRef = Arc<ConnInfo>;
+
+const CURSOR_COUNT_WARNING_LIMIT: usize = 10;
+
+pub fn generate_remote_query_id() -> String {
+    generate_remote_query_id_value().to_string()
+}
+
+pub fn generate_remote_query_id_value() -> QueryId {
+    QueryId::new()
+}
+
+#[derive(Debug, Builder, Clone)]
+#[builder(pattern = "owned")]
+#[builder(build_fn(skip))]
+pub struct QueryContext {
+    current_catalog: String,
+    /// mapping of RegionId to SequenceNumber, for snapshot read, meaning that the read should only
+    /// container data that was committed before(and include) the given sequence number
+    /// this field will only be filled if extensions contains a pair of "snapshot_read" and "true"
+    snapshot_seqs: Arc<RwLock<HashMap<u64, u64>>>,
+    /// Mappings of the RegionId to the minimal sequence of SST file to scan.
+    sst_min_sequences: Arc<RwLock<HashMap<u64, u64>>>,
+    // we use Arc<RwLock>> for modifiable fields
+    #[builder(default)]
+    mutable_session_data: Arc<RwLock<MutableInner>>,
+    #[builder(default)]
+    mutable_query_context_data: Arc<RwLock<QueryContextMutableFields>>,
+    sql_dialect: Arc<dyn Dialect + Send + Sync>,
+    #[builder(default)]
+    extensions: HashMap<String, String>,
+    /// The configuration parameter are used to store the parameters that are set by the user
+    #[builder(default)]
+    configuration_parameter: Arc<ConfigurationVariables>,
+    /// Track which protocol the query comes from.
+    #[builder(default)]
+    channel: Channel,
+    /// Process id for managing on-going queries
+    #[builder(default)]
+    process_id: u32,
+    /// Connection information
+    #[builder(default)]
+    conn_info: ConnInfo,
+    /// Protocol specific context
+    #[builder(default)]
+    protocol_ctx: ProtocolCtx,
+}
+
+/// This fields hold data that is only valid to current query context
+#[derive(Debug, Builder, Clone, Default)]
+pub struct QueryContextMutableFields {
+    warning: Option<String>,
+    // TODO: remove this when format is supported in datafusion
+    explain_format: Option<String>,
+    /// Explain options to control the verbose analyze output.
+    explain_options: Option<ExplainOptions>,
+}
+
+impl Display for QueryContext {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "QueryContext{{catalog: {}, schema: {}}}",
+            self.current_catalog(),
+            self.current_schema()
+        )
+    }
+}
+
+impl QueryContextBuilder {
+    pub fn current_schema(mut self, schema: String) -> Self {
+        if self.mutable_session_data.is_none() {
+            self.mutable_session_data = Some(Arc::new(RwLock::new(MutableInner::default())));
+        }
+
+        // safe for unwrap because previous none check
+        self.mutable_session_data
+            .as_mut()
+            .unwrap()
+            .write()
+            .unwrap()
+            .schema = schema;
+        self
+    }
+
+    pub fn timezone(mut self, timezone: Timezone) -> Self {
+        if self.mutable_session_data.is_none() {
+            self.mutable_session_data = Some(Arc::new(RwLock::new(MutableInner::default())));
+        }
+
+        self.mutable_session_data
+            .as_mut()
+            .unwrap()
+            .write()
+            .unwrap()
+            .timezone = timezone;
+        self
+    }
+
+    pub fn explain_options(mut self, explain_options: Option<ExplainOptions>) -> Self {
+        self.mutable_query_context_data
+            .get_or_insert_default()
+            .write()
+            .unwrap()
+            .explain_options = explain_options;
+        self
+    }
+
+    pub fn read_preference(mut self, read_preference: ReadPreference) -> Self {
+        self.mutable_session_data
+            .get_or_insert_default()
+            .write()
+            .unwrap()
+            .read_preference = read_preference;
+        self
+    }
+}
+
+impl From<&RegionRequestHeader> for QueryContext {
+    fn from(value: &RegionRequestHeader) -> Self {
+        if let Some(ctx) = &value.query_context {
+            ctx.clone().into()
+        } else {
+            QueryContextBuilder::default()
+                .set_extension(
+                    REMOTE_QUERY_ID_EXTENSION_KEY.to_string(),
+                    generate_remote_query_id(),
+                )
+                .build()
+        }
+    }
+}
+
+impl From<api::v1::QueryContext> for QueryContext {
+    fn from(ctx: api::v1::QueryContext) -> Self {
+        let sequences = ctx.snapshot_seqs.as_ref();
+        QueryContextBuilder::default()
+            .current_catalog(ctx.current_catalog)
+            .current_schema(ctx.current_schema)
+            .timezone(parse_timezone(Some(&ctx.timezone)))
+            .extensions(ctx.extensions)
+            .channel(ctx.channel.into())
+            .snapshot_seqs(Arc::new(RwLock::new(
+                sequences
+                    .map(|x| x.snapshot_seqs.clone())
+                    .unwrap_or_default(),
+            )))
+            .sst_min_sequences(Arc::new(RwLock::new(
+                sequences
+                    .map(|x| x.sst_min_sequences.clone())
+                    .unwrap_or_default(),
+            )))
+            .explain_options(ctx.explain)
+            .build()
+    }
+}
+
+impl From<QueryContext> for api::v1::QueryContext {
+    fn from(
+        QueryContext {
+            current_catalog,
+            mutable_session_data: mutable_inner,
+            extensions,
+            channel,
+            snapshot_seqs,
+            sst_min_sequences,
+            mutable_query_context_data,
+            ..
+        }: QueryContext,
+    ) -> Self {
+        let explain = mutable_query_context_data.read().unwrap().explain_options;
+        let mutable_inner = mutable_inner.read().unwrap();
+        api::v1::QueryContext {
+            current_catalog,
+            current_schema: mutable_inner.schema.clone(),
+            timezone: mutable_inner.timezone.to_string(),
+            extensions,
+            channel: channel as u32,
+            snapshot_seqs: Some(api::v1::SnapshotSequences {
+                snapshot_seqs: snapshot_seqs.read().unwrap().clone(),
+                sst_min_sequences: sst_min_sequences.read().unwrap().clone(),
+            }),
+            explain,
+        }
+    }
+}
+
+impl From<&QueryContext> for api::v1::QueryContext {
+    fn from(ctx: &QueryContext) -> Self {
+        ctx.clone().into()
+    }
+}
+
+impl QueryContext {
+    pub fn arc() -> QueryContextRef {
+        Arc::new(
+            QueryContextBuilder::default()
+                .set_extension(
+                    REMOTE_QUERY_ID_EXTENSION_KEY.to_string(),
+                    generate_remote_query_id(),
+                )
+                .build(),
+        )
+    }
+
+    /// Create a new  datafusion's ConfigOptions instance based on the current QueryContext.
+    pub fn create_config_options(&self) -> ConfigOptions {
+        let mut config = ConfigOptions::default();
+        config.execution.time_zone = Some(self.timezone().to_string());
+        config
+    }
+
+    pub fn with(catalog: &str, schema: &str) -> QueryContext {
+        QueryContextBuilder::default()
+            .current_catalog(catalog.to_string())
+            .current_schema(schema.to_string())
+            .set_extension(
+                REMOTE_QUERY_ID_EXTENSION_KEY.to_string(),
+                generate_remote_query_id(),
+            )
+            .build()
+    }
+
+    pub fn with_channel(catalog: &str, schema: &str, channel: Channel) -> QueryContext {
+        QueryContextBuilder::default()
+            .current_catalog(catalog.to_string())
+            .current_schema(schema.to_string())
+            .channel(channel)
+            .set_extension(
+                REMOTE_QUERY_ID_EXTENSION_KEY.to_string(),
+                generate_remote_query_id(),
+            )
+            .build()
+    }
+
+    pub fn with_db_name(db_name: Option<&str>) -> QueryContext {
+        let (catalog, schema) = db_name
+            .map(|db| {
+                let (catalog, schema) = parse_catalog_and_schema_from_db_string(db);
+                (catalog, schema)
+            })
+            .unwrap_or_else(|| {
+                (
+                    DEFAULT_CATALOG_NAME.to_string(),
+                    DEFAULT_SCHEMA_NAME.to_string(),
+                )
+            });
+        QueryContextBuilder::default()
+            .current_catalog(catalog)
+            .current_schema(schema.clone())
+            .set_extension(
+                REMOTE_QUERY_ID_EXTENSION_KEY.to_string(),
+                generate_remote_query_id(),
+            )
+            .build()
+    }
+
+    pub fn current_schema(&self) -> String {
+        self.mutable_session_data.read().unwrap().schema.clone()
+    }
+
+    pub fn set_current_schema(&self, new_schema: &str) {
+        self.mutable_session_data.write().unwrap().schema = new_schema.to_string();
+    }
+
+    pub fn current_catalog(&self) -> &str {
+        &self.current_catalog
+    }
+
+    pub fn set_current_catalog(&mut self, new_catalog: &str) {
+        self.current_catalog = new_catalog.to_string();
+    }
+
+    pub fn sql_dialect(&self) -> &(dyn Dialect + Send + Sync) {
+        &*self.sql_dialect
+    }
+
+    pub fn get_db_string(&self) -> String {
+        let catalog = self.current_catalog();
+        let schema = self.current_schema();
+        build_db_string(catalog, &schema)
+    }
+
+    pub fn timezone(&self) -> Timezone {
+        self.mutable_session_data.read().unwrap().timezone.clone()
+    }
+
+    pub fn set_timezone(&self, timezone: Timezone) {
+        self.mutable_session_data.write().unwrap().timezone = timezone;
+    }
+
+    pub fn read_preference(&self) -> ReadPreference {
+        self.mutable_session_data.read().unwrap().read_preference
+    }
+
+    pub fn set_read_preference(&self, read_preference: ReadPreference) {
+        self.mutable_session_data.write().unwrap().read_preference = read_preference;
+    }
+
+    pub fn current_user(&self) -> UserInfoRef {
+        self.mutable_session_data.read().unwrap().user_info.clone()
+    }
+
+    pub fn set_current_user(&self, user: UserInfoRef) {
+        self.mutable_session_data.write().unwrap().user_info = user;
+    }
+
+    pub fn set_extension<S1: Into<String>, S2: Into<String>>(&mut self, key: S1, value: S2) {
+        self.extensions.insert(key.into(), value.into());
+    }
+
+    pub fn extension<S: AsRef<str>>(&self, key: S) -> Option<&str> {
+        self.extensions.get(key.as_ref()).map(|v| v.as_str())
+    }
+
+    pub fn remote_query_id(&self) -> Option<&str> {
+        self.extension(REMOTE_QUERY_ID_EXTENSION_KEY)
+    }
+
+    pub fn remote_query_id_value(&self) -> Option<QueryId> {
+        self.remote_query_id()
+            .and_then(|query_id| query_id.parse().ok())
+    }
+
+    pub fn extensions(&self) -> HashMap<String, String> {
+        self.extensions.clone()
+    }
+
+    /// Default to double quote and fallback to back quote
+    pub fn quote_style(&self) -> char {
+        if self.sql_dialect().is_delimited_identifier_start('"') {
+            '"'
+        } else if self.sql_dialect().is_delimited_identifier_start('\'') {
+            '\''
+        } else {
+            '`'
+        }
+    }
+
+    pub fn configuration_parameter(&self) -> &ConfigurationVariables {
+        &self.configuration_parameter
+    }
+
+    pub fn channel(&self) -> Channel {
+        self.channel
+    }
+
+    pub fn set_channel(&mut self, channel: Channel) {
+        self.channel = channel;
+    }
+
+    pub fn warning(&self) -> Option<String> {
+        self.mutable_query_context_data
+            .read()
+            .unwrap()
+            .warning
+            .clone()
+    }
+
+    pub fn set_warning(&self, msg: String) {
+        self.mutable_query_context_data.write().unwrap().warning = Some(msg);
+    }
+
+    pub fn explain_format(&self) -> Option<String> {
+        self.mutable_query_context_data
+            .read()
+            .unwrap()
+            .explain_format
+            .clone()
+    }
+
+    pub fn set_explain_format(&self, format: String) {
+        self.mutable_query_context_data
+            .write()
+            .unwrap()
+            .explain_format = Some(format);
+    }
+
+    pub fn explain_verbose(&self) -> bool {
+        self.mutable_query_context_data
+            .read()
+            .unwrap()
+            .explain_options
+            .map(|opts| opts.verbose)
+            .unwrap_or(false)
+    }
+
+    pub fn set_explain_verbose(&self, verbose: bool) {
+        self.mutable_query_context_data
+            .write()
+            .unwrap()
+            .explain_options
+            .get_or_insert_default()
+            .verbose = verbose;
+    }
+
+    pub fn query_timeout(&self) -> Option<Duration> {
+        self.mutable_session_data.read().unwrap().query_timeout
+    }
+
+    pub fn query_timeout_as_millis(&self) -> u128 {
+        let timeout = self.mutable_session_data.read().unwrap().query_timeout;
+        if let Some(t) = timeout {
+            return t.as_millis();
+        }
+        0
+    }
+
+    pub fn set_query_timeout(&self, timeout: Duration) {
+        self.mutable_session_data.write().unwrap().query_timeout = Some(timeout);
+    }
+
+    pub fn insert_cursor(&self, name: String, rb: RecordBatchStreamCursor) {
+        let mut guard = self.mutable_session_data.write().unwrap();
+        guard.cursors.insert(name, Arc::new(rb));
+
+        let cursor_count = guard.cursors.len();
+        if cursor_count > CURSOR_COUNT_WARNING_LIMIT {
+            warn!("Current connection has {} open cursors", cursor_count);
+        }
+    }
+
+    pub fn remove_cursor(&self, name: &str) {
+        let mut guard = self.mutable_session_data.write().unwrap();
+        guard.cursors.remove(name);
+    }
+
+    pub fn get_cursor(&self, name: &str) -> Option<Arc<RecordBatchStreamCursor>> {
+        let guard = self.mutable_session_data.read().unwrap();
+        let rb = guard.cursors.get(name);
+        rb.cloned()
+    }
+
+    pub fn snapshots(&self) -> HashMap<u64, u64> {
+        self.snapshot_seqs.read().unwrap().clone()
+    }
+
+    pub fn sst_min_sequences(&self) -> HashMap<u64, u64> {
+        self.sst_min_sequences.read().unwrap().clone()
+    }
+
+    pub fn get_snapshot(&self, region_id: u64) -> Option<u64> {
+        self.snapshot_seqs.read().unwrap().get(&region_id).cloned()
+    }
+
+    pub fn set_snapshot(&self, region_id: u64, sequence: u64) {
+        self.snapshot_seqs
+            .write()
+            .unwrap()
+            .insert(region_id, sequence);
+    }
+
+    /// Returns `true` if the session can cast strings to numbers in MySQL style.
+    pub fn auto_string_to_numeric(&self) -> bool {
+        matches!(self.channel, Channel::Mysql)
+    }
+
+    /// Finds the minimal sequence of SST files to scan of a Region.
+    pub fn sst_min_sequence(&self, region_id: u64) -> Option<u64> {
+        self.sst_min_sequences
+            .read()
+            .unwrap()
+            .get(&region_id)
+            .copied()
+    }
+
+    pub fn process_id(&self) -> u32 {
+        self.process_id
+    }
+
+    /// Get client information
+    pub fn conn_info(&self) -> &ConnInfo {
+        &self.conn_info
+    }
+
+    pub fn protocol_ctx(&self) -> &ProtocolCtx {
+        &self.protocol_ctx
+    }
+
+    pub fn set_protocol_ctx(&mut self, protocol_ctx: ProtocolCtx) {
+        self.protocol_ctx = protocol_ctx;
+    }
+}
+
+impl QueryContextBuilder {
+    pub fn build(self) -> QueryContext {
+        let channel = self.channel.unwrap_or_default();
+        let mut extensions = self.extensions.unwrap_or_default();
+        extensions
+            .entry(REMOTE_QUERY_ID_EXTENSION_KEY.to_string())
+            .or_insert_with(generate_remote_query_id);
+        QueryContext {
+            current_catalog: self
+                .current_catalog
+                .unwrap_or_else(|| DEFAULT_CATALOG_NAME.to_string()),
+            snapshot_seqs: self.snapshot_seqs.unwrap_or_default(),
+            sst_min_sequences: self.sst_min_sequences.unwrap_or_default(),
+            mutable_session_data: self.mutable_session_data.unwrap_or_default(),
+            mutable_query_context_data: self.mutable_query_context_data.unwrap_or_default(),
+            sql_dialect: self
+                .sql_dialect
+                .unwrap_or_else(|| Arc::new(GreptimeDbDialect {})),
+            extensions,
+            configuration_parameter: self
+                .configuration_parameter
+                .unwrap_or_else(|| Arc::new(ConfigurationVariables::default())),
+            channel,
+            process_id: self.process_id.unwrap_or_default(),
+            conn_info: self.conn_info.unwrap_or_default(),
+            protocol_ctx: self.protocol_ctx.unwrap_or_default(),
+        }
+    }
+
+    pub fn set_extension(mut self, key: String, value: String) -> Self {
+        self.extensions
+            .get_or_insert_with(HashMap::new)
+            .insert(key, value);
+        self
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ConnInfo {
+    pub client_addr: Option<SocketAddr>,
+    pub channel: Channel,
+}
+
+impl Display for ConnInfo {
+    fn fmt(&self, f: &mut Formatter) -> std::fmt::Result {
+        write!(
+            f,
+            "{}[{}]",
+            self.channel,
+            self.client_addr
+                .map(|addr| addr.to_string())
+                .as_deref()
+                .unwrap_or("unknown client addr")
+        )
+    }
+}
+
+impl ConnInfo {
+    pub fn new(client_addr: Option<SocketAddr>, channel: Channel) -> Self {
+        Self {
+            client_addr,
+            channel,
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Default, Clone, Copy)]
+#[repr(u8)]
+pub enum Channel {
+    #[default]
+    Unknown = 0,
+
+    Mysql = 1,
+    Postgres = 2,
+    HttpSql = 3,
+    Prometheus = 4,
+    Otlp = 5,
+    Grpc = 6,
+    Influx = 7,
+    Opentsdb = 8,
+    Loki = 9,
+    Elasticsearch = 10,
+    Jaeger = 11,
+    Log = 12,
+    Promql = 13,
+    Splunk = 14,
+}
+
+impl From<u32> for Channel {
+    fn from(value: u32) -> Self {
+        match value {
+            1 => Self::Mysql,
+            2 => Self::Postgres,
+            3 => Self::HttpSql,
+            4 => Self::Prometheus,
+            5 => Self::Otlp,
+            6 => Self::Grpc,
+            7 => Self::Influx,
+            8 => Self::Opentsdb,
+            9 => Self::Loki,
+            10 => Self::Elasticsearch,
+            11 => Self::Jaeger,
+            12 => Self::Log,
+            13 => Self::Promql,
+            14 => Self::Splunk,
+            _ => Self::Unknown,
+        }
+    }
+}
+
+impl Channel {
+    pub fn dialect(&self) -> Arc<dyn Dialect + Send + Sync> {
+        match self {
+            Channel::Mysql => Arc::new(MySqlDialect {}),
+            Channel::Postgres => Arc::new(PostgreSqlDialect {}),
+            _ => Arc::new(GenericDialect {}),
+        }
+    }
+}
+
+impl Display for Channel {
+    fn fmt(&self, f: &mut Formatter) -> std::fmt::Result {
+        write!(f, "{}", self.as_ref())
+    }
+}
+
+impl AsRef<str> for Channel {
+    fn as_ref(&self) -> &str {
+        match self {
+            Channel::Mysql => "mysql",
+            Channel::Postgres => "postgres",
+            Channel::HttpSql => "httpsql",
+            Channel::Prometheus => "prometheus",
+            Channel::Otlp => "otlp",
+            Channel::Grpc => "grpc",
+            Channel::Influx => "influx",
+            Channel::Opentsdb => "opentsdb",
+            Channel::Loki => "loki",
+            Channel::Elasticsearch => "elasticsearch",
+            Channel::Jaeger => "jaeger",
+            Channel::Log => "log",
+            Channel::Promql => "promql",
+            Channel::Splunk => "splunk",
+            Channel::Unknown => "unknown",
+        }
+    }
+}
+
+#[derive(Default, Debug)]
+pub struct ConfigurationVariables {
+    postgres_bytea_output: ArcSwap<PGByteaOutputValue>,
+    pg_datestyle_format: ArcSwap<(PGDateTimeStyle, PGDateOrder)>,
+    pg_intervalstyle_format: ArcSwap<PGIntervalStyle>,
+    allow_query_fallback: ArcSwap<bool>,
+}
+
+impl Clone for ConfigurationVariables {
+    fn clone(&self) -> Self {
+        Self {
+            postgres_bytea_output: ArcSwap::new(self.postgres_bytea_output.load().clone()),
+            pg_datestyle_format: ArcSwap::new(self.pg_datestyle_format.load().clone()),
+            pg_intervalstyle_format: ArcSwap::new(self.pg_intervalstyle_format.load().clone()),
+            allow_query_fallback: ArcSwap::new(self.allow_query_fallback.load().clone()),
+        }
+    }
+}
+
+impl ConfigurationVariables {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn set_postgres_bytea_output(&self, value: PGByteaOutputValue) {
+        let _ = self.postgres_bytea_output.swap(Arc::new(value));
+    }
+
+    pub fn postgres_bytea_output(&self) -> Arc<PGByteaOutputValue> {
+        self.postgres_bytea_output.load().clone()
+    }
+
+    pub fn pg_datetime_style(&self) -> Arc<(PGDateTimeStyle, PGDateOrder)> {
+        self.pg_datestyle_format.load().clone()
+    }
+
+    pub fn set_pg_datetime_style(&self, style: PGDateTimeStyle, order: PGDateOrder) {
+        self.pg_datestyle_format.swap(Arc::new((style, order)));
+    }
+
+    pub fn pg_intervalstyle_format(&self) -> Arc<PGIntervalStyle> {
+        self.pg_intervalstyle_format.load().clone()
+    }
+
+    pub fn set_pg_intervalstyle_format(&self, value: PGIntervalStyle) {
+        self.pg_intervalstyle_format.swap(Arc::new(value));
+    }
+
+    pub fn allow_query_fallback(&self) -> bool {
+        **self.allow_query_fallback.load()
+    }
+
+    pub fn set_allow_query_fallback(&self, allow: bool) {
+        self.allow_query_fallback.swap(Arc::new(allow));
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use std::collections::HashMap;
+
+    use common_catalog::consts::DEFAULT_CATALOG_NAME;
+
+    use super::*;
+    use crate::Session;
+    use crate::context::Channel;
+
+    #[test]
+    fn test_session() {
+        let session = Session::new(
+            Some("127.0.0.1:9000".parse().unwrap()),
+            Channel::Mysql,
+            Default::default(),
+            100,
+        );
+        // test user_info
+        assert_eq!(session.user_info().username(), "greptime");
+
+        // test channel
+        assert_eq!(session.conn_info().channel, Channel::Mysql);
+        let client_addr = session.conn_info().client_addr.as_ref().unwrap();
+        assert_eq!(client_addr.ip().to_string(), "127.0.0.1");
+        assert_eq!(client_addr.port(), 9000);
+
+        assert_eq!("mysql[127.0.0.1:9000]", session.conn_info().to_string());
+        assert_eq!(100, session.process_id());
+
+        let query_ctx = session.new_query_context();
+        assert!(query_ctx.remote_query_id().is_some());
+    }
+
+    #[test]
+    fn test_context_db_string() {
+        let context = QueryContext::with("a0b1c2d3", "test");
+        assert_eq!("a0b1c2d3-test", context.get_db_string());
+
+        let context = QueryContext::with(DEFAULT_CATALOG_NAME, "test");
+        assert_eq!("test", context.get_db_string());
+    }
+
+    #[test]
+    fn test_api_query_context_roundtrip_with_sequences() {
+        let api_ctx = api::v1::QueryContext {
+            current_catalog: "c1".to_string(),
+            current_schema: "s1".to_string(),
+            timezone: "UTC".to_string(),
+            extensions: HashMap::from([("flow.return_region_seq".to_string(), "true".to_string())]),
+            channel: Channel::Grpc as u32,
+            snapshot_seqs: Some(api::v1::SnapshotSequences {
+                snapshot_seqs: HashMap::from([(1, 100)]),
+                sst_min_sequences: HashMap::from([(1, 90)]),
+            }),
+            explain: None,
+        };
+
+        let session_ctx: QueryContext = api_ctx.clone().into();
+        let roundtrip_api: api::v1::QueryContext = session_ctx.into();
+
+        assert_eq!(roundtrip_api.current_catalog, api_ctx.current_catalog);
+        assert_eq!(roundtrip_api.current_schema, api_ctx.current_schema);
+        assert_eq!(roundtrip_api.timezone, api_ctx.timezone);
+        assert_eq!(
+            roundtrip_api.extensions.get("flow.return_region_seq"),
+            Some(&"true".to_string())
+        );
+        assert!(
+            roundtrip_api
+                .extensions
+                .contains_key(REMOTE_QUERY_ID_EXTENSION_KEY)
+        );
+        assert_eq!(roundtrip_api.channel, api_ctx.channel);
+        assert_eq!(roundtrip_api.snapshot_seqs, api_ctx.snapshot_seqs);
+    }
+
+    #[test]
+    fn test_query_context_remote_query_id_round_trip() {
+        let query_id = "0195f4fd-c503-7c54-8b8f-7dfb8f6f9c4a";
+        let ctx = QueryContextBuilder::default()
+            .current_catalog(DEFAULT_CATALOG_NAME.to_string())
+            .current_schema("public".to_string())
+            .set_extension(
+                REMOTE_QUERY_ID_EXTENSION_KEY.to_string(),
+                query_id.to_string(),
+            )
+            .build();
+
+        assert_eq!(ctx.remote_query_id(), Some(query_id));
+        assert_eq!(ctx.remote_query_id_value().unwrap().to_string(), query_id);
+
+        let proto: api::v1::QueryContext = (&ctx).into();
+        let restored = QueryContext::from(proto);
+        assert_eq!(restored.remote_query_id(), Some(query_id));
+        assert_eq!(
+            restored.remote_query_id_value().unwrap().to_string(),
+            query_id
+        );
+    }
+}

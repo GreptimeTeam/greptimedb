@@ -1,0 +1,85 @@
+// Copyright 2023 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+#![feature(try_blocks)]
+#![feature(exclusive_wrapper)]
+
+use datafusion_expr::LogicalPlan;
+use sql::statements::statement::Statement;
+// Re-export for use in add_service! macro
+#[doc(hidden)]
+pub use tower;
+
+pub mod addrs;
+pub mod configurator;
+pub(crate) mod elasticsearch;
+pub mod error;
+pub mod grpc;
+
+mod hint_headers;
+pub mod http;
+pub mod influxdb;
+pub mod interceptor;
+pub mod metrics;
+pub mod metrics_handler;
+pub mod mysql;
+pub mod opentsdb;
+pub mod otel_arrow;
+pub mod otlp;
+pub mod pending_rows_batcher;
+mod pipeline;
+pub mod postgres;
+pub mod prom_remote_write;
+pub(crate) mod prom_row_builder;
+pub mod prom_store;
+pub mod prometheus;
+pub mod prometheus_handler;
+pub mod query_handler;
+pub mod repeated_field;
+pub mod request_memory_limiter;
+pub mod request_memory_metrics;
+mod row_writer;
+pub mod server;
+pub mod tls;
+
+/// Cached sql plan or statement for database interfaces
+#[derive(Clone, Debug)]
+pub enum SqlPlan {
+    /// Empty Query
+    Empty,
+    /// Hardcoded SQL shortcuts
+    Shortcut(String),
+    /// Datafusion parsed execution plan with the original statement
+    Plan(LogicalPlan, Statement),
+    /// Parsed statement when execution is not managed by datafusion
+    /// eg. CREATE TABLE
+    /// The String is the original query string to avoid AST round-trip issues
+    Statement(Statement, String),
+}
+
+/// Install the default crypto provider for rustls process-wide. see:
+///
+///  https://docs.rs/rustls/latest/rustls/crypto/struct.CryptoProvider.html#using-the-per-process-default-cryptoprovider
+///
+/// for more information.
+pub fn install_default_crypto_provider() -> Result<(), String> {
+    rustls::crypto::CryptoProvider::install_default(rustls::crypto::aws_lc_rs::default_provider())
+        .map_err(|ret| {
+            format!(
+                "CryptoProvider already installed as: {:?}, but providing {:?}",
+                rustls::crypto::CryptoProvider::get_default(),
+                ret
+            )
+        })
+}

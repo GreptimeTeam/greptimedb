@@ -1,0 +1,12 @@
+[package]
+name = "common-workload"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+common-telemetry.workspace = true
+serde.workspace = true

@@ -1,0 +1,147 @@
+-- Migrated from DuckDB test: test/sql/aggregate/aggregates/test_string_agg.test
+-- Test STRING_AGG operator
+-- test string aggregation on scalar values
+SELECT STRING_AGG('a',',');
+
++---------------------------------+
+| string_agg(Utf8("a"),Utf8(",")) |
++---------------------------------+
+| a                               |
++---------------------------------+
+
+-- test string aggregation on scalar values with NULL
+SELECT STRING_AGG('a',','), STRING_AGG(NULL,','), STRING_AGG('a', NULL), STRING_AGG(NULL,NULL);
+
++---------------------------------+----------------------------+----------------------------+-----------------------+
+| string_agg(Utf8("a"),Utf8(",")) | string_agg(NULL,Utf8(",")) | string_agg(Utf8("a"),NULL) | string_agg(NULL,NULL) |
++---------------------------------+----------------------------+----------------------------+-----------------------+
+| a                               |                            | a                          |                       |
++---------------------------------+----------------------------+----------------------------+-----------------------+
+
+-- test string aggregation on a set of values
+CREATE TABLE strings(g INTEGER, x VARCHAR, y VARCHAR, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+INSERT INTO strings VALUES
+    (1,'a','/', 1000), (1,'b','-', 2000),
+    (2,'i','/', 3000), (2,NULL,'-', 4000), (2,'j','+', 5000),
+    (3,'p','/', 6000),
+    (4,'x','/', 7000), (4,'y','-', 8000), (4,'z','+', 9000);
+
+Affected Rows: 9
+
+SELECT g, STRING_AGG(x,'|') FROM strings GROUP BY g ORDER BY g;
+
++---+---------------------------------+
+| g | string_agg(strings.x,Utf8("|")) |
++---+---------------------------------+
+| 1 | a|b                             |
+| 2 | i|j                             |
+| 3 | p                               |
+| 4 | x|y|z                           |
++---+---------------------------------+
+
+-- test agg on empty set
+SELECT STRING_AGG(x,',') FROM strings WHERE g > 100;
+
++---------------------------------+
+| string_agg(strings.x,Utf8(",")) |
++---------------------------------+
+|                                 |
++---------------------------------+
+
+-- string_agg can be used instead of group_concat
+SELECT string_agg('a', ',');
+
++---------------------------------+
+| string_agg(Utf8("a"),Utf8(",")) |
++---------------------------------+
+| a                               |
++---------------------------------+
+
+SELECT string_agg('a', ',');
+
++---------------------------------+
+| string_agg(Utf8("a"),Utf8(",")) |
++---------------------------------+
+| a                               |
++---------------------------------+
+
+SELECT g, string_agg(x, ',') FROM strings GROUP BY g ORDER BY g;
+
++---+---------------------------------+
+| g | string_agg(strings.x,Utf8(",")) |
++---+---------------------------------+
+| 1 | a,b                             |
+| 2 | i,j                             |
+| 3 | p                               |
+| 4 | x,y,z                           |
++---+---------------------------------+
+
+-- Test ORDER BY
+-- Single group
+SELECT STRING_AGG(x, '' ORDER BY x ASC), STRING_AGG(x, '|' ORDER BY x ASC) FROM strings;
+
++--------------------------------------------------------------------+---------------------------------------------------------------------+
+| string_agg(strings.x,Utf8("")) ORDER BY [strings.x ASC NULLS LAST] | string_agg(strings.x,Utf8("|")) ORDER BY [strings.x ASC NULLS LAST] |
++--------------------------------------------------------------------+---------------------------------------------------------------------+
+| abijpxyz                                                           | a|b|i|j|p|x|y|z                                                     |
++--------------------------------------------------------------------+---------------------------------------------------------------------+
+
+SELECT STRING_AGG(x, '' ORDER BY x DESC), STRING_AGG(x,'|' ORDER BY x DESC) FROM strings;
+
++----------------------------------------------------------------------+-----------------------------------------------------------------------+
+| string_agg(strings.x,Utf8("")) ORDER BY [strings.x DESC NULLS FIRST] | string_agg(strings.x,Utf8("|")) ORDER BY [strings.x DESC NULLS FIRST] |
++----------------------------------------------------------------------+-----------------------------------------------------------------------+
+| zyxpjiba                                                             | z|y|x|p|j|i|b|a                                                       |
++----------------------------------------------------------------------+-----------------------------------------------------------------------+
+
+-- Grouped with ORDER BY
+SELECT g, STRING_AGG(x, '' ORDER BY x ASC), STRING_AGG(x, '|' ORDER BY x ASC) FROM strings GROUP BY g ORDER BY g;
+
++---+--------------------------------------------------------------------+---------------------------------------------------------------------+
+| g | string_agg(strings.x,Utf8("")) ORDER BY [strings.x ASC NULLS LAST] | string_agg(strings.x,Utf8("|")) ORDER BY [strings.x ASC NULLS LAST] |
++---+--------------------------------------------------------------------+---------------------------------------------------------------------+
+| 1 | ab                                                                 | a|b                                                                 |
+| 2 | ij                                                                 | i|j                                                                 |
+| 3 | p                                                                  | p                                                                   |
+| 4 | xyz                                                                | x|y|z                                                               |
++---+--------------------------------------------------------------------+---------------------------------------------------------------------+
+
+SELECT g, STRING_AGG(x, '' ORDER BY x DESC), STRING_AGG(x,'|' ORDER BY x DESC) FROM strings GROUP BY g ORDER BY g;
+
++---+----------------------------------------------------------------------+-----------------------------------------------------------------------+
+| g | string_agg(strings.x,Utf8("")) ORDER BY [strings.x DESC NULLS FIRST] | string_agg(strings.x,Utf8("|")) ORDER BY [strings.x DESC NULLS FIRST] |
++---+----------------------------------------------------------------------+-----------------------------------------------------------------------+
+| 1 | ba                                                                   | b|a                                                                   |
+| 2 | ji                                                                   | j|i                                                                   |
+| 3 | p                                                                    | p                                                                     |
+| 4 | zyx                                                                  | z|y|x                                                                 |
++---+----------------------------------------------------------------------+-----------------------------------------------------------------------+
+
+-- Test with DISTINCT
+SELECT STRING_AGG(DISTINCT x, '' ORDER BY x), STRING_AGG(DISTINCT x, '|' ORDER BY x) FROM strings;
+
++-----------------------------------------------------------------------------+------------------------------------------------------------------------------+
+| string_agg(DISTINCT strings.x,Utf8("")) ORDER BY [strings.x ASC NULLS LAST] | string_agg(DISTINCT strings.x,Utf8("|")) ORDER BY [strings.x ASC NULLS LAST] |
++-----------------------------------------------------------------------------+------------------------------------------------------------------------------+
+| abijpxyz                                                                    | a|b|i|j|p|x|y|z                                                              |
++-----------------------------------------------------------------------------+------------------------------------------------------------------------------+
+
+SELECT g, STRING_AGG(DISTINCT x, '' ORDER BY x) FROM strings GROUP BY g ORDER BY g;
+
++---+-----------------------------------------------------------------------------+
+| g | string_agg(DISTINCT strings.x,Utf8("")) ORDER BY [strings.x ASC NULLS LAST] |
++---+-----------------------------------------------------------------------------+
+| 1 | ab                                                                          |
+| 2 | ij                                                                          |
+| 3 | p                                                                           |
+| 4 | xyz                                                                         |
++---+-----------------------------------------------------------------------------+
+
+-- cleanup
+DROP TABLE strings;
+
+Affected Rows: 0
+

@@ -1,0 +1,755 @@
+## The datanode identifier and should be unique in the cluster.
+## @toml2docs:none-default
+node_id = 42
+
+## The default column prefix for auto-created time index and value columns.
+## @toml2docs:none-default
+default_column_prefix = "greptime"
+
+## Start services after regions have obtained leases.
+## It will block the datanode start if it can't receive leases in the heartbeat from metasrv.
+require_lease_before_startup = false
+
+## Initialize all regions in the background during the startup.
+## By default, it provides services after all regions have been initialized.
+init_regions_in_background = false
+
+## Parallelism of initializing regions.
+init_regions_parallelism = 16
+
+## The maximum concurrent queries allowed to be executed. Zero means unlimited.
+max_concurrent_queries = 0
+
+## Timeout to acquire a permit from the concurrent query limiter when `max_concurrent_queries` is reached.
+concurrent_query_limiter_timeout = "100ms"
+
+## Enable telemetry to collect anonymous usage data. Enabled by default.
+#+ enable_telemetry = true
+
+## The HTTP server options.
+[http]
+## The address to bind the HTTP server.
+addr = "127.0.0.1:4000"
+## HTTP request timeout. Set to 0 to disable timeout.
+timeout = "0s"
+## HTTP request body limit.
+## The following units are supported: `B`, `KB`, `KiB`, `MB`, `MiB`, `GB`, `GiB`, `TB`, `TiB`, `PB`, `PiB`.
+## Set to 0 to disable limit.
+body_limit = "64MB"
+
+## The gRPC server options.
+[grpc]
+## The address to bind the gRPC server.
+bind_addr = "127.0.0.1:3001"
+## The address advertised to the metasrv, and used for connections from outside the host.
+## If left empty or unset, the server will automatically use the IP address of the first network interface
+## on the host, with the same port number as the one specified in `grpc.bind_addr`.
+server_addr = "127.0.0.1:3001"
+## The number of server worker threads.
+runtime_size = 8
+## The maximum receive message size for gRPC server.
+max_recv_message_size = "512MB"
+## The maximum send message size for gRPC server.
+max_send_message_size = "512MB"
+## Compression mode for datanode side Arrow IPC service. Available options:
+## - `none`: disable all compression
+## - `transport`: only enable gRPC transport compression (zstd)
+## - `arrow_ipc`: only enable Arrow IPC compression (lz4)
+## - `all`: enable all compression.
+## Default to `none`
+flight_compression = "arrow_ipc"
+
+## gRPC server TLS options, see `mysql.tls` section.
+[grpc.tls]
+## TLS mode.
+mode = "disable"
+
+## Certificate file path.
+## @toml2docs:none-default
+cert_path = ""
+
+## Private key file path.
+## @toml2docs:none-default
+key_path = ""
+
+## Watch for Certificate and key file change and auto reload.
+## For now, gRPC tls config does not support auto reload.
+watch = false
+
+## The runtime options.
+#+ [runtime]
+## The number of threads to execute the runtime for global read operations.
+#+ global_rt_size = 8
+## The number of threads to execute the runtime for global write operations.
+#+ compact_rt_size = 4
+## The number of threads to execute datanode query operations.
+## Defaults to max(num_cpus - 1, 1).
+#+ query_rt_size = 7
+## The number of threads to execute datanode ingestion operations.
+#+ ingest_rt_size = 8
+
+## The metasrv client options.
+[meta_client]
+## The addresses of the metasrv.
+metasrv_addrs = ["127.0.0.1:3002"]
+
+## Operation timeout.
+timeout = "3s"
+
+## DDL timeout.
+ddl_timeout = "10s"
+
+## Connect server timeout.
+connect_timeout = "1s"
+
+## `TCP_NODELAY` option for accepted connections.
+tcp_nodelay = true
+
+## The configuration about the cache of the metadata.
+metadata_cache_max_capacity = 100000
+
+## TTL of the metadata cache.
+metadata_cache_ttl = "10m"
+
+# TTI of the metadata cache.
+metadata_cache_tti = "5m"
+
+## The WAL options.
+[wal]
+## The provider of the WAL.
+## - `raft_engine`: the wal is stored in the local file system by raft-engine.
+## - `kafka`: it's remote wal that data is stored in Kafka.
+## - `noop`: it's a no-op WAL provider that does not store any WAL data.<br/>**Notes: any unflushed data will be lost when the datanode is shutdown.**
+provider = "raft_engine"
+
+## The directory to store the WAL files.
+## **It's only used when the provider is `raft_engine`**.
+## @toml2docs:none-default
+dir = "./greptimedb_data/wal"
+
+## The size of the WAL segment file.
+## **It's only used when the provider is `raft_engine`**.
+file_size = "128MB"
+
+## The threshold of the WAL size to trigger a purge.
+## **It's only used when the provider is `raft_engine`**.
+purge_threshold = "1GB"
+
+## The interval to trigger a purge.
+## **It's only used when the provider is `raft_engine`**.
+purge_interval = "1m"
+
+## The read batch size.
+## **It's only used when the provider is `raft_engine`**.
+read_batch_size = 128
+
+## Whether to use sync write.
+## **It's only used when the provider is `raft_engine`**.
+sync_write = false
+
+## Whether to reuse logically truncated log files.
+## **It's only used when the provider is `raft_engine`**.
+enable_log_recycle = true
+
+## Whether to pre-create log files on start up.
+## **It's only used when the provider is `raft_engine`**.
+prefill_log_files = false
+
+## Duration for fsyncing log files.
+## **It's only used when the provider is `raft_engine`**.
+sync_period = "10s"
+
+## Parallelism during WAL recovery.
+recovery_parallelism = 2
+
+## The Kafka broker endpoints.
+## **It's only used when the provider is `kafka`**.
+broker_endpoints = ["127.0.0.1:9092"]
+
+## The connect timeout for kafka client.
+## **It's only used when the provider is `kafka`**.
+#+ connect_timeout = "3s"
+
+## The timeout for kafka client.
+## **It's only used when the provider is `kafka`**.
+#+ timeout = "3s"
+
+## The max size of a single producer batch.
+## Warning: Kafka has a default limit of 1MB per message in a topic.
+## **It's only used when the provider is `kafka`**.
+max_batch_bytes = "1MB"
+
+## The consumer wait timeout.
+## **It's only used when the provider is `kafka`**.
+consumer_wait_timeout = "100ms"
+
+## Whether to enable WAL index creation.
+## **It's only used when the provider is `kafka`**.
+create_index = true
+
+## The interval for dumping WAL indexes.
+## **It's only used when the provider is `kafka`**.
+dump_index_interval = "60s"
+
+## Ignore missing entries during read WAL.
+## **It's only used when the provider is `kafka`**.
+##
+## This option ensures that when Kafka messages are deleted, the system
+## can still successfully replay memtable data without throwing an
+## out-of-range error.
+## However, enabling this option might lead to unexpected data loss,
+## as the system will skip over missing entries instead of treating
+## them as critical errors.
+overwrite_entry_start_id = false
+
+# The Kafka SASL configuration.
+# **It's only used when the provider is `kafka`**.
+# Available SASL mechanisms:
+# - `PLAIN`
+# - `SCRAM-SHA-256`
+# - `SCRAM-SHA-512`
+# [wal.sasl]
+# type = "SCRAM-SHA-512"
+# username = "user_kafka"
+# password = "secret"
+
+# The Kafka TLS configuration.
+# **It's only used when the provider is `kafka`**.
+# [wal.tls]
+# server_ca_cert_path = "/path/to/server_cert"
+# client_cert_path = "/path/to/client_cert"
+# client_key_path = "/path/to/key"
+
+# Example of using S3 as the storage.
+# [storage]
+# type = "S3"
+# bucket = "greptimedb"
+# root = "data"
+# access_key_id = "test"
+# secret_access_key = "123456"
+# endpoint = "https://s3.amazonaws.com"
+# region = "us-west-2"
+# enable_virtual_host_style = false
+# disable_ec2_metadata = false
+
+# Example of using Oss as the storage.
+# [storage]
+# type = "Oss"
+# bucket = "greptimedb"
+# root = "data"
+# access_key_id = "test"
+# access_key_secret = "123456"
+# endpoint = "https://oss-cn-hangzhou.aliyuncs.com"
+
+# Example of using Azblob as the storage.
+# [storage]
+# type = "Azblob"
+# container = "greptimedb"
+# root = "data"
+# account_name = "test"
+# account_key = "123456"
+# endpoint = "https://greptimedb.blob.core.windows.net"
+# sas_token = ""
+
+# Example of using Gcs as the storage.
+# [storage]
+# type = "Gcs"
+# bucket = "greptimedb"
+# root = "data"
+# scope = "test"
+# credential_path = "123456"
+# credential = "base64-credential"
+# endpoint = "https://storage.googleapis.com"
+
+## The query engine options.
+[query]
+## Parallelism of the query engine.
+## Default to 0, which means the number of CPU cores.
+parallelism = 0
+
+## Memory pool size for query execution operators (aggregation, sorting, join).
+## Supports absolute size (e.g., "2GB", "4GB") or percentage of system memory (e.g., "20%").
+## Setting it to 0 disables the limit (unbounded, default behavior).
+## When this limit is reached, queries will fail with ResourceExhausted error.
+## NOTE: This does NOT limit memory used by table scans.
+memory_pool_size = "50%"
+
+## The data storage options.
+[storage]
+## The working home directory.
+data_home = "./greptimedb_data"
+
+## The storage type used to store the data.
+## - `File`: the data is stored in the local file system.
+## - `S3`: the data is stored in the S3 object storage.
+## - `Gcs`: the data is stored in the Google Cloud Storage.
+## - `Azblob`: the data is stored in the Azure Blob Storage.
+## - `Oss`: the data is stored in the Aliyun OSS.
+type = "File"
+
+## The S3 bucket name.
+## **It's only used when the storage type is `S3`, `Oss` and `Gcs`**.
+## @toml2docs:none-default
+bucket = "greptimedb"
+
+## The S3 data will be stored in the specified prefix, for example, `s3://${bucket}/${root}`.
+## **It's only used when the storage type is `S3`, `Oss` and `Azblob`**.
+## @toml2docs:none-default
+root = "greptimedb"
+
+## The access key id of the aws account.
+## It's **highly recommended** to use AWS IAM roles instead of hardcoding the access key id and secret key.
+## **It's only used when the storage type is `S3` and `Oss`**.
+## @toml2docs:none-default
+access_key_id = "test"
+
+## The secret access key of the aws account.
+## It's **highly recommended** to use AWS IAM roles instead of hardcoding the access key id and secret key.
+## **It's only used when the storage type is `S3`**.
+## @toml2docs:none-default
+secret_access_key = "test"
+
+## The secret access key of the aliyun account.
+## **It's only used when the storage type is `Oss`**.
+## @toml2docs:none-default
+access_key_secret = "test"
+
+## The account key of the azure account.
+## **It's only used when the storage type is `Azblob`**.
+## @toml2docs:none-default
+account_name = "test"
+
+## The account key of the azure account.
+## **It's only used when the storage type is `Azblob`**.
+## @toml2docs:none-default
+account_key = "test"
+
+## The scope of the google cloud storage.
+## **It's only used when the storage type is `Gcs`**.
+## @toml2docs:none-default
+scope = "test"
+
+## The credential path of the google cloud storage.
+## **It's only used when the storage type is `Gcs`**.
+## @toml2docs:none-default
+credential_path = "test"
+
+## The credential of the google cloud storage.
+## **It's only used when the storage type is `Gcs`**.
+## @toml2docs:none-default
+credential = "base64-credential"
+
+## The container of the azure account.
+## **It's only used when the storage type is `Azblob`**.
+## @toml2docs:none-default
+container = "greptimedb"
+
+## The sas token of the azure account.
+## **It's only used when the storage type is `Azblob`**.
+## @toml2docs:none-default
+sas_token = ""
+
+## The endpoint of the S3 service.
+## **It's only used when the storage type is `S3`, `Oss`, `Gcs` and `Azblob`**.
+## @toml2docs:none-default
+endpoint = "https://s3.amazonaws.com"
+
+## The region of the S3 service.
+## **It's only used when the storage type is `S3`, `Oss`, `Gcs` and `Azblob`**.
+## @toml2docs:none-default
+region = "us-west-2"
+
+## The http client options to the storage.
+## **It's only used when the storage type is `S3`, `Oss`, `Gcs` and `Azblob`**.
+[storage.http_client]
+
+## The maximum idle connection per host allowed in the pool.
+pool_max_idle_per_host = 1024
+
+## The timeout for only the connect phase of a http client.
+connect_timeout = "30s"
+
+## The total request timeout, applied from when the request starts connecting until the response body has finished.
+## Also considered a total deadline.
+timeout = "30s"
+
+## The timeout for idle sockets being kept-alive.
+pool_idle_timeout = "90s"
+
+## To skip the ssl verification
+## **Security Notice**: Setting `skip_ssl_validation = true` disables certificate verification, making connections vulnerable to man-in-the-middle attacks. Only use this in development or trusted private networks.
+skip_ssl_validation = false
+
+# Custom storage options
+# [[storage.providers]]
+# name = "S3"
+# type = "S3"
+# bucket = "greptimedb"
+# root = "data"
+# access_key_id = "test"
+# secret_access_key = "123456"
+# endpoint = "https://s3.amazonaws.com"
+# region = "us-west-2"
+# [[storage.providers]]
+# name = "Gcs"
+# type = "Gcs"
+# bucket = "greptimedb"
+# root = "data"
+# scope = "test"
+# credential_path = "123456"
+# credential = "base64-credential"
+# endpoint = "https://storage.googleapis.com"
+
+## The region engine options. You can configure multiple region engines.
+[[region_engine]]
+
+## The Mito engine options.
+[region_engine.mito]
+
+## Number of region workers.
+#+ num_workers = 8
+
+## Request channel size of each worker.
+worker_channel_size = 128
+
+## Max batch size for a worker to handle requests.
+worker_request_batch_size = 64
+
+## Number of meta action updated to trigger a new checkpoint for the manifest.
+manifest_checkpoint_distance = 10
+
+
+## Number of removed files to keep in manifest's `removed_files` field before also
+## remove them from `removed_files`. Mostly for debugging purpose.
+## If set to 0, it will only use `keep_removed_file_ttl` to decide when to remove files
+## from `removed_files` field.
+experimental_manifest_keep_removed_file_count = 256
+
+## How long to keep removed files in the `removed_files` field of manifest
+## after they are removed from manifest.
+## files will only be removed from `removed_files` field
+## if both `keep_removed_file_count` and `keep_removed_file_ttl` is reached.
+experimental_manifest_keep_removed_file_ttl = "1h"
+
+## Whether to compress manifest and checkpoint file by gzip (default false).
+compress_manifest = false
+
+## Max number of running background flush jobs (default: 1/2 of cpu cores).
+## @toml2docs:none-default="Auto"
+#+ max_background_flushes = 4
+
+## Max number of running background compaction jobs (default: 1/4 of cpu cores).
+## @toml2docs:none-default="Auto"
+#+ max_background_compactions = 2
+
+## Max number of running background purge jobs (default: number of cpu cores).
+## @toml2docs:none-default="Auto"
+#+ max_background_purges = 8
+
+## Memory budget for compaction tasks.
+## Supports absolute size (e.g., "2GiB", "512MB") or percentage of system memory (e.g., "50%").
+## Setting it to 0 or "unlimited" disables the limit.
+## @toml2docs:none-default="0"
+#+ experimental_compaction_memory_limit = "0"
+
+## Behavior when compaction cannot acquire memory from the budget.
+## Options: "wait" (default, 10s), "wait(<duration>)", "fail"
+## @toml2docs:none-default="wait"
+#+ experimental_compaction_on_exhausted = "wait"
+
+## Interval to auto flush a region if it has not flushed yet.
+auto_flush_interval = "1h"
+
+## Global write buffer size for all regions. If not set, it's default to 1/8 of OS memory with a max limitation of 1GB.
+## @toml2docs:none-default="Auto"
+#+ global_write_buffer_size = "1GB"
+
+## Global write buffer size threshold to reject write requests. If not set, it's default to 2 times of `global_write_buffer_size`
+## @toml2docs:none-default="Auto"
+#+ global_write_buffer_reject_size = "2GB"
+
+## Cache size for SST metadata. Setting it to 0 to disable the cache.
+## If not set, it's default to 1/32 of OS memory with a max limitation of 128MB.
+## @toml2docs:none-default="Auto"
+#+ sst_meta_cache_size = "128MB"
+
+## Cache size for vectors and arrow arrays. Setting it to 0 to disable the cache.
+## If not set, it's default to 1/16 of OS memory with a max limitation of 512MB.
+## @toml2docs:none-default="Auto"
+#+ vector_cache_size = "512MB"
+
+## Cache size for pages of SST row groups. Setting it to 0 to disable the cache.
+## If not set, it's default to 1/8 of OS memory.
+## @toml2docs:none-default="Auto"
+#+ page_cache_size = "512MB"
+
+## Cache size for time series selector (e.g. `last_value()`). Setting it to 0 to disable the cache.
+## If not set, it's default to 1/16 of OS memory with a max limitation of 512MB.
+## @toml2docs:none-default="Auto"
+#+ selector_result_cache_size = "512MB"
+
+## Cache size for flat range scan results. Setting it to 0 to disable the cache.
+## If not set, it's default to 1/16 of OS memory with a max limitation of 512MB.
+## @toml2docs:none-default="Auto"
+#+ range_result_cache_size = "512MB"
+
+## Cache size for prefilter results. Setting it to 0 to disable the cache.
+## If not set, it's default to 1/32 of OS memory with a max limitation of 128MB.
+## @toml2docs:none-default="Auto"
+#+ prefilter_result_cache_size = "128MB"
+
+## Whether to enable the write cache, it's enabled by default when using object storage. It is recommended to enable it when using object storage for better performance.
+enable_write_cache = false
+
+## File system path for write cache, defaults to `{data_home}`.
+write_cache_path = ""
+
+## Capacity for write cache. If your disk space is sufficient, it is recommended to set it larger.
+write_cache_size = "5GiB"
+
+## TTL for write cache.
+## @toml2docs:none-default
+write_cache_ttl = "8h"
+
+## Preload index (puffin) files into cache on region open (default: true).
+## When enabled, index files are loaded into the write cache during region initialization,
+## which can improve query performance at the cost of longer startup times.
+preload_index_cache = true
+
+## Percentage of write cache capacity allocated for index (puffin) files (default: 20).
+## The remaining capacity is used for data (parquet) files.
+## Must be between 0 and 100 (exclusive). For example, with a 5GiB write cache and 20% allocation,
+## 1GiB is reserved for index files and 4GiB for data files.
+index_cache_percent = 20
+
+## Enable refilling cache on read operations (default: true).
+## When disabled, cache refilling on read won't happen.
+enable_refill_cache_on_read = true
+
+## Capacity for manifest cache (default: 256MB).
+manifest_cache_size = "256MB"
+
+## Buffer size for SST writing.
+sst_write_buffer_size = "8MB"
+
+## Maximum number of SST files to scan concurrently.
+max_concurrent_scan_files = 384
+
+## Whether to allow stale WAL entries read during replay.
+allow_stale_entries = false
+
+## Memory limit for table scans across all queries.
+## Supports absolute size (e.g., "2GB") or percentage of system memory (e.g., "20%").
+## Setting it to 0 or "unlimited" disables the limit.
+scan_memory_limit = "unlimited"
+## Controls what happens when a scan cannot get memory immediately.
+## "fail" (default) fails fast and is the recommended option for most users.
+## "wait" / "wait(<duration>)" waits for memory to become available. This is mainly
+## for advanced tuning in bursty workloads where temporary contention is common and
+## higher latency is acceptable.
+## "wait" means "wait(10s)", not unlimited waiting.
+scan_memory_on_exhausted = "fail"
+
+## Minimum time interval between two compactions.
+## To align with the old behavior, the default value is 0 (no restrictions).
+min_compaction_interval = "0m"
+
+## Whether to allow to schedule a compaction after a successful region edit.
+##
+## Setting this to "true" is a necessary but not sufficient condition for scheduling compaction after a region edit.
+## Other constraints, such as "min_compaction_interval", may still prevent compaction from being scheduled.
+## Setting this to "false", however, guarantees that compaction will not be scheduled after a region edit.
+schedule_compaction_after_edit = true
+
+## Whether to enable flat format as the default SST format.
+default_flat_format = true
+
+## The options for index in Mito engine.
+[region_engine.mito.index]
+
+## Auxiliary directory path for the index in filesystem, used to store intermediate files for
+## creating the index and staging files for searching the index, defaults to `{data_home}/index_intermediate`.
+## The default name for this directory is `index_intermediate` for backward compatibility.
+##
+## This path contains two subdirectories:
+## - `__intm`: for storing intermediate files used during creating index.
+## - `staging`: for storing staging files used during searching index.
+aux_path = ""
+
+## The max capacity of the staging directory.
+staging_size = "2GB"
+
+## The TTL of the staging directory.
+## Defaults to 7 days.
+## Setting it to "0s" to disable TTL.
+staging_ttl = "7d"
+
+## Cache size for inverted index metadata.
+metadata_cache_size = "64MiB"
+
+## Cache size for inverted index content.
+content_cache_size = "128MiB"
+
+## Page size for inverted index content cache.
+content_cache_page_size = "64KiB"
+
+## Cache size for index result.
+result_cache_size = "128MiB"
+
+## The options for inverted index in Mito engine.
+[region_engine.mito.inverted_index]
+
+## Whether to create the index on flush.
+## - `auto`: automatically (default)
+## - `disable`: never
+create_on_flush = "auto"
+
+## Whether to create the index on compaction.
+## - `auto`: automatically (default)
+## - `disable`: never
+create_on_compaction = "auto"
+
+## Whether to apply the index on query
+## - `auto`: automatically (default)
+## - `disable`: never
+apply_on_query = "auto"
+
+## Memory threshold for performing an external sort during index creation.
+## - `auto`: automatically determine the threshold based on the system memory size (default)
+## - `unlimited`: no memory limit
+## - `[size]` e.g. `64MB`: fixed memory threshold
+mem_threshold_on_create = "auto"
+
+## Deprecated, use `region_engine.mito.index.aux_path` instead.
+intermediate_path = ""
+
+## The options for full-text index in Mito engine.
+[region_engine.mito.fulltext_index]
+
+## Whether to create the index on flush.
+## - `auto`: automatically (default)
+## - `disable`: never
+create_on_flush = "auto"
+
+## Whether to create the index on compaction.
+## - `auto`: automatically (default)
+## - `disable`: never
+create_on_compaction = "auto"
+
+## Whether to apply the index on query
+## - `auto`: automatically (default)
+## - `disable`: never
+apply_on_query = "auto"
+
+## Memory threshold for index creation.
+## - `auto`: automatically determine the threshold based on the system memory size (default)
+## - `unlimited`: no memory limit
+## - `[size]` e.g. `64MB`: fixed memory threshold
+mem_threshold_on_create = "auto"
+
+## The options for bloom filter index in Mito engine.
+[region_engine.mito.bloom_filter_index]
+
+## Whether to create the index on flush.
+## - `auto`: automatically (default)
+## - `disable`: never
+create_on_flush = "auto"
+
+## Whether to create the index on compaction.
+## - `auto`: automatically (default)
+## - `disable`: never
+create_on_compaction = "auto"
+
+## Whether to apply the index on query
+## - `auto`: automatically (default)
+## - `disable`: never
+apply_on_query = "auto"
+
+## Memory threshold for the index creation.
+## - `auto`: automatically determine the threshold based on the system memory size (default)
+## - `unlimited`: no memory limit
+## - `[size]` e.g. `64MB`: fixed memory threshold
+mem_threshold_on_create = "auto"
+
+[region_engine.mito.gc]
+## Whether GC is enabled. Need to be the same with metasrv's `gc.enable` or unexpected behavior will occur
+enable = false
+
+## Lingering time before deleting files.
+## Should be long enough to allow long running queries to finish.
+## If set to None, then unused files will be deleted immediately.
+lingering_time = "1h"
+
+## Lingering time before deleting unknown files (files with undetermined expel time).
+## Only applies during full file listing GC.
+## This uses the object's last-modified timestamp as a heuristic (strict less-than comparison);
+## do not configure this value too small in production to avoid deleting pre-manifest files
+## from in-progress compaction or flush.
+## For active/open regions, an unknown file is deleted only if its object last-modified time exceeds this TTL.
+## If the object store does not provide a last-modified timestamp, the file is conservatively kept.
+## For dropped regions, unknown files are deleted immediately.
+unknown_file_lingering_time = "1d"
+
+[[region_engine]]
+## Enable the file engine.
+[region_engine.file]
+
+[[region_engine]]
+## Metric engine options.
+[region_engine.metric]
+## Whether to use sparse primary key encoding.
+sparse_primary_key_encoding = true
+
+## The logging options.
+[logging]
+## The directory to store the log files. If set to empty, logs will not be written to files.
+dir = "./greptimedb_data/logs"
+
+## The log level. Can be `info`/`debug`/`warn`/`error`.
+## @toml2docs:none-default
+level = "info"
+
+## Enable OTLP tracing.
+enable_otlp_tracing = false
+
+## The OTLP tracing endpoint.
+otlp_endpoint = "http://localhost:4318/v1/traces"
+
+## Whether to append logs to stdout.
+append_stdout = true
+
+## The log format. Can be `text`/`json`.
+log_format = "text"
+
+## The maximum amount of log files.
+max_log_files = 720
+
+## The OTLP tracing export protocol. Can be `grpc`/`http`.
+otlp_export_protocol = "http"
+
+## Additional OTLP headers, only valid when using OTLP http
+[logging.otlp_headers]
+## @toml2docs:none-default
+#Authorization = "Bearer my-token"
+## @toml2docs:none-default
+#Database = "My database"
+
+## The percentage of tracing will be sampled and exported.
+## Valid range `[0, 1]`, 1 means all traces are sampled, 0 means all traces are not sampled, the default value is 1.
+## ratio > 1 are treated as 1. Fractions < 0 are treated as 0
+[logging.tracing_sample_ratio]
+default_ratio = 1.0
+
+## The tracing options. Only effect when compiled with `tokio-console` feature.
+#+ [tracing]
+## The tokio console address.
+## @toml2docs:none-default
+#+ tokio_console_addr = "127.0.0.1"
+
+## The memory options.
+[memory]
+## Whether to enable heap profiling activation during startup.
+## When enabled, heap profiling will be activated if the `MALLOC_CONF` environment variable
+## is set to "prof:true,prof_active:false". The official image adds this env variable.
+## Default is true.
+enable_heap_profiling = true

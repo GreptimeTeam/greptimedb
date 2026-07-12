@@ -1,0 +1,3204 @@
+// Copyright 2023 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+use std::cmp::Ordering;
+use std::fmt::{Display, Formatter};
+use std::sync::Arc;
+
+use arrow_array::{Array, StructArray};
+use common_base::bytes::{Bytes, StringBytes};
+use common_decimal::Decimal128;
+use common_telemetry::error;
+use common_time::date::Date;
+use common_time::interval::IntervalUnit;
+use common_time::time::Time;
+use common_time::timestamp::{TimeUnit, Timestamp};
+use common_time::{Duration, IntervalDayTime, IntervalMonthDayNano, IntervalYearMonth, Timezone};
+use datafusion_common::ScalarValue;
+use datafusion_common::scalar::ScalarStructBuilder;
+pub use ordered_float::OrderedFloat;
+use serde::{Deserialize, Serialize, Serializer};
+use serde_json::Map;
+use snafu::{ResultExt, ensure};
+
+use crate::error::{
+    self, ConvertArrowArrayToScalarsSnafu, ConvertScalarToArrowArraySnafu, Error,
+    InconsistentStructFieldsAndItemsSnafu, Result, TryFromValueSnafu,
+};
+use crate::json::value::{JsonValue, JsonValueRef};
+use crate::prelude::*;
+use crate::type_id::LogicalTypeId;
+use crate::types::{IntervalType, ListType, StructType};
+use crate::vectors::{ListVector, StructVector};
+
+pub type OrderedF32 = OrderedFloat<f32>;
+pub type OrderedF64 = OrderedFloat<f64>;
+
+/// Value holds a single arbitrary value of any [DataType](crate::data_type::DataType).
+///
+/// Comparison between values with different types (expect Null) is not allowed.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Value {
+    Null,
+
+    // Numeric types:
+    Boolean(bool),
+    UInt8(u8),
+    UInt16(u16),
+    UInt32(u32),
+    UInt64(u64),
+    Int8(i8),
+    Int16(i16),
+    Int32(i32),
+    Int64(i64),
+    Float32(OrderedF32),
+    Float64(OrderedF64),
+
+    // Decimal type:
+    Decimal128(Decimal128),
+
+    // String types:
+    String(StringBytes),
+    Binary(Bytes),
+
+    // Date & Time types:
+    Date(Date),
+    Timestamp(Timestamp),
+    Time(Time),
+    Duration(Duration),
+    // Interval types:
+    IntervalYearMonth(IntervalYearMonth),
+    IntervalDayTime(IntervalDayTime),
+    IntervalMonthDayNano(IntervalMonthDayNano),
+
+    // Collection types:
+    List(ListValue),
+    Struct(StructValue),
+
+    // Json Logical types:
+    Json(Box<JsonValue>),
+}
+
+impl Display for Value {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Value::Null => write!(f, "{}", self.data_type().name()),
+            Value::Boolean(v) => write!(f, "{v}"),
+            Value::UInt8(v) => write!(f, "{v}"),
+            Value::UInt16(v) => write!(f, "{v}"),
+            Value::UInt32(v) => write!(f, "{v}"),
+            Value::UInt64(v) => write!(f, "{v}"),
+            Value::Int8(v) => write!(f, "{v}"),
+            Value::Int16(v) => write!(f, "{v}"),
+            Value::Int32(v) => write!(f, "{v}"),
+            Value::Int64(v) => write!(f, "{v}"),
+            Value::Float32(v) => write!(f, "{v}"),
+            Value::Float64(v) => write!(f, "{v}"),
+            Value::String(v) => write!(f, "{}", v.as_utf8()),
+            Value::Binary(v) => {
+                let hex = v
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<Vec<String>>()
+                    .join("");
+                write!(f, "{hex}")
+            }
+            Value::Date(v) => write!(f, "{v}"),
+            Value::Timestamp(v) => write!(f, "{}", v.to_iso8601_string()),
+            Value::Time(t) => write!(f, "{}", t.to_iso8601_string()),
+            Value::IntervalYearMonth(v) => {
+                write!(f, "{}", v.to_iso8601_string())
+            }
+            Value::IntervalDayTime(v) => {
+                write!(f, "{}", v.to_iso8601_string())
+            }
+            Value::IntervalMonthDayNano(v) => {
+                write!(f, "{}", v.to_iso8601_string())
+            }
+            Value::Duration(d) => write!(f, "{d}"),
+            Value::List(v) => {
+                let items = v
+                    .items()
+                    .iter()
+                    .map(|i| i.to_string())
+                    .collect::<Vec<String>>()
+                    .join(", ");
+                write!(f, "{}[{}]", v.datatype.name(), items)
+            }
+            Value::Decimal128(v) => write!(f, "{}", v),
+            Value::Struct(s) => {
+                let items = s
+                    .fields
+                    .fields()
+                    .iter()
+                    .map(|f| f.name())
+                    .zip(s.items().iter())
+                    .map(|(k, v)| format!("{k}: {v}"))
+                    .collect::<Vec<String>>()
+                    .join(", ");
+                write!(f, "{{ {items} }}")
+            }
+            Value::Json(json_data) => {
+                write!(f, "Json({})", json_data)
+            }
+        }
+    }
+}
+
+macro_rules! define_data_type_func {
+    ($struct: ident) => {
+        /// Returns data type of the value.
+        ///
+        /// # Panics
+        /// Panics if the data type is not supported.
+        pub fn data_type(&self) -> ConcreteDataType {
+            match self {
+                $struct::Null => ConcreteDataType::null_datatype(),
+                $struct::Boolean(_) => ConcreteDataType::boolean_datatype(),
+                $struct::UInt8(_) => ConcreteDataType::uint8_datatype(),
+                $struct::UInt16(_) => ConcreteDataType::uint16_datatype(),
+                $struct::UInt32(_) => ConcreteDataType::uint32_datatype(),
+                $struct::UInt64(_) => ConcreteDataType::uint64_datatype(),
+                $struct::Int8(_) => ConcreteDataType::int8_datatype(),
+                $struct::Int16(_) => ConcreteDataType::int16_datatype(),
+                $struct::Int32(_) => ConcreteDataType::int32_datatype(),
+                $struct::Int64(_) => ConcreteDataType::int64_datatype(),
+                $struct::Float32(_) => ConcreteDataType::float32_datatype(),
+                $struct::Float64(_) => ConcreteDataType::float64_datatype(),
+                $struct::String(_) => ConcreteDataType::string_datatype(),
+                $struct::Binary(_) => ConcreteDataType::binary_datatype(),
+                $struct::Date(_) => ConcreteDataType::date_datatype(),
+                $struct::Time(t) => ConcreteDataType::time_datatype(*t.unit()),
+                $struct::Timestamp(v) => ConcreteDataType::timestamp_datatype(v.unit()),
+                $struct::IntervalYearMonth(_) => {
+                    ConcreteDataType::interval_datatype(IntervalUnit::YearMonth)
+                }
+                $struct::IntervalDayTime(_) => {
+                    ConcreteDataType::interval_datatype(IntervalUnit::DayTime)
+                }
+                $struct::IntervalMonthDayNano(_) => {
+                    ConcreteDataType::interval_datatype(IntervalUnit::MonthDayNano)
+                }
+                $struct::List(list) => ConcreteDataType::list_datatype(list.datatype().clone()),
+                $struct::Duration(d) => ConcreteDataType::duration_datatype(d.unit()),
+                $struct::Decimal128(d) => {
+                    ConcreteDataType::decimal128_datatype(d.precision(), d.scale())
+                }
+                $struct::Struct(struct_value) => {
+                    ConcreteDataType::struct_datatype(struct_value.struct_type().clone())
+                }
+                $struct::Json(v) => v.data_type(),
+            }
+        }
+    };
+}
+
+impl Value {
+    define_data_type_func!(Value);
+
+    /// Returns true if this is a null value.
+    pub fn is_null(&self) -> bool {
+        match self {
+            Value::Null => true,
+            Value::Json(inner) => inner.is_null(),
+            _ => false,
+        }
+    }
+
+    /// Cast itself to [ListValue].
+    pub fn as_list(&self) -> Result<Option<&ListValue>> {
+        match self {
+            Value::Null => Ok(None),
+            Value::List(v) => Ok(Some(v)),
+            other => error::CastTypeSnafu {
+                msg: format!("Failed to cast {other:?} to list value"),
+            }
+            .fail(),
+        }
+    }
+
+    pub fn as_struct(&self) -> Result<Option<&StructValue>> {
+        match self {
+            Value::Null => Ok(None),
+            Value::Struct(v) => Ok(Some(v)),
+            other => error::CastTypeSnafu {
+                msg: format!("Failed to cast {other:?} to struct value"),
+            }
+            .fail(),
+        }
+    }
+
+    /// Cast itself to [ValueRef].
+    pub fn as_value_ref(&self) -> ValueRef<'_> {
+        match self {
+            Value::Null => ValueRef::Null,
+            Value::Boolean(v) => ValueRef::Boolean(*v),
+            Value::UInt8(v) => ValueRef::UInt8(*v),
+            Value::UInt16(v) => ValueRef::UInt16(*v),
+            Value::UInt32(v) => ValueRef::UInt32(*v),
+            Value::UInt64(v) => ValueRef::UInt64(*v),
+            Value::Int8(v) => ValueRef::Int8(*v),
+            Value::Int16(v) => ValueRef::Int16(*v),
+            Value::Int32(v) => ValueRef::Int32(*v),
+            Value::Int64(v) => ValueRef::Int64(*v),
+            Value::Float32(v) => ValueRef::Float32(*v),
+            Value::Float64(v) => ValueRef::Float64(*v),
+            Value::String(v) => ValueRef::String(v.as_utf8()),
+            Value::Binary(v) => ValueRef::Binary(v),
+            Value::Date(v) => ValueRef::Date(*v),
+            Value::List(v) => ValueRef::List(ListValueRef::Ref { val: v }),
+            Value::Timestamp(v) => ValueRef::Timestamp(*v),
+            Value::Time(v) => ValueRef::Time(*v),
+            Value::IntervalYearMonth(v) => ValueRef::IntervalYearMonth(*v),
+            Value::IntervalDayTime(v) => ValueRef::IntervalDayTime(*v),
+            Value::IntervalMonthDayNano(v) => ValueRef::IntervalMonthDayNano(*v),
+            Value::Duration(v) => ValueRef::Duration(*v),
+            Value::Decimal128(v) => ValueRef::Decimal128(*v),
+            Value::Struct(v) => ValueRef::Struct(StructValueRef::Ref(v)),
+            Value::Json(v) => ValueRef::Json(Box::new((**v).as_ref())),
+        }
+    }
+
+    /// Cast Value to timestamp. Return None if value is not a valid timestamp data type.
+    pub fn as_timestamp(&self) -> Option<Timestamp> {
+        match self {
+            Value::Timestamp(t) => Some(*t),
+            _ => None,
+        }
+    }
+
+    /// Cast Value to utf8 String. Return None if value is not a valid string data type.
+    pub fn as_string(&self) -> Option<String> {
+        match self {
+            Value::String(bytes) => Some(bytes.as_utf8().to_string()),
+            _ => None,
+        }
+    }
+
+    /// Cast Value to Date. Return None if value is not a valid date data type.
+    pub fn as_date(&self) -> Option<Date> {
+        match self {
+            Value::Date(t) => Some(*t),
+            _ => None,
+        }
+    }
+
+    /// Cast Value to [Time]. Return None if value is not a valid time data type.
+    pub fn as_time(&self) -> Option<Time> {
+        match self {
+            Value::Time(t) => Some(*t),
+            _ => None,
+        }
+    }
+
+    /// Cast Value to [IntervalYearMonth]. Return None if value is not a valid interval year month data type.
+    pub fn as_interval_year_month(&self) -> Option<IntervalYearMonth> {
+        match self {
+            Value::IntervalYearMonth(v) => Some(*v),
+            _ => None,
+        }
+    }
+
+    /// Cast Value to [IntervalDayTime]. Return None if value is not a valid interval day time data type.
+    pub fn as_interval_day_time(&self) -> Option<IntervalDayTime> {
+        match self {
+            Value::IntervalDayTime(v) => Some(*v),
+            _ => None,
+        }
+    }
+
+    /// Cast Value to [IntervalMonthDayNano]. Return None if value is not a valid interval month day nano data type.
+    pub fn as_interval_month_day_nano(&self) -> Option<IntervalMonthDayNano> {
+        match self {
+            Value::IntervalMonthDayNano(v) => Some(*v),
+            _ => None,
+        }
+    }
+
+    /// Cast Value to i64. Return None if value is not a valid int64 data type.
+    pub fn as_i64(&self) -> Option<i64> {
+        match self {
+            Value::Int8(v) => Some(*v as _),
+            Value::Int16(v) => Some(*v as _),
+            Value::Int32(v) => Some(*v as _),
+            Value::Int64(v) => Some(*v),
+            Value::UInt8(v) => Some(*v as _),
+            Value::UInt16(v) => Some(*v as _),
+            Value::UInt32(v) => Some(*v as _),
+            Value::Json(inner) => inner.as_i64(),
+            _ => None,
+        }
+    }
+
+    /// Cast Value to u64. Return None if value is not a valid uint64 data type.
+    pub fn as_u64(&self) -> Option<u64> {
+        match self {
+            Value::UInt8(v) => Some(*v as _),
+            Value::UInt16(v) => Some(*v as _),
+            Value::UInt32(v) => Some(*v as _),
+            Value::UInt64(v) => Some(*v),
+            Value::Json(inner) => inner.as_u64(),
+            _ => None,
+        }
+    }
+    /// Cast Value to f64. Return None if it's not castable;
+    pub fn as_f64_lossy(&self) -> Option<f64> {
+        match self {
+            Value::Float32(v) => Some(v.0 as _),
+            Value::Float64(v) => Some(v.0),
+            Value::Int8(v) => Some(*v as _),
+            Value::Int16(v) => Some(*v as _),
+            Value::Int32(v) => Some(*v as _),
+            Value::Int64(v) => Some(*v as _),
+            Value::UInt8(v) => Some(*v as _),
+            Value::UInt16(v) => Some(*v as _),
+            Value::UInt32(v) => Some(*v as _),
+            Value::UInt64(v) => Some(*v as _),
+            Value::Json(inner) => inner.as_f64_lossy(),
+            _ => None,
+        }
+    }
+
+    /// Cast Value to [Duration]. Return None if value is not a valid duration data type.
+    pub fn as_duration(&self) -> Option<Duration> {
+        match self {
+            Value::Duration(d) => Some(*d),
+            _ => None,
+        }
+    }
+
+    /// Cast value to Boolean. Return None if value is not a boolean type.
+    pub fn as_bool(&self) -> Option<bool> {
+        match self {
+            Value::Boolean(b) => Some(*b),
+            Value::Json(inner) => inner.as_bool(),
+            _ => None,
+        }
+    }
+
+    /// Extract the inner JSON value from a JSON type.
+    pub fn into_json_inner(self) -> Option<Value> {
+        match self {
+            Value::Json(v) => Some((*v).into_value()),
+            _ => None,
+        }
+    }
+
+    /// Returns the logical type of the value.
+    pub fn logical_type_id(&self) -> LogicalTypeId {
+        match self {
+            Value::Null => LogicalTypeId::Null,
+            Value::Boolean(_) => LogicalTypeId::Boolean,
+            Value::UInt8(_) => LogicalTypeId::UInt8,
+            Value::UInt16(_) => LogicalTypeId::UInt16,
+            Value::UInt32(_) => LogicalTypeId::UInt32,
+            Value::UInt64(_) => LogicalTypeId::UInt64,
+            Value::Int8(_) => LogicalTypeId::Int8,
+            Value::Int16(_) => LogicalTypeId::Int16,
+            Value::Int32(_) => LogicalTypeId::Int32,
+            Value::Int64(_) => LogicalTypeId::Int64,
+            Value::Float32(_) => LogicalTypeId::Float32,
+            Value::Float64(_) => LogicalTypeId::Float64,
+            Value::String(_) => LogicalTypeId::String,
+            Value::Binary(_) => LogicalTypeId::Binary,
+            Value::List(_) => LogicalTypeId::List,
+            Value::Date(_) => LogicalTypeId::Date,
+            Value::Timestamp(t) => match t.unit() {
+                TimeUnit::Second => LogicalTypeId::TimestampSecond,
+                TimeUnit::Millisecond => LogicalTypeId::TimestampMillisecond,
+                TimeUnit::Microsecond => LogicalTypeId::TimestampMicrosecond,
+                TimeUnit::Nanosecond => LogicalTypeId::TimestampNanosecond,
+            },
+            Value::Time(t) => match t.unit() {
+                TimeUnit::Second => LogicalTypeId::TimeSecond,
+                TimeUnit::Millisecond => LogicalTypeId::TimeMillisecond,
+                TimeUnit::Microsecond => LogicalTypeId::TimeMicrosecond,
+                TimeUnit::Nanosecond => LogicalTypeId::TimeNanosecond,
+            },
+            Value::IntervalYearMonth(_) => LogicalTypeId::IntervalYearMonth,
+            Value::IntervalDayTime(_) => LogicalTypeId::IntervalDayTime,
+            Value::IntervalMonthDayNano(_) => LogicalTypeId::IntervalMonthDayNano,
+            Value::Duration(d) => match d.unit() {
+                TimeUnit::Second => LogicalTypeId::DurationSecond,
+                TimeUnit::Millisecond => LogicalTypeId::DurationMillisecond,
+                TimeUnit::Microsecond => LogicalTypeId::DurationMicrosecond,
+                TimeUnit::Nanosecond => LogicalTypeId::DurationNanosecond,
+            },
+            Value::Decimal128(_) => LogicalTypeId::Decimal128,
+            Value::Struct(_) => LogicalTypeId::Struct,
+            Value::Json(_) => LogicalTypeId::Json,
+        }
+    }
+
+    /// Convert the value into [`ScalarValue`] according to the `output_type`.
+    pub fn try_to_scalar_value(&self, output_type: &ConcreteDataType) -> Result<ScalarValue> {
+        // Compare logical type, since value might not contains full type information.
+        let value_type_id = self.logical_type_id();
+        let output_type_id = output_type.logical_type_id();
+        ensure!(
+            output_type_id == value_type_id
+                || self.is_null()
+                || (output_type_id == LogicalTypeId::Json
+                    && (value_type_id == LogicalTypeId::Binary
+                        || value_type_id == LogicalTypeId::Json)),
+            error::ToScalarValueSnafu {
+                reason: format!(
+                    "expect value to return output_type {output_type_id:?}, actual: {value_type_id:?}",
+                ),
+            }
+        );
+
+        let scalar_value = match self {
+            Value::Boolean(v) => ScalarValue::Boolean(Some(*v)),
+            Value::UInt8(v) => ScalarValue::UInt8(Some(*v)),
+            Value::UInt16(v) => ScalarValue::UInt16(Some(*v)),
+            Value::UInt32(v) => ScalarValue::UInt32(Some(*v)),
+            Value::UInt64(v) => ScalarValue::UInt64(Some(*v)),
+            Value::Int8(v) => ScalarValue::Int8(Some(*v)),
+            Value::Int16(v) => ScalarValue::Int16(Some(*v)),
+            Value::Int32(v) => ScalarValue::Int32(Some(*v)),
+            Value::Int64(v) => ScalarValue::Int64(Some(*v)),
+            Value::Float32(v) => ScalarValue::Float32(Some(v.0)),
+            Value::Float64(v) => ScalarValue::Float64(Some(v.0)),
+            Value::String(v) => {
+                let s = v.as_utf8().to_string();
+                match output_type {
+                    ConcreteDataType::String(t) if t.is_large() => ScalarValue::LargeUtf8(Some(s)),
+                    _ => ScalarValue::Utf8(Some(s)),
+                }
+            }
+            Value::Binary(v) => ScalarValue::Binary(Some(v.to_vec())),
+            Value::Date(v) => ScalarValue::Date32(Some(v.val())),
+            Value::Null => to_null_scalar_value(output_type)?,
+            Value::List(list) => {
+                // Safety: The logical type of the value and output_type are the same.
+                let list_type = output_type.as_list().unwrap();
+                list.try_to_scalar_value(list_type)?
+            }
+            Value::Timestamp(t) => timestamp_to_scalar_value(t.unit(), Some(t.value())),
+            Value::Time(t) => time_to_scalar_value(*t.unit(), Some(t.value()))?,
+            Value::IntervalYearMonth(v) => ScalarValue::IntervalYearMonth(Some(v.to_i32())),
+            Value::IntervalDayTime(v) => ScalarValue::IntervalDayTime(Some((*v).into())),
+            Value::IntervalMonthDayNano(v) => ScalarValue::IntervalMonthDayNano(Some((*v).into())),
+            Value::Duration(d) => duration_to_scalar_value(d.unit(), Some(d.value())),
+            Value::Decimal128(d) => {
+                let (v, p, s) = d.to_scalar_value();
+                ScalarValue::Decimal128(v, p, s)
+            }
+            Value::Struct(struct_value) => {
+                let struct_type = output_type.as_struct().unwrap();
+                struct_value.try_to_scalar_value(struct_type)?
+            }
+            Value::Json(_) => {
+                return error::ToScalarValueSnafu {
+                    reason: "unsupported for json value",
+                }
+                .fail();
+            }
+        };
+
+        Ok(scalar_value)
+    }
+
+    /// Apply `-` unary op if possible
+    pub fn try_negative(&self) -> Option<Self> {
+        match self {
+            Value::Null => Some(Value::Null),
+            Value::UInt8(x) => {
+                if *x == 0 {
+                    Some(Value::UInt8(*x))
+                } else {
+                    None
+                }
+            }
+            Value::UInt16(x) => {
+                if *x == 0 {
+                    Some(Value::UInt16(*x))
+                } else {
+                    None
+                }
+            }
+            Value::UInt32(x) => {
+                if *x == 0 {
+                    Some(Value::UInt32(*x))
+                } else {
+                    None
+                }
+            }
+            Value::UInt64(x) => {
+                if *x == 0 {
+                    Some(Value::UInt64(*x))
+                } else {
+                    None
+                }
+            }
+            Value::Int8(x) => Some(Value::Int8(-*x)),
+            Value::Int16(x) => Some(Value::Int16(-*x)),
+            Value::Int32(x) => Some(Value::Int32(-*x)),
+            Value::Int64(x) => Some(Value::Int64(-*x)),
+            Value::Float32(x) => Some(Value::Float32(-*x)),
+            Value::Float64(x) => Some(Value::Float64(-*x)),
+            Value::Decimal128(x) => Some(Value::Decimal128(x.negative())),
+            Value::Date(x) => Some(Value::Date(x.negative())),
+            Value::Timestamp(x) => Some(Value::Timestamp(x.negative())),
+            Value::Time(x) => Some(Value::Time(x.negative())),
+            Value::Duration(x) => Some(Value::Duration(x.negative())),
+            Value::IntervalYearMonth(x) => Some(Value::IntervalYearMonth(x.negative())),
+            Value::IntervalDayTime(x) => Some(Value::IntervalDayTime(x.negative())),
+            Value::IntervalMonthDayNano(x) => Some(Value::IntervalMonthDayNano(x.negative())),
+
+            Value::Binary(_)
+            | Value::String(_)
+            | Value::Boolean(_)
+            | Value::List(_)
+            | Value::Struct(_)
+            | Value::Json(_) => None,
+        }
+    }
+}
+
+pub trait TryAsPrimitive<T: LogicalPrimitiveType> {
+    fn try_as_primitive(&self) -> Option<T::Native>;
+}
+
+macro_rules! impl_try_as_primitive {
+    ($Type: ident, $Variant: ident) => {
+        impl TryAsPrimitive<crate::types::$Type> for Value {
+            fn try_as_primitive(
+                &self,
+            ) -> Option<<crate::types::$Type as crate::types::LogicalPrimitiveType>::Native> {
+                match self {
+                    Value::$Variant(v) => Some((*v).into()),
+                    _ => None,
+                }
+            }
+        }
+    };
+}
+
+impl_try_as_primitive!(Int8Type, Int8);
+impl_try_as_primitive!(Int16Type, Int16);
+impl_try_as_primitive!(Int32Type, Int32);
+impl_try_as_primitive!(Int64Type, Int64);
+impl_try_as_primitive!(UInt8Type, UInt8);
+impl_try_as_primitive!(UInt16Type, UInt16);
+impl_try_as_primitive!(UInt32Type, UInt32);
+impl_try_as_primitive!(UInt64Type, UInt64);
+impl_try_as_primitive!(Float32Type, Float32);
+impl_try_as_primitive!(Float64Type, Float64);
+
+pub fn to_null_scalar_value(output_type: &ConcreteDataType) -> Result<ScalarValue> {
+    Ok(match output_type {
+        ConcreteDataType::Null(_) => ScalarValue::Null,
+        ConcreteDataType::Boolean(_) => ScalarValue::Boolean(None),
+        ConcreteDataType::Int8(_) => ScalarValue::Int8(None),
+        ConcreteDataType::Int16(_) => ScalarValue::Int16(None),
+        ConcreteDataType::Int32(_) => ScalarValue::Int32(None),
+        ConcreteDataType::Int64(_) => ScalarValue::Int64(None),
+        ConcreteDataType::UInt8(_) => ScalarValue::UInt8(None),
+        ConcreteDataType::UInt16(_) => ScalarValue::UInt16(None),
+        ConcreteDataType::UInt32(_) => ScalarValue::UInt32(None),
+        ConcreteDataType::UInt64(_) => ScalarValue::UInt64(None),
+        ConcreteDataType::Float32(_) => ScalarValue::Float32(None),
+        ConcreteDataType::Float64(_) => ScalarValue::Float64(None),
+        ConcreteDataType::Binary(_) | ConcreteDataType::Json(_) | ConcreteDataType::Vector(_) => {
+            ScalarValue::Binary(None)
+        }
+        ConcreteDataType::String(t) => {
+            if t.is_large() {
+                ScalarValue::LargeUtf8(None)
+            } else {
+                ScalarValue::Utf8(None)
+            }
+        }
+        ConcreteDataType::Date(_) => ScalarValue::Date32(None),
+        ConcreteDataType::Timestamp(t) => timestamp_to_scalar_value(t.unit(), None),
+        ConcreteDataType::Interval(v) => match v {
+            IntervalType::YearMonth(_) => ScalarValue::IntervalYearMonth(None),
+            IntervalType::DayTime(_) => ScalarValue::IntervalDayTime(None),
+            IntervalType::MonthDayNano(_) => ScalarValue::IntervalMonthDayNano(None),
+        },
+        ConcreteDataType::List(list_type) => {
+            ScalarValue::new_null_list(list_type.item_type().as_arrow_type(), true, 1)
+        }
+        ConcreteDataType::Struct(fields) => {
+            let fields = fields.as_arrow_fields();
+            ScalarStructBuilder::new_null(fields)
+        }
+        ConcreteDataType::Dictionary(dict) => ScalarValue::Dictionary(
+            Box::new(dict.key_type().as_arrow_type()),
+            Box::new(to_null_scalar_value(dict.value_type())?),
+        ),
+        ConcreteDataType::Time(t) => time_to_scalar_value(t.unit(), None)?,
+        ConcreteDataType::Duration(d) => duration_to_scalar_value(d.unit(), None),
+        ConcreteDataType::Decimal128(d) => ScalarValue::Decimal128(None, d.precision(), d.scale()),
+    })
+}
+
+pub fn timestamp_to_scalar_value(unit: TimeUnit, val: Option<i64>) -> ScalarValue {
+    match unit {
+        TimeUnit::Second => ScalarValue::TimestampSecond(val, None),
+        TimeUnit::Millisecond => ScalarValue::TimestampMillisecond(val, None),
+        TimeUnit::Microsecond => ScalarValue::TimestampMicrosecond(val, None),
+        TimeUnit::Nanosecond => ScalarValue::TimestampNanosecond(val, None),
+    }
+}
+
+/// Cast the 64-bit elapsed time into the arrow ScalarValue by time unit.
+pub fn time_to_scalar_value(unit: TimeUnit, val: Option<i64>) -> Result<ScalarValue> {
+    Ok(match unit {
+        TimeUnit::Second => ScalarValue::Time32Second(
+            val.map(|i| i.try_into().context(error::CastTimeTypeSnafu))
+                .transpose()?,
+        ),
+        TimeUnit::Millisecond => ScalarValue::Time32Millisecond(
+            val.map(|i| i.try_into().context(error::CastTimeTypeSnafu))
+                .transpose()?,
+        ),
+        TimeUnit::Microsecond => ScalarValue::Time64Microsecond(val),
+        TimeUnit::Nanosecond => ScalarValue::Time64Nanosecond(val),
+    })
+}
+
+/// Cast the 64-bit duration into the arrow ScalarValue with time unit.
+pub fn duration_to_scalar_value(unit: TimeUnit, val: Option<i64>) -> ScalarValue {
+    match unit {
+        TimeUnit::Second => ScalarValue::DurationSecond(val),
+        TimeUnit::Millisecond => ScalarValue::DurationMillisecond(val),
+        TimeUnit::Microsecond => ScalarValue::DurationMicrosecond(val),
+        TimeUnit::Nanosecond => ScalarValue::DurationNanosecond(val),
+    }
+}
+
+/// Convert [`ScalarValue`] to [`Timestamp`].
+/// If it's `ScalarValue::Utf8`, try to parse it with the given timezone.
+/// Return `None` if given scalar value cannot be converted to a valid timestamp.
+pub fn scalar_value_to_timestamp(
+    scalar: &ScalarValue,
+    timezone: Option<&Timezone>,
+) -> Option<Timestamp> {
+    match scalar {
+        ScalarValue::Utf8(Some(s)) => match Timestamp::from_str(s, timezone) {
+            Ok(t) => Some(t),
+            Err(e) => {
+                error!(e;"Failed to convert string literal {s} to timestamp");
+                None
+            }
+        },
+        ScalarValue::TimestampSecond(v, _) => v.map(Timestamp::new_second),
+        ScalarValue::TimestampMillisecond(v, _) => v.map(Timestamp::new_millisecond),
+        ScalarValue::TimestampMicrosecond(v, _) => v.map(Timestamp::new_microsecond),
+        ScalarValue::TimestampNanosecond(v, _) => v.map(Timestamp::new_nanosecond),
+        _ => None,
+    }
+}
+
+macro_rules! impl_ord_for_value_like {
+    ($Type: ident, $left: ident, $right: ident) => {
+        if $left.is_null() && !$right.is_null() {
+            return Ordering::Less;
+        } else if !$left.is_null() && $right.is_null() {
+            return Ordering::Greater;
+        } else {
+            match ($left, $right) {
+                ($Type::Null, $Type::Null) => Ordering::Equal,
+                ($Type::Boolean(v1), $Type::Boolean(v2)) => v1.cmp(v2),
+                ($Type::UInt8(v1), $Type::UInt8(v2)) => v1.cmp(v2),
+                ($Type::UInt16(v1), $Type::UInt16(v2)) => v1.cmp(v2),
+                ($Type::UInt32(v1), $Type::UInt32(v2)) => v1.cmp(v2),
+                ($Type::UInt64(v1), $Type::UInt64(v2)) => v1.cmp(v2),
+                ($Type::Int8(v1), $Type::Int8(v2)) => v1.cmp(v2),
+                ($Type::Int16(v1), $Type::Int16(v2)) => v1.cmp(v2),
+                ($Type::Int32(v1), $Type::Int32(v2)) => v1.cmp(v2),
+                ($Type::Int64(v1), $Type::Int64(v2)) => v1.cmp(v2),
+                ($Type::Float32(v1), $Type::Float32(v2)) => v1.cmp(v2),
+                ($Type::Float64(v1), $Type::Float64(v2)) => v1.cmp(v2),
+                ($Type::String(v1), $Type::String(v2)) => v1.cmp(v2),
+                ($Type::Binary(v1), $Type::Binary(v2)) => v1.cmp(v2),
+                ($Type::Date(v1), $Type::Date(v2)) => v1.cmp(v2),
+                ($Type::Timestamp(v1), $Type::Timestamp(v2)) => v1.cmp(v2),
+                ($Type::Time(v1), $Type::Time(v2)) => v1.cmp(v2),
+                ($Type::IntervalYearMonth(v1), $Type::IntervalYearMonth(v2)) => v1.cmp(v2),
+                ($Type::IntervalDayTime(v1), $Type::IntervalDayTime(v2)) => v1.cmp(v2),
+                ($Type::IntervalMonthDayNano(v1), $Type::IntervalMonthDayNano(v2)) => v1.cmp(v2),
+                ($Type::Duration(v1), $Type::Duration(v2)) => v1.cmp(v2),
+                ($Type::List(v1), $Type::List(v2)) => v1.cmp(v2),
+                _ => panic!(
+                    "Cannot compare different values {:?} and {:?}",
+                    $left, $right
+                ),
+            }
+        }
+    };
+}
+
+impl PartialOrd for Value {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Value {
+    fn cmp(&self, other: &Self) -> Ordering {
+        impl_ord_for_value_like!(Value, self, other)
+    }
+}
+
+macro_rules! impl_try_from_value {
+    ($Variant: ident, $Type: ident) => {
+        impl TryFrom<Value> for $Type {
+            type Error = Error;
+
+            #[inline]
+            fn try_from(from: Value) -> std::result::Result<Self, Self::Error> {
+                match from {
+                    Value::$Variant(v) => Ok(v.into()),
+                    _ => TryFromValueSnafu {
+                        reason: format!("{:?} is not a {}", from, stringify!($Type)),
+                    }
+                    .fail(),
+                }
+            }
+        }
+
+        impl TryFrom<Value> for Option<$Type> {
+            type Error = Error;
+
+            #[inline]
+            fn try_from(from: Value) -> std::result::Result<Self, Self::Error> {
+                match from {
+                    Value::$Variant(v) => Ok(Some(v.into())),
+                    Value::Null => Ok(None),
+                    _ => TryFromValueSnafu {
+                        reason: format!("{:?} is not a {}", from, stringify!($Type)),
+                    }
+                    .fail(),
+                }
+            }
+        }
+    };
+}
+
+impl_try_from_value!(Boolean, bool);
+impl_try_from_value!(UInt8, u8);
+impl_try_from_value!(UInt16, u16);
+impl_try_from_value!(UInt32, u32);
+impl_try_from_value!(UInt64, u64);
+impl_try_from_value!(Int8, i8);
+impl_try_from_value!(Int16, i16);
+impl_try_from_value!(Int32, i32);
+impl_try_from_value!(Int64, i64);
+impl_try_from_value!(Float32, f32);
+impl_try_from_value!(Float64, f64);
+impl_try_from_value!(Float32, OrderedF32);
+impl_try_from_value!(Float64, OrderedF64);
+impl_try_from_value!(String, StringBytes);
+impl_try_from_value!(Binary, Bytes);
+impl_try_from_value!(Date, Date);
+impl_try_from_value!(Time, Time);
+impl_try_from_value!(Timestamp, Timestamp);
+impl_try_from_value!(IntervalYearMonth, IntervalYearMonth);
+impl_try_from_value!(IntervalDayTime, IntervalDayTime);
+impl_try_from_value!(IntervalMonthDayNano, IntervalMonthDayNano);
+impl_try_from_value!(Duration, Duration);
+impl_try_from_value!(Decimal128, Decimal128);
+
+macro_rules! impl_value_from {
+    ($Variant: ident, $Type: ident) => {
+        impl From<$Type> for Value {
+            fn from(value: $Type) -> Self {
+                Value::$Variant(value.into())
+            }
+        }
+
+        impl From<Option<$Type>> for Value {
+            fn from(value: Option<$Type>) -> Self {
+                match value {
+                    Some(v) => Value::$Variant(v.into()),
+                    None => Value::Null,
+                }
+            }
+        }
+    };
+}
+
+impl_value_from!(Boolean, bool);
+impl_value_from!(UInt8, u8);
+impl_value_from!(UInt16, u16);
+impl_value_from!(UInt32, u32);
+impl_value_from!(UInt64, u64);
+impl_value_from!(Int8, i8);
+impl_value_from!(Int16, i16);
+impl_value_from!(Int32, i32);
+impl_value_from!(Int64, i64);
+impl_value_from!(Float32, f32);
+impl_value_from!(Float64, f64);
+impl_value_from!(Float32, OrderedF32);
+impl_value_from!(Float64, OrderedF64);
+impl_value_from!(String, StringBytes);
+impl_value_from!(Binary, Bytes);
+impl_value_from!(Date, Date);
+impl_value_from!(Time, Time);
+impl_value_from!(Timestamp, Timestamp);
+impl_value_from!(IntervalYearMonth, IntervalYearMonth);
+impl_value_from!(IntervalDayTime, IntervalDayTime);
+impl_value_from!(IntervalMonthDayNano, IntervalMonthDayNano);
+impl_value_from!(Duration, Duration);
+impl_value_from!(String, String);
+impl_value_from!(Decimal128, Decimal128);
+
+impl From<&str> for Value {
+    fn from(string: &str) -> Value {
+        Value::String(string.into())
+    }
+}
+
+impl From<Vec<u8>> for Value {
+    fn from(bytes: Vec<u8>) -> Value {
+        Value::Binary(bytes.into())
+    }
+}
+
+impl From<&[u8]> for Value {
+    fn from(bytes: &[u8]) -> Value {
+        Value::Binary(bytes.into())
+    }
+}
+
+impl From<()> for Value {
+    fn from(_: ()) -> Self {
+        Value::Null
+    }
+}
+
+impl TryFrom<Value> for serde_json::Value {
+    type Error = serde_json::Error;
+
+    fn try_from(value: Value) -> serde_json::Result<serde_json::Value> {
+        let json_value = match value {
+            Value::Null => serde_json::Value::Null,
+            Value::Boolean(v) => serde_json::Value::Bool(v),
+            Value::UInt8(v) => serde_json::Value::from(v),
+            Value::UInt16(v) => serde_json::Value::from(v),
+            Value::UInt32(v) => serde_json::Value::from(v),
+            Value::UInt64(v) => serde_json::Value::from(v),
+            Value::Int8(v) => serde_json::Value::from(v),
+            Value::Int16(v) => serde_json::Value::from(v),
+            Value::Int32(v) => serde_json::Value::from(v),
+            Value::Int64(v) => serde_json::Value::from(v),
+            Value::Float32(v) => serde_json::Value::from(v.0),
+            Value::Float64(v) => serde_json::Value::from(v.0),
+            Value::String(bytes) => serde_json::Value::String(bytes.into_string()),
+            Value::Binary(bytes) => serde_json::to_value(bytes)?,
+            Value::Date(v) => serde_json::Value::Number(v.val().into()),
+            Value::List(v) => {
+                let items = v
+                    .take_items()
+                    .into_iter()
+                    .map(serde_json::Value::try_from)
+                    .collect::<serde_json::Result<Vec<_>>>()?;
+                serde_json::Value::Array(items)
+            }
+            Value::Timestamp(v) => serde_json::to_value(v.value())?,
+            Value::Time(v) => serde_json::to_value(v.value())?,
+            Value::IntervalYearMonth(v) => serde_json::to_value(v.to_i32())?,
+            Value::IntervalDayTime(v) => serde_json::to_value(v.to_i64())?,
+            Value::IntervalMonthDayNano(v) => serde_json::to_value(v.to_i128())?,
+            Value::Duration(v) => serde_json::to_value(v.value())?,
+            Value::Decimal128(v) => serde_json::to_value(v.to_string())?,
+            Value::Struct(v) => {
+                let (items, struct_type) = v.into_parts();
+                let map = struct_type
+                    .fields()
+                    .iter()
+                    .zip(items)
+                    .map(|(field, value)| {
+                        Ok((
+                            field.name().to_string(),
+                            serde_json::Value::try_from(value)?,
+                        ))
+                    })
+                    .collect::<serde_json::Result<Map<String, serde_json::Value>>>()?;
+                serde_json::Value::Object(map)
+            }
+            Value::Json(v) => (*v).try_into()?,
+        };
+
+        Ok(json_value)
+    }
+}
+
+// TODO(yingwen): Consider removing the `datatype` field from `ListValue`.
+/// List value.
+#[derive(Debug, Clone, PartialEq, Hash, Serialize, Deserialize)]
+pub struct ListValue {
+    items: Vec<Value>,
+    /// Inner values datatype, to distinguish empty lists of different datatypes.
+    /// Restricted by DataFusion, cannot use null datatype for empty list.
+    datatype: Arc<ConcreteDataType>,
+}
+
+impl Eq for ListValue {}
+
+impl ListValue {
+    pub fn new(items: Vec<Value>, datatype: Arc<ConcreteDataType>) -> Self {
+        Self { items, datatype }
+    }
+
+    pub fn items(&self) -> &[Value] {
+        &self.items
+    }
+
+    pub fn take_items(self) -> Vec<Value> {
+        self.items
+    }
+
+    pub fn into_parts(self) -> (Vec<Value>, Arc<ConcreteDataType>) {
+        (self.items, self.datatype)
+    }
+
+    /// List value's inner type data type
+    pub fn datatype(&self) -> Arc<ConcreteDataType> {
+        self.datatype.clone()
+    }
+
+    pub fn len(&self) -> usize {
+        self.items.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty()
+    }
+
+    pub fn try_to_scalar_value(&self, output_type: &ListType) -> Result<ScalarValue> {
+        let vs = self
+            .items
+            .iter()
+            .map(|v| v.try_to_scalar_value(output_type.item_type()))
+            .collect::<Result<Vec<_>>>()?;
+        Ok(ScalarValue::List(ScalarValue::new_list(
+            &vs,
+            &self.datatype.as_arrow_type(),
+            true,
+        )))
+    }
+
+    /// use 'the first item size' * 'length of items' to estimate the size.
+    /// it could be inaccurate.
+    fn estimated_size(&self) -> usize {
+        self.items
+            .first()
+            .map(|x| x.as_value_ref().data_size() * self.items.len())
+            .unwrap_or(0)
+            + std::mem::size_of::<Arc<ConcreteDataType>>()
+    }
+}
+
+impl Default for ListValue {
+    fn default() -> ListValue {
+        ListValue::new(vec![], Arc::new(ConcreteDataType::null_datatype()))
+    }
+}
+
+impl PartialOrd for ListValue {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for ListValue {
+    fn cmp(&self, other: &Self) -> Ordering {
+        assert_eq!(
+            self.datatype, other.datatype,
+            "Cannot compare different datatypes!"
+        );
+        self.items.cmp(&other.items)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct StructValue {
+    items: Vec<Value>,
+    fields: StructType,
+}
+
+impl StructValue {
+    pub fn try_new(items: Vec<Value>, fields: StructType) -> Result<Self> {
+        ensure!(
+            items.len() == fields.fields().len(),
+            InconsistentStructFieldsAndItemsSnafu {
+                field_len: fields.fields().len(),
+                item_len: items.len()
+            }
+        );
+        Ok(Self { items, fields })
+    }
+
+    /// Create a new struct value.
+    ///
+    /// Panics if the number of items does not match the number of fields.
+    pub fn new(items: Vec<Value>, fields: StructType) -> Self {
+        Self::try_new(items, fields).unwrap()
+    }
+
+    pub fn items(&self) -> &[Value] {
+        &self.items
+    }
+
+    pub fn take_items(self) -> Vec<Value> {
+        self.items
+    }
+
+    pub fn into_parts(self) -> (Vec<Value>, StructType) {
+        (self.items, self.fields)
+    }
+
+    pub fn struct_type(&self) -> &StructType {
+        &self.fields
+    }
+
+    pub fn len(&self) -> usize {
+        self.items.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty()
+    }
+
+    fn estimated_size(&self) -> usize {
+        self.items
+            .iter()
+            .map(|x| x.as_value_ref().data_size())
+            .sum::<usize>()
+            + std::mem::size_of::<StructType>()
+    }
+
+    fn try_to_scalar_value(&self, output_type: &StructType) -> Result<ScalarValue> {
+        let arrays = self
+            .items
+            .iter()
+            .map(|value| {
+                let scalar_value = value.try_to_scalar_value(&value.data_type())?;
+                scalar_value
+                    .to_array()
+                    .context(ConvertScalarToArrowArraySnafu)
+            })
+            .collect::<Result<Vec<Arc<dyn Array>>>>()?;
+
+        let fields = output_type.as_arrow_fields();
+        let struct_array = StructArray::new(fields, arrays, None);
+        Ok(ScalarValue::Struct(Arc::new(struct_array)))
+    }
+}
+
+impl Default for StructValue {
+    fn default() -> StructValue {
+        StructValue::try_new(vec![], StructType::new(Arc::new(vec![]))).unwrap()
+    }
+}
+
+// TODO(ruihang): Implement this type
+/// Dictionary value.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DictionaryValue {
+    /// Inner values datatypes
+    key_type: ConcreteDataType,
+    value_type: ConcreteDataType,
+}
+
+impl Eq for DictionaryValue {}
+
+impl TryFrom<ScalarValue> for Value {
+    type Error = error::Error;
+
+    fn try_from(v: ScalarValue) -> Result<Self> {
+        let v = match v {
+            ScalarValue::Null => Value::Null,
+            ScalarValue::Boolean(b) => Value::from(b),
+            ScalarValue::Float32(f) => Value::from(f),
+            ScalarValue::Float64(f) => Value::from(f),
+            ScalarValue::Int8(i) => Value::from(i),
+            ScalarValue::Int16(i) => Value::from(i),
+            ScalarValue::Int32(i) => Value::from(i),
+            ScalarValue::Int64(i) => Value::from(i),
+            ScalarValue::UInt8(u) => Value::from(u),
+            ScalarValue::UInt16(u) => Value::from(u),
+            ScalarValue::UInt32(u) => Value::from(u),
+            ScalarValue::UInt64(u) => Value::from(u),
+            ScalarValue::Utf8(s) | ScalarValue::LargeUtf8(s) => {
+                Value::from(s.map(StringBytes::from))
+            }
+            ScalarValue::Binary(b)
+            | ScalarValue::LargeBinary(b)
+            | ScalarValue::FixedSizeBinary(_, b) => Value::from(b.map(Bytes::from)),
+            ScalarValue::List(array) => {
+                // this is for item type
+                let datatype = ConcreteDataType::try_from(&array.value_type())?;
+                let scalar_values = ScalarValue::convert_array_to_scalar_vec(array.as_ref())
+                    .context(ConvertArrowArrayToScalarsSnafu)?;
+                let items = scalar_values
+                    .into_iter()
+                    .flat_map(|v| v.unwrap_or_else(|| vec![ScalarValue::Null]))
+                    .map(|x| x.try_into())
+                    .collect::<Result<Vec<Value>>>()?;
+                Value::List(ListValue::new(items, Arc::new(datatype)))
+            }
+            ScalarValue::Date32(d) => d.map(|x| Value::Date(Date::new(x))).unwrap_or(Value::Null),
+            ScalarValue::TimestampSecond(t, _) => t
+                .map(|x| Value::Timestamp(Timestamp::new(x, TimeUnit::Second)))
+                .unwrap_or(Value::Null),
+            ScalarValue::TimestampMillisecond(t, _) => t
+                .map(|x| Value::Timestamp(Timestamp::new(x, TimeUnit::Millisecond)))
+                .unwrap_or(Value::Null),
+            ScalarValue::TimestampMicrosecond(t, _) => t
+                .map(|x| Value::Timestamp(Timestamp::new(x, TimeUnit::Microsecond)))
+                .unwrap_or(Value::Null),
+            ScalarValue::TimestampNanosecond(t, _) => t
+                .map(|x| Value::Timestamp(Timestamp::new(x, TimeUnit::Nanosecond)))
+                .unwrap_or(Value::Null),
+            ScalarValue::Time32Second(t) => t
+                .map(|x| Value::Time(Time::new(x as i64, TimeUnit::Second)))
+                .unwrap_or(Value::Null),
+            ScalarValue::Time32Millisecond(t) => t
+                .map(|x| Value::Time(Time::new(x as i64, TimeUnit::Millisecond)))
+                .unwrap_or(Value::Null),
+            ScalarValue::Time64Microsecond(t) => t
+                .map(|x| Value::Time(Time::new(x, TimeUnit::Microsecond)))
+                .unwrap_or(Value::Null),
+            ScalarValue::Time64Nanosecond(t) => t
+                .map(|x| Value::Time(Time::new(x, TimeUnit::Nanosecond)))
+                .unwrap_or(Value::Null),
+
+            ScalarValue::IntervalYearMonth(t) => t
+                .map(|x| Value::IntervalYearMonth(IntervalYearMonth::from_i32(x)))
+                .unwrap_or(Value::Null),
+            ScalarValue::IntervalDayTime(t) => t
+                .map(|x| Value::IntervalDayTime(IntervalDayTime::from(x)))
+                .unwrap_or(Value::Null),
+            ScalarValue::IntervalMonthDayNano(t) => t
+                .map(|x| Value::IntervalMonthDayNano(IntervalMonthDayNano::from(x)))
+                .unwrap_or(Value::Null),
+            ScalarValue::DurationSecond(d) => d
+                .map(|x| Value::Duration(Duration::new(x, TimeUnit::Second)))
+                .unwrap_or(Value::Null),
+            ScalarValue::DurationMillisecond(d) => d
+                .map(|x| Value::Duration(Duration::new(x, TimeUnit::Millisecond)))
+                .unwrap_or(Value::Null),
+            ScalarValue::DurationMicrosecond(d) => d
+                .map(|x| Value::Duration(Duration::new(x, TimeUnit::Microsecond)))
+                .unwrap_or(Value::Null),
+            ScalarValue::DurationNanosecond(d) => d
+                .map(|x| Value::Duration(Duration::new(x, TimeUnit::Nanosecond)))
+                .unwrap_or(Value::Null),
+            ScalarValue::Decimal128(v, p, s) => v
+                .map(|v| Value::Decimal128(Decimal128::new(v, p, s)))
+                .unwrap_or(Value::Null),
+            ScalarValue::Struct(struct_array) => {
+                let struct_type = StructType::from(struct_array.fields());
+                let items = struct_array
+                    .columns()
+                    .iter()
+                    .map(|array| {
+                        // we only take first element from each array
+                        let field_scalar_value = ScalarValue::try_from_array(array.as_ref(), 0)
+                            .context(ConvertArrowArrayToScalarsSnafu)?;
+                        field_scalar_value.try_into()
+                    })
+                    .collect::<Result<Vec<Value>>>()?;
+                Value::Struct(StructValue::try_new(items, struct_type)?)
+            }
+            ScalarValue::Decimal32(_, _, _)
+            | ScalarValue::Decimal64(_, _, _)
+            | ScalarValue::Decimal256(_, _, _)
+            | ScalarValue::FixedSizeList(_)
+            | ScalarValue::LargeList(_)
+            | ScalarValue::Dictionary(_, _)
+            | ScalarValue::Union(_, _, _)
+            | ScalarValue::Float16(_)
+            | ScalarValue::Utf8View(_)
+            | ScalarValue::BinaryView(_)
+            | ScalarValue::Map(_)
+            | ScalarValue::Date64(_)
+            | ScalarValue::RunEndEncoded(_, _, _) => {
+                return error::UnsupportedArrowTypeSnafu {
+                    arrow_type: v.data_type(),
+                }
+                .fail();
+            }
+        };
+        Ok(v)
+    }
+}
+
+impl From<ValueRef<'_>> for Value {
+    fn from(value: ValueRef<'_>) -> Self {
+        match value {
+            ValueRef::Null => Value::Null,
+            ValueRef::Boolean(v) => Value::Boolean(v),
+            ValueRef::UInt8(v) => Value::UInt8(v),
+            ValueRef::UInt16(v) => Value::UInt16(v),
+            ValueRef::UInt32(v) => Value::UInt32(v),
+            ValueRef::UInt64(v) => Value::UInt64(v),
+            ValueRef::Int8(v) => Value::Int8(v),
+            ValueRef::Int16(v) => Value::Int16(v),
+            ValueRef::Int32(v) => Value::Int32(v),
+            ValueRef::Int64(v) => Value::Int64(v),
+            ValueRef::Float32(v) => Value::Float32(v),
+            ValueRef::Float64(v) => Value::Float64(v),
+            ValueRef::String(v) => Value::String(v.into()),
+            ValueRef::Binary(v) => Value::Binary(v.into()),
+            ValueRef::Date(v) => Value::Date(v),
+            ValueRef::Timestamp(v) => Value::Timestamp(v),
+            ValueRef::Time(v) => Value::Time(v),
+            ValueRef::IntervalYearMonth(v) => Value::IntervalYearMonth(v),
+            ValueRef::IntervalDayTime(v) => Value::IntervalDayTime(v),
+            ValueRef::IntervalMonthDayNano(v) => Value::IntervalMonthDayNano(v),
+            ValueRef::Duration(v) => Value::Duration(v),
+            ValueRef::List(v) => v.to_value(),
+            ValueRef::Decimal128(v) => Value::Decimal128(v),
+            ValueRef::Struct(v) => v.to_value(),
+            ValueRef::Json(v) => Value::Json(Box::new(JsonValue::from(*v))),
+        }
+    }
+}
+
+/// Reference to [Value].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub enum ValueRef<'a> {
+    Null,
+
+    // Numeric types:
+    Boolean(bool),
+    UInt8(u8),
+    UInt16(u16),
+    UInt32(u32),
+    UInt64(u64),
+    Int8(i8),
+    Int16(i16),
+    Int32(i32),
+    Int64(i64),
+    Float32(OrderedF32),
+    Float64(OrderedF64),
+
+    // Decimal type:
+    Decimal128(Decimal128),
+
+    // String types:
+    String(&'a str),
+    Binary(&'a [u8]),
+
+    // Date & Time types:
+    Date(Date),
+    Timestamp(Timestamp),
+    Time(Time),
+    Duration(Duration),
+    // Interval types:
+    IntervalYearMonth(IntervalYearMonth),
+    IntervalDayTime(IntervalDayTime),
+    IntervalMonthDayNano(IntervalMonthDayNano),
+
+    // Compound types:
+    List(ListValueRef<'a>),
+    Struct(StructValueRef<'a>),
+
+    Json(Box<JsonValueRef<'a>>),
+}
+
+macro_rules! impl_as_for_value_ref {
+    ($value: ident, $Variant: ident) => {
+        match $value {
+            ValueRef::Null => Ok(None),
+            ValueRef::$Variant(v) => Ok(Some(v.clone())),
+            other => error::CastTypeSnafu {
+                msg: format!(
+                    "Failed to cast value ref {:?} to {}",
+                    other,
+                    stringify!($Variant)
+                ),
+            }
+            .fail(),
+        }
+    };
+}
+
+impl<'a> ValueRef<'a> {
+    define_data_type_func!(ValueRef);
+
+    /// Returns true if this is null.
+    pub fn is_null(&self) -> bool {
+        match self {
+            ValueRef::Null => true,
+            ValueRef::Json(v) => v.is_null(),
+            _ => false,
+        }
+    }
+
+    /// Cast itself to binary slice.
+    pub fn try_into_binary(&self) -> Result<Option<&'a [u8]>> {
+        impl_as_for_value_ref!(self, Binary)
+    }
+
+    /// Cast itself to string slice.
+    pub fn try_into_string(&self) -> Result<Option<&'a str>> {
+        impl_as_for_value_ref!(self, String)
+    }
+
+    /// Cast itself to boolean.
+    pub fn try_into_boolean(&self) -> Result<Option<bool>> {
+        impl_as_for_value_ref!(self, Boolean)
+    }
+
+    pub fn try_into_i8(&self) -> Result<Option<i8>> {
+        impl_as_for_value_ref!(self, Int8)
+    }
+
+    pub fn try_into_u8(&self) -> Result<Option<u8>> {
+        impl_as_for_value_ref!(self, UInt8)
+    }
+
+    pub fn try_into_i16(&self) -> Result<Option<i16>> {
+        impl_as_for_value_ref!(self, Int16)
+    }
+
+    pub fn try_into_u16(&self) -> Result<Option<u16>> {
+        impl_as_for_value_ref!(self, UInt16)
+    }
+
+    pub fn try_into_i32(&self) -> Result<Option<i32>> {
+        impl_as_for_value_ref!(self, Int32)
+    }
+
+    pub fn try_into_u32(&self) -> Result<Option<u32>> {
+        impl_as_for_value_ref!(self, UInt32)
+    }
+
+    pub fn try_into_i64(&self) -> Result<Option<i64>> {
+        impl_as_for_value_ref!(self, Int64)
+    }
+
+    pub fn try_into_u64(&self) -> Result<Option<u64>> {
+        impl_as_for_value_ref!(self, UInt64)
+    }
+
+    pub fn try_into_f32(&self) -> Result<Option<f32>> {
+        match self {
+            ValueRef::Null => Ok(None),
+            ValueRef::Float32(f) => Ok(Some(f.0)),
+            ValueRef::Json(v) => Ok(v.as_f32()),
+            other => error::CastTypeSnafu {
+                msg: format!("Failed to cast value ref {:?} to ValueRef::Float32", other,),
+            }
+            .fail(),
+        }
+    }
+
+    pub fn try_into_f64(&self) -> Result<Option<f64>> {
+        match self {
+            ValueRef::Null => Ok(None),
+            ValueRef::Float64(f) => Ok(Some(f.0)),
+            ValueRef::Json(v) => Ok(v.as_f64()),
+            other => error::CastTypeSnafu {
+                msg: format!("Failed to cast value ref {:?} to ValueRef::Float64", other,),
+            }
+            .fail(),
+        }
+    }
+
+    /// Cast itself to [Date].
+    pub fn try_into_date(&self) -> Result<Option<Date>> {
+        impl_as_for_value_ref!(self, Date)
+    }
+
+    /// Cast itself to [Timestamp].
+    pub fn try_into_timestamp(&self) -> Result<Option<Timestamp>> {
+        impl_as_for_value_ref!(self, Timestamp)
+    }
+
+    /// Cast itself to [Time].
+    pub fn try_into_time(&self) -> Result<Option<Time>> {
+        impl_as_for_value_ref!(self, Time)
+    }
+
+    pub fn try_into_duration(&self) -> Result<Option<Duration>> {
+        impl_as_for_value_ref!(self, Duration)
+    }
+
+    /// Cast itself to [IntervalYearMonth].
+    pub fn try_into_interval_year_month(&self) -> Result<Option<IntervalYearMonth>> {
+        impl_as_for_value_ref!(self, IntervalYearMonth)
+    }
+
+    /// Cast itself to [IntervalDayTime].
+    pub fn try_into_interval_day_time(&self) -> Result<Option<IntervalDayTime>> {
+        impl_as_for_value_ref!(self, IntervalDayTime)
+    }
+
+    /// Cast itself to [IntervalMonthDayNano].
+    pub fn try_into_interval_month_day_nano(&self) -> Result<Option<IntervalMonthDayNano>> {
+        impl_as_for_value_ref!(self, IntervalMonthDayNano)
+    }
+
+    /// Cast itself to [ListValueRef].
+    pub fn try_into_list(&self) -> Result<Option<ListValueRef<'_>>> {
+        impl_as_for_value_ref!(self, List)
+    }
+
+    /// Cast itself to [StructValueRef].
+    pub fn try_into_struct(&self) -> Result<Option<StructValueRef<'_>>> {
+        impl_as_for_value_ref!(self, Struct)
+    }
+
+    /// Cast itself to [Decimal128].
+    pub fn try_into_decimal128(&self) -> Result<Option<Decimal128>> {
+        impl_as_for_value_ref!(self, Decimal128)
+    }
+}
+
+impl PartialOrd for ValueRef<'_> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for ValueRef<'_> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        impl_ord_for_value_like!(ValueRef, self, other)
+    }
+}
+
+macro_rules! impl_value_ref_from {
+    ($Variant:ident, $Type:ident) => {
+        impl From<$Type> for ValueRef<'_> {
+            fn from(value: $Type) -> Self {
+                ValueRef::$Variant(value.into())
+            }
+        }
+
+        impl From<Option<$Type>> for ValueRef<'_> {
+            fn from(value: Option<$Type>) -> Self {
+                match value {
+                    Some(v) => ValueRef::$Variant(v.into()),
+                    None => ValueRef::Null,
+                }
+            }
+        }
+    };
+}
+
+impl_value_ref_from!(Boolean, bool);
+impl_value_ref_from!(UInt8, u8);
+impl_value_ref_from!(UInt16, u16);
+impl_value_ref_from!(UInt32, u32);
+impl_value_ref_from!(UInt64, u64);
+impl_value_ref_from!(Int8, i8);
+impl_value_ref_from!(Int16, i16);
+impl_value_ref_from!(Int32, i32);
+impl_value_ref_from!(Int64, i64);
+impl_value_ref_from!(Float32, f32);
+impl_value_ref_from!(Float64, f64);
+impl_value_ref_from!(Date, Date);
+impl_value_ref_from!(Timestamp, Timestamp);
+impl_value_ref_from!(Time, Time);
+impl_value_ref_from!(IntervalYearMonth, IntervalYearMonth);
+impl_value_ref_from!(IntervalDayTime, IntervalDayTime);
+impl_value_ref_from!(IntervalMonthDayNano, IntervalMonthDayNano);
+impl_value_ref_from!(Duration, Duration);
+impl_value_ref_from!(Decimal128, Decimal128);
+
+impl<'a> From<&'a str> for ValueRef<'a> {
+    fn from(string: &'a str) -> ValueRef<'a> {
+        ValueRef::String(string)
+    }
+}
+
+impl<'a> From<&'a [u8]> for ValueRef<'a> {
+    fn from(bytes: &'a [u8]) -> ValueRef<'a> {
+        ValueRef::Binary(bytes)
+    }
+}
+
+impl<'a> From<Option<ListValueRef<'a>>> for ValueRef<'a> {
+    fn from(list: Option<ListValueRef>) -> ValueRef {
+        match list {
+            Some(v) => ValueRef::List(v),
+            None => ValueRef::Null,
+        }
+    }
+}
+
+/// Reference to a [ListValue].
+///
+/// Now comparison still requires some allocation (call of `to_value()`) and
+/// might be avoidable by downcasting and comparing the underlying array slice
+/// if it becomes bottleneck.
+#[derive(Debug, Clone)]
+pub enum ListValueRef<'a> {
+    // TODO(yingwen): Consider replace this by VectorRef.
+    Indexed {
+        vector: &'a ListVector,
+        idx: usize,
+    },
+    Ref {
+        val: &'a ListValue,
+    },
+    RefList {
+        val: Vec<ValueRef<'a>>,
+        item_datatype: Arc<ConcreteDataType>,
+    },
+}
+
+impl ListValueRef<'_> {
+    /// Convert self to [Value]. This method would clone the underlying data.
+    fn to_value(&self) -> Value {
+        match self {
+            ListValueRef::Indexed { vector, idx } => vector.get(*idx),
+            ListValueRef::Ref { val } => Value::List((*val).clone()),
+            ListValueRef::RefList { val, item_datatype } => Value::List(ListValue::new(
+                val.iter().map(|v| Value::from(v.clone())).collect(),
+                item_datatype.clone(),
+            )),
+        }
+    }
+    /// Returns the inner element's data type.
+    fn datatype(&self) -> Arc<ConcreteDataType> {
+        match self {
+            ListValueRef::Indexed { vector, .. } => vector.item_type(),
+            ListValueRef::Ref { val } => val.datatype().clone(),
+            ListValueRef::RefList { item_datatype, .. } => item_datatype.clone(),
+        }
+    }
+}
+
+impl Serialize for ListValueRef<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        match self {
+            ListValueRef::Indexed { vector, idx } => match vector.get(*idx) {
+                Value::List(v) => v.serialize(serializer),
+                _ => unreachable!(),
+            },
+            ListValueRef::Ref { val } => val.serialize(serializer),
+            ListValueRef::RefList { val, .. } => val.serialize(serializer),
+        }
+    }
+}
+
+impl PartialEq for ListValueRef<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.to_value().eq(&other.to_value())
+    }
+}
+
+impl Eq for ListValueRef<'_> {}
+
+impl Ord for ListValueRef<'_> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        // Respect the order of `Value` by converting into value before comparison.
+        self.to_value().cmp(&other.to_value())
+    }
+}
+
+impl PartialOrd for ListValueRef<'_> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum StructValueRef<'a> {
+    Indexed {
+        vector: &'a StructVector,
+        idx: usize,
+    },
+    Ref(&'a StructValue),
+    RefList {
+        val: Vec<ValueRef<'a>>,
+        fields: StructType,
+    },
+}
+
+impl<'a> StructValueRef<'a> {
+    pub fn to_value(&self) -> Value {
+        match self {
+            StructValueRef::Indexed { vector, idx } => vector.get(*idx),
+            StructValueRef::Ref(val) => Value::Struct((*val).clone()),
+            StructValueRef::RefList { val, fields } => {
+                let items = val.iter().map(|v| Value::from(v.clone())).collect();
+                Value::Struct(StructValue::try_new(items, fields.clone()).unwrap())
+            }
+        }
+    }
+
+    pub fn struct_type(&self) -> &StructType {
+        match self {
+            StructValueRef::Indexed { vector, .. } => vector.struct_type(),
+            StructValueRef::Ref(val) => val.struct_type(),
+            StructValueRef::RefList { fields, .. } => fields,
+        }
+    }
+}
+
+impl Serialize for StructValueRef<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        match self {
+            StructValueRef::Indexed { vector, idx } => match vector.get(*idx) {
+                Value::Struct(v) => v.serialize(serializer),
+                _ => unreachable!(),
+            },
+            StructValueRef::Ref(val) => val.serialize(serializer),
+            StructValueRef::RefList { val, .. } => val.serialize(serializer),
+        }
+    }
+}
+
+impl PartialEq for StructValueRef<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.to_value().eq(&other.to_value())
+    }
+}
+
+impl Eq for StructValueRef<'_> {}
+
+impl Ord for StructValueRef<'_> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        // Respect the order of `Value` by converting into value before comparison.
+        self.to_value().cmp(&other.to_value())
+    }
+}
+
+impl PartialOrd for StructValueRef<'_> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl ValueRef<'_> {
+    /// Returns the size of the underlying data in bytes,
+    /// The size is estimated and only considers the data size.
+    pub fn data_size(&self) -> usize {
+        match self {
+            // Since the `Null` type is also considered to occupy space, we have opted to use the
+            // size of `i64` as an initial approximation.
+            ValueRef::Null => 8,
+            ValueRef::Boolean(_) => 1,
+            ValueRef::UInt8(_) => 1,
+            ValueRef::UInt16(_) => 2,
+            ValueRef::UInt32(_) => 4,
+            ValueRef::UInt64(_) => 8,
+            ValueRef::Int8(_) => 1,
+            ValueRef::Int16(_) => 2,
+            ValueRef::Int32(_) => 4,
+            ValueRef::Int64(_) => 8,
+            ValueRef::Float32(_) => 4,
+            ValueRef::Float64(_) => 8,
+            ValueRef::String(v) => std::mem::size_of_val(*v),
+            ValueRef::Binary(v) => std::mem::size_of_val(*v),
+            ValueRef::Date(_) => 4,
+            ValueRef::Timestamp(_) => 16,
+            ValueRef::Time(_) => 16,
+            ValueRef::Duration(_) => 16,
+            ValueRef::IntervalYearMonth(_) => 4,
+            ValueRef::IntervalDayTime(_) => 8,
+            ValueRef::IntervalMonthDayNano(_) => 16,
+            ValueRef::Decimal128(_) => 32,
+            ValueRef::List(v) => match v {
+                ListValueRef::Indexed { vector, .. } => vector.memory_size() / vector.len(),
+                ListValueRef::Ref { val } => val.estimated_size(),
+                ListValueRef::RefList { val, .. } => {
+                    val.iter().map(|v| v.data_size()).sum::<usize>()
+                        + std::mem::size_of::<Arc<ConcreteDataType>>()
+                }
+            },
+            ValueRef::Struct(val) => match val {
+                StructValueRef::Indexed { vector, .. } => vector.memory_size() / vector.len(),
+                StructValueRef::Ref(val) => val.estimated_size(),
+                StructValueRef::RefList { val, .. } => {
+                    val.iter().map(|v| v.data_size()).sum::<usize>()
+                        + std::mem::size_of::<StructType>()
+                }
+            },
+            ValueRef::Json(v) => v.data_size(),
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use arrow::datatypes::{DataType as ArrowDataType, Field};
+    use common_time::timezone::set_default_timezone;
+    use num_traits::Float;
+
+    use super::*;
+    use crate::json::value::{JsonVariant, JsonVariantRef};
+    use crate::types::StructField;
+    use crate::types::json_type::{JsonNativeType, JsonObjectType};
+    use crate::vectors::ListVectorBuilder;
+
+    pub(crate) fn build_struct_type() -> StructType {
+        StructType::new(Arc::new(vec![
+            StructField::new("id".to_string(), ConcreteDataType::int32_datatype(), false),
+            StructField::new(
+                "name".to_string(),
+                ConcreteDataType::string_datatype(),
+                true,
+            ),
+            StructField::new("age".to_string(), ConcreteDataType::uint8_datatype(), true),
+            StructField::new(
+                "address".to_string(),
+                ConcreteDataType::string_datatype(),
+                true,
+            ),
+            StructField::new(
+                "awards".to_string(),
+                ConcreteDataType::list_datatype(Arc::new(ConcreteDataType::boolean_datatype())),
+                true,
+            ),
+        ]))
+    }
+
+    pub(crate) fn build_struct_value() -> StructValue {
+        let struct_type = build_struct_type();
+
+        let struct_items = vec![
+            Value::Int32(1),
+            Value::String("tom".into()),
+            Value::UInt8(25),
+            Value::String("94038".into()),
+            Value::List(build_list_value()),
+        ];
+        StructValue::try_new(struct_items, struct_type).unwrap()
+    }
+
+    pub(crate) fn build_scalar_struct_value() -> ScalarValue {
+        let struct_type = build_struct_type();
+        let arrays = vec![
+            ScalarValue::Int32(Some(1)).to_array().unwrap(),
+            ScalarValue::Utf8(Some("tom".into())).to_array().unwrap(),
+            ScalarValue::UInt8(Some(25)).to_array().unwrap(),
+            ScalarValue::Utf8(Some("94038".into())).to_array().unwrap(),
+            build_scalar_list_value().to_array().unwrap(),
+        ];
+        let struct_arrow_array = StructArray::new(struct_type.as_arrow_fields(), arrays, None);
+        ScalarValue::Struct(Arc::new(struct_arrow_array))
+    }
+
+    pub(crate) fn build_list_value() -> ListValue {
+        let items = vec![Value::Boolean(true), Value::Boolean(false)];
+        ListValue::new(items, Arc::new(ConcreteDataType::boolean_datatype()))
+    }
+
+    pub(crate) fn build_scalar_list_value() -> ScalarValue {
+        let items = vec![
+            ScalarValue::Boolean(Some(true)),
+            ScalarValue::Boolean(Some(false)),
+        ];
+        ScalarValue::List(ScalarValue::new_list(&items, &ArrowDataType::Boolean, true))
+    }
+
+    #[test]
+    fn test_try_from_scalar_value() {
+        assert_eq!(
+            Value::Boolean(true),
+            ScalarValue::Boolean(Some(true)).try_into().unwrap()
+        );
+        assert_eq!(
+            Value::Boolean(false),
+            ScalarValue::Boolean(Some(false)).try_into().unwrap()
+        );
+        assert_eq!(Value::Null, ScalarValue::Boolean(None).try_into().unwrap());
+
+        assert_eq!(
+            Value::Float32(1.0f32.into()),
+            ScalarValue::Float32(Some(1.0f32)).try_into().unwrap()
+        );
+        assert_eq!(Value::Null, ScalarValue::Float32(None).try_into().unwrap());
+
+        assert_eq!(
+            Value::Float64(2.0f64.into()),
+            ScalarValue::Float64(Some(2.0f64)).try_into().unwrap()
+        );
+        assert_eq!(Value::Null, ScalarValue::Float64(None).try_into().unwrap());
+
+        assert_eq!(
+            Value::Int8(i8::MAX),
+            ScalarValue::Int8(Some(i8::MAX)).try_into().unwrap()
+        );
+        assert_eq!(Value::Null, ScalarValue::Int8(None).try_into().unwrap());
+
+        assert_eq!(
+            Value::Int16(i16::MAX),
+            ScalarValue::Int16(Some(i16::MAX)).try_into().unwrap()
+        );
+        assert_eq!(Value::Null, ScalarValue::Int16(None).try_into().unwrap());
+
+        assert_eq!(
+            Value::Int32(i32::MAX),
+            ScalarValue::Int32(Some(i32::MAX)).try_into().unwrap()
+        );
+        assert_eq!(Value::Null, ScalarValue::Int32(None).try_into().unwrap());
+
+        assert_eq!(
+            Value::Int64(i64::MAX),
+            ScalarValue::Int64(Some(i64::MAX)).try_into().unwrap()
+        );
+        assert_eq!(Value::Null, ScalarValue::Int64(None).try_into().unwrap());
+
+        assert_eq!(
+            Value::UInt8(u8::MAX),
+            ScalarValue::UInt8(Some(u8::MAX)).try_into().unwrap()
+        );
+        assert_eq!(Value::Null, ScalarValue::UInt8(None).try_into().unwrap());
+
+        assert_eq!(
+            Value::UInt16(u16::MAX),
+            ScalarValue::UInt16(Some(u16::MAX)).try_into().unwrap()
+        );
+        assert_eq!(Value::Null, ScalarValue::UInt16(None).try_into().unwrap());
+
+        assert_eq!(
+            Value::UInt32(u32::MAX),
+            ScalarValue::UInt32(Some(u32::MAX)).try_into().unwrap()
+        );
+        assert_eq!(Value::Null, ScalarValue::UInt32(None).try_into().unwrap());
+
+        assert_eq!(
+            Value::UInt64(u64::MAX),
+            ScalarValue::UInt64(Some(u64::MAX)).try_into().unwrap()
+        );
+        assert_eq!(Value::Null, ScalarValue::UInt64(None).try_into().unwrap());
+
+        assert_eq!(
+            Value::from("hello"),
+            ScalarValue::Utf8(Some("hello".to_string()))
+                .try_into()
+                .unwrap()
+        );
+        assert_eq!(Value::Null, ScalarValue::Utf8(None).try_into().unwrap());
+
+        assert_eq!(
+            Value::from("large_hello"),
+            ScalarValue::LargeUtf8(Some("large_hello".to_string()))
+                .try_into()
+                .unwrap()
+        );
+        assert_eq!(
+            Value::Null,
+            ScalarValue::LargeUtf8(None).try_into().unwrap()
+        );
+
+        assert_eq!(
+            Value::from("world".as_bytes()),
+            ScalarValue::Binary(Some("world".as_bytes().to_vec()))
+                .try_into()
+                .unwrap()
+        );
+        assert_eq!(Value::Null, ScalarValue::Binary(None).try_into().unwrap());
+
+        assert_eq!(
+            Value::from("large_world".as_bytes()),
+            ScalarValue::LargeBinary(Some("large_world".as_bytes().to_vec()))
+                .try_into()
+                .unwrap()
+        );
+        assert_eq!(
+            Value::Null,
+            ScalarValue::LargeBinary(None).try_into().unwrap()
+        );
+
+        assert_eq!(
+            Value::List(build_list_value()),
+            build_scalar_list_value().try_into().unwrap()
+        );
+        assert_eq!(
+            Value::List(ListValue::new(
+                vec![],
+                Arc::new(ConcreteDataType::uint32_datatype())
+            )),
+            ScalarValue::List(ScalarValue::new_list(&[], &ArrowDataType::UInt32, true))
+                .try_into()
+                .unwrap()
+        );
+
+        assert_eq!(
+            Value::Date(Date::new(123)),
+            ScalarValue::Date32(Some(123)).try_into().unwrap()
+        );
+        assert_eq!(Value::Null, ScalarValue::Date32(None).try_into().unwrap());
+
+        assert_eq!(
+            Value::Timestamp(Timestamp::new(1, TimeUnit::Second)),
+            ScalarValue::TimestampSecond(Some(1), None)
+                .try_into()
+                .unwrap()
+        );
+        assert_eq!(
+            Value::Null,
+            ScalarValue::TimestampSecond(None, None).try_into().unwrap()
+        );
+
+        assert_eq!(
+            Value::Timestamp(Timestamp::new(1, TimeUnit::Millisecond)),
+            ScalarValue::TimestampMillisecond(Some(1), None)
+                .try_into()
+                .unwrap()
+        );
+        assert_eq!(
+            Value::Null,
+            ScalarValue::TimestampMillisecond(None, None)
+                .try_into()
+                .unwrap()
+        );
+
+        assert_eq!(
+            Value::Timestamp(Timestamp::new(1, TimeUnit::Microsecond)),
+            ScalarValue::TimestampMicrosecond(Some(1), None)
+                .try_into()
+                .unwrap()
+        );
+        assert_eq!(
+            Value::Null,
+            ScalarValue::TimestampMicrosecond(None, None)
+                .try_into()
+                .unwrap()
+        );
+
+        assert_eq!(
+            Value::Timestamp(Timestamp::new(1, TimeUnit::Nanosecond)),
+            ScalarValue::TimestampNanosecond(Some(1), None)
+                .try_into()
+                .unwrap()
+        );
+        assert_eq!(
+            Value::Null,
+            ScalarValue::TimestampNanosecond(None, None)
+                .try_into()
+                .unwrap()
+        );
+        assert_eq!(
+            Value::Null,
+            ScalarValue::IntervalMonthDayNano(None).try_into().unwrap()
+        );
+        assert_eq!(
+            Value::IntervalMonthDayNano(IntervalMonthDayNano::new(1, 1, 1)),
+            ScalarValue::IntervalMonthDayNano(Some(IntervalMonthDayNano::new(1, 1, 1).into()))
+                .try_into()
+                .unwrap()
+        );
+
+        assert_eq!(
+            Value::Time(Time::new(1, TimeUnit::Second)),
+            ScalarValue::Time32Second(Some(1)).try_into().unwrap()
+        );
+        assert_eq!(
+            Value::Null,
+            ScalarValue::Time32Second(None).try_into().unwrap()
+        );
+
+        assert_eq!(
+            Value::Time(Time::new(1, TimeUnit::Millisecond)),
+            ScalarValue::Time32Millisecond(Some(1)).try_into().unwrap()
+        );
+        assert_eq!(
+            Value::Null,
+            ScalarValue::Time32Millisecond(None).try_into().unwrap()
+        );
+
+        assert_eq!(
+            Value::Time(Time::new(1, TimeUnit::Microsecond)),
+            ScalarValue::Time64Microsecond(Some(1)).try_into().unwrap()
+        );
+        assert_eq!(
+            Value::Null,
+            ScalarValue::Time64Microsecond(None).try_into().unwrap()
+        );
+
+        assert_eq!(
+            Value::Time(Time::new(1, TimeUnit::Nanosecond)),
+            ScalarValue::Time64Nanosecond(Some(1)).try_into().unwrap()
+        );
+        assert_eq!(
+            Value::Null,
+            ScalarValue::Time64Nanosecond(None).try_into().unwrap()
+        );
+
+        assert_eq!(
+            Value::Duration(Duration::new_second(1)),
+            ScalarValue::DurationSecond(Some(1)).try_into().unwrap()
+        );
+        assert_eq!(
+            Value::Null,
+            ScalarValue::DurationSecond(None).try_into().unwrap()
+        );
+
+        assert_eq!(
+            Value::Duration(Duration::new_millisecond(1)),
+            ScalarValue::DurationMillisecond(Some(1))
+                .try_into()
+                .unwrap()
+        );
+        assert_eq!(
+            Value::Null,
+            ScalarValue::DurationMillisecond(None).try_into().unwrap()
+        );
+
+        assert_eq!(
+            Value::Duration(Duration::new_microsecond(1)),
+            ScalarValue::DurationMicrosecond(Some(1))
+                .try_into()
+                .unwrap()
+        );
+        assert_eq!(
+            Value::Null,
+            ScalarValue::DurationMicrosecond(None).try_into().unwrap()
+        );
+
+        assert_eq!(
+            Value::Duration(Duration::new_nanosecond(1)),
+            ScalarValue::DurationNanosecond(Some(1)).try_into().unwrap()
+        );
+        assert_eq!(
+            Value::Null,
+            ScalarValue::DurationNanosecond(None).try_into().unwrap()
+        );
+
+        assert_eq!(
+            Value::Decimal128(Decimal128::new(1, 38, 10)),
+            ScalarValue::Decimal128(Some(1), 38, 10).try_into().unwrap()
+        );
+        assert_eq!(
+            Value::Null,
+            ScalarValue::Decimal128(None, 0, 0).try_into().unwrap()
+        );
+
+        let struct_value = build_struct_value();
+        let scalar_struct_value = build_scalar_struct_value();
+        assert_eq!(
+            Value::Struct(struct_value),
+            scalar_struct_value.try_into().unwrap()
+        );
+    }
+
+    #[test]
+    fn test_value_from_inner() {
+        assert_eq!(Value::Boolean(true), Value::from(true));
+        assert_eq!(Value::Boolean(false), Value::from(false));
+
+        assert_eq!(Value::UInt8(u8::MIN), Value::from(u8::MIN));
+        assert_eq!(Value::UInt8(u8::MAX), Value::from(u8::MAX));
+
+        assert_eq!(Value::UInt16(u16::MIN), Value::from(u16::MIN));
+        assert_eq!(Value::UInt16(u16::MAX), Value::from(u16::MAX));
+
+        assert_eq!(Value::UInt32(u32::MIN), Value::from(u32::MIN));
+        assert_eq!(Value::UInt32(u32::MAX), Value::from(u32::MAX));
+
+        assert_eq!(Value::UInt64(u64::MIN), Value::from(u64::MIN));
+        assert_eq!(Value::UInt64(u64::MAX), Value::from(u64::MAX));
+
+        assert_eq!(Value::Int8(i8::MIN), Value::from(i8::MIN));
+        assert_eq!(Value::Int8(i8::MAX), Value::from(i8::MAX));
+
+        assert_eq!(Value::Int16(i16::MIN), Value::from(i16::MIN));
+        assert_eq!(Value::Int16(i16::MAX), Value::from(i16::MAX));
+
+        assert_eq!(Value::Int32(i32::MIN), Value::from(i32::MIN));
+        assert_eq!(Value::Int32(i32::MAX), Value::from(i32::MAX));
+
+        assert_eq!(Value::Int64(i64::MIN), Value::from(i64::MIN));
+        assert_eq!(Value::Int64(i64::MAX), Value::from(i64::MAX));
+
+        assert_eq!(
+            Value::Float32(OrderedFloat(f32::MIN)),
+            Value::from(f32::MIN)
+        );
+        assert_eq!(
+            Value::Float32(OrderedFloat(f32::MAX)),
+            Value::from(f32::MAX)
+        );
+
+        assert_eq!(
+            Value::Float64(OrderedFloat(f64::MIN)),
+            Value::from(f64::MIN)
+        );
+        assert_eq!(
+            Value::Float64(OrderedFloat(f64::MAX)),
+            Value::from(f64::MAX)
+        );
+
+        let string_bytes = StringBytes::from("hello");
+        assert_eq!(
+            Value::String(string_bytes.clone()),
+            Value::from(string_bytes)
+        );
+
+        let bytes = Bytes::from(b"world".as_slice());
+        assert_eq!(Value::Binary(bytes.clone()), Value::from(bytes));
+    }
+
+    fn check_type_and_value(data_type: &ConcreteDataType, value: &Value) {
+        assert_eq!(*data_type, value.data_type());
+        assert_eq!(data_type.logical_type_id(), value.logical_type_id());
+    }
+
+    #[test]
+    fn test_value_datatype() {
+        check_type_and_value(&ConcreteDataType::boolean_datatype(), &Value::Boolean(true));
+        check_type_and_value(&ConcreteDataType::uint8_datatype(), &Value::UInt8(u8::MIN));
+        check_type_and_value(
+            &ConcreteDataType::uint16_datatype(),
+            &Value::UInt16(u16::MIN),
+        );
+        check_type_and_value(
+            &ConcreteDataType::uint16_datatype(),
+            &Value::UInt16(u16::MAX),
+        );
+        check_type_and_value(
+            &ConcreteDataType::uint32_datatype(),
+            &Value::UInt32(u32::MIN),
+        );
+        check_type_and_value(
+            &ConcreteDataType::uint64_datatype(),
+            &Value::UInt64(u64::MIN),
+        );
+        check_type_and_value(&ConcreteDataType::int8_datatype(), &Value::Int8(i8::MIN));
+        check_type_and_value(&ConcreteDataType::int16_datatype(), &Value::Int16(i16::MIN));
+        check_type_and_value(&ConcreteDataType::int32_datatype(), &Value::Int32(i32::MIN));
+        check_type_and_value(&ConcreteDataType::int64_datatype(), &Value::Int64(i64::MIN));
+        check_type_and_value(
+            &ConcreteDataType::float32_datatype(),
+            &Value::Float32(OrderedFloat(f32::MIN)),
+        );
+        check_type_and_value(
+            &ConcreteDataType::float64_datatype(),
+            &Value::Float64(OrderedFloat(f64::MIN)),
+        );
+        check_type_and_value(
+            &ConcreteDataType::string_datatype(),
+            &Value::String(StringBytes::from("hello")),
+        );
+        check_type_and_value(
+            &ConcreteDataType::binary_datatype(),
+            &Value::Binary(Bytes::from(b"world".as_slice())),
+        );
+        let item_type = Arc::new(ConcreteDataType::int32_datatype());
+        check_type_and_value(
+            &ConcreteDataType::list_datatype(item_type.clone()),
+            &Value::List(ListValue::new(vec![Value::Int32(10)], item_type.clone())),
+        );
+        check_type_and_value(
+            &ConcreteDataType::list_datatype(Arc::new(ConcreteDataType::null_datatype())),
+            &Value::List(ListValue::default()),
+        );
+        check_type_and_value(
+            &ConcreteDataType::date_datatype(),
+            &Value::Date(Date::new(1)),
+        );
+        check_type_and_value(
+            &ConcreteDataType::timestamp_millisecond_datatype(),
+            &Value::Timestamp(Timestamp::new_millisecond(1)),
+        );
+        check_type_and_value(
+            &ConcreteDataType::time_second_datatype(),
+            &Value::Time(Time::new_second(1)),
+        );
+        check_type_and_value(
+            &ConcreteDataType::time_millisecond_datatype(),
+            &Value::Time(Time::new_millisecond(1)),
+        );
+        check_type_and_value(
+            &ConcreteDataType::time_microsecond_datatype(),
+            &Value::Time(Time::new_microsecond(1)),
+        );
+        check_type_and_value(
+            &ConcreteDataType::time_nanosecond_datatype(),
+            &Value::Time(Time::new_nanosecond(1)),
+        );
+        check_type_and_value(
+            &ConcreteDataType::interval_year_month_datatype(),
+            &Value::IntervalYearMonth(IntervalYearMonth::new(1)),
+        );
+        check_type_and_value(
+            &ConcreteDataType::interval_day_time_datatype(),
+            &Value::IntervalDayTime(IntervalDayTime::new(1, 2)),
+        );
+        check_type_and_value(
+            &ConcreteDataType::interval_month_day_nano_datatype(),
+            &Value::IntervalMonthDayNano(IntervalMonthDayNano::new(1, 2, 3)),
+        );
+        check_type_and_value(
+            &ConcreteDataType::duration_second_datatype(),
+            &Value::Duration(Duration::new_second(1)),
+        );
+        check_type_and_value(
+            &ConcreteDataType::duration_millisecond_datatype(),
+            &Value::Duration(Duration::new_millisecond(1)),
+        );
+        check_type_and_value(
+            &ConcreteDataType::duration_microsecond_datatype(),
+            &Value::Duration(Duration::new_microsecond(1)),
+        );
+        check_type_and_value(
+            &ConcreteDataType::duration_nanosecond_datatype(),
+            &Value::Duration(Duration::new_nanosecond(1)),
+        );
+        check_type_and_value(
+            &ConcreteDataType::decimal128_datatype(38, 10),
+            &Value::Decimal128(Decimal128::new(1, 38, 10)),
+        );
+
+        let item_type = Arc::new(ConcreteDataType::boolean_datatype());
+        check_type_and_value(
+            &ConcreteDataType::list_datatype(item_type.clone()),
+            &Value::List(ListValue::new(
+                vec![Value::Boolean(true)],
+                item_type.clone(),
+            )),
+        );
+
+        check_type_and_value(
+            &ConcreteDataType::struct_datatype(build_struct_type()),
+            &Value::Struct(build_struct_value()),
+        );
+
+        check_type_and_value(
+            &ConcreteDataType::json2(JsonNativeType::Bool),
+            &Value::Json(Box::new(true.into())),
+        );
+
+        check_type_and_value(
+            &ConcreteDataType::json2(JsonNativeType::Array(Box::new(JsonNativeType::Bool))),
+            &Value::Json(Box::new([true].into())),
+        );
+
+        check_type_and_value(
+            &ConcreteDataType::json2(JsonNativeType::Object(JsonObjectType::from([
+                ("address".to_string(), JsonNativeType::String),
+                ("age".to_string(), JsonNativeType::u64()),
+                (
+                    "awards".to_string(),
+                    JsonNativeType::Array(Box::new(JsonNativeType::Bool)),
+                ),
+                ("id".to_string(), JsonNativeType::i64()),
+                ("name".to_string(), JsonNativeType::String),
+            ]))),
+            &Value::Json(Box::new(
+                [
+                    ("id", JsonVariant::from(1i64)),
+                    ("name", "Alice".into()),
+                    ("age", 1u64.into()),
+                    ("address", "blah".into()),
+                    ("awards", [true, false].into()),
+                ]
+                .into(),
+            )),
+        );
+    }
+
+    #[test]
+    fn test_value_from_string() {
+        let hello = "hello".to_string();
+        assert_eq!(
+            Value::String(StringBytes::from(hello.clone())),
+            Value::from(hello)
+        );
+
+        let world = "world";
+        assert_eq!(Value::String(StringBytes::from(world)), Value::from(world));
+    }
+
+    #[test]
+    fn test_value_from_bytes() {
+        let hello = b"hello".to_vec();
+        assert_eq!(
+            Value::Binary(Bytes::from(hello.clone())),
+            Value::from(hello)
+        );
+
+        let world: &[u8] = b"world";
+        assert_eq!(Value::Binary(Bytes::from(world)), Value::from(world));
+    }
+
+    fn to_json(value: Value) -> serde_json::Value {
+        value.try_into().unwrap()
+    }
+
+    #[test]
+    fn test_to_json_value() {
+        assert_eq!(serde_json::Value::Null, to_json(Value::Null));
+        assert_eq!(serde_json::Value::Bool(true), to_json(Value::Boolean(true)));
+        assert_eq!(
+            serde_json::Value::Number(20u8.into()),
+            to_json(Value::UInt8(20))
+        );
+        assert_eq!(
+            serde_json::Value::Number(20i8.into()),
+            to_json(Value::Int8(20))
+        );
+        assert_eq!(
+            serde_json::Value::Number(2000u16.into()),
+            to_json(Value::UInt16(2000))
+        );
+        assert_eq!(
+            serde_json::Value::Number(2000i16.into()),
+            to_json(Value::Int16(2000))
+        );
+        assert_eq!(
+            serde_json::Value::Number(3000u32.into()),
+            to_json(Value::UInt32(3000))
+        );
+        assert_eq!(
+            serde_json::Value::Number(3000i32.into()),
+            to_json(Value::Int32(3000))
+        );
+        assert_eq!(
+            serde_json::Value::Number(4000u64.into()),
+            to_json(Value::UInt64(4000))
+        );
+        assert_eq!(
+            serde_json::Value::Number(4000i64.into()),
+            to_json(Value::Int64(4000))
+        );
+        assert_eq!(
+            serde_json::Value::from(125.0f32),
+            to_json(Value::Float32(125.0.into()))
+        );
+        assert_eq!(
+            serde_json::Value::from(125.0f64),
+            to_json(Value::Float64(125.0.into()))
+        );
+        assert_eq!(
+            serde_json::Value::String(String::from("hello")),
+            to_json(Value::String(StringBytes::from("hello")))
+        );
+        assert_eq!(
+            serde_json::Value::from(b"world".as_slice()),
+            to_json(Value::Binary(Bytes::from(b"world".as_slice())))
+        );
+        assert_eq!(
+            serde_json::Value::Number(5000i32.into()),
+            to_json(Value::Date(Date::new(5000)))
+        );
+        assert_eq!(
+            serde_json::Value::Number(1.into()),
+            to_json(Value::Timestamp(Timestamp::new_millisecond(1)))
+        );
+        assert_eq!(
+            serde_json::Value::Number(1.into()),
+            to_json(Value::Time(Time::new_millisecond(1)))
+        );
+        assert_eq!(
+            serde_json::Value::Number(1.into()),
+            to_json(Value::Duration(Duration::new_millisecond(1)))
+        );
+
+        let json_value: serde_json::Value = serde_json::from_str(r#"[123]"#).unwrap();
+        assert_eq!(
+            json_value,
+            to_json(Value::List(ListValue {
+                items: vec![Value::Int32(123)],
+                datatype: Arc::new(ConcreteDataType::int32_datatype()),
+            }))
+        );
+
+        let struct_value = StructValue::try_new(
+            vec![
+                Value::Int64(42),
+                Value::String("tomcat".into()),
+                Value::Boolean(true),
+            ],
+            StructType::new(Arc::new(vec![
+                StructField::new("num".to_string(), ConcreteDataType::int64_datatype(), true),
+                StructField::new(
+                    "name".to_string(),
+                    ConcreteDataType::string_datatype(),
+                    true,
+                ),
+                StructField::new(
+                    "yes_or_no".to_string(),
+                    ConcreteDataType::boolean_datatype(),
+                    true,
+                ),
+            ])),
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::Value::try_from(Value::Struct(struct_value.clone())).unwrap(),
+            serde_json::json!({
+                "num": 42,
+                "name": "tomcat",
+                "yes_or_no": true
+            })
+        );
+
+        // string wrapped in json
+        assert_eq!(
+            serde_json::Value::try_from(Value::Json(Box::new("hello".into()))).unwrap(),
+            serde_json::json!("hello")
+        );
+
+        // list wrapped in json
+        assert_eq!(
+            serde_json::Value::try_from(Value::Json(Box::new([1i64, 2, 3,].into()))).unwrap(),
+            serde_json::json!([1, 2, 3])
+        );
+
+        // struct wrapped in json
+        assert_eq!(
+            serde_json::Value::try_from(Value::Json(Box::new(
+                [
+                    ("num".to_string(), JsonVariant::from(42i64)),
+                    ("name".to_string(), "tomcat".into()),
+                    ("yes_or_no".to_string(), true.into()),
+                ]
+                .into()
+            )))
+            .unwrap(),
+            serde_json::json!({
+                "num": 42,
+                "name": "tomcat",
+                "yes_or_no": true
+            })
+        );
+    }
+
+    #[test]
+    fn test_null_value() {
+        assert!(Value::Null.is_null());
+        assert!(Value::Json(Box::new(JsonValue::null())).is_null());
+        assert!(!Value::Boolean(true).is_null());
+        assert!(Value::Null < Value::Boolean(false));
+        assert!(Value::Boolean(true) > Value::Null);
+        assert!(Value::Null < Value::Int32(10));
+        assert!(Value::Int32(10) > Value::Null);
+    }
+
+    #[test]
+    fn test_null_value_ref() {
+        assert!(ValueRef::Null.is_null());
+        assert!(!ValueRef::Boolean(true).is_null());
+        assert!(ValueRef::Null < ValueRef::Boolean(false));
+        assert!(ValueRef::Boolean(true) > ValueRef::Null);
+        assert!(ValueRef::Null < ValueRef::Int32(10));
+        assert!(ValueRef::Int32(10) > ValueRef::Null);
+    }
+
+    #[test]
+    fn test_as_value_ref() {
+        macro_rules! check_as_value_ref {
+            ($Variant: ident, $data: expr) => {
+                let value = Value::$Variant($data);
+                let value_ref = value.as_value_ref();
+                let expect_ref = ValueRef::$Variant($data);
+
+                assert_eq!(expect_ref, value_ref);
+            };
+        }
+
+        assert_eq!(ValueRef::Null, Value::Null.as_value_ref());
+        check_as_value_ref!(Boolean, true);
+        check_as_value_ref!(UInt8, 123);
+        check_as_value_ref!(UInt16, 123);
+        check_as_value_ref!(UInt32, 123);
+        check_as_value_ref!(UInt64, 123);
+        check_as_value_ref!(Int8, -12);
+        check_as_value_ref!(Int16, -12);
+        check_as_value_ref!(Int32, -12);
+        check_as_value_ref!(Int64, -12);
+        check_as_value_ref!(Float32, OrderedF32::from(16.0));
+        check_as_value_ref!(Float64, OrderedF64::from(16.0));
+        check_as_value_ref!(Timestamp, Timestamp::new_millisecond(1));
+        check_as_value_ref!(Time, Time::new_millisecond(1));
+        check_as_value_ref!(IntervalYearMonth, IntervalYearMonth::new(1));
+        check_as_value_ref!(IntervalDayTime, IntervalDayTime::new(1, 2));
+        check_as_value_ref!(IntervalMonthDayNano, IntervalMonthDayNano::new(1, 2, 3));
+        check_as_value_ref!(Duration, Duration::new_millisecond(1));
+
+        assert_eq!(
+            ValueRef::String("hello"),
+            Value::String("hello".into()).as_value_ref()
+        );
+        assert_eq!(
+            ValueRef::Binary(b"hello"),
+            Value::Binary("hello".as_bytes().into()).as_value_ref()
+        );
+
+        check_as_value_ref!(Date, Date::new(103));
+
+        let list = build_list_value();
+        assert_eq!(
+            ValueRef::List(ListValueRef::Ref { val: &list }),
+            Value::List(list.clone()).as_value_ref()
+        );
+
+        let jsonb_value = jsonb::parse_value(r#"{"key": "value"}"#.as_bytes())
+            .unwrap()
+            .to_vec();
+        assert_eq!(
+            ValueRef::Binary(jsonb_value.clone().as_slice()),
+            Value::Binary(jsonb_value.into()).as_value_ref()
+        );
+
+        let struct_value = build_struct_value();
+        assert_eq!(
+            ValueRef::Struct(StructValueRef::Ref(&struct_value)),
+            Value::Struct(struct_value.clone()).as_value_ref()
+        );
+    }
+
+    #[test]
+    fn test_value_ref_as() {
+        macro_rules! check_as_null {
+            ($method: ident) => {
+                assert_eq!(None, ValueRef::Null.$method().unwrap());
+            };
+        }
+
+        check_as_null!(try_into_binary);
+        check_as_null!(try_into_string);
+        check_as_null!(try_into_boolean);
+        check_as_null!(try_into_list);
+        check_as_null!(try_into_struct);
+
+        macro_rules! check_as_correct {
+            ($data: expr, $Variant: ident, $method: ident) => {
+                assert_eq!(Some($data), ValueRef::$Variant($data).$method().unwrap());
+            };
+        }
+
+        check_as_correct!("hello", String, try_into_string);
+        check_as_correct!("hello".as_bytes(), Binary, try_into_binary);
+        check_as_correct!(true, Boolean, try_into_boolean);
+        check_as_correct!(Date::new(123), Date, try_into_date);
+        check_as_correct!(Time::new_second(12), Time, try_into_time);
+        check_as_correct!(Duration::new_second(12), Duration, try_into_duration);
+
+        let list = build_list_value();
+        check_as_correct!(ListValueRef::Ref { val: &list }, List, try_into_list);
+
+        let struct_value = build_struct_value();
+        check_as_correct!(StructValueRef::Ref(&struct_value), Struct, try_into_struct);
+
+        let wrong_value = ValueRef::Int32(12345);
+        assert!(wrong_value.try_into_binary().is_err());
+        assert!(wrong_value.try_into_string().is_err());
+        assert!(wrong_value.try_into_boolean().is_err());
+        assert!(wrong_value.try_into_list().is_err());
+        assert!(wrong_value.try_into_struct().is_err());
+        assert!(wrong_value.try_into_date().is_err());
+        assert!(wrong_value.try_into_time().is_err());
+        assert!(wrong_value.try_into_timestamp().is_err());
+        assert!(wrong_value.try_into_duration().is_err());
+    }
+
+    #[test]
+    fn test_display() {
+        set_default_timezone(Some("Asia/Shanghai")).unwrap();
+        assert_eq!(Value::Null.to_string(), "Null");
+        assert_eq!(Value::UInt8(8).to_string(), "8");
+        assert_eq!(Value::UInt16(16).to_string(), "16");
+        assert_eq!(Value::UInt32(32).to_string(), "32");
+        assert_eq!(Value::UInt64(64).to_string(), "64");
+        assert_eq!(Value::Int8(-8).to_string(), "-8");
+        assert_eq!(Value::Int16(-16).to_string(), "-16");
+        assert_eq!(Value::Int32(-32).to_string(), "-32");
+        assert_eq!(Value::Int64(-64).to_string(), "-64");
+        assert_eq!(Value::Float32((-32.123).into()).to_string(), "-32.123");
+        assert_eq!(Value::Float64((-64.123).into()).to_string(), "-64.123");
+        assert_eq!(Value::Float64(OrderedF64::infinity()).to_string(), "inf");
+        assert_eq!(Value::Float64(OrderedF64::nan()).to_string(), "NaN");
+        assert_eq!(Value::String(StringBytes::from("123")).to_string(), "123");
+        assert_eq!(
+            Value::Binary(Bytes::from(vec![1, 2, 3])).to_string(),
+            "010203"
+        );
+        assert_eq!(Value::Date(Date::new(0)).to_string(), "1970-01-01");
+        assert_eq!(
+            Value::Timestamp(Timestamp::new(1000, TimeUnit::Millisecond)).to_string(),
+            "1970-01-01 08:00:01+0800"
+        );
+        assert_eq!(
+            Value::Time(Time::new(1000, TimeUnit::Millisecond)).to_string(),
+            "08:00:01+0800"
+        );
+        assert_eq!(
+            Value::Duration(Duration::new_millisecond(1000)).to_string(),
+            "1000ms"
+        );
+        assert_eq!(
+            Value::List(build_list_value()).to_string(),
+            "Boolean[true, false]"
+        );
+        assert_eq!(
+            Value::List(ListValue::new(
+                vec![],
+                Arc::new(ConcreteDataType::timestamp_second_datatype()),
+            ))
+            .to_string(),
+            "TimestampSecond[]"
+        );
+        assert_eq!(
+            Value::List(ListValue::new(
+                vec![],
+                Arc::new(ConcreteDataType::timestamp_millisecond_datatype()),
+            ))
+            .to_string(),
+            "TimestampMillisecond[]"
+        );
+        assert_eq!(
+            Value::List(ListValue::new(
+                vec![],
+                Arc::new(ConcreteDataType::timestamp_microsecond_datatype()),
+            ))
+            .to_string(),
+            "TimestampMicrosecond[]"
+        );
+        assert_eq!(
+            Value::List(ListValue::new(
+                vec![],
+                Arc::new(ConcreteDataType::timestamp_nanosecond_datatype()),
+            ))
+            .to_string(),
+            "TimestampNanosecond[]"
+        );
+
+        assert_eq!(
+            Value::Struct(build_struct_value()).to_string(),
+            "{ id: 1, name: tom, age: 25, address: 94038, awards: Boolean[true, false] }"
+        );
+
+        assert_eq!(
+            Value::Json(Box::new(
+                [
+                    ("id", JsonVariant::from(1i64)),
+                    ("name", "tom".into()),
+                    ("age", 25u64.into()),
+                    ("address", "94038".into()),
+                    ("awards", [true, false].into()),
+                ]
+                .into()
+            ))
+            .to_string(),
+            "Json({ address: 94038, age: 25, awards: [true, false], id: 1, name: tom })"
+        )
+    }
+
+    #[test]
+    fn test_not_null_value_to_scalar_value() {
+        assert_eq!(
+            ScalarValue::Boolean(Some(true)),
+            Value::Boolean(true)
+                .try_to_scalar_value(&ConcreteDataType::boolean_datatype())
+                .unwrap()
+        );
+        assert_eq!(
+            ScalarValue::Boolean(Some(false)),
+            Value::Boolean(false)
+                .try_to_scalar_value(&ConcreteDataType::boolean_datatype())
+                .unwrap()
+        );
+        assert_eq!(
+            ScalarValue::UInt8(Some(1)),
+            Value::UInt8(1)
+                .try_to_scalar_value(&ConcreteDataType::uint8_datatype())
+                .unwrap()
+        );
+        assert_eq!(
+            ScalarValue::UInt16(Some(2)),
+            Value::UInt16(2)
+                .try_to_scalar_value(&ConcreteDataType::uint16_datatype())
+                .unwrap()
+        );
+        assert_eq!(
+            ScalarValue::UInt32(Some(3)),
+            Value::UInt32(3)
+                .try_to_scalar_value(&ConcreteDataType::uint32_datatype())
+                .unwrap()
+        );
+        assert_eq!(
+            ScalarValue::UInt64(Some(4)),
+            Value::UInt64(4)
+                .try_to_scalar_value(&ConcreteDataType::uint64_datatype())
+                .unwrap()
+        );
+        assert_eq!(
+            ScalarValue::Int8(Some(i8::MIN + 4)),
+            Value::Int8(i8::MIN + 4)
+                .try_to_scalar_value(&ConcreteDataType::int8_datatype())
+                .unwrap()
+        );
+        assert_eq!(
+            ScalarValue::Int16(Some(i16::MIN + 5)),
+            Value::Int16(i16::MIN + 5)
+                .try_to_scalar_value(&ConcreteDataType::int16_datatype())
+                .unwrap()
+        );
+        assert_eq!(
+            ScalarValue::Int32(Some(i32::MIN + 6)),
+            Value::Int32(i32::MIN + 6)
+                .try_to_scalar_value(&ConcreteDataType::int32_datatype())
+                .unwrap()
+        );
+        assert_eq!(
+            ScalarValue::Int64(Some(i64::MIN + 7)),
+            Value::Int64(i64::MIN + 7)
+                .try_to_scalar_value(&ConcreteDataType::int64_datatype())
+                .unwrap()
+        );
+        assert_eq!(
+            ScalarValue::Float32(Some(8.0f32)),
+            Value::Float32(OrderedFloat(8.0f32))
+                .try_to_scalar_value(&ConcreteDataType::float32_datatype())
+                .unwrap()
+        );
+        assert_eq!(
+            ScalarValue::Float64(Some(9.0f64)),
+            Value::Float64(OrderedFloat(9.0f64))
+                .try_to_scalar_value(&ConcreteDataType::float64_datatype())
+                .unwrap()
+        );
+        assert_eq!(
+            ScalarValue::Utf8(Some("hello".to_string())),
+            Value::String(StringBytes::from("hello"))
+                .try_to_scalar_value(&ConcreteDataType::string_datatype(),)
+                .unwrap()
+        );
+        assert_eq!(
+            ScalarValue::Binary(Some("world".as_bytes().to_vec())),
+            Value::Binary(Bytes::from("world".as_bytes()))
+                .try_to_scalar_value(&ConcreteDataType::binary_datatype())
+                .unwrap()
+        );
+
+        let jsonb_value = jsonb::parse_value(r#"{"key": "value"}"#.as_bytes())
+            .unwrap()
+            .to_vec();
+        assert_eq!(
+            ScalarValue::Binary(Some(jsonb_value.clone())),
+            Value::Binary(jsonb_value.into())
+                .try_to_scalar_value(&ConcreteDataType::json_datatype())
+                .unwrap()
+        );
+
+        assert_eq!(
+            build_scalar_struct_value(),
+            Value::Struct(build_struct_value())
+                .try_to_scalar_value(&ConcreteDataType::struct_datatype(build_struct_type()))
+                .unwrap()
+        );
+
+        assert_eq!(
+            build_scalar_list_value(),
+            Value::List(build_list_value())
+                .try_to_scalar_value(&ConcreteDataType::list_datatype(Arc::new(
+                    ConcreteDataType::boolean_datatype()
+                )))
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn test_null_value_to_scalar_value() {
+        assert_eq!(
+            ScalarValue::Boolean(None),
+            Value::Null
+                .try_to_scalar_value(&ConcreteDataType::boolean_datatype())
+                .unwrap()
+        );
+        assert_eq!(
+            ScalarValue::UInt8(None),
+            Value::Null
+                .try_to_scalar_value(&ConcreteDataType::uint8_datatype())
+                .unwrap()
+        );
+        assert_eq!(
+            ScalarValue::UInt16(None),
+            Value::Null
+                .try_to_scalar_value(&ConcreteDataType::uint16_datatype())
+                .unwrap()
+        );
+        assert_eq!(
+            ScalarValue::UInt32(None),
+            Value::Null
+                .try_to_scalar_value(&ConcreteDataType::uint32_datatype())
+                .unwrap()
+        );
+        assert_eq!(
+            ScalarValue::UInt64(None),
+            Value::Null
+                .try_to_scalar_value(&ConcreteDataType::uint64_datatype())
+                .unwrap()
+        );
+        assert_eq!(
+            ScalarValue::Int8(None),
+            Value::Null
+                .try_to_scalar_value(&ConcreteDataType::int8_datatype())
+                .unwrap()
+        );
+        assert_eq!(
+            ScalarValue::Int16(None),
+            Value::Null
+                .try_to_scalar_value(&ConcreteDataType::int16_datatype())
+                .unwrap()
+        );
+        assert_eq!(
+            ScalarValue::Int32(None),
+            Value::Null
+                .try_to_scalar_value(&ConcreteDataType::int32_datatype())
+                .unwrap()
+        );
+        assert_eq!(
+            ScalarValue::Int64(None),
+            Value::Null
+                .try_to_scalar_value(&ConcreteDataType::int64_datatype())
+                .unwrap()
+        );
+        assert_eq!(
+            ScalarValue::Float32(None),
+            Value::Null
+                .try_to_scalar_value(&ConcreteDataType::float32_datatype())
+                .unwrap()
+        );
+        assert_eq!(
+            ScalarValue::Float64(None),
+            Value::Null
+                .try_to_scalar_value(&ConcreteDataType::float64_datatype())
+                .unwrap()
+        );
+        assert_eq!(
+            ScalarValue::Utf8(None),
+            Value::Null
+                .try_to_scalar_value(&ConcreteDataType::string_datatype())
+                .unwrap()
+        );
+        assert_eq!(
+            ScalarValue::Binary(None),
+            Value::Null
+                .try_to_scalar_value(&ConcreteDataType::binary_datatype())
+                .unwrap()
+        );
+
+        assert_eq!(
+            ScalarValue::Time32Second(None),
+            Value::Null
+                .try_to_scalar_value(&ConcreteDataType::time_second_datatype())
+                .unwrap()
+        );
+        assert_eq!(
+            ScalarValue::Time32Millisecond(None),
+            Value::Null
+                .try_to_scalar_value(&ConcreteDataType::time_millisecond_datatype())
+                .unwrap()
+        );
+        assert_eq!(
+            ScalarValue::Time64Microsecond(None),
+            Value::Null
+                .try_to_scalar_value(&ConcreteDataType::time_microsecond_datatype())
+                .unwrap()
+        );
+        assert_eq!(
+            ScalarValue::Time64Nanosecond(None),
+            Value::Null
+                .try_to_scalar_value(&ConcreteDataType::time_nanosecond_datatype())
+                .unwrap()
+        );
+
+        assert_eq!(
+            ScalarValue::DurationSecond(None),
+            Value::Null
+                .try_to_scalar_value(&ConcreteDataType::duration_second_datatype())
+                .unwrap()
+        );
+        assert_eq!(
+            ScalarValue::DurationMillisecond(None),
+            Value::Null
+                .try_to_scalar_value(&ConcreteDataType::duration_millisecond_datatype())
+                .unwrap()
+        );
+        assert_eq!(
+            ScalarValue::DurationMicrosecond(None),
+            Value::Null
+                .try_to_scalar_value(&ConcreteDataType::duration_microsecond_datatype())
+                .unwrap()
+        );
+        assert_eq!(
+            ScalarValue::DurationNanosecond(None),
+            Value::Null
+                .try_to_scalar_value(&ConcreteDataType::duration_nanosecond_datatype())
+                .unwrap()
+        );
+        assert_eq!(
+            ScalarValue::Binary(None),
+            Value::Null
+                .try_to_scalar_value(&ConcreteDataType::json_datatype())
+                .unwrap()
+        );
+
+        assert_eq!(
+            ScalarValue::new_null_list(ArrowDataType::Boolean, true, 1),
+            Value::Null
+                .try_to_scalar_value(&ConcreteDataType::list_datatype(Arc::new(
+                    ConcreteDataType::boolean_datatype()
+                )))
+                .unwrap()
+        );
+
+        assert_eq!(
+            ScalarStructBuilder::new_null(build_struct_type().as_arrow_fields()),
+            Value::Null
+                .try_to_scalar_value(&ConcreteDataType::struct_datatype(build_struct_type()))
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn test_list_value_to_scalar_value() {
+        let items = vec![Value::Int32(-1), Value::Null];
+        let item_type = Arc::new(ConcreteDataType::int32_datatype());
+        let list = Value::List(ListValue::new(items, item_type.clone()));
+        let df_list = list
+            .try_to_scalar_value(&ConcreteDataType::list_datatype(item_type.clone()))
+            .unwrap();
+        assert!(matches!(df_list, ScalarValue::List(_)));
+        match df_list {
+            ScalarValue::List(vs) => {
+                assert_eq!(
+                    ArrowDataType::List(Arc::new(Field::new_list_field(
+                        ArrowDataType::Int32,
+                        true
+                    ))),
+                    *vs.data_type()
+                );
+
+                let vs = ScalarValue::convert_array_to_scalar_vec(vs.as_ref())
+                    .unwrap()
+                    .into_iter()
+                    .flatten()
+                    .flatten()
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    vs,
+                    vec![ScalarValue::Int32(Some(-1)), ScalarValue::Int32(None)]
+                );
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn test_struct_value_to_scalar_value() {
+        let struct_value = build_struct_value();
+        let scalar_value = struct_value
+            .try_to_scalar_value(&build_struct_type())
+            .unwrap();
+
+        assert_eq!(scalar_value, build_scalar_struct_value());
+
+        assert!(matches!(scalar_value, ScalarValue::Struct(_)));
+        match scalar_value {
+            ScalarValue::Struct(values) => {
+                assert_eq!(&build_struct_type().as_arrow_fields(), values.fields());
+
+                assert_eq!(
+                    ScalarValue::try_from_array(values.column(0), 0).unwrap(),
+                    ScalarValue::Int32(Some(1))
+                );
+                assert_eq!(
+                    ScalarValue::try_from_array(values.column(1), 0).unwrap(),
+                    ScalarValue::Utf8(Some("tom".into()))
+                );
+                assert_eq!(
+                    ScalarValue::try_from_array(values.column(2), 0).unwrap(),
+                    ScalarValue::UInt8(Some(25))
+                );
+                assert_eq!(
+                    ScalarValue::try_from_array(values.column(3), 0).unwrap(),
+                    ScalarValue::Utf8(Some("94038".into()))
+                );
+            }
+            _ => panic!("Unexpected value type"),
+        }
+    }
+
+    #[test]
+    fn test_timestamp_to_scalar_value() {
+        assert_eq!(
+            ScalarValue::TimestampSecond(Some(1), None),
+            timestamp_to_scalar_value(TimeUnit::Second, Some(1))
+        );
+        assert_eq!(
+            ScalarValue::TimestampMillisecond(Some(1), None),
+            timestamp_to_scalar_value(TimeUnit::Millisecond, Some(1))
+        );
+        assert_eq!(
+            ScalarValue::TimestampMicrosecond(Some(1), None),
+            timestamp_to_scalar_value(TimeUnit::Microsecond, Some(1))
+        );
+        assert_eq!(
+            ScalarValue::TimestampNanosecond(Some(1), None),
+            timestamp_to_scalar_value(TimeUnit::Nanosecond, Some(1))
+        );
+    }
+
+    #[test]
+    fn test_time_to_scalar_value() {
+        assert_eq!(
+            ScalarValue::Time32Second(Some(1)),
+            time_to_scalar_value(TimeUnit::Second, Some(1)).unwrap()
+        );
+        assert_eq!(
+            ScalarValue::Time32Millisecond(Some(1)),
+            time_to_scalar_value(TimeUnit::Millisecond, Some(1)).unwrap()
+        );
+        assert_eq!(
+            ScalarValue::Time64Microsecond(Some(1)),
+            time_to_scalar_value(TimeUnit::Microsecond, Some(1)).unwrap()
+        );
+        assert_eq!(
+            ScalarValue::Time64Nanosecond(Some(1)),
+            time_to_scalar_value(TimeUnit::Nanosecond, Some(1)).unwrap()
+        );
+    }
+
+    #[test]
+    fn test_duration_to_scalar_value() {
+        assert_eq!(
+            ScalarValue::DurationSecond(Some(1)),
+            duration_to_scalar_value(TimeUnit::Second, Some(1))
+        );
+        assert_eq!(
+            ScalarValue::DurationMillisecond(Some(1)),
+            duration_to_scalar_value(TimeUnit::Millisecond, Some(1))
+        );
+        assert_eq!(
+            ScalarValue::DurationMicrosecond(Some(1)),
+            duration_to_scalar_value(TimeUnit::Microsecond, Some(1))
+        );
+        assert_eq!(
+            ScalarValue::DurationNanosecond(Some(1)),
+            duration_to_scalar_value(TimeUnit::Nanosecond, Some(1))
+        );
+    }
+
+    fn check_value_ref_size_eq(value_ref: &ValueRef, size: usize) {
+        assert_eq!(value_ref.data_size(), size);
+    }
+
+    #[test]
+    fn test_value_ref_estimated_size() {
+        check_value_ref_size_eq(&ValueRef::Null, 8);
+        check_value_ref_size_eq(&ValueRef::Boolean(true), 1);
+        check_value_ref_size_eq(&ValueRef::UInt8(1), 1);
+        check_value_ref_size_eq(&ValueRef::UInt16(1), 2);
+        check_value_ref_size_eq(&ValueRef::UInt32(1), 4);
+        check_value_ref_size_eq(&ValueRef::UInt64(1), 8);
+        check_value_ref_size_eq(&ValueRef::Int8(1), 1);
+        check_value_ref_size_eq(&ValueRef::Int16(1), 2);
+        check_value_ref_size_eq(&ValueRef::Int32(1), 4);
+        check_value_ref_size_eq(&ValueRef::Int64(1), 8);
+        check_value_ref_size_eq(&ValueRef::Float32(1.0.into()), 4);
+        check_value_ref_size_eq(&ValueRef::Float64(1.0.into()), 8);
+        check_value_ref_size_eq(&ValueRef::String("greptimedb"), 10);
+        check_value_ref_size_eq(&ValueRef::Binary(b"greptimedb"), 10);
+        check_value_ref_size_eq(&ValueRef::Date(Date::new(1)), 4);
+        check_value_ref_size_eq(&ValueRef::Timestamp(Timestamp::new_millisecond(1)), 16);
+        check_value_ref_size_eq(&ValueRef::Time(Time::new_millisecond(1)), 16);
+        check_value_ref_size_eq(&ValueRef::IntervalYearMonth(IntervalYearMonth::new(1)), 4);
+        check_value_ref_size_eq(&ValueRef::IntervalDayTime(IntervalDayTime::new(1, 2)), 8);
+        check_value_ref_size_eq(
+            &ValueRef::IntervalMonthDayNano(IntervalMonthDayNano::new(1, 2, 3)),
+            16,
+        );
+        check_value_ref_size_eq(&ValueRef::Duration(Duration::new_millisecond(1)), 16);
+        check_value_ref_size_eq(
+            &ValueRef::List(ListValueRef::Ref {
+                val: &ListValue {
+                    items: vec![
+                        Value::String("hello world".into()),
+                        Value::String("greptimedb".into()),
+                    ],
+                    datatype: Arc::new(ConcreteDataType::string_datatype()),
+                },
+            }),
+            30,
+        );
+
+        let data = vec![
+            Some(vec![Some(1), Some(2), Some(3)]),
+            None,
+            Some(vec![Some(4), None, Some(6)]),
+        ];
+        let item_type = Arc::new(ConcreteDataType::int32_datatype());
+        let mut builder = ListVectorBuilder::with_type_capacity(item_type.clone(), 8);
+        for vec_opt in &data {
+            if let Some(vec) = vec_opt {
+                let values = vec.iter().map(|v| Value::from(*v)).collect();
+                let list_value = ListValue::new(values, item_type.clone());
+
+                builder.push(Some(ListValueRef::Ref { val: &list_value }));
+            } else {
+                builder.push(None);
+            }
+        }
+        let vector = builder.finish();
+
+        check_value_ref_size_eq(
+            &ValueRef::List(ListValueRef::Indexed {
+                vector: &vector,
+                idx: 0,
+            }),
+            74,
+        );
+        check_value_ref_size_eq(
+            &ValueRef::List(ListValueRef::Indexed {
+                vector: &vector,
+                idx: 1,
+            }),
+            74,
+        );
+        check_value_ref_size_eq(
+            &ValueRef::List(ListValueRef::Indexed {
+                vector: &vector,
+                idx: 2,
+            }),
+            74,
+        );
+        check_value_ref_size_eq(&ValueRef::Decimal128(Decimal128::new(1234, 3, 1)), 32);
+
+        check_value_ref_size_eq(
+            &ValueRef::Struct(StructValueRef::Ref(&build_struct_value())),
+            31,
+        );
+
+        check_value_ref_size_eq(
+            &ValueRef::Json(Box::new(
+                [
+                    ("id", JsonVariantRef::from(1i64)),
+                    ("name", "tom".into()),
+                    ("age", 25u64.into()),
+                    ("address", "94038".into()),
+                    ("awards", [true, false].into()),
+                ]
+                .into(),
+            )),
+            48,
+        );
+    }
+
+    #[test]
+    fn test_incorrect_default_value_issue_3479() {
+        let value = OrderedF64::from(0.047318541668048164);
+        let serialized = serde_json::to_string(&value).unwrap();
+        let deserialized: OrderedF64 = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(value, deserialized);
+    }
+}

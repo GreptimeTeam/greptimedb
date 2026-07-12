@@ -1,0 +1,32 @@
+-- SQLNESS ARG version=v0.9.5
+CREATE TABLE update_test (
+    id INT,
+    val INT,
+    ts TIMESTAMP TIME INDEX,
+    PRIMARY KEY(id)
+);
+
+Affected Rows: 0
+
+INSERT INTO update_test(id, val, ts) VALUES (1, 10, 1672531200000), (2, 20, 1672531201000);
+
+Affected Rows: 2
+
+-- SQLNESS ARG version=latest
+UPDATE update_test SET val = 100 WHERE id = 1;
+
+Error: 1001(Unsupported), SQL statement is not supported, keyword: UPDATE
+
+SELECT * FROM update_test ORDER BY id;
+
++----+-----+---------------------+
+| id | val | ts                  |
++----+-----+---------------------+
+| 1  | 10  | 2023-01-01T00:00:00 |
+| 2  | 20  | 2023-01-01T00:00:01 |
++----+-----+---------------------+
+
+DROP TABLE update_test;
+
+Affected Rows: 0
+

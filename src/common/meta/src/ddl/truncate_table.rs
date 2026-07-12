@@ -1,0 +1,245 @@
+// Copyright 2023 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+use api::helper::to_pb_time_ranges;
+use api::v1::region::{
+    RegionRequest, RegionRequestHeader, TruncateRequest as PbTruncateRegionRequest, region_request,
+    truncate_request,
+};
+use async_trait::async_trait;
+use common_procedure::error::{FromJsonSnafu, ToJsonSnafu};
+use common_procedure::{
+    Context as ProcedureContext, LockKey, Procedure, Result as ProcedureResult, Status,
+};
+use common_telemetry::debug;
+use common_telemetry::tracing_context::TracingContext;
+use futures::future::join_all;
+use serde::{Deserialize, Serialize};
+use snafu::{ResultExt, ensure};
+use store_api::storage::RegionId;
+use strum::AsRefStr;
+use table::metadata::{TableId, TableInfo};
+use table::table_name::TableName;
+use table::table_reference::TableReference;
+
+use crate::ddl::DdlContext;
+use crate::ddl::utils::{add_peer_context_if_needed, map_to_procedure_error};
+use crate::error::{ConvertTimeRangesSnafu, Result, TableNotFoundSnafu};
+use crate::key::DeserializedValueWithBytes;
+use crate::key::table_info::TableInfoValue;
+use crate::key::table_name::TableNameKey;
+use crate::lock_key::{CatalogLock, SchemaLock, TableLock};
+use crate::metrics;
+use crate::rpc::ddl::TruncateTableTask;
+use crate::rpc::router::{find_leader_regions, find_leaders};
+
+pub struct TruncateTableProcedure {
+    context: DdlContext,
+    data: TruncateTableData,
+}
+
+#[async_trait]
+impl Procedure for TruncateTableProcedure {
+    fn type_name(&self) -> &str {
+        Self::TYPE_NAME
+    }
+
+    async fn execute(&mut self, _ctx: &ProcedureContext) -> ProcedureResult<Status> {
+        let state = &self.data.state;
+
+        let _timer = metrics::METRIC_META_PROCEDURE_TRUNCATE_TABLE
+            .with_label_values(&[state.as_ref()])
+            .start_timer();
+
+        match self.data.state {
+            TruncateTableState::Prepare => self.on_prepare().await,
+            TruncateTableState::DatanodeTruncateRegions => {
+                self.on_datanode_truncate_regions().await
+            }
+        }
+        .map_err(map_to_procedure_error)
+    }
+
+    fn dump(&self) -> ProcedureResult<String> {
+        serde_json::to_string(&self.data).context(ToJsonSnafu)
+    }
+
+    fn lock_key(&self) -> LockKey {
+        let table_ref = &self.data.table_ref();
+        let table_id = self.data.table_id();
+        let lock_key = vec![
+            CatalogLock::Read(table_ref.catalog).into(),
+            SchemaLock::read(table_ref.catalog, table_ref.schema).into(),
+            TableLock::Write(table_id).into(),
+        ];
+
+        LockKey::new(lock_key)
+    }
+}
+
+impl TruncateTableProcedure {
+    pub(crate) const TYPE_NAME: &'static str = "metasrv-procedure::TruncateTable";
+
+    pub(crate) fn new(
+        task: TruncateTableTask,
+        table_info_value: DeserializedValueWithBytes<TableInfoValue>,
+        context: DdlContext,
+    ) -> Self {
+        Self {
+            context,
+            data: TruncateTableData::new(task, table_info_value),
+        }
+    }
+
+    pub(crate) fn from_json(json: &str, context: DdlContext) -> ProcedureResult<Self> {
+        let data = serde_json::from_str(json).context(FromJsonSnafu)?;
+        Ok(Self { context, data })
+    }
+
+    // Checks whether the table exists.
+    async fn on_prepare(&mut self) -> Result<Status> {
+        let table_ref = &self.data.table_ref();
+
+        let manager = &self.context.table_metadata_manager;
+
+        let exist = manager
+            .table_name_manager()
+            .exists(TableNameKey::new(
+                table_ref.catalog,
+                table_ref.schema,
+                table_ref.table,
+            ))
+            .await?;
+
+        ensure!(
+            exist,
+            TableNotFoundSnafu {
+                table_name: table_ref.to_string()
+            }
+        );
+
+        self.data.state = TruncateTableState::DatanodeTruncateRegions;
+
+        Ok(Status::executing(true))
+    }
+
+    async fn on_datanode_truncate_regions(&mut self) -> Result<Status> {
+        let table_id = self.data.table_id();
+
+        let (_, physical_table_route) = self
+            .context
+            .table_metadata_manager
+            .table_route_manager()
+            .get_physical_table_route(table_id)
+            .await?;
+        let leaders = find_leaders(&physical_table_route.region_routes);
+        let mut truncate_region_tasks = Vec::with_capacity(leaders.len());
+
+        for datanode in leaders {
+            let requester = self.context.node_manager.datanode(&datanode).await;
+            let regions = find_leader_regions(&physical_table_route.region_routes, &datanode);
+
+            for region in regions {
+                let region_id = RegionId::new(table_id, region);
+                debug!(
+                    "Truncating table {} region {} on Datanode {:?}",
+                    self.data.table_ref(),
+                    region_id,
+                    datanode
+                );
+
+                let time_ranges = &self.data.task.time_ranges;
+                let kind = if time_ranges.is_empty() {
+                    truncate_request::Kind::All(api::v1::region::All {})
+                } else {
+                    let pb_time_ranges =
+                        to_pb_time_ranges(time_ranges).context(ConvertTimeRangesSnafu)?;
+                    truncate_request::Kind::TimeRanges(pb_time_ranges)
+                };
+
+                let request = RegionRequest {
+                    header: Some(RegionRequestHeader {
+                        tracing_context: TracingContext::from_current_span().to_w3c(),
+                        ..Default::default()
+                    }),
+                    body: Some(region_request::Body::Truncate(PbTruncateRegionRequest {
+                        region_id: region_id.as_u64(),
+                        kind: Some(kind),
+                    })),
+                };
+
+                let datanode = datanode.clone();
+                let requester = requester.clone();
+
+                truncate_region_tasks.push(async move {
+                    requester
+                        .handle(request)
+                        .await
+                        .map_err(add_peer_context_if_needed(datanode))
+                });
+            }
+        }
+
+        join_all(truncate_region_tasks)
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>>>()?;
+
+        Ok(Status::done())
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TruncateTableData {
+    state: TruncateTableState,
+    task: TruncateTableTask,
+    table_info_value: DeserializedValueWithBytes<TableInfoValue>,
+}
+
+impl TruncateTableData {
+    pub fn new(
+        task: TruncateTableTask,
+        table_info_value: DeserializedValueWithBytes<TableInfoValue>,
+    ) -> Self {
+        Self {
+            state: TruncateTableState::Prepare,
+            task,
+            table_info_value,
+        }
+    }
+
+    pub fn table_ref(&self) -> TableReference<'_> {
+        self.task.table_ref()
+    }
+
+    pub fn table_name(&self) -> TableName {
+        self.task.table_name()
+    }
+
+    fn table_info(&self) -> &TableInfo {
+        &self.table_info_value.table_info
+    }
+
+    fn table_id(&self) -> TableId {
+        self.table_info().ident.table_id
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, AsRefStr)]
+enum TruncateTableState {
+    /// Prepares to truncate the table
+    Prepare,
+    /// Truncates regions on Datanode
+    DatanodeTruncateRegions,
+}

@@ -1,0 +1,4 @@
+host_id,host_name,reading_value,ts
+1,Alice,10.5,2024-01-01T00:00:00
+bad,Bad,20.0,2024-01-01T00:00:01
+2,Bob,30.5,2024-01-01T00:00:02

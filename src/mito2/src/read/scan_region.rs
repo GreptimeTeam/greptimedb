@@ -1,0 +1,2534 @@
+// Copyright 2023 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//! Scans a region according to the scan request.
+
+use std::collections::{HashMap, HashSet};
+use std::fmt;
+use std::num::NonZeroU64;
+use std::sync::Arc;
+use std::time::Instant;
+
+use api::v1::SemanticType;
+use common_error::ext::BoxedError;
+use common_recordbatch::SendableRecordBatchStream;
+use common_recordbatch::adapter::RegionQueryStatCounters;
+use common_recordbatch::filter::SimpleFilterEvaluator;
+use common_telemetry::tracing::Instrument;
+use common_telemetry::{debug, error, tracing, warn};
+use common_time::range::TimestampRange;
+use datafusion::physical_plan::expressions::DynamicFilterPhysicalExpr;
+use datafusion_common::pruning::PruningStatistics;
+use datafusion_common::{Column, ScalarValue};
+use datafusion_expr::Expr;
+use datafusion_expr::utils::expr_to_columns;
+use datatypes::arrow::array::{ArrayRef, BooleanArray, UInt64Array};
+use datatypes::extension::json::is_structured_json_field;
+use datatypes::types::json_type::JsonNativeType;
+use datatypes::value::timestamp_to_scalar_value;
+use futures::StreamExt;
+use itertools::Itertools;
+use partition::expr::PartitionExpr;
+use smallvec::SmallVec;
+use snafu::ResultExt;
+use store_api::metadata::{RegionMetadata, RegionMetadataRef};
+use store_api::region_engine::{PartitionRange, RegionScannerRef};
+use store_api::storage::{
+    NestedPath, RegionId, ScanRequest, SequenceNumber, SequenceRange, TimeSeriesDistribution,
+    TimeSeriesRowSelector,
+};
+use table::predicate::{Predicate, build_time_range_predicate, extract_time_range_from_expr};
+use tokio::sync::{Semaphore, mpsc};
+use tokio_stream::wrappers::ReceiverStream;
+
+use crate::access_layer::AccessLayerRef;
+use crate::cache::CacheStrategy;
+use crate::config::DEFAULT_MAX_CONCURRENT_SCAN_FILES;
+use crate::error::{InvalidPartitionExprSnafu, Result};
+#[cfg(feature = "enterprise")]
+use crate::extension::{BoxedExtensionRange, BoxedExtensionRangeProvider};
+use crate::memtable::{MemtableRange, RangesOptions};
+use crate::metrics::READ_SST_COUNT;
+use crate::read::compat::{self, FlatCompatBatch};
+use crate::read::flat_projection::FlatProjectionMapper;
+use crate::read::range::{FileRangeBuilder, MemRangeBuilder, RangeMeta, RowGroupIndex};
+use crate::read::range_cache::{ScanRequestFingerprint, implied_time_range_from_exprs};
+use crate::read::read_columns::{
+    ReadColumns, merge, merge_nested_paths, read_columns_from_predicate,
+    read_columns_from_projection,
+};
+use crate::read::seq_scan::SeqScan;
+use crate::read::series_scan::SeriesScan;
+use crate::read::stream::ScanBatchStream;
+use crate::read::unordered_scan::UnorderedScan;
+use crate::read::{BoxedRecordBatchStream, RecordBatch};
+use crate::region::options::MergeMode;
+use crate::region::version::VersionRef;
+use crate::sst::file::FileHandle;
+use crate::sst::index::bloom_filter::applier::{
+    BloomFilterIndexApplierBuilder, BloomFilterIndexApplierRef,
+};
+use crate::sst::index::fulltext_index::applier::FulltextIndexApplierRef;
+use crate::sst::index::fulltext_index::applier::builder::FulltextIndexApplierBuilder;
+use crate::sst::index::inverted_index::applier::InvertedIndexApplierRef;
+use crate::sst::index::inverted_index::applier::builder::InvertedIndexApplierBuilder;
+#[cfg(feature = "vector_index")]
+use crate::sst::index::vector_index::applier::{VectorIndexApplier, VectorIndexApplierRef};
+use crate::sst::parquet::file_range::PreFilterMode;
+use crate::sst::parquet::reader::ReaderMetrics;
+
+#[cfg(feature = "vector_index")]
+const VECTOR_INDEX_OVERFETCH_MULTIPLIER: usize = 2;
+
+/// A scanner scans a region and returns a [SendableRecordBatchStream].
+pub(crate) enum Scanner {
+    /// Sequential scan.
+    Seq(SeqScan),
+    /// Unordered scan.
+    Unordered(UnorderedScan),
+    /// Per-series scan.
+    Series(SeriesScan),
+}
+
+impl Scanner {
+    /// Returns a [SendableRecordBatchStream] to retrieve scan results from all partitions.
+    #[tracing::instrument(level = tracing::Level::DEBUG, skip_all)]
+    pub(crate) async fn scan(&self) -> Result<SendableRecordBatchStream, BoxedError> {
+        match self {
+            Scanner::Seq(seq_scan) => seq_scan.build_stream(),
+            Scanner::Unordered(unordered_scan) => unordered_scan.build_stream().await,
+            Scanner::Series(series_scan) => series_scan.build_stream().await,
+        }
+    }
+
+    /// Create a stream of [`Batch`] by this scanner.
+    pub(crate) fn scan_batch(&self) -> Result<ScanBatchStream> {
+        match self {
+            Scanner::Seq(x) => x.scan_all_partitions(),
+            Scanner::Unordered(x) => x.scan_all_partitions(),
+            Scanner::Series(x) => x.scan_all_partitions(),
+        }
+    }
+}
+
+#[cfg(test)]
+impl Scanner {
+    /// Returns number of files to scan.
+    pub(crate) fn num_files(&self) -> usize {
+        match self {
+            Scanner::Seq(seq_scan) => seq_scan.input().num_files(),
+            Scanner::Unordered(unordered_scan) => unordered_scan.input().num_files(),
+            Scanner::Series(series_scan) => series_scan.input().num_files(),
+        }
+    }
+
+    /// Returns number of memtables to scan.
+    pub(crate) fn num_memtables(&self) -> usize {
+        match self {
+            Scanner::Seq(seq_scan) => seq_scan.input().num_memtables(),
+            Scanner::Unordered(unordered_scan) => unordered_scan.input().num_memtables(),
+            Scanner::Series(series_scan) => series_scan.input().num_memtables(),
+        }
+    }
+
+    /// Returns SST file ids to scan.
+    pub(crate) fn file_ids(&self) -> Vec<crate::sst::file::RegionFileId> {
+        match self {
+            Scanner::Seq(seq_scan) => seq_scan.input().file_ids(),
+            Scanner::Unordered(unordered_scan) => unordered_scan.input().file_ids(),
+            Scanner::Series(series_scan) => series_scan.input().file_ids(),
+        }
+    }
+
+    pub(crate) fn index_ids(&self) -> Vec<crate::sst::file::RegionIndexId> {
+        match self {
+            Scanner::Seq(seq_scan) => seq_scan.input().index_ids(),
+            Scanner::Unordered(unordered_scan) => unordered_scan.input().index_ids(),
+            Scanner::Series(series_scan) => series_scan.input().index_ids(),
+        }
+    }
+
+    pub(crate) fn snapshot_sequence(&self) -> Option<SequenceNumber> {
+        match self {
+            Scanner::Seq(seq_scan) => seq_scan.input().snapshot_sequence,
+            Scanner::Unordered(unordered_scan) => unordered_scan.input().snapshot_sequence,
+            Scanner::Series(series_scan) => series_scan.input().snapshot_sequence,
+        }
+    }
+
+    /// Sets the target partitions for the scanner. It can controls the parallelism of the scanner.
+    pub(crate) fn set_target_partitions(&mut self, target_partitions: usize) {
+        use store_api::region_engine::{PrepareRequest, RegionScanner};
+
+        let request = PrepareRequest::default().with_target_partitions(target_partitions);
+        match self {
+            Scanner::Seq(seq_scan) => seq_scan.prepare(request).unwrap(),
+            Scanner::Unordered(unordered_scan) => unordered_scan.prepare(request).unwrap(),
+            Scanner::Series(series_scan) => series_scan.prepare(request).unwrap(),
+        }
+    }
+}
+
+#[cfg_attr(doc, aquamarine::aquamarine)]
+/// Helper to scans a region by [ScanRequest].
+///
+/// [ScanRegion] collects SSTs and memtables to scan without actually reading them. It
+/// creates a [Scanner] to actually scan these targets in [Scanner::scan()].
+///
+/// ```mermaid
+/// classDiagram
+/// class ScanRegion {
+///     -VersionRef version
+///     -ScanRequest request
+///     ~scanner() Scanner
+///     ~seq_scan() SeqScan
+/// }
+/// class Scanner {
+///     <<enumeration>>
+///     SeqScan
+///     UnorderedScan
+///     +scan() SendableRecordBatchStream
+/// }
+/// class SeqScan {
+///     -ScanInput input
+///     +build() SendableRecordBatchStream
+/// }
+/// class UnorderedScan {
+///     -ScanInput input
+///     +build() SendableRecordBatchStream
+/// }
+/// class ScanInput {
+///     -ProjectionMapper mapper
+///     -Option~TimeRange~ time_range
+///     -Option~Predicate~ predicate
+///     -Vec~MemtableRef~ memtables
+///     -Vec~FileHandle~ files
+/// }
+/// class ProjectionMapper {
+///     ~output_schema() SchemaRef
+///     ~convert(Batch) RecordBatch
+/// }
+/// ScanRegion -- Scanner
+/// ScanRegion o-- ScanRequest
+/// Scanner o-- SeqScan
+/// Scanner o-- UnorderedScan
+/// SeqScan o-- ScanInput
+/// UnorderedScan o-- ScanInput
+/// Scanner -- SendableRecordBatchStream
+/// ScanInput o-- ProjectionMapper
+/// SeqScan -- SendableRecordBatchStream
+/// UnorderedScan -- SendableRecordBatchStream
+/// ```
+pub(crate) struct ScanRegion {
+    /// Version of the region at scan.
+    version: VersionRef,
+    /// Access layer of the region.
+    access_layer: AccessLayerRef,
+    /// Scan request.
+    request: ScanRequest,
+    /// Cache.
+    cache_strategy: CacheStrategy,
+    /// Maximum number of SST files to scan concurrently.
+    max_concurrent_scan_files: usize,
+    /// Whether to ignore inverted index.
+    ignore_inverted_index: bool,
+    /// Whether to ignore fulltext index.
+    ignore_fulltext_index: bool,
+    /// Whether to ignore bloom filter.
+    ignore_bloom_filter: bool,
+    /// Start time of the scan task.
+    start_time: Option<Instant>,
+    /// Whether to filter out the deleted rows.
+    /// Usually true for normal read, and false for scan for compaction.
+    filter_deleted: bool,
+    /// Counters that should receive query-load metrics.
+    query_stat_counters: Option<RegionQueryStatCounters>,
+    #[cfg(feature = "enterprise")]
+    extension_range_provider: Option<BoxedExtensionRangeProvider>,
+}
+
+impl ScanRegion {
+    /// Creates a [ScanRegion].
+    pub(crate) fn new(
+        version: VersionRef,
+        access_layer: AccessLayerRef,
+        request: ScanRequest,
+        cache_strategy: CacheStrategy,
+    ) -> ScanRegion {
+        ScanRegion {
+            version,
+            access_layer,
+            request,
+            cache_strategy,
+            max_concurrent_scan_files: DEFAULT_MAX_CONCURRENT_SCAN_FILES,
+            ignore_inverted_index: false,
+            ignore_fulltext_index: false,
+            ignore_bloom_filter: false,
+            start_time: None,
+            filter_deleted: true,
+            query_stat_counters: None,
+            #[cfg(feature = "enterprise")]
+            extension_range_provider: None,
+        }
+    }
+
+    /// Sets counters that should receive query-load metrics.
+    #[must_use]
+    pub(crate) fn with_query_stat_counters(mut self, counters: RegionQueryStatCounters) -> Self {
+        self.query_stat_counters = Some(counters);
+        self
+    }
+
+    /// Sets maximum number of SST files to scan concurrently.
+    #[must_use]
+    pub(crate) fn with_max_concurrent_scan_files(
+        mut self,
+        max_concurrent_scan_files: usize,
+    ) -> Self {
+        self.max_concurrent_scan_files = max_concurrent_scan_files;
+        self
+    }
+
+    /// Sets whether to ignore inverted index.
+    #[must_use]
+    pub(crate) fn with_ignore_inverted_index(mut self, ignore: bool) -> Self {
+        self.ignore_inverted_index = ignore;
+        self
+    }
+
+    /// Sets whether to ignore fulltext index.
+    #[must_use]
+    pub(crate) fn with_ignore_fulltext_index(mut self, ignore: bool) -> Self {
+        self.ignore_fulltext_index = ignore;
+        self
+    }
+
+    /// Sets whether to ignore bloom filter.
+    #[must_use]
+    pub(crate) fn with_ignore_bloom_filter(mut self, ignore: bool) -> Self {
+        self.ignore_bloom_filter = ignore;
+        self
+    }
+
+    #[must_use]
+    pub(crate) fn with_start_time(mut self, now: Instant) -> Self {
+        self.start_time = Some(now);
+        self
+    }
+
+    pub(crate) fn set_filter_deleted(&mut self, filter_deleted: bool) {
+        self.filter_deleted = filter_deleted;
+    }
+
+    #[cfg(feature = "enterprise")]
+    pub(crate) fn set_extension_range_provider(
+        &mut self,
+        extension_range_provider: BoxedExtensionRangeProvider,
+    ) {
+        self.extension_range_provider = Some(extension_range_provider);
+    }
+
+    /// Returns a [Scanner] to scan the region.
+    #[tracing::instrument(skip_all, fields(region_id = %self.region_id()))]
+    pub(crate) async fn scanner(self) -> Result<Scanner> {
+        if self.use_series_scan() {
+            self.series_scan().await.map(Scanner::Series)
+        } else if self.use_unordered_scan() {
+            // If table is append only and there is no series row selector, we use unordered scan in query.
+            // We still use seq scan in compaction.
+            self.unordered_scan().await.map(Scanner::Unordered)
+        } else {
+            self.seq_scan().await.map(Scanner::Seq)
+        }
+    }
+
+    /// Returns a [RegionScanner] to scan the region.
+    #[tracing::instrument(
+        level = tracing::Level::DEBUG,
+        skip_all,
+        fields(region_id = %self.region_id())
+    )]
+    pub(crate) async fn region_scanner(self) -> Result<RegionScannerRef> {
+        if self.use_series_scan() {
+            self.series_scan()
+                .await
+                .map(|scanner| Box::new(scanner) as _)
+        } else if self.use_unordered_scan() {
+            self.unordered_scan()
+                .await
+                .map(|scanner| Box::new(scanner) as _)
+        } else {
+            self.seq_scan().await.map(|scanner| Box::new(scanner) as _)
+        }
+    }
+
+    /// Scan sequentially.
+    #[tracing::instrument(skip_all, fields(region_id = %self.region_id()))]
+    pub(crate) async fn seq_scan(self) -> Result<SeqScan> {
+        let input = self.scan_input().await?.with_compaction(false);
+        Ok(SeqScan::new(input))
+    }
+
+    /// Unordered scan.
+    #[tracing::instrument(skip_all, fields(region_id = %self.region_id()))]
+    pub(crate) async fn unordered_scan(self) -> Result<UnorderedScan> {
+        let input = self.scan_input().await?;
+        Ok(UnorderedScan::new(input))
+    }
+
+    /// Scans by series.
+    #[tracing::instrument(skip_all, fields(region_id = %self.region_id()))]
+    pub(crate) async fn series_scan(self) -> Result<SeriesScan> {
+        let input = self.scan_input().await?;
+        Ok(SeriesScan::new(input))
+    }
+
+    /// Returns true if the region can use unordered scan for current request.
+    fn use_unordered_scan(&self) -> bool {
+        // We use unordered scan when:
+        // 1. The region is in append mode.
+        // 2. There is no series row selector.
+        // 3. The required distribution is None or TimeSeriesDistribution::TimeWindowed.
+        //
+        // We still use seq scan in compaction.
+        self.version.options.append_mode
+            && self.request.series_row_selector.is_none()
+            && (self.request.distribution.is_none()
+                || self.request.distribution == Some(TimeSeriesDistribution::TimeWindowed))
+    }
+
+    /// Returns true if the region can use series scan for current request.
+    fn use_series_scan(&self) -> bool {
+        self.request.distribution == Some(TimeSeriesDistribution::PerSeries)
+    }
+
+    /// Creates a scan input.
+    #[tracing::instrument(skip_all, fields(region_id = %self.region_id()))]
+    async fn scan_input(self) -> Result<ScanInput> {
+        let sst_min_sequence = self.request.sst_min_sequence.and_then(NonZeroU64::new);
+        let time_range = self.build_time_range_predicate();
+        let predicate = PredicateGroup::new(&self.version.metadata, &self.request.filters)?;
+
+        let mut read_cols = match &self.request.projection_input {
+            Some(p) => {
+                // Read columns include the pushed-down projection and columns
+                // resolved from the predicate.
+                let metadata = &self.version.metadata;
+                let from_projection = read_columns_from_projection(p.clone(), metadata)?;
+                let from_predicate = read_columns_from_predicate(&predicate, metadata);
+                merge(from_projection, from_predicate)
+            }
+            None => {
+                let read_col_ids = self
+                    .version
+                    .metadata
+                    .column_metadatas
+                    .iter()
+                    .map(|col| col.column_id);
+                ReadColumns::from_deduped_column_ids(read_col_ids)
+            }
+        };
+        // Only narrow read columns and pass JSON type hints for structured JSON (JSON2)
+        // columns. Legacy JSONB columns have JSON extension metadata but their physical
+        // Arrow type is Binary, not Struct, so they must not enter structured JSON paths.
+        let has_structured_json = self
+            .version
+            .metadata
+            .schema
+            .arrow_schema()
+            .fields()
+            .iter()
+            .any(is_structured_json_field);
+        if has_structured_json {
+            narrow_read_columns_by_json_type_hint(
+                &mut read_cols,
+                &self.request.json_type_hint,
+                &self.version.metadata,
+            );
+        }
+        let read_col_ids = read_cols.column_ids();
+
+        // The mapper always computes projected column ids as the schema of SSTs may change.
+        let projection = self
+            .request
+            .projection_indices()
+            .map(|x| x.to_vec())
+            .unwrap_or_else(|| (0..self.version.metadata.column_metadatas.len()).collect());
+        let json_type_hint = has_structured_json
+            .then_some(&self.request.json_type_hint)
+            .inspect(|json_type_hint| {
+                debug!(
+                    "Concretized JSON type: {{{}}}",
+                    json_type_hint
+                        .iter()
+                        .map(|(k, v)| format!("{}: {}", k, v))
+                        .join(", ")
+                );
+            });
+        let mapper = FlatProjectionMapper::new_with_read_columns(
+            &self.version.metadata,
+            projection,
+            read_cols,
+            json_type_hint,
+        )?;
+
+        let ssts = &self.version.ssts;
+        let mut files = Vec::new();
+        if !self.request.skip_sst_files {
+            for level in ssts.levels() {
+                for file in level.files.values() {
+                    let exceed_min_sequence = match (sst_min_sequence, file.meta_ref().sequence) {
+                        (Some(min_sequence), Some(file_sequence)) => file_sequence > min_sequence,
+                        // If the file's sequence is None (or actually is zero), it could mean the file
+                        // is generated and added to the region "directly". In this case, its data should
+                        // be considered as fresh as the memtable. So its sequence is treated greater than
+                        // the min_sequence, whatever the value of min_sequence is. Hence the default
+                        // "true" in this arm.
+                        (Some(_), None) => true,
+                        (None, _) => true,
+                    };
+
+                    // Finds SST files in range.
+                    if exceed_min_sequence && file_in_range(file, &time_range) {
+                        files.push(file.clone());
+                    }
+                    // There is no need to check and prune for file's sequence here as the sequence number is usually very new,
+                    // unless the timing is too good, or the sequence number wouldn't be in file.
+                    // and the batch will be filtered out by tree reader anyway.
+                }
+            }
+        }
+
+        let memtables = self.version.memtables.list_memtables();
+        // Skip empty memtables and memtables out of time range.
+        let mut mem_range_builders = Vec::new();
+        let filter_mode = pre_filter_mode(
+            self.version.options.append_mode,
+            self.version.options.merge_mode(),
+        );
+
+        for m in memtables {
+            // check if memtable is empty by reading stats.
+            let Some((start, end)) = m.stats().time_range() else {
+                continue;
+            };
+            // The time range of the memtable is inclusive.
+            let memtable_range = TimestampRange::new_inclusive(Some(start), Some(end));
+            if !memtable_range.intersects(&time_range) {
+                continue;
+            }
+            let ranges_in_memtable = m.ranges(
+                Some(&read_col_ids),
+                RangesOptions::default()
+                    .with_predicate(predicate.clone())
+                    .with_sequence(SequenceRange::new(
+                        self.request.memtable_min_sequence,
+                        self.request.memtable_max_sequence,
+                    ))
+                    .with_pre_filter_mode(filter_mode),
+            )?;
+            mem_range_builders.extend(ranges_in_memtable.ranges.into_values().map(|v| {
+                let stats = v.stats().clone();
+                MemRangeBuilder::new(v, stats)
+            }));
+        }
+
+        let region_id = self.region_id();
+        debug!(
+            "Scan region {}, request: {:?}, time range: {:?}, memtables: {}, ssts_to_read: {}, append_mode: {}",
+            region_id,
+            self.request,
+            time_range,
+            mem_range_builders.len(),
+            files.len(),
+            self.version.options.append_mode,
+        );
+
+        let (non_field_filters, field_filters) = self.partition_by_field_filters();
+        let inverted_index_appliers = [
+            self.build_invereted_index_applier(&non_field_filters),
+            self.build_invereted_index_applier(&field_filters),
+        ];
+        let bloom_filter_appliers = [
+            self.build_bloom_filter_applier(&non_field_filters),
+            self.build_bloom_filter_applier(&field_filters),
+        ];
+        let fulltext_index_appliers = [
+            self.build_fulltext_index_applier(&non_field_filters),
+            self.build_fulltext_index_applier(&field_filters),
+        ];
+        #[cfg(feature = "vector_index")]
+        let vector_index_applier = self.build_vector_index_applier();
+        #[cfg(feature = "vector_index")]
+        let vector_index_k = self.request.vector_search.as_ref().map(|search| {
+            if self.request.filters.is_empty() {
+                search.k
+            } else {
+                search.k.saturating_mul(VECTOR_INDEX_OVERFETCH_MULTIPLIER)
+            }
+        });
+
+        let input = ScanInput::new(self.access_layer, mapper)
+            .with_time_range(Some(time_range))
+            .with_predicate(predicate)
+            .with_memtables(mem_range_builders)
+            .with_files(files)
+            .with_cache(self.cache_strategy)
+            .with_inverted_index_appliers(inverted_index_appliers)
+            .with_bloom_filter_index_appliers(bloom_filter_appliers)
+            .with_fulltext_index_appliers(fulltext_index_appliers)
+            .with_max_concurrent_scan_files(self.max_concurrent_scan_files)
+            .with_start_time(self.start_time)
+            .with_append_mode(self.version.options.append_mode)
+            .with_filter_deleted(self.filter_deleted)
+            .with_merge_mode(self.version.options.merge_mode())
+            .with_series_row_selector(self.request.series_row_selector)
+            .with_distribution(self.request.distribution)
+            .with_explain_flat_format(
+                self.version.options.sst_format == Some(crate::sst::FormatType::Flat),
+            )
+            .with_snapshot_sequence(
+                self.request
+                    .snapshot_on_scan
+                    .then_some(self.request.memtable_max_sequence)
+                    .flatten(),
+            )
+            .with_query_stat_counters(self.query_stat_counters);
+        #[cfg(feature = "vector_index")]
+        let input = input
+            .with_vector_index_applier(vector_index_applier)
+            .with_vector_index_k(vector_index_k);
+
+        #[cfg(feature = "enterprise")]
+        let input = if !self.request.skip_sst_files
+            && let Some(provider) = self.extension_range_provider
+        {
+            let ranges = provider
+                .find_extension_ranges(self.version.flushed_sequence, time_range, &self.request)
+                .await?;
+            debug!("Find extension ranges: {ranges:?}");
+            input.with_extension_ranges(ranges)
+        } else {
+            input
+        };
+        Ok(input)
+    }
+
+    fn region_id(&self) -> RegionId {
+        self.version.metadata.region_id
+    }
+
+    /// Build time range predicate from filters.
+    fn build_time_range_predicate(&self) -> TimestampRange {
+        let time_index = self.version.metadata.time_index_column();
+        let unit = time_index
+            .column_schema
+            .data_type
+            .as_timestamp()
+            .expect("Time index must have timestamp-compatible type")
+            .unit();
+        build_time_range_predicate(&time_index.column_schema.name, unit, &self.request.filters)
+    }
+
+    /// Partitions filters into two groups: non-field filters and field filters.
+    /// Returns `(non_field_filters, field_filters)`.
+    fn partition_by_field_filters(&self) -> (Vec<Expr>, Vec<Expr>) {
+        let field_columns = self
+            .version
+            .metadata
+            .field_columns()
+            .map(|col| &col.column_schema.name)
+            .collect::<HashSet<_>>();
+
+        let mut columns = HashSet::new();
+
+        self.request.filters.iter().cloned().partition(|expr| {
+            columns.clear();
+            // `expr_to_columns` won't return error.
+            if expr_to_columns(expr, &mut columns).is_err() {
+                // If we can't extract columns, treat it as non-field filter
+                return true;
+            }
+            // Return true for non-field filters (partition puts true cases in first vec)
+            !columns
+                .iter()
+                .any(|column| field_columns.contains(&column.name))
+        })
+    }
+
+    /// Use the latest schema to build the inverted index applier.
+    fn build_invereted_index_applier(&self, filters: &[Expr]) -> Option<InvertedIndexApplierRef> {
+        if self.ignore_inverted_index {
+            return None;
+        }
+
+        let file_cache = self.cache_strategy.write_cache().map(|w| w.file_cache());
+        let inverted_index_cache = self.cache_strategy.inverted_index_cache().cloned();
+
+        let puffin_metadata_cache = self.cache_strategy.puffin_metadata_cache().cloned();
+
+        InvertedIndexApplierBuilder::new(
+            self.access_layer.table_dir().to_string(),
+            self.access_layer.path_type(),
+            self.access_layer.object_store().clone(),
+            self.version.metadata.as_ref(),
+            self.version.metadata.inverted_indexed_column_ids(
+                self.version
+                    .options
+                    .index_options
+                    .inverted_index
+                    .ignore_column_ids
+                    .iter(),
+            ),
+            self.access_layer.puffin_manager_factory().clone(),
+        )
+        .with_file_cache(file_cache)
+        .with_inverted_index_cache(inverted_index_cache)
+        .with_puffin_metadata_cache(puffin_metadata_cache)
+        .build(filters)
+        .inspect_err(|err| warn!(err; "Failed to build invereted index applier"))
+        .ok()
+        .flatten()
+        .map(Arc::new)
+    }
+
+    /// Use the latest schema to build the bloom filter index applier.
+    fn build_bloom_filter_applier(&self, filters: &[Expr]) -> Option<BloomFilterIndexApplierRef> {
+        if self.ignore_bloom_filter {
+            return None;
+        }
+
+        let file_cache = self.cache_strategy.write_cache().map(|w| w.file_cache());
+        let bloom_filter_index_cache = self.cache_strategy.bloom_filter_index_cache().cloned();
+        let puffin_metadata_cache = self.cache_strategy.puffin_metadata_cache().cloned();
+
+        BloomFilterIndexApplierBuilder::new(
+            self.access_layer.table_dir().to_string(),
+            self.access_layer.path_type(),
+            self.access_layer.object_store().clone(),
+            self.version.metadata.as_ref(),
+            self.access_layer.puffin_manager_factory().clone(),
+        )
+        .with_file_cache(file_cache)
+        .with_bloom_filter_index_cache(bloom_filter_index_cache)
+        .with_puffin_metadata_cache(puffin_metadata_cache)
+        .build(filters)
+        .inspect_err(|err| warn!(err; "Failed to build bloom filter index applier"))
+        .ok()
+        .flatten()
+        .map(Arc::new)
+    }
+
+    /// Use the latest schema to build the fulltext index applier.
+    fn build_fulltext_index_applier(&self, filters: &[Expr]) -> Option<FulltextIndexApplierRef> {
+        if self.ignore_fulltext_index {
+            return None;
+        }
+
+        let file_cache = self.cache_strategy.write_cache().map(|w| w.file_cache());
+        let puffin_metadata_cache = self.cache_strategy.puffin_metadata_cache().cloned();
+        let bloom_filter_index_cache = self.cache_strategy.bloom_filter_index_cache().cloned();
+        FulltextIndexApplierBuilder::new(
+            self.access_layer.table_dir().to_string(),
+            self.access_layer.path_type(),
+            self.access_layer.object_store().clone(),
+            self.access_layer.puffin_manager_factory().clone(),
+            self.version.metadata.as_ref(),
+        )
+        .with_file_cache(file_cache)
+        .with_puffin_metadata_cache(puffin_metadata_cache)
+        .with_bloom_filter_cache(bloom_filter_index_cache)
+        .build(filters)
+        .inspect_err(|err| warn!(err; "Failed to build fulltext index applier"))
+        .ok()
+        .flatten()
+        .map(Arc::new)
+    }
+
+    /// Build the vector index applier from vector search request.
+    #[cfg(feature = "vector_index")]
+    fn build_vector_index_applier(&self) -> Option<VectorIndexApplierRef> {
+        let vector_search = self.request.vector_search.as_ref()?;
+
+        let file_cache = self.cache_strategy.write_cache().map(|w| w.file_cache());
+        let puffin_metadata_cache = self.cache_strategy.puffin_metadata_cache().cloned();
+        let vector_index_cache = self.cache_strategy.vector_index_cache().cloned();
+
+        let applier = VectorIndexApplier::new(
+            self.access_layer.table_dir().to_string(),
+            self.access_layer.path_type(),
+            self.access_layer.object_store().clone(),
+            self.access_layer.puffin_manager_factory().clone(),
+            vector_search.column_id,
+            vector_search.query_vector.clone(),
+            vector_search.metric,
+        )
+        .with_file_cache(file_cache)
+        .with_puffin_metadata_cache(puffin_metadata_cache)
+        .with_vector_index_cache(vector_index_cache);
+
+        Some(Arc::new(applier))
+    }
+}
+
+/// Returns true if the time range of a SST `file` matches the `predicate`.
+fn file_in_range(file: &FileHandle, predicate: &TimestampRange) -> bool {
+    if predicate == &TimestampRange::min_to_max() {
+        return true;
+    }
+    // end timestamp of a SST is inclusive.
+    let (start, end) = file.time_range();
+    let file_ts_range = TimestampRange::new_inclusive(Some(start), Some(end));
+    file_ts_range.intersects(predicate)
+}
+
+/// Common input for different scanners.
+pub struct ScanInput {
+    /// Region SST access layer.
+    access_layer: AccessLayerRef,
+    /// Maps projected Batches to RecordBatches.
+    pub(crate) mapper: Arc<FlatProjectionMapper>,
+    /// The columns to read from memtables and SSTs.
+    /// Notice this is different from the columns in `mapper` which are projected columns.
+    /// But this read columns might also include non-projected columns needed for filtering.
+    pub(crate) read_cols: ReadColumns,
+    /// Time range filter for time index.
+    pub(crate) time_range: Option<TimestampRange>,
+    /// Predicate to push down.
+    pub(crate) predicate: PredicateGroup,
+    /// Region partition expr applied at read time.
+    region_partition_expr: Option<PartitionExpr>,
+    /// Memtable range builders for memtables in the time range..
+    pub(crate) memtables: Vec<MemRangeBuilder>,
+    /// Handles to SST files to scan.
+    pub(crate) files: Vec<FileHandle>,
+    /// Cache.
+    pub(crate) cache_strategy: CacheStrategy,
+    /// Ignores file not found error.
+    ignore_file_not_found: bool,
+    /// Maximum number of SST files to scan concurrently.
+    pub(crate) max_concurrent_scan_files: usize,
+    /// Index appliers.
+    inverted_index_appliers: [Option<InvertedIndexApplierRef>; 2],
+    bloom_filter_index_appliers: [Option<BloomFilterIndexApplierRef>; 2],
+    fulltext_index_appliers: [Option<FulltextIndexApplierRef>; 2],
+    /// Vector index applier for KNN search.
+    #[cfg(feature = "vector_index")]
+    pub(crate) vector_index_applier: Option<VectorIndexApplierRef>,
+    /// Over-fetched k for vector index scan.
+    #[cfg(feature = "vector_index")]
+    pub(crate) vector_index_k: Option<usize>,
+    /// Start time of the query.
+    pub(crate) query_start: Option<Instant>,
+    /// The region is using append mode.
+    pub(crate) append_mode: bool,
+    /// Whether to remove deletion markers.
+    pub(crate) filter_deleted: bool,
+    /// Mode to merge duplicate rows.
+    pub(crate) merge_mode: MergeMode,
+    /// Hint to select rows from time series.
+    pub(crate) series_row_selector: Option<TimeSeriesRowSelector>,
+    /// Hint for the required distribution of the scanner.
+    pub(crate) distribution: Option<TimeSeriesDistribution>,
+    /// Whether the region's configured SST format is flat.
+    explain_flat_format: bool,
+    /// Snapshot upper bound bound at scan open and propagated back to the caller.
+    pub(crate) snapshot_sequence: Option<SequenceNumber>,
+    /// Whether this scan is for compaction.
+    pub(crate) compaction: bool,
+    /// Counters that should receive query-load metrics.
+    pub(crate) query_stat_counters: Option<RegionQueryStatCounters>,
+    #[cfg(feature = "enterprise")]
+    extension_ranges: Vec<BoxedExtensionRange>,
+}
+
+impl ScanInput {
+    /// Creates a new [ScanInput].
+    #[must_use]
+    pub(crate) fn new(access_layer: AccessLayerRef, mapper: FlatProjectionMapper) -> ScanInput {
+        ScanInput {
+            access_layer,
+            read_cols: mapper.read_columns().clone(),
+            mapper: Arc::new(mapper),
+            time_range: None,
+            predicate: PredicateGroup::default(),
+            region_partition_expr: None,
+            memtables: Vec::new(),
+            files: Vec::new(),
+            cache_strategy: CacheStrategy::Disabled,
+            ignore_file_not_found: false,
+            max_concurrent_scan_files: DEFAULT_MAX_CONCURRENT_SCAN_FILES,
+            inverted_index_appliers: [None, None],
+            bloom_filter_index_appliers: [None, None],
+            fulltext_index_appliers: [None, None],
+            #[cfg(feature = "vector_index")]
+            vector_index_applier: None,
+            #[cfg(feature = "vector_index")]
+            vector_index_k: None,
+            query_start: None,
+            append_mode: false,
+            filter_deleted: true,
+            merge_mode: MergeMode::default(),
+            series_row_selector: None,
+            distribution: None,
+            explain_flat_format: false,
+            snapshot_sequence: None,
+            compaction: false,
+            query_stat_counters: None,
+            #[cfg(feature = "enterprise")]
+            extension_ranges: Vec::new(),
+        }
+    }
+
+    /// Sets time range filter for time index.
+    #[must_use]
+    pub(crate) fn with_time_range(mut self, time_range: Option<TimestampRange>) -> Self {
+        self.time_range = time_range;
+        self
+    }
+
+    /// Sets predicate to push down.
+    #[must_use]
+    pub(crate) fn with_predicate(mut self, predicate: PredicateGroup) -> Self {
+        self.region_partition_expr = predicate.region_partition_expr().cloned();
+        self.predicate = predicate;
+        self
+    }
+
+    /// Sets memtable range builders.
+    #[must_use]
+    pub(crate) fn with_memtables(mut self, memtables: Vec<MemRangeBuilder>) -> Self {
+        self.memtables = memtables;
+        self
+    }
+
+    /// Sets files to read.
+    #[must_use]
+    pub(crate) fn with_files(mut self, files: Vec<FileHandle>) -> Self {
+        self.files = files;
+        self
+    }
+
+    /// Sets cache for this query.
+    #[must_use]
+    pub(crate) fn with_cache(mut self, cache: CacheStrategy) -> Self {
+        self.cache_strategy = cache;
+        self
+    }
+
+    /// Ignores file not found error.
+    #[must_use]
+    pub(crate) fn with_ignore_file_not_found(mut self, ignore: bool) -> Self {
+        self.ignore_file_not_found = ignore;
+        self
+    }
+
+    /// Sets maximum number of SST files to scan concurrently.
+    #[must_use]
+    pub(crate) fn with_max_concurrent_scan_files(
+        mut self,
+        max_concurrent_scan_files: usize,
+    ) -> Self {
+        self.max_concurrent_scan_files = max_concurrent_scan_files;
+        self
+    }
+
+    /// Sets inverted index appliers.
+    #[must_use]
+    pub(crate) fn with_inverted_index_appliers(
+        mut self,
+        appliers: [Option<InvertedIndexApplierRef>; 2],
+    ) -> Self {
+        self.inverted_index_appliers = appliers;
+        self
+    }
+
+    /// Sets bloom filter appliers.
+    #[must_use]
+    pub(crate) fn with_bloom_filter_index_appliers(
+        mut self,
+        appliers: [Option<BloomFilterIndexApplierRef>; 2],
+    ) -> Self {
+        self.bloom_filter_index_appliers = appliers;
+        self
+    }
+
+    /// Sets fulltext index appliers.
+    #[must_use]
+    pub(crate) fn with_fulltext_index_appliers(
+        mut self,
+        appliers: [Option<FulltextIndexApplierRef>; 2],
+    ) -> Self {
+        self.fulltext_index_appliers = appliers;
+        self
+    }
+
+    /// Sets vector index applier for KNN search.
+    #[cfg(feature = "vector_index")]
+    #[must_use]
+    pub(crate) fn with_vector_index_applier(
+        mut self,
+        applier: Option<VectorIndexApplierRef>,
+    ) -> Self {
+        self.vector_index_applier = applier;
+        self
+    }
+
+    /// Sets over-fetched k for vector index scan.
+    #[cfg(feature = "vector_index")]
+    #[must_use]
+    pub(crate) fn with_vector_index_k(mut self, k: Option<usize>) -> Self {
+        self.vector_index_k = k;
+        self
+    }
+
+    /// Sets start time of the query.
+    #[must_use]
+    pub(crate) fn with_start_time(mut self, now: Option<Instant>) -> Self {
+        self.query_start = now;
+        self
+    }
+
+    #[must_use]
+    pub(crate) fn with_append_mode(mut self, is_append_mode: bool) -> Self {
+        self.append_mode = is_append_mode;
+        self
+    }
+
+    pub(crate) fn with_query_stat_counters(
+        mut self,
+        counters: Option<RegionQueryStatCounters>,
+    ) -> Self {
+        self.query_stat_counters = counters;
+        self
+    }
+
+    /// Sets whether to remove deletion markers during scan.
+    #[must_use]
+    pub(crate) fn with_filter_deleted(mut self, filter_deleted: bool) -> Self {
+        self.filter_deleted = filter_deleted;
+        self
+    }
+
+    /// Sets the merge mode.
+    #[must_use]
+    pub(crate) fn with_merge_mode(mut self, merge_mode: MergeMode) -> Self {
+        self.merge_mode = merge_mode;
+        self
+    }
+
+    /// Sets the distribution hint.
+    #[must_use]
+    pub(crate) fn with_distribution(
+        mut self,
+        distribution: Option<TimeSeriesDistribution>,
+    ) -> Self {
+        self.distribution = distribution;
+        self
+    }
+
+    /// Sets whether the region's configured SST format is flat for explain output.
+    #[must_use]
+    pub(crate) fn with_explain_flat_format(mut self, explain_flat_format: bool) -> Self {
+        self.explain_flat_format = explain_flat_format;
+        self
+    }
+
+    /// Sets the time series row selector.
+    #[must_use]
+    pub(crate) fn with_series_row_selector(
+        mut self,
+        series_row_selector: Option<TimeSeriesRowSelector>,
+    ) -> Self {
+        self.series_row_selector = series_row_selector;
+        self
+    }
+
+    #[must_use]
+    pub(crate) fn with_snapshot_sequence(
+        mut self,
+        snapshot_sequence: Option<SequenceNumber>,
+    ) -> Self {
+        self.snapshot_sequence = snapshot_sequence;
+        self
+    }
+
+    /// Sets whether this scan is for compaction.
+    #[must_use]
+    pub(crate) fn with_compaction(mut self, compaction: bool) -> Self {
+        self.compaction = compaction;
+        self
+    }
+
+    /// Builds memtable ranges to scan by `index`.
+    pub(crate) fn build_mem_ranges(&self, index: RowGroupIndex) -> SmallVec<[MemtableRange; 2]> {
+        let memtable = &self.memtables[index.index];
+        let mut ranges = SmallVec::new();
+        memtable.build_ranges(index.row_group_index, &mut ranges);
+        ranges
+    }
+
+    pub(crate) fn predicate_for_file(&self, file: &FileHandle) -> Option<Predicate> {
+        if self.should_skip_region_partition(file) {
+            self.predicate.predicate_without_region().cloned()
+        } else {
+            self.predicate.predicate().cloned()
+        }
+    }
+
+    fn should_skip_region_partition(&self, file: &FileHandle) -> bool {
+        match (
+            self.region_partition_expr.as_ref(),
+            file.meta_ref().partition_expr.as_ref(),
+        ) {
+            (Some(region_expr), Some(file_expr)) => region_expr == file_expr,
+            _ => false,
+        }
+    }
+
+    /// Tries to build file-level pruning statistics using only the [FileHandle]'s manifest-level
+    /// time range, without reading any parquet metadata.
+    ///
+    /// Returns `None` if timestamp unit conversion overflows (conservative: keep the file).
+    fn try_file_level_pruning_stats(&self, file: &FileHandle) -> Option<FileLevelPruningStats> {
+        let (ts_min, ts_max) = file.time_range();
+        let time_index = self.mapper.metadata().time_index_column();
+        let time_index_unit = time_index.column_schema.data_type.as_timestamp()?.unit();
+
+        // Convert file timestamps to the time index column's unit. Use `convert_to_ceil` for
+        // the upper bound to avoid accidentally shrinking the manifest range.
+        let min_ts = ts_min.convert_to(time_index_unit)?;
+        let max_ts = ts_max.convert_to_ceil(time_index_unit)?;
+
+        Some(FileLevelPruningStats {
+            min_scalar: timestamp_to_scalar_value(time_index_unit, Some(min_ts.value())),
+            max_scalar: timestamp_to_scalar_value(time_index_unit, Some(max_ts.value())),
+            time_index_col_name: time_index.column_schema.name.clone(),
+        })
+    }
+
+    /// Checks whether a file can be definitively pruned using only its manifest-level
+    /// time range and the current predicate, without reading any parquet metadata.
+    ///
+    /// Returns `true` if [PruningStatistics] proves the file cannot contain matching rows.
+    #[inline]
+    pub(crate) fn can_manifest_prune_file(&self, file: &FileHandle) -> bool {
+        let predicate = self.predicate_for_file(file);
+        self.manifest_prunes_file(file, predicate.as_ref())
+    }
+
+    fn manifest_prunes_file(&self, file: &FileHandle, predicate: Option<&Predicate>) -> bool {
+        if let Some(pred) = predicate
+            && !pred.is_empty()
+            && let Some(file_level_stats) = self.try_file_level_pruning_stats(file)
+        {
+            let pruning_results = pred.prune_with_stats(
+                &file_level_stats,
+                self.mapper.metadata().schema.arrow_schema(),
+            );
+            pruning_results.first() == Some(&false)
+        } else {
+            false
+        }
+    }
+
+    /// Prunes a file to scan and returns the builder to build readers.
+    ///
+    /// This is the public entry point used by direct tests and non-pruner callers.
+    /// It performs its own manifest-level pruning check internally.
+    #[tracing::instrument(
+        skip_all,
+        fields(
+            region_id = %self.region_metadata().region_id,
+            file_id = %file.file_id()
+        )
+    )]
+    pub async fn prune_file(
+        &self,
+        file: &FileHandle,
+        pre_filter_mode: PreFilterMode,
+        reader_metrics: &mut ReaderMetrics,
+    ) -> Result<FileRangeBuilder> {
+        let predicate = self.predicate_for_file(file);
+
+        // Early file-level pruning using manifest time range before any parquet metadata access.
+        if self.manifest_prunes_file(file, predicate.as_ref()) {
+            reader_metrics.filter_metrics.files_time_range_pruned += 1;
+            return Ok(FileRangeBuilder::default());
+        }
+
+        self.prune_file_after_manifest_check(file, pre_filter_mode, predicate, reader_metrics)
+            .await
+    }
+
+    /// Second half of `prune_file` — performs the actual parquet metadata /
+    /// reader setup. Callers that already performed manifest-level pruning
+    /// (e.g. the `Pruner` via its shared `manifest_pruned_files` cache) should
+    /// call this directly to avoid a redundant manifest check.
+    ///
+    /// `predicate` is the result of `self.predicate_for_file(file)` computed
+    /// externally so the caller can reuse it if needed.
+    pub(crate) async fn prune_file_after_manifest_check(
+        &self,
+        file: &FileHandle,
+        pre_filter_mode: PreFilterMode,
+        predicate: Option<Predicate>,
+        reader_metrics: &mut ReaderMetrics,
+    ) -> Result<FileRangeBuilder> {
+        let may_build_selective_row_selection = predicate.is_some();
+        let decode_pk_values = !self.compaction
+            && self
+                .mapper
+                .read_columns()
+                .column_ids_iter()
+                .any(|column_id| self.mapper.metadata().primary_key.contains(&column_id));
+        let reader = self
+            .access_layer
+            .read_sst(file.clone())
+            .predicate(predicate)
+            .projection(Some(self.read_cols.clone()))
+            .cache(self.cache_strategy.clone())
+            .inverted_index_appliers(self.inverted_index_appliers.clone())
+            .bloom_filter_index_appliers(self.bloom_filter_index_appliers.clone())
+            .fulltext_index_appliers(self.fulltext_index_appliers.clone());
+        let reader = if !self.compaction && may_build_selective_row_selection {
+            reader.deferred_optional_page_index()
+        } else {
+            reader
+        };
+        #[cfg(feature = "vector_index")]
+        let reader = {
+            let mut reader = reader;
+            reader =
+                reader.vector_index_applier(self.vector_index_applier.clone(), self.vector_index_k);
+            reader
+        };
+        let res = reader
+            .expected_metadata(Some(self.mapper.metadata().clone()))
+            .compaction(self.compaction)
+            .pre_filter_mode(pre_filter_mode)
+            .decode_primary_key_values(decode_pk_values)
+            .build_reader_input(reader_metrics)
+            .await;
+        let read_input = match res {
+            Ok(x) => x,
+            Err(e) => {
+                if e.is_object_not_found() && self.ignore_file_not_found {
+                    error!(e; "File to scan does not exist, region_id: {}, file: {}", file.region_id(), file.file_id());
+                    return Ok(FileRangeBuilder::default());
+                } else {
+                    return Err(e);
+                }
+            }
+        };
+
+        let Some((mut file_range_ctx, selection)) = read_input else {
+            return Ok(FileRangeBuilder::default());
+        };
+
+        let need_compat = !compat::has_same_columns_and_pk_encoding(
+            &self.mapper,
+            file_range_ctx.read_format(),
+            self.compaction,
+        );
+        if need_compat {
+            // They have different schema. We need to adapt the batch first so the
+            // mapper can convert it.
+            let compat = FlatCompatBatch::try_new(
+                &self.mapper,
+                file_range_ctx.read_format(),
+                self.compaction,
+            )?;
+            file_range_ctx.set_compat_batch(compat);
+        }
+        Ok(FileRangeBuilder::new(Arc::new(file_range_ctx), selection))
+    }
+
+    /// Scans flat sources (RecordBatch streams) in parallel.
+    ///
+    /// # Panics if the input doesn't allow parallel scan.
+    #[tracing::instrument(
+        skip(self, sources, semaphore),
+        fields(
+            region_id = %self.region_metadata().region_id,
+            source_count = sources.len()
+        )
+    )]
+    pub(crate) fn create_parallel_flat_sources(
+        &self,
+        sources: Vec<BoxedRecordBatchStream>,
+        semaphore: Arc<Semaphore>,
+        channel_size: usize,
+    ) -> Result<Vec<BoxedRecordBatchStream>> {
+        if sources.len() <= 1 {
+            return Ok(sources);
+        }
+
+        // Spawn a task for each source.
+        let sources = sources
+            .into_iter()
+            .map(|source| {
+                let (sender, receiver) = mpsc::channel(channel_size);
+                self.spawn_flat_scan_task(source, semaphore.clone(), sender);
+                let stream = Box::pin(ReceiverStream::new(receiver));
+                Box::pin(stream) as _
+            })
+            .collect();
+        Ok(sources)
+    }
+
+    /// Spawns a task to scan a flat source (RecordBatch stream) asynchronously.
+    #[tracing::instrument(
+        skip(self, input, semaphore, sender),
+        fields(region_id = %self.region_metadata().region_id)
+    )]
+    pub(crate) fn spawn_flat_scan_task(
+        &self,
+        mut input: BoxedRecordBatchStream,
+        semaphore: Arc<Semaphore>,
+        sender: mpsc::Sender<Result<RecordBatch>>,
+    ) {
+        let region_id = self.region_metadata().region_id;
+        let span = tracing::info_span!(
+            "ScanInput::parallel_scan_task",
+            region_id = %region_id,
+            stream_kind = "flat"
+        );
+        common_runtime::spawn_query(
+            async move {
+                loop {
+                    // We release the permit before sending result to avoid the task waiting on
+                    // the channel with the permit held.
+                    let maybe_batch = {
+                        // Safety: We never close the semaphore.
+                        let _permit = semaphore.acquire().await.unwrap();
+                        input.next().await
+                    };
+                    match maybe_batch {
+                        Some(Ok(batch)) => {
+                            let _ = sender.send(Ok(batch)).await;
+                        }
+                        Some(Err(e)) => {
+                            let _ = sender.send(Err(e)).await;
+                            break;
+                        }
+                        None => break,
+                    }
+                }
+            }
+            .instrument(span),
+        );
+    }
+
+    pub(crate) fn total_rows(&self) -> usize {
+        let rows_in_files: usize = self.files.iter().map(|f| f.num_rows()).sum();
+        let rows_in_memtables: usize = self.memtables.iter().map(|m| m.stats().num_rows()).sum();
+
+        let rows = rows_in_files + rows_in_memtables;
+        #[cfg(feature = "enterprise")]
+        let rows = rows
+            + self
+                .extension_ranges
+                .iter()
+                .map(|x| x.num_rows())
+                .sum::<u64>() as usize;
+        rows
+    }
+
+    pub(crate) fn predicate_group(&self) -> &PredicateGroup {
+        &self.predicate
+    }
+
+    /// Returns number of memtables to scan.
+    pub(crate) fn num_memtables(&self) -> usize {
+        self.memtables.len()
+    }
+
+    /// Returns number of SST files to scan.
+    pub(crate) fn num_files(&self) -> usize {
+        self.files.len()
+    }
+
+    /// Gets the file handle from a row group index.
+    pub(crate) fn file_from_index(&self, index: RowGroupIndex) -> &FileHandle {
+        let file_index = index.index - self.num_memtables();
+        &self.files[file_index]
+    }
+
+    pub fn region_metadata(&self) -> &RegionMetadataRef {
+        self.mapper.metadata()
+    }
+
+    fn range_pre_filter_mode(&self, source_count: usize) -> PreFilterMode {
+        if source_count <= 1 {
+            // Duplicated rows in the same source is not a normal case and we don't provide
+            // strict dedup semantic (last_row/last_non_null) for it. We expect the duplicated rows
+            // are exactly identical in the same source so we use PreFilterMode::All for
+            // performance reason.
+            return PreFilterMode::All;
+        }
+
+        pre_filter_mode(self.append_mode, self.merge_mode)
+    }
+}
+
+#[cfg(feature = "enterprise")]
+impl ScanInput {
+    #[must_use]
+    pub(crate) fn with_extension_ranges(self, extension_ranges: Vec<BoxedExtensionRange>) -> Self {
+        Self {
+            extension_ranges,
+            ..self
+        }
+    }
+
+    #[cfg(feature = "enterprise")]
+    pub(crate) fn extension_ranges(&self) -> &[BoxedExtensionRange] {
+        &self.extension_ranges
+    }
+
+    /// Get a boxed [ExtensionRange] by the index in all ranges.
+    #[cfg(feature = "enterprise")]
+    pub(crate) fn extension_range(&self, i: usize) -> &BoxedExtensionRange {
+        &self.extension_ranges[i - self.num_memtables() - self.num_files()]
+    }
+}
+
+/// Lightweight [PruningStatistics] that only uses the file-level time range from manifest
+/// metadata, avoiding any parquet metadata reads. Used for early file-level pruning before
+/// accessing row-group-level statistics.
+pub(crate) struct FileLevelPruningStats {
+    /// Scalar value for the file's minimum timestamp in the time index column's unit.
+    pub(crate) min_scalar: ScalarValue,
+    /// Scalar value for the file's maximum timestamp in the time index column's unit.
+    pub(crate) max_scalar: ScalarValue,
+    /// Name of the time index column.
+    pub(crate) time_index_col_name: String,
+}
+
+impl PruningStatistics for FileLevelPruningStats {
+    fn min_values(&self, column: &Column) -> Option<ArrayRef> {
+        if column.name == self.time_index_col_name {
+            ScalarValue::iter_to_array(std::iter::once(self.min_scalar.clone())).ok()
+        } else {
+            None
+        }
+    }
+
+    fn max_values(&self, column: &Column) -> Option<ArrayRef> {
+        if column.name == self.time_index_col_name {
+            ScalarValue::iter_to_array(std::iter::once(self.max_scalar.clone())).ok()
+        } else {
+            None
+        }
+    }
+
+    fn num_containers(&self) -> usize {
+        1
+    }
+
+    fn null_counts(&self, column: &Column) -> Option<ArrayRef> {
+        if column.name == self.time_index_col_name {
+            // The time index column is NOT NULL.
+            Some(Arc::new(UInt64Array::from(vec![0u64])))
+        } else {
+            None
+        }
+    }
+
+    fn row_counts(&self, _column: &Column) -> Option<ArrayRef> {
+        None
+    }
+
+    fn contained(&self, _column: &Column, _values: &HashSet<ScalarValue>) -> Option<BooleanArray> {
+        None
+    }
+}
+
+#[cfg(test)]
+impl ScanInput {
+    /// Returns SST file ids to scan.
+    pub(crate) fn file_ids(&self) -> Vec<crate::sst::file::RegionFileId> {
+        self.files.iter().map(|file| file.file_id()).collect()
+    }
+
+    pub(crate) fn index_ids(&self) -> Vec<crate::sst::file::RegionIndexId> {
+        self.files.iter().map(|file| file.index_id()).collect()
+    }
+}
+
+fn pre_filter_mode(append_mode: bool, merge_mode: MergeMode) -> PreFilterMode {
+    if append_mode {
+        return PreFilterMode::All;
+    }
+
+    match merge_mode {
+        MergeMode::LastRow => PreFilterMode::SkipFields,
+        MergeMode::LastNonNull => PreFilterMode::SkipFields,
+    }
+}
+
+fn narrow_read_columns_by_json_type_hint(
+    read_columns: &mut ReadColumns,
+    json_type_hint: &HashMap<String, JsonNativeType>,
+    metadata: &RegionMetadata,
+) {
+    if json_type_hint.is_empty() {
+        return;
+    }
+
+    for read_column in &mut read_columns.cols {
+        let Some(column) = metadata.column_by_id(read_column.column_id) else {
+            continue;
+        };
+        let column_name = &column.column_schema.name;
+        let Some(json_type) = json_type_hint.get(column_name) else {
+            continue;
+        };
+
+        let mut paths = Vec::new();
+        let mut current = vec![column_name.clone()];
+        collect_json_nested_paths(json_type, &mut current, &mut paths);
+        merge_nested_paths(&mut read_column.nested_paths, paths)
+    }
+}
+
+fn collect_json_nested_paths(
+    json_type: &JsonNativeType,
+    current: &mut NestedPath,
+    paths: &mut Vec<NestedPath>,
+) {
+    match json_type {
+        JsonNativeType::Object(fields) if !fields.is_empty() => {
+            for (field, child) in fields {
+                current.push(field.clone());
+                collect_json_nested_paths(child, current, paths);
+                current.pop();
+            }
+        }
+        _ => paths.push(current.clone()),
+    }
+}
+
+/// Output of [build_scan_fingerprint]: the cache fingerprint plus the derived
+/// implied time range used to decide whether the cache key can drop the time
+/// predicates for a given partition (see `build_range_cache_key`).
+pub(crate) struct ScanFingerprintBundle {
+    pub(crate) fingerprint: ScanRequestFingerprint,
+    /// `Some(r)` = all time-only predicates are guaranteed true on `r` (in the
+    /// column's `TimeUnit`).
+    /// `None`    = at least one time-only predicate could not be proven (e.g.
+    /// `OR`), so the cache-key optimization is disabled for this scan.
+    pub(crate) implied_time_range: Option<TimestampRange>,
+}
+
+/// Builds a [ScanFingerprintBundle] from a [ScanInput] if the scan is eligible
+/// for partition range caching.
+pub(crate) fn build_scan_fingerprint(input: &ScanInput) -> Option<ScanFingerprintBundle> {
+    let eligible = !input.compaction
+        && !input.files.is_empty()
+        && matches!(input.cache_strategy, CacheStrategy::EnableAll(_));
+
+    if !eligible {
+        return None;
+    }
+
+    let metadata = input.region_metadata();
+    let tag_names: HashSet<&str> = metadata
+        .column_metadatas
+        .iter()
+        .filter(|col| col.semantic_type == SemanticType::Tag)
+        .map(|col| col.column_schema.name.as_str())
+        .collect();
+
+    let time_index = metadata.time_index_column();
+    let time_index_name = time_index.column_schema.name.clone();
+    let ts_col_unit = time_index
+        .column_schema
+        .data_type
+        .as_timestamp()
+        .expect("Time index must have timestamp-compatible type")
+        .unit();
+
+    let exprs = input
+        .predicate_group()
+        .predicate_without_region()
+        .map(|predicate| predicate.exprs())
+        .unwrap_or_default();
+
+    let mut filters = Vec::new();
+    let mut time_only_exprs: Vec<&Expr> = Vec::new();
+    let mut has_tag_filter = false;
+    let mut columns = HashSet::new();
+
+    for expr in exprs {
+        columns.clear();
+        let is_time_only = match expr_to_columns(expr, &mut columns) {
+            Ok(()) if !columns.is_empty() => {
+                has_tag_filter |= columns
+                    .iter()
+                    .any(|col| tag_names.contains(col.name.as_str()));
+                columns.iter().all(|col| col.name == time_index_name)
+            }
+            _ => false,
+        };
+
+        // Route time-only exprs that the legacy extractor recognizes into
+        // `time_only_exprs` so the implication walker
+        // (`implied_time_range_from_exprs`, called below) can attempt to drop
+        // them from the cache key when the partition's `FileTimeRange` is fully
+        // covered, then stringify them into the fingerprint's `time_filters`
+        // bucket. Time-only exprs that the extractor doesn't recognize stay in
+        // `filters` and never get stripped — conservatively correct.
+        if is_time_only
+            && extract_time_range_from_expr(&time_index_name, ts_col_unit, expr).is_some()
+        {
+            time_only_exprs.push(expr);
+        } else {
+            filters.push(expr.to_string());
+        }
+    }
+
+    if !has_tag_filter {
+        // We only cache requests that have tag filters to avoid caching all series.
+        return None;
+    }
+
+    let implied_time_range =
+        implied_time_range_from_exprs(&time_index_name, ts_col_unit, &time_only_exprs);
+    let mut time_filters: Vec<String> = time_only_exprs.iter().map(|e| e.to_string()).collect();
+
+    // Ensure the filters are sorted for consistent fingerprinting.
+    filters.sort_unstable();
+    time_filters.sort_unstable();
+    let read_columns = input.read_cols.clone();
+    let fingerprint = crate::read::range_cache::ScanRequestFingerprintBuilder {
+        read_column_types: read_columns
+            .column_ids_iter()
+            .map(|id| {
+                metadata
+                    .column_by_id(id)
+                    .map(|col| col.column_schema.data_type.clone())
+            })
+            .collect(),
+        read_columns,
+        filters,
+        time_filters,
+        series_row_selector: input.series_row_selector,
+        append_mode: input.append_mode,
+        filter_deleted: input.filter_deleted,
+        merge_mode: input.merge_mode,
+        partition_expr_version: metadata.partition_expr_version,
+    }
+    .build();
+
+    Some(ScanFingerprintBundle {
+        fingerprint,
+        implied_time_range,
+    })
+}
+
+/// Context shared by different streams from a scanner.
+/// It contains the input and ranges to scan.
+pub struct StreamContext {
+    /// Input memtables and files.
+    pub input: ScanInput,
+    /// Metadata for partition ranges.
+    pub(crate) ranges: Vec<RangeMeta>,
+    /// Precomputed scan fingerprint for partition range caching.
+    /// `None` when the scan is not eligible for caching.
+    #[allow(dead_code)]
+    pub(crate) scan_fingerprint: Option<ScanRequestFingerprint>,
+    /// Implied range of every time-only predicate, in the time index column's
+    /// `TimeUnit`. Used by `build_range_cache_key` to decide whether the
+    /// partition's `FileTimeRange` is fully covered (allowing `time_filters`
+    /// to be stripped from the cache key). `None` when caching is ineligible
+    /// or when the implication walker bailed on an unsupported shape (e.g.
+    /// `OR`).
+    pub(crate) scan_implied_time_range: Option<TimestampRange>,
+
+    // Metrics:
+    /// The start time of the query.
+    pub(crate) query_start: Instant,
+}
+
+impl StreamContext {
+    /// Creates a new [StreamContext] for [SeqScan].
+    pub(crate) fn seq_scan_ctx(input: ScanInput) -> Self {
+        let query_start = input.query_start.unwrap_or_else(Instant::now);
+        let ranges = RangeMeta::seq_scan_ranges(&input);
+        READ_SST_COUNT.observe(input.num_files() as f64);
+        let (scan_fingerprint, scan_implied_time_range) = match build_scan_fingerprint(&input) {
+            Some(b) => (Some(b.fingerprint), b.implied_time_range),
+            None => (None, None),
+        };
+
+        Self {
+            input,
+            ranges,
+            scan_fingerprint,
+            scan_implied_time_range,
+            query_start,
+        }
+    }
+
+    /// Creates a new [StreamContext] for [UnorderedScan].
+    pub(crate) fn unordered_scan_ctx(input: ScanInput) -> Self {
+        let query_start = input.query_start.unwrap_or_else(Instant::now);
+        let ranges = RangeMeta::unordered_scan_ranges(&input);
+        READ_SST_COUNT.observe(input.num_files() as f64);
+        let (scan_fingerprint, scan_implied_time_range) = match build_scan_fingerprint(&input) {
+            Some(b) => (Some(b.fingerprint), b.implied_time_range),
+            None => (None, None),
+        };
+
+        Self {
+            input,
+            ranges,
+            scan_fingerprint,
+            scan_implied_time_range,
+            query_start,
+        }
+    }
+
+    /// Returns true if the index refers to a memtable.
+    pub(crate) fn is_mem_range_index(&self, index: RowGroupIndex) -> bool {
+        self.input.num_memtables() > index.index
+    }
+
+    pub(crate) fn is_file_range_index(&self, index: RowGroupIndex) -> bool {
+        !self.is_mem_range_index(index)
+            && index.index < self.input.num_files() + self.input.num_memtables()
+    }
+
+    pub(crate) fn range_pre_filter_mode(&self, part_range: &PartitionRange) -> PreFilterMode {
+        let range_meta = &self.ranges[part_range.identifier];
+        let source_count = range_meta.indices.len();
+
+        self.input.range_pre_filter_mode(source_count)
+    }
+
+    /// Retrieves the partition ranges.
+    pub(crate) fn partition_ranges(&self) -> Vec<PartitionRange> {
+        self.ranges
+            .iter()
+            .enumerate()
+            .map(|(idx, range_meta)| range_meta.new_partition_range(idx))
+            .collect()
+    }
+
+    /// Format the context for explain.
+    pub(crate) fn format_for_explain(&self, verbose: bool, f: &mut fmt::Formatter) -> fmt::Result {
+        let (mut num_mem_ranges, mut num_file_ranges, mut num_other_ranges) = (0, 0, 0);
+        for range_meta in &self.ranges {
+            for idx in &range_meta.row_group_indices {
+                if self.is_mem_range_index(*idx) {
+                    num_mem_ranges += 1;
+                } else if self.is_file_range_index(*idx) {
+                    num_file_ranges += 1;
+                } else {
+                    num_other_ranges += 1;
+                }
+            }
+        }
+        if verbose {
+            write!(f, "{{")?;
+        }
+        write!(
+            f,
+            r#""partition_count":{{"count":{}, "mem_ranges":{}, "files":{}, "file_ranges":{}"#,
+            self.ranges.len(),
+            num_mem_ranges,
+            self.input.num_files(),
+            num_file_ranges,
+        )?;
+        if num_other_ranges > 0 {
+            write!(f, r#", "other_ranges":{}"#, num_other_ranges)?;
+        }
+        write!(f, "}}")?;
+
+        if let Some(selector) = &self.input.series_row_selector {
+            write!(f, ", \"selector\":\"{}\"", selector)?;
+        }
+        if let Some(distribution) = &self.input.distribution {
+            write!(f, ", \"distribution\":\"{}\"", distribution)?;
+        }
+
+        if verbose {
+            self.format_verbose_content(f)?;
+        }
+
+        Ok(())
+    }
+
+    fn format_verbose_content(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        struct FileWrapper<'a> {
+            file: &'a FileHandle,
+        }
+
+        impl fmt::Debug for FileWrapper<'_> {
+            fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                let (start, end) = self.file.time_range();
+                write!(
+                    f,
+                    r#"{{"file_id":"{}","time_range_start":"{}::{}","time_range_end":"{}::{}","rows":{},"size":{},"index_size":{}}}"#,
+                    self.file.file_id(),
+                    start.value(),
+                    start.unit(),
+                    end.value(),
+                    end.unit(),
+                    self.file.num_rows(),
+                    self.file.size(),
+                    self.file.index_size()
+                )
+            }
+        }
+
+        struct InputWrapper<'a> {
+            input: &'a ScanInput,
+        }
+
+        #[cfg(feature = "enterprise")]
+        impl InputWrapper<'_> {
+            fn format_extension_ranges(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                if self.input.extension_ranges.is_empty() {
+                    return Ok(());
+                }
+
+                let mut delimiter = "";
+                write!(f, ", extension_ranges: [")?;
+                for range in self.input.extension_ranges() {
+                    write!(f, "{}{:?}", delimiter, range)?;
+                    delimiter = ", ";
+                }
+                write!(f, "]")?;
+                Ok(())
+            }
+        }
+
+        impl fmt::Debug for InputWrapper<'_> {
+            fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                let output_schema = self.input.mapper.output_schema();
+                if !output_schema.is_empty() {
+                    let names: Vec<_> = output_schema
+                        .column_schemas()
+                        .iter()
+                        .map(|col| &col.name)
+                        .collect();
+                    write!(f, ", \"projection\": {:?}", names)?;
+                }
+                if let Some(predicate) = &self.input.predicate.predicate() {
+                    if !predicate.exprs().is_empty() {
+                        let exprs: Vec<_> =
+                            predicate.exprs().iter().map(|e| e.to_string()).collect();
+                        write!(f, ", \"filters\": {:?}", exprs)?;
+                    }
+                    if !predicate.dyn_filters().is_empty() {
+                        let dyn_filters: Vec<_> = predicate
+                            .dyn_filters()
+                            .iter()
+                            .map(|f| format!("{}", f))
+                            .collect();
+                        write!(f, ", \"dyn_filters\": {:?}", dyn_filters)?;
+                    }
+                }
+                #[cfg(feature = "vector_index")]
+                if let Some(vector_index_k) = self.input.vector_index_k {
+                    write!(f, ", \"vector_index_k\": {}", vector_index_k)?;
+                }
+                if !self.input.files.is_empty() {
+                    write!(f, ", \"files\": ")?;
+                    f.debug_list()
+                        .entries(self.input.files.iter().map(|file| FileWrapper { file }))
+                        .finish()?;
+                }
+                write!(f, ", \"flat_format\": {}", self.input.explain_flat_format)?;
+                #[cfg(feature = "enterprise")]
+                self.format_extension_ranges(f)?;
+
+                Ok(())
+            }
+        }
+
+        write!(f, "{:?}", InputWrapper { input: &self.input })
+    }
+
+    /// Add new dynamic filters to the predicates.
+    /// Safe after stream creation; in-flight reads may still observe an older snapshot.
+    pub(crate) fn add_dyn_filter_to_predicate(
+        self: &Arc<Self>,
+        filter_exprs: Vec<Arc<dyn datafusion::physical_plan::PhysicalExpr>>,
+    ) -> Vec<bool> {
+        let mut supported = Vec::with_capacity(filter_exprs.len());
+        let filter_expr = filter_exprs
+            .into_iter()
+            .filter_map(|expr| {
+                if let Ok(dyn_filter) = (expr as Arc<dyn std::any::Any + Send + Sync + 'static>)
+                .downcast::<datafusion::physical_plan::expressions::DynamicFilterPhysicalExpr>()
+            {
+                supported.push(true);
+                Some(dyn_filter)
+            } else {
+                supported.push(false);
+                None
+            }
+            })
+            .collect();
+        self.input.predicate.add_dyn_filters(filter_expr);
+        supported
+    }
+}
+
+/// Predicates to evaluate.
+/// It only keeps filters that [SimpleFilterEvaluator] supports.
+#[derive(Clone, Default)]
+pub struct PredicateGroup {
+    time_filters: Option<Arc<Vec<SimpleFilterEvaluator>>>,
+    /// Predicate that includes request filters and region partition expr (if any).
+    predicate_all: Predicate,
+    /// Predicate that only includes request filters.
+    predicate_without_region: Predicate,
+    /// Region partition expression restored from metadata.
+    region_partition_expr: Option<PartitionExpr>,
+}
+
+impl PredicateGroup {
+    /// Creates a new `PredicateGroup` from exprs according to the metadata.
+    pub fn new(metadata: &RegionMetadata, exprs: &[Expr]) -> Result<Self> {
+        let mut combined_exprs = exprs.to_vec();
+        let mut region_partition_expr = None;
+
+        if let Some(expr_json) = metadata.partition_expr.as_ref()
+            && !expr_json.is_empty()
+            && let Some(expr) = PartitionExpr::from_json_str(expr_json)
+                .context(InvalidPartitionExprSnafu { expr: expr_json })?
+        {
+            let logical_expr = expr
+                .try_as_logical_expr()
+                .context(InvalidPartitionExprSnafu {
+                    expr: expr_json.clone(),
+                })?;
+
+            combined_exprs.push(logical_expr);
+            region_partition_expr = Some(expr);
+        }
+
+        let mut time_filters = Vec::with_capacity(combined_exprs.len());
+        // Columns in the expr.
+        let mut columns = HashSet::new();
+        for expr in &combined_exprs {
+            columns.clear();
+            let Some(filter) = Self::expr_to_filter(expr, metadata, &mut columns) else {
+                continue;
+            };
+            time_filters.push(filter);
+        }
+        let time_filters = if time_filters.is_empty() {
+            None
+        } else {
+            Some(Arc::new(time_filters))
+        };
+
+        let predicate_all = Predicate::new(combined_exprs);
+        let predicate_without_region = Predicate::new(exprs.to_vec());
+
+        Ok(Self {
+            time_filters,
+            predicate_all,
+            predicate_without_region,
+            region_partition_expr,
+        })
+    }
+
+    /// Returns time filters.
+    pub(crate) fn time_filters(&self) -> Option<Arc<Vec<SimpleFilterEvaluator>>> {
+        self.time_filters.clone()
+    }
+
+    /// Returns predicate of all exprs (including region partition expr if present).
+    pub(crate) fn predicate(&self) -> Option<&Predicate> {
+        if self.predicate_all.is_empty() {
+            None
+        } else {
+            Some(&self.predicate_all)
+        }
+    }
+
+    /// Returns predicate that excludes region partition expr.
+    pub(crate) fn predicate_without_region(&self) -> Option<&Predicate> {
+        if self.predicate_without_region.is_empty() {
+            None
+        } else {
+            Some(&self.predicate_without_region)
+        }
+    }
+
+    /// Add dynamic filters in the predicates.
+    pub(crate) fn add_dyn_filters(&self, dyn_filters: Vec<Arc<DynamicFilterPhysicalExpr>>) {
+        self.predicate_all.add_dyn_filters(dyn_filters.clone());
+        self.predicate_without_region.add_dyn_filters(dyn_filters);
+    }
+
+    /// Returns the region partition expr from metadata, if any.
+    pub(crate) fn region_partition_expr(&self) -> Option<&PartitionExpr> {
+        self.region_partition_expr.as_ref()
+    }
+
+    fn expr_to_filter(
+        expr: &Expr,
+        metadata: &RegionMetadata,
+        columns: &mut HashSet<Column>,
+    ) -> Option<SimpleFilterEvaluator> {
+        columns.clear();
+        // `expr_to_columns` won't return error.
+        // We still ignore these expressions for safety.
+        expr_to_columns(expr, columns).ok()?;
+        if columns.len() > 1 {
+            // Simple filter doesn't support multiple columns.
+            return None;
+        }
+        let column = columns.iter().next()?;
+        let column_meta = metadata.column_by_name(&column.name)?;
+        if column_meta.semantic_type == SemanticType::Timestamp {
+            SimpleFilterEvaluator::try_new(expr)
+        } else {
+            None
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use common_time::timestamp::{TimeUnit, Timestamp};
+    use datafusion::physical_plan::expressions::{
+        binary as physical_binary, col as physical_col, lit as physical_lit,
+    };
+    use datafusion_common::ScalarValue;
+    use datafusion_expr::{Operator, col, lit};
+    use datatypes::arrow::datatypes::{
+        DataType as ArrowDataType, Field, Schema as ArrowSchema, TimeUnit as ArrowTimeUnit,
+    };
+    use datatypes::prelude::ConcreteDataType;
+    use datatypes::schema::ColumnSchema;
+    use datatypes::types::json_type::JsonObjectType;
+    use datatypes::value::Value;
+    use partition::expr::col as partition_col;
+    use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
+    use store_api::storage::{RegionId, TimeSeriesDistribution, TimeSeriesRowSelector};
+
+    use super::*;
+    use crate::cache::CacheManager;
+    use crate::error::InvalidMetadataSnafu;
+    use crate::read::range_cache::ScanRequestFingerprintBuilder;
+    use crate::read::read_columns::ReadColumn;
+    use crate::sst::file::FileMeta;
+    use crate::test_util::memtable_util::metadata_with_primary_key;
+    use crate::test_util::scheduler_util::SchedulerEnv;
+
+    async fn new_scan_input(metadata: RegionMetadataRef, filters: Vec<Expr>) -> ScanInput {
+        let env = SchedulerEnv::new().await;
+        let mapper = FlatProjectionMapper::new(&metadata, [0, 2, 3]).unwrap();
+        let predicate = PredicateGroup::new(metadata.as_ref(), &filters).unwrap();
+        let file = FileHandle::new(
+            crate::sst::file::FileMeta::default(),
+            Arc::new(crate::sst::file_purger::NoopFilePurger),
+        );
+
+        ScanInput::new(env.access_layer.clone(), mapper)
+            .with_predicate(predicate)
+            .with_cache(CacheStrategy::EnableAll(Arc::new(
+                CacheManager::builder()
+                    .range_result_cache_size(1024)
+                    .build(),
+            )))
+            .with_files(vec![file])
+    }
+
+    /// Helper to create a timestamp millisecond literal.
+    fn ts_lit(val: i64) -> datafusion_expr::Expr {
+        lit(ScalarValue::TimestampMillisecond(Some(val), None))
+    }
+
+    fn metadata_with_time_index_unit(unit: TimeUnit) -> RegionMetadataRef {
+        let mut builder = RegionMetadataBuilder::new(RegionId::new(123, 456));
+        builder
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "k0".to_string(),
+                    ConcreteDataType::string_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Tag,
+                column_id: 0,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "k1".to_string(),
+                    ConcreteDataType::uint32_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Tag,
+                column_id: 1,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "ts".to_string(),
+                    ConcreteDataType::timestamp_datatype(unit),
+                    false,
+                ),
+                semantic_type: SemanticType::Timestamp,
+                column_id: 2,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "v0".to_string(),
+                    ConcreteDataType::int64_datatype(),
+                    true,
+                ),
+                semantic_type: SemanticType::Field,
+                column_id: 3,
+            })
+            .primary_key(vec![0, 1]);
+
+        Arc::new(builder.build().unwrap())
+    }
+
+    fn file_handle_with_time_range(start: Timestamp, end: Timestamp) -> FileHandle {
+        FileHandle::new(
+            FileMeta {
+                time_range: (start, end),
+                ..Default::default()
+            },
+            Arc::new(crate::sst::file_purger::NoopFilePurger),
+        )
+    }
+
+    #[test]
+    fn test_fill_json_nested_paths_from_hint() -> Result<()> {
+        fn json_projection_test_metadata() -> Result<RegionMetadataRef> {
+            let mut builder = RegionMetadataBuilder::new(RegionId::new(1024, 0));
+            builder
+                .push_column_metadata(ColumnMetadata {
+                    column_schema: ColumnSchema::new(
+                        "tag".to_string(),
+                        ConcreteDataType::string_datatype(),
+                        true,
+                    ),
+                    semantic_type: SemanticType::Tag,
+                    column_id: 0,
+                })
+                .push_column_metadata(ColumnMetadata {
+                    column_schema: ColumnSchema::new(
+                        "j".to_string(),
+                        ConcreteDataType::json2(JsonNativeType::Object(JsonObjectType::new())),
+                        true,
+                    ),
+                    semantic_type: SemanticType::Field,
+                    column_id: 1,
+                })
+                .push_column_metadata(ColumnMetadata {
+                    column_schema: ColumnSchema::new(
+                        "ts".to_string(),
+                        ConcreteDataType::timestamp_millisecond_datatype(),
+                        false,
+                    ),
+                    semantic_type: SemanticType::Timestamp,
+                    column_id: 2,
+                });
+            builder.primary_key(vec![0]);
+            builder.build().context(InvalidMetadataSnafu).map(Arc::new)
+        }
+
+        let metadata = json_projection_test_metadata()?;
+        let hint = HashMap::from([(
+            "j".to_string(),
+            JsonNativeType::Object(JsonObjectType::from([
+                ("a".to_string(), JsonNativeType::i64()),
+                (
+                    "b".to_string(),
+                    JsonNativeType::Object(JsonObjectType::from([(
+                        "c".to_string(),
+                        JsonNativeType::String,
+                    )])),
+                ),
+            ])),
+        )]);
+
+        fn nested_path(parts: &[&str]) -> NestedPath {
+            parts.iter().map(|part| part.to_string()).collect()
+        }
+
+        let mut read_columns = ReadColumns {
+            cols: vec![ReadColumn::new(1, vec![]), ReadColumn::new(0, vec![])],
+        };
+        narrow_read_columns_by_json_type_hint(&mut read_columns, &hint, metadata.as_ref());
+        assert_eq!(
+            read_columns,
+            ReadColumns {
+                cols: vec![
+                    ReadColumn::new(
+                        1,
+                        vec![nested_path(&["j", "a"]), nested_path(&["j", "b", "c"])]
+                    ),
+                    ReadColumn::new(0, vec![])
+                ]
+            }
+        );
+
+        let mut read_columns = ReadColumns {
+            cols: vec![ReadColumn::new(0, vec![])],
+        };
+        narrow_read_columns_by_json_type_hint(&mut read_columns, &hint, metadata.as_ref());
+        assert_eq!(
+            read_columns,
+            ReadColumns {
+                cols: vec![ReadColumn::new(0, vec![])]
+            }
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_build_scan_fingerprint_for_eligible_scan() {
+        let metadata = Arc::new(metadata_with_primary_key(vec![0, 1], false));
+        let input = new_scan_input(
+            metadata.clone(),
+            vec![
+                col("ts").gt_eq(ts_lit(1000)),
+                col("k0").eq(lit("foo")),
+                col("v0").gt(lit(1)),
+            ],
+        )
+        .await
+        .with_distribution(Some(TimeSeriesDistribution::PerSeries))
+        .with_series_row_selector(Some(TimeSeriesRowSelector::LastRow))
+        .with_merge_mode(MergeMode::LastNonNull)
+        .with_filter_deleted(false);
+
+        let fingerprint = build_scan_fingerprint(&input).unwrap();
+
+        let expected = ScanRequestFingerprintBuilder {
+            read_columns: input.read_cols,
+            read_column_types: vec![
+                metadata
+                    .column_by_id(0)
+                    .map(|col| col.column_schema.data_type.clone()),
+                metadata
+                    .column_by_id(2)
+                    .map(|col| col.column_schema.data_type.clone()),
+                metadata
+                    .column_by_id(3)
+                    .map(|col| col.column_schema.data_type.clone()),
+            ],
+            filters: vec![
+                col("k0").eq(lit("foo")).to_string(),
+                col("v0").gt(lit(1)).to_string(),
+            ],
+            time_filters: vec![col("ts").gt_eq(ts_lit(1000)).to_string()],
+            series_row_selector: Some(TimeSeriesRowSelector::LastRow),
+            append_mode: false,
+            filter_deleted: false,
+            merge_mode: MergeMode::LastNonNull,
+            partition_expr_version: 0,
+        }
+        .build();
+        assert_eq!(expected, fingerprint.fingerprint);
+    }
+
+    #[tokio::test]
+    async fn test_build_scan_fingerprint_requires_tag_filter() {
+        let metadata = Arc::new(metadata_with_primary_key(vec![0, 1], false));
+        let input = new_scan_input(
+            metadata,
+            vec![col("ts").gt_eq(lit(1000)), col("v0").gt(lit(1))],
+        )
+        .await;
+
+        assert!(build_scan_fingerprint(&input).is_none());
+    }
+
+    #[tokio::test]
+    async fn test_build_scan_fingerprint_respects_scan_eligibility() {
+        let metadata = Arc::new(metadata_with_primary_key(vec![0, 1], false));
+        let filters = vec![col("k0").eq(lit("foo"))];
+
+        let disabled = ScanInput::new(
+            SchedulerEnv::new().await.access_layer.clone(),
+            FlatProjectionMapper::new(&metadata, [0, 2, 3].into_iter()).unwrap(),
+        )
+        .with_predicate(PredicateGroup::new(metadata.as_ref(), &filters).unwrap());
+        assert!(build_scan_fingerprint(&disabled).is_none());
+
+        let compaction = new_scan_input(metadata.clone(), filters.clone())
+            .await
+            .with_compaction(true);
+        assert!(build_scan_fingerprint(&compaction).is_none());
+
+        // No files to read.
+        let no_files = new_scan_input(metadata, filters).await.with_files(vec![]);
+        assert!(build_scan_fingerprint(&no_files).is_none());
+    }
+
+    #[tokio::test]
+    async fn test_build_scan_fingerprint_tracks_schema_and_partition_expr_changes() {
+        let base = metadata_with_primary_key(vec![0, 1], false);
+        let mut builder = RegionMetadataBuilder::from_existing(base);
+        let partition_expr = partition_col("k0")
+            .gt_eq(Value::String("foo".into()))
+            .as_json_str()
+            .unwrap();
+        builder.partition_expr_json(Some(partition_expr));
+        let metadata = Arc::new(builder.build_without_validation().unwrap());
+
+        let input = new_scan_input(metadata.clone(), vec![col("k0").eq(lit("foo"))]).await;
+        let fingerprint = build_scan_fingerprint(&input).unwrap();
+
+        let expected = ScanRequestFingerprintBuilder {
+            read_columns: input.read_cols,
+            read_column_types: vec![
+                metadata
+                    .column_by_id(0)
+                    .map(|col| col.column_schema.data_type.clone()),
+                metadata
+                    .column_by_id(2)
+                    .map(|col| col.column_schema.data_type.clone()),
+                metadata
+                    .column_by_id(3)
+                    .map(|col| col.column_schema.data_type.clone()),
+            ],
+            filters: vec![col("k0").eq(lit("foo")).to_string()],
+            time_filters: vec![],
+            series_row_selector: None,
+            append_mode: false,
+            filter_deleted: true,
+            merge_mode: MergeMode::LastRow,
+            partition_expr_version: metadata.partition_expr_version,
+        }
+        .build();
+        assert_eq!(expected, fingerprint.fingerprint);
+        assert_ne!(0, metadata.partition_expr_version);
+    }
+
+    #[test]
+    fn test_update_dyn_filters_with_empty_base_predicates() {
+        let metadata = Arc::new(metadata_with_primary_key(vec![0, 1], false));
+        let predicate_group = PredicateGroup::new(metadata.as_ref(), &[]).unwrap();
+        assert!(predicate_group.predicate().is_none());
+        assert!(predicate_group.predicate_without_region().is_none());
+
+        let dyn_filter = Arc::new(DynamicFilterPhysicalExpr::new(vec![], physical_lit(false)));
+        predicate_group.add_dyn_filters(vec![dyn_filter]);
+
+        let predicate_all = predicate_group.predicate().unwrap();
+        assert!(predicate_all.exprs().is_empty());
+        assert_eq!(1, predicate_all.dyn_filters().len());
+
+        let predicate_without_region = predicate_group.predicate_without_region().unwrap();
+        assert!(predicate_without_region.exprs().is_empty());
+        assert_eq!(1, predicate_without_region.dyn_filters().len());
+    }
+
+    #[test]
+    fn test_file_level_pruning_stats_prunes_old_file() {
+        let ts_col_name = "ts";
+        let predicate = Predicate::new(vec![col(ts_col_name).gt(ts_lit(1000))]);
+        let arrow_schema = Arc::new(ArrowSchema::new(vec![Field::new(
+            ts_col_name,
+            ArrowDataType::Timestamp(ArrowTimeUnit::Millisecond, None),
+            false,
+        )]));
+
+        // File with time range [0ms, 500ms] is completely before `ts > 1000ms`.
+        let stats = FileLevelPruningStats {
+            min_scalar: ScalarValue::TimestampMillisecond(Some(0), None),
+            max_scalar: ScalarValue::TimestampMillisecond(Some(500), None),
+            time_index_col_name: ts_col_name.to_string(),
+        };
+        assert_eq!(
+            vec![false],
+            predicate.prune_with_stats(&stats, &arrow_schema)
+        );
+
+        // File with time range [0ms, 2000ms] overlaps `ts > 1000ms`, so keep it.
+        let stats = FileLevelPruningStats {
+            min_scalar: ScalarValue::TimestampMillisecond(Some(0), None),
+            max_scalar: ScalarValue::TimestampMillisecond(Some(2000), None),
+            time_index_col_name: ts_col_name.to_string(),
+        };
+        assert_eq!(
+            vec![true],
+            predicate.prune_with_stats(&stats, &arrow_schema)
+        );
+    }
+
+    #[test]
+    fn test_file_level_pruning_stats_no_predicate_keeps_all() {
+        let predicate = Predicate::new(vec![]);
+        assert!(predicate.is_empty());
+
+        let stats = FileLevelPruningStats {
+            min_scalar: ScalarValue::TimestampMillisecond(Some(0), None),
+            max_scalar: ScalarValue::TimestampMillisecond(Some(500), None),
+            time_index_col_name: "ts".to_string(),
+        };
+        let arrow_schema = Arc::new(ArrowSchema::new(Vec::<Field>::new()));
+        assert_eq!(
+            vec![true],
+            predicate.prune_with_stats(&stats, &arrow_schema)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_file_level_pruning_stats_ceil_max_unit_conversion() {
+        let metadata = metadata_with_time_index_unit(TimeUnit::Millisecond);
+        let input = new_scan_input(metadata, vec![]).await;
+        let file = file_handle_with_time_range(
+            Timestamp::new(1_000_001, TimeUnit::Nanosecond),
+            Timestamp::new(1_000_001, TimeUnit::Nanosecond),
+        );
+
+        let stats = input.try_file_level_pruning_stats(&file).unwrap();
+        assert_eq!(
+            ScalarValue::TimestampMillisecond(Some(1), None),
+            stats.min_scalar
+        );
+        assert_eq!(
+            ScalarValue::TimestampMillisecond(Some(2), None),
+            stats.max_scalar
+        );
+
+        // The actual max timestamp is slightly greater than 1ms. It must be kept for `ts > 1ms`.
+        let predicate = Predicate::new(vec![col("ts").gt(ts_lit(1))]);
+        assert_eq!(
+            vec![true],
+            predicate.prune_with_stats(&stats, input.mapper.metadata().schema.arrow_schema())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_file_level_pruning_stats_overflow_keeps_file() {
+        let metadata = metadata_with_time_index_unit(TimeUnit::Nanosecond);
+        let input = new_scan_input(metadata, vec![]).await;
+        let file = file_handle_with_time_range(
+            Timestamp::new(0, TimeUnit::Second),
+            Timestamp::new(i64::MAX, TimeUnit::Second),
+        );
+
+        assert!(input.try_file_level_pruning_stats(&file).is_none());
+    }
+
+    #[test]
+    fn test_file_level_pruning_stats_keeps_inclusive_boundary() {
+        let ts_col_name = "ts";
+        let predicate = Predicate::new(vec![col(ts_col_name).gt_eq(ts_lit(1000))]);
+        let arrow_schema = Arc::new(ArrowSchema::new(vec![Field::new(
+            ts_col_name,
+            ArrowDataType::Timestamp(ArrowTimeUnit::Millisecond, None),
+            false,
+        )]));
+        let stats = FileLevelPruningStats {
+            min_scalar: ScalarValue::TimestampMillisecond(Some(0), None),
+            max_scalar: ScalarValue::TimestampMillisecond(Some(1000), None),
+            time_index_col_name: ts_col_name.to_string(),
+        };
+
+        assert_eq!(
+            vec![true],
+            predicate.prune_with_stats(&stats, &arrow_schema)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_file_level_pruning_with_dyn_filter_only_predicate() {
+        let metadata = Arc::new(metadata_with_primary_key(vec![0, 1], false));
+        let mapper = FlatProjectionMapper::new(&metadata, [0, 2, 3]).unwrap();
+        let predicate_group = PredicateGroup::new(metadata.as_ref(), &[]).unwrap();
+        predicate_group.add_dyn_filters(vec![Arc::new(DynamicFilterPhysicalExpr::new(
+            vec![],
+            physical_lit(false),
+        ))]);
+        let input = ScanInput::new(SchedulerEnv::new().await.access_layer.clone(), mapper)
+            .with_predicate(predicate_group);
+        let file = file_handle_with_time_range(
+            Timestamp::new_millisecond(0),
+            Timestamp::new_millisecond(1000),
+        );
+        let mut reader_metrics = ReaderMetrics::default();
+
+        let builder = input
+            .prune_file(&file, PreFilterMode::SkipFields, &mut reader_metrics)
+            .await
+            .unwrap();
+
+        assert_eq!(1, reader_metrics.filter_metrics.files_time_range_pruned);
+        let mut ranges = SmallVec::new();
+        builder.build_ranges(-1, &mut ranges);
+        assert!(ranges.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_manifest_pruning_observes_dynamic_filter_update() {
+        let metadata = Arc::new(metadata_with_primary_key(vec![0, 1], false));
+        let mapper = FlatProjectionMapper::new(&metadata, [0, 2, 3]).unwrap();
+        let predicate_group = PredicateGroup::new(metadata.as_ref(), &[]).unwrap();
+        let arrow_schema = metadata.schema.arrow_schema();
+        let ts_expr = physical_col("ts", arrow_schema.as_ref()).unwrap();
+        let dyn_filter = Arc::new(DynamicFilterPhysicalExpr::new(
+            vec![ts_expr.clone()],
+            physical_lit(true),
+        ));
+        predicate_group.add_dyn_filters(vec![dyn_filter.clone()]);
+        let input = ScanInput::new(SchedulerEnv::new().await.access_layer.clone(), mapper)
+            .with_predicate(predicate_group);
+        let file = file_handle_with_time_range(
+            Timestamp::new_millisecond(0),
+            Timestamp::new_millisecond(1000),
+        );
+
+        assert!(!input.can_manifest_prune_file(&file));
+
+        let updated = physical_binary(
+            ts_expr,
+            Operator::Gt,
+            physical_lit(ScalarValue::TimestampMillisecond(Some(1000), None)),
+            arrow_schema.as_ref(),
+        )
+        .unwrap();
+        dyn_filter.update(updated).unwrap();
+
+        assert!(input.can_manifest_prune_file(&file));
+    }
+
+    #[tokio::test]
+    async fn test_range_pre_filter_mode() {
+        let metadata = Arc::new(metadata_with_primary_key(vec![0, 1], false));
+        let cases = [
+            (true, MergeMode::LastRow, 1, PreFilterMode::All),
+            (false, MergeMode::LastNonNull, 1, PreFilterMode::All),
+            (false, MergeMode::LastRow, 2, PreFilterMode::SkipFields),
+            (true, MergeMode::LastRow, 2, PreFilterMode::All),
+        ];
+
+        for (append_mode, merge_mode, source_count, expected_mode) in cases {
+            let input = new_scan_input(metadata.clone(), vec![])
+                .await
+                .with_append_mode(append_mode)
+                .with_merge_mode(merge_mode);
+
+            assert_eq!(expected_mode, input.range_pre_filter_mode(source_count));
+        }
+    }
+}

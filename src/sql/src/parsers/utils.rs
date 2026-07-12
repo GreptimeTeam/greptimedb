@@ -1,0 +1,569 @@
+// Copyright 2023 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use chrono::{DateTime, Utc};
+use datafusion::config::ConfigOptions;
+use datafusion::error::Result as DfResult;
+use datafusion::execution::SessionStateBuilder;
+use datafusion::execution::context::SessionState;
+use datafusion::optimizer::simplify_expressions::ExprSimplifier;
+use datafusion_common::tree_node::{TreeNode, TreeNodeVisitor};
+use datafusion_common::{DFSchema, ScalarValue};
+use datafusion_expr::simplify::SimplifyContext;
+use datafusion_expr::{AggregateUDF, Expr, ScalarUDF, TableSource, WindowUDF};
+use datafusion_sql::TableReference;
+use datafusion_sql::planner::{ContextProvider, SqlToRel};
+use datatypes::arrow::datatypes::DataType;
+use datatypes::schema::{
+    COLUMN_FULLTEXT_OPT_KEY_ANALYZER, COLUMN_FULLTEXT_OPT_KEY_BACKEND,
+    COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE, COLUMN_FULLTEXT_OPT_KEY_FALSE_POSITIVE_RATE,
+    COLUMN_FULLTEXT_OPT_KEY_GRANULARITY, COLUMN_SKIPPING_INDEX_OPT_KEY_FALSE_POSITIVE_RATE,
+    COLUMN_SKIPPING_INDEX_OPT_KEY_GRANULARITY, COLUMN_SKIPPING_INDEX_OPT_KEY_TYPE,
+    COLUMN_VECTOR_INDEX_OPT_KEY_CONNECTIVITY, COLUMN_VECTOR_INDEX_OPT_KEY_ENGINE,
+    COLUMN_VECTOR_INDEX_OPT_KEY_EXPANSION_ADD, COLUMN_VECTOR_INDEX_OPT_KEY_EXPANSION_SEARCH,
+    COLUMN_VECTOR_INDEX_OPT_KEY_METRIC,
+};
+use snafu::{ResultExt, ensure};
+use sqlparser::dialect::Dialect;
+use sqlparser::keywords::Keyword;
+use sqlparser::parser::Parser;
+use table::requests::{SEMANTIC_PREFIX, validate_semantic_option, validate_table_option};
+
+use crate::error::{
+    ConvertToLogicalExpressionSnafu, InvalidSqlSnafu, InvalidTableOptionSnafu, ParseSqlValueSnafu,
+    Result, SimplificationSnafu, SyntaxSnafu,
+};
+use crate::parser::{ParseOptions, ParserContext};
+use crate::parsers::with_tql_parser::CteContent;
+use crate::statements::OptionMap;
+use crate::statements::query::Query;
+use crate::statements::statement::Statement;
+use crate::util::{OptionValue, parse_option_string};
+
+/// Check if the given SQL query is a TQL statement. Simple tql cte query is also considered as TQL statement.
+pub fn is_tql(dialect: &dyn Dialect, sql: &str) -> Result<bool> {
+    let stmts = ParserContext::create_with_dialect(sql, dialect, ParseOptions::default())?;
+
+    ensure!(
+        stmts.len() == 1,
+        InvalidSqlSnafu {
+            msg: format!("Expect only one statement, found {}", stmts.len())
+        }
+    );
+    let stmt = &stmts[0];
+    match stmt {
+        Statement::Tql(_) => Ok(true),
+        Statement::Query(query) => Ok(is_simple_tql_cte_query(query)),
+        _ => Ok(false),
+    }
+}
+
+pub(crate) fn is_simple_tql_cte_query(query: &Query) -> bool {
+    use crate::parser::ParserContext;
+
+    let Some(hybrid_cte) = &query.hybrid_cte else {
+        return false;
+    };
+
+    if !has_only_hybrid_tql_cte(query) {
+        return false;
+    }
+
+    let Some(cte) = hybrid_cte.cte_tables.first() else {
+        return false;
+    };
+    if hybrid_cte.cte_tables.len() != 1 || !matches!(cte.content, CteContent::Tql(_)) {
+        return false;
+    }
+
+    let Some(reference) = extract_simple_select_star_reference(query) else {
+        return false;
+    };
+
+    let reference = ParserContext::canonicalize_identifier(reference).value;
+    let cte_name = ParserContext::canonicalize_identifier(cte.name.clone()).value;
+    reference == cte_name
+}
+
+pub(crate) fn has_tql_cte(query: &Query) -> bool {
+    query.hybrid_cte.as_ref().is_some_and(|with| {
+        with.cte_tables
+            .iter()
+            .any(|cte| matches!(cte.content, CteContent::Tql(_)))
+    })
+}
+
+fn has_only_hybrid_tql_cte(query: &Query) -> bool {
+    query
+        .inner
+        .with
+        .as_ref()
+        .is_none_or(|with| with.cte_tables.is_empty())
+}
+
+fn extract_simple_select_star_reference(query: &Query) -> Option<sqlparser::ast::Ident> {
+    use sqlparser::ast::{SetExpr, TableFactor};
+
+    if !is_plain_query_root(&query.inner) {
+        return None;
+    }
+
+    let SetExpr::Select(select) = &*query.inner.body else {
+        return None;
+    };
+    if !is_plain_select(select) || !is_plain_wildcard_projection(select.projection.as_slice()) {
+        return None;
+    }
+
+    let [table_with_joins] = select.from.as_slice() else {
+        return None;
+    };
+    if !table_with_joins.joins.is_empty() {
+        return None;
+    }
+
+    let TableFactor::Table { name, .. } = &table_with_joins.relation else {
+        return None;
+    };
+    if name.0.len() != 1 {
+        return None;
+    }
+
+    name.0[0].as_ident().cloned()
+}
+
+fn is_plain_query_root(query: &sqlparser::ast::Query) -> bool {
+    query.order_by.is_none()
+        && query.limit_clause.is_none()
+        && query.fetch.is_none()
+        && query.locks.is_empty()
+        && query.for_clause.is_none()
+        && query.settings.is_none()
+        && query.format_clause.is_none()
+        && query.pipe_operators.is_empty()
+}
+
+fn is_plain_select(select: &sqlparser::ast::Select) -> bool {
+    use sqlparser::ast::GroupByExpr;
+
+    select.distinct.is_none()
+        && select.top.is_none()
+        && select.exclude.is_none()
+        && select.into.is_none()
+        && select.lateral_views.is_empty()
+        && select.prewhere.is_none()
+        && select.selection.is_none()
+        && matches!(select.group_by, GroupByExpr::Expressions(ref exprs, _) if exprs.is_empty())
+        && select.cluster_by.is_empty()
+        && select.distribute_by.is_empty()
+        && select.sort_by.is_empty()
+        && select.having.is_none()
+        && select.named_window.is_empty()
+        && select.qualify.is_none()
+        && select.value_table_mode.is_none()
+        && select.connect_by.is_empty()
+}
+
+fn is_plain_wildcard_projection(projection: &[sqlparser::ast::SelectItem]) -> bool {
+    use sqlparser::ast::SelectItem;
+
+    matches!(
+        projection,
+        [SelectItem::Wildcard(options)]
+            if options.opt_ilike.is_none()
+                && options.opt_exclude.is_none()
+                && options.opt_except.is_none()
+                && options.opt_replace.is_none()
+                && options.opt_rename.is_none()
+    )
+}
+
+/// Convert a parser expression to a scalar value. This function will try the
+/// best to resolve and reduce constants. Exprs like `1 + 1` or `now()` can be
+/// handled properly.
+///
+/// if `require_now_expr` is true, it will ensure that the expression contains a `now()` function.
+/// If the expression does not contain `now()`, it will return an error.
+///
+pub fn parser_expr_to_scalar_value_literal(
+    expr: sqlparser::ast::Expr,
+    require_now_expr: bool,
+) -> Result<ScalarValue> {
+    parser_expr_to_scalar_value_literal_at(expr, require_now_expr, None)
+}
+
+/// Same as [`parser_expr_to_scalar_value_literal`] but uses the provided
+/// `scheduled_time` for evaluating `now()`. If `scheduled_time` is
+/// `Some`, `now()` will be simplified to the given timestamp instead of
+/// the current wall-clock time.
+pub fn parser_expr_to_scalar_value_literal_at(
+    expr: sqlparser::ast::Expr,
+    require_now_expr: bool,
+    scheduled_time: Option<DateTime<Utc>>,
+) -> Result<ScalarValue> {
+    // 1. convert parser expr to logical expr
+    let empty_df_schema = DFSchema::empty();
+    let logical_expr = SqlToRel::new(&StubContextProvider::default())
+        .sql_to_expr(expr, &empty_df_schema, &mut Default::default())
+        .context(ConvertToLogicalExpressionSnafu)?;
+
+    struct FindNow {
+        found: bool,
+    }
+
+    impl TreeNodeVisitor<'_> for FindNow {
+        type Node = Expr;
+        fn f_down(
+            &mut self,
+            node: &Self::Node,
+        ) -> DfResult<datafusion_common::tree_node::TreeNodeRecursion> {
+            if let Expr::ScalarFunction(func) = node
+                && func.name().to_lowercase() == "now"
+            {
+                if !func.args.is_empty() {
+                    return Err(datafusion_common::DataFusionError::Plan(
+                        "now() function should not have arguments".to_string(),
+                    ));
+                }
+                self.found = true;
+                return Ok(datafusion_common::tree_node::TreeNodeRecursion::Stop);
+            }
+            Ok(datafusion_common::tree_node::TreeNodeRecursion::Continue)
+        }
+    }
+
+    if require_now_expr {
+        let have_now = {
+            let mut visitor = FindNow { found: false };
+            logical_expr.visit(&mut visitor).unwrap();
+            visitor.found
+        };
+        if !have_now {
+            return ParseSqlValueSnafu {
+                msg: format!(
+                    "expected now() expression, but not found in {}",
+                    logical_expr
+                ),
+            }
+            .fail();
+        }
+    }
+
+    // 2. simplify logical expr — use scheduled time if provided, else wall-clock
+    let info = match scheduled_time {
+        Some(dt) => SimplifyContext::default().with_query_execution_start_time(Some(dt)),
+        None => SimplifyContext::default().with_current_time(),
+    };
+    let simplifier = ExprSimplifier::new(info);
+
+    // Coerce the logical expression so simplifier can handle it correctly. This is necessary for const eval with possible type mismatch. i.e.: `now() - now() + '15s'::interval` which is `TimestampNanosecond - TimestampNanosecond + IntervalMonthDayNano`.
+    let logical_expr = simplifier
+        .coerce(logical_expr, &empty_df_schema)
+        .context(SimplificationSnafu)?;
+
+    let simplified_expr = simplifier
+        .simplify(logical_expr)
+        .context(SimplificationSnafu)?;
+
+    if let datafusion::logical_expr::Expr::Literal(lit, _) = simplified_expr {
+        Ok(lit)
+    } else {
+        // Err(ParseSqlValue)
+        ParseSqlValueSnafu {
+            msg: format!("expected literal value, but found {:?}", simplified_expr),
+        }
+        .fail()
+    }
+}
+
+/// Helper struct for [`parser_expr_to_scalar_value`].
+struct StubContextProvider {
+    state: SessionState,
+}
+
+impl Default for StubContextProvider {
+    fn default() -> Self {
+        Self {
+            state: SessionStateBuilder::new()
+                .with_config(Default::default())
+                .with_runtime_env(Default::default())
+                .with_default_features()
+                .build(),
+        }
+    }
+}
+
+impl ContextProvider for StubContextProvider {
+    fn get_table_source(&self, _name: TableReference) -> DfResult<Arc<dyn TableSource>> {
+        unimplemented!()
+    }
+
+    fn get_function_meta(&self, name: &str) -> Option<Arc<ScalarUDF>> {
+        self.state.scalar_functions().get(name).cloned()
+    }
+
+    fn get_aggregate_meta(&self, name: &str) -> Option<Arc<AggregateUDF>> {
+        self.state.aggregate_functions().get(name).cloned()
+    }
+
+    fn get_window_meta(&self, _name: &str) -> Option<Arc<WindowUDF>> {
+        unimplemented!()
+    }
+
+    fn get_variable_type(&self, _variable_names: &[String]) -> Option<DataType> {
+        unimplemented!()
+    }
+
+    fn options(&self) -> &ConfigOptions {
+        self.state.config_options()
+    }
+
+    fn udf_names(&self) -> Vec<String> {
+        self.state.scalar_functions().keys().cloned().collect()
+    }
+
+    fn udaf_names(&self) -> Vec<String> {
+        self.state.aggregate_functions().keys().cloned().collect()
+    }
+
+    fn udwf_names(&self) -> Vec<String> {
+        self.state.window_functions().keys().cloned().collect()
+    }
+}
+
+pub fn validate_column_fulltext_create_option(key: &str) -> bool {
+    [
+        COLUMN_FULLTEXT_OPT_KEY_ANALYZER,
+        COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE,
+        COLUMN_FULLTEXT_OPT_KEY_BACKEND,
+        COLUMN_FULLTEXT_OPT_KEY_GRANULARITY,
+        COLUMN_FULLTEXT_OPT_KEY_FALSE_POSITIVE_RATE,
+    ]
+    .contains(&key)
+}
+
+pub fn validate_column_skipping_index_create_option(key: &str) -> bool {
+    [
+        COLUMN_SKIPPING_INDEX_OPT_KEY_GRANULARITY,
+        COLUMN_SKIPPING_INDEX_OPT_KEY_TYPE,
+        COLUMN_SKIPPING_INDEX_OPT_KEY_FALSE_POSITIVE_RATE,
+    ]
+    .contains(&key)
+}
+
+pub fn validate_column_vector_index_create_option(key: &str) -> bool {
+    [
+        COLUMN_VECTOR_INDEX_OPT_KEY_ENGINE,
+        COLUMN_VECTOR_INDEX_OPT_KEY_METRIC,
+        COLUMN_VECTOR_INDEX_OPT_KEY_CONNECTIVITY,
+        COLUMN_VECTOR_INDEX_OPT_KEY_EXPANSION_ADD,
+        COLUMN_VECTOR_INDEX_OPT_KEY_EXPANSION_SEARCH,
+    ]
+    .contains(&key)
+}
+
+/// Convert an [`IntervalMonthDayNano`] to a [`Duration`].
+#[cfg(feature = "enterprise")]
+pub fn convert_month_day_nano_to_duration(
+    interval: arrow_buffer::IntervalMonthDayNano,
+) -> Result<std::time::Duration> {
+    let months: i64 = interval.months.into();
+    let days: i64 = interval.days.into();
+    let months_in_seconds: i64 = months * 60 * 60 * 24 * 3044 / 1000;
+    let days_in_seconds: i64 = days * 60 * 60 * 24;
+    let seconds_from_nanos = interval.nanoseconds / 1_000_000_000;
+    let total_seconds = months_in_seconds + days_in_seconds + seconds_from_nanos;
+
+    let mut nanos_remainder = interval.nanoseconds % 1_000_000_000;
+    let mut adjusted_seconds = total_seconds;
+
+    if nanos_remainder < 0 {
+        nanos_remainder += 1_000_000_000;
+        adjusted_seconds -= 1;
+    }
+
+    snafu::ensure!(
+        adjusted_seconds >= 0,
+        crate::error::InvalidIntervalSnafu {
+            reason: "must be a positive interval",
+        }
+    );
+
+    // Cast safety: `adjusted_seconds` is guaranteed to be non-negative before.
+    let adjusted_seconds = adjusted_seconds as u64;
+    // Cast safety: `nanos_remainder` is smaller than 1_000_000_000 which
+    // is checked above.
+    let nanos_remainder = nanos_remainder as u32;
+
+    Ok(std::time::Duration::new(adjusted_seconds, nanos_remainder))
+}
+
+pub fn parse_with_options(parser: &mut Parser) -> Result<OptionMap> {
+    let options = parser
+        .parse_options(Keyword::WITH)
+        .context(SyntaxSnafu)?
+        .into_iter()
+        .map(parse_option_string)
+        .collect::<Result<HashMap<String, OptionValue>>>()?;
+    for (key, value) in &options {
+        if key.starts_with(SEMANTIC_PREFIX) {
+            // Semantic keys are whitelisted and value-checked against their domain,
+            // so a user cannot set an unknown key or an out-of-range value.
+            let value = value.as_string().unwrap_or_default();
+            ensure!(
+                validate_semantic_option(key, value),
+                InvalidTableOptionSnafu { key }
+            );
+        } else {
+            ensure!(validate_table_option(key), InvalidTableOptionSnafu { key });
+        }
+    }
+    Ok(OptionMap::new(options))
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::DateTime;
+    use datafusion::functions::datetime::expr_fn::now;
+    use datafusion_expr::lit;
+    use datatypes::arrow::datatypes::TimestampNanosecondType;
+
+    use super::*;
+    use crate::dialect::GreptimeDbDialect;
+    use crate::parser::{ParseOptions, ParserContext};
+    use crate::statements::statement::Statement;
+
+    #[test]
+    fn test_is_tql() {
+        let dialect = GreptimeDbDialect {};
+
+        assert!(is_tql(&dialect, "TQL EVAL (0, 10, '1s') cpu_usage_total").unwrap());
+        assert!(!is_tql(&dialect, "SELECT 1").unwrap());
+
+        let tql_cte = r#"
+WITH tql_cte(ts, val) AS (
+    TQL EVAL (0, 15, '5s') metric
+)
+SELECT * FROM tql_cte
+"#;
+        assert!(is_tql(&dialect, tql_cte).unwrap());
+
+        let rename_cols = r#"
+WITH tql (the_timestamp, the_value) AS (
+    TQL EVAL (0, 40, '10s') metric
+)
+SELECT * FROM tql
+"#;
+        assert!(is_tql(&dialect, rename_cols).unwrap());
+        let stmts =
+            ParserContext::create_with_dialect(rename_cols, &dialect, ParseOptions::default())
+                .unwrap();
+        let Statement::Query(q) = &stmts[0] else {
+            panic!("Expected Query statement");
+        };
+        let hybrid = q.hybrid_cte.as_ref().expect("Expected hybrid cte");
+        assert_eq!(hybrid.cte_tables.len(), 1);
+        assert_eq!(hybrid.cte_tables[0].columns.len(), 2);
+        assert_eq!(hybrid.cte_tables[0].columns[0].to_string(), "the_timestamp");
+        assert_eq!(hybrid.cte_tables[0].columns[1].to_string(), "the_value");
+
+        let sql_cte = r#"
+WITH cte AS (SELECT 1)
+SELECT * FROM cte
+"#;
+        assert!(!is_tql(&dialect, sql_cte).unwrap());
+
+        let extra_sql_cte = r#"
+WITH sql_cte AS (SELECT 1), tql_cte(ts, val) AS (
+    TQL EVAL (0, 15, '5s') metric
+)
+SELECT * FROM tql_cte
+"#;
+        assert!(!is_tql(&dialect, extra_sql_cte).unwrap());
+
+        let not_select_star = r#"
+WITH tql_cte(ts, val) AS (
+    TQL EVAL (0, 15, '5s') metric
+)
+SELECT ts FROM tql_cte
+"#;
+        assert!(!is_tql(&dialect, not_select_star).unwrap());
+
+        let with_filter = r#"
+WITH tql_cte(ts, val) AS (
+    TQL EVAL (0, 15, '5s') metric
+)
+SELECT * FROM tql_cte WHERE ts > 0
+"#;
+        assert!(!is_tql(&dialect, with_filter).unwrap());
+    }
+
+    /// Keep this test to make sure we are using datafusion's `ExprSimplifier` correctly.
+    #[test]
+    fn test_simplifier() {
+        let now_time = DateTime::from_timestamp(61, 0).unwrap();
+        let lit_now = lit(ScalarValue::new_timestamp::<TimestampNanosecondType>(
+            now_time.timestamp_nanos_opt(),
+            None,
+        ));
+        let testcases = vec![
+            (now(), lit_now),
+            (now() - now(), lit(ScalarValue::DurationNanosecond(Some(0)))),
+            (
+                now() + lit(ScalarValue::new_interval_dt(0, 1500)),
+                lit(ScalarValue::new_timestamp::<TimestampNanosecondType>(
+                    Some(62500000000),
+                    None,
+                )),
+            ),
+            (
+                now() - (now() + lit(ScalarValue::new_interval_dt(0, 1500))),
+                lit(ScalarValue::DurationNanosecond(Some(-1500000000))),
+            ),
+            // this one failed if type is not coerced
+            (
+                now() - now() + lit(ScalarValue::new_interval_dt(0, 1500)),
+                lit(ScalarValue::new_interval_mdn(0, 0, 1500000000)),
+            ),
+            (
+                lit(ScalarValue::new_interval_mdn(
+                    0,
+                    0,
+                    61 * 86400 * 1_000_000_000,
+                )),
+                lit(ScalarValue::new_interval_mdn(
+                    0,
+                    0,
+                    61 * 86400 * 1_000_000_000,
+                )),
+            ),
+        ];
+
+        let info = SimplifyContext::default().with_query_execution_start_time(Some(now_time));
+        let simplifier = ExprSimplifier::new(info);
+        for (expr, expected) in testcases {
+            let expr_name = expr.schema_name().to_string();
+            let expr = simplifier.coerce(expr, &DFSchema::empty()).unwrap();
+
+            let simplified_expr = simplifier.simplify(expr).unwrap();
+            assert_eq!(
+                simplified_expr, expected,
+                "Failed to simplify expression: {expr_name}"
+            );
+        }
+    }
+}

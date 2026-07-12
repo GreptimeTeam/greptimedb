@@ -1,0 +1,409 @@
+// Copyright 2023 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//! Unordered scanner.
+
+use std::fmt;
+use std::sync::Arc;
+use std::time::Instant;
+
+use async_stream::{stream, try_stream};
+use common_error::ext::BoxedError;
+use common_recordbatch::{RecordBatchStreamWrapper, SendableRecordBatchStream};
+use common_telemetry::{tracing, warn};
+use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
+use datafusion::physical_plan::{DisplayAs, DisplayFormatType};
+use datatypes::arrow::record_batch::RecordBatch;
+use datatypes::schema::SchemaRef;
+use futures::{Stream, StreamExt};
+use snafu::ensure;
+use store_api::metadata::RegionMetadataRef;
+use store_api::region_engine::{
+    PrepareRequest, QueryScanContext, RegionScanner, ScannerProperties,
+};
+
+use crate::error::{PartitionOutOfRangeSnafu, Result};
+use crate::read::pruner::{PartitionPruner, Pruner};
+use crate::read::scan_region::{ScanInput, StreamContext};
+use crate::read::scan_util::{
+    PartitionMetrics, PartitionMetricsList, scan_flat_file_ranges, scan_flat_mem_ranges,
+};
+use crate::read::stream::{ConvertBatchStream, ScanBatch, ScanBatchStream};
+use crate::read::{ScannerMetrics, scan_util};
+
+/// Scans a region without providing any output ordering guarantee.
+///
+/// Only an append only table should use this scanner.
+pub struct UnorderedScan {
+    /// Properties of the scanner.
+    properties: ScannerProperties,
+    /// Context of streams.
+    stream_ctx: Arc<StreamContext>,
+    /// Shared pruner for file range building.
+    pruner: Arc<Pruner>,
+    /// Metrics for each partition.
+    metrics_list: PartitionMetricsList,
+}
+
+impl UnorderedScan {
+    /// Creates a new [UnorderedScan].
+    pub(crate) fn new(input: ScanInput) -> Self {
+        let mut properties = ScannerProperties::default()
+            .with_append_mode(input.append_mode)
+            .with_total_rows(input.total_rows());
+        if let Some(counters) = input.query_stat_counters.clone() {
+            properties.set_query_stat_counters(counters);
+        }
+        let stream_ctx = Arc::new(StreamContext::unordered_scan_ctx(input));
+        properties.partitions = vec![stream_ctx.partition_ranges()];
+
+        // Create the shared pruner with number of workers equal to CPU cores.
+        let num_workers = common_stat::get_total_cpu_cores().max(1);
+        let pruner = Arc::new(Pruner::new(stream_ctx.clone(), num_workers));
+
+        Self {
+            properties,
+            stream_ctx,
+            pruner,
+            metrics_list: PartitionMetricsList::default(),
+        }
+    }
+
+    /// Scans the region and returns a stream.
+    #[tracing::instrument(
+        skip_all,
+        fields(region_id = %self.stream_ctx.input.mapper.metadata().region_id)
+    )]
+    pub(crate) async fn build_stream(&self) -> Result<SendableRecordBatchStream, BoxedError> {
+        let metrics_set = ExecutionPlanMetricsSet::new();
+        let part_num = self.properties.num_partitions();
+        let streams = (0..part_num)
+            .map(|i| self.scan_partition(&QueryScanContext::default(), &metrics_set, i))
+            .collect::<Result<Vec<_>, BoxedError>>()?;
+        let stream = stream! {
+            for mut stream in streams {
+                while let Some(rb) = stream.next().await {
+                    yield rb;
+                }
+            }
+        };
+        let stream = Box::pin(RecordBatchStreamWrapper::new(
+            self.schema(),
+            Box::pin(stream),
+        ));
+        Ok(stream)
+    }
+
+    /// Scans a [PartitionRange] by its `identifier` and returns a flat stream of RecordBatch.
+    #[tracing::instrument(
+        skip_all,
+        fields(
+            region_id = %stream_ctx.input.region_metadata().region_id,
+            part_range_id = part_range_id
+        )
+    )]
+    fn scan_flat_partition_range(
+        stream_ctx: Arc<StreamContext>,
+        part_range_id: usize,
+        part_metrics: PartitionMetrics,
+        partition_pruner: Arc<PartitionPruner>,
+    ) -> impl Stream<Item = Result<RecordBatch>> {
+        try_stream! {
+            // Gets range meta.
+            let range_meta = &stream_ctx.ranges[part_range_id];
+            let part_range = range_meta.new_partition_range(part_range_id);
+            let pre_filter_mode = stream_ctx.range_pre_filter_mode(&part_range);
+            for index in &range_meta.row_group_indices {
+                if stream_ctx.is_mem_range_index(*index) {
+                    let stream = scan_flat_mem_ranges(
+                        stream_ctx.clone(),
+                        part_metrics.clone(),
+                        *index,
+                        range_meta.time_range,
+                    );
+                    for await record_batch in stream {
+                        yield record_batch?;
+                    }
+                } else if stream_ctx.is_file_range_index(*index) {
+                    // Common manifest-level fast-skip shared by UnorderedScan and SeqScan.
+                    if partition_pruner
+                        .try_skip_manifest_pruned_file_range(*index, &part_metrics)
+                    {
+                        continue;
+                    }
+                    let stream = scan_flat_file_ranges(
+                        stream_ctx.clone(),
+                        part_metrics.clone(),
+                        *index,
+                        "unordered_scan_files",
+                        partition_pruner.clone(),
+                    ).await?;
+                    for await record_batch in stream {
+                        yield record_batch?;
+                    }
+                } else {
+                    let stream = scan_util::maybe_scan_flat_other_ranges(
+                        &stream_ctx,
+                        *index,
+                        &part_metrics,
+                        pre_filter_mode,
+                    ).await?;
+                    for await record_batch in stream {
+                        yield record_batch?;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Scan [`Batch`] in all partitions one by one.
+    pub(crate) fn scan_all_partitions(&self) -> Result<ScanBatchStream> {
+        let metrics_set = ExecutionPlanMetricsSet::new();
+
+        let streams = (0..self.properties.partitions.len())
+            .map(|partition| {
+                let metrics = self.partition_metrics(false, partition, &metrics_set);
+                self.scan_flat_batch_in_partition(partition, metrics)
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        Ok(Box::pin(futures::stream::iter(streams).flatten()))
+    }
+
+    fn partition_metrics(
+        &self,
+        explain_verbose: bool,
+        partition: usize,
+        metrics_set: &ExecutionPlanMetricsSet,
+    ) -> PartitionMetrics {
+        let part_metrics = PartitionMetrics::new(
+            self.stream_ctx.input.mapper.metadata().region_id,
+            partition,
+            "UnorderedScan",
+            self.stream_ctx.query_start,
+            explain_verbose,
+            metrics_set,
+        );
+        self.metrics_list.set(partition, part_metrics.clone());
+        part_metrics
+    }
+
+    #[tracing::instrument(
+        skip_all,
+        fields(
+            region_id = %self.stream_ctx.input.mapper.metadata().region_id,
+            partition = partition
+        )
+    )]
+    fn scan_partition_impl(
+        &self,
+        ctx: &QueryScanContext,
+        metrics_set: &ExecutionPlanMetricsSet,
+        partition: usize,
+    ) -> Result<SendableRecordBatchStream> {
+        if ctx.explain_verbose {
+            common_telemetry::info!(
+                "UnorderedScan partition {}, region_id: {}",
+                partition,
+                self.stream_ctx.input.region_metadata().region_id
+            );
+        }
+
+        let metrics = self.partition_metrics(ctx.explain_verbose, partition, metrics_set);
+        let input = &self.stream_ctx.input;
+
+        let batch_stream = self.scan_flat_batch_in_partition(partition, metrics.clone())?;
+
+        let record_batch_stream = ConvertBatchStream::new(
+            batch_stream,
+            input.mapper.clone(),
+            input.cache_strategy.clone(),
+            metrics,
+        );
+
+        Ok(Box::pin(RecordBatchStreamWrapper::new(
+            input.mapper.output_schema(),
+            Box::pin(record_batch_stream),
+        )))
+    }
+
+    #[tracing::instrument(
+        skip_all,
+        fields(
+            region_id = %self.stream_ctx.input.mapper.metadata().region_id,
+            partition = partition
+        )
+    )]
+    fn scan_flat_batch_in_partition(
+        &self,
+        partition: usize,
+        part_metrics: PartitionMetrics,
+    ) -> Result<ScanBatchStream> {
+        ensure!(
+            partition < self.properties.partitions.len(),
+            PartitionOutOfRangeSnafu {
+                given: partition,
+                all: self.properties.partitions.len(),
+            }
+        );
+
+        let stream_ctx = self.stream_ctx.clone();
+        let part_ranges = self.properties.partitions[partition].clone();
+        let pruner = self.pruner.clone();
+        // Initializes ref counts for the pruner.
+        // If we call scan_batch_in_partition() multiple times but don't read all batches from the stream,
+        // then the ref count won't be decremented.
+        // This is a rare case and keeping all remaining entries still uses less memory than a per partition cache.
+        pruner.add_partition_ranges(&part_ranges);
+        let partition_pruner = Arc::new(PartitionPruner::new(pruner, &part_ranges));
+
+        let stream = try_stream! {
+            part_metrics.on_first_poll();
+
+            // Scans each part.
+            for part_range in part_ranges {
+                let mut metrics = ScannerMetrics::default();
+                let mut fetch_start = Instant::now();
+
+                let stream = Self::scan_flat_partition_range(
+                    stream_ctx.clone(),
+                    part_range.identifier,
+                    part_metrics.clone(),
+                    partition_pruner.clone(),
+                );
+                for await record_batch in stream {
+                    let record_batch = record_batch?;
+                    metrics.scan_cost += fetch_start.elapsed();
+                    metrics.num_batches += 1;
+                    metrics.num_rows += record_batch.num_rows();
+
+                    debug_assert!(record_batch.num_rows() > 0);
+                    if record_batch.num_rows() == 0 {
+                        continue;
+                    }
+
+                    let yield_start = Instant::now();
+                    yield ScanBatch::RecordBatch(record_batch);
+                    metrics.yield_cost += yield_start.elapsed();
+
+                    fetch_start = Instant::now();
+                }
+
+                metrics.scan_cost += fetch_start.elapsed();
+                part_metrics.merge_metrics(&metrics);
+            }
+
+            part_metrics.on_finish();
+        };
+        Ok(Box::pin(stream))
+    }
+}
+
+impl RegionScanner for UnorderedScan {
+    fn name(&self) -> &str {
+        "UnorderedScan"
+    }
+
+    fn properties(&self) -> &ScannerProperties {
+        &self.properties
+    }
+
+    fn schema(&self) -> SchemaRef {
+        self.stream_ctx.input.mapper.output_schema()
+    }
+
+    fn metadata(&self) -> RegionMetadataRef {
+        self.stream_ctx.input.mapper.metadata().clone()
+    }
+
+    fn prepare(&mut self, request: PrepareRequest) -> Result<(), BoxedError> {
+        self.properties.prepare(request);
+
+        Ok(())
+    }
+
+    fn scan_partition(
+        &self,
+        ctx: &QueryScanContext,
+        metrics_set: &ExecutionPlanMetricsSet,
+        partition: usize,
+    ) -> Result<SendableRecordBatchStream, BoxedError> {
+        self.scan_partition_impl(ctx, metrics_set, partition)
+            .map_err(BoxedError::new)
+    }
+
+    /// If this scanner have predicate other than region partition exprs
+    fn has_predicate_without_region(&self) -> bool {
+        let predicate = self
+            .stream_ctx
+            .input
+            .predicate_group()
+            .predicate_without_region();
+        predicate.is_some()
+    }
+
+    fn add_dyn_filter_to_predicate(
+        &mut self,
+        filter_exprs: Vec<Arc<dyn datafusion::physical_plan::PhysicalExpr>>,
+    ) -> Vec<bool> {
+        self.stream_ctx.add_dyn_filter_to_predicate(filter_exprs)
+    }
+
+    fn set_logical_region(&mut self, logical_region: bool) {
+        self.properties.set_logical_region(logical_region);
+    }
+
+    fn set_query_load_region_id(&mut self, region_id: store_api::storage::RegionId) {
+        self.properties.set_query_load_region_id(region_id);
+    }
+
+    fn snapshot_sequence(&self) -> Option<u64> {
+        self.stream_ctx.input.snapshot_sequence
+    }
+}
+
+impl DisplayAs for UnorderedScan {
+    fn fmt_as(&self, t: DisplayFormatType, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(
+            f,
+            "UnorderedScan: region={}, ",
+            self.stream_ctx.input.mapper.metadata().region_id
+        )?;
+        match t {
+            DisplayFormatType::Default | DisplayFormatType::TreeRender => {
+                self.stream_ctx.format_for_explain(false, f)
+            }
+            DisplayFormatType::Verbose => {
+                self.stream_ctx.format_for_explain(true, f)?;
+                self.metrics_list.format_verbose_metrics(f)
+            }
+        }
+    }
+}
+
+impl fmt::Debug for UnorderedScan {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("UnorderedScan")
+            .field("num_ranges", &self.stream_ctx.ranges.len())
+            .finish()
+    }
+}
+
+#[cfg(test)]
+impl UnorderedScan {
+    /// Returns the input.
+    pub(crate) fn input(&self) -> &ScanInput {
+        &self.stream_ctx.input
+    }
+}

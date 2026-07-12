@@ -1,0 +1,52 @@
+// Copyright 2023 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+use common_base::Plugins;
+use common_meta::cache::CacheRegistryBuilder;
+use common_meta::kv_backend::KvBackendRef;
+use standalone::error::Result;
+use standalone::options::StandaloneOptions;
+
+use crate::options::PluginOptions;
+
+#[allow(unused_variables)]
+#[allow(unused_mut)]
+pub async fn setup_standalone_plugins(
+    plugins: &mut Plugins,
+    plugin_options: &[PluginOptions],
+    standalone_opts: &StandaloneOptions,
+    metadata_kvbackend: KvBackendRef,
+) -> Result<()> {
+    Ok(())
+}
+
+/// Allows standalone plugins to add cache invalidators to the layered registry.
+pub fn configure_cache_registry(_plugins: &Plugins) -> Option<CacheRegistryBuilder> {
+    None
+}
+
+pub mod context {
+    use std::sync::Arc;
+
+    use catalog::CatalogManagerRef;
+    use common_meta::kv_backend::KvBackendRef;
+    use flow::FrontendClient;
+
+    /// The context for [`common_meta::ddl_manager::DdlManagerConfiguratorRef`] in standalone.
+    pub struct DdlManagerConfigureContext {
+        pub kv_backend: KvBackendRef,
+        pub fe_client: Arc<FrontendClient>,
+        pub catalog_manager: CatalogManagerRef,
+    }
+}

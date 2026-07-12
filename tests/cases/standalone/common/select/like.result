@@ -1,0 +1,30 @@
+CREATE TABLE host (
+  ts TIMESTAMP(3) TIME INDEX,
+  host STRING PRIMARY KEY,
+  val DOUBLE,
+);
+
+Affected Rows: 0
+
+INSERT INTO TABLE host VALUES
+    (0, 'a+b', 1.0),
+    (1, 'b+c', 2.0),
+    (2, 'a', 3.0),
+    (3, 'c', 4.0);
+
+Affected Rows: 4
+
+-- SQLNESS SORT_RESULT 3 1
+SELECT * FROM host WHERE host LIKE '%+%';
+
++-------------------------+------+-----+
+| ts                      | host | val |
++-------------------------+------+-----+
+| 1970-01-01T00:00:00     | a+b  | 1.0 |
+| 1970-01-01T00:00:00.001 | b+c  | 2.0 |
++-------------------------+------+-----+
+
+DROP TABLE host;
+
+Affected Rows: 0
+

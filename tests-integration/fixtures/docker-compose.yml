@@ -1,0 +1,140 @@
+services:
+
+  zookeeper:
+    image: greptime/zookeeper:3.7
+    ports:
+      - '2181:2181'
+    environment:
+      - ALLOW_ANONYMOUS_LOGIN=yes
+
+  kafka:
+    image: greptime/kafka:3.9.0-debian-12-r1
+    container_name: kafka
+    ports:
+      - 9092:9092
+      - 9093:9093
+    environment:
+      KAFKA_CFG_NODE_ID: "1"
+      KAFKA_CFG_PROCESS_ROLES: broker,controller
+      KAFKA_CFG_CONTROLLER_QUORUM_VOTERS: 1@127.0.0.1:2181
+      # Listeners
+      KAFKA_CFG_ADVERTISED_LISTENERS: PLAINTEXT://127.0.0.1:9092,SECURE://localhost:9093
+      KAFKA_CFG_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,SECURE:SASL_PLAINTEXT
+      KAFKA_CFG_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:2181,SECURE://:9093
+      ALLOW_PLAINTEXT_LISTENER: "yes"
+      KAFKA_BROKER_ID: "1"
+      KAFKA_CLIENT_USERS: "user_kafka"
+      KAFKA_CLIENT_PASSWORDS: "secret"
+      KAFKA_CFG_AUTO_CREATE_TOPICS_ENABLE: false
+    depends_on:
+      zookeeper:
+        condition: service_started
+
+  etcd:
+    image: greptime/etcd:3.6.1-debian-12-r3
+    ports:
+      - "2379:2379"
+      - "2380:2380"
+    environment:
+      ALLOW_NONE_AUTHENTICATION: "yes"
+      ETCD_NAME: etcd
+      ETCD_LISTEN_CLIENT_URLS: http://0.0.0.0:2379
+      ETCD_ADVERTISE_CLIENT_URLS: http://etcd:2379
+      ETCD_MAX_REQUEST_BYTES: 10485760
+
+  etcd-tls:
+    image: greptime/etcd:3.6.1-debian-12-r3
+    ports:
+      - "2378:2378"
+      - "2381:2381"
+    environment:
+      ALLOW_NONE_AUTHENTICATION: "yes"
+      ETCD_NAME: etcd-tls
+      ETCD_LISTEN_CLIENT_URLS: https://0.0.0.0:2378
+      ETCD_ADVERTISE_CLIENT_URLS: https://etcd-tls:2378
+      ETCD_LISTEN_PEER_URLS: https://0.0.0.0:2381
+      ETCD_INITIAL_ADVERTISE_PEER_URLS: https://etcd-tls:2381
+      ETCD_INITIAL_CLUSTER: etcd-tls=https://etcd-tls:2381
+      ETCD_INITIAL_CLUSTER_TOKEN: etcd-tls-cluster
+      ETCD_INITIAL_CLUSTER_STATE: new
+      ETCD_CERT_FILE: /certs/server.crt
+      ETCD_KEY_FILE: /certs/server-key.pem
+      ETCD_TRUSTED_CA_FILE: /certs/ca.crt
+      ETCD_PEER_CERT_FILE: /certs/server.crt
+      ETCD_PEER_KEY_FILE: /certs/server-key.pem
+      ETCD_PEER_TRUSTED_CA_FILE: /certs/ca.crt
+      ETCD_CLIENT_CERT_AUTH: "true"
+      ETCD_PEER_CLIENT_CERT_AUTH: "true"
+      ETCD_MAX_REQUEST_BYTES: 10485760
+    volumes:
+      - ./etcd-tls-certs:/certs:ro
+
+  minio:
+    image: greptime/minio:2024
+    ports:
+      - '9000:9000'
+      - '9001:9001'
+    environment:
+      - MINIO_ROOT_USER=superpower_ci_user
+      - MINIO_ROOT_PASSWORD=superpower_password
+      - MINIO_DEFAULT_BUCKETS=greptime
+      - BITNAMI_DEBUG=true
+    volumes:
+      - 'minio_data:/bitnami/minio/data'
+
+  postgres:
+    image: docker.io/postgres:14-alpine
+    ports:
+      - 5432:5432
+    volumes:
+      - ~/apps/postgres:/var/lib/postgresql/data
+      - ./certs:/tmp/certs:ro
+      - ./postgres/tls/pg_hba.conf:/var/lib/postgresql/pg_hba.conf
+    environment:
+      - POSTGRES_USER=greptimedb
+      - POSTGRES_DB=postgres
+      - POSTGRES_PASSWORD=admin
+    # Hack: Ensures certs are owned by database user with 600 permissions.
+    command: >
+      bash -c "
+        mkdir -p /certs &&
+        cp /tmp/certs/* /certs &&
+        chown -R postgres:postgres /certs &&
+        chmod 600 /certs/*.key &&
+        chmod 644 /certs/*.crt &&
+        exec docker-entrypoint.sh postgres
+        -c hba_file=/var/lib/postgresql/pg_hba.conf
+        -c ssl=on
+        -c ssl_cert_file=/certs/server.crt
+        -c ssl_key_file=/certs/server.key
+        -c ssl_ca_file=/certs/root.crt"
+
+  postgres15:
+    image: docker.io/postgres:15-alpine
+    ports:
+        - 5433:5432
+    volumes:
+        - ~/apps/postgres15:/var/lib/postgresql/data
+        - ./postgres/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    environment:
+        - POSTGRES_USER=greptimedb
+        - POSTGRES_DB=postgres
+        - POSTGRES_PASSWORD=admin
+
+  mysql:
+    image: greptime/mysql:5.7
+    ports:
+      - 3306:3306
+    volumes:
+      - ./certs:/certs:ro
+      - ./mysql/my.cnf:/opt/bitnami/mysql/conf/my_custom.cnf:ro
+    environment:
+      - MYSQL_DATABASE=mysql
+      - MYSQL_USER=greptimedb
+      - MYSQL_PASSWORD=admin
+      - MYSQL_ROOT_PASSWORD=admin
+
+volumes:
+  minio_data:
+    driver: local

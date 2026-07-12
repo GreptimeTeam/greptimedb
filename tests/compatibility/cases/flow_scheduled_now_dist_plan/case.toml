@@ -1,0 +1,8 @@
+name = "flow_scheduled_now_dist_plan"
+reason = "Verify flow metadata containing now()/current_timestamp() created by old binaries binds scheduled logical time after upgrade."
+introduced_by = "PR #8389"
+topologies = ["distributed"]
+from_range = ["<=v1.1.1"]
+to_range = [">v1.1.1"]
+features = ["flow", "table"]
+owner = "flow"

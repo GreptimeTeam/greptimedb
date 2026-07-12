@@ -1,0 +1,702 @@
+// Copyright 2023 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+use std::collections::HashMap;
+
+use chrono::{DateTime, Utc};
+use common_base::memory_limit::MemoryLimit;
+use datafusion::config::{ConfigEntry, ConfigExtension, ExtensionOptions};
+use serde::{Deserialize, Serialize};
+use session::context::QueryContextRef;
+use store_api::storage::RegionId;
+use table::metadata::TableId;
+
+use crate::error::{Error, InvalidQueryContextExtensionSnafu, Result};
+
+pub const FLOW_INCREMENTAL_AFTER_SEQS: &str = "flow.incremental_after_seqs";
+pub const FLOW_INCREMENTAL_MODE: &str = "flow.incremental_mode";
+pub const FLOW_RETURN_REGION_SEQ: &str = "flow.return_region_seq";
+pub const FLOW_SINK_TABLE_ID: &str = "flow.sink_table_id";
+/// Flow scheduler binding for the logical time of one scheduled attempt.
+/// Query planning, SQL/TQL parsing, range-select rewrite and DataFusion
+/// execution read this extension so `now()` is stable for the whole attempt.
+pub const FLOW_SCHEDULED_TIME_MILLIS: &str = "flow.scheduled_time_millis";
+/// Enable by default, set to false to explicitly disable.
+pub const QUERY_ENABLE_REMOTE_DYNAMIC_FILTER_PUSHDOWN: &str =
+    "query.enable_remote_dynamic_filter_pushdown";
+
+pub const FLOW_INCREMENTAL_MODE_MEMTABLE_ONLY: &str = "memtable_only";
+
+/// Query engine config
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct QueryOptions {
+    /// Parallelism of query engine. Default to 0, which implies the number of logical CPUs.
+    pub parallelism: usize,
+    /// Whether to allow query fallback when push down fails.
+    pub allow_query_fallback: bool,
+    /// Memory pool size for query execution. Setting it to 0 disables the limit (unbounded).
+    /// Supports absolute size (e.g., "2GB") or percentage (e.g., "50%").
+    /// When this limit is reached, queries will fail with ResourceExhausted error.
+    pub memory_pool_size: MemoryLimit,
+    /// Whether to expose per-region query load metrics.
+    #[serde(skip)]
+    pub enable_per_region_metrics: bool,
+}
+
+#[allow(clippy::derivable_impls)]
+impl Default for QueryOptions {
+    fn default() -> Self {
+        Self {
+            parallelism: 0,
+            allow_query_fallback: false,
+            memory_pool_size: MemoryLimit::default(),
+            enable_per_region_metrics: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FlowIncrementalMode {
+    MemtableOnly,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct FlowQueryExtensions {
+    /// Maps region id -> lower exclusive sequence bound for incremental reads.
+    pub incremental_after_seqs: Option<HashMap<u64, u64>>,
+    /// Incremental read mode requested by the caller.
+    pub incremental_mode: Option<FlowIncrementalMode>,
+    /// Whether the caller expects per-region watermark metadata in terminal metrics.
+    pub return_region_seq: bool,
+    /// Optional sink table id used to distinguish source scans from sink reads.
+    pub sink_table_id: Option<TableId>,
+}
+
+impl FlowQueryExtensions {
+    /// Parses flow-specific query extensions when any flow key is present.
+    ///
+    /// Returns `Ok(None)` for ordinary queries with no flow-related extensions,
+    /// `Ok(Some(_))` when flow context is present and valid, and `Err(_)` when a
+    /// flow-related extension is present but malformed or incomplete.
+    pub fn parse_flow_extensions(extensions: &HashMap<String, String>) -> Result<Option<Self>> {
+        let has_flow_context = extensions.contains_key(FLOW_INCREMENTAL_AFTER_SEQS)
+            || extensions.contains_key(FLOW_INCREMENTAL_MODE)
+            || extensions.contains_key(FLOW_RETURN_REGION_SEQ)
+            || extensions.contains_key(FLOW_SINK_TABLE_ID);
+
+        if !has_flow_context {
+            return Ok(None);
+        }
+
+        let incremental_mode = extensions
+            .get(FLOW_INCREMENTAL_MODE)
+            .map(|value| match value.as_str() {
+                v if v.eq_ignore_ascii_case(FLOW_INCREMENTAL_MODE_MEMTABLE_ONLY) => {
+                    Ok(FlowIncrementalMode::MemtableOnly)
+                }
+                _ => Err(invalid_query_context_extension(format!(
+                    "Invalid value for {}: {}",
+                    FLOW_INCREMENTAL_MODE, value
+                ))),
+            })
+            .transpose()?;
+
+        let incremental_after_seqs = extensions
+            .get(FLOW_INCREMENTAL_AFTER_SEQS)
+            .map(|value| parse_incremental_after_seqs(value.as_str()))
+            .transpose()?;
+
+        let return_region_seq = extensions
+            .get(FLOW_RETURN_REGION_SEQ)
+            .map(|value| parse_bool(FLOW_RETURN_REGION_SEQ, value.as_str()))
+            .transpose()?
+            .unwrap_or(false);
+
+        let sink_table_id = extensions
+            .get(FLOW_SINK_TABLE_ID)
+            .map(|value| {
+                value.parse::<TableId>().map_err(|_| {
+                    invalid_query_context_extension(format!(
+                        "Invalid value for {}: {}",
+                        FLOW_SINK_TABLE_ID, value
+                    ))
+                })
+            })
+            .transpose()?;
+
+        if matches!(incremental_mode, Some(FlowIncrementalMode::MemtableOnly)) {
+            let after_seqs = incremental_after_seqs.as_ref().ok_or_else(|| {
+                invalid_query_context_extension(format!(
+                    "{} is required when {}={}.",
+                    FLOW_INCREMENTAL_AFTER_SEQS,
+                    FLOW_INCREMENTAL_MODE,
+                    FLOW_INCREMENTAL_MODE_MEMTABLE_ONLY
+                ))
+            })?;
+            if after_seqs.is_empty() {
+                return Err(invalid_query_context_extension(format!(
+                    "{} must not be empty when {}={}.",
+                    FLOW_INCREMENTAL_AFTER_SEQS,
+                    FLOW_INCREMENTAL_MODE,
+                    FLOW_INCREMENTAL_MODE_MEMTABLE_ONLY
+                )));
+            }
+        }
+
+        Ok(Some(Self {
+            incremental_after_seqs,
+            incremental_mode,
+            return_region_seq,
+            sink_table_id,
+        }))
+    }
+
+    pub fn validate_for_scan(&self, source_region_id: RegionId) -> Result<bool> {
+        if self.sink_table_id.is_some() && self.sink_table_id == Some(source_region_id.table_id()) {
+            return Ok(false);
+        }
+
+        if matches!(
+            self.incremental_mode,
+            Some(FlowIncrementalMode::MemtableOnly)
+        ) {
+            let after_seqs = self.incremental_after_seqs.as_ref().ok_or_else(|| {
+                invalid_query_context_extension(format!(
+                    "{} is required when {}=memtable_only.",
+                    FLOW_INCREMENTAL_AFTER_SEQS, FLOW_INCREMENTAL_MODE
+                ))
+            })?;
+
+            if !after_seqs.contains_key(&source_region_id.as_u64()) {
+                return Err(invalid_query_context_extension(format!(
+                    "Missing region {} in {} when {}=memtable_only.",
+                    source_region_id, FLOW_INCREMENTAL_AFTER_SEQS, FLOW_INCREMENTAL_MODE
+                )));
+            }
+        }
+
+        Ok(self.incremental_after_seqs.is_some())
+    }
+
+    pub fn should_collect_region_watermark(&self) -> bool {
+        should_collect_region_watermark(
+            self.return_region_seq,
+            self.incremental_after_seqs.is_some(),
+        )
+    }
+}
+
+/// Returns whether query-level remote dynamic filter propagation is enabled.
+///
+/// The option defaults to enabled to preserve existing behavior. Callers may set
+/// `query.enable_remote_dynamic_filter_pushdown=false` in query context
+/// extensions to disable FE->DN remote dynamic filter propagation for a single
+/// query.
+pub fn remote_dyn_filter_pushdown_enabled_from_extensions(
+    extensions: &HashMap<String, String>,
+) -> Result<bool> {
+    extensions
+        .get(QUERY_ENABLE_REMOTE_DYNAMIC_FILTER_PUSHDOWN)
+        .map(|value| parse_bool(QUERY_ENABLE_REMOTE_DYNAMIC_FILTER_PUSHDOWN, value.as_str()))
+        .transpose()
+        .map(|value| value.unwrap_or(true))
+}
+
+/// Returns whether raw Flow query extensions request terminal region watermark collection.
+///
+/// This is only an intent/presence check for transport/scan plumbing; callers that need
+/// validated Flow options must still use [`FlowQueryExtensions::parse_flow_extensions`].
+pub fn should_collect_region_watermark_from_extensions(
+    extensions: &HashMap<String, String>,
+) -> bool {
+    let return_region_seq = extensions
+        .get(FLOW_RETURN_REGION_SEQ)
+        .is_some_and(|value| value.eq_ignore_ascii_case("true"));
+    let has_incremental_after_seqs = extensions.contains_key(FLOW_INCREMENTAL_AFTER_SEQS);
+
+    should_collect_region_watermark(return_region_seq, has_incremental_after_seqs)
+}
+
+fn should_collect_region_watermark(
+    return_region_seq: bool,
+    has_incremental_after_seqs: bool,
+) -> bool {
+    return_region_seq || has_incremental_after_seqs
+}
+
+fn parse_incremental_after_seqs(value: &str) -> Result<HashMap<u64, u64>> {
+    let raw = serde_json::from_str::<HashMap<String, serde_json::Value>>(value).map_err(|e| {
+        invalid_query_context_extension(format!(
+            "Invalid JSON for {}: {} ({})",
+            FLOW_INCREMENTAL_AFTER_SEQS, value, e
+        ))
+    })?;
+
+    raw.into_iter()
+        .map(|(region_id, raw_seq)| {
+            let region_id = region_id.parse::<u64>().map_err(|_| {
+                invalid_query_context_extension(format!(
+                    "Invalid region id in {}: {}",
+                    FLOW_INCREMENTAL_AFTER_SEQS, region_id
+                ))
+            })?;
+
+            let seq = match raw_seq {
+                serde_json::Value::Number(num) => num.as_u64().ok_or_else(|| {
+                    invalid_query_context_extension(format!(
+                        "Invalid sequence value in {} for region {}: {}",
+                        FLOW_INCREMENTAL_AFTER_SEQS, region_id, num
+                    ))
+                })?,
+                serde_json::Value::String(s) => s.parse::<u64>().map_err(|_| {
+                    invalid_query_context_extension(format!(
+                        "Invalid sequence string in {} for region {}: {}",
+                        FLOW_INCREMENTAL_AFTER_SEQS, region_id, s
+                    ))
+                })?,
+                _ => {
+                    return Err(invalid_query_context_extension(format!(
+                        "Invalid sequence value type in {} for region {}",
+                        FLOW_INCREMENTAL_AFTER_SEQS, region_id
+                    )));
+                }
+            };
+
+            Ok((region_id, seq))
+        })
+        .collect()
+}
+
+fn parse_bool(option_name: &str, value: &str) -> Result<bool> {
+    match value {
+        v if v.eq_ignore_ascii_case("true") => Ok(true),
+        v if v.eq_ignore_ascii_case("false") => Ok(false),
+        _ => Err(invalid_query_context_extension(format!(
+            "Invalid value for {}: {}",
+            option_name, value
+        ))),
+    }
+}
+
+/// Parse the scheduled time (in milliseconds since Unix epoch) from extensions.
+///
+/// Returns `Ok(None)` if the extension key is absent, `Ok(Some(millis))` on success,
+/// or `Err` if the value is malformed.
+pub fn parse_scheduled_time_millis(extensions: &HashMap<String, String>) -> Result<Option<i64>> {
+    match extensions.get(FLOW_SCHEDULED_TIME_MILLIS) {
+        Some(val) => val.parse::<i64>().map(Some).map_err(|_| {
+            invalid_query_context_extension(format!(
+                "Invalid value for {}: {}",
+                FLOW_SCHEDULED_TIME_MILLIS, val
+            ))
+        }),
+        None => Ok(None),
+    }
+}
+
+/// Parse the scheduled time from extensions into a [`DateTime<Utc>`].
+///
+/// Returns `Ok(None)` if the extension key is absent, `Ok(Some(datetime))` on success,
+/// or `Err` if the value is malformed.  Millis that produce an out-of-range timestamp are
+/// also rejected.
+pub fn parse_scheduled_time_datetime(
+    extensions: &HashMap<String, String>,
+) -> Result<Option<DateTime<Utc>>> {
+    match parse_scheduled_time_millis(extensions)? {
+        Some(millis) => DateTime::from_timestamp_millis(millis)
+            .map(Some)
+            .ok_or_else(|| {
+                invalid_query_context_extension(format!(
+                    "Out-of-range timestamp for {}: {} ms",
+                    FLOW_SCHEDULED_TIME_MILLIS, millis
+                ))
+            }),
+        None => Ok(None),
+    }
+}
+
+/// Best-effort helper: extract scheduled time from a [`QueryContextRef`] as a [`DateTime<Utc>`].
+///
+/// Errors are silently swallowed, returning `None`; use [`parse_scheduled_time_datetime`]
+/// at call sites that need to reject malformed scheduled time.
+pub fn scheduled_time_from_ctx(query_ctx: &QueryContextRef) -> Option<DateTime<Utc>> {
+    let extensions = query_ctx.extensions();
+    parse_scheduled_time_datetime(&extensions).ok().flatten()
+}
+
+/// Carries the scheduled logical "now" through [`ConfigOptions::extensions`] so
+/// that the distributed plan analyzer can apply it during expression
+/// simplification (preventing wall-clock constant-folding of `now()`).
+#[derive(Debug, Clone)]
+pub(crate) struct ScheduledTimeExtension {
+    pub(crate) scheduled_time: Option<DateTime<Utc>>,
+}
+
+impl ConfigExtension for ScheduledTimeExtension {
+    const PREFIX: &'static str = "flow_scheduled_time";
+}
+
+impl ExtensionOptions for ScheduledTimeExtension {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+
+    fn cloned(&self) -> Box<dyn ExtensionOptions> {
+        Box::new(self.clone())
+    }
+
+    fn set(&mut self, key: &str, value: &str) -> datafusion::error::Result<()> {
+        Err(datafusion_common::DataFusionError::NotImplemented(format!(
+            "ScheduledTimeExtension does not support set key: {key} with value: {value}"
+        )))
+    }
+
+    fn entries(&self) -> Vec<ConfigEntry> {
+        vec![]
+    }
+}
+
+fn invalid_query_context_extension(reason: String) -> Error {
+    InvalidQueryContextExtensionSnafu { reason }.build()
+}
+
+#[cfg(test)]
+mod flow_extension_tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_flow_extensions_returns_none_for_non_flow_query() {
+        let exts = HashMap::new();
+        let parsed = FlowQueryExtensions::parse_flow_extensions(&exts).unwrap();
+
+        assert_eq!(parsed, None);
+    }
+
+    #[test]
+    fn test_remote_dyn_filter_pushdown_enabled_from_extensions_defaults_true() {
+        assert!(remote_dyn_filter_pushdown_enabled_from_extensions(&HashMap::new()).unwrap());
+    }
+
+    #[test]
+    fn test_remote_dyn_filter_pushdown_enabled_from_extensions_parses_bool() {
+        let exts = HashMap::from([(
+            QUERY_ENABLE_REMOTE_DYNAMIC_FILTER_PUSHDOWN.to_string(),
+            "false".to_string(),
+        )]);
+        assert!(!remote_dyn_filter_pushdown_enabled_from_extensions(&exts).unwrap());
+
+        let exts = HashMap::from([(
+            QUERY_ENABLE_REMOTE_DYNAMIC_FILTER_PUSHDOWN.to_string(),
+            "true".to_string(),
+        )]);
+        assert!(remote_dyn_filter_pushdown_enabled_from_extensions(&exts).unwrap());
+    }
+
+    #[test]
+    fn test_remote_dyn_filter_pushdown_enabled_from_extensions_rejects_invalid_bool() {
+        let exts = HashMap::from([(
+            QUERY_ENABLE_REMOTE_DYNAMIC_FILTER_PUSHDOWN.to_string(),
+            "invalid".to_string(),
+        )]);
+
+        let err = remote_dyn_filter_pushdown_enabled_from_extensions(&exts).unwrap_err();
+        assert!(format!("{err}").contains(QUERY_ENABLE_REMOTE_DYNAMIC_FILTER_PUSHDOWN));
+    }
+
+    #[test]
+    fn test_parse_flow_extensions_memtable_only_success() {
+        let exts = HashMap::from([
+            (
+                FLOW_INCREMENTAL_MODE.to_string(),
+                FLOW_INCREMENTAL_MODE_MEMTABLE_ONLY.to_string(),
+            ),
+            (
+                FLOW_INCREMENTAL_AFTER_SEQS.to_string(),
+                r#"{"1":10,"2":20}"#.to_string(),
+            ),
+            (FLOW_RETURN_REGION_SEQ.to_string(), "true".to_string()),
+            (FLOW_SINK_TABLE_ID.to_string(), "1024".to_string()),
+        ]);
+
+        let parsed = FlowQueryExtensions::parse_flow_extensions(&exts)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            parsed.incremental_mode,
+            Some(FlowIncrementalMode::MemtableOnly)
+        );
+        assert_eq!(
+            parsed.incremental_after_seqs.unwrap(),
+            HashMap::from([(1, 10), (2, 20)])
+        );
+        assert!(parsed.return_region_seq);
+        assert_eq!(parsed.sink_table_id, Some(1024));
+    }
+
+    #[test]
+    fn test_parse_flow_extensions_mode_requires_after_seqs() {
+        let exts = HashMap::from([(
+            FLOW_INCREMENTAL_MODE.to_string(),
+            FLOW_INCREMENTAL_MODE_MEMTABLE_ONLY.to_string(),
+        )]);
+
+        let err = FlowQueryExtensions::parse_flow_extensions(&exts).unwrap_err();
+        assert!(format!("{err}").contains(FLOW_INCREMENTAL_AFTER_SEQS));
+    }
+
+    #[test]
+    fn test_parse_flow_extensions_invalid_mode() {
+        let exts = HashMap::from([(FLOW_INCREMENTAL_MODE.to_string(), "foo".to_string())]);
+
+        let err = FlowQueryExtensions::parse_flow_extensions(&exts).unwrap_err();
+        assert!(format!("{err}").contains(FLOW_INCREMENTAL_MODE));
+    }
+
+    #[test]
+    fn test_parse_flow_extensions_invalid_after_seqs_json() {
+        let exts = HashMap::from([
+            (
+                FLOW_INCREMENTAL_MODE.to_string(),
+                FLOW_INCREMENTAL_MODE_MEMTABLE_ONLY.to_string(),
+            ),
+            (
+                FLOW_INCREMENTAL_AFTER_SEQS.to_string(),
+                "not-json".to_string(),
+            ),
+        ]);
+
+        let err = FlowQueryExtensions::parse_flow_extensions(&exts).unwrap_err();
+        assert!(format!("{err}").contains(FLOW_INCREMENTAL_AFTER_SEQS));
+    }
+
+    #[test]
+    fn test_parse_flow_extensions_after_seqs_string_values() {
+        let exts = HashMap::from([(
+            FLOW_INCREMENTAL_AFTER_SEQS.to_string(),
+            r#"{"1":"10","2":"20"}"#.to_string(),
+        )]);
+
+        let parsed = FlowQueryExtensions::parse_flow_extensions(&exts)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            parsed.incremental_after_seqs.unwrap(),
+            HashMap::from([(1, 10), (2, 20)])
+        );
+    }
+
+    #[test]
+    fn test_parse_flow_extensions_after_seqs_invalid_value_type() {
+        let exts = HashMap::from([(
+            FLOW_INCREMENTAL_AFTER_SEQS.to_string(),
+            r#"{"1":true}"#.to_string(),
+        )]);
+
+        let err = FlowQueryExtensions::parse_flow_extensions(&exts).unwrap_err();
+        assert!(format!("{err}").contains(FLOW_INCREMENTAL_AFTER_SEQS));
+    }
+
+    #[test]
+    fn test_parse_flow_extensions_invalid_sink_table_id() {
+        let exts = HashMap::from([(FLOW_SINK_TABLE_ID.to_string(), "x".to_string())]);
+
+        let err = FlowQueryExtensions::parse_flow_extensions(&exts).unwrap_err();
+        assert!(format!("{err}").contains(FLOW_SINK_TABLE_ID));
+    }
+
+    #[test]
+    fn test_validate_for_scan_missing_source_region() {
+        let source_region_id = RegionId::new(100, 2);
+        let existing_region_id = RegionId::new(100, 1);
+        let exts = HashMap::from([
+            (
+                FLOW_INCREMENTAL_MODE.to_string(),
+                FLOW_INCREMENTAL_MODE_MEMTABLE_ONLY.to_string(),
+            ),
+            (
+                FLOW_INCREMENTAL_AFTER_SEQS.to_string(),
+                format!(r#"{{"{}":10}}"#, existing_region_id.as_u64()),
+            ),
+        ]);
+
+        let parsed = FlowQueryExtensions::parse_flow_extensions(&exts)
+            .unwrap()
+            .unwrap();
+        let err = parsed.validate_for_scan(source_region_id).unwrap_err();
+        assert!(format!("{err}").contains("Missing region"));
+    }
+
+    #[test]
+    fn test_validate_for_scan_sink_table_excluded() {
+        let source_region_id = RegionId::new(1024, 1);
+        let exts = HashMap::from([
+            (
+                FLOW_INCREMENTAL_MODE.to_string(),
+                FLOW_INCREMENTAL_MODE_MEMTABLE_ONLY.to_string(),
+            ),
+            (
+                FLOW_INCREMENTAL_AFTER_SEQS.to_string(),
+                format!(r#"{{"{}":10}}"#, source_region_id.as_u64()),
+            ),
+            (FLOW_SINK_TABLE_ID.to_string(), "1024".to_string()),
+        ]);
+
+        let parsed = FlowQueryExtensions::parse_flow_extensions(&exts)
+            .unwrap()
+            .unwrap();
+        let apply_incremental = parsed.validate_for_scan(source_region_id).unwrap();
+        assert!(!apply_incremental);
+    }
+
+    #[test]
+    fn test_should_collect_region_watermark_defaults_false() {
+        let parsed = FlowQueryExtensions::default();
+        assert!(!parsed.should_collect_region_watermark());
+    }
+
+    #[test]
+    fn test_should_collect_region_watermark_true_for_return_region_seq() {
+        let parsed = FlowQueryExtensions {
+            return_region_seq: true,
+            ..Default::default()
+        };
+        assert!(parsed.should_collect_region_watermark());
+    }
+
+    #[test]
+    fn test_should_collect_region_watermark_true_for_incremental_query() {
+        let parsed = FlowQueryExtensions {
+            incremental_after_seqs: Some(HashMap::from([(1, 10)])),
+            ..Default::default()
+        };
+        assert!(parsed.should_collect_region_watermark());
+    }
+
+    #[test]
+    fn test_should_collect_region_watermark_from_extensions() {
+        let exts = HashMap::from([(FLOW_RETURN_REGION_SEQ.to_string(), "true".to_string())]);
+        assert!(should_collect_region_watermark_from_extensions(&exts));
+
+        let exts = HashMap::from([(
+            FLOW_INCREMENTAL_AFTER_SEQS.to_string(),
+            r#"{"1":10}"#.to_string(),
+        )]);
+        assert!(should_collect_region_watermark_from_extensions(&exts));
+
+        let exts = HashMap::from([(FLOW_RETURN_REGION_SEQ.to_string(), "false".to_string())]);
+        assert!(!should_collect_region_watermark_from_extensions(&exts));
+        assert!(!should_collect_region_watermark_from_extensions(
+            &HashMap::new()
+        ));
+    }
+
+    #[test]
+    fn test_parse_flow_extensions_return_region_seq_only_returns_some() {
+        let exts = HashMap::from([(FLOW_RETURN_REGION_SEQ.to_string(), "true".to_string())]);
+
+        let parsed = FlowQueryExtensions::parse_flow_extensions(&exts)
+            .unwrap()
+            .unwrap();
+
+        assert!(parsed.return_region_seq);
+    }
+
+    #[test]
+    fn test_parse_flow_extensions_sink_table_only_returns_some() {
+        let exts = HashMap::from([(FLOW_SINK_TABLE_ID.to_string(), "1024".to_string())]);
+
+        let parsed = FlowQueryExtensions::parse_flow_extensions(&exts)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(parsed.sink_table_id, Some(1024));
+    }
+
+    #[test]
+    fn test_parse_flow_extensions_incremental_after_seqs_only_returns_some() {
+        let exts = HashMap::from([(
+            FLOW_INCREMENTAL_AFTER_SEQS.to_string(),
+            r#"{"1":10}"#.to_string(),
+        )]);
+
+        let parsed = FlowQueryExtensions::parse_flow_extensions(&exts)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            parsed.incremental_after_seqs,
+            Some(HashMap::from([(1, 10)]))
+        );
+    }
+
+    // --- scheduled time helper tests ---
+
+    #[test]
+    fn test_parse_scheduled_time_millis_absent() {
+        let exts = HashMap::new();
+        assert_eq!(parse_scheduled_time_millis(&exts).unwrap(), None);
+    }
+
+    #[test]
+    fn test_parse_scheduled_time_millis_valid() {
+        let exts = HashMap::from([(
+            FLOW_SCHEDULED_TIME_MILLIS.to_string(),
+            "1700000000000".to_string(),
+        )]);
+        assert_eq!(
+            parse_scheduled_time_millis(&exts).unwrap(),
+            Some(1700000000000)
+        );
+    }
+
+    #[test]
+    fn test_parse_scheduled_time_millis_malformed() {
+        let exts = HashMap::from([(
+            FLOW_SCHEDULED_TIME_MILLIS.to_string(),
+            "not-a-number".to_string(),
+        )]);
+        let err = parse_scheduled_time_millis(&exts).unwrap_err();
+        assert!(format!("{err}").contains(FLOW_SCHEDULED_TIME_MILLIS));
+    }
+
+    #[test]
+    fn test_parse_scheduled_time_datetime_valid() {
+        let exts = HashMap::from([(
+            FLOW_SCHEDULED_TIME_MILLIS.to_string(),
+            "1700000000000".to_string(),
+        )]);
+        let dt = parse_scheduled_time_datetime(&exts).unwrap().unwrap();
+        assert_eq!(dt.timestamp_millis(), 1700000000000);
+    }
+
+    #[test]
+    fn test_parse_scheduled_time_datetime_negative_millis() {
+        let exts = HashMap::from([(FLOW_SCHEDULED_TIME_MILLIS.to_string(), "-1".to_string())]);
+        let dt = parse_scheduled_time_datetime(&exts).unwrap().unwrap();
+        assert_eq!(dt.timestamp_millis(), -1);
+    }
+
+    #[test]
+    fn test_parse_scheduled_time_datetime_out_of_range() {
+        // i64::MAX millis is well beyond representable chrono::DateTime range
+        let exts = HashMap::from([(FLOW_SCHEDULED_TIME_MILLIS.to_string(), i64::MAX.to_string())]);
+        let err = parse_scheduled_time_datetime(&exts).unwrap_err();
+        assert!(format!("{err}").contains("Out-of-range"));
+    }
+}

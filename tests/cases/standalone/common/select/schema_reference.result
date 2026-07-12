@@ -1,0 +1,38 @@
+-- Migrated from DuckDB test: test/sql/select/test_schema_reference.test
+-- Description: Test schema reference in column reference
+CREATE SCHEMA s1;
+
+Affected Rows: 1
+
+CREATE TABLE s1.tbl(i INTEGER, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+INSERT INTO s1.tbl VALUES (1, 1000), (2, 2000);
+
+Affected Rows: 2
+
+-- Standard schema reference: schema.table.column
+SELECT s1.tbl.i FROM s1.tbl ORDER BY i;
+
++---+
+| i |
++---+
+| 1 |
+| 2 |
++---+
+
+-- Test schema mismatch error - should fail
+SELECT s2.tbl.i FROM s1.tbl;
+
+Error: 3000(PlanQuery), Failed to plan SQL: No field named s2.tbl.i. Valid fields are s1.tbl.i, s1.tbl.ts.
+
+-- Clean up
+DROP TABLE s1.tbl;
+
+Affected Rows: 0
+
+DROP SCHEMA s1;
+
+Affected Rows: 0
+

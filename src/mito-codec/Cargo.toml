@@ -1,0 +1,42 @@
+[package]
+name = "mito-codec"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+testing = []
+
+[dependencies]
+api.workspace = true
+bytes.workspace = true
+common-base.workspace = true
+common-decimal.workspace = true
+common-error.workspace = true
+common-macro.workspace = true
+common-recordbatch.workspace = true
+common-telemetry.workspace = true
+common-time.workspace = true
+datatypes.workspace = true
+memcomparable = { git = "https://github.com/v0y4g3r/memcomparable.git", rev = "a07122dc03556bbd88ad66234cbea7efd3b23efb" }
+paste.workspace = true
+serde.workspace = true
+snafu.workspace = true
+store-api.workspace = true
+
+[dev-dependencies]
+common-query.workspace = true
+criterion = "0.7"
+datafusion-common.workspace = true
+datafusion-expr.workspace = true
+
+[[bench]]
+name = "bench_sparse_encoding"
+harness = false
+required-features = ["testing"]
+
+[[bench]]
+name = "bench_primary_key_filter"
+harness = false
+required-features = ["testing"]

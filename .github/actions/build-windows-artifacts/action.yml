@@ -1,0 +1,70 @@
+name: Build Windows artifacts
+description: Build Windows artifacts
+inputs:
+  arch:
+    description: Architecture to build
+    required: true
+  cargo-profile:
+    description: Cargo profile to build
+    required: true
+  features:
+    description: Cargo features to build
+    required: true
+  version:
+    description: Version of the artifact
+    required: true
+  disable-run-tests:
+    description: Disable running integration tests
+    required: true
+  artifacts-dir:
+    description: Directory to store artifacts
+    required: true
+runs:
+  using: composite
+  steps:
+    - uses: arduino/setup-protoc@v3
+
+    - name: Install rust toolchain
+      uses: actions-rust-lang/setup-rust-toolchain@v1
+      with:
+        target: ${{ inputs.arch }}
+        components: llvm-tools-preview
+
+    - name: Rust Cache
+      uses: Swatinem/rust-cache@v2
+
+    - name: Install WSL distribution
+      uses: Vampire/setup-wsl@v2
+      with:
+        distribution: Ubuntu-22.04
+
+    - name: Install latest nextest release # For integration tests.
+      if: ${{ inputs.disable-run-tests == 'false' }}
+      uses: taiki-e/install-action@nextest
+
+    - name: Run integration tests
+      if: ${{ inputs.disable-run-tests == 'false' }}
+      shell: pwsh
+      run: make test sqlness-test
+      env:
+        RUST_BACKTRACE: 1
+        SQLNESS_OPTS: "--preserve-state"
+
+    - name: Upload sqlness logs
+      if: ${{ failure() }} # Only upload logs when the integration tests failed.
+      uses: actions/upload-artifact@v4
+      with:
+        name: sqlness-logs
+        path: C:\Users\RUNNER~1\AppData\Local\Temp\sqlness*
+        retention-days: 3
+
+    - name: Build greptime binary
+      shell: pwsh
+      run: cargo build --profile ${{ inputs.cargo-profile }} --features ${{ inputs.features }} --target ${{ inputs.arch }} --bin greptime
+
+    - name: Upload artifacts
+      uses: ./.github/actions/upload-artifacts
+      with:
+        artifacts-dir: ${{ inputs.artifacts-dir }}
+        target-files: target/${{ inputs.arch }}/${{ inputs.cargo-profile }}/greptime,target/${{ inputs.arch }}/${{ inputs.cargo-profile }}/greptime.pdb
+        version: ${{ inputs.version }}

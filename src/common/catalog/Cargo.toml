@@ -1,0 +1,13 @@
+[package]
+name = "common-catalog"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+const_format.workspace = true
+
+[dev-dependencies]

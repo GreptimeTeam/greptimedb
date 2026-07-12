@@ -1,0 +1,8 @@
+name = "alter_auto_flush_interval_old_table"
+reason = "Verify current ALTER TABLE SET auto_flush_interval works on tables created by old binaries."
+introduced_by = "PR #8403"
+topologies = ["distributed"]
+from_range = ["*"]
+to_range = [">v1.1.1"]
+features = ["table", "metadata", "alter", "auto_flush_interval"]
+owner = "storage"

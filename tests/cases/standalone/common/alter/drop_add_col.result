@@ -1,0 +1,67 @@
+CREATE TABLE test(i TIMESTAMP TIME INDEX, j INTEGER, k INTEGER NOT NULL);
+
+Affected Rows: 0
+
+INSERT INTO test(i, j, k) VALUES (1, 11, 5), (2, 12, 5);
+
+Affected Rows: 2
+
+SELECT * FROM test order by i;
+
++-------------------------+----+---+
+| i                       | j  | k |
++-------------------------+----+---+
+| 1970-01-01T00:00:00.001 | 11 | 5 |
+| 1970-01-01T00:00:00.002 | 12 | 5 |
++-------------------------+----+---+
+
+ADMIN FLUSH_TABLE('test');
+
++---------------------------+
+| ADMIN FLUSH_TABLE('test') |
++---------------------------+
+| 0                         |
++---------------------------+
+
+ALTER TABLE test DROP COLUMN j;
+
+Affected Rows: 0
+
+ALTER TABLE test ADD COLUMN j INTEGER DEFAULT 0;
+
+Affected Rows: 0
+
+INSERT INTO test(i, j, k) VALUES (3, 0, 6);
+
+Affected Rows: 1
+
+INSERT INTO test VALUES (4, 7, 0);
+
+Affected Rows: 1
+
+SELECT * FROM test order by i;
+
++-------------------------+---+---+
+| i                       | k | j |
++-------------------------+---+---+
+| 1970-01-01T00:00:00.001 | 5 | 0 |
+| 1970-01-01T00:00:00.002 | 5 | 0 |
+| 1970-01-01T00:00:00.003 | 6 | 0 |
+| 1970-01-01T00:00:00.004 | 7 | 0 |
++-------------------------+---+---+
+
+SELECT * FROM test WHERE j = 0 order by i;
+
++-------------------------+---+---+
+| i                       | k | j |
++-------------------------+---+---+
+| 1970-01-01T00:00:00.001 | 5 | 0 |
+| 1970-01-01T00:00:00.002 | 5 | 0 |
+| 1970-01-01T00:00:00.003 | 6 | 0 |
+| 1970-01-01T00:00:00.004 | 7 | 0 |
++-------------------------+---+---+
+
+DROP TABLE test;
+
+Affected Rows: 0
+

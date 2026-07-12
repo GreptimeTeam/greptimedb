@@ -1,0 +1,441 @@
+// Copyright 2023 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//! Handling flush related requests.
+
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
+
+use common_telemetry::{debug, error, info};
+use store_api::logstore::LogStore;
+use store_api::region_request::{RegionFlushReason, RegionFlushRequest};
+use store_api::storage::RegionId;
+
+use crate::config::{IndexBuildMode, MitoConfig};
+use crate::error::{RegionNotFoundSnafu, Result};
+use crate::flush::{FlushReason, RegionFlushTask};
+use crate::region::MitoRegionRef;
+use crate::request::{BuildIndexRequest, FlushFailed, FlushFinished, OnFailure, OptionOutputTx};
+use crate::sst::index::IndexBuildType;
+use crate::worker::RegionWorkerLoop;
+
+fn resolve_flush_reason(
+    request_reason: Option<RegionFlushReason>,
+    is_downgrading: bool,
+) -> FlushReason {
+    match request_reason {
+        Some(reason) => FlushReason::from(reason),
+        None if is_downgrading => FlushReason::Downgrading,
+        None => FlushReason::Manual,
+    }
+}
+
+impl<S: LogStore> RegionWorkerLoop<S> {
+    /// On region flush job failed.
+    pub(crate) async fn handle_flush_failed(&mut self, region_id: RegionId, request: FlushFailed) {
+        self.flush_scheduler.on_flush_failed(region_id, request.err);
+        debug!(
+            "Flush failed for region {}, handling stalled requests",
+            region_id
+        );
+        // Maybe flush worker again.
+        self.maybe_flush_worker();
+
+        // Handle stalled requests.
+        self.handle_stalled_requests().await;
+    }
+
+    /// Checks whether the engine reaches flush threshold. If so, finds regions in this
+    /// worker to flush.
+    pub(crate) fn maybe_flush_worker(&mut self) {
+        if !self.write_buffer_manager.should_flush_engine() {
+            debug!("No need to flush worker");
+            // No need to flush worker.
+            return;
+        }
+
+        // If the engine needs flush, each worker will find some regions to flush. We might
+        // flush more memory than expect but it should be acceptable.
+        if let Err(e) = self.flush_regions_on_engine_full() {
+            error!(e; "Failed to flush worker");
+        }
+    }
+
+    /// Finds some regions to flush to reduce write buffer usage.
+    fn flush_regions_on_engine_full(&mut self) -> Result<()> {
+        let regions = self.regions.list_regions();
+        let now = self.time_provider.current_time_millis();
+        let mut pending_regions = vec![];
+
+        for region in &regions {
+            if self.flush_scheduler.is_flush_requested(region.region_id) || !region.is_writable() {
+                // Already flushing or not writable.
+                continue;
+            }
+
+            let version = region.version();
+            let region_memtable_size =
+                version.memtables.mutable_usage() + version.memtables.immutables_usage();
+
+            let auto_flush_interval = version
+                .options
+                .auto_flush_interval_or(self.config.auto_flush_interval);
+            let min_last_flush_time = now.saturating_sub(
+                auto_flush_interval
+                    .as_millis()
+                    .try_into()
+                    .unwrap_or(i64::MAX),
+            );
+
+            if region.last_flush_millis() < min_last_flush_time {
+                // If flush time of this region is earlier than `min_last_flush_time`, we can flush this region.
+                let task =
+                    self.new_flush_task(region, FlushReason::EngineFull, None, self.config.clone());
+                self.flush_scheduler.schedule_flush(
+                    region.region_id,
+                    &region.version_control,
+                    task,
+                )?;
+            } else if region_memtable_size > 0 {
+                // We should only consider regions with memtable size > 0 to flush.
+                pending_regions.push((region, region_memtable_size));
+            }
+        }
+        pending_regions.sort_unstable_by_key(|(_, size)| std::cmp::Reverse(*size));
+        // The flush target is the mutable memtable limit (half of the global buffer).
+        // When memory is full, we aggressively flush regions until usage drops below this target,
+        // not just below the full limit.
+        let target_memory_usage = self.write_buffer_manager.flush_limit();
+        let mut memory_usage = self.write_buffer_manager.memory_usage();
+
+        #[cfg(test)]
+        {
+            debug!(
+                "Flushing regions on engine full, target memory usage: {}, memory usage: {}, pending regions: {:?}",
+                target_memory_usage,
+                memory_usage,
+                pending_regions
+                    .iter()
+                    .map(|(region, mem_size)| (region.region_id, mem_size))
+                    .collect::<Vec<_>>()
+            );
+        }
+        // Iterate over pending regions in descending order of their memory size and schedule flush tasks
+        // for each region until the overall memory usage drops below the flush limit.
+        for (region, region_mem_size) in pending_regions.into_iter() {
+            // Make sure the first region is always flushed.
+            if memory_usage < target_memory_usage {
+                // Stop flushing regions if memory usage is already below the flush limit
+                break;
+            }
+            let task =
+                self.new_flush_task(region, FlushReason::EngineFull, None, self.config.clone());
+            debug!("Scheduling flush task for region {}", region.region_id);
+            // Schedule a flush task for the current region
+            self.flush_scheduler
+                .schedule_flush(region.region_id, &region.version_control, task)?;
+            // Reduce memory usage by the region's size, ensuring it doesn't go negative
+            memory_usage = memory_usage.saturating_sub(region_mem_size);
+        }
+
+        Ok(())
+    }
+
+    /// Creates a flush task with specific `reason` for the `region`.
+    pub(crate) fn new_flush_task(
+        &self,
+        region: &MitoRegionRef,
+        reason: FlushReason,
+        row_group_size: Option<usize>,
+        engine_config: Arc<MitoConfig>,
+    ) -> RegionFlushTask {
+        RegionFlushTask {
+            region_id: region.region_id,
+            reason,
+            senders: Vec::new(),
+            request_sender: self.sender.clone(),
+            access_layer: region.access_layer.clone(),
+            listener: self.listener.clone(),
+            engine_config,
+            row_group_size,
+            cache_manager: self.cache_manager.clone(),
+            manifest_ctx: region.manifest_ctx.clone(),
+            index_options: region.version().options.index_options.clone(),
+            flush_semaphore: self.flush_semaphore.clone(),
+            is_staging: region.is_staging(),
+            partition_expr: region.maybe_staging_partition_expr_str(),
+        }
+    }
+}
+
+impl<S: LogStore> RegionWorkerLoop<S> {
+    /// Handles manual flush request.
+    pub(crate) fn handle_flush_request(
+        &mut self,
+        region_id: RegionId,
+        request: RegionFlushRequest,
+        sender: OptionOutputTx,
+    ) {
+        let region = match self.regions.flushable_region(region_id) {
+            Ok(region) => region,
+            Err(e) => {
+                sender.send(Err(e));
+                return;
+            }
+        };
+
+        // `update_topic_latest_entry_id` updates `topic_latest_entry_id` when memtables are empty.
+        // But the flush is skipped if memtables are empty. Thus should update the `topic_latest_entry_id`
+        // when handling flush request instead of in `schedule_flush` or `flush_finished`.
+        self.update_topic_latest_entry_id(&region);
+
+        let reason = resolve_flush_reason(request.reason, region.is_downgrading());
+        let mut task =
+            self.new_flush_task(&region, reason, request.row_group_size, self.config.clone());
+        task.push_sender(sender);
+        if let Err(e) =
+            self.flush_scheduler
+                .schedule_flush(region.region_id, &region.version_control, task)
+        {
+            error!(e; "Failed to schedule flush task for region {}", region.region_id);
+        }
+    }
+
+    /// Flushes regions periodically.
+    pub(crate) fn flush_periodically(&mut self) -> Result<()> {
+        let regions = self.regions.list_regions();
+        let now = self.time_provider.current_time_millis();
+
+        for region in &regions {
+            if self.flush_scheduler.is_flush_requested(region.region_id) || !region.is_writable() {
+                // Already flushing or not writable.
+                continue;
+            }
+            self.update_topic_latest_entry_id(region);
+
+            let auto_flush_interval = region
+                .version()
+                .options
+                .auto_flush_interval_or(self.config.auto_flush_interval);
+            let min_last_flush_time = now.saturating_sub(
+                auto_flush_interval
+                    .as_millis()
+                    .try_into()
+                    .unwrap_or(i64::MAX),
+            );
+
+            if region.last_flush_millis() < min_last_flush_time {
+                // If flush time of this region is earlier than `min_last_flush_time`, we can flush this region.
+                let task = self.new_flush_task(
+                    region,
+                    FlushReason::Periodically,
+                    None,
+                    self.config.clone(),
+                );
+                self.flush_scheduler.schedule_flush(
+                    region.region_id,
+                    &region.version_control,
+                    task,
+                )?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// On region flush job finished.
+    pub(crate) async fn handle_flush_finished(
+        &mut self,
+        region_id: RegionId,
+        mut request: FlushFinished,
+    ) {
+        // Notifies other workers. Even the remaining steps of this method fail we still
+        // wake up other workers as we have released some memory by flush.
+        self.notify_group();
+
+        let region = match self.regions.get_region(region_id) {
+            Some(region) => region,
+            None => {
+                request.on_failure(RegionNotFoundSnafu { region_id }.build());
+                return;
+            }
+        };
+
+        if request.is_staging {
+            // Skip the region metadata update.
+            info!(
+                "Skipping region metadata update for region {} in staging mode",
+                region_id
+            );
+            region.version_control.apply_edit(
+                None,
+                &request.memtables_to_remove,
+                region.file_purger.clone(),
+            );
+        } else {
+            region.version_control.apply_edit(
+                Some(request.edit.clone()),
+                &request.memtables_to_remove,
+                region.file_purger.clone(),
+            );
+        }
+
+        region.update_flush_millis();
+        // Update topic latest entry id as soon as possible after flush to make sure the prunable entry id is updated timely,
+        // which is important for remote WAL pruning.
+        self.update_topic_latest_entry_id(&region);
+
+        // Delete wal.
+        info!(
+            "Region {} flush finished, tries to bump wal to {}",
+            region_id, request.flushed_entry_id
+        );
+        if let Err(e) = self
+            .wal
+            .obsolete(region_id, request.flushed_entry_id, &region.provider)
+            .await
+        {
+            error!(e; "Failed to write wal, region: {}", region_id);
+            request.on_failure(e);
+            return;
+        }
+
+        let flush_on_close = request.flush_reason == FlushReason::Closing;
+
+        let index_build_file_metas = std::mem::take(&mut request.edit.files_to_add);
+
+        // In async mode, create indexes after flush.
+        if self.config.index.build_mode == IndexBuildMode::Async {
+            self.handle_rebuild_index(
+                BuildIndexRequest {
+                    region_id,
+                    build_type: IndexBuildType::Flush,
+                    file_metas: index_build_file_metas,
+                },
+                OptionOutputTx::new(None),
+            )
+            .await;
+        }
+
+        if flush_on_close {
+            self.remove_region(region_id).await;
+            info!("Region {} closed after flush", region_id);
+            request.on_success();
+            self.listener.on_flush_success(region_id);
+            return;
+        }
+
+        // Notifies waiters and observes the flush timer.
+        request.on_success();
+        // Handle pending requests for the region.
+        if let Some((mut ddl_requests, mut write_requests, mut bulk_writes)) =
+            self.flush_scheduler.on_flush_success(region_id)
+        {
+            // Perform DDLs first because they require empty memtables.
+            self.handle_ddl_requests(&mut ddl_requests).await;
+            if self.flush_scheduler.is_flush_requested(region_id) {
+                // The DDL may schedule another flush, e.g. a close-time flush after writes
+                // arrived in the mutable memtable during the previous flush. Keep pending
+                // writes fenced until that flush reaches its terminal state instead of
+                // accepting them while the DDL is still in progress.
+                for write_request in write_requests {
+                    self.flush_scheduler
+                        .add_write_request_to_pending(write_request);
+                }
+                for bulk_write in bulk_writes {
+                    self.flush_scheduler.add_bulk_request_to_pending(bulk_write);
+                }
+                self.listener.on_flush_success(region_id);
+                return;
+            }
+            // A pending close DDL may have removed the region. Reject queued writes as
+            // not found, then stop instead of scheduling compaction for a closed region.
+            if !self.regions.is_region_exists(region_id) {
+                self.handle_write_requests(&mut write_requests, &mut bulk_writes, false)
+                    .await;
+                self.listener.on_flush_success(region_id);
+                return;
+            }
+            // Handle pending write requests, we don't stall these requests.
+            self.handle_write_requests(&mut write_requests, &mut bulk_writes, false)
+                .await;
+        }
+        // Maybe flush worker again.
+        self.maybe_flush_worker();
+        // Handle stalled requests.
+        self.handle_stalled_requests().await;
+        // Schedules compaction.
+        self.schedule_compaction(&region).await;
+
+        self.listener.on_flush_success(region_id);
+    }
+
+    /// Updates the latest entry id since flush of the region.
+    /// **This is only used for remote WAL pruning.**
+    pub(crate) fn update_topic_latest_entry_id(&mut self, region: &MitoRegionRef) {
+        if region.provider.is_remote_wal() && region.version().memtables.is_empty() {
+            let latest_offset = self
+                .wal
+                .store()
+                .latest_entry_id(&region.provider)
+                .unwrap_or(0);
+            let topic_last_entry_id = region.topic_latest_entry_id.load(Ordering::Relaxed);
+
+            if latest_offset > topic_last_entry_id {
+                region
+                    .topic_latest_entry_id
+                    .store(latest_offset, Ordering::Relaxed);
+                debug!(
+                    "Region {} latest entry id updated to {}",
+                    region.region_id, latest_offset
+                );
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_resolve_flush_reason_uses_request_reason() {
+        assert_eq!(
+            resolve_flush_reason(Some(RegionFlushReason::RegionMigration), true),
+            FlushReason::RegionMigration
+        );
+        assert_eq!(
+            resolve_flush_reason(Some(RegionFlushReason::Repartition), false),
+            FlushReason::Repartition
+        );
+        assert_eq!(
+            resolve_flush_reason(Some(RegionFlushReason::RemoteWalPrune), false),
+            FlushReason::RemoteWalPrune
+        );
+        assert_eq!(
+            resolve_flush_reason(Some(RegionFlushReason::Closing), false),
+            FlushReason::Closing
+        );
+        assert_eq!(
+            resolve_flush_reason(Some(RegionFlushReason::Downgrading), false),
+            FlushReason::Downgrading
+        );
+    }
+
+    #[test]
+    fn test_resolve_flush_reason_fallback_unchanged() {
+        assert_eq!(resolve_flush_reason(None, true), FlushReason::Downgrading);
+        assert_eq!(resolve_flush_reason(None, false), FlushReason::Manual);
+    }
+}

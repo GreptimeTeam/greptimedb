@@ -1,0 +1,108 @@
+// Copyright 2023-2026 GrepTime Inc.
+//
+// This file is part of the GreptimeDB Enterprise Edition and is licensed under
+// the GreptimeDB Enterprise License. You may not use this file except in
+// compliance with that license. A copy of the license is available at the root
+// of this repository in the file LICENSE-ENTERPRISE.
+//
+// Unless required by applicable law or agreed to in writing, this software is
+// distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND,
+// either express or implied.
+
+use std::fmt::{self, Display};
+
+use serde::Serialize;
+use sqlparser_derive::{Visit, VisitMut};
+
+use crate::ast::ObjectName;
+use crate::statements::show::ShowKind;
+
+/// SQL structure for `SHOW TRIGGERS`.
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
+pub struct ShowTriggers {
+    pub kind: ShowKind,
+}
+
+impl Display for ShowTriggers {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "SHOW TRIGGERS")?;
+        format_kind!(self, f);
+        Ok(())
+    }
+}
+
+/// SQL structure for `SHOW CREATE TRIGGER`.
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
+pub struct ShowCreateTrigger {
+    pub trigger_name: ObjectName,
+}
+
+impl Display for ShowCreateTrigger {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "SHOW CREATE TRIGGER {}", self.trigger_name)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::dialect::GreptimeDbDialect;
+    use crate::parser::{ParseOptions, ParserContext};
+    use crate::statements::show::ShowKind;
+    use crate::statements::show::trigger::ShowTriggers;
+    use crate::statements::statement::Statement;
+
+    #[test]
+    fn test_show_triggers_display() {
+        let show_triggers = ShowTriggers {
+            kind: ShowKind::All,
+        };
+        assert_eq!(show_triggers.to_string(), "SHOW TRIGGERS");
+
+        let sql = "SHOW TRIGGERS LIKE 'test_trigger'";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+        assert_eq!(1, result.len());
+        let Statement::ShowTriggers(show_triggers) = &result[0] else {
+            panic!("Expected ShowTriggers statement");
+        };
+        let expected = "SHOW TRIGGERS LIKE 'test_trigger'";
+        assert_eq!(show_triggers.to_string(), expected);
+
+        let sql = "SHOW TRIGGERS WHERE name = 'test_trigger'";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+        assert_eq!(1, result.len());
+        let Statement::ShowTriggers(show_triggers) = &result[0] else {
+            panic!("Expected ShowTriggers statement");
+        };
+        let expected = "SHOW TRIGGERS WHERE name = 'test_trigger'";
+        assert_eq!(show_triggers.to_string(), expected);
+    }
+
+    #[test]
+    fn test_show_create_trigger_display() {
+        let sql = "SHOW CREATE TRIGGER test_trigger";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+        assert_eq!(1, result.len());
+        let Statement::ShowCreateTrigger(show_create_trigger) = &result[0] else {
+            panic!("Expected ShowCreateTrigger statement");
+        };
+        let expected = "SHOW CREATE TRIGGER test_trigger";
+        assert_eq!(show_create_trigger.to_string(), expected);
+
+        let sql = "SHOW CREATE TRIGGER greptime.Test_Trigger";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+        assert_eq!(1, result.len());
+        let Statement::ShowCreateTrigger(show_create_trigger) = &result[0] else {
+            panic!("Expected ShowCreateTrigger statement");
+        };
+        let expected = "SHOW CREATE TRIGGER greptime.test_trigger";
+        assert_eq!(show_create_trigger.to_string(), expected);
+    }
+}

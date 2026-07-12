@@ -1,0 +1,129 @@
+CREATE TABLE t1(a INT, b STRING, c TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+INSERT INTO t1 VALUES (41, "hello", 1), (42, "world", 2), (43, "greptime", 3);
+
+Affected Rows: 3
+
+CREATE VIEW v1 AS SELECT a, b FROM t1;
+
+Affected Rows: 0
+
+SELECT * FROM v1;
+
++----+----------+
+| a  | b        |
++----+----------+
+| 41 | hello    |
+| 42 | world    |
+| 43 | greptime |
++----+----------+
+
+SELECT a FROM v1;
+
++----+
+| a  |
++----+
+| 41 |
+| 42 |
+| 43 |
++----+
+
+INSERT INTO t1 VALUES (44, "greptimedb", 4);
+
+Affected Rows: 1
+
+SELECT * FROM v1;
+
++----+------------+
+| a  | b          |
++----+------------+
+| 41 | hello      |
+| 42 | world      |
+| 43 | greptime   |
+| 44 | greptimedb |
++----+------------+
+
+SHOW CREATE VIEW v1;
+
++------+---------------------------------------+
+| View | Create View                           |
++------+---------------------------------------+
+| v1   | CREATE VIEW v1 AS SELECT a, b FROM t1 |
++------+---------------------------------------+
+
+CREATE OR REPLACE VIEW v1 AS SELECT a, b, c FROM t1 WHERE a > 43;
+
+Affected Rows: 0
+
+SHOW CREATE VIEW v1;
+
++------+------------------------------------------------------------------+
+| View | Create View                                                      |
++------+------------------------------------------------------------------+
+| v1   | CREATE OR REPLACE VIEW v1 AS SELECT a, b, c FROM t1 WHERE a > 43 |
++------+------------------------------------------------------------------+
+
+SELECT * FROM v1;
+
++----+------------+-------------------------+
+| a  | b          | c                       |
++----+------------+-------------------------+
+| 44 | greptimedb | 1970-01-01T00:00:00.004 |
++----+------------+-------------------------+
+
+--- if not exists, so it doesn't change at all ---
+CREATE VIEW IF NOT EXISTS v1 AS SELECT c FROM t1;
+
+Affected Rows: 0
+
+SHOW CREATE VIEW v1;
+
++------+------------------------------------------------------------------+
+| View | Create View                                                      |
++------+------------------------------------------------------------------+
+| v1   | CREATE OR REPLACE VIEW v1 AS SELECT a, b, c FROM t1 WHERE a > 43 |
++------+------------------------------------------------------------------+
+
+SELECT * FROM v1;
+
++----+------------+-------------------------+
+| a  | b          | c                       |
++----+------------+-------------------------+
+| 44 | greptimedb | 1970-01-01T00:00:00.004 |
++----+------------+-------------------------+
+
+--- if not exists with replace, so it changes ---
+CREATE OR REPLACE VIEW IF NOT EXISTS v1 AS SELECT c FROM t1;
+
+Error: 1004(InvalidArguments), Invalid SQL, error: syntax error Create Or Replace and If Not Exist cannot be used together
+
+SHOW CREATE VIEW v1;
+
++------+------------------------------------------------------------------+
+| View | Create View                                                      |
++------+------------------------------------------------------------------+
+| v1   | CREATE OR REPLACE VIEW v1 AS SELECT a, b, c FROM t1 WHERE a > 43 |
++------+------------------------------------------------------------------+
+
+SELECT * FROM v1;
+
++----+------------+-------------------------+
+| a  | b          | c                       |
++----+------------+-------------------------+
+| 44 | greptimedb | 1970-01-01T00:00:00.004 |
++----+------------+-------------------------+
+
+DROP VIEW v1;
+
+Affected Rows: 0
+
+DROP TABLE t1;
+
+Affected Rows: 0
+
+SHOW CREATE VIEW v1;
+
+Error: 4001(TableNotFound), View not found: v1
+

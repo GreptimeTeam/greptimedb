@@ -1,0 +1,162 @@
+-- Migrated from DuckDB test: test/sql/join/cross_product/ advanced tests
+-- Tests advanced cross join scenarios
+CREATE TABLE products(prod_id INTEGER, prod_name VARCHAR, price DOUBLE, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+CREATE TABLE stores(store_id INTEGER, store_name VARCHAR, city VARCHAR, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+CREATE TABLE categories(cat_id INTEGER, cat_name VARCHAR, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+INSERT INTO products VALUES
+(1, 'Laptop', 999.99, 1000), (2, 'Mouse', 29.99, 2000), (3, 'Monitor', 299.99, 3000);
+
+Affected Rows: 3
+
+INSERT INTO stores VALUES
+(1, 'TechStore', 'NYC', 1000), (2, 'GadgetShop', 'LA', 2000);
+
+Affected Rows: 2
+
+INSERT INTO categories VALUES
+(1, 'Electronics', 1000), (2, 'Accessories', 2000);
+
+Affected Rows: 2
+
+-- Basic cross join
+SELECT
+  p.prod_name, s.store_name, s.city
+FROM products p
+CROSS JOIN stores s
+ORDER BY p.prod_id, s.store_id;
+
++-----------+------------+------+
+| prod_name | store_name | city |
++-----------+------------+------+
+| Laptop    | TechStore  | NYC  |
+| Laptop    | GadgetShop | LA   |
+| Mouse     | TechStore  | NYC  |
+| Mouse     | GadgetShop | LA   |
+| Monitor   | TechStore  | NYC  |
+| Monitor   | GadgetShop | LA   |
++-----------+------------+------+
+
+-- Cross join with filtering
+SELECT
+  p.prod_name, s.store_name, p.price
+FROM products p
+CROSS JOIN stores s
+WHERE p.price > 100.00
+ORDER BY p.price DESC, s.store_name;
+
++-----------+------------+--------+
+| prod_name | store_name | price  |
++-----------+------------+--------+
+| Laptop    | GadgetShop | 999.99 |
+| Laptop    | TechStore  | 999.99 |
+| Monitor   | GadgetShop | 299.99 |
+| Monitor   | TechStore  | 299.99 |
++-----------+------------+--------+
+
+-- Triple cross join
+SELECT
+  p.prod_name, s.store_name, c.cat_name,
+  CASE WHEN p.price > 500 THEN 'Premium' ELSE 'Standard' END as tier
+FROM products p
+CROSS JOIN stores s
+CROSS JOIN categories c
+ORDER BY p.prod_id, s.store_id, c.cat_id;
+
++-----------+------------+-------------+----------+
+| prod_name | store_name | cat_name    | tier     |
++-----------+------------+-------------+----------+
+| Laptop    | TechStore  | Electronics | Premium  |
+| Laptop    | TechStore  | Accessories | Premium  |
+| Laptop    | GadgetShop | Electronics | Premium  |
+| Laptop    | GadgetShop | Accessories | Premium  |
+| Mouse     | TechStore  | Electronics | Standard |
+| Mouse     | TechStore  | Accessories | Standard |
+| Mouse     | GadgetShop | Electronics | Standard |
+| Mouse     | GadgetShop | Accessories | Standard |
+| Monitor   | TechStore  | Electronics | Standard |
+| Monitor   | TechStore  | Accessories | Standard |
+| Monitor   | GadgetShop | Electronics | Standard |
+| Monitor   | GadgetShop | Accessories | Standard |
++-----------+------------+-------------+----------+
+
+-- Cross join with aggregation
+SELECT
+  s.city,
+  COUNT(*) as product_store_combinations,
+  AVG(p.price) as avg_price,
+  SUM(p.price) as total_inventory_value
+FROM products p
+CROSS JOIN stores s
+GROUP BY s.city
+ORDER BY s.city;
+
++------+----------------------------+-------------------+-----------------------+
+| city | product_store_combinations | avg_price         | total_inventory_value |
++------+----------------------------+-------------------+-----------------------+
+| LA   | 3                          | 443.3233333333333 | 1329.97               |
+| NYC  | 3                          | 443.3233333333333 | 1329.97               |
++------+----------------------------+-------------------+-----------------------+
+
+-- Cross join for inventory matrix
+SELECT
+  p.prod_name,
+  SUM(CASE WHEN s.city = 'NYC' THEN 1 ELSE 0 END) as nyc_availability,
+  SUM(CASE WHEN s.city = 'LA' THEN 1 ELSE 0 END) as la_availability,
+  COUNT(s.store_id) as total_store_availability
+FROM products p
+CROSS JOIN stores s
+GROUP BY p.prod_name, p.prod_id
+ORDER BY p.prod_id;
+
++-----------+------------------+-----------------+--------------------------+
+| prod_name | nyc_availability | la_availability | total_store_availability |
++-----------+------------------+-----------------+--------------------------+
+| Laptop    | 1                | 1               | 2                        |
+| Mouse     | 1                | 1               | 2                        |
+| Monitor   | 1                | 1               | 2                        |
++-----------+------------------+-----------------+--------------------------+
+
+-- Cross join with conditions and calculations
+SELECT
+  p.prod_name,
+  s.store_name,
+  p.price,
+  p.price * 0.1 as store_commission,
+  p.price * 1.08 as price_with_tax
+FROM products p
+CROSS JOIN stores s
+WHERE p.price BETWEEN 25.00 AND 1000.00
+ORDER BY p.price DESC, s.store_name;
+
++-----------+------------+--------+--------------------+--------------------+
+| prod_name | store_name | price  | store_commission   | price_with_tax     |
++-----------+------------+--------+--------------------+--------------------+
+| Laptop    | GadgetShop | 999.99 | 99.99900000000001  | 1079.9892          |
+| Laptop    | TechStore  | 999.99 | 99.99900000000001  | 1079.9892          |
+| Monitor   | GadgetShop | 299.99 | 29.999000000000002 | 323.98920000000004 |
+| Monitor   | TechStore  | 299.99 | 29.999000000000002 | 323.98920000000004 |
+| Mouse     | GadgetShop | 29.99  | 2.999              | 32.3892            |
+| Mouse     | TechStore  | 29.99  | 2.999              | 32.3892            |
++-----------+------------+--------+--------------------+--------------------+
+
+DROP TABLE products;
+
+Affected Rows: 0
+
+DROP TABLE stores;
+
+Affected Rows: 0
+
+DROP TABLE categories;
+
+Affected Rows: 0
+

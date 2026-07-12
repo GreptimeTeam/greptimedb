@@ -1,0 +1,38 @@
+CREATE TABLE monitor (host STRING NOT NULL, ts TIMESTAMP NOT NULL, cpu DOUBLE NOT NULL, memory DOUBLE NOT NULL, TIME INDEX (ts), PRIMARY KEY(host));
+
+Affected Rows: 0
+
+INSERT INTO monitor(ts, host, cpu, memory) VALUES
+(1655276557000, 'host1', 10.0, 1024),
+(1655276557000, 'host2', 20.0, 1024),
+(1655276557000, 'host3', 30.0, 1024);
+
+Affected Rows: 3
+
+SELECT ts, host, cpu, memory FROM monitor ORDER BY ts, host;
+
++---------------------+-------+------+--------+
+| ts                  | host  | cpu  | memory |
++---------------------+-------+------+--------+
+| 2022-06-15T07:02:37 | host1 | 10.0 | 1024.0 |
+| 2022-06-15T07:02:37 | host2 | 20.0 | 1024.0 |
+| 2022-06-15T07:02:37 | host3 | 30.0 | 1024.0 |
++---------------------+-------+------+--------+
+
+DELETE FROM monitor WHERE host = 'host2';
+
+Affected Rows: 1
+
+SELECT ts, host, cpu, memory FROM monitor ORDER BY ts, host;
+
++---------------------+-------+------+--------+
+| ts                  | host  | cpu  | memory |
++---------------------+-------+------+--------+
+| 2022-06-15T07:02:37 | host1 | 10.0 | 1024.0 |
+| 2022-06-15T07:02:37 | host3 | 30.0 | 1024.0 |
++---------------------+-------+------+--------+
+
+DROP TABLE monitor;
+
+Affected Rows: 0
+

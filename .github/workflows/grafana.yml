@@ -1,0 +1,26 @@
+name: Check Grafana Panels
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'grafana/**'  # Trigger only when files under the grafana/ directory change
+
+jobs:
+  check-panels:
+    runs-on: ubuntu-latest
+
+    steps:
+      # Check out the repository
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Install jq (required for the script)
+      - name: Install jq
+        run: sudo apt-get install -y jq
+
+      # Make the check.sh script executable
+      - name: Check grafana dashboards
+        run: |
+          make check-dashboards

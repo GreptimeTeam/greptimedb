@@ -1,0 +1,55 @@
+[package]
+name = "log-store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[build-dependencies]
+protobuf-build = { version = "0.15", default-features = false, features = [
+    "protobuf-codec",
+] }
+
+[lints]
+workspace = true
+
+[dependencies]
+async-stream.workspace = true
+async-trait.workspace = true
+bytes.workspace = true
+chrono.workspace = true
+common-base.workspace = true
+common-config.workspace = true
+common-error.workspace = true
+common-macro.workspace = true
+common-meta.workspace = true
+common-runtime.workspace = true
+common-telemetry.workspace = true
+common-time.workspace = true
+common-wal.workspace = true
+dashmap.workspace = true
+delta-encoding = "0.4"
+derive_builder.workspace = true
+futures.workspace = true
+futures-util.workspace = true
+itertools.workspace = true
+lazy_static.workspace = true
+object-store.workspace = true
+pin-project.workspace = true
+prometheus.workspace = true
+protobuf = { version = "2", features = ["bytes"] }
+raft-engine.workspace = true
+rskafka.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+snafu.workspace = true
+store-api.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+common-meta = { workspace = true, features = ["testing"] }
+common-test-util.workspace = true
+common-wal = { workspace = true, features = ["testing"] }
+itertools.workspace = true
+rand.workspace = true
+rskafka = { workspace = true, features = ["unstable-fuzzing"] }
+uuid.workspace = true

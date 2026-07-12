@@ -1,0 +1,103 @@
+-- Migrated from DuckDB test: test/sql/aggregate/aggregates/test_bit_*.test
+-- Test bitwise aggregate operations
+-- Test BIT_AND
+CREATE TABLE bit_test(i INTEGER, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+INSERT INTO bit_test VALUES
+    (7, 1000),   -- 111
+    (3, 2000),   -- 011
+    (5, 3000),   -- 101
+    (NULL, 4000);
+
+Affected Rows: 4
+
+-- Should be 1 (001)
+SELECT BIT_AND(i) FROM bit_test;
+
++---------------------+
+| bit_and(bit_test.i) |
++---------------------+
+| 1                   |
++---------------------+
+
+-- Test BIT_OR
+-- Should be 7 (111)
+SELECT BIT_OR(i) FROM bit_test;
+
++--------------------+
+| bit_or(bit_test.i) |
++--------------------+
+| 7                  |
++--------------------+
+
+-- Test BIT_XOR
+-- Should be 1 (111 XOR 011 XOR 101)
+SELECT BIT_XOR(i) FROM bit_test;
+
++---------------------+
+| bit_xor(bit_test.i) |
++---------------------+
+| 1                   |
++---------------------+
+
+-- Test with groups
+INSERT INTO bit_test VALUES (8, 5000), (12, 6000), (4, 7000);
+
+Affected Rows: 3
+
+-- Create separate table for group testing
+CREATE TABLE bit_groups(grp INTEGER, i INTEGER, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+INSERT INTO bit_groups VALUES
+    (1, 7, 1000), (1, 3, 2000), (1, 5, 3000),
+    (2, 8, 4000), (2, 12, 5000), (2, 4, 6000);
+
+Affected Rows: 6
+
+SELECT grp, BIT_AND(i), BIT_OR(i), BIT_XOR(i) FROM bit_groups GROUP BY grp ORDER BY grp;
+
++-----+-----------------------+----------------------+-----------------------+
+| grp | bit_and(bit_groups.i) | bit_or(bit_groups.i) | bit_xor(bit_groups.i) |
++-----+-----------------------+----------------------+-----------------------+
+| 1   | 1                     | 7                    | 1                     |
+| 2   | 0                     | 12                   | 0                     |
++-----+-----------------------+----------------------+-----------------------+
+
+-- Test edge cases
+-- NULL
+SELECT BIT_AND(i) FROM bit_test WHERE i > 100;
+
++---------------------+
+| bit_and(bit_test.i) |
++---------------------+
+|                     |
++---------------------+
+
+SELECT BIT_OR(i) FROM bit_test WHERE i > 100;
+
++--------------------+
+| bit_or(bit_test.i) |
++--------------------+
+|                    |
++--------------------+
+
+SELECT BIT_XOR(i) FROM bit_test WHERE i > 100;
+
++---------------------+
+| bit_xor(bit_test.i) |
++---------------------+
+|                     |
++---------------------+
+
+DROP TABLE bit_test;
+
+Affected Rows: 0
+
+DROP TABLE bit_groups;
+
+Affected Rows: 0
+

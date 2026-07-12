@@ -1,0 +1,55 @@
+logging:
+  level: "info"
+  format: "json"
+  filters:
+  - log_store=debug
+meta:
+  configData: |-
+    [runtime]
+    global_rt_size = 4
+
+    [wal]
+    provider = "kafka"
+    broker_endpoints = ["kafka.kafka-cluster.svc.cluster.local:9092"]
+    connect_timeout = "10s"
+    timeout = "10s"
+    num_topics = 3
+    auto_prune_interval = "30s"
+    trigger_flush_threshold = 100
+
+    [datanode]
+    [datanode.client]
+    timeout = "120s"
+datanode:
+  configData: |-
+    [runtime]
+    global_rt_size = 4
+    compact_rt_size = 2
+
+    [wal]
+    provider = "kafka"
+    broker_endpoints = ["kafka.kafka-cluster.svc.cluster.local:9092"]
+    connect_timeout = "10s"
+    timeout = "10s"
+    overwrite_entry_start_id = true
+frontend:
+  configData: |-
+    [runtime]
+    global_rt_size = 4
+
+    [meta_client]
+    ddl_timeout = "120s"
+objectStorage:
+  s3:
+    bucket: default
+    region: us-west-2
+    root: test-root
+    endpoint: http://minio.minio.svc.cluster.local 
+  credentials:
+    accessKeyId: rootuser
+    secretAccessKey: rootpass123
+remoteWal:
+   enabled: true
+   kafka:
+     brokerEndpoints: 
+      - "kafka.kafka-cluster.svc.cluster.local:9092"

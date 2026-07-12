@@ -1,0 +1,6 @@
+hostname,environment,usage_user,usage_system,usage_idle,usage_nice,usage_iowait,usage_irq,usage_softirq,usage_steal,usage_guest,usage_guest_nice,ts
+host_0,test,32,58,36,72,61,21,53,12,59,72,2023-04-01T00:00:00+00:00
+host_1,staging,12,32,50,84,19,73,38,37,72,2,2023-04-01T00:00:00+00:00
+host_2,test,98,5,40,95,64,39,21,63,53,94,2023-04-01T00:00:00+00:00
+host_3,test,98,95,7,48,99,67,14,86,36,23,2023-04-01T00:00:00+00:00
+host_4,test,32,44,11,53,64,9,17,39,20,7,2023-04-01T00:00:00+00:00

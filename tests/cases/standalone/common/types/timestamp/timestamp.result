@@ -1,0 +1,209 @@
+CREATE TABLE IF NOT EXISTS timestamp (t TIMESTAMP, ts TIMESTAMP time index DEFAULT current_timestamp());
+
+Affected Rows: 0
+
+INSERT INTO timestamp VALUES ('2008-01-01 00:00:01', 1), (NULL, 2), ('2007-01-01 00:00:01', 3), ('2008-02-01 00:00:01', 4), ('2008-01-02 00:00:01', 5), ('2008-01-01 10:00:00', 6), ('2008-01-01 00:10:00', 7), ('2008-01-01 00:00:10', 8);
+
+Affected Rows: 8
+
+SELECT timestamp '2017-07-23 13:10:11';
+
++-----------------------------+
+| Utf8("2017-07-23 13:10:11") |
++-----------------------------+
+| 2017-07-23T13:10:11         |
++-----------------------------+
+
+SELECT timestamp '2017-07-23T13:10:11',timestamp '2017-07-23T13:10:11Z';
+
++-----------------------------+------------------------------+
+| Utf8("2017-07-23T13:10:11") | Utf8("2017-07-23T13:10:11Z") |
++-----------------------------+------------------------------+
+| 2017-07-23T13:10:11         | 2017-07-23T13:10:11          |
++-----------------------------+------------------------------+
+
+SELECT timestamp '    2017-07-23     13:10:11    ';
+
++-----------------------------+
+| Utf8("2017-07-23 13:10:11") |
++-----------------------------+
+| 2017-07-23T13:10:11         |
++-----------------------------+
+
+SELECT timestamp '    2017-07-23     13:10:11    AA';
+
+Error: 3001(EngineExecuteQuery), Parser error: Invalid timezone "AA": failed to parse timezone
+
+SELECT timestamp 'AA2017-07-23 13:10:11';
+
+Error: 3001(EngineExecuteQuery), Parser error: Error parsing timestamp from 'AA2017-07-23 13:10:11': error parsing date
+
+SELECT timestamp '2017-07-23A13:10:11';
+
+Error: 3001(EngineExecuteQuery), Parser error: Error parsing timestamp from '2017-07-23A13:10:11': invalid timestamp separator
+
+SELECT t FROM timestamp ORDER BY t;
+
++---------------------+
+| t                   |
++---------------------+
+| 2007-01-01T00:00:01 |
+| 2008-01-01T00:00:01 |
+| 2008-01-01T00:00:10 |
+| 2008-01-01T00:10:00 |
+| 2008-01-01T10:00:00 |
+| 2008-01-02T00:00:01 |
+| 2008-02-01T00:00:01 |
+|                     |
++---------------------+
+
+SELECT MIN(t) FROM timestamp;
+
++---------------------+
+| min(timestamp.t)    |
++---------------------+
+| 2007-01-01T00:00:01 |
++---------------------+
+
+SELECT MAX(t) FROM timestamp;
+
++---------------------+
+| max(timestamp.t)    |
++---------------------+
+| 2008-02-01T00:00:01 |
++---------------------+
+
+SELECT SUM(t) FROM timestamp;
+
+Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Execution error: Function 'sum' failed to match any signature, errors: Error during planning: Function 'sum' requires TypeSignatureClass::Decimal, but received Timestamp(ms) (DataType: Timestamp(ms)).,Error during planning: Function 'sum' requires TypeSignatureClass::Native(LogicalType(Native(UInt64), UInt64)), but received Timestamp(ms) (DataType: Timestamp(ms)).,Error during planning: Function 'sum' requires TypeSignatureClass::Native(LogicalType(Native(Int64), Int64)), but received Timestamp(ms) (DataType: Timestamp(ms)).,Error during planning: Function 'sum' requires TypeSignatureClass::Native(LogicalType(Native(Float64), Float64)), but received Timestamp(ms) (DataType: Timestamp(ms)).,Error during planning: Function 'sum' requires TypeSignatureClass::Duration, but received Timestamp(ms) (DataType: Timestamp(ms)). No function matches the given name and argument types 'sum(Timestamp(ms))'. You might need to add explicit type casts.
+	Candidate functions:
+	sum(Coercion(TypeSignatureClass::Decimal))
+	sum(Coercion(TypeSignatureClass::Native(LogicalType(Native(UInt64), UInt64)), implicit_coercion=ImplicitCoercion([Native(LogicalType(Native(UInt8), UInt8)), Native(LogicalType(Native(UInt16), UInt16)), Native(LogicalType(Native(UInt32), UInt32))], default_type=UInt64))
+	sum(Coercion(TypeSignatureClass::Native(LogicalType(Native(Int64), Int64)), implicit_coercion=ImplicitCoercion([Native(LogicalType(Native(Int8), Int8)), Native(LogicalType(Native(Int16), Int16)), Native(LogicalType(Native(Int32), Int32))], default_type=Int64))
+	sum(Coercion(TypeSignatureClass::Native(LogicalType(Native(Float64), Float64)), implicit_coercion=ImplicitCoercion([Float], default_type=Float64))
+	sum(Coercion(TypeSignatureClass::Duration))
+
+SELECT AVG(t) FROM timestamp;
+
+Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Execution error: Function 'avg' failed to match any signature, errors: Error during planning: Function 'avg' requires TypeSignatureClass::Decimal, but received Timestamp(ms) (DataType: Timestamp(ms)).,Error during planning: Function 'avg' requires TypeSignatureClass::Duration, but received Timestamp(ms) (DataType: Timestamp(ms)).,Error during planning: Function 'avg' requires TypeSignatureClass::Native(LogicalType(Native(Float64), Float64)), but received Timestamp(ms) (DataType: Timestamp(ms)). No function matches the given name and argument types 'avg(Timestamp(ms))'. You might need to add explicit type casts.
+	Candidate functions:
+	avg(Coercion(TypeSignatureClass::Decimal))
+	avg(Coercion(TypeSignatureClass::Duration))
+	avg(Coercion(TypeSignatureClass::Native(LogicalType(Native(Float64), Float64)), implicit_coercion=ImplicitCoercion([Integer, Float], default_type=Float64))
+
+SELECT t+t FROM timestamp;
+
+Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Cannot get result type for temporal operation Timestamp(ms) + Timestamp(ms): Invalid argument error: Invalid timestamp arithmetic operation: Timestamp(ms) + Timestamp(ms)
+
+SELECT t*t FROM timestamp;
+
+Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Cannot get result type for temporal operation Timestamp(ms) * Timestamp(ms): Invalid argument error: Invalid timestamp arithmetic operation: Timestamp(ms) * Timestamp(ms)
+
+SELECT t/t FROM timestamp;
+
+Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Cannot get result type for temporal operation Timestamp(ms) / Timestamp(ms): Invalid argument error: Invalid timestamp arithmetic operation: Timestamp(ms) / Timestamp(ms)
+
+SELECT t%t FROM timestamp;
+
+Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Cannot get result type for temporal operation Timestamp(ms) % Timestamp(ms): Invalid argument error: Invalid timestamp arithmetic operation: Timestamp(ms) % Timestamp(ms)
+
+SELECT t-t FROM timestamp;
+
++---------------------------+
+| timestamp.t - timestamp.t |
++---------------------------+
+| P0D                       |
+|                           |
+| P0D                       |
+| P0D                       |
+| P0D                       |
+| P0D                       |
+| P0D                       |
+| P0D                       |
++---------------------------+
+
+SELECT EXTRACT(YEAR from TIMESTAMP '1992-01-01 01:01:01');
+
++-----------------------------------------------------+
+| date_part(Utf8("YEAR"),Utf8("1992-01-01 01:01:01")) |
++-----------------------------------------------------+
+| 1992                                                |
++-----------------------------------------------------+
+
+SELECT EXTRACT(YEAR from TIMESTAMP '1992-01-01 01:01:01'::DATE);
+
++-----------------------------------------------------+
+| date_part(Utf8("YEAR"),Utf8("1992-01-01 01:01:01")) |
++-----------------------------------------------------+
+| 1992                                                |
++-----------------------------------------------------+
+
+SELECT (TIMESTAMP '1992-01-01 01:01:01')::DATE;
+
++-----------------------------+
+| Utf8("1992-01-01 01:01:01") |
++-----------------------------+
+| 1992-01-01                  |
++-----------------------------+
+
+SELECT (TIMESTAMP '1992-01-01 01:01:01')::TIME;
+
++-----------------------------+
+| Utf8("1992-01-01 01:01:01") |
++-----------------------------+
+| 01:01:01                    |
++-----------------------------+
+
+SELECT t::DATE FROM timestamp WHERE EXTRACT(YEAR from t)=2007 ORDER BY 1;
+
++-------------+
+| timestamp.t |
++-------------+
+| 2007-01-01  |
++-------------+
+
+SELECT t::TIME FROM timestamp WHERE EXTRACT(YEAR from t)=2007 ORDER BY 1;
+
++-------------+
+| timestamp.t |
++-------------+
+| 00:00:01    |
++-------------+
+
+SELECT (DATE '1992-01-01')::TIMESTAMP;
+
++------------------------------------------------------+
+| arrow_cast(Utf8("1992-01-01"),Utf8("Timestamp(ms)")) |
++------------------------------------------------------+
+| 1992-01-01T00:00:00                                  |
++------------------------------------------------------+
+
+SELECT TIMESTAMP '2008-01-01 00:00:01.5'::VARCHAR;
+
++-------------------------------+
+| Utf8("2008-01-01 00:00:01.5") |
++-------------------------------+
+| 2008-01-01T00:00:01.500       |
++-------------------------------+
+
+SELECT TIMESTAMP '-8-01-01 00:00:01.5'::VARCHAR;
+
+Error: 3001(EngineExecuteQuery), Parser error: Error parsing timestamp from '-8-01-01 00:00:01.5': error parsing date
+
+SELECT TIMESTAMP '100000-01-01 00:00:01.5'::VARCHAR;
+
+Error: 3001(EngineExecuteQuery), Parser error: Error parsing timestamp from '100000-01-01 00:00:01.5': error parsing date
+
+DROP TABLE timestamp;
+
+Affected Rows: 0
+
+-- SQLNESS PROTOCOL POSTGRES
+SELECT '2025-04-14 20:42:19.021000'::TIMESTAMP - '2025-04-14 20:42:18.103000'::TIMESTAMP;
+
++---------------------------------------------------------------------------------------------------------------------------------------------+
+| arrow_cast(Utf8("2025-04-14 20:42:19.021000"),Utf8("Timestamp(ms)")) - arrow_cast(Utf8("2025-04-14 20:42:18.103000"),Utf8("Timestamp(ms)")) |
++---------------------------------------------------------------------------------------------------------------------------------------------+
+| 00:00:00.918000                                                                                                                             |
++---------------------------------------------------------------------------------------------------------------------------------------------+
+

@@ -1,0 +1,252 @@
+-- Migrated from DuckDB test: test/sql/types/float/nan_cast.test
+-- Test casting of NaN and inf values
+-- Test valid casts between FLOAT, DOUBLE, and VARCHAR
+-- NaN casts
+SELECT 'nan'::FLOAT::DOUBLE;
+
++-------------+
+| Utf8("nan") |
++-------------+
+| NaN         |
++-------------+
+
+SELECT 'nan'::FLOAT::VARCHAR;
+
++-------------+
+| Utf8("nan") |
++-------------+
+| NaN         |
++-------------+
+
+SELECT 'nan'::DOUBLE::FLOAT;
+
++-------------+
+| Utf8("nan") |
++-------------+
+| NaN         |
++-------------+
+
+SELECT 'nan'::DOUBLE::VARCHAR;
+
++-------------+
+| Utf8("nan") |
++-------------+
+| NaN         |
++-------------+
+
+SELECT 'nan'::VARCHAR::FLOAT;
+
++-------------+
+| Utf8("nan") |
++-------------+
+| NaN         |
++-------------+
+
+SELECT 'nan'::VARCHAR::DOUBLE;
+
++-------------+
+| Utf8("nan") |
++-------------+
+| NaN         |
++-------------+
+
+-- Infinity casts
+SELECT 'inf'::FLOAT::DOUBLE;
+
++-------------+
+| Utf8("inf") |
++-------------+
+| inf         |
++-------------+
+
+SELECT 'inf'::FLOAT::VARCHAR;
+
++-------------+
+| Utf8("inf") |
++-------------+
+| inf         |
++-------------+
+
+SELECT 'inf'::DOUBLE::FLOAT;
+
++-------------+
+| Utf8("inf") |
++-------------+
+| inf         |
++-------------+
+
+SELECT 'inf'::DOUBLE::VARCHAR;
+
++-------------+
+| Utf8("inf") |
++-------------+
+| inf         |
++-------------+
+
+SELECT 'inf'::VARCHAR::FLOAT;
+
++-------------+
+| Utf8("inf") |
++-------------+
+| inf         |
++-------------+
+
+SELECT 'inf'::VARCHAR::DOUBLE;
+
++-------------+
+| Utf8("inf") |
++-------------+
+| inf         |
++-------------+
+
+-- Negative infinity casts
+SELECT '-inf'::FLOAT::DOUBLE;
+
++--------------+
+| Utf8("-inf") |
++--------------+
+| -inf         |
++--------------+
+
+SELECT '-inf'::FLOAT::VARCHAR;
+
++--------------+
+| Utf8("-inf") |
++--------------+
+| -inf         |
++--------------+
+
+SELECT '-inf'::DOUBLE::FLOAT;
+
++--------------+
+| Utf8("-inf") |
++--------------+
+| -inf         |
++--------------+
+
+SELECT '-inf'::DOUBLE::VARCHAR;
+
++--------------+
+| Utf8("-inf") |
++--------------+
+| -inf         |
++--------------+
+
+SELECT '-inf'::VARCHAR::FLOAT;
+
++--------------+
+| Utf8("-inf") |
++--------------+
+| -inf         |
++--------------+
+
+SELECT '-inf'::VARCHAR::DOUBLE;
+
++--------------+
+| Utf8("-inf") |
++--------------+
+| -inf         |
++--------------+
+
+-- Test TRY_CAST for invalid conversions (should return NULL)
+SELECT TRY_CAST('nan'::FLOAT AS INTEGER);
+
++-------------+
+| Utf8("nan") |
++-------------+
+|             |
++-------------+
+
+SELECT TRY_CAST('inf'::FLOAT AS INTEGER);
+
++-------------+
+| Utf8("inf") |
++-------------+
+|             |
++-------------+
+
+SELECT TRY_CAST('-inf'::FLOAT AS INTEGER);
+
++--------------+
+| Utf8("-inf") |
++--------------+
+|              |
++--------------+
+
+SELECT TRY_CAST('nan'::DOUBLE AS BIGINT);
+
++-------------+
+| Utf8("nan") |
++-------------+
+|             |
++-------------+
+
+SELECT TRY_CAST('inf'::DOUBLE AS BIGINT);
+
++-------------+
+| Utf8("inf") |
++-------------+
+|             |
++-------------+
+
+SELECT TRY_CAST('-inf'::DOUBLE AS BIGINT);
+
++--------------+
+| Utf8("-inf") |
++--------------+
+|              |
++--------------+
+
+-- Test with table data
+CREATE TABLE cast_test(f FLOAT, d DOUBLE, s VARCHAR, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+INSERT INTO cast_test VALUES
+    ('nan'::FLOAT, 'nan'::DOUBLE, 'nan', 1000),
+    ('inf'::FLOAT, 'inf'::DOUBLE, 'inf', 2000),
+    ('-inf'::FLOAT, '-inf'::DOUBLE, '-inf', 3000),
+    (1.5, 2.5, '3.5', 4000);
+
+Affected Rows: 4
+
+-- Cast between float types
+SELECT f, f::DOUBLE AS fd, d, d::FLOAT AS df FROM cast_test ORDER BY ts;
+
++------+------+------+------+
+| f    | fd   | d    | df   |
++------+------+------+------+
+| NaN  | NaN  | NaN  | NaN  |
+| inf  | inf  | inf  | inf  |
+| -inf | -inf | -inf | -inf |
+| 1.5  | 1.5  | 2.5  | 2.5  |
++------+------+------+------+
+
+-- Cast to string
+SELECT f::VARCHAR, d::VARCHAR FROM cast_test ORDER BY ts;
+
++-------------+-------------+
+| cast_test.f | cast_test.d |
++-------------+-------------+
+| NaN         | NaN         |
+| inf         | inf         |
+| -inf        | -inf        |
+| 1.5         | 2.5         |
++-------------+-------------+
+
+-- Cast from string
+SELECT s, TRY_CAST(s AS FLOAT) AS sf, TRY_CAST(s AS DOUBLE) AS sd FROM cast_test ORDER BY ts;
+
++------+------+------+
+| s    | sf   | sd   |
++------+------+------+
+| nan  | NaN  | NaN  |
+| inf  | inf  | inf  |
+| -inf | -inf | -inf |
+| 3.5  | 3.5  | 3.5  |
++------+------+------+
+
+DROP TABLE cast_test;
+
+Affected Rows: 0
+

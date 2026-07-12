@@ -1,0 +1,146 @@
+CREATE TABLE test (a TIMESTAMP TIME INDEX, b INTEGER);
+
+Affected Rows: 0
+
+INSERT INTO test VALUES (11, 22), (12, 21), (13, 22);
+
+Affected Rows: 3
+
+SELECT a FROM test LIMIT 1;
+
++-------------------------+
+| a                       |
++-------------------------+
+| 1970-01-01T00:00:00.011 |
++-------------------------+
+
+SELECT b FROM test ORDER BY b LIMIT 2 OFFSET 0;
+
++----+
+| b  |
++----+
+| 21 |
+| 22 |
++----+
+
+SELECT a FROM test LIMIT 1.25;
+
+Error: 3001(EngineExecuteQuery), Error during planning: Expected LIMIT to be an integer or null, but got Float64
+
+SELECT a FROM test LIMIT 2-1;
+
++-------------------------+
+| a                       |
++-------------------------+
+| 1970-01-01T00:00:00.011 |
++-------------------------+
+
+SELECT a FROM test LIMIT a;
+
+Error: 3000(PlanQuery), Failed to plan SQL: No field named a.
+
+SELECT a FROM test LIMIT a+1;
+
+Error: 3000(PlanQuery), Failed to plan SQL: No field named a.
+
+SELECT a FROM test LIMIT SUM(42);
+
+Error: 1001(Unsupported), This feature is not implemented: Unsupported LIMIT expression: Some(AggregateFunction(AggregateFunction { func: AggregateUDF { inner: Sum { signature: Signature { type_signature: OneOf([Coercible([Exact { desired_type: Decimal }]), Coercible([Implicit { desired_type: Native(LogicalType(Native(UInt64), UInt64)), implicit_coercion: ImplicitCoercion { allowed_source_types: [Native(LogicalType(Native(UInt8), UInt8)), Native(LogicalType(Native(UInt16), UInt16)), Native(LogicalType(Native(UInt32), UInt32))], default_casted_type: UInt64 } }]), Coercible([Implicit { desired_type: Native(LogicalType(Native(Int64), Int64)), implicit_coercion: ImplicitCoercion { allowed_source_types: [Native(LogicalType(Native(Int8), Int8)), Native(LogicalType(Native(Int16), Int16)), Native(LogicalType(Native(Int32), Int32))], default_casted_type: Int64 } }]), Coercible([Implicit { desired_type: Native(LogicalType(Native(Float64), Float64)), implicit_coercion: ImplicitCoercion { allowed_source_types: [Float], default_casted_type: Float64 } }]), Coercible([Exact { desired_type: Duration }])]), volatility: Immutable, parameter_names: None } } }, params: AggregateFunctionParams { args: [Literal(Int64(42), None)], distinct: false, filter: None, order_by: [], null_treatment: None } }))
+
+SELECT a FROM test LIMIT row_number() OVER ();
+
+Error: 3001(EngineExecuteQuery), This feature is not implemented: Unsupported LIMIT expression: Some(Cast(Cast { expr: WindowFunction(WindowFunction { fun: WindowUDF(WindowUDF { inner: RowNumber { signature: Signature { type_signature: Nullary, volatility: Immutable, parameter_names: None } } }), params: WindowFunctionParams { args: [], partition_by: [], order_by: [], window_frame: WindowFrame { units: Rows, start_bound: Preceding(UInt64(NULL)), end_bound: Following(UInt64(NULL)), is_causal: false }, filter: None, null_treatment: None, distinct: false } }), data_type: Int64 }))
+
+CREATE TABLE test2 (a STRING, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+INSERT INTO test2 VALUES ('Hello World', 1);
+
+Affected Rows: 1
+
+SELECT * FROM test2 LIMIT 3;
+
++-------------+-------------------------+
+| a           | ts                      |
++-------------+-------------------------+
+| Hello World | 1970-01-01T00:00:00.001 |
++-------------+-------------------------+
+
+select 1 limit date '1992-01-01';
+
+Error: 3001(EngineExecuteQuery), Error during planning: Expected LIMIT to be an integer or null, but got Date32
+
+CREATE TABLE integers(i TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+INSERT INTO integers VALUES (1), (2), (3), (4), (5);
+
+Affected Rows: 5
+
+SELECT * FROM integers LIMIT 3;
+
++-------------------------+
+| i                       |
++-------------------------+
+| 1970-01-01T00:00:00.001 |
+| 1970-01-01T00:00:00.002 |
+| 1970-01-01T00:00:00.003 |
++-------------------------+
+
+SELECT * FROM integers LIMIT 4;
+
++-------------------------+
+| i                       |
++-------------------------+
+| 1970-01-01T00:00:00.001 |
+| 1970-01-01T00:00:00.002 |
+| 1970-01-01T00:00:00.003 |
+| 1970-01-01T00:00:00.004 |
++-------------------------+
+
+SELECT * FROM integers as int LIMIT (SELECT MIN(integers.i) FROM integers);
+
+Error: 3001(EngineExecuteQuery), Error during planning: Expected LIMIT to be an integer or null, but got Timestamp(ms)
+
+SELECT * FROM integers as int OFFSET (SELECT MIN(integers.i) FROM integers);
+
+Error: 3001(EngineExecuteQuery), Error during planning: Expected OFFSET to be an integer or null, but got Timestamp(ms)
+
+SELECT * FROM integers as int LIMIT (SELECT MAX(integers.i) FROM integers) OFFSET (SELECT MIN(integers.i) FROM integers);
+
+Error: 3001(EngineExecuteQuery), Error during planning: Expected LIMIT to be an integer or null, but got Timestamp(ms)
+
+SELECT * FROM integers as int LIMIT (SELECT max(integers.i) FROM integers where i > 5);
+
+Error: 3001(EngineExecuteQuery), Error during planning: Cannot infer common argument type for comparison operation Timestamp(ms) > Int64
+
+SELECT * FROM integers as int LIMIT (SELECT max(integers.i) FROM integers where i > 5);
+
+Error: 3001(EngineExecuteQuery), Error during planning: Cannot infer common argument type for comparison operation Timestamp(ms) > Int64
+
+SELECT * FROM integers as int LIMIT (SELECT NULL);
+
+Error: 1001(Unsupported), This feature is not implemented: Unsupported LIMIT expression: Some(ScalarSubquery(<subquery>))
+
+SELECT * FROM integers as int LIMIT (SELECT -1);
+
+Error: 1001(Unsupported), This feature is not implemented: Unsupported LIMIT expression: Some(ScalarSubquery(<subquery>))
+
+SELECT * FROM integers as int LIMIT (SELECT 'ab');
+
+Error: 3001(EngineExecuteQuery), Error during planning: Expected LIMIT to be an integer or null, but got Utf8
+
+DROP TABLE integers;
+
+Affected Rows: 0
+
+DROP TABLE test;
+
+Affected Rows: 0
+
+DROP TABLE test2;
+
+Affected Rows: 0
+

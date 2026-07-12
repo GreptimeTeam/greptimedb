@@ -1,0 +1,138 @@
+CREATE TABLE blobs (b BYTEA, t timestamp time index);
+
+Affected Rows: 0
+
+--Insert valid hex strings--
+INSERT INTO blobs VALUES('\xaa\xff\xaa'::BYTEA, 1), ('\xAA\xFF\xAA\xAA\xFF\xAA'::BYTEA, 2), ('\xAA\xFF\xAA\xAA\xFF\xAA\xAA\xFF\xAA'::BYTEA, 3);
+
+Affected Rows: 3
+
+SELECT * FROM blobs;
+
++--------------------------------------------------------------------------+-------------------------+
+| b                                                                        | t                       |
++--------------------------------------------------------------------------+-------------------------+
+| 5c7861615c7866665c786161                                                 | 1970-01-01T00:00:00.001 |
+| 5c7841415c7846465c7841415c7841415c7846465c784141                         | 1970-01-01T00:00:00.002 |
+| 5c7841415c7846465c7841415c7841415c7846465c7841415c7841415c7846465c784141 | 1970-01-01T00:00:00.003 |
++--------------------------------------------------------------------------+-------------------------+
+
+--Insert valid hex strings, lower case--
+DELETE FROM blobs;
+
+Affected Rows: 3
+
+INSERT INTO blobs VALUES('\xaa\xff\xaa'::BYTEA, 1), ('\xaa\xff\xaa\xaa\xff\xaa'::BYTEA, 2), ('\xaa\xff\xaa\xaa\xff\xaa\xaa\xff\xaa'::BYTEA, 3);
+
+Affected Rows: 3
+
+SELECT * FROM blobs;
+
++--------------------------------------------------------------------------+-------------------------+
+| b                                                                        | t                       |
++--------------------------------------------------------------------------+-------------------------+
+| 5c7861615c7866665c786161                                                 | 1970-01-01T00:00:00.001 |
+| 5c7861615c7866665c7861615c7861615c7866665c786161                         | 1970-01-01T00:00:00.002 |
+| 5c7861615c7866665c7861615c7861615c7866665c7861615c7861615c7866665c786161 | 1970-01-01T00:00:00.003 |
++--------------------------------------------------------------------------+-------------------------+
+
+--Insert valid hex strings with number and letters--
+DELETE FROM blobs;
+
+Affected Rows: 3
+
+INSERT INTO blobs VALUES('\xaa1199'::BYTEA, 1), ('\xaa1199aa1199'::BYTEA, 2), ('\xaa1199aa1199aa1199'::BYTEA, 3);
+
+Affected Rows: 3
+
+SELECT * FROM blobs;
+
++------------------------------------------+-------------------------+
+| b                                        | t                       |
++------------------------------------------+-------------------------+
+| 5c78616131313939                         | 1970-01-01T00:00:00.001 |
+| 5c78616131313939616131313939             | 1970-01-01T00:00:00.002 |
+| 5c78616131313939616131313939616131313939 | 1970-01-01T00:00:00.003 |
++------------------------------------------+-------------------------+
+
+--Insert invalid hex strings (invalid hex chars: G, H, I)--
+INSERT INTO blobs VALUES('\xGA\xFF\xAA'::BYTEA, 4);
+
+Affected Rows: 1
+
+--Insert invalid hex strings (odd # of chars)--
+INSERT INTO blobs VALUES('\xA'::BYTEA, 4);
+
+Affected Rows: 1
+
+INSERT INTO blobs VALUES('\xAA\xA'::BYTEA, 4);
+
+Affected Rows: 1
+
+INSERT INTO blobs VALUES('blablabla\x'::BYTEA, 4);
+
+Affected Rows: 1
+
+SELECT 'abc �'::BYTEA;
+
++----------------+
+| Utf8("abc �")  |
++----------------+
+| 61626320efbfbd |
++----------------+
+
+SELECT ''::BYTEA;
+
++----------+
+| Utf8("") |
++----------+
+|          |
++----------+
+
+SELECT NULL::BYTEA;
+
++------+
+| NULL |
++------+
+|      |
++------+
+
+CREATE TABLE blob_empty (b BYTEA, t timestamp time index);
+
+Affected Rows: 0
+
+INSERT INTO blob_empty VALUES(''::BYTEA, 1), (''::BYTEA, 2);
+
+Affected Rows: 2
+
+INSERT INTO blob_empty VALUES(NULL, 3), (NULL::BYTEA, 4);
+
+Affected Rows: 2
+
+SELECT * FROM blob_empty;
+
++---+-------------------------+
+| b | t                       |
++---+-------------------------+
+|   | 1970-01-01T00:00:00.001 |
+|   | 1970-01-01T00:00:00.002 |
+|   | 1970-01-01T00:00:00.003 |
+|   | 1970-01-01T00:00:00.004 |
++---+-------------------------+
+
+SELECT '\x7F'::BYTEA;
+
++--------------+
+| Utf8("\x7F") |
++--------------+
+| 5c783746     |
++--------------+
+
+drop table blobs;
+
+Affected Rows: 0
+
+drop table blob_empty;
+
+Affected Rows: 0
+

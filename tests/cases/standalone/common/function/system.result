@@ -1,0 +1,34 @@
+-- SQLNESS REPLACE branch:\s+.+ branch: BRANCH
+-- SQLNESS REPLACE commit:\s+.+ commit: COMMIT
+-- SQLNESS REPLACE commit_short:\s+.+ commit_short: COMMIT_SHORT
+-- SQLNESS REPLACE clean:\s+.+ clean: CLEAN
+-- SQLNESS REPLACE version:\s+.+ version: VERSION
+-- SQLNESS REPLACE [\s\-]+
+SELECT build();
+
+++|build()|++|branch:BRANCH|commit:COMMIT|commit_short:COMMIT_SHORT|clean:CLEAN|version:VERSION++
+
+-- SQLNESS REPLACE (\d+\.\d+(?:\.\d+)*(?:-[a-zA-Z0-9.-]+)?) VERSION
+-- SQLNESS REPLACE [\s\-]+
+SELECT version();
+
+++|version()|++|VERSION|++
+
+-- SQLNESS REPLACE \d+ PID
+SELECT pg_backend_pid();
+
++------------------+
+| pg_backend_pid() |
++------------------+
+| PID                |
++------------------+
+
+-- SQLNESS REPLACE \d+ PID
+SELECT connection_id();
+
++-----------------+
+| connection_id() |
++-----------------+
+| PID               |
++-----------------+
+

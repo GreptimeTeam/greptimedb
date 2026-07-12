@@ -1,0 +1,134 @@
+name: Release CN artifacts
+description: Release artifacts to CN region
+inputs:
+  src-image-registry:
+    description: The source image registry to store the images
+    required: true
+    default: docker.io
+  src-image-namespace:
+    description: The namespace of the source image registry to store the images
+    required: true
+    default: greptime
+  src-image-name:
+    description: The name of the source image
+    required: false
+    default: greptimedb
+  dst-image-registry:
+    description: The destination image registry to store the images
+    required: true
+  dst-image-namespace:
+    description: The namespace of the destination image registry to store the images
+    required: true
+    default: greptime
+  dst-image-registry-username:
+    description: The username to login to the image registry
+    required: true
+  dst-image-registry-password:
+    description: The password to login to the image registry
+    required: true
+  version:
+    description: Version of the artifact
+    required: true
+  dev-mode:
+    description: Enable dev mode, only push standard greptime
+    required: false
+    default: 'false'
+  push-latest-tag:
+    description: Whether to push the latest tag of the image
+    required: false
+    default: 'true'
+  proxy-url:
+    description: The url of the S3 proxy server
+    required: true
+  proxy-username:
+    description: The username of the S3 proxy
+    required: true
+  proxy-password:
+    description: The password of the S3 proxy
+    required: true
+  upload-to-s3:
+    description: Upload to S3
+    required: true
+    default: 'false'
+  artifacts-dir:
+    description: Directory to store artifacts
+    required: false
+    default: 'artifacts'
+  update-version-info:
+    description: Update the version info in S3
+    required: false
+    default: 'true'
+  upload-max-retry-times:
+    description: Max retry times for uploading artifacts to S3
+    required: false
+    default: "30"
+  upload-retry-timeout:
+    description: Timeout for uploading artifacts to S3
+    required: false
+    default: "120" # minutes
+runs:
+  using: composite
+  steps:
+    - name: Download artifacts
+      uses: actions/download-artifact@v4
+      with:
+        path: ${{ inputs.artifacts-dir }}
+
+    - name: Release artifacts to cn region
+      uses: nick-invision/retry@v2
+      if: ${{ inputs.upload-to-s3 == 'true' }}
+      env:
+        PROXY_URL: ${{ inputs.proxy-url }}
+        PROXY_USERNAME: ${{ inputs.proxy-username }}
+        PROXY_PASSWORD: ${{ inputs.proxy-password }}
+        UPDATE_VERSION_INFO: ${{ inputs.update-version-info }}
+      with:
+        max_attempts: ${{ inputs.upload-max-retry-times }}
+        timeout_minutes: ${{ inputs.upload-retry-timeout }}
+        command: |
+          ./.github/scripts/upload-artifacts-to-s3.sh \
+            ${{ inputs.artifacts-dir }} \
+            ${{ inputs.version }}
+
+    - name: Push greptimedb image from Dockerhub to ACR
+      shell: bash
+      env:
+        DST_REGISTRY_USERNAME: ${{ inputs.dst-image-registry-username }}
+        DST_REGISTRY_PASSWORD: ${{ inputs.dst-image-registry-password }}
+      run: |
+        ./.github/scripts/copy-image.sh \
+         ${{ inputs.src-image-registry }}/${{ inputs.src-image-namespace }}/${{ inputs.src-image-name }}:${{ inputs.version }} \
+         ${{ inputs.dst-image-registry }}/${{ inputs.dst-image-namespace }}
+
+    - name: Push latest greptimedb image from Dockerhub to ACR
+      shell: bash
+      if: ${{ inputs.push-latest-tag == 'true' }}
+      env:
+        DST_REGISTRY_USERNAME: ${{ inputs.dst-image-registry-username }}
+        DST_REGISTRY_PASSWORD: ${{ inputs.dst-image-registry-password }}
+      run: |
+        ./.github/scripts/copy-image.sh \
+         ${{ inputs.src-image-registry }}/${{ inputs.src-image-namespace }}/${{ inputs.src-image-name }}:latest \
+         ${{ inputs.dst-image-registry }}/${{ inputs.dst-image-namespace }}
+
+    - name: Push greptimedb-centos image from DockerHub to ACR
+      shell: bash
+      if: ${{ inputs.dev-mode == 'false' }}
+      env:
+        DST_REGISTRY_USERNAME: ${{ inputs.dst-image-registry-username }}
+        DST_REGISTRY_PASSWORD: ${{ inputs.dst-image-registry-password }}
+      run: |
+        ./.github/scripts/copy-image.sh \
+         ${{ inputs.src-image-registry }}/${{ inputs.src-image-namespace }}/${{ inputs.src-image-name }}-centos:${{ inputs.version }} \
+         ${{ inputs.dst-image-registry }}/${{ inputs.dst-image-namespace }}
+
+    - name: Push latest greptimedb-centos image from DockerHub to ACR
+      shell: bash
+      if: ${{ inputs.dev-mode == 'false' && inputs.push-latest-tag == 'true' }}
+      env:
+        DST_REGISTRY_USERNAME: ${{ inputs.dst-image-registry-username }}
+        DST_REGISTRY_PASSWORD: ${{ inputs.dst-image-registry-password }}
+      run: |
+        ./.github/scripts/copy-image.sh \
+         ${{ inputs.src-image-registry }}/${{ inputs.src-image-namespace }}/${{ inputs.src-image-name }}-centos:latest \
+         ${{ inputs.dst-image-registry }}/${{ inputs.dst-image-namespace }}

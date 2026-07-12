@@ -1,0 +1,399 @@
+CREATE DATABASE alter_database;
+
+Affected Rows: 1
+
+SHOW CREATE DATABASE alter_database;
+
++----------------+----------------------------------------------+
+| Database       | Create Database                              |
++----------------+----------------------------------------------+
+| alter_database | CREATE DATABASE IF NOT EXISTS alter_database |
++----------------+----------------------------------------------+
+
+ALTER DATABASE alter_database SET 'ttl'='10s';
+
+Affected Rows: 0
+
+SHOW CREATE DATABASE alter_database;
+
++----------------+----------------------------------------------+
+| Database       | Create Database                              |
++----------------+----------------------------------------------+
+| alter_database | CREATE DATABASE IF NOT EXISTS alter_database |
+|                | WITH(                                        |
+|                |   ttl = '10s'                                |
+|                | )                                            |
++----------------+----------------------------------------------+
+
+ALTER DATABASE alter_database SET 'ttl'='20s';
+
+Affected Rows: 0
+
+SHOW CREATE DATABASE alter_database;
+
++----------------+----------------------------------------------+
+| Database       | Create Database                              |
++----------------+----------------------------------------------+
+| alter_database | CREATE DATABASE IF NOT EXISTS alter_database |
+|                | WITH(                                        |
+|                |   ttl = '20s'                                |
+|                | )                                            |
++----------------+----------------------------------------------+
+
+-- SQLNESS ARG restart=true
+SHOW CREATE DATABASE alter_database;
+
++----------------+----------------------------------------------+
+| Database       | Create Database                              |
++----------------+----------------------------------------------+
+| alter_database | CREATE DATABASE IF NOT EXISTS alter_database |
+|                | WITH(                                        |
+|                |   ttl = '20s'                                |
+|                | )                                            |
++----------------+----------------------------------------------+
+
+ALTER DATABASE alter_database SET 'ttl'='';
+
+Affected Rows: 0
+
+SHOW CREATE DATABASE alter_database;
+
++----------------+----------------------------------------------+
+| Database       | Create Database                              |
++----------------+----------------------------------------------+
+| alter_database | CREATE DATABASE IF NOT EXISTS alter_database |
+|                | WITH(                                        |
+|                |   ttl = 'forever'                            |
+|                | )                                            |
++----------------+----------------------------------------------+
+
+ALTER DATABASE alter_database SET 'ttl'='😁';
+
+Error: 1004(InvalidArguments), Invalid set database option, key: ttl, value: 😁
+
+ALTER DATABASE alter_database SET '🕶️'='1s';
+
+Error: 1004(InvalidArguments), Invalid set database option, key: 🕶️, value: 1s
+
+ALTER DATABASE alter_database SET 'ttl'='40s';
+
+Affected Rows: 0
+
+ALTER DATABASE alter_database UNSET 'ttl';
+
+Affected Rows: 0
+
+ALTER DATABASE alter_database UNSET '🕶️';
+
+Error: 1004(InvalidArguments), Invalid unset database option, key: 🕶️
+
+SHOW CREATE DATABASE alter_database;
+
++----------------+----------------------------------------------+
+| Database       | Create Database                              |
++----------------+----------------------------------------------+
+| alter_database | CREATE DATABASE IF NOT EXISTS alter_database |
++----------------+----------------------------------------------+
+
+-- SQLNESS ARG restart=true
+SHOW CREATE DATABASE alter_database;
+
++----------------+----------------------------------------------+
+| Database       | Create Database                              |
++----------------+----------------------------------------------+
+| alter_database | CREATE DATABASE IF NOT EXISTS alter_database |
++----------------+----------------------------------------------+
+
+ALTER DATABASE alter_database SET 'compaction.type'='twcs';
+
+Affected Rows: 0
+
+SHOW CREATE DATABASE alter_database;
+
++----------------+----------------------------------------------+
+| Database       | Create Database                              |
++----------------+----------------------------------------------+
+| alter_database | CREATE DATABASE IF NOT EXISTS alter_database |
+|                | WITH(                                        |
+|                |   'compaction.type' = 'twcs'                 |
+|                | )                                            |
++----------------+----------------------------------------------+
+
+ALTER DATABASE alter_database SET 'compaction.twcs.time_window'='2h';
+
+Affected Rows: 0
+
+SHOW CREATE DATABASE alter_database;
+
++----------------+----------------------------------------------+
+| Database       | Create Database                              |
++----------------+----------------------------------------------+
+| alter_database | CREATE DATABASE IF NOT EXISTS alter_database |
+|                | WITH(                                        |
+|                |   'compaction.twcs.time_window' = '2h',      |
+|                |   'compaction.type' = 'twcs'                 |
+|                | )                                            |
++----------------+----------------------------------------------+
+
+ALTER DATABASE alter_database SET 'compaction.twcs.trigger_file_num'='8';
+
+Affected Rows: 0
+
+ALTER DATABASE alter_database SET 'compaction.twcs.max_output_file_size'='512MB';
+
+Affected Rows: 0
+
+SHOW CREATE DATABASE alter_database;
+
++----------------+-----------------------------------------------------+
+| Database       | Create Database                                     |
++----------------+-----------------------------------------------------+
+| alter_database | CREATE DATABASE IF NOT EXISTS alter_database        |
+|                | WITH(                                               |
+|                |   'compaction.twcs.max_output_file_size' = '512MB', |
+|                |   'compaction.twcs.time_window' = '2h',             |
+|                |   'compaction.twcs.trigger_file_num' = '8',         |
+|                |   'compaction.type' = 'twcs'                        |
+|                | )                                                   |
++----------------+-----------------------------------------------------+
+
+ALTER DATABASE alter_database SET 'compaction.twcs.time_window'='1d';
+
+Affected Rows: 0
+
+SHOW CREATE DATABASE alter_database;
+
++----------------+-----------------------------------------------------+
+| Database       | Create Database                                     |
++----------------+-----------------------------------------------------+
+| alter_database | CREATE DATABASE IF NOT EXISTS alter_database        |
+|                | WITH(                                               |
+|                |   'compaction.twcs.max_output_file_size' = '512MB', |
+|                |   'compaction.twcs.time_window' = '1d',             |
+|                |   'compaction.twcs.trigger_file_num' = '8',         |
+|                |   'compaction.type' = 'twcs'                        |
+|                | )                                                   |
++----------------+-----------------------------------------------------+
+
+-- SQLNESS ARG restart=true
+SHOW CREATE DATABASE alter_database;
+
++----------------+-----------------------------------------------------+
+| Database       | Create Database                                     |
++----------------+-----------------------------------------------------+
+| alter_database | CREATE DATABASE IF NOT EXISTS alter_database        |
+|                | WITH(                                               |
+|                |   'compaction.twcs.max_output_file_size' = '512MB', |
+|                |   'compaction.twcs.time_window' = '1d',             |
+|                |   'compaction.twcs.trigger_file_num' = '8',         |
+|                |   'compaction.type' = 'twcs'                        |
+|                | )                                                   |
++----------------+-----------------------------------------------------+
+
+ALTER DATABASE alter_database UNSET 'compaction.twcs.trigger_file_num';
+
+Affected Rows: 0
+
+SHOW CREATE DATABASE alter_database;
+
++----------------+-----------------------------------------------------+
+| Database       | Create Database                                     |
++----------------+-----------------------------------------------------+
+| alter_database | CREATE DATABASE IF NOT EXISTS alter_database        |
+|                | WITH(                                               |
+|                |   'compaction.twcs.max_output_file_size' = '512MB', |
+|                |   'compaction.twcs.time_window' = '1d',             |
+|                |   'compaction.type' = 'twcs'                        |
+|                | )                                                   |
++----------------+-----------------------------------------------------+
+
+ALTER DATABASE alter_database UNSET 'compaction.twcs.time_window';
+
+Affected Rows: 0
+
+SHOW CREATE DATABASE alter_database;
+
++----------------+-----------------------------------------------------+
+| Database       | Create Database                                     |
++----------------+-----------------------------------------------------+
+| alter_database | CREATE DATABASE IF NOT EXISTS alter_database        |
+|                | WITH(                                               |
+|                |   'compaction.twcs.max_output_file_size' = '512MB', |
+|                |   'compaction.type' = 'twcs'                        |
+|                | )                                                   |
++----------------+-----------------------------------------------------+
+
+ALTER DATABASE alter_database SET 'compaction.twcs.fallback_to_local'='true';
+
+Affected Rows: 0
+
+SHOW CREATE DATABASE alter_database;
+
++----------------+-----------------------------------------------------+
+| Database       | Create Database                                     |
++----------------+-----------------------------------------------------+
+| alter_database | CREATE DATABASE IF NOT EXISTS alter_database        |
+|                | WITH(                                               |
+|                |   'compaction.twcs.fallback_to_local' = 'true',     |
+|                |   'compaction.twcs.max_output_file_size' = '512MB', |
+|                |   'compaction.type' = 'twcs'                        |
+|                | )                                                   |
++----------------+-----------------------------------------------------+
+
+ALTER DATABASE alter_database UNSET 'compaction.type';
+
+Affected Rows: 0
+
+ALTER DATABASE alter_database UNSET 'compaction.twcs.max_output_file_size';
+
+Affected Rows: 0
+
+ALTER DATABASE alter_database UNSET 'compaction.twcs.fallback_to_local';
+
+Affected Rows: 0
+
+SHOW CREATE DATABASE alter_database;
+
++----------------+----------------------------------------------+
+| Database       | Create Database                              |
++----------------+----------------------------------------------+
+| alter_database | CREATE DATABASE IF NOT EXISTS alter_database |
++----------------+----------------------------------------------+
+
+-- SQLNESS ARG restart=true
+SHOW CREATE DATABASE alter_database;
+
++----------------+----------------------------------------------+
+| Database       | Create Database                              |
++----------------+----------------------------------------------+
+| alter_database | CREATE DATABASE IF NOT EXISTS alter_database |
++----------------+----------------------------------------------+
+
+ALTER DATABASE alter_database SET 'invalid.compaction.option'='value';
+
+Error: 1004(InvalidArguments), Invalid set database option, key: invalid.compaction.option, value: value
+
+ALTER DATABASE alter_database SET 'ttl'='1h';
+
+Affected Rows: 0
+
+ALTER DATABASE alter_database SET 'compaction.type'='twcs';
+
+Affected Rows: 0
+
+ALTER DATABASE alter_database SET 'compaction.twcs.time_window'='30m';
+
+Affected Rows: 0
+
+SHOW CREATE DATABASE alter_database;
+
++----------------+----------------------------------------------+
+| Database       | Create Database                              |
++----------------+----------------------------------------------+
+| alter_database | CREATE DATABASE IF NOT EXISTS alter_database |
+|                | WITH(                                        |
+|                |   'compaction.twcs.time_window' = '30m',     |
+|                |   'compaction.type' = 'twcs',                |
+|                |   ttl = '1h'                                 |
+|                | )                                            |
++----------------+----------------------------------------------+
+
+ALTER DATABASE alter_database UNSET 'ttl';
+
+Affected Rows: 0
+
+SHOW CREATE DATABASE alter_database;
+
++----------------+----------------------------------------------+
+| Database       | Create Database                              |
++----------------+----------------------------------------------+
+| alter_database | CREATE DATABASE IF NOT EXISTS alter_database |
+|                | WITH(                                        |
+|                |   'compaction.twcs.time_window' = '30m',     |
+|                |   'compaction.type' = 'twcs'                 |
+|                | )                                            |
++----------------+----------------------------------------------+
+
+-- Test sst_format option
+ALTER DATABASE alter_database SET 'sst_format'='flat';
+
+Affected Rows: 0
+
+SHOW CREATE DATABASE alter_database;
+
++----------------+----------------------------------------------+
+| Database       | Create Database                              |
++----------------+----------------------------------------------+
+| alter_database | CREATE DATABASE IF NOT EXISTS alter_database |
+|                | WITH(                                        |
+|                |   'compaction.twcs.time_window' = '30m',     |
+|                |   'compaction.type' = 'twcs',                |
+|                |   sst_format = 'flat'                        |
+|                | )                                            |
++----------------+----------------------------------------------+
+
+USE alter_database;
+
+Affected Rows: 0
+
+CREATE TABLE monitor(ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+SHOW CREATE TABLE monitor;
+
++---------+----------------------------------------+
+| Table   | Create Table                           |
++---------+----------------------------------------+
+| monitor | CREATE TABLE IF NOT EXISTS "monitor" ( |
+|         |   "ts" TIMESTAMP(3) NOT NULL,          |
+|         |   TIME INDEX ("ts")                    |
+|         | )                                      |
+|         |                                        |
+|         | ENGINE=mito                            |
+|         | WITH(                                  |
+|         |   sst_format = 'flat'                  |
+|         | )                                      |
++---------+----------------------------------------+
+
+USE public;
+
+Affected Rows: 0
+
+ALTER DATABASE alter_database SET 'sst_format'='primary_key';
+
+Affected Rows: 0
+
+SHOW CREATE DATABASE alter_database;
+
++----------------+----------------------------------------------+
+| Database       | Create Database                              |
++----------------+----------------------------------------------+
+| alter_database | CREATE DATABASE IF NOT EXISTS alter_database |
+|                | WITH(                                        |
+|                |   'compaction.twcs.time_window' = '30m',     |
+|                |   'compaction.type' = 'twcs',                |
+|                |   sst_format = 'primary_key'                 |
+|                | )                                            |
++----------------+----------------------------------------------+
+
+ALTER DATABASE alter_database UNSET 'sst_format';
+
+Affected Rows: 0
+
+SHOW CREATE DATABASE alter_database;
+
++----------------+----------------------------------------------+
+| Database       | Create Database                              |
++----------------+----------------------------------------------+
+| alter_database | CREATE DATABASE IF NOT EXISTS alter_database |
+|                | WITH(                                        |
+|                |   'compaction.twcs.time_window' = '30m',     |
+|                |   'compaction.type' = 'twcs'                 |
+|                | )                                            |
++----------------+----------------------------------------------+
+
+DROP DATABASE alter_database;
+
+Affected Rows: 0
+

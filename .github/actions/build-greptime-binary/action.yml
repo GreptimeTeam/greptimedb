@@ -1,0 +1,92 @@
+name: Build greptime binary
+description: Build and upload the single linux artifact
+inputs:
+  base-image:
+    description: Base image to build greptime
+    required: true
+  features:
+    description: Cargo features to build
+    required: true
+  cargo-profile:
+    description: Cargo profile to build
+    required: true
+  artifacts-dir:
+    description: Directory to store artifacts
+    required: true
+  version:
+    description: Version of the artifact
+    required: true
+  working-dir:
+    description: Working directory to build the artifacts
+    required: false
+    default: .
+  build-android-artifacts:
+    description: Build android artifacts
+    required: false
+    default: 'false'
+  image-namespace:
+    description: Image Namespace
+    required: false
+    default: 'greptime'
+  image-registry:
+    description: Image Registry
+    required: false
+    default: 'docker.io'
+  large-page-size:
+    description: Build GreptimeDB with large page size (65536).
+    required: false
+    default: 'false'
+
+runs:
+  using: composite
+  steps:
+    - name: Set extra build environment variables
+      shell: bash
+      run: |
+        if [[ '${{ inputs.large-page-size }}' == 'true' ]]; then
+          echo 'EXTRA_BUILD_ENVS="JEMALLOC_SYS_WITH_LG_PAGE=16"' >> $GITHUB_ENV
+        else
+          echo 'EXTRA_BUILD_ENVS=' >> $GITHUB_ENV
+        fi
+
+    - name: Build greptime binary
+      shell: bash
+      if: ${{ inputs.build-android-artifacts == 'false' }}
+      run: |
+        cd ${{ inputs.working-dir }} && \
+        make build-by-dev-builder \
+          CARGO_PROFILE=${{ inputs.cargo-profile }} \
+          FEATURES=${{ inputs.features }} \
+          BASE_IMAGE=${{ inputs.base-image }} \
+          IMAGE_NAMESPACE=${{ inputs.image-namespace }} \
+          IMAGE_REGISTRY=${{ inputs.image-registry }} \
+          EXTRA_BUILD_ENVS=$EXTRA_BUILD_ENVS
+
+    - name: Upload artifacts
+      uses: ./.github/actions/upload-artifacts
+      if: ${{ inputs.build-android-artifacts == 'false' }}
+      env:
+        PROFILE_TARGET: ${{ inputs.cargo-profile == 'dev' && 'debug' || inputs.cargo-profile }}
+      with:
+        artifacts-dir: ${{ inputs.artifacts-dir }}
+        target-files: ./target/$PROFILE_TARGET/greptime
+        version: ${{ inputs.version }}
+        working-dir: ${{ inputs.working-dir }}
+
+    # TODO(zyy17): We can remove build-android-artifacts flag in the future.
+    - name: Build greptime binary
+      shell: bash
+      if: ${{ inputs.build-android-artifacts == 'true' }}
+      run: |
+        cd ${{ inputs.working-dir }} && make strip-android-bin \
+          IMAGE_NAMESPACE=${{ inputs.image-namespace }} \
+          IMAGE_REGISTRY=${{ inputs.image-registry }}
+
+    - name: Upload android artifacts
+      uses: ./.github/actions/upload-artifacts
+      if: ${{ inputs.build-android-artifacts == 'true' }}
+      with:
+        artifacts-dir: ${{ inputs.artifacts-dir }}
+        target-files: ./target/aarch64-linux-android/release/greptime
+        version: ${{ inputs.version }}
+        working-dir: ${{ inputs.working-dir }}

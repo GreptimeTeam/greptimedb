@@ -1,0 +1,90 @@
+-- Regression for a TQL flow whose pre-created sink table is missing the value
+-- output column. The labels are intentionally minimal and anonymous.
+CREATE DATABASE source_schema;
+
+Affected Rows: 1
+
+CREATE DATABASE sink_schema;
+
+Affected Rows: 1
+
+USE source_schema;
+
+Affected Rows: 0
+
+CREATE TABLE metric_input (
+  namespace STRING NULL,
+  app STRING NULL,
+  greptime_timestamp TIMESTAMP(3) NOT NULL,
+  greptime_value DOUBLE NULL,
+  TIME INDEX (greptime_timestamp),
+  PRIMARY KEY (namespace, app)
+);
+
+Affected Rows: 0
+
+INSERT INTO metric_input VALUES
+  ('ns', 'app-a', '2026-01-23T03:40:00Z', 10.0),
+  ('ns', 'app-a', '2026-01-23T03:50:00Z', 20.0);
+
+Affected Rows: 2
+
+USE sink_schema;
+
+Affected Rows: 0
+
+-- Intentionally omit greptime_value DOUBLE from the pre-created sink table.
+CREATE TABLE missing_value_sink (
+  namespace STRING NULL,
+  app STRING NULL,
+  greptime_timestamp TIMESTAMP(3) NOT NULL,
+  TIME INDEX (greptime_timestamp),
+  PRIMARY KEY (namespace, app)
+)
+ENGINE=mito;
+
+Affected Rows: 0
+
+-- SQLNESS REPLACE (in\scontext:\sFailed\sto\srewrite\splan:\sError\sduring\splanning:.*) in context: Failed to rewrite plan
+CREATE FLOW missing_value_flow
+SINK TO sink_schema.missing_value_sink
+EVAL INTERVAL '3600 s'
+AS TQL EVAL (
+  date_bin('2m'::interval, now() - '2m'::interval),
+  date_bin('2m'::interval, now() - '2m'::interval),
+  '1h'
+)
+  avg by (namespace, app) (
+    avg_over_time(metric_input{__schema__="source_schema"}[1h])
+  );
+
+Error: 3001(EngineExecuteQuery), Datafusion error: Plan("Flow output schema does not match sink table schema: found 4 flow output columns and 3 sink table columns. flow output columns: [\"namespace\", \"app\", \"greptime_timestamp\", \"avg(prom_avg_over_time(greptime_timestamp_range,greptime_value))\"], sink table columns: [\"namespace\", \"app\", \"greptime_timestamp\"], extra flow columns not in sink: [\"avg(prom_avg_over_time(greptime_timestamp_range,greptime_value))\"], missing sink columns from flow output: []") in context: Failed to rewrite plan
+
+DROP FLOW IF EXISTS missing_value_flow;
+
+Affected Rows: 0
+
+DROP TABLE missing_value_sink;
+
+Affected Rows: 0
+
+USE source_schema;
+
+Affected Rows: 0
+
+DROP TABLE metric_input;
+
+Affected Rows: 0
+
+USE public;
+
+Affected Rows: 0
+
+DROP DATABASE sink_schema;
+
+Affected Rows: 0
+
+DROP DATABASE source_schema;
+
+Affected Rows: 0
+

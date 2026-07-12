@@ -1,0 +1,575 @@
+// Copyright 2023 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+use std::ops::ControlFlow;
+use std::time::Duration;
+
+use chrono::NaiveDate;
+use common_query::prelude::ScalarValue;
+use common_sql::convert::sql_value_to_value;
+use common_time::{Date, Timestamp};
+use datatypes::prelude::ConcreteDataType;
+use datatypes::schema::ColumnSchema;
+use datatypes::types::TimestampType;
+use datatypes::value::{self, Value};
+#[cfg(test)]
+use itertools::Itertools;
+use opensrv_mysql::{ParamValue, ValueInner, to_naive_datetime};
+use snafu::ResultExt;
+use sql::ast::{Expr, Value as ValueExpr, ValueWithSpan, VisitMut, visit_expressions_mut};
+use sql::statements::statement::Statement;
+
+use crate::error::{self, Result};
+
+/// Location of a prepared-statement placeholder in the original SQL text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PlaceholderSpan {
+    /// 1-based placeholder index.
+    pub(crate) index: usize,
+    pub(crate) start_line: u64,
+    pub(crate) start_column: u64,
+    pub(crate) end_line: u64,
+    pub(crate) end_column: u64,
+}
+
+/// Returns the placeholder string "$i".
+pub fn format_placeholder(i: usize) -> String {
+    format!("${}", i)
+}
+
+/// Replace all the "?" placeholder into "$i" in SQL,
+/// returns the new SQL and the last placeholder index.
+#[cfg(test)]
+pub fn replace_placeholders(query: &str) -> (String, usize) {
+    let query_parts = query.split('?').collect::<Vec<_>>();
+    let parts_len = query_parts.len();
+    let mut index = 0;
+    let query = query_parts
+        .into_iter()
+        .enumerate()
+        .map(|(i, part)| {
+            if i == parts_len - 1 {
+                return part.to_string();
+            }
+
+            index += 1;
+            format!("{part}{}", format_placeholder(index))
+        })
+        .join("");
+
+    (query, index + 1)
+}
+
+/// Transform all the "?" placeholders into "$i" and return the number of
+/// transformed placeholders.
+pub fn transform_placeholders_with_count(mut stmt: Statement) -> (Statement, usize) {
+    let count = visit_placeholders(&mut stmt);
+    (stmt, count)
+}
+
+/// Collect spans of "$i" placeholders in a statement.
+pub(crate) fn placeholder_spans(mut stmt: Statement) -> Vec<PlaceholderSpan> {
+    let mut spans = Vec::new();
+    collect_placeholder_spans(&mut stmt, &mut spans);
+    spans
+}
+
+fn collect_placeholder_spans<V>(v: &mut V, spans: &mut Vec<PlaceholderSpan>)
+where
+    V: VisitMut,
+{
+    let _ = visit_expressions_mut(v, |expr| {
+        if let Expr::Value(ValueWithSpan {
+            value: ValueExpr::Placeholder(s),
+            span,
+        }) = expr
+            && let Some(index) = placeholder_index(s)
+        {
+            spans.push(PlaceholderSpan {
+                index,
+                start_line: span.start.line,
+                start_column: span.start.column,
+                end_line: span.end.line,
+                end_column: span.end.column,
+            });
+        }
+        ControlFlow::<()>::Continue(())
+    });
+}
+
+fn placeholder_index(s: &str) -> Option<usize> {
+    s.strip_prefix('$')?
+        .parse::<usize>()
+        .ok()
+        .filter(|i| *i > 0)
+}
+
+fn visit_placeholders<V>(v: &mut V) -> usize
+where
+    V: VisitMut,
+{
+    let mut index = 1;
+    let _ = visit_expressions_mut(v, |expr| {
+        if let Expr::Value(ValueWithSpan {
+            value: ValueExpr::Placeholder(s),
+            ..
+        }) = expr
+            && s == "?"
+        {
+            *s = format_placeholder(index);
+            index += 1;
+        }
+        ControlFlow::<()>::Continue(())
+    });
+    index - 1
+}
+
+/// Convert [`ParamValue`] into [`Value`] according to param type.
+/// It will try it's best to do type conversions if possible
+pub fn convert_value(param: &ParamValue, t: &ConcreteDataType) -> Result<ScalarValue> {
+    match param.value.into_inner() {
+        ValueInner::Int(i) => match t {
+            ConcreteDataType::Int8(_) => Ok(ScalarValue::Int8(Some(i as i8))),
+            ConcreteDataType::Int16(_) => Ok(ScalarValue::Int16(Some(i as i16))),
+            ConcreteDataType::Int32(_) => Ok(ScalarValue::Int32(Some(i as i32))),
+            ConcreteDataType::Int64(_) => Ok(ScalarValue::Int64(Some(i))),
+            ConcreteDataType::UInt8(_) => Ok(ScalarValue::UInt8(Some(i as u8))),
+            ConcreteDataType::UInt16(_) => Ok(ScalarValue::UInt16(Some(i as u16))),
+            ConcreteDataType::UInt32(_) => Ok(ScalarValue::UInt32(Some(i as u32))),
+            ConcreteDataType::UInt64(_) => Ok(ScalarValue::UInt64(Some(i as u64))),
+            ConcreteDataType::Float32(_) => Ok(ScalarValue::Float32(Some(i as f32))),
+            ConcreteDataType::Float64(_) => Ok(ScalarValue::Float64(Some(i as f64))),
+            ConcreteDataType::Boolean(_) => Ok(ScalarValue::Boolean(Some(i != 0))),
+            ConcreteDataType::Timestamp(ts_type) => Value::Timestamp(ts_type.create_timestamp(i))
+                .try_to_scalar_value(t)
+                .context(error::ConvertScalarValueSnafu),
+
+            _ => error::PreparedStmtTypeMismatchSnafu {
+                expected: t,
+                actual: param.coltype,
+            }
+            .fail(),
+        },
+        ValueInner::UInt(u) => match t {
+            ConcreteDataType::Int8(_) => Ok(ScalarValue::Int8(Some(u as i8))),
+            ConcreteDataType::Int16(_) => Ok(ScalarValue::Int16(Some(u as i16))),
+            ConcreteDataType::Int32(_) => Ok(ScalarValue::Int32(Some(u as i32))),
+            ConcreteDataType::Int64(_) => Ok(ScalarValue::Int64(Some(u as i64))),
+            ConcreteDataType::UInt8(_) => Ok(ScalarValue::UInt8(Some(u as u8))),
+            ConcreteDataType::UInt16(_) => Ok(ScalarValue::UInt16(Some(u as u16))),
+            ConcreteDataType::UInt32(_) => Ok(ScalarValue::UInt32(Some(u as u32))),
+            ConcreteDataType::UInt64(_) => Ok(ScalarValue::UInt64(Some(u))),
+            ConcreteDataType::Float32(_) => Ok(ScalarValue::Float32(Some(u as f32))),
+            ConcreteDataType::Float64(_) => Ok(ScalarValue::Float64(Some(u as f64))),
+            ConcreteDataType::Boolean(_) => Ok(ScalarValue::Boolean(Some(u != 0))),
+            ConcreteDataType::Timestamp(ts_type) => {
+                Value::Timestamp(ts_type.create_timestamp(u as i64))
+                    .try_to_scalar_value(t)
+                    .context(error::ConvertScalarValueSnafu)
+            }
+
+            _ => error::PreparedStmtTypeMismatchSnafu {
+                expected: t,
+                actual: param.coltype,
+            }
+            .fail(),
+        },
+        ValueInner::Double(f) => match t {
+            ConcreteDataType::Int8(_) => Ok(ScalarValue::Int8(Some(f as i8))),
+            ConcreteDataType::Int16(_) => Ok(ScalarValue::Int16(Some(f as i16))),
+            ConcreteDataType::Int32(_) => Ok(ScalarValue::Int32(Some(f as i32))),
+            ConcreteDataType::Int64(_) => Ok(ScalarValue::Int64(Some(f as i64))),
+            ConcreteDataType::UInt8(_) => Ok(ScalarValue::UInt8(Some(f as u8))),
+            ConcreteDataType::UInt16(_) => Ok(ScalarValue::UInt16(Some(f as u16))),
+            ConcreteDataType::UInt32(_) => Ok(ScalarValue::UInt32(Some(f as u32))),
+            ConcreteDataType::UInt64(_) => Ok(ScalarValue::UInt64(Some(f as u64))),
+            ConcreteDataType::Float32(_) => Ok(ScalarValue::Float32(Some(f as f32))),
+            ConcreteDataType::Float64(_) => Ok(ScalarValue::Float64(Some(f))),
+
+            _ => error::PreparedStmtTypeMismatchSnafu {
+                expected: t,
+                actual: param.coltype,
+            }
+            .fail(),
+        },
+        ValueInner::NULL => value::to_null_scalar_value(t).context(error::ConvertScalarValueSnafu),
+        ValueInner::Bytes(b) => match t {
+            ConcreteDataType::String(t) => {
+                let s = String::from_utf8_lossy(b).to_string();
+                if t.is_large() {
+                    Ok(ScalarValue::LargeUtf8(Some(s)))
+                } else {
+                    Ok(ScalarValue::Utf8(Some(s)))
+                }
+            }
+            ConcreteDataType::Binary(_) => Ok(ScalarValue::Binary(Some(b.to_vec()))),
+            ConcreteDataType::Timestamp(ts_type) => convert_bytes_to_timestamp(b, ts_type),
+            ConcreteDataType::Date(_) => convert_bytes_to_date(b),
+            _ => error::PreparedStmtTypeMismatchSnafu {
+                expected: t,
+                actual: param.coltype,
+            }
+            .fail(),
+        },
+        ValueInner::Date(_) => {
+            let date: common_time::Date = NaiveDate::from(param.value).into();
+            Ok(ScalarValue::Date32(Some(date.val())))
+        }
+        ValueInner::Datetime(_) => {
+            let timestamp_millis = to_naive_datetime(param.value)
+                .map_err(|e| {
+                    error::MysqlValueConversionSnafu {
+                        err_msg: e.to_string(),
+                    }
+                    .build()
+                })?
+                .and_utc()
+                .timestamp_millis();
+
+            match t {
+                ConcreteDataType::Timestamp(_) => Ok(ScalarValue::TimestampMillisecond(
+                    Some(timestamp_millis),
+                    None,
+                )),
+                _ => error::PreparedStmtTypeMismatchSnafu {
+                    expected: t,
+                    actual: param.coltype,
+                }
+                .fail(),
+            }
+        }
+        ValueInner::Time(_) => Ok(ScalarValue::Time64Nanosecond(Some(
+            Duration::from(param.value).as_millis() as i64,
+        ))),
+    }
+}
+
+/// Convert an MySQL expression to a scalar value.
+/// It automatically handles the conversion of strings to numeric values.
+pub fn convert_expr_to_scalar_value(param: &Expr, t: &ConcreteDataType) -> Result<ScalarValue> {
+    let column_schema = ColumnSchema::new("", t.clone(), true);
+    match param {
+        Expr::Value(v) => {
+            let v = sql_value_to_value(&column_schema, &v.value, None, None, true);
+            match v {
+                Ok(v) => v
+                    .try_to_scalar_value(t)
+                    .context(error::ConvertScalarValueSnafu),
+                Err(e) => error::InvalidParameterSnafu {
+                    reason: e.to_string(),
+                }
+                .fail(),
+            }
+        }
+        Expr::UnaryOp { op, expr } if let Expr::Value(v) = &**expr => {
+            let v = sql_value_to_value(&column_schema, &v.value, None, Some(*op), true);
+            match v {
+                Ok(v) => v
+                    .try_to_scalar_value(t)
+                    .context(error::ConvertScalarValueSnafu),
+                Err(e) => error::InvalidParameterSnafu {
+                    reason: e.to_string(),
+                }
+                .fail(),
+            }
+        }
+        _ => error::InvalidParameterSnafu {
+            reason: format!("cannot convert {:?} to scalar value of type {}", param, t),
+        }
+        .fail(),
+    }
+}
+
+fn convert_bytes_to_timestamp(bytes: &[u8], ts_type: &TimestampType) -> Result<ScalarValue> {
+    let ts = Timestamp::from_str_utc(&String::from_utf8_lossy(bytes))
+        .map_err(|e| {
+            error::MysqlValueConversionSnafu {
+                err_msg: e.to_string(),
+            }
+            .build()
+        })?
+        .convert_to(ts_type.unit())
+        .ok_or_else(|| {
+            error::MysqlValueConversionSnafu {
+                err_msg: "Overflow when converting timestamp to target unit".to_string(),
+            }
+            .build()
+        })?;
+    match ts_type {
+        TimestampType::Nanosecond(_) => {
+            Ok(ScalarValue::TimestampNanosecond(Some(ts.value()), None))
+        }
+        TimestampType::Microsecond(_) => {
+            Ok(ScalarValue::TimestampMicrosecond(Some(ts.value()), None))
+        }
+        TimestampType::Millisecond(_) => {
+            Ok(ScalarValue::TimestampMillisecond(Some(ts.value()), None))
+        }
+        TimestampType::Second(_) => Ok(ScalarValue::TimestampSecond(Some(ts.value()), None)),
+    }
+}
+
+fn convert_bytes_to_date(bytes: &[u8]) -> Result<ScalarValue> {
+    let date = Date::from_str_utc(&String::from_utf8_lossy(bytes)).map_err(|e| {
+        error::MysqlValueConversionSnafu {
+            err_msg: e.to_string(),
+        }
+        .build()
+    })?;
+
+    Ok(ScalarValue::Date32(Some(date.val())))
+}
+
+#[cfg(test)]
+mod tests {
+    use datatypes::types::{
+        TimestampMicrosecondType, TimestampMillisecondType, TimestampNanosecondType,
+        TimestampSecondType,
+    };
+    use sql::dialect::MySqlDialect;
+    use sql::parser::{ParseOptions, ParserContext};
+
+    use super::*;
+
+    #[test]
+    fn test_format_placeholder() {
+        assert_eq!("$1", format_placeholder(1));
+        assert_eq!("$3", format_placeholder(3));
+    }
+
+    #[test]
+    fn test_replace_placeholders() {
+        let create = "create table demo(host string, ts timestamp time index)";
+        let (sql, index) = replace_placeholders(create);
+        assert_eq!(create, sql);
+        assert_eq!(1, index);
+
+        let insert = "insert into demo values(?,?,?)";
+        let (sql, index) = replace_placeholders(insert);
+        assert_eq!("insert into demo values($1,$2,$3)", sql);
+        assert_eq!(4, index);
+
+        let query = "select from demo where host=? and idc in (select idc from idcs where name=?) and cpu>?";
+        let (sql, index) = replace_placeholders(query);
+        assert_eq!(
+            "select from demo where host=$1 and idc in (select idc from idcs where name=$2) and cpu>$3",
+            sql
+        );
+        assert_eq!(4, index);
+    }
+
+    fn parse_sql(sql: &str) -> Statement {
+        let mut stmts =
+            ParserContext::create_with_dialect(sql, &MySqlDialect {}, ParseOptions::default())
+                .unwrap();
+        stmts.remove(0)
+    }
+
+    #[test]
+    fn test_transform_placeholders() {
+        let insert = parse_sql("insert into demo values(?,?,?)");
+        let (stmt, count) = transform_placeholders_with_count(insert);
+        let Statement::Insert(insert) = stmt else {
+            unreachable!()
+        };
+        assert_eq!(
+            "INSERT INTO demo VALUES ($1, $2, $3)",
+            insert.inner.to_string()
+        );
+        assert_eq!(3, count);
+
+        let delete = parse_sql("delete from demo where host=? and idc=?");
+        let (stmt, count) = transform_placeholders_with_count(delete);
+        let Statement::Delete(delete) = stmt else {
+            unreachable!()
+        };
+        assert_eq!(
+            "DELETE FROM demo WHERE host = $1 AND idc = $2",
+            delete.inner.to_string()
+        );
+        assert_eq!(2, count);
+
+        let select = parse_sql(
+            "select * from demo where host=? and idc in (select idc from idcs where name=?) and cpu>?",
+        );
+        let (stmt, count) = transform_placeholders_with_count(select);
+        let Statement::Query(select) = stmt else {
+            unreachable!()
+        };
+        assert_eq!(
+            "SELECT * FROM demo WHERE host = $1 AND idc IN (SELECT idc FROM idcs WHERE name = $2) AND cpu > $3",
+            select.inner.to_string()
+        );
+        assert_eq!(3, count);
+
+        let select = parse_sql("select '?', ?");
+        let (stmt, count) = transform_placeholders_with_count(select);
+        let Statement::Query(select) = stmt else {
+            unreachable!()
+        };
+        assert_eq!("SELECT '?', $1", select.inner.to_string());
+        assert_eq!(1, count);
+
+        let set = parse_sql("set time_zone = ?");
+        let (stmt, count) = transform_placeholders_with_count(set);
+        assert_eq!("SET time_zone = $1", stmt.to_string());
+        assert_eq!(1, count);
+    }
+
+    #[test]
+    fn test_convert_expr_to_scalar_value() {
+        let expr = Expr::Value(ValueExpr::Number("123".to_string(), false).into());
+        let t = ConcreteDataType::int32_datatype();
+        let v = convert_expr_to_scalar_value(&expr, &t).unwrap();
+        assert_eq!(ScalarValue::Int32(Some(123)), v);
+
+        let expr = Expr::Value(ValueExpr::Number("123.456789".to_string(), false).into());
+        let t = ConcreteDataType::float64_datatype();
+        let v = convert_expr_to_scalar_value(&expr, &t).unwrap();
+        assert_eq!(ScalarValue::Float64(Some(123.456789)), v);
+
+        let expr = Expr::Value(ValueExpr::SingleQuotedString("2001-01-02".to_string()).into());
+        let t = ConcreteDataType::date_datatype();
+        let v = convert_expr_to_scalar_value(&expr, &t).unwrap();
+        let scalar_v = ScalarValue::Utf8(Some("2001-01-02".to_string()))
+            .cast_to(&arrow_schema::DataType::Date32)
+            .unwrap();
+        assert_eq!(scalar_v, v);
+
+        let expr =
+            Expr::Value(ValueExpr::SingleQuotedString("2001-01-02 03:04:05".to_string()).into());
+        let t = ConcreteDataType::timestamp_microsecond_datatype();
+        let v = convert_expr_to_scalar_value(&expr, &t).unwrap();
+        let scalar_v = ScalarValue::Utf8(Some("2001-01-02 03:04:05".to_string()))
+            .cast_to(&arrow_schema::DataType::Timestamp(
+                arrow_schema::TimeUnit::Microsecond,
+                None,
+            ))
+            .unwrap();
+        assert_eq!(scalar_v, v);
+
+        let expr = Expr::Value(ValueExpr::SingleQuotedString("hello".to_string()).into());
+        let t = ConcreteDataType::string_datatype();
+        let v = convert_expr_to_scalar_value(&expr, &t).unwrap();
+        assert_eq!(ScalarValue::Utf8(Some("hello".to_string())), v);
+
+        let expr = Expr::Value(ValueExpr::Null.into());
+        let t = ConcreteDataType::time_microsecond_datatype();
+        let v = convert_expr_to_scalar_value(&expr, &t).unwrap();
+        assert_eq!(ScalarValue::Time64Microsecond(None), v);
+    }
+
+    #[test]
+    fn test_convert_bytes_to_timestamp() {
+        let test_cases = vec![
+            // input unix timestamp in seconds -> nanosecond.
+            (
+                "2024-12-26 12:00:00",
+                TimestampType::Nanosecond(TimestampNanosecondType),
+                ScalarValue::TimestampNanosecond(Some(1735214400000000000), None),
+            ),
+            // input unix timestamp in seconds -> microsecond.
+            (
+                "2024-12-26 12:00:00",
+                TimestampType::Microsecond(TimestampMicrosecondType),
+                ScalarValue::TimestampMicrosecond(Some(1735214400000000), None),
+            ),
+            // input unix timestamp in seconds -> millisecond.
+            (
+                "2024-12-26 12:00:00",
+                TimestampType::Millisecond(TimestampMillisecondType),
+                ScalarValue::TimestampMillisecond(Some(1735214400000), None),
+            ),
+            // input unix timestamp in seconds -> second.
+            (
+                "2024-12-26 12:00:00",
+                TimestampType::Second(TimestampSecondType),
+                ScalarValue::TimestampSecond(Some(1735214400), None),
+            ),
+            // input unix timestamp in milliseconds -> nanosecond.
+            (
+                "2024-12-26 12:00:00.123",
+                TimestampType::Nanosecond(TimestampNanosecondType),
+                ScalarValue::TimestampNanosecond(Some(1735214400123000000), None),
+            ),
+            // input unix timestamp in milliseconds -> microsecond.
+            (
+                "2024-12-26 12:00:00.123",
+                TimestampType::Microsecond(TimestampMicrosecondType),
+                ScalarValue::TimestampMicrosecond(Some(1735214400123000), None),
+            ),
+            // input unix timestamp in milliseconds -> millisecond.
+            (
+                "2024-12-26 12:00:00.123",
+                TimestampType::Millisecond(TimestampMillisecondType),
+                ScalarValue::TimestampMillisecond(Some(1735214400123), None),
+            ),
+            // input unix timestamp in milliseconds -> second.
+            (
+                "2024-12-26 12:00:00.123",
+                TimestampType::Second(TimestampSecondType),
+                ScalarValue::TimestampSecond(Some(1735214400), None),
+            ),
+            // input unix timestamp in microseconds -> nanosecond.
+            (
+                "2024-12-26 12:00:00.123456",
+                TimestampType::Nanosecond(TimestampNanosecondType),
+                ScalarValue::TimestampNanosecond(Some(1735214400123456000), None),
+            ),
+            // input unix timestamp in microseconds -> microsecond.
+            (
+                "2024-12-26 12:00:00.123456",
+                TimestampType::Microsecond(TimestampMicrosecondType),
+                ScalarValue::TimestampMicrosecond(Some(1735214400123456), None),
+            ),
+            // input unix timestamp in microseconds -> millisecond.
+            (
+                "2024-12-26 12:00:00.123456",
+                TimestampType::Millisecond(TimestampMillisecondType),
+                ScalarValue::TimestampMillisecond(Some(1735214400123), None),
+            ),
+            // input unix timestamp in milliseconds -> second.
+            (
+                "2024-12-26 12:00:00.123456",
+                TimestampType::Second(TimestampSecondType),
+                ScalarValue::TimestampSecond(Some(1735214400), None),
+            ),
+        ];
+
+        for (input, ts_type, expected) in test_cases {
+            let result = convert_bytes_to_timestamp(input.as_bytes(), &ts_type).unwrap();
+            assert_eq!(result, expected);
+        }
+    }
+
+    #[test]
+    fn test_convert_bytes_to_date() {
+        let test_cases = vec![
+            // Standard date format: YYYY-MM-DD
+            ("1970-01-01", ScalarValue::Date32(Some(0))),
+            ("1969-12-31", ScalarValue::Date32(Some(-1))),
+            ("2024-02-29", ScalarValue::Date32(Some(19782))),
+            ("2024-01-01", ScalarValue::Date32(Some(19723))),
+            ("2024-12-31", ScalarValue::Date32(Some(20088))),
+            ("2001-01-02", ScalarValue::Date32(Some(11324))),
+            ("2050-06-14", ScalarValue::Date32(Some(29384))),
+            ("2020-03-15", ScalarValue::Date32(Some(18336))),
+        ];
+
+        for (input, expected) in test_cases {
+            let result = convert_bytes_to_date(input.as_bytes()).unwrap();
+            assert_eq!(result, expected, "Failed for input: {}", input);
+        }
+    }
+}

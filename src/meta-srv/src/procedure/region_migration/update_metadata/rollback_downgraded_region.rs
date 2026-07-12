@@ -1,0 +1,175 @@
+// Copyright 2023 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+use common_error::ext::BoxedError;
+use common_meta::lock_key::TableLock;
+use common_procedure::ContextProviderRef;
+use common_telemetry::{error, info};
+use snafu::ResultExt;
+
+use crate::error::{self, Result};
+use crate::procedure::region_migration::Context;
+use crate::procedure::region_migration::update_metadata::UpdateMetadata;
+
+impl UpdateMetadata {
+    /// Rollbacks the downgraded leader region if the candidate region is unreachable.
+    ///
+    /// Abort(non-retry):
+    /// - TableRoute is not found.
+    ///
+    /// Retry:
+    /// - Failed to update [TableRouteValue](common_meta::key::table_region::TableRegionValue).
+    /// - Failed to retrieve the metadata of table.
+    pub async fn rollback_downgraded_region(
+        &self,
+        ctx: &mut Context,
+        ctx_provider: &ContextProviderRef,
+    ) -> Result<()> {
+        let table_metadata_manager = ctx.table_metadata_manager.clone();
+        let table_regions = ctx.persistent_ctx.table_regions();
+
+        for (table_id, regions) in table_regions {
+            let table_lock = TableLock::Write(table_id).into();
+            let _guard = ctx_provider.acquire_lock(&table_lock).await;
+
+            let current_table_route_value = ctx.get_table_route_value(table_id).await?;
+            if let Err(err) = table_metadata_manager
+                .update_leader_region_status(table_id, &current_table_route_value, |route| {
+                    if regions.contains(&route.region.id) {
+                        Some(None)
+                    } else {
+                        None
+                    }
+                })
+                .await
+                .context(error::TableMetadataManagerSnafu)
+            {
+                error!(err; "Failed to update the table route during the rollback downgraded leader regions: {regions:?}");
+                return Err(BoxedError::new(err)).with_context(|_| error::RetryLaterWithSourceSnafu {
+                    reason: format!("Failed to update the table route during the rollback downgraded leader regions: {regions:?}"),
+                });
+            }
+            info!(
+                "Rolling back downgraded leader region table route success, table_id: {table_id}, regions: {regions:?}"
+            );
+        }
+        ctx.register_failure_detectors().await;
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::assert_matches;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use common_meta::key::test_utils::new_test_table_info;
+    use common_meta::peer::Peer;
+    use common_meta::rpc::router::{LeaderState, Region, RegionRoute};
+    use common_procedure_test::MockContextProvider;
+    use store_api::storage::RegionId;
+
+    use crate::error::Error;
+    use crate::procedure::region_migration::migration_abort::RegionMigrationAbort;
+    use crate::procedure::region_migration::test_util::{self, TestingEnv, new_procedure_context};
+    use crate::procedure::region_migration::update_metadata::UpdateMetadata;
+    use crate::procedure::region_migration::{ContextFactory, PersistentContext, State};
+
+    fn new_persistent_context() -> PersistentContext {
+        test_util::new_persistent_context(1, 2, RegionId::new(1024, 1))
+    }
+
+    #[tokio::test]
+    async fn test_table_route_is_not_found_error() {
+        let state = UpdateMetadata::Rollback;
+        let env = TestingEnv::new();
+        let persistent_context = new_persistent_context();
+        let mut ctx = env.context_factory().new_context(persistent_context);
+
+        let provider = Arc::new(MockContextProvider::new(HashMap::new())) as _;
+        let err = state
+            .rollback_downgraded_region(&mut ctx, &provider)
+            .await
+            .unwrap_err();
+
+        assert_matches!(err, Error::TableRouteNotFound { .. });
+
+        assert!(!err.is_retryable());
+    }
+
+    #[tokio::test]
+    async fn test_next_migration_end_state() {
+        let mut state = Box::new(UpdateMetadata::Rollback);
+        let persistent_context = new_persistent_context();
+        let from_peer = persistent_context.from_peer.clone();
+
+        let env = TestingEnv::new();
+        let mut ctx = env.context_factory().new_context(persistent_context);
+        let table_id = ctx.persistent_ctx.region_ids[0].table_id();
+
+        let table_info = new_test_table_info(1024);
+        let region_routes = vec![
+            RegionRoute {
+                region: Region::new_test(RegionId::new(1024, 1)),
+                leader_peer: Some(from_peer.clone()),
+                leader_state: Some(LeaderState::Downgrading),
+                ..Default::default()
+            },
+            RegionRoute {
+                region: Region::new_test(RegionId::new(1024, 2)),
+                leader_peer: Some(Peer::empty(4)),
+                leader_state: Some(LeaderState::Downgrading),
+                ..Default::default()
+            },
+            RegionRoute {
+                region: Region::new_test(RegionId::new(1024, 3)),
+                leader_peer: Some(Peer::empty(5)),
+                ..Default::default()
+            },
+        ];
+
+        let expected_region_routes = {
+            let mut region_routes = region_routes.clone();
+            region_routes[0].leader_state = None;
+            region_routes
+        };
+
+        env.create_physical_table_metadata(table_info, region_routes)
+            .await;
+
+        let table_metadata_manager = env.table_metadata_manager();
+
+        let procedure_ctx = new_procedure_context();
+        let (next, _) = state.next(&mut ctx, &procedure_ctx).await.unwrap();
+
+        let _ = next
+            .as_any()
+            .downcast_ref::<RegionMigrationAbort>()
+            .unwrap();
+
+        let table_route = table_metadata_manager
+            .table_route_manager()
+            .table_route_storage()
+            .get(table_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            &expected_region_routes,
+            table_route.region_routes().unwrap()
+        );
+    }
+}

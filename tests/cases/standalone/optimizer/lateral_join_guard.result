@@ -1,0 +1,93 @@
+-- Document the current aliased SQL LATERAL limitation and guard the remote
+-- scan boundary. DataFusion's DecorrelateLateralJoin does not currently match
+-- the SubqueryAlias(Subquery) shape produced by `LATERAL (...) d`, so this query
+-- is still expected to fail physical planning with an outer_ref expression. The
+-- important regression assertion is that the remaining outer_ref predicate must
+-- NOT be advertised as a remote TableScan.partial_filters predicate.
+CREATE TABLE lateral_fact (
+    ts TIMESTAMP(3) TIME INDEX,
+    k STRING,
+    val DOUBLE,
+    PRIMARY KEY (k)
+) ENGINE = mito;
+
+Affected Rows: 0
+
+CREATE TABLE lateral_dim (
+    ts TIMESTAMP(3) TIME INDEX,
+    k STRING,
+    threshold DOUBLE,
+    PRIMARY KEY (k)
+) ENGINE = mito;
+
+Affected Rows: 0
+
+INSERT INTO lateral_fact VALUES
+    ('2024-01-30 00:00:00', 'a', 10.0),
+    ('2024-01-30 01:00:00', 'b', 20.0);
+
+Affected Rows: 2
+
+INSERT INTO lateral_dim VALUES
+    ('2024-01-30 00:00:00', 'a', 5.0),
+    ('2024-01-30 01:00:00', 'b', 25.0);
+
+Affected Rows: 2
+
+ADMIN FLUSH_TABLE('lateral_fact');
+
++-----------------------------------+
+| ADMIN FLUSH_TABLE('lateral_fact') |
++-----------------------------------+
+| 0                                 |
++-----------------------------------+
+
+ADMIN FLUSH_TABLE('lateral_dim');
+
++----------------------------------+
+| ADMIN FLUSH_TABLE('lateral_dim') |
++----------------------------------+
+| 0                                |
++----------------------------------+
+
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+EXPLAIN SELECT f.k, d.threshold
+FROM lateral_fact f,
+LATERAL (
+    SELECT threshold FROM lateral_dim d WHERE d.k = f.k
+) d
+WHERE f.val > d.threshold
+ORDER BY f.k;
+
++---------------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| plan_type           | plan                                                                                                                                                                                                                     |
++---------------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| logical_plan        | Sort: f.k ASC NULLS LAST                                                                                                                                                                                                 |
+|                     |   Projection: f.k, d.threshold                                                                                                                                                                                           |
+|                     |     Inner Join:  Filter: f.val > d.threshold                                                                                                                                                                             |
+|                     |       Projection: f.k, f.val                                                                                                                                                                                             |
+|                     |         MergeScan [is_placeholder=false, remote_input=[                                                                                                                                                                  |
+|                     | SubqueryAlias: f                                                                                                                                                                                                         |
+|                     |   TableScan: lateral_fact                                                                                                                                                                                                |
+|                     | ]]                                                                                                                                                                                                                       |
+|                     |       SubqueryAlias: d                                                                                                                                                                                                   |
+|                     |         Subquery:                                                                                                                                                                                                        |
+|                     |           SubqueryAlias: d                                                                                                                                                                                               |
+|                     |             Projection: lateral_dim.threshold                                                                                                                                                                            |
+|                     |               Filter: lateral_dim.k = outer_ref(f.k)                                                                                                                                                                     |
+|                     |                 Projection: lateral_dim.k, lateral_dim.threshold                                                                                                                                                         |
+|                     |                   MergeScan [is_placeholder=false, remote_input=[                                                                                                                                                        |
+|                     | TableScan: lateral_dim                                                                                                                                                                                                   |
+|                     | ]]                                                                                                                                                                                                                       |
+| physical_plan_error | This feature is not implemented: Physical plan does not support logical expression OuterReferenceColumn(Field { name: "k", data_type: Utf8, nullable: true }, Column { relation: Some(Bare { table: "f" }), name: "k" }) |
++---------------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+
+DROP TABLE lateral_fact;
+
+Affected Rows: 0
+
+DROP TABLE lateral_dim;
+
+Affected Rows: 0
+

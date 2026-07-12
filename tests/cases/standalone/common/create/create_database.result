@@ -1,0 +1,27 @@
+create database '㊙️database';
+
+Error: 1002(Unexpected), Unexpected, violated: Invalid database name: ㊙️database
+
+create database illegal-database;
+
+Error: 1001(Unsupported), SQL statement is not supported, keyword: -
+
+create database 'illegal-database';
+
+Affected Rows: 1
+
+show databases;
+
++--------------------+
+| Database           |
++--------------------+
+| greptime_private   |
+| illegal-database   |
+| information_schema |
+| public             |
++--------------------+
+
+drop database 'illegal-database';
+
+Affected Rows: 0
+

@@ -1,0 +1,214 @@
+// Copyright 2023 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+pub mod cluster_info;
+pub mod config;
+pub mod crd;
+/// CSV dump writer utilities for fuzz tests.
+pub mod csv_dump_writer;
+pub mod health;
+pub mod kafka_wal_http;
+pub mod migration;
+pub mod network_chaos;
+pub mod partition;
+pub mod pod_failure;
+pub mod procedure;
+#[cfg(feature = "unstable")]
+pub mod process;
+pub mod retry;
+/// SQL dump writer utilities for fuzz tests.
+pub mod sql_dump_writer;
+pub mod wait;
+
+use std::env;
+use std::str::FromStr;
+
+use common_base::readable_size::ReadableSize;
+use common_telemetry::info;
+use common_telemetry::tracing::log::LevelFilter;
+use paste::paste;
+use snafu::ResultExt;
+use sqlx::mysql::{MySqlConnectOptions, MySqlPoolOptions};
+use sqlx::{ConnectOptions, MySql, Pool};
+
+use crate::error::{self, Result};
+use crate::ir::Ident;
+
+/// Database connections
+pub struct Connections {
+    pub mysql: Option<Pool<MySql>>,
+}
+
+const GT_MYSQL_ADDR: &str = "GT_MYSQL_ADDR";
+
+/// Connects to GreptimeDB via env variables.
+pub async fn init_greptime_connections_via_env() -> Connections {
+    crate::install_rustls_crypto_provider();
+
+    let _ = dotenv::dotenv();
+    let mysql = if let Ok(addr) = env::var(GT_MYSQL_ADDR) {
+        Some(addr)
+    } else {
+        info!("GT_MYSQL_ADDR is empty, ignores test");
+        None
+    };
+
+    init_greptime_connections(mysql).await
+}
+
+/// Connects to GreptimeDB.
+pub async fn init_greptime_connections(mysql: Option<String>) -> Connections {
+    let mysql = if let Some(addr) = mysql {
+        let opts = format!("mysql://{addr}/public")
+            .parse::<MySqlConnectOptions>()
+            .unwrap()
+            .log_statements(LevelFilter::Off);
+
+        Some(MySqlPoolOptions::new().connect_with(opts).await.unwrap())
+    } else {
+        None
+    };
+
+    Connections { mysql }
+}
+
+const GT_FUZZ_BINARY_PATH: &str = "GT_FUZZ_BINARY_PATH";
+const GT_FUZZ_INSTANCE_ROOT_DIR: &str = "GT_FUZZ_INSTANCE_ROOT_DIR";
+
+/// The variables for unstable test
+pub struct UnstableTestVariables {
+    pub binary_path: String,
+    pub root_dir: Option<String>,
+}
+
+/// Loads env variables for unstable test
+pub fn load_unstable_test_env_variables() -> UnstableTestVariables {
+    let _ = dotenv::dotenv();
+    let binary_path = env::var(GT_FUZZ_BINARY_PATH).expect("GT_FUZZ_BINARY_PATH not found");
+    let root_dir = env::var(GT_FUZZ_INSTANCE_ROOT_DIR).ok();
+
+    UnstableTestVariables {
+        binary_path,
+        root_dir,
+    }
+}
+
+pub const GT_FUZZ_CLUSTER_NAMESPACE: &str = "GT_FUZZ_CLUSTER_NAMESPACE";
+pub const GT_FUZZ_CLUSTER_NAME: &str = "GT_FUZZ_CLUSTER_NAME";
+
+/// Flushes memtable to SST file.
+pub async fn flush_memtable(e: &Pool<MySql>, table_name: &Ident) -> Result<()> {
+    let sql = format!("admin flush_table(\"{}\")", table_name);
+    let result = sqlx::query(&sql)
+        .execute(e)
+        .await
+        .context(error::ExecuteQuerySnafu { sql })?;
+    info!("Flush table: {}\n\nResult: {result:?}\n\n", table_name);
+
+    Ok(())
+}
+
+/// Triggers a compaction for table
+pub async fn compact_table(e: &Pool<MySql>, table_name: &Ident) -> Result<()> {
+    let sql = format!("admin compact_table(\"{}\")", table_name);
+    let result = sqlx::query(&sql)
+        .execute(e)
+        .await
+        .context(error::ExecuteQuerySnafu { sql })?;
+    info!("Compact table: {}\n\nResult: {result:?}\n\n", table_name);
+
+    Ok(())
+}
+
+pub const GT_FUZZ_INPUT_MAX_ROWS: &str = "GT_FUZZ_INPUT_MAX_ROWS";
+pub const GT_FUZZ_INPUT_MAX_TABLES: &str = "GT_FUZZ_INPUT_MAX_TABLES";
+pub const GT_FUZZ_INPUT_MAX_COLUMNS: &str = "GT_FUZZ_INPUT_MAX_COLUMNS";
+pub const GT_FUZZ_INPUT_MAX_ALTER_ACTIONS: &str = "GT_FUZZ_INPUT_MAX_ALTER_ACTIONS";
+pub const GT_FUZZ_INPUT_MAX_INSERT_ACTIONS: &str = "GT_FUZZ_INPUT_MAX_INSERT_ACTIONS";
+pub const FUZZ_OVERRIDE_PREFIX: &str = "GT_FUZZ_OVERRIDE_";
+/// Enables CSV dump generation for fuzz runs.
+pub const GT_FUZZ_DUMP_TABLE_CSV: &str = "GT_FUZZ_DUMP_TABLE_CSV";
+/// Base directory for CSV dump sessions.
+pub const GT_FUZZ_DUMP_DIR: &str = "GT_FUZZ_DUMP_DIR";
+/// Directory suffix used by one CSV dump session.
+pub const GT_FUZZ_DUMP_SUFFIX: &str = "GT_FUZZ_DUMP_SUFFIX";
+/// Max in-memory CSV buffer size before auto flush.
+pub const GT_FUZZ_DUMP_BUFFER_MAX_BYTES: &str = "GT_FUZZ_DUMP_BUFFER_MAX_BYTES";
+
+/// Reads an override value for a fuzz parameter from env `GT_FUZZ_OVERRIDE_<NAME>`.
+pub fn get_fuzz_override<T>(name: &str) -> Option<T>
+where
+    T: std::str::FromStr,
+{
+    let _ = dotenv::dotenv();
+    let key = format!("{}{}", FUZZ_OVERRIDE_PREFIX, name.to_ascii_uppercase());
+    env::var(&key).ok().and_then(|v| v.parse().ok())
+}
+
+/// Returns CSV dump base directory.
+pub fn get_gt_fuzz_dump_dir() -> String {
+    let _ = dotenv::dotenv();
+    env::var(GT_FUZZ_DUMP_DIR).unwrap_or_else(|_| "/tmp/greptime-fuzz-dumps".to_string())
+}
+
+/// Returns CSV dump directory suffix.
+pub fn get_gt_fuzz_dump_suffix() -> String {
+    let _ = dotenv::dotenv();
+    env::var(GT_FUZZ_DUMP_SUFFIX).unwrap_or_else(|_| ".repartition-metric-csv".to_string())
+}
+
+/// Returns max CSV in-memory buffer size.
+pub fn get_gt_fuzz_dump_buffer_max_bytes() -> usize {
+    let _ = dotenv::dotenv();
+    env::var(GT_FUZZ_DUMP_BUFFER_MAX_BYTES)
+        .ok()
+        .and_then(|value| {
+            value.parse::<usize>().ok().or_else(|| {
+                ReadableSize::from_str(&value)
+                    .ok()
+                    .map(|size| size.as_bytes() as usize)
+            })
+        })
+        .unwrap_or(8 * 1024 * 1024)
+}
+
+macro_rules! make_get_from_env_helper {
+    ($key:expr, $default: expr) => {
+        paste! {
+            #[doc = "Retrieves `" $key "` environment variable \
+                     or returns a default value (`" $default "`) if the environment variable is not set.
+            "]
+            pub fn [<get_ $key:lower>]() -> usize {
+                get_from_env_or_default_value($key, $default)
+            }
+        }
+    };
+}
+
+make_get_from_env_helper!(GT_FUZZ_INPUT_MAX_ALTER_ACTIONS, 256);
+make_get_from_env_helper!(GT_FUZZ_INPUT_MAX_INSERT_ACTIONS, 4);
+make_get_from_env_helper!(GT_FUZZ_INPUT_MAX_ROWS, 512);
+make_get_from_env_helper!(GT_FUZZ_INPUT_MAX_TABLES, 32);
+make_get_from_env_helper!(GT_FUZZ_INPUT_MAX_COLUMNS, 16);
+
+/// Retrieves a value from the environment variables
+/// or returns a default value if the environment variable is not set.
+fn get_from_env_or_default_value(key: &str, default_value: usize) -> usize {
+    let _ = dotenv::dotenv();
+    if let Ok(value) = env::var(key) {
+        value.parse().unwrap()
+    } else {
+        default_value
+    }
+}

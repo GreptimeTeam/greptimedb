@@ -1,0 +1,54 @@
+CREATE TABLE test(i INTEGER, j TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+INSERT INTO test VALUES (1, 1), (2, 2);
+
+Affected Rows: 2
+
+ALTER TABLE test DROP COLUMN "I";
+
+Error: 4002(TableColumnNotFound), Column I not exists in table test
+
+ALTER TABLE test DROP COLUMN I;
+
+Affected Rows: 0
+
+SELECT * FROM test;
+
++-------------------------+
+| j                       |
++-------------------------+
+| 1970-01-01T00:00:00.001 |
+| 1970-01-01T00:00:00.002 |
++-------------------------+
+
+ALTER TABLE test DROP COLUMN j;
+
+Error: 1004(InvalidArguments), Not allowed to remove index column j from table test
+
+DROP TABLE test;
+
+Affected Rows: 0
+
+CREATE TABLE my_table (
+  a INT PRIMARY KEY,
+  b STRING,
+  ts TIMESTAMP TIME INDEX,
+)
+PARTITION ON COLUMNS (a) (
+  a < 1000,
+  a >= 1000 AND a < 2000,
+  a >= 2000
+);
+
+Affected Rows: 0
+
+ALTER TABLE my_table DROP COLUMN a;
+
+Error: 1004(InvalidArguments), Not allowed to remove index column a from table my_table
+
+DROP TABLE my_table;
+
+Affected Rows: 0
+

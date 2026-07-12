@@ -1,0 +1,142 @@
+[package]
+name = "mito2"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+test = ["common-test-util", "rstest", "rstest_reuse", "rskafka"]
+testing = ["test"]
+test-shared-fs-region-migration = []
+enterprise = []
+vector_index = ["dep:roaring", "index/vector_index"]
+
+[lints]
+workspace = true
+
+[dependencies]
+api.workspace = true
+aquamarine.workspace = true
+arrow-schema.workspace = true
+async-channel = "1.9"
+common-stat.workspace = true
+async-stream.workspace = true
+async-trait.workspace = true
+base64.workspace = true
+bytemuck.workspace = true
+bytes.workspace = true
+chrono.workspace = true
+common-base.workspace = true
+common-config.workspace = true
+common-datasource.workspace = true
+common-decimal.workspace = true
+common-error.workspace = true
+common-grpc.workspace = true
+common-function.workspace = true
+common-macro.workspace = true
+common-memory-manager.workspace = true
+common-meta.workspace = true
+common-query.workspace = true
+common-recordbatch.workspace = true
+common-runtime.workspace = true
+common-telemetry.workspace = true
+common-test-util = { workspace = true, optional = true }
+common-time.workspace = true
+common-wal.workspace = true
+crc32fast = "1"
+crossbeam-utils.workspace = true
+datafusion.workspace = true
+datafusion-common.workspace = true
+datafusion-expr.workspace = true
+datatypes.workspace = true
+dashmap.workspace = true
+derive_more.workspace = true
+dotenv.workspace = true
+either.workspace = true
+futures.workspace = true
+humantime.workspace = true
+humantime-serde.workspace = true
+index.workspace = true
+itertools.workspace = true
+greptime-proto.workspace = true
+lazy_static = "1.4"
+log-store = { workspace = true }
+mito-codec.workspace = true
+moka = { workspace = true, features = ["sync", "future"] }
+object-store = { workspace = true, features = ["testing"] }
+parquet = { workspace = true, features = ["async"] }
+paste.workspace = true
+pin-project.workspace = true
+prometheus.workspace = true
+prost.workspace = true
+partition.workspace = true
+puffin.workspace = true
+rand.workspace = true
+rayon = "1.10"
+roaring = { version = "0.10", optional = true }
+regex.workspace = true
+rskafka = { workspace = true, optional = true }
+rstest = { workspace = true, optional = true }
+rstest_reuse = { workspace = true, optional = true }
+scopeguard = "1.2"
+serde.workspace = true
+serde_json.workspace = true
+serde_with.workspace = true
+smallvec.workspace = true
+snafu.workspace = true
+store-api.workspace = true
+strum.workspace = true
+table.workspace = true
+tokio.workspace = true
+tokio-stream.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+common-function.workspace = true
+common-meta = { workspace = true, features = ["testing"] }
+common-test-util.workspace = true
+criterion = { workspace = true, features = ["async", "async_tokio"] }
+dotenv.workspace = true
+log-store.workspace = true
+mito-codec = { workspace = true, features = ["testing"] }
+object-store = { workspace = true, features = ["services-memory"] }
+rskafka.workspace = true
+rstest.workspace = true
+rstest_reuse.workspace = true
+session.workspace = true
+toml.workspace = true
+
+[[bench]]
+name = "memtable_bench"
+harness = false
+required-features = ["test"]
+
+[[bench]]
+name = "bench_cache_stream"
+harness = false
+required-features = ["test"]
+
+[[bench]]
+name = "bench_filter_time_partition"
+harness = false
+required-features = ["test"]
+
+[[bench]]
+name = "bench_compaction_picker"
+harness = false
+required-features = ["testing"]
+
+[[bench]]
+name = "simple_bulk_memtable"
+harness = false
+required-features = ["test"]
+
+[[bench]]
+name = "bench_wal_encode"
+harness = false
+
+[package.metadata.cargo-udeps.ignore]
+normal = ["aquamarine"]

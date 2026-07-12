@@ -1,0 +1,25 @@
+CREATE TABLE table_should_not_break_after_incorrect_alter(i INTEGER, j TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+ALTER TABLE table_should_not_break_after_incorrect_alter ADD column k string NOT NULL;
+
+Error: 1004(InvalidArguments), Invalid alter table(table_should_not_break_after_incorrect_alter) request: no default value for column k
+
+INSERT INTO table_should_not_break_after_incorrect_alter VALUES (1, 1), (2, 2);
+
+Affected Rows: 2
+
+SELECT * FROM table_should_not_break_after_incorrect_alter;
+
++---+-------------------------+
+| i | j                       |
++---+-------------------------+
+| 1 | 1970-01-01T00:00:00.001 |
+| 2 | 1970-01-01T00:00:00.002 |
++---+-------------------------+
+
+DROP TABLE table_should_not_break_after_incorrect_alter;
+
+Affected Rows: 0
+

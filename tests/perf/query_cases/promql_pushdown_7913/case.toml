@@ -1,0 +1,101 @@
+# Query performance regression case for GreptimeDB issue #7913.
+# This is a case config for the generic direct-SST fixture generator. The
+# generator must not hard-code PromQL/#7913 behavior; this file only supplies one
+# schema/layout/query instance.
+
+[case]
+name = "promql_pushdown_7913"
+description = "PromQL/TQL small-window selectors should stay fast on high-cardinality metric-like fixtures"
+issue = "https://github.com/GreptimeTeam/greptimedb/issues/7913"
+
+[scenario]
+kind = "direct_readable_sst"
+seed = 7913
+
+
+[[scenario.tables]]
+database = "public"
+name = "promql_pushdown_7913"
+engine = "mito"
+append_mode = true
+sst_format = "flat"
+primary_key = ["host", "instance"]
+time_index = "greptime_timestamp"
+
+[[scenario.tables.columns]]
+name = "host"
+type = "STRING"
+semantic = "tag"
+distribution = { kind = "cardinality", values = 256, prefix = "host" }
+
+[[scenario.tables.columns]]
+name = "instance"
+type = "STRING"
+semantic = "tag"
+distribution = { kind = "cardinality", values = 4096, prefix = "instance" }
+
+[[scenario.tables.columns]]
+name = "download_mbs"
+type = "DOUBLE"
+semantic = "field"
+distribution = { kind = "deterministic_wave", min = 0.0, max = 1000.0 }
+
+[[scenario.tables.columns]]
+name = "greptime_timestamp"
+type = "TIMESTAMP(9)"
+semantic = "timestamp"
+
+[scenario.layout]
+regions = 1
+sst_count = 1024
+rows_per_sst = 32768
+row_group_size = 8192
+series_count = 4096
+start_unix_nanos = 1_704_067_200_000_000_000 # 2024-01-01T00:00:00Z
+step_nanos = 1_000_000_000
+time_range_layout = "non_overlapping_per_sst"
+series_layout = "timestamp_major"
+
+[[scenario.queries]]
+name = "selector_5m_high_cardinality"
+kind = "tql"
+# TQL start/end timestamps are epoch seconds. `timestamp_major` layout writes one
+# sample for every series at each scrape timestamp, so short PromQL windows still
+# scan millions of raw samples instead of millisecond-scale synthetic trickles.
+# The default 5-minute lookback means scans start before each query window.
+query = "TQL ANALYZE VERBOSE (1704069000, 1704069300, '15s') promql_pushdown_7913{host=~'host.*'}"
+warmup = 3
+iterations = 9
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 15
+
+[[scenario.queries]]
+name = "latest_timestamp_equality_subquery"
+kind = "sql"
+query = "SELECT * FROM promql_pushdown_7913 WHERE greptime_timestamp = (SELECT greptime_timestamp FROM promql_pushdown_7913 ORDER BY greptime_timestamp DESC LIMIT 1)"
+warmup = 3
+iterations = 9
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 15
+
+[[scenario.queries]]
+name = "selector_15m_high_cardinality"
+kind = "tql"
+query = "TQL ANALYZE VERBOSE (1704069000, 1704069900, '15s') promql_pushdown_7913{host=~'host.*'}"
+warmup = 3
+iterations = 9
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 15
+
+[[scenario.queries]]
+name = "selector_1h_high_cardinality"
+kind = "tql"
+query = "TQL ANALYZE VERBOSE (1704069000, 1704072600, '15s') promql_pushdown_7913{host=~'host.*'}"
+warmup = 3
+iterations = 9
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 15

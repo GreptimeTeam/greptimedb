@@ -1,0 +1,36 @@
+[package]
+name = "sqlness-runner"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+async-trait.workspace = true
+clap.workspace = true
+client = { workspace = true, features = ["testing"] }
+common-error.workspace = true
+common-query.workspace = true
+common-recordbatch.workspace = true
+common-time.workspace = true
+datatypes = { workspace = true }
+flate2 = "1.0"
+hex = "0.4"
+local-ip-address = "0.6"
+mysql = { version = "26", default-features = false, features = ["minimal", "rustls-tls"] }
+num_cpus = "1.16"
+regex.workspace = true
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+serde.workspace = true
+serde_json.workspace = true
+sha2 = "0.10"
+sqlness = { git = "https://github.com/GreptimeTeam/sqlness", rev = "cf4c2ae005fb8531a023ea638124ef49f1022025" }
+tar = "0.4"
+tempfile.workspace = true
+tinytemplate = "1.2"
+tokio.workspace = true
+tokio-postgres = { workspace = true }
+tokio-stream.workspace = true
+toml.workspace = true

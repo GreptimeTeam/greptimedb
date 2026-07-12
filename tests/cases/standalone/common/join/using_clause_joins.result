@@ -1,0 +1,125 @@
+-- Migrated from DuckDB test: test/sql/join/ USING clause tests
+-- Tests USING clause join syntax
+CREATE TABLE orders_using(order_id INTEGER, customer_id INTEGER, total DOUBLE, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+CREATE TABLE customers_using(customer_id INTEGER, customer_name VARCHAR, city VARCHAR, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+CREATE TABLE payments_using(payment_id INTEGER, order_id INTEGER, amount DOUBLE, "method" VARCHAR, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+INSERT INTO orders_using VALUES
+(1, 101, 250.00, 1000), (2, 102, 180.00, 2000), (3, 101, 420.00, 3000), (4, 103, 95.00, 4000);
+
+Affected Rows: 4
+
+INSERT INTO customers_using VALUES
+(101, 'John Doe', 'NYC', 1000), (102, 'Jane Smith', 'LA', 2000), (103, 'Bob Wilson', 'Chicago', 3000);
+
+Affected Rows: 3
+
+INSERT INTO payments_using VALUES
+(1, 1, 250.00, 'Credit', 1000), (2, 2, 180.00, 'Debit', 2000),
+(3, 3, 420.00, 'Credit', 3000), (4, 4, 95.00, 'Cash', 4000);
+
+Affected Rows: 4
+
+-- Basic USING clause join
+SELECT order_id, customer_name, total
+FROM orders_using
+INNER JOIN customers_using USING (customer_id)
+ORDER BY order_id;
+
++----------+---------------+-------+
+| order_id | customer_name | total |
++----------+---------------+-------+
+| 1        | John Doe      | 250.0 |
+| 2        | Jane Smith    | 180.0 |
+| 3        | John Doe      | 420.0 |
+| 4        | Bob Wilson    | 95.0  |
++----------+---------------+-------+
+
+-- Multiple USING clause joins
+SELECT o.order_id, c.customer_name, p.amount, p."method"
+FROM orders_using o
+INNER JOIN customers_using c USING (customer_id)
+INNER JOIN payments_using p USING (order_id)
+ORDER BY o.order_id;
+
++----------+---------------+--------+--------+
+| order_id | customer_name | amount | method |
++----------+---------------+--------+--------+
+| 1        | John Doe      | 250.0  | Credit |
+| 2        | Jane Smith    | 180.0  | Debit  |
+| 3        | John Doe      | 420.0  | Credit |
+| 4        | Bob Wilson    | 95.0   | Cash   |
++----------+---------------+--------+--------+
+
+-- LEFT JOIN with USING
+SELECT c.customer_name, o.order_id, o.total
+FROM customers_using c
+LEFT JOIN orders_using o USING (customer_id)
+ORDER BY c.customer_id, o.order_id;
+
++---------------+----------+-------+
+| customer_name | order_id | total |
++---------------+----------+-------+
+| John Doe      | 1        | 250.0 |
+| John Doe      | 3        | 420.0 |
+| Jane Smith    | 2        | 180.0 |
+| Bob Wilson    | 4        | 95.0  |
++---------------+----------+-------+
+
+-- USING with aggregation
+SELECT
+  c.city,
+  COUNT(o.order_id) as order_count,
+  SUM(o.total) as total_sales
+FROM customers_using c
+LEFT JOIN orders_using o USING (customer_id)
+GROUP BY c.city
+ORDER BY total_sales DESC;
+
++---------+-------------+-------------+
+| city    | order_count | total_sales |
++---------+-------------+-------------+
+| NYC     | 2           | 670.0       |
+| LA      | 1           | 180.0       |
+| Chicago | 1           | 95.0        |
++---------+-------------+-------------+
+
+-- USING with complex expressions
+SELECT
+  c.customer_name,
+  COUNT(o.order_id) as order_count,
+  COALESCE(SUM(o.total), 0) as total_spent
+FROM customers_using c
+LEFT JOIN orders_using o USING (customer_id)
+GROUP BY c.customer_id, c.customer_name
+HAVING COUNT(o.order_id) != 0
+ORDER BY total_spent DESC;
+
++---------------+-------------+-------------+
+| customer_name | order_count | total_spent |
++---------------+-------------+-------------+
+| John Doe      | 2           | 670.0       |
+| Jane Smith    | 1           | 180.0       |
+| Bob Wilson    | 1           | 95.0        |
++---------------+-------------+-------------+
+
+DROP TABLE orders_using;
+
+Affected Rows: 0
+
+DROP TABLE customers_using;
+
+Affected Rows: 0
+
+DROP TABLE payments_using;
+
+Affected Rows: 0
+

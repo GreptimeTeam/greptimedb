@@ -1,0 +1,129 @@
+[package]
+name = "cmd"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+default-run = "greptime"
+
+[[bin]]
+name = "greptime"
+path = "src/bin/greptime.rs"
+
+[[bin]]
+name = "query_perf_fixture"
+path = "src/bin/query_perf_fixture.rs"
+required-features = ["dev-tools"]
+
+[features]
+default = [
+    "servers/pprof",
+    "servers/mem-prof",
+    "meta-srv/pg_kvbackend",
+    "meta-srv/mysql_kvbackend",
+]
+enterprise = ["common-meta/enterprise", "frontend/enterprise", "meta-srv/enterprise"]
+# Developer-only helper binary gate for `query_perf_fixture`.
+# Kept out of `default` so normal/release builds don't compile them.
+dev-tools = []
+tokio-console = ["common-telemetry/tokio-console"]
+vector_index = ["mito2/vector_index", "query/vector_index"]
+
+[lints]
+workspace = true
+
+[dependencies]
+api.workspace = true
+async-trait.workspace = true
+auth.workspace = true
+base64.workspace = true
+cache.workspace = true
+catalog.workspace = true
+chrono.workspace = true
+clap.workspace = true
+cli.workspace = true
+client.workspace = true
+colored = "2.1.0"
+common-base.workspace = true
+common-catalog.workspace = true
+common-config.workspace = true
+common-error.workspace = true
+common-grpc.workspace = true
+common-macro.workspace = true
+common-mem-prof.workspace = true
+common-meta.workspace = true
+common-options.workspace = true
+common-procedure.workspace = true
+common-query.workspace = true
+common-recordbatch.workspace = true
+common-runtime.workspace = true
+common-stat.workspace = true
+common-telemetry = { workspace = true, features = [
+    "deadlock_detection",
+] }
+common-time.workspace = true
+common-version.workspace = true
+common-wal.workspace = true
+datafusion.workspace = true
+datafusion-common.workspace = true
+datafusion-physical-plan.workspace = true
+datanode.workspace = true
+datatypes.workspace = true
+either = "1.15"
+etcd-client.workspace = true
+flow.workspace = true
+frontend = { workspace = true, default-features = false }
+futures.workspace = true
+hex.workspace = true
+human-panic = "2.0"
+humantime.workspace = true
+lazy_static.workspace = true
+log-store.workspace = true
+meta-client.workspace = true
+meta-srv.workspace = true
+metric-engine.workspace = true
+mito-codec.workspace = true
+mito2.workspace = true
+moka = { workspace = true, features = ["future"] }
+object-store.workspace = true
+parquet = { workspace = true, features = ["object_store"] }
+plugins.workspace = true
+prometheus.workspace = true
+prost.workspace = true
+query.workspace = true
+rand.workspace = true
+regex.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+servers.workspace = true
+session.workspace = true
+smallvec.workspace = true
+snafu.workspace = true
+sqlparser.workspace = true
+standalone.workspace = true
+store-api.workspace = true
+table.workspace = true
+tokio.workspace = true
+toml.workspace = true
+tonic.workspace = true
+tracing-appender.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+pprof = { version = "0.14", features = [
+    "flamegraph",
+] }
+
+[target.'cfg(not(windows))'.dependencies]
+tikv-jemallocator = "0.6"
+
+[dev-dependencies]
+api.workspace = true
+client = { workspace = true, features = ["testing"] }
+common-test-util.workspace = true
+common-version.workspace = true
+file-engine.workspace = true
+mito2.workspace = true
+serde.workspace = true
+similar-asserts.workspace = true
+temp-env = "0.3"
+tempfile.workspace = true

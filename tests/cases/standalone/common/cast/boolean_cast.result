@@ -1,0 +1,94 @@
+-- Migrated from DuckDB test: test/sql/cast/boolean_autocast.test
+-- Description: Test boolean casts
+-- Note: GreptimeDB doesn't support automatic boolean-integer comparisons
+-- Test explicit boolean casts (supported)
+SELECT 1::BOOLEAN;
+
++----------+
+| Int64(1) |
++----------+
+| true     |
++----------+
+
+SELECT 0::BOOLEAN;
+
++----------+
+| Int64(0) |
++----------+
+| false    |
++----------+
+
+SELECT 'true'::BOOLEAN;
+
++--------------+
+| Utf8("true") |
++--------------+
+| true         |
++--------------+
+
+SELECT 'false'::BOOLEAN;
+
++---------------+
+| Utf8("false") |
++---------------+
+| false         |
++---------------+
+
+-- Test boolean operations
+SELECT true AND false;
+
++----------------------------------+
+| Boolean(true) AND Boolean(false) |
++----------------------------------+
+| false                            |
++----------------------------------+
+
+SELECT true OR false;
+
++---------------------------------+
+| Boolean(true) OR Boolean(false) |
++---------------------------------+
+| true                            |
++---------------------------------+
+
+SELECT NOT true;
+
++-------------------+
+| NOT Boolean(true) |
++-------------------+
+| false             |
++-------------------+
+
+SELECT NOT false;
+
++--------------------+
+| NOT Boolean(false) |
++--------------------+
+| true               |
++--------------------+
+
+-- Test boolean comparisons (same type)
+SELECT true = true;
+
++-------------------------------+
+| Boolean(true) = Boolean(true) |
++-------------------------------+
+| true                          |
++-------------------------------+
+
+SELECT true = false;
+
++--------------------------------+
+| Boolean(true) = Boolean(false) |
++--------------------------------+
+| false                          |
++--------------------------------+
+
+SELECT false = false;
+
++---------------------------------+
+| Boolean(false) = Boolean(false) |
++---------------------------------+
+| true                            |
++---------------------------------+
+

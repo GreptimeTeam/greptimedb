@@ -1,0 +1,516 @@
+CREATE TABLE system_metrics (
+  `id` INT UNSIGNED,
+  host STRING,
+  cpu DOUBLE,
+  disk FLOAT COMMENT 'comment',
+  ts TIMESTAMP NOT NULL DEFAULT current_timestamp(),
+  TIME INDEX (ts),
+  PRIMARY KEY (`id`, host)
+)
+PARTITION ON COLUMNS (`id`) (
+  `id` < 5,
+  `id` >= 5 AND `id` < 9,
+  `id` >= 9
+)
+ENGINE=mito
+WITH(
+  ttl = '7d',
+  write_buffer_size = 1024
+);
+
+Affected Rows: 0
+
+SHOW CREATE TABLE system_metrics;
+
++----------------+-----------------------------------------------------------+
+| Table          | Create Table                                              |
++----------------+-----------------------------------------------------------+
+| system_metrics | CREATE TABLE IF NOT EXISTS "system_metrics" (             |
+|                |   "id" INT UNSIGNED NULL,                                 |
+|                |   "host" STRING NULL,                                     |
+|                |   "cpu" DOUBLE NULL,                                      |
+|                |   "disk" FLOAT NULL COMMENT 'comment',                    |
+|                |   "ts" TIMESTAMP(3) NOT NULL DEFAULT current_timestamp(), |
+|                |   TIME INDEX ("ts"),                                      |
+|                |   PRIMARY KEY ("id", "host")                              |
+|                | )                                                         |
+|                | PARTITION ON COLUMNS ("id") (                             |
+|                |   id < 5,                                                 |
+|                |   id >= 5 AND id < 9,                                     |
+|                |   id >= 9                                                 |
+|                | )                                                         |
+|                | ENGINE=mito                                               |
+|                | WITH(                                                     |
+|                |   ttl = '7days',                                          |
+|                |   write_buffer_size = '1.0KiB'                            |
+|                | )                                                         |
++----------------+-----------------------------------------------------------+
+
+SHOW CREATE TABLE system_metrics FOR POSTGRES_FOREIGN_TABLE;
+
++----------------+------------------------------------------+
+| Table          | Create Table                             |
++----------------+------------------------------------------+
+| system_metrics | CREATE FOREIGN TABLE ft_system_metrics ( |
+|                |   "id" INT4,                             |
+|                |   "host" VARCHAR,                        |
+|                |   "cpu" FLOAT8,                          |
+|                |   "disk" FLOAT4,                         |
+|                |   "ts" TIMESTAMP                         |
+|                | )                                        |
+|                | SERVER greptimedb                        |
+|                | OPTIONS (table_name 'system_metrics')    |
++----------------+------------------------------------------+
+
+DROP TABLE system_metrics;
+
+Affected Rows: 0
+
+create table table_without_partition (
+  ts TIMESTAMP TIME INDEX NOT NULL DEFAULT current_timestamp()
+);
+
+Affected Rows: 0
+
+show create table table_without_partition;
+
++-------------------------+-----------------------------------------------------------+
+| Table                   | Create Table                                              |
++-------------------------+-----------------------------------------------------------+
+| table_without_partition | CREATE TABLE IF NOT EXISTS "table_without_partition" (    |
+|                         |   "ts" TIMESTAMP(3) NOT NULL DEFAULT current_timestamp(), |
+|                         |   TIME INDEX ("ts")                                       |
+|                         | )                                                         |
+|                         |                                                           |
+|                         | ENGINE=mito                                               |
+|                         |                                                           |
++-------------------------+-----------------------------------------------------------+
+
+drop table table_without_partition;
+
+Affected Rows: 0
+
+CREATE TABLE hint_table (
+  host STRING,
+  ts TIMESTAMP TIME INDEX,
+  cpu DOUBLE,
+  PRIMARY KEY(host)
+)
+WITH ('repartition.column.hint' = 'host');
+
+Affected Rows: 0
+
+SHOW CREATE TABLE hint_table;
+
++------------+-------------------------------------------+
+| Table      | Create Table                              |
++------------+-------------------------------------------+
+| hint_table | CREATE TABLE IF NOT EXISTS "hint_table" ( |
+|            |   "host" STRING NULL,                     |
+|            |   "ts" TIMESTAMP(3) NOT NULL,             |
+|            |   "cpu" DOUBLE NULL,                      |
+|            |   TIME INDEX ("ts"),                      |
+|            |   PRIMARY KEY ("host")                    |
+|            | )                                         |
+|            |                                           |
+|            | ENGINE=mito                               |
+|            | WITH(                                     |
+|            |   'repartition.column.hint' = 'host'      |
+|            | )                                         |
++------------+-------------------------------------------+
+
+DROP TABLE hint_table;
+
+Affected Rows: 0
+
+CREATE TABLE alter_hint_table (
+  host STRING,
+  ts TIMESTAMP TIME INDEX,
+  cpu DOUBLE,
+  PRIMARY KEY(host)
+);
+
+Affected Rows: 0
+
+ALTER TABLE alter_hint_table SET 'repartition.column.hint' = 'host';
+
+Affected Rows: 0
+
+SHOW CREATE TABLE alter_hint_table;
+
++------------------+-------------------------------------------------+
+| Table            | Create Table                                    |
++------------------+-------------------------------------------------+
+| alter_hint_table | CREATE TABLE IF NOT EXISTS "alter_hint_table" ( |
+|                  |   "host" STRING NULL,                           |
+|                  |   "ts" TIMESTAMP(3) NOT NULL,                   |
+|                  |   "cpu" DOUBLE NULL,                            |
+|                  |   TIME INDEX ("ts"),                            |
+|                  |   PRIMARY KEY ("host")                          |
+|                  | )                                               |
+|                  |                                                 |
+|                  | ENGINE=mito                                     |
+|                  | WITH(                                           |
+|                  |   'repartition.column.hint' = 'host'            |
+|                  | )                                               |
++------------------+-------------------------------------------------+
+
+ALTER TABLE alter_hint_table UNSET 'repartition.column.hint';
+
+Affected Rows: 0
+
+SHOW CREATE TABLE alter_hint_table;
+
++------------------+-------------------------------------------------+
+| Table            | Create Table                                    |
++------------------+-------------------------------------------------+
+| alter_hint_table | CREATE TABLE IF NOT EXISTS "alter_hint_table" ( |
+|                  |   "host" STRING NULL,                           |
+|                  |   "ts" TIMESTAMP(3) NOT NULL,                   |
+|                  |   "cpu" DOUBLE NULL,                            |
+|                  |   TIME INDEX ("ts"),                            |
+|                  |   PRIMARY KEY ("host")                          |
+|                  | )                                               |
+|                  |                                                 |
+|                  | ENGINE=mito                                     |
+|                  |                                                 |
++------------------+-------------------------------------------------+
+
+DROP TABLE alter_hint_table;
+
+Affected Rows: 0
+
+CREATE TABLE not_supported_table_storage_option (
+  `id` INT UNSIGNED,
+  host STRING,
+  cpu DOUBLE,
+  disk FLOAT,
+  ts TIMESTAMP NOT NULL DEFAULT current_timestamp(),
+  TIME INDEX (ts),
+  PRIMARY KEY (`id`, host)
+)
+PARTITION ON COLUMNS (`id`) (
+  `id` < 5,
+  `id` >= 5 AND `id` < 9,
+  `id` >= 9
+)
+ENGINE=mito
+WITH(
+  storage = 'S3'
+);
+
+Error: 1004(InvalidArguments), Object store not found: S3
+
+CREATE TABLE phy (ts timestamp time index, val double) engine=metric with ("physical_metric_table" = "");
+
+Affected Rows: 0
+
+CREATE TABLE t1 (ts timestamp time index, val double, host string primary key) engine = metric with ("on_physical_table" = "phy");
+
+Affected Rows: 0
+
+show create table phy;
+
++-------+------------------------------------+
+| Table | Create Table                       |
++-------+------------------------------------+
+| phy   | CREATE TABLE IF NOT EXISTS "phy" ( |
+|       |   "ts" TIMESTAMP(3) NOT NULL,      |
+|       |   "val" DOUBLE NULL,               |
+|       |   "host" STRING NULL,              |
+|       |   TIME INDEX ("ts"),               |
+|       |   PRIMARY KEY ("host")             |
+|       | )                                  |
+|       |                                    |
+|       | ENGINE=metric                      |
+|       | WITH(                              |
+|       |   physical_metric_table = ''       |
+|       | )                                  |
++-------+------------------------------------+
+
+show create table t1;
+
++-------+-----------------------------------+
+| Table | Create Table                      |
++-------+-----------------------------------+
+| t1    | CREATE TABLE IF NOT EXISTS "t1" ( |
+|       |   "host" STRING NULL,             |
+|       |   "ts" TIMESTAMP(3) NOT NULL,     |
+|       |   "val" DOUBLE NULL,              |
+|       |   TIME INDEX ("ts"),              |
+|       |   PRIMARY KEY ("host")            |
+|       | )                                 |
+|       |                                   |
+|       | ENGINE=metric                     |
+|       | WITH(                             |
+|       |   on_physical_table = 'phy'       |
+|       | )                                 |
++-------+-----------------------------------+
+
+SHOW CREATE TABLE t1 FOR POSTGRES_FOREIGN_TABLE;
+
++-------+------------------------------+
+| Table | Create Table                 |
++-------+------------------------------+
+| t1    | CREATE FOREIGN TABLE ft_t1 ( |
+|       |   "host" VARCHAR,            |
+|       |   "ts" TIMESTAMP,            |
+|       |   "val" FLOAT8               |
+|       | )                            |
+|       | SERVER greptimedb            |
+|       | OPTIONS (table_name 't1')    |
++-------+------------------------------+
+
+drop table t1;
+
+Affected Rows: 0
+
+drop table phy;
+
+Affected Rows: 0
+
+CREATE TABLE IF NOT EXISTS "phy" (
+  "ts" TIMESTAMP(3) NOT NULL,
+  "val" DOUBLE NULL,
+  "__table_id" INT UNSIGNED NOT NULL,
+  "__tsid" BIGINT UNSIGNED NOT NULL,
+  "host" STRING NULL,
+  "job" STRING NULL,
+  TIME INDEX ("ts"),
+  PRIMARY KEY ("__table_id", "__tsid", "host", "job")
+)
+ENGINE=mito
+WITH(
+   physical_metric_table = '',
+);
+
+Affected Rows: 0
+
+show create table phy;
+
++-------+-------------------------------------------------------+
+| Table | Create Table                                          |
++-------+-------------------------------------------------------+
+| phy   | CREATE TABLE IF NOT EXISTS "phy" (                    |
+|       |   "ts" TIMESTAMP(3) NOT NULL,                         |
+|       |   "val" DOUBLE NULL,                                  |
+|       |   "__table_id" INT UNSIGNED NOT NULL,                 |
+|       |   "__tsid" BIGINT UNSIGNED NOT NULL,                  |
+|       |   "host" STRING NULL,                                 |
+|       |   "job" STRING NULL,                                  |
+|       |   TIME INDEX ("ts"),                                  |
+|       |   PRIMARY KEY ("__table_id", "__tsid", "host", "job") |
+|       | )                                                     |
+|       |                                                       |
+|       | ENGINE=mito                                           |
+|       | WITH(                                                 |
+|       |   physical_metric_table = ''                          |
+|       | )                                                     |
++-------+-------------------------------------------------------+
+
+drop table phy;
+
+Affected Rows: 0
+
+CREATE TABLE IF NOT EXISTS "phy" (
+  "ts" TIMESTAMP(3) NOT NULL,
+  "val" DOUBLE NULL,
+  "host" STRING NULL SKIPPING INDEX WITH(granularity = '8192', type = 'BLOOM'),
+  TIME INDEX ("ts"),
+  PRIMARY KEY ("host"),
+)
+ENGINE=metric
+WITH(
+  'index.granularity' = '8192',
+  'index.type' = 'skipping',
+  physical_metric_table = ''
+);
+
+Affected Rows: 0
+
+show create table phy;
+
++-------+---------------------------------------------------------------------------------------------------------------+
+| Table | Create Table                                                                                                  |
++-------+---------------------------------------------------------------------------------------------------------------+
+| phy   | CREATE TABLE IF NOT EXISTS "phy" (                                                                            |
+|       |   "ts" TIMESTAMP(3) NOT NULL,                                                                                 |
+|       |   "val" DOUBLE NULL,                                                                                          |
+|       |   "host" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '8192', type = 'BLOOM'), |
+|       |   TIME INDEX ("ts"),                                                                                          |
+|       |   PRIMARY KEY ("host")                                                                                        |
+|       | )                                                                                                             |
+|       |                                                                                                               |
+|       | ENGINE=metric                                                                                                 |
+|       | WITH(                                                                                                         |
+|       |   'index.granularity' = '8192',                                                                               |
+|       |   'index.type' = 'skipping',                                                                                  |
+|       |   physical_metric_table = ''                                                                                  |
+|       | )                                                                                                             |
++-------+---------------------------------------------------------------------------------------------------------------+
+
+CREATE TABLE t1 (
+    ts TIMESTAMP TIME INDEX, 
+    val DOUBLE, 
+    job STRING PRIMARY KEY
+) ENGINE=metric WITH (
+    "on_physical_table" = "phy"
+);
+
+Affected Rows: 0
+
+show index from phy;
+
++-------+------------+---------------------------+--------------+-------------+-----------+-------------+----------+--------+------+------------+---------+---------------+---------+------------+
+| Table | Non_unique | Key_name                  | Seq_in_index | Column_name | Collation | Cardinality | Sub_part | Packed | Null | Index_type | Comment | Index_comment | Visible | Expression |
++-------+------------+---------------------------+--------------+-------------+-----------+-------------+----------+--------+------+------------+---------+---------------+---------+------------+
+| phy   | 0          | PRIMARY                   | 1            | host        | A         |             |          |        | YES  | PRIMARY    |         |               | YES     |            |
+| phy   | 0          | PRIMARY                   | 2            | __table_id  | A         |             |          |        |      | PRIMARY    |         |               | YES     |            |
+| phy   | 0          | PRIMARY                   | 3            | __tsid      | A         |             |          |        |      | PRIMARY    |         |               | YES     |            |
+| phy   | 0          | PRIMARY                   | 4            | job         | A         |             |          |        | YES  | PRIMARY    |         |               | YES     |            |
+| phy   | 1          | SKIPPING_INDEX___table_id | 1            | __table_id  | A         |             |          |        |      | SKIPPING   |         |               | YES     |            |
+| phy   | 1          | SKIPPING_INDEX_host       | 1            | host        | A         |             |          |        | YES  | SKIPPING   |         |               | YES     |            |
+| phy   | 1          | SKIPPING_INDEX_job        | 1            | job         | A         |             |          |        | YES  | SKIPPING   |         |               | YES     |            |
+| phy   | 1          | TIME INDEX                | 1            | ts          | A         |             |          |        |      | TIME       |         |               | YES     |            |
++-------+------------+---------------------------+--------------+-------------+-----------+-------------+----------+--------+------+------------+---------+---------------+---------+------------+
+
+drop table t1;
+
+Affected Rows: 0
+
+drop table phy;
+
+Affected Rows: 0
+
+show create table numbers;
+
+Error: 1001(Unsupported), Show create table only for base table. greptime.public.numbers is TEMPORARY
+
+show create table information_schema.columns;
+
+Error: 1001(Unsupported), Show create table only for base table. greptime.information_schema.columns is TEMPORARY
+
+CREATE TABLE "specify_invereted_index_cols" (
+  "ts" TIMESTAMP(3) NOT NULL,
+  "val" DOUBLE NULL,
+  "host" STRING NULL,
+  "job" STRING NULL INVERTED INDEX,
+  TIME INDEX ("ts"),
+  PRIMARY KEY ("host", "job"),
+);
+
+Affected Rows: 0
+
+show create table specify_invereted_index_cols;
+
++------------------------------+-------------------------------------------------------------+
+| Table                        | Create Table                                                |
++------------------------------+-------------------------------------------------------------+
+| specify_invereted_index_cols | CREATE TABLE IF NOT EXISTS "specify_invereted_index_cols" ( |
+|                              |   "ts" TIMESTAMP(3) NOT NULL,                               |
+|                              |   "val" DOUBLE NULL,                                        |
+|                              |   "host" STRING NULL,                                       |
+|                              |   "job" STRING NULL INVERTED INDEX,                         |
+|                              |   TIME INDEX ("ts"),                                        |
+|                              |   PRIMARY KEY ("host", "job")                               |
+|                              | )                                                           |
+|                              |                                                             |
+|                              | ENGINE=mito                                                 |
+|                              |                                                             |
++------------------------------+-------------------------------------------------------------+
+
+drop table specify_invereted_index_cols;
+
+Affected Rows: 0
+
+CREATE TABLE "specify_empty_invereted_index_cols" (
+  "ts" TIMESTAMP(3) NOT NULL,
+  "val" DOUBLE NULL,
+  "host" STRING NULL,
+  "job" STRING NULL,
+  TIME INDEX ("ts"),
+  PRIMARY KEY ("host", "job"),
+);
+
+Affected Rows: 0
+
+show create table specify_empty_invereted_index_cols;
+
++------------------------------------+-------------------------------------------------------------------+
+| Table                              | Create Table                                                      |
++------------------------------------+-------------------------------------------------------------------+
+| specify_empty_invereted_index_cols | CREATE TABLE IF NOT EXISTS "specify_empty_invereted_index_cols" ( |
+|                                    |   "ts" TIMESTAMP(3) NOT NULL,                                     |
+|                                    |   "val" DOUBLE NULL,                                              |
+|                                    |   "host" STRING NULL,                                             |
+|                                    |   "job" STRING NULL,                                              |
+|                                    |   TIME INDEX ("ts"),                                              |
+|                                    |   PRIMARY KEY ("host", "job")                                     |
+|                                    | )                                                                 |
+|                                    |                                                                   |
+|                                    | ENGINE=mito                                                       |
+|                                    |                                                                   |
++------------------------------------+-------------------------------------------------------------------+
+
+drop table specify_empty_invereted_index_cols;
+
+Affected Rows: 0
+
+CREATE TABLE test_column_constrain_composite_indexes (
+  `id` INT SKIPPING INDEX INVERTED INDEX,
+  host STRING PRIMARY KEY SKIPPING INDEX FULLTEXT INDEX INVERTED INDEX,
+  ts TIMESTAMP TIME INDEX,
+);
+
+Affected Rows: 0
+
+show create table test_column_constrain_composite_indexes;
+
++-----------------------------------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| Table                                   | Create Table                                                                                                                                                                                                                                                              |
++-----------------------------------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| test_column_constrain_composite_indexes | CREATE TABLE IF NOT EXISTS "test_column_constrain_composite_indexes" (                                                                                                                                                                                                    |
+|                                         |   "id" INT NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM') INVERTED INDEX,                                                                                                                                                  |
+|                                         |   "host" STRING NULL FULLTEXT INDEX WITH(analyzer = 'English', backend = 'bloom', case_sensitive = 'false', false_positive_rate = '0.01', granularity = '10240') SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM') INVERTED INDEX, |
+|                                         |   "ts" TIMESTAMP(3) NOT NULL,                                                                                                                                                                                                                                             |
+|                                         |   TIME INDEX ("ts"),                                                                                                                                                                                                                                                      |
+|                                         |   PRIMARY KEY ("host")                                                                                                                                                                                                                                                    |
+|                                         | )                                                                                                                                                                                                                                                                         |
+|                                         |                                                                                                                                                                                                                                                                           |
+|                                         | ENGINE=mito                                                                                                                                                                                                                                                               |
+|                                         |                                                                                                                                                                                                                                                                           |
++-----------------------------------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+
+drop table test_column_constrain_composite_indexes;
+
+Affected Rows: 0
+
+CREATE TABLE `table_comment_in_cjk` (
+    `ts` TIMESTAMP(3) NOT NULL COMMENT '时间戳',
+    `val` DOUBLE NULL COMMENT '值',
+    TIME INDEX ("ts"),
+) WITH (comment = '你好\nこんにちは\n안녕하세요');
+
+Affected Rows: 0
+
+show create table table_comment_in_cjk;
+
++----------------------+-----------------------------------------------------+
+| Table                | Create Table                                        |
++----------------------+-----------------------------------------------------+
+| table_comment_in_cjk | CREATE TABLE IF NOT EXISTS "table_comment_in_cjk" ( |
+|                      |   "ts" TIMESTAMP(3) NOT NULL COMMENT '时间戳',      |
+|                      |   "val" DOUBLE NULL COMMENT '值',                   |
+|                      |   TIME INDEX ("ts")                                 |
+|                      | )                                                   |
+|                      |                                                     |
+|                      | ENGINE=mito                                         |
+|                      | WITH(                                               |
+|                      |   comment = '你好\\nこんにちは\\n안녕하세요'        |
+|                      | )                                                   |
++----------------------+-----------------------------------------------------+
+
+drop table table_comment_in_cjk;
+
+Affected Rows: 0
+

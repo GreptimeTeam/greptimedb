@@ -1,0 +1,68 @@
+name: Upload artifacts
+description: Upload artifacts
+inputs:
+  artifacts-dir:
+    description: Directory to store artifacts
+    required: true
+  target-files:
+    description: The multiple target files to upload, separated by comma
+    required: false
+  version:
+    description: Version of the artifact
+    required: true
+  working-dir:
+    description: Working directory to upload the artifacts
+    required: false
+    default: .
+runs:
+  using: composite
+  steps:
+    - name: Create artifacts directory
+      if: ${{ inputs.target-files != '' }}
+      working-directory: ${{ inputs.working-dir }}
+      shell: bash
+      run: |
+        set -e
+        mkdir -p ${{ inputs.artifacts-dir }}
+        IFS=',' read -ra FILES <<< "${{ inputs.target-files }}"
+        for file in "${FILES[@]}"; do
+          cp "$file" ${{ inputs.artifacts-dir }}/
+        done
+
+    # The compressed artifacts will use the following layout:
+    # greptime-linux-amd64-v0.3.0sha256sum
+    # greptime-linux-amd64-v0.3.0.tar.gz
+    #   greptime-linux-amd64-v0.3.0
+    #   └── greptime
+    - name: Compress artifacts and calculate checksum
+      working-directory: ${{ inputs.working-dir }}
+      shell: bash
+      run: |
+        tar -zcvf ${{ inputs.artifacts-dir }}.tar.gz ${{ inputs.artifacts-dir }}
+
+    - name: Calculate checksum
+      if: runner.os != 'Windows'
+      working-directory: ${{ inputs.working-dir }}
+      shell: bash
+      run: |
+        echo $(shasum -a 256 ${{ inputs.artifacts-dir }}.tar.gz | cut -f1 -d' ') > ${{ inputs.artifacts-dir }}.sha256sum
+
+    - name: Calculate checksum on Windows
+      if: runner.os == 'Windows'
+      working-directory: ${{ inputs.working-dir }}
+      shell: pwsh
+      run: Get-FileHash ${{ inputs.artifacts-dir }}.tar.gz -Algorithm SHA256 | select -ExpandProperty Hash > ${{ inputs.artifacts-dir }}.sha256sum
+
+    # Note: The artifacts will be double zip compressed(related issue: https://github.com/actions/upload-artifact/issues/39).
+    # However, when we use 'actions/download-artifact' to download the artifacts, it will be automatically unzipped.
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.artifacts-dir }}
+        path: ${{ inputs.working-dir }}/${{ inputs.artifacts-dir }}.tar.gz
+
+    - name: Upload checksum
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.artifacts-dir }}.sha256sum
+        path: ${{ inputs.working-dir }}/${{ inputs.artifacts-dir }}.sha256sum

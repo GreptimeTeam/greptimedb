@@ -1,0 +1,397 @@
+// Copyright 2023 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+use std::collections::HashMap;
+
+use api::v1::meta::mailbox_message::Payload;
+use api::v1::meta::{HeartbeatResponse, MailboxMessage};
+use common_meta::instruction::{
+    DowngradeRegionReply, DowngradeRegionsReply, EnterStagingRegionReply, EnterStagingRegionsReply,
+    FlushRegionReply, InstructionError, InstructionReply, SimpleReply, SyncRegionReply,
+    SyncRegionsReply, UpgradeRegionReply, UpgradeRegionsReply,
+};
+use common_meta::key::TableMetadataManagerRef;
+use common_meta::key::table_route::TableRouteValue;
+use common_meta::key::test_utils::new_test_table_info;
+use common_meta::key::topic_name::TopicNameKey;
+use common_meta::peer::Peer;
+use common_meta::region_registry::{
+    LeaderRegion, LeaderRegionManifestInfo, LeaderRegionRegistryRef,
+};
+use common_meta::rpc::router::{Region, RegionRoute};
+use common_meta::sequence::Sequence;
+use common_meta::wal_provider::RegionWalOptions;
+use common_time::util::current_time_millis;
+use common_wal::options::{KafkaWalOptions, WalOptions};
+use store_api::logstore::EntryId;
+use store_api::storage::RegionId;
+use tokio::sync::mpsc::{Receiver, Sender};
+
+use crate::error::Result;
+use crate::handler::{HeartbeatMailbox, Pusher, Pushers};
+use crate::service::mailbox::{Channel, MailboxRef};
+
+fn legacy_instruction_error(error: Option<String>) -> Option<InstructionError> {
+    error.map(InstructionError::legacy_internal_retryable)
+}
+
+pub type MockHeartbeatReceiver = Receiver<std::result::Result<HeartbeatResponse, tonic::Status>>;
+
+/// The context of mailbox.
+pub struct MailboxContext {
+    mailbox: MailboxRef,
+    // The pusher is used in the mailbox.
+    pushers: Pushers,
+}
+
+impl MailboxContext {
+    pub fn new(sequence: Sequence) -> Self {
+        let pushers = Pushers::default();
+        let mailbox = HeartbeatMailbox::create(pushers.clone(), sequence);
+
+        Self { mailbox, pushers }
+    }
+
+    /// Inserts a pusher for `datanode_id`
+    pub async fn insert_heartbeat_response_receiver(
+        &mut self,
+        channel: Channel,
+        tx: Sender<std::result::Result<HeartbeatResponse, tonic::Status>>,
+    ) {
+        let pusher_id = channel.pusher_id();
+        let pusher = Pusher::new(tx);
+        let _ = self.pushers.insert(pusher_id, pusher).await;
+    }
+
+    pub fn mailbox(&self) -> &MailboxRef {
+        &self.mailbox
+    }
+}
+
+/// Sends a mock reply.
+pub fn send_mock_reply(
+    mailbox: MailboxRef,
+    mut rx: MockHeartbeatReceiver,
+    msg: impl Fn(u64) -> Result<MailboxMessage> + Send + 'static,
+) {
+    common_runtime::spawn_global(async move {
+        while let Some(Ok(resp)) = rx.recv().await {
+            let reply_id = resp.mailbox_message.unwrap().id;
+            mailbox.on_recv(reply_id, msg(reply_id)).await.unwrap();
+        }
+    });
+}
+
+/// Generates a [InstructionReply::OpenRegion] reply.
+pub fn new_open_region_reply(id: u64, result: bool, error: Option<String>) -> MailboxMessage {
+    new_open_region_reply_with_error(id, result, legacy_instruction_error(error))
+}
+
+/// Generates a [InstructionReply::OpenRegion] reply with a structured error.
+pub fn new_open_region_reply_with_error(
+    id: u64,
+    result: bool,
+    error: Option<InstructionError>,
+) -> MailboxMessage {
+    MailboxMessage {
+        id,
+        subject: "mock".to_string(),
+        from: "datanode".to_string(),
+        to: "meta".to_string(),
+        timestamp_millis: current_time_millis(),
+        payload: Some(Payload::Json(
+            serde_json::to_string(&InstructionReply::OpenRegions(SimpleReply {
+                result,
+                error,
+            }))
+            .unwrap(),
+        )),
+        header: None,
+    }
+}
+
+/// Generates a [InstructionReply::FlushRegions] reply with a single region.
+pub fn new_flush_region_reply(id: u64, result: bool, error: Option<String>) -> MailboxMessage {
+    // Use RegionId(0, 0) as default for backward compatibility in tests
+    let region_id = RegionId::new(0, 0);
+    let flush_reply = if result {
+        FlushRegionReply::success_single(region_id)
+    } else {
+        FlushRegionReply::error_single(
+            region_id,
+            InstructionError::legacy_internal_retryable(error.unwrap_or("Test error".to_string())),
+        )
+    };
+
+    MailboxMessage {
+        id,
+        subject: "mock".to_string(),
+        from: "datanode".to_string(),
+        to: "meta".to_string(),
+        timestamp_millis: current_time_millis(),
+        payload: Some(Payload::Json(
+            serde_json::to_string(&InstructionReply::FlushRegions(flush_reply)).unwrap(),
+        )),
+        header: None,
+    }
+}
+
+/// Generates a [InstructionReply::FlushRegions] reply for a specific region.
+pub fn new_flush_region_reply_for_region(
+    id: u64,
+    region_id: RegionId,
+    result: bool,
+    error: Option<String>,
+) -> MailboxMessage {
+    let flush_reply = if result {
+        FlushRegionReply::success_single(region_id)
+    } else {
+        FlushRegionReply::error_single(
+            region_id,
+            InstructionError::legacy_internal_retryable(error.unwrap_or("Test error".to_string())),
+        )
+    };
+
+    MailboxMessage {
+        id,
+        subject: "mock".to_string(),
+        from: "datanode".to_string(),
+        to: "meta".to_string(),
+        timestamp_millis: current_time_millis(),
+        payload: Some(Payload::Json(
+            serde_json::to_string(&InstructionReply::FlushRegions(flush_reply)).unwrap(),
+        )),
+        header: None,
+    }
+}
+
+/// Generates a [InstructionReply::CloseRegion] reply.
+pub fn new_close_region_reply(id: u64) -> MailboxMessage {
+    MailboxMessage {
+        id,
+        subject: "mock".to_string(),
+        from: "datanode".to_string(),
+        to: "meta".to_string(),
+        timestamp_millis: current_time_millis(),
+        payload: Some(Payload::Json(
+            serde_json::to_string(&InstructionReply::CloseRegions(SimpleReply {
+                result: false,
+                error: None,
+            }))
+            .unwrap(),
+        )),
+        header: None,
+    }
+}
+
+/// Generates a [InstructionReply::DowngradeRegion] reply.
+pub fn new_downgrade_region_reply(
+    id: u64,
+    last_entry_id: Option<u64>,
+    exist: bool,
+    error: Option<String>,
+) -> MailboxMessage {
+    MailboxMessage {
+        id,
+        subject: "mock".to_string(),
+        from: "datanode".to_string(),
+        to: "meta".to_string(),
+        timestamp_millis: current_time_millis(),
+        payload: Some(Payload::Json(
+            serde_json::to_string(&InstructionReply::DowngradeRegions(
+                DowngradeRegionsReply::new(vec![DowngradeRegionReply {
+                    region_id: RegionId::new(0, 0),
+                    last_entry_id,
+                    metadata_last_entry_id: None,
+                    exists: exist,
+                    error: legacy_instruction_error(error),
+                }]),
+            ))
+            .unwrap(),
+        )),
+        header: None,
+    }
+}
+
+/// Generates a [InstructionReply::UpgradeRegions] reply.
+pub fn new_upgrade_region_reply(
+    id: u64,
+    ready: bool,
+    exists: bool,
+    error: Option<String>,
+) -> MailboxMessage {
+    MailboxMessage {
+        id,
+        subject: "mock".to_string(),
+        from: "datanode".to_string(),
+        to: "meta".to_string(),
+        timestamp_millis: current_time_millis(),
+        payload: Some(Payload::Json(
+            serde_json::to_string(&InstructionReply::UpgradeRegions(
+                UpgradeRegionsReply::single(UpgradeRegionReply {
+                    region_id: RegionId::new(0, 0),
+                    ready,
+                    exists,
+                    error: legacy_instruction_error(error),
+                }),
+            ))
+            .unwrap(),
+        )),
+        header: None,
+    }
+}
+
+/// Generates a [InstructionReply::EnterStagingRegions] reply.
+pub fn new_enter_staging_region_reply(
+    id: u64,
+    region_id: RegionId,
+    ready: bool,
+    exists: bool,
+    error: Option<String>,
+) -> MailboxMessage {
+    MailboxMessage {
+        id,
+        subject: "mock".to_string(),
+        from: "datanode".to_string(),
+        to: "meta".to_string(),
+        timestamp_millis: current_time_millis(),
+        payload: Some(Payload::Json(
+            serde_json::to_string(&InstructionReply::EnterStagingRegions(
+                EnterStagingRegionsReply::new(vec![EnterStagingRegionReply {
+                    region_id,
+                    ready,
+                    exists,
+                    error: legacy_instruction_error(error),
+                }]),
+            ))
+            .unwrap(),
+        )),
+        header: None,
+    }
+}
+
+/// Generates a [InstructionReply::SyncRegions] reply.
+pub fn new_sync_region_reply(
+    id: u64,
+    region_id: RegionId,
+    ready: bool,
+    exists: bool,
+    error: Option<String>,
+) -> MailboxMessage {
+    MailboxMessage {
+        id,
+        subject: "mock".to_string(),
+        from: "datanode".to_string(),
+        to: "meta".to_string(),
+        timestamp_millis: current_time_millis(),
+        payload: Some(Payload::Json(
+            serde_json::to_string(&InstructionReply::SyncRegions(SyncRegionsReply::new(vec![
+                SyncRegionReply {
+                    region_id,
+                    ready,
+                    exists,
+                    error: legacy_instruction_error(error),
+                },
+            ])))
+            .unwrap(),
+        )),
+        header: None,
+    }
+}
+
+/// Mock the test data for WAL pruning.
+pub async fn new_wal_prune_metadata(
+    table_metadata_manager: TableMetadataManagerRef,
+    leader_region_registry: LeaderRegionRegistryRef,
+    n_region: u32,
+    n_table: u32,
+    offsets: &[i64],
+    topic: String,
+) -> EntryId {
+    let datanode_id = 1;
+    let from_peer = Peer::empty(datanode_id);
+    let mut min_prunable_entry_id = u64::MAX;
+    let mut max_prunable_entry_id = 0;
+    let mut region_entry_ids = HashMap::with_capacity(n_table as usize * n_region as usize);
+    for table_id in 0..n_table {
+        let region_ids = (0..n_region)
+            .map(|i| RegionId::new(table_id, i))
+            .collect::<Vec<_>>();
+        let table_info = new_test_table_info(table_id);
+        let region_routes = region_ids
+            .iter()
+            .map(|region_id| RegionRoute {
+                region: Region::new_test(*region_id),
+                leader_peer: Some(from_peer.clone()),
+                ..Default::default()
+            })
+            .collect::<Vec<_>>();
+        let wal_options = WalOptions::Kafka(KafkaWalOptions::new(topic.clone()));
+        let region_wal_options: RegionWalOptions = (0..n_region)
+            .map(|region_number| (region_number, wal_options.clone()))
+            .collect();
+
+        table_metadata_manager
+            .create_table_metadata(
+                table_info,
+                TableRouteValue::physical(region_routes),
+                region_wal_options,
+            )
+            .await
+            .unwrap();
+        table_metadata_manager
+            .topic_name_manager()
+            .batch_put(vec![TopicNameKey::new(&topic)])
+            .await
+            .unwrap();
+
+        let current_region_entry_ids = region_ids
+            .iter()
+            .map(|region_id| {
+                let rand_n = rand::random::<u64>() as usize;
+                let current_prunable_entry_id = offsets[rand_n % offsets.len()] as u64;
+                min_prunable_entry_id = min_prunable_entry_id.min(current_prunable_entry_id);
+                max_prunable_entry_id = max_prunable_entry_id.max(current_prunable_entry_id);
+                (*region_id, current_prunable_entry_id)
+            })
+            .collect::<HashMap<_, _>>();
+        region_entry_ids.extend(current_region_entry_ids.clone());
+        update_in_memory_region_flushed_entry_id(&leader_region_registry, current_region_entry_ids)
+            .await
+            .unwrap();
+    }
+
+    min_prunable_entry_id
+}
+
+pub async fn update_in_memory_region_flushed_entry_id(
+    leader_region_registry: &LeaderRegionRegistryRef,
+    region_entry_ids: HashMap<RegionId, u64>,
+) -> Result<()> {
+    let mut key_values = Vec::with_capacity(region_entry_ids.len());
+    for (region_id, flushed_entry_id) in region_entry_ids {
+        let value = LeaderRegion {
+            datanode_id: 1,
+            manifest: LeaderRegionManifestInfo::Mito {
+                manifest_version: 0,
+                flushed_entry_id,
+                topic_latest_entry_id: 0,
+            },
+        };
+        key_values.push((region_id, value));
+    }
+    leader_region_registry.batch_put(key_values);
+
+    Ok(())
+}

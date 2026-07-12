@@ -1,0 +1,27 @@
+[package]
+name = "substrait"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+async-trait.workspace = true
+bytes.workspace = true
+common-error.workspace = true
+common-function.workspace = true
+common-macro.workspace = true
+common-telemetry.workspace = true
+datafusion.workspace = true
+datafusion-common.workspace = true
+datafusion-expr.workspace = true
+datafusion-substrait.workspace = true
+promql.workspace = true
+prost.workspace = true
+snafu.workspace = true
+
+[dev-dependencies]
+datatypes.workspace = true
+tokio.workspace = true

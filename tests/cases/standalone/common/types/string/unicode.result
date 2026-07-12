@@ -1,0 +1,71 @@
+-- description: Test unicode strings
+-- insert unicode strings into the database
+CREATE TABLE emojis(`id` INTEGER, s VARCHAR, ts timestamp time index);
+
+Affected Rows: 0
+
+INSERT INTO emojis VALUES (1, '🦆', 1), (2, '🦆🍞🦆', 2);
+
+Affected Rows: 2
+
+-- retrieve unicode strings again
+SELECT * FROM emojis ORDER BY id;
+
++----+--------+-------------------------+
+| id | s      | ts                      |
++----+--------+-------------------------+
+| 1  | 🦆     | 1970-01-01T00:00:00.001 |
+| 2  | 🦆🍞🦆 | 1970-01-01T00:00:00.002 |
++----+--------+-------------------------+
+
+-- substr on unicode
+-- Because "substr" always use "Utf8View" as its return type, this query will return error
+-- "column types must match schema types, expected Utf8View but found Utf8" if the "CAST" is not used.
+-- TODO(LFC): support "Utf8View" Arrow array so that this "CAST" walkaround can be removed.
+SELECT CAST(substr(s, 1, 1) AS STRING), CAST(substr(s, 2, 1) AS STRING) FROM emojis ORDER BY id;
+
++------------------------------------+------------------------------------+
+| substr(emojis.s,Int64(1),Int64(1)) | substr(emojis.s,Int64(2),Int64(1)) |
++------------------------------------+------------------------------------+
+| 🦆                                 |                                    |
+| 🦆                                 | 🍞                                 |
++------------------------------------+------------------------------------+
+
+SELECT substr('u🦆', 1, 1);
+
++---------------------------------------+
+| substr(Utf8("u🦆"),Int64(1),Int64(1)) |
++---------------------------------------+
+| u                                     |
++---------------------------------------+
+
+SELECT substr('A3🦤u🦆f', 4, 3);
+
++--------------------------------------------+
+| substr(Utf8("A3🦤u🦆f"),Int64(4),Int64(3)) |
++--------------------------------------------+
+| u🦆f                                       |
++--------------------------------------------+
+
+SELECT substr('🦤🦆f', 1, 2);
+
++-----------------------------------------+
+| substr(Utf8("🦤🦆f"),Int64(1),Int64(2)) |
++-----------------------------------------+
+| 🦤🦆                                    |
++-----------------------------------------+
+
+-- length on emojis
+SELECT length(s) FROM emojis ORDER BY id;
+
++------------------+
+| length(emojis.s) |
++------------------+
+| 1                |
+| 3                |
++------------------+
+
+DROP TABLE emojis;
+
+Affected Rows: 0
+

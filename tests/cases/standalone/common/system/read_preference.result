@@ -1,0 +1,28 @@
+-- SQLNESS PROTOCOL MYSQL
+SELECT read_preference();
+
++-------------------+
+| read_preference() |
++-------------------+
+| LEADER            |
++-------------------+
+
+-- SQLNESS PROTOCOL MYSQL
+SET read_preference = 'hi';
+
+Failed to execute query, err: MySqlError { ERROR 1235 (42000): (Unsupported): Not supported: Invalid read preference expr hi in set variable statement }
+
+-- SQLNESS PROTOCOL MYSQL
+SET read_preference = 'leader';
+
+affected_rows: 0
+
+-- SQLNESS PROTOCOL MYSQL
+SELECT read_preference();
+
++-------------------+
+| read_preference() |
++-------------------+
+| LEADER            |
++-------------------+
+

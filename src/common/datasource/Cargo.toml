@@ -1,0 +1,49 @@
+[package]
+name = "common-datasource"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+arrow.workspace = true
+arrow-schema.workspace = true
+async-compression = { version = "0.4", features = [
+    "bzip2",
+    "gzip",
+    "xz",
+    "zstd",
+    "futures-io",
+    "tokio",
+] }
+async-trait.workspace = true
+bytes.workspace = true
+common-base.workspace = true
+common-error.workspace = true
+common-macro.workspace = true
+common-recordbatch.workspace = true
+common-runtime.workspace = true
+common-telemetry.workspace = true
+datafusion.workspace = true
+datafusion-datasource.workspace = true
+datafusion-orc.workspace = true
+datatypes.workspace = true
+futures.workspace = true
+lazy_static.workspace = true
+object-store.workspace = true
+object_store_opendal.workspace = true
+orc-rust = { version = "0.8", default-features = false, features = ["async"] }
+parquet.workspace = true
+paste.workspace = true
+regex.workspace = true
+serde.workspace = true
+snafu.workspace = true
+strum.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+common-test-util.workspace = true

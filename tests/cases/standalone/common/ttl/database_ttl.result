@@ -1,0 +1,96 @@
+CREATE DATABASE test_ttl_db WITH (ttl = '1 second');
+
+Affected Rows: 1
+
+USE test_ttl_db;
+
+Affected Rows: 0
+
+-- It will use the database TTL setting --
+CREATE TABLE test_ttl(ts TIMESTAMP TIME INDEX, val INT);
+
+Affected Rows: 0
+
+INSERT INTO test_ttl VALUES
+       (now(), 1);
+
+Affected Rows: 1
+
+SELECT val from test_ttl;
+
++-----+
+| val |
++-----+
+| 1   |
++-----+
+
+-- SQLNESS SLEEP 2s
+ADMIN flush_table('test_ttl');
+
++-------------------------------+
+| ADMIN flush_table('test_ttl') |
++-------------------------------+
+| 0                             |
++-------------------------------+
+
+ADMIN compact_table('test_ttl');
+
++---------------------------------+
+| ADMIN compact_table('test_ttl') |
++---------------------------------+
+| 0                               |
++---------------------------------+
+
+-- Must be expired --
+SELECT val from test_ttl;
+
+++
+++
+
+ALTER DATABASE test_ttl_db SET ttl = '1 day';
+
+Affected Rows: 0
+
+INSERT INTO test_ttl VALUES
+       (now(), 1);
+
+Affected Rows: 1
+
+-- SQLNESS SLEEP 2s
+ADMIN flush_table('test_ttl');
+
++-------------------------------+
+| ADMIN flush_table('test_ttl') |
++-------------------------------+
+| 0                             |
++-------------------------------+
+
+ADMIN compact_table('test_ttl');
+
++---------------------------------+
+| ADMIN compact_table('test_ttl') |
++---------------------------------+
+| 0                               |
++---------------------------------+
+
+-- Must not be expired --
+SELECT val from test_ttl;
+
++-----+
+| val |
++-----+
+| 1   |
++-----+
+
+DROP TABLE test_ttl;
+
+Affected Rows: 0
+
+USE public;
+
+Affected Rows: 0
+
+DROP DATABASE test_ttl_db;
+
+Affected Rows: 0
+

@@ -1,0 +1,82 @@
+CREATE TABLE t(i INTEGER, j TIMESTAMP TIME INDEX);
+
+DESC TABLE t;
+
+ALTER TABLE t ADD COLUMN k INTEGER;
+
+DESC TABLE t;
+
+-- SQLNESS ARG restart=true
+DESC TABLE t;
+
+ALTER TABLE t ADD COLUMN m INTEGER;
+
+DESC TABLE t;
+
+INSERT INTO t VALUES (1, 2, 3, 4);
+
+SELECT * FROM t;
+
+ALTER TABLE t ADD COLUMN n INTEGER FIRST;
+
+DESC TABLE t;
+
+SELECT * FROM t;
+
+INSERT INTO t VALUES (2, 3, 4, 5, 6);
+
+ALTER TABLE t ADD COLUMN y INTEGER AFTER j;
+
+DESC TABLE t;
+
+-- SQLNESS SORT_RESULT 3 1
+SELECT * FROM t;
+
+-- SQLNESS ARG restart=true
+ALTER TABLE t ADD COLUMN a INTEGER FIRST;
+
+DESC TABLE t;
+
+ALTER TABLE t ADD COLUMN b INTEGER AFTER j;
+
+DESC TABLE t;
+
+-- SQLNESS SORT_RESULT 3 1
+SELECT * FROM t;
+
+ALTER TABLE t ADD COLUMN x int xxx;
+
+DROP TABLE t;
+
+CREATE TABLE my_table (
+  a INT PRIMARY KEY,
+  b STRING,
+  ts TIMESTAMP TIME INDEX,
+)
+PARTITION ON COLUMNS (a) (
+  a < 1000,
+  a >= 1000 AND a < 2000,
+  a >= 2000
+);
+
+INSERT INTO my_table VALUES
+    (100, 'a', 1),
+    (200, 'b', 2),
+    (1100, 'c', 3),
+    (1200, 'd', 4),
+    (2000, 'e', 5),
+    (2100, 'f', 6),
+    (2200, 'g', 7),
+    (2400, 'h', 8);
+
+SELECT * FROM my_table WHERE a > 100 order by a;
+
+SELECT count(*) FROM my_table WHERE a > 100;
+
+ALTER TABLE my_table ADD COLUMN c STRING FIRST;
+
+SELECT * FROM my_table WHERE a > 100 order by a;
+
+SELECT count(*) FROM my_table WHERE a > 100;
+
+DROP TABLE my_table;

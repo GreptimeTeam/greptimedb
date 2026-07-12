@@ -1,0 +1,253 @@
+CREATE TABLE t(i INTEGER, j TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+DESC TABLE t;
+
++--------+----------------------+-----+------+---------+---------------+
+| Column | Type                 | Key | Null | Default | Semantic Type |
++--------+----------------------+-----+------+---------+---------------+
+| i      | Int32                |     | YES  |         | FIELD         |
+| j      | TimestampMillisecond | PRI | NO   |         | TIMESTAMP     |
++--------+----------------------+-----+------+---------+---------------+
+
+ALTER TABLE t ADD COLUMN k INTEGER;
+
+Affected Rows: 0
+
+DESC TABLE t;
+
++--------+----------------------+-----+------+---------+---------------+
+| Column | Type                 | Key | Null | Default | Semantic Type |
++--------+----------------------+-----+------+---------+---------------+
+| i      | Int32                |     | YES  |         | FIELD         |
+| j      | TimestampMillisecond | PRI | NO   |         | TIMESTAMP     |
+| k      | Int32                |     | YES  |         | FIELD         |
++--------+----------------------+-----+------+---------+---------------+
+
+-- SQLNESS ARG restart=true
+DESC TABLE t;
+
++--------+----------------------+-----+------+---------+---------------+
+| Column | Type                 | Key | Null | Default | Semantic Type |
++--------+----------------------+-----+------+---------+---------------+
+| i      | Int32                |     | YES  |         | FIELD         |
+| j      | TimestampMillisecond | PRI | NO   |         | TIMESTAMP     |
+| k      | Int32                |     | YES  |         | FIELD         |
++--------+----------------------+-----+------+---------+---------------+
+
+ALTER TABLE t ADD COLUMN m INTEGER;
+
+Affected Rows: 0
+
+DESC TABLE t;
+
++--------+----------------------+-----+------+---------+---------------+
+| Column | Type                 | Key | Null | Default | Semantic Type |
++--------+----------------------+-----+------+---------+---------------+
+| i      | Int32                |     | YES  |         | FIELD         |
+| j      | TimestampMillisecond | PRI | NO   |         | TIMESTAMP     |
+| k      | Int32                |     | YES  |         | FIELD         |
+| m      | Int32                |     | YES  |         | FIELD         |
++--------+----------------------+-----+------+---------+---------------+
+
+INSERT INTO t VALUES (1, 2, 3, 4);
+
+Affected Rows: 1
+
+SELECT * FROM t;
+
++---+-------------------------+---+---+
+| i | j                       | k | m |
++---+-------------------------+---+---+
+| 1 | 1970-01-01T00:00:00.002 | 3 | 4 |
++---+-------------------------+---+---+
+
+ALTER TABLE t ADD COLUMN n INTEGER FIRST;
+
+Affected Rows: 0
+
+DESC TABLE t;
+
++--------+----------------------+-----+------+---------+---------------+
+| Column | Type                 | Key | Null | Default | Semantic Type |
++--------+----------------------+-----+------+---------+---------------+
+| n      | Int32                |     | YES  |         | FIELD         |
+| i      | Int32                |     | YES  |         | FIELD         |
+| j      | TimestampMillisecond | PRI | NO   |         | TIMESTAMP     |
+| k      | Int32                |     | YES  |         | FIELD         |
+| m      | Int32                |     | YES  |         | FIELD         |
++--------+----------------------+-----+------+---------+---------------+
+
+SELECT * FROM t;
+
++---+---+-------------------------+---+---+
+| n | i | j                       | k | m |
++---+---+-------------------------+---+---+
+|   | 1 | 1970-01-01T00:00:00.002 | 3 | 4 |
++---+---+-------------------------+---+---+
+
+INSERT INTO t VALUES (2, 3, 4, 5, 6);
+
+Affected Rows: 1
+
+ALTER TABLE t ADD COLUMN y INTEGER AFTER j;
+
+Affected Rows: 0
+
+DESC TABLE t;
+
++--------+----------------------+-----+------+---------+---------------+
+| Column | Type                 | Key | Null | Default | Semantic Type |
++--------+----------------------+-----+------+---------+---------------+
+| n      | Int32                |     | YES  |         | FIELD         |
+| i      | Int32                |     | YES  |         | FIELD         |
+| j      | TimestampMillisecond | PRI | NO   |         | TIMESTAMP     |
+| y      | Int32                |     | YES  |         | FIELD         |
+| k      | Int32                |     | YES  |         | FIELD         |
+| m      | Int32                |     | YES  |         | FIELD         |
++--------+----------------------+-----+------+---------+---------------+
+
+-- SQLNESS SORT_RESULT 3 1
+SELECT * FROM t;
+
++---+---+-------------------------+---+---+---+
+| n | i | j                       | y | k | m |
++---+---+-------------------------+---+---+---+
+|   | 1 | 1970-01-01T00:00:00.002 |   | 3 | 4 |
+| 2 | 3 | 1970-01-01T00:00:00.004 |   | 5 | 6 |
++---+---+-------------------------+---+---+---+
+
+-- SQLNESS ARG restart=true
+ALTER TABLE t ADD COLUMN a INTEGER FIRST;
+
+Affected Rows: 0
+
+DESC TABLE t;
+
++--------+----------------------+-----+------+---------+---------------+
+| Column | Type                 | Key | Null | Default | Semantic Type |
++--------+----------------------+-----+------+---------+---------------+
+| a      | Int32                |     | YES  |         | FIELD         |
+| n      | Int32                |     | YES  |         | FIELD         |
+| i      | Int32                |     | YES  |         | FIELD         |
+| j      | TimestampMillisecond | PRI | NO   |         | TIMESTAMP     |
+| y      | Int32                |     | YES  |         | FIELD         |
+| k      | Int32                |     | YES  |         | FIELD         |
+| m      | Int32                |     | YES  |         | FIELD         |
++--------+----------------------+-----+------+---------+---------------+
+
+ALTER TABLE t ADD COLUMN b INTEGER AFTER j;
+
+Affected Rows: 0
+
+DESC TABLE t;
+
++--------+----------------------+-----+------+---------+---------------+
+| Column | Type                 | Key | Null | Default | Semantic Type |
++--------+----------------------+-----+------+---------+---------------+
+| a      | Int32                |     | YES  |         | FIELD         |
+| n      | Int32                |     | YES  |         | FIELD         |
+| i      | Int32                |     | YES  |         | FIELD         |
+| j      | TimestampMillisecond | PRI | NO   |         | TIMESTAMP     |
+| b      | Int32                |     | YES  |         | FIELD         |
+| y      | Int32                |     | YES  |         | FIELD         |
+| k      | Int32                |     | YES  |         | FIELD         |
+| m      | Int32                |     | YES  |         | FIELD         |
++--------+----------------------+-----+------+---------+---------------+
+
+-- SQLNESS SORT_RESULT 3 1
+SELECT * FROM t;
+
++---+---+---+-------------------------+---+---+---+---+
+| a | n | i | j                       | b | y | k | m |
++---+---+---+-------------------------+---+---+---+---+
+|   |   | 1 | 1970-01-01T00:00:00.002 |   |   | 3 | 4 |
+|   | 2 | 3 | 1970-01-01T00:00:00.004 |   |   | 5 | 6 |
++---+---+---+-------------------------+---+---+---+---+
+
+ALTER TABLE t ADD COLUMN x int xxx;
+
+Error: 1001(Unsupported), SQL statement is not supported, keyword: xxx
+
+DROP TABLE t;
+
+Affected Rows: 0
+
+CREATE TABLE my_table (
+  a INT PRIMARY KEY,
+  b STRING,
+  ts TIMESTAMP TIME INDEX,
+)
+PARTITION ON COLUMNS (a) (
+  a < 1000,
+  a >= 1000 AND a < 2000,
+  a >= 2000
+);
+
+Affected Rows: 0
+
+INSERT INTO my_table VALUES
+    (100, 'a', 1),
+    (200, 'b', 2),
+    (1100, 'c', 3),
+    (1200, 'd', 4),
+    (2000, 'e', 5),
+    (2100, 'f', 6),
+    (2200, 'g', 7),
+    (2400, 'h', 8);
+
+Affected Rows: 8
+
+SELECT * FROM my_table WHERE a > 100 order by a;
+
++------+---+-------------------------+
+| a    | b | ts                      |
++------+---+-------------------------+
+| 200  | b | 1970-01-01T00:00:00.002 |
+| 1100 | c | 1970-01-01T00:00:00.003 |
+| 1200 | d | 1970-01-01T00:00:00.004 |
+| 2000 | e | 1970-01-01T00:00:00.005 |
+| 2100 | f | 1970-01-01T00:00:00.006 |
+| 2200 | g | 1970-01-01T00:00:00.007 |
+| 2400 | h | 1970-01-01T00:00:00.008 |
++------+---+-------------------------+
+
+SELECT count(*) FROM my_table WHERE a > 100;
+
++----------+
+| count(*) |
++----------+
+| 7        |
++----------+
+
+ALTER TABLE my_table ADD COLUMN c STRING FIRST;
+
+Affected Rows: 0
+
+SELECT * FROM my_table WHERE a > 100 order by a;
+
++---+------+---+-------------------------+
+| c | a    | b | ts                      |
++---+------+---+-------------------------+
+|   | 200  | b | 1970-01-01T00:00:00.002 |
+|   | 1100 | c | 1970-01-01T00:00:00.003 |
+|   | 1200 | d | 1970-01-01T00:00:00.004 |
+|   | 2000 | e | 1970-01-01T00:00:00.005 |
+|   | 2100 | f | 1970-01-01T00:00:00.006 |
+|   | 2200 | g | 1970-01-01T00:00:00.007 |
+|   | 2400 | h | 1970-01-01T00:00:00.008 |
++---+------+---+-------------------------+
+
+SELECT count(*) FROM my_table WHERE a > 100;
+
++----------+
+| count(*) |
++----------+
+| 7        |
++----------+
+
+DROP TABLE my_table;
+
+Affected Rows: 0
+

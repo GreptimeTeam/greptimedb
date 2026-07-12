@@ -1,0 +1,81 @@
+[package]
+name = "operator"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+testing = []
+enterprise = ["common-meta/enterprise", "sql/enterprise", "query/enterprise", "prost-types"]
+
+[lints]
+workspace = true
+
+[dependencies]
+ahash.workspace = true
+api.workspace = true
+arrow.workspace = true
+arrow-ipc.workspace = true
+async-stream.workspace = true
+async-trait.workspace = true
+bytes.workspace = true
+catalog.workspace = true
+chrono.workspace = true
+client.workspace = true
+common-base.workspace = true
+common-catalog.workspace = true
+common-datasource.workspace = true
+common-error.workspace = true
+common-frontend.workspace = true
+common-function.workspace = true
+common-grpc.workspace = true
+common-grpc-expr.workspace = true
+common-macro.workspace = true
+common-meta.workspace = true
+common-query.workspace = true
+common-recordbatch.workspace = true
+common-runtime.workspace = true
+common-sql.workspace = true
+common-stat.workspace = true
+common-telemetry.workspace = true
+common-time.workspace = true
+datafusion.workspace = true
+datafusion-common.workspace = true
+datafusion-expr.workspace = true
+datatypes.workspace = true
+file-engine.workspace = true
+futures.workspace = true
+futures-util.workspace = true
+humantime.workspace = true
+itertools.workspace = true
+jsonb.workspace = true
+lazy_static.workspace = true
+meta-client.workspace = true
+meter-core.workspace = true
+meter-macros.workspace = true
+moka = { workspace = true, features = ["future"] }
+object-store.workspace = true
+partition.workspace = true
+prometheus.workspace = true
+prost.workspace = true
+prost-types = { workspace = true, optional = true }
+query.workspace = true
+regex.workspace = true
+serde_json.workspace = true
+session.workspace = true
+snafu.workspace = true
+sql.workspace = true
+sqlparser.workspace = true
+store-api.workspace = true
+substrait.workspace = true
+table.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tonic.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+catalog = { workspace = true, features = ["testing"] }
+common-meta = { workspace = true, features = ["testing"] }
+common-test-util.workspace = true
+path-slash = "0.2"

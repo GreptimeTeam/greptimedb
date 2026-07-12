@@ -1,0 +1,1110 @@
+// Copyright 2023 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//! Pruner for parallel file pruning across scanner partitions.
+
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
+
+use common_telemetry::debug;
+use smallvec::SmallVec;
+use snafu::ResultExt;
+use store_api::region_engine::PartitionRange;
+use store_api::storage::FileId;
+use tokio::sync::{mpsc, oneshot};
+use uuid::Uuid;
+
+use crate::error::{PruneFileSnafu, Result};
+use crate::metrics::PRUNER_ACTIVE_BUILDERS;
+use crate::read::range::{FileRangeBuilder, RowGroupIndex};
+use crate::read::scan_region::StreamContext;
+use crate::read::scan_util::{FileScanMetrics, PartitionMetrics, new_filter_metrics};
+use crate::sst::parquet::file_range::{FileRange, PreFilterMode};
+use crate::sst::parquet::reader::ReaderMetrics;
+
+/// Number of files to pre-fetch ahead of the current position.
+const PREFETCH_COUNT: usize = 8;
+
+/// Local pruner in a partition that supports prefetching files to prune.
+pub struct PartitionPruner {
+    pruner: Arc<Pruner>,
+    /// Files to prune, in the order to scan.
+    file_indices: Vec<usize>,
+    /// Per-file pre-filter mode lookup indexed by file_index.
+    pre_filter_modes: Vec<PreFilterMode>,
+    /// Current position for tracking pre-fetch progress.
+    current_position: AtomicUsize,
+}
+
+impl PartitionPruner {
+    /// Creates a new `PartitionPruner` for the given partition ranges.
+    pub fn new(pruner: Arc<Pruner>, partition_ranges: &[PartitionRange]) -> Self {
+        let num_files = pruner.inner.stream_ctx.input.num_files();
+        let mut file_indices = Vec::with_capacity(num_files);
+        let mut pre_filter_modes = vec![PreFilterMode::SkipFields; num_files];
+        let mut dedup_set = HashSet::with_capacity(pruner.inner.stream_ctx.input.num_files());
+
+        let num_memtables = pruner.inner.stream_ctx.input.num_memtables();
+        for part_range in partition_ranges {
+            let range_meta = &pruner.inner.stream_ctx.ranges[part_range.identifier];
+            let pre_filter_mode = pruner.inner.stream_ctx.range_pre_filter_mode(part_range);
+            for row_group_index in &range_meta.row_group_indices {
+                if pruner
+                    .inner
+                    .stream_ctx
+                    .is_file_range_index(*row_group_index)
+                {
+                    let file_index = row_group_index.index - num_memtables;
+                    if dedup_set.contains(&file_index) {
+                        continue;
+                    } else {
+                        file_indices.push(file_index);
+                        pre_filter_modes[file_index] = pre_filter_mode;
+                        dedup_set.insert(file_index);
+                    }
+                }
+            }
+        }
+
+        Self {
+            pruner,
+            file_indices,
+            pre_filter_modes,
+            current_position: AtomicUsize::new(0),
+        }
+    }
+
+    /// Gets or creates the FileRangeBuilder for a file.
+    ///
+    /// This method also triggers pre-fetching of upcoming files in the background
+    /// to improve performance by overlapping I/O with computation.
+    pub async fn build_file_ranges(
+        &self,
+        index: RowGroupIndex,
+        partition_metrics: &PartitionMetrics,
+        reader_metrics: &mut ReaderMetrics,
+    ) -> Result<SmallVec<[FileRange; 2]>> {
+        let file_index = index.index - self.pruner.inner.stream_ctx.input.num_memtables();
+        let pre_filter_mode = self.pre_filter_mode(file_index);
+
+        // Delegate to underlying Pruner
+        let ranges = self
+            .pruner
+            .build_file_ranges(index, pre_filter_mode, partition_metrics, reader_metrics)
+            .await?;
+
+        // Find position and trigger pre-fetch for upcoming files
+        if let Some(pos) = self.file_indices.iter().position(|&idx| idx == file_index) {
+            let prev_pos = self.current_position.fetch_max(pos, Ordering::Relaxed);
+            if pos > prev_pos || prev_pos == 0 {
+                self.prefetch_upcoming_files(pos, partition_metrics);
+            }
+        }
+
+        Ok(ranges)
+    }
+
+    /// Checks whether the file range at `index` can be skipped because the
+    /// current predicate definitively prunes it at manifest level (no I/O).
+    ///
+    /// Returns `true` if the range was skipped. When skipped, this method
+    /// balances the pruner's per-file reference count and merges the resulting
+    /// reader metrics into `part_metrics`.
+    ///
+    /// Uses shared per-file state so repeated row groups can skip cheaply after
+    /// the first manifest-prune decision.
+    pub fn try_skip_manifest_pruned_file_range(
+        &self,
+        index: RowGroupIndex,
+        part_metrics: &PartitionMetrics,
+    ) -> bool {
+        let Some(file_index) = self.file_index(index) else {
+            return false;
+        };
+        let mut reader_metrics = ReaderMetrics::default();
+        let pruned = self
+            .pruner
+            .inner
+            .try_mark_manifest_pruned(file_index, &mut reader_metrics);
+        if pruned {
+            self.pruner.skip_file_range(index, &mut reader_metrics);
+            part_metrics.merge_reader_metrics(&reader_metrics, None);
+        }
+        pruned
+    }
+
+    /// Pre-fetches upcoming files starting from the given position.
+    fn prefetch_upcoming_files(&self, current_pos: usize, partition_metrics: &PartitionMetrics) {
+        let start = current_pos + 1;
+        let end = (start + PREFETCH_COUNT).min(self.file_indices.len());
+
+        for i in start..end {
+            let file_index = self.file_indices[i];
+            let pre_filter_mode = self.pre_filter_mode(file_index);
+            self.pruner.get_file_builder_background(
+                file_index,
+                pre_filter_mode,
+                Some(partition_metrics.clone()),
+            );
+        }
+    }
+
+    fn pre_filter_mode(&self, file_index: usize) -> PreFilterMode {
+        self.pre_filter_modes
+            .get(file_index)
+            .copied()
+            .unwrap_or(PreFilterMode::SkipFields)
+    }
+
+    fn file_index(&self, index: RowGroupIndex) -> Option<usize> {
+        self.pruner
+            .inner
+            .stream_ctx
+            .is_file_range_index(index)
+            .then(|| index.index - self.pruner.inner.stream_ctx.input.num_memtables())
+    }
+}
+
+/// A pruner that prunes files for all partitions of a scanner.
+pub struct Pruner {
+    /// Channels to send requests to workers.
+    worker_senders: Vec<mpsc::Sender<PruneRequest>>,
+    inner: Arc<PrunerInner>,
+}
+
+struct PrunerInner {
+    /// Number of worker tasks.
+    num_workers: usize,
+    /// Per-file state (indexed by file_index).
+    file_entries: Vec<Mutex<FileBuilderEntry>>,
+    /// StreamContext containing all context needed for pruning.
+    stream_ctx: Arc<StreamContext>,
+    /// Positive manifest-prune cache shared across all scan partitions.
+    ///
+    /// SAFETY: cached positives are valid because dynamic filters only tighten;
+    /// negative decisions are not cached. Reset by `add_partition_ranges()` for
+    /// each fresh batch of partition ranges.
+    manifest_pruned_files: Vec<AtomicBool>,
+}
+
+impl PrunerInner {
+    /// Checks whether manifest-level pruning proves this file is empty given the
+    /// current predicate. If true, CAS the shared cache from false→true and
+    /// record `files_time_range_pruned` in `reader_metrics`.
+    ///
+    /// Returns `true` if already cached or newly proven pruned.
+    fn try_mark_manifest_pruned(
+        &self,
+        file_index: usize,
+        reader_metrics: &mut ReaderMetrics,
+    ) -> bool {
+        if self.manifest_pruned_files[file_index].load(Ordering::Relaxed) {
+            return true;
+        }
+        let file = &self.stream_ctx.input.files[file_index];
+        if !self.stream_ctx.input.can_manifest_prune_file(file) {
+            return false;
+        }
+        if self.manifest_pruned_files[file_index]
+            .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
+            reader_metrics.filter_metrics.files_time_range_pruned += 1;
+        }
+        true
+    }
+}
+
+/// Per-file state tracking.
+struct FileBuilderEntry {
+    /// Cached builder after pruning. None if not yet built or already cleared.
+    builder: Option<Arc<FileRangeBuilder>>,
+    /// Number of remaining ranges to scan for this file.
+    /// When this reaches 0, the builder is dropped for memory cleanup.
+    remaining_ranges: usize,
+    /// Waiters when pruning is in-progress.
+    waiters: Vec<oneshot::Sender<Result<Arc<FileRangeBuilder>>>>,
+}
+
+/// Request to prune a file.
+struct PruneRequest {
+    /// Index of the file in ScanInput.files.
+    file_index: usize,
+    /// Pre-filter mode to use for the file.
+    pre_filter_mode: PreFilterMode,
+    /// Oneshot channel to send back the result.
+    response_tx: Option<oneshot::Sender<Result<Arc<FileRangeBuilder>>>>,
+    /// Partition metrics for merging reader metrics.
+    partition_metrics: Option<PartitionMetrics>,
+}
+
+impl Pruner {
+    /// Creates a new Pruner with N worker tasks.
+    ///
+    /// Initially all file_entries have `remaining_ranges = 0`.
+    /// Call `add_partition_ranges()` to initialize ref counts.
+    pub fn new(stream_ctx: Arc<StreamContext>, num_workers: usize) -> Self {
+        let num_files = stream_ctx.input.num_files();
+        let file_entries: Vec<_> = (0..num_files)
+            .map(|_| {
+                Mutex::new(FileBuilderEntry {
+                    builder: None,
+                    remaining_ranges: 0,
+                    waiters: Vec::new(),
+                })
+            })
+            .collect();
+        let manifest_pruned_files: Vec<AtomicBool> =
+            (0..num_files).map(|_| AtomicBool::new(false)).collect();
+        // Create channels and collect senders
+        let mut worker_senders = Vec::with_capacity(num_workers);
+        let mut receivers = Vec::with_capacity(num_workers);
+        for _ in 0..num_workers {
+            let (tx, rx) = mpsc::channel::<PruneRequest>(64);
+            worker_senders.push(tx);
+            receivers.push(rx);
+        }
+
+        let inner = Arc::new(PrunerInner {
+            num_workers,
+            file_entries,
+            stream_ctx,
+            manifest_pruned_files,
+        });
+
+        // Spawn worker tasks with their receivers
+        for (worker_id, rx) in receivers.into_iter().enumerate() {
+            let inner_clone = inner.clone();
+            common_runtime::spawn_query(async move {
+                Self::worker_loop(worker_id, rx, inner_clone).await;
+            });
+        }
+
+        Self {
+            worker_senders,
+            inner,
+        }
+    }
+
+    /// Adds reference counts for all partitions' ranges and resets the full
+    /// manifest-prune cache so that dynamic-filter updates are visible to the
+    /// fresh scan.
+    pub fn add_partition_ranges(&self, partition_ranges: &[PartitionRange]) {
+        for pruned in &self.inner.manifest_pruned_files {
+            pruned.store(false, Ordering::Relaxed);
+        }
+
+        // Add reference counts for each partition range
+        let num_memtables = self.inner.stream_ctx.input.num_memtables();
+        for part_range in partition_ranges {
+            let range_meta = &self.inner.stream_ctx.ranges[part_range.identifier];
+            for row_group_index in &range_meta.row_group_indices {
+                if self.inner.stream_ctx.is_file_range_index(*row_group_index) {
+                    let file_index = row_group_index.index - num_memtables;
+                    if file_index < self.inner.file_entries.len() {
+                        let mut entry = self.inner.file_entries[file_index].lock().unwrap();
+                        entry.remaining_ranges += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Gets or creates the FileRangeBuilder for a file, builds ranges,
+    /// and decrements ref count (cleans up if zero).
+    ///
+    /// Callers should invoke [add_partition_ranges()](Pruner::add_partition_ranges()) to initialize the
+    /// file entries and ref counts.
+    pub async fn build_file_ranges(
+        &self,
+        index: RowGroupIndex,
+        pre_filter_mode: PreFilterMode,
+        partition_metrics: &PartitionMetrics,
+        reader_metrics: &mut ReaderMetrics,
+    ) -> Result<SmallVec<[FileRange; 2]>> {
+        let file_index = index.index - self.inner.stream_ctx.input.num_memtables();
+
+        // Get builder (from cache or by pruning)
+        let builder = self
+            .get_file_builder(
+                file_index,
+                pre_filter_mode,
+                partition_metrics,
+                reader_metrics,
+            )
+            .await?;
+
+        // Build ranges
+        let mut ranges = SmallVec::new();
+        builder.build_ranges(index.row_group_index, &mut ranges);
+
+        // Decrement ref count and cleanup if needed
+        self.decrement_and_maybe_clear(file_index, reader_metrics);
+
+        Ok(ranges)
+    }
+
+    /// Skips a file range that has been pruned before entering the file pruner.
+    ///
+    /// This keeps the pruner's per-file reference counts balanced with
+    /// `add_partition_ranges()`. It may also clear a cached builder when this was the
+    /// last remaining range for the file.
+    pub fn skip_file_range(&self, index: RowGroupIndex, reader_metrics: &mut ReaderMetrics) {
+        if !self.inner.stream_ctx.is_file_range_index(index) {
+            return;
+        }
+        let file_index = index.index - self.inner.stream_ctx.input.num_memtables();
+        self.decrement_and_maybe_clear(file_index, reader_metrics);
+    }
+
+    /// Gets or creates the FileRangeBuilder for a file.
+    async fn get_file_builder(
+        &self,
+        file_index: usize,
+        pre_filter_mode: PreFilterMode,
+        partition_metrics: &PartitionMetrics,
+        reader_metrics: &mut ReaderMetrics,
+    ) -> Result<Arc<FileRangeBuilder>> {
+        // Fast path: checks cache
+        {
+            let entry = self.inner.file_entries[file_index].lock().unwrap();
+            if let Some(builder) = &entry.builder {
+                reader_metrics.filter_metrics.pruner_cache_hit += 1;
+                return Ok(builder.clone());
+            }
+        }
+
+        reader_metrics.filter_metrics.pruner_cache_miss += 1;
+        let prune_start = Instant::now();
+        let file = &self.inner.stream_ctx.input.files[file_index];
+        let file_id = file.file_id().file_id();
+        let worker_idx = self.get_worker_idx(file_id);
+
+        let (response_tx, response_rx) = oneshot::channel();
+        let request = PruneRequest {
+            file_index,
+            pre_filter_mode,
+            response_tx: Some(response_tx),
+            partition_metrics: Some(partition_metrics.clone()),
+        };
+
+        let result = if self.worker_senders[worker_idx].send(request).await.is_err() {
+            common_telemetry::warn!("Worker channel closed, falling back to direct pruning");
+            // Worker channel closed, falls back to direct pruning
+            self.prune_file_directly(file_index, pre_filter_mode, reader_metrics)
+                .await
+        } else {
+            // Waits for response
+            match response_rx.await {
+                Ok(result) => result,
+                Err(_) => {
+                    common_telemetry::warn!(
+                        "Response channel closed, falling back to direct pruning"
+                    );
+                    // Channel closed, falls back to direct pruning
+                    self.prune_file_directly(file_index, pre_filter_mode, reader_metrics)
+                        .await
+                }
+            }
+        };
+        reader_metrics.filter_metrics.pruner_prune_cost += prune_start.elapsed();
+        result
+    }
+
+    /// Gets or creates the FileRangeBuilder for a file.
+    pub fn get_file_builder_background(
+        &self,
+        file_index: usize,
+        pre_filter_mode: PreFilterMode,
+        partition_metrics: Option<PartitionMetrics>,
+    ) {
+        // Fast path: checks cache
+        {
+            let entry = self.inner.file_entries[file_index].lock().unwrap();
+            if entry.builder.is_some() {
+                return;
+            }
+        }
+
+        let file = &self.inner.stream_ctx.input.files[file_index];
+        let file_id = file.file_id().file_id();
+        let worker_idx = self.get_worker_idx(file_id);
+
+        let request = PruneRequest {
+            file_index,
+            pre_filter_mode,
+            response_tx: None,
+            partition_metrics,
+        };
+
+        // Sends request to worker
+        let _ = self.worker_senders[worker_idx].try_send(request);
+    }
+
+    fn get_worker_idx(&self, file_id: FileId) -> usize {
+        let file_id_hash = Uuid::from(file_id).as_u128() as usize;
+        file_id_hash % self.inner.num_workers
+    }
+
+    /// Prunes a file directly without going through a worker.
+    /// Used as fallback when worker channels are closed.
+    async fn prune_file_directly(
+        &self,
+        file_index: usize,
+        pre_filter_mode: PreFilterMode,
+        reader_metrics: &mut ReaderMetrics,
+    ) -> Result<Arc<FileRangeBuilder>> {
+        // Check manifest-level prune first (shared cache, no I/O).
+        if self
+            .inner
+            .try_mark_manifest_pruned(file_index, reader_metrics)
+        {
+            let arc_builder = Arc::new(FileRangeBuilder::default());
+            // Do NOT cache an empty manifest-pruned builder; the cache flag
+            // already records the decision.
+            return Ok(arc_builder);
+        }
+
+        let file = &self.inner.stream_ctx.input.files[file_index];
+        let predicate = self.inner.stream_ctx.input.predicate_for_file(file);
+        let builder = self
+            .inner
+            .stream_ctx
+            .input
+            .prune_file_after_manifest_check(file, pre_filter_mode, predicate, reader_metrics)
+            .await?;
+
+        let arc_builder = Arc::new(builder);
+
+        // Caches the builder only if the file still has remaining ranges.
+        // `skip_file_range` may have already consumed all ranges for this file.
+        {
+            let mut entry = self.inner.file_entries[file_index].lock().unwrap();
+            cache_builder_if_needed(&mut entry, &arc_builder, reader_metrics);
+        }
+
+        Ok(arc_builder)
+    }
+
+    /// Decrements ref count and clears builder if no longer needed.
+    fn decrement_and_maybe_clear(&self, file_index: usize, reader_metrics: &mut ReaderMetrics) {
+        let mut entry = self.inner.file_entries[file_index].lock().unwrap();
+        entry.remaining_ranges = entry.remaining_ranges.saturating_sub(1);
+
+        if entry.remaining_ranges == 0
+            && let Some(builder) = entry.builder.take()
+        {
+            PRUNER_ACTIVE_BUILDERS.dec();
+            reader_metrics.metadata_mem_size -= builder.memory_size() as isize;
+            reader_metrics.num_range_builders -= 1;
+        }
+    }
+
+    /// Worker loop that processes prune requests.
+    async fn worker_loop(
+        worker_id: usize,
+        mut rx: mpsc::Receiver<PruneRequest>,
+        inner: Arc<PrunerInner>,
+    ) {
+        let mut worker_cache_hit = 0;
+        let mut worker_cache_miss = 0;
+        let mut pruned_files = Vec::new();
+
+        while let Some(request) = rx.recv().await {
+            let PruneRequest {
+                file_index,
+                pre_filter_mode,
+                response_tx,
+                partition_metrics,
+            } = request;
+
+            // Check if already cached or in-progress
+            {
+                let entry = inner.file_entries[file_index].lock().unwrap();
+                if let Some(builder) = &entry.builder {
+                    // Cache hit - send immediately
+                    if let Some(response_tx) = response_tx {
+                        let _ = response_tx.send(Ok(builder.clone()));
+                    }
+                    worker_cache_hit += 1;
+                    continue;
+                }
+            }
+            worker_cache_miss += 1;
+
+            let file = &inner.stream_ctx.input.files[file_index];
+            pruned_files.push(file.file_id().file_id());
+            let explain_verbose = partition_metrics
+                .as_ref()
+                .map(|m| m.explain_verbose())
+                .unwrap_or(false);
+            let mut metrics = ReaderMetrics {
+                filter_metrics: new_filter_metrics(explain_verbose),
+                ..Default::default()
+            };
+
+            // Check manifest-level prune first (shared cache, no I/O).
+            let result = if inner.try_mark_manifest_pruned(file_index, &mut metrics) {
+                // Manifest-level pruning proved the file empty — produce a
+                // default builder without reading any parquet metadata.
+                Ok(FileRangeBuilder::default())
+            } else {
+                let predicate = inner.stream_ctx.input.predicate_for_file(file);
+                inner
+                    .stream_ctx
+                    .input
+                    .prune_file_after_manifest_check(file, pre_filter_mode, predicate, &mut metrics)
+                    .await
+            };
+
+            // Update state and notify waiters
+            let mut entry = inner.file_entries[file_index].lock().unwrap();
+            match result {
+                Ok(builder) => {
+                    let arc_builder = Arc::new(builder);
+                    let is_background = response_tx.is_none();
+
+                    // Only cache the builder if the file still has remaining ranges.
+                    // If remaining_ranges == 0, a concurrent `skip_file_range` (e.g. from a
+                    // dynamic filter tightening via manifest-prune fast-skip) already consumed
+                    // all ranges and may have cleared a previously cached builder.
+                    // Skip caching manifest-pruned empty builders; the cache flag is enough.
+                    let did_cache =
+                        if inner.manifest_pruned_files[file_index].load(Ordering::Relaxed) {
+                            false
+                        } else {
+                            cache_builder_if_needed(&mut entry, &arc_builder, &mut metrics)
+                        };
+
+                    // Notify all waiters
+                    for waiter in entry.waiters.drain(..) {
+                        let _ = waiter.send(Ok(arc_builder.clone()));
+                    }
+                    // Always respond to foreground caller, even if we did not cache.
+                    if let Some(response_tx) = response_tx {
+                        let _ = response_tx.send(Ok(arc_builder));
+                    }
+
+                    debug!(
+                        "Pruner worker {} pruned file_index: {}, file: {:?}, metrics: {:?}",
+                        worker_id,
+                        file_index,
+                        file.file_id(),
+                        metrics
+                    );
+
+                    // Merge metrics if this is a foreground request, or if the builder
+                    // was cached. Skip stale per-file metrics
+                    // for background requests that completed after the file was already
+                    // fully skipped.
+                    if (!is_background || did_cache)
+                        && let Some(part_metrics) = &partition_metrics
+                    {
+                        let per_file_metrics = if part_metrics.explain_verbose() {
+                            let file_id = file.file_id();
+                            let mut map = HashMap::new();
+                            map.insert(
+                                file_id,
+                                FileScanMetrics {
+                                    build_part_cost: metrics.build_cost,
+                                    ..Default::default()
+                                },
+                            );
+                            Some(map)
+                        } else {
+                            None
+                        };
+                        part_metrics.merge_reader_metrics(&metrics, per_file_metrics.as_ref());
+                    }
+                }
+                Err(e) => {
+                    let arc_error = Arc::new(e);
+                    for waiter in entry.waiters.drain(..) {
+                        let _ = waiter.send(Err(arc_error.clone()).context(PruneFileSnafu));
+                    }
+                    if let Some(response_tx) = response_tx {
+                        let _ = response_tx.send(Err(arc_error).context(PruneFileSnafu));
+                    }
+                }
+            }
+        }
+
+        common_telemetry::debug!(
+            "Pruner worker {} finished, cache_hit: {}, cache_miss: {}, files: {:?}",
+            worker_id,
+            worker_cache_hit,
+            worker_cache_miss,
+            pruned_files,
+        );
+    }
+}
+
+#[cfg(test)]
+impl Pruner {
+    /// Returns the remaining range count for a file (test-only).
+    fn test_remaining_ranges(&self, file_index: usize) -> usize {
+        self.inner.file_entries[file_index]
+            .lock()
+            .unwrap()
+            .remaining_ranges
+    }
+
+    /// Returns whether a cached builder exists for a file (test-only).
+    fn test_has_builder(&self, file_index: usize) -> bool {
+        self.inner.file_entries[file_index]
+            .lock()
+            .unwrap()
+            .builder
+            .is_some()
+    }
+
+    /// Returns the manifest-pruned flag for a file (test-only).
+    fn test_is_manifest_pruned(&self, file_index: usize) -> bool {
+        self.inner.manifest_pruned_files[file_index].load(Ordering::Relaxed)
+    }
+
+    /// Clears a cached builder for a file, simulating stale cleanup (test-only).
+    #[allow(dead_code)]
+    fn test_clear_builder(&self, file_index: usize) {
+        let mut entry = self.inner.file_entries[file_index].lock().unwrap();
+        if entry.builder.take().is_some() {
+            PRUNER_ACTIVE_BUILDERS.dec();
+        }
+    }
+}
+
+/// Returns true if a freshly pruned builder should be cached for this file.
+fn should_cache_builder(entry: &FileBuilderEntry) -> bool {
+    entry.builder.is_none() && entry.remaining_ranges > 0
+}
+
+/// Caches a freshly pruned builder if the file still has remaining ranges, and
+/// records the corresponding builder memory/count deltas for verbose metrics.
+fn cache_builder_if_needed(
+    entry: &mut FileBuilderEntry,
+    builder: &Arc<FileRangeBuilder>,
+    reader_metrics: &mut ReaderMetrics,
+) -> bool {
+    if should_cache_builder(entry) {
+        reader_metrics.metadata_mem_size += builder.memory_size() as isize;
+        reader_metrics.num_range_builders += 1;
+        entry.builder = Some(builder.clone());
+        PRUNER_ACTIVE_BUILDERS.inc();
+        true
+    } else {
+        false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use common_time::Timestamp;
+    use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
+    use datafusion_common::ScalarValue;
+    use datafusion_expr::{Expr, col, lit};
+    use store_api::region_engine::PartitionRange;
+    use store_api::storage::{FileId, RegionId};
+
+    use super::*;
+    use crate::read::flat_projection::FlatProjectionMapper;
+    use crate::read::range::RowGroupIndex;
+    use crate::read::scan_region::{PredicateGroup, ScanInput};
+    use crate::read::scan_util::PartitionMetrics;
+    use crate::sst::file::{FileHandle, FileMeta};
+    use crate::sst::parquet::reader::ReaderMetrics;
+    use crate::test_util::memtable_util::metadata_with_primary_key;
+    use crate::test_util::new_noop_file_purger;
+    use crate::test_util::scheduler_util::SchedulerEnv;
+
+    async fn make_test_pruner(num_files: usize) -> (SchedulerEnv, Arc<Pruner>) {
+        let env = SchedulerEnv::new().await;
+        let metadata = Arc::new(metadata_with_primary_key(vec![0, 1], false));
+        let mapper = FlatProjectionMapper::new(&metadata, [0, 2, 3]).unwrap();
+
+        let files: Vec<FileHandle> = (0..num_files)
+            .map(|_| {
+                let meta = FileMeta {
+                    region_id: RegionId::new(123, 456),
+                    file_id: FileId::random(),
+                    time_range: (
+                        Timestamp::new_millisecond(0),
+                        Timestamp::new_millisecond(1000),
+                    ),
+                    num_row_groups: 1,
+                    num_rows: 1024,
+                    level: 0,
+                    ..Default::default()
+                };
+                FileHandle::new(meta, new_noop_file_purger())
+            })
+            .collect();
+
+        let input = ScanInput::new(env.access_layer.clone(), mapper)
+            .with_files(files)
+            .with_append_mode(true);
+        let stream_ctx = Arc::new(StreamContext::unordered_scan_ctx(input));
+        let pruner = Arc::new(Pruner::new(stream_ctx, 1));
+        (env, pruner)
+    }
+
+    /// Builds a minimal `PartitionRange` that references `file_index`.
+    /// `add_partition_ranges` will look up `stream_ctx.ranges[identifier]`
+    /// and find `row_group_indices[0] == RowGroupIndex { index: file_index,
+    /// row_group_index: 0 }` because `unordered_scan_ranges` with
+    /// `num_row_groups=1` produces one range per file.
+    fn file_partition_range(file_index: usize) -> PartitionRange {
+        PartitionRange {
+            start: Timestamp::new_millisecond(0),
+            end: Timestamp::new_millisecond(1001),
+            num_rows: 1024,
+            identifier: file_index,
+        }
+    }
+
+    async fn make_test_pruner_with_predicate(
+        num_files: usize,
+        row_groups_per_file: u64,
+        predicate_exprs: &[Expr],
+    ) -> (SchedulerEnv, Arc<Pruner>) {
+        let env = SchedulerEnv::new().await;
+        let metadata = Arc::new(metadata_with_primary_key(vec![0, 1], false));
+        let mapper = FlatProjectionMapper::new(&metadata, [0, 2, 3]).unwrap();
+        let predicate = PredicateGroup::new(&metadata, predicate_exprs).unwrap();
+
+        let files: Vec<FileHandle> = (0..num_files)
+            .map(|_| {
+                let meta = FileMeta {
+                    region_id: RegionId::new(123, 456),
+                    file_id: FileId::random(),
+                    time_range: (
+                        Timestamp::new_millisecond(0),
+                        Timestamp::new_millisecond(1000),
+                    ),
+                    num_row_groups: row_groups_per_file,
+                    num_rows: row_groups_per_file * 1024,
+                    level: 0,
+                    ..Default::default()
+                };
+                FileHandle::new(meta, new_noop_file_purger())
+            })
+            .collect();
+
+        let input = ScanInput::new(env.access_layer.clone(), mapper)
+            .with_files(files)
+            .with_predicate(predicate)
+            .with_append_mode(true);
+        let stream_ctx = Arc::new(StreamContext::unordered_scan_ctx(input));
+        let pruner = Arc::new(Pruner::new(stream_ctx, 1));
+        (env, pruner)
+    }
+
+    fn make_partition_metrics() -> PartitionMetrics {
+        let metrics_set = ExecutionPlanMetricsSet::new();
+        PartitionMetrics::new(
+            RegionId::new(123, 456),
+            0,
+            "test",
+            Instant::now(),
+            false,
+            &metrics_set,
+        )
+    }
+
+    #[test]
+    fn should_cache_builder_when_ranges_remain() {
+        let entry = FileBuilderEntry {
+            builder: None,
+            remaining_ranges: 3,
+            waiters: Vec::new(),
+        };
+        assert!(should_cache_builder(&entry));
+    }
+
+    #[test]
+    fn should_not_cache_builder_when_no_ranges_remain() {
+        let entry = FileBuilderEntry {
+            builder: None,
+            remaining_ranges: 0,
+            waiters: Vec::new(),
+        };
+        assert!(!should_cache_builder(&entry));
+    }
+
+    #[test]
+    fn should_not_cache_builder_when_already_cached() {
+        let entry = FileBuilderEntry {
+            builder: Some(Arc::new(FileRangeBuilder::default())),
+            remaining_ranges: 1,
+            waiters: Vec::new(),
+        };
+        assert!(!should_cache_builder(&entry));
+    }
+
+    #[test]
+    fn cache_builder_records_metrics() {
+        let mut entry = FileBuilderEntry {
+            builder: None,
+            remaining_ranges: 1,
+            waiters: Vec::new(),
+        };
+        let builder = Arc::new(FileRangeBuilder::default());
+        let mut reader_metrics = ReaderMetrics::default();
+
+        assert!(cache_builder_if_needed(
+            &mut entry,
+            &builder,
+            &mut reader_metrics
+        ));
+        assert!(entry.builder.is_some());
+        assert_eq!(
+            reader_metrics.metadata_mem_size,
+            builder.memory_size() as isize
+        );
+        assert_eq!(reader_metrics.num_range_builders, 1);
+
+        if entry.builder.take().is_some() {
+            PRUNER_ACTIVE_BUILDERS.dec();
+        }
+    }
+
+    #[tokio::test]
+    async fn skip_file_range_decrements_and_clears_builder() {
+        let (_env, pruner) = make_test_pruner(1).await;
+
+        // Simulate 3 partition ranges for file 0.
+        let ranges: Vec<PartitionRange> = (0..3).map(|_| file_partition_range(0)).collect();
+        pruner.add_partition_ranges(&ranges);
+        assert_eq!(pruner.test_remaining_ranges(0), 3);
+
+        // Manually set a cached builder (simulating a previous cache hit).
+        {
+            let mut entry = pruner.inner.file_entries[0].lock().unwrap();
+            entry.builder = Some(Arc::new(FileRangeBuilder::default()));
+            PRUNER_ACTIVE_BUILDERS.inc();
+        }
+        assert!(pruner.test_has_builder(0));
+
+        // Skip all 3 ranges; the third should clear the builder.
+        let mut reader_metrics = ReaderMetrics::default();
+        for i in 0..3 {
+            let index = RowGroupIndex {
+                index: 0,
+                row_group_index: i as i64,
+            };
+            pruner.skip_file_range(index, &mut reader_metrics);
+        }
+
+        assert_eq!(pruner.test_remaining_ranges(0), 0);
+        assert!(!pruner.test_has_builder(0));
+    }
+
+    #[tokio::test]
+    async fn worker_does_not_cache_after_skip_file_range_consumed_all() {
+        let (_env, pruner) = make_test_pruner(1).await;
+
+        // Simulate one range for file 0.
+        let ranges = vec![file_partition_range(0)];
+        pruner.add_partition_ranges(&ranges);
+        assert_eq!(pruner.test_remaining_ranges(0), 1);
+
+        // Simulate skip_file_range consuming the last range BEFORE the
+        // background worker finishes. This mirrors the race: a dynamic filter
+        // tightens and manifest-prune fast-skip zeros out remaining_ranges.
+        let mut reader_metrics = ReaderMetrics::default();
+        let index = RowGroupIndex {
+            index: 0,
+            row_group_index: 0,
+        };
+        pruner.skip_file_range(index, &mut reader_metrics);
+        assert_eq!(pruner.test_remaining_ranges(0), 0);
+        assert!(!pruner.test_has_builder(0));
+
+        // Now simulate the worker completing: check the caching guard.
+        let entry = pruner.inner.file_entries[0].lock().unwrap();
+        let should_cache = should_cache_builder(&entry);
+        drop(entry);
+
+        assert!(!should_cache);
+
+        // Ensure the gauge was not incremented for a stale builder.
+        // (skip_file_range already decremented it if there was one, but here
+        // there was none, so the gauge should be at baseline.)
+    }
+
+    #[tokio::test]
+    async fn worker_caches_when_ranges_remain() {
+        let (_env, pruner) = make_test_pruner(1).await;
+
+        // Simulate 2 ranges for file 0.
+        let ranges: Vec<PartitionRange> = (0..2).map(|_| file_partition_range(0)).collect();
+        pruner.add_partition_ranges(&ranges);
+        assert_eq!(pruner.test_remaining_ranges(0), 2);
+
+        // Consume only 1 range.
+        let mut reader_metrics = ReaderMetrics::default();
+        let index = RowGroupIndex {
+            index: 0,
+            row_group_index: 0,
+        };
+        pruner.skip_file_range(index, &mut reader_metrics);
+        assert_eq!(pruner.test_remaining_ranges(0), 1);
+
+        // The worker should still cache because remaining_ranges > 0.
+        let entry = pruner.inner.file_entries[0].lock().unwrap();
+        assert!(should_cache_builder(&entry));
+    }
+
+    // ── Corner case: fast-skip across multiple row groups ─────────────
+
+    /// 1 file × 3 row groups, predicate `ts > 10000ms` prunes the file at
+    /// manifest level. Fast-skipping each of the 3 row groups must return true
+    /// and decrement remaining_ranges to 0.
+    #[tokio::test]
+    async fn try_skip_manifest_pruned_file_range_multi_row_groups() {
+        let predicate_exprs: Vec<Expr> =
+            vec![col("ts").gt(lit(ScalarValue::TimestampMillisecond(Some(10_000), None)))];
+        let (_env, pruner) = make_test_pruner_with_predicate(1, 3, &predicate_exprs).await;
+
+        let ranges = pruner.inner.stream_ctx.partition_ranges();
+        assert_eq!(ranges.len(), 3);
+        pruner.add_partition_ranges(&ranges);
+        assert_eq!(pruner.test_remaining_ranges(0), 3);
+
+        let partition_pruner = Arc::new(PartitionPruner::new(pruner.clone(), &ranges));
+        let partition_metrics = make_partition_metrics();
+
+        // Fast-skip each of the 3 row groups.
+        for rg in 0..3 {
+            let index = RowGroupIndex {
+                index: 0, // file_index == 0, no memtables
+                row_group_index: rg,
+            };
+            let skipped =
+                partition_pruner.try_skip_manifest_pruned_file_range(index, &partition_metrics);
+            assert!(skipped, "row group {} should be skipped", rg);
+        }
+
+        // All refs consumed.
+        assert_eq!(pruner.test_remaining_ranges(0), 0);
+        // manifest_pruned_files is CAS'd exactly once (first call).
+        assert!(pruner.test_is_manifest_pruned(0));
+    }
+
+    /// A file whose manifest time range may contain matching rows must not be
+    /// fast-skipped. This protects query correctness over metrics precision.
+    #[tokio::test]
+    async fn try_skip_manifest_pruned_file_range_keeps_overlapping_file() {
+        let predicate_exprs: Vec<Expr> =
+            vec![col("ts").gt(lit(ScalarValue::TimestampMillisecond(Some(500), None)))];
+        let (_env, pruner) = make_test_pruner_with_predicate(1, 2, &predicate_exprs).await;
+
+        let ranges = pruner.inner.stream_ctx.partition_ranges();
+        assert_eq!(ranges.len(), 2);
+        pruner.add_partition_ranges(&ranges);
+        assert_eq!(pruner.test_remaining_ranges(0), 2);
+
+        let partition_pruner = Arc::new(PartitionPruner::new(pruner.clone(), &ranges));
+        let partition_metrics = make_partition_metrics();
+        let range_meta = &pruner.inner.stream_ctx.ranges[ranges[0].identifier];
+        let index = range_meta.row_group_indices[0];
+
+        let skipped =
+            partition_pruner.try_skip_manifest_pruned_file_range(index, &partition_metrics);
+
+        assert!(!skipped);
+        assert_eq!(pruner.test_remaining_ranges(0), 2);
+        assert!(!pruner.test_is_manifest_pruned(0));
+    }
+
+    // ── Corner case: add_partition_ranges resets the manifest-pruned flag ──
+
+    #[tokio::test]
+    async fn add_partition_ranges_resets_manifest_pruned_flag() {
+        let predicate_exprs: Vec<Expr> =
+            vec![col("ts").gt(lit(ScalarValue::TimestampMillisecond(Some(10_000), None)))];
+        let (_env, pruner) = make_test_pruner_with_predicate(1, 1, &predicate_exprs).await;
+
+        // Mark file 0 as manifest-pruned.
+        let mut reader_metrics = ReaderMetrics::default();
+        let marked = pruner
+            .inner
+            .try_mark_manifest_pruned(0, &mut reader_metrics);
+        assert!(marked);
+        assert!(pruner.test_is_manifest_pruned(0));
+        assert_eq!(reader_metrics.filter_metrics.files_time_range_pruned, 1);
+
+        // Calling add_partition_ranges must reset the flag.
+        let ranges = vec![file_partition_range(0)];
+        pruner.add_partition_ranges(&ranges);
+        assert!(!pruner.test_is_manifest_pruned(0));
+        // remaining_ranges was also incremented.
+        assert_eq!(pruner.test_remaining_ranges(0), 1);
+    }
+
+    // ── Corner case: prune_file_directly short-circuits via manifest prune ──
+
+    #[tokio::test]
+    async fn prune_file_directly_manifest_pruned_returns_empty_builder() {
+        let predicate_exprs: Vec<Expr> =
+            vec![col("ts").gt(lit(ScalarValue::TimestampMillisecond(Some(10_000), None)))];
+        let (_env, pruner) = make_test_pruner_with_predicate(1, 1, &predicate_exprs).await;
+
+        // Ensure there is no cached builder yet.
+        assert!(!pruner.test_has_builder(0));
+
+        let mut reader_metrics = ReaderMetrics::default();
+        let builder = pruner
+            .prune_file_directly(0, PreFilterMode::SkipFields, &mut reader_metrics)
+            .await
+            .unwrap();
+
+        // Should be the default (empty) builder.
+        assert_eq!(
+            builder.memory_size(),
+            FileRangeBuilder::default().memory_size()
+        );
+        // builder must NOT be cached — the manifest-pruned flag is enough.
+        assert!(!pruner.test_has_builder(0));
+        // files_time_range_pruned was recorded.
+        assert_eq!(reader_metrics.filter_metrics.files_time_range_pruned, 1);
+    }
+
+    // ── Corner case: try_mark_manifest_pruned does not double-count ───
+
+    #[tokio::test]
+    async fn try_mark_manifest_pruned_only_counts_first_cas() {
+        let predicate_exprs: Vec<Expr> =
+            vec![col("ts").gt(lit(ScalarValue::TimestampMillisecond(Some(10_000), None)))];
+        let (_env, pruner) = make_test_pruner_with_predicate(1, 1, &predicate_exprs).await;
+
+        // First call: CAS succeeds, metric incremented.
+        let mut reader_metrics = ReaderMetrics::default();
+        let marked = pruner
+            .inner
+            .try_mark_manifest_pruned(0, &mut reader_metrics);
+        assert!(marked);
+        assert_eq!(reader_metrics.filter_metrics.files_time_range_pruned, 1);
+        assert!(pruner.test_is_manifest_pruned(0));
+
+        // Second call: already true, no metric delta.
+        let mut reader_metrics2 = ReaderMetrics::default();
+        let marked2 = pruner
+            .inner
+            .try_mark_manifest_pruned(0, &mut reader_metrics2);
+        assert!(marked2);
+        assert_eq!(reader_metrics2.filter_metrics.files_time_range_pruned, 0);
+    }
+}

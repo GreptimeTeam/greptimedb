@@ -1,0 +1,58 @@
+-- Migrated from DuckDB test: test/sql/window/test_window_rows.test
+-- Tests window frame specifications
+CREATE TABLE t3(a VARCHAR, b VARCHAR, c INTEGER, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+INSERT INTO t3 VALUES
+('AA', 'aa', 100, 1000), ('BB', 'aa', 200, 2000), ('CC', 'bb', 300, 3000),
+('DD', 'aa', 400, 4000), ('EE', 'bb', 500, 5000);
+
+Affected Rows: 5
+
+-- Window with ROWS frame
+SELECT a, c, SUM(c) OVER (ORDER BY c ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING) as sum_val
+FROM t3 ORDER BY c;
+
++----+-----+---------+
+| a  | c   | sum_val |
++----+-----+---------+
+| AA | 100 | 300     |
+| BB | 200 | 600     |
+| CC | 300 | 900     |
+| DD | 400 | 1200    |
+| EE | 500 | 900     |
++----+-----+---------+
+
+-- Window with UNBOUNDED frame
+SELECT a, c, SUM(c) OVER (ORDER BY c ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) as cumsum
+FROM t3 ORDER BY c;
+
++----+-----+--------+
+| a  | c   | cumsum |
++----+-----+--------+
+| AA | 100 | 100    |
+| BB | 200 | 300    |
+| CC | 300 | 600    |
+| DD | 400 | 1000   |
+| EE | 500 | 1500   |
++----+-----+--------+
+
+-- Window with partition and frame
+SELECT a, b, c, AVG(c) OVER (PARTITION BY b ORDER BY c ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) as avg_val
+FROM t3 ORDER BY b, c;
+
++----+----+-----+---------+
+| a  | b  | c   | avg_val |
++----+----+-----+---------+
+| AA | aa | 100 | 100.0   |
+| BB | aa | 200 | 150.0   |
+| DD | aa | 400 | 300.0   |
+| CC | bb | 300 | 300.0   |
+| EE | bb | 500 | 400.0   |
++----+----+-----+---------+
+
+DROP TABLE t3;
+
+Affected Rows: 0
+

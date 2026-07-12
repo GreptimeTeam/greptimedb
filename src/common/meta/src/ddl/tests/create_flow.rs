@@ -1,0 +1,1264 @@
+// Copyright 2023 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+use std::assert_matches;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
+
+use api::v1::flow::CreateRequest;
+use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use common_procedure::{Procedure, Status};
+use common_procedure_test::execute_procedure_until_done;
+use table::table_name::TableName;
+
+use crate::ddl::DdlContext;
+use crate::ddl::create_flow::{
+    CreateFlowData, CreateFlowProcedure, CreateFlowState, DEFER_ON_MISSING_SOURCE_KEY,
+    FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY, FlowType, defer_on_missing_source,
+    effective_eval_schedule_from_flow_info, resolve_schedule_defaults_into_task,
+    validate_flow_options,
+};
+use crate::ddl::test_util::create_table::test_create_table_task;
+use crate::ddl::test_util::flownode_handler::NaiveFlownodeHandler;
+use crate::error;
+use crate::key::FlowId;
+use crate::key::flow::flow_info::{
+    FlowInfoValue, FlowMissedTickPolicy, FlowScheduleConfig, FlowStatus,
+};
+use crate::key::table_route::TableRouteValue;
+use crate::rpc::ddl::{CreateFlowTask, FlowQueryContext, QueryContext};
+use crate::test_util::{MockFlownodeManager, new_ddl_context};
+
+fn test_query_context() -> QueryContext {
+    QueryContext {
+        current_catalog: DEFAULT_CATALOG_NAME.to_string(),
+        current_schema: DEFAULT_SCHEMA_NAME.to_string(),
+        timezone: "UTC".to_string(),
+        extensions: HashMap::new(),
+        channel: 0,
+        snapshot_seqs: HashMap::new(),
+        sst_min_sequences: HashMap::new(),
+    }
+}
+
+pub(crate) fn test_create_flow_task(
+    name: &str,
+    source_table_names: Vec<TableName>,
+    sink_table_name: TableName,
+    create_if_not_exists: bool,
+) -> CreateFlowTask {
+    CreateFlowTask {
+        catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+        flow_name: name.to_string(),
+        source_table_names,
+        sink_table_name,
+        or_replace: false,
+        create_if_not_exists,
+        expire_after: Some(300),
+        eval_interval_secs: None,
+        comment: "".to_string(),
+        sql: "select 1".to_string(),
+        flow_options: Default::default(),
+        eval_schedule: None,
+    }
+}
+
+fn enable_defer_on_missing_source(task: &mut CreateFlowTask) {
+    task.flow_options
+        .insert(DEFER_ON_MISSING_SOURCE_KEY.to_string(), "true".to_string());
+}
+
+fn flow_info_for_schedule_test(
+    eval_schedule: Option<FlowScheduleConfig>,
+    eval_interval_secs: Option<i64>,
+    options: HashMap<String, String>,
+    created_time_secs: i64,
+) -> FlowInfoValue {
+    let created_time = chrono::DateTime::from_timestamp(created_time_secs, 0).unwrap();
+    FlowInfoValue {
+        source_table_ids: vec![],
+        all_source_table_names: vec![],
+        unresolved_source_table_names: vec![],
+        sink_table_name: TableName::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "sink"),
+        flownode_ids: BTreeMap::new(),
+        catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+        query_context: None,
+        flow_name: "flow".to_string(),
+        raw_sql: "select 1".to_string(),
+        expire_after: None,
+        eval_interval_secs,
+        comment: String::new(),
+        options,
+        status: FlowStatus::Active,
+        created_time,
+        updated_time: created_time,
+        eval_schedule,
+    }
+}
+
+#[tokio::test]
+async fn test_create_flow_source_table_not_found() {
+    let source_table_names = vec![TableName::new(
+        DEFAULT_CATALOG_NAME,
+        DEFAULT_SCHEMA_NAME,
+        "my_table",
+    )];
+    let sink_table_name =
+        TableName::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "my_sink_table");
+    let task = test_create_flow_task("my_flow", source_table_names, sink_table_name, false);
+    let node_manager = Arc::new(MockFlownodeManager::new(NaiveFlownodeHandler));
+    let ddl_context = new_ddl_context(node_manager);
+    let query_ctx = test_query_context();
+    let mut procedure = CreateFlowProcedure::new(task, query_ctx, ddl_context);
+    let err = procedure.on_prepare().await.unwrap_err();
+    assert_matches!(err, error::Error::Unsupported { .. });
+    assert!(
+        err.to_string()
+            .contains("requires WITH ('defer_on_missing_source'='true')")
+    );
+}
+
+#[tokio::test]
+async fn test_create_pending_flow_source_table_not_found_with_defer() {
+    let source_table_names = vec![TableName::new(
+        DEFAULT_CATALOG_NAME,
+        DEFAULT_SCHEMA_NAME,
+        "my_table",
+    )];
+    let sink_table_name =
+        TableName::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "my_sink_table");
+    let mut task = test_create_flow_task("my_flow", source_table_names, sink_table_name, false);
+    enable_defer_on_missing_source(&mut task);
+    let node_manager = Arc::new(MockFlownodeManager::new(NaiveFlownodeHandler));
+    let ddl_context = new_ddl_context(node_manager);
+    let query_ctx = test_query_context();
+    let mut procedure = CreateFlowProcedure::new(task, query_ctx, ddl_context.clone());
+    let status = procedure.on_prepare().await.unwrap();
+    assert_matches!(status, Status::Executing { persist: true, .. });
+    assert_eq!(procedure.data.unresolved_source_table_names.len(), 1);
+    assert_eq!(procedure.data.source_table_ids, Vec::<u32>::new());
+
+    let output = execute_procedure_until_done(&mut procedure).await.unwrap();
+    let flow_id = *output.downcast_ref::<FlowId>().unwrap();
+    let flow_info = ddl_context
+        .flow_metadata_manager
+        .flow_info_manager()
+        .get(flow_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(flow_info.source_table_ids(), Vec::<u32>::new());
+    assert_eq!(
+        flow_info
+            .options()
+            .get(DEFER_ON_MISSING_SOURCE_KEY)
+            .map(String::as_str),
+        Some("true")
+    );
+}
+
+#[tokio::test]
+async fn test_create_pending_flow_source_table_not_found_with_defer_false() {
+    let source_table_names = vec![TableName::new(
+        DEFAULT_CATALOG_NAME,
+        DEFAULT_SCHEMA_NAME,
+        "my_table",
+    )];
+    let sink_table_name =
+        TableName::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "my_sink_table");
+    let mut task = test_create_flow_task("my_flow", source_table_names, sink_table_name, false);
+    task.flow_options
+        .insert(DEFER_ON_MISSING_SOURCE_KEY.to_string(), "false".to_string());
+    let node_manager = Arc::new(MockFlownodeManager::new(NaiveFlownodeHandler));
+    let ddl_context = new_ddl_context(node_manager);
+    let query_ctx = test_query_context();
+    let mut procedure = CreateFlowProcedure::new(task, query_ctx, ddl_context);
+    let err = procedure.on_prepare().await.unwrap_err();
+    assert_matches!(err, error::Error::Unsupported { .. });
+    assert!(
+        err.to_string()
+            .contains("requires WITH ('defer_on_missing_source'='true')")
+    );
+}
+
+#[tokio::test]
+async fn test_create_pending_flow_records_partial_source_resolution() {
+    let existing_source = TableName::new(
+        DEFAULT_CATALOG_NAME,
+        DEFAULT_SCHEMA_NAME,
+        "partial_existing_source_table",
+    );
+    let missing_source = TableName::new(
+        DEFAULT_CATALOG_NAME,
+        DEFAULT_SCHEMA_NAME,
+        "partial_missing_source_table",
+    );
+    let sink_table_name = TableName::new(
+        DEFAULT_CATALOG_NAME,
+        DEFAULT_SCHEMA_NAME,
+        "partial_pending_sink_table",
+    );
+    let node_manager = Arc::new(MockFlownodeManager::new(NaiveFlownodeHandler));
+    let ddl_context = new_ddl_context(node_manager);
+
+    let existing_table_id = 3026;
+    let create_table_task =
+        test_create_table_task("partial_existing_source_table", existing_table_id);
+    ddl_context
+        .table_metadata_manager
+        .create_table_metadata(
+            create_table_task.table_info.clone(),
+            TableRouteValue::physical(vec![]),
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+
+    let mut task = test_create_flow_task(
+        "partial_pending_flow",
+        vec![existing_source.clone(), missing_source.clone()],
+        sink_table_name,
+        false,
+    );
+    enable_defer_on_missing_source(&mut task);
+    let query_ctx = test_query_context();
+    let mut procedure = CreateFlowProcedure::new(task, query_ctx, ddl_context.clone());
+    let status = procedure.on_prepare().await.unwrap();
+    assert_matches!(status, Status::Executing { persist: true, .. });
+    assert_eq!(procedure.data.source_table_ids, vec![existing_table_id]);
+    assert_eq!(
+        procedure.data.unresolved_source_table_names,
+        vec![missing_source.clone()]
+    );
+
+    let output = execute_procedure_until_done(&mut procedure).await.unwrap();
+    let flow_id = *output.downcast_ref::<FlowId>().unwrap();
+    let flow_info = ddl_context
+        .flow_metadata_manager
+        .flow_info_manager()
+        .get(flow_id)
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert!(flow_info.is_pending());
+    assert_eq!(flow_info.source_table_ids(), &[existing_table_id]);
+    let expected_all_sources = vec![existing_source, missing_source.clone()];
+    assert_eq!(
+        flow_info.all_source_table_names(),
+        expected_all_sources.as_slice()
+    );
+    assert_eq!(flow_info.unresolved_source_table_names(), &[missing_source]);
+    assert!(flow_info.flownode_ids().is_empty());
+}
+
+#[test]
+fn test_defer_on_missing_source_defaults_false() {
+    let task = test_create_flow_task(
+        "my_flow",
+        vec![],
+        TableName::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "my_sink_table"),
+        false,
+    );
+
+    assert!(!defer_on_missing_source(&task).unwrap());
+}
+
+#[test]
+fn test_defer_on_missing_source_true() {
+    let mut task = test_create_flow_task(
+        "my_flow",
+        vec![],
+        TableName::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "my_sink_table"),
+        false,
+    );
+    task.flow_options
+        .insert(DEFER_ON_MISSING_SOURCE_KEY.to_string(), "true".to_string());
+
+    assert!(defer_on_missing_source(&task).unwrap());
+}
+
+#[test]
+fn test_defer_on_missing_source_invalid_value() {
+    let mut task = test_create_flow_task(
+        "my_flow",
+        vec![],
+        TableName::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "my_sink_table"),
+        false,
+    );
+    task.flow_options.insert(
+        DEFER_ON_MISSING_SOURCE_KEY.to_string(),
+        "invalid".to_string(),
+    );
+
+    let err = defer_on_missing_source(&task).unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("Invalid flow option 'defer_on_missing_source': invalid")
+    );
+}
+
+#[test]
+fn test_validate_flow_options_allows_incremental_read_option() {
+    let mut task = test_create_flow_task(
+        "my_flow",
+        vec![],
+        TableName::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "my_sink_table"),
+        false,
+    );
+    task.flow_options.insert(
+        FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY.to_string(),
+        "true".to_string(),
+    );
+
+    validate_flow_options(&task).unwrap();
+}
+
+#[test]
+fn test_validate_flow_options_rejects_schedule_and_internal_keys_as_unknown() {
+    for key in [
+        "eval_interval_anchor",
+        "eval_interval_start",
+        "eval_interval_missed_tick_policy",
+        "eval_interval_catchup_max_runs",
+        "eval_interval_catchup_max_lag",
+        "__greptime_internal_eval_schedule",
+    ] {
+        let mut task = test_create_flow_task(
+            "my_flow",
+            vec![],
+            TableName::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "my_sink_table"),
+            false,
+        );
+        task.eval_interval_secs = Some(300);
+        task.flow_options
+            .insert(key.to_string(), "value".to_string());
+
+        let err = validate_flow_options(&task).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains(&format!("Unknown flow option '{key}'")),
+            "unexpected error for {key}: {err}"
+        );
+    }
+}
+
+#[test]
+fn test_validate_flow_options_rejects_non_positive_eval_interval() {
+    for secs in [0, -1] {
+        let mut task = test_create_flow_task(
+            "my_flow",
+            vec![],
+            TableName::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "my_sink_table"),
+            false,
+        );
+        task.eval_interval_secs = Some(secs);
+
+        let err = validate_flow_options(&task).unwrap_err();
+        assert!(err.to_string().contains("EVAL INTERVAL must be positive"));
+    }
+}
+
+#[test]
+fn test_resolved_schedule_defaults_in_create_request() {
+    let mut task = test_create_flow_task(
+        "my_flow",
+        vec![],
+        TableName::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "my_sink_table"),
+        false,
+    );
+    task.eval_interval_secs = Some(300);
+
+    // Simulate on_prepare: resolve defaults into task.
+    resolve_schedule_defaults_into_task(&mut task, None);
+
+    // Verify typed schedule config is populated.
+    let sched = task.eval_schedule.as_ref().unwrap();
+    assert!(sched.start_secs > 0);
+    assert_eq!(sched.anchor_secs, 0);
+    assert_eq!(
+        sched.missed_tick_policy,
+        FlowMissedTickPolicy::BoundedCatchUp
+    );
+    assert_eq!(sched.catchup_max_runs, 3);
+    assert!(sched.catchup_max_lag_secs >= 300);
+
+    // Verify schedule option names are NOT in flow_options.
+    for key in &[
+        "eval_interval_start",
+        "eval_interval_anchor",
+        "eval_interval_missed_tick_policy",
+        "eval_interval_catchup_max_runs",
+        "eval_interval_catchup_max_lag",
+    ] {
+        assert!(
+            !task.flow_options.contains_key(*key),
+            "flow_options should not contain {key}"
+        );
+    }
+
+    // Idempotent: second call does not overwrite.
+    let start_before = sched.start_secs;
+    resolve_schedule_defaults_into_task(&mut task, None);
+    assert_eq!(
+        task.eval_schedule.as_ref().unwrap().start_secs,
+        start_before
+    );
+
+    let flow_context = FlowQueryContext {
+        catalog: DEFAULT_CATALOG_NAME.to_string(),
+        schema: DEFAULT_SCHEMA_NAME.to_string(),
+        timezone: "UTC".to_string(),
+        extensions: HashMap::new(),
+        channel: 0,
+        snapshot_seqs: HashMap::new(),
+        sst_min_sequences: HashMap::new(),
+    };
+
+    // Construct CreateFlowData and verify CreateRequest carries internal key.
+    let data = CreateFlowData {
+        state: CreateFlowState::CreateFlows,
+        task,
+        flow_id: Some(1024),
+        peers: vec![],
+        source_table_ids: vec![],
+        unresolved_source_table_names: vec![],
+        flow_context: flow_context.clone(),
+        prev_flow_info_value: None,
+        did_replace: false,
+        flow_type: Some(FlowType::Batching),
+    };
+
+    let data2 = CreateFlowData {
+        state: CreateFlowState::CreateMetadata,
+        task: data.task.clone(),
+        flow_id: Some(1024),
+        peers: vec![],
+        source_table_ids: vec![],
+        unresolved_source_table_names: vec![],
+        flow_context,
+        prev_flow_info_value: None,
+        did_replace: false,
+        flow_type: Some(FlowType::Batching),
+    };
+
+    let request: CreateRequest = (&data).into();
+    // Verify internal key is present in the runtime request.
+    assert!(
+        request
+            .flow_options
+            .contains_key("__greptime_internal_eval_schedule"),
+        "CreateRequest must contain internal eval schedule key"
+    );
+
+    // Verify FlowInfoValue has eval_schedule populated, and options do NOT
+    // contain schedule keys.
+    let (flow_info, _) = <(FlowInfoValue, Vec<(_, _)>)>::from(&data2);
+    assert!(
+        flow_info.eval_schedule.is_some(),
+        "FlowInfoValue must have eval_schedule set"
+    );
+    for key in &[
+        "eval_interval_start",
+        "eval_interval_anchor",
+        "eval_interval_missed_tick_policy",
+        "eval_interval_catchup_max_runs",
+        "eval_interval_catchup_max_lag",
+    ] {
+        assert!(
+            !flow_info.options.contains_key(*key),
+            "FlowInfoValue.options should not contain {key}"
+        );
+    }
+}
+
+#[test]
+fn test_effective_eval_schedule_prefers_typed_config() {
+    let typed = FlowScheduleConfig {
+        anchor_secs: 0,
+        start_secs: 999,
+        missed_tick_policy: FlowMissedTickPolicy::BoundedCatchUp,
+        catchup_max_runs: 9,
+        catchup_max_lag_secs: 900,
+    };
+    let unrelated_options = HashMap::from([("unrelated".to_string(), "value".to_string())]);
+    let flow_info =
+        flow_info_for_schedule_test(Some(typed.clone()), Some(60), unrelated_options, 1);
+
+    let effective = effective_eval_schedule_from_flow_info(&flow_info).unwrap();
+    assert_eq!(effective, typed);
+}
+
+#[test]
+fn test_effective_eval_schedule_uses_created_time_default() {
+    let flow_info = flow_info_for_schedule_test(None, Some(60), HashMap::new(), 61);
+
+    let effective = effective_eval_schedule_from_flow_info(&flow_info).unwrap();
+    assert_eq!(effective.anchor_secs, 0);
+    assert_eq!(effective.start_secs, 120);
+    assert_eq!(
+        effective.missed_tick_policy,
+        FlowMissedTickPolicy::BoundedCatchUp
+    );
+    assert_eq!(effective.catchup_max_runs, 3);
+    assert_eq!(effective.catchup_max_lag_secs, 300);
+}
+
+#[test]
+fn test_effective_eval_schedule_none_without_eval_interval() {
+    let flow_info = flow_info_for_schedule_test(None, None, HashMap::new(), 61);
+    assert!(effective_eval_schedule_from_flow_info(&flow_info).is_none());
+}
+
+#[test]
+fn test_effective_eval_schedule_deterministic_on_old_metadata() {
+    // Old metadata: no typed eval_schedule, but has eval_interval_secs and
+    // a fixed created_time. Repeated calls must produce the same config.
+    let flow_info = flow_info_for_schedule_test(None, Some(60), HashMap::new(), 61);
+    let first = effective_eval_schedule_from_flow_info(&flow_info).unwrap();
+    let second = effective_eval_schedule_from_flow_info(&flow_info).unwrap();
+    assert_eq!(first, second);
+    // Sanity: the derived values are based on created_time=61 + interval=60.
+    assert_eq!(first.anchor_secs, 0);
+    assert_eq!(first.start_secs, 120); // ceil(61, 0, 60) = 120
+    assert_eq!(
+        first.missed_tick_policy,
+        FlowMissedTickPolicy::BoundedCatchUp
+    );
+    assert_eq!(first.catchup_max_runs, 3);
+    assert_eq!(first.catchup_max_lag_secs, 300); // max(300, 3*60) = 300
+}
+
+#[test]
+fn test_old_flow_info_json_without_eval_schedule_deserializes() {
+    let typed = FlowScheduleConfig {
+        anchor_secs: 0,
+        start_secs: 999,
+        missed_tick_policy: FlowMissedTickPolicy::BoundedCatchUp,
+        catchup_max_runs: 9,
+        catchup_max_lag_secs: 900,
+    };
+    let flow_info = flow_info_for_schedule_test(Some(typed), Some(60), HashMap::new(), 61);
+    let mut json = serde_json::to_value(&flow_info).unwrap();
+    json.as_object_mut().unwrap().remove("eval_schedule");
+
+    let decoded: FlowInfoValue = serde_json::from_value(json).unwrap();
+    assert!(decoded.eval_schedule.is_none());
+
+    let effective = effective_eval_schedule_from_flow_info(&decoded).unwrap();
+    assert_eq!(effective.anchor_secs, 0);
+    assert_eq!(effective.start_secs, 120);
+    assert_eq!(
+        effective.missed_tick_policy,
+        FlowMissedTickPolicy::BoundedCatchUp
+    );
+    assert_eq!(effective.catchup_max_runs, 3);
+    assert_eq!(effective.catchup_max_lag_secs, 300);
+}
+
+#[tokio::test]
+async fn test_create_flow_rejects_unknown_option_in_meta_task() {
+    let mut task = test_create_flow_task(
+        "my_flow",
+        vec![],
+        TableName::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "my_sink_table"),
+        false,
+    );
+    task.flow_options
+        .insert("unknown_option".to_string(), "value".to_string());
+    let node_manager = Arc::new(MockFlownodeManager::new(NaiveFlownodeHandler));
+    let ddl_context = new_ddl_context(node_manager);
+    let query_ctx = test_query_context();
+    let mut procedure = CreateFlowProcedure::new(task, query_ctx, ddl_context);
+
+    let err = procedure.on_prepare().await.unwrap_err();
+    assert_matches!(err, error::Error::Unexpected { .. });
+    assert!(
+        err.to_string()
+            .contains("Unknown flow option 'unknown_option'")
+    );
+}
+
+#[test]
+fn test_create_request_strips_defer_on_missing_source_runtime_option() {
+    let mut task = test_create_flow_task(
+        "my_flow",
+        vec![],
+        TableName::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "my_sink_table"),
+        false,
+    );
+    enable_defer_on_missing_source(&mut task);
+
+    let data = CreateFlowData {
+        state: CreateFlowState::CreateFlows,
+        task,
+        flow_id: Some(1024),
+        peers: vec![],
+        source_table_ids: vec![],
+        unresolved_source_table_names: vec![],
+        flow_context: FlowQueryContext {
+            catalog: DEFAULT_CATALOG_NAME.to_string(),
+            schema: DEFAULT_SCHEMA_NAME.to_string(),
+            timezone: "UTC".to_string(),
+            extensions: HashMap::new(),
+            channel: 0,
+            snapshot_seqs: HashMap::new(),
+            sst_min_sequences: HashMap::new(),
+        },
+        prev_flow_info_value: None,
+        did_replace: false,
+        flow_type: Some(FlowType::Batching),
+    };
+
+    let request: CreateRequest = (&data).into();
+
+    assert!(
+        !request
+            .flow_options
+            .contains_key(DEFER_ON_MISSING_SOURCE_KEY)
+    );
+    assert_eq!(
+        request
+            .flow_options
+            .get(FlowType::FLOW_TYPE_KEY)
+            .map(String::as_str),
+        Some(FlowType::BATCHING)
+    );
+}
+
+pub(crate) async fn create_test_flow(
+    ddl_context: &DdlContext,
+    flow_name: &str,
+    source_table_names: Vec<TableName>,
+    sink_table_name: TableName,
+) -> FlowId {
+    let task = test_create_flow_task(
+        flow_name,
+        source_table_names.clone(),
+        sink_table_name.clone(),
+        false,
+    );
+    let query_ctx = test_query_context();
+    let mut procedure = CreateFlowProcedure::new(task.clone(), query_ctx, ddl_context.clone());
+    let output = execute_procedure_until_done(&mut procedure).await.unwrap();
+    let flow_id = output.downcast_ref::<FlowId>().unwrap();
+
+    *flow_id
+}
+
+pub(crate) async fn create_test_pending_flow(
+    ddl_context: &DdlContext,
+    flow_name: &str,
+    source_table_names: Vec<TableName>,
+    sink_table_name: TableName,
+) -> FlowId {
+    let mut task = test_create_flow_task(
+        flow_name,
+        source_table_names.clone(),
+        sink_table_name.clone(),
+        false,
+    );
+    enable_defer_on_missing_source(&mut task);
+    let query_ctx = test_query_context();
+    let mut procedure = CreateFlowProcedure::new(task, query_ctx, ddl_context.clone());
+    let output = execute_procedure_until_done(&mut procedure).await.unwrap();
+    let flow_id = output.downcast_ref::<FlowId>().unwrap();
+
+    *flow_id
+}
+
+#[tokio::test]
+async fn test_create_flow() {
+    let table_id = 1024;
+    let source_table_names = vec![TableName::new(
+        DEFAULT_CATALOG_NAME,
+        DEFAULT_SCHEMA_NAME,
+        "my_source_table",
+    )];
+    let sink_table_name =
+        TableName::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "my_sink_table");
+    let node_manager = Arc::new(MockFlownodeManager::new(NaiveFlownodeHandler));
+    let ddl_context = new_ddl_context(node_manager);
+
+    let task = test_create_table_task("my_source_table", table_id);
+    ddl_context
+        .table_metadata_manager
+        .create_table_metadata(
+            task.table_info.clone(),
+            TableRouteValue::physical(vec![]),
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+    let flow_id = create_test_flow(
+        &ddl_context,
+        "my_flow",
+        source_table_names.clone(),
+        sink_table_name.clone(),
+    )
+    .await;
+    assert_eq!(flow_id, 1024);
+
+    // Creates if not exists
+    let task = test_create_flow_task(
+        "my_flow",
+        source_table_names.clone(),
+        sink_table_name.clone(),
+        true,
+    );
+    let query_ctx = test_query_context();
+    let mut procedure = CreateFlowProcedure::new(task.clone(), query_ctx, ddl_context.clone());
+    let output = execute_procedure_until_done(&mut procedure).await.unwrap();
+    let flow_id = output.downcast_ref::<FlowId>().unwrap();
+    assert_eq!(*flow_id, 1024);
+
+    // Creates again
+    let task = test_create_flow_task("my_flow", source_table_names, sink_table_name, false);
+    let query_ctx = test_query_context();
+    let mut procedure = CreateFlowProcedure::new(task.clone(), query_ctx, ddl_context);
+    let err = procedure.on_prepare().await.unwrap_err();
+    assert_matches!(err, error::Error::FlowAlreadyExists { .. });
+}
+
+#[tokio::test]
+async fn test_replace_pending_flow_with_active_flow_is_unsupported() {
+    let source_table_name = TableName::new(
+        DEFAULT_CATALOG_NAME,
+        DEFAULT_SCHEMA_NAME,
+        "replace_pending_source_table",
+    );
+    let sink_table_name = TableName::new(
+        DEFAULT_CATALOG_NAME,
+        DEFAULT_SCHEMA_NAME,
+        "replace_pending_sink_table",
+    );
+    let node_manager = Arc::new(MockFlownodeManager::new(NaiveFlownodeHandler));
+    let ddl_context = new_ddl_context(node_manager);
+
+    let pending_flow_id = create_test_pending_flow(
+        &ddl_context,
+        "replace_pending_flow",
+        vec![source_table_name.clone()],
+        sink_table_name.clone(),
+    )
+    .await;
+
+    let pending_flow = ddl_context
+        .flow_metadata_manager
+        .flow_info_manager()
+        .get(pending_flow_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(pending_flow.is_pending());
+    assert!(pending_flow.flownode_ids().is_empty());
+
+    let create_table_task = test_create_table_task("replace_pending_source_table", 1026);
+    ddl_context
+        .table_metadata_manager
+        .create_table_metadata(
+            create_table_task.table_info.clone(),
+            TableRouteValue::physical(vec![]),
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+
+    let mut replace_task = test_create_flow_task(
+        "replace_pending_flow",
+        vec![source_table_name],
+        sink_table_name,
+        false,
+    );
+    replace_task.or_replace = true;
+    let query_ctx = test_query_context();
+    let mut procedure = CreateFlowProcedure::new(replace_task, query_ctx, ddl_context.clone());
+    let err = procedure.on_prepare().await.unwrap_err();
+    assert_matches!(err, error::Error::Unsupported { .. });
+    assert!(
+        err.to_string()
+            .contains("Replacing between pending and active flow states")
+    );
+}
+
+#[tokio::test]
+async fn test_replace_active_flow_with_pending_flow_is_unsupported() {
+    let existing_source_table = TableName::new(
+        DEFAULT_CATALOG_NAME,
+        DEFAULT_SCHEMA_NAME,
+        "replace_active_source_table",
+    );
+    let missing_source_table = TableName::new(
+        DEFAULT_CATALOG_NAME,
+        DEFAULT_SCHEMA_NAME,
+        "replace_missing_source_table",
+    );
+    let sink_table_name = TableName::new(
+        DEFAULT_CATALOG_NAME,
+        DEFAULT_SCHEMA_NAME,
+        "replace_active_sink_table",
+    );
+
+    let node_manager = Arc::new(MockFlownodeManager::new(NaiveFlownodeHandler));
+    let ddl_context = new_ddl_context(node_manager);
+
+    let create_table_task = test_create_table_task("replace_active_source_table", 2026);
+    ddl_context
+        .table_metadata_manager
+        .create_table_metadata(
+            create_table_task.table_info.clone(),
+            TableRouteValue::physical(vec![]),
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+
+    let _flow_id = create_test_flow(
+        &ddl_context,
+        "replace_active_flow_to_pending",
+        vec![existing_source_table],
+        sink_table_name.clone(),
+    )
+    .await;
+
+    let mut replace_task = test_create_flow_task(
+        "replace_active_flow_to_pending",
+        vec![missing_source_table],
+        sink_table_name,
+        false,
+    );
+    enable_defer_on_missing_source(&mut replace_task);
+    replace_task.or_replace = true;
+    let query_ctx = test_query_context();
+    let mut procedure = CreateFlowProcedure::new(replace_task, query_ctx, ddl_context.clone());
+    let err = procedure.on_prepare().await.unwrap_err();
+    assert_matches!(err, error::Error::Unsupported { .. });
+    assert!(
+        err.to_string()
+            .contains("Replacing between pending and active flow states")
+    );
+}
+
+#[tokio::test]
+async fn test_replace_pending_flow_with_pending_flow_updates_metadata() {
+    let first_missing_source = TableName::new(
+        DEFAULT_CATALOG_NAME,
+        DEFAULT_SCHEMA_NAME,
+        "replace_pending_first_missing_source",
+    );
+    let second_missing_source = TableName::new(
+        DEFAULT_CATALOG_NAME,
+        DEFAULT_SCHEMA_NAME,
+        "replace_pending_second_missing_source",
+    );
+    let sink_table_name = TableName::new(
+        DEFAULT_CATALOG_NAME,
+        DEFAULT_SCHEMA_NAME,
+        "replace_pending_to_pending_sink_table",
+    );
+    let node_manager = Arc::new(MockFlownodeManager::new(NaiveFlownodeHandler));
+    let ddl_context = new_ddl_context(node_manager);
+
+    let original_flow_id = create_test_pending_flow(
+        &ddl_context,
+        "replace_pending_to_pending_flow",
+        vec![first_missing_source.clone()],
+        sink_table_name.clone(),
+    )
+    .await;
+
+    let original_flow = ddl_context
+        .flow_metadata_manager
+        .flow_info_manager()
+        .get(original_flow_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(original_flow.is_pending());
+    assert_eq!(
+        original_flow.unresolved_source_table_names(),
+        &[first_missing_source]
+    );
+    assert!(original_flow.flownode_ids().is_empty());
+
+    let mut replace_task = test_create_flow_task(
+        "replace_pending_to_pending_flow",
+        vec![second_missing_source.clone()],
+        sink_table_name,
+        false,
+    );
+    enable_defer_on_missing_source(&mut replace_task);
+    replace_task.or_replace = true;
+    let query_ctx = test_query_context();
+    let mut procedure = CreateFlowProcedure::new(replace_task, query_ctx, ddl_context.clone());
+    let output = execute_procedure_until_done(&mut procedure).await.unwrap();
+    let replaced_flow_id = *output.downcast_ref::<FlowId>().unwrap();
+    assert_eq!(replaced_flow_id, original_flow_id);
+
+    let replaced_flow = ddl_context
+        .flow_metadata_manager
+        .flow_info_manager()
+        .get(replaced_flow_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(replaced_flow.is_pending());
+    assert_eq!(replaced_flow.source_table_ids(), Vec::<u32>::new());
+    assert_eq!(
+        replaced_flow.unresolved_source_table_names(),
+        std::slice::from_ref(&second_missing_source)
+    );
+    assert_eq!(
+        replaced_flow.all_source_table_names(),
+        &[second_missing_source]
+    );
+    assert!(replaced_flow.flownode_ids().is_empty());
+}
+
+#[tokio::test]
+async fn test_create_flow_same_source_and_sink_table() {
+    let table_id = 1024;
+    let table_name = TableName::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "same_table");
+
+    // Use the same table for both source and sink
+    let source_table_names = vec![table_name.clone()];
+    let sink_table_name = table_name.clone();
+
+    let node_manager = Arc::new(MockFlownodeManager::new(NaiveFlownodeHandler));
+    let ddl_context = new_ddl_context(node_manager);
+
+    // Create the table first so it exists
+    let task = test_create_table_task("same_table", table_id);
+    ddl_context
+        .table_metadata_manager
+        .create_table_metadata(
+            task.table_info.clone(),
+            TableRouteValue::physical(vec![]),
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+
+    // Try to create a flow with same source and sink table - should fail
+    let task = test_create_flow_task("my_flow", source_table_names, sink_table_name, false);
+    let query_ctx = test_query_context();
+    let mut procedure = CreateFlowProcedure::new(task, query_ctx, ddl_context);
+    let err = procedure.on_prepare().await.unwrap_err();
+    assert_matches!(err, error::Error::Unsupported { .. });
+
+    // Verify the error message contains information about the same table
+    if let error::Error::Unsupported { operation, .. } = &err {
+        assert!(operation.contains("source and sink table being the same"));
+        assert!(operation.contains("same_table"));
+    }
+}
+
+fn create_test_flow_task_for_serialization() -> CreateFlowTask {
+    CreateFlowTask {
+        catalog_name: "test_catalog".to_string(),
+        flow_name: "test_flow".to_string(),
+        source_table_names: vec![TableName::new("catalog", "schema", "source_table")],
+        sink_table_name: TableName::new("catalog", "schema", "sink_table"),
+        or_replace: false,
+        create_if_not_exists: false,
+        expire_after: None,
+        eval_interval_secs: None,
+        comment: "test comment".to_string(),
+        sql: "SELECT * FROM source_table".to_string(),
+        flow_options: HashMap::new(),
+        eval_schedule: None,
+    }
+}
+
+#[test]
+fn test_create_flow_lock_key_does_not_lock_sink_table_name() {
+    let task = create_test_flow_task_for_serialization();
+    let query_ctx = test_query_context();
+    let ddl_context = new_ddl_context(Arc::new(MockFlownodeManager::new(NaiveFlownodeHandler)));
+    let procedure = CreateFlowProcedure::new(task, query_ctx, ddl_context);
+
+    let lock_keys = procedure.lock_key().get_keys();
+
+    assert!(
+        lock_keys.contains(&"Share(\"__catalog_lock/test_catalog\")".to_string()),
+        "lock keys should include the catalog read lock, got: {lock_keys:?}"
+    );
+    assert!(
+        lock_keys.contains(&"Exclusive(\"__flow_name_lock/test_catalog.test_flow\")".to_string()),
+        "lock keys should include the flow name lock, got: {lock_keys:?}"
+    );
+    assert_eq!(
+        lock_keys
+            .iter()
+            .filter(|key| key.contains("__table_name_lock"))
+            .count(),
+        0,
+        "sink table name lock should be acquired by the nested create table procedure, got: {lock_keys:?}"
+    );
+}
+
+#[test]
+fn test_create_flow_data_serialization_backward_compatibility() {
+    // Test that old serialized data with query_context can be deserialized
+    let old_json = r#"{
+        "state": "Prepare",
+        "task": {
+            "catalog_name": "test_catalog",
+            "flow_name": "test_flow",
+            "source_table_names": [{"catalog_name": "catalog", "schema_name": "schema", "table_name": "source"}],
+            "sink_table_name": {"catalog_name": "catalog", "schema_name": "schema", "table_name": "sink"},
+            "or_replace": false,
+            "create_if_not_exists": false,
+            "expire_after": null,
+            "comment": "test",
+            "sql": "SELECT * FROM source",
+            "flow_options": {}
+        },
+        "flow_id": null,
+        "peers": [],
+        "source_table_ids": [],
+        "unresolved_source_table_names": [],
+        "query_context": {
+            "current_catalog": "old_catalog",
+            "current_schema": "old_schema",
+            "timezone": "UTC",
+            "extensions": {},
+            "channel": 0
+        },
+        "prev_flow_info_value": null,
+        "did_replace": false,
+        "flow_type": null
+    }"#;
+
+    let data: CreateFlowData = serde_json::from_str(old_json).unwrap();
+    assert_eq!(data.flow_context.catalog, "old_catalog");
+    assert_eq!(data.flow_context.schema, "old_schema");
+    assert_eq!(data.flow_context.timezone, "UTC");
+}
+
+#[test]
+fn test_create_flow_data_new_format_serialization() {
+    // Test new format serialization/deserialization
+    let flow_context = FlowQueryContext {
+        catalog: "new_catalog".to_string(),
+        schema: "new_schema".to_string(),
+        timezone: "America/New_York".to_string(),
+        extensions: HashMap::new(),
+        channel: 0,
+        snapshot_seqs: HashMap::new(),
+        sst_min_sequences: HashMap::new(),
+    };
+
+    let data = CreateFlowData {
+        state: CreateFlowState::Prepare,
+        task: create_test_flow_task_for_serialization(),
+        flow_id: None,
+        peers: vec![],
+        source_table_ids: vec![],
+        unresolved_source_table_names: vec![],
+        flow_context,
+        prev_flow_info_value: None,
+        did_replace: false,
+        flow_type: None,
+    };
+
+    let serialized = serde_json::to_string(&data).unwrap();
+    let deserialized: CreateFlowData = serde_json::from_str(&serialized).unwrap();
+
+    assert_eq!(data.flow_context, deserialized.flow_context);
+    assert_eq!(deserialized.flow_context.catalog, "new_catalog");
+    assert_eq!(deserialized.flow_context.schema, "new_schema");
+    assert_eq!(deserialized.flow_context.timezone, "America/New_York");
+    assert_eq!(deserialized.flow_context.channel, 0);
+    assert_eq!(deserialized.flow_context.snapshot_seqs, HashMap::new());
+    assert_eq!(deserialized.flow_context.sst_min_sequences, HashMap::new());
+}
+
+#[test]
+fn test_flow_query_context_conversion_from_query_context() {
+    let query_context = QueryContext {
+        current_catalog: "prod_catalog".to_string(),
+        current_schema: "public".to_string(),
+        timezone: "America/Los_Angeles".to_string(),
+        extensions: [
+            ("unused_key".to_string(), "unused_value".to_string()),
+            ("another_key".to_string(), "another_value".to_string()),
+        ]
+        .into(),
+        channel: 99,
+        snapshot_seqs: HashMap::from([(1, 10)]),
+        sst_min_sequences: HashMap::from([(1, 8)]),
+    };
+
+    let flow_context: FlowQueryContext = query_context.into();
+
+    assert_eq!(flow_context.catalog, "prod_catalog");
+    assert_eq!(flow_context.schema, "public");
+    assert_eq!(flow_context.timezone, "America/Los_Angeles");
+    assert_eq!(flow_context.channel, 99);
+    assert_eq!(flow_context.snapshot_seqs, HashMap::from([(1, 10)]));
+    assert_eq!(flow_context.sst_min_sequences, HashMap::from([(1, 8)]));
+}
+
+#[test]
+fn test_create_flow_procedure_strips_scheduled_time_extension() {
+    let task = test_create_flow_task(
+        "my_flow",
+        vec![],
+        TableName::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "my_sink_table"),
+        false,
+    );
+    let ddl_context = new_ddl_context(Arc::new(MockFlownodeManager::new(NaiveFlownodeHandler)));
+    let mut query_ctx = test_query_context();
+    query_ctx.extensions.insert(
+        "flow.scheduled_time_millis".to_string(),
+        "1700000000000".to_string(),
+    );
+    query_ctx
+        .extensions
+        .insert("flow.other".to_string(), "kept".to_string());
+
+    let procedure = CreateFlowProcedure::new(task, query_ctx, ddl_context);
+
+    assert!(
+        !procedure
+            .data
+            .flow_context
+            .extensions
+            .contains_key("flow.scheduled_time_millis")
+    );
+    assert_eq!(
+        procedure
+            .data
+            .flow_context
+            .extensions
+            .get("flow.other")
+            .map(String::as_str),
+        Some("kept")
+    );
+}
+
+#[test]
+fn test_flow_info_conversion_with_flow_context() {
+    let flow_context = FlowQueryContext {
+        catalog: "info_catalog".to_string(),
+        schema: "info_schema".to_string(),
+        timezone: "Europe/Berlin".to_string(),
+        extensions: HashMap::new(),
+        channel: 0,
+        snapshot_seqs: HashMap::new(),
+        sst_min_sequences: HashMap::new(),
+    };
+
+    let data = CreateFlowData {
+        state: CreateFlowState::CreateMetadata,
+        task: create_test_flow_task_for_serialization(),
+        flow_id: Some(123),
+        peers: vec![],
+        source_table_ids: vec![456, 789],
+        unresolved_source_table_names: vec![],
+        flow_context,
+        prev_flow_info_value: None,
+        did_replace: false,
+        flow_type: Some(FlowType::Batching),
+    };
+
+    let (flow_info, _routes) = (&data).into();
+
+    assert!(flow_info.query_context.is_some());
+    let query_context = flow_info.query_context.unwrap();
+    assert_eq!(query_context.current_catalog(), "info_catalog");
+    assert_eq!(query_context.current_schema(), "info_schema");
+    assert_eq!(query_context.timezone(), "Europe/Berlin");
+    assert_eq!(query_context.channel(), 0);
+    assert!(query_context.extensions().is_empty());
+}
+
+#[test]
+fn test_flow_info_conversion_strips_scheduled_time_extension() {
+    let flow_context = FlowQueryContext {
+        catalog: "info_catalog".to_string(),
+        schema: "info_schema".to_string(),
+        timezone: "UTC".to_string(),
+        extensions: HashMap::from([
+            (
+                "flow.scheduled_time_millis".to_string(),
+                "1700000000000".to_string(),
+            ),
+            ("flow.other".to_string(), "kept".to_string()),
+        ]),
+        channel: 0,
+        snapshot_seqs: HashMap::new(),
+        sst_min_sequences: HashMap::new(),
+    };
+
+    let data = CreateFlowData {
+        state: CreateFlowState::CreateMetadata,
+        task: create_test_flow_task_for_serialization(),
+        flow_id: Some(123),
+        peers: vec![],
+        source_table_ids: vec![],
+        unresolved_source_table_names: vec![],
+        flow_context,
+        prev_flow_info_value: None,
+        did_replace: false,
+        flow_type: Some(FlowType::Batching),
+    };
+
+    let (flow_info, _routes) = (&data).into();
+    let query_context = flow_info.query_context.unwrap();
+    assert!(
+        !query_context
+            .extensions()
+            .contains_key("flow.scheduled_time_millis")
+    );
+    assert_eq!(
+        query_context
+            .extensions()
+            .get("flow.other")
+            .map(String::as_str),
+        Some("kept")
+    );
+}
+
+#[test]
+fn test_mixed_serialization_format_support() {
+    // Test that we can deserialize both old and new formats
+
+    // Test new FlowQueryContext format
+    let new_format = r#"{"catalog": "test", "schema": "test", "timezone": "UTC"}"#;
+    let ctx_from_new: FlowQueryContext = serde_json::from_str(new_format).unwrap();
+    assert_eq!(ctx_from_new.catalog, "test");
+    assert_eq!(ctx_from_new.schema, "test");
+    assert_eq!(ctx_from_new.timezone, "UTC");
+
+    // Test old QueryContext format conversion
+    let old_format = r#"{"current_catalog": "old_test", "current_schema": "old_schema", "timezone": "PST", "extensions": {}, "channel": 0}"#;
+    let ctx_from_old: FlowQueryContext = serde_json::from_str(old_format).unwrap();
+    assert_eq!(ctx_from_old.catalog, "old_test");
+    assert_eq!(ctx_from_old.schema, "old_schema");
+    assert_eq!(ctx_from_old.timezone, "PST");
+
+    // Test that they can be compared
+    let expected_new = FlowQueryContext {
+        catalog: "test".to_string(),
+        schema: "test".to_string(),
+        timezone: "UTC".to_string(),
+        extensions: HashMap::new(),
+        channel: 0,
+        snapshot_seqs: HashMap::new(),
+        sst_min_sequences: HashMap::new(),
+    };
+    assert_eq!(ctx_from_new, expected_new);
+}

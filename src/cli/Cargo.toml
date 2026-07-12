@@ -1,0 +1,78 @@
+[package]
+name = "cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = [
+    "pg_kvbackend",
+    "mysql_kvbackend",
+]
+pg_kvbackend = ["common-meta/pg_kvbackend", "meta-srv/pg_kvbackend"]
+mysql_kvbackend = ["common-meta/mysql_kvbackend", "meta-srv/mysql_kvbackend"]
+
+[lints]
+workspace = true
+
+[dependencies]
+async-stream.workspace = true
+async-trait.workspace = true
+auth.workspace = true
+base64.workspace = true
+cache.workspace = true
+catalog.workspace = true
+chrono.workspace = true
+clap.workspace = true
+client = { workspace = true, features = ["testing"] }
+common-base.workspace = true
+common-catalog.workspace = true
+common-config.workspace = true
+common-error.workspace = true
+common-grpc.workspace = true
+common-macro.workspace = true
+common-meta.workspace = true
+common-procedure.workspace = true
+common-query.workspace = true
+common-recordbatch.workspace = true
+common-runtime.workspace = true
+common-telemetry = { workspace = true, features = [
+    "deadlock_detection",
+] }
+common-time.workspace = true
+common-version.workspace = true
+common-wal.workspace = true
+datatypes.workspace = true
+etcd-client.workspace = true
+fs2.workspace = true
+futures.workspace = true
+humantime.workspace = true
+indicatif.workspace = true
+meta-client.workspace = true
+meta-srv.workspace = true
+object-store.workspace = true
+operator.workspace = true
+partition.workspace = true
+paste.workspace = true
+query.workspace = true
+rand.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+servers.workspace = true
+session.workspace = true
+snafu.workspace = true
+standalone.workspace = true
+store-api.workspace = true
+table.workspace = true
+tokio.workspace = true
+tracing-appender.workspace = true
+url.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+common-meta = { workspace = true, features = ["testing"] }
+common-test-util.workspace = true
+common-version.workspace = true
+serde.workspace = true
+tempfile.workspace = true

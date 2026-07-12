@@ -1,0 +1,133 @@
+CREATE TABLE base (
+    desc_str STRING,
+    ts TIMESTAMP TIME INDEX
+);
+
+Affected Rows: 0
+
+CREATE TABLE sink (
+    desc_str STRING,
+    ts TIMESTAMP TIME INDEX
+);
+
+Affected Rows: 0
+
+CREATE FLOW filter_out
+SINK TO sink
+AS
+SELECT desc_str, ts FROM base
+WHERE desc_str IN ('a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j');
+
+Affected Rows: 0
+
+SELECT options FROM INFORMATION_SCHEMA.FLOWS WHERE flow_name = 'filter_out';
+
++---------------------------+
+| options                   |
++---------------------------+
+| {"flow_type":"streaming"} |
++---------------------------+
+
+INSERT INTO base VALUES
+('a', '2023-01-01 00:00:00'),
+('j', '2023-01-01 00:00:09'),
+('l', '2023-01-01 00:00:08');
+
+Affected Rows: 3
+
+-- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
+ADMIN FLUSH_FLOW('filter_out');
+
++--------------------------------+
+| ADMIN FLUSH_FLOW('filter_out') |
++--------------------------------+
+|  FLOW_FLUSHED  |
++--------------------------------+
+
+SELECT * FROM sink ORDER BY ts;
+
++----------+---------------------+
+| desc_str | ts                  |
++----------+---------------------+
+| a        | 2023-01-01T00:00:00 |
+| j        | 2023-01-01T00:00:09 |
++----------+---------------------+
+
+DROP FLOW filter_out;
+
+Affected Rows: 0
+
+DROP TABLE base;
+
+Affected Rows: 0
+
+DROP TABLE sink;
+
+Affected Rows: 0
+
+CREATE TABLE base (
+    desc_str STRING,
+    ts TIMESTAMP TIME INDEX
+);
+
+Affected Rows: 0
+
+CREATE TABLE sink (
+    desc_str STRING,
+    ts TIMESTAMP TIME INDEX
+);
+
+Affected Rows: 0
+
+CREATE FLOW filter_out
+SINK TO sink
+AS
+SELECT desc_str, ts FROM base
+WHERE desc_str NOT IN ('a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j');
+
+Affected Rows: 0
+
+SELECT options FROM INFORMATION_SCHEMA.FLOWS WHERE flow_name = 'filter_out';
+
++---------------------------+
+| options                   |
++---------------------------+
+| {"flow_type":"streaming"} |
++---------------------------+
+
+INSERT INTO base VALUES
+('a', '2023-01-01 00:00:00'),
+('j', '2023-01-01 00:00:09'),
+('l', '2023-01-01 00:00:08');
+
+Affected Rows: 3
+
+-- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
+ADMIN FLUSH_FLOW('filter_out');
+
++--------------------------------+
+| ADMIN FLUSH_FLOW('filter_out') |
++--------------------------------+
+|  FLOW_FLUSHED  |
++--------------------------------+
+
+SELECT * FROM sink ORDER BY ts;
+
++----------+---------------------+
+| desc_str | ts                  |
++----------+---------------------+
+| l        | 2023-01-01T00:00:08 |
++----------+---------------------+
+
+DROP FLOW filter_out;
+
+Affected Rows: 0
+
+DROP TABLE base;
+
+Affected Rows: 0
+
+DROP TABLE sink;
+
+Affected Rows: 0
+

@@ -1,0 +1,24 @@
+name: Setup Minio cluster
+description: Deploy Minio cluster on Kubernetes
+inputs:
+  replicas:
+    default: 1
+    description: "replicas"
+
+runs:
+  using: composite
+  steps:
+  - name: Install Etcd cluster
+    shell: bash
+    run: | 
+      helm repo add minio https://charts.min.io/
+      helm upgrade --install minio \
+      --set resources.requests.memory=128Mi \
+      --set replicas=${{ inputs.replicas }} \
+      --set mode=standalone \
+      --set rootUser=rootuser,rootPassword=rootpass123 \
+      --set buckets[0].name=default \
+      --set service.port=80,service.targetPort=9000 \
+      minio/minio \
+      --create-namespace \
+      -n minio

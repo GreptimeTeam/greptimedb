@@ -1,0 +1,62 @@
+-- SQLNESS ARG version=v0.9.5
+CREATE TABLE alter_drop_test (
+    id INT,
+    val_to_drop STRING,
+    val_to_keep STRING,
+    ts TIMESTAMP TIME INDEX,
+    PRIMARY KEY(id)
+);
+
+Affected Rows: 0
+
+INSERT INTO alter_drop_test(id, val_to_drop, val_to_keep, ts) VALUES (1, 'a', 'x', 1672531200000);
+
+Affected Rows: 1
+
+-- SQLNESS ARG version=latest
+ALTER TABLE alter_drop_test DROP COLUMN val_to_drop;
+
+Affected Rows: 0
+
+SHOW CREATE TABLE alter_drop_test;
+
++-----------------+------------------------------------------------+
+| Table           | Create Table                                   |
++-----------------+------------------------------------------------+
+| alter_drop_test | CREATE TABLE IF NOT EXISTS "alter_drop_test" ( |
+|                 |   "id" INT NULL,                               |
+|                 |   "val_to_keep" STRING NULL,                   |
+|                 |   "ts" TIMESTAMP(3) NOT NULL,                  |
+|                 |   TIME INDEX ("ts"),                           |
+|                 |   PRIMARY KEY ("id")                           |
+|                 | )                                              |
+|                 |                                                |
+|                 | ENGINE=mito                                    |
+|                 |                                                |
++-----------------+------------------------------------------------+
+
+SELECT * FROM alter_drop_test ORDER BY id;
+
++----+-------------+---------------------+
+| id | val_to_keep | ts                  |
++----+-------------+---------------------+
+| 1  | x           | 2023-01-01T00:00:00 |
++----+-------------+---------------------+
+
+INSERT INTO alter_drop_test(id, val_to_keep, ts) VALUES (2, 'y', 1672531201000);
+
+Affected Rows: 1
+
+SELECT * FROM alter_drop_test ORDER BY id;
+
++----+-------------+---------------------+
+| id | val_to_keep | ts                  |
++----+-------------+---------------------+
+| 1  | x           | 2023-01-01T00:00:00 |
+| 2  | y           | 2023-01-01T00:00:01 |
++----+-------------+---------------------+
+
+DROP TABLE alter_drop_test;
+
+Affected Rows: 0
+

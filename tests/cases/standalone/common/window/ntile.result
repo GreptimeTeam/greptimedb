@@ -1,0 +1,96 @@
+-- Migrated from DuckDB test: test/sql/window/test_ntile.test
+CREATE TABLE "Scoreboard"("TeamName" VARCHAR, "Player" VARCHAR, "Score" INTEGER, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+INSERT INTO "Scoreboard" VALUES 
+('Mongrels', 'Apu', 350, 1000),
+('Mongrels', 'Ned', 666, 2000),
+('Mongrels', 'Meg', 1030, 3000),
+('Mongrels', 'Burns', 1270, 4000),
+('Simpsons', 'Homer', 1, 5000),
+('Simpsons', 'Lisa', 710, 6000),
+('Simpsons', 'Marge', 990, 7000),
+('Simpsons', 'Bart', 2010, 8000);
+
+Affected Rows: 8
+
+-- NTILE with partition
+SELECT "TeamName", "Player", "Score", NTILE(2) OVER (PARTITION BY "TeamName" ORDER BY "Score" ASC) AS ntile_val
+FROM "Scoreboard" ORDER BY "TeamName", "Score";
+
++----------+--------+-------+-----------+
+| TeamName | Player | Score | ntile_val |
++----------+--------+-------+-----------+
+| Mongrels | Apu    | 350   | 1         |
+| Mongrels | Ned    | 666   | 1         |
+| Mongrels | Meg    | 1030  | 2         |
+| Mongrels | Burns  | 1270  | 2         |
+| Simpsons | Homer  | 1     | 1         |
+| Simpsons | Lisa   | 710   | 1         |
+| Simpsons | Marge  | 990   | 2         |
+| Simpsons | Bart   | 2010  | 2         |
++----------+--------+-------+-----------+
+
+-- NTILE without partition
+SELECT "TeamName", "Player", "Score", NTILE(2) OVER (ORDER BY "Score" ASC) AS ntile_val
+FROM "Scoreboard" ORDER BY "Score";
+
++----------+--------+-------+-----------+
+| TeamName | Player | Score | ntile_val |
++----------+--------+-------+-----------+
+| Simpsons | Homer  | 1     | 1         |
+| Mongrels | Apu    | 350   | 1         |
+| Mongrels | Ned    | 666   | 1         |
+| Simpsons | Lisa   | 710   | 1         |
+| Simpsons | Marge  | 990   | 2         |
+| Mongrels | Meg    | 1030  | 2         |
+| Mongrels | Burns  | 1270  | 2         |
+| Simpsons | Bart   | 2010  | 2         |
++----------+--------+-------+-----------+
+
+-- NTILE with large number
+SELECT "TeamName", "Score", NTILE(1000) OVER (PARTITION BY "TeamName" ORDER BY "Score" ASC) AS ntile_val
+FROM "Scoreboard" ORDER BY "TeamName", "Score";
+
++----------+-------+-----------+
+| TeamName | Score | ntile_val |
++----------+-------+-----------+
+| Mongrels | 350   | 1         |
+| Mongrels | 666   | 2         |
+| Mongrels | 1030  | 3         |
+| Mongrels | 1270  | 4         |
+| Simpsons | 1     | 1         |
+| Simpsons | 710   | 2         |
+| Simpsons | 990   | 3         |
+| Simpsons | 2010  | 4         |
++----------+-------+-----------+
+
+-- NTILE with 1 (all rows in same tile)
+SELECT "TeamName", "Score", NTILE(1) OVER (PARTITION BY "TeamName" ORDER BY "Score" ASC) AS ntile_val
+FROM "Scoreboard" ORDER BY "TeamName", "Score";
+
++----------+-------+-----------+
+| TeamName | Score | ntile_val |
++----------+-------+-----------+
+| Mongrels | 350   | 1         |
+| Mongrels | 666   | 1         |
+| Mongrels | 1030  | 1         |
+| Mongrels | 1270  | 1         |
+| Simpsons | 1     | 1         |
+| Simpsons | 710   | 1         |
+| Simpsons | 990   | 1         |
+| Simpsons | 2010  | 1         |
++----------+-------+-----------+
+
+-- NTILE with NULL (should return NULL)
+-- TODO: duckdb return null, but GreptimeDB raise an error
+SELECT "TeamName", "Score", NTILE(NULL) OVER (PARTITION BY "TeamName" ORDER BY "Score" ASC) AS ntile_val
+FROM "Scoreboard" ORDER BY "TeamName", "Score";
+
+Error: 3001(EngineExecuteQuery), Execution error: NTILE requires a positive integer, but finds NULL
+
+DROP TABLE "Scoreboard";
+
+Affected Rows: 0
+

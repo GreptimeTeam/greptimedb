@@ -1,0 +1,46 @@
+# Copyright 2023 Greptime Team
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+headerPath = "Apache-2.0.txt"
+
+includes = [
+    "*.rs",
+    "*.py",
+    "*.ts",
+]
+
+excludes = [
+    # copied sources
+    "src/common/base/src/readable_size.rs",
+    "src/common/base/src/secrets.rs",
+    "src/servers/src/repeated_field.rs",
+    "src/servers/src/http/test_helpers.rs",
+    # enterprise: Apache-2.0 header is NOT applied to these. They are governed by
+    # the GreptimeDB Enterprise License and checked via `licenserc-enterprise.toml`.
+    # Keep this list in sync with that file's `includes`.
+    "src/common/meta/src/rpc/ddl/trigger.rs",
+    "src/operator/src/expr_helper/trigger.rs",
+    "src/sql/src/statements/alter/trigger.rs",
+    "src/sql/src/statements/create/trigger.rs",
+    "src/sql/src/statements/show/trigger.rs",
+    "src/sql/src/statements/drop/trigger.rs",
+    "src/sql/src/parsers/alter_parser/trigger.rs",
+    "src/sql/src/parsers/create_parser/trigger.rs",
+    "src/sql/src/parsers/show_parser/trigger.rs",
+    "src/mito2/src/extension.rs",
+]
+
+[properties]
+inceptionYear = 2023
+copyrightOwner = "Greptime Team"

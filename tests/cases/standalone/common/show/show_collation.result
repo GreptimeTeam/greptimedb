@@ -1,0 +1,31 @@
+SHOW COLLATION;
+
++-----------+---------+----+---------+----------+---------+
+| Collation | Charset | Id | Default | Compiled | Sortlen |
++-----------+---------+----+---------+----------+---------+
+| utf8_bin  | utf8    | 1  | Yes     | Yes      | 1       |
++-----------+---------+----+---------+----------+---------+
+
+SHOW COLLATION LIKE 'utf8';
+
+++
+++
+
+SHOW COLLATION WHERE Charset = 'utf8';
+
++-----------+---------+----+---------+----------+---------+
+| Collation | Charset | Id | Default | Compiled | Sortlen |
++-----------+---------+----+---------+----------+---------+
+| utf8_bin  | utf8    | 1  | Yes     | Yes      | 1       |
++-----------+---------+----+---------+----------+---------+
+
+SHOW COLLATION WHERE Charset = 'latin1';
+
+++
+++
+
+SHOW COLLATION LIKE 'latin1';
+
+++
+++
+

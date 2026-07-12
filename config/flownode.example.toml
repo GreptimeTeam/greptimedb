@@ -1,0 +1,163 @@
+## The flownode identifier and should be unique in the cluster.
+## @toml2docs:none-default
+node_id = 14
+
+## flow engine options.
+[flow]
+## The number of flow worker in flownode.
+## Not setting(or set to 0) this value will use the number of CPU cores divided by 2.
+#+num_workers=0
+[flow.batching_mode]
+## The default batching engine query timeout is 10 minutes.
+#+query_timeout="600s"
+## will output a warn log for any query that runs for more that this threshold
+#+slow_query_threshold="60s"
+## The minimum duration between two queries execution by batching mode task
+#+experimental_min_refresh_duration="5s"
+## The gRPC connection timeout
+#+grpc_conn_timeout="5s"
+## The gRPC max retry number
+#+experimental_grpc_max_retries=3
+## Flow wait for available frontend timeout,
+## if failed to find available frontend after frontend_scan_timeout elapsed, return error
+## which prevent flownode from starting
+#+experimental_frontend_scan_timeout="30s"
+## Maximum number of filters allowed in a single query
+#+experimental_max_filter_num_per_query=20
+## Time window merge distance
+#+experimental_time_window_merge_threshold=3
+## Whether to enable experimental flow incremental source reads.
+## When disabled, batching flows always execute full-snapshot queries.
+## Can be overridden per flow with WITH (experimental_enable_incremental_read = 'true').
+#+experimental_enable_incremental_read=false
+## Read preference of the Frontend client.
+#+read_preference="Leader"
+[flow.batching_mode.frontend_tls]
+## Whether to enable TLS for client.
+#+enabled=false
+## Server Certificate file path.
+## @toml2docs:none-default
+#+server_ca_cert_path=""
+## Client Certificate file path.
+## @toml2docs:none-default
+#+client_cert_path=""
+## Client Private key file path.
+## @toml2docs:none-default
+#+client_key_path=""
+
+## The gRPC server options.
+[grpc]
+## The address to bind the gRPC server.
+bind_addr = "127.0.0.1:6800"
+## The address advertised to the metasrv,
+## and used for connections from outside the host
+server_addr = "127.0.0.1:6800"
+## The number of server worker threads.
+runtime_size = 2
+## The maximum receive message size for gRPC server.
+max_recv_message_size = "512MB"
+## The maximum send message size for gRPC server.
+max_send_message_size = "512MB"
+
+## The HTTP server options.
+[http]
+## The address to bind the HTTP server.
+addr = "127.0.0.1:4000"
+## HTTP request timeout. Set to 0 to disable timeout.
+timeout = "0s"
+## HTTP request body limit.
+## The following units are supported: `B`, `KB`, `KiB`, `MB`, `MiB`, `GB`, `GiB`, `TB`, `TiB`, `PB`, `PiB`.
+## Set to 0 to disable limit.
+body_limit = "64MB"
+
+## The metasrv client options.
+[meta_client]
+## The addresses of the metasrv.
+metasrv_addrs = ["127.0.0.1:3002"]
+
+## Operation timeout.
+timeout = "3s"
+
+## DDL timeout.
+ddl_timeout = "10s"
+
+## Connect server timeout.
+connect_timeout = "1s"
+
+## `TCP_NODELAY` option for accepted connections.
+tcp_nodelay = true
+
+## The configuration about the cache of the metadata.
+metadata_cache_max_capacity = 100000
+
+## TTL of the metadata cache.
+metadata_cache_ttl = "10m"
+
+# TTI of the metadata cache.
+metadata_cache_tti = "5m"
+
+## The logging options.
+[logging]
+## The directory to store the log files. If set to empty, logs will not be written to files.
+dir = "./greptimedb_data/logs"
+
+## The log level. Can be `info`/`debug`/`warn`/`error`.
+## @toml2docs:none-default
+level = "info"
+
+## Enable OTLP tracing.
+enable_otlp_tracing = false
+
+## The OTLP tracing endpoint.
+otlp_endpoint = "http://localhost:4318/v1/traces"
+
+## Whether to append logs to stdout.
+append_stdout = true
+
+## The log format. Can be `text`/`json`.
+log_format = "text"
+
+## The maximum amount of log files.
+max_log_files = 720
+
+## The OTLP tracing export protocol. Can be `grpc`/`http`.
+otlp_export_protocol = "http"
+
+## Additional OTLP headers, only valid when using OTLP http
+[logging.otlp_headers]
+## @toml2docs:none-default
+#Authorization = "Bearer my-token"
+## @toml2docs:none-default
+#Database = "My database"
+
+## The percentage of tracing will be sampled and exported.
+## Valid range `[0, 1]`, 1 means all traces are sampled, 0 means all traces are not sampled, the default value is 1.
+## ratio > 1 are treated as 1. Fractions < 0 are treated as 0
+[logging.tracing_sample_ratio]
+default_ratio = 1.0
+
+## The tracing options. Only effect when compiled with `tokio-console` feature.
+#+ [tracing]
+## The tokio console address.
+## @toml2docs:none-default
+#+ tokio_console_addr = "127.0.0.1"
+
+[query]
+## Parallelism of the query engine for query sent by flownode.
+## Default to 1, so it won't use too much cpu or memory
+parallelism = 1
+
+## Memory pool size for query execution operators (aggregation, sorting, join).
+## Supports absolute size (e.g., "1GB", "2GB") or percentage of system memory (e.g., "20%").
+## Setting it to 0 disables the limit (unbounded, default behavior).
+## When this limit is reached, queries will fail with ResourceExhausted error.
+## NOTE: This does NOT limit memory used by table scans.
+memory_pool_size = "50%"
+
+## The memory options.
+[memory]
+## Whether to enable heap profiling activation during startup.
+## When enabled, heap profiling will be activated if the `MALLOC_CONF` environment variable
+## is set to "prof:true,prof_active:false". The official image adds this env variable.
+## Default is true.
+enable_heap_profiling = true

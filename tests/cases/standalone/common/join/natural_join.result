@@ -1,0 +1,60 @@
+-- Migrated from DuckDB test: test/sql/join/natural/natural_join.test
+-- Tests NATURAL JOIN functionality
+CREATE TABLE emp_natural("id" INTEGER, "name" VARCHAR, dept_id INTEGER, ts1 TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+CREATE TABLE dept_natural(dept_id INTEGER, dept_name VARCHAR, ts2 TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+INSERT INTO emp_natural VALUES (1, 'Alice', 10, 1000), (2, 'Bob', 20, 2000), (3, 'Carol', 10, 3000);
+
+Affected Rows: 3
+
+INSERT INTO dept_natural VALUES (10, 'Engineering', 4000), (20, 'Sales', 5000), (30, 'Marketing', 6000);
+
+Affected Rows: 3
+
+-- NATURAL JOIN (joins on common column names)
+SELECT * FROM emp_natural NATURAL JOIN dept_natural ORDER BY "id";
+
++----+-------+---------------------+---------+-------------+---------------------+
+| id | name  | ts1                 | dept_id | dept_name   | ts2                 |
++----+-------+---------------------+---------+-------------+---------------------+
+| 1  | Alice | 1970-01-01T00:00:01 | 10      | Engineering | 1970-01-01T00:00:04 |
+| 2  | Bob   | 1970-01-01T00:00:02 | 20      | Sales       | 1970-01-01T00:00:05 |
+| 3  | Carol | 1970-01-01T00:00:03 | 10      | Engineering | 1970-01-01T00:00:04 |
++----+-------+---------------------+---------+-------------+---------------------+
+
+-- NATURAL LEFT JOIN
+SELECT * FROM emp_natural NATURAL LEFT JOIN dept_natural ORDER BY "id";
+
++----+-------+---------------------+---------+-------------+---------------------+
+| id | name  | ts1                 | dept_id | dept_name   | ts2                 |
++----+-------+---------------------+---------+-------------+---------------------+
+| 1  | Alice | 1970-01-01T00:00:01 | 10      | Engineering | 1970-01-01T00:00:04 |
+| 2  | Bob   | 1970-01-01T00:00:02 | 20      | Sales       | 1970-01-01T00:00:05 |
+| 3  | Carol | 1970-01-01T00:00:03 | 10      | Engineering | 1970-01-01T00:00:04 |
++----+-------+---------------------+---------+-------------+---------------------+
+
+-- NATURAL RIGHT JOIN
+SELECT * FROM emp_natural NATURAL RIGHT JOIN dept_natural ORDER BY dept_id;
+
++----+-------+---------------------+---------+-------------+---------------------+
+| id | name  | ts1                 | dept_id | dept_name   | ts2                 |
++----+-------+---------------------+---------+-------------+---------------------+
+| 1  | Alice | 1970-01-01T00:00:01 | 10      | Engineering | 1970-01-01T00:00:04 |
+| 3  | Carol | 1970-01-01T00:00:03 | 10      | Engineering | 1970-01-01T00:00:04 |
+| 2  | Bob   | 1970-01-01T00:00:02 | 20      | Sales       | 1970-01-01T00:00:05 |
+|    |       |                     | 30      | Marketing   | 1970-01-01T00:00:06 |
++----+-------+---------------------+---------+-------------+---------------------+
+
+DROP TABLE dept_natural;
+
+Affected Rows: 0
+
+DROP TABLE emp_natural;
+
+Affected Rows: 0
+

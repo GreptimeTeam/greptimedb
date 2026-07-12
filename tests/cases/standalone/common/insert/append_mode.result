@@ -1,0 +1,78 @@
+create table if not exists append_mode_on(
+    host string,
+    ts timestamp,
+    cpu double,
+    TIME INDEX (ts),
+    PRIMARY KEY(host)
+)
+engine=mito
+with('append_mode'='true');
+
+Affected Rows: 0
+
+SELECT host, ts from append_mode_on ORDER BY host, ts;
+
+++
+++
+
+INSERT INTO append_mode_on VALUES ('host1',0, 0), ('host2', 1, 1,);
+
+Affected Rows: 2
+
+INSERT INTO append_mode_on VALUES ('host1',0, 0), ('host2', 1, 1,);
+
+Affected Rows: 2
+
+SELECT * from append_mode_on ORDER BY host, ts;
+
++-------+-------------------------+-----+
+| host  | ts                      | cpu |
++-------+-------------------------+-----+
+| host1 | 1970-01-01T00:00:00     | 0.0 |
+| host1 | 1970-01-01T00:00:00     | 0.0 |
+| host2 | 1970-01-01T00:00:00.001 | 1.0 |
+| host2 | 1970-01-01T00:00:00.001 | 1.0 |
++-------+-------------------------+-----+
+
+-- SQLNESS REPLACE (region\s\d+\(\d+\,\s\d+\)) region
+DELETE FROM append_mode_on WHERE host = 'host1';
+
+Error: 1004(InvalidArguments), Invalid request to region, reason: DELETE is not allowed under append mode
+
+create table if not exists append_mode_off(
+    host string,
+    ts timestamp,
+    cpu double,
+    TIME INDEX (ts),
+    PRIMARY KEY(host)
+)
+engine=mito
+with('append_mode'='false');
+
+Affected Rows: 0
+
+INSERT INTO append_mode_off VALUES ('host1',0, 0), ('host2', 1, 1,);
+
+Affected Rows: 2
+
+INSERT INTO append_mode_off VALUES ('host1',0, 10), ('host2', 1, 11,);
+
+Affected Rows: 2
+
+SELECT * from append_mode_off ORDER BY host, ts;
+
++-------+-------------------------+------+
+| host  | ts                      | cpu  |
++-------+-------------------------+------+
+| host1 | 1970-01-01T00:00:00     | 10.0 |
+| host2 | 1970-01-01T00:00:00.001 | 11.0 |
++-------+-------------------------+------+
+
+DROP TABLE append_mode_on;
+
+Affected Rows: 0
+
+DROP TABLE append_mode_off;
+
+Affected Rows: 0
+

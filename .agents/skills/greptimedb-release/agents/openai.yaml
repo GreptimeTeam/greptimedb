@@ -1,0 +1,4 @@
+interface:
+  display_name: "GreptimeDB Release"
+  short_description: "Publish a GreptimeDB release"
+  default_prompt: "Use $greptimedb-release to publish the next GreptimeDB release and coordinate the changelog, GitHub release, CI follow-up, and docs PR."

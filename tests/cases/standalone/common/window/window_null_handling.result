@@ -1,0 +1,79 @@
+-- Migrated from DuckDB test: Multiple window tests with NULL handling
+-- Tests window functions with NULL values
+CREATE TABLE null_test("id" INTEGER, val INTEGER, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+INSERT INTO null_test VALUES 
+(1, 100, 1000), (2, NULL, 2000), (3, 300, 3000), (4, NULL, 4000), (5, 500, 5000);
+
+Affected Rows: 5
+
+-- Window functions with NULL values
+SELECT "id", val, 
+  ROW_NUMBER() OVER (ORDER BY val NULLS LAST) as row_num,
+  RANK() OVER (ORDER BY val NULLS LAST) as rank_val
+FROM null_test ORDER BY "id";
+
++----+-----+---------+----------+
+| id | val | row_num | rank_val |
++----+-----+---------+----------+
+| 1  | 100 | 1       | 1        |
+| 2  |     | 4       | 4        |
+| 3  | 300 | 2       | 2        |
+| 4  |     | 5       | 4        |
+| 5  | 500 | 3       | 3        |
++----+-----+---------+----------+
+
+-- LEAD/LAG with NULL values
+SELECT "id", val,
+  LAG(val, 1) OVER (ORDER BY "id") as prev_val,
+  LEAD(val, 1) OVER (ORDER BY "id") as next_val
+FROM null_test ORDER BY "id";
+
++----+-----+----------+----------+
+| id | val | prev_val | next_val |
++----+-----+----------+----------+
+| 1  | 100 |          |          |
+| 2  |     | 100      | 300      |
+| 3  | 300 |          |          |
+| 4  |     | 300      | 500      |
+| 5  | 500 |          |          |
++----+-----+----------+----------+
+
+-- Aggregate window functions with NULL
+SELECT "id", val,
+  SUM(val) OVER (ORDER BY "id" ROWS UNBOUNDED PRECEDING) as running_sum,
+  COUNT(val) OVER (ORDER BY "id" ROWS UNBOUNDED PRECEDING) as running_count
+FROM null_test ORDER BY "id";
+
++----+-----+-------------+---------------+
+| id | val | running_sum | running_count |
++----+-----+-------------+---------------+
+| 1  | 100 | 100         | 1             |
+| 2  |     | 100         | 1             |
+| 3  | 300 | 400         | 2             |
+| 4  |     | 400         | 2             |
+| 5  | 500 | 900         | 3             |
++----+-----+-------------+---------------+
+
+-- FIRST_VALUE/LAST_VALUE with NULL
+SELECT "id", val,
+  FIRST_VALUE(val) OVER (ORDER BY "id" ROWS UNBOUNDED PRECEDING) as first_val,
+  LAST_VALUE(val) OVER (ORDER BY "id" ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) as last_val
+FROM null_test ORDER BY "id";
+
++----+-----+-----------+----------+
+| id | val | first_val | last_val |
++----+-----+-----------+----------+
+| 1  | 100 | 100       | 100      |
+| 2  |     | 100       |          |
+| 3  | 300 | 100       | 300      |
+| 4  |     | 100       |          |
+| 5  | 500 | 100       | 500      |
++----+-----+-----------+----------+
+
+DROP TABLE null_test;
+
+Affected Rows: 0
+

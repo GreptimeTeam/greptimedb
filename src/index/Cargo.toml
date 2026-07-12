@@ -1,0 +1,65 @@
+[package]
+name = "index"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+vector_index = ["dep:usearch"]
+
+[dependencies]
+async-trait.workspace = true
+asynchronous-codec = "0.7.0"
+bytemuck.workspace = true
+bytes.workspace = true
+common-base.workspace = true
+common-error.workspace = true
+common-macro.workspace = true
+common-runtime.workspace = true
+common-telemetry.workspace = true
+datatypes.workspace = true
+fastbloom = "0.8"
+fst.workspace = true
+futures.workspace = true
+greptime-proto.workspace = true
+itertools.workspace = true
+jieba-rs = "0.10"
+lazy_static.workspace = true
+mockall.workspace = true
+nalgebra.workspace = true
+pin-project.workspace = true
+prost.workspace = true
+puffin.workspace = true
+regex.workspace = true
+regex-automata.workspace = true
+roaring = "0.10"
+serde.workspace = true
+serde_json.workspace = true
+snafu.workspace = true
+store-api.workspace = true
+tantivy = { version = "0.26", features = ["zstd-compression"] }
+tantivy-jieba = "0.20"
+tokio.workspace = true
+tokio-util.workspace = true
+usearch = { version = "2.21", default-features = false, features = ["fp16lib"], optional = true }
+uuid.workspace = true
+
+[dev-dependencies]
+common-test-util.workspace = true
+criterion.workspace = true
+rand.workspace = true
+rand_chacha = "0.9"
+tempfile.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+
+[[bench]]
+name = "tokenizer_bench"
+harness = false
+
+[[bench]]
+name = "bytes_to_u64_vec"
+harness = false

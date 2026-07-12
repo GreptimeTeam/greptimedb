@@ -1,0 +1,97 @@
+on:
+  merge_group:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - 'docs/**'
+      - 'config/**'
+      - '**.md'
+      - '.dockerignore'
+      - 'docker/**'
+      - '.gitignore'
+      - 'grafana/**'
+      - 'Makefile'
+  push:
+    branches:
+      - main
+    paths:
+      - 'docs/**'
+      - 'config/**'
+      - '**.md'
+      - '.dockerignore'
+      - 'docker/**'
+      - '.gitignore'
+      - 'grafana/**'
+      - 'Makefile'
+  workflow_dispatch:
+
+name: CI
+
+# To pass the required status check, see:
+# https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/defining-the-mergeability-of-pull-requests/troubleshooting-required-status-checks#handling-skipped-but-required-checks
+
+jobs:
+  typos:
+    name: Spell Check with Typos
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: crate-ci/typos@master
+
+  license-header-check:
+    runs-on: ubuntu-latest
+    name: Check License Header
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: korandoru/hawkeye@v5
+
+  check:
+    name: Check
+    runs-on: ubuntu-latest
+    steps:
+      - run: 'echo "No action required"'
+
+  fmt:
+    name: Rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - run: 'echo "No action required"'
+
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - run: 'echo "No action required"'
+
+  check-udeps:
+    name: Unused Dependencies
+    runs-on: ubuntu-latest
+    steps:
+      - run: 'echo "No action required"'
+
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - run: 'echo "No action required"'
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: 'echo "No action required"'
+
+  sqlness:
+    name: Sqlness Test (${{ matrix.mode.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ ubuntu-latest ]
+        mode:
+          - name: "Basic"
+          - name: "Remote WAL"
+          - name: "Flat format"
+    steps:
+      - run: 'echo "No action required"'

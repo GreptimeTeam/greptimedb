@@ -1,0 +1,52 @@
+CREATE FLOW pending_without_defer
+SINK TO pending_sink
+AS SELECT val FROM pending_source;
+
+Error: 1004(InvalidArguments), Invalid SQL, error: missing source tables for flow 'pending_without_defer'; use WITH (defer_on_missing_source = true) to create a pending flow
+
+CREATE FLOW pending_with_defer
+SINK TO pending_sink
+WITH (defer_on_missing_source = true)
+AS SELECT val FROM pending_source WHERE val > 10;
+
+Affected Rows: 0
+
+SHOW CREATE FLOW pending_with_defer;
+
++--------------------+--------------------------------------------------+
+| Flow               | Create Flow                                      |
++--------------------+--------------------------------------------------+
+| pending_with_defer | CREATE FLOW IF NOT EXISTS pending_with_defer     |
+|                    | SINK TO public.pending_sink                      |
+|                    | WITH (defer_on_missing_source = 'true')          |
+|                    | AS SELECT val FROM pending_source WHERE val > 10 |
++--------------------+--------------------------------------------------+
+
+SELECT
+    flow_definition,
+    source_table_ids,
+    source_table_names,
+    flownode_ids,
+    options LIKE '%"defer_on_missing_source":"true"%' AS has_defer_option,
+    options LIKE '%"flow_type":"batching"%' AS has_flow_type_option
+FROM INFORMATION_SCHEMA.FLOWS
+WHERE flow_name = 'pending_with_defer';
+
++--------------------------------------------------+------------------+--------------------+--------------+------------------+----------------------+
+| flow_definition                                  | source_table_ids | source_table_names | flownode_ids | has_defer_option | has_flow_type_option |
++--------------------------------------------------+------------------+--------------------+--------------+------------------+----------------------+
+| CREATE FLOW IF NOT EXISTS pending_with_defer     | []               |                    | {}           | true             | true                 |
+| SINK TO public.pending_sink                      |                  |                    |              |                  |                      |
+| WITH (defer_on_missing_source = 'true')          |                  |                    |              |                  |                      |
+| AS SELECT val FROM pending_source WHERE val > 10 |                  |                    |              |                  |                      |
++--------------------------------------------------+------------------+--------------------+--------------+------------------+----------------------+
+
+DROP FLOW pending_with_defer;
+
+Affected Rows: 0
+
+SELECT flow_name FROM INFORMATION_SCHEMA.FLOWS WHERE flow_name = 'pending_with_defer';
+
+++
+++
+

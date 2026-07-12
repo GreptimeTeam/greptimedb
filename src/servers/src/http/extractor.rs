@@ -1,0 +1,332 @@
+// Copyright 2023 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+use core::str;
+
+use ahash::HashSet;
+use axum::extract::FromRequestParts;
+use axum::http::StatusCode;
+use axum::http::request::Parts;
+use http::HeaderMap;
+use pipeline::{GreptimePipelineParams, SelectInfo, truthy};
+use session::protocol_ctx::OtlpMetricTranslationStrategy;
+
+use crate::http::header::constants::{
+    GREPTIME_LOG_EXTRACT_KEYS_HEADER_NAME, GREPTIME_LOG_PIPELINE_NAME_HEADER_NAME,
+    GREPTIME_LOG_PIPELINE_VERSION_HEADER_NAME, GREPTIME_LOG_TABLE_NAME_HEADER_NAME,
+    GREPTIME_OTLP_METRIC_IGNORE_RESOURCE_ATTRS_HEADER_NAME,
+    GREPTIME_OTLP_METRIC_PROMOTE_ALL_RESOURCE_ATTRS_HEADER_NAME,
+    GREPTIME_OTLP_METRIC_PROMOTE_RESOURCE_ATTRS_HEADER_NAME,
+    GREPTIME_OTLP_METRIC_PROMOTE_SCOPE_ATTRS_HEADER_NAME,
+    GREPTIME_OTLP_METRIC_TRANSLATION_STRATEGY_HEADER_NAME, GREPTIME_PIPELINE_NAME_HEADER_NAME,
+    GREPTIME_PIPELINE_PARAMS_HEADER, GREPTIME_PIPELINE_VERSION_HEADER_NAME,
+    GREPTIME_TRACE_TABLE_NAME_HEADER_NAME,
+};
+
+/// Axum extractor for optional target log table name from HTTP header
+/// using [`GREPTIME_LOG_TABLE_NAME_HEADER_NAME`] as key.
+pub struct LogTableName(pub Option<String>);
+
+impl<S> FromRequestParts<S> for LogTableName
+where
+    S: Send + Sync,
+{
+    type Rejection = (StatusCode, String);
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        let headers = &parts.headers;
+        string_value_from_header(headers, &[GREPTIME_LOG_TABLE_NAME_HEADER_NAME]).map(LogTableName)
+    }
+}
+
+/// Axum extractor for optional target trace table name from HTTP header
+/// using [`GREPTIME_TRACE_TABLE_NAME_HEADER_NAME`] as key.
+pub struct TraceTableName(pub Option<String>);
+
+impl<S> FromRequestParts<S> for TraceTableName
+where
+    S: Send + Sync,
+{
+    type Rejection = (StatusCode, String);
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        let headers = &parts.headers;
+        string_value_from_header(headers, &[GREPTIME_TRACE_TABLE_NAME_HEADER_NAME])
+            .map(TraceTableName)
+    }
+}
+
+/// Axum extractor for select keys from HTTP header,
+/// to extract and uplift key-values from OTLP attributes.
+/// See [`SelectInfo`] for more details.
+pub struct SelectInfoWrapper(pub SelectInfo);
+
+impl<S> FromRequestParts<S> for SelectInfoWrapper
+where
+    S: Send + Sync,
+{
+    type Rejection = (StatusCode, String);
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        let select =
+            string_value_from_header(&parts.headers, &[GREPTIME_LOG_EXTRACT_KEYS_HEADER_NAME])?;
+
+        match select {
+            Some(name) => {
+                if name.is_empty() {
+                    Ok(SelectInfoWrapper(Default::default()))
+                } else {
+                    Ok(SelectInfoWrapper(SelectInfo::from(name)))
+                }
+            }
+            None => Ok(SelectInfoWrapper(Default::default())),
+        }
+    }
+}
+
+/// Axum extractor for optional Pipeline name and version
+/// from HTTP headers.
+pub struct PipelineInfo {
+    pub pipeline_name: Option<String>,
+    pub pipeline_version: Option<String>,
+    pub pipeline_params: GreptimePipelineParams,
+}
+
+impl<S> FromRequestParts<S> for PipelineInfo
+where
+    S: Send + Sync,
+{
+    type Rejection = (StatusCode, String);
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        let headers = &parts.headers;
+        let pipeline_name = string_value_from_header(
+            headers,
+            &[
+                GREPTIME_LOG_PIPELINE_NAME_HEADER_NAME,
+                GREPTIME_PIPELINE_NAME_HEADER_NAME,
+            ],
+        )?;
+        let pipeline_version = string_value_from_header(
+            headers,
+            &[
+                GREPTIME_LOG_PIPELINE_VERSION_HEADER_NAME,
+                GREPTIME_PIPELINE_VERSION_HEADER_NAME,
+            ],
+        )?;
+        let pipeline_parameters =
+            string_value_from_header(headers, &[GREPTIME_PIPELINE_PARAMS_HEADER])?;
+
+        Ok(PipelineInfo {
+            pipeline_name,
+            pipeline_version,
+            pipeline_params: GreptimePipelineParams::from_params(pipeline_parameters.as_deref()),
+        })
+    }
+}
+
+/// Axum extractor for OTLP metric options from HTTP headers.
+pub struct OtlpMetricOptions {
+    /// Persist all resource attributes to the table
+    /// If false, persist selected attributes. See [`promote_resource_attrs`].
+    pub promote_all_resource_attrs: bool,
+
+    /// If `promote_all_resource_attrs` is true, then the list is an exclude list from `ignore_resource_attrs`.
+    /// If `promote_all_resource_attrs` is false, then this list is a include list from `promote_resource_attrs`.
+    pub resource_attrs: HashSet<String>,
+
+    /// Persist scope attributes to the table
+    /// If false, persist none
+    pub promote_scope_attrs: bool,
+
+    /// Metric and label name translation strategy.
+    pub metric_translation_strategy: OtlpMetricTranslationStrategy,
+}
+
+impl<S> FromRequestParts<S> for OtlpMetricOptions
+where
+    S: Send + Sync,
+{
+    type Rejection = (StatusCode, String);
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        let headers = &parts.headers;
+        let promote_all_resource_attrs = string_value_from_header(
+            headers,
+            &[GREPTIME_OTLP_METRIC_PROMOTE_ALL_RESOURCE_ATTRS_HEADER_NAME],
+        )?
+        .map(truthy)
+        .unwrap_or(false);
+
+        let attr_header = if promote_all_resource_attrs {
+            [GREPTIME_OTLP_METRIC_IGNORE_RESOURCE_ATTRS_HEADER_NAME]
+        } else {
+            [GREPTIME_OTLP_METRIC_PROMOTE_RESOURCE_ATTRS_HEADER_NAME]
+        };
+
+        let resource_attrs = string_value_from_header(headers, &attr_header)?
+            .map(|s| s.split(';').map(|s| s.trim().to_string()).collect())
+            .unwrap_or_default();
+
+        let promote_scope_attrs = string_value_from_header(
+            headers,
+            &[GREPTIME_OTLP_METRIC_PROMOTE_SCOPE_ATTRS_HEADER_NAME],
+        )?
+        .map(truthy)
+        .unwrap_or(false);
+
+        let metric_translation_strategy = string_value_from_header(
+            headers,
+            &[GREPTIME_OTLP_METRIC_TRANSLATION_STRATEGY_HEADER_NAME],
+        )?
+        .map(|value| parse_otlp_metric_translation_strategy(&value))
+        .transpose()?
+        .unwrap_or_default();
+
+        Ok(OtlpMetricOptions {
+            promote_all_resource_attrs,
+            resource_attrs,
+            promote_scope_attrs,
+            metric_translation_strategy,
+        })
+    }
+}
+
+fn parse_otlp_metric_translation_strategy(
+    value: &str,
+) -> Result<OtlpMetricTranslationStrategy, (StatusCode, String)> {
+    value.parse().map_err(|_| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!(
+                "`{}` header value `{}` is invalid. Expected one of: {}.",
+                GREPTIME_OTLP_METRIC_TRANSLATION_STRATEGY_HEADER_NAME,
+                value,
+                OtlpMetricTranslationStrategy::VALUES.join(", ")
+            ),
+        )
+    })
+}
+
+#[inline]
+fn string_value_from_header(
+    headers: &HeaderMap,
+    header_keys: &[&str],
+) -> Result<Option<String>, (StatusCode, String)> {
+    for header_key in header_keys {
+        if let Some(value) = headers.get(*header_key) {
+            return Some(String::from_utf8(value.as_bytes().to_vec()).map_err(|_| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    format!("`{}` header is not valid UTF-8 string type.", header_key),
+                )
+            }))
+            .transpose();
+        }
+    }
+
+    Ok(None)
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::http::Request;
+    use session::protocol_ctx::OtlpMetricTranslationStrategy;
+
+    use super::*;
+
+    #[test]
+    fn test_parse_otlp_metric_translation_strategy() {
+        let cases = [
+            (
+                "UnderscoreEscapingWithSuffixes",
+                OtlpMetricTranslationStrategy::UnderscoreEscapingWithSuffixes,
+            ),
+            (
+                "UnderscoreEscapingWithoutSuffixes",
+                OtlpMetricTranslationStrategy::UnderscoreEscapingWithoutSuffixes,
+            ),
+            (
+                "NoUTF8EscapingWithSuffixes",
+                OtlpMetricTranslationStrategy::NoUtf8EscapingWithSuffixes,
+            ),
+            (
+                "NoTranslation",
+                OtlpMetricTranslationStrategy::NoTranslation,
+            ),
+        ];
+
+        for (value, expected) in cases {
+            assert_eq!(
+                parse_otlp_metric_translation_strategy(value).unwrap(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn test_parse_otlp_metric_translation_strategy_rejects_invalid_value() {
+        let err = parse_otlp_metric_translation_strategy("no_translation").unwrap_err();
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        assert!(
+            err.1
+                .contains(GREPTIME_OTLP_METRIC_TRANSLATION_STRATEGY_HEADER_NAME)
+        );
+        assert!(err.1.contains("no_translation"));
+        assert!(err.1.contains("NoTranslation"));
+    }
+
+    #[tokio::test]
+    async fn test_otlp_metric_options_extracts_translation_strategy() {
+        let (mut parts, _) = Request::builder()
+            .header(
+                GREPTIME_OTLP_METRIC_TRANSLATION_STRATEGY_HEADER_NAME,
+                "NoTranslation",
+            )
+            .body(())
+            .unwrap()
+            .into_parts();
+
+        let opts = OtlpMetricOptions::from_request_parts(&mut parts, &())
+            .await
+            .unwrap();
+        assert_eq!(
+            opts.metric_translation_strategy,
+            OtlpMetricTranslationStrategy::NoTranslation
+        );
+    }
+
+    #[tokio::test]
+    async fn test_otlp_metric_options_rejects_invalid_translation_strategy() {
+        let (mut parts, _) = Request::builder()
+            .header(
+                GREPTIME_OTLP_METRIC_TRANSLATION_STRATEGY_HEADER_NAME,
+                "no_translation",
+            )
+            .body(())
+            .unwrap()
+            .into_parts();
+
+        let err = match OtlpMetricOptions::from_request_parts(&mut parts, &()).await {
+            Ok(_) => panic!("invalid metric translation strategy should be rejected"),
+            Err(err) => err,
+        };
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        assert!(
+            err.1
+                .contains(GREPTIME_OTLP_METRIC_TRANSLATION_STRATEGY_HEADER_NAME)
+        );
+        assert!(err.1.contains("no_translation"));
+    }
+}

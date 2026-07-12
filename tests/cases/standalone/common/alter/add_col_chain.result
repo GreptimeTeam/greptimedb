@@ -1,0 +1,38 @@
+CREATE TABLE test(i INTEGER, j TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+INSERT INTO test VALUES (1, 1), (2, 2);
+
+Affected Rows: 2
+
+INSERT INTO test VALUES (3, 3);
+
+Affected Rows: 1
+
+ALTER TABLE test ADD COLUMN k INTEGER;
+
+Affected Rows: 0
+
+ALTER TABLE test ADD COLUMN l INTEGER;
+
+Affected Rows: 0
+
+ALTER TABLE test ADD COLUMN m INTEGER DEFAULT 3;
+
+Affected Rows: 0
+
+SELECT * FROM test;
+
++---+-------------------------+---+---+---+
+| i | j                       | k | l | m |
++---+-------------------------+---+---+---+
+| 1 | 1970-01-01T00:00:00.001 |   |   | 3 |
+| 2 | 1970-01-01T00:00:00.002 |   |   | 3 |
+| 3 | 1970-01-01T00:00:00.003 |   |   | 3 |
++---+-------------------------+---+---+---+
+
+DROP TABLE test;
+
+Affected Rows: 0
+

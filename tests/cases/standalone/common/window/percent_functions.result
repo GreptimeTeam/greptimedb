@@ -1,0 +1,63 @@
+-- Migrated from DuckDB test: test/sql/window/test_cume_dist_orderby.test  
+-- Tests CUME_DIST and PERCENT_RANK window functions
+CREATE TABLE test_rank(x INTEGER, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+INSERT INTO test_rank VALUES 
+(1, 1000), (1, 2000), (2, 3000), (2, 4000), (3, 5000), (3, 6000), (4, 7000);
+
+Affected Rows: 7
+
+-- CUME_DIST function
+SELECT x, CUME_DIST() OVER (ORDER BY x) as cume_dist_val FROM test_rank ORDER BY ts;
+
++---+--------------------+
+| x | cume_dist_val      |
++---+--------------------+
+| 1 | 0.2857142857142857 |
+| 1 | 0.2857142857142857 |
+| 2 | 0.5714285714285714 |
+| 2 | 0.5714285714285714 |
+| 3 | 0.8571428571428571 |
+| 3 | 0.8571428571428571 |
+| 4 | 1.0                |
++---+--------------------+
+
+-- PERCENT_RANK function  
+SELECT x, PERCENT_RANK() OVER (ORDER BY x) as percent_rank_val FROM test_rank ORDER BY ts;
+
++---+--------------------+
+| x | percent_rank_val   |
++---+--------------------+
+| 1 | 0.0                |
+| 1 | 0.0                |
+| 2 | 0.3333333333333333 |
+| 2 | 0.3333333333333333 |
+| 3 | 0.6666666666666666 |
+| 3 | 0.6666666666666666 |
+| 4 | 1.0                |
++---+--------------------+
+
+-- Combined with partitioning
+SELECT x, 
+  CUME_DIST() OVER (PARTITION BY x ORDER BY ts) as cume_dist_partition,
+  PERCENT_RANK() OVER (PARTITION BY x ORDER BY ts) as percent_rank_partition
+FROM test_rank ORDER BY x, ts;
+
++---+---------------------+------------------------+
+| x | cume_dist_partition | percent_rank_partition |
++---+---------------------+------------------------+
+| 1 | 0.5                 | 0.0                    |
+| 1 | 1.0                 | 1.0                    |
+| 2 | 0.5                 | 0.0                    |
+| 2 | 1.0                 | 1.0                    |
+| 3 | 0.5                 | 0.0                    |
+| 3 | 1.0                 | 1.0                    |
+| 4 | 1.0                 | 0.0                    |
++---+---------------------+------------------------+
+
+DROP TABLE test_rank;
+
+Affected Rows: 0
+

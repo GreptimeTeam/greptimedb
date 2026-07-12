@@ -1,0 +1,17 @@
+syntax = "proto3";
+
+package logstore;
+
+message EntryImpl {
+  uint64 id = 1;
+  uint64 namespace_id = 2;
+  bytes data = 3;
+}
+
+message LogStoreState {
+  uint64 last_index = 1;
+}
+
+message NamespaceImpl {
+  uint64 id = 1;
+}

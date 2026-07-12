@@ -1,0 +1,574 @@
+// Copyright 2023 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+use std::any::Any;
+use std::sync::Arc;
+
+use common_error::define_into_tonic_status;
+use common_error::ext::{BoxedError, ErrorExt, RetryHint};
+use common_error::status_code::StatusCode;
+use common_macro::stack_trace_debug;
+use common_runtime::JoinError;
+use snafu::{Location, Snafu};
+use store_api::storage::RegionId;
+use table::error::Error as TableError;
+use tokio::time::error::Elapsed;
+
+/// Business error of datanode.
+#[derive(Snafu)]
+#[snafu(visibility(pub))]
+#[stack_trace_debug]
+pub enum Error {
+    #[snafu(display("Failed to execute async task"))]
+    AsyncTaskExecute {
+        #[snafu(implicit)]
+        location: Location,
+        source: Arc<Error>,
+    },
+
+    #[snafu(display("Failed to watch change"))]
+    WatchAsyncTaskChange {
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        error: tokio::sync::watch::error::RecvError,
+    },
+
+    #[snafu(display("Failed to handle heartbeat response"))]
+    HandleHeartbeatResponse {
+        #[snafu(implicit)]
+        location: Location,
+        source: common_meta::error::Error,
+    },
+
+    #[snafu(display("Failed to get info from meta server"))]
+    GetMetadata {
+        #[snafu(implicit)]
+        location: Location,
+        source: common_meta::error::Error,
+    },
+
+    #[snafu(display("Failed to execute logical plan"))]
+    ExecuteLogicalPlan {
+        #[snafu(implicit)]
+        location: Location,
+        source: query::error::Error,
+    },
+
+    #[snafu(display("Failed to join datanode runtime task, request_type: {}", request_type))]
+    RuntimeJoin {
+        request_type: &'static str,
+        #[snafu(source)]
+        error: JoinError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to create plan decoder"))]
+    NewPlanDecoder {
+        #[snafu(implicit)]
+        location: Location,
+        source: query::error::Error,
+    },
+
+    #[snafu(display("Failed to decode logical plan"))]
+    DecodeLogicalPlan {
+        #[snafu(implicit)]
+        location: Location,
+        source: common_query::error::Error,
+    },
+
+    #[snafu(display("Schema not found: {}", name))]
+    SchemaNotFound {
+        name: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Missing timestamp column in request"))]
+    MissingTimestampColumn {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to delete value from table: {}", table_name))]
+    Delete {
+        table_name: String,
+        #[snafu(implicit)]
+        location: Location,
+        source: TableError,
+    },
+
+    #[snafu(display("Failed to start server"))]
+    StartServer {
+        #[snafu(implicit)]
+        location: Location,
+        source: servers::error::Error,
+    },
+
+    #[snafu(display("Failed to parse address {}", addr))]
+    ParseAddr {
+        addr: String,
+        #[snafu(source)]
+        error: std::net::AddrParseError,
+    },
+
+    #[snafu(display("Failed to create directory {}", dir))]
+    CreateDir {
+        dir: String,
+        #[snafu(source)]
+        error: std::io::Error,
+    },
+
+    #[snafu(display("Failed to remove directory {}", dir))]
+    RemoveDir {
+        dir: String,
+        #[snafu(source)]
+        error: std::io::Error,
+    },
+
+    #[snafu(display("Failed to open log store"))]
+    OpenLogStore {
+        #[snafu(implicit)]
+        location: Location,
+        source: Box<log_store::error::Error>,
+    },
+
+    #[snafu(display("Invalid SQL, error: {}", msg))]
+    InvalidSql { msg: String },
+
+    #[snafu(display("Illegal primary keys definition: {}", msg))]
+    IllegalPrimaryKeysDef {
+        msg: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Schema {} already exists", name))]
+    SchemaExists {
+        name: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to initialize meta client"))]
+    MetaClientInit {
+        #[snafu(implicit)]
+        location: Location,
+        source: meta_client::error::Error,
+    },
+
+    #[snafu(display("Missing node id in Datanode config"))]
+    MissingNodeId {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to build datanode"))]
+    BuildDatanode {
+        #[snafu(implicit)]
+        location: Location,
+        source: BoxedError,
+    },
+
+    #[snafu(display("Failed to build http client"))]
+    BuildHttpClient {
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        error: reqwest::Error,
+    },
+
+    #[snafu(display("Missing required field: {}", name))]
+    MissingRequiredField {
+        name: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "No valid default value can be built automatically, column: {}",
+        column,
+    ))]
+    ColumnNoneDefaultValue {
+        column: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to shutdown server"))]
+    ShutdownServer {
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        source: servers::error::Error,
+    },
+
+    #[snafu(display("Failed to shutdown instance"))]
+    ShutdownInstance {
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        source: BoxedError,
+    },
+
+    #[snafu(display("Payload not exist"))]
+    PayloadNotExist {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Unexpected, violated: {}", violated))]
+    Unexpected {
+        violated: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to handle request for region {}", region_id))]
+    HandleRegionRequest {
+        region_id: RegionId,
+        #[snafu(implicit)]
+        location: Location,
+        source: BoxedError,
+    },
+
+    #[snafu(display("Failed to open batch regions"))]
+    HandleBatchOpenRequest {
+        #[snafu(implicit)]
+        location: Location,
+        source: BoxedError,
+    },
+
+    #[snafu(display("Failed to handle batch ddl request, ddl_type: {}", ddl_type))]
+    HandleBatchDdlRequest {
+        #[snafu(implicit)]
+        location: Location,
+        source: BoxedError,
+        ddl_type: String,
+    },
+
+    #[snafu(display("RegionId {} not found", region_id))]
+    RegionNotFound {
+        region_id: RegionId,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Region {} not ready", region_id))]
+    RegionNotReady {
+        region_id: RegionId,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Region {} is busy", region_id))]
+    RegionBusy {
+        region_id: RegionId,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Region engine {} is not registered", name))]
+    RegionEngineNotFound {
+        name: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Unsupported output type, expected: {}", expected))]
+    UnsupportedOutput {
+        expected: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to build region requests"))]
+    BuildRegionRequests {
+        #[snafu(implicit)]
+        location: Location,
+        source: store_api::metadata::MetadataError,
+    },
+
+    #[snafu(display("Failed to serialize WAL options for region {}", region_id))]
+    SerializeWalOptions {
+        region_id: RegionId,
+        #[snafu(source)]
+        error: serde_json::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to stop region engine {}", name))]
+    StopRegionEngine {
+        name: String,
+        #[snafu(implicit)]
+        location: Location,
+        source: BoxedError,
+    },
+
+    #[snafu(display(
+        "Failed to find logical regions in physical region {}",
+        physical_region_id
+    ))]
+    FindLogicalRegions {
+        physical_region_id: RegionId,
+        source: metric_engine::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to build mito engine"))]
+    BuildMitoEngine {
+        source: mito2::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to build metric engine"))]
+    BuildMetricEngine {
+        source: metric_engine::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to run gc for region {}", region_id))]
+    GcMitoEngine {
+        region_id: RegionId,
+        source: mito2::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to list SST entries from storage"))]
+    ListStorageSsts {
+        #[snafu(implicit)]
+        location: Location,
+        source: mito2::error::Error,
+    },
+
+    #[snafu(display("Failed to serialize options to TOML"))]
+    TomlFormat {
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source(from(common_config::error::Error, Box::new)))]
+        source: Box<common_config::error::Error>,
+    },
+
+    #[snafu(display(
+        "Failed to get region metadata from engine {} for region_id {}",
+        engine,
+        region_id,
+    ))]
+    GetRegionMetadata {
+        engine: String,
+        region_id: RegionId,
+        #[snafu(implicit)]
+        location: Location,
+        source: BoxedError,
+    },
+
+    #[snafu(display("DataFusion"))]
+    DataFusion {
+        #[snafu(source)]
+        error: datafusion::error::DataFusionError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to acquire permit, source closed"))]
+    ConcurrentQueryLimiterClosed {
+        #[snafu(source)]
+        error: tokio::sync::AcquireError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to acquire permit under timeouts"))]
+    ConcurrentQueryLimiterTimeout {
+        #[snafu(source)]
+        error: Elapsed,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Cache not found in registry"))]
+    MissingCache {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to serialize json"))]
+    SerializeJson {
+        #[snafu(source)]
+        error: serde_json::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed object store operation"))]
+    ObjectStore {
+        source: object_store::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Not yet implemented: {what}"))]
+    NotYetImplemented { what: String },
+}
+
+pub type Result<T> = std::result::Result<T, Error>;
+
+impl ErrorExt for Error {
+    fn status_code(&self) -> StatusCode {
+        use Error::*;
+        match self {
+            NewPlanDecoder { source, .. } | ExecuteLogicalPlan { source, .. } => {
+                source.status_code()
+            }
+
+            BuildRegionRequests { source, .. } => source.status_code(),
+            HandleHeartbeatResponse { source, .. } | GetMetadata { source, .. } => {
+                source.status_code()
+            }
+
+            DecodeLogicalPlan { source, .. } => source.status_code(),
+
+            Delete { source, .. } => source.status_code(),
+
+            InvalidSql { .. }
+            | IllegalPrimaryKeysDef { .. }
+            | MissingTimestampColumn { .. }
+            | SchemaNotFound { .. }
+            | SchemaExists { .. }
+            | MissingNodeId { .. }
+            | ColumnNoneDefaultValue { .. }
+            | MissingRequiredField { .. }
+            | RegionEngineNotFound { .. }
+            | ParseAddr { .. }
+            | TomlFormat { .. }
+            | BuildDatanode { .. } => StatusCode::InvalidArguments,
+
+            PayloadNotExist { .. }
+            | Unexpected { .. }
+            | SerializeWalOptions { .. }
+            | WatchAsyncTaskChange { .. }
+            | BuildHttpClient { .. } => StatusCode::Unexpected,
+
+            AsyncTaskExecute { source, .. } => source.status_code(),
+
+            CreateDir { .. }
+            | RemoveDir { .. }
+            | ShutdownInstance { .. }
+            | DataFusion { .. }
+            | RuntimeJoin { .. } => StatusCode::Internal,
+
+            RegionNotFound { .. } => StatusCode::RegionNotFound,
+            RegionNotReady { .. } => StatusCode::RegionNotReady,
+            RegionBusy { .. } => StatusCode::RegionBusy,
+
+            StartServer { source, .. } | ShutdownServer { source, .. } => source.status_code(),
+
+            OpenLogStore { source, .. } => source.status_code(),
+            MetaClientInit { source, .. } => source.status_code(),
+            UnsupportedOutput { .. } | NotYetImplemented { .. } => StatusCode::Unsupported,
+            HandleRegionRequest { source, .. }
+            | GetRegionMetadata { source, .. }
+            | HandleBatchOpenRequest { source, .. }
+            | HandleBatchDdlRequest { source, .. } => source.status_code(),
+            StopRegionEngine { source, .. } => source.status_code(),
+
+            FindLogicalRegions { source, .. } => source.status_code(),
+            BuildMitoEngine { source, .. } | GcMitoEngine { source, .. } => source.status_code(),
+            BuildMetricEngine { source, .. } => source.status_code(),
+            ListStorageSsts { source, .. } => source.status_code(),
+            ConcurrentQueryLimiterClosed { .. } | ConcurrentQueryLimiterTimeout { .. } => {
+                StatusCode::RegionBusy
+            }
+            MissingCache { .. } => StatusCode::Internal,
+            SerializeJson { .. } => StatusCode::Internal,
+
+            ObjectStore { source, .. } => source.status_code(),
+        }
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn retry_hint(&self) -> RetryHint {
+        use Error::*;
+
+        match self {
+            RegionBusy { .. }
+            | RegionNotReady { .. }
+            | ConcurrentQueryLimiterClosed { .. }
+            | ConcurrentQueryLimiterTimeout { .. } => RetryHint::Retryable,
+            NewPlanDecoder { source, .. } | ExecuteLogicalPlan { source, .. } => {
+                source.retry_hint()
+            }
+            HandleHeartbeatResponse { source, .. } | GetMetadata { source, .. } => {
+                source.retry_hint()
+            }
+            DecodeLogicalPlan { source, .. } => source.retry_hint(),
+            Delete { source, .. } => source.retry_hint(),
+            AsyncTaskExecute { source, .. } => source.retry_hint(),
+            StartServer { source, .. } | ShutdownServer { source, .. } => source.retry_hint(),
+            OpenLogStore { source, .. } => source.retry_hint(),
+            MetaClientInit { source, .. } => source.retry_hint(),
+            HandleRegionRequest { source, .. }
+            | GetRegionMetadata { source, .. }
+            | HandleBatchOpenRequest { source, .. }
+            | HandleBatchDdlRequest { source, .. }
+            | StopRegionEngine { source, .. } => source.retry_hint(),
+            FindLogicalRegions { source, .. } => source.retry_hint(),
+            BuildMitoEngine { source, .. } => source.retry_hint(),
+            GcMitoEngine { source, .. } => source.retry_hint(),
+            BuildMetricEngine { source, .. } => source.retry_hint(),
+            ListStorageSsts { source, .. } => source.retry_hint(),
+            ObjectStore { source, .. } => source.retry_hint(),
+            _ => RetryHint::NonRetryable,
+        }
+    }
+}
+
+define_into_tonic_status!(Error);
+
+#[cfg(test)]
+mod tests {
+    use common_error::ext::RetryHint;
+
+    use super::*;
+
+    #[test]
+    fn test_region_state_hints_are_retryable() {
+        let region_id = RegionId::new(1024, 1);
+
+        let err = RegionBusySnafu { region_id }.build();
+        assert_eq!(err.retry_hint(), RetryHint::Retryable);
+
+        let err = RegionNotReadySnafu { region_id }.build();
+        assert_eq!(err.retry_hint(), RetryHint::Retryable);
+    }
+
+    #[test]
+    fn test_default_hint_is_non_retryable() {
+        let err = UnexpectedSnafu {
+            violated: "mock error",
+        }
+        .build();
+
+        assert_eq!(err.retry_hint(), RetryHint::NonRetryable);
+    }
+}

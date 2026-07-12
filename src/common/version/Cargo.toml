@@ -1,0 +1,19 @@
+[package]
+name = "common-version"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+codec = ["dep:serde"]
+
+[dependencies]
+const_format.workspace = true
+serde = { workspace = true, optional = true }
+
+[build-dependencies]
+cargo-manifest = "0.19"
+git2 = { version = "0.20", default-features = false }

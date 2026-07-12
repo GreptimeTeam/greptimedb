@@ -1,0 +1,109 @@
+CREATE TABLE phy (ts timestamp time index, val double, a_label STRING, PRIMARY KEY(a_label)) engine=metric with ("physical_metric_table" = "");
+
+Affected Rows: 0
+
+ALTER TABLE phy ADD COLUMN b_label STRING PRIMARY KEY;
+
+Error: 1001(Unsupported), Alter request to physical region is forbidden
+
+ALTER TABLE phy DROP COLUMN a_label;
+
+Error: 1004(InvalidArguments), Not allowed to remove index column a_label from table phy
+
+ALTER TABLE phy SET 'ttl'='1d';
+
+Affected Rows: 0
+
+SHOW CREATE TABLE phy;
+
++-------+------------------------------------+
+| Table | Create Table                       |
++-------+------------------------------------+
+| phy   | CREATE TABLE IF NOT EXISTS "phy" ( |
+|       |   "ts" TIMESTAMP(3) NOT NULL,      |
+|       |   "val" DOUBLE NULL,               |
+|       |   "a_label" STRING NULL,           |
+|       |   TIME INDEX ("ts"),               |
+|       |   PRIMARY KEY ("a_label")          |
+|       | )                                  |
+|       |                                    |
+|       | ENGINE=metric                      |
+|       | WITH(                              |
+|       |   physical_metric_table = '',      |
+|       |   ttl = '1day'                     |
+|       | )                                  |
++-------+------------------------------------+
+
+ALTER TABLE phy UNSET 'ttl';
+
+Affected Rows: 0
+
+SHOW CREATE TABLE phy;
+
++-------+------------------------------------+
+| Table | Create Table                       |
++-------+------------------------------------+
+| phy   | CREATE TABLE IF NOT EXISTS "phy" ( |
+|       |   "ts" TIMESTAMP(3) NOT NULL,      |
+|       |   "val" DOUBLE NULL,               |
+|       |   "a_label" STRING NULL,           |
+|       |   TIME INDEX ("ts"),               |
+|       |   PRIMARY KEY ("a_label")          |
+|       | )                                  |
+|       |                                    |
+|       | ENGINE=metric                      |
+|       | WITH(                              |
+|       |   physical_metric_table = ''       |
+|       | )                                  |
++-------+------------------------------------+
+
+ALTER TABLE phy MODIFY COLUMN a_label SET INVERTED INDEX;
+
+Affected Rows: 0
+
+SHOW CREATE TABLE phy;
+
++-------+-----------------------------------------+
+| Table | Create Table                            |
++-------+-----------------------------------------+
+| phy   | CREATE TABLE IF NOT EXISTS "phy" (      |
+|       |   "ts" TIMESTAMP(3) NOT NULL,           |
+|       |   "val" DOUBLE NULL,                    |
+|       |   "a_label" STRING NULL INVERTED INDEX, |
+|       |   TIME INDEX ("ts"),                    |
+|       |   PRIMARY KEY ("a_label")               |
+|       | )                                       |
+|       |                                         |
+|       | ENGINE=metric                           |
+|       | WITH(                                   |
+|       |   physical_metric_table = ''            |
+|       | )                                       |
++-------+-----------------------------------------+
+
+ALTER TABLE phy MODIFY COLUMN a_label UNSET INVERTED INDEX;
+
+Affected Rows: 0
+
+SHOW CREATE TABLE phy;
+
++-------+------------------------------------+
+| Table | Create Table                       |
++-------+------------------------------------+
+| phy   | CREATE TABLE IF NOT EXISTS "phy" ( |
+|       |   "ts" TIMESTAMP(3) NOT NULL,      |
+|       |   "val" DOUBLE NULL,               |
+|       |   "a_label" STRING NULL,           |
+|       |   TIME INDEX ("ts"),               |
+|       |   PRIMARY KEY ("a_label")          |
+|       | )                                  |
+|       |                                    |
+|       | ENGINE=metric                      |
+|       | WITH(                              |
+|       |   physical_metric_table = ''       |
+|       | )                                  |
++-------+------------------------------------+
+
+DROP TABLE phy;
+
+Affected Rows: 0
+

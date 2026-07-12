@@ -1,0 +1,25 @@
+create table foo(ts timestamp time index, s string primary key, i int);
+
+Affected Rows: 0
+
+insert into foo values
+("2024-02-02 01:00:00+0800", "my_tag_1", 1),
+("2024-02-02 02:00:00+0800", "my_tag_2", 2),
+("2024-02-02 03:00:00+0800", "my_tag_3", 3);
+
+Affected Rows: 3
+
+-- Alter the table to trigger a flush (will be executed before process being terminated).
+-- Otherwise the SST might not be generated (the data could be remained in WAL).
+-- If we have the explicitly flush table interface in the future, it's still good to have the alter table in the test.
+alter table foo add column f float;
+
+Affected Rows: 0
+
+insert into foo values
+("2024-02-02 04:00:00+0800", "my_tag_4", 4, 4.4),
+("2024-02-02 05:00:00+0800", "my_tag_5", 5, 5.5),
+("2024-02-02 06:00:00+0800", "my_tag_6", 6, 6.6);
+
+Affected Rows: 3
+

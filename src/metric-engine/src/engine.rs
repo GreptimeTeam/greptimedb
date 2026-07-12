@@ -1,0 +1,964 @@
+// Copyright 2023 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+mod alter;
+mod bulk_insert;
+mod catchup;
+mod close;
+mod create;
+mod drop;
+mod flush;
+mod open;
+mod options;
+mod put;
+mod read;
+mod region_metadata;
+mod staging;
+mod state;
+mod sync;
+
+use std::any::Any;
+use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
+
+use api::region::RegionResponse;
+use async_trait::async_trait;
+use common_error::ext::{BoxedError, ErrorExt};
+use common_error::status_code::StatusCode;
+use common_runtime::RepeatedTask;
+use mito2::engine::MitoEngine;
+pub(crate) use options::IndexOptions;
+use snafu::{OptionExt, ResultExt};
+pub(crate) use state::MetricEngineState;
+use store_api::metadata::RegionMetadataRef;
+use store_api::metric_engine_consts::METRIC_ENGINE_NAME;
+use store_api::region_engine::{
+    BatchResponses, RegionEngine, RegionRole, RegionScannerRef, RegionStatistic,
+    RemapManifestsRequest, RemapManifestsResponse, SetRegionRoleStateResponse,
+    SetRegionRoleStateSuccess, SettableRegionRoleState, SyncRegionFromRequest,
+    SyncRegionFromResponse,
+};
+use store_api::region_request::{
+    AffectedRows, BatchRegionDdlRequest, RegionCatchupRequest, RegionOpenRequest, RegionPutRequest,
+    RegionRequest,
+};
+use store_api::storage::{RegionId, ScanRequest, SequenceNumber};
+
+use crate::config::EngineConfig;
+use crate::data_region::DataRegion;
+use crate::error::{
+    self, Error, Result, StartRepeatedTaskSnafu, UnsupportedRegionRequestSnafu,
+    UnsupportedRemapManifestsRequestSnafu,
+};
+use crate::metadata_region::MetadataRegion;
+use crate::repeated_task::FlushMetadataRegionTask;
+use crate::row_modifier::RowModifier;
+use crate::utils::{self, get_region_statistic};
+
+#[cfg_attr(doc, aquamarine::aquamarine)]
+/// # Metric Engine
+///
+/// ## Regions
+///
+/// Regions in this metric engine has several roles. There is `PhysicalRegion`,
+/// which refer to the region that actually stores the data. And `LogicalRegion`
+/// that is "simulated" over physical regions. Each logical region is associated
+/// with one physical region group, which is a group of two physical regions.
+/// Their relationship is illustrated below:
+///
+/// ```mermaid
+/// erDiagram
+///     LogicalRegion ||--o{ PhysicalRegionGroup : corresponds
+///     PhysicalRegionGroup ||--|| DataRegion : contains
+///     PhysicalRegionGroup ||--|| MetadataRegion : contains
+/// ```
+///
+/// Metric engine uses two region groups. One is for data region
+/// ([METRIC_DATA_REGION_GROUP](crate::consts::METRIC_DATA_REGION_GROUP)), and the
+/// other is for metadata region ([METRIC_METADATA_REGION_GROUP](crate::consts::METRIC_METADATA_REGION_GROUP)).
+/// From the definition of [`RegionId`], we can convert between these two physical
+/// region ids easily. Thus in the code base we usually refer to one "physical
+/// region id", and convert it to the other one when necessary.
+///
+/// The logical region, in contrast, is a virtual region. It doesn't has dedicated
+/// storage or region group. Only a region id that is allocated by meta server.
+/// And all other things is shared with other logical region that are associated
+/// with the same physical region group.
+///
+/// For more document about physical regions, please refer to [`MetadataRegion`]
+/// and [`DataRegion`].
+///
+/// ## Operations
+///
+/// Both physical and logical region are accessible to user. But the operation
+/// they support are different. List below:
+///
+/// | Operations | Logical Region | Physical Region |
+/// | ---------- | -------------- | --------------- |
+/// |   Create   |       ✅        |        ✅        |
+/// |    Drop    |       ✅        |        ❓*       |
+/// |   Write    |       ✅        |        ❌        |
+/// |    Read    |       ✅        |        ✅        |
+/// |   Close    |       ✅        |        ✅        |
+/// |    Open    |       ✅        |        ✅        |
+/// |   Alter    |       ✅        |        ❓*       |
+///
+/// *: Physical region can be dropped only when all related logical regions are dropped.
+/// *: Alter: Physical regions only support altering region options.
+///
+/// ## Internal Columns
+///
+/// The physical data region contains two internal columns. Should
+/// mention that "internal" here is for metric engine itself. Mito
+/// engine will add it's internal columns to the region as well.
+///
+/// Their column id is registered in [`ReservedColumnId`]. And column name is
+/// defined in [`DATA_SCHEMA_TSID_COLUMN_NAME`] and [`DATA_SCHEMA_TABLE_ID_COLUMN_NAME`].
+///
+/// Tsid is generated by hashing all tags. And table id is retrieved from logical region
+/// id to distinguish data from different logical tables.
+#[derive(Clone)]
+pub struct MetricEngine {
+    inner: Arc<MetricEngineInner>,
+}
+
+#[async_trait]
+impl RegionEngine for MetricEngine {
+    /// Name of this engine
+    fn name(&self) -> &str {
+        METRIC_ENGINE_NAME
+    }
+
+    async fn handle_batch_open_requests(
+        &self,
+        parallelism: usize,
+        requests: Vec<(RegionId, RegionOpenRequest)>,
+    ) -> Result<BatchResponses, BoxedError> {
+        self.inner
+            .handle_batch_open_requests(parallelism, requests)
+            .await
+            .map_err(BoxedError::new)
+    }
+
+    async fn handle_batch_catchup_requests(
+        &self,
+        parallelism: usize,
+        requests: Vec<(RegionId, RegionCatchupRequest)>,
+    ) -> Result<BatchResponses, BoxedError> {
+        self.inner
+            .handle_batch_catchup_requests(parallelism, requests)
+            .await
+            .map_err(BoxedError::new)
+    }
+
+    async fn handle_batch_ddl_requests(
+        &self,
+        batch_request: BatchRegionDdlRequest,
+    ) -> Result<RegionResponse, BoxedError> {
+        match batch_request {
+            BatchRegionDdlRequest::Create(requests) => {
+                let mut extension_return_value = HashMap::new();
+                let rows = self
+                    .inner
+                    .create_regions(requests, &mut extension_return_value)
+                    .await
+                    .map_err(BoxedError::new)?;
+
+                Ok(RegionResponse {
+                    affected_rows: rows,
+                    extensions: extension_return_value,
+                    metadata: Vec::new(),
+                })
+            }
+            BatchRegionDdlRequest::Alter(requests) => {
+                let mut extension_return_value = HashMap::new();
+                let rows = self
+                    .inner
+                    .alter_regions(requests, &mut extension_return_value)
+                    .await
+                    .map_err(BoxedError::new)?;
+
+                Ok(RegionResponse {
+                    affected_rows: rows,
+                    extensions: extension_return_value,
+                    metadata: Vec::new(),
+                })
+            }
+            BatchRegionDdlRequest::Drop(requests) => {
+                self.handle_requests(
+                    requests
+                        .into_iter()
+                        .map(|(region_id, req)| (region_id, RegionRequest::Drop(req))),
+                )
+                .await
+            }
+        }
+    }
+
+    /// Handles non-query request to the region. Returns the count of affected rows.
+    async fn handle_request(
+        &self,
+        region_id: RegionId,
+        request: RegionRequest,
+    ) -> Result<RegionResponse, BoxedError> {
+        let mut extension_return_value = HashMap::new();
+
+        let result = match request {
+            RegionRequest::EnterStaging(_) => {
+                if self.inner.is_physical_region(region_id) {
+                    self.handle_enter_staging_request(region_id, request).await
+                } else {
+                    UnsupportedRegionRequestSnafu { request }.fail()
+                }
+            }
+            RegionRequest::ApplyStagingManifest(_) => {
+                if self.inner.is_physical_region(region_id) {
+                    return self.inner.mito.handle_request(region_id, request).await;
+                } else {
+                    UnsupportedRegionRequestSnafu { request }.fail()
+                }
+            }
+            RegionRequest::Put(put) => self.inner.put_region(region_id, put).await,
+            RegionRequest::Create(create) => {
+                self.inner
+                    .create_regions(vec![(region_id, create)], &mut extension_return_value)
+                    .await
+            }
+            RegionRequest::Drop(drop) => self.inner.drop_region(region_id, drop).await,
+            RegionRequest::Open(open) => self.inner.open_region(region_id, open).await,
+            RegionRequest::Close(close) => self.inner.close_region(region_id, close).await,
+            RegionRequest::Alter(alter) => {
+                self.inner
+                    .alter_regions(vec![(region_id, alter)], &mut extension_return_value)
+                    .await
+            }
+            RegionRequest::Compact(_) => {
+                if self.inner.is_physical_region(region_id) {
+                    self.inner
+                        .mito
+                        .handle_request(region_id, request)
+                        .await
+                        .context(error::MitoFlushOperationSnafu)
+                        .map(|response| response.affected_rows)
+                } else {
+                    UnsupportedRegionRequestSnafu { request }.fail()
+                }
+            }
+            RegionRequest::Flush(req) => self.inner.flush_region(region_id, req).await,
+            RegionRequest::BuildIndex(_) => {
+                if self.inner.is_physical_region(region_id) {
+                    self.inner
+                        .mito
+                        .handle_request(region_id, request)
+                        .await
+                        .context(error::MitoFlushOperationSnafu)
+                        .map(|response| response.affected_rows)
+                } else {
+                    UnsupportedRegionRequestSnafu { request }.fail()
+                }
+            }
+            RegionRequest::Truncate(_) => UnsupportedRegionRequestSnafu { request }.fail(),
+            RegionRequest::Delete(delete) => self.inner.delete_region(region_id, delete).await,
+            RegionRequest::Catchup(_) => {
+                let mut response = self
+                    .inner
+                    .handle_batch_catchup_requests(
+                        1,
+                        vec![(region_id, RegionCatchupRequest::default())],
+                    )
+                    .await
+                    .map_err(BoxedError::new)?;
+                debug_assert_eq!(response.len(), 1);
+                let (resp_region_id, response) = response
+                    .pop()
+                    .context(error::UnexpectedRequestSnafu {
+                        reason: "expected 1 response, but got zero responses",
+                    })
+                    .map_err(BoxedError::new)?;
+                debug_assert_eq!(region_id, resp_region_id);
+                return response;
+            }
+            RegionRequest::BulkInserts(bulk) => {
+                self.inner.bulk_insert_region(region_id, bulk).await
+            }
+        };
+
+        result.map_err(BoxedError::new).map(|rows| RegionResponse {
+            affected_rows: rows,
+            extensions: extension_return_value,
+            metadata: Vec::new(),
+        })
+    }
+
+    async fn handle_query(
+        &self,
+        region_id: RegionId,
+        request: ScanRequest,
+    ) -> Result<RegionScannerRef, BoxedError> {
+        self.handle_query(region_id, request).await
+    }
+
+    async fn get_committed_sequence(
+        &self,
+        region_id: RegionId,
+    ) -> Result<SequenceNumber, BoxedError> {
+        self.inner
+            .get_last_seq_num(region_id)
+            .await
+            .map_err(BoxedError::new)
+    }
+
+    /// Retrieves region's metadata.
+    async fn get_metadata(&self, region_id: RegionId) -> Result<RegionMetadataRef, BoxedError> {
+        self.inner
+            .load_region_metadata(region_id)
+            .await
+            .map_err(BoxedError::new)
+    }
+
+    /// Retrieves region's disk usage.
+    ///
+    /// Note: Returns `None` if it's a logical region.
+    fn region_statistic(&self, region_id: RegionId) -> Option<RegionStatistic> {
+        if self.inner.is_physical_region(region_id) {
+            get_region_statistic(&self.inner.mito, region_id)
+        } else {
+            None
+        }
+    }
+
+    /// Stops the engine
+    async fn stop(&self) -> Result<(), BoxedError> {
+        // don't need to stop the underlying mito engine
+        Ok(())
+    }
+
+    fn set_region_role(&self, region_id: RegionId, role: RegionRole) -> Result<(), BoxedError> {
+        // ignore the region not found error
+        for x in [
+            utils::to_metadata_region_id(region_id),
+            utils::to_data_region_id(region_id),
+        ] {
+            if let Err(e) = self.inner.mito.set_region_role(x, role)
+                && e.status_code() != StatusCode::RegionNotFound
+            {
+                return Err(e);
+            }
+        }
+        Ok(())
+    }
+
+    async fn sync_region(
+        &self,
+        region_id: RegionId,
+        request: SyncRegionFromRequest,
+    ) -> Result<SyncRegionFromResponse, BoxedError> {
+        match request {
+            SyncRegionFromRequest::FromManifest(manifest_info) => self
+                .inner
+                .sync_region_from_manifest(region_id, manifest_info)
+                .await
+                .map_err(BoxedError::new),
+            SyncRegionFromRequest::FromRegion {
+                source_region_id,
+                parallelism,
+            } => {
+                if self.inner.is_physical_region(region_id) {
+                    self.inner
+                        .sync_region_from_region(region_id, source_region_id, parallelism)
+                        .await
+                        .map_err(BoxedError::new)
+                } else {
+                    Err(BoxedError::new(
+                        error::UnsupportedSyncRegionFromRequestSnafu { region_id }.build(),
+                    ))
+                }
+            }
+        }
+    }
+
+    async fn remap_manifests(
+        &self,
+        request: RemapManifestsRequest,
+    ) -> Result<RemapManifestsResponse, BoxedError> {
+        let region_id = request.region_id;
+        if self.inner.is_physical_region(region_id) {
+            self.inner.mito.remap_manifests(request).await
+        } else {
+            Err(BoxedError::new(
+                UnsupportedRemapManifestsRequestSnafu { region_id }.build(),
+            ))
+        }
+    }
+
+    async fn set_region_role_state_gracefully(
+        &self,
+        region_id: RegionId,
+        region_role_state: SettableRegionRoleState,
+    ) -> std::result::Result<SetRegionRoleStateResponse, BoxedError> {
+        let metadata_result = match self
+            .inner
+            .mito
+            .set_region_role_state_gracefully(
+                utils::to_metadata_region_id(region_id),
+                region_role_state,
+            )
+            .await?
+        {
+            SetRegionRoleStateResponse::Success(success) => success,
+            SetRegionRoleStateResponse::NotFound => {
+                return Ok(SetRegionRoleStateResponse::NotFound);
+            }
+            SetRegionRoleStateResponse::InvalidTransition(error) => {
+                return Ok(SetRegionRoleStateResponse::InvalidTransition(error));
+            }
+        };
+
+        let data_result = match self
+            .inner
+            .mito
+            .set_region_role_state_gracefully(region_id, region_role_state)
+            .await?
+        {
+            SetRegionRoleStateResponse::Success(success) => success,
+            SetRegionRoleStateResponse::NotFound => {
+                return Ok(SetRegionRoleStateResponse::NotFound);
+            }
+            SetRegionRoleStateResponse::InvalidTransition(error) => {
+                return Ok(SetRegionRoleStateResponse::InvalidTransition(error));
+            }
+        };
+
+        Ok(SetRegionRoleStateResponse::success(
+            SetRegionRoleStateSuccess::metric(
+                data_result.last_entry_id().unwrap_or_default(),
+                metadata_result.last_entry_id().unwrap_or_default(),
+            ),
+        ))
+    }
+
+    /// Returns the physical region role.
+    ///
+    /// Note: Returns `None` if it's a logical region.
+    fn role(&self, region_id: RegionId) -> Option<RegionRole> {
+        if self.inner.is_physical_region(region_id) {
+            self.inner.mito.role(region_id)
+        } else {
+            None
+        }
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+impl MetricEngine {
+    pub fn try_new(mito: MitoEngine, mut config: EngineConfig) -> Result<Self> {
+        let metadata_region = MetadataRegion::new(mito.clone());
+        let data_region = DataRegion::new(mito.clone());
+        let state = Arc::new(RwLock::default());
+        config.sanitize();
+        let flush_interval = config.flush_metadata_region_interval;
+        let inner = Arc::new(MetricEngineInner {
+            mito: mito.clone(),
+            metadata_region,
+            data_region,
+            state: state.clone(),
+            config,
+            row_modifier: RowModifier::default(),
+            flush_task: RepeatedTask::new(
+                flush_interval,
+                Box::new(FlushMetadataRegionTask {
+                    state: state.clone(),
+                    mito: mito.clone(),
+                }),
+            ),
+        });
+        inner
+            .flush_task
+            .start(common_runtime::global_runtime())
+            .context(StartRepeatedTaskSnafu { name: "flush_task" })?;
+        Ok(Self { inner })
+    }
+
+    pub fn mito(&self) -> MitoEngine {
+        self.inner.mito.clone()
+    }
+
+    /// Batch put operation for multiple logical regions.
+    /// Requests are grouped by physical region; a failure can leave earlier
+    /// physical-region groups committed.
+    pub async fn put_regions_batch(
+        &self,
+        requests: impl ExactSizeIterator<Item = (RegionId, RegionPutRequest)>,
+    ) -> Result<AffectedRows> {
+        self.inner.put_regions_batch(requests).await
+    }
+
+    /// Returns all logical regions associated with the physical region.
+    pub async fn logical_regions(&self, physical_region_id: RegionId) -> Result<Vec<RegionId>> {
+        self.inner
+            .metadata_region
+            .logical_regions(physical_region_id)
+            .await
+    }
+
+    /// Handles substrait query and return a stream of record batches
+    async fn handle_query(
+        &self,
+        region_id: RegionId,
+        request: ScanRequest,
+    ) -> Result<RegionScannerRef, BoxedError> {
+        self.inner
+            .read_region(region_id, request)
+            .await
+            .map_err(BoxedError::new)
+    }
+
+    async fn handle_requests(
+        &self,
+        requests: impl IntoIterator<Item = (RegionId, RegionRequest)>,
+    ) -> Result<RegionResponse, BoxedError> {
+        let mut affected_rows = 0;
+        let mut extensions = HashMap::new();
+        for (region_id, request) in requests {
+            let response = self.handle_request(region_id, request).await?;
+            affected_rows += response.affected_rows;
+            extensions.extend(response.extensions);
+        }
+
+        Ok(RegionResponse {
+            affected_rows,
+            extensions,
+            metadata: Vec::new(),
+        })
+    }
+}
+
+#[cfg(test)]
+impl MetricEngine {
+    pub async fn scan_to_stream(
+        &self,
+        region_id: RegionId,
+        request: ScanRequest,
+    ) -> Result<common_recordbatch::SendableRecordBatchStream, BoxedError> {
+        self.inner.scan_to_stream(region_id, request).await
+    }
+
+    /// Returns the configuration of the engine.
+    pub fn config(&self) -> &EngineConfig {
+        &self.inner.config
+    }
+}
+
+struct MetricEngineInner {
+    mito: MitoEngine,
+    metadata_region: MetadataRegion,
+    data_region: DataRegion,
+    state: Arc<RwLock<MetricEngineState>>,
+    config: EngineConfig,
+    row_modifier: RowModifier,
+    flush_task: RepeatedTask<Error>,
+}
+
+#[cfg(test)]
+mod test {
+    use std::assert_matches;
+    use std::collections::HashMap;
+
+    use common_telemetry::info;
+    use common_wal::options::{KafkaWalOptions, WalOptions};
+    use mito2::sst::location::region_dir_from_table_dir;
+    use mito2::test_util::{kafka_log_store_factory, prepare_test_for_kafka_log_store};
+    use store_api::metric_engine_consts::PHYSICAL_TABLE_METADATA_KEY;
+    use store_api::mito_engine_options::WAL_OPTIONS_KEY;
+    use store_api::region_request::{
+        PathType, RegionCloseRequest, RegionDropRequest, RegionFlushRequest, RegionOpenRequest,
+        RegionRequest,
+    };
+
+    use super::*;
+    use crate::maybe_skip_kafka_log_store_integration_test;
+    use crate::test_util::{TestEnv, create_logical_region_request};
+
+    #[tokio::test]
+    async fn close_open_regions() {
+        let env = TestEnv::new().await;
+        env.init_metric_region().await;
+        let engine = env.metric();
+
+        // close physical region
+        let physical_region_id = env.default_physical_region_id();
+        engine
+            .handle_request(
+                physical_region_id,
+                RegionRequest::Close(RegionCloseRequest {}),
+            )
+            .await
+            .unwrap();
+
+        // reopen physical region
+        let physical_region_option = [(PHYSICAL_TABLE_METADATA_KEY.to_string(), String::new())]
+            .into_iter()
+            .collect();
+        let open_request = RegionOpenRequest {
+            engine: METRIC_ENGINE_NAME.to_string(),
+            table_dir: TestEnv::default_table_dir(),
+            path_type: PathType::Bare, // Use Bare path type for engine regions
+            options: physical_region_option,
+            skip_wal_replay: false,
+            checkpoint: None,
+            requirements: Default::default(),
+        };
+        engine
+            .handle_request(physical_region_id, RegionRequest::Open(open_request))
+            .await
+            .unwrap();
+
+        // close nonexistent region won't report error
+        let nonexistent_region_id = RegionId::new(12313, 12);
+        engine
+            .handle_request(
+                nonexistent_region_id,
+                RegionRequest::Close(RegionCloseRequest {}),
+            )
+            .await
+            .unwrap();
+
+        // open nonexistent region won't report error
+        let invalid_open_request = RegionOpenRequest {
+            engine: METRIC_ENGINE_NAME.to_string(),
+            table_dir: TestEnv::default_table_dir(),
+            path_type: PathType::Bare, // Use Bare path type for engine regions
+            options: HashMap::new(),
+            skip_wal_replay: false,
+            checkpoint: None,
+            requirements: Default::default(),
+        };
+        engine
+            .handle_request(
+                nonexistent_region_id,
+                RegionRequest::Open(invalid_open_request),
+            )
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_role() {
+        let env = TestEnv::new().await;
+        env.init_metric_region().await;
+
+        let logical_region_id = env.default_logical_region_id();
+        let physical_region_id = env.default_physical_region_id();
+
+        assert!(env.metric().role(logical_region_id).is_none());
+        assert!(env.metric().role(physical_region_id).is_some());
+    }
+
+    #[tokio::test]
+    async fn test_region_disk_usage() {
+        let env = TestEnv::new().await;
+        env.init_metric_region().await;
+
+        let logical_region_id = env.default_logical_region_id();
+        let physical_region_id = env.default_physical_region_id();
+
+        assert!(env.metric().region_statistic(logical_region_id).is_none());
+        assert!(env.metric().region_statistic(physical_region_id).is_some());
+    }
+
+    #[tokio::test]
+    async fn test_open_region_failure() {
+        let env = TestEnv::new().await;
+        env.init_metric_region().await;
+        let physical_region_id = env.default_physical_region_id();
+
+        let metric_engine = env.metric();
+        metric_engine
+            .handle_request(
+                physical_region_id,
+                RegionRequest::Flush(RegionFlushRequest::default()),
+            )
+            .await
+            .unwrap();
+
+        let path = region_dir_from_table_dir(
+            &TestEnv::default_table_dir(),
+            physical_region_id,
+            PathType::Metadata,
+        );
+        let object_store = env.get_object_store().unwrap();
+        let list = object_store.list(&path).await.unwrap();
+        // Delete parquet files in metadata region
+        for entry in list {
+            if entry.metadata().is_dir() {
+                continue;
+            }
+            if entry.name().ends_with("parquet") {
+                info!("deleting {}", entry.path());
+                object_store.delete(entry.path()).await.unwrap();
+            }
+        }
+
+        let physical_region_option = [(PHYSICAL_TABLE_METADATA_KEY.to_string(), String::new())]
+            .into_iter()
+            .collect();
+        let open_request = RegionOpenRequest {
+            engine: METRIC_ENGINE_NAME.to_string(),
+            table_dir: TestEnv::default_table_dir(),
+            path_type: PathType::Bare,
+            options: physical_region_option,
+            skip_wal_replay: false,
+            checkpoint: None,
+            requirements: Default::default(),
+        };
+        // Opening an already opened region should succeed.
+        // Since the region is already open, no metadata recovery operations will be performed.
+        metric_engine
+            .handle_request(physical_region_id, RegionRequest::Open(open_request))
+            .await
+            .unwrap();
+
+        // Close the region
+        metric_engine
+            .handle_request(
+                physical_region_id,
+                RegionRequest::Close(RegionCloseRequest {}),
+            )
+            .await
+            .unwrap();
+
+        // Try to reopen region.
+        let physical_region_option = [(PHYSICAL_TABLE_METADATA_KEY.to_string(), String::new())]
+            .into_iter()
+            .collect();
+        let open_request = RegionOpenRequest {
+            engine: METRIC_ENGINE_NAME.to_string(),
+            table_dir: TestEnv::default_table_dir(),
+            path_type: PathType::Bare,
+            options: physical_region_option,
+            skip_wal_replay: false,
+            checkpoint: None,
+            requirements: Default::default(),
+        };
+        let err = metric_engine
+            .handle_request(physical_region_id, RegionRequest::Open(open_request))
+            .await
+            .unwrap_err();
+        // Failed to open region because of missing parquet files.
+        assert_eq!(err.status_code(), StatusCode::StorageUnavailable);
+
+        let mito_engine = metric_engine.mito();
+        let data_region_id = utils::to_data_region_id(physical_region_id);
+        let metadata_region_id = utils::to_metadata_region_id(physical_region_id);
+        // The metadata/data region should be closed.
+        let err = mito_engine.get_metadata(data_region_id).await.unwrap_err();
+        assert_eq!(err.status_code(), StatusCode::RegionNotFound);
+        let err = mito_engine
+            .get_metadata(metadata_region_id)
+            .await
+            .unwrap_err();
+        assert_eq!(err.status_code(), StatusCode::RegionNotFound);
+    }
+
+    #[tokio::test]
+    async fn test_catchup_regions() {
+        common_telemetry::init_default_ut_logging();
+        maybe_skip_kafka_log_store_integration_test!();
+        let kafka_log_store_factory = kafka_log_store_factory().unwrap();
+        let mito_env = mito2::test_util::TestEnv::new()
+            .await
+            .with_log_store_factory(kafka_log_store_factory.clone());
+        let env = TestEnv::with_mito_env(mito_env).await;
+        let table_dir = |region_id| format!("table/{region_id}");
+        let mut physical_region_ids = vec![];
+        let mut logical_region_ids = vec![];
+
+        let num_topics = 3;
+        let num_physical_regions = 8;
+        let num_logical_regions = 16;
+        let parallelism = 2;
+        let mut topics = Vec::with_capacity(num_topics);
+        for _ in 0..num_topics {
+            let topic = prepare_test_for_kafka_log_store(&kafka_log_store_factory)
+                .await
+                .unwrap();
+            topics.push(topic);
+        }
+
+        let topic_idx = |id| (id as usize) % num_topics;
+        // Creates physical regions
+        for i in 0..num_physical_regions {
+            let physical_region_id = RegionId::new(1, i);
+            physical_region_ids.push(physical_region_id);
+
+            let wal_options = WalOptions::Kafka(KafkaWalOptions::new(topics[topic_idx(i)].clone()));
+            env.create_physical_region(
+                physical_region_id,
+                &table_dir(physical_region_id),
+                vec![(
+                    WAL_OPTIONS_KEY.to_string(),
+                    serde_json::to_string(&wal_options).unwrap(),
+                )],
+            )
+            .await;
+            // Creates logical regions for each physical region
+            for j in 0..num_logical_regions {
+                let logical_region_id = RegionId::new(1024 + i, j);
+                logical_region_ids.push(logical_region_id);
+                env.create_logical_region(physical_region_id, logical_region_id)
+                    .await;
+            }
+        }
+
+        let metric_engine = env.metric();
+        // Closes all regions
+        for region_id in logical_region_ids.iter().chain(physical_region_ids.iter()) {
+            metric_engine
+                .handle_request(*region_id, RegionRequest::Close(RegionCloseRequest {}))
+                .await
+                .unwrap();
+        }
+
+        // Opens all regions and skip the wal
+        let requests = physical_region_ids
+            .iter()
+            .enumerate()
+            .map(|(idx, region_id)| {
+                let mut options = HashMap::new();
+                let wal_options =
+                    WalOptions::Kafka(KafkaWalOptions::new(topics[topic_idx(idx as u32)].clone()));
+                options.insert(PHYSICAL_TABLE_METADATA_KEY.to_string(), String::new());
+                options.insert(
+                    WAL_OPTIONS_KEY.to_string(),
+                    serde_json::to_string(&wal_options).unwrap(),
+                );
+                (
+                    *region_id,
+                    RegionOpenRequest {
+                        engine: METRIC_ENGINE_NAME.to_string(),
+                        table_dir: table_dir(*region_id),
+                        path_type: PathType::Bare,
+                        options: options.clone(),
+                        skip_wal_replay: true,
+                        checkpoint: None,
+                        requirements: Default::default(),
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        info!("Open batch regions with parallelism: {parallelism}");
+        metric_engine
+            .handle_batch_open_requests(parallelism, requests)
+            .await
+            .unwrap();
+        {
+            let state = metric_engine.inner.state.read().unwrap();
+            for logical_region in &logical_region_ids {
+                assert!(!state.logical_regions().contains_key(logical_region));
+            }
+        }
+
+        let catch_requests = physical_region_ids
+            .iter()
+            .map(|region_id| {
+                (
+                    *region_id,
+                    RegionCatchupRequest {
+                        set_writable: true,
+                        ..Default::default()
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        metric_engine
+            .handle_batch_catchup_requests(parallelism, catch_requests)
+            .await
+            .unwrap();
+        {
+            let state = metric_engine.inner.state.read().unwrap();
+            for logical_region in &logical_region_ids {
+                assert!(state.logical_regions().contains_key(logical_region));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_drop_region() {
+        let env = TestEnv::new().await;
+        let engine = env.metric();
+        let physical_region_id1 = RegionId::new(1024, 0);
+        let logical_region_id1 = RegionId::new(1025, 0);
+        env.create_physical_region(physical_region_id1, "/test_dir1", vec![])
+            .await;
+        let region_create_request1 =
+            create_logical_region_request(&["job"], physical_region_id1, "logical1");
+        engine
+            .handle_batch_ddl_requests(BatchRegionDdlRequest::Create(vec![(
+                logical_region_id1,
+                region_create_request1,
+            )]))
+            .await
+            .unwrap();
+        let err = engine
+            .handle_request(
+                physical_region_id1,
+                RegionRequest::Drop(RegionDropRequest {
+                    fast_path: false,
+                    force: false,
+                    partial_drop: false,
+                }),
+            )
+            .await
+            .unwrap_err();
+        assert_matches!(
+            err.as_any().downcast_ref::<Error>().unwrap(),
+            &Error::PhysicalRegionBusy { .. }
+        );
+
+        engine
+            .handle_request(
+                physical_region_id1,
+                RegionRequest::Drop(RegionDropRequest {
+                    fast_path: false,
+                    force: true,
+                    partial_drop: false,
+                }),
+            )
+            .await
+            .unwrap();
+        assert!(
+            engine
+                .inner
+                .state
+                .read()
+                .unwrap()
+                .physical_region_states()
+                .get(&physical_region_id1)
+                .is_none()
+        );
+        assert!(
+            engine
+                .inner
+                .state
+                .read()
+                .unwrap()
+                .logical_regions()
+                .get(&logical_region_id1)
+                .is_none()
+        );
+    }
+}

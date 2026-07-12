@@ -1,0 +1,18 @@
+FROM ubuntu:24.04
+
+ARG TARGETARCH
+ARG TARGET_BIN=kafka_wal_helper
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends ca-certificates && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+ADD ${TARGETARCH}/${TARGET_BIN} /greptime/bin/${TARGET_BIN}
+
+ENV PATH=/greptime/bin/:$PATH
+
+EXPOSE 8080
+
+ENTRYPOINT ["/greptime/bin/kafka_wal_helper"]
+CMD ["--addr", "0.0.0.0:8080"]

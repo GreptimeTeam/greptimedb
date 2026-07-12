@@ -1,0 +1,16 @@
+-- Test error cases for ADMIN BUILD_INDEX
+-- Error: wrong number of args (0 args, expected 1)
+ADMIN BUILD_INDEX();
+
+Error: 1004(InvalidArguments), Expected 1 args, but actual 0
+
+-- Error: wrong argument type (Int64, expected Utf8)
+ADMIN BUILD_INDEX(1);
+
+Error: 1004(InvalidArguments), Failed to build admin function args: failed to cast 1
+
+-- Error: table does not exist
+ADMIN BUILD_INDEX('non_existent_table');
+
+Error: 1002(Unexpected), Failed to execute admin function build_index: Execution error: Table not found: greptime.public.non_existent_table
+

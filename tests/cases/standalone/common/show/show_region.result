@@ -1,0 +1,58 @@
+CREATE TABLE my_table (
+  a INT PRIMARY KEY,
+  b STRING,
+  ts TIMESTAMP TIME INDEX,
+)
+PARTITION ON COLUMNS (a) (
+  a < 1000,
+  a >= 1000 AND a < 2000,
+  a >= 2000
+);
+
+Affected Rows: 0
+
+CREATE TABLE another_table (
+  a INT PRIMARY KEY,
+  b STRING,
+  ts TIMESTAMP TIME INDEX,
+);
+
+Affected Rows: 0
+
+-- SQLNESS REPLACE (\d{13}) REGION_ID
+-- SQLNESS REPLACE (\d{1}) PEER_ID
+SHOW REGION FROM my_table;
+
++----------+---------------+------+--------+
+| Table    | Region        | Peer | Leader |
++----------+---------------+------+--------+
+| my_table | REGION_ID | PEER_ID    | Yes    |
+| my_table | REGION_ID | PEER_ID    | Yes    |
+| my_table | REGION_ID | PEER_ID    | Yes    |
++----------+---------------+------+--------+
+
+-- SQLNESS REPLACE (\d{13}) REGION_ID
+-- SQLNESS REPLACE (\d{1}) PEER_ID
+SHOW REGION FROM another_table in public;
+
++---------------+---------------+------+--------+
+| Table         | Region        | Peer | Leader |
++---------------+---------------+------+--------+
+| another_table | REGION_ID | PEER_ID    | Yes    |
++---------------+---------------+------+--------+
+
+-- SQLNESS REPLACE (\d{13}) REGION_ID
+-- SQLNESS REPLACE (\d{1}) PEER_ID
+SHOW REGION FROM another_table WHERE Leader = 'No';
+
+++
+++
+
+DROP TABLE my_table;
+
+Affected Rows: 0
+
+DROP TABLE another_table;
+
+Affected Rows: 0
+
