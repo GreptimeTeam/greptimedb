@@ -2718,16 +2718,21 @@ async fn execute_undrop_table(
         .await
         .context(error::ExecuteDdlSnafu)?;
 
-    cache_invalidator
+    if let Err(err) = cache_invalidator
         .invalidate(
             &Context::default(),
             &[
                 CacheIdent::TableId(dropped.table_id),
-                CacheIdent::TableName(table_name),
+                CacheIdent::TableName(table_name.clone()),
             ],
         )
         .await
-        .context(error::InvalidateTableCacheSnafu)?;
+    {
+        warn!(
+            "Failed to invalidate cache after restoring table '{}' (id={}): {}",
+            table_name, dropped.table_id, err
+        );
+    }
 
     Ok(Output::new_with_affected_rows(0))
 }
@@ -2933,7 +2938,7 @@ mod test {
     }
 
     #[tokio::test]
-    async fn test_undrop_table_cache_failure_is_propagated_after_submit() {
+    async fn test_undrop_table_cache_failure_returns_success_after_submit() {
         let name = TableName::new("greptime", "public", "metrics");
         let manager = dropped_table_manager(42, &name).await;
         let procedure = Arc::new(RecordingProcedureExecutor::default());
@@ -2941,20 +2946,20 @@ mod test {
             fail: true,
             ..Default::default()
         });
-        let err = execute_undrop_table(
+        execute_undrop_table(
             &manager,
             &(procedure.clone() as ProcedureExecutorRef),
-            &(cache as CacheInvalidatorRef),
-            name,
+            &(cache.clone() as CacheInvalidatorRef),
+            name.clone(),
             QueryContext::arc(),
         )
         .await
-        .unwrap_err();
-        assert!(matches!(
-            err,
-            crate::error::Error::InvalidateTableCache { .. }
-        ));
+        .unwrap();
         assert_eq!(procedure.requests.lock().unwrap().len(), 1);
+        assert_eq!(
+            cache.invalidations.lock().unwrap()[0],
+            vec![CacheIdent::TableId(42), CacheIdent::TableName(name)]
+        );
     }
 
     #[test]
