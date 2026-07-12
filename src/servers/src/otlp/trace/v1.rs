@@ -110,6 +110,9 @@ impl TraceBatchSchema {
     fn observe_binary_type(&mut self, name: &str, row_index: usize, binary_type: TraceBinaryType) {
         let column = self.columns.entry(name.to_string()).or_default();
         column.observe_row(row_index);
+        if !column.value_types.contains(&ColumnDataType::Binary) {
+            column.value_types.push(ColumnDataType::Binary);
+        }
         if let Some((last_row_index, last_type)) = column.binary_types.last_mut()
             && *last_row_index == row_index
         {
@@ -149,7 +152,12 @@ impl TraceBatchSchema {
             .into_iter()
             .filter(|(_, column)| !column.present_rows.is_empty())
             .map(|(name, column)| {
-                let binary_types = if column.has_incompatible_logical_types() {
+                let binary_types = if column.has_incompatible_logical_types()
+                    || column
+                        .value_types
+                        .iter()
+                        .any(|datatype| *datatype != ColumnDataType::Binary)
+                {
                     column.binary_types
                 } else {
                     Vec::new()
@@ -498,37 +506,36 @@ fn write_attributes_with_schema(
                 if let Some(batch_schema) = batch_schema.as_deref_mut() {
                     batch_schema.observe_binary_type(&key, row_index, TraceBinaryType::Json);
                 }
-                row_writer::write_json(
-                    writer,
-                    key,
-                    any_value_to_jsonb(OtlpValue::ArrayValue(v)),
+                writer.write_column_unchecked(
+                    row_writer::build_json_column_schema(key),
+                    Some(ValueData::BinaryValue(
+                        any_value_to_jsonb(OtlpValue::ArrayValue(v)).to_vec(),
+                    )),
                     row,
-                )?;
+                );
             }
             Some(OtlpValue::KvlistValue(v)) => {
                 if let Some(batch_schema) = batch_schema.as_deref_mut() {
                     batch_schema.observe_binary_type(&key, row_index, TraceBinaryType::Json);
                 }
-                row_writer::write_json(
-                    writer,
-                    key,
-                    any_value_to_jsonb(OtlpValue::KvlistValue(v)),
+                writer.write_column_unchecked(
+                    row_writer::build_json_column_schema(key),
+                    Some(ValueData::BinaryValue(
+                        any_value_to_jsonb(OtlpValue::KvlistValue(v)).to_vec(),
+                    )),
                     row,
-                )?;
+                );
             }
             Some(OtlpValue::BytesValue(v)) => {
                 if let Some(batch_schema) = batch_schema.as_deref_mut() {
                     batch_schema.observe_binary_type(&key, row_index, TraceBinaryType::Binary);
                 }
-                row_writer::write_fields(
-                    writer,
-                    std::iter::once(make_column_data(
-                        &key,
-                        ColumnDataType::Binary,
-                        Some(ValueData::BinaryValue(v)),
-                    )),
+                writer.write_field_unchecked(
+                    key,
+                    ColumnDataType::Binary,
+                    Some(ValueData::BinaryValue(v)),
                     row,
-                )?;
+                );
             }
             None => {}
         }
@@ -657,6 +664,48 @@ mod tests {
         assert_eq!(
             retry_column.binary_types,
             [(0, TraceBinaryType::Binary), (1, TraceBinaryType::Json)]
+        );
+    }
+
+    #[test]
+    fn test_batch_schema_preserves_scalar_then_binary_values() {
+        let mut scalar_span = make_span("svc-a", "trace-a", "span-a");
+        scalar_span.span_attributes = Attributes::from(vec![
+            make_kv("bytes", OtlpValue::StringValue("text".to_string())),
+            make_kv("json", OtlpValue::StringValue("text".to_string())),
+        ]);
+        let mut binary_span = make_span("svc-a", "trace-a", "span-b");
+        binary_span.span_attributes = Attributes::from(vec![
+            make_kv("bytes", OtlpValue::BytesValue(vec![1_u8, 2, 3])),
+            make_kv(
+                "json",
+                OtlpValue::ArrayValue(ArrayValue {
+                    values: vec![AnyValue {
+                        value: Some(OtlpValue::IntValue(1)),
+                    }],
+                }),
+            ),
+        ]);
+
+        let (_, batch_schema) =
+            build_trace_table_data_with_schema(vec![scalar_span, binary_span].into_iter()).unwrap();
+
+        assert_eq!(
+            batch_schema.value_types("span_attributes.bytes").unwrap(),
+            [ColumnDataType::String, ColumnDataType::Binary]
+        );
+        assert_eq!(
+            batch_schema.value_types("span_attributes.json").unwrap(),
+            [ColumnDataType::String, ColumnDataType::Binary]
+        );
+        let retry_columns = batch_schema.into_retry_columns();
+        assert_eq!(
+            retry_columns["span_attributes.bytes"].binary_types,
+            [(1, TraceBinaryType::Binary)]
+        );
+        assert_eq!(
+            retry_columns["span_attributes.json"].binary_types,
+            [(1, TraceBinaryType::Json)]
         );
     }
 

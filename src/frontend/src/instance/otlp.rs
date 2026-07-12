@@ -187,6 +187,11 @@ impl TraceChunkRetry {
             .fail();
         }
 
+        let retry_columns_by_index = rows
+            .schema
+            .iter()
+            .map(|column| retry_columns.get(&column.column_name))
+            .collect::<Vec<_>>();
         let mut fixed_columns = Vec::with_capacity(rows.schema.len());
         let mut sparse_columns = vec![Vec::new(); rows.rows.len()];
         for (column_index, column) in rows.schema.iter().enumerate() {
@@ -194,7 +199,7 @@ impl TraceChunkRetry {
                 fixed_columns.push(column_index);
                 continue;
             }
-            let Some(retry_column) = retry_columns.get(&column.column_name) else {
+            let Some(retry_column) = retry_columns_by_index[column_index] else {
                 continue;
             };
             for present_row in &retry_column.present_rows {
@@ -228,16 +233,17 @@ impl TraceChunkRetry {
                 let column = &rows.schema[column_index];
                 let value = &row.values[column_index];
                 let value_type = value.value_data.as_ref().and_then(trace_value_datatype);
-                let binary_type = (value_type == Some(ColumnDataType::Binary))
-                    .then(|| retry_columns.get(&column.column_name))
-                    .flatten()
-                    .and_then(|retry_column| {
+                let binary_type = if value_type == Some(ColumnDataType::Binary) {
+                    retry_columns_by_index[column_index].and_then(|retry_column| {
                         retry_column
                             .binary_types
                             .binary_search_by_key(&row_index, |(row_index, _)| *row_index)
                             .ok()
                             .map(|index| retry_column.binary_types[index].1)
-                    });
+                    })
+                } else {
+                    None
+                };
                 let schema_type = binary_type.map(TraceRetrySchemaType::Binary).or_else(|| {
                     value_type
                         .filter(|datatype| {
@@ -573,13 +579,11 @@ impl TraceRequestSchema {
         pending_rewrites
     }
 
-    fn remove_observations(&mut self, exclusions: &TraceSchemaExclusions) {
+    fn remove_batches(&mut self, batch_indexes: &HashSet<usize>) {
         for column in &mut self.columns {
-            if let Some(batch_indexes) = exclusions.get(&column.schema.column_name) {
-                column
-                    .batches
-                    .retain(|batch_index, _| !batch_indexes.contains(batch_index));
-            }
+            column
+                .batches
+                .retain(|batch_index, _| !batch_indexes.contains(batch_index));
             column.target_type = None;
         }
         self.columns.retain(|column| !column.batches.is_empty());
@@ -937,7 +941,9 @@ impl Instance {
                             ingest_ctx.table_name,
                         )?;
                     let span_fallback_only = batch_schema.has_incompatible_logical_types();
-                    request_schema.observe_batch_schema(batch_index, &request, &batch_schema);
+                    if !span_fallback_only {
+                        request_schema.observe_batch_schema(batch_index, &request, &batch_schema);
+                    }
                     chunk_inserts.push(TraceChunkInsert {
                         span_metadata,
                         request,
@@ -1179,14 +1185,30 @@ impl Instance {
             )
             .await
         {
-            if !matches!(
-                Self::classify_trace_chunk_failure(err.status_code()),
-                ChunkFailureReaction::RetryPerSpan
-            ) {
-                return Err(err);
-            }
-            for chunk_insert in &mut chunk_inserts {
-                chunk_insert.schema_prepared = false;
+            match Self::classify_trace_chunk_failure(err.status_code()) {
+                ChunkFailureReaction::RetryPerSpan => {
+                    for chunk_insert in &mut chunk_inserts {
+                        chunk_insert.schema_prepared = false;
+                    }
+                }
+                ChunkFailureReaction::DiscardChunk => {
+                    let span_count = chunk_inserts
+                        .iter()
+                        .map(|chunk_insert| chunk_insert.span_metadata.len())
+                        .sum::<usize>();
+                    ingest_state.outcome.rejected_spans += span_count;
+                    Self::push_trace_failure_message(
+                        &mut ingest_state.failure_messages,
+                        ChunkFailureReaction::DiscardChunk.as_metric_label(),
+                        format!(
+                            "Discarded {} spans after ambiguous chunk failure ({})",
+                            span_count,
+                            err.status_code().as_ref()
+                        ),
+                    );
+                    return Ok(());
+                }
+                ChunkFailureReaction::Propagate => return Err(err),
             }
         }
 
@@ -1497,12 +1519,17 @@ impl Instance {
         chunk_inserts: &mut [TraceChunkInsert],
         exclusions: &TraceSchemaExclusions,
     ) {
-        for batch_index in exclusions.values().flatten() {
+        let batch_indexes = exclusions
+            .values()
+            .flatten()
+            .copied()
+            .collect::<HashSet<_>>();
+        for batch_index in &batch_indexes {
             if let Some(chunk_insert) = chunk_inserts.get_mut(*batch_index) {
                 chunk_insert.schema_prepared = false;
             }
         }
-        request_schema.remove_observations(exclusions);
+        request_schema.remove_batches(&batch_indexes);
     }
 
     fn apply_prepared_trace_v1_chunk_rewrites(
@@ -1855,8 +1882,8 @@ fn trace_logical_types_incompatible(
 ) -> bool {
     left_concrete_type != right_concrete_type
         && (left_datatype == right_datatype
-            || (!is_trace_reconcile_candidate_type(left_datatype)
-                && !is_trace_reconcile_candidate_type(right_datatype)))
+            || !is_trace_reconcile_candidate_type(left_datatype)
+            || !is_trace_reconcile_candidate_type(right_datatype))
 }
 
 fn is_sparse_trace_column(column_name: &str) -> bool {
@@ -2363,6 +2390,31 @@ mod tests {
     }
 
     #[test]
+    fn test_trace_request_schema_isolates_non_candidate_batch() {
+        let column_name = "span_attributes.payload";
+        let string_schema = field_schema(column_name, ColumnDataType::String);
+        let binary_schema = field_schema(column_name, ColumnDataType::Binary);
+        let existing_string_schema =
+            DatatypesSchemaBuilder::try_from_columns(vec![DatatypesColumnSchema::new(
+                column_name,
+                ConcreteDataType::string_datatype(),
+                true,
+            )])
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let mut request_schema = TraceRequestSchema::default();
+        request_schema.observe_trace_column(0, &string_schema, Some(ColumnDataType::String));
+        request_schema.observe_trace_column(1, &binary_schema, Some(ColumnDataType::Binary));
+
+        assert_eq!(
+            request_schema.incompatible_schema_observations(Some(&existing_string_schema)),
+            HashMap::from([(column_name.to_string(), HashSet::from([1]))])
+        );
+    }
+
+    #[test]
     fn test_trace_request_schema_isolates_unsupported_type_batches() {
         let mixed_column = "span_attributes.mixed";
         let unrelated_column = "span_attributes.unrelated";
@@ -2385,14 +2437,18 @@ mod tests {
             HashMap::from([(mixed_column.to_string(), HashSet::from([0, 1]))])
         );
 
-        request_schema.remove_observations(&exclusions);
+        let batch_indexes = exclusions
+            .values()
+            .flatten()
+            .copied()
+            .collect::<HashSet<_>>();
+        request_schema.remove_batches(&batch_indexes);
         let plan = ready_plan(request_schema.resolve_table_schema(None));
-        assert_eq!(plan.ensure_columns.len(), 1);
-        assert_eq!(plan.ensure_columns[0].column_name, unrelated_column);
+        assert!(!plan.requires_ddl());
     }
 
     #[test]
-    fn test_trace_request_schema_isolates_failed_batch() {
+    fn test_trace_request_schema_drops_failed_batch() {
         let table_name = "trace_failed_batch";
         let column_name = "span_attributes.value";
         let failed_only_column = "span_attributes.server.port";
@@ -2455,27 +2511,16 @@ mod tests {
         assert!(chunks[0].schema_prepared);
         assert!(!chunks[1].schema_prepared);
 
-        request_schema.remove_observations(&exclusions);
-        ready_plan(request_schema.resolve_table_schema(None));
-        let (_, exclusions) =
-            Instance::prepare_trace_v1_chunk_rewrites(&request_schema, &mut chunks).unwrap();
-        assert_eq!(
-            exclusions,
-            HashMap::from([(failed_only_column.to_string(), HashSet::from([1]))])
-        );
-        request_schema.remove_observations(&exclusions);
+        request_schema.remove_batches(&HashSet::from([1]));
         assert!(
             !request_schema
                 .column_indexes
                 .contains_key(failed_only_column)
         );
-        assert!(request_schema.column_indexes.contains_key(safe_column));
+        assert!(!request_schema.column_indexes.contains_key(safe_column));
         let plan = ready_plan(request_schema.resolve_table_schema(None));
-        assert!(
-            plan.ensure_columns
-                .iter()
-                .any(|column| column.column_name == safe_column)
-        );
+        assert_eq!(plan.ensure_columns.len(), 1);
+        assert_eq!(plan.ensure_columns[0].column_name, column_name);
         let (prepared, exclusions) =
             Instance::prepare_trace_v1_chunk_rewrites(&request_schema, &mut chunks).unwrap();
         assert!(exclusions.is_empty());
