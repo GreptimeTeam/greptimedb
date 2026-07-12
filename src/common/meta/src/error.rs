@@ -380,9 +380,8 @@ pub enum Error {
     },
 
     #[snafu(display(
-        "Cannot drop table '{}': tombstoned table id {} already uses the same full name",
-        table_name,
-        existing_table_id
+        "Cannot drop table '{}': an older tombstone already uses the same full name",
+        table_name
     ))]
     /// Raised when a live table is recreated with a name still reserved by an older tombstone.
     TableNameTombstoneConflict {

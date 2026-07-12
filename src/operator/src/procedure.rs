@@ -17,6 +17,7 @@ use async_trait::async_trait;
 use catalog::CatalogManagerRef;
 use common_error::ext::BoxedError;
 use common_function::handlers::ProcedureServiceHandler;
+use common_meta::cache_invalidator::CacheInvalidatorRef;
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::procedure_executor::{ExecutorContext, ProcedureExecutorRef};
 use common_meta::rpc::ddl::{DdlTask, SubmitDdlTaskRequest};
@@ -39,6 +40,7 @@ pub struct ProcedureServiceOperator {
     procedure_executor: ProcedureExecutorRef,
     catalog_manager: CatalogManagerRef,
     table_metadata_manager: TableMetadataManagerRef,
+    cache_invalidator: CacheInvalidatorRef,
 }
 
 impl ProcedureServiceOperator {
@@ -46,11 +48,13 @@ impl ProcedureServiceOperator {
         procedure_executor: ProcedureExecutorRef,
         catalog_manager: CatalogManagerRef,
         table_metadata_manager: TableMetadataManagerRef,
+        cache_invalidator: CacheInvalidatorRef,
     ) -> Self {
         Self {
             procedure_executor,
             catalog_manager,
             table_metadata_manager,
+            cache_invalidator,
         }
     }
 }
@@ -85,6 +89,9 @@ impl ProcedureServiceHandler for ProcedureServiceOperator {
             .await
             .map_err(BoxedError::new)
             .context(query_error::ProcedureServiceSnafu)?;
+        if let Err(err) = self.cache_invalidator.invalidate_all() {
+            common_telemetry::warn!(err; "Failed to invalidate caches after purging table '{}'; the purge has already committed", table_name);
+        }
         Ok(())
     }
 
@@ -156,6 +163,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use api::v1::meta::{ProcedureDetailResponse, ReconcileResponse};
+    use common_meta::cache_invalidator::{CacheInvalidator, Context};
     use common_meta::key::TableMetadataManager;
     use common_meta::key::table_route::TableRouteValue;
     use common_meta::key::test_utils::new_test_table_info_with_name;
@@ -172,6 +180,34 @@ mod tests {
     struct RecordingProcedureExecutor {
         requests: Mutex<Vec<SubmitDdlTaskRequest>>,
         fail: bool,
+    }
+
+    #[derive(Default)]
+    struct RecordingCacheInvalidator {
+        invalidate_all_calls: Mutex<usize>,
+        fail: bool,
+    }
+
+    #[async_trait]
+    impl CacheInvalidator for RecordingCacheInvalidator {
+        async fn invalidate(
+            &self,
+            _: &Context,
+            _: &[common_meta::instruction::CacheIdent],
+        ) -> common_meta::error::Result<()> {
+            Ok(())
+        }
+
+        fn invalidate_all(&self) -> common_meta::error::Result<()> {
+            *self.invalidate_all_calls.lock().unwrap() += 1;
+            if self.fail {
+                return common_meta::error::UnsupportedSnafu {
+                    operation: "test cache invalidation failure",
+                }
+                .fail();
+            }
+            Ok(())
+        }
     }
 
     #[async_trait]
@@ -223,7 +259,11 @@ mod tests {
         table_id: u32,
         name: &TableName,
         fail: bool,
-    ) -> (ProcedureServiceOperator, Arc<RecordingProcedureExecutor>) {
+    ) -> (
+        ProcedureServiceOperator,
+        Arc<RecordingProcedureExecutor>,
+        Arc<RecordingCacheInvalidator>,
+    ) {
         let manager = Arc::new(TableMetadataManager::new(Arc::new(
             MemoryKvBackend::default(),
         )));
@@ -243,18 +283,20 @@ mod tests {
             fail,
             ..Default::default()
         });
+        let cache = Arc::new(RecordingCacheInvalidator::default());
         let operator = ProcedureServiceOperator::new(
             executor.clone() as ProcedureExecutorRef,
             catalog::memory::MemoryCatalogManager::new(),
             manager,
+            cache.clone(),
         );
-        (operator, executor)
+        (operator, executor, cache)
     }
 
     #[tokio::test]
     async fn test_purge_table_submits_tombstone_id_and_query_context() {
         let name = TableName::new("catalog", "schema", "metrics");
-        let (operator, executor) = operator_with_tombstone(42, &name, false).await;
+        let (operator, executor, cache) = operator_with_tombstone(42, &name, false).await;
         let manager = operator.table_metadata_manager.clone();
         let mut live = new_test_table_info_with_name(99, "metrics");
         live.catalog_name = "catalog".to_string();
@@ -269,7 +311,7 @@ mod tests {
             .build()
             .into();
 
-        operator.purge_table(name, query_ctx).await.unwrap();
+        operator.purge_table(name.clone(), query_ctx).await.unwrap();
 
         let requests = executor.requests.lock().unwrap();
         assert!(
@@ -277,6 +319,7 @@ mod tests {
         );
         assert_eq!(requests[0].query_context.current_catalog, "catalog");
         assert_eq!(requests[0].query_context.current_schema, "schema");
+        assert_eq!(1, *cache.invalidate_all_calls.lock().unwrap());
     }
 
     #[tokio::test]
@@ -289,6 +332,7 @@ mod tests {
             executor.clone(),
             catalog::memory::MemoryCatalogManager::new(),
             manager,
+            Arc::new(RecordingCacheInvalidator::default()),
         );
         let error = operator
             .purge_table(
@@ -311,7 +355,7 @@ mod tests {
     #[tokio::test]
     async fn test_purge_table_propagates_submission_failure() {
         let name = TableName::new("catalog", "schema", "metrics");
-        let (operator, executor) = operator_with_tombstone(42, &name, true).await;
+        let (operator, executor, cache) = operator_with_tombstone(42, &name, true).await;
         assert!(
             operator
                 .purge_table(
@@ -326,5 +370,25 @@ mod tests {
                 .is_err()
         );
         assert_eq!(1, executor.requests.lock().unwrap().len());
+        assert_eq!(0, *cache.invalidate_all_calls.lock().unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_purge_table_ignores_post_submission_cache_invalidation_failure() {
+        let name = TableName::new("catalog", "schema", "metrics");
+        let (mut operator, executor, _) = operator_with_tombstone(42, &name, false).await;
+        let cache = Arc::new(RecordingCacheInvalidator {
+            fail: true,
+            ..Default::default()
+        });
+        operator.cache_invalidator = cache.clone();
+
+        operator
+            .purge_table(name, QueryContextBuilder::default().build().into())
+            .await
+            .unwrap();
+
+        assert_eq!(1, executor.requests.lock().unwrap().len());
+        assert_eq!(1, *cache.invalidate_all_calls.lock().unwrap());
     }
 }

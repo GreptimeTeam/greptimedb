@@ -34,6 +34,8 @@ use crate::key::view_info::ViewInfoKey;
 #[async_trait::async_trait]
 pub trait KvCacheInvalidator: Send + Sync {
     async fn invalidate_key(&self, key: &[u8]);
+
+    fn invalidate_all(&self);
 }
 
 pub type KvCacheInvalidatorRef = Arc<dyn KvCacheInvalidator>;
@@ -43,6 +45,8 @@ pub struct DummyKvCacheInvalidator;
 #[async_trait::async_trait]
 impl KvCacheInvalidator for DummyKvCacheInvalidator {
     async fn invalidate_key(&self, _key: &[u8]) {}
+
+    fn invalidate_all(&self) {}
 }
 
 /// Places context of invalidating cache. e.g., span id, trace id etc.
@@ -171,9 +175,7 @@ where
     }
 
     fn invalidate_all(&self) -> Result<()> {
-        // KvCacheInvalidator only knows how to invalidate explicit metadata
-        // keys. There is no safe generic way to enumerate or clear the backend
-        // keyspace, so full invalidation is intentionally a no-op here.
+        KvCacheInvalidator::invalidate_all(self);
         Ok(())
     }
 }

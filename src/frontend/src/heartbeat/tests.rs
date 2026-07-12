@@ -44,6 +44,21 @@ impl KvCacheInvalidator for MockKvCacheInvalidator {
     async fn invalidate_key(&self, key: &[u8]) {
         let _ = self.inner.lock().unwrap().remove(key);
     }
+
+    fn invalidate_all(&self) {
+        self.inner.lock().unwrap().clear();
+    }
+}
+
+#[test]
+fn test_mock_kv_cache_invalidator_invalidates_all() {
+    let backend = MockKvCacheInvalidator {
+        inner: Mutex::new(HashMap::from([(b"key".to_vec(), 1)])),
+    };
+
+    backend.invalidate_all();
+
+    assert!(backend.inner.lock().unwrap().is_empty());
 }
 
 pub fn test_message_meta(id: u64, subject: &str, to: &str, from: &str) -> MessageMeta {

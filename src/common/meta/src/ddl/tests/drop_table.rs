@@ -912,6 +912,10 @@ async fn test_hard_drop_recreated_table_fails_when_soft_tombstone_exists() {
     );
     let err = procedure.on_prepare().await.unwrap_err();
 
+    assert_eq!(
+        "Cannot drop table 'greptime.public.foo': an older tombstone already uses the same full name",
+        err.to_string()
+    );
     assert_matches!(err, Error::TableNameTombstoneConflict { .. });
 }
 

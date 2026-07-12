@@ -3421,7 +3421,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_dropped_table_lookup_ignores_unrelated_malformed_datanode_tombstones() {
+    async fn test_dropped_table_exact_lookup_ignores_unrelated_malformed_table_name_tombstone() {
         let table_id = 1025;
         let table_name = "foo";
         let (mem_kv, table_metadata_manager, table_name, table_info, region_routes, options) =
@@ -3439,7 +3439,7 @@ mod tests {
         mem_kv
             .put(
                 PutRequest::new()
-                    .with_key("__tombstone/__dn_table/not-a-datanode-table-key")
+                    .with_key("__tombstone/__table_name/not-a-table-name-key")
                     .with_value("malformed"),
             )
             .await
@@ -3457,6 +3457,63 @@ mod tests {
             &table_info,
             &region_routes,
             &options,
+        );
+    }
+
+    #[tokio::test]
+    async fn test_dropped_table_exact_lookup_tracks_reused_name_after_purge() {
+        let old_table_id = 1025;
+        let new_table_id = 1026;
+        let (_, manager, table_name, _, old_routes, old_options) =
+            create_dropped_physical_table_metadata(
+                old_table_id,
+                "foo",
+                vec![test_physical_region_route(old_table_id, 1, 1, vec![])],
+                HashMap::new(),
+            )
+            .await;
+
+        manager
+            .delete_table_metadata_tombstone(
+                old_table_id,
+                &table_name,
+                &TableRouteValue::physical(old_routes),
+                &old_options,
+            )
+            .await
+            .unwrap();
+        let new_task = test_create_table_task("foo", new_table_id);
+        let new_info = new_task.table_info.clone();
+        let new_route =
+            TableRouteValue::physical(vec![test_physical_region_route(new_table_id, 1, 1, vec![])]);
+        manager
+            .create_table_metadata(new_task.table_info, new_route.clone(), HashMap::new())
+            .await
+            .unwrap();
+        manager
+            .delete_table_metadata(new_table_id, &table_name, &new_route, &HashMap::new(), None)
+            .await
+            .unwrap();
+
+        let dropped = manager
+            .get_dropped_table(&table_name)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(new_table_id, dropped.table_id);
+        assert_eq!(new_info, dropped.table_info_value.table_info);
+    }
+
+    #[tokio::test]
+    async fn test_dropped_table_exact_lookup_missing() {
+        let manager = TableMetadataManager::new(Arc::new(MemoryKvBackend::default()));
+
+        assert!(
+            manager
+                .get_dropped_table(&TableName::new("greptime", "public", "missing"))
+                .await
+                .unwrap()
+                .is_none()
         );
     }
 
