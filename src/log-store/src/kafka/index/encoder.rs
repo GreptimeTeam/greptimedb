@@ -60,22 +60,6 @@ impl DeltaEncodedRegionIndexes {
     pub(crate) fn last_index(&self) -> u64 {
         self.last_index
     }
-
-    pub(crate) fn to_region_indexes(&self) -> RegionIndexes {
-        RegionIndexes {
-            regions: self
-                .regions
-                .iter()
-                .map(|(region_id, delta)| {
-                    (
-                        *region_id,
-                        delta.iter().copied().original().collect::<BTreeSet<_>>(),
-                    )
-                })
-                .collect(),
-            latest_entry_id: self.last_index,
-        }
-    }
 }
 
 pub trait IndexEncoder: Send + Sync {
@@ -108,12 +92,10 @@ impl DatanodeWalIndexes {
         self.0.get(&provider.topic)
     }
 
-    pub(crate) fn provider_region_indexes(
-        &self,
-        provider: &KafkaProvider,
-    ) -> Option<RegionIndexes> {
-        self.provider(provider)
-            .map(DeltaEncodedRegionIndexes::to_region_indexes)
+    pub(crate) fn remove_region(&mut self, provider: &KafkaProvider, region_id: RegionId) {
+        if let Some(indexes) = self.0.get_mut(&provider.topic) {
+            indexes.regions.remove(&region_id);
+        }
     }
 }
 

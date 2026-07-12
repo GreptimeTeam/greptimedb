@@ -78,12 +78,6 @@ impl DumpIndexRequest {
             rx,
         )
     }
-
-    #[cfg(test)]
-    pub(crate) fn apply(self, collector: &mut dyn IndexCollector) {
-        collector.dump(self.encoder.as_ref());
-        let _ = self.sender.send(());
-    }
 }
 
 pub(crate) struct TruncateIndexRequest {

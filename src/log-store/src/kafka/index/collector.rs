@@ -120,6 +120,21 @@ impl CollectionTask {
         Ok(())
     }
 
+    async fn truncate_all(&self, provider: &KafkaProvider, region_id: RegionId) -> Result<()> {
+        let _guard = self.dump_lock.lock().await;
+        let mut indexes = self.read_index().await?;
+        indexes.remove_region(provider, region_id);
+        let bytes = indexes.encode()?;
+        let mut writer = self
+            .operator
+            .writer(&self.path)
+            .await
+            .context(error::CreateWriterSnafu)?;
+        writer.write(bytes).await.context(error::WriteIndexSnafu)?;
+        writer.close().await.context(error::WriteIndexSnafu)?;
+        Ok(())
+    }
+
     /// The background task performs two main operations:
     /// - Persists the WAL index to the specified `path` at every `dump_index_interval`.
     /// - Updates the latest index ID for each WAL provider at every `checkpoint_interval`.
@@ -249,26 +264,16 @@ impl GlobalIndexCollector {
     }
 
     /// Creates a new [`ProviderLevelIndexCollector`] for a specified provider.
-    ///
-    /// This is called when initializing a provider client, not for every WAL operation. It restores
-    /// the provider's persisted indexes so a subsequent truncation preserves indexes belonging to
-    /// other regions in the same topic. The dump lock keeps restoration consistent with concurrent
-    /// index dumps.
     pub(crate) async fn provider_level_index_collector(
         &self,
         provider: Arc<KafkaProvider>,
         sender: Sender<WorkerRequest>,
-    ) -> Result<Box<dyn IndexCollector>> {
-        let indexes = {
-            let _guard = self.task.dump_lock.lock().await;
-            self.task
-                .read_index()
-                .await?
-                .provider_region_indexes(&provider)
-                .unwrap_or_default()
-        };
+    ) -> Box<dyn IndexCollector> {
         self.providers.lock().await.insert(provider.clone(), sender);
-        Ok(Box::new(ProviderLevelIndexCollector { indexes, provider }))
+        Box::new(ProviderLevelIndexCollector {
+            indexes: RegionIndexes::default(),
+            provider,
+        })
     }
 
     /// Truncates the index for a specific region up to a given [`EntryId`].
@@ -318,8 +323,7 @@ impl GlobalIndexCollector {
         receiver
             .await
             .context(error::WaitTruncateAllIndexSnafu {})?;
-        self.task.dump_index().await?;
-        Ok(())
+        self.task.truncate_all(provider, region_id).await
     }
 }
 
@@ -453,8 +457,7 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(8);
         let mut provider_collector = collector
             .provider_level_index_collector(provider.clone(), tx)
-            .await
-            .unwrap();
+            .await;
         let region_to_remove = RegionId::new(1, 1);
         let region_to_keep = RegionId::new(1, 2);
         provider_collector.append(region_to_remove, 1);
@@ -463,17 +466,11 @@ mod tests {
         provider_collector.set_latest_entry_id(6);
 
         let worker = tokio::spawn(async move {
-            loop {
-                match rx.recv().await.unwrap() {
-                    WorkerRequest::TruncateAllIndex(request) => {
-                        request.apply(provider_collector.as_mut())
-                    }
-                    WorkerRequest::DumpIndex(request) => {
-                        request.apply(provider_collector.as_mut());
-                        break;
-                    }
-                    _ => unreachable!(),
+            match rx.recv().await.unwrap() {
+                WorkerRequest::TruncateAllIndex(request) => {
+                    request.apply(provider_collector.as_mut())
                 }
+                _ => unreachable!(),
             }
             provider_collector
         });
@@ -521,20 +518,13 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(8);
         let mut provider_collector = collector
             .provider_level_index_collector(provider.clone(), tx)
-            .await
-            .unwrap();
+            .await;
         let worker = tokio::spawn(async move {
-            loop {
-                match rx.recv().await.unwrap() {
-                    WorkerRequest::TruncateAllIndex(request) => {
-                        request.apply(provider_collector.as_mut())
-                    }
-                    WorkerRequest::DumpIndex(request) => {
-                        request.apply(provider_collector.as_mut());
-                        break;
-                    }
-                    _ => unreachable!(),
+            match rx.recv().await.unwrap() {
+                WorkerRequest::TruncateAllIndex(request) => {
+                    request.apply(provider_collector.as_mut())
                 }
+                _ => unreachable!(),
             }
         });
 
@@ -558,6 +548,77 @@ mod tests {
         assert_eq!(kept, BTreeSet::from([2, 6]));
         assert_eq!(last_index, 7);
         assert_eq!(kept_last_index, 7);
+    }
+
+    #[tokio::test]
+    async fn test_provider_collector_creation_does_not_read_checkpoint() {
+        let operator = object_store::ObjectStore::new(object_store::services::Memory::default())
+            .unwrap()
+            .finish();
+        let path = default_index_file(0);
+        let mut writer = operator.writer(&path).await.unwrap();
+        writer.write(b"invalid checkpoint".to_vec()).await.unwrap();
+        writer.close().await.unwrap();
+
+        let collector = GlobalIndexCollector::new_for_test(operator);
+        let provider = Arc::new(KafkaProvider::new("my_topic_0".to_string()));
+        let (tx, _rx) = mpsc::channel(8);
+
+        collector.provider_level_index_collector(provider, tx).await;
+    }
+
+    #[tokio::test]
+    async fn test_truncate_all_reads_latest_checkpoint() {
+        let operator = object_store::ObjectStore::new(object_store::services::Memory::default())
+            .unwrap()
+            .finish();
+        let path = default_index_file(0);
+        let provider = Arc::new(KafkaProvider::new("my_topic_0".to_string()));
+        let region_to_remove = RegionId::new(1, 1);
+        let region_to_keep = RegionId::new(1, 2);
+        let collector = GlobalIndexCollector::new_for_test(operator.clone());
+        let (tx, mut rx) = mpsc::channel(8);
+        let mut provider_collector = collector
+            .provider_level_index_collector(provider.clone(), tx)
+            .await;
+
+        let encoder = JsonIndexEncoder::default();
+        encoder.encode(
+            &provider,
+            &RegionIndexes {
+                regions: HashMap::from([
+                    (region_to_remove, BTreeSet::from([1, 5])),
+                    (region_to_keep, BTreeSet::from([2, 6])),
+                ]),
+                latest_entry_id: 7,
+            },
+        );
+        let mut writer = operator.writer(&path).await.unwrap();
+        writer.write(encoder.finish().unwrap()).await.unwrap();
+        writer.close().await.unwrap();
+
+        let worker = tokio::spawn(async move {
+            match rx.recv().await.unwrap() {
+                WorkerRequest::TruncateAllIndex(request) => {
+                    request.apply(provider_collector.as_mut())
+                }
+                _ => unreachable!(),
+            }
+        });
+
+        collector
+            .truncate_all(&provider, region_to_remove)
+            .await
+            .unwrap();
+        worker.await.unwrap();
+
+        let (kept, last_index) = collector
+            .read_remote_region_index(0, &provider, region_to_keep, 0)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(kept, BTreeSet::from([2, 6]));
+        assert_eq!(last_index, 7);
     }
 
     #[tokio::test]
