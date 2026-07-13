@@ -1,0 +1,8 @@
+name = "legacy_json2_non_append_table"
+reason = "Verify current binaries can read a non-append JSON2 table created by old binaries and migrate it to append_mode=true."
+introduced_by = "PR #8434"
+topologies = ["distributed"]
+from_range = ["=v1.1.0", "=v1.1.1", "=v1.1.2"]
+to_range = [">v1.1.1"]
+features = ["json", "json2", "table", "append_mode", "read"]
+owner = "query"
