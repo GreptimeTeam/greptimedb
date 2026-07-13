@@ -34,8 +34,6 @@ use crate::log_query::error::{
     UnknownTableSnafu,
 };
 
-const DEFAULT_LIMIT: usize = 1000;
-
 pub struct LogQueryPlanner {
     table_provider: DfTableSourceProvider,
     session_state: SessionState,
@@ -99,17 +97,16 @@ impl LogQueryPlanner {
                 .context(DataFusionPlanningSnafu)?;
         }
 
-        // Apply limit
-        plan_builder = plan_builder
-            .limit(
-                query.limit.skip.unwrap_or(0),
-                Some(query.limit.fetch.unwrap_or(DEFAULT_LIMIT)),
-            )
-            .context(DataFusionPlanningSnafu)?;
-
         // Apply log expressions
         for expr in &query.exprs {
             plan_builder = self.process_log_expr(plan_builder, expr)?;
+        }
+
+        // Apply pagination to the final result after all log expressions.
+        if query.limit.skip.is_some() || query.limit.fetch.is_some() {
+            plan_builder = plan_builder
+                .limit(query.limit.skip.unwrap_or(0), query.limit.fetch)
+                .context(DataFusionPlanningSnafu)?;
         }
 
         // Build the final plan
@@ -849,7 +846,7 @@ mod tests {
         };
 
         let plan = planner.query_to_plan(log_query).await.unwrap();
-        let expected = "Limit: skip=10, fetch=1000 [message:Utf8, timestamp:Timestamp(ms), host:Utf8;N, is_active:Boolean;N]\
+        let expected = "Limit: skip=10, fetch=None [message:Utf8, timestamp:Timestamp(ms), host:Utf8;N, is_active:Boolean;N]\
 \n  Filter: greptime.public.test_table.timestamp >= Utf8(\"2021-01-01T00:00:00Z\") AND greptime.public.test_table.timestamp < Utf8(\"2021-01-02T00:00:00Z\") AND greptime.public.test_table.message LIKE Utf8(\"%error%\") [message:Utf8, timestamp:Timestamp(ms), host:Utf8;N, is_active:Boolean;N]\
 \n    TableScan: greptime.public.test_table [message:Utf8, timestamp:Timestamp(ms), host:Utf8;N, is_active:Boolean;N]";
 
@@ -884,9 +881,8 @@ mod tests {
         };
 
         let plan = planner.query_to_plan(log_query).await.unwrap();
-        let expected = "Limit: skip=0, fetch=1000 [message:Utf8, timestamp:Timestamp(ms), host:Utf8;N, is_active:Boolean;N]\
-\n  Filter: greptime.public.test_table.timestamp >= Utf8(\"2021-01-01T00:00:00Z\") AND greptime.public.test_table.timestamp < Utf8(\"2021-01-02T00:00:00Z\") AND greptime.public.test_table.message LIKE Utf8(\"%error%\") [message:Utf8, timestamp:Timestamp(ms), host:Utf8;N, is_active:Boolean;N]\
-\n    TableScan: greptime.public.test_table [message:Utf8, timestamp:Timestamp(ms), host:Utf8;N, is_active:Boolean;N]";
+        let expected = "Filter: greptime.public.test_table.timestamp >= Utf8(\"2021-01-01T00:00:00Z\") AND greptime.public.test_table.timestamp < Utf8(\"2021-01-02T00:00:00Z\") AND greptime.public.test_table.message LIKE Utf8(\"%error%\") [message:Utf8, timestamp:Timestamp(ms), host:Utf8;N, is_active:Boolean;N]\
+\n  TableScan: greptime.public.test_table [message:Utf8, timestamp:Timestamp(ms), host:Utf8;N, is_active:Boolean;N]";
 
         assert_eq!(plan.display_indent_schema().to_string(), expected);
     }
@@ -931,8 +927,8 @@ mod tests {
         };
 
         let plan = planner.query_to_plan(log_query).await.unwrap();
-        let expected = "Aggregate: groupBy=[[greptime.public.test_table.host]], aggr=[[count(greptime.public.test_table.message) AS count_result]] [host:Utf8;N, count_result:Int64]\
-\n  Limit: skip=0, fetch=100 [message:Utf8, timestamp:Timestamp(ms), host:Utf8;N, is_active:Boolean;N]\
+        let expected = "Limit: skip=0, fetch=100 [host:Utf8;N, count_result:Int64]\
+\n  Aggregate: groupBy=[[greptime.public.test_table.host]], aggr=[[count(greptime.public.test_table.message) AS count_result]] [host:Utf8;N, count_result:Int64]\
 \n    Filter: greptime.public.test_table.timestamp >= Utf8(\"2021-01-01T00:00:00Z\") AND greptime.public.test_table.timestamp < Utf8(\"2021-01-02T00:00:00Z\") [message:Utf8, timestamp:Timestamp(ms), host:Utf8;N, is_active:Boolean;N]\
 \n      TableScan: greptime.public.test_table [message:Utf8, timestamp:Timestamp(ms), host:Utf8;N, is_active:Boolean;N]";
 
@@ -971,8 +967,8 @@ mod tests {
         };
 
         let plan = planner.query_to_plan(log_query).await.unwrap();
-        let expected = "Projection: date_trunc(Utf8(\"day\"), greptime.public.test_table.timestamp) AS time_bucket [time_bucket:Timestamp(ms)]\
-        \n  Limit: skip=0, fetch=100 [message:Utf8, timestamp:Timestamp(ms), host:Utf8;N, is_active:Boolean;N]\
+        let expected = "Limit: skip=0, fetch=100 [time_bucket:Timestamp(ms)]\
+        \n  Projection: date_trunc(Utf8(\"day\"), greptime.public.test_table.timestamp) AS time_bucket [time_bucket:Timestamp(ms)]\
         \n    Filter: greptime.public.test_table.timestamp >= Utf8(\"2021-01-01T00:00:00Z\") AND greptime.public.test_table.timestamp < Utf8(\"2021-01-02T00:00:00Z\") [message:Utf8, timestamp:Timestamp(ms), host:Utf8;N, is_active:Boolean;N]\
         \n      TableScan: greptime.public.test_table [message:Utf8, timestamp:Timestamp(ms), host:Utf8;N, is_active:Boolean;N]";
 
@@ -1054,9 +1050,9 @@ mod tests {
         };
 
         let plan = planner.query_to_plan(log_query).await.unwrap();
-        let expected = "Aggregate: groupBy=[[2__date_histogram__time_bucket]], aggr=[[count(2__date_histogram__time_bucket) AS count_result]] [2__date_histogram__time_bucket:Timestamp(ns);N, count_result:Int64]\
-\n  Projection: date_bin(Utf8(\"30 seconds\"), greptime.public.test_table.timestamp) AS 2__date_histogram__time_bucket [2__date_histogram__time_bucket:Timestamp(ns);N]\
-\n    Limit: skip=0, fetch=1000 [message:Utf8, timestamp:Timestamp(ms), host:Utf8;N, is_active:Boolean;N]\
+        let expected = "Limit: skip=0, fetch=None [2__date_histogram__time_bucket:Timestamp(ns);N, count_result:Int64]\
+\n  Aggregate: groupBy=[[2__date_histogram__time_bucket]], aggr=[[count(2__date_histogram__time_bucket) AS count_result]] [2__date_histogram__time_bucket:Timestamp(ns);N, count_result:Int64]\
+\n    Projection: date_bin(Utf8(\"30 seconds\"), greptime.public.test_table.timestamp) AS 2__date_histogram__time_bucket [2__date_histogram__time_bucket:Timestamp(ns);N]\
 \n      Filter: greptime.public.test_table.timestamp >= Utf8(\"2021-01-01T00:00:00Z\") AND greptime.public.test_table.timestamp < Utf8(\"2021-01-02T00:00:00Z\") [message:Utf8, timestamp:Timestamp(ms), host:Utf8;N, is_active:Boolean;N]\
 \n        TableScan: greptime.public.test_table [message:Utf8, timestamp:Timestamp(ms), host:Utf8;N, is_active:Boolean;N]";
 
