@@ -42,8 +42,7 @@ type HmacSha256 = Hmac<Sha256>;
 
 /// Process-wide secret used to derive a stable mock salt for unknown users, so
 /// the SCRAM `server-first-message` can't be used to enumerate usernames.
-static PG_SCRAM_MOCK_SECRET: LazyLock<[u8; PG_SCRAM_SHA256_KEY_LEN]> =
-    LazyLock::new(rand::random);
+static PG_SCRAM_MOCK_SECRET: LazyLock<[u8; PG_SCRAM_SHA256_KEY_LEN]> = LazyLock::new(rand::random);
 
 /// construct a [`UserInfo`](crate::user_info::UserInfo) impl with name
 /// use default username `greptime` if None is provided
