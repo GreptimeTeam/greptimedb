@@ -4289,8 +4289,6 @@ impl PromPlanner {
             .cloned()
             .chain([left_time_index.clone()])
             .collect::<Vec<_>>();
-        self.ctx.time_index_column = Some(left_time_index.clone());
-        self.ctx.use_tsid = left_context.use_tsid;
 
         // alias right time index column if necessary
         if left_context.time_index_column != right_context.time_index_column {
@@ -4320,14 +4318,9 @@ impl PromPlanner {
                 operator: "AND operator"
             }
         );
-        // Update the field column in context.
-        // The AND/UNLESS operator only keep the field column in left input.
-        let left_field_col = left_context.field_columns.first().unwrap();
-        self.ctx.field_columns = vec![left_field_col.clone()];
-
         // Generate join plan.
         // All set operations in PromQL are "distinct"
-        match op.id() {
+        let result = match op.id() {
             token::T_LAND => LogicalPlanBuilder::from(left)
                 .distinct()
                 .context(DataFusionPlanningSnafu)?
@@ -4360,7 +4353,11 @@ impl PromPlanner {
                 unreachable!()
             }
             _ => UnexpectedTokenSnafu { token: op }.fail(),
-        }
+        }?;
+
+        // AND/UNLESS preserve the complete left operand schema and metadata.
+        self.ctx = left_context;
+        Ok(result)
     }
 
     fn string_value_data_type(data_type: &ArrowDataType) -> Option<&ArrowDataType> {
@@ -5556,6 +5553,108 @@ mod test {
             }),
             "{fields:?}"
         );
+    }
+
+    async fn build_test_table_provider_with_distinct_tags(
+        table_tags: &[(&str, &[&str])],
+    ) -> DfTableSourceProvider {
+        let catalog_list = MemoryCatalogManager::with_default_setup();
+        for (table_name, tags) in table_tags {
+            let mut columns = tags
+                .iter()
+                .map(|tag| {
+                    ColumnSchema::new(
+                        (*tag).to_string(),
+                        ConcreteDataType::string_datatype(),
+                        false,
+                    )
+                })
+                .collect::<Vec<_>>();
+            columns.push(
+                ColumnSchema::new(
+                    greptime_timestamp().to_string(),
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                )
+                .with_time_index(true),
+            );
+            columns.push(ColumnSchema::new(
+                greptime_value().to_string(),
+                ConcreteDataType::float64_datatype(),
+                true,
+            ));
+            let table_meta = TableMetaBuilder::empty()
+                .schema(Arc::new(Schema::new(columns)))
+                .primary_key_indices((0..tags.len()).collect())
+                .next_column_id(1024)
+                .build()
+                .unwrap();
+            let table_info = TableInfoBuilder::default()
+                .name((*table_name).to_string())
+                .meta(table_meta)
+                .build()
+                .unwrap();
+
+            assert!(
+                catalog_list
+                    .register_table_sync(RegisterTableRequest {
+                        catalog: DEFAULT_CATALOG_NAME.to_string(),
+                        schema: DEFAULT_SCHEMA_NAME.to_string(),
+                        table_name: (*table_name).to_string(),
+                        table_id: 1024,
+                        table: EmptyTable::from_table_info(&table_info),
+                    })
+                    .is_ok()
+            );
+        }
+
+        DfTableSourceProvider::new(
+            catalog_list,
+            false,
+            QueryContext::arc(),
+            DummyDecoder::arc(),
+            false,
+        )
+    }
+
+    fn contains_histogram_fold(plan: &LogicalPlan) -> bool {
+        matches!(plan, LogicalPlan::Extension(Extension { node }) if node.as_any().is::<HistogramFold>())
+            || plan.inputs().into_iter().any(contains_histogram_fold)
+    }
+
+    async fn build_set_op_context_table_provider() -> DfTableSourceProvider {
+        build_test_table_provider_with_distinct_tags(&[
+            ("bucket_metric", &["job", "le"]),
+            ("normal_metric", &["job"]),
+            ("fallback_metric", &["instance"]),
+        ])
+        .await
+    }
+
+    async fn build_or_context_table_provider() -> DfTableSourceProvider {
+        build_test_table_provider_with_distinct_tags(&[
+            ("normal_metric", &["job"]),
+            ("other_metric", &["instance"]),
+            ("non_hist_metric", &["instance"]),
+        ])
+        .await
+    }
+
+    async fn optimize_and_create_physical_plan(
+        state: &QueryEngineState,
+        plan: LogicalPlan,
+    ) -> (
+        LogicalPlan,
+        Arc<dyn datafusion::physical_plan::ExecutionPlan>,
+    ) {
+        let context = QueryEngineContext::new(state.session_state(), QueryContext::arc());
+        let optimized = state.optimize_by_extension_rules(plan, &context).unwrap();
+        let physical = state
+            .session_state()
+            .create_physical_plan(&optimized)
+            .await
+            .unwrap();
+        (optimized, physical)
     }
 
     async fn build_test_table_provider(
@@ -9324,5 +9423,98 @@ Projection: count(prometheus_tsdb_head_series.greptime_value) AS my_series, prom
                     .unwrap();
             assert_normal_metric_schema(&plan);
         }
+    }
+
+    #[tokio::test]
+    async fn test_unless_preserves_left_context_for_histogram() {
+        let eval_stmt = build_eval_stmt(
+            r#"histogram_quantile(0.99, bucket_metric unless on(job) normal_metric) or fallback_metric"#,
+        );
+        let state = build_query_engine_state();
+        let plan = PromPlanner::stmt_to_plan(
+            build_set_op_context_table_provider().await,
+            &eval_stmt,
+            &state,
+        )
+        .await
+        .unwrap();
+        assert!(contains_histogram_fold(&plan), "{plan:?}");
+        let (optimized, physical) = optimize_and_create_physical_plan(&state, plan).await;
+        assert!(contains_histogram_fold(&optimized), "{optimized:?}");
+        let batches =
+            datafusion::physical_plan::collect(physical, state.session_state().task_ctx())
+                .await
+                .unwrap();
+        assert!(batches.iter().all(|batch| batch.num_rows() == 0));
+    }
+
+    #[tokio::test]
+    async fn test_and_preserves_left_context_for_histogram() {
+        let eval_stmt = build_eval_stmt(
+            r#"histogram_quantile(0.99, bucket_metric and on(job) normal_metric) or fallback_metric"#,
+        );
+        let plan = PromPlanner::stmt_to_plan(
+            build_set_op_context_table_provider().await,
+            &eval_stmt,
+            &build_query_engine_state(),
+        )
+        .await
+        .unwrap();
+        assert!(contains_histogram_fold(&plan), "{plan:?}");
+    }
+
+    #[tokio::test]
+    async fn test_and_preserves_left_context_when_le_is_missing() {
+        let eval_stmt =
+            build_eval_stmt(r#"histogram_quantile(0.99, normal_metric and on(job) bucket_metric)"#);
+        let plan = PromPlanner::stmt_to_plan(
+            build_set_op_context_table_provider().await,
+            &eval_stmt,
+            &build_query_engine_state(),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(&plan, LogicalPlan::EmptyRelation(_)), "{plan:?}");
+        assert!(!plan.schema().fields().is_empty());
+        assert!(!contains_histogram_fold(&plan), "{plan:?}");
+    }
+
+    #[tokio::test]
+    async fn test_or_context_uses_left_qualified_output() {
+        let case = r#"(normal_metric or other_metric) + 1"#;
+        let eval_stmt = build_eval_stmt(case);
+        let state = build_query_engine_state();
+        let plan =
+            PromPlanner::stmt_to_plan(build_or_context_table_provider().await, &eval_stmt, &state)
+                .await
+                .unwrap();
+        assert!(
+            plan.schema()
+                .fields()
+                .iter()
+                .any(|field| field.data_type() == &ArrowDataType::Float64),
+            "{plan:?}"
+        );
+        let (_optimized, _physical) = optimize_and_create_physical_plan(&state, plan).await;
+    }
+
+    #[tokio::test]
+    async fn test_or_context_uses_left_qualified_empty_histogram_output() {
+        let case = r#"(abs(histogram_quantile(0.99, non_hist_metric)) or normal_metric) + 1"#;
+        let eval_stmt = build_eval_stmt(case);
+        let plan = PromPlanner::stmt_to_plan(
+            build_or_context_table_provider().await,
+            &eval_stmt,
+            &build_query_engine_state(),
+        )
+        .await
+        .unwrap();
+        assert!(
+            plan.schema()
+                .fields()
+                .iter()
+                .any(|field| field.data_type() == &ArrowDataType::Float64),
+            "{plan:?}"
+        );
     }
 }
