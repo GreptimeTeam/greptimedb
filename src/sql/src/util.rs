@@ -14,6 +14,7 @@
 
 use std::collections::HashSet;
 use std::fmt::{Display, Formatter};
+use std::ops::ControlFlow;
 
 use itertools::Itertools;
 use promql_parser::label::{METRIC_NAME, MatchOp};
@@ -26,8 +27,8 @@ use promql_parser::parser::{
 use serde::Serialize;
 use snafu::ensure;
 use sqlparser::ast::{
-    Array, Expr, Ident, ObjectName, ObjectNamePart, SetExpr, SqlOption, TableFactor,
-    TableWithJoins, Value, ValueWithSpan,
+    Array, Expr, Ident, ObjectName, ObjectNamePart, Query as SqlQuery, SetExpr, SqlOption,
+    TableFactor, TableWithJoins, Value, ValueWithSpan, Visit as AstVisit, Visitor,
 };
 use sqlparser_derive::{Visit, VisitMut};
 
@@ -184,48 +185,60 @@ pub fn parse_option_string(option: SqlOption) -> Result<(String, OptionValue)> {
 
 /// Walk through a [Query] and extract all the tables referenced in it.
 pub fn extract_tables_from_query(query: &SqlOrTql) -> impl Iterator<Item = ObjectName> {
-    let mut names = HashSet::new();
-
-    match query {
-        SqlOrTql::Sql(query, _) => {
-            extract_tables_from_sql_query(&query.inner, &mut names);
-            extract_tables_from_hybrid_cte_query(query, &mut names);
-        }
-        SqlOrTql::Tql(tql, _) => extract_tables_from_tql(tql, &mut names),
-    }
-
-    names.into_iter()
+    extract_tables_from_query_inner(query).0.into_iter()
 }
 
-fn extract_tables_from_hybrid_cte_query(query: &Query, sql_names: &mut HashSet<ObjectName>) {
-    if let Some(hybrid_cte) = &query.hybrid_cte {
-        let mut cte_names: HashSet<String> = hybrid_cte
-            .cte_tables
-            .iter()
-            .map(|cte| ParserContext::canonicalize_identifier(cte.name.clone()).value)
-            .collect();
-        remove_cte_names(sql_names, &cte_names);
+/// Walk through a [Query] and extract its referenced tables, returning `None`
+/// if any table reference cannot be resolved statically.
+pub fn extract_tables_from_query_checked(
+    query: &SqlOrTql,
+) -> Option<impl Iterator<Item = ObjectName>> {
+    let (names, complete) = extract_tables_from_query_inner(query);
+    complete.then_some(names.into_iter())
+}
 
-        cte_names.clear();
-        for cte in &hybrid_cte.cte_tables {
-            let cte_name = ParserContext::canonicalize_identifier(cte.name.clone()).value;
-            let mut cte_query_names = HashSet::new();
-            match &cte.content {
-                CteContent::Sql(cte_query) => {
-                    extract_tables_from_sql_query(cte_query, &mut cte_query_names)
-                }
-                CteContent::Tql(tql) => extract_tables_from_tql(tql, &mut cte_query_names),
-            }
-            if hybrid_cte.recursive {
-                cte_names.insert(cte_name.clone());
-            }
-            remove_cte_names(&mut cte_query_names, &cte_names);
-            sql_names.extend(cte_query_names);
-            if !hybrid_cte.recursive {
-                cte_names.insert(cte_name);
-            }
+fn extract_tables_from_query_inner(query: &SqlOrTql) -> (HashSet<ObjectName>, bool) {
+    let mut names = HashSet::new();
+
+    let complete = match query {
+        SqlOrTql::Sql(query, _) => {
+            extract_tables_from_sql_query(&query.inner, &mut names);
+            extract_tables_from_hybrid_cte_query(query, &mut names)
         }
+        SqlOrTql::Tql(tql, _) => extract_tables_from_tql(tql, &mut names),
+    };
+
+    (names, complete)
+}
+
+fn extract_tables_from_hybrid_cte_query(
+    query: &Query,
+    sql_names: &mut HashSet<ObjectName>,
+) -> bool {
+    let Some(hybrid_cte) = &query.hybrid_cte else {
+        return true;
+    };
+
+    let mut complete = true;
+    let cte_names: HashSet<String> = hybrid_cte
+        .cte_tables
+        .iter()
+        .map(|cte| ParserContext::canonicalize_identifier(cte.name.clone()).value)
+        .collect();
+    remove_cte_names(sql_names, &cte_names);
+
+    for cte in &hybrid_cte.cte_tables {
+        let mut cte_query_names = HashSet::new();
+        match &cte.content {
+            CteContent::Sql(cte_query) => {
+                extract_tables_from_sql_query(cte_query, &mut cte_query_names)
+            }
+            CteContent::Tql(tql) => complete &= extract_tables_from_tql(tql, &mut cte_query_names),
+        }
+        sql_names.extend(cte_query_names);
     }
+
+    complete
 }
 
 fn remove_cte_names(names: &mut HashSet<ObjectName>, cte_names: &HashSet<String>) {
@@ -246,55 +259,54 @@ fn remove_cte_names(names: &mut HashSet<ObjectName>, cte_names: &HashSet<String>
     });
 }
 
-fn extract_tables_from_tql(tql: &Tql, names: &mut HashSet<ObjectName>) {
+fn extract_tables_from_tql(tql: &Tql, names: &mut HashSet<ObjectName>) -> bool {
     let promql = match tql {
         Tql::Eval(eval) => &eval.query,
         Tql::Explain(explain) => &explain.query,
         Tql::Analyze(analyze) => &analyze.query,
     };
 
-    if let Ok(expr) = promql_parser::parser::parse(promql) {
-        extract_tables_from_prom_expr(&expr, names);
-    }
+    let Ok(expr) = promql_parser::parser::parse(promql) else {
+        return false;
+    };
+    extract_tables_from_prom_expr(&expr, names)
 }
 
-fn extract_tables_from_prom_expr(expr: &PromExpr, names: &mut HashSet<ObjectName>) {
+fn extract_tables_from_prom_expr(expr: &PromExpr, names: &mut HashSet<ObjectName>) -> bool {
     match expr {
         PromExpr::Aggregate(PromAggregateExpr { expr, .. }) => {
-            extract_tables_from_prom_expr(expr, names);
+            extract_tables_from_prom_expr(expr, names)
         }
-        PromExpr::Unary(PromUnaryExpr { expr, .. }) => {
-            extract_tables_from_prom_expr(expr, names);
-        }
+        PromExpr::Unary(PromUnaryExpr { expr, .. }) => extract_tables_from_prom_expr(expr, names),
         PromExpr::Binary(PromBinaryExpr { lhs, rhs, .. }) => {
-            extract_tables_from_prom_expr(lhs, names);
-            extract_tables_from_prom_expr(rhs, names);
+            extract_tables_from_prom_expr(lhs, names) & extract_tables_from_prom_expr(rhs, names)
         }
-        PromExpr::Paren(PromParenExpr { expr }) => {
-            extract_tables_from_prom_expr(expr, names);
-        }
+        PromExpr::Paren(PromParenExpr { expr }) => extract_tables_from_prom_expr(expr, names),
         PromExpr::Subquery(PromSubqueryExpr { expr, .. }) => {
-            extract_tables_from_prom_expr(expr, names);
+            extract_tables_from_prom_expr(expr, names)
         }
         PromExpr::VectorSelector(selector) => {
-            extract_metric_name_from_vector_selector(selector, names);
+            extract_metric_name_from_vector_selector(selector, names)
         }
         PromExpr::MatrixSelector(PromMatrixSelector { vs, .. }) => {
-            extract_metric_name_from_vector_selector(vs, names);
+            extract_metric_name_from_vector_selector(vs, names)
         }
         PromExpr::Call(PromCall { args, .. }) => {
+            let mut complete = true;
             for arg in &args.args {
-                extract_tables_from_prom_expr(arg, names);
+                complete &= extract_tables_from_prom_expr(arg, names);
             }
+            complete
         }
-        PromExpr::NumberLiteral(_) | PromExpr::StringLiteral(_) | PromExpr::Extension(_) => {}
+        PromExpr::NumberLiteral(_) | PromExpr::StringLiteral(_) => true,
+        PromExpr::Extension(_) => false,
     }
 }
 
 fn extract_metric_name_from_vector_selector(
     selector: &PromVectorSelector,
     names: &mut HashSet<ObjectName>,
-) {
+) -> bool {
     let metric_name = selector.name.clone().or_else(|| {
         let mut metric_name_matchers = selector.matchers.find_matchers(METRIC_NAME);
         if metric_name_matchers.len() == 1 && metric_name_matchers[0].op == MatchOp::Equal {
@@ -304,8 +316,15 @@ fn extract_metric_name_from_vector_selector(
         }
     });
     let Some(metric_name) = metric_name else {
-        return;
+        return false;
     };
+
+    if selector.matchers.matchers.iter().any(|matcher| {
+        (matcher.name == SCHEMA_MATCHER || matcher.name == DATABASE_MATCHER)
+            && matcher.op != MatchOp::Equal
+    }) {
+        return false;
+    }
 
     let schema_matcher = selector.matchers.matchers.iter().rev().find(|matcher| {
         matcher.op == MatchOp::Equal
@@ -322,6 +341,7 @@ fn extract_metric_name_from_vector_selector(
             metric_name,
         ))]));
     }
+    true
 }
 
 /// translate the start location to the index in the sql string
@@ -344,12 +364,24 @@ pub fn location_to_index(sql: &str, location: &sqlparser::tokenizer::Location) -
 ///
 /// Handle [sqlparser::ast::Query].
 fn extract_tables_from_sql_query(query: &sqlparser::ast::Query, names: &mut HashSet<ObjectName>) {
+    extract_tables_from_sql_query_inner(query, names, &mut HashSet::new());
+}
+
+fn extract_tables_from_sql_query_inner(
+    query: &SqlQuery,
+    names: &mut HashSet<ObjectName>,
+    visited: &mut HashSet<*const SqlQuery>,
+) {
+    if !visited.insert(query) {
+        return;
+    }
+
     let mut cte_names = HashSet::new();
     if let Some(with) = &query.with {
         for cte in &with.cte_tables {
             let cte_name = ParserContext::canonicalize_identifier(cte.alias.name.clone()).value;
             let mut cte_query_names = HashSet::new();
-            extract_tables_from_sql_query(&cte.query, &mut cte_query_names);
+            extract_tables_from_sql_query_inner(&cte.query, &mut cte_query_names, visited);
             if with.recursive {
                 cte_names.insert(cte_name.clone());
             }
@@ -362,27 +394,67 @@ fn extract_tables_from_sql_query(query: &sqlparser::ast::Query, names: &mut Hash
     }
 
     let mut body_names = HashSet::new();
-    extract_tables_from_set_expr(&query.body, &mut body_names);
+    extract_tables_from_set_expr(&query.body, &mut body_names, visited);
+    extract_tables_from_expression_subqueries(query, &mut body_names, visited);
     remove_cte_names(&mut body_names, &cte_names);
     names.extend(body_names);
+}
+
+fn extract_tables_from_expression_subqueries(
+    query: &SqlQuery,
+    names: &mut HashSet<ObjectName>,
+    visited: &mut HashSet<*const SqlQuery>,
+) {
+    struct SubqueryCollector<'a, 'b> {
+        names: &'a mut HashSet<ObjectName>,
+        visited: &'b mut HashSet<*const SqlQuery>,
+        depth: usize,
+    }
+
+    impl Visitor for SubqueryCollector<'_, '_> {
+        type Break = ();
+
+        fn pre_visit_query(&mut self, query: &SqlQuery) -> ControlFlow<Self::Break> {
+            if self.depth == 1 {
+                extract_tables_from_sql_query_inner(query, self.names, self.visited);
+            }
+            self.depth += 1;
+            ControlFlow::Continue(())
+        }
+
+        fn post_visit_query(&mut self, _query: &SqlQuery) -> ControlFlow<Self::Break> {
+            self.depth -= 1;
+            ControlFlow::Continue(())
+        }
+    }
+
+    let _ = query.visit(&mut SubqueryCollector {
+        names,
+        visited,
+        depth: 0,
+    });
 }
 
 /// Helper function for [extract_tables_from_query].
 ///
 /// Handle [SetExpr].
-fn extract_tables_from_set_expr(set_expr: &SetExpr, names: &mut HashSet<ObjectName>) {
+fn extract_tables_from_set_expr(
+    set_expr: &SetExpr,
+    names: &mut HashSet<ObjectName>,
+    visited: &mut HashSet<*const SqlQuery>,
+) {
     match set_expr {
         SetExpr::Select(select) => {
             for from in &select.from {
-                extract_tables_from_table_with_joins(from, names);
+                extract_tables_from_table_with_joins(from, names, visited);
             }
         }
         SetExpr::Query(query) => {
-            extract_tables_from_sql_query(query, names);
+            extract_tables_from_sql_query_inner(query, names, visited);
         }
         SetExpr::SetOperation { left, right, .. } => {
-            extract_tables_from_set_expr(left, names);
-            extract_tables_from_set_expr(right, names);
+            extract_tables_from_set_expr(left, names, visited);
+            extract_tables_from_set_expr(right, names, visited);
         }
         _ => {}
     };
@@ -394,33 +466,38 @@ fn extract_tables_from_set_expr(set_expr: &SetExpr, names: &mut HashSet<ObjectNa
 fn extract_tables_from_table_with_joins(
     table_with_joins: &TableWithJoins,
     names: &mut HashSet<ObjectName>,
+    visited: &mut HashSet<*const SqlQuery>,
 ) {
-    table_factor_to_object_name(&table_with_joins.relation, names);
+    table_factor_to_object_name(&table_with_joins.relation, names, visited);
     for join in &table_with_joins.joins {
-        table_factor_to_object_name(&join.relation, names);
+        table_factor_to_object_name(&join.relation, names, visited);
     }
 }
 
 /// Helper function for [extract_tables_from_query].
 ///
 /// Handle [TableFactor].
-fn table_factor_to_object_name(table_factor: &TableFactor, names: &mut HashSet<ObjectName>) {
+fn table_factor_to_object_name(
+    table_factor: &TableFactor,
+    names: &mut HashSet<ObjectName>,
+    visited: &mut HashSet<*const SqlQuery>,
+) {
     match table_factor {
         TableFactor::Table { name, .. } => {
             names.insert(name.to_owned());
         }
         TableFactor::Derived { subquery, .. } => {
-            extract_tables_from_sql_query(subquery, names);
+            extract_tables_from_sql_query_inner(subquery, names, visited);
         }
         TableFactor::NestedJoin {
             table_with_joins, ..
         } => {
-            extract_tables_from_table_with_joins(table_with_joins, names);
+            extract_tables_from_table_with_joins(table_with_joins, names, visited);
         }
         TableFactor::Pivot { table, .. }
         | TableFactor::Unpivot { table, .. }
         | TableFactor::MatchRecognize { table, .. } => {
-            table_factor_to_object_name(table, names);
+            table_factor_to_object_name(table, names, visited);
         }
         TableFactor::TableFunction { .. }
         | TableFactor::Function { .. }
@@ -519,6 +596,65 @@ TQL EVAL (now() - '15s'::interval, now(), '5s') count_values("status_code", {__n
     }
 
     #[test]
+    fn test_extract_tables_from_tql_query_completeness() {
+        let testcases = [
+            ("cpu", true, vec!["cpu"]),
+            (r#"{__name__="cpu"}"#, true, vec!["cpu"]),
+            (r#"cpu + {job="api"}"#, false, vec!["cpu"]),
+            (r#"{__name__=~"cpu.*"}"#, false, vec![]),
+            (r#"cpu{__schema__=~"private.*"}"#, false, vec![]),
+        ];
+
+        for (promql, expected_complete, expected_tables) in testcases {
+            let sql = format!("TQL EVAL (0, 10, '5s') {promql}");
+            let mut stmts = ParserContext::create_with_dialect(
+                &sql,
+                &GreptimeDbDialect {},
+                ParseOptions::default(),
+            )
+            .unwrap();
+            let Statement::Tql(tql) = stmts.pop().unwrap() else {
+                unreachable!()
+            };
+
+            let query = SqlOrTql::Tql(tql, sql);
+            let (tables, complete) = extract_tables_from_query_inner(&query);
+            let mut tables = tables
+                .into_iter()
+                .map(|table| format_raw_object_name(&table))
+                .collect_vec();
+            tables.sort();
+            assert_eq!(expected_complete, complete, "{promql}");
+            assert_eq!(expected_tables, tables, "{promql}");
+            assert_eq!(
+                expected_complete,
+                extract_tables_from_query_checked(&query).is_some(),
+                "{promql}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_extract_tables_from_chained_tql_ctes() {
+        let sql = "WITH denied AS (TQL EVAL (0, 10, '5s') allowed), \
+                   leak AS (TQL EVAL (0, 10, '5s') denied) \
+                   SELECT * FROM leak";
+        let mut stmts =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+        let Statement::Query(query) = stmts.pop().unwrap() else {
+            unreachable!()
+        };
+
+        let mut tables = extract_tables_from_query_checked(&SqlOrTql::Sql(*query, sql.to_string()))
+            .unwrap()
+            .map(|table| format_raw_object_name(&table))
+            .collect_vec();
+        tables.sort();
+        assert_eq!(vec!["allowed".to_string(), "denied".to_string()], tables);
+    }
+
+    #[test]
     fn test_extract_tables_from_sql_query_with_derived_join() {
         let sql = r#"
 CREATE FLOW flow_batch_join_subquery SINK TO flow_batch_join_sink
@@ -557,6 +693,60 @@ LEFT JOIN (
     }
 
     #[test]
+    fn test_extract_tables_from_deeply_nested_derived_queries() {
+        let mut sql = "SELECT * FROM physical_source".to_string();
+        for depth in 0..20 {
+            sql = format!("SELECT * FROM ({sql}) nested_{depth}");
+        }
+
+        let mut stmts = ParserContext::create_with_dialect(
+            &sql,
+            &GreptimeDbDialect {},
+            ParseOptions::default(),
+        )
+        .unwrap();
+        let Statement::Query(query) = stmts.pop().unwrap() else {
+            unreachable!()
+        };
+
+        let tables = extract_tables_from_query(&SqlOrTql::Sql(*query, sql))
+            .map(|table| format_raw_object_name(&table))
+            .collect_vec();
+        assert_eq!(vec!["physical_source"], tables);
+    }
+
+    #[test]
+    fn test_extract_tables_from_sql_query_with_expression_subqueries() {
+        let sql = r#"
+SELECT
+    (SELECT max(value) FROM scalar_source)
+FROM outer_source
+WHERE EXISTS (SELECT 1 FROM exists_source)
+ORDER BY (SELECT max(value) FROM order_source);
+"#;
+        let mut stmts =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap();
+        let Statement::Query(query) = stmts.pop().unwrap() else {
+            unreachable!()
+        };
+
+        let mut tables = extract_tables_from_query(&SqlOrTql::Sql(*query, sql.to_string()))
+            .map(|table| format_raw_object_name(&table))
+            .collect_vec();
+        tables.sort();
+        assert_eq!(
+            vec![
+                "exists_source".to_string(),
+                "order_source".to_string(),
+                "outer_source".to_string(),
+                "scalar_source".to_string(),
+            ],
+            tables
+        );
+    }
+
+    #[test]
     fn test_extract_tables_from_sql_query_with_cte_scopes() {
         let testcases = vec![
             (
@@ -578,6 +768,24 @@ WITH first_cte AS (
 SELECT * FROM second_cte;
 "#,
                 vec!["physical_source".to_string()],
+            ),
+            (
+                r#"
+SELECT * FROM (
+    WITH nested_cte AS (SELECT * FROM nested_source)
+    SELECT * FROM nested_cte
+);
+"#,
+                vec!["nested_source".to_string()],
+            ),
+            (
+                r#"
+SELECT * FROM (
+    WITH nested_cte AS (SELECT * FROM nested_source)
+    SELECT (SELECT * FROM nested_cte)
+);
+"#,
+                vec!["nested_source".to_string()],
             ),
         ];
 

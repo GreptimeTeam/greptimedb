@@ -178,7 +178,6 @@ impl Statement {
             | Statement::ShowSearchPath(_)
             | Statement::ShowViews(_)
             | Statement::DescribeTable(_)
-            | Statement::Explain(_)
             | Statement::ShowVariables(_)
             | Statement::ShowProcesslist(_)
             | Statement::FetchCursor(_)
@@ -188,6 +187,8 @@ impl Statement {
             Statement::ShowCreateTrigger(_) => true,
             #[cfg(feature = "enterprise")]
             Statement::ShowTriggers(_) => true,
+
+            Statement::Explain(explain) => !explain.analyze || explain.statement.is_readonly(),
 
             // Write operations
             Statement::Insert(_)
