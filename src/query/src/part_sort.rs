@@ -19,12 +19,13 @@
 //! sort expressions.
 
 use std::any::Any;
+use std::collections::VecDeque;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use arrow::array::{Array, ArrayRef};
-use arrow::compute::{concat, concat_batches, take_record_batch};
+use arrow::array::{Array, ArrayRef, BooleanArray};
+use arrow::compute::{concat, concat_batches, filter_record_batch, take_record_batch};
 use arrow_schema::{DataType, SchemaRef, TimeUnit};
 use common_recordbatch::{DfRecordBatch, DfSendableRecordBatchStream};
 use common_time::Timestamp;
@@ -343,6 +344,8 @@ struct PartSortStream {
     partition: usize,
     cur_part_idx: usize,
     evaluating_batch: Option<DfRecordBatch>,
+    /// NULL rows deferred for unbounded NULLS LAST sorting across range groups.
+    deferred_null_batches: VecDeque<DfRecordBatch>,
     metrics: BaselineMetrics,
     dynamic_filter: Option<Arc<DynamicFilterPhysicalExpr>>,
     dynamic_filter_threshold: Option<TopKThreshold>,
@@ -385,6 +388,7 @@ impl PartSortStream {
             partition,
             cur_part_idx: 0,
             evaluating_batch: None,
+            deferred_null_batches: VecDeque::new(),
             metrics: BaselineMetrics::new(&sort.metrics, partition),
             dynamic_filter: sort.dynamic_filter.clone(),
             dynamic_filter_threshold: None,
@@ -945,7 +949,60 @@ impl PartSortStream {
             unreachable!()
         };
 
-        self.sort_record_batches(&buffer, self.limit, self.limit.is_none())
+        if self.expression.options.nulls_first {
+            return self.sort_record_batches(&buffer, self.limit, true);
+        }
+
+        let mut non_null_batches = Vec::with_capacity(buffer.len());
+        for batch in buffer {
+            let sort_column = self.expression.evaluate_to_sort_column(&batch)?.values;
+            let null_count = sort_column.null_count();
+            if null_count == 0 {
+                non_null_batches.push(batch);
+                continue;
+            }
+
+            let null_filter = BooleanArray::from(
+                (0..batch.num_rows())
+                    .map(|index| sort_column.is_null(index))
+                    .collect::<Vec<_>>(),
+            );
+            let null_batch = filter_record_batch(&batch, &null_filter).map_err(|e| {
+                DataFusionError::ArrowError(
+                    Box::new(e),
+                    Some(format!(
+                        "Fail to filter NULL rows when sorting at {}",
+                        location!()
+                    )),
+                )
+            })?;
+            if null_batch.num_rows() != 0 {
+                self.reservation
+                    .try_grow(null_batch.get_array_memory_size())?;
+                self.deferred_null_batches.push_back(null_batch);
+            }
+
+            if null_count != batch.num_rows() {
+                let non_null_filter = BooleanArray::from(
+                    (0..batch.num_rows())
+                        .map(|index| !sort_column.is_null(index))
+                        .collect::<Vec<_>>(),
+                );
+                let non_null_batch =
+                    filter_record_batch(&batch, &non_null_filter).map_err(|e| {
+                        DataFusionError::ArrowError(
+                            Box::new(e),
+                            Some(format!(
+                                "Fail to filter non-NULL rows when sorting at {}",
+                                location!()
+                            )),
+                        )
+                    })?;
+                non_null_batches.push(non_null_batch);
+            }
+        }
+
+        self.sort_record_batches(&non_null_batches, self.limit, true)
     }
 
     fn sort_topk_buffer(&mut self) -> datafusion_common::Result<DfRecordBatch> {
@@ -975,6 +1032,20 @@ impl PartSortStream {
     fn mark_dynamic_filter_complete(&self) {
         if let Some(filter) = &self.dynamic_filter {
             filter.mark_complete();
+        }
+    }
+
+    /// Pops a compact deferred NULL batch and releases its retained-memory charge.
+    fn pop_deferred_null_batch(&mut self) -> Option<DfRecordBatch> {
+        let batch = self.deferred_null_batches.pop_front()?;
+        self.reservation.shrink(batch.get_array_memory_size());
+        Some(batch)
+    }
+
+    /// Discards deferred NULL batches and releases their retained-memory charges.
+    fn discard_deferred_null_batches(&mut self) {
+        while let Some(batch) = self.deferred_null_batches.pop_front() {
+            self.reservation.shrink(batch.get_array_memory_size());
         }
     }
 
@@ -1157,6 +1228,9 @@ impl PartSortStream {
                     self.mark_dynamic_filter_complete();
                     return Poll::Ready(Some(Ok(sorted_batch)));
                 }
+                if let Some(null_batch) = self.pop_deferred_null_batch() {
+                    return Poll::Ready(Some(Ok(null_batch)));
+                }
                 self.mark_dynamic_filter_complete();
                 return Poll::Ready(None);
             }
@@ -1169,7 +1243,9 @@ impl PartSortStream {
                 // Check if we've already processed all partitions
                 if self.cur_part_idx >= self.partition_ranges.len() {
                     // All partitions processed, discard remaining data
-                    if let Some(sorted_batch) = self.sorted_buffer_if_non_empty()? {
+                    let sorted_batch = self.sorted_buffer_if_non_empty()?;
+                    self.discard_deferred_null_batches();
+                    if let Some(sorted_batch) = sorted_batch {
                         self.mark_dynamic_filter_complete();
                         return Poll::Ready(Some(Ok(sorted_batch)));
                     }
@@ -1225,14 +1301,16 @@ mod test {
     use std::sync::Arc;
 
     use arrow::array::{
-        BooleanArray, TimestampMicrosecondArray, TimestampMillisecondArray,
-        TimestampNanosecondArray, TimestampSecondArray,
+        ArrayRef, BooleanArray, TimestampMicrosecondArray, TimestampMillisecondArray,
+        TimestampNanosecondArray, TimestampSecondArray, UInt32Array,
     };
     use arrow::json::ArrayWriter;
     use arrow_schema::{DataType, Field, Schema, SortOptions, TimeUnit};
     use common_time::Timestamp;
+    use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryPool};
+    use datafusion::execution::runtime_env::RuntimeEnvBuilder;
     use datafusion_physical_expr::expressions::Column;
-    use futures::StreamExt;
+    use futures::{StreamExt, TryStreamExt};
     use store_api::region_engine::PartitionRange;
 
     use super::*;
@@ -3118,5 +3196,401 @@ mod test {
             Some(7), // Must read to detect early stop condition
         )
         .await;
+    }
+
+    #[tokio::test]
+    async fn test_ascending_nulls_last_across_ranges() {
+        let unit = TimeUnit::Millisecond;
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "ts",
+            DataType::Timestamp(unit, None),
+            true,
+        )]));
+        let nullable_ts = |values: Vec<Option<i64>>| {
+            Arc::new(TimestampMillisecondArray::from(values)) as ArrayRef
+        };
+        let input = Arc::new(MockInputExec::new(
+            vec![vec![
+                DfRecordBatch::try_new(schema.clone(), vec![nullable_ts(vec![Some(1), None])])
+                    .unwrap(),
+                DfRecordBatch::try_new(schema.clone(), vec![nullable_ts(vec![Some(11)])]).unwrap(),
+            ]],
+            schema.clone(),
+        ));
+        let ranges = vec![
+            PartitionRange {
+                start: Timestamp::new(0, unit.into()),
+                end: Timestamp::new(10, unit.into()),
+                num_rows: 2,
+                identifier: 0,
+            },
+            PartitionRange {
+                start: Timestamp::new(10, unit.into()),
+                end: Timestamp::new(20, unit.into()),
+                num_rows: 1,
+                identifier: 1,
+            },
+        ];
+        let exec = PartSortExec::try_new(
+            PhysicalSortExpr {
+                expr: Arc::new(Column::new("ts", 0)),
+                options: SortOptions {
+                    descending: false,
+                    nulls_first: false,
+                },
+            },
+            None,
+            vec![ranges],
+            input,
+        )
+        .unwrap();
+
+        let output = exec
+            .execute(0, Arc::new(TaskContext::default()))
+            .unwrap()
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap();
+        let actual = concat_batches(&schema, &output).unwrap();
+        let expected =
+            DfRecordBatch::try_new(schema, vec![nullable_ts(vec![Some(1), Some(11), None])])
+                .unwrap();
+        assert_eq!(actual, expected);
+    }
+
+    async fn collect_part_sort(
+        schema: SchemaRef,
+        ranges: Vec<PartitionRange>,
+        batches: Vec<DfRecordBatch>,
+        options: SortOptions,
+        limit: Option<usize>,
+    ) -> Vec<DfRecordBatch> {
+        let input = Arc::new(MockInputExec::new(vec![batches], schema.clone()));
+        let exec = PartSortExec::try_new(
+            PhysicalSortExpr {
+                expr: Arc::new(Column::new("ts", 0)),
+                options,
+            },
+            limit,
+            vec![ranges],
+            input,
+        )
+        .unwrap();
+
+        exec.execute(0, Arc::new(TaskContext::default()))
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap()
+    }
+
+    fn task_context_with_memory_pool(pool: Arc<dyn MemoryPool>) -> Arc<TaskContext> {
+        let runtime_env = RuntimeEnvBuilder::new()
+            .with_memory_pool(pool)
+            .build()
+            .unwrap();
+        Arc::new(TaskContext::default().with_runtime(Arc::new(runtime_env)))
+    }
+
+    fn new_nulls_last_stream(context: Arc<TaskContext>, schema: SchemaRef) -> PartSortStream {
+        let range = PartitionRange {
+            start: Timestamp::new(0, TimeUnit::Millisecond.into()),
+            end: Timestamp::new(10, TimeUnit::Millisecond.into()),
+            num_rows: 0,
+            identifier: 0,
+        };
+        let input = Arc::new(MockInputExec::new(vec![vec![]], schema.clone()));
+        let exec = PartSortExec::try_new(
+            PhysicalSortExpr {
+                expr: Arc::new(Column::new("ts", 0)),
+                options: SortOptions {
+                    descending: false,
+                    nulls_first: false,
+                },
+            },
+            None,
+            vec![vec![range]],
+            input.clone(),
+        )
+        .unwrap();
+        let input_stream = input.execute(0, context.clone()).unwrap();
+
+        PartSortStream::new(context, &exec, None, input_stream, vec![range], 0).unwrap()
+    }
+
+    fn nullable_timestamp_batch(schema: SchemaRef, values: Vec<Option<i64>>) -> DfRecordBatch {
+        DfRecordBatch::try_new(
+            schema,
+            vec![Arc::new(TimestampMillisecondArray::from(values))],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn test_deferred_null_reservation_is_charged_and_released() {
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "ts",
+            DataType::Timestamp(TimeUnit::Millisecond, None),
+            true,
+        )]));
+        let pool = Arc::new(GreedyMemoryPool::new(4096));
+        let context = task_context_with_memory_pool(pool.clone());
+        let mut stream = new_nulls_last_stream(context, schema.clone());
+        stream.buffer = PartSortBuffer::All(vec![nullable_timestamp_batch(schema, vec![None])]);
+
+        assert_eq!(stream.reservation.size(), 0);
+        assert_eq!(stream.sort_all_buffer().unwrap().num_rows(), 0);
+        let deferred_size = stream
+            .deferred_null_batches
+            .front()
+            .unwrap()
+            .get_array_memory_size();
+        assert_eq!(stream.reservation.size(), deferred_size);
+        assert_eq!(pool.reserved(), deferred_size);
+
+        assert_eq!(stream.pop_deferred_null_batch().unwrap().num_rows(), 1);
+        assert_eq!(stream.reservation.size(), 0);
+        assert_eq!(pool.reserved(), 0);
+    }
+
+    #[test]
+    fn test_deferred_null_reservation_failure_keeps_stream_uncharged() {
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "ts",
+            DataType::Timestamp(TimeUnit::Millisecond, None),
+            true,
+        )]));
+        let pool = Arc::new(GreedyMemoryPool::new(0));
+        let context = task_context_with_memory_pool(pool.clone());
+        let mut stream = new_nulls_last_stream(context, schema.clone());
+        stream.buffer = PartSortBuffer::All(vec![nullable_timestamp_batch(schema, vec![None])]);
+
+        assert!(stream.sort_all_buffer().is_err());
+        assert_eq!(stream.reservation.size(), 0);
+        assert!(stream.deferred_null_batches.is_empty());
+        assert_eq!(pool.reserved(), 0);
+    }
+
+    #[test]
+    fn test_deferred_null_reservation_is_released_when_stream_drops_after_failure() {
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "ts",
+            DataType::Timestamp(TimeUnit::Millisecond, None),
+            true,
+        )]));
+        let batch = nullable_timestamp_batch(schema.clone(), vec![None]);
+        let compact_size = filter_record_batch(&batch, &BooleanArray::from(vec![true]))
+            .unwrap()
+            .get_array_memory_size();
+        let pool = Arc::new(GreedyMemoryPool::new(compact_size));
+        let context = task_context_with_memory_pool(pool.clone());
+        let mut stream = new_nulls_last_stream(context, schema);
+        stream.buffer = PartSortBuffer::All(vec![batch.clone(), batch]);
+
+        assert!(stream.sort_all_buffer().is_err());
+        assert_eq!(stream.reservation.size(), compact_size);
+        assert_eq!(pool.reserved(), compact_size);
+        assert_eq!(stream.deferred_null_batches.len(), 1);
+
+        drop(stream);
+        assert_eq!(pool.reserved(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_nulls_last_across_three_ascending_ranges_preserves_payload() {
+        let unit = TimeUnit::Millisecond;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("ts", DataType::Timestamp(unit, None), true),
+            Field::new("payload", DataType::UInt32, false),
+        ]));
+        let nullable_ts = |values: Vec<Option<i64>>| {
+            Arc::new(TimestampMillisecondArray::from(values)) as ArrayRef
+        };
+        let batch = |ts, payload| {
+            DfRecordBatch::try_new(
+                schema.clone(),
+                vec![nullable_ts(ts), Arc::new(UInt32Array::from(payload))],
+            )
+            .unwrap()
+        };
+        let ranges = [0, 10, 20]
+            .into_iter()
+            .enumerate()
+            .map(|(identifier, start)| PartitionRange {
+                start: Timestamp::new(start, unit.into()),
+                end: Timestamp::new(start + 10, unit.into()),
+                num_rows: 2,
+                identifier,
+            })
+            .collect();
+
+        let output = collect_part_sort(
+            schema.clone(),
+            ranges,
+            vec![batch(
+                vec![Some(1), None, Some(12), None, Some(23), None],
+                vec![101, 901, 102, 902, 103, 903],
+            )],
+            SortOptions {
+                descending: false,
+                nulls_first: false,
+            },
+            None,
+        )
+        .await;
+
+        assert!(output.iter().all(|batch| batch.num_rows() != 0));
+        let actual = concat_batches(&schema, &output).unwrap();
+        let expected = batch(
+            vec![Some(1), Some(12), Some(23), None, None, None],
+            vec![101, 102, 103, 901, 902, 903],
+        );
+        assert_eq!(actual, expected);
+    }
+
+    #[tokio::test]
+    async fn test_nulls_last_across_three_descending_ranges_preserves_payload() {
+        let unit = TimeUnit::Millisecond;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("ts", DataType::Timestamp(unit, None), true),
+            Field::new("payload", DataType::UInt32, false),
+        ]));
+        let nullable_ts = |values: Vec<Option<i64>>| {
+            Arc::new(TimestampMillisecondArray::from(values)) as ArrayRef
+        };
+        let batch = |ts, payload| {
+            DfRecordBatch::try_new(
+                schema.clone(),
+                vec![nullable_ts(ts), Arc::new(UInt32Array::from(payload))],
+            )
+            .unwrap()
+        };
+        let ranges = [20, 10, 0]
+            .into_iter()
+            .enumerate()
+            .map(|(identifier, start)| PartitionRange {
+                start: Timestamp::new(start, unit.into()),
+                end: Timestamp::new(start + 10, unit.into()),
+                num_rows: 2,
+                identifier,
+            })
+            .collect();
+
+        let output = collect_part_sort(
+            schema.clone(),
+            ranges,
+            vec![
+                batch(vec![Some(28), None], vec![201, 901]),
+                batch(vec![Some(18), None], vec![202, 902]),
+                batch(vec![Some(8), None], vec![203, 903]),
+            ],
+            SortOptions {
+                descending: true,
+                nulls_first: false,
+            },
+            None,
+        )
+        .await;
+
+        assert!(output.iter().all(|batch| batch.num_rows() != 0));
+        let actual = concat_batches(&schema, &output).unwrap();
+        let expected = batch(
+            vec![Some(28), Some(18), Some(8), None, None, None],
+            vec![201, 202, 203, 901, 902, 903],
+        );
+        assert_eq!(actual, expected);
+    }
+
+    #[tokio::test]
+    async fn test_nulls_last_with_all_null_intermediate_and_final_ranges() {
+        let unit = TimeUnit::Millisecond;
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "ts",
+            DataType::Timestamp(unit, None),
+            true,
+        )]));
+        let nullable_ts = |values: Vec<Option<i64>>| {
+            Arc::new(TimestampMillisecondArray::from(values)) as ArrayRef
+        };
+        let ranges = [0, 10, 20, 30]
+            .into_iter()
+            .enumerate()
+            .map(|(identifier, start)| PartitionRange {
+                start: Timestamp::new(start, unit.into()),
+                end: Timestamp::new(start + 10, unit.into()),
+                num_rows: 1,
+                identifier,
+            })
+            .collect();
+        let batch =
+            |values| DfRecordBatch::try_new(schema.clone(), vec![nullable_ts(values)]).unwrap();
+
+        let output = collect_part_sort(
+            schema.clone(),
+            ranges,
+            vec![
+                batch(vec![Some(1)]),
+                batch(vec![None]),
+                batch(vec![Some(21)]),
+                batch(vec![None]),
+            ],
+            SortOptions {
+                descending: false,
+                nulls_first: false,
+            },
+            None,
+        )
+        .await;
+
+        assert!(output.iter().all(|batch| batch.num_rows() != 0));
+        let actual = concat_batches(&schema, &output).unwrap();
+        let expected = batch(vec![Some(1), Some(21), None, None]);
+        assert_eq!(actual, expected);
+    }
+
+    #[tokio::test]
+    async fn test_topk_nulls_last_keeps_reading_for_late_non_null_values() {
+        let unit = TimeUnit::Millisecond;
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "ts",
+            DataType::Timestamp(unit, None),
+            true,
+        )]));
+        let nullable_ts = |values: Vec<Option<i64>>| {
+            Arc::new(TimestampMillisecondArray::from(values)) as ArrayRef
+        };
+        let batch =
+            |values| DfRecordBatch::try_new(schema.clone(), vec![nullable_ts(values)]).unwrap();
+        let ranges = vec![
+            PartitionRange {
+                start: Timestamp::new(0, unit.into()),
+                end: Timestamp::new(10, unit.into()),
+                num_rows: 2,
+                identifier: 0,
+            },
+            PartitionRange {
+                start: Timestamp::new(10, unit.into()),
+                end: Timestamp::new(20, unit.into()),
+                num_rows: 1,
+                identifier: 1,
+            },
+        ];
+
+        let output = collect_part_sort(
+            schema.clone(),
+            ranges,
+            vec![batch(vec![Some(5), None]), batch(vec![Some(11)])],
+            SortOptions {
+                descending: false,
+                nulls_first: false,
+            },
+            Some(2),
+        )
+        .await;
+
+        assert_eq!(output.len(), 1);
+        let actual = concat_batches(&schema, &output).unwrap();
+        let expected = batch(vec![Some(5), Some(11)]);
+        assert_eq!(actual, expected);
     }
 }
