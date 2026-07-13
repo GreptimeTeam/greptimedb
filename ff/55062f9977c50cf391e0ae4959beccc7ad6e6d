@@ -1,0 +1,40 @@
+.agents/skills/greptimedb-development-docker-image/scripts/build_binary.sh
+  s_ff3fc17ec86f31::t_1c751c3820cf7e 6
+.agents/skills/greptimedb-development-docker-image/tests/test_image_config.py
+  s_ff3fc17ec86f31::t_1c751c3820cf7e 18,24-25
+  s_0b3e808051c755::t_0edd05cd4f9e06 26
+.agents/skills/greptimedb-development-docker-image/tests/test_binary_platform.py
+  s_ff3fc17ec86f31::t_1c751c3820cf7e 24-25
+  s_0b3e808051c755::t_63c5a4ebecbb37 26
+.agents/skills/greptimedb-development-docker-image/scripts/collect_context.py
+  s_ff3fc17ec86f31::t_1c751c3820cf7e 169-175,186
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.13",
+  "base_commit_sha": "ff55062f9977c50cf391e0ae4959beccc7ad6e6d",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_0b3e808051c755": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_0a48bebb8ffeGu398iAeFLvaqk",
+        "model": "gpt-5.6-luna"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    },
+    "s_ff3fc17ec86f31": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_0a4d9c44bffewL5DHk7M1BKPcZ",
+        "model": "gpt-5.6-terra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
