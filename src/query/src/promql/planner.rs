@@ -3655,7 +3655,7 @@ impl PromPlanner {
             return Ok(LogicalPlan::EmptyRelation(
                 datafusion::logical_expr::EmptyRelation {
                     produce_one_row: false,
-                    schema: Arc::new(DFSchema::empty()),
+                    schema: input_plan.schema().clone(),
                 },
             ));
         }
@@ -9230,7 +9230,7 @@ Projection: count(prometheus_tsdb_head_series.greptime_value) AS my_series, prom
     #[tokio::test]
     async fn test_or_with_both_empty_histograms() {
         let eval_stmt = build_eval_stmt(
-            r#"histogram_quantile(0.99, left_histogram_bucket) or histogram_quantile(0.99, right_histogram_bucket)"#,
+            r#"histogram_quantile(0.99, sum by(pod) (left_histogram_bucket)) or histogram_quantile(0.99, sum by(instance) (right_histogram_bucket))"#,
         );
         let table_provider = build_test_table_provider_with_fields(
             &[
@@ -9251,10 +9251,62 @@ Projection: count(prometheus_tsdb_head_series.greptime_value) AS my_series, prom
             PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
                 .await
                 .unwrap();
-        assert!(matches!(
-            plan,
-            LogicalPlan::EmptyRelation(relation) if !relation.produce_one_row
-        ));
+        match plan {
+            LogicalPlan::EmptyRelation(relation) => {
+                assert!(!relation.produce_one_row);
+                assert!(!relation.schema.fields().is_empty());
+                assert!(
+                    relation
+                        .schema
+                        .fields()
+                        .iter()
+                        .any(|field| field.data_type() == &ArrowDataType::Float64)
+                );
+                assert!(
+                    relation
+                        .schema
+                        .fields()
+                        .iter()
+                        .any(|field| field.name() == "pod")
+                );
+                assert!(
+                    !relation
+                        .schema
+                        .fields()
+                        .iter()
+                        .any(|field| field.name() == "instance")
+                );
+            }
+            _ => panic!("Expected EmptyRelation, but got: {plan:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_nested_or_with_both_empty_histograms() {
+        for case in [
+            r#"abs(histogram_quantile(0.99, left_histogram_bucket) or histogram_quantile(0.99, right_histogram_bucket))"#,
+            r#"(histogram_quantile(0.99, left_histogram_bucket) or histogram_quantile(0.99, right_histogram_bucket)) + 1"#,
+        ] {
+            let eval_stmt = build_eval_stmt(case);
+            let table_provider = build_test_table_provider_with_fields(
+                &[
+                    (
+                        DEFAULT_SCHEMA_NAME.to_string(),
+                        "left_histogram_bucket".to_string(),
+                    ),
+                    (
+                        DEFAULT_SCHEMA_NAME.to_string(),
+                        "right_histogram_bucket".to_string(),
+                    ),
+                ],
+                &["pod", "instance"],
+            )
+            .await;
+
+            PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
+                .await
+                .unwrap();
+        }
     }
 
     #[tokio::test]
