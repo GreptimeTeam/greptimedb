@@ -345,6 +345,12 @@ mod test {
         metrics: RecordBatchMetrics,
     }
 
+    struct MetricsThenBatchStream {
+        schema: SchemaRef,
+        metrics: RecordBatchMetrics,
+        rx: tokio::sync::mpsc::UnboundedReceiver<common_recordbatch::error::Result<RecordBatch>>,
+    }
+
     impl RecordBatchStream for PendingMetricsStream {
         fn schema(&self) -> SchemaRef {
             self.schema.clone()
@@ -364,6 +370,28 @@ mod test {
 
         fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
             Poll::Pending
+        }
+    }
+
+    impl RecordBatchStream for MetricsThenBatchStream {
+        fn schema(&self) -> SchemaRef {
+            self.schema.clone()
+        }
+
+        fn output_ordering(&self) -> Option<&[OrderOption]> {
+            None
+        }
+
+        fn metrics(&self) -> Option<RecordBatchMetrics> {
+            Some(self.metrics.clone())
+        }
+    }
+
+    impl Stream for MetricsThenBatchStream {
+        type Item = common_recordbatch::error::Result<RecordBatch>;
+
+        fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            self.rx.poll_recv(cx)
         }
     }
 
@@ -467,6 +495,76 @@ mod test {
                 assert_eq!(metrics.elapsed_compute, 42);
             }
             other => panic!("expected metrics message, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_flight_record_batch_stream_continues_after_pending_metrics() {
+        let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
+            "a",
+            ConcreteDataType::int32_datatype(),
+            false,
+        )]));
+        let metrics = RecordBatchMetrics {
+            elapsed_compute: 42,
+            ..Default::default()
+        };
+        let recordbatch = RecordBatch::new(
+            schema.clone(),
+            vec![Arc::new(Int32Vector::from_slice([1])) as VectorRef],
+        )
+        .unwrap();
+        let expected_recordbatch = recordbatch.df_record_batch().clone();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let recordbatches = Box::pin(MetricsThenBatchStream {
+            schema: schema.clone(),
+            metrics,
+            rx,
+        });
+        let query_ctx = Arc::new(
+            QueryContextBuilder::default()
+                .set_extension(
+                    SUPPORT_FLIGHT_METRICS_BEFORE_BATCH_EXTENSION_KEY.to_string(),
+                    "true".to_string(),
+                )
+                .build(),
+        );
+        query_ctx.set_explain_verbose(true);
+        let mut stream = FlightRecordBatchStream::new(
+            recordbatches,
+            TracingContext::default(),
+            FlightCompression::default(),
+            query_ctx,
+        );
+
+        let decoder = &mut FlightDecoder::default();
+        let schema_data = stream.next().await.unwrap().unwrap();
+        assert!(matches!(
+            decoder.try_decode(&schema_data).unwrap().unwrap(),
+            FlightMessage::Schema(_)
+        ));
+
+        let metrics_data = tokio::time::timeout(Duration::from_secs(2), stream.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            decoder.try_decode(&metrics_data).unwrap().unwrap(),
+            FlightMessage::Metrics(_)
+        ));
+
+        tx.send(Ok(recordbatch)).unwrap();
+        let batch_data = tokio::time::timeout(Duration::from_secs(2), stream.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        match decoder.try_decode(&batch_data).unwrap().unwrap() {
+            FlightMessage::RecordBatch(actual_recordbatch) => {
+                assert_eq!(&actual_recordbatch, &expected_recordbatch);
+            }
+            other => panic!("expected record batch after pending metrics, got {other:?}"),
         }
     }
 
