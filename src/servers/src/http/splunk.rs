@@ -92,20 +92,25 @@ const RAW_MESSAGE_COLUMN: &str = "message";
 /// Collects request-level `/raw` metadata (`host`/`source`/`sourcetype`) present in
 /// the query params. The keys double as the tag-column names; values apply to every
 /// event in the request (HEC `/raw` metadata is request-level, unlike `/event`).
-fn raw_metadata(params: &SplunkRawQueryParams) -> Vec<(&'static str, &str)> {
+/// Values are allocated as `Bytes` once here so each line clones them O(1).
+fn raw_metadata(params: &SplunkRawQueryParams) -> Vec<(&'static str, Bytes)> {
     [
         ("host", &params.host),
         ("source", &params.source),
         ("sourcetype", &params.sourcetype),
     ]
     .into_iter()
-    .filter_map(|(key, value)| value.as_deref().map(|v| (key, v)))
+    .filter_map(|(key, value)| {
+        value
+            .as_deref()
+            .map(|v| (key, Bytes::copy_from_slice(v.as_bytes())))
+    })
     .collect()
 }
 
 /// Maps one raw line to a per-event map: `{ greptime_timestamp: ts, message: <line>,
 /// <metadata columns> }`. The line is stored as it is.
-fn raw_line_to_map(line: &str, ts: DateTime<Utc>, metadata: &[(&'static str, &str)]) -> VrlValue {
+fn raw_line_to_map(line: &str, ts: DateTime<Utc>, metadata: &[(&'static str, Bytes)]) -> VrlValue {
     let mut map: BTreeMap<KeyString, VrlValue> = BTreeMap::new();
     map.insert(
         KeyString::from(greptime_timestamp()),
@@ -113,13 +118,10 @@ fn raw_line_to_map(line: &str, ts: DateTime<Utc>, metadata: &[(&'static str, &st
     );
     map.insert(
         KeyString::from(RAW_MESSAGE_COLUMN),
-        VrlValue::Bytes(Bytes::from(line.to_string())),
+        VrlValue::Bytes(Bytes::copy_from_slice(line.as_bytes())),
     );
     for (key, value) in metadata {
-        map.insert(
-            KeyString::from(*key),
-            VrlValue::Bytes(Bytes::from(value.to_string())),
-        );
+        map.insert(KeyString::from(*key), VrlValue::Bytes(value.clone()));
     }
     VrlValue::Object(map)
 }
@@ -657,7 +659,13 @@ mod tests {
         };
         let meta = raw_metadata(&params);
         // present params only; keys are the tag-column names.
-        assert_eq!(meta, vec![("host", "web-01"), ("sourcetype", "access_log")]);
+        assert_eq!(
+            meta,
+            vec![
+                ("host", Bytes::from_static(b"web-01")),
+                ("sourcetype", Bytes::from_static(b"access_log"))
+            ]
+        );
 
         let ts = DateTime::from_timestamp(1447828325, 0).unwrap();
         let VrlValue::Object(m) = raw_line_to_map("GET /api 200", ts, &meta) else {

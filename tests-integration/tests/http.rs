@@ -1877,7 +1877,7 @@ pub async fn test_splunk_raw(store_type: StorageType) {
     assert!(res.text().await.contains("\"code\":7"));
 
     // 7. Replay of a real Vector `splunk_hec_logs` (endpoint_target = "raw") request,
-    //    path and headers verbatim from a wire capture (body trimmed): 
+    //    path and headers verbatim from a wire capture (body trimmed):
     let mut headers = splunk_headers();
     headers.push((
         HeaderName::from_static("x-splunk-request-channel"),
