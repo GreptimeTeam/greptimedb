@@ -82,9 +82,17 @@ pub enum PgAuthInfo {
     Cleartext,
 }
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone)]
 pub(crate) enum PasswordVerifier {
-    PlainText(String),
+    PlainText {
+        password: String,
+        /// SCRAM verifier derived once at load time. Precomputing it keeps the
+        /// Postgres SCRAM `server-first-message` (stable salt, fixed iterations)
+        /// and per-connection cost indistinguishable from stored-hash and
+        /// unknown users, instead of running PBKDF2 with a fresh salt on every
+        /// connection.
+        scram: PgScramSha256Verifier,
+    },
     Pbkdf2Sha256 {
         iterations: u32,
         salt: Vec<u8>,
@@ -96,10 +104,43 @@ pub(crate) enum PasswordVerifier {
     PgScramSha256(PgScramSha256Verifier),
 }
 
+impl PartialEq for PasswordVerifier {
+    fn eq(&self, other: &Self) -> bool {
+        // The precomputed SCRAM verifier is a cache derived from the password, so
+        // two plaintext verifiers are equal iff their passwords match.
+        match (self, other) {
+            (
+                PasswordVerifier::PlainText { password: a, .. },
+                PasswordVerifier::PlainText { password: b, .. },
+            ) => a == b,
+            (
+                PasswordVerifier::Pbkdf2Sha256 {
+                    iterations: i1,
+                    salt: s1,
+                    hash: h1,
+                },
+                PasswordVerifier::Pbkdf2Sha256 {
+                    iterations: i2,
+                    salt: s2,
+                    hash: h2,
+                },
+            ) => i1 == i2 && s1 == s2 && h1 == h2,
+            (
+                PasswordVerifier::MysqlNativePassword { hash_stage_2: a },
+                PasswordVerifier::MysqlNativePassword { hash_stage_2: b },
+            ) => a == b,
+            (PasswordVerifier::PgScramSha256(a), PasswordVerifier::PgScramSha256(b)) => a == b,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for PasswordVerifier {}
+
 impl fmt::Debug for PasswordVerifier {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            PasswordVerifier::PlainText(_) => {
+            PasswordVerifier::PlainText { .. } => {
                 f.debug_tuple("PlainText").field(&"<REDACTED>").finish()
             }
             PasswordVerifier::Pbkdf2Sha256 { iterations, .. } => f
@@ -121,9 +162,24 @@ impl fmt::Debug for PasswordVerifier {
 }
 
 impl PasswordVerifier {
+    /// Builds a plaintext verifier, precomputing a stable SCRAM verifier so the
+    /// Postgres SCRAM handshake for this user carries a stable salt and runs no
+    /// per-connection PBKDF2. Uses [`DEFAULT_PBKDF2_SHA256_ITERATIONS`] to match
+    /// the mock verifier handed to unknown users.
+    fn plain_text(password: String) -> Option<Self> {
+        let salt = rand::random::<[u8; PG_SCRAM_SHA256_KEY_LEN]>();
+        let scram = PgScramSha256Verifier::from_password(
+            password.as_bytes(),
+            &salt,
+            crate::DEFAULT_PBKDF2_SHA256_ITERATIONS,
+        )
+        .ok()?;
+        Some(Self::PlainText { password, scram })
+    }
+
     fn parse(input: &str) -> Option<Self> {
         if let Some(password) = input.strip_prefix("plain:") {
-            return Some(Self::PlainText(password.to_string()));
+            return Self::plain_text(password.to_string());
         }
 
         if let Some(verifier) = input.strip_prefix("pbkdf2_sha256:") {
@@ -175,7 +231,7 @@ impl PasswordVerifier {
                 .map(Self::PgScramSha256);
         }
 
-        Some(Self::PlainText(input.to_string()))
+        Self::plain_text(input.to_string())
     }
 
     fn supports_pg_scram_sha256(&self) -> bool {
@@ -184,15 +240,7 @@ impl PasswordVerifier {
 
     fn to_pg_scram_sha256_verifier(&self) -> Option<PgScramSha256Verifier> {
         match self {
-            PasswordVerifier::PlainText(password) => {
-                let salt = rand::random::<[u8; PG_SCRAM_SHA256_KEY_LEN]>();
-                PgScramSha256Verifier::from_password(
-                    password.as_bytes(),
-                    &salt,
-                    crate::DEFAULT_PBKDF2_SHA256_ITERATIONS,
-                )
-                .ok()
-            }
+            PasswordVerifier::PlainText { scram, .. } => Some(scram.clone()),
             PasswordVerifier::Pbkdf2Sha256 {
                 iterations,
                 salt,
@@ -208,9 +256,9 @@ impl PasswordVerifier {
 
     fn verify_plain_text(&self, password: &str) -> bool {
         match self {
-            PasswordVerifier::PlainText(expected) => {
-                expected.as_bytes().ct_eq(password.as_bytes()).into()
-            }
+            PasswordVerifier::PlainText {
+                password: expected, ..
+            } => expected.as_bytes().ct_eq(password.as_bytes()).into(),
             PasswordVerifier::Pbkdf2Sha256 {
                 iterations,
                 salt,
@@ -237,7 +285,7 @@ impl PasswordVerifier {
         username: &str,
     ) -> Result<()> {
         match self {
-            PasswordVerifier::PlainText(password) => {
+            PasswordVerifier::PlainText { password, .. } => {
                 auth_mysql(auth_data, salt, username, password.as_bytes())
             }
             PasswordVerifier::MysqlNativePassword { hash_stage_2 } => {
@@ -438,7 +486,7 @@ mod tests {
     use crate::common::{format_pg_scram_sha256_password_verifier, mysql_native_password_hash};
 
     fn plain(password: &str) -> PasswordVerifier {
-        PasswordVerifier::PlainText(password.to_string())
+        PasswordVerifier::plain_text(password.to_string()).unwrap()
     }
 
     fn sha1_one(data: &[u8]) -> Vec<u8> {
@@ -676,7 +724,7 @@ mod tests {
         let users = HashMap::from([(
             "user".to_string(),
             (
-                PasswordVerifier::PlainText(password.to_string()),
+                PasswordVerifier::plain_text(password.to_string()).unwrap(),
                 PermissionMode::default(),
             ),
         )]);
@@ -740,6 +788,23 @@ mod tests {
             Password::PlainText("wrong".to_string().into()),
         );
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_plain_text_scram_verifier_is_stable() {
+        let verifier = PasswordVerifier::plain_text("password".to_string()).unwrap();
+        let first = verifier.to_pg_scram_sha256_verifier().unwrap();
+        let second = verifier.to_pg_scram_sha256_verifier().unwrap();
+
+        // A plaintext-backed user must present a stable salt and fixed iterations
+        // across connections without re-running PBKDF2, otherwise the SCRAM
+        // server-first message (and its timing) leaks that the user exists.
+        assert_eq!(first.salt(), second.salt());
+        assert_eq!(first.iterations(), crate::DEFAULT_PBKDF2_SHA256_ITERATIONS);
+
+        // The derived verifier must still accept the real password.
+        assert!(first.verify_plain_password(b"password").unwrap());
+        assert!(!first.verify_plain_password(b"wrong").unwrap());
     }
 
     #[test]
@@ -807,7 +872,10 @@ mod tests {
 
     #[test]
     fn test_password_verifier_debug_redacts_secrets() {
-        let debug = format!("{:?}", PasswordVerifier::PlainText("secret".to_string()));
+        let debug = format!(
+            "{:?}",
+            PasswordVerifier::plain_text("secret".to_string()).unwrap()
+        );
         assert!(debug.contains("<REDACTED>"));
         assert!(!debug.contains("secret"));
 
