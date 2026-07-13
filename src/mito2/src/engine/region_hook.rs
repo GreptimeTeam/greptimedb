@@ -16,7 +16,8 @@
 //!
 //! ## Design
 //!
-//! The [`RegionHook`] trait provides two methods with clear separation of concerns:
+//! The [`RegionHook`] trait observes region activity through two categories of
+//! callbacks — manifest/file observation and region lifecycle:
 //!
 //! - [`on_sst_files_written`]: Fires when mito2 physically writes SST **data files**.
 //!   Provides per-file [`SstInfo`] + [`FileMeta`]; metadata richness varies by path
@@ -26,7 +27,7 @@
 //!   Receives the full [`RegionMetaActionList`] so consumers can inspect what changed
 //!   (file additions/removals, schema changes, truncation, partition expression changes, etc.).
 //!
-//! - [`on_region_closed`] / [`on_region_dropped`] / [`on_region_files_removed`]:
+//! - [`on_region_opened`] / [`on_region_closed`] / [`on_region_dropped`] / [`on_region_files_removed`]:
 //!   Region **lifecycle** callbacks for open, close, logical drop, and physical file removal.
 //!   See [Region lifecycle](#region-lifecycle) below.
 //!
@@ -272,8 +273,9 @@ pub trait RegionHook: Send + Sync + Debug {
         let _ = (region_id, action_list, manifest_version);
     }
 
-    /// Called after a region is **opened** (created or reopened) and registered
-    /// as an active region in the engine.
+    /// Called once a region **open** or **create** succeeds, but **before** the
+    /// region is registered in the engine's active set (`insert_region` runs
+    /// immediately afterwards).
     ///
     /// Fires once when a region becomes active via a create or open request —
     /// the natural counterpart to [`on_region_closed`] / [`on_region_dropped`].
@@ -301,8 +303,8 @@ pub trait RegionHook: Send + Sync + Debug {
     /// later. Fires once per successful close, after the region's background
     /// tasks (flush/compaction) have been stopped.
     ///
-    /// Does **not** fire when a region is dropped (see [`on_region_dropped`])
-    /// or for follower/catchup regions.
+    /// Fires for a region of **any** role (leader or follower) that is closed.
+    /// Does **not** fire when a region is dropped (see [`on_region_dropped`]).
     ///
     /// Runs inline in the region worker loop; implementations should be fast.
     ///
