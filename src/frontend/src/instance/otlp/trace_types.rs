@@ -43,6 +43,7 @@ impl TraceReconcileDecision {
     }
 }
 
+/// Describes a column rewrite before its row values have been validated.
 #[derive(Debug)]
 pub(super) struct PendingTraceColumnRewrite {
     pub(super) col_idx: usize,
@@ -50,24 +51,28 @@ pub(super) struct PendingTraceColumnRewrite {
     pub(super) column_name: String,
 }
 
+/// Holds the schema and value rewrites prepared for atomic application.
 #[derive(Debug)]
 pub(super) struct PreparedTraceColumnRewrites {
     columns: Vec<PreparedTraceColumnRewrite>,
     values: Vec<PreparedTraceValueRewrite>,
 }
 
+/// Reports the column whose trace value could not be rewritten.
 #[derive(Debug)]
 pub(super) struct TraceColumnRewriteError {
     pub(super) error: servers::error::Error,
     pub(super) column_name: String,
 }
 
+/// Updates one request column to its reconciled datatype.
 #[derive(Debug)]
 struct PreparedTraceColumnRewrite {
     col_idx: usize,
     target_type: ColumnDataType,
 }
 
+/// Replaces one trace value with its precomputed coerced value.
 #[derive(Debug)]
 struct PreparedTraceValueRewrite {
     row_idx: usize,
@@ -167,7 +172,14 @@ fn choose_fixed_trace_reconcile_decision(
     .fail()
 }
 
-/// Prepare all pending trace column rewrites before any schema mutation happens.
+/// Prepares an atomic rewrite plan without mutating the input rows.
+///
+/// For each pending column rewrite, this precomputes every required value
+/// coercion. Missing, null, and already-correct values are skipped. If any
+/// coercion fails, it returns the failing column and leaves all rows unchanged.
+///
+/// Target types must already have been selected by `TraceRequestSchema`.
+/// Call [`PreparedTraceColumnRewrites::apply`] to update the schema and values.
 pub(super) fn prepare_trace_column_rewrites(
     rows: &[Row],
     pending_rewrites: Vec<PendingTraceColumnRewrite>,

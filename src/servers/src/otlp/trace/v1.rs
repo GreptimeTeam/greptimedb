@@ -44,13 +44,17 @@ const APPROXIMATE_COLUMN_COUNT: usize = 30;
 // Use a timestamp(2100-01-01 00:00:00) as large as possible.
 const MAX_TIMESTAMP: i64 = 4102444800000000000;
 
+/// Distinguishes raw bytes from JSONB values that both use a binary protobuf value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TraceBinaryType {
+    /// Raw OTLP bytes with no datatype extension.
     Binary,
+    /// An OTLP array or key-value list encoded with the JSONB extension.
     Json,
 }
 
 impl TraceBinaryType {
+    /// Applies this logical binary type to a column schema.
     pub fn apply_to_schema(self, schema: &mut ColumnSchema) {
         schema.datatype = ColumnDataType::Binary as i32;
         schema.datatype_extension = match self {
@@ -62,6 +66,7 @@ impl TraceBinaryType {
     }
 }
 
+/// Per-column observations collected while building one trace chunk.
 #[derive(Default)]
 struct TraceBatchColumnSchema {
     value_types: Vec<ColumnDataType>,
@@ -70,12 +75,14 @@ struct TraceBatchColumnSchema {
 }
 
 impl TraceBatchColumnSchema {
+    /// Records a row once while preserving encounter order.
     fn observe_row(&mut self, row_index: usize) {
         if self.present_rows.last() != Some(&row_index) {
             self.present_rows.push(row_index);
         }
     }
 
+    /// Returns whether raw binary and JSONB values share this column.
     fn has_incompatible_logical_types(&self) -> bool {
         let Some((_, first_type)) = self.binary_types.first() else {
             return false;
@@ -86,19 +93,25 @@ impl TraceBatchColumnSchema {
     }
 }
 
+/// Sparse column metadata retained for span-level fallback.
 pub struct TraceRetryColumn {
+    /// Row indexes that contain this dynamic column.
     pub present_rows: Vec<usize>,
+    /// Row-specific binary kinds needed to restore the logical schema.
     pub binary_types: Vec<(usize, TraceBinaryType)>,
 }
 
+/// Retry metadata keyed by dynamic trace column name.
 pub type TraceRetryColumns = HashMap<String, TraceRetryColumn>;
 
+/// Schema observations for dynamic columns in one converted trace chunk.
 #[derive(Default)]
 pub struct TraceBatchSchema {
     columns: HashMap<String, TraceBatchColumnSchema>,
 }
 
 impl TraceBatchSchema {
+    /// Records a scalar value type and the row where the column is present.
     fn observe_value_type(&mut self, name: &str, row_index: usize, value_type: ColumnDataType) {
         let column = self.columns.entry(name.to_string()).or_default();
         column.observe_row(row_index);
@@ -107,6 +120,7 @@ impl TraceBatchSchema {
         }
     }
 
+    /// Records the logical kind of a binary protobuf value for one row.
     fn observe_binary_type(&mut self, name: &str, row_index: usize, binary_type: TraceBinaryType) {
         let column = self.columns.entry(name.to_string()).or_default();
         column.observe_row(row_index);
@@ -122,6 +136,7 @@ impl TraceBatchSchema {
         }
     }
 
+    /// Records a sparse column occurrence that has no dynamic value type.
     fn observe_present_column(&mut self, name: &str, row_index: usize) {
         self.columns
             .entry(name.to_string())
@@ -129,24 +144,28 @@ impl TraceBatchSchema {
             .observe_row(row_index);
     }
 
+    /// Returns the distinct value types in first-seen order for a column.
     pub fn value_types(&self, name: &str) -> Option<&[ColumnDataType]> {
         self.columns
             .get(name)
             .map(|column| column.value_types.as_slice())
     }
 
+    /// Returns whether any column mixes raw binary and JSONB values.
     pub fn has_incompatible_logical_types(&self) -> bool {
         self.columns
             .values()
             .any(TraceBatchColumnSchema::has_incompatible_logical_types)
     }
 
+    /// Returns whether the named column mixes raw binary and JSONB values.
     pub fn has_incompatible_logical_types_for(&self, name: &str) -> bool {
         self.columns
             .get(name)
             .is_some_and(TraceBatchColumnSchema::has_incompatible_logical_types)
     }
 
+    /// Converts batch observations into sparse metadata for per-span retries.
     pub fn into_retry_columns(self) -> TraceRetryColumns {
         self.columns
             .into_iter()
@@ -190,6 +209,7 @@ pub fn v1_to_grpc_main_insert_requests(
     Ok((requests, spans.len()))
 }
 
+/// Converts owned spans into one main-table request and its observed batch schema.
 pub fn v1_to_grpc_main_insert_requests_with_schema(
     spans: Vec<TraceSpan>,
     table_name: &str,
@@ -207,6 +227,7 @@ pub fn v1_to_grpc_main_insert_requests_with_schema(
     ))
 }
 
+/// Builds the main-table request without collecting batch schema observations.
 fn v1_to_grpc_main_insert_requests_from_iter(
     spans: impl ExactSizeIterator<Item = TraceSpan>,
     table_name: &str,
@@ -223,6 +244,7 @@ pub fn build_trace_table_data(spans: &[TraceSpan]) -> Result<TableData> {
     build_trace_table_data_from_iter(spans.iter().cloned(), None)
 }
 
+/// Builds trace rows while collecting dynamic column observations.
 fn build_trace_table_data_with_schema(
     spans: impl ExactSizeIterator<Item = TraceSpan>,
 ) -> Result<(TableData, TraceBatchSchema)> {
@@ -231,6 +253,7 @@ fn build_trace_table_data_with_schema(
     Ok((trace_writer, batch_schema))
 }
 
+/// Shared row builder with optional batch schema observation.
 fn build_trace_table_data_from_iter(
     spans: impl ExactSizeIterator<Item = TraceSpan>,
     mut batch_schema: Option<&mut TraceBatchSchema>,
@@ -274,6 +297,7 @@ pub fn write_span_to_row(writer: &mut TableData, span: TraceSpan) -> Result<()> 
     write_span_to_row_inner(writer, span, row_index, None)
 }
 
+/// Writes one span and optionally records its dynamic columns for reconciliation.
 fn write_span_to_row_inner(
     writer: &mut TableData,
     span: TraceSpan,
@@ -436,6 +460,7 @@ pub(crate) fn write_attributes(
     write_attributes_with_schema(writer, prefix, attributes, row, row_index, None)
 }
 
+/// Writes flattened attributes without coercion and optionally records their actual types.
 fn write_attributes_with_schema(
     writer: &mut TableData,
     prefix: &str,
