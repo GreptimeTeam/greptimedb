@@ -20,6 +20,7 @@ use std::time::Duration;
 use common_telemetry::{error, info};
 use futures::future::try_join_all;
 use object_store::ErrorKind;
+use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 use store_api::logstore::EntryId;
 use store_api::logstore::provider::KafkaProvider;
@@ -40,7 +41,7 @@ pub trait IndexCollector: Send + Sync {
 
     /// Truncates the index for a specific region up to a given [`EntryId`].
     ///
-    /// It removes all [`EntryId`]s less than or equal to `entry_id`.
+    /// It removes all [`EntryId`]s smaller than `entry_id`.
     fn truncate(&mut self, region_id: RegionId, entry_id: EntryId);
 
     /// Sets the latest [`EntryId`].
@@ -69,18 +70,8 @@ pub struct CollectionTask {
 }
 
 impl CollectionTask {
-    async fn read_index(&self) -> Result<DatanodeWalIndexes> {
-        match self.operator.read(&self.path).await {
-            Ok(bytes) => DatanodeWalIndexes::decode(bytes.to_bytes().as_ref()),
-            Err(err) if err.kind() == ErrorKind::NotFound => Ok(DatanodeWalIndexes::default()),
-            Err(err) => Err(err).context(error::ReadIndexSnafu {
-                path: self.path.clone(),
-            }),
-        }
-    }
-
     async fn dump_index(&self) -> Result<()> {
-        let encoder = Arc::new(JsonIndexEncoder::with_indexes(self.read_index().await?));
+        let encoder = Arc::new(JsonIndexEncoder::default());
         let receivers = {
             let providers = self.providers.lock().await;
             let mut receivers = Vec::with_capacity(providers.len());
@@ -99,10 +90,7 @@ impl CollectionTask {
         try_join_all(receivers)
             .await
             .context(error::WaitDumpIndexSnafu)?;
-        self.write_index(encoder.finish()?).await
-    }
-
-    async fn write_index(&self, bytes: Vec<u8>) -> Result<()> {
+        let bytes = encoder.finish()?;
         let mut writer = self
             .operator
             .writer(&self.path)
@@ -174,7 +162,7 @@ impl GlobalIndexCollector {
             path,
             running: Arc::new(AtomicBool::new(true)),
         };
-        let handle = task.clone().run();
+        let handle = task.run();
         Self {
             providers,
             operator,
@@ -184,10 +172,8 @@ impl GlobalIndexCollector {
 
     #[cfg(test)]
     pub fn new_for_test(operator: object_store::ObjectStore) -> Self {
-        let providers: Arc<TokioMutex<HashMap<Arc<KafkaProvider>, Sender<WorkerRequest>>>> =
-            Default::default();
         Self {
-            providers,
+            providers: Default::default(),
             operator,
             _handle: Default::default(),
         }
@@ -239,14 +225,14 @@ impl GlobalIndexCollector {
     ) -> Box<dyn IndexCollector> {
         self.providers.lock().await.insert(provider.clone(), sender);
         Box::new(ProviderLevelIndexCollector {
-            indexes: RegionIndexes::default(),
+            indexes: Default::default(),
             provider,
         })
     }
 
     /// Truncates the index for a specific region up to a given [`EntryId`].
     ///
-    /// It removes all [`EntryId`]s less than or equal to `entry_id`.
+    /// It removes all [`EntryId`]s smaller than `entry_id`.
     pub(crate) async fn truncate(
         &self,
         provider: &Arc<KafkaProvider>,
@@ -272,11 +258,10 @@ impl GlobalIndexCollector {
 /// Each region is identified by a `RegionId` and maps to a set of [`EntryId`]s,
 /// representing the entries within that region. It also keeps track of the
 /// latest [`EntryId`] across all regions.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RegionIndexes {
     pub(crate) regions: HashMap<RegionId, BTreeSet<EntryId>>,
     pub(crate) latest_entry_id: EntryId,
-    pub(crate) truncated_to: HashMap<RegionId, EntryId>,
 }
 
 impl RegionIndexes {
@@ -286,18 +271,11 @@ impl RegionIndexes {
     }
 
     fn truncate(&mut self, region_id: RegionId, entry_id: EntryId) {
-        self.truncated_to
-            .entry(region_id)
-            .and_modify(|watermark| *watermark = (*watermark).max(entry_id))
-            .or_insert(entry_id);
         if let Some(entry_ids) = self.regions.get_mut(&region_id) {
-            *entry_ids = entry_id
-                .checked_add(1)
-                .map(|next_entry_id| entry_ids.split_off(&next_entry_id))
-                .unwrap_or_default();
+            *entry_ids = entry_ids.split_off(&entry_id);
+            // The `RegionIndexes` can be empty, keeps to track the latest entry id.
+            self.latest_entry_id = self.latest_entry_id.max(entry_id);
         }
-        // The `RegionIndexes` can be empty, keeps to track the latest entry id.
-        self.latest_entry_id = self.latest_entry_id.max(entry_id);
     }
 
     fn set_latest_entry_id(&mut self, entry_id: EntryId) {
@@ -350,146 +328,14 @@ impl IndexCollector for NoopCollector {
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeSet, HashMap};
-    use std::sync::Arc;
 
     use store_api::logstore::provider::KafkaProvider;
     use store_api::storage::RegionId;
-    use tokio::sync::mpsc;
 
     use crate::kafka::index::JsonIndexEncoder;
     use crate::kafka::index::collector::RegionIndexes;
-    use crate::kafka::index::encoder::{DatanodeWalIndexes, IndexEncoder};
+    use crate::kafka::index::encoder::IndexEncoder;
     use crate::kafka::{GlobalIndexCollector, default_index_file};
-
-    fn persisted_indexes(
-        provider: &KafkaProvider,
-        regions: HashMap<RegionId, BTreeSet<u64>>,
-        latest_entry_id: u64,
-    ) -> DatanodeWalIndexes {
-        let encoder = JsonIndexEncoder::default();
-        encoder.encode(
-            provider,
-            &RegionIndexes {
-                regions,
-                latest_entry_id,
-                ..Default::default()
-            },
-        );
-        DatanodeWalIndexes::decode(&encoder.finish().unwrap()).unwrap()
-    }
-
-    #[test]
-    fn test_dump_merges_persisted_and_new_indexes() {
-        let provider = KafkaProvider::new("my_topic_0".to_string());
-        let region_id = RegionId::new(1, 1);
-        let persisted = persisted_indexes(
-            &provider,
-            HashMap::from([(region_id, BTreeSet::from([1, 2]))]),
-            2,
-        );
-        let mut indexes = RegionIndexes::default();
-        indexes.append(region_id, 3);
-        let encoder = JsonIndexEncoder::with_indexes(persisted);
-
-        encoder.encode(&provider, &indexes);
-
-        let decoded = DatanodeWalIndexes::decode(&encoder.finish().unwrap()).unwrap();
-        let topic = decoded.provider(&provider).unwrap();
-        assert_eq!(topic.region(region_id), Some(BTreeSet::from([1, 2, 3])));
-        assert_eq!(topic.last_index(), 3);
-    }
-
-    #[test]
-    fn test_dump_applies_max_truncate_watermark() {
-        let provider = KafkaProvider::new("my_topic_0".to_string());
-        let region_id = RegionId::new(1, 1);
-        let persisted = persisted_indexes(
-            &provider,
-            HashMap::from([(region_id, BTreeSet::from([1, 5, 10, 15]))]),
-            15,
-        );
-        let mut indexes = RegionIndexes::default();
-        indexes.truncate(region_id, 5);
-        indexes.truncate(region_id, 10);
-        indexes.truncate(region_id, 7);
-        let encoder = JsonIndexEncoder::with_indexes(persisted);
-
-        encoder.encode(&provider, &indexes);
-
-        let decoded = DatanodeWalIndexes::decode(&encoder.finish().unwrap()).unwrap();
-        let topic = decoded.provider(&provider).unwrap();
-        assert_eq!(topic.region(region_id), Some(BTreeSet::from([15])));
-        assert_eq!(topic.last_index(), 15);
-    }
-
-    #[test]
-    fn test_truncate_removes_boundary_entry() {
-        let region_id = RegionId::new(1, 1);
-        let mut indexes = RegionIndexes {
-            regions: HashMap::from([(region_id, BTreeSet::from([1, 5, 10]))]),
-            ..Default::default()
-        };
-
-        indexes.truncate(region_id, 5);
-
-        assert_eq!(indexes.regions[&region_id], BTreeSet::from([10]));
-    }
-
-    #[test]
-    fn test_truncate_max_clears_region() {
-        let region_id = RegionId::new(1, 1);
-        let mut indexes = RegionIndexes {
-            regions: HashMap::from([(region_id, BTreeSet::from([1, u64::MAX]))]),
-            ..Default::default()
-        };
-
-        indexes.truncate(region_id, u64::MAX);
-
-        assert!(indexes.regions[&region_id].is_empty());
-    }
-
-    #[test]
-    fn test_dump_max_truncate_watermark_clears_persisted_region() {
-        let provider = KafkaProvider::new("my_topic_0".to_string());
-        let region_id = RegionId::new(1, 1);
-        let persisted = persisted_indexes(
-            &provider,
-            HashMap::from([(region_id, BTreeSet::from([1, u64::MAX]))]),
-            u64::MAX,
-        );
-        let mut indexes = RegionIndexes::default();
-        indexes.truncate(region_id, u64::MAX);
-        let encoder = JsonIndexEncoder::with_indexes(persisted);
-
-        encoder.encode(&provider, &indexes);
-
-        let decoded = DatanodeWalIndexes::decode(&encoder.finish().unwrap()).unwrap();
-        assert!(
-            decoded
-                .provider(&provider)
-                .unwrap()
-                .region(region_id)
-                .unwrap()
-                .is_empty()
-        );
-    }
-
-    #[tokio::test]
-    async fn test_provider_collector_creation_does_not_read_checkpoint() {
-        let operator = object_store::ObjectStore::new(object_store::services::Memory::default())
-            .unwrap()
-            .finish();
-        let path = default_index_file(0);
-        let mut writer = operator.writer(&path).await.unwrap();
-        writer.write(b"invalid checkpoint".to_vec()).await.unwrap();
-        writer.close().await.unwrap();
-
-        let collector = GlobalIndexCollector::new_for_test(operator);
-        let provider = Arc::new(KafkaProvider::new("my_topic_0".to_string()));
-        let (tx, _rx) = mpsc::channel(8);
-
-        collector.provider_level_index_collector(provider, tx).await;
-    }
 
     #[tokio::test]
     async fn test_read_remote_region_index() {
@@ -504,7 +350,6 @@ mod tests {
             &RegionIndexes {
                 regions: HashMap::from([(RegionId::new(1, 1), BTreeSet::from([1, 5, 15]))]),
                 latest_entry_id: 20,
-                ..Default::default()
             },
         );
         let bytes = encoder.finish().unwrap();

@@ -565,8 +565,6 @@ mod tests {
     use common_telemetry::tracing::warn;
     use common_wal::config::kafka::DatanodeKafkaConfig;
     use common_wal::config::kafka::common::KafkaConnectionConfig;
-    use common_wal::maybe_skip_kafka_integration_test;
-    use common_wal::test_util::get_kafka_endpoints;
     use dashmap::DashMap;
     use futures::TryStreamExt;
     use rand::Rng;
@@ -578,50 +576,7 @@ mod tests {
     use store_api::storage::RegionId;
 
     use super::build_entry;
-    use crate::kafka::index::{GlobalIndexCollector, default_index_file};
     use crate::kafka::log_store::{KafkaLogStore, PeriodicTopicStatsReporter, TopicStat};
-
-    #[tokio::test]
-    async fn test_obsolete_all_does_not_initialize_provider_or_change_checkpoint() {
-        maybe_skip_kafka_integration_test!();
-        let operator = object_store::ObjectStore::new(object_store::services::Memory::default())
-            .unwrap()
-            .finish();
-        let path = default_index_file(0);
-        let checkpoint = b"{}";
-        let mut writer = operator.writer(&path).await.unwrap();
-        writer.write(checkpoint.to_vec()).await.unwrap();
-        writer.close().await.unwrap();
-
-        let collector =
-            GlobalIndexCollector::new(Duration::from_secs(60), operator.clone(), path.clone());
-        let config = DatanodeKafkaConfig {
-            connection: KafkaConnectionConfig {
-                broker_endpoints: get_kafka_endpoints(),
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        let logstore = KafkaLogStore::try_new(&config, Some(collector))
-            .await
-            .unwrap();
-        tokio::task::yield_now().await;
-        let checkpoint = operator.read(&path).await.unwrap().to_bytes();
-
-        logstore
-            .obsolete_all(
-                &Provider::kafka_provider(format!("obsolete-all-{}", uuid::Uuid::new_v4())),
-                RegionId::new(1, 1),
-            )
-            .await
-            .unwrap();
-
-        assert!(logstore.client_manager.list_topics().await.is_empty());
-        assert_eq!(
-            checkpoint.as_ref(),
-            operator.read(&path).await.unwrap().to_bytes().as_ref()
-        );
-    }
 
     #[test]
     fn test_build_naive_entry() {

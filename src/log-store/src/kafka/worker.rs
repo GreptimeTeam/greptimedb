@@ -193,11 +193,6 @@ impl BackgroundProducerWorker {
     async fn handle_requests(&mut self, buffer: &mut Vec<WorkerRequest>) {
         let mut produce_requests = Vec::with_capacity(buffer.len());
         for req in buffer.drain(..) {
-            if !matches!(req, WorkerRequest::Produce(_)) && !produce_requests.is_empty() {
-                let pending_requests =
-                    self.aggregate_records(&mut produce_requests, self.max_batch_bytes);
-                self.try_flush_pending_requests(pending_requests).await;
-            }
             match req {
                 WorkerRequest::Produce(req) => produce_requests.push(req),
                 WorkerRequest::TruncateIndex(TruncateIndexRequest {

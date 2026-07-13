@@ -73,34 +73,11 @@ pub trait IndexEncoder: Send + Sync {
 pub(crate) struct DatanodeWalIndexes(HashMap<String, DeltaEncodedRegionIndexes>);
 
 impl DatanodeWalIndexes {
-    fn merge(&mut self, topic: String, region_index: &RegionIndexes) {
-        let persisted = self.0.entry(topic).or_default();
-
-        for (region_id, entry_id) in &region_index.truncated_to {
-            if let Some(mut indexes) = persisted.region(*region_id) {
-                persisted.regions.insert(
-                    *region_id,
-                    entry_id
-                        .checked_add(1)
-                        .map(|next_entry_id| indexes.split_off(&next_entry_id))
-                        .unwrap_or_default()
-                        .into_iter()
-                        .deltas()
-                        .collect(),
-                );
-            }
-        }
-        for (region_id, indexes) in &region_index.regions {
-            let mut merged = persisted.region(*region_id).unwrap_or_default();
-            merged.extend(indexes);
-            persisted
-                .regions
-                .insert(*region_id, merged.into_iter().deltas().collect());
-        }
-        persisted.last_index = persisted.last_index.max(region_index.latest_entry_id);
+    fn insert(&mut self, topic: String, region_index: &RegionIndexes) {
+        self.0.insert(topic, region_index.into());
     }
 
-    pub(crate) fn encode(&mut self) -> Result<Vec<u8>> {
+    fn encode(&mut self) -> Result<Vec<u8>> {
         let value = serde_json::to_vec(&self.0).context(error::EncodeJsonSnafu);
         self.0.clear();
         value
@@ -122,20 +99,12 @@ pub(crate) struct JsonIndexEncoder {
     buf: Mutex<DatanodeWalIndexes>,
 }
 
-impl JsonIndexEncoder {
-    pub(crate) fn with_indexes(indexes: DatanodeWalIndexes) -> Self {
-        Self {
-            buf: Mutex::new(indexes),
-        }
-    }
-}
-
 impl IndexEncoder for JsonIndexEncoder {
     fn encode(&self, provider: &KafkaProvider, region_index: &RegionIndexes) {
         self.buf
             .lock()
             .unwrap()
-            .merge(provider.topic.clone(), region_index);
+            .insert(provider.topic.clone(), region_index);
     }
 
     fn finish(&self) -> Result<Vec<u8>> {
@@ -168,7 +137,6 @@ mod tests {
                     (RegionId::new(1, 2), region_2_indexes.clone()),
                 ]),
                 latest_entry_id: 1024,
-                ..Default::default()
             },
         );
         let topic_2 = KafkaProvider::new("my_topic_2".to_string());
@@ -183,7 +151,6 @@ mod tests {
                     (RegionId::new(1, 2), BTreeSet::from([1512])),
                 ]),
                 latest_entry_id: 2048,
-                ..Default::default()
             },
         );
 
