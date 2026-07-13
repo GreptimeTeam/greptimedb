@@ -2,6 +2,7 @@ src/log-store/src/kafka/test_util.rs
   s_62c601b727c0fc::t_af95c847482ee3 73
 src/log-store/src/kafka/log_store.rs
   s_62c601b727c0fc::t_af95c847482ee3 650,676,734,760
+  h_623774b620da8e 40,145,374,456,461,466,476-478
 src/log-store/src/raft_engine/log_store.rs
   s_62c601b727c0fc::t_af95c847482ee3 601,636,654,740
 src/cmd/src/datanode/scanbench.rs
