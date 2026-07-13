@@ -16,7 +16,8 @@
 //!
 //! ## Design
 //!
-//! The [`RegionHook`] trait provides two methods with clear separation of concerns:
+//! The [`RegionHook`] trait observes region activity through two categories of
+//! callbacks — manifest/file observation and region lifecycle:
 //!
 //! - [`on_sst_files_written`]: Fires when mito2 physically writes SST **data files**.
 //!   Provides per-file [`SstInfo`] + [`FileMeta`]; metadata richness varies by path
@@ -25,6 +26,10 @@
 //! - [`on_manifest_updated`]: Fires after **any** manifest write is successfully committed.
 //!   Receives the full [`RegionMetaActionList`] so consumers can inspect what changed
 //!   (file additions/removals, schema changes, truncation, partition expression changes, etc.).
+//!
+//! - [`on_region_opened`] / [`on_region_closed`] / [`on_region_dropped`] / [`on_region_files_removed`]:
+//!   Region **lifecycle** callbacks for open, close, logical drop, and physical file removal.
+//!   See [Region lifecycle](#region-lifecycle) below.
 //!
 //! Hook implementations are registered via the [`Plugins`](common_base::Plugins) system:
 //! ```ignore
@@ -56,7 +61,39 @@
 //!
 //! The following paths do **not** trigger any hook:
 //! - Follower region sync / catchup (manifest read-only; followers don't author changes)
-//! - GC / checkpoint / drop / remap (internal bookkeeping, not logical state changes)
+//! - GC / checkpoint / remap (internal bookkeeping, not logical state changes)
+//!
+//! An explicit region **drop** does fire lifecycle hooks — see
+//! [Region lifecycle](#region-lifecycle).
+//!
+//! ## Region lifecycle
+//!
+//! Beyond manifest/SST observation, the hook observes the high-level lifecycle of an
+//! active region:
+//!
+//! | Event | Method | When |
+//! |-------|--------|------|
+//! | Open | [`on_region_opened`] | A create or open request registers the region as active (the counterpart to close/drop). Does not fire for the compactor's transient regions or the catch-up reopen. |
+//! | Close | [`on_region_closed`] | A close request (or a close-after-flush) removes the region from the active set. Data files, manifest and WAL state are **preserved**; the region may be reopened. |
+//! | Logical drop | [`on_region_dropped`] | A drop request has been handled: the region leaves the active set and its WAL entries are marked obsolete. Data files are **not yet deleted**. |
+//! | Physical file removal | [`on_region_files_removed`] | The drop GC worker has deleted the region directory. Terminal file-lifecycle event. |
+//!
+//! Notes:
+//! - `on_region_closed` / `on_region_dropped` run **inline in the region worker loop**,
+//!   so implementations must be fast (same contract as `on_manifest_updated`).
+//! - `on_region_opened` runs inline in the worker loop on the **create** path, but on the
+//!   **open** path it fires inside the spawned open task (`common_runtime::spawn_global`),
+//!   i.e. concurrently with the worker loop — after WAL replay, before the region is
+//!   registered and its open request is acknowledged. Implementations must still be fast
+//!   and must not assume worker-loop-thread affinity or strict ordering against concurrent
+//!   requests to other regions.
+//! - `on_region_files_removed` runs on the background drop GC task, outside the worker loop.
+//! - When global GC is enabled and a normal table region is dropped with `partial_drop`, its
+//!   directory is left for global reclamation and `on_region_files_removed` is **not** fired
+//!   by the drop worker (observe it via the global GC path instead).
+//! - Logical file removal (compaction, region edit, truncate) is already observable via
+//!   [`on_manifest_updated`] (`Edit.files_to_remove` / `Truncate` action); only the drop
+//!   worker's physical directory deletion needs a dedicated file hook.
 //!
 //! ## Invocation points
 //!
@@ -77,11 +114,18 @@
 //!
 //! ## Future work
 //!
-//! A future `on_files_removed` hook may be added to observe file lifecycle end
-//! (GC, drop, truncate, compaction removal). This is not yet implemented.
+//! `on_region_files_removed` currently covers only the **drop** GC worker's physical
+//! directory removal. A broader per-file `on_files_removed` hook covering compaction
+//! removal, truncate, and the global GC reclamation path is not yet implemented
+//! (though logical file removal is already observable via `on_manifest_updated`).
+//! Role/leadership transitions (`on_region_role_changed`) are also not hooked.
 //!
 //! [`on_sst_files_written`]: RegionHook::on_sst_files_written
 //! [`on_manifest_updated`]: RegionHook::on_manifest_updated
+//! [`on_region_opened`]: RegionHook::on_region_opened
+//! [`on_region_closed`]: RegionHook::on_region_closed
+//! [`on_region_dropped`]: RegionHook::on_region_dropped
+//! [`on_region_files_removed`]: RegionHook::on_region_files_removed
 //! [`RegionManifestManager::update`]: crate::manifest::manager::RegionManifestManager::update
 //! [`ManifestContext::update_locked`]: crate::region::ManifestContext::update_locked
 //! [`ManifestContext::update_manifest`]: crate::region::ManifestContext::update_manifest
@@ -227,6 +271,80 @@ pub trait RegionHook: Send + Sync + Debug {
         manifest_version: ManifestVersion,
     ) {
         let _ = (region_id, action_list, manifest_version);
+    }
+
+    /// Called once a region **open** or **create** succeeds, but **before** the
+    /// region is registered in the engine's active set (`insert_region` runs
+    /// immediately afterwards).
+    ///
+    /// Fires once when a region becomes active via a create or open request —
+    /// the natural counterpart to [`on_region_closed`] / [`on_region_dropped`].
+    /// It does **not** fire for the compactor's transient compaction regions
+    /// (`open_compaction_region`), nor for the internal reopen performed during
+    /// follower catch-up / leadership promotion.
+    ///
+    /// On the **create** path it runs inline in the region worker loop; on the
+    /// **open** path it runs inside the spawned open task
+    /// (`common_runtime::spawn_global`), concurrently with the worker loop
+    /// (after WAL replay, before the region is registered/acknowledged).
+    /// Implementations must be fast and must **not** assume worker-loop-thread
+    /// affinity or strict ordering against concurrent requests to other regions.
+    ///
+    /// [`on_region_closed`]: RegionHook::on_region_closed
+    /// [`on_region_dropped`]: RegionHook::on_region_dropped
+    async fn on_region_opened(&self, region_id: RegionId, region_metadata: &RegionMetadataRef) {
+        let _ = (region_id, region_metadata);
+    }
+
+    /// Called after a region is **closed** via a close request.
+    ///
+    /// The region is removed from the engine's active set, but its data files,
+    /// manifest, and WAL state are **preserved**; the region may be reopened
+    /// later. Fires once per successful close, after the region's background
+    /// tasks (flush/compaction) have been stopped.
+    ///
+    /// Fires for a region of **any** role (leader or follower) that is closed.
+    /// Does **not** fire when a region is dropped (see [`on_region_dropped`]).
+    ///
+    /// Runs inline in the region worker loop; implementations should be fast.
+    ///
+    /// [`on_region_dropped`]: RegionHook::on_region_dropped
+    async fn on_region_closed(&self, region_id: RegionId, region_metadata: &RegionMetadataRef) {
+        let _ = (region_id, region_metadata);
+    }
+
+    /// Called after a region is **logically dropped** (a drop request has been
+    /// handled).
+    ///
+    /// The region is removed from the active set and its WAL entries are marked
+    /// obsolete. Its data files are **not yet deleted** — they are scheduled for
+    /// asynchronous removal by the GC worker. Observe physical deletion via
+    /// [`on_region_files_removed`].
+    ///
+    /// Runs inline in the region worker loop; implementations should be fast.
+    ///
+    /// [`on_region_files_removed`]: RegionHook::on_region_files_removed
+    async fn on_region_dropped(&self, region_id: RegionId, region_metadata: &RegionMetadataRef) {
+        let _ = (region_id, region_metadata);
+    }
+
+    /// Called after a dropped region's data files are **physically removed** by
+    /// the drop GC worker (the region directory has been deleted).
+    ///
+    /// This is the terminal event in a region's file lifecycle; no further
+    /// callbacks fire for this region id afterwards. Fires only when the drop
+    /// worker itself deletes the directory. When global GC is enabled and the
+    /// region is a normal table region dropped with `partial_drop`, the
+    /// directory is left for global reclamation and this hook is **not** fired
+    /// by the drop worker.
+    ///
+    /// Runs on a background task, outside the region worker loop.
+    async fn on_region_files_removed(
+        &self,
+        region_id: RegionId,
+        region_metadata: &RegionMetadataRef,
+    ) {
+        let _ = (region_id, region_metadata);
     }
 }
 
