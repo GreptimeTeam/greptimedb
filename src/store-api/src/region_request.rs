@@ -189,6 +189,10 @@ impl RegionRequest {
                 reason: "RemoteDynFilter request should be handled separately by RegionServer",
             }
             .fail(),
+            region_request::Body::CleanUp(_) => UnexpectedSnafu {
+                reason: "CleanUp request should be handled separately by RegionServer",
+            }
+            .fail(),
             region_request::Body::ApplyStagingManifest(apply) => {
                 make_region_apply_staging_manifest(apply)
             }
@@ -329,7 +333,9 @@ fn make_region_close(close: CloseRequest) -> Result<Vec<(RegionId, RegionRequest
     let region_id = close.region_id.into();
     Ok(vec![(
         region_id,
-        RegionRequest::Close(RegionCloseRequest {}),
+        RegionRequest::Close(RegionCloseRequest {
+            flush_on_close: close.flush_on_close,
+        }),
     )])
 }
 
@@ -647,8 +653,11 @@ impl RegionOpenRequest {
 }
 
 /// Close region request.
-#[derive(Debug)]
-pub struct RegionCloseRequest {}
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RegionCloseRequest {
+    /// Whether to flush the region before closing it.
+    pub flush_on_close: bool,
+}
 
 /// Alter metadata of a region.
 #[derive(Debug, PartialEq, Eq, Clone)]

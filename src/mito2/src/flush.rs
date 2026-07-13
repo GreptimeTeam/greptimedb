@@ -2107,7 +2107,7 @@ mod tests {
         scheduler.add_ddl_request_to_pending(SenderDdlRequest {
             sender: OptionOutputTx::from(sender),
             region_id: builder.region_id(),
-            request: DdlRequest::Close(store_api::region_request::RegionCloseRequest {}),
+            request: DdlRequest::Close(store_api::region_request::RegionCloseRequest::default()),
         });
 
         let version_data = version_control.current();

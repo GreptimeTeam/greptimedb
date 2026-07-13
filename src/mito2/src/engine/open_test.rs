@@ -245,7 +245,10 @@ async fn test_engine_region_open_with_options_with_format(flat_format: bool) {
 
     // Close the region.
     engine
-        .handle_request(region_id, RegionRequest::Close(RegionCloseRequest {}))
+        .handle_request(
+            region_id,
+            RegionRequest::Close(RegionCloseRequest::default()),
+        )
         .await
         .unwrap();
 
@@ -306,7 +309,10 @@ async fn test_engine_region_open_with_custom_store_with_format(flat_format: bool
 
     // Close the custom region.
     engine
-        .handle_request(region_id, RegionRequest::Close(RegionCloseRequest {}))
+        .handle_request(
+            region_id,
+            RegionRequest::Close(RegionCloseRequest::default()),
+        )
         .await
         .unwrap();
 
@@ -628,7 +634,10 @@ async fn test_open_compaction_region_with_format(flat_format: bool) {
 
     // Close the region.
     engine
-        .handle_request(region_id, RegionRequest::Close(RegionCloseRequest {}))
+        .handle_request(
+            region_id,
+            RegionRequest::Close(RegionCloseRequest::default()),
+        )
         .await
         .unwrap();
 
@@ -708,7 +717,10 @@ async fn test_open_backfills_partition_expr_with_fetcher() {
 
     // close and reopen to trigger backfill in opener
     engine
-        .handle_request(region_id, RegionRequest::Close(RegionCloseRequest {}))
+        .handle_request(
+            region_id,
+            RegionRequest::Close(RegionCloseRequest::default()),
+        )
         .await
         .unwrap();
     engine
@@ -742,7 +754,10 @@ async fn test_open_backfills_partition_expr_with_fetcher() {
 
     // reopen again to ensure no further changes and still Some
     engine
-        .handle_request(region_id, RegionRequest::Close(RegionCloseRequest {}))
+        .handle_request(
+            region_id,
+            RegionRequest::Close(RegionCloseRequest::default()),
+        )
         .await
         .unwrap();
     let engine = env.reopen_engine(engine, MitoConfig::default()).await;
@@ -784,7 +799,10 @@ async fn test_open_keeps_none_without_fetcher() {
     assert!(meta.partition_expr.is_none());
 
     engine
-        .handle_request(region_id, RegionRequest::Close(RegionCloseRequest {}))
+        .handle_request(
+            region_id,
+            RegionRequest::Close(RegionCloseRequest::default()),
+        )
         .await
         .unwrap();
     let engine = env.reopen_engine(engine, MitoConfig::default()).await;

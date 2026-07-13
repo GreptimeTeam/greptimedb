@@ -604,7 +604,7 @@ mod test {
         engine
             .handle_request(
                 physical_region_id,
-                RegionRequest::Close(RegionCloseRequest {}),
+                RegionRequest::Close(RegionCloseRequest::default()),
             )
             .await
             .unwrap();
@@ -632,7 +632,7 @@ mod test {
         engine
             .handle_request(
                 nonexistent_region_id,
-                RegionRequest::Close(RegionCloseRequest {}),
+                RegionRequest::Close(RegionCloseRequest::default()),
             )
             .await
             .unwrap();
@@ -736,7 +736,7 @@ mod test {
         metric_engine
             .handle_request(
                 physical_region_id,
-                RegionRequest::Close(RegionCloseRequest {}),
+                RegionRequest::Close(RegionCloseRequest::default()),
             )
             .await
             .unwrap();
@@ -828,7 +828,10 @@ mod test {
         // Closes all regions
         for region_id in logical_region_ids.iter().chain(physical_region_ids.iter()) {
             metric_engine
-                .handle_request(*region_id, RegionRequest::Close(RegionCloseRequest {}))
+                .handle_request(
+                    *region_id,
+                    RegionRequest::Close(RegionCloseRequest::default()),
+                )
                 .await
                 .unwrap();
         }

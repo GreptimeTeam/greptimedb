@@ -1852,7 +1852,10 @@ impl RegionServerInner {
 
         for (region_id, engine) in regions {
             let closed = engine
-                .handle_request(region_id, RegionRequest::Close(RegionCloseRequest {}))
+                .handle_request(
+                    region_id,
+                    RegionRequest::Close(RegionCloseRequest::default()),
+                )
                 .await;
             match closed {
                 Ok(_) => debug!("Region {region_id} is closed"),
@@ -2218,7 +2221,10 @@ mod tests {
         );
 
         let response = mock_region_server
-            .handle_request(region_id, RegionRequest::Close(RegionCloseRequest {}))
+            .handle_request(
+                region_id,
+                RegionRequest::Close(RegionCloseRequest::default()),
+            )
             .await
             .unwrap();
         assert_eq!(response.affected_rows, 0);

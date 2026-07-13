@@ -511,6 +511,10 @@ impl LogStore for KafkaLogStore {
         Ok(())
     }
 
+    async fn obsolete_all(&self, _provider: &Provider, _region_id: RegionId) -> Result<()> {
+        Ok(())
+    }
+
     /// Returns the highest entry id of the specified topic in remote WAL.
     fn latest_entry_id(&self, provider: &Provider) -> Result<EntryId> {
         let provider = provider

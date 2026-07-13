@@ -313,6 +313,7 @@ impl DropTableExecutor {
                     }),
                     body: Some(region_request::Body::Close(PbCloseRegionRequest {
                         region_id: region_id.as_u64(),
+                        flush_on_close: false,
                     })),
                 };
 
@@ -348,11 +349,13 @@ impl DropTableExecutor {
     }
 
     /// Closes all table regions on datanodes without deleting region files or metadata tombstones.
+    /// When `flush_leaders_on_close` is set, only leader regions are flushed before close.
     pub async fn on_close_regions(
         &self,
         node_manager: &NodeManagerRef,
         leader_region_registry: &LeaderRegionRegistryRef,
         region_routes: &[RegionRoute],
+        flush_leaders_on_close: bool,
     ) -> Result<()> {
         let table_id = self.table_id;
         let mut seen_peer_ids = HashSet::new();
@@ -360,39 +363,57 @@ impl DropTableExecutor {
             .into_iter()
             .chain(find_followers(region_routes))
             .filter(|peer| seen_peer_ids.insert(peer.id));
-        let mut close_region_tasks = Vec::new();
-
-        for datanode in peers {
-            let requester = node_manager.datanode(&datanode).await;
+        let close_region_tasks = peers.map(|datanode| {
             let region_ids = find_leader_regions(region_routes, &datanode)
                 .into_iter()
-                .chain(find_follower_regions(region_routes, &datanode))
-                .map(|region_number| RegionId::new(table_id, region_number));
+                .map(|region_number| {
+                    (
+                        RegionId::new(table_id, region_number),
+                        flush_leaders_on_close,
+                    )
+                })
+                .chain(
+                    find_follower_regions(region_routes, &datanode)
+                        .into_iter()
+                        .map(|region_number| (RegionId::new(table_id, region_number), false)),
+                )
+                .collect::<Vec<_>>();
 
-            for region_id in region_ids {
-                debug!("Closing region {region_id} on Datanode {datanode:?}");
-                let request = RegionRequest {
-                    header: Some(RegionRequestHeader {
-                        tracing_context: TracingContext::from_current_span().to_w3c(),
-                        ..Default::default()
-                    }),
-                    body: Some(region_request::Body::Close(PbCloseRegionRequest {
-                        region_id: region_id.as_u64(),
-                    })),
-                };
+            async move {
+                let requester = node_manager.datanode(&datanode).await;
+                let close_region_tasks =
+                    region_ids.into_iter().map(|(region_id, flush_on_close)| {
+                        debug!("Closing region {region_id} on Datanode {datanode:?}");
+                        let request = RegionRequest {
+                            header: Some(RegionRequestHeader {
+                                tracing_context: TracingContext::from_current_span().to_w3c(),
+                                ..Default::default()
+                            }),
+                            body: Some(region_request::Body::Close(PbCloseRegionRequest {
+                                region_id: region_id.as_u64(),
+                                flush_on_close,
+                            })),
+                        };
 
-                let datanode = datanode.clone();
-                let requester = requester.clone();
-                close_region_tasks.push(async move {
-                    if let Err(err) = requester.handle(request).await
-                        && err.status_code() != StatusCode::RegionNotFound
-                    {
-                        return Err(add_peer_context_if_needed(datanode)(err));
-                    }
-                    Ok(())
-                });
+                        let datanode = datanode.clone();
+                        let requester = requester.clone();
+                        async move {
+                            if let Err(err) = requester.handle(request).await
+                                && err.status_code() != StatusCode::RegionNotFound
+                            {
+                                return Err(add_peer_context_if_needed(datanode)(err));
+                            }
+                            Ok(())
+                        }
+                    });
+
+                join_all(close_region_tasks)
+                    .await
+                    .into_iter()
+                    .collect::<Result<Vec<_>>>()?;
+                Ok(())
             }
-        }
+        });
 
         join_all(close_region_tasks)
             .await
