@@ -76,14 +76,17 @@ impl DatanodeWalIndexes {
     fn merge(&mut self, topic: String, region_index: &RegionIndexes) {
         let persisted = self.0.entry(topic).or_default();
 
-        for region_id in &region_index.truncated_regions {
-            persisted.regions.remove(region_id);
-        }
         for (region_id, entry_id) in &region_index.truncated_to {
             if let Some(mut indexes) = persisted.region(*region_id) {
                 persisted.regions.insert(
                     *region_id,
-                    indexes.split_off(entry_id).into_iter().deltas().collect(),
+                    entry_id
+                        .checked_add(1)
+                        .map(|next_entry_id| indexes.split_off(&next_entry_id))
+                        .unwrap_or_default()
+                        .into_iter()
+                        .deltas()
+                        .collect(),
                 );
             }
         }
