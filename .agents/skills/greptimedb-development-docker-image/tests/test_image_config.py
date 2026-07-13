@@ -14,12 +14,15 @@
 # limitations under the License.
 
 import importlib
-import os
 import stat
+import sys
 import tempfile
 import unittest
 from unittest import mock
 from pathlib import Path
+
+SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
+sys.path.insert(0, str(SCRIPTS))
 
 image_config = importlib.import_module("image_config")
 

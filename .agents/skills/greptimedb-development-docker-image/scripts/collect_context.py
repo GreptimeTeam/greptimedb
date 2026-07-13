@@ -166,7 +166,13 @@ def collect_report(args: argparse.Namespace) -> dict[str, object]:
     binary_details: dict[str, object] = {"platform": None, "error": None}
     if expected.is_file():
         try:
-            binary_details["platform"] = next(name for name, machine in PLATFORM_MACHINES.items() if machine == inspect_elf(expected))
+            machine = inspect_elf(expected)
+            binary_details["platform"] = next(
+                (name for name, expected_machine in PLATFORM_MACHINES.items() if expected_machine == machine),
+                None,
+            )
+            if binary_details["platform"] is None:
+                binary_details["error"] = f"binary has unsupported ELF machine: {machine}"
         except ValueError as exc:
             binary_details["error"] = str(exc)
     return {
@@ -177,7 +183,7 @@ def collect_report(args: argparse.Namespace) -> dict[str, object]:
         "registry_tag": registry_tag_status(values, args.check_registry_tag, engine, configuration_source),
         "cargo": {"workspace_root": metadata["workspace_root"], "target_dir": str(target_dir), "binaries": targets},
         "selected_binary": {"name": args.binary, "package": args.package, "cargo_target_exists": selected_target is not None, "target": selected_target},
-        "expected_binary": {"profile": args.profile, "rust_target": args.target, "path": str(expected), "exists": expected.is_file(), "executable": os.access(expected, os.X_OK), "platform": binary_details["platform"], "validation_error": binary_details["error"], "mtime": datetime.fromtimestamp(expected.stat().st_mtime, timezone.utc).isoformat() if expected.exists() else None, "freshness": "unverified"},
+        "expected_binary": {"profile": args.profile, "rust_target": args.target, "path": str(expected), "exists": expected.is_file(), "executable": os.access(expected, os.X_OK), "platform": binary_details["platform"], "requested_platform": args.platform, "platform_matches": binary_details["platform"] == args.platform if args.platform and binary_details["platform"] else None, "validation_error": binary_details["error"], "mtime": datetime.fromtimestamp(expected.stat().st_mtime, timezone.utc).isoformat() if expected.exists() else None, "freshness": "unverified"},
     }
 
 

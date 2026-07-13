@@ -3,7 +3,7 @@
 set -euo pipefail
 
 usage() {
-    printf 'Usage: %s --source PATH --bin NAME --profile PROFILE [--target RUST_TARGET]\n' "$0" >&2
+    printf 'Usage: %s --source PATH --bin NAME --profile PROFILE [--target RUST_TARGET] [--package PACKAGE] [--features FEATURES]\n' "$0" >&2
 }
 
 source_dir=""
