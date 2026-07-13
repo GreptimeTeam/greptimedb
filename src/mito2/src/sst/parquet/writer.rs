@@ -57,7 +57,9 @@ use crate::sst::file::RegionFileId;
 use crate::sst::index::{IndexOutput, Indexer, IndexerBuilder};
 use crate::sst::parquet::flat_format::{FlatWriteFormat, time_index_column_index};
 use crate::sst::parquet::format::PrimaryKeyWriteFormat;
-use crate::sst::parquet::metric_value_split::metric_value_split_columns;
+use crate::sst::parquet::metric_value_split::{
+    MetricValueSplitColumn, metric_value_split_columns, split_metric_value_columns,
+};
 use crate::sst::parquet::{PARQUET_METADATA_KEY, SstInfo, WriteOptions};
 use crate::sst::{
     DEFAULT_WRITE_BUFFER_SIZE, DEFAULT_WRITE_CONCURRENCY, FlatSchemaOptions, SeriesEstimator,
@@ -75,11 +77,11 @@ enum FlatBatchConverter {
 }
 
 impl FlatBatchConverter {
-    fn convert_batch(&self, batch: &RecordBatch) -> Result<RecordBatch> {
+    fn convert_batch(&self, batch: RecordBatch) -> Result<RecordBatch> {
         match self {
             FlatBatchConverter::Flat(f) => f.convert_batch(batch),
             FlatBatchConverter::PrimaryKey { format, num_fields } => {
-                format.convert_flat_batch(batch, *num_fields)
+                format.convert_flat_batch(&batch, *num_fields)
             }
         }
     }
@@ -338,9 +340,10 @@ where
     ) -> Result<SstInfoArray> {
         let mut results = smallvec![];
         let mut stats = SourceStats::default();
+        let mut split_columns = None;
 
         while let Some(record_batch) = self
-            .write_next_flat_batch(&mut source, converter, opts)
+            .write_next_flat_batch(&mut source, converter, &mut split_columns, opts)
             .await
             .transpose()
         {
@@ -420,6 +423,7 @@ where
         &mut self,
         source: &mut FlatSource,
         converter: &FlatBatchConverter,
+        split_columns: &mut Option<Vec<MetricValueSplitColumn>>,
         opts: &WriteOptions,
     ) -> Result<Option<RecordBatch>> {
         let start = Instant::now();
@@ -428,7 +432,11 @@ where
         };
         self.metrics.iter_source += start.elapsed();
 
-        let arrow_batch = converter.convert_batch(&record_batch)?;
+        let split_columns = split_columns.get_or_insert_with(|| {
+            metric_value_split_columns(&self.metadata, record_batch.schema_ref())
+        });
+        let split_batch = split_metric_value_columns(&record_batch, split_columns)?;
+        let arrow_batch = converter.convert_batch(split_batch)?;
 
         let start = Instant::now();
         self.maybe_init_writer(arrow_batch.schema_ref(), opts)

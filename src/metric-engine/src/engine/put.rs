@@ -762,6 +762,7 @@ impl MetricEngineInner {
 mod tests {
     use std::collections::HashSet;
 
+    use api::v1::region::{StrictWindow, compact_request};
     use api::v1::value::ValueData;
     use api::v1::{ColumnDataType, ColumnSchema as PbColumnSchema};
     use common_error::ext::ErrorExt;
@@ -785,7 +786,8 @@ mod tests {
     use store_api::path_utils::table_dir;
     use store_api::region_engine::RegionEngine;
     use store_api::region_request::{
-        EnterStagingRequest, RegionRequest, StagingPartitionDirective,
+        AlterKind, EnterStagingRequest, RegionAlterRequest, RegionCompactRequest, RegionRequest,
+        SetRegionOption, StagingPartitionDirective,
     };
     use store_api::storage::ScanRequest;
     use store_api::storage::consts::PRIMARY_KEY_COLUMN_NAME;
@@ -1201,33 +1203,39 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_metric_value_split_roundtrip_after_flush() {
+    async fn test_metric_value_split_across_sst_formats_and_compaction() {
         let env = TestEnv::new().await;
         env.init_metric_region().await;
 
         let schema = test_util::row_schema_with_tags(&["job"]);
-        let rows = [
+        let build_rows = |samples: &[(i64, f64, &str)]| {
+            samples
+                .iter()
+                .map(|(timestamp, value, job)| Row {
+                    values: vec![
+                        ValueData::TimestampMillisecondValue(*timestamp).into(),
+                        ValueData::F64Value(*value).into(),
+                        ValueData::StringValue(job.to_string()).into(),
+                    ],
+                })
+                .collect()
+        };
+        let rows = build_rows(&[
             (0, 1.0, "integer"),
             (1, 2.0, "integer"),
             (0, 1.5, "float"),
             (1, 2.0, "float"),
-        ]
-        .into_iter()
-        .map(|(timestamp, value, job)| Row {
-            values: vec![
-                ValueData::TimestampMillisecondValue(timestamp).into(),
-                ValueData::F64Value(value).into(),
-                ValueData::StringValue(job.to_string()).into(),
-            ],
-        })
-        .collect();
+        ]);
 
         let logical_region_id = env.default_logical_region_id();
         env.metric()
             .handle_request(
                 logical_region_id,
                 RegionRequest::Put(RegionPutRequest {
-                    rows: Rows { schema, rows },
+                    rows: Rows {
+                        schema: schema.clone(),
+                        rows,
+                    },
                     hint: None,
                     partition_expr_version: None,
                 }),
@@ -1256,28 +1264,6 @@ mod tests {
                 .column_schema_by_name(&int_column_name)
                 .is_none(),
             "metric physical reads should hide split companion column"
-        );
-
-        let raw_physical_batches = RecordBatches::try_collect(
-            env.mito()
-                .scan_to_stream(
-                    to_data_region_id(physical_region_id),
-                    ScanRequest::default(),
-                )
-                .await
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-        let physical_rows = collect_value_rows(&raw_physical_batches, Some(&int_column_name));
-        assert_eq!(
-            physical_rows,
-            vec![
-                ("float".to_string(), 0, Some(1.5), None),
-                ("float".to_string(), 1, None, Some(2)),
-                ("integer".to_string(), 0, None, Some(1)),
-                ("integer".to_string(), 1, None, Some(2)),
-            ]
         );
 
         let logical_batches = RecordBatches::try_collect(
@@ -1320,6 +1306,98 @@ mod tests {
                 ("float".to_string(), 1, Some(2.0), None),
                 ("integer".to_string(), 1, Some(2.0), None),
             ]
+        );
+
+        env.metric()
+            .handle_request(
+                physical_region_id,
+                RegionRequest::Alter(RegionAlterRequest {
+                    kind: AlterKind::SetRegionOptions {
+                        options: vec![SetRegionOption::Format("primary_key".to_string())],
+                    },
+                }),
+            )
+            .await
+            .unwrap();
+
+        let rows = build_rows(&[
+            (2, 3.0, "integer"),
+            (3, 4.0, "integer"),
+            (2, 3.5, "float"),
+            (3, 4.0, "float"),
+        ]);
+        env.metric()
+            .handle_request(
+                logical_region_id,
+                RegionRequest::Put(RegionPutRequest {
+                    rows: Rows { schema, rows },
+                    hint: None,
+                    partition_expr_version: None,
+                }),
+            )
+            .await
+            .unwrap();
+        env.metric()
+            .handle_request(physical_region_id, RegionRequest::Flush(Default::default()))
+            .await
+            .unwrap();
+
+        let expected_physical_rows = vec![
+            ("float".to_string(), 0, Some(1.5), None),
+            ("float".to_string(), 1, None, Some(2)),
+            ("float".to_string(), 2, Some(3.5), None),
+            ("float".to_string(), 3, None, Some(4)),
+            ("integer".to_string(), 0, None, Some(1)),
+            ("integer".to_string(), 1, None, Some(2)),
+            ("integer".to_string(), 2, None, Some(3)),
+            ("integer".to_string(), 3, None, Some(4)),
+        ];
+        let data_region_id = to_data_region_id(physical_region_id);
+        let raw_physical_batches = RecordBatches::try_collect(
+            env.mito()
+                .scan_to_stream(data_region_id, ScanRequest::default())
+                .await
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            collect_value_rows(&raw_physical_batches, Some(&int_column_name)),
+            expected_physical_rows
+        );
+        assert_eq!(
+            env.mito().region_statistic(data_region_id).unwrap().sst_num,
+            2
+        );
+
+        env.mito()
+            .handle_request(
+                data_region_id,
+                RegionRequest::Compact(RegionCompactRequest {
+                    options: compact_request::Options::StrictWindow(StrictWindow {
+                        window_seconds: 0,
+                    }),
+                    parallelism: None,
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            env.mito().region_statistic(data_region_id).unwrap().sst_num,
+            1
+        );
+
+        let raw_physical_batches = RecordBatches::try_collect(
+            env.mito()
+                .scan_to_stream(data_region_id, ScanRequest::default())
+                .await
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            collect_value_rows(&raw_physical_batches, Some(&int_column_name)),
+            expected_physical_rows
         );
     }
 
