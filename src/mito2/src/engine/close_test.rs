@@ -24,8 +24,8 @@ use store_api::storage::{RegionId, ScanRequest};
 
 use crate::config::MitoConfig;
 use crate::engine::flush_test::MockRegionHook;
-use crate::engine::region_hook::RegionHookRef;
 use crate::engine::listener::AlterFlushListener;
+use crate::engine::region_hook::RegionHookRef;
 use crate::test_util::{
     CreateRequestBuilder, TestEnv, build_rows, flush_region, put_rows, rows_schema,
 };
