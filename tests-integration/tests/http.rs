@@ -7811,7 +7811,7 @@ pub async fn test_log_query(store_type: StorageType) {
     assert_eq!(res.status(), StatusCode::OK, "{:?}", res.text().await);
     let res = client
         .post(
-            "/v1/sql?sql=insert into logs values ('2024-11-07 10:53:50', 'before-explicit-end'), ('2024-11-07 10:53:51', 'at-explicit-end'), ('2024-11-07 10:53:52', 'after-explicit-end');",
+            "/v1/sql?sql=insert into logs values ('2024-11-06 23:59:59', 'before-date-end'), ('2024-11-07 10:53:50', 'before-explicit-end'), ('2024-11-07 10:53:51', 'at-explicit-end'), ('2024-11-07 10:53:52', 'after-explicit-end');",
         )
         .header("Content-Type", "application/x-www-form-urlencoded")
         .send()
@@ -7819,7 +7819,7 @@ pub async fn test_log_query(store_type: StorageType) {
     assert_eq!(res.status(), StatusCode::OK, "{:?}", res.text().await);
 
     // test log query
-    let log_query = LogQuery {
+    let mut log_query = LogQuery {
         table: TableName {
             catalog_name: "greptime".to_string(),
             schema_name: "public".to_string(),
@@ -7850,6 +7850,35 @@ pub async fn test_log_query(store_type: StorageType) {
     let resp = res.text().await;
     let v = get_rows_from_output(&resp);
     assert_eq!(v, "[[1730976830000,\"before-explicit-end\"]]");
+
+    log_query.time_filter.start = Some("2024-11-06".to_string());
+    log_query.time_filter.end = Some("2024-11-07".to_string());
+    log_query.limit.fetch = Some(4);
+    let res = client
+        .post("/v1/logs")
+        .header("Content-Type", "application/json")
+        .body(serde_json::to_string(&log_query).unwrap())
+        .send()
+        .await;
+
+    assert_eq!(res.status(), StatusCode::OK, "{:?}", res.text().await);
+    let resp = res.text().await;
+    let output = serde_json::from_str::<Value>(&resp).unwrap();
+    let rows = output["output"][0]["records"]["rows"].as_array().unwrap();
+    let mut messages = rows
+        .iter()
+        .map(|row| row[1].as_str().unwrap())
+        .collect::<Vec<_>>();
+    messages.sort_unstable();
+    assert_eq!(
+        messages,
+        vec![
+            "after-explicit-end",
+            "at-explicit-end",
+            "before-date-end",
+            "before-explicit-end",
+        ]
+    );
 
     guard.remove_all().await;
 }
