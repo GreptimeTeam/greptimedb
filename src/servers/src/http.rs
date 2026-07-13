@@ -978,6 +978,13 @@ impl HttpServer {
                 "/services/collector/event/1.0",
                 routing::post(splunk::handle_event),
             )
+            // The raw endpoint (plain-text body, one event per line) plus its
+            // versioned alias.
+            .route("/services/collector/raw", routing::post(splunk::handle_raw))
+            .route(
+                "/services/collector/raw/1.0",
+                routing::post(splunk::handle_raw),
+            )
             .layer(
                 ServiceBuilder::new()
                     .layer(RequestDecompressionLayer::new().pass_through_unaccepted(true)),
