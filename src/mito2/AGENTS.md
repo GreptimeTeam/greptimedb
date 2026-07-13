@@ -77,6 +77,14 @@ Tests live next to the code as `*_test.rs` (e.g. `src/mito2/src/engine/flush_tes
 
 - Sequence numbers are strictly increasing per region; dedup and snapshot reads
   depend on this. Do not change assignment lightly.
+- For non-append-only tables using `LastRow` or `LastNonNull`, field predicates
+  must not participate in per-source pruning, index filtering, or prefiltering
+  when multiple sources overlap. A merged field value may come from another
+  version or source. Propagate `PreFilterMode::SkipFields` through every pruning
+  and index path, include the mode in related cache keys, and leave field
+  predicates for evaluation after merge/dedup. Tag and timestamp predicates are
+  safe; keep any single-source optimization explicit. See `read/scan_region.rs`,
+  `sst/parquet/file_range.rs`, and `cache/index/result_cache.rs`.
 - Manifest version is monotonic — never reset or skip it.
 - Lock ordering: take the manifest lock before updating `version_control`; the
   reverse deadlocks against concurrent flush/compaction.
