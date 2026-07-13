@@ -653,6 +653,86 @@ mod tests {
     }
 
     #[test]
+    fn test_logical_slice_memory_size_for_sliced_mixed_null_views() {
+        let before = "before out-of-line payload";
+        let null_out_of_line = "null out-of-line payload";
+        let inline = "inline";
+        let visible_out_of_line = "visible out-of-line payload";
+        let null_inline = "null";
+        let after = "after out-of-line payload";
+        let validity = vec![true, false, true, true, false, true];
+        let slice_offset = 1;
+        let visible_rows = 4;
+        let expected_valid_indices = vec![1, 2];
+        let view_bytes = visible_rows * size_of::<u128>();
+        let validity_bytes = visible_rows.div_ceil(8);
+        let expected_size = view_bytes + validity_bytes + visible_out_of_line.len();
+
+        let (views, buffers, _) = StringViewArray::from(vec![
+            before,
+            null_out_of_line,
+            inline,
+            visible_out_of_line,
+            null_inline,
+            after,
+        ])
+        .into_parts();
+        let string_view =
+            StringViewArray::new(views, buffers, Some(NullBuffer::from(validity.clone())))
+                .slice(slice_offset, visible_rows);
+        assert_eq!(
+            expected_valid_indices,
+            string_view
+                .nulls()
+                .unwrap()
+                .valid_indices()
+                .collect::<Vec<_>>()
+        );
+        let string_schema = Arc::new(Schema::new(vec![ColumnSchema::new(
+            "strings",
+            ConcreteDataType::utf8_view_datatype(),
+            true,
+        )]));
+        let string_batch = RecordBatch::new(
+            string_schema,
+            vec![Arc::new(StringVector::from(string_view)) as VectorRef],
+        )
+        .unwrap();
+        assert_eq!(expected_size, string_batch.logical_slice_memory_size());
+
+        let (views, buffers, _) = BinaryViewArray::from(vec![
+            before.as_bytes(),
+            null_out_of_line.as_bytes(),
+            inline.as_bytes(),
+            visible_out_of_line.as_bytes(),
+            null_inline.as_bytes(),
+            after.as_bytes(),
+        ])
+        .into_parts();
+        let binary_view = BinaryViewArray::new(views, buffers, Some(NullBuffer::from(validity)))
+            .slice(slice_offset, visible_rows);
+        assert_eq!(
+            expected_valid_indices,
+            binary_view
+                .nulls()
+                .unwrap()
+                .valid_indices()
+                .collect::<Vec<_>>()
+        );
+        let binary_schema = Arc::new(Schema::new(vec![ColumnSchema::new(
+            "binary",
+            ConcreteDataType::binary_view_datatype(),
+            true,
+        )]));
+        let binary_batch = RecordBatch::new(
+            binary_schema,
+            vec![Arc::new(BinaryVector::from(binary_view)) as VectorRef],
+        )
+        .unwrap();
+        assert_eq!(expected_size, binary_batch.logical_slice_memory_size());
+    }
+
+    #[test]
     fn test_string_view_payload_size_handles_null_shapes_and_slices() {
         let inline = "inline";
         let first = "first out-of-line payload";
