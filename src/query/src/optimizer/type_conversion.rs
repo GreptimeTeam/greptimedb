@@ -104,8 +104,11 @@ impl ExtensionAnalyzerRule for TypeConversionRule {
             }
 
             LogicalPlan::Join(join) => {
+                let Ok(schema) = join.left.schema().join(join.right.schema()) else {
+                    return Ok(Transformed::no(LogicalPlan::Join(join)));
+                };
                 let mut converter = TypeConverter {
-                    schema: std::sync::Arc::new(join.left.schema().join(join.right.schema())?),
+                    schema: std::sync::Arc::new(schema),
                     query_ctx: ctx.query_ctx(),
                 };
                 let plan = LogicalPlan::Join(join);
@@ -325,9 +328,9 @@ mod tests {
     use std::sync::Arc;
 
     use datafusion_common::arrow::datatypes::Field;
-    use datafusion_common::{Column, DFSchema};
+    use datafusion_common::{Column, DFSchema, NullEquality};
     use datafusion_expr::expr::Exists;
-    use datafusion_expr::{JoinType, Literal, LogicalPlanBuilder, Subquery};
+    use datafusion_expr::{Join, JoinConstraint, JoinType, Literal, LogicalPlanBuilder, Subquery};
     use datafusion_sql::TableReference;
     use session::context::QueryContext;
 
@@ -592,6 +595,47 @@ mod tests {
                 .lit())
             )
         );
+    }
+
+    #[test]
+    fn test_semi_anti_join_with_duplicate_unqualified_fields() {
+        let left = Arc::new(
+            LogicalPlanBuilder::values(vec![vec![1_i64.lit()]])
+                .unwrap()
+                .build()
+                .unwrap(),
+        );
+        let right = Arc::new(
+            LogicalPlanBuilder::values(vec![vec![2_i64.lit()]])
+                .unwrap()
+                .build()
+                .unwrap(),
+        );
+        let context = QueryEngineContext::mock();
+
+        for join_type in [JoinType::LeftSemi, JoinType::LeftAnti] {
+            let join = Join::try_new(
+                Arc::clone(&left),
+                Arc::clone(&right),
+                vec![(
+                    Expr::Column(Column::from_name("column1")),
+                    Expr::Column(Column::from_name("column1")),
+                )],
+                None,
+                join_type,
+                JoinConstraint::On,
+                NullEquality::NullEqualsNothing,
+                false,
+            )
+            .unwrap();
+
+            let result = TypeConversionRule.analyze(
+                LogicalPlan::Join(join),
+                &context,
+                &ConfigOptions::default(),
+            );
+            assert!(result.is_ok(), "{join_type:?}: {result:?}");
+        }
     }
 
     #[test]
