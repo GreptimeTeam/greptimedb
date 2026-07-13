@@ -13,12 +13,13 @@
 // limitations under the License.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::fmt;
 
 use catalog::RegisterTableRequest;
 use catalog::memory::MemoryCatalogManager;
 use client::OutputWithMetrics;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
-use common_error::ext::BoxedError;
+use common_error::ext::{BoxedError, ErrorExt, StackError};
 use common_error::mock::MockError;
 use common_error::status_code::StatusCode;
 use common_query::Output;
@@ -159,6 +160,149 @@ async fn test_dirty_time_windows_uses_batch_opts() {
     let state = task.state.read().unwrap();
     assert_eq!(7, state.dirty_time_windows.max_filter_num_per_query());
     assert_eq!(11, state.dirty_time_windows.time_window_merge_threshold());
+}
+
+#[tokio::test]
+async fn test_flush_dirty_window_count_forces_nonzero_for_tiny_dirty_coverage() {
+    let task = new_time_window_test_task_with_query(
+        "SELECT number, date_bin(INTERVAL '5 second', ts) AS time_window FROM numbers_with_ts GROUP BY time_window, number",
+    )
+    .await
+    .task;
+    {
+        let mut state = task.state.write().unwrap();
+        state
+            .dirty_time_windows
+            .add_window(Timestamp::new_second(1), Some(Timestamp::new_second(2)));
+    }
+
+    assert_eq!(Some(1), task.current_flush_dirty_window_count());
+}
+
+#[test]
+fn test_conservative_flush_window_count_rounds_up_and_preserves_ranges() {
+    let window_size = Duration::from_secs(5);
+    let mut slightly_over_one_window = DirtyTimeWindows::default();
+    slightly_over_one_window.add_window(Timestamp::new_second(0), Some(Timestamp::new_second(6)));
+    assert_eq!(
+        2,
+        slightly_over_one_window.conservative_flush_window_count(&window_size)
+    );
+
+    let mut separated_short_ranges = DirtyTimeWindows::default();
+    separated_short_ranges.add_window(Timestamp::new_second(0), Some(Timestamp::new_second(1)));
+    separated_short_ranges.add_window(Timestamp::new_second(30), Some(Timestamp::new_second(31)));
+    assert_eq!(
+        2,
+        separated_short_ranges.conservative_flush_window_count(&window_size)
+    );
+}
+
+#[tokio::test]
+async fn test_flush_dirty_window_count_includes_dirty_and_pending_fenced_repair() {
+    let task = new_time_window_test_task_with_query(
+        "SELECT number, date_bin(INTERVAL '5 second', ts) AS time_window FROM numbers_with_ts GROUP BY time_window, number",
+    )
+    .await
+    .task;
+    {
+        let mut state = task.state.write().unwrap();
+        state
+            .dirty_time_windows
+            .add_window(Timestamp::new_second(0), Some(Timestamp::new_second(10)));
+        state
+            .start_fenced_repair(BTreeMap::from([(1_u64, 10_u64)]))
+            .unwrap();
+        state
+            .dirty_time_windows
+            .add_window(Timestamp::new_second(20), Some(Timestamp::new_second(25)));
+    }
+
+    assert_eq!(Some(3), task.current_flush_dirty_window_count());
+}
+
+#[tokio::test]
+async fn test_flush_dual_queue_plans_pending_repair_then_live_dirty() {
+    let TestTaskParts {
+        task,
+        query_engine,
+        ..
+    } = new_time_window_test_task_with_query(
+        "SELECT number, date_bin(INTERVAL '5 second', ts) AS time_window FROM numbers_with_ts GROUP BY time_window, number",
+    )
+    .await;
+    let high = BTreeMap::from([(1_u64, 10_u64)]);
+    {
+        let mut state = task.state.write().unwrap();
+        state
+            .dirty_time_windows
+            .add_window(Timestamp::new_second(0), Some(Timestamp::new_second(1)));
+        state
+            .dirty_time_windows
+            .add_window(Timestamp::new_second(30), Some(Timestamp::new_second(31)));
+        state.start_fenced_repair(high.clone()).unwrap();
+        // This simulates a post-H dirty notification. It must remain outside
+        // the old fenced repair and be planned in the second flush round.
+        state
+            .dirty_time_windows
+            .add_window(Timestamp::new_second(60), Some(Timestamp::new_second(61)));
+    }
+
+    assert!(task.flush_has_pending_and_live_dirty_coverage());
+    let first_cap = task.current_flush_dirty_window_count();
+    assert_eq!(Some(3), first_cap);
+    let first_plan = task
+        .gen_query_with_time_window(
+            query_engine.clone(),
+            &aggregate_time_window_sink_schema(),
+            &[],
+            false,
+            first_cap,
+        )
+        .await
+        .unwrap()
+        .expect("first flush round should plan the pending fenced repair");
+    assert!(matches!(
+        first_plan.coverage,
+        QueryCoverage::FencedRepairChunk { .. }
+    ));
+    assert_eq!(task.state.read().unwrap().dirty_time_windows.len(), 1);
+    assert!(task.state.read().unwrap().fenced_repair_pending_is_empty());
+
+    {
+        let mut state = task.state.write().unwrap();
+        let decision = BatchingTask::apply_query_result_to_state(
+            &mut state,
+            &output_with_region_watermarks([(1_u64, Some(10_u64))]),
+            std::time::Duration::from_millis(1),
+            &first_plan.coverage,
+        );
+        assert!(matches!(
+            decision,
+            FlowCheckpointDecision::AdvancedFromFullSnapshot { .. }
+        ));
+        assert!(state.pending_fenced_repair().is_none());
+        assert_eq!(state.dirty_time_windows.len(), 1);
+    }
+
+    let second_cap = task.current_flush_dirty_window_count();
+    assert_eq!(Some(1), second_cap);
+    let second_plan = task
+        .gen_query_with_time_window(
+            query_engine,
+            &aggregate_time_window_sink_schema(),
+            &[],
+            false,
+            second_cap,
+        )
+        .await
+        .unwrap()
+        .expect("second flush round should plan the post-H live dirty window");
+    assert!(matches!(
+        second_plan.coverage,
+        QueryCoverage::IncrementalDelta
+    ));
+    assert!(task.state.read().unwrap().dirty_time_windows.is_empty());
 }
 
 #[tokio::test]
@@ -317,6 +461,67 @@ fn flow_error_with_status(status_code: StatusCode) -> Error {
     Err::<(), _>(BoxedError::new(MockError::new(status_code)))
         .context(crate::error::ExternalSnafu)
         .unwrap_err()
+}
+
+fn flow_error_with_message(message: &str) -> Error {
+    crate::error::InvalidQuerySnafu {
+        reason: message.to_string(),
+    }
+    .build()
+}
+
+#[derive(Debug)]
+struct MarkerSourceError(&'static str);
+
+impl fmt::Display for MarkerSourceError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl std::error::Error for MarkerSourceError {}
+
+#[derive(Debug)]
+struct WrappedMarkerError {
+    source: MarkerSourceError,
+}
+
+impl fmt::Display for WrappedMarkerError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "External error")
+    }
+}
+
+impl std::error::Error for WrappedMarkerError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.source)
+    }
+}
+
+impl ErrorExt for WrappedMarkerError {
+    fn status_code(&self) -> StatusCode {
+        StatusCode::Unexpected
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+impl StackError for WrappedMarkerError {
+    fn debug_fmt(&self, _: usize, _: &mut Vec<String>) {}
+
+    fn next(&self) -> Option<&dyn StackError> {
+        None
+    }
+}
+
+fn external_error_with_source_marker(marker: &'static str) -> Error {
+    Err::<(), _>(BoxedError::new(WrappedMarkerError {
+        source: MarkerSourceError(marker),
+    }))
+    .context(crate::error::ExternalSnafu)
+    .unwrap_err()
 }
 
 /// Test-only error that carries a non-RequestOutdated status code but
@@ -1277,6 +1482,115 @@ fn test_apply_query_failure_to_state_falls_back_from_incremental() {
     );
 }
 
+#[tokio::test]
+async fn test_stale_cursor_failure_next_plan_is_unfiltered_full_recompute() {
+    let TestTaskParts {
+        task,
+        query_engine,
+        ..
+    } = new_time_window_test_task_with_query(
+        "SELECT number, date_bin(INTERVAL '5 second', ts) AS time_window FROM numbers_with_ts GROUP BY time_window, number",
+    )
+    .await;
+
+    {
+        let mut state = task.state.write().unwrap();
+        state.advance_checkpoints(HashMap::from([(1_u64, 8527000_u64)]));
+        state
+            .dirty_time_windows
+            .add_window(Timestamp::new_second(10), Some(Timestamp::new_second(15)));
+    }
+
+    let incremental_plan = task
+        .gen_query_with_time_window(
+            query_engine.clone(),
+            &aggregate_time_window_sink_schema(),
+            &[],
+            false,
+            Some(1),
+        )
+        .await
+        .unwrap()
+        .expect("incremental mode with dirty signal should generate a delta plan");
+    assert!(matches!(
+        incremental_plan.coverage,
+        QueryCoverage::IncrementalDelta
+    ));
+
+    {
+        let mut state = task.state.write().unwrap();
+        let decision = BatchingTask::apply_query_failure_to_state(
+            &mut state,
+            std::time::Duration::from_millis(1),
+            &incremental_plan.coverage,
+            FlowQueryFallbackReason::StaleCursor,
+        );
+        assert_eq!(
+            decision,
+            Some(FlowCheckpointDecision::FallbackToFullSnapshot {
+                previous_mode: CheckpointMode::Incremental,
+                reason: FlowQueryFallbackReason::StaleCursor,
+            })
+        );
+        assert!(state.force_full_recompute());
+    }
+    task.handle_executed_query_failure(Some(&incremental_plan));
+
+    let repair_plan = task
+        .gen_query_with_time_window(
+            query_engine,
+            &aggregate_time_window_sink_schema(),
+            &[],
+            false,
+            Some(1),
+        )
+        .await
+        .unwrap()
+        .expect("stale cursor should force a full recompute retry");
+    assert!(matches!(
+        repair_plan.coverage,
+        QueryCoverage::UnfilteredFull
+    ));
+    assert!(task.state.read().unwrap().force_full_recompute());
+}
+
+#[test]
+fn test_stale_cursor_failure_flag_survives_failure_and_clears_after_full_success() {
+    let query_ctx = QueryContext::arc();
+    let (_tx, rx) = tokio::sync::oneshot::channel();
+    let mut state = TaskState::new(query_ctx, rx);
+    state.advance_checkpoints(HashMap::from([(1_u64, 10_u64)]));
+
+    BatchingTask::apply_query_failure_to_state(
+        &mut state,
+        std::time::Duration::from_millis(1),
+        &QueryCoverage::IncrementalDelta,
+        FlowQueryFallbackReason::StaleCursor,
+    );
+    assert!(state.force_full_recompute());
+
+    BatchingTask::apply_query_failure_to_state(
+        &mut state,
+        std::time::Duration::from_millis(1),
+        &QueryCoverage::UnfilteredFull,
+        FlowQueryFallbackReason::QueryFailure,
+    );
+    assert!(state.force_full_recompute());
+
+    let success_decision = BatchingTask::apply_query_result_to_state(
+        &mut state,
+        &output_with_region_watermarks([(1_u64, Some(20_u64))]),
+        std::time::Duration::from_millis(1),
+        &QueryCoverage::UnfilteredFull,
+    );
+    assert!(matches!(
+        success_decision,
+        FlowCheckpointDecision::AdvancedFromFullSnapshot { .. }
+    ));
+    assert!(!state.force_full_recompute());
+    assert_eq!(state.checkpoints(), &BTreeMap::from([(1_u64, 20_u64)]));
+}
+
 #[test]
 fn test_apply_query_failure_to_state_records_full_snapshot_failure() {
     let query_ctx = QueryContext::arc();
@@ -1318,6 +1632,48 @@ fn test_query_failure_reason_distinguishes_fenced_repair_stale_fence() {
         BatchingTask::query_failure_reason(&err, &QueryCoverage::IncrementalDelta),
         FlowQueryFallbackReason::StaleCursor
     );
+
+    for message in [
+        "wrapped storage error: STALE_CURSOR given_seq=8 min_readable_seq=9",
+        "storage hint FALLBACK_FULL_RECOMPUTE for flow incremental scan",
+        "incremental query stale, retry with full recompute",
+    ] {
+        let wrapped = flow_error_with_message(message);
+        assert_eq!(
+            BatchingTask::query_failure_reason(&wrapped, &QueryCoverage::IncrementalDelta),
+            FlowQueryFallbackReason::StaleCursor,
+            "{message}"
+        );
+    }
+
+    let source_chain_stale_cursor = external_error_with_source_marker(
+        "storage returned STALE_CURSOR: given_seq=8527000 min_readable_seq=8550000",
+    );
+    assert_eq!(
+        BatchingTask::query_failure_reason(
+            &source_chain_stale_cursor,
+            &QueryCoverage::IncrementalDelta
+        ),
+        FlowQueryFallbackReason::StaleCursor
+    );
+
+    for message in [
+        "wrapped storage error: STALE_SNAPSHOT_FENCE",
+        "storage hint REBIND_SNAPSHOT_FENCE for fenced repair",
+        "snapshot upper bound stale for region 1",
+    ] {
+        let wrapped = external_error_with_source_marker(message);
+        assert_eq!(
+            BatchingTask::query_failure_reason(
+                &wrapped,
+                &QueryCoverage::FencedRepairChunk {
+                    high: BTreeMap::new(),
+                },
+            ),
+            FlowQueryFallbackReason::SnapshotFenceExpired,
+            "{message}"
+        );
+    }
 
     let generic_err = flow_error_with_status(StatusCode::Unexpected);
     assert_eq!(

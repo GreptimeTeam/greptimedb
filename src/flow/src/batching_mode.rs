@@ -22,6 +22,7 @@ use session::ReadPreference;
 
 mod checkpoint;
 pub(crate) mod engine;
+mod error_chain;
 mod eval_schedule;
 pub(crate) mod frontend_client;
 mod state;

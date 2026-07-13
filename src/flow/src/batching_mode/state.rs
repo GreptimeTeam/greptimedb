@@ -59,6 +59,9 @@ pub struct TaskState {
     /// Set when the flow's query shape is deterministically incompatible
     /// with incremental execution (e.g. unsupported aggregate expressions).
     incremental_disabled: bool,
+    /// One-shot stale-cursor recovery guard. When set, the next execution must
+    /// run an unfiltered full recompute instead of dirty-scoped repair.
+    force_full_recompute: bool,
     exec_state: ExecState,
     /// Shutdown receiver
     pub(crate) shutdown_rx: oneshot::Receiver<()>,
@@ -85,6 +88,7 @@ impl TaskState {
             pending_fenced_repair: None,
             checkpoints: Default::default(),
             incremental_disabled: false,
+            force_full_recompute: false,
             exec_state: ExecState::Idle,
             shutdown_rx,
             task_handle: None,
@@ -124,6 +128,18 @@ impl TaskState {
         self.incremental_disabled
     }
 
+    pub fn force_full_recompute(&self) -> bool {
+        self.force_full_recompute
+    }
+
+    pub fn set_force_full_recompute(&mut self) {
+        self.force_full_recompute = true;
+    }
+
+    pub fn clear_force_full_recompute(&mut self) {
+        self.force_full_recompute = false;
+    }
+
     /// Permanently disable incremental mode for this task and
     /// immediately fall back to full snapshot for the current cycle.
     pub fn disable_incremental(&mut self) {
@@ -143,6 +159,7 @@ impl TaskState {
     pub fn advance_checkpoints(&mut self, watermark_map: HashMap<u64, u64>) {
         self.checkpoints = watermark_map.into_iter().collect();
         self.pending_fenced_repair = None;
+        self.clear_force_full_recompute();
         if !self.incremental_disabled {
             self.checkpoint_mode = CheckpointMode::Incremental;
         }
@@ -574,6 +591,38 @@ impl DirtyTimeWindows {
         } else {
             (total_window_time_range.num_seconds() / window_size.num_seconds()) as usize
         }
+    }
+
+    /// Returns a conservative cap for an explicit flush. Unlike
+    /// [`Self::effective_count`], this rounds represented coverage up and
+    /// preserves enough capacity to consume every separately stored range in a
+    /// single bounded flush round.
+    pub fn conservative_flush_window_count(&self, window_size: &Duration) -> usize {
+        if self.windows.is_empty() {
+            return 0;
+        }
+
+        let range_count = self.windows.len();
+        let window_nanos = window_size.as_nanos();
+        if window_nanos == 0 {
+            return range_count;
+        }
+
+        let total_nanos = self.windows.iter().fold(0_u128, |total, (start, end)| {
+            let represented = match end {
+                Some(end) => end
+                    .sub(start)
+                    .and_then(|duration| duration.to_std().ok())
+                    .unwrap_or_default(),
+                None => *window_size,
+            }
+            .as_nanos();
+            total.saturating_add(represented)
+        });
+        let rounded_up = total_nanos / window_nanos + u128::from(total_nanos % window_nanos != 0);
+        let rounded_up = rounded_up.min(usize::MAX as u128) as usize;
+
+        rounded_up.max(range_count)
     }
 
     /// Generate all filter expressions consuming all time windows
