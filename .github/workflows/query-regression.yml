@@ -71,7 +71,10 @@ jobs:
       CARGO_INCREMENTAL: "0"
       QUERY_REGRESSION_CACHE_EPOCH: "1"
       BASE_REF: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || inputs.base_ref }}
-      CANDIDATE_REF: ${{ github.event_name == 'pull_request' && format('refs/pull/{0}/merge', github.event.pull_request.number) || inputs.candidate_ref || github.ref }}
+      CANDIDATE_REF: ${{ github.event_name == 'workflow_dispatch' && (inputs.candidate_ref || github.ref) || '' }}
+      EVENT_MERGE_SHA: ${{ github.event_name == 'pull_request' && github.sha || '' }}
+      EVENT_HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || '' }}
+      EVENT_BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || '' }}
     steps:
       - name: Checkout base source
         uses: actions/checkout@v4
@@ -88,6 +91,81 @@ jobs:
             query-regression-trusted-scripts/query-regression-pr-metadata.py
           cp src/.github/scripts/query-regression-summary.py \
             query-regression-trusted-scripts/query-regression-summary.py
+
+      - name: Resolve immutable candidate and build base
+        working-directory: src
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          fail_closed() {
+            printf '%s\n' \
+              "PR changed or merge result unavailable; maintainer must remove and re-add query-regression after reviewing current revision. $1" >&2
+            exit 1
+          }
+
+          is_full_sha() {
+            [[ "$1" =~ ^[[:xdigit:]]{40}$ ]]
+          }
+
+          initially_checked_out_base_sha="$(git rev-parse --verify HEAD)"
+          is_full_sha "${initially_checked_out_base_sha}" || {
+            printf 'Could not resolve initially checked-out BASE_REF commit.\n' >&2
+            exit 1
+          }
+
+          if [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
+            for identity in EVENT_MERGE_SHA EVENT_HEAD_SHA EVENT_BASE_SHA; do
+              value="${!identity-}"
+              is_full_sha "${value}" || fail_closed "Missing or invalid ${identity}."
+            done
+
+            if ! git fetch --no-tags --prune --depth=2 origin "${EVENT_MERGE_SHA}"; then
+              fail_closed "Could not fetch event merge SHA ${EVENT_MERGE_SHA}."
+            fi
+            fetched_sha="$(git rev-parse --verify FETCH_HEAD 2>/dev/null)" \
+              || fail_closed "Fetched event merge SHA could not be resolved."
+            [[ "${fetched_sha,,}" == "${EVENT_MERGE_SHA,,}" ]] \
+              || fail_closed "FETCH_HEAD ${fetched_sha} does not match event merge SHA ${EVENT_MERGE_SHA}."
+
+            read -r -a parents <<< "$(git show -s --format=%P FETCH_HEAD)"
+            (( ${#parents[@]} == 2 )) \
+              || fail_closed "Event merge SHA ${EVENT_MERGE_SHA} is not a two-parent merge commit."
+            head_parent_count=0
+            for parent in "${parents[@]}"; do
+              if [[ "${parent,,}" == "${EVENT_HEAD_SHA,,}" ]]; then
+                ((head_parent_count += 1))
+              else
+                VERIFIED_BASE_SHA="${parent,,}"
+              fi
+            done
+            (( head_parent_count == 1 )) \
+              || fail_closed "Event merge SHA must have exactly one EVENT_HEAD_SHA parent."
+            is_full_sha "${VERIFIED_BASE_SHA-}" \
+              || fail_closed "Event merge SHA has no non-head parent for the base build."
+            VERIFIED_CANDIDATE_SHA="${fetched_sha,,}"
+          else
+            git fetch --no-tags --prune --depth=1 origin "${CANDIDATE_REF}"
+            VERIFIED_CANDIDATE_SHA="$(git rev-parse --verify FETCH_HEAD)"
+            VERIFIED_BASE_SHA="${initially_checked_out_base_sha}"
+          fi
+
+          is_full_sha "${VERIFIED_CANDIDATE_SHA}" || {
+            printf 'Could not resolve candidate SHA.\n' >&2
+            exit 1
+          }
+          is_full_sha "${VERIFIED_BASE_SHA}" || {
+            printf 'Could not resolve build base SHA.\n' >&2
+            exit 1
+          }
+          printf 'VERIFIED_CANDIDATE_SHA=%s\n' "${VERIFIED_CANDIDATE_SHA,,}" >> "${GITHUB_ENV}"
+          printf 'VERIFIED_BASE_SHA=%s\n' "${VERIFIED_BASE_SHA,,}" >> "${GITHUB_ENV}"
+          printf 'Verified candidate SHA: %s\n' "${VERIFIED_CANDIDATE_SHA,,}"
+          printf 'Verified build base SHA: %s\n' "${VERIFIED_BASE_SHA,,}"
+          printf -- '- Verified candidate SHA: `%s`; built base SHA: `%s`\n' \
+            "${VERIFIED_CANDIDATE_SHA,,}" "${VERIFIED_BASE_SHA,,}" >> "${GITHUB_STEP_SUMMARY}"
+          git reset --hard "${VERIFIED_BASE_SHA}"
+          git clean -ffdx
 
       - name: Verify runner image tools
         shell: bash
@@ -334,9 +412,18 @@ jobs:
 
       - name: Switch source to candidate
         working-directory: src
+        shell: bash
         run: |
-          git fetch --no-tags --prune --depth=1 origin "${CANDIDATE_REF}"
-          git reset --hard FETCH_HEAD
+          set -euo pipefail
+          [[ "${VERIFIED_CANDIDATE_SHA}" =~ ^[[:xdigit:]]{40}$ ]] || {
+            printf 'Verified candidate SHA is missing or invalid.\n' >&2
+            exit 1
+          }
+          git cat-file -e "${VERIFIED_CANDIDATE_SHA}^{commit}" || {
+            printf 'Verified candidate SHA is unavailable in the local repository.\n' >&2
+            exit 1
+          }
+          git reset --hard "${VERIFIED_CANDIDATE_SHA}"
           git clean -ffdx
 
       - name: Test query regression runner lifecycle
