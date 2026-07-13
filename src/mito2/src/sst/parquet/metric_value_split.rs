@@ -14,23 +14,17 @@
 
 use std::sync::Arc;
 
-use api::v1::SemanticType;
 use datatypes::arrow::array::{
     Array, ArrayRef, Float64Array, Float64Builder, Int64Array, Int64Builder,
 };
 use datatypes::arrow::buffer::{BooleanBuffer, Buffer, NullBuffer, ScalarBuffer};
 use datatypes::arrow::datatypes::SchemaRef;
 use datatypes::arrow::record_batch::RecordBatch;
-use datatypes::prelude::ConcreteDataType;
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::RegionMetadata;
-use store_api::metric_engine_consts::{
-    DATA_SCHEMA_TABLE_ID_COLUMN_NAME, DATA_SCHEMA_TSID_COLUMN_NAME,
-    metric_engine_value_int_column_name,
-};
-use store_api::storage::consts::ReservedColumnId;
 
 use crate::error::{InvalidRecordBatchSnafu, NewRecordBatchSnafu, Result};
+use crate::metric_value::metric_value_columns;
 
 #[derive(Debug, Clone)]
 pub(crate) struct MetricValueSplitColumn {
@@ -42,47 +36,21 @@ pub(crate) fn metric_value_split_columns(
     metadata: &RegionMetadata,
     arrow_schema: &SchemaRef,
 ) -> Vec<MetricValueSplitColumn> {
-    if !is_metric_engine_data_region(metadata) {
-        return vec![];
-    }
-
-    metadata
-        .field_columns()
-        .filter(|column| column.column_schema.data_type == ConcreteDataType::float64_datatype())
-        .filter_map(|float_column| {
-            let int_name = metric_engine_value_int_column_name(&float_column.column_schema.name);
-            let int_column = metadata.column_by_name(&int_name)?;
-            if int_column.semantic_type != SemanticType::Field
-                || int_column.column_schema.data_type != ConcreteDataType::int64_datatype()
-            {
-                return None;
-            }
-
+    metric_value_columns(metadata)
+        .into_iter()
+        .filter_map(|column| {
+            let float_column = &metadata.column_metadatas[column.value_index];
+            let int_column = &metadata.column_metadatas[column.int_index];
             let float_index = arrow_schema
                 .index_of(&float_column.column_schema.name)
                 .ok()?;
-            let int_index = arrow_schema.index_of(&int_name).ok()?;
+            let int_index = arrow_schema.index_of(&int_column.column_schema.name).ok()?;
             Some(MetricValueSplitColumn {
                 float_index,
                 int_index,
             })
         })
         .collect()
-}
-
-fn is_metric_engine_data_region(metadata: &RegionMetadata) -> bool {
-    let has_internal_tag = |name, column_id| {
-        metadata.column_by_name(name).is_some_and(|column| {
-            column.semantic_type == SemanticType::Tag
-                && column.column_id == column_id
-                && metadata.primary_key.contains(&column_id)
-        })
-    };
-
-    has_internal_tag(
-        DATA_SCHEMA_TABLE_ID_COLUMN_NAME,
-        ReservedColumnId::table_id(),
-    ) && has_internal_tag(DATA_SCHEMA_TSID_COLUMN_NAME, ReservedColumnId::tsid())
 }
 
 pub(crate) fn split_metric_value_columns(
@@ -247,12 +215,16 @@ fn integer_value(value: f64) -> Option<i64> {
 
 #[cfg(test)]
 mod tests {
+    use api::v1::SemanticType;
     use datatypes::arrow::array::{Float64Array, Int64Array};
+    use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::ColumnSchema;
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
+    use store_api::metric_engine_consts::metric_engine_value_int_column_name;
     use store_api::storage::RegionId;
 
     use super::*;
+    use crate::metric_value::is_metric_engine_data_region;
 
     fn column_metadata(
         column_id: u32,

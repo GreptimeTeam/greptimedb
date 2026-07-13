@@ -26,7 +26,6 @@ common-telemetry.workspace = true
 common-time.workspace = true
 chrono.workspace = true
 datafusion.workspace = true
-datafusion-physical-expr.workspace = true
 datatypes.workspace = true
 futures-util.workspace = true
 humantime-serde.workspace = true

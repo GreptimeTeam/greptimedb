@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashSet;
 use std::fmt;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -26,23 +27,200 @@ use common_recordbatch::filter::batch_filter;
 use common_recordbatch::{
     DfRecordBatch, OrderOption, RecordBatch, RecordBatchStream, SendableRecordBatchStream,
 };
-use datafusion::common::ToDFSchema;
+use datafusion::arrow::datatypes::DataType as ArrowDataType;
+use datafusion::common::tree_node::{Transformed, TreeNode, TreeNodeRecursion, TreeNodeRewriter};
+use datafusion::common::{Column, Result as DataFusionResult, ToDFSchema};
 use datafusion::execution::context::ExecutionProps;
+use datafusion::functions::expr_fn::coalesce;
 use datafusion::logical_expr::Expr;
-use datafusion::logical_expr::utils::conjunction;
-use datafusion::physical_expr::create_physical_expr;
+use datafusion::logical_expr::expr_fn::cast;
+use datafusion::logical_expr::utils::{conjunction, expr_to_columns};
+use datafusion::physical_expr::{PhysicalExpr, create_physical_expr};
 use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType};
-use datafusion_physical_expr::PhysicalExpr;
 use datatypes::arrow::array::{Array, ArrayRef, Float64Array, Float64Builder, Int64Array};
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
-use futures_util::Stream;
+use futures::Stream;
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::RegionMetadataRef;
+use store_api::metric_engine_consts::metric_engine_value_int_column_name;
 use store_api::region_engine::{
     PrepareRequest, QueryScanContext, RegionScanner, RegionScannerRef, ScannerProperties,
 };
-use store_api::storage::{RegionId, SequenceNumber};
+use store_api::storage::{RegionId, ScanRequest, SequenceNumber};
+
+use crate::error::{InvalidRequestSnafu, Result};
+use crate::metric_value::{metric_value_columns, visible_region_metadata};
+
+pub(crate) fn prepare_value_split_scan(
+    region_id: RegionId,
+    request: &mut ScanRequest,
+    physical_metadata: &RegionMetadataRef,
+) -> Result<Option<ValueSplitProjectionMapper>> {
+    let split_columns = metric_value_columns(physical_metadata);
+    if split_columns.is_empty() {
+        return Ok(None);
+    }
+
+    let visible_metadata = visible_region_metadata(physical_metadata)?;
+    let split_value_columns = split_columns
+        .into_iter()
+        .map(|column| {
+            physical_metadata.column_metadatas[column.value_index]
+                .column_schema
+                .name
+                .clone()
+        })
+        .collect::<HashSet<_>>();
+
+    let mut residual_column_names = HashSet::new();
+    let residual_filters = request
+        .filters
+        .iter()
+        .filter(|filter| {
+            let mut columns = HashSet::new();
+            let is_residual = expr_to_columns(filter, &mut columns).is_ok()
+                && columns
+                    .iter()
+                    .any(|column| split_value_columns.contains(&column.name));
+            if is_residual {
+                residual_column_names.extend(columns.into_iter().map(|column| column.name));
+            }
+            is_residual
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+
+    let mut visible_projection = match request.projection_input.as_ref() {
+        Some(projection_input) => projection_input.projection.clone(),
+        None => (0..visible_metadata.column_metadatas.len()).collect(),
+    };
+    let visible_columns = visible_projection.len();
+    let mut projected = visible_projection.iter().copied().collect::<HashSet<_>>();
+    for (index, column) in visible_metadata.column_metadatas.iter().enumerate() {
+        if residual_column_names.contains(&column.column_schema.name) && projected.insert(index) {
+            visible_projection.push(index);
+        }
+    }
+
+    let mut physical_projection = Vec::with_capacity(visible_projection.len());
+    let mut output_columns = Vec::with_capacity(visible_projection.len());
+    for visible_index in visible_projection {
+        let visible_column = visible_metadata
+            .column_metadatas
+            .get(visible_index)
+            .with_context(|| InvalidRequestSnafu {
+                region_id,
+                reason: format!("projection index {visible_index} is out of bound"),
+            })?;
+        let value_name = &visible_column.column_schema.name;
+        let physical_index = physical_metadata
+            .column_index_by_name(value_name)
+            .with_context(|| InvalidRequestSnafu {
+                region_id,
+                reason: format!("column {value_name} is missing from physical metadata"),
+            })?;
+        let input_value_index = physical_projection.len();
+        physical_projection.push(physical_index);
+
+        if split_value_columns.contains(value_name) {
+            let int_name = metric_engine_value_int_column_name(value_name);
+            let int_index = physical_metadata
+                .column_index_by_name(&int_name)
+                .with_context(|| InvalidRequestSnafu {
+                    region_id,
+                    reason: format!("column {int_name} is missing from physical metadata"),
+                })?;
+            let input_int_index = physical_projection.len();
+            physical_projection.push(int_index);
+            output_columns.push(ValueColumnProjection::Split {
+                float_index: input_value_index,
+                int_index: input_int_index,
+                output_schema: visible_column.column_schema.clone(),
+            });
+        } else {
+            output_columns.push(ValueColumnProjection::Direct {
+                input_index: input_value_index,
+                output_schema: visible_column.column_schema.clone(),
+            });
+        }
+    }
+
+    request.projection_input.get_or_insert_default().projection = physical_projection;
+    request.filters = request
+        .filters
+        .drain(..)
+        .map(|filter| rewrite_metric_value_filter(region_id, filter, &split_value_columns))
+        .collect::<Result<Vec<_>>>()?;
+
+    Ok(Some(ValueSplitProjectionMapper::new(
+        visible_metadata,
+        output_columns,
+        visible_columns,
+        residual_filters,
+    )))
+}
+
+fn rewrite_metric_value_filter(
+    region_id: RegionId,
+    filter: Expr,
+    split_value_columns: &HashSet<String>,
+) -> Result<Expr> {
+    let filter_display = filter.to_string();
+    let mut rewriter = MetricValueFilterRewriter {
+        split_value_columns,
+    };
+    filter
+        .rewrite(&mut rewriter)
+        .map(|rewritten| rewritten.data)
+        .map_err(|err| {
+            InvalidRequestSnafu {
+                region_id,
+                reason: format!("failed to rewrite metric value filter {filter_display}: {err}"),
+            }
+            .build()
+        })
+}
+
+struct MetricValueFilterRewriter<'a> {
+    split_value_columns: &'a HashSet<String>,
+}
+
+impl TreeNodeRewriter for MetricValueFilterRewriter<'_> {
+    type Node = Expr;
+
+    fn f_down(&mut self, expr: Expr) -> DataFusionResult<Transformed<Expr>> {
+        let recursion = if matches!(
+            expr,
+            Expr::Exists(_) | Expr::InSubquery(_) | Expr::ScalarSubquery(_)
+        ) {
+            TreeNodeRecursion::Jump
+        } else {
+            TreeNodeRecursion::Continue
+        };
+
+        Ok(Transformed::new(expr, false, recursion))
+    }
+
+    fn f_up(&mut self, expr: Expr) -> DataFusionResult<Transformed<Expr>> {
+        let Expr::Column(column) = expr else {
+            return Ok(Transformed::no(expr));
+        };
+
+        if !self.split_value_columns.contains(&column.name) {
+            return Ok(Transformed::no(Expr::Column(column)));
+        }
+
+        let int_column = Column {
+            relation: column.relation.clone(),
+            name: metric_engine_value_int_column_name(&column.name),
+            spans: column.spans.clone(),
+        };
+        let float_expr = Expr::Column(column);
+        let int_expr = cast(Expr::Column(int_column), ArrowDataType::Float64);
+        Ok(Transformed::yes(coalesce(vec![int_expr, float_expr])))
+    }
+}
 
 #[derive(Clone)]
 pub(crate) enum ValueColumnProjection {
@@ -59,6 +237,7 @@ pub(crate) enum ValueColumnProjection {
 
 #[derive(Clone)]
 pub(crate) struct ValueSplitProjectionMapper {
+    metadata: RegionMetadataRef,
     output_schema: SchemaRef,
     working_schema: SchemaRef,
     columns: Vec<ValueColumnProjection>,
@@ -69,6 +248,7 @@ pub(crate) struct ValueSplitProjectionMapper {
 
 impl ValueSplitProjectionMapper {
     pub(crate) fn new(
+        metadata: RegionMetadataRef,
         columns: Vec<ValueColumnProjection>,
         visible_columns: usize,
         residual_filters: Vec<Expr>,
@@ -90,6 +270,7 @@ impl ValueSplitProjectionMapper {
             .collect::<Vec<_>>();
 
         Self {
+            metadata,
             output_schema: Arc::new(Schema::new(output_columns)),
             working_schema: Arc::new(Schema::new(working_columns)),
             columns,
@@ -196,21 +377,12 @@ fn coalesce_value_columns(float_col: &ArrayRef, int_col: &ArrayRef) -> RecordBat
 
 pub(crate) struct ValueSplitScanner {
     inner: RegionScannerRef,
-    logical_metadata: RegionMetadataRef,
     mapper: ValueSplitProjectionMapper,
 }
 
 impl ValueSplitScanner {
-    pub(crate) fn new(
-        inner: RegionScannerRef,
-        logical_metadata: RegionMetadataRef,
-        mapper: ValueSplitProjectionMapper,
-    ) -> Self {
-        Self {
-            inner,
-            logical_metadata,
-            mapper,
-        }
+    pub(crate) fn new(inner: RegionScannerRef, mapper: ValueSplitProjectionMapper) -> Self {
+        Self { inner, mapper }
     }
 }
 
@@ -243,7 +415,7 @@ impl RegionScanner for ValueSplitScanner {
     }
 
     fn metadata(&self) -> RegionMetadataRef {
-        self.logical_metadata.clone()
+        self.mapper.metadata.clone()
     }
 
     fn prepare(&mut self, request: PrepareRequest) -> Result<(), BoxedError> {

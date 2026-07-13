@@ -25,7 +25,6 @@ use snafu::{OptionExt, ResultExt, ensure};
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::RegionMetadataRef;
 use store_api::metric_engine_consts::is_metric_engine_value_int_column;
-use store_api::region_engine::RegionEngine;
 use store_api::region_request::{AffectedRows, RegionBulkInsertsRequest, RegionRequest};
 use store_api::storage::RegionId;
 use store_api::storage::consts::PRIMARY_KEY_COLUMN_NAME;
@@ -163,7 +162,7 @@ impl MetricEngineInner {
     ) -> Result<RecordBatch> {
         let metadata = self
             .mito
-            .get_metadata(data_region_id)
+            .get_physical_metadata(data_region_id)
             .await
             .context(error::MitoReadOperationSnafu)?;
         let batch_schema = batch.schema();
@@ -222,7 +221,7 @@ impl MetricEngineInner {
     async fn physical_schema_version(&self, region_id: RegionId) -> Result<u64> {
         Ok(self
             .mito
-            .get_metadata(region_id)
+            .get_physical_metadata(region_id)
             .await
             .context(error::MitoReadOperationSnafu)?
             .schema_version)

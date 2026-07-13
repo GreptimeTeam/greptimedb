@@ -1251,6 +1251,7 @@ mod tests {
             .unwrap();
 
         let physical_region_id = env.default_physical_region_id();
+        let data_region_id = to_data_region_id(physical_region_id);
         let visible_physical_stream = env
             .metric()
             .scan_to_stream(physical_region_id, ScanRequest::default())
@@ -1258,12 +1259,44 @@ mod tests {
             .unwrap();
         let int_column_name =
             store_api::metric_engine_consts::metric_engine_value_int_column_name(greptime_value());
+        let visible_mito_metadata = env.mito().get_metadata(data_region_id).await.unwrap();
+        let physical_mito_metadata = env
+            .mito()
+            .get_physical_metadata(data_region_id)
+            .await
+            .unwrap();
+        assert!(
+            visible_mito_metadata
+                .column_by_name(&int_column_name)
+                .is_none(),
+            "mito query metadata should hide split companion columns"
+        );
+        assert!(
+            physical_mito_metadata
+                .column_by_name(&int_column_name)
+                .is_some(),
+            "mito physical metadata should retain split companion columns"
+        );
         assert!(
             visible_physical_stream
                 .schema()
                 .column_schema_by_name(&int_column_name)
                 .is_none(),
             "metric physical reads should hide split companion column"
+        );
+
+        let logical_scanner = env
+            .metric()
+            .handle_query(logical_region_id, ScanRequest::default())
+            .await
+            .unwrap();
+        assert_eq!(logical_scanner.metadata().region_id, logical_region_id);
+        assert!(
+            logical_scanner
+                .metadata()
+                .column_by_name(&int_column_name)
+                .is_none(),
+            "logical scanner metadata should not expose split companion columns"
         );
 
         let logical_batches = RecordBatches::try_collect(
@@ -1352,7 +1385,6 @@ mod tests {
             ("integer".to_string(), 2, None, Some(3)),
             ("integer".to_string(), 3, None, Some(4)),
         ];
-        let data_region_id = to_data_region_id(physical_region_id);
         let raw_physical_batches = RecordBatches::try_collect(
             env.mito()
                 .scan_to_stream(data_region_id, ScanRequest::default())

@@ -101,7 +101,7 @@ impl DataRegion {
         // retrieve underlying version
         let region_metadata = self
             .mito
-            .get_metadata(region_id)
+            .get_physical_metadata(region_id)
             .await
             .context(MitoReadOperationSnafu)?;
 
@@ -214,7 +214,7 @@ impl DataRegion {
         let data_region_id = utils::to_data_region_id(physical_region_id);
         let metadata = self
             .mito
-            .get_metadata(data_region_id)
+            .get_physical_metadata(data_region_id)
             .await
             .context(MitoReadOperationSnafu)?;
         Ok(metadata.column_metadatas.clone())
@@ -268,7 +268,7 @@ mod test {
 
         let current_version = env
             .mito()
-            .get_metadata(utils::to_data_region_id(env.default_physical_region_id()))
+            .get_physical_metadata(utils::to_data_region_id(env.default_physical_region_id()))
             .await
             .unwrap()
             .schema_version;
@@ -306,7 +306,7 @@ mod test {
 
         let new_metadata = env
             .mito()
-            .get_metadata(utils::to_data_region_id(env.default_physical_region_id()))
+            .get_physical_metadata(utils::to_data_region_id(env.default_physical_region_id()))
             .await
             .unwrap();
         let column_names = new_metadata
