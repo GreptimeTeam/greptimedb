@@ -50,6 +50,7 @@ use datafusion_expr::utils::conjunction;
 use datafusion_expr::{
     ExprSchemable, Literal, Projection, SortExpr, TableScan, TableSource, col, lit,
 };
+use datafusion_functions::core::coalesce;
 use datatypes::arrow::datatypes::{DataType as ArrowDataType, TimeUnit as ArrowTimeUnit};
 use datatypes::data_type::ConcreteDataType;
 use itertools::Itertools;
@@ -4423,6 +4424,59 @@ impl PromPlanner {
         // Take the name of first field column. The length is checked above.
         let left_field_col = left_context.field_columns.first().unwrap();
         let right_field_col = right_context.field_columns.first().unwrap();
+        let left_field = left
+            .schema()
+            .iter()
+            .find(|(_, field)| field.name() == left_field_col)
+            .map(|(qualifier, field)| (qualifier.cloned(), field.data_type().clone()))
+            .with_context(|| ColumnNotFoundSnafu {
+                col: left_field_col.clone(),
+            })?;
+        let right_field = right
+            .schema()
+            .iter()
+            .find(|(_, field)| field.name() == right_field_col)
+            .map(|(qualifier, field)| (qualifier.cloned(), field.data_type().clone()))
+            .with_context(|| ColumnNotFoundSnafu {
+                col: right_field_col.clone(),
+            })?;
+        let target_field_type = if left_field.1 == right_field.1 {
+            left_field.1.clone()
+        } else if matches!(
+            left_field.1,
+            ArrowDataType::Int8
+                | ArrowDataType::Int16
+                | ArrowDataType::Int32
+                | ArrowDataType::Int64
+                | ArrowDataType::UInt8
+                | ArrowDataType::UInt16
+                | ArrowDataType::UInt32
+                | ArrowDataType::UInt64
+                | ArrowDataType::Float32
+                | ArrowDataType::Float64
+        ) && matches!(
+            right_field.1,
+            ArrowDataType::Int8
+                | ArrowDataType::Int16
+                | ArrowDataType::Int32
+                | ArrowDataType::Int64
+                | ArrowDataType::UInt8
+                | ArrowDataType::UInt16
+                | ArrowDataType::UInt32
+                | ArrowDataType::UInt64
+                | ArrowDataType::Float32
+                | ArrowDataType::Float64
+        ) {
+            ArrowDataType::Float64
+        } else {
+            return UnexpectedPlanExprSnafu {
+                desc: format!(
+                    "OR value fields have incompatible types: {:?} and {:?}",
+                    left_field.1, right_field.1
+                ),
+            }
+            .fail();
+        };
         let left_has_tsid = left
             .schema()
             .fields()
@@ -4459,10 +4513,26 @@ impl PromPlanner {
         all_columns.sort_unstable();
         // use left time index column name as the result time index column name
         all_columns.insert(0, left_time_index_column.clone());
+        let mut occupied_column_names = left
+            .schema()
+            .fields()
+            .iter()
+            .chain(right.schema().fields().iter())
+            .map(|field| field.name().clone())
+            .collect::<HashSet<_>>();
 
         // step 1: align schema using project, fill non-exist columns with null
         let left_proj_exprs = all_columns.iter().map(|col| {
-            if tags_not_in_left.contains(col) {
+            if col == left_field_col && left_field.1 != target_field_type {
+                DfExpr::Cast(Cast {
+                    expr: Box::new(DfExpr::Column(Column::new(
+                        left_field.0.clone(),
+                        left_field_col,
+                    ))),
+                    data_type: target_field_type.clone(),
+                })
+                .alias(left_field_col.clone())
+            } else if tags_not_in_left.contains(col) {
                 DfExpr::Literal(ScalarValue::Utf8(None), None).alias(col.clone())
             } else {
                 DfExpr::Column(Column::new(None::<String>, col))
@@ -4475,25 +4545,22 @@ impl PromPlanner {
         .alias(left_time_index_column.clone());
         // The field column in right side may not have qualifier (it may be removed by join operation),
         // so we need to find it from the schema.
-        let right_qualifier_for_field = right
-            .schema()
-            .iter()
-            .find(|(_, f)| f.name() == right_field_col)
-            .map(|(q, _)| q)
-            .with_context(|| ColumnNotFoundSnafu {
-                col: right_field_col.clone(),
-            })?
-            .cloned();
-
         // `skip（1)` to skip the time index column
         let right_proj_exprs_without_time_index = all_columns.iter().skip(1).map(|col| {
             // expr
-            if col == left_field_col && left_field_col != right_field_col {
-                // qualify field in right side if necessary to handle different field name
-                DfExpr::Column(Column::new(
-                    right_qualifier_for_field.clone(),
-                    right_field_col,
-                ))
+            if col == left_field_col {
+                let expr = DfExpr::Column(Column::new(right_field.0.clone(), right_field_col));
+                if right_field.1 != target_field_type {
+                    DfExpr::Cast(Cast {
+                        expr: Box::new(expr),
+                        data_type: target_field_type.clone(),
+                    })
+                    .alias(left_field_col.clone())
+                } else if left_field_col != right_field_col {
+                    expr.alias(left_field_col.clone())
+                } else {
+                    expr
+                }
             } else if tags_not_in_right.contains(col) {
                 DfExpr::Literal(ScalarValue::Utf8(None), None).alias(col.clone())
             } else {
@@ -4537,24 +4604,168 @@ impl PromPlanner {
         };
         // sort to ensure the generated plan is not volatile
         match_columns.sort_unstable();
-        // step 3: build `UnionDistinctOn` plan
-        let schema = left_projected.schema().clone();
-        let union_distinct_on = UnionDistinctOn::new(
-            left_projected,
-            right_projected,
-            match_columns,
-            left_time_index_column.clone(),
-            schema,
+        match_columns.dedup();
+        occupied_column_names.extend(
+            left_projected
+                .schema()
+                .fields()
+                .iter()
+                .chain(right_projected.schema().fields().iter())
+                .map(|field| field.name().clone()),
         );
-        let result = LogicalPlan::Extension(Extension {
+
+        let visible_schema = left_projected.schema().clone();
+        let visible_left_exprs = left_projected
+            .schema()
+            .iter()
+            .map(|(qualifier, field)| {
+                DfExpr::Column(Column::new(qualifier.cloned(), field.name().clone()))
+            })
+            .collect::<Vec<_>>();
+        let visible_right_exprs = right_projected
+            .schema()
+            .iter()
+            .map(|(qualifier, field)| {
+                DfExpr::Column(Column::new(qualifier.cloned(), field.name().clone()))
+            })
+            .collect::<Vec<_>>();
+        let mut left_match_exprs = Vec::with_capacity(match_columns.len());
+        let mut right_match_exprs = Vec::with_capacity(match_columns.len());
+        let mut next_internal_column = 0;
+
+        for label in &match_columns {
+            let left_field = if left_tag_cols_set.contains(label) {
+                Some(
+                    left_projected
+                        .schema()
+                        .iter()
+                        .find(|(_, field)| field.name() == label)
+                        .map(|(qualifier, field)| (qualifier.cloned(), field.data_type().clone()))
+                        .with_context(|| ColumnNotFoundSnafu { col: label.clone() })?,
+                )
+            } else {
+                None
+            };
+            let right_field = if right_tag_cols_set.contains(label) {
+                Some(
+                    right_projected
+                        .schema()
+                        .iter()
+                        .find(|(_, field)| field.name() == label)
+                        .map(|(qualifier, field)| (qualifier.cloned(), field.data_type().clone()))
+                        .with_context(|| ColumnNotFoundSnafu { col: label.clone() })?,
+                )
+            } else {
+                None
+            };
+            let data_type = match (left_field.as_ref(), right_field.as_ref()) {
+                (Some((_, left_type)), Some((_, right_type))) if left_type == right_type => {
+                    left_type.clone()
+                }
+                (Some((_, left_type)), Some((_, right_type))) => {
+                    return UnexpectedPlanExprSnafu {
+                        desc: format!(
+                            "OR match label {label} has incompatible types: {left_type:?} and {right_type:?}"
+                        ),
+                    }
+                    .fail();
+                }
+                (Some((_, data_type)), None) | (None, Some((_, data_type))) => data_type.clone(),
+                (None, None) => ArrowDataType::Utf8,
+            };
+            let empty = match data_type {
+                ArrowDataType::Utf8 => ScalarValue::Utf8(Some(String::new())),
+                ArrowDataType::LargeUtf8 => ScalarValue::LargeUtf8(Some(String::new())),
+                _ => {
+                    return UnexpectedPlanExprSnafu {
+                        desc: format!("OR match label {label} must be a string"),
+                    }
+                    .fail();
+                }
+            };
+            let internal_name = loop {
+                let name = format!("__promql_or_match_{next_internal_column}");
+                next_internal_column += 1;
+                if occupied_column_names.insert(name.clone()) {
+                    break name;
+                }
+            };
+            let normalize = |field: Option<(Option<TableReference>, ArrowDataType)>| {
+                let expr = if let Some((qualifier, _)) = field {
+                    DfExpr::ScalarFunction(ScalarFunction {
+                        func: coalesce(),
+                        args: vec![
+                            DfExpr::Column(Column::new(qualifier, label.clone())),
+                            DfExpr::Literal(empty.clone(), None),
+                        ],
+                    })
+                } else {
+                    DfExpr::Literal(empty.clone(), None)
+                };
+                expr.alias(internal_name.clone())
+            };
+            left_match_exprs.push(normalize(left_field));
+            right_match_exprs.push(normalize(right_field));
+        }
+
+        let left_augmented = LogicalPlanBuilder::from(left_projected)
+            .project(visible_left_exprs.into_iter().chain(left_match_exprs))
+            .context(DataFusionPlanningSnafu)?
+            .build()
+            .context(DataFusionPlanningSnafu)?;
+        let right_augmented = LogicalPlanBuilder::from(right_projected)
+            .project(visible_right_exprs.into_iter().chain(right_match_exprs))
+            .context(DataFusionPlanningSnafu)?
+            .build()
+            .context(DataFusionPlanningSnafu)?;
+
+        // step 3: build `UnionDistinctOn` with normalized internal match keys.
+        let visible_field_count = visible_schema.fields().len();
+        let compare_key_indices =
+            (visible_field_count..visible_field_count + match_columns.len()).collect::<Vec<_>>();
+        let (time_qualifier, _) = visible_schema
+            .iter()
+            .find(|(_, field)| field.name() == &left_time_index_column)
+            .with_context(|| TimeIndexNotFoundSnafu {
+                table: left_qualifier_string.clone(),
+            })?;
+        let ts_col_idx = left_augmented
+            .schema()
+            .iter()
+            .position(|(qualifier, field)| {
+                qualifier == time_qualifier && field.name() == &left_time_index_column
+            })
+            .with_context(|| TimeIndexNotFoundSnafu {
+                table: left_qualifier_string.clone(),
+            })?;
+        let union_distinct_on = UnionDistinctOn::try_new(
+            left_augmented,
+            right_augmented,
+            compare_key_indices,
+            ts_col_idx,
+        )
+        .context(DataFusionPlanningSnafu)?;
+        let augmented_result = LogicalPlan::Extension(Extension {
             node: Arc::new(union_distinct_on),
         });
+        let result = LogicalPlanBuilder::from(augmented_result)
+            .project(visible_schema.iter().map(|(qualifier, field)| {
+                DfExpr::Column(Column::new(qualifier.cloned(), field.name().clone()))
+            }))
+            .context(DataFusionPlanningSnafu)?
+            .build()
+            .context(DataFusionPlanningSnafu)?;
 
         // step 4: update context
-        self.ctx.time_index_column = Some(left_time_index_column);
-        self.ctx.tag_columns = all_tags.into_iter().collect();
-        self.ctx.field_columns = vec![left_field_col.clone()];
-        self.ctx.use_tsid = left_has_tsid && right_has_tsid;
+        let output_field_col = left_field_col.clone();
+        let mut output_context = left_context;
+        let mut visible_tags = all_tags.into_iter().collect::<Vec<_>>();
+        visible_tags.sort_unstable();
+        output_context.time_index_column = Some(left_time_index_column);
+        output_context.tag_columns = visible_tags;
+        output_context.field_columns = vec![output_field_col];
+        output_context.use_tsid = left_has_tsid && right_has_tsid;
+        self.ctx = output_context;
 
         Ok(result)
     }
@@ -4761,15 +4972,23 @@ mod test {
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use common_query::prelude::greptime_timestamp;
     use common_query::test_util::DummyDecoder;
-    use datafusion::arrow::datatypes::Schema as ArrowSchema;
+    use datafusion::arrow::array::{
+        Float64Array, Int64Array, StringArray, TimestampMillisecondArray,
+    };
+    use datafusion::arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
+    use datafusion::arrow::record_batch::RecordBatch;
+    use datafusion::catalog::{CatalogProvider, MemoryCatalogProvider, MemorySchemaProvider};
     use datafusion::datasource::memory::MemorySourceConfig;
     use datafusion::datasource::source::DataSourceExec;
+    use datafusion::datasource::{MemTable, provider_as_source};
+    use datafusion::execution::context::SessionContext;
     use datafusion::logical_expr::Extension;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, Schema};
     use promql_parser::label::Labels;
     use promql_parser::parser;
     use session::context::QueryContext;
+    use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
     use table::metadata::{TableInfoBuilder, TableMetaBuilder};
     use table::test_util::EmptyTable;
 
@@ -4777,6 +4996,7 @@ mod test {
     use crate::QueryEngineContext;
     use crate::options::QueryOptions;
     use crate::parser::QueryLanguageParser;
+    use crate::query_engine::DefaultSerializer;
 
     fn find_instant_manipulate(plan: &LogicalPlan) -> Option<&InstantManipulate> {
         if let LogicalPlan::Extension(Extension { node }) = plan
@@ -4870,6 +5090,313 @@ mod test {
             interval: Duration::from_secs(5),
             lookback_delta: Duration::from_secs(1),
         }
+    }
+
+    fn direct_or_input(
+        name: &str,
+        k: Option<Option<&str>>,
+        timestamp: i64,
+        value: f64,
+    ) -> LogicalPlan {
+        let mut fields = vec![
+            Field::new(
+                "ts",
+                DataType::Timestamp(ArrowTimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new("job", DataType::Utf8, false),
+        ];
+        if k.is_some() {
+            fields.push(Field::new("k", DataType::Utf8, true));
+        }
+        fields.push(Field::new("v", DataType::Float64, true));
+        let schema = Arc::new(ArrowSchema::new(fields));
+        let mut columns: Vec<Arc<dyn datafusion::arrow::array::Array>> = vec![
+            Arc::new(TimestampMillisecondArray::from(vec![timestamp])),
+            Arc::new(StringArray::from(vec!["job"])),
+        ];
+        if let Some(k) = k {
+            columns.push(Arc::new(StringArray::from(vec![k])));
+        }
+        columns.push(Arc::new(Float64Array::from(vec![value])));
+        let batch = RecordBatch::try_new(schema.clone(), columns).unwrap();
+        let table = MemTable::try_new(schema, vec![vec![batch]]).unwrap();
+        LogicalPlanBuilder::scan(name, provider_as_source(Arc::new(table)), None)
+            .unwrap()
+            .build()
+            .unwrap()
+    }
+
+    fn direct_or_empty_input(name: &str, has_k: bool) -> LogicalPlan {
+        let mut fields = vec![
+            Field::new(
+                "ts",
+                DataType::Timestamp(ArrowTimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new("job", DataType::Utf8, false),
+        ];
+        if has_k {
+            fields.push(Field::new("k", DataType::Utf8, true));
+        }
+        fields.push(Field::new("v", DataType::Float64, true));
+        let table = MemTable::try_new(Arc::new(ArrowSchema::new(fields)), vec![vec![]]).unwrap();
+        LogicalPlanBuilder::scan(name, provider_as_source(Arc::new(table)), None)
+            .unwrap()
+            .build()
+            .unwrap()
+    }
+
+    fn direct_or_empty_typed_input(name: &str, value_type: ArrowDataType) -> LogicalPlan {
+        let schema = Arc::new(ArrowSchema::new(vec![
+            Field::new(
+                "ts",
+                DataType::Timestamp(ArrowTimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new("job", DataType::Utf8, false),
+            Field::new("v", value_type, true),
+        ]));
+        let table = MemTable::try_new(schema, vec![vec![]]).unwrap();
+        LogicalPlanBuilder::scan(name, provider_as_source(Arc::new(table)), None)
+            .unwrap()
+            .build()
+            .unwrap()
+    }
+
+    fn direct_or_input_with_tags(
+        name: &str,
+        tags: &[(&str, Option<&str>)],
+        timestamp: i64,
+        value: f64,
+    ) -> LogicalPlan {
+        let mut fields = vec![
+            Field::new(
+                "ts",
+                DataType::Timestamp(ArrowTimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new("job", DataType::Utf8, false),
+        ];
+        fields.extend(
+            tags.iter()
+                .map(|(name, _)| Field::new(*name, DataType::Utf8, true)),
+        );
+        fields.push(Field::new("v", DataType::Float64, true));
+        let schema = Arc::new(ArrowSchema::new(fields));
+        let mut columns: Vec<Arc<dyn datafusion::arrow::array::Array>> = vec![
+            Arc::new(TimestampMillisecondArray::from(vec![timestamp])),
+            Arc::new(StringArray::from(vec!["job"])),
+        ];
+        columns.extend(tags.iter().map(|(_, value)| {
+            Arc::new(StringArray::from(vec![*value])) as Arc<dyn datafusion::arrow::array::Array>
+        }));
+        columns.push(Arc::new(Float64Array::from(vec![value])));
+        let batch = RecordBatch::try_new(schema.clone(), columns).unwrap();
+        let table = MemTable::try_new(schema, vec![vec![batch]]).unwrap();
+        LogicalPlanBuilder::scan(name, provider_as_source(Arc::new(table)), None)
+            .unwrap()
+            .build()
+            .unwrap()
+    }
+
+    fn direct_or_memtable(k: Option<&str>, value: f64) -> Arc<MemTable> {
+        let mut fields = vec![
+            Field::new(
+                "ts",
+                DataType::Timestamp(ArrowTimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new("job", DataType::Utf8, false),
+        ];
+        if k.is_some() {
+            fields.push(Field::new("k", DataType::Utf8, true));
+        }
+        fields.push(Field::new("v", DataType::Float64, true));
+        let schema = Arc::new(ArrowSchema::new(fields));
+        let mut columns: Vec<Arc<dyn datafusion::arrow::array::Array>> = vec![
+            Arc::new(TimestampMillisecondArray::from(vec![1])),
+            Arc::new(StringArray::from(vec!["job"])),
+        ];
+        if let Some(k) = k {
+            columns.push(Arc::new(StringArray::from(vec![k])));
+        }
+        columns.push(Arc::new(Float64Array::from(vec![value])));
+        Arc::new(
+            MemTable::try_new(
+                schema.clone(),
+                vec![vec![RecordBatch::try_new(schema, columns).unwrap()]],
+            )
+            .unwrap(),
+        )
+    }
+
+    fn direct_or_typed_memtable(
+        k: Option<&str>,
+        value_type: ArrowDataType,
+        value: Option<f64>,
+    ) -> Arc<MemTable> {
+        let mut fields = vec![
+            Field::new(
+                "ts",
+                DataType::Timestamp(ArrowTimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new("job", DataType::Utf8, false),
+        ];
+        if k.is_some() {
+            fields.push(Field::new("k", DataType::Utf8, true));
+        }
+        fields.push(Field::new("v", value_type.clone(), true));
+        let schema = Arc::new(ArrowSchema::new(fields));
+        let partitions = value.map_or_else(
+            || vec![vec![]],
+            |value| {
+                let mut columns: Vec<Arc<dyn datafusion::arrow::array::Array>> = vec![
+                    Arc::new(TimestampMillisecondArray::from(vec![1])),
+                    Arc::new(StringArray::from(vec!["job"])),
+                ];
+                if let Some(k) = k {
+                    columns.push(Arc::new(StringArray::from(vec![k])));
+                }
+                columns.push(match value_type {
+                    ArrowDataType::Int64 => Arc::new(Int64Array::from(vec![value as i64]))
+                        as Arc<dyn datafusion::arrow::array::Array>,
+                    ArrowDataType::Float64 => Arc::new(Float64Array::from(vec![value]))
+                        as Arc<dyn datafusion::arrow::array::Array>,
+                    _ => unreachable!(),
+                });
+                vec![vec![RecordBatch::try_new(schema.clone(), columns).unwrap()]]
+            },
+        );
+        Arc::new(MemTable::try_new(schema, partitions).unwrap())
+    }
+
+    fn direct_or_context_with_tags(name: &str, tags: &[&str]) -> PromPlannerContext {
+        PromPlannerContext {
+            table_name: Some(name.to_string()),
+            time_index_column: Some("ts".to_string()),
+            field_columns: vec!["v".to_string()],
+            tag_columns: ["job".to_string()]
+                .into_iter()
+                .chain(tags.iter().map(|tag| (*tag).to_string()))
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    fn direct_or_context(name: &str, has_k: bool) -> PromPlannerContext {
+        PromPlannerContext {
+            table_name: Some(name.to_string()),
+            time_index_column: Some("ts".to_string()),
+            field_columns: vec!["v".to_string()],
+            tag_columns: ["job".to_string()]
+                .into_iter()
+                .chain(has_k.then_some("k".to_string()))
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    fn or_modifier(expr: &str) -> Option<BinModifier> {
+        let PromExpr::Binary(expr) = parser::parse(expr).unwrap() else {
+            unreachable!()
+        };
+        expr.modifier
+    }
+
+    async fn collect_direct_or(
+        left_k: Option<Option<&str>>,
+        right_k: Option<Option<&str>>,
+        left_ts: i64,
+        right_ts: i64,
+        modifier: &Option<BinModifier>,
+    ) -> (LogicalPlan, LogicalPlan, Vec<RecordBatch>) {
+        let table_provider = build_test_table_provider_with_fields(
+            &[(DEFAULT_SCHEMA_NAME.to_string(), "dummy".to_string())],
+            &[],
+        )
+        .await;
+        let mut planner = PromPlanner {
+            table_provider,
+            ctx: PromPlannerContext::default(),
+        };
+        let left = direct_or_input("lhs", left_k, left_ts, 1.0);
+        let right = direct_or_input("rhs", right_k, right_ts, 2.0);
+        let raw = planner
+            .or_operator(
+                left,
+                right,
+                direct_or_context("lhs", left_k.is_some())
+                    .tag_columns
+                    .iter()
+                    .cloned()
+                    .collect(),
+                direct_or_context("rhs", right_k.is_some())
+                    .tag_columns
+                    .iter()
+                    .cloned()
+                    .collect(),
+                direct_or_context("lhs", left_k.is_some()),
+                direct_or_context("rhs", right_k.is_some()),
+                modifier,
+            )
+            .unwrap();
+        let state = build_query_engine_state();
+        let context = QueryEngineContext::new(state.session_state(), QueryContext::arc());
+        let optimized = state
+            .optimize_by_extension_rules(raw.clone(), &context)
+            .unwrap();
+        let physical = state
+            .session_state()
+            .create_physical_plan(&optimized)
+            .await
+            .unwrap();
+        let batches =
+            datafusion::physical_plan::collect(physical, state.session_state().task_ctx())
+                .await
+                .unwrap();
+        (raw, optimized, batches)
+    }
+
+    async fn collect_direct_or_plans(
+        left: LogicalPlan,
+        right: LogicalPlan,
+        left_context: PromPlannerContext,
+        right_context: PromPlannerContext,
+        modifier: &Option<BinModifier>,
+    ) -> Vec<RecordBatch> {
+        let table_provider = build_test_table_provider_with_fields(
+            &[(DEFAULT_SCHEMA_NAME.to_string(), "dummy".to_string())],
+            &[],
+        )
+        .await;
+        let mut planner = PromPlanner {
+            table_provider,
+            ctx: PromPlannerContext::default(),
+        };
+        let raw = planner
+            .or_operator(
+                left,
+                right,
+                left_context.tag_columns.iter().cloned().collect(),
+                right_context.tag_columns.iter().cloned().collect(),
+                left_context,
+                right_context,
+                modifier,
+            )
+            .unwrap();
+        let state = build_query_engine_state();
+        let context = QueryEngineContext::new(state.session_state(), QueryContext::arc());
+        let optimized = state.optimize_by_extension_rules(raw, &context).unwrap();
+        let physical = state
+            .session_state()
+            .create_physical_plan(&optimized)
+            .await
+            .unwrap();
+        datafusion::physical_plan::collect(physical, state.session_state().task_ctx())
+            .await
+            .unwrap()
     }
 
     async fn build_test_table_provider(
@@ -8214,24 +8741,14 @@ Projection: count(prometheus_tsdb_head_series.greptime_value) AS my_series, prom
             PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
                 .await
                 .unwrap();
-        let expected = r#"UnionDistinctOn: on col=[["job"]], ts_col=[greptime_timestamp] [greptime_timestamp:Timestamp(ms), job:Utf8, sum(metric_exists.greptime_value):Float64;N]
-  SubqueryAlias: metric_exists [greptime_timestamp:Timestamp(ms), job:Utf8, sum(metric_exists.greptime_value):Float64;N]
-    Projection: metric_exists.greptime_timestamp, metric_exists.job, sum(metric_exists.greptime_value) [greptime_timestamp:Timestamp(ms), job:Utf8, sum(metric_exists.greptime_value):Float64;N]
-      Sort: metric_exists.job ASC NULLS LAST, metric_exists.greptime_timestamp ASC NULLS LAST [job:Utf8, greptime_timestamp:Timestamp(ms), sum(metric_exists.greptime_value):Float64;N]
-        Aggregate: groupBy=[[metric_exists.job, metric_exists.greptime_timestamp]], aggr=[[sum(metric_exists.greptime_value)]] [job:Utf8, greptime_timestamp:Timestamp(ms), sum(metric_exists.greptime_value):Float64;N]
-          PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[greptime_timestamp] [job:Utf8, greptime_timestamp:Timestamp(ms), greptime_value:Float64;N]
-            PromSeriesDivide: tags=["job"] [job:Utf8, greptime_timestamp:Timestamp(ms), greptime_value:Float64;N]
-              Sort: metric_exists.job ASC NULLS FIRST, metric_exists.greptime_timestamp ASC NULLS FIRST [job:Utf8, greptime_timestamp:Timestamp(ms), greptime_value:Float64;N]
-                Filter: metric_exists.greptime_timestamp >= TimestampMillisecond(-999, None) AND metric_exists.greptime_timestamp <= TimestampMillisecond(100000000, None) [job:Utf8, greptime_timestamp:Timestamp(ms), greptime_value:Float64;N]
-                  TableScan: metric_exists [job:Utf8, greptime_timestamp:Timestamp(ms), greptime_value:Float64;N]
-  SubqueryAlias:  [greptime_timestamp:Timestamp(ms), job:Utf8;N, sum(.value):Float64;N]
-    Projection: .time AS greptime_timestamp, Utf8(NULL) AS job, sum(.value) [greptime_timestamp:Timestamp(ms), job:Utf8;N, sum(.value):Float64;N]
-      Sort: .time ASC NULLS LAST [time:Timestamp(ms), sum(.value):Float64;N]
-        Aggregate: groupBy=[[.time]], aggr=[[sum(.value)]] [time:Timestamp(ms), sum(.value):Float64;N]
-          EmptyMetric: range=[0..-1], interval=[5000] [time:Timestamp(ms), value:Float64;N]
-            TableScan: dummy [time:Timestamp(ms), value:Float64;N]"#;
-
-        assert_eq!(plan.display_indent_schema().to_string(), expected);
+        let plan_str = plan.display_indent_schema().to_string();
+        assert!(plan_str.contains("__promql_or_match_0@"), "{plan_str}");
+        assert!(
+            plan.schema()
+                .fields()
+                .iter()
+                .all(|field| !field.name().starts_with("__promql_or_match_"))
+        );
     }
 
     #[tokio::test]
@@ -8282,5 +8799,697 @@ Projection: count(prometheus_tsdb_head_series.greptime_value) AS my_series, prom
             }
             _ => panic!("Expected EmptyRelation, but got: {:?}", plan),
         }
+    }
+
+    #[tokio::test]
+    async fn test_or_on_absent_label_with_unregistered_metric_executes() {
+        let eval_stmt = build_eval_stmt(r#"missing_metric or on(absent_label) normal_metric"#);
+        let table_provider = build_test_table_provider_with_fields(
+            &[(DEFAULT_SCHEMA_NAME.to_string(), "normal_metric".to_string())],
+            &["job"],
+        )
+        .await;
+        let state = build_query_engine_state();
+        let raw_plan = PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &state)
+            .await
+            .unwrap();
+        let visible_schema = raw_plan.schema().clone();
+        assert!(
+            visible_schema
+                .fields()
+                .iter()
+                .all(|field| !field.name().starts_with("__promql_or_match_"))
+        );
+
+        let context = QueryEngineContext::new(state.session_state(), QueryContext::arc());
+        let optimized_plan = state
+            .optimize_by_extension_rules(raw_plan, &context)
+            .unwrap();
+        assert_eq!(optimized_plan.schema(), &visible_schema);
+        let physical_plan = state
+            .session_state()
+            .create_physical_plan(&optimized_plan)
+            .await
+            .unwrap();
+        assert!(
+            physical_plan
+                .schema()
+                .fields()
+                .iter()
+                .all(|field| !field.name().starts_with("__promql_or_match_"))
+        );
+        datafusion::physical_plan::collect(physical_plan, state.session_state().task_ctx())
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_direct_or_normalizes_missing_match_labels() {
+        let modifier = or_modifier("lhs or on(k) rhs");
+        for (name, left_k, right_k, expected_rows) in [
+            ("absent/absent", None, None, vec![(1.0, None)]),
+            ("absent/empty", None, Some(Some("")), vec![(1.0, None)]),
+            ("empty/absent", Some(Some("")), None, vec![(1.0, Some(""))]),
+            (
+                "absent/nonempty",
+                None,
+                Some(Some("r")),
+                vec![(1.0, None), (2.0, Some("r"))],
+            ),
+            (
+                "nonempty/absent",
+                Some(Some("l")),
+                None,
+                vec![(1.0, Some("l")), (2.0, None)],
+            ),
+            (
+                "empty/empty",
+                Some(Some("")),
+                Some(Some("")),
+                vec![(1.0, Some(""))],
+            ),
+            (
+                "equal",
+                Some(Some("x")),
+                Some(Some("x")),
+                vec![(1.0, Some("x"))],
+            ),
+            (
+                "different",
+                Some(Some("l")),
+                Some(Some("r")),
+                vec![(1.0, Some("l")), (2.0, Some("r"))],
+            ),
+            ("null/empty", Some(None), Some(Some("")), vec![(1.0, None)]),
+            (
+                "null/nonempty",
+                Some(None),
+                Some(Some("r")),
+                vec![(1.0, None), (2.0, Some("r"))],
+            ),
+        ] {
+            let (raw, optimized, batches) =
+                collect_direct_or(left_k, right_k, 1, 1, &modifier).await;
+            assert_eq!(raw.schema(), optimized.schema(), "{name}");
+            for schema in [raw.schema(), optimized.schema()] {
+                assert!(
+                    schema
+                        .fields()
+                        .iter()
+                        .all(|field| !field.name().starts_with("__promql_or_match_")),
+                    "{name}: {schema:?}"
+                );
+            }
+            let mut rows = batches
+                .iter()
+                .flat_map(|batch| {
+                    let values = batch
+                        .column_by_name("v")
+                        .unwrap()
+                        .as_any()
+                        .downcast_ref::<Float64Array>()
+                        .unwrap();
+                    let labels = batch
+                        .column_by_name("k")
+                        .map(|array| array.as_any().downcast_ref::<StringArray>().unwrap());
+                    (0..batch.num_rows()).map(move |index| {
+                        (
+                            values.value(index),
+                            labels
+                                .and_then(|labels| labels.iter().nth(index).flatten())
+                                .map(str::to_string),
+                        )
+                    })
+                })
+                .collect::<Vec<_>>();
+            rows.sort_by(|left, right| left.0.total_cmp(&right.0));
+            assert_eq!(
+                rows,
+                expected_rows
+                    .into_iter()
+                    .map(|(value, label)| (value, label.map(str::to_string)))
+                    .collect::<Vec<_>>(),
+                "{name}"
+            );
+            assert!(batches.iter().all(|batch| {
+                batch
+                    .schema()
+                    .fields()
+                    .iter()
+                    .all(|field| !field.name().starts_with("__promql_or_match_"))
+            }));
+        }
+
+        let (_, _, batches) = collect_direct_or(None, None, 1, 2, &modifier).await;
+        assert_eq!(
+            batches.iter().map(RecordBatch::num_rows).sum::<usize>(),
+            2,
+            "different timestamps must not match"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_direct_or_match_modifiers_normalize_labels() {
+        for (name, modifier, left_k, right_k, expected_rows) in [
+            (
+                "on empty",
+                or_modifier("lhs or on() rhs"),
+                Some(Some("left")),
+                Some(Some("right")),
+                1,
+            ),
+            ("default absent empty", None, None, Some(Some("")), 1),
+            (
+                "ignoring k",
+                or_modifier("lhs or ignoring(k) rhs"),
+                Some(Some("left")),
+                Some(Some("right")),
+                1,
+            ),
+            (
+                "ignoring other",
+                or_modifier("lhs or ignoring(other) rhs"),
+                Some(Some("left")),
+                Some(Some("right")),
+                2,
+            ),
+        ] {
+            let (_, _, batches) = collect_direct_or(left_k, right_k, 1, 1, &modifier).await;
+            assert_eq!(
+                batches.iter().map(RecordBatch::num_rows).sum::<usize>(),
+                expected_rows,
+                "{name}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_direct_or_with_empty_input_is_asymmetric() {
+        let modifier = or_modifier("lhs or on(k) rhs");
+        for (name, left_empty, expected_value) in
+            [("empty lhs", true, 2.0), ("empty rhs", false, 1.0)]
+        {
+            let left = if left_empty {
+                direct_or_empty_input("lhs", true)
+            } else {
+                direct_or_input("lhs", Some(Some("k")), 1, 1.0)
+            };
+            let right = if left_empty {
+                direct_or_input("rhs", Some(Some("k")), 1, 2.0)
+            } else {
+                direct_or_empty_input("rhs", true)
+            };
+            let batches = collect_direct_or_plans(
+                left,
+                right,
+                direct_or_context("lhs", true),
+                direct_or_context("rhs", true),
+                &modifier,
+            )
+            .await;
+            let values = batches
+                .iter()
+                .flat_map(|batch| {
+                    batch
+                        .column_by_name("v")
+                        .unwrap()
+                        .as_any()
+                        .downcast_ref::<Float64Array>()
+                        .unwrap()
+                        .iter()
+                        .flatten()
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(values, vec![expected_value], "{name}");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_direct_or_nested_projection_uses_left_context() {
+        let table_provider = build_test_table_provider_with_fields(
+            &[(DEFAULT_SCHEMA_NAME.to_string(), "dummy".to_string())],
+            &[],
+        )
+        .await;
+        let mut planner = PromPlanner {
+            table_provider,
+            ctx: PromPlannerContext::default(),
+        };
+        let left_context = direct_or_context("lhs", true);
+        let right_context = direct_or_context("rhs", true);
+        let plan = planner
+            .or_operator(
+                direct_or_input("lhs", Some(Some("k")), 1, 1.0),
+                direct_or_input("rhs", Some(Some("k")), 1, 2.0),
+                left_context.tag_columns.iter().cloned().collect(),
+                right_context.tag_columns.iter().cloned().collect(),
+                left_context,
+                right_context,
+                &or_modifier("lhs or on(k) rhs"),
+            )
+            .unwrap();
+        assert_eq!(planner.ctx.table_name.as_deref(), Some("lhs"));
+        let nested = LogicalPlanBuilder::from(plan)
+            .project(vec![
+                DfExpr::BinaryExpr(BinaryExpr {
+                    left: Box::new(DfExpr::Column(Column::new(
+                        Some(TableReference::bare("lhs")),
+                        "v",
+                    ))),
+                    op: Operator::Plus,
+                    right: Box::new(lit(1.0)),
+                })
+                .alias("v_plus"),
+            ])
+            .unwrap()
+            .build()
+            .unwrap();
+        let state = build_query_engine_state();
+        let context = QueryEngineContext::new(state.session_state(), QueryContext::arc());
+        let optimized = state.optimize_by_extension_rules(nested, &context).unwrap();
+        let physical = state
+            .session_state()
+            .create_physical_plan(&optimized)
+            .await
+            .unwrap();
+        let batches =
+            datafusion::physical_plan::collect(physical, state.session_state().task_ctx())
+                .await
+                .unwrap();
+        let values = batches
+            .iter()
+            .flat_map(|batch| {
+                batch
+                    .column_by_name("v_plus")
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<Float64Array>()
+                    .unwrap()
+                    .iter()
+                    .flatten()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(values, vec![2.0]);
+    }
+
+    #[tokio::test]
+    async fn test_direct_or_ignores_non_tag_physical_match_columns() {
+        for modifier in [
+            or_modifier("lhs or on(ts) rhs"),
+            or_modifier("lhs or on(v) rhs"),
+        ] {
+            let (_, _, batches) = collect_direct_or(None, None, 1, 1, &modifier).await;
+            assert_eq!(
+                batches.iter().map(RecordBatch::num_rows).sum::<usize>(),
+                1,
+                "physical columns that are not semantic tags compare as absent"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_direct_or_skips_user_internal_key_name() {
+        const USER_TAG: &str = "__promql_or_match_0";
+        let table_provider = build_test_table_provider_with_fields(
+            &[(DEFAULT_SCHEMA_NAME.to_string(), "dummy".to_string())],
+            &[],
+        )
+        .await;
+        let mut planner = PromPlanner {
+            table_provider,
+            ctx: PromPlannerContext::default(),
+        };
+        let left_context = direct_or_context_with_tags("lhs", &[USER_TAG]);
+        let right_context = direct_or_context_with_tags("rhs", &[USER_TAG]);
+        let raw = planner
+            .or_operator(
+                direct_or_input_with_tags("lhs", &[(USER_TAG, Some("left"))], 1, 1.0),
+                direct_or_input_with_tags("rhs", &[(USER_TAG, Some("right"))], 1, 2.0),
+                left_context.tag_columns.iter().cloned().collect(),
+                right_context.tag_columns.iter().cloned().collect(),
+                left_context,
+                right_context,
+                &or_modifier("lhs or on(missing_label) rhs"),
+            )
+            .unwrap();
+        let raw_plan = raw.display_indent_schema().to_string();
+        assert!(raw_plan.contains("__promql_or_match_1@4"), "{raw_plan}");
+        assert!(
+            raw.schema()
+                .fields()
+                .iter()
+                .any(|field| field.name() == USER_TAG)
+        );
+        assert!(
+            raw.schema()
+                .fields()
+                .iter()
+                .all(|field| field.name() != "__promql_or_match_1")
+        );
+
+        let state = build_query_engine_state();
+        let context = QueryEngineContext::new(state.session_state(), QueryContext::arc());
+        let optimized = state.optimize_by_extension_rules(raw, &context).unwrap();
+        assert!(
+            optimized
+                .schema()
+                .fields()
+                .iter()
+                .any(|field| field.name() == USER_TAG)
+        );
+        let physical = state
+            .session_state()
+            .create_physical_plan(&optimized)
+            .await
+            .unwrap();
+        assert!(
+            physical
+                .schema()
+                .fields()
+                .iter()
+                .any(|field| field.name() == USER_TAG)
+        );
+        assert!(
+            physical
+                .schema()
+                .fields()
+                .iter()
+                .all(|field| field.name() != "__promql_or_match_1")
+        );
+        let batches =
+            datafusion::physical_plan::collect(physical, state.session_state().task_ctx())
+                .await
+                .unwrap();
+        assert_eq!(batches.iter().map(RecordBatch::num_rows).sum::<usize>(), 1);
+        let user_tags = batches
+            .iter()
+            .flat_map(|batch| {
+                batch
+                    .column_by_name(USER_TAG)
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .unwrap()
+                    .iter()
+                    .flatten()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(user_tags, vec!["left"]);
+    }
+
+    #[tokio::test]
+    async fn test_direct_or_substrait_round_trip_with_normalized_key() {
+        let state = build_query_engine_state();
+        let ctx = SessionContext::new_with_state(state.session_state());
+        let catalog = Arc::new(MemoryCatalogProvider::new());
+        catalog
+            .register_schema("public", Arc::new(MemorySchemaProvider::new()))
+            .unwrap();
+        ctx.register_catalog("datafusion", catalog);
+        ctx.register_table(
+            TableReference::full("datafusion", "public", "lhs"),
+            direct_or_memtable(Some(""), 1.0),
+        )
+        .unwrap();
+        ctx.register_table(
+            TableReference::full("datafusion", "public", "rhs"),
+            direct_or_memtable(None, 2.0),
+        )
+        .unwrap();
+        let left = ctx
+            .table("datafusion.public.lhs")
+            .await
+            .unwrap()
+            .into_unoptimized_plan();
+        let right = ctx
+            .table("datafusion.public.rhs")
+            .await
+            .unwrap()
+            .into_unoptimized_plan();
+        let table_provider = build_test_table_provider_with_fields(
+            &[(DEFAULT_SCHEMA_NAME.to_string(), "dummy".to_string())],
+            &[],
+        )
+        .await;
+        let mut planner = PromPlanner {
+            table_provider,
+            ctx: PromPlannerContext::default(),
+        };
+        let left_context = direct_or_context("lhs", true);
+        let right_context = direct_or_context("rhs", false);
+        let raw = planner
+            .or_operator(
+                left,
+                right,
+                left_context.tag_columns.iter().cloned().collect(),
+                right_context.tag_columns.iter().cloned().collect(),
+                left_context,
+                right_context,
+                &or_modifier("lhs or on(k) rhs"),
+            )
+            .unwrap();
+        let visible_schema = raw.schema().clone();
+        let bytes = DFLogicalSubstraitConvertor
+            .encode(&raw, DefaultSerializer)
+            .unwrap();
+        let decoded = DFLogicalSubstraitConvertor
+            .decode(bytes, ctx.state())
+            .await
+            .unwrap();
+        assert_eq!(decoded.schema().inner(), visible_schema.inner());
+        let decoded_plan = decoded.display_indent_schema().to_string();
+        assert!(decoded_plan.contains("UnionDistinctOn:"), "{decoded_plan}");
+        let bytes = DFLogicalSubstraitConvertor
+            .encode(&decoded, DefaultSerializer)
+            .unwrap();
+        let decoded = DFLogicalSubstraitConvertor
+            .decode(bytes, ctx.state())
+            .await
+            .unwrap();
+        assert_eq!(decoded.schema().inner(), visible_schema.inner());
+        let query_context = QueryEngineContext::new(ctx.state(), QueryContext::arc());
+        let optimized = state
+            .optimize_by_extension_rules(decoded, &query_context)
+            .unwrap();
+        let physical = ctx.state().create_physical_plan(&optimized).await.unwrap();
+        assert!(
+            physical
+                .schema()
+                .fields()
+                .iter()
+                .all(|field| !field.name().starts_with("__promql_or_match_"))
+        );
+        let batches = datafusion::physical_plan::collect(physical, ctx.task_ctx())
+            .await
+            .unwrap();
+        assert_eq!(batches.iter().map(RecordBatch::num_rows).sum::<usize>(), 1);
+        let values = batches
+            .iter()
+            .flat_map(|batch| {
+                batch
+                    .column_by_name("v")
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<Float64Array>()
+                    .unwrap()
+                    .iter()
+                    .flatten()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(values, vec![1.0]);
+    }
+
+    #[tokio::test]
+    async fn test_direct_or_substrait_round_trip_casts_unmatched_fractional_rhs() {
+        let state = build_query_engine_state();
+        let ctx = SessionContext::new_with_state(state.session_state());
+        let catalog = Arc::new(MemoryCatalogProvider::new());
+        catalog
+            .register_schema("public", Arc::new(MemorySchemaProvider::new()))
+            .unwrap();
+        ctx.register_catalog("datafusion", catalog);
+        ctx.register_table(
+            TableReference::full("datafusion", "public", "lhs"),
+            direct_or_typed_memtable(Some(""), ArrowDataType::Int64, None),
+        )
+        .unwrap();
+        ctx.register_table(
+            TableReference::full("datafusion", "public", "rhs"),
+            direct_or_typed_memtable(Some("rhs"), ArrowDataType::Float64, Some(0.5)),
+        )
+        .unwrap();
+        let left = ctx
+            .table("datafusion.public.lhs")
+            .await
+            .unwrap()
+            .into_unoptimized_plan();
+        let right = ctx
+            .table("datafusion.public.rhs")
+            .await
+            .unwrap()
+            .into_unoptimized_plan();
+        let table_provider = build_test_table_provider_with_fields(
+            &[(DEFAULT_SCHEMA_NAME.to_string(), "dummy".to_string())],
+            &[],
+        )
+        .await;
+        let mut planner = PromPlanner {
+            table_provider,
+            ctx: PromPlannerContext::default(),
+        };
+        let left_context = direct_or_context("lhs", true);
+        let right_context = direct_or_context("rhs", true);
+        let raw = planner
+            .or_operator(
+                left,
+                right,
+                left_context.tag_columns.iter().cloned().collect(),
+                right_context.tag_columns.iter().cloned().collect(),
+                left_context,
+                right_context,
+                &or_modifier("lhs or on(k) rhs"),
+            )
+            .unwrap();
+        let visible_schema = raw.schema().clone();
+        assert_eq!(
+            visible_schema
+                .field_with_name(None, "v")
+                .unwrap()
+                .data_type(),
+            &ArrowDataType::Float64
+        );
+        let bytes = DFLogicalSubstraitConvertor
+            .encode(&raw, DefaultSerializer)
+            .unwrap();
+        let decoded = DFLogicalSubstraitConvertor
+            .decode(bytes, ctx.state())
+            .await
+            .unwrap();
+        let bytes = DFLogicalSubstraitConvertor
+            .encode(&decoded, DefaultSerializer)
+            .unwrap();
+        let decoded = DFLogicalSubstraitConvertor
+            .decode(bytes, ctx.state())
+            .await
+            .unwrap();
+        assert_eq!(decoded.schema().inner(), visible_schema.inner());
+        let query_context = QueryEngineContext::new(ctx.state(), QueryContext::arc());
+        let optimized = state
+            .optimize_by_extension_rules(decoded, &query_context)
+            .unwrap();
+        let physical = ctx.state().create_physical_plan(&optimized).await.unwrap();
+        assert_eq!(physical.schema(), visible_schema.inner().clone());
+        let batches = datafusion::physical_plan::collect(physical, ctx.task_ctx())
+            .await
+            .unwrap();
+        assert_eq!(batches.iter().map(RecordBatch::num_rows).sum::<usize>(), 1);
+        for batch in &batches {
+            assert_eq!(batch.schema(), visible_schema.inner().clone());
+            assert!(batch.schema().fields().iter().all(|field| {
+                field.name() == "v" && field.data_type() == &ArrowDataType::Float64
+                    || !field.name().starts_with("__promql_or_match_")
+            }));
+        }
+        let values = batches
+            .iter()
+            .flat_map(|batch| {
+                batch
+                    .column_by_name("v")
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<Float64Array>()
+                    .unwrap()
+                    .iter()
+                    .flatten()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(values, vec![0.5]);
+    }
+
+    #[tokio::test]
+    async fn test_direct_or_numeric_value_types_align_to_float64() {
+        for (left_type, right_type) in [
+            (ArrowDataType::Int64, ArrowDataType::Float64),
+            (ArrowDataType::Float32, ArrowDataType::Int64),
+            (ArrowDataType::Int32, ArrowDataType::UInt64),
+            (ArrowDataType::Float64, ArrowDataType::Int64),
+        ] {
+            let table_provider = build_test_table_provider_with_fields(
+                &[(DEFAULT_SCHEMA_NAME.to_string(), "dummy".to_string())],
+                &[],
+            )
+            .await;
+            let mut planner = PromPlanner {
+                table_provider,
+                ctx: PromPlannerContext::default(),
+            };
+            let left_context = direct_or_context("lhs", false);
+            let right_context = direct_or_context("rhs", false);
+            let raw = planner
+                .or_operator(
+                    direct_or_empty_typed_input("lhs", left_type),
+                    direct_or_empty_typed_input("rhs", right_type),
+                    left_context.tag_columns.iter().cloned().collect(),
+                    right_context.tag_columns.iter().cloned().collect(),
+                    left_context,
+                    right_context,
+                    &or_modifier("lhs or on(k) rhs"),
+                )
+                .unwrap();
+            assert_eq!(
+                raw.schema().field_with_name(None, "v").unwrap().data_type(),
+                &ArrowDataType::Float64
+            );
+            let state = build_query_engine_state();
+            let context = QueryEngineContext::new(state.session_state(), QueryContext::arc());
+            let optimized = state.optimize_by_extension_rules(raw, &context).unwrap();
+            assert_eq!(
+                optimized
+                    .schema()
+                    .field_with_name(None, "v")
+                    .unwrap()
+                    .data_type(),
+                &ArrowDataType::Float64
+            );
+            let physical = state
+                .session_state()
+                .create_physical_plan(&optimized)
+                .await
+                .unwrap();
+            datafusion::physical_plan::collect(physical, state.session_state().task_ctx())
+                .await
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn test_direct_or_rejects_nonnumeric_value_type_mismatch() {
+        let table_provider = build_test_table_provider_with_fields(
+            &[(DEFAULT_SCHEMA_NAME.to_string(), "dummy".to_string())],
+            &[],
+        )
+        .await;
+        let mut planner = PromPlanner {
+            table_provider,
+            ctx: PromPlannerContext::default(),
+        };
+        let left_context = direct_or_context("lhs", false);
+        let right_context = direct_or_context("rhs", false);
+        let error = planner
+            .or_operator(
+                direct_or_empty_typed_input("lhs", ArrowDataType::Utf8),
+                direct_or_empty_typed_input("rhs", ArrowDataType::Float64),
+                left_context.tag_columns.iter().cloned().collect(),
+                right_context.tag_columns.iter().cloned().collect(),
+                left_context,
+                right_context,
+                &or_modifier("lhs or on(k) rhs"),
+            )
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("OR value fields have incompatible types")
+        );
     }
 }

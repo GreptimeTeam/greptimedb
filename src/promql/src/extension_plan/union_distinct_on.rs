@@ -40,8 +40,7 @@ use greptime_proto::substrait_extension as pb;
 use prost::Message;
 use snafu::ResultExt;
 
-use crate::error::{DeserializeSnafu, Result};
-use crate::extension_plan::{resolve_column_name, serialize_column_index};
+use crate::error::{DataFusionPlanningSnafu, DeserializeSnafu, Result};
 
 /// A special kind of `UNION`(`OR` in PromQL) operator, for PromQL specific use case.
 ///
@@ -54,7 +53,7 @@ use crate::extension_plan::{resolve_column_name, serialize_column_index};
 ///     preserved. All others are discarded.
 ///   - If the collision is from left child, the row in right child will be discarded.
 /// - The output order is not maintained. This plan will output left child first, then right child.
-/// - The output schema contains all columns from left or right child plans.
+/// - The output schema is based on the left child schema, with nullability widened from both inputs.
 ///
 /// From the implementation perspective, this operator is similar to `HashJoin`, but the
 /// probe side is the right child, and the build side is the left child. Another difference
@@ -68,16 +67,9 @@ pub struct UnionDistinctOn {
     right: LogicalPlan,
     /// The columns to compare for equality.
     /// TIME INDEX is included.
-    compare_keys: Vec<String>,
-    ts_col: String,
+    compare_key_indices: Vec<usize>,
+    ts_col_idx: usize,
     output_schema: DFSchemaRef,
-    unfix: Option<UnfixIndices>,
-}
-
-#[derive(Debug, PartialEq, Eq, Hash, PartialOrd)]
-struct UnfixIndices {
-    pub compare_key_indices: Vec<u64>,
-    pub ts_col_idx: u64,
 }
 
 impl UnionDistinctOn {
@@ -85,21 +77,92 @@ impl UnionDistinctOn {
         "UnionDistinctOn"
     }
 
-    pub fn new(
+    pub fn try_new(
         left: LogicalPlan,
         right: LogicalPlan,
-        compare_keys: Vec<String>,
-        ts_col: String,
-        output_schema: DFSchemaRef,
-    ) -> Self {
-        Self {
+        compare_key_indices: Vec<usize>,
+        ts_col_idx: usize,
+    ) -> DataFusionResult<Self> {
+        let output_schema =
+            Self::validate_children(&left, &right, &compare_key_indices, ts_col_idx)?;
+        Ok(Self {
             left,
             right,
-            compare_keys,
-            ts_col,
+            compare_key_indices,
+            ts_col_idx,
             output_schema,
-            unfix: None,
+        })
+    }
+
+    fn validate_children(
+        left: &LogicalPlan,
+        right: &LogicalPlan,
+        compare_key_indices: &[usize],
+        ts_col_idx: usize,
+    ) -> DataFusionResult<DFSchemaRef> {
+        let left_schema = left.schema();
+        let right_schema = right.schema();
+        let left_fields = left_schema.fields();
+        let right_fields = right_schema.fields();
+
+        if left_fields.len() != right_fields.len() {
+            return Err(DataFusionError::Plan(format!(
+                "UnionDistinctOn inputs have different field counts: left={}, right={}",
+                left_fields.len(),
+                right_fields.len()
+            )));
         }
+
+        for (column_type, index) in compare_key_indices
+            .iter()
+            .map(|index| ("compare key", *index))
+            .chain(std::iter::once(("timestamp", ts_col_idx)))
+        {
+            if index >= left_fields.len() || index >= right_fields.len() {
+                return Err(DataFusionError::Plan(format!(
+                    "UnionDistinctOn {column_type} index {index} is out of bounds for inputs with {} fields",
+                    left_fields.len()
+                )));
+            }
+        }
+
+        for (index, (left_field, right_field)) in left_fields.iter().zip(right_fields).enumerate() {
+            if left_field.data_type() != right_field.data_type() {
+                return Err(DataFusionError::Plan(format!(
+                    "UnionDistinctOn input field at index {index} has incompatible data types: left={:?}, right={:?}",
+                    left_field.data_type(),
+                    right_field.data_type()
+                )));
+            }
+        }
+
+        let output_fields = left_fields
+            .iter()
+            .zip(right_fields)
+            .enumerate()
+            .map(|(index, (left_field, right_field))| {
+                let (qualifier, _) = left_schema.qualified_field(index);
+                (
+                    qualifier.cloned(),
+                    Arc::new(
+                        left_field
+                            .as_ref()
+                            .clone()
+                            .with_nullable(left_field.is_nullable() || right_field.is_nullable()),
+                    ),
+                )
+            })
+            .collect();
+        let output_schema =
+            DFSchema::new_with_metadata(output_fields, left_schema.metadata().clone()).map_err(
+                |error| {
+                    DataFusionError::Plan(format!(
+                        "Failed to construct UnionDistinctOn output schema: {error}"
+                    ))
+                },
+            )?;
+
+        Ok(Arc::new(output_schema))
     }
 
     pub fn to_execution_plan(
@@ -117,8 +180,8 @@ impl UnionDistinctOn {
         Arc::new(UnionDistinctOnExec {
             left: left_exec,
             right: right_exec,
-            compare_keys: self.compare_keys.clone(),
-            ts_col: self.ts_col.clone(),
+            compare_key_indices: self.compare_key_indices.clone(),
+            ts_col_idx: self.ts_col_idx,
             output_schema,
             metric: ExecutionPlanMetricsSet::new(),
             properties,
@@ -128,12 +191,11 @@ impl UnionDistinctOn {
 
     pub fn serialize(&self) -> Vec<u8> {
         let compare_key_indices = self
-            .compare_keys
+            .compare_key_indices
             .iter()
-            .map(|name| serialize_column_index(&self.output_schema, name))
-            .collect::<Vec<u64>>();
-
-        let ts_col_idx = serialize_column_index(&self.output_schema, &self.ts_col);
+            .map(|index| u64::try_from(*index).expect("usize always fits in u64"))
+            .collect();
+        let ts_col_idx = u64::try_from(self.ts_col_idx).expect("usize always fits in u64");
 
         pb::UnionDistinctOn {
             compare_key_indices,
@@ -149,18 +211,33 @@ impl UnionDistinctOn {
             schema: Arc::new(DFSchema::empty()),
         });
 
-        let unfix = UnfixIndices {
-            compare_key_indices: pb_union.compare_key_indices.clone(),
-            ts_col_idx: pb_union.ts_col_idx,
-        };
+        let compare_key_indices = pb_union
+            .compare_key_indices
+            .into_iter()
+            .map(|index| {
+                usize::try_from(index).map_err(|_| {
+                    DataFusionError::Plan(format!(
+                        "UnionDistinctOn compare key index {index} does not fit in usize"
+                    ))
+                })
+            })
+            .collect::<DataFusionResult<Vec<_>>>()
+            .context(DataFusionPlanningSnafu)?;
+        let ts_col_idx = usize::try_from(pb_union.ts_col_idx)
+            .map_err(|_| {
+                DataFusionError::Plan(format!(
+                    "UnionDistinctOn timestamp index {} does not fit in usize",
+                    pb_union.ts_col_idx
+                ))
+            })
+            .context(DataFusionPlanningSnafu)?;
 
         Ok(Self {
             left: placeholder_plan.clone(),
             right: placeholder_plan,
-            compare_keys: Vec::new(),
-            ts_col: String::new(),
+            compare_key_indices,
+            ts_col_idx,
             output_schema: Arc::new(DFSchema::empty()),
-            unfix: Some(unfix),
         })
     }
 }
@@ -176,11 +253,14 @@ impl PartialOrd for UnionDistinctOn {
             Some(core::cmp::Ordering::Equal) => {}
             ord => return ord,
         }
-        match self.compare_keys.partial_cmp(&other.compare_keys) {
+        match self
+            .compare_key_indices
+            .partial_cmp(&other.compare_key_indices)
+        {
             Some(core::cmp::Ordering::Equal) => {}
             ord => return ord,
         }
-        self.ts_col.partial_cmp(&other.ts_col)
+        self.ts_col_idx.partial_cmp(&other.ts_col_idx)
     }
 }
 
@@ -198,22 +278,21 @@ impl UserDefinedLogicalNodeCore for UnionDistinctOn {
     }
 
     fn expressions(&self) -> Vec<Expr> {
-        if self.unfix.is_some() {
-            return vec![];
-        }
-
-        let mut exprs: Vec<Expr> = self.compare_keys.iter().map(col).collect();
-        if !self.compare_keys.iter().any(|key| key == &self.ts_col) {
-            exprs.push(col(&self.ts_col));
+        let fields = self.left.schema().fields();
+        let mut exprs = self
+            .compare_key_indices
+            .iter()
+            .filter_map(|index| fields.get(*index).map(|field| col(field.name())))
+            .collect::<Vec<_>>();
+        if !self.compare_key_indices.contains(&self.ts_col_idx)
+            && let Some(field) = fields.get(self.ts_col_idx)
+        {
+            exprs.push(col(field.name()));
         }
         exprs
     }
 
     fn necessary_children_exprs(&self, _output_columns: &[usize]) -> Option<Vec<Vec<usize>>> {
-        if self.unfix.is_some() {
-            return None;
-        }
-
         let left_len = self.left.schema().fields().len();
         let right_len = self.right.schema().fields().len();
         Some(vec![
@@ -223,10 +302,20 @@ impl UserDefinedLogicalNodeCore for UnionDistinctOn {
     }
 
     fn fmt_for_explain(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let fields = self.left.schema().fields();
+        let display_column = |index: usize| match fields.get(index) {
+            Some(field) => format!("{}@{index}", field.name()),
+            None => format!("@{index}"),
+        };
+        let compare_keys = self
+            .compare_key_indices
+            .iter()
+            .map(|index| display_column(*index))
+            .collect::<Vec<_>>();
         write!(
             f,
-            "UnionDistinctOn: on col=[{:?}], ts_col=[{}]",
-            self.compare_keys, self.ts_col
+            "UnionDistinctOn: on col={compare_keys:?}, ts_col={}",
+            display_column(self.ts_col_idx)
         )
     }
 
@@ -245,38 +334,12 @@ impl UserDefinedLogicalNodeCore for UnionDistinctOn {
         let left = inputs.next().unwrap();
         let right = inputs.next().unwrap();
 
-        if let Some(unfix) = &self.unfix {
-            let output_schema = left.schema().clone();
-
-            let compare_keys = unfix
-                .compare_key_indices
-                .iter()
-                .map(|idx| {
-                    resolve_column_name(*idx, &output_schema, "UnionDistinctOn", "compare key")
-                })
-                .collect::<DataFusionResult<Vec<String>>>()?;
-
-            let ts_col =
-                resolve_column_name(unfix.ts_col_idx, &output_schema, "UnionDistinctOn", "ts")?;
-
-            Ok(Self {
-                left,
-                right,
-                compare_keys,
-                ts_col,
-                output_schema,
-                unfix: None,
-            })
-        } else {
-            Ok(Self {
-                left,
-                right,
-                compare_keys: self.compare_keys.clone(),
-                ts_col: self.ts_col.clone(),
-                output_schema: self.output_schema.clone(),
-                unfix: None,
-            })
-        }
+        Self::try_new(
+            left,
+            right,
+            self.compare_key_indices.clone(),
+            self.ts_col_idx,
+        )
     }
 }
 
@@ -284,8 +347,8 @@ impl UserDefinedLogicalNodeCore for UnionDistinctOn {
 pub struct UnionDistinctOnExec {
     left: Arc<dyn ExecutionPlan>,
     right: Arc<dyn ExecutionPlan>,
-    compare_keys: Vec<String>,
-    ts_col: String,
+    compare_key_indices: Vec<usize>,
+    ts_col_idx: usize,
     output_schema: SchemaRef,
     metric: ExecutionPlanMetricsSet,
     properties: Arc<PlanProperties>,
@@ -326,8 +389,8 @@ impl ExecutionPlan for UnionDistinctOnExec {
         Ok(Arc::new(UnionDistinctOnExec {
             left,
             right,
-            compare_keys: self.compare_keys.clone(),
-            ts_col: self.ts_col.clone(),
+            compare_key_indices: self.compare_key_indices.clone(),
+            ts_col_idx: self.ts_col_idx,
             output_schema: self.output_schema.clone(),
             metric: self.metric.clone(),
             properties: self.properties.clone(),
@@ -343,30 +406,15 @@ impl ExecutionPlan for UnionDistinctOnExec {
         let left_stream = self.left.execute(partition, context.clone())?;
         let right_stream = self.right.execute(partition, context.clone())?;
 
-        // Convert column name to column index. Add one for the time column.
-        let mut key_indices = Vec::with_capacity(self.compare_keys.len() + 1);
-        for key in &self.compare_keys {
-            let index = self
-                .output_schema
-                .column_with_name(key)
-                .map(|(i, _)| i)
-                .ok_or_else(|| DataFusionError::Internal(format!("Column {} not found", key)))?;
-            key_indices.push(index);
-        }
-        let ts_index = self
-            .output_schema
-            .column_with_name(&self.ts_col)
-            .map(|(i, _)| i)
-            .ok_or_else(|| {
-                DataFusionError::Internal(format!("Column {} not found", self.ts_col))
-            })?;
-        key_indices.push(ts_index);
+        let mut key_indices = self.compare_key_indices.clone();
+        key_indices.push(self.ts_col_idx);
 
         // Build right hash table future.
         let hashed_data_future = HashedDataFut::Pending(Box::pin(HashedData::new(
             right_stream,
             self.random_state.clone(),
             key_indices.clone(),
+            self.output_schema.clone(),
         )));
 
         let baseline_metric = BaselineMetrics::new(&self.metric, partition);
@@ -396,8 +444,8 @@ impl DisplayAs for UnionDistinctOnExec {
             | DisplayFormatType::TreeRender => {
                 write!(
                     f,
-                    "UnionDistinctOnExec: on col=[{:?}], ts_col=[{}]",
-                    self.compare_keys, self.ts_col
+                    "UnionDistinctOnExec: on col={:?}, ts_col={}",
+                    self.compare_key_indices, self.ts_col_idx
                 )
             }
         }
@@ -437,7 +485,7 @@ impl UnionDistinctOnStream {
             Some(Ok(left)) => {
                 // observe left batch and return it
                 right.update_map(&left)?;
-                Poll::Ready(Some(Ok(left)))
+                Poll::Ready(Some(Ok(with_schema(left, self.output_schema.clone())?)))
             }
             Some(Err(e)) => Poll::Ready(Some(Err(e))),
             None => {
@@ -494,10 +542,10 @@ impl HashedData {
         input: SendableRecordBatchStream,
         random_state: RandomState,
         hash_key_indices: Vec<usize>,
+        output_schema: SchemaRef,
     ) -> DataFusionResult<Self> {
         // Collect all batches from the input stream
         let initial = (Vec::new(), 0);
-        let schema = input.schema();
         let (batches, _num_rows) = input
             .try_fold(initial, |mut acc, batch| async {
                 // Update rowcount
@@ -535,7 +583,7 @@ impl HashedData {
         }
 
         // Finalize the hash map
-        let batch = interleave_batches(schema, batches, interleave_indices)?;
+        let batch = interleave_batches(output_schema, batches, interleave_indices)?;
 
         Ok(Self {
             hash_map,
@@ -574,6 +622,11 @@ impl HashedData {
         let result = take_batch(&self.batch, &valid_indices)?;
         Ok(result)
     }
+}
+
+fn with_schema(batch: RecordBatch, schema: SchemaRef) -> DataFusionResult<RecordBatch> {
+    RecordBatch::try_new(schema, batch.columns().to_vec())
+        .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))
 }
 
 /// Utility function to interleave batches. Based on [interleave](datafusion::arrow::compute::interleave)
@@ -637,10 +690,13 @@ fn take_batch(batch: &RecordBatch, indices: &[usize]) -> DataFusionResult<Record
 mod test {
     use std::sync::Arc;
 
-    use datafusion::arrow::array::Int32Array;
-    use datafusion::arrow::datatypes::{DataType, Field, Schema};
+    use datafusion::arrow::array::{Array, Float64Array, Int32Array, Int64Array, StringArray};
+    use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
     use datafusion::common::ToDFSchema;
+    use datafusion::datasource::memory::MemorySourceConfig;
+    use datafusion::datasource::source::DataSourceExec;
     use datafusion::logical_expr::{EmptyRelation, LogicalPlan};
+    use datafusion::prelude::SessionContext;
 
     use super::*;
 
@@ -660,13 +716,7 @@ mod test {
             produce_one_row: false,
             schema: df_schema.clone(),
         });
-        let plan = UnionDistinctOn::new(
-            left,
-            right,
-            vec!["k".to_string()],
-            "ts".to_string(),
-            df_schema,
-        );
+        let plan = UnionDistinctOn::try_new(left, right, vec![1], 0).unwrap();
 
         // Simulate a parent projection requesting only one output column.
         let output_columns = [2usize];
@@ -757,39 +807,223 @@ mod test {
         assert_eq!(result, expected);
     }
 
+    fn empty_plan(schema: datafusion::common::DFSchemaRef) -> LogicalPlan {
+        LogicalPlan::EmptyRelation(EmptyRelation {
+            produce_one_row: false,
+            schema,
+        })
+    }
+
+    fn source_exec(schema: SchemaRef, batch: RecordBatch) -> Arc<dyn ExecutionPlan> {
+        Arc::new(DataSourceExec::new(Arc::new(
+            MemorySourceConfig::try_new(&[vec![batch]], schema, None).unwrap(),
+        )))
+    }
+
     #[tokio::test]
-    async fn encode_decode_union_distinct_on() {
+    async fn serialize_deserialize_and_execute_with_different_input_names() {
+        let left_schema = Arc::new(Schema::new(vec![
+            Field::new("left_ts", DataType::Int64, false),
+            Field::new("left_job", DataType::Utf8, false),
+            Field::new("left_value", DataType::Float64, false),
+        ]));
+        let right_schema = Arc::new(Schema::new(vec![
+            Field::new("right_ts", DataType::Int64, false),
+            Field::new("right_job", DataType::Utf8, false),
+            Field::new("right_value", DataType::Float64, false),
+        ]));
+        let left_plan = empty_plan(left_schema.clone().to_dfschema_ref().unwrap());
+        let right_plan = empty_plan(right_schema.clone().to_dfschema_ref().unwrap());
+        let plan =
+            UnionDistinctOn::try_new(left_plan.clone(), right_plan.clone(), vec![1], 0).unwrap();
+
+        let decoded = UnionDistinctOn::deserialize(&plan.serialize()).unwrap();
+        let decoded = decoded
+            .with_exprs_and_inputs(vec![], vec![left_plan, right_plan])
+            .unwrap();
+        assert_eq!(decoded.compare_key_indices, vec![1]);
+        assert_eq!(decoded.ts_col_idx, 0);
+        assert_eq!(
+            decoded.output_schema,
+            left_schema.clone().to_dfschema_ref().unwrap()
+        );
+
+        let left_batch = RecordBatch::try_new(
+            left_schema.clone(),
+            vec![
+                Arc::new(Int64Array::from(vec![1])),
+                Arc::new(StringArray::from(vec!["left"])),
+                Arc::new(Float64Array::from(vec![10.0])),
+            ],
+        )
+        .unwrap();
+        let right_batch = RecordBatch::try_new(
+            right_schema.clone(),
+            vec![
+                Arc::new(Int64Array::from(vec![2])),
+                Arc::new(StringArray::from(vec!["right"])),
+                Arc::new(Float64Array::from(vec![20.0])),
+            ],
+        )
+        .unwrap();
+        let exec = decoded.to_execution_plan(
+            source_exec(left_schema.clone(), left_batch),
+            source_exec(right_schema, right_batch),
+        );
+        let result = datafusion::physical_plan::collect(exec, SessionContext::default().task_ctx())
+            .await
+            .unwrap();
+
+        assert_eq!(result.len(), 2);
+        assert!(result.iter().all(|batch| batch.schema() == left_schema));
+        assert_eq!(result[0].num_rows(), 1);
+        assert_eq!(result[1].num_rows(), 1);
+    }
+
+    #[tokio::test]
+    async fn execute_widens_nullable_label_and_emits_rhs_null() {
+        let left_schema = Arc::new(Schema::new(vec![
+            Field::new("left_ts", DataType::Int64, false),
+            Field::new("left_label", DataType::Utf8, false),
+        ]));
+        let right_schema = Arc::new(Schema::new(vec![
+            Field::new("right_ts", DataType::Int64, false),
+            Field::new("right_label", DataType::Utf8, true),
+        ]));
+        let plan = UnionDistinctOn::try_new(
+            empty_plan(left_schema.clone().to_dfschema_ref().unwrap()),
+            empty_plan(right_schema.clone().to_dfschema_ref().unwrap()),
+            vec![1],
+            0,
+        )
+        .unwrap();
+        let declared_schema = plan.output_schema.inner().clone();
+        assert!(declared_schema.field(1).is_nullable());
+
+        let left_batch = RecordBatch::try_new(
+            left_schema.clone(),
+            vec![
+                Arc::new(Int64Array::from(vec![1])),
+                Arc::new(StringArray::from(vec!["present"])),
+            ],
+        )
+        .unwrap();
+        let right_batch = RecordBatch::try_new(
+            right_schema.clone(),
+            vec![
+                Arc::new(Int64Array::from(vec![2])),
+                Arc::new(StringArray::from(vec![None::<&str>])),
+            ],
+        )
+        .unwrap();
+        let result = datafusion::physical_plan::collect(
+            plan.to_execution_plan(
+                source_exec(left_schema, left_batch),
+                source_exec(right_schema, right_batch),
+            ),
+            SessionContext::default().task_ctx(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.len(), 2);
+        assert!(result.iter().all(|batch| batch.schema() == declared_schema));
+        assert!(result[1].column(1).is_null(0));
+    }
+
+    #[tokio::test]
+    async fn execute_widens_nullable_value_for_both_inputs() {
+        let left_schema = Arc::new(Schema::new(vec![
+            Field::new("left_ts", DataType::Int64, false),
+            Field::new("left_value", DataType::Float64, false),
+        ]));
+        let right_schema = Arc::new(Schema::new(vec![
+            Field::new("right_ts", DataType::Int64, false),
+            Field::new("right_value", DataType::Float64, true),
+        ]));
+        let plan = UnionDistinctOn::try_new(
+            empty_plan(left_schema.clone().to_dfschema_ref().unwrap()),
+            empty_plan(right_schema.clone().to_dfschema_ref().unwrap()),
+            vec![1],
+            0,
+        )
+        .unwrap();
+        let declared_schema = plan.output_schema.inner().clone();
+        assert!(declared_schema.field(1).is_nullable());
+
+        let left_batch = RecordBatch::try_new(
+            left_schema.clone(),
+            vec![
+                Arc::new(Int64Array::from(vec![1])),
+                Arc::new(Float64Array::from(vec![10.0])),
+            ],
+        )
+        .unwrap();
+        let right_batch = RecordBatch::try_new(
+            right_schema.clone(),
+            vec![
+                Arc::new(Int64Array::from(vec![2])),
+                Arc::new(Float64Array::from(vec![20.0])),
+            ],
+        )
+        .unwrap();
+        let result = datafusion::physical_plan::collect(
+            plan.to_execution_plan(
+                source_exec(left_schema, left_batch),
+                source_exec(right_schema, right_batch),
+            ),
+            SessionContext::default().task_ctx(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.len(), 2);
+        assert!(result.iter().all(|batch| batch.schema() == declared_schema));
+        assert_eq!(result[0].num_rows(), 1);
+        assert_eq!(result[1].num_rows(), 1);
+    }
+
+    #[test]
+    fn malformed_indices_and_incompatible_inputs_fail_before_execution() {
         let schema = Arc::new(Schema::new(vec![
             Field::new("ts", DataType::Int64, false),
             Field::new("job", DataType::Utf8, false),
-            Field::new("value", DataType::Float64, false),
         ]));
-        let df_schema = schema.clone().to_dfschema_ref().unwrap();
-        let left_plan = LogicalPlan::EmptyRelation(EmptyRelation {
-            produce_one_row: false,
-            schema: df_schema.clone(),
-        });
-        let right_plan = LogicalPlan::EmptyRelation(EmptyRelation {
-            produce_one_row: false,
-            schema: df_schema.clone(),
-        });
-        let plan_node = UnionDistinctOn::new(
-            left_plan.clone(),
-            right_plan.clone(),
-            vec!["job".to_string()],
-            "ts".to_string(),
-            df_schema.clone(),
+        let df_schema = schema.to_dfschema_ref().unwrap();
+
+        for protobuf in [
+            pb::UnionDistinctOn {
+                compare_key_indices: vec![2],
+                ts_col_idx: 0,
+            },
+            pb::UnionDistinctOn {
+                compare_key_indices: vec![1],
+                ts_col_idx: 2,
+            },
+        ] {
+            let decoded = UnionDistinctOn::deserialize(&protobuf.encode_to_vec()).unwrap();
+            assert!(
+                decoded
+                    .with_exprs_and_inputs(
+                        vec![],
+                        vec![empty_plan(df_schema.clone()), empty_plan(df_schema.clone())],
+                    )
+                    .is_err()
+            );
+        }
+
+        let incompatible_schema = Arc::new(Schema::new(vec![
+            Field::new("other_ts", DataType::Int64, false),
+            Field::new("other_job", DataType::Int64, false),
+        ]));
+        assert!(
+            UnionDistinctOn::try_new(
+                empty_plan(df_schema),
+                empty_plan(incompatible_schema.to_dfschema_ref().unwrap()),
+                vec![1],
+                0,
+            )
+            .is_err()
         );
-
-        let bytes = plan_node.serialize();
-
-        let union_distinct_on = UnionDistinctOn::deserialize(&bytes).unwrap();
-        let union_distinct_on = union_distinct_on
-            .with_exprs_and_inputs(vec![], vec![left_plan, right_plan])
-            .unwrap();
-
-        assert_eq!(union_distinct_on.compare_keys, vec!["job".to_string()]);
-        assert_eq!(union_distinct_on.ts_col, "ts");
-        assert_eq!(union_distinct_on.output_schema, df_schema);
     }
 }
