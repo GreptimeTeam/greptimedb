@@ -1098,6 +1098,10 @@ async fn test_execute_copy_from_csv_strict_headers(instance: Arc<dyn MockInstanc
     let unknown_path = tmp_dir.path().join("unknown.csv");
     let missing_path = tmp_dir.path().join("missing.csv");
     let duplicate_path = tmp_dir.path().join("duplicate.csv");
+    let matching_location = prepare_path(matching_path.to_str().unwrap());
+    let unknown_location = prepare_path(unknown_path.to_str().unwrap());
+    let missing_location = prepare_path(missing_path.to_str().unwrap());
+    let duplicate_location = prepare_path(duplicate_path.to_str().unwrap());
     std::fs::write(
         &matching_path,
         "ts,host_id,reading_value\n2024-01-01T00:00:00,1,10.5\n",
@@ -1127,7 +1131,7 @@ async fn test_execute_copy_from_csv_strict_headers(instance: Arc<dyn MockInstanc
         &instance,
         &format!(
             "COPY csv_strict_headers FROM '{}' WITH (FORMAT='csv', STRICT_HEADERS='true');",
-            matching_path.display()
+            matching_location
         ),
     )
     .await
@@ -1149,7 +1153,7 @@ async fn test_execute_copy_from_csv_strict_headers(instance: Arc<dyn MockInstanc
         &instance,
         &format!(
             "COPY csv_strict_headers FROM '{}' WITH (FORMAT='csv', STRICT_HEADERS='true');",
-            unknown_path.display()
+            unknown_location
         ),
     )
     .await
@@ -1173,7 +1177,7 @@ async fn test_execute_copy_from_csv_strict_headers(instance: Arc<dyn MockInstanc
         &instance,
         &format!(
             "COPY csv_strict_headers FROM '{}' WITH (FORMAT='csv', STRICT_HEADERS='true');",
-            missing_path.display()
+            missing_location
         ),
     )
     .await
@@ -1197,7 +1201,7 @@ async fn test_execute_copy_from_csv_strict_headers(instance: Arc<dyn MockInstanc
         &instance,
         &format!(
             "COPY csv_strict_headers FROM '{}' WITH (FORMAT='csv', STRICT_HEADERS='true');",
-            duplicate_path.display()
+            duplicate_location
         ),
     )
     .await
