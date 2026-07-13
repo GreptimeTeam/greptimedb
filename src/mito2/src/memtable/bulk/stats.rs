@@ -17,6 +17,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use api::v1::SemanticType;
 use datafusion_common::pruning::PruningStatistics;
 use datafusion_common::{Column, ScalarValue};
 use datatypes::arrow;
@@ -34,11 +35,8 @@ use datatypes::arrow::datatypes::{
     i256,
 };
 use datatypes::data_type::{ConcreteDataType, DataType};
-use snafu::ResultExt;
 use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataRef};
 use store_api::storage::ColumnId;
-
-use crate::error::{ComputeArrowSnafu, Result};
 
 type ScalarPair = (ScalarValue, ScalarValue);
 
@@ -62,10 +60,14 @@ impl BatchStats {
     pub(crate) fn compute(
         batches: &[common_recordbatch::DfRecordBatch],
         metadata: &RegionMetadata,
+        skip_fields: bool,
     ) -> Self {
         let mut columns = HashMap::with_capacity(metadata.column_metadatas.len());
 
         for column in &metadata.column_metadatas {
+            if skip_fields && column.semantic_type == SemanticType::Field {
+                continue;
+            }
             let Some(stats) = compute_column_stats(batches, column) else {
                 continue;
             };
@@ -120,7 +122,13 @@ fn compute_column_stats(
     let mut maxes = Vec::with_capacity(batches.len());
 
     for batch in batches {
-        let Some((min, max)) = min_max_scalar(batch.column(column_idx), &arrow_type).ok()? else {
+        let array = batch.column(column_idx);
+        if array.data_type() != &arrow_type
+            && !matches!(array.data_type(), ArrowDataType::Dictionary(_, value_type) if value_type.as_ref() == &arrow_type)
+        {
+            return None;
+        }
+        let Some((min, max)) = min_max_scalar(array, &arrow_type) else {
             mins.push(null_scalar.clone());
             maxes.push(null_scalar.clone());
             continue;
@@ -176,16 +184,19 @@ fn is_supported_arrow_type(arrow_type: &ArrowDataType) -> bool {
 
 /// Returns exact min/max scalars for a supported Arrow array.
 ///
-/// Empty/all-null arrays return `Ok(None)`. Unsupported arrays return `Ok(None)`.
-fn min_max_scalar(array: &ArrayRef, logical_type: &ArrowDataType) -> Result<Option<ScalarPair>> {
+/// Empty/all-null and unsupported arrays return `None`.
+fn min_max_scalar(array: &ArrayRef, logical_type: &ArrowDataType) -> Option<ScalarPair> {
     if array.is_empty() || array.null_count() == array.len() {
-        return Ok(None);
+        return None;
     }
 
     if let ArrowDataType::Dictionary(_, value_type) = array.data_type() {
-        let decoded =
-            arrow::compute::cast(array.as_ref(), value_type).context(ComputeArrowSnafu)?;
-        return min_max_scalar(&decoded, value_type);
+        let values = array.as_any_dictionary().values();
+        let logical_type = match logical_type {
+            ArrowDataType::Dictionary(_, logical_value_type) => logical_value_type,
+            _ => value_type,
+        };
+        return min_max_scalar(&values, logical_type);
     }
 
     let stats = match logical_type {
@@ -274,7 +285,7 @@ fn min_max_scalar(array: &ArrayRef, logical_type: &ArrowDataType) -> Result<Opti
         _ => None,
     };
 
-    Ok(stats)
+    stats
 }
 
 trait ScalarValueFromPrimitive: ArrowPrimitiveType {
@@ -433,23 +444,38 @@ fn fixed_size_binary_min_max(array: &FixedSizeBinaryArray) -> Option<ScalarPair>
 pub(crate) struct BatchPruningStats<'a> {
     stats: &'a BatchStats,
     metadata: &'a RegionMetadataRef,
+    skip_fields: bool,
 }
 
 impl<'a> BatchPruningStats<'a> {
     /// Creates a new [`BatchPruningStats`].
-    pub(crate) fn new(stats: &'a BatchStats, metadata: &'a RegionMetadataRef) -> Self {
-        Self { stats, metadata }
+    pub(crate) fn new(
+        stats: &'a BatchStats,
+        metadata: &'a RegionMetadataRef,
+        skip_fields: bool,
+    ) -> Self {
+        Self {
+            stats,
+            metadata,
+            skip_fields,
+        }
     }
 }
 
 impl PruningStatistics for BatchPruningStats<'_> {
     fn min_values(&self, column: &Column) -> Option<ArrayRef> {
         let col = self.metadata.column_by_name(&column.name)?;
+        if self.skip_fields && col.semantic_type == SemanticType::Field {
+            return None;
+        }
         self.stats.min_values(col.column_id)
     }
 
     fn max_values(&self, column: &Column) -> Option<ArrayRef> {
         let col = self.metadata.column_by_name(&column.name)?;
+        if self.skip_fields && col.semantic_type == SemanticType::Field {
+            return None;
+        }
         self.stats.max_values(col.column_id)
     }
 

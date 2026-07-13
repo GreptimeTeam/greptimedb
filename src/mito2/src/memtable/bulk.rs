@@ -449,8 +449,11 @@ impl Memtable for BulkMemtable {
                 if bulk_parts.should_compact_unordered_part()
                     && let Some(bulk_part) = bulk_parts.unordered_part.to_bulk_part()?
                 {
-                    let batch_stats =
-                        BatchStats::compute(std::slice::from_ref(&bulk_part.batch), &self.metadata);
+                    let batch_stats = BatchStats::compute(
+                        std::slice::from_ref(&bulk_part.batch),
+                        &self.metadata,
+                        !self.append_mode,
+                    );
                     bulk_parts.parts.push(BulkPartWrapper {
                         part: PartToMerge::Bulk {
                             part: bulk_part,
@@ -462,8 +465,11 @@ impl Memtable for BulkMemtable {
                     bulk_parts.unordered_part.clear();
                 }
             } else {
-                let batch_stats =
-                    BatchStats::compute(std::slice::from_ref(&fragment.batch), &self.metadata);
+                let batch_stats = BatchStats::compute(
+                    std::slice::from_ref(&fragment.batch),
+                    &self.metadata,
+                    !self.append_mode,
+                );
                 bulk_parts.parts.push(BulkPartWrapper {
                     part: PartToMerge::Bulk {
                         part: fragment,
@@ -515,17 +521,13 @@ impl Memtable for BulkMemtable {
             if !bulk_parts.unordered_part.is_empty()
                 && let Some(unordered_bulk_part) = bulk_parts.unordered_part.to_bulk_part()?
             {
-                let batch_stats = BatchStats::compute(
-                    std::slice::from_ref(&unordered_bulk_part.batch),
-                    &self.metadata,
-                );
                 let part_stats = unordered_bulk_part.to_memtable_stats(&self.metadata);
                 let range = MemtableRange::new(
                     Arc::new(MemtableRangeContext::new(
                         self.id,
                         Box::new(BulkRangeIterBuilder {
                             part: unordered_bulk_part,
-                            batch_stats,
+                            batch_stats: None,
                             context: context.clone(),
                             sequence,
                         }),
@@ -550,7 +552,7 @@ impl Memtable for BulkMemtable {
                         part, batch_stats, ..
                     } => Box::new(BulkRangeIterBuilder {
                         part: part.clone(),
-                        batch_stats: batch_stats.clone(),
+                        batch_stats: Some(batch_stats.clone()),
                         context: context.clone(),
                         sequence,
                     }),
@@ -787,7 +789,7 @@ impl BulkMemtable {
 /// Iterator builder for bulk range
 pub struct BulkRangeIterBuilder {
     pub part: BulkPart,
-    pub(crate) batch_stats: BatchStats,
+    pub(crate) batch_stats: Option<BatchStats>,
     pub context: Arc<BulkIterContext>,
     pub sequence: Option<SequenceRange>,
 }
@@ -816,7 +818,11 @@ impl IterBuilder for BulkRangeIterBuilder {
         _time_range: Option<(Timestamp, Timestamp)>,
         metrics: Option<MemScanMetrics>,
     ) -> Result<BoxedRecordBatchIterator> {
-        if should_prune_bulk_part(&self.batch_stats, &self.context) {
+        if self
+            .batch_stats
+            .as_ref()
+            .is_some_and(|stats| should_prune_bulk_part(stats, &self.context))
+        {
             return Ok(Box::new(std::iter::empty()));
         }
 
@@ -1286,6 +1292,7 @@ impl MemtableCompactor {
                 max_sequence,
                 estimated_series_count,
                 metadata,
+                dedup,
             );
 
             common_telemetry::trace!(
@@ -2243,7 +2250,7 @@ mod tests {
     /// Helper to create a BulkPartWrapper from a BulkPart.
     fn create_bulk_part_wrapper(part: BulkPart) -> BulkPartWrapper {
         let metadata = metadata_for_test();
-        let batch_stats = BatchStats::compute(std::slice::from_ref(&part.batch), &metadata);
+        let batch_stats = BatchStats::compute(std::slice::from_ref(&part.batch), &metadata, false);
         BulkPartWrapper {
             part: PartToMerge::Bulk {
                 part,

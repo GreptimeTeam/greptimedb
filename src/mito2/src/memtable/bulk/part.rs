@@ -1270,7 +1270,8 @@ pub(crate) fn should_prune_bulk_part(stats: &BatchStats, context: &BulkIterConte
         None => return false,
     };
     let region_meta = context.read_format().metadata();
-    let pruning_stats = BatchPruningStats::new(stats, region_meta);
+    let pruning_stats =
+        BatchPruningStats::new(stats, region_meta, context.pre_filter_mode().skip_fields());
     let mask = predicate.prune_with_stats(&pruning_stats, region_meta.schema.arrow_schema());
     !mask.first().copied().unwrap_or(true)
 }
@@ -1303,7 +1304,7 @@ impl MultiBulkPart {
     pub fn from_bulk_part(part: BulkPart, metadata: &RegionMetadata) -> Self {
         let num_rows = part.num_rows();
         let series_count = part.estimated_series_count();
-        let batch_stats = BatchStats::compute(std::slice::from_ref(&part.batch), metadata);
+        let batch_stats = BatchStats::compute(std::slice::from_ref(&part.batch), metadata, false);
         let mut batches = SmallVec::new();
         batches.push(part.batch);
 
@@ -1327,6 +1328,7 @@ impl MultiBulkPart {
     /// * `max_sequence` - Maximum sequence number across all batches
     /// * `series_count` - Number of series in the batches
     /// * `metadata` - Region metadata for computing batch statistics
+    /// * `skip_fields` - Whether to skip field column statistics
     ///
     /// # Panics
     /// Panics if batches is empty.
@@ -1337,11 +1339,12 @@ impl MultiBulkPart {
         max_sequence: SequenceNumber,
         series_count: usize,
         metadata: &RegionMetadata,
+        skip_fields: bool,
     ) -> Self {
         assert!(!batches.is_empty(), "batches must not be empty");
 
         let total_rows = batches.iter().map(|b| b.num_rows()).sum();
-        let batch_stats = BatchStats::compute(&batches, metadata);
+        let batch_stats = BatchStats::compute(&batches, metadata, skip_fields);
 
         Self {
             batches: SmallVec::from_vec(batches),
@@ -1428,7 +1431,11 @@ impl MultiBulkPart {
     fn prune_batches(&self, context: &BulkIterContextRef) -> Vec<RecordBatch> {
         if let Some(predicate) = &context.predicate {
             let region_meta = context.read_format().metadata();
-            let pruning_stats = BatchPruningStats::new(&self.batch_stats, region_meta);
+            let pruning_stats = BatchPruningStats::new(
+                &self.batch_stats,
+                region_meta,
+                context.pre_filter_mode().skip_fields(),
+            );
             let mask =
                 predicate.prune_with_stats(&pruning_stats, region_meta.schema.arrow_schema());
             self.batches
@@ -2598,6 +2605,7 @@ mod tests {
             max_seq,
             groups.len(),
             &metadata,
+            false,
         );
         (multi, metadata)
     }
@@ -2723,7 +2731,19 @@ mod tests {
             false,
         )
         .unwrap();
-        let batch_stats = BatchStats::compute(std::slice::from_ref(&part.batch), &metadata);
+        let batch_stats = BatchStats::compute(std::slice::from_ref(&part.batch), &metadata, false);
+        assert!(should_prune_bulk_part(&batch_stats, &context));
+
+        // The stored k0 column is dictionary encoded. Stats use the dictionary values array.
+        let context = BulkIterContext::new(
+            metadata.clone(),
+            None,
+            Some(Predicate::new(vec![
+                datafusion_expr::col("k0").eq(datafusion_expr::lit("missing")),
+            ])),
+            false,
+        )
+        .unwrap();
         assert!(should_prune_bulk_part(&batch_stats, &context));
 
         let context = BulkIterContext::new(
@@ -2736,6 +2756,41 @@ mod tests {
         )
         .unwrap();
         assert!(should_prune_bulk_part(&batch_stats, &context));
+    }
+
+    #[test]
+    fn test_bulk_part_stats_skip_fields() {
+        let input = [MutationInput {
+            k0: "a",
+            k1: 10,
+            timestamps: &[1, 2],
+            v1: &[Some(10.0), Some(11.0)],
+            sequence: 0,
+        }];
+        let metadata = metadata_for_test();
+        let part = build_converted_bulk_part(&input);
+        let stats = BatchStats::compute(std::slice::from_ref(&part.batch), &metadata, true);
+        let tag_context = BulkIterContext::new(
+            metadata.clone(),
+            None,
+            Some(Predicate::new(vec![
+                datafusion_expr::col("k1").eq(datafusion_expr::lit(999u32)),
+            ])),
+            false,
+        )
+        .unwrap();
+        assert!(should_prune_bulk_part(&stats, &tag_context));
+
+        let field_context = BulkIterContext::new(
+            metadata,
+            None,
+            Some(Predicate::new(vec![
+                datafusion_expr::col("v1").gt(datafusion_expr::lit(100.0f64)),
+            ])),
+            false,
+        )
+        .unwrap();
+        assert!(!should_prune_bulk_part(&stats, &field_context));
     }
 
     #[test]
@@ -2755,7 +2810,7 @@ mod tests {
             false,
         )
         .unwrap();
-        let batch_stats = BatchStats::compute(std::slice::from_ref(&part.batch), &metadata);
+        let batch_stats = BatchStats::compute(std::slice::from_ref(&part.batch), &metadata, false);
         assert!(!should_prune_bulk_part(&batch_stats, &context));
     }
 }
