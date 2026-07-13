@@ -24,7 +24,6 @@ impl BackgroundProducerWorker {
         &mut self,
         PendingRequest {
             batch,
-            region_ids,
             sender,
             size: _size,
         }: PendingRequest,
@@ -38,7 +37,6 @@ impl BackgroundProducerWorker {
 
         if let Ok(result) = &result {
             let total_record_size = result.encoded_request_size as u64;
-            let _ = region_ids;
 
             let max_offset = result.offsets.iter().max().cloned().unwrap_or_default() as u64;
             self.topic_stats

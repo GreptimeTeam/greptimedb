@@ -1418,7 +1418,7 @@ mod tests {
         assert_eq!(downgrade_region_instruction, downgrade_region);
 
         // legacy upgrade region instruction
-        let upgrade_region_instruction = r#"{"UpgradeRegion":{"region_id":4398046511105,"last_entry_id":null,"metadata_last_entry_id":null,"replay_timeout":"1s","replay_entry_id":null,"metadata_replay_entry_id":null}}"#;
+        let upgrade_region_instruction = r#"{"UpgradeRegion":{"region_id":4398046511105,"last_entry_id":null,"metadata_last_entry_id":null,"replay_timeout":"1s","location_id":null,"replay_entry_id":null,"metadata_replay_entry_id":null}}"#;
         let upgrade_region_instruction: Instruction =
             serde_json::from_str(upgrade_region_instruction).unwrap();
         let upgrade_region = Instruction::UpgradeRegions(vec![UpgradeRegion {

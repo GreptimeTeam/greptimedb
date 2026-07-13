@@ -69,10 +69,8 @@ pub(crate) async fn prepare(
         },
         ..Default::default()
     };
-    let high_watermark = Arc::new(DashMap::new());
-    let manager = ClientManager::try_new(&config, high_watermark)
-        .await
-        .unwrap();
+    let topic_stats = Arc::new(DashMap::new());
+    let manager = ClientManager::try_new(&config, topic_stats).await.unwrap();
 
     (manager, topics)
 }

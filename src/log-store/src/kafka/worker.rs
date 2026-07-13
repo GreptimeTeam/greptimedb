@@ -25,7 +25,6 @@ use rskafka::client::partition::Compression;
 use rskafka::record::Record;
 use snafu::{OptionExt, ResultExt};
 use store_api::logstore::provider::KafkaProvider;
-use store_api::storage::RegionId;
 use tokio::sync::mpsc::Receiver;
 use tokio::sync::oneshot::{self};
 
@@ -39,25 +38,17 @@ pub(crate) enum WorkerRequest {
 }
 
 impl WorkerRequest {
-    pub(crate) fn new_produce_request(
-        region_id: RegionId,
-        batch: Vec<Record>,
-    ) -> (WorkerRequest, ProduceResultHandle) {
+    pub(crate) fn new_produce_request(batch: Vec<Record>) -> (WorkerRequest, ProduceResultHandle) {
         let (tx, rx) = oneshot::channel();
 
         (
-            WorkerRequest::Produce(ProduceRequest {
-                region_id,
-                batch,
-                sender: tx,
-            }),
+            WorkerRequest::Produce(ProduceRequest { batch, sender: tx }),
             ProduceResultHandle { receiver: rx },
         )
     }
 }
 
 pub(crate) struct ProduceRequest {
-    region_id: RegionId,
     batch: Vec<Record>,
     sender: oneshot::Sender<ProduceResultReceiver>,
 }
@@ -105,7 +96,6 @@ impl ProduceResultReceiver {
 
 pub(crate) struct PendingRequest {
     batch: Vec<Record>,
-    region_ids: Vec<RegionId>,
     size: usize,
     sender: oneshot::Sender<Result<Vec<i64>>>,
 }

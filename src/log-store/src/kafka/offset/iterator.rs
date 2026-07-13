@@ -68,6 +68,7 @@ impl RegionWalRange {
 impl RegionWalOffsetIterator for RegionWalRange {
     fn next_batch_hint(&self, avg_size: usize) -> Option<NextBatchHint> {
         if let Some(size) = self.next_batch_size() {
+            let avg_size = avg_size.max(1);
             let bytes = min(size as usize * avg_size, self.max_batch_size);
             let len = bytes / avg_size;
 
@@ -136,6 +137,10 @@ mod tests {
 
         assert_eq!(range.next_batch_size(), Some(1));
         assert_eq!(range.peek(), Some(0));
+        assert_eq!(
+            range.next_batch_hint(0),
+            Some(NextBatchHint { bytes: 1, len: 1 })
+        );
 
         // Advance 1 step
         assert_eq!(range.next(), Some(0));

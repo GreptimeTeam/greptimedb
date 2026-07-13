@@ -284,8 +284,7 @@ impl LogStore for KafkaLogStore {
         for (region_id, (producer, records)) in region_grouped_records {
             // Safety: `KafkaLogStore::entry` will ensure that the
             // `Record`'s `approximate_size` must be less or equal to `max_batch_bytes`.
-            region_grouped_result_receivers
-                .push((region_id, producer.produce(region_id, records).await?))
+            region_grouped_result_receivers.push((region_id, producer.produce(records).await?))
         }
 
         let region_grouped_max_offset =
@@ -468,9 +467,7 @@ impl LogStore for KafkaLogStore {
         Ok(vec![])
     }
 
-    /// Marks all entries with ids `<=entry_id` of the given `namespace` as obsolete,
-    /// so that the log store can safely delete those entries. This method does not guarantee
-    /// that the obsolete entries are deleted immediately.
+    /// Kafka WAL pruning is coordinated by Metasrv, so this is a no-op.
     async fn obsolete(
         &self,
         _provider: &Provider,
