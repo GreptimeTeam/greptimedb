@@ -441,6 +441,9 @@ pub async fn handle_raw(
     query_ctx.set_channel(Channel::Splunk);
 
     let body = String::from_utf8_lossy(&payload);
+    if matches!(body, std::borrow::Cow::Owned(_)) {
+        debug!("splunk raw body contains invalid UTF-8; bytes replaced with U+FFFD");
+    }
     let lines = parse_raw_lines(&body);
     if lines.is_empty() {
         // HEC code 5 == "No data".
@@ -532,7 +535,10 @@ async fn resolve_pipeline_and_ingest(
     let custom_time_index = Some((format!("{};epoch;ns", greptime_timestamp()), false));
     let pipeline = match PipelineDefinition::from_name(&pipeline_name, version, custom_time_index) {
         Ok(pipeline) => pipeline,
-        Err(_) => return hec_response(StatusCode::INTERNAL_SERVER_ERROR, 8, "pipeline error"),
+        Err(e) => {
+            error!(e; "failed to resolve splunk pipeline definition: {pipeline_name}");
+            return hec_response(StatusCode::INTERNAL_SERVER_ERROR, 8, "pipeline error");
+        }
     };
     let pipeline_params =
         GreptimePipelineParams::from_map(extract_pipeline_params_map_from_headers(headers));
@@ -681,6 +687,24 @@ mod tests {
             panic!("expected object");
         };
         assert_eq!(m.len(), 2);
+    }
+
+    #[test]
+    fn parses_real_raw_client_payloads() {
+        // Shapes captured from Vector's `splunk_hec_logs` sink with
+        // `endpoint_target = "raw"`
+
+        // --- batch.max_events = 1: one event per request, no trailing newline. ---
+        let single = "190.79.85.36 - b0rnc0nfused [13/Jul/2026:05:10:25 +0000] \"GET /money HTTP/2.0\" 300 29099";
+        assert_eq!(parse_raw_lines(single), vec![single]);
+
+        // --- Vector's default batching concatenates events with NO separator.
+        //     so the lines form just one event here.
+        let concatenated = concat!(
+            "214.106.15.209 - AnthraX [13/Jul/2026:05:08:12 +0000] \"GET /secret-info HTTP/1.0\" 401 47103",
+            "245.115.225.188 - KarimMove [13/Jul/2026:05:08:12 +0000] \"PUT /apps/deploy HTTP/2.0\" 302 18226",
+        );
+        assert_eq!(parse_raw_lines(concatenated).len(), 1);
     }
 
     // ---- parse_hec_time ----
