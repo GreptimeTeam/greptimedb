@@ -1,0 +1,29 @@
+.agents/skills/greptimedb-development-docker-image/scripts/prepare_context.sh
+  s_ff3fc17ec86f31::t_1dc004a7932f08 53-70
+  s_ff3fc17ec86f31::t_c2ac9d48efc833 13
+.agents/skills/greptimedb-development-docker-image/scripts/collect_context.py
+  s_ff3fc17ec86f31::t_1dc004a7932f08 67,157
+.agents/skills/greptimedb-development-docker-image/SKILL.md
+  s_ff3fc17ec86f31::t_1dc004a7932f08 7
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.13",
+  "base_commit_sha": "6e99c7be837fc1ff15480cab582fe1b7b6038370",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_ff3fc17ec86f31": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_0a4d9c44bffewL5DHk7M1BKPcZ",
+        "model": "gpt-5.6-terra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
