@@ -32,7 +32,7 @@ Collect or discover the following before any build or push:
 | --- | --- |
 | Source repository | Treat the directory in which this skill is invoked as the default workspace. Include it as an editable field in the batch configuration; do not ask a separate confirmation. Do not assume open-source versus Enterprise. |
 | Edition and binary | Default to `greptime`; use the binary name the user requests for Enterprise builds. The copied Docker-context filename must always be `greptime`. |
-| Cargo profile and binary source | Include this in the batch configuration. Default to `nightly` and reuse its existing binary when available; let the user choose rebuild or another profile/path only when needed. |
+| Cargo profile and binary source | Include this in the batch configuration. Default to rebuilding `nightly`; reuse an existing binary only after the user explicitly accepts that its freshness is unverified. |
 | Target platform | Preselect `linux/amd64` unless Docker's server is `linux/arm64`, then preselect `linux/arm64`. Let the user override it in the batch configuration. Ubuntu 24.04 is the runtime base image, not a target-platform choice. Each image has exactly one target platform, but it may differ from the host platform. |
 | Build mode | Ask whether the user wants a locally loadable debug image or a registry push. |
 | Registry/repository | Read `IMAGE_REGISTRY` and `IMAGE_REPOSITORY` only from the selected workspace's `.env` and prefill them in the batch configuration. Example: `registry.example.com/team` + `greptimedb-dev`. |
@@ -78,7 +78,7 @@ choices:
 
 | Decision | Required choices |
 | --- | --- |
-| Cargo output | Reuse existing `nightly` binary when available (recommended), rebuild `nightly`, choose a profile/binary |
+| Cargo output | Rebuild `nightly` (recommended), reuse an existing binary only with a freshness-unverified acknowledgement, choose a profile/binary |
 | Target platform | `linux/amd64` (default unless Docker server is arm64), `linux/arm64` (default when Docker server is arm64). The selected image may be cross-built with Buildx. |
 | Build mode | Load locally (recommended), push to development registry |
 | Registry/repository | Use `.env` defaults, enter new values |
@@ -127,16 +127,20 @@ Use its report to identify:
   available.
 
 When push is selected and image configuration is complete, rerun the collector
-with `--check-registry-tag`. It uses Docker's read-only manifest
-inspection and returns `exists` or `unknown`; `unknown` includes an unavailable
-registry, an absent tag, or missing authentication and must not be treated as
-an absent tag.
+with `--check-registry-tag` and all selected image values. It uses the selected
+engine's read-only manifest inspection and returns `exists` or `unknown`;
+`unknown` includes an unavailable registry, an absent tag, or missing
+authentication and must not be treated as an absent tag.
 
 ```bash
 python3 <skill-dir>/scripts/collect_context.py \
   --source <source-checkout> \
   --bin <binary> \
   --profile <profile> \
+  --engine <docker|podman> \
+  --registry <registry> \
+  --repository <repository> \
+  --tag <tag> \
   --check-registry-tag
 ```
 
@@ -154,8 +158,8 @@ question. Its default is the existing `nightly` output when present:
 ```text
 Question: Which Cargo build output should package this image?
 Options:
-- Reuse nightly output (Recommended): use the existing `target[/<target>]/nightly/<binary>` after checking it exists and matches the platform.
-- Rebuild nightly: run Cargo with `--profile nightly`, then use its output.
+- Rebuild nightly (Recommended): run Cargo with `--profile nightly`, then use its output.
+- Reuse nightly output: use the existing output only after showing its path, modification time, size, and matching platform; freshness is unverified.
 - Choose profile or binary: provide a different Cargo profile or an explicit binary path.
 ```
 
@@ -231,18 +235,9 @@ For a native-platform build, Podman can be used if Docker is unavailable. For
 any non-native request, require Docker Buildx. Do not silently fall back to a
 native build when the requested image platform differs.
 
-If the requested target is `linux/arm64` from an `amd64` Linux host, verify a
-Buildx builder with emulation first. The documented fallback for compiling the
-binary is:
-
-```bash
-rustup target add aarch64-unknown-linux-gnu
-sudo apt-get install -y gcc-aarch64-linux-gnu
-docker run --rm --privileged multiarch/qemu-user-static --reset -p yes
-```
-
-Explain that `sudo` and `--privileged` need user approval before running them.
-Prefer a configured Buildx builder when available.
+If the requested target is unavailable, stop and ask the user to configure a
+Buildx builder and cross-compilation toolchain externally. Do not automate
+privileged QEMU or binfmt setup, and never run an unpinned privileged image.
 
 ### 2. Build the executable for the image platform
 
@@ -250,7 +245,7 @@ From the source checkout, build the requested binary. For open-source amd64:
 
 ```bash
 <skill-dir>/scripts/build_binary.sh \
-  --source <source-checkout> --bin greptime --profile nightly
+  --source <source-checkout> --package cmd --bin greptime --profile nightly
 ```
 
 For open-source arm64:
@@ -258,6 +253,7 @@ For open-source arm64:
 ```bash
 <skill-dir>/scripts/build_binary.sh \
   --source <source-checkout> \
+  --package cmd \
   --bin greptime \
   --profile nightly \
   --target aarch64-unknown-linux-gnu
@@ -287,15 +283,16 @@ cp <source-target-binary> <build-context>/greptime
 Verify it before building the image with `file <build-context>/greptime`; its
 reported architecture must match the requested target platform.
 
-Use the bundled preparation script to copy the binary. It initializes the
-Dockerfile from `assets/Dockerfile` only if the context has none, so it does not
-overwrite a local Dockerfile:
+Create a fresh isolated build context (never use the repository root) and use
+the bundled preparation script. The helper rejects an existing Dockerfile or
+binary output to prevent accidental context reuse:
 
 ```bash
 <skill-dir>/scripts/prepare_context.sh \
-  --context <build-context> \
+  --context "$(mktemp -d)" \
   --binary <source-target-binary> \
-  --dockerfile <skill-dir>/assets/Dockerfile
+  --dockerfile <skill-dir>/assets/Dockerfile \
+  --platform <platform>
 ```
 
 ### 3. Build or push the image
@@ -335,12 +332,17 @@ process instead.
 
 ### 4. Verify the result
 
-For a local image, inspect its architecture and start it with `--help`:
+For a local image, use the selected engine to inspect its architecture and
+start it with `--help`:
 
 ```bash
 docker image inspect <image-reference> --format '{{.Os}}/{{.Architecture}}'
 docker run --rm <image-reference> --help
 ```
+
+For Podman, use `podman image inspect <image-reference>` and
+`podman run --rm <image-reference> --help`. For a pushed Podman image, use
+`podman manifest inspect <image-reference>`.
 
 For a pushed image, inspect its remote manifest:
 

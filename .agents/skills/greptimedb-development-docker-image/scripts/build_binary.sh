@@ -10,10 +10,12 @@ source_dir=""
 binary_name=""
 profile=""
 target=""
+package=""
+features=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --source|--bin|--profile|--target)
+        --source|--bin|--profile|--target|--package|--features)
             if [[ $# -lt 2 ]]; then
                 usage
                 exit 2
@@ -23,6 +25,8 @@ while [[ $# -gt 0 ]]; do
                 --bin) binary_name="$2" ;;
                 --profile) profile="$2" ;;
                 --target) target="$2" ;;
+                --package) package="$2" ;;
+                --features) features="$2" ;;
             esac
             shift 2
             ;;
@@ -43,7 +47,13 @@ if [[ ! -f "$source_dir/Cargo.toml" ]]; then
     exit 1
 fi
 
-command=(cargo build --bin "$binary_name" --profile "$profile")
+command=(cargo build --locked --bin "$binary_name" --profile "$profile")
+if [[ -n "$package" ]]; then
+    command+=(--package "$package")
+fi
+if [[ -n "$features" ]]; then
+    command+=(--features "$features")
+fi
 if [[ -n "$target" ]]; then
     command+=(--target "$target")
 fi

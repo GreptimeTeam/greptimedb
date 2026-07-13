@@ -1,12 +1,13 @@
 FROM ubuntu:24.04
 
-RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
     curl \
     unzip \
     mysql-client \
-    wget
+    wget \
+    && rm -rf /var/lib/apt/lists/*
 
-ADD ./greptime /greptime/bin/
+COPY ./greptime /greptime/bin/
 
 ENV PATH=/greptime/bin/:$PATH
 
