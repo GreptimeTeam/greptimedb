@@ -14,6 +14,7 @@
 
 //! Handling flush related requests.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
@@ -153,34 +154,44 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         Ok(())
     }
 
+    /// Flushes write regions that exceed their flush threshold and returns the regions that should
+    /// stall new writes.
     pub(crate) fn maybe_flush_write_regions(
         &mut self,
-        region_ids: impl IntoIterator<Item = RegionId>,
-    ) {
-        for region_id in region_ids {
-            let Some(region) = self.regions.get_region(region_id) else {
-                continue;
+        mut region_ids: HashSet<RegionId>,
+    ) -> HashSet<RegionId> {
+        region_ids.retain(|region_id| {
+            let Some(region) = self.regions.get_region(*region_id) else {
+                return false;
             };
-            if self.flush_scheduler.is_flush_requested(region.region_id) || !region.is_writable() {
-                // Already flushing or not writable.
-                continue;
-            }
-            if !should_flush_region(
+            let (should_flush, should_stall) = region_write_buffer_status(
                 &region.version(),
                 self.config.default_region_write_buffer_size,
-            ) {
-                continue;
+            );
+
+            if should_flush
+                && !self.flush_scheduler.is_flush_requested(region.region_id)
+                && region.is_writable()
+            {
+                let task = self.new_flush_task(
+                    &region,
+                    FlushReason::RegionFull,
+                    None,
+                    self.config.clone(),
+                );
+                if let Err(e) = self.flush_scheduler.schedule_flush(
+                    region.region_id,
+                    &region.version_control,
+                    task,
+                ) {
+                    error!(e; "Failed to schedule flush task for region {}", region.region_id);
+                }
             }
 
-            let task =
-                self.new_flush_task(&region, FlushReason::RegionFull, None, self.config.clone());
-            if let Err(e) =
-                self.flush_scheduler
-                    .schedule_flush(region.region_id, &region.version_control, task)
-            {
-                error!(e; "Failed to schedule flush task for region {}", region.region_id);
-            }
-        }
+            should_stall
+        });
+
+        region_ids
     }
 
     /// Creates a flush task with specific `reason` for the `region`.
@@ -225,21 +236,23 @@ pub(crate) fn region_write_buffer_size(
     (size.as_bytes() > 0).then_some(size.as_bytes() as usize)
 }
 
-fn should_flush_region(
+/// Returns whether the region should flush and whether new writes should stall.
+fn region_write_buffer_status(
     version: &VersionRef,
     default_region_write_buffer_size: ReadableSize,
-) -> bool {
+) -> (bool, bool) {
     let Some(write_buffer_size) =
         region_write_buffer_size(version, default_region_write_buffer_size)
     else {
-        return false;
+        return (false, false);
     };
 
     let mutable_usage = version.memtables.mutable_usage();
     let memory_usage = region_memtable_usage(version);
     let mutable_limit = std::cmp::max(1, write_buffer_size / 2);
+    let should_stall = memory_usage >= write_buffer_size;
 
-    mutable_usage >= mutable_limit || memory_usage >= write_buffer_size
+    (mutable_usage >= mutable_limit || should_stall, should_stall)
 }
 
 impl<S: LogStore> RegionWorkerLoop<S> {

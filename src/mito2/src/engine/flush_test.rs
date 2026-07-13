@@ -382,6 +382,7 @@ async fn test_region_write_buffer_limit_flushes_hot_region() {
     )
     .await;
 
+    // The next write triggers a flush after the first write crosses the threshold.
     put_rows(
         &engine,
         hot_region_id,
