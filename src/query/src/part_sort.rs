@@ -339,7 +339,6 @@ struct PartSortStream {
     input_complete: bool,
     schema: SchemaRef,
     partition_ranges: Vec<PartitionRange>,
-    #[allow(dead_code)] // this is used under #[debug_assertions]
     partition: usize,
     cur_part_idx: usize,
     evaluating_batch: Option<DfRecordBatch>,
@@ -978,6 +977,15 @@ impl PartSortStream {
         }
     }
 
+    fn exhausted_partition_ranges_error(&self, rows: usize) -> DataFusionError {
+        DataFusionError::Internal(format!(
+            "PartSortExec input partition {} has {} unconsumed row(s) after exhausting {} declared PartitionRange(s)",
+            self.partition,
+            rows,
+            self.partition_ranges.len(),
+        ))
+    }
+
     /// Try to split the input batch if it contains data that exceeds the current partition range.
     ///
     /// When the input batch contains data that exceeds the current partition range, this function
@@ -1040,7 +1048,9 @@ impl PartSortStream {
 
         // If we've processed all partitions, mark completion.
         if self.cur_part_idx >= self.partition_ranges.len() {
-            debug_assert!(remaining_range.num_rows() == 0);
+            if remaining_range.num_rows() != 0 {
+                return Err(self.exhausted_partition_ranges_error(remaining_range.num_rows()));
+            }
             self.input_complete = true;
             return Ok(());
         }
@@ -1103,8 +1113,9 @@ impl PartSortStream {
 
         // If we've processed all partitions, sort and output
         if self.cur_part_idx >= self.partition_ranges.len() {
-            // assert there is no data beyond the last partition range (remaining is empty).
-            debug_assert!(remaining_range.num_rows() == 0);
+            if remaining_range.num_rows() != 0 {
+                return Err(self.exhausted_partition_ranges_error(remaining_range.num_rows()));
+            }
 
             // Sort and output the final group
             return self.sorted_buffer_if_non_empty();
@@ -1168,13 +1179,9 @@ impl PartSortStream {
             {
                 // Check if we've already processed all partitions
                 if self.cur_part_idx >= self.partition_ranges.len() {
-                    // All partitions processed, discard remaining data
-                    if let Some(sorted_batch) = self.sorted_buffer_if_non_empty()? {
-                        self.mark_dynamic_filter_complete();
-                        return Poll::Ready(Some(Ok(sorted_batch)));
-                    }
-                    self.mark_dynamic_filter_complete();
-                    return Poll::Ready(None);
+                    return Poll::Ready(Some(Err(
+                        self.exhausted_partition_ranges_error(evaluating_batch.num_rows())
+                    )));
                 }
 
                 if let Some(sorted_batch) = self.split_batch(evaluating_batch)? {
@@ -1232,7 +1239,7 @@ mod test {
     use arrow_schema::{DataType, Field, Schema, SortOptions, TimeUnit};
     use common_time::Timestamp;
     use datafusion_physical_expr::expressions::Column;
-    use futures::StreamExt;
+    use futures::{StreamExt, TryStreamExt};
     use store_api::region_engine::PartitionRange;
 
     use super::*;
@@ -1599,6 +1606,87 @@ mod test {
                 None,
             )
             .await;
+        }
+    }
+
+    async fn execute_declared_range_outlier(
+        input_values: Vec<i64>,
+        options: SortOptions,
+        limit: Option<usize>,
+    ) -> datafusion_common::Result<Vec<DfRecordBatch>> {
+        let unit = TimeUnit::Millisecond;
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "ts",
+            DataType::Timestamp(unit, None),
+            false,
+        )]));
+        let declared_range = PartitionRange {
+            start: Timestamp::new(0, unit.into()),
+            end: Timestamp::new(10, unit.into()),
+            num_rows: input_values.len(),
+            identifier: 0,
+        };
+        let input = Arc::new(MockInputExec::new(
+            vec![vec![
+                DfRecordBatch::try_new(schema.clone(), vec![new_ts_array(unit, input_values)])
+                    .unwrap(),
+            ]],
+            schema,
+        ));
+        let exec = PartSortExec::try_new(
+            PhysicalSortExpr {
+                expr: Arc::new(Column::new("ts", 0)),
+                options,
+            },
+            limit,
+            vec![vec![declared_range]],
+            input,
+        )
+        .unwrap();
+
+        exec.execute(0, Arc::new(TaskContext::default()))?
+            .try_collect()
+            .await
+    }
+
+    #[tokio::test]
+    async fn ascending_declared_range_outlier() {
+        let error = execute_declared_range_outlier(vec![1, 11], SortOptions::default(), None)
+            .await
+            .unwrap_err();
+
+        match error {
+            DataFusionError::Internal(message) => {
+                assert!(
+                    message.contains("unconsumed row(s) after exhausting"),
+                    "unexpected internal error: {message}"
+                );
+            }
+            error => panic!("expected internal error, got {error:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn descending_topk_declared_range_outlier() {
+        let error = execute_declared_range_outlier(
+            vec![1, 11],
+            SortOptions {
+                descending: true,
+                ..Default::default()
+            },
+            Some(2),
+        )
+        .await
+        .unwrap_err();
+
+        match error {
+            DataFusionError::Internal(message) => {
+                assert!(
+                    message.contains("unconsumed row(s) after exhausting"),
+                    "unexpected internal error: {message}"
+                );
+            }
+            error => panic!("expected internal error, got {error:?}"),
         }
     }
 
