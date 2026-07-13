@@ -1,0 +1,24 @@
+.agents/skills/greptimedb-development-docker-image/scripts/next_image_tag.py
+  s_ff3fc17ec86f31::t_541e710afd3a68 2-15
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.13",
+  "base_commit_sha": "f243d002fdcf7c2a310eda15a04d8ed9bead5b25",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_ff3fc17ec86f31": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_0a4d9c44bffewL5DHk7M1BKPcZ",
+        "model": "gpt-5.6-terra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
