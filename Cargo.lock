@@ -11020,6 +11020,7 @@ dependencies = [
  "bytemuck",
  "common-error",
  "common-macro",
+ "common-query",
  "common-recordbatch",
  "common-telemetry",
  "criterion 0.7.0",

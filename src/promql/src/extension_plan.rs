@@ -41,12 +41,6 @@ pub use union_distinct_on::{UnionDistinctOn, UnionDistinctOnExec, UnionDistinctO
 
 pub type Millisecond = <TimestampMillisecondType as ArrowPrimitiveType>::Native;
 
-pub(crate) const PROMETHEUS_STALE_NAN_BITS: u64 = 0x7ff0_0000_0000_0002;
-
-pub(crate) fn is_prometheus_stale_nan(value: f64) -> bool {
-    value.to_bits() == PROMETHEUS_STALE_NAN_BITS
-}
-
 const METRIC_NUM_SERIES: &str = "num_series";
 
 /// Utilities for handling unfix logic in extension plans

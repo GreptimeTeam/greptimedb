@@ -18,6 +18,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
+use common_query::prometheus::is_prometheus_stale_nan;
 use datafusion::arrow::array::{Array, Float64Array, TimestampMillisecondArray, UInt64Array};
 use datafusion::arrow::datatypes::{DataType, SchemaRef};
 use datafusion::arrow::record_batch::RecordBatch;
@@ -45,8 +46,7 @@ use snafu::ResultExt;
 use crate::error::{DeserializeSnafu, Result};
 use crate::extension_plan::series_divide::SeriesDivide;
 use crate::extension_plan::{
-    METRIC_NUM_SERIES, Millisecond, is_prometheus_stale_nan, resolve_column_name,
-    serialize_column_index,
+    METRIC_NUM_SERIES, Millisecond, resolve_column_name, serialize_column_index,
 };
 use crate::metrics::PROMQL_SERIES_COUNT;
 
@@ -580,6 +580,7 @@ impl InstantManipulateStream {
                 match curr.cmp(&expected_ts) {
                     Ordering::Equal => {
                         if let Some(field_column) = &field_column
+                            && field_column.is_valid(cursor)
                             && is_prometheus_stale_nan(field_column.value(cursor))
                         {
                             // Ignore the stale marker.
@@ -614,6 +615,7 @@ impl InstantManipulateStream {
                     if prev_ts + self.lookback_delta > expected_ts {
                         // only use the point in the time range
                         if let Some(field_column) = &field_column
+                            && field_column.is_valid(prev_cursor)
                             && is_prometheus_stale_nan(field_column.value(prev_cursor))
                         {
                             // Do not use a stale marker as the newest value.
@@ -625,6 +627,7 @@ impl InstantManipulateStream {
                     }
                 }
             } else if let Some(field_column) = &field_column
+                && field_column.is_valid(cursor)
                 && is_prometheus_stale_nan(field_column.value(cursor))
             {
                 // Do not use a stale marker as the newest value.
@@ -689,6 +692,7 @@ fn reuse_constant_column(array: &Arc<dyn Array>, len: usize) -> DataFusionResult
 
 #[cfg(test)]
 mod test {
+    use datafusion::arrow::buffer::NullBuffer;
     use datafusion::arrow::datatypes::{DataType, Field, Schema};
     use datafusion::common::ToDFSchema;
     use datafusion::datasource::memory::MemorySourceConfig;
@@ -697,7 +701,6 @@ mod test {
     use datafusion::prelude::SessionContext;
 
     use super::*;
-    use crate::extension_plan::PROMETHEUS_STALE_NAN_BITS;
     use crate::extension_plan::test_util::{
         TIME_INDEX_COLUMN, prepare_test_data, prepare_test_data_with_stale_marker,
     };
@@ -1398,7 +1401,7 @@ mod test {
                 Arc::new(TimestampMillisecondArray::from(vec![500, 1_000])),
                 Arc::new(Float64Array::from(vec![
                     42.0,
-                    f64::from_bits(PROMETHEUS_STALE_NAN_BITS),
+                    f64::from_bits(0x7ff0_0000_0000_0002),
                 ])),
             ],
         )
@@ -1429,5 +1432,66 @@ mod test {
             "the stale marker must suppress both the exact and lookback selections rather than \
              falling back to 42.0"
         );
+    }
+
+    #[tokio::test]
+    async fn null_value_backed_by_stale_bits_is_selected_for_exact_and_lookback() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(
+                TIME_INDEX_COLUMN,
+                DataType::Timestamp(datafusion::arrow::datatypes::TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new("value", DataType::Float64, true),
+        ]));
+        let field_column = Float64Array::new(
+            vec![f64::from_bits(0x7ff0_0000_0000_0002)].into(),
+            Some(NullBuffer::from(vec![false])),
+        );
+        assert!(!field_column.is_valid(0));
+        assert_eq!(field_column.value(0).to_bits(), 0x7ff0_0000_0000_0002);
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(TimestampMillisecondArray::from(vec![1_000])),
+                Arc::new(field_column),
+            ],
+        )
+        .unwrap();
+        let input = Arc::new(DataSourceExec::new(Arc::new(
+            MemorySourceConfig::try_new(&[vec![batch]], schema, None).unwrap(),
+        )));
+        let exec = Arc::new(InstantManipulateExec {
+            start: 1_000,
+            end: 1_500,
+            lookback_delta: 1_000,
+            interval: 500,
+            time_index_column: TIME_INDEX_COLUMN.to_string(),
+            field_column: Some("value".to_string()),
+            reuse_tsid_column: false,
+            input,
+            metric: ExecutionPlanMetricsSet::new(),
+        });
+
+        let context = SessionContext::default();
+        let batches = datafusion::physical_plan::collect(exec, context.task_ctx())
+            .await
+            .unwrap();
+        assert_eq!(batches.iter().map(RecordBatch::num_rows).sum::<usize>(), 2);
+        let batch = batches.iter().find(|batch| batch.num_rows() == 2).unwrap();
+        let timestamps = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<TimestampMillisecondArray>()
+            .unwrap();
+        let values = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+
+        assert_eq!(timestamps.values(), &[1_000, 1_500]);
+        assert!(!values.is_valid(0));
+        assert!(!values.is_valid(1));
     }
 }

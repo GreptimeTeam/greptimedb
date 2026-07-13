@@ -16,6 +16,7 @@
 
 use std::sync::Arc;
 
+use common_query::prometheus::PROMETHEUS_STALE_NAN_BITS;
 use common_recordbatch::DfRecordBatch as RecordBatch;
 use datafusion::arrow::array::Float64Array;
 use datafusion::arrow::datatypes::{
@@ -25,8 +26,6 @@ use datafusion::datasource::memory::MemorySourceConfig;
 use datafusion::datasource::source::DataSourceExec;
 use datatypes::arrow::array::TimestampMillisecondArray;
 use datatypes::arrow_array::StringArray;
-
-use crate::extension_plan::PROMETHEUS_STALE_NAN_BITS;
 
 pub(crate) const TIME_INDEX_COLUMN: &str = "timestamp";
 
