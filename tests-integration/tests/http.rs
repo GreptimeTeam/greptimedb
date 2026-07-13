@@ -7810,7 +7810,9 @@ pub async fn test_log_query(store_type: StorageType) {
         .await;
     assert_eq!(res.status(), StatusCode::OK, "{:?}", res.text().await);
     let res = client
-        .post("/v1/sql?sql=insert into logs values ('2024-11-07 10:53:50', 'hello');")
+        .post(
+            "/v1/sql?sql=insert into logs values ('2024-11-07 10:53:50', 'before-explicit-end'), ('2024-11-07 10:53:51', 'at-explicit-end'), ('2024-11-07 10:53:52', 'after-explicit-end');",
+        )
         .header("Content-Type", "application/x-www-form-urlencoded")
         .send()
         .await;
@@ -7825,12 +7827,12 @@ pub async fn test_log_query(store_type: StorageType) {
         },
         time_filter: TimeFilter {
             start: Some("2024-11-07".to_string()),
-            end: None,
+            end: Some("2024-11-07T10:53:51Z".to_string()),
             span: None,
         },
         limit: Limit {
             skip: None,
-            fetch: Some(1),
+            fetch: Some(3),
         },
         columns: vec!["ts".to_string(), "message".to_string()],
         filters: Default::default(),
@@ -7847,7 +7849,7 @@ pub async fn test_log_query(store_type: StorageType) {
     assert_eq!(res.status(), StatusCode::OK, "{:?}", res.text().await);
     let resp = res.text().await;
     let v = get_rows_from_output(&resp);
-    assert_eq!(v, "[[1730976830000,\"hello\"]]");
+    assert_eq!(v, "[[1730976830000,\"before-explicit-end\"]]");
 
     guard.remove_all().await;
 }
