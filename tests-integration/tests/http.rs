@@ -168,6 +168,7 @@ macro_rules! http_tests {
                 test_splunk_health,
                 test_splunk_health_is_public,
                 test_splunk_logs,
+                test_splunk_raw,
                 test_log_query,
                 test_jaeger_query_api,
                 test_jaeger_query_api_for_trace_v1,
@@ -1711,6 +1712,198 @@ transform:
     .await;
     assert_eq!(StatusCode::FORBIDDEN, res.status());
     assert!(res.text().await.contains("\"code\":4"));
+
+    guard.remove_all().await;
+}
+
+pub async fn test_splunk_raw(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+
+    let user_provider =
+        user_provider_from_option("static_user_provider:cmd:greptime_user=greptime_pwd").unwrap();
+    let (app, mut guard) = setup_test_http_app_with_frontend_and_user_provider(
+        store_type,
+        "test_splunk_raw",
+        Some(user_provider),
+    )
+    .await;
+    let client = TestClient::new(app).await;
+
+    async fn query(client: &TestClient, sql: &str) -> String {
+        let res = client
+            .get(format!("/v1/sql?sql={sql}").as_str())
+            .header("Authorization", basic_auth("greptime_user", "greptime_pwd"))
+            .send()
+            .await;
+        assert_eq!(res.status(), StatusCode::OK, "query failed: {sql}");
+        res.text().await
+    }
+
+    // HEC `Authorization: Splunk <user:pass>` + plain-text content type (raw bodies).
+    let splunk_headers = || {
+        vec![
+            (
+                HeaderName::from_static("authorization"),
+                HeaderValue::from_static("Splunk greptime_user:greptime_pwd"),
+            ),
+            (
+                HeaderName::from_static("content-type"),
+                HeaderValue::from_static("text/plain"),
+            ),
+        ]
+    };
+    let raw_path = "/v1/splunk/services/collector/raw";
+
+    // 1. Raw lines with request-level metadata; `channel` (param AND header) is
+    //    accepted and ignored (ack protocol not implemented); `?time=` sets the
+    //    timestamp for every event; `index` routes the table. Blank lines are
+    //    skipped; indentation inside a line is preserved verbatim.
+    let mut headers = splunk_headers();
+    headers.push((
+        HeaderName::from_static("x-splunk-request-channel"),
+        HeaderValue::from_static("FE0ECFAD-13D5-401B-847D-77833BD77131"),
+    ));
+    let body = "line one\nline two\r\n\n  indented line";
+    let res = send_req(
+        &client,
+        headers,
+        &format!(
+            "{raw_path}?channel=FE0ECFAD-13D5-401B-847D-77833BD77131\
+             &host=web-01&source=nginx&sourcetype=access&index=raw_main&time=1700000100"
+        ),
+        body.as_bytes().to_vec(),
+        false,
+    )
+    .await;
+    assert_eq!(StatusCode::OK, res.status());
+    assert!(res.text().await.contains("\"code\":0"));
+
+    // 2. Rows landed: `message` holds each line verbatim, metadata columns carry the
+    //    query-param values, `?time=` (epoch seconds) became the timestamp.
+    let rows = get_rows_from_output(
+        &query(
+            &client,
+            "select host, source, sourcetype, message, greptime_timestamp from raw_main order by message",
+        )
+        .await,
+    );
+    assert_eq!(
+        rows,
+        concat!(
+            r#"[["web-01","nginx","access","  indented line",1700000100000000000],"#,
+            r#"["web-01","nginx","access","line one",1700000100000000000],"#,
+            r#"["web-01","nginx","access","line two",1700000100000000000]]"#
+        )
+    );
+
+    // 3. host/source/sourcetype are tags (primary key); `message` is not.
+    let create = query(&client, "show create table raw_main").await;
+    let pk = create
+        .split("PRIMARY KEY")
+        .nth(1)
+        .expect("raw_main should have a PRIMARY KEY");
+    for col in ["host", "source", "sourcetype"] {
+        assert!(
+            pk.contains(col),
+            "expected `{col}` in primary key: {create}"
+        );
+    }
+    assert!(
+        !pk.contains("message"),
+        "`message` must not be a tag: {create}"
+    );
+
+    // 4. No query params at all: default table (`splunk_logs`), only timestamp +
+    //    `message` columns, ingest-time timestamp.
+    let res = send_req(
+        &client,
+        splunk_headers(),
+        raw_path,
+        b"Hello World".to_vec(),
+        false,
+    )
+    .await;
+    assert_eq!(StatusCode::OK, res.status());
+    let rows = get_rows_from_output(&query(&client, "select message from splunk_logs").await);
+    assert_eq!(rows, r#"[["Hello World"]]"#);
+
+    // 5. gzip-compressed raw body on the versioned alias (exercises the
+    //    decompression layer and the `/raw/1.0` route).
+    let res = send_req(
+        &client,
+        splunk_headers(),
+        "/v1/splunk/services/collector/raw/1.0?table=raw_gzip",
+        b"compressed line".to_vec(),
+        true,
+    )
+    .await;
+    assert_eq!(StatusCode::OK, res.status());
+    let rows = get_rows_from_output(&query(&client, "select message from raw_gzip").await);
+    assert_eq!(rows, r#"[["compressed line"]]"#);
+
+    // 6. Error paths: empty body -> 5 ("No data"); unparsable `?time=` -> 6;
+    //    invalid `?table=` -> 7 ("incorrect index").
+    let res = send_req(
+        &client,
+        splunk_headers(),
+        raw_path,
+        b"  \n ".to_vec(),
+        false,
+    )
+    .await;
+    assert_eq!(StatusCode::BAD_REQUEST, res.status());
+    assert!(res.text().await.contains("\"code\":5"));
+
+    let res = send_req(
+        &client,
+        splunk_headers(),
+        &format!("{raw_path}?time=not-a-time"),
+        b"x".to_vec(),
+        false,
+    )
+    .await;
+    assert_eq!(StatusCode::BAD_REQUEST, res.status());
+    assert!(res.text().await.contains("\"code\":6"));
+
+    let res = send_req(
+        &client,
+        splunk_headers(),
+        &format!("{raw_path}?table=bad%20name"),
+        b"x".to_vec(),
+        false,
+    )
+    .await;
+    assert_eq!(StatusCode::BAD_REQUEST, res.status());
+    assert!(res.text().await.contains("\"code\":7"));
+
+    // 7. Replay of a real Vector `splunk_hec_logs` (endpoint_target = "raw") request,
+    //    path and headers verbatim from a wire capture (body trimmed): 
+    let mut headers = splunk_headers();
+    headers.push((
+        HeaderName::from_static("x-splunk-request-channel"),
+        HeaderValue::from_static("b408271e-51af-43c1-a99f-9c21f78df0cf"),
+    ));
+    let res = send_req(
+        &client,
+        headers,
+        "/v1/splunk/services/collector/raw?source=vector%2Dsrc&sourcetype=vector%5Fdemo&index=vector_raw&host=localhost",
+        b"245.158.191.1 - AnthraX [13/Jul/2026:05:10:26 +0000] \"GET /wp-admin HTTP/1.0\" 300 17922".to_vec(),
+        false,
+    )
+    .await;
+    assert_eq!(StatusCode::OK, res.status());
+    let rows = get_rows_from_output(
+        &query(
+            &client,
+            "select host, source, sourcetype, message from vector_raw",
+        )
+        .await,
+    );
+    // the percent-encoded params (`vector%2Dsrc` etc.) decode to the plain values.
+    assert_eq!(
+        rows,
+        r#"[["localhost","vector-src","vector_demo","245.158.191.1 - AnthraX [13/Jul/2026:05:10:26 +0000] \"GET /wp-admin HTTP/1.0\" 300 17922"]]"#
+    );
 
     guard.remove_all().await;
 }
