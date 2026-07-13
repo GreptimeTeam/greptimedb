@@ -1,0 +1,30 @@
+src/log-store/src/kafka/test_util.rs
+  s_62c601b727c0fc::t_af95c847482ee3 73
+src/log-store/src/kafka/log_store.rs
+  s_62c601b727c0fc::t_af95c847482ee3 650,676,734,760
+src/log-store/src/raft_engine/log_store.rs
+  s_62c601b727c0fc::t_af95c847482ee3 601,636,654,740
+src/cmd/src/datanode/scanbench.rs
+  s_62c601b727c0fc::t_10ce9d21fc7ad3 500
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.6",
+  "base_commit_sha": "d43a227c7ed7298dd806024c8a743e8d3f50fb6d",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_62c601b727c0fc": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_14a643751ffey50Kzy1nQIzVGA",
+        "model": "gpt-5.5"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
