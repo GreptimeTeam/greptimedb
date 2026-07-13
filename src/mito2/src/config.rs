@@ -38,7 +38,11 @@ pub(crate) const DEFAULT_MAX_CONCURRENT_SCAN_FILES: usize = 384;
 // Use `1/GLOBAL_WRITE_BUFFER_SIZE_FACTOR` of OS memory as global write buffer size in default mode
 const GLOBAL_WRITE_BUFFER_SIZE_FACTOR: u64 = 8;
 /// Use `1/SST_META_CACHE_SIZE_FACTOR` of OS memory size as SST meta cache size in default mode
-const SST_META_CACHE_SIZE_FACTOR: u64 = 32;
+const SST_META_CACHE_SIZE_FACTOR: u64 = 8;
+/// Use `1/PREFILTER_RESULT_CACHE_SIZE_FACTOR` of OS memory size as prefilter result cache size in default mode
+const PREFILTER_RESULT_CACHE_SIZE_FACTOR: u64 = 32;
+/// Use `1/INDEX_METADATA_CACHE_SIZE_FACTOR` of OS memory size as index metadata cache size in default mode
+const INDEX_METADATA_CACHE_SIZE_FACTOR: u64 = 32;
 /// Use `1/MEM_CACHE_SIZE_FACTOR` of OS memory size as mem cache size in default mode
 const MEM_CACHE_SIZE_FACTOR: u64 = 16;
 /// Use `1/PAGE_CACHE_SIZE_FACTOR` of OS memory size as page cache size in default mode
@@ -321,9 +325,14 @@ impl MitoConfig {
         );
         // Use 2x of global write buffer size as global write buffer reject size.
         let global_write_buffer_reject_size = global_write_buffer_size * 2;
-        // shouldn't be greater than 128MB in default mode.
+        // Page-index-bearing SST metadata can be much larger than footers alone.
+        // Keep the auto-sized default bounded, but allow a larger warm working set.
         let sst_meta_cache_size = cmp::min(
             sys_memory / SST_META_CACHE_SIZE_FACTOR,
+            ReadableSize::mb(512),
+        );
+        let prefilter_result_cache_size = cmp::min(
+            sys_memory / PREFILTER_RESULT_CACHE_SIZE_FACTOR,
             ReadableSize::mb(128),
         );
         // shouldn't be greater than 512MB in default mode.
@@ -338,7 +347,7 @@ impl MitoConfig {
         self.selector_result_cache_size = mem_cache_size;
         self.range_result_cache_size = mem_cache_size;
         // Use a smaller cache size because prefilter result usually should be small.
-        self.prefilter_result_cache_size = sst_meta_cache_size;
+        self.prefilter_result_cache_size = prefilter_result_cache_size;
 
         self.index.adjust_buffer_and_cache_size(sys_memory);
     }
@@ -356,6 +365,24 @@ impl MitoConfig {
         self.write_cache_size = size;
         self.write_cache_ttl = ttl;
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_adjust_sst_metadata_and_prefilter_cache_caps_independently() {
+        let mut config = MitoConfig::default();
+
+        config.adjust_buffer_and_cache_size(ReadableSize::gb(1));
+        assert_eq!(ReadableSize::mb(128), config.sst_meta_cache_size);
+        assert_eq!(ReadableSize::mb(32), config.prefilter_result_cache_size);
+
+        config.adjust_buffer_and_cache_size(ReadableSize::gb(64));
+        assert_eq!(ReadableSize::mb(512), config.sst_meta_cache_size);
+        assert_eq!(ReadableSize::mb(128), config.prefilter_result_cache_size);
     }
 }
 
@@ -466,7 +493,7 @@ impl IndexConfig {
         self.content_cache_size = cmp::min(self.content_cache_size, cache_size);
 
         let metadata_cache_size = cmp::min(
-            sys_memory / SST_META_CACHE_SIZE_FACTOR,
+            sys_memory / INDEX_METADATA_CACHE_SIZE_FACTOR,
             ReadableSize::mb(64),
         );
         self.metadata_cache_size = cmp::min(self.metadata_cache_size, metadata_cache_size);
