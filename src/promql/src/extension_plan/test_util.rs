@@ -26,6 +26,8 @@ use datafusion::datasource::source::DataSourceExec;
 use datatypes::arrow::array::TimestampMillisecondArray;
 use datatypes::arrow_array::StringArray;
 
+use crate::extension_plan::PROMETHEUS_STALE_NAN_BITS;
+
 pub(crate) const TIME_INDEX_COLUMN: &str = "timestamp";
 
 pub(crate) fn prepare_test_data() -> DataSourceExec {
@@ -52,7 +54,7 @@ pub(crate) fn prepare_test_data() -> DataSourceExec {
     ))
 }
 
-pub(crate) fn prepare_test_data_with_nan() -> DataSourceExec {
+pub(crate) fn prepare_test_data_with_stale_marker() -> DataSourceExec {
     let schema = Arc::new(Schema::new(vec![
         Field::new(TIME_INDEX_COLUMN, TimestampMillisecondType::DATA_TYPE, true),
         Field::new("value", DataType::Float64, true),
@@ -60,7 +62,13 @@ pub(crate) fn prepare_test_data_with_nan() -> DataSourceExec {
     let timestamp_column = Arc::new(TimestampMillisecondArray::from(vec![
         0, 30_000, 60_000, 90_000, 120_000, // every 30s
     ])) as _;
-    let field_column = Arc::new(Float64Array::from(vec![0.0, f64::NAN, 6.0, f64::NAN, 12.0])) as _;
+    let field_column = Arc::new(Float64Array::from(vec![
+        0.0,
+        f64::from_bits(PROMETHEUS_STALE_NAN_BITS),
+        6.0,
+        f64::from_bits(PROMETHEUS_STALE_NAN_BITS),
+        12.0,
+    ])) as _;
     let data = RecordBatch::try_new(schema.clone(), vec![timestamp_column, field_column]).unwrap();
 
     DataSourceExec::new(Arc::new(
