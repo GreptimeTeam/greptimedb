@@ -4200,6 +4200,12 @@ impl PromPlanner {
             .context(DataFusionPlanningSnafu)
     }
 
+    fn is_zero_row_empty_relation(plan: &LogicalPlan) -> bool {
+        // `produce_one_row` is used for input-free plans that still emit one row;
+        // only the false case is a statically proven empty vector.
+        matches!(plan, LogicalPlan::EmptyRelation(relation) if !relation.produce_one_row)
+    }
+
     /// Build a set operator (AND/OR/UNLESS)
     fn set_op_on_non_field_columns(
         &mut self,
@@ -4424,6 +4430,24 @@ impl PromPlanner {
         right_context: PromPlannerContext,
         modifier: &Option<BinModifier>,
     ) -> Result<LogicalPlan> {
+        let left_is_empty = Self::is_zero_row_empty_relation(&left);
+        let right_is_empty = Self::is_zero_row_empty_relation(&right);
+        match (left_is_empty, right_is_empty) {
+            (true, false) => {
+                self.ctx = right_context;
+                return Ok(right);
+            }
+            (false, true) => {
+                self.ctx = left_context;
+                return Ok(left);
+            }
+            (true, true) => {
+                self.ctx = left_context;
+                return Ok(left);
+            }
+            (false, false) => {}
+        }
+
         // checks
         ensure!(
             left_context.field_columns.len() == right_context.field_columns.len(),
@@ -4436,6 +4460,12 @@ impl PromPlanner {
             left_context.field_columns.len() == 1,
             MultiFieldsNotSupportedSnafu {
                 operator: "OR operator"
+            }
+        );
+        ensure!(
+            !left.schema().fields().is_empty() && !right.schema().fields().is_empty(),
+            UnexpectedPlanExprSnafu {
+                desc: "OR operator input has zero columns".to_string(),
             }
         );
 
@@ -5487,6 +5517,45 @@ mod test {
             if k.is_some() { &["job", "k"] } else { &["job"] },
             "v",
         )
+    }
+
+    async fn build_missing_le_or_normal_metric_table_provider() -> DfTableSourceProvider {
+        build_test_table_provider_with_fields(
+            &[
+                (
+                    DEFAULT_SCHEMA_NAME.to_string(),
+                    "non_existent_histogram_bucket".to_string(),
+                ),
+                (DEFAULT_SCHEMA_NAME.to_string(), "normal_metric".to_string()),
+            ],
+            &["pod", "instance"],
+        )
+        .await
+    }
+
+    fn assert_normal_metric_schema(plan: &LogicalPlan) {
+        let fields = plan.schema().fields();
+        assert_eq!(fields.len(), 4, "{fields:?}");
+        assert!(
+            fields.iter().any(|field| field.name() == "pod"),
+            "{fields:?}"
+        );
+        assert!(
+            fields.iter().any(|field| field.name() == "instance"),
+            "{fields:?}"
+        );
+        assert!(
+            fields
+                .iter()
+                .any(|field| field.name() == greptime_timestamp()),
+            "{fields:?}"
+        );
+        assert!(
+            fields.iter().any(|field| {
+                field.name() == greptime_value() && field.data_type() == &ArrowDataType::Float64
+            }),
+            "{fields:?}"
+        );
     }
 
     async fn build_test_table_provider(
@@ -9131,5 +9200,77 @@ Projection: count(prometheus_tsdb_head_series.greptime_value) AS my_series, prom
                 .to_string()
                 .contains("OR value fields have incompatible types")
         );
+    }
+
+    #[tokio::test]
+    async fn test_or_with_histogram_quantile_missing_le_column() {
+        let case = r#"histogram_quantile(0.99, non_existent_histogram_bucket) or normal_metric"#;
+        let eval_stmt = build_eval_stmt(case);
+        let table_provider = build_missing_le_or_normal_metric_table_provider().await;
+
+        let plan =
+            PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
+                .await
+                .unwrap();
+        assert_normal_metric_schema(&plan);
+    }
+
+    #[tokio::test]
+    async fn test_or_with_right_empty_histogram_restores_left_context() {
+        let eval_stmt = build_eval_stmt(
+            r#"abs(sum by(instance) (normal_metric) or histogram_quantile(0.99, sum by(pod) (non_existent_histogram_bucket)))"#,
+        );
+        let table_provider = build_missing_le_or_normal_metric_table_provider().await;
+
+        PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_or_with_both_empty_histograms() {
+        let eval_stmt = build_eval_stmt(
+            r#"histogram_quantile(0.99, left_histogram_bucket) or histogram_quantile(0.99, right_histogram_bucket)"#,
+        );
+        let table_provider = build_test_table_provider_with_fields(
+            &[
+                (
+                    DEFAULT_SCHEMA_NAME.to_string(),
+                    "left_histogram_bucket".to_string(),
+                ),
+                (
+                    DEFAULT_SCHEMA_NAME.to_string(),
+                    "right_histogram_bucket".to_string(),
+                ),
+            ],
+            &["pod", "instance"],
+        )
+        .await;
+
+        let plan =
+            PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
+                .await
+                .unwrap();
+        assert!(matches!(
+            plan,
+            LogicalPlan::EmptyRelation(relation) if !relation.produce_one_row
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_or_with_empty_histogram_modifiers() {
+        for case in [
+            r#"histogram_quantile(0.99, non_existent_histogram_bucket) or on(pod) normal_metric"#,
+            r#"normal_metric or ignoring(instance) histogram_quantile(0.99, non_existent_histogram_bucket)"#,
+        ] {
+            let eval_stmt = build_eval_stmt(case);
+            let table_provider = build_missing_le_or_normal_metric_table_provider().await;
+
+            let plan =
+                PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
+                    .await
+                    .unwrap();
+            assert_normal_metric_schema(&plan);
+        }
     }
 }
