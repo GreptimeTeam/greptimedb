@@ -232,9 +232,6 @@ impl Stream for FlightRecordBatchStream {
                     Poll::Ready(None)
                 }
                 Poll::Ready(Some(result)) => match result {
-                    Ok(FlightMessage::Schema(schema)) => {
-                        Poll::Ready(Some(Ok(this.encoder.encode_query_schema(schema.as_ref()))))
-                    }
                     Ok(flight_message) => {
                         let mut iter = this.encoder.encode(flight_message).into_iter();
                         let Some(first) = iter.next() else {

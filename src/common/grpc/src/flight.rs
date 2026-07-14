@@ -25,7 +25,7 @@ use common_recordbatch::DfRecordBatch;
 use datatypes::arrow;
 use datatypes::arrow::array::ArrayRef;
 use datatypes::arrow::buffer::Buffer;
-use datatypes::arrow::datatypes::{DataType, Schema as ArrowSchema, SchemaRef};
+use datatypes::arrow::datatypes::{Schema as ArrowSchema, SchemaRef};
 use datatypes::arrow::error::ArrowError;
 use datatypes::arrow::ipc::{MessageHeader, convert, reader, root_as_message, writer};
 use flatbuffers::FlatBufferBuilder;
@@ -87,17 +87,6 @@ impl FlightEncoder {
         }
     }
 
-    /// Encodes a query-result schema and tracks dictionaries recursively.
-    pub fn encode_query_schema(&mut self, schema: &ArrowSchema) -> FlightData {
-        self.data_gen
-            .schema_to_bytes_with_dictionary_tracker(
-                schema,
-                &mut self.dictionary_tracker,
-                &self.write_options,
-            )
-            .into()
-    }
-
     /// Encode the Arrow schema to [FlightData].
     pub fn encode_schema(&self, schema: &ArrowSchema) -> FlightData {
         SchemaAsIpc::new(schema, &self.write_options).into()
@@ -110,15 +99,15 @@ impl FlightEncoder {
     /// be encoded to exactly one [FlightData].
     pub fn encode(&mut self, flight_message: FlightMessage) -> Vec1<FlightData> {
         match flight_message {
-            FlightMessage::Schema(schema) => {
-                schema.fields().iter().for_each(|x| {
-                    if matches!(x.data_type(), DataType::Dictionary(_, _)) {
-                        self.dictionary_tracker.next_dict_id();
-                    }
-                });
-
-                vec1![self.encode_schema(schema.as_ref())]
-            }
+            FlightMessage::Schema(schema) => vec1![
+                self.data_gen
+                    .schema_to_bytes_with_dictionary_tracker(
+                        schema.as_ref(),
+                        &mut self.dictionary_tracker,
+                        &self.write_options,
+                    )
+                    .into(),
+            ],
             FlightMessage::RecordBatch(record_batch) => {
                 let (encoded_dictionaries, encoded_batch) = self
                     .data_gen
@@ -618,7 +607,7 @@ mod test {
     }
 
     #[test]
-    fn test_query_schema_with_nested_dictionary_array() -> Result<()> {
+    fn test_schema_with_nested_dictionary_array() -> Result<()> {
         let item = Arc::new(Field::new_dictionary(
             "item",
             DataType::UInt32,
@@ -643,12 +632,12 @@ mod test {
         let batch = DfRecordBatch::try_new(schema.clone(), vec![Arc::new(list)]).unwrap();
 
         let mut encoder = FlightEncoder::default();
-        let encoded_schema = encoder.encode_query_schema(&schema);
+        let encoded_schema = encoder.encode(FlightMessage::Schema(schema.clone()));
         let encoded_batch = encoder.encode(FlightMessage::RecordBatch(batch.clone()));
 
         let mut decoder = FlightDecoder::default();
         assert!(matches!(
-            decoder.try_decode(&encoded_schema)?,
+            decoder.try_decode(&encoded_schema[0])?,
             Some(FlightMessage::Schema(actual)) if actual == schema
         ));
         for data in encoded_batch.iter().take(encoded_batch.len() - 1) {

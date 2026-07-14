@@ -301,7 +301,7 @@ fn find_merge_scan(plan: &LogicalPlan) -> Option<&MergeScanLogicalPlan> {
 }
 
 #[test]
-fn dictionary_literals_are_unwrapped_only_in_remote_input() {
+fn dictionary_literals_are_unwrapped_before_pushdown() {
     let table = Arc::new(Table::new(
         TestTable::table_info(0, "t".to_string(), MITO_ENGINE.to_string()),
         FilterPushDownType::Inexact,
@@ -330,7 +330,7 @@ fn dictionary_literals_are_unwrapped_only_in_remote_input() {
     assert!(
         result
             .to_string()
-            .contains("Filter: t.pk1 = Dictionary(UInt32, Utf8(\"host-a\"))")
+            .contains("Filter: t.pk1 = Utf8(\"host-a\")")
     );
 
     let remote_input = find_merge_scan(&result).unwrap().input();
@@ -342,6 +342,34 @@ fn dictionary_literals_are_unwrapped_only_in_remote_input() {
     DFLogicalSubstraitConvertor
         .encode(remote_input, DefaultSerializer)
         .unwrap();
+}
+
+#[test]
+fn dictionary_literals_in_values_keep_their_schema() {
+    let literal = Expr::Literal(
+        ScalarValue::Dictionary(
+            Box::new(DataType::UInt32),
+            Box::new(ScalarValue::Utf8(Some("host-a".to_string()))),
+        ),
+        None,
+    );
+    let plan = LogicalPlanBuilder::values(vec![vec![literal]])
+        .unwrap()
+        .build()
+        .unwrap();
+    let schema = plan.schema().clone();
+
+    let transformed = plan
+        .transform_down_with_subqueries(&unwrap_dictionary_literals)
+        .unwrap()
+        .data;
+
+    assert_eq!(&schema, transformed.schema());
+    assert!(
+        transformed
+            .to_string()
+            .contains("Dictionary(UInt32, Utf8(\"host-a\"))")
+    );
 }
 
 #[cfg(feature = "vector_index")]
