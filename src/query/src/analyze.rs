@@ -434,7 +434,7 @@ mod tests {
                 .schema()
                 .field(0)
                 .name()
-                .to_string();
+                .clone();
             panic!("expected an arity error for multiple children, but retained `{retained}`");
         }
     }
