@@ -173,15 +173,28 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             .inc_by(delete_rows as u64);
     }
 
-    /// Handles all stalled write requests.
+    /// Handles stalled write requests whose regions no longer need to stall.
     pub(crate) async fn handle_stalled_requests(&mut self) {
-        // Handle stalled requests.
-        let stalled = std::mem::take(&mut self.stalled_requests);
-        self.stalling_count.sub(stalled.stalled_count() as i64);
-        // We already stalled these requests, don't stall them again.
-        for (_, (_, mut requests, mut bulk)) in stalled.requests {
-            self.handle_write_requests(&mut requests, &mut bulk, false)
-                .await;
+        let region_ids = self
+            .stalled_requests
+            .requests
+            .keys()
+            .copied()
+            .collect::<HashSet<_>>();
+        let stalled_region_ids = self.maybe_flush_write_regions(region_ids);
+        let ready_region_ids = self
+            .stalled_requests
+            .requests
+            .keys()
+            .filter(|region_id| !stalled_region_ids.contains(region_id))
+            .copied()
+            .collect::<Vec<_>>();
+
+        // These requests have already been stalled. Retry ready regions without stalling the
+        // same requests again. Regions that still exceed their limit remain in the queue until
+        // their own flush releases the pressure.
+        for region_id in ready_region_ids {
+            self.handle_region_stalled_requests(&region_id, false).await;
         }
     }
 

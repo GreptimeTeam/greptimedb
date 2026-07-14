@@ -40,7 +40,7 @@ use store_api::storage::{RegionId, ScanRequest};
 use tokio::sync::Notify;
 
 use crate::config::MitoConfig;
-use crate::engine::listener::{FlushListener, StallListener};
+use crate::engine::listener::{EventListener, FlushListener, StallListener};
 use crate::engine::region_hook::{RegionHook, RegionHookRef, SstFileInfo};
 use crate::manifest::action::RegionMetaActionList;
 use crate::test_util::{
@@ -51,6 +51,54 @@ use crate::test_util::{
 };
 use crate::time_provider::TimeProvider;
 use crate::worker::MAX_INITIAL_CHECK_DELAY_SECS;
+
+struct RegionFlushGate {
+    blocked_region_id: RegionId,
+    observed_region_id: RegionId,
+    blocked_flush_started: Notify,
+    resume_blocked_flush: Notify,
+    observed_flush_finished: Notify,
+}
+
+impl RegionFlushGate {
+    fn new(blocked_region_id: RegionId, observed_region_id: RegionId) -> Self {
+        Self {
+            blocked_region_id,
+            observed_region_id,
+            blocked_flush_started: Notify::new(),
+            resume_blocked_flush: Notify::new(),
+            observed_flush_finished: Notify::new(),
+        }
+    }
+
+    async fn wait_blocked_flush_started(&self) {
+        self.blocked_flush_started.notified().await;
+    }
+
+    fn resume_blocked_flush(&self) {
+        self.resume_blocked_flush.notify_one();
+    }
+
+    async fn wait_observed_flush_finished(&self) {
+        self.observed_flush_finished.notified().await;
+    }
+}
+
+#[async_trait]
+impl EventListener for RegionFlushGate {
+    fn on_flush_success(&self, region_id: RegionId) {
+        if region_id == self.observed_region_id {
+            self.observed_flush_finished.notify_one();
+        }
+    }
+
+    async fn on_flush_begin(&self, region_id: RegionId) {
+        if region_id == self.blocked_region_id {
+            self.blocked_flush_started.notify_one();
+            self.resume_blocked_flush.notified().await;
+        }
+    }
+}
 
 #[tokio::test]
 async fn test_manual_flush() {
@@ -515,6 +563,113 @@ async fn test_region_write_buffer_stall_does_not_block_other_region() {
         .unwrap();
     assert_eq!(0, scanner.num_files());
     assert_eq!(1, scanner.num_memtables());
+}
+
+#[tokio::test]
+async fn test_unrelated_flush_does_not_resume_region_stalled_write() {
+    let mut env = TestEnv::new().await;
+    let stalled_region_id = RegionId::new(1, 1);
+    let normal_region_id = RegionId::new(2, 1);
+    let listener = Arc::new(RegionFlushGate::new(stalled_region_id, normal_region_id));
+    let engine = env
+        .create_engine_with(
+            MitoConfig {
+                default_region_write_buffer_size: ReadableSize(1),
+                max_background_flushes: 2,
+                ..Default::default()
+            },
+            None,
+            Some(listener.clone()),
+            None,
+        )
+        .await;
+
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            stalled_region_id.table_id(),
+            "stalled_table",
+            "test_catalog",
+            "test_schema",
+            None,
+            env.get_kv_backend(),
+        )
+        .await;
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            normal_region_id.table_id(),
+            "normal_table",
+            "test_catalog",
+            "test_schema",
+            None,
+            env.get_kv_backend(),
+        )
+        .await;
+
+    let stalled_request = CreateRequestBuilder::new().build();
+    let stalled_schema = rows_schema(&stalled_request);
+    engine
+        .handle_request(stalled_region_id, RegionRequest::Create(stalled_request))
+        .await
+        .unwrap();
+
+    let normal_request = CreateRequestBuilder::new()
+        .table_dir("normal")
+        .insert_option(WRITE_BUFFER_SIZE_KEY, "1GiB")
+        .build();
+    let normal_schema = rows_schema(&normal_request);
+    engine
+        .handle_request(normal_region_id, RegionRequest::Create(normal_request))
+        .await
+        .unwrap();
+
+    put_rows(
+        &engine,
+        stalled_region_id,
+        Rows {
+            schema: stalled_schema.clone(),
+            rows: build_rows_for_key("stalled", 0, 2, 0),
+        },
+    )
+    .await;
+    put_rows(
+        &engine,
+        normal_region_id,
+        Rows {
+            schema: normal_schema,
+            rows: build_rows_for_key("normal", 0, 2, 0),
+        },
+    )
+    .await;
+
+    let engine_cloned = engine.clone();
+    let mut stalled_write = tokio::spawn(async move {
+        put_rows(
+            &engine_cloned,
+            stalled_region_id,
+            Rows {
+                schema: stalled_schema,
+                rows: build_rows_for_key("stalled", 2, 2, 0),
+            },
+        )
+        .await;
+    });
+
+    listener.wait_blocked_flush_started().await;
+    flush_region(&engine, normal_region_id, None).await;
+    listener.wait_observed_flush_finished().await;
+
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), &mut stalled_write)
+            .await
+            .is_err(),
+        "an unrelated region flush resumed the region-stalled write"
+    );
+
+    listener.resume_blocked_flush();
+    tokio::time::timeout(Duration::from_secs(10), &mut stalled_write)
+        .await
+        .expect("the stalled write should resume after its region flushes")
+        .unwrap();
 }
 
 #[tokio::test]
