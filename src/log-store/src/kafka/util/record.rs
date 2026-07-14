@@ -294,10 +294,19 @@ pub(crate) fn maybe_emit_entry(
         RecordType::Last => {
             let region_id = record.meta.ns.region_id.into();
             let records = buffered_records.entry(region_id).or_default();
-            if records.last().is_some_and(|last_record| {
-                last_record.meta.tp == RecordType::Last && last_record.data == record.data
-            }) {
-                return Ok(None);
+            if let Some(last_record) = records.last() {
+                ensure!(
+                    last_record.meta.tp != RecordType::Last || last_record.data == record.data,
+                    IllegalSequenceSnafu {
+                        error: format!(
+                            "Illegal sequence of a last record, last record: {:?}, incoming record: {:?}",
+                            last_record.meta.tp, record.meta.tp
+                        )
+                    }
+                );
+                if last_record.meta.tp == RecordType::Last {
+                    return Ok(None);
+                }
             }
             records.push(record);
         }
@@ -572,6 +581,29 @@ mod tests {
         }
 
         let duplicate = new_test_record(RecordType::Middle(1), 1, region_id.as_u64(), vec![3; 100]);
+        let err = maybe_emit_entry(&provider, duplicate, &mut buffer).unwrap_err();
+
+        assert_matches!(err, error::Error::IllegalSequence { .. });
+    }
+
+    #[test]
+    fn test_maybe_emit_entry_rejects_conflicting_duplicate_last_record() {
+        let provider = Arc::new(KafkaProvider::new("my_topic".to_string()));
+        let region_id = RegionId::new(1, 1);
+        let mut buffer = HashMap::new();
+
+        for record in [
+            new_test_record(RecordType::First, 1, region_id.as_u64(), vec![1; 100]),
+            new_test_record(RecordType::Last, 1, region_id.as_u64(), vec![2; 100]),
+        ] {
+            assert!(
+                maybe_emit_entry(&provider, record, &mut buffer)
+                    .unwrap()
+                    .is_none()
+            );
+        }
+
+        let duplicate = new_test_record(RecordType::Last, 1, region_id.as_u64(), vec![3; 100]);
         let err = maybe_emit_entry(&provider, duplicate, &mut buffer).unwrap_err();
 
         assert_matches!(err, error::Error::IllegalSequence { .. });
