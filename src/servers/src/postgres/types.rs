@@ -220,7 +220,18 @@ where
                     encode_list(encoder, items, pg_field)?;
                 }
                 DataType::Struct(_) => {
-                    encode_struct(query_ctx, Default::default(), encoder, pg_field)?;
+                    let scalar_value = ScalarValue::try_from_array(column, i)
+                        .context(server_error::DataFusionSnafu)
+                        .map_err(convert_err)?;
+                    let value = Value::try_from(scalar_value).map_err(convert_err)?;
+                    let Value::Struct(struct_value) = value else {
+                        return server_error::InternalSnafu {
+                            err_msg: format!("expected Struct value, found {value:?}"),
+                        }
+                        .fail()
+                        .map_err(convert_err);
+                    };
+                    encode_struct(query_ctx, struct_value, encoder, pg_field)?;
                 }
                 _ => {
                     // Encode value using arrow-pg
@@ -1252,12 +1263,16 @@ mod test {
     use bytes::Bytes;
     use datafusion_expr::expr::Placeholder;
     use datafusion_expr::{Expr, LogicalPlanBuilder};
+    use datatypes::prelude::ScalarVectorBuilder;
     use datatypes::schema::{ColumnSchema, Schema};
+    use datatypes::types::{StructField, StructType};
+    use datatypes::value::{StructValue, StructValueRef, Value};
     use datatypes::vectors::{
         BinaryVector, BooleanVector, DateVector, Float32Vector, Float64Vector, Int8Vector,
         Int16Vector, Int32Vector, Int64Vector, IntervalDayTimeVector, IntervalMonthDayNanoVector,
-        IntervalYearMonthVector, ListVector, NullVector, StringVector, TimeSecondVector,
-        TimestampSecondVector, UInt8Vector, UInt16Vector, UInt32Vector, UInt64Vector, VectorRef,
+        IntervalYearMonthVector, ListVector, NullVector, StringVector, StructVectorBuilder,
+        TimeSecondVector, TimestampSecondVector, UInt8Vector, UInt16Vector, UInt32Vector,
+        UInt64Vector, VectorRef,
     };
     use futures::{StreamExt as FuturesStreamExt, stream};
     use pgwire::api::Type;
@@ -2024,5 +2039,82 @@ mod test {
 
         let values = parameters_to_scalar_values(&plan, &portal).unwrap();
         assert_eq!(values[0], ScalarValue::Int8(None));
+    }
+
+    fn qbs_data_row_field(row: &pgwire::messages::data::DataRow) -> Option<Vec<u8>> {
+        assert_eq!(1, row.field_count);
+        assert!(row.data.len() >= 4);
+
+        let length = i32::from_be_bytes(row.data[..4].try_into().unwrap());
+        let data = &row.data[4..];
+        if length == -1 {
+            assert!(data.is_empty());
+            None
+        } else {
+            assert_eq!(length as usize, data.len());
+            Some(data.to_vec())
+        }
+    }
+
+    #[test]
+    fn test_qbs_pg_struct_rows_encode_distinct_json_and_null() {
+        let struct_type = StructType::from([
+            StructField::new("id", ConcreteDataType::int64_datatype(), false),
+            StructField::new("name", ConcreteDataType::string_datatype(), false),
+        ]);
+        let first = StructValue::new(
+            vec![Value::Int64(1), Value::String("first".into())],
+            struct_type.clone(),
+        );
+        let second = StructValue::new(
+            vec![Value::Int64(2), Value::String("second".into())],
+            struct_type.clone(),
+        );
+        let mut builder = StructVectorBuilder::with_type_and_capacity(struct_type.clone(), 3);
+        builder.push(Some(StructValueRef::Ref(&first)));
+        builder.push(Some(StructValueRef::Ref(&second)));
+        builder.push(None);
+
+        let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
+            "payload",
+            ConcreteDataType::struct_datatype(struct_type),
+            true,
+        )]));
+        let record_batch = RecordBatch::new(
+            schema.clone(),
+            vec![Arc::new(builder.finish()) as VectorRef],
+        )
+        .unwrap();
+        let pg_schema = Arc::new(vec![FieldInfo::new(
+            "payload".into(),
+            None,
+            None,
+            Type::JSON,
+            FieldFormat::Text,
+        )]);
+        let query_context = QueryContextBuilder::default()
+            .configuration_parameter(Default::default())
+            .build()
+            .into();
+        let row_stream = RecordBatchRowStream::new(
+            query_context,
+            pg_schema.clone(),
+            schema,
+            stream::once(async { Ok(record_batch) }),
+            DataRowEncoder::new(pg_schema),
+        );
+
+        let mut batches = futures::executor::block_on(row_stream.collect::<Vec<_>>());
+        let rows = batches.pop().unwrap().unwrap();
+        assert_eq!(3, rows.len());
+
+        let first_json: serde_json::Value =
+            serde_json::from_slice(&qbs_data_row_field(&rows[0]).unwrap()).unwrap();
+        let second_json: serde_json::Value =
+            serde_json::from_slice(&qbs_data_row_field(&rows[1]).unwrap()).unwrap();
+        assert_eq!(serde_json::json!({"id": 1, "name": "first"}), first_json);
+        assert_eq!(serde_json::json!({"id": 2, "name": "second"}), second_json);
+        assert_ne!(first_json, second_json);
+        assert_eq!(None, qbs_data_row_field(&rows[2]));
     }
 }
