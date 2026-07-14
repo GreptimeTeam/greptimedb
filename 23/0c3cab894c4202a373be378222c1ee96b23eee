@@ -1,0 +1,20 @@
+src/log-store/src/kafka/util/record.rs
+  s_103b6c71bbf9f5::t_23e13682f8365d 297-309,589-606
+  s_103b6c71bbf9f5::t_e72f7dd03b20d0 607-609
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.13",
+  "base_commit_sha": "230c3cab894c4202a373be378222c1ee96b23eee",
+  "prompts": {},
+  "sessions": {
+    "s_103b6c71bbf9f5": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_0a02600c7ffeSwRw8ixkE59Xuk",
+        "model": "gpt-5.6-terra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
