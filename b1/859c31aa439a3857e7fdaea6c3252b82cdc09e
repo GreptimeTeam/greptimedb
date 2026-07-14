@@ -1,0 +1,31 @@
+config/config.md
+  s_55841a6813ca64::t_7f05aa2bd91a39 517
+src/common/wal/src/config/kafka/datanode.rs
+  s_ec92c5a7ebbf6f::t_fbae9f1d2727c4 63
+config/datanode.example.toml
+  s_ec92c5a7ebbf6f::t_fbae9f1d2727c4 188
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.13",
+  "base_commit_sha": "b1859c31aa439a3857e7fdaea6c3252b82cdc09e",
+  "prompts": {},
+  "sessions": {
+    "s_55841a6813ca64": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_0a14adb9dffeGB1iemwd4JCYa7",
+        "model": "gpt-5.6-terra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    },
+    "s_ec92c5a7ebbf6f": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_0a147197fffekVOjsa7LhuN7sx",
+        "model": "gpt-5.6-luna"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
