@@ -185,7 +185,7 @@ consumer_wait_timeout = "100ms"
 
 ## Whether to enable WAL index creation.
 ## **It's only used when the provider is `kafka`**.
-create_index = true
+create_index = false
 
 ## The interval for dumping WAL indexes.
 ## **It's only used when the provider is `kafka`**.
