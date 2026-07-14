@@ -90,14 +90,6 @@ fn validate_remote_schema(
     actual: &ArrowSchema,
     source: &str,
 ) -> Result<()> {
-    if expected.metadata() != actual.metadata() {
-        return Err(remote_schema_mismatch(format!(
-            "MergeScan {source} schema metadata mismatch: expected {:?}, actual {:?}",
-            expected.metadata(),
-            actual.metadata()
-        )));
-    }
-
     if expected.fields().len() != actual.fields().len() {
         return Err(remote_schema_mismatch(format!(
             "MergeScan {source} schema field count mismatch: expected {}, actual {}",
@@ -494,10 +486,7 @@ impl MergeScanExec {
                     stream.schema().arrow_schema().as_ref(),
                     "advertised remote stream",
                 )
-                .map_err(|error| {
-                    MERGE_SCAN_ERRORS_TOTAL.inc();
-                    error
-                })?;
+                .inspect_err(|_| MERGE_SCAN_ERRORS_TOTAL.inc())?;
                 let do_get_cost = do_get_start.elapsed();
 
                 if let Some(remote_dyn_filter_registry_lease) =
@@ -525,10 +514,7 @@ impl MergeScanExec {
                         df_batch.schema().as_ref(),
                         "remote record batch",
                     )
-                    .map_err(|error| {
-                        MERGE_SCAN_ERRORS_TOTAL.inc();
-                        error
-                    })?;
+                    .inspect_err(|_| MERGE_SCAN_ERRORS_TOTAL.inc())?;
                     let batch =
                         patch_batch_timezone(arrow_schema.clone(), df_batch.columns().to_vec())?;
                     metric.record_output_batch_rows(batch.num_rows());
@@ -1582,14 +1568,18 @@ mod tests {
     }
 
     #[test]
-    fn merge_scan_remote_schema_identity_rejects_top_level_metadata_mismatch() {
-        let expected = expected_int64_schema();
+    fn merge_scan_remote_schema_identity_allows_top_level_metadata_mismatch() {
+        let fields = expected_int64_schema().fields().clone();
+        let expected = ArrowSchema::new_with_metadata(
+            fields.clone(),
+            StdHashMap::from([("greptime:version".to_string(), "1".to_string())]),
+        );
         let actual = ArrowSchema::new_with_metadata(
-            expected.fields().clone(),
-            StdHashMap::from([("remote".to_string(), "different".to_string())]),
+            fields,
+            StdHashMap::from([("greptime:version".to_string(), "0".to_string())]),
         );
 
-        assert!(validate_remote_schema(&expected, &actual, "test").is_err());
+        assert!(validate_remote_schema(&expected, &actual, "test").is_ok());
     }
 
     #[test]
@@ -1678,6 +1668,55 @@ mod tests {
         );
 
         assert!(collect_merge_scan(exec).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn merge_scan_remote_schema_identity_allows_top_level_metadata_version_mismatch() {
+        let fields = expected_int64_schema().fields().clone();
+        let expected_schema = ArrowSchema::new_with_metadata(
+            fields.clone(),
+            StdHashMap::from([("greptime:version".to_string(), "1".to_string())]),
+        );
+        let remote_schema = Arc::new(
+            Schema::try_from(Arc::new(ArrowSchema::new_with_metadata(
+                fields,
+                StdHashMap::from([("greptime:version".to_string(), "0".to_string())]),
+            )))
+            .unwrap(),
+        );
+        let region_id = RegionId::new(1024, 1);
+        let batch = record_batch(
+            remote_schema.clone(),
+            vec![
+                Arc::new(Int64Vector::from_slice([11])) as _,
+                Arc::new(Int64Vector::from_slice([12])) as _,
+            ],
+        );
+        let exec = merge_scan_exec_with_handler(
+            vec![region_id],
+            expected_schema.clone(),
+            Arc::new(TestRegionQueryHandler::with_responses(vec![(
+                region_id,
+                remote_schema,
+                vec![batch],
+            )])),
+            1,
+        );
+
+        let batches = collect_merge_scan(exec).await.unwrap();
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].schema().as_ref(), &expected_schema);
+        let a = batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .expect("column a must be Int64");
+        let b = batches[0]
+            .column(1)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .expect("column b must be Int64");
+        assert_eq!((a.value(0), b.value(0)), (11, 12));
     }
 
     #[tokio::test]
