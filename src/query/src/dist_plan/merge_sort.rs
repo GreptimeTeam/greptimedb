@@ -100,8 +100,14 @@ impl UserDefinedLogicalNodeCore for MergeSortLogicalPlan {
     fn with_exprs_and_inputs(
         &self,
         exprs: Vec<datafusion::prelude::Expr>,
-        mut inputs: Vec<LogicalPlan>,
+        inputs: Vec<LogicalPlan>,
     ) -> Result<Self> {
+        let [input] = inputs.as_slice() else {
+            return Err(DataFusionError::Internal(
+                "Expected exactly one input with MergeSort".to_string(),
+            ));
+        };
+
         let mut zelf = self.clone();
         zelf.expr = zelf
             .expr
@@ -109,9 +115,7 @@ impl UserDefinedLogicalNodeCore for MergeSortLogicalPlan {
             .zip(exprs)
             .map(|(sort, expr)| sort.with_expr(expr))
             .collect();
-        zelf.input = Arc::new(inputs.pop().ok_or_else(|| {
-            DataFusionError::Internal("Expected exactly one input with MergeSort".to_string())
-        })?);
+        zelf.input = Arc::new(input.clone());
         Ok(zelf)
     }
 }
@@ -125,5 +129,88 @@ pub fn merge_sort_transformer(plan: &LogicalPlan) -> Option<LogicalPlan> {
         )
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use datafusion::arrow::datatypes::{DataType, Field, Schema};
+    use datafusion_common::DFSchema;
+    use datafusion_expr::{EmptyRelation, UserDefinedLogicalNodeCore, col, lit};
+
+    use super::*;
+
+    fn empty_relation(produce_one_row: bool) -> LogicalPlan {
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "sort_key",
+            DataType::Int64,
+            true,
+        )]));
+        LogicalPlan::EmptyRelation(EmptyRelation {
+            produce_one_row,
+            schema: Arc::new(DFSchema::try_from(schema).unwrap()),
+        })
+    }
+
+    fn merge_sort_plan() -> MergeSortLogicalPlan {
+        MergeSortLogicalPlan::new(
+            Arc::new(empty_relation(false)),
+            vec![col("sort_key").sort(true, true)],
+            Some(17),
+        )
+    }
+
+    #[test]
+    fn qbs_merge_sort_rejects_zero_inputs() {
+        let plan = merge_sort_plan();
+
+        match UserDefinedLogicalNodeCore::with_exprs_and_inputs(&plan, plan.expressions(), vec![]) {
+            Err(DataFusionError::Internal(message)) => {
+                assert_eq!(message, "Expected exactly one input with MergeSort");
+            }
+            Err(error) => panic!("expected an internal exact-one-input error, got {error:?}"),
+            Ok(_) => panic!("MergeSort accepted zero inputs instead of rejecting them"),
+        }
+    }
+
+    #[test]
+    fn qbs_merge_sort_accepts_one_input() {
+        let plan = merge_sort_plan();
+        let replacement = empty_relation(true);
+        let replacement_expr = lit(1_i64);
+
+        let rebuilt = UserDefinedLogicalNodeCore::with_exprs_and_inputs(
+            &plan,
+            vec![replacement_expr.clone()],
+            vec![replacement.clone()],
+        )
+        .unwrap();
+
+        assert_eq!(rebuilt.fetch, plan.fetch);
+        assert_eq!(rebuilt.expr, vec![replacement_expr.sort(true, true)]);
+        assert_eq!(rebuilt.input.as_ref(), &replacement);
+        assert_eq!(rebuilt.input.schema(), replacement.schema());
+        assert_eq!(rebuilt.input.schema().field(0).name(), "sort_key");
+    }
+
+    #[test]
+    fn qbs_merge_sort_rejects_multiple_inputs() {
+        let plan = merge_sort_plan();
+        let first = empty_relation(false);
+        let second = empty_relation(true);
+
+        match UserDefinedLogicalNodeCore::with_exprs_and_inputs(
+            &plan,
+            plan.expressions(),
+            vec![first, second],
+        ) {
+            Err(DataFusionError::Internal(message)) => {
+                assert_eq!(message, "Expected exactly one input with MergeSort");
+            }
+            Err(error) => panic!("expected an internal exact-one-input error, got {error:?}"),
+            Ok(_) => panic!("MergeSort accepted multiple inputs instead of rejecting them"),
+        }
     }
 }
