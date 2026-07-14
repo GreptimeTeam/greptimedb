@@ -214,9 +214,9 @@ impl TimeFilter {
             (Some(start), Some(end), _) => {
                 // Both 'start' and 'end' are provided
                 let (start, _) = Self::parse_datetime(start)?;
-                let (end, _) = Self::parse_datetime(end)?;
+                let (end, inferred_end) = Self::parse_datetime(end)?;
                 start_dt = Some(start);
-                end_dt = Some(end);
+                end_dt = Some(inferred_end.unwrap_or(end));
             }
             (Some(start), None, Some(span)) => {
                 let (start, _) = Self::parse_datetime(start)?;
@@ -276,41 +276,39 @@ impl TimeFilter {
         if let Ok(dt) = DateTime::parse_from_rfc3339(s) {
             Ok((dt.with_timezone(&Utc), None))
         } else {
-            let formats = ["%Y-%m-%d", "%Y-%m", "%Y"];
-            for format in &formats {
-                if let Ok(naive_date) = NaiveDate::parse_from_str(s, format) {
-                    let start = Utc.from_utc_datetime(
-                        &naive_date.and_time(NaiveTime::from_hms_opt(0, 0, 0).unwrap()),
-                    );
-                    let end = match *format {
-                        "%Y-%m-%d" => start + Duration::days(1),
-                        "%Y-%m" => {
-                            let next_month = if naive_date.month() == 12 {
-                                NaiveDate::from_ymd_opt(naive_date.year() + 1, 1, 1).unwrap()
-                            } else {
-                                NaiveDate::from_ymd_opt(
-                                    naive_date.year(),
-                                    naive_date.month() + 1,
-                                    1,
-                                )
-                                .unwrap()
-                            };
-                            Utc.from_utc_datetime(&next_month.and_hms_opt(0, 0, 0).unwrap())
-                        }
-                        "%Y" => {
-                            let next_year =
-                                NaiveDate::from_ymd_opt(naive_date.year() + 1, 1, 1).unwrap();
-                            Utc.from_utc_datetime(&next_year.and_hms_opt(0, 0, 0).unwrap())
-                        }
-                        _ => unreachable!(),
-                    };
-                    return Ok((start, Some(end)));
+            let (naive_date, format) = if let Ok(date) = NaiveDate::parse_from_str(s, "%Y-%m-%d") {
+                (date, "%Y-%m-%d")
+            } else if let Ok(date) = NaiveDate::parse_from_str(&format!("{s}-01"), "%Y-%m-%d") {
+                (date, "%Y-%m")
+            } else if let Ok(date) = NaiveDate::parse_from_str(&format!("{s}-01-01"), "%Y-%m-%d") {
+                (date, "%Y")
+            } else {
+                return Err(InvalidDateFormatSnafu {
+                    input: s.to_string(),
                 }
-            }
-            Err(InvalidDateFormatSnafu {
-                input: s.to_string(),
-            }
-            .build())
+                .build());
+            };
+
+            let start = Utc
+                .from_utc_datetime(&naive_date.and_time(NaiveTime::from_hms_opt(0, 0, 0).unwrap()));
+            let end = match format {
+                "%Y-%m-%d" => start + Duration::days(1),
+                "%Y-%m" => {
+                    let next_month = if naive_date.month() == 12 {
+                        NaiveDate::from_ymd_opt(naive_date.year() + 1, 1, 1).unwrap()
+                    } else {
+                        NaiveDate::from_ymd_opt(naive_date.year(), naive_date.month() + 1, 1)
+                            .unwrap()
+                    };
+                    Utc.from_utc_datetime(&next_month.and_hms_opt(0, 0, 0).unwrap())
+                }
+                "%Y" => {
+                    let next_year = NaiveDate::from_ymd_opt(naive_date.year() + 1, 1, 1).unwrap();
+                    Utc.from_utc_datetime(&next_year.and_hms_opt(0, 0, 0).unwrap())
+                }
+                _ => unreachable!(),
+            };
+            Ok((start, Some(end)))
         }
     }
 
@@ -544,5 +542,45 @@ mod tests {
         };
         let result = tf.canonicalize();
         assert!(matches!(result, Err(Error::EndBeforeStart { .. })));
+    }
+
+    #[test]
+    fn test_canonicalize_date_end() {
+        let mut date_end = TimeFilter {
+            start: Some("2023-10-01".to_string()),
+            end: Some("2023-10-02".to_string()),
+            span: None,
+        };
+        date_end.canonicalize().unwrap();
+        assert_eq!(date_end.end.as_deref(), Some("2023-10-03T00:00:00+00:00"));
+
+        let mut timestamp_end = TimeFilter {
+            start: Some("2023-10-01".to_string()),
+            end: Some("2023-10-02T12:34:56Z".to_string()),
+            span: None,
+        };
+        timestamp_end.canonicalize().unwrap();
+        assert_eq!(
+            timestamp_end.end.as_deref(),
+            Some("2023-10-02T12:34:56+00:00")
+        );
+
+        let mut month = TimeFilter {
+            start: Some("2023-10".to_string()),
+            end: Some("2023-10".to_string()),
+            span: None,
+        };
+        month.canonicalize().unwrap();
+        assert_eq!(month.start.as_deref(), Some("2023-10-01T00:00:00+00:00"));
+        assert_eq!(month.end.as_deref(), Some("2023-11-01T00:00:00+00:00"));
+
+        let mut year = TimeFilter {
+            start: Some("2023".to_string()),
+            end: Some("2023".to_string()),
+            span: None,
+        };
+        year.canonicalize().unwrap();
+        assert_eq!(year.start.as_deref(), Some("2023-01-01T00:00:00+00:00"));
+        assert_eq!(year.end.as_deref(), Some("2024-01-01T00:00:00+00:00"));
     }
 }
