@@ -52,7 +52,7 @@ use table::predicate::Predicate;
 
 use self::stream::{NestedSchemaAligner, ProjectedRecordBatchStream};
 use crate::cache::index::result_cache::PredicateKey;
-use crate::cache::{CacheStrategy, CachedSstMeta};
+use crate::cache::{CacheStrategy, CachedSstMeta, prepare_sst_meta};
 #[cfg(feature = "vector_index")]
 use crate::error::ApplyVectorIndexSnafu;
 use crate::error::{
@@ -698,18 +698,23 @@ impl ParquetReaderBuilder {
         metadata_loader.with_page_index_policy(page_index_policy);
         let metadata = metadata_loader.load(cache_metrics).await?;
 
-        let metadata = Arc::new(CachedSstMeta::try_new_with_page_index_policy(
-            file_path,
-            metadata,
-            None,
-            page_index_policy,
-        )?);
-        // Cache the metadata.
-        self.cache_strategy
-            .put_sst_meta_data(file_id, metadata.clone());
+        let decoded = if self.cache_strategy.sst_meta_cache_enabled() {
+            let metadata = prepare_sst_meta(file_path, metadata, None, page_index_policy).await?;
+            let decoded = metadata.decoded();
+            self.cache_strategy
+                .put_prepared_sst_meta(file_id, metadata, true);
+            decoded
+        } else {
+            Arc::new(CachedSstMeta::try_new_with_page_index_policy(
+                file_path,
+                metadata,
+                None,
+                page_index_policy,
+            )?)
+        };
 
         cache_metrics.metadata_load_cost += start.elapsed();
-        Ok((metadata, true))
+        Ok((decoded, true))
     }
 
     /// Computes row groups to read, along with their respective row selections.
