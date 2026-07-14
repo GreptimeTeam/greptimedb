@@ -20,10 +20,7 @@ use datafusion::arrow::util::pretty::pretty_format_batches;
 use datafusion_common::arrow::array::ArrayRef;
 use datafusion_common::arrow::compute;
 use datafusion_common::arrow::datatypes::{DataType as ArrowDataType, SchemaRef as ArrowSchemaRef};
-use datatypes::arrow::array::types::ByteViewType;
-use datatypes::arrow::array::{
-    Array, AsArray, BinaryViewArray, GenericByteViewArray, RecordBatchOptions, StringViewArray,
-};
+use datatypes::arrow::array::{Array, AsArray, RecordBatchOptions};
 use datatypes::extension::json::is_structured_json_field;
 use datatypes::prelude::DataType;
 use datatypes::schema::SchemaRef;
@@ -274,27 +271,19 @@ impl RecordBatch {
 
     /// Returns the logical memory size of this batch's array slices.
     ///
-    /// This estimates the bytes represented by each slice rather than the capacity of its shared
-    /// backing buffers. For top-level view columns, this includes each visible 16-byte view record
-    /// and the visible out-of-line payload bytes, but not unrelated payloads in shared backing
-    /// buffers. Nested view arrays include only their view records, not their out-of-line payloads.
-    /// It is not an exact measure of live physical memory. If Arrow cannot calculate a slice's
-    /// size, the full buffer size is used conservatively.
+    /// This sums Arrow's logical visible slice buffers rather than the capacity of their shared
+    /// backing buffers. View out-of-line payloads and nested custom payloads are not separately
+    /// traversed or accounted. It is not an exact measure of live physical memory. If Arrow cannot
+    /// calculate a slice's size, the full buffer size is used conservatively.
     pub fn logical_slice_memory_size(&self) -> usize {
         self.df_record_batch
             .columns()
             .iter()
             .fold(0, |total, array| {
-                let array_size = match array.data_type() {
-                    ArrowDataType::Utf8View | ArrowDataType::BinaryView => {
-                        view_array_structural_size(array.len(), array.nulls().is_some())
-                            .saturating_add(view_payload_size(array))
-                    }
-                    _ => array
-                        .to_data()
-                        .get_slice_memory_size()
-                        .unwrap_or_else(|_| array.get_buffer_memory_size()),
-                };
+                let array_size = array
+                    .to_data()
+                    .get_slice_memory_size()
+                    .unwrap_or_else(|_| array.get_buffer_memory_size());
                 total.saturating_add(array_size)
             })
     }
@@ -368,66 +357,6 @@ impl Serialize for RecordBatch {
     }
 }
 
-/// Arrow ByteView stores values up to this length inline in the 128-bit view record.
-const MAX_INLINE_VIEW_LEN: usize = 12;
-
-fn view_array_structural_size(len: usize, has_null_buffer: bool) -> usize {
-    let views = len.saturating_mul(size_of::<u128>());
-    let nulls = if has_null_buffer {
-        len.checked_add(7)
-            .map(|bits| bits / 8)
-            .unwrap_or(usize::MAX)
-    } else {
-        0
-    };
-    views.saturating_add(nulls)
-}
-
-fn byte_view_payload_size<T: ByteViewType + ?Sized>(array: &GenericByteViewArray<T>) -> usize {
-    if array.data_buffers().is_empty() || array.null_count() == array.len() {
-        return 0;
-    }
-    if array.null_count() == 0 {
-        return array.views().chunks(1_024).fold(0usize, |total, chunk| {
-            // A chunk contains at most 1024 u32 lengths, so its u64 sum cannot overflow.
-            let chunk_total = chunk
-                .iter()
-                .map(|view| *view as u32 as u64)
-                .filter(|length| *length > MAX_INLINE_VIEW_LEN as u64)
-                .sum::<u64>();
-            total.saturating_add(usize::try_from(chunk_total).unwrap_or(usize::MAX))
-        });
-    }
-    array
-        .nulls()
-        .expect("nonzero null count must have a null buffer")
-        .valid_indices()
-        .map(|index| array.views()[index] as u32 as usize)
-        .filter(|length| *length > MAX_INLINE_VIEW_LEN)
-        .fold(0usize, usize::saturating_add)
-}
-
-/// Returns out-of-line payload bytes omitted by Arrow's slice memory calculation.
-fn view_payload_size(array: &ArrayRef) -> usize {
-    match array.data_type() {
-        ArrowDataType::Utf8View => {
-            let array = array
-                .as_any()
-                .downcast_ref::<StringViewArray>()
-                .expect("Utf8View must be a StringViewArray");
-            byte_view_payload_size(array)
-        }
-        ArrowDataType::BinaryView => {
-            let array = array
-                .as_any()
-                .downcast_ref::<BinaryViewArray>()
-                .expect("BinaryView must be a BinaryViewArray");
-            byte_view_payload_size(array)
-        }
-        _ => 0,
-    }
-}
-
 /// merge multiple recordbatch into a single
 pub fn merge_record_batches(schema: SchemaRef, batches: &[RecordBatch]) -> Result<RecordBatch> {
     let batches_len = batches.len();
@@ -473,9 +402,8 @@ mod tests {
     use std::sync::Arc;
 
     use datatypes::arrow::array::{
-        AsArray, BinaryArray, BinaryViewArray, StringArray, StringViewArray, UInt32Array,
+        AsArray, BinaryArray, StringArray, StringViewArray, UInt32Array,
     };
-    use datatypes::arrow::buffer::NullBuffer;
     use datatypes::arrow::datatypes::{DataType, Field, Schema as ArrowSchema, UInt32Type};
     use datatypes::data_type::ConcreteDataType;
     use datatypes::extension::json::{JsonExtensionType, JsonMetadata};
@@ -568,20 +496,28 @@ mod tests {
     }
 
     #[test]
-    fn test_logical_slice_memory_size_excludes_unsliced_buffer_capacity() {
+    fn test_logical_slice_memory_size_for_visible_primitive_string_binary_slices() {
         let schema = Arc::new(Schema::new(vec![
             ColumnSchema::new("numbers", ConcreteDataType::uint32_datatype(), false),
-            ColumnSchema::new("strings", ConcreteDataType::string_datatype(), false),
+            ColumnSchema::new("strings", ConcreteDataType::string_datatype(), true),
+            ColumnSchema::new("binary", ConcreteDataType::binary_datatype(), true),
         ]));
         let numbers: Vec<_> = (0..1024).collect();
-        let strings: Vec<_> = (0..1024).map(|value| format!("value-{value}")).collect();
+        let strings = (0..1024)
+            .map(|value| (value % 3 != 0).then(|| format!("value-{value}")))
+            .collect::<Vec<_>>();
+        let binary = (0_u32..1024)
+            .map(|value| (value % 3 != 0).then(|| value.to_le_bytes().to_vec()))
+            .collect::<Vec<_>>();
         let columns: Vec<VectorRef> = vec![
             Arc::new(UInt32Vector::from_slice(numbers)),
             Arc::new(StringVector::from(strings)),
+            Arc::new(BinaryVector::from(binary)),
         ];
         let batch = RecordBatch::new(schema, columns).unwrap();
-        let slice = batch.slice(512, 1).unwrap();
+        let slice = batch.slice(511, 3).unwrap();
 
+        assert!(slice.columns().iter().any(|column| column.null_count() > 0));
         assert!(slice.logical_slice_memory_size() < slice.buffer_memory_size());
         assert_eq!(
             slice.logical_slice_memory_size(),
@@ -594,8 +530,41 @@ mod tests {
     }
 
     #[test]
-    fn test_logical_slice_memory_size_includes_string_view_payload() {
-        let visible = "visible string view payload";
+    fn test_logical_slice_memory_size_for_many_shared_buffer_slices() {
+        let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
+            "strings",
+            ConcreteDataType::string_datatype(),
+            false,
+        )]));
+        let strings = (0..1024)
+            .map(|value| format!("shared-value-{value}"))
+            .collect::<Vec<_>>();
+        let backing = RecordBatch::new(
+            schema,
+            vec![Arc::new(StringVector::from(strings)) as VectorRef],
+        )
+        .unwrap();
+        let slices = (0..128)
+            .map(|index| backing.slice(index * 4, 2).unwrap())
+            .collect::<Vec<_>>();
+        let logical_total = slices
+            .iter()
+            .map(RecordBatch::logical_slice_memory_size)
+            .sum::<usize>();
+        let buffer_total = slices
+            .iter()
+            .map(RecordBatch::buffer_memory_size)
+            .sum::<usize>();
+
+        assert!(logical_total < buffer_total);
+        assert!(slices.iter().all(|slice| {
+            slice.logical_slice_memory_size()
+                == slice.column(0).to_data().get_slice_memory_size().unwrap()
+        }));
+    }
+
+    #[test]
+    fn test_logical_slice_memory_size_uses_arrow_slice_scope_for_views() {
         let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
             "strings",
             ConcreteDataType::utf8_view_datatype(),
@@ -604,281 +573,17 @@ mod tests {
         let columns: Vec<VectorRef> =
             vec![Arc::new(StringVector::from(StringViewArray::from(vec![
                 "unrelated backing payload",
-                visible,
+                "visible string view payload",
             ])))];
         let batch = RecordBatch::new(schema, columns)
             .unwrap()
             .slice(1, 1)
             .unwrap();
 
-        assert_eq!(16 + visible.len(), batch.logical_slice_memory_size());
-    }
-
-    #[test]
-    fn test_logical_slice_memory_size_ignores_null_string_view_payload() {
-        let payload = "null string view payload";
-        let (views, buffers, _) = StringViewArray::from(vec![payload]).into_parts();
-        let array = StringViewArray::new(views, buffers, Some(NullBuffer::new_null(1)));
-        let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
-            "strings",
-            ConcreteDataType::utf8_view_datatype(),
-            true,
-        )]));
-        let columns: Vec<VectorRef> = vec![Arc::new(StringVector::from(array))];
-        let batch = RecordBatch::new(schema, columns).unwrap();
-        let arrow_slice_size = batch.column(0).to_data().get_slice_memory_size().unwrap();
-
-        assert_eq!(arrow_slice_size, batch.logical_slice_memory_size());
-    }
-
-    #[test]
-    fn test_logical_slice_memory_size_includes_binary_view_payload() {
-        let unrelated = b"unrelated backing payload".as_slice();
-        let visible = b"visible binary view payload".as_slice();
-        let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
-            "binary",
-            ConcreteDataType::binary_view_datatype(),
-            false,
-        )]));
-        let columns: Vec<VectorRef> =
-            vec![Arc::new(BinaryVector::from(BinaryViewArray::from(vec![
-                unrelated, visible,
-            ])))];
-        let batch = RecordBatch::new(schema, columns)
-            .unwrap()
-            .slice(1, 1)
-            .unwrap();
-
-        assert_eq!(16 + visible.len(), batch.logical_slice_memory_size());
-    }
-
-    #[test]
-    fn test_logical_slice_memory_size_for_sliced_mixed_null_views() {
-        let before = "before out-of-line payload";
-        let null_out_of_line = "null out-of-line payload";
-        let inline = "inline";
-        let visible_out_of_line = "visible out-of-line payload";
-        let null_inline = "null";
-        let after = "after out-of-line payload";
-        let validity = vec![true, false, true, true, false, true];
-        let slice_offset = 1;
-        let visible_rows = 4;
-        let expected_valid_indices = vec![1, 2];
-        let view_bytes = visible_rows * size_of::<u128>();
-        let validity_bytes = visible_rows.div_ceil(8);
-        let expected_size = view_bytes + validity_bytes + visible_out_of_line.len();
-
-        let (views, buffers, _) = StringViewArray::from(vec![
-            before,
-            null_out_of_line,
-            inline,
-            visible_out_of_line,
-            null_inline,
-            after,
-        ])
-        .into_parts();
-        let string_view =
-            StringViewArray::new(views, buffers, Some(NullBuffer::from(validity.clone())))
-                .slice(slice_offset, visible_rows);
         assert_eq!(
-            expected_valid_indices,
-            string_view
-                .nulls()
-                .unwrap()
-                .valid_indices()
-                .collect::<Vec<_>>()
+            batch.column(0).to_data().get_slice_memory_size().unwrap(),
+            batch.logical_slice_memory_size()
         );
-        let string_schema = Arc::new(Schema::new(vec![ColumnSchema::new(
-            "strings",
-            ConcreteDataType::utf8_view_datatype(),
-            true,
-        )]));
-        let string_batch = RecordBatch::new(
-            string_schema,
-            vec![Arc::new(StringVector::from(string_view)) as VectorRef],
-        )
-        .unwrap();
-        assert_eq!(expected_size, string_batch.logical_slice_memory_size());
-
-        let (views, buffers, _) = BinaryViewArray::from(vec![
-            before.as_bytes(),
-            null_out_of_line.as_bytes(),
-            inline.as_bytes(),
-            visible_out_of_line.as_bytes(),
-            null_inline.as_bytes(),
-            after.as_bytes(),
-        ])
-        .into_parts();
-        let binary_view = BinaryViewArray::new(views, buffers, Some(NullBuffer::from(validity)))
-            .slice(slice_offset, visible_rows);
-        assert_eq!(
-            expected_valid_indices,
-            binary_view
-                .nulls()
-                .unwrap()
-                .valid_indices()
-                .collect::<Vec<_>>()
-        );
-        let binary_schema = Arc::new(Schema::new(vec![ColumnSchema::new(
-            "binary",
-            ConcreteDataType::binary_view_datatype(),
-            true,
-        )]));
-        let binary_batch = RecordBatch::new(
-            binary_schema,
-            vec![Arc::new(BinaryVector::from(binary_view)) as VectorRef],
-        )
-        .unwrap();
-        assert_eq!(expected_size, binary_batch.logical_slice_memory_size());
-    }
-
-    #[test]
-    fn test_string_view_payload_size_handles_null_shapes_and_slices() {
-        let inline = "inline";
-        let first = "first out-of-line payload";
-        let second = "second out-of-line payload";
-        let no_nulls = Arc::new(StringViewArray::from(vec![inline, first])) as ArrayRef;
-        assert_eq!(first.len(), view_payload_size(&no_nulls));
-
-        let (views, buffers, _) = StringViewArray::from(vec![inline, first]).into_parts();
-        let all_valid = Arc::new(StringViewArray::new(
-            views,
-            buffers,
-            Some(NullBuffer::new_valid(2)),
-        )) as ArrayRef;
-        assert_eq!(first.len(), view_payload_size(&all_valid));
-
-        let (views, buffers, _) = StringViewArray::from(vec![first, second]).into_parts();
-        let all_null = Arc::new(StringViewArray::new(
-            views,
-            buffers,
-            Some(NullBuffer::new_null(2)),
-        )) as ArrayRef;
-        assert_eq!(0, view_payload_size(&all_null));
-
-        let (views, buffers, _) = StringViewArray::from(vec![first, second, inline]).into_parts();
-        let mixed = Arc::new(StringViewArray::new(
-            views,
-            buffers,
-            Some(NullBuffer::from(vec![true, false, true])),
-        )) as ArrayRef;
-        assert_eq!(first.len(), view_payload_size(&mixed));
-
-        let sliced = (Arc::new(StringViewArray::from(vec![first, second])) as ArrayRef).slice(1, 1);
-        assert_eq!(second.len(), view_payload_size(&sliced));
-    }
-
-    #[test]
-    fn test_binary_view_payload_size_handles_null_shapes_and_slices() {
-        let inline = b"inline".as_slice();
-        let first = b"first out-of-line payload".as_slice();
-        let second = b"second out-of-line payload".as_slice();
-        let no_nulls = Arc::new(BinaryViewArray::from(vec![inline, first])) as ArrayRef;
-        assert_eq!(first.len(), view_payload_size(&no_nulls));
-
-        let (views, buffers, _) = BinaryViewArray::from(vec![inline, first]).into_parts();
-        let all_valid = Arc::new(BinaryViewArray::new(
-            views,
-            buffers,
-            Some(NullBuffer::new_valid(2)),
-        )) as ArrayRef;
-        assert_eq!(first.len(), view_payload_size(&all_valid));
-
-        let (views, buffers, _) = BinaryViewArray::from(vec![first, second]).into_parts();
-        let all_null = Arc::new(BinaryViewArray::new(
-            views,
-            buffers,
-            Some(NullBuffer::new_null(2)),
-        )) as ArrayRef;
-        assert_eq!(0, view_payload_size(&all_null));
-
-        let (views, buffers, _) = BinaryViewArray::from(vec![first, second, inline]).into_parts();
-        let mixed = Arc::new(BinaryViewArray::new(
-            views,
-            buffers,
-            Some(NullBuffer::from(vec![true, false, true])),
-        )) as ArrayRef;
-        assert_eq!(first.len(), view_payload_size(&mixed));
-
-        let sliced = (Arc::new(BinaryViewArray::from(vec![first, second])) as ArrayRef).slice(1, 1);
-        assert_eq!(second.len(), view_payload_size(&sliced));
-    }
-
-    #[test]
-    fn test_view_structural_size_matches_arrow_slice_memory_size() {
-        let no_nulls =
-            Arc::new(StringViewArray::from(vec!["inline", "out-of-line payload"])) as ArrayRef;
-        let empty = no_nulls.slice(0, 0);
-        let (views, buffers, _) =
-            StringViewArray::from(vec!["inline", "out-of-line payload"]).into_parts();
-        let all_valid = Arc::new(StringViewArray::new(
-            views.clone(),
-            buffers.clone(),
-            Some(NullBuffer::new_valid(2)),
-        )) as ArrayRef;
-        let all_null = Arc::new(StringViewArray::new(
-            views.clone(),
-            buffers.clone(),
-            Some(NullBuffer::new_null(2)),
-        )) as ArrayRef;
-        let mixed = Arc::new(StringViewArray::new(
-            views,
-            buffers,
-            Some(NullBuffer::from(vec![true, false])),
-        )) as ArrayRef;
-        let binary_no_nulls = Arc::new(BinaryViewArray::from(vec![
-            b"inline".as_slice(),
-            b"out-of-line payload".as_slice(),
-        ])) as ArrayRef;
-        let (binary_views, binary_buffers, _) = BinaryViewArray::from(vec![
-            b"inline".as_slice(),
-            b"out-of-line payload".as_slice(),
-        ])
-        .into_parts();
-        let binary_mixed = Arc::new(BinaryViewArray::new(
-            binary_views,
-            binary_buffers,
-            Some(NullBuffer::from(vec![true, false])),
-        )) as ArrayRef;
-
-        assert!(all_valid.nulls().is_some());
-        assert_eq!(33, view_array_structural_size(all_valid.len(), true));
-
-        for (case, array) in [
-            ("empty", empty),
-            ("no_nulls", no_nulls),
-            ("all_null", all_null),
-            ("mixed", mixed.clone()),
-            ("nonzero_offset", mixed.slice(1, 1)),
-            ("binary_no_nulls", binary_no_nulls),
-            ("binary_mixed", binary_mixed),
-        ] {
-            assert_eq!(
-                array.to_data().get_slice_memory_size().unwrap(),
-                view_array_structural_size(array.len(), array.nulls().is_some()),
-                "{case}"
-            );
-        }
-    }
-
-    #[test]
-    fn test_view_structural_size_saturates_on_overflow() {
-        assert_eq!(usize::MAX, view_array_structural_size(usize::MAX, true));
-    }
-
-    #[test]
-    fn test_view_payload_empty_buffers_and_inherited_buffers() {
-        let inline_only = Arc::new(StringViewArray::from(vec!["inline"])) as ArrayRef;
-        assert!(inline_only.as_string_view().data_buffers().is_empty());
-        assert_eq!(0, view_payload_size(&inline_only));
-
-        let parent = Arc::new(StringViewArray::from(vec![
-            "inline",
-            "out-of-line parent payload",
-        ])) as ArrayRef;
-        let inline_slice = parent.slice(0, 1);
-        assert!(!inline_slice.as_string_view().data_buffers().is_empty());
-        assert_eq!(0, view_payload_size(&inline_slice));
     }
 
     #[test]
