@@ -24,8 +24,11 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use arrow::array::{Array, ArrayRef, BooleanArray};
-use arrow::compute::{concat, concat_batches, filter_record_batch, take_record_batch};
+use arrow::array::{Array, ArrayRef};
+use arrow::compute::{
+    concat, concat_batches, filter_record_batch, is_not_null as array_is_not_null,
+    is_null as array_is_null, take_record_batch,
+};
 use arrow_schema::{DataType, SchemaRef, TimeUnit};
 use common_recordbatch::{DfRecordBatch, DfSendableRecordBatchStream};
 use common_time::Timestamp;
@@ -962,11 +965,21 @@ impl PartSortStream {
                 continue;
             }
 
-            let null_filter = BooleanArray::from(
-                (0..batch.num_rows())
-                    .map(|index| sort_column.is_null(index))
-                    .collect::<Vec<_>>(),
-            );
+            if null_count == batch.num_rows() {
+                self.reservation.try_grow(batch.get_array_memory_size())?;
+                self.deferred_null_batches.push_back(batch);
+                continue;
+            }
+
+            let null_filter = array_is_null(sort_column.as_ref()).map_err(|e| {
+                DataFusionError::ArrowError(
+                    Box::new(e),
+                    Some(format!(
+                        "Fail to evaluate NULL rows when sorting at {}",
+                        location!()
+                    )),
+                )
+            })?;
             let null_batch = filter_record_batch(&batch, &null_filter).map_err(|e| {
                 DataFusionError::ArrowError(
                     Box::new(e),
@@ -982,24 +995,25 @@ impl PartSortStream {
                 self.deferred_null_batches.push_back(null_batch);
             }
 
-            if null_count != batch.num_rows() {
-                let non_null_filter = BooleanArray::from(
-                    (0..batch.num_rows())
-                        .map(|index| !sort_column.is_null(index))
-                        .collect::<Vec<_>>(),
-                );
-                let non_null_batch =
-                    filter_record_batch(&batch, &non_null_filter).map_err(|e| {
-                        DataFusionError::ArrowError(
-                            Box::new(e),
-                            Some(format!(
-                                "Fail to filter non-NULL rows when sorting at {}",
-                                location!()
-                            )),
-                        )
-                    })?;
-                non_null_batches.push(non_null_batch);
-            }
+            let non_null_filter = array_is_not_null(sort_column.as_ref()).map_err(|e| {
+                DataFusionError::ArrowError(
+                    Box::new(e),
+                    Some(format!(
+                        "Fail to evaluate non-NULL rows when sorting at {}",
+                        location!()
+                    )),
+                )
+            })?;
+            let non_null_batch = filter_record_batch(&batch, &non_null_filter).map_err(|e| {
+                DataFusionError::ArrowError(
+                    Box::new(e),
+                    Some(format!(
+                        "Fail to filter non-NULL rows when sorting at {}",
+                        location!()
+                    )),
+                )
+            })?;
+            non_null_batches.push(non_null_batch);
         }
 
         self.sort_record_batches(&non_null_batches, self.limit, true)
