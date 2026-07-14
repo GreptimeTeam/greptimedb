@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -21,7 +21,8 @@ use std::task::{Context, Poll};
 use common_error::ext::BoxedError;
 use common_recordbatch::adapter::RecordBatchMetrics;
 use common_recordbatch::error::{
-    CreateRecordBatchesSnafu, NewDfRecordBatchSnafu, PhysicalExprSnafu, Result as RecordBatchResult,
+    ArrowComputeSnafu, CreateRecordBatchesSnafu, NewDfRecordBatchSnafu, PhysicalExprSnafu,
+    Result as RecordBatchResult,
 };
 use common_recordbatch::filter::batch_filter;
 use common_recordbatch::{
@@ -34,11 +35,13 @@ use datafusion::execution::context::ExecutionProps;
 use datafusion::functions::expr_fn::coalesce;
 use datafusion::logical_expr::Expr;
 use datafusion::logical_expr::expr_fn::cast;
-use datafusion::logical_expr::utils::{conjunction, expr_to_columns};
+use datafusion::logical_expr::utils::conjunction;
 use datafusion::physical_expr::{PhysicalExpr, create_physical_expr};
 use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType};
-use datatypes::arrow::array::{Array, ArrayRef, Float64Array, Float64Builder, Int64Array};
+use datatypes::arrow::array::{ArrayRef, Float64Array, Int64Array};
+use datatypes::arrow::compute::kernels::zip::zip;
+use datatypes::arrow::compute::{cast as cast_array, is_not_null};
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use futures::Stream;
 use snafu::{OptionExt, ResultExt};
@@ -49,8 +52,8 @@ use store_api::region_engine::{
 };
 use store_api::storage::{RegionId, ScanRequest, SequenceNumber};
 
-use crate::error::{InvalidRequestSnafu, Result};
-use crate::metric_value::{metric_value_columns, visible_region_metadata};
+use crate::error::{InvalidRequestSnafu, RecordBatchSnafu, Result};
+use crate::metric_value::{MetricValueColumn, metric_value_columns, visible_region_metadata};
 
 pub(crate) fn prepare_value_split_scan(
     region_id: RegionId,
@@ -62,34 +65,34 @@ pub(crate) fn prepare_value_split_scan(
         return Ok(None);
     }
 
-    let visible_metadata = visible_region_metadata(physical_metadata)?;
+    let visible_metadata = visible_region_metadata(physical_metadata, &split_columns)?;
     let split_value_columns = split_columns
-        .into_iter()
+        .iter()
         .map(|column| {
-            physical_metadata.column_metadatas[column.value_index]
+            let name = physical_metadata.column_metadatas[column.value_index]
                 .column_schema
                 .name
-                .clone()
+                .as_str();
+            (name, *column)
         })
-        .collect::<HashSet<_>>();
+        .collect::<HashMap<_, _>>();
 
     let mut residual_column_names = HashSet::new();
-    let residual_filters = request
+    let mut residual_filters = Vec::new();
+    request.filters = request
         .filters
-        .iter()
-        .filter(|filter| {
-            let mut columns = HashSet::new();
-            let is_residual = expr_to_columns(filter, &mut columns).is_ok()
-                && columns
-                    .iter()
-                    .any(|column| split_value_columns.contains(&column.name));
-            if is_residual {
-                residual_column_names.extend(columns.into_iter().map(|column| column.name));
+        .drain(..)
+        .map(|filter| {
+            let residual_filter = filter.clone();
+            let (filter, columns) =
+                rewrite_metric_value_filter(region_id, filter, &split_value_columns)?;
+            if let Some(columns) = columns {
+                residual_column_names.extend(columns);
+                residual_filters.push(residual_filter);
             }
-            is_residual
+            Ok(filter)
         })
-        .cloned()
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>>>()?;
 
     let mut visible_projection = match request.projection_input.as_ref() {
         Some(projection_input) => projection_input.projection.clone(),
@@ -114,65 +117,61 @@ pub(crate) fn prepare_value_split_scan(
                 reason: format!("projection index {visible_index} is out of bound"),
             })?;
         let value_name = &visible_column.column_schema.name;
-        let physical_index = physical_metadata
-            .column_index_by_name(value_name)
-            .with_context(|| InvalidRequestSnafu {
-                region_id,
-                reason: format!("column {value_name} is missing from physical metadata"),
-            })?;
+        let split_column = split_value_columns.get(value_name.as_str());
+        let physical_index = match split_column {
+            Some(column) => column.value_index,
+            None => physical_metadata
+                .column_index_by_name(value_name)
+                .with_context(|| InvalidRequestSnafu {
+                    region_id,
+                    reason: format!("column {value_name} is missing from physical metadata"),
+                })?,
+        };
         let input_value_index = physical_projection.len();
         physical_projection.push(physical_index);
 
-        if split_value_columns.contains(value_name) {
-            let int_name = metric_engine_value_int_column_name(value_name);
-            let int_index = physical_metadata
-                .column_index_by_name(&int_name)
-                .with_context(|| InvalidRequestSnafu {
-                    region_id,
-                    reason: format!("column {int_name} is missing from physical metadata"),
-                })?;
+        let input_int_index = if let Some(split_column) = split_column {
             let input_int_index = physical_projection.len();
-            physical_projection.push(int_index);
-            output_columns.push(ValueColumnProjection::Split {
-                float_index: input_value_index,
-                int_index: input_int_index,
-                output_schema: visible_column.column_schema.clone(),
-            });
+            physical_projection.push(split_column.int_index);
+            Some(input_int_index)
         } else {
-            output_columns.push(ValueColumnProjection::Direct {
-                input_index: input_value_index,
-                output_schema: visible_column.column_schema.clone(),
-            });
-        }
+            None
+        };
+        output_columns.push(ValueColumnProjection {
+            input_index: input_value_index,
+            int_index: input_int_index,
+            output_schema: visible_column.column_schema.clone(),
+        });
     }
 
     request.projection_input.get_or_insert_default().projection = physical_projection;
-    request.filters = request
-        .filters
-        .drain(..)
-        .map(|filter| rewrite_metric_value_filter(region_id, filter, &split_value_columns))
-        .collect::<Result<Vec<_>>>()?;
 
-    Ok(Some(ValueSplitProjectionMapper::new(
+    let mapper = ValueSplitProjectionMapper::try_new(
         visible_metadata,
         output_columns,
         visible_columns,
         residual_filters,
-    )))
+    )
+    .context(RecordBatchSnafu)?;
+    Ok(Some(mapper))
 }
 
 fn rewrite_metric_value_filter(
     region_id: RegionId,
     filter: Expr,
-    split_value_columns: &HashSet<String>,
-) -> Result<Expr> {
+    split_value_columns: &HashMap<&str, MetricValueColumn>,
+) -> Result<(Expr, Option<HashSet<String>>)> {
     let filter_display = filter.to_string();
     let mut rewriter = MetricValueFilterRewriter {
         split_value_columns,
+        referenced_columns: HashSet::new(),
     };
     filter
         .rewrite(&mut rewriter)
-        .map(|rewritten| rewritten.data)
+        .map(|rewritten| {
+            let residual_columns = rewritten.transformed.then_some(rewriter.referenced_columns);
+            (rewritten.data, residual_columns)
+        })
         .map_err(|err| {
             InvalidRequestSnafu {
                 region_id,
@@ -183,7 +182,8 @@ fn rewrite_metric_value_filter(
 }
 
 struct MetricValueFilterRewriter<'a> {
-    split_value_columns: &'a HashSet<String>,
+    split_value_columns: &'a HashMap<&'a str, MetricValueColumn>,
+    referenced_columns: HashSet<String>,
 }
 
 impl TreeNodeRewriter for MetricValueFilterRewriter<'_> {
@@ -206,8 +206,9 @@ impl TreeNodeRewriter for MetricValueFilterRewriter<'_> {
         let Expr::Column(column) = expr else {
             return Ok(Transformed::no(expr));
         };
+        self.referenced_columns.insert(column.name.clone());
 
-        if !self.split_value_columns.contains(&column.name) {
+        if !self.split_value_columns.contains_key(column.name.as_str()) {
             return Ok(Transformed::no(Expr::Column(column)));
         }
 
@@ -223,16 +224,10 @@ impl TreeNodeRewriter for MetricValueFilterRewriter<'_> {
 }
 
 #[derive(Clone)]
-pub(crate) enum ValueColumnProjection {
-    Direct {
-        input_index: usize,
-        output_schema: ColumnSchema,
-    },
-    Split {
-        float_index: usize,
-        int_index: usize,
-        output_schema: ColumnSchema,
-    },
+struct ValueColumnProjection {
+    input_index: usize,
+    int_index: Option<usize>,
+    output_schema: ColumnSchema,
 }
 
 #[derive(Clone)]
@@ -241,54 +236,64 @@ pub(crate) struct ValueSplitProjectionMapper {
     output_schema: SchemaRef,
     working_schema: SchemaRef,
     columns: Vec<ValueColumnProjection>,
-    visible_columns: usize,
     has_split: bool,
-    residual_filters: Vec<Expr>,
+    residual_filter: Option<Arc<dyn PhysicalExpr>>,
 }
 
 impl ValueSplitProjectionMapper {
-    pub(crate) fn new(
+    fn try_new(
         metadata: RegionMetadataRef,
         columns: Vec<ValueColumnProjection>,
         visible_columns: usize,
         residual_filters: Vec<Expr>,
-    ) -> Self {
-        let has_split = columns
-            .iter()
-            .any(|column| matches!(column, ValueColumnProjection::Split { .. }));
+    ) -> RecordBatchResult<Self> {
+        let has_split = columns.iter().any(|column| column.int_index.is_some());
         let working_columns = columns
             .iter()
-            .map(|column| match column {
-                ValueColumnProjection::Direct { output_schema, .. }
-                | ValueColumnProjection::Split { output_schema, .. } => output_schema.clone(),
-            })
+            .map(|column| column.output_schema.clone())
             .collect::<Vec<_>>();
-        let output_columns = working_columns
-            .iter()
-            .take(visible_columns)
-            .cloned()
-            .collect::<Vec<_>>();
+        let working_schema = Arc::new(Schema::new(working_columns));
+        let output_schema = if visible_columns == columns.len() {
+            working_schema.clone()
+        } else {
+            Arc::new(Schema::new(
+                columns
+                    .iter()
+                    .take(visible_columns)
+                    .map(|column| column.output_schema.clone())
+                    .collect(),
+            ))
+        };
+        let residual_filter = if let Some(filter) = conjunction(residual_filters) {
+            let df_schema = working_schema
+                .arrow_schema()
+                .clone()
+                .to_dfschema_ref()
+                .context(PhysicalExprSnafu)?;
+            Some(
+                create_physical_expr(&filter, &df_schema, &ExecutionProps::new())
+                    .context(PhysicalExprSnafu)?,
+            )
+        } else {
+            None
+        };
 
-        Self {
+        Ok(Self {
             metadata,
-            output_schema: Arc::new(Schema::new(output_columns)),
-            working_schema: Arc::new(Schema::new(working_columns)),
+            output_schema,
+            working_schema,
             columns,
-            visible_columns,
             has_split,
-            residual_filters,
-        }
+            residual_filter,
+        })
     }
 
     fn convert_batch(&self, batch: RecordBatch) -> RecordBatchResult<RecordBatch> {
-        if !self.has_split && self.residual_filters.is_empty() {
+        if !self.has_split && self.residual_filter.is_none() {
             let projection = self
                 .columns
                 .iter()
-                .map(|column| match column {
-                    ValueColumnProjection::Direct { input_index, .. } => *input_index,
-                    ValueColumnProjection::Split { .. } => unreachable!(),
-                })
+                .map(|column| column.input_index)
                 .collect::<Vec<_>>();
             return batch.try_project(&projection);
         }
@@ -296,54 +301,36 @@ impl ValueSplitProjectionMapper {
         let arrays = self
             .columns
             .iter()
-            .map(|column| match column {
-                ValueColumnProjection::Direct { input_index, .. } => {
-                    Ok(batch.column(*input_index).clone())
+            .map(|column| {
+                if let Some(int_index) = column.int_index {
+                    coalesce_value_columns(
+                        batch.column(column.input_index),
+                        batch.column(int_index),
+                    )
+                } else {
+                    Ok(batch.column(column.input_index).clone())
                 }
-                ValueColumnProjection::Split {
-                    float_index,
-                    int_index,
-                    ..
-                } => coalesce_value_columns(batch.column(*float_index), batch.column(*int_index)),
             })
             .collect::<RecordBatchResult<Vec<_>>>()?;
 
         let df_record_batch =
             DfRecordBatch::try_new(self.working_schema.arrow_schema().clone(), arrays)
                 .context(NewDfRecordBatchSnafu)?;
-        let mut batch =
-            RecordBatch::from_df_record_batch(self.working_schema.clone(), df_record_batch);
-        batch = self.apply_residual_filters(batch)?;
-
-        if self.visible_columns == self.columns.len() {
-            Ok(RecordBatch::from_df_record_batch(
-                self.output_schema.clone(),
-                batch.into_df_record_batch(),
-            ))
+        let batch = RecordBatch::from_df_record_batch(self.working_schema.clone(), df_record_batch);
+        let batch = if let Some(predicate) = &self.residual_filter {
+            let df_record_batch =
+                batch_filter(batch.df_record_batch(), predicate).context(PhysicalExprSnafu)?;
+            RecordBatch::from_df_record_batch(self.working_schema.clone(), df_record_batch)
         } else {
-            let projection = (0..self.visible_columns).collect::<Vec<_>>();
-            batch.try_project(&projection)
-        }
-    }
-
-    fn apply_residual_filters(&self, batch: RecordBatch) -> RecordBatchResult<RecordBatch> {
-        let Some(filter) = conjunction(self.residual_filters.clone()) else {
-            return Ok(batch);
+            batch
         };
-        let df_schema = self
-            .working_schema
-            .arrow_schema()
-            .clone()
-            .to_dfschema_ref()
-            .context(PhysicalExprSnafu)?;
-        let predicate = create_physical_expr(&filter, &df_schema, &ExecutionProps::new())
-            .context(PhysicalExprSnafu)?;
-        let df_record_batch =
-            batch_filter(batch.df_record_batch(), &predicate).context(PhysicalExprSnafu)?;
-        Ok(RecordBatch::from_df_record_batch(
-            self.working_schema.clone(),
-            df_record_batch,
-        ))
+
+        let output_columns = self.output_schema.num_columns();
+        if output_columns == self.columns.len() {
+            Ok(batch)
+        } else {
+            batch.try_project(&(0..output_columns).collect::<Vec<_>>())
+        }
     }
 }
 
@@ -361,18 +348,9 @@ fn coalesce_value_columns(float_col: &ArrayRef, int_col: &ArrayRef) -> RecordBat
             reason: format!("expected Int64 metric value column, got {int_col:?}"),
         })?;
 
-    let mut builder = Float64Builder::with_capacity(float_array.len());
-    for row in 0..float_array.len() {
-        if !int_array.is_null(row) {
-            builder.append_value(int_array.value(row) as f64);
-        } else if !float_array.is_null(row) {
-            builder.append_value(float_array.value(row));
-        } else {
-            builder.append_null();
-        }
-    }
-
-    Ok(Arc::new(builder.finish()))
+    let int_as_float = cast_array(int_array, &ArrowDataType::Float64).context(ArrowComputeSnafu)?;
+    let use_int = is_not_null(int_array).context(ArrowComputeSnafu)?;
+    zip(&use_int, &int_as_float, float_array).context(ArrowComputeSnafu)
 }
 
 pub(crate) struct ValueSplitScanner {

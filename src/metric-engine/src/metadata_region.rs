@@ -523,12 +523,15 @@ impl MetadataRegion {
     }
 
     /// Add logical regions to the metadata region.
-    pub async fn add_logical_regions(
+    pub async fn add_logical_regions<C>(
         &self,
         physical_region_id: RegionId,
         write_region_id: bool,
-        logical_regions: impl Iterator<Item = (RegionId, HashMap<&str, &ColumnMetadata>)>,
-    ) -> Result<()> {
+        logical_regions: impl IntoIterator<Item = (RegionId, C)>,
+    ) -> Result<()>
+    where
+        C: IntoIterator<Item = ColumnMetadata>,
+    {
         let metadata_region_id = utils::to_metadata_region_id(physical_region_id);
         let iter = logical_regions
             .into_iter()
@@ -542,14 +545,14 @@ impl MetadataRegion {
                     None
                 }
                 .into_iter()
-                .chain(column_metadatas.into_iter().map(
-                    move |(name, column_metadata)| {
-                        (
-                            MetadataRegion::concat_column_key(logical_region_id, name),
-                            MetadataRegion::serialize_column_metadata(column_metadata),
-                        )
-                    },
-                ))
+                .chain(column_metadatas.into_iter().map(move |column_metadata| {
+                    let key = MetadataRegion::concat_column_key(
+                        logical_region_id,
+                        &column_metadata.column_schema.name,
+                    );
+                    let value = MetadataRegion::serialize_column_metadata(&column_metadata);
+                    (key, value)
+                }))
             })
             .collect::<Vec<_>>();
 
@@ -843,27 +846,17 @@ mod test {
         let column_metadatas = test_column_metadatas();
         let logical_region_id = RegionId::new(1024, 1);
 
-        let iter = vec![(
+        let logical_regions = vec![(
             logical_region_id,
-            column_metadatas
-                .iter()
-                .map(|(k, v)| (k.as_str(), v))
-                .collect::<HashMap<_, _>>(),
+            column_metadatas.values().cloned().collect::<Vec<_>>(),
         )];
         metadata_region
-            .add_logical_regions(physical_region_id, true, iter.into_iter())
+            .add_logical_regions(physical_region_id, true, logical_regions.clone())
             .await
             .unwrap();
         // Add logical region again.
-        let iter = vec![(
-            logical_region_id,
-            column_metadatas
-                .iter()
-                .map(|(k, v)| (k.as_str(), v))
-                .collect::<HashMap<_, _>>(),
-        )];
         metadata_region
-            .add_logical_regions(physical_region_id, true, iter.into_iter())
+            .add_logical_regions(physical_region_id, true, logical_regions)
             .await
             .unwrap();
 

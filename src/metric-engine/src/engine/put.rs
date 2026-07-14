@@ -1260,11 +1260,7 @@ mod tests {
         let int_column_name =
             store_api::metric_engine_consts::metric_engine_value_int_column_name(greptime_value());
         let visible_mito_metadata = env.mito().get_metadata(data_region_id).await.unwrap();
-        let physical_mito_metadata = env
-            .mito()
-            .get_physical_metadata(data_region_id)
-            .await
-            .unwrap();
+        let physical_mito_metadata = env.mito().get_physical_metadata(data_region_id).unwrap();
         assert!(
             visible_mito_metadata
                 .column_by_name(&int_column_name)

@@ -297,10 +297,7 @@ impl MetricEngineInner {
             physical_region_id,
             logical_regions
         );
-        let physical_columns = self
-            .data_region
-            .physical_columns(physical_region_id)
-            .await?;
+        let physical_columns = self.data_region.physical_columns(physical_region_id)?;
         let primary_key_encoding = self
             .mito
             .get_primary_key_encoding(physical_region_id)

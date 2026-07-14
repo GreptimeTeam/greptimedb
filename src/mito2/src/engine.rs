@@ -142,7 +142,7 @@ use crate::extension::BoxedExtensionRangeProviderFactory;
 use crate::gc::GcLimiterRef;
 use crate::manifest::action::RegionEdit;
 use crate::memtable::MemtableStats;
-use crate::metric_value::visible_region_metadata;
+use crate::metric_value::{metric_value_columns, visible_region_metadata};
 use crate::metrics::{
     HANDLE_REQUEST_ELAPSED, SCAN_MEMORY_EXHAUSTED_TOTAL, SCAN_MEMORY_USAGE_BYTES,
     SCAN_REQUESTS_REJECTED_TOTAL,
@@ -403,7 +403,7 @@ impl MitoEngine {
     }
 
     /// Returns persisted region metadata, including engine-internal columns.
-    pub async fn get_physical_metadata(
+    pub fn get_physical_metadata(
         &self,
         region_id: RegionId,
     ) -> std::result::Result<RegionMetadataRef, BoxedError> {
@@ -1290,11 +1290,9 @@ impl RegionEngine for MitoEngine {
         &self,
         region_id: RegionId,
     ) -> std::result::Result<RegionMetadataRef, BoxedError> {
-        let metadata = self
-            .inner
-            .get_metadata(region_id)
-            .map_err(BoxedError::new)?;
-        visible_region_metadata(&metadata).map_err(BoxedError::new)
+        let metadata = self.get_physical_metadata(region_id)?;
+        let split_columns = metric_value_columns(&metadata);
+        visible_region_metadata(&metadata, &split_columns).map_err(BoxedError::new)
     }
 
     /// Stop the engine.

@@ -89,14 +89,17 @@ impl MetricEngineInner {
         let logical_metadata = self
             .logical_region_metadata(physical_region_id, logical_region_id)
             .await?;
-        let request = self
-            .transform_request_with_metadata(
-                physical_region_id,
-                logical_region_id,
-                request,
-                &logical_metadata,
-            )
-            .await?;
+        let physical_metadata = self
+            .mito
+            .get_metadata(data_region_id)
+            .await
+            .context(MitoReadOperationSnafu)?;
+        let request = Self::transform_request_with_metadata(
+            logical_region_id,
+            request,
+            &logical_metadata,
+            &physical_metadata,
+        )?;
         let mut scanner = self
             .mito
             .handle_query(data_region_id, request)
@@ -105,10 +108,10 @@ impl MetricEngineInner {
         scanner.set_logical_region(true);
         scanner.set_query_load_region_id(data_region_id);
 
-        Ok(Box::new(LogicalRegionScanner::new(
-            scanner,
-            logical_metadata,
-        )))
+        Ok(Box::new(LogicalRegionScanner {
+            inner: scanner,
+            metadata: logical_metadata,
+        }))
     }
 
     pub async fn get_last_seq_num(&self, region_id: RegionId) -> Result<SequenceNumber> {
@@ -168,33 +171,29 @@ impl MetricEngineInner {
         let logical_metadata = self
             .logical_region_metadata(physical_region_id, logical_region_id)
             .await?;
-        self.transform_request_with_metadata(
-            physical_region_id,
+        let physical_metadata = self
+            .mito
+            .get_metadata(utils::to_data_region_id(physical_region_id))
+            .await
+            .context(MitoReadOperationSnafu)?;
+        Self::transform_request_with_metadata(
             logical_region_id,
             request,
             &logical_metadata,
+            &physical_metadata,
         )
-        .await
     }
 
-    async fn transform_request_with_metadata(
-        &self,
-        physical_region_id: RegionId,
+    fn transform_request_with_metadata(
         logical_region_id: RegionId,
         mut request: ScanRequest,
         logical_metadata: &RegionMetadataRef,
+        physical_metadata: &RegionMetadataRef,
     ) -> Result<ScanRequest> {
         let logical_projection = match request.projection_input.as_ref() {
             Some(projection_input) => projection_input.projection.clone(),
             None => (0..logical_metadata.column_metadatas.len()).collect(),
         };
-        let data_region_id = utils::to_data_region_id(physical_region_id);
-        let physical_metadata = self
-            .mito
-            .get_metadata(data_region_id)
-            .await
-            .context(MitoReadOperationSnafu)?;
-
         let mut physical_projection = Vec::with_capacity(logical_projection.len());
         for logical_index in logical_projection {
             let logical_column = logical_metadata
@@ -257,23 +256,10 @@ impl MetricEngineInner {
     }
 }
 
+#[derive(Debug)]
 struct LogicalRegionScanner {
     inner: RegionScannerRef,
     metadata: RegionMetadataRef,
-}
-
-impl LogicalRegionScanner {
-    fn new(inner: RegionScannerRef, metadata: RegionMetadataRef) -> Self {
-        Self { inner, metadata }
-    }
-}
-
-impl fmt::Debug for LogicalRegionScanner {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("LogicalRegionScanner")
-            .field("inner", &self.inner)
-            .finish()
-    }
 }
 
 impl DisplayAs for LogicalRegionScanner {

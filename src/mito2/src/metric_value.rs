@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashSet;
 use std::sync::Arc;
 
 use api::v1::SemanticType;
@@ -40,11 +39,17 @@ pub(crate) fn metric_value_columns(metadata: &RegionMetadata) -> Vec<MetricValue
     }
 
     metadata
-        .field_columns()
-        .filter(|column| column.column_schema.data_type == ConcreteDataType::float64_datatype())
-        .filter_map(|value_column| {
+        .column_metadatas
+        .iter()
+        .enumerate()
+        .filter(|(_, column)| {
+            column.semantic_type == SemanticType::Field
+                && column.column_schema.data_type == ConcreteDataType::float64_datatype()
+        })
+        .filter_map(|(value_index, value_column)| {
             let int_name = metric_engine_value_int_column_name(&value_column.column_schema.name);
-            let int_column = metadata.column_by_name(&int_name)?;
+            let int_index = metadata.column_index_by_name(&int_name)?;
+            let int_column = &metadata.column_metadatas[int_index];
             if int_column.semantic_type != SemanticType::Field
                 || int_column.column_schema.data_type != ConcreteDataType::int64_datatype()
             {
@@ -52,39 +57,35 @@ pub(crate) fn metric_value_columns(metadata: &RegionMetadata) -> Vec<MetricValue
             }
 
             Some(MetricValueColumn {
-                value_index: metadata.column_index_by_name(&value_column.column_schema.name)?,
-                int_index: metadata.column_index_by_name(&int_name)?,
+                value_index,
+                int_index,
             })
         })
         .collect()
 }
 
-pub(crate) fn visible_region_metadata(metadata: &RegionMetadataRef) -> Result<RegionMetadataRef> {
-    let split_columns = metric_value_columns(metadata);
+pub(crate) fn visible_region_metadata(
+    metadata: &RegionMetadataRef,
+    split_columns: &[MetricValueColumn],
+) -> Result<RegionMetadataRef> {
     if split_columns.is_empty() {
         return Ok(metadata.clone());
     }
 
-    let int_indices = split_columns
-        .into_iter()
-        .map(|column| column.int_index)
-        .collect::<HashSet<_>>();
-    let visible_columns = metadata
-        .column_metadatas
+    let names = split_columns
         .iter()
-        .enumerate()
-        .filter(|(index, _)| !int_indices.contains(index))
-        .map(|(_, column)| column.clone())
+        .map(|column| {
+            metadata.column_metadatas[column.int_index]
+                .column_schema
+                .name
+                .clone()
+        })
         .collect::<Vec<_>>();
 
-    let primary_key = metadata.primary_key.clone();
     let mut builder = RegionMetadataBuilder::from_existing((**metadata).clone());
     builder
-        .alter(AlterKind::SyncColumns {
-            column_metadatas: visible_columns,
-        })
+        .alter(AlterKind::DropColumns { names })
         .context(InvalidMetadataSnafu)?;
-    builder.primary_key(primary_key);
     builder.build().map(Arc::new).context(InvalidMetadataSnafu)
 }
 

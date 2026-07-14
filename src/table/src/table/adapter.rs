@@ -27,9 +27,7 @@ use datafusion_expr::TableProviderFilterPushDown as DfTableProviderFilterPushDow
 use datafusion_expr::expr::Expr;
 use datafusion_physical_expr::PhysicalSortExpr;
 use datafusion_physical_expr::expressions::Column;
-use store_api::metric_engine_consts::{
-    METRIC_ENGINE_NAME, PHYSICAL_TABLE_METADATA_KEY, is_metric_engine_value_int_column,
-};
+use store_api::metric_engine_consts::{METRIC_ENGINE_NAME, is_metric_engine_value_int_column};
 use store_api::storage::{ScanRequest, VectorSearchRequest};
 
 use crate::table::{TableRef, TableType};
@@ -89,11 +87,7 @@ impl TableProvider for DfTableProviderAdapter {
         let schema = table_schema.arrow_schema();
         let table_info = self.table.table_info();
         if table_info.meta.engine != METRIC_ENGINE_NAME
-            || !table_info
-                .meta
-                .options
-                .extra_options
-                .contains_key(PHYSICAL_TABLE_METADATA_KEY)
+            || !table_info.is_physical_table()
             || !schema
                 .fields()
                 .iter()

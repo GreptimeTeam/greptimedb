@@ -294,7 +294,7 @@ impl MetricEngineInner {
             .add_columns(data_region_id, new_columns, index_option)
             .await?;
 
-        let physical_columns = self.data_region.physical_columns(data_region_id).await?;
+        let physical_columns = self.data_region.physical_columns(data_region_id)?;
         let physical_schema_map = physical_columns
             .iter()
             .map(|metadata| (metadata.column_schema.name.as_str(), metadata))
@@ -303,36 +303,20 @@ impl MetricEngineInner {
             .iter()
             .map(|(region_id, _)| *region_id)
             .collect::<Vec<_>>();
-        let logical_column_metadata = requests
-            .iter()
-            .map(|(region_id, request)| {
-                (
-                    *region_id,
-                    request
-                        .column_metadatas
-                        .iter()
-                        .map(|metadata| {
-                            // Safety: previous steps ensure the physical region exist
-                            let physical_metadata = *physical_schema_map
-                                .get(metadata.column_schema.name.as_str())
-                                .unwrap();
-                            let mut column_metadata = physical_metadata.clone();
-                            if metadata.semantic_type == SemanticType::Field {
-                                column_metadata.column_schema = metadata.column_schema.clone();
-                            }
-                            (metadata.column_schema.name.clone(), column_metadata)
-                        })
-                        .collect::<HashMap<_, _>>(),
-                )
-            })
-            .collect::<Vec<_>>();
-        let logical_region_columns = logical_column_metadata.iter().map(|(region_id, columns)| {
+        let logical_region_columns = requests.iter().map(|(region_id, request)| {
             (
                 *region_id,
-                columns
-                    .iter()
-                    .map(|(name, column_metadata)| (name.as_str(), column_metadata))
-                    .collect::<HashMap<_, _>>(),
+                request.column_metadatas.iter().map(|metadata| {
+                    // Safety: previous steps ensure the physical region exist.
+                    let mut column_metadata = (*physical_schema_map
+                        .get(metadata.column_schema.name.as_str())
+                        .unwrap())
+                    .clone();
+                    if metadata.semantic_type == SemanticType::Field {
+                        column_metadata.column_schema = metadata.column_schema.clone();
+                    }
+                    column_metadata
+                }),
             )
         });
 
@@ -355,7 +339,7 @@ impl MetricEngineInner {
         {
             let mut state = self.state.write().unwrap();
             state.add_physical_columns(data_region_id, new_add_columns);
-            state.add_logical_regions(physical_region_id, logical_regions.clone());
+            state.add_logical_regions(physical_region_id, logical_regions.iter().copied());
         }
         for logical_region_id in logical_regions {
             self.metadata_region
@@ -396,10 +380,11 @@ impl MetricEngineInner {
                 column: DATA_SCHEMA_TSID_COLUMN_NAME,
             }
         );
-        for name in name_to_index.keys() {
+        for column in &request.column_metadatas {
+            let name = &column.column_schema.name;
             ensure!(
                 !is_metric_engine_value_int_column(name)
-                    || is_valid_physical_metric_value_int_column(request, name),
+                    || is_valid_physical_metric_value_int_column(request, column),
                 InternalColumnOccupiedSnafu { column: name }
             );
         }
@@ -595,24 +580,26 @@ impl MetricEngineInner {
     }
 }
 
-fn is_valid_physical_metric_value_int_column(request: &RegionCreateRequest, name: &str) -> bool {
+fn is_valid_physical_metric_value_int_column(
+    request: &RegionCreateRequest,
+    int_column: &ColumnMetadata,
+) -> bool {
     if !request.is_physical_table() {
         return false;
     }
 
-    let Some(value_name) = name.strip_prefix(DATA_SCHEMA_VALUE_INT_COLUMN_PREFIX) else {
+    let Some(value_name) = int_column
+        .column_schema
+        .name
+        .strip_prefix(DATA_SCHEMA_VALUE_INT_COLUMN_PREFIX)
+    else {
         return false;
     };
-    let find_column = |name| {
-        request
-            .column_metadatas
-            .iter()
-            .find(|metadata| metadata.column_schema.name == name)
-    };
-    let Some(value_column) = find_column(value_name) else {
-        return false;
-    };
-    let Some(int_column) = find_column(name) else {
+    let Some(value_column) = request
+        .column_metadatas
+        .iter()
+        .find(|metadata| metadata.column_schema.name == value_name)
+    else {
         return false;
     };
 
@@ -626,9 +613,18 @@ fn configure_metric_value_int_columns(
     column_metadatas: &mut Vec<ColumnMetadata>,
     value_split_enabled: bool,
 ) {
+    column_metadatas.retain_mut(|metadata| {
+        let is_int_column = is_metric_engine_value_int_column(&metadata.column_schema.name);
+        if is_int_column
+            || (metadata.semantic_type == SemanticType::Field
+                && metadata.column_schema.data_type == ConcreteDataType::float64_datatype())
+        {
+            metadata.column_schema.set_nullable();
+        }
+        value_split_enabled || !is_int_column
+    });
     if !value_split_enabled {
-        column_metadatas
-            .retain(|metadata| !is_metric_engine_value_int_column(&metadata.column_schema.name));
+        return;
     }
 
     let mut next_column_id = column_metadatas
@@ -640,29 +636,19 @@ fn configure_metric_value_int_columns(
         + 1;
     let existing_names = column_metadatas
         .iter()
-        .map(|metadata| metadata.column_schema.name.clone())
+        .map(|metadata| metadata.column_schema.name.as_str())
         .collect::<HashSet<_>>();
     let mut int_columns = Vec::new();
 
-    for metadata in column_metadatas.iter_mut() {
-        if is_metric_engine_value_int_column(&metadata.column_schema.name) {
-            metadata.column_schema.set_nullable();
-            continue;
-        }
+    for metadata in column_metadatas.iter() {
         if metadata.semantic_type != SemanticType::Field
             || metadata.column_schema.data_type != ConcreteDataType::float64_datatype()
         {
             continue;
         }
 
-        metadata.column_schema.set_nullable();
-
-        if !value_split_enabled {
-            continue;
-        }
-
         let int_column_name = metric_engine_value_int_column_name(&metadata.column_schema.name);
-        if existing_names.contains(&int_column_name) {
+        if existing_names.contains(int_column_name.as_str()) {
             continue;
         }
 

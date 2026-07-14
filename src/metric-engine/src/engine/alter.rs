@@ -167,7 +167,7 @@ impl MetricEngineInner {
             .add_columns(data_region_id, new_columns_to_add, index_options)
             .await?;
 
-        let physical_columns = self.data_region.physical_columns(data_region_id).await?;
+        let physical_columns = self.data_region.physical_columns(data_region_id)?;
         let physical_schema_map = physical_columns
             .iter()
             .map(|metadata| (metadata.column_schema.name.as_str(), metadata))
@@ -179,14 +179,10 @@ impl MetricEngineInner {
             };
             (
                 *region_id,
-                columns
-                    .iter()
-                    .map(|col| {
-                        let column_name = col.column_metadata.column_schema.name.as_str();
-                        let column_metadata = *physical_schema_map.get(column_name).unwrap();
-                        (column_name, column_metadata)
-                    })
-                    .collect::<HashMap<_, _>>(),
+                columns.iter().map(|col| {
+                    let column_name = col.column_metadata.column_schema.name.as_str();
+                    (*physical_schema_map.get(column_name).unwrap()).clone()
+                }),
             )
         });
 
