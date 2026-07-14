@@ -28,7 +28,7 @@ use crate::error::{
     self, ExecuteDdlSnafu, ExternalSnafu, InvalidSqlSnafu, Result, TableMetadataManagerSnafu,
 };
 use crate::statement::StatementExecutor;
-use crate::utils::to_meta_query_context;
+use crate::utils::to_meta_query_context_with_ddl_procedure_id;
 
 impl StatementExecutor {
     /// Adds a comment to a database object (table, column, or flow).
@@ -53,7 +53,7 @@ impl StatementExecutor {
         let cache_idents = comment_on_task.cache_idents();
 
         let request = SubmitDdlTaskRequest::new(
-            to_meta_query_context(query_ctx),
+            to_meta_query_context_with_ddl_procedure_id(query_ctx),
             DdlTask::new_comment_on(comment_on_task),
         );
 
@@ -87,7 +87,7 @@ impl StatementExecutor {
         let cache_idents = comment_on_task.cache_idents();
 
         let request = SubmitDdlTaskRequest::new(
-            to_meta_query_context(query_ctx),
+            to_meta_query_context_with_ddl_procedure_id(query_ctx),
             DdlTask::new_comment_on(comment_on_task),
         );
 

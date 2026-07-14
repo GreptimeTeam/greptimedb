@@ -110,7 +110,9 @@ use crate::error::{
 use crate::expr_helper::{self, RepartitionRequest, RepartitionSource};
 use crate::statement::StatementExecutor;
 use crate::statement::show::create_partitions_stmt;
-use crate::utils::{to_meta_query_context, to_meta_query_context_with_origin_frontend};
+use crate::utils::{
+    to_meta_query_context_with_ddl_procedure_id, to_meta_query_context_with_origin_frontend,
+};
 
 #[derive(Debug, Clone, Copy)]
 struct DdlSubmitOptions {
@@ -698,7 +700,7 @@ impl StatementExecutor {
         .context(error::InvalidExprSnafu)?;
 
         let request = SubmitDdlTaskRequest::new(
-            to_meta_query_context(query_context),
+            to_meta_query_context_with_ddl_procedure_id(query_context),
             DdlTask::new_create_trigger(task),
         );
 
@@ -762,7 +764,7 @@ impl StatementExecutor {
         })
         .context(error::InvalidExprSnafu)?;
         let request = SubmitDdlTaskRequest::new(
-            to_meta_query_context(query_context),
+            to_meta_query_context_with_ddl_procedure_id(query_context),
             DdlTask::new_create_flow(task),
         );
 
@@ -1075,7 +1077,7 @@ impl StatementExecutor {
         };
 
         let request = SubmitDdlTaskRequest::new(
-            to_meta_query_context(ctx),
+            to_meta_query_context_with_ddl_procedure_id(ctx),
             DdlTask::new_create_view(expr, view_info.clone()),
         );
 
@@ -1161,7 +1163,7 @@ impl StatementExecutor {
         query_context: QueryContextRef,
     ) -> Result<SubmitDdlTaskResponse> {
         let request = SubmitDdlTaskRequest::new(
-            to_meta_query_context(query_context),
+            to_meta_query_context_with_ddl_procedure_id(query_context),
             DdlTask::new_drop_flow(expr),
         );
 
@@ -1196,7 +1198,7 @@ impl StatementExecutor {
         query_context: QueryContextRef,
     ) -> Result<SubmitDdlTaskResponse> {
         let request = SubmitDdlTaskRequest::new(
-            to_meta_query_context(query_context),
+            to_meta_query_context_with_ddl_procedure_id(query_context),
             DdlTask::new_drop_trigger(expr),
         );
 
@@ -1264,7 +1266,7 @@ impl StatementExecutor {
         query_context: QueryContextRef,
     ) -> Result<SubmitDdlTaskResponse> {
         let request = SubmitDdlTaskRequest::new(
-            to_meta_query_context(query_context),
+            to_meta_query_context_with_ddl_procedure_id(query_context),
             DdlTask::new_drop_view(expr),
         );
 
@@ -1728,7 +1730,7 @@ impl StatementExecutor {
             ..Default::default()
         };
         let mut req = SubmitDdlTaskRequest::new(
-            to_meta_query_context(query_context.clone()),
+            to_meta_query_context_with_ddl_procedure_id(query_context.clone()),
             DdlTask::new_alter_table(AlterTableExpr {
                 catalog_name: request.catalog_name.clone(),
                 schema_name: request.schema_name.clone(),
@@ -1840,7 +1842,7 @@ impl StatementExecutor {
         let (req, invalidate_keys) = if physical_table_id == table_id {
             // This is physical table
             let req = SubmitDdlTaskRequest::new(
-                to_meta_query_context(query_context),
+                to_meta_query_context_with_ddl_procedure_id(query_context),
                 DdlTask::new_alter_table(expr),
             );
 
@@ -1853,7 +1855,7 @@ impl StatementExecutor {
         } else {
             // This is logical table
             let req = SubmitDdlTaskRequest::new(
-                to_meta_query_context(query_context),
+                to_meta_query_context_with_ddl_procedure_id(query_context),
                 DdlTask::new_alter_logical_tables(vec![expr]),
             );
 
@@ -2006,7 +2008,7 @@ impl StatementExecutor {
         query_context: QueryContextRef,
     ) -> Result<SubmitDdlTaskResponse> {
         let request = SubmitDdlTaskRequest::new(
-            to_meta_query_context(query_context),
+            to_meta_query_context_with_ddl_procedure_id(query_context),
             DdlTask::new_alter_logical_tables(tables_data),
         );
 
@@ -2024,7 +2026,7 @@ impl StatementExecutor {
         query_context: QueryContextRef,
     ) -> Result<SubmitDdlTaskResponse> {
         let request = SubmitDdlTaskRequest::new(
-            to_meta_query_context(query_context),
+            to_meta_query_context_with_ddl_procedure_id(query_context),
             DdlTask::new_drop_table(
                 table_name.catalog_name.clone(),
                 table_name.schema_name.clone(),
@@ -2048,7 +2050,7 @@ impl StatementExecutor {
         query_context: QueryContextRef,
     ) -> Result<SubmitDdlTaskResponse> {
         let request = SubmitDdlTaskRequest::new(
-            to_meta_query_context(query_context),
+            to_meta_query_context_with_ddl_procedure_id(query_context),
             DdlTask::new_drop_database(catalog, schema, drop_if_exists),
         );
 
@@ -2064,7 +2066,7 @@ impl StatementExecutor {
         query_context: QueryContextRef,
     ) -> Result<SubmitDdlTaskResponse> {
         let request = SubmitDdlTaskRequest::new(
-            to_meta_query_context(query_context),
+            to_meta_query_context_with_ddl_procedure_id(query_context),
             DdlTask::new_alter_database(alter_expr),
         );
 
@@ -2082,7 +2084,7 @@ impl StatementExecutor {
         query_context: QueryContextRef,
     ) -> Result<SubmitDdlTaskResponse> {
         let request = SubmitDdlTaskRequest::new(
-            to_meta_query_context(query_context),
+            to_meta_query_context_with_ddl_procedure_id(query_context),
             DdlTask::new_truncate_table(
                 table_name.catalog_name.clone(),
                 table_name.schema_name.clone(),
@@ -2154,7 +2156,7 @@ impl StatementExecutor {
         query_context: QueryContextRef,
     ) -> Result<SubmitDdlTaskResponse> {
         let request = SubmitDdlTaskRequest::new(
-            to_meta_query_context(query_context),
+            to_meta_query_context_with_ddl_procedure_id(query_context),
             DdlTask::new_create_database(catalog, database, create_if_not_exists, options),
         );
 

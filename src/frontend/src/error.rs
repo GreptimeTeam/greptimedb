@@ -351,8 +351,9 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Canceling statement due to statement timeout"))]
+    #[snafu(display("{msg}"))]
     StatementTimeout {
+        msg: String,
         #[snafu(implicit)]
         location: Location,
     },
@@ -365,6 +366,19 @@ pub enum Error {
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+pub(crate) fn statement_timeout_message(ddl_procedure_ids: &[String]) -> String {
+    match ddl_procedure_ids {
+        [] => "Canceling statement due to statement timeout".to_string(),
+        [procedure_id] => format!(
+            "Canceling statement due to statement timeout. The DDL request may still be running. Procedure ID: {procedure_id}. Please use this procedure id to query the final status"
+        ),
+        procedure_ids => format!(
+            "Canceling statement due to statement timeout. Some DDL procedures may still be running. Procedure IDs: {}. Please use these procedure ids to query the final status",
+            procedure_ids.join(", ")
+        ),
+    }
+}
 
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
@@ -487,6 +501,36 @@ impl ErrorExt for Error {
 
             _ => RetryHint::NonRetryable,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::statement_timeout_message;
+
+    #[test]
+    fn test_statement_timeout_message_without_ddl_procedure_ids() {
+        assert_eq!(
+            statement_timeout_message(&[]),
+            "Canceling statement due to statement timeout"
+        );
+    }
+
+    #[test]
+    fn test_statement_timeout_message_with_single_ddl_procedure_id() {
+        let message = statement_timeout_message(&["procedure-1".to_string()]);
+
+        assert!(message.contains("DDL request may still be running"));
+        assert!(message.contains("Procedure ID: procedure-1"));
+    }
+
+    #[test]
+    fn test_statement_timeout_message_with_multiple_ddl_procedure_ids() {
+        let message =
+            statement_timeout_message(&["procedure-1".to_string(), "procedure-2".to_string()]);
+
+        assert!(message.contains("DDL procedures may still be running"));
+        assert!(message.contains("Procedure IDs: procedure-1, procedure-2"));
     }
 }
 

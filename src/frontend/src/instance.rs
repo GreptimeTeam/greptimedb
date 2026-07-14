@@ -97,7 +97,7 @@ use tracing::Span;
 use crate::error::{
     self, Error, ExecLogicalPlanSnafu, ExecutePromqlSnafu, ExternalSnafu, InvalidSqlSnafu,
     ParseSqlSnafu, PermissionSnafu, PlanStatementSnafu, Result, SqlExecInterceptedSnafu,
-    StatementTimeoutSnafu, TableOperationSnafu,
+    StatementTimeoutSnafu, TableOperationSnafu, statement_timeout_message,
 };
 use crate::service_config::InfluxdbMergeMode;
 use crate::stream_wrapper::CancellableStreamWrapper;
@@ -248,6 +248,7 @@ impl Instance {
 
     async fn query_statement(&self, stmt: Statement, query_ctx: QueryContextRef) -> Result<Output> {
         check_permission(self.plugins.clone(), &stmt, &query_ctx)?;
+        query_ctx.clear_ddl_procedure_ids();
 
         let query_interceptor = self.plugins.get::<SqlQueryInterceptorRef<Error>>();
         let query_interceptor = query_interceptor.as_ref();
@@ -300,10 +301,10 @@ impl Instance {
                 let start = tokio::time::Instant::now();
                 let output = tokio::time::timeout(
                     timeout,
-                    self.exec_statement(stmt, query_ctx, query_interceptor),
+                    self.exec_statement(stmt, query_ctx.clone(), query_interceptor),
                 )
                 .await
-                .map_err(|_| StatementTimeoutSnafu.build())??;
+                .map_err(|_| statement_timeout_error(&query_ctx))??;
                 // compute remaining timeout
                 let remaining_timeout = timeout.checked_sub(start.elapsed()).unwrap_or_default();
                 attach_timeout(output, remaining_timeout)
@@ -533,6 +534,21 @@ fn derive_timeout(stmt: &Statement, query_ctx: &QueryContextRef) -> Option<Durat
     }
 }
 
+fn statement_timeout_error(query_ctx: &QueryContextRef) -> Error {
+    let ddl_procedure_ids = query_ctx.ddl_procedure_ids();
+    StatementTimeoutSnafu {
+        msg: statement_timeout_message(&ddl_procedure_ids),
+    }
+    .build()
+}
+
+fn plain_statement_timeout_error() -> Error {
+    StatementTimeoutSnafu {
+        msg: statement_timeout_message(&[]),
+    }
+    .build()
+}
+
 /// Derives timeout for plan execution.
 fn derive_timeout_for_plan(plan: &LogicalPlan, query_ctx: &QueryContextRef) -> Option<Duration> {
     let query_timeout = query_ctx.query_timeout()?;
@@ -548,7 +564,7 @@ fn derive_timeout_for_plan(plan: &LogicalPlan, query_ctx: &QueryContextRef) -> O
 
 fn attach_timeout(output: Output, mut timeout: Duration) -> Result<Output> {
     if timeout.is_zero() {
-        return StatementTimeoutSnafu.fail();
+        return Err(plain_statement_timeout_error());
     }
 
     let output = match output.data {
@@ -723,9 +739,9 @@ impl Instance {
         match timeout {
             Some(timeout) => {
                 let start = tokio::time::Instant::now();
-                let output = tokio::time::timeout(timeout, self.exec_plan(plan, query_ctx))
+                let output = tokio::time::timeout(timeout, self.exec_plan(plan, query_ctx.clone()))
                     .await
-                    .map_err(|_| StatementTimeoutSnafu.build())??;
+                    .map_err(|_| statement_timeout_error(&query_ctx))??;
                 let remaining_timeout = timeout.checked_sub(start.elapsed()).unwrap_or_default();
                 attach_timeout(output, remaining_timeout)
             }

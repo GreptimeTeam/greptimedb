@@ -34,11 +34,20 @@ pub fn to_meta_query_context(
     }
 }
 
+pub fn to_meta_query_context_with_ddl_procedure_id(
+    query_context: QueryContextRef,
+) -> common_meta::rpc::ddl::QueryContext {
+    let mut meta_query_context = to_meta_query_context(query_context.clone());
+    let procedure_id = common_meta::rpc::ddl::inject_ddl_procedure_id(&mut meta_query_context);
+    query_context.push_ddl_procedure_id(procedure_id);
+    meta_query_context
+}
+
 pub fn to_meta_query_context_with_origin_frontend(
     query_context: QueryContextRef,
     origin_frontend_addr: &str,
 ) -> common_meta::rpc::ddl::QueryContext {
-    let mut meta_query_context = to_meta_query_context(query_context);
+    let mut meta_query_context = to_meta_query_context_with_ddl_procedure_id(query_context);
     meta_query_context.extensions.insert(
         common_meta::rpc::ddl::ORIGIN_FRONTEND_ADDR_EXTENSION_KEY.to_string(),
         origin_frontend_addr.to_string(),
@@ -69,13 +78,15 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::{Arc, RwLock};
 
-    use common_meta::rpc::ddl::ORIGIN_FRONTEND_ADDR_EXTENSION_KEY;
+    use common_meta::rpc::ddl::{
+        DDL_PROCEDURE_ID_EXTENSION_KEY, ORIGIN_FRONTEND_ADDR_EXTENSION_KEY,
+    };
     use common_time::Timezone;
     use session::context::QueryContextBuilder;
 
     use super::{
-        to_meta_query_context, to_meta_query_context_with_origin_frontend,
-        try_to_session_query_context,
+        to_meta_query_context, to_meta_query_context_with_ddl_procedure_id,
+        to_meta_query_context_with_origin_frontend, try_to_session_query_context,
     };
 
     #[test]
@@ -112,7 +123,8 @@ mod tests {
                 .build(),
         );
 
-        let meta_ctx = to_meta_query_context_with_origin_frontend(session_ctx, "127.0.0.1:4000");
+        let meta_ctx =
+            to_meta_query_context_with_origin_frontend(session_ctx.clone(), "127.0.0.1:4000");
 
         assert_eq!(
             meta_ctx
@@ -121,5 +133,33 @@ mod tests {
                 .map(String::as_str),
             Some("127.0.0.1:4000")
         );
+        assert!(
+            meta_ctx
+                .extensions
+                .contains_key(DDL_PROCEDURE_ID_EXTENSION_KEY)
+        );
+        assert_eq!(session_ctx.ddl_procedure_ids().len(), 1);
+    }
+
+    #[test]
+    fn test_meta_query_context_with_ddl_procedure_id_records_generated_id() {
+        let session_ctx = Arc::new(
+            QueryContextBuilder::default()
+                .set_extension(
+                    DDL_PROCEDURE_ID_EXTENSION_KEY.to_string(),
+                    "spoofed".to_string(),
+                )
+                .build(),
+        );
+
+        let meta_ctx = to_meta_query_context_with_ddl_procedure_id(session_ctx.clone());
+        let procedure_id = meta_ctx
+            .extensions
+            .get(DDL_PROCEDURE_ID_EXTENSION_KEY)
+            .cloned()
+            .unwrap();
+
+        assert_ne!("spoofed", procedure_id);
+        assert_eq!(session_ctx.ddl_procedure_ids(), vec![procedure_id]);
     }
 }
