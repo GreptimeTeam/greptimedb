@@ -90,8 +90,16 @@ impl JsonGetResultBuilder for StringResultBuilder {
                 if let Some(v) = string_array_value_at_index(column, i) {
                     self.0.append_value(v);
                 } else {
-                    self.0
-                        .append_value(arrow_cast::display::array_value_to_string(column, i)?);
+                    let value = JsonArray::from(column)
+                        .try_get_value(i)
+                        .map_err(|e| exec_datafusion_err!("{e}"))?;
+                    if value.is_null() {
+                        self.0.append_null();
+                    } else if let Some(s) = value.as_str() {
+                        self.0.append_value(s);
+                    } else {
+                        self.0.append_value(value.to_string());
+                    }
                 }
             }
             JsonResultValue::JsonStructByValue(value) => {

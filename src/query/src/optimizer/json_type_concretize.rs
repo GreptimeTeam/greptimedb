@@ -14,7 +14,6 @@
 
 use std::collections::HashMap;
 
-use arrow_schema::DataType;
 use common_function::scalars::json::json_get::JsonGetWithType;
 use datafusion::datasource::DefaultTableSource;
 use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRecursion};
@@ -121,14 +120,15 @@ fn deduce_json_type(expr: &Expr) -> Result<Option<(String, JsonNativeType)>> {
         .args
         .get(2)
         .and_then(|expr| expr.as_literal())
-        .map(|x| x.data_type())
-        .unwrap_or(DataType::Utf8View);
-    let with_type =
-        JsonNativeType::try_from(&with_type).map_err(|e| plan_datafusion_err!("{e:?}"))?;
+        .map(|x| {
+            JsonNativeType::try_from(&x.data_type()).map_err(|e| plan_datafusion_err!("{e:?}"))
+        })
+        .transpose()?
+        .unwrap_or(JsonNativeType::Variant);
 
     let mut split = path.rsplit(".");
     let Some(leaf) = split.next() else {
-        return Ok(Some((column.name.clone(), JsonNativeType::String)));
+        return Ok(Some((column.name.clone(), JsonNativeType::Variant)));
     };
 
     let mut object = JsonObjectType::new();
@@ -148,6 +148,7 @@ fn deduce_json_type(expr: &Expr) -> Result<Option<(String, JsonNativeType)>> {
 mod tests {
     use std::sync::Arc;
 
+    use arrow_schema::DataType;
     use common_function::scalars::udf::create_udf;
     use datafusion::datasource::provider_as_source;
     use datafusion_common::{Column, ScalarValue};
@@ -203,7 +204,7 @@ mod tests {
                 "a".to_string(),
                 JsonNativeType::Object(JsonObjectType::from([
                     ("b".to_string(), JsonNativeType::i64()),
-                    ("c".to_string(), JsonNativeType::String),
+                    ("c".to_string(), JsonNativeType::Variant),
                 ])),
             ),
             ("d".to_string(), JsonNativeType::Bool),
@@ -286,7 +287,7 @@ mod tests {
     }
 
     #[test]
-    fn test_deduce_json_type_default_string() -> Result<()> {
+    fn test_deduce_json_type_default_variant() -> Result<()> {
         let expr = json_get_expr(
             Expr::Column(Column::new_unqualified("k0")),
             path_expr("a.b"),
@@ -298,7 +299,7 @@ mod tests {
             "a".to_string(),
             JsonNativeType::Object(JsonObjectType::from([(
                 "b".to_string(),
-                JsonNativeType::String,
+                JsonNativeType::Variant,
             )])),
         )]));
 

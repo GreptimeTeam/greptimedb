@@ -73,6 +73,34 @@ select j.d from json2_table order by ts;
 
 drop table json2_table;
 
+create table json2_root_schema_merge (
+    ts timestamp time index,
+    j json2
+) with (
+    'sst_format' = 'flat',
+    'append_mode' = true,
+);
+
+insert into json2_root_schema_merge
+values
+    (1, '{"a": {"b": 1, "c": "sst1"}}'),
+    (2, '{"a": {"b": 2, "c": "sst2"}}');
+
+admin flush_table('json2_root_schema_merge');
+
+insert into json2_root_schema_merge
+values
+    (3, '{"a": {"b": 3, "d": true}}'),
+    (4, '{"a": {"d": false, "c": "sst3"}}');
+
+admin flush_table('json2_root_schema_merge');
+
+select json_get(j, 'a')
+from json2_root_schema_merge
+order by ts;
+
+drop table json2_root_schema_merge;
+
 create table json2_without_append_mode (
     ts timestamp time index,
     j json2
