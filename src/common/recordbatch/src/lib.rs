@@ -769,7 +769,7 @@ impl MemoryTrackedStream {
         batch: RecordBatch,
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<RecordBatch>>> {
-        let additional = batch.buffer_memory_size();
+        let additional = batch.logical_slice_memory_size();
         let tracker = self.ready_tracker_mut();
 
         if let Err(error) = tracker.try_track(additional) {
@@ -858,6 +858,35 @@ mod tests {
         PermitGranularity::Kilobyte
             .permits_to_bytes(PermitGranularity::Kilobyte.bytes_to_permits(bytes as u64))
             as usize
+    }
+
+    #[tokio::test]
+    async fn test_memory_tracked_stream_charges_logical_slice_size() {
+        let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
+            "payload",
+            ConcreteDataType::string_datatype(),
+            false,
+        )]));
+        let payloads: Vec<_> = (0..1024)
+            .map(|value| format!("payload-{value:04}"))
+            .collect();
+        let batch = RecordBatch::new(schema, vec![Arc::new(StringVector::from(payloads)) as _])
+            .unwrap()
+            .slice(512, 1)
+            .unwrap();
+        let expected_bytes = aligned_tracked_bytes(batch.logical_slice_memory_size());
+        assert!(expected_bytes < aligned_tracked_bytes(batch.buffer_memory_size()));
+        let tracker = QueryMemoryTracker::builder(MB, OnExhaustedPolicy::Fail).build();
+        let mut stream = MemoryTrackedStream::new(
+            RecordBatches::try_new(batch.schema.clone(), vec![batch])
+                .unwrap()
+                .as_stream(),
+            tracker.clone(),
+        );
+
+        stream.next().await.unwrap().unwrap();
+
+        assert_eq!(tracker.current(), expected_bytes);
     }
 
     #[test]
@@ -1052,7 +1081,7 @@ mod tests {
         })
         .build();
         let batch = large_string_batch(700 * 1024);
-        let expected_bytes = aligned_tracked_bytes(batch.buffer_memory_size());
+        let expected_bytes = aligned_tracked_bytes(batch.logical_slice_memory_size());
 
         let mut stream1 = MemoryTrackedStream::new(
             RecordBatches::try_new(batch.schema.clone(), vec![batch.clone()])
