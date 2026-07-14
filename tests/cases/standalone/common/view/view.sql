@@ -39,6 +39,20 @@ DROP VIEW v2;
 
 DROP VIEW IF EXISTS v2;
 
+CREATE VIEW pg_keywords_view AS SELECT * FROM pg_get_keywords();
+
+SELECT count(*) FROM pg_keywords_view;
+
+SELECT count(*) FROM pg_keywords_view;
+
+DROP VIEW pg_keywords_view;
+
+CREATE VIEW rejected_pg_keywords_view AS SELECT * FROM pg_get_keywords(1);
+
+CREATE VIEW rejected_udtf_view AS SELECT * FROM generate_series(1, 2);
+
+SHOW VIEWS;
+
 DROP TABLE t1;
 
 SHOW TABLES;

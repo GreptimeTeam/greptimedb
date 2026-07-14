@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::collections::{HashMap, HashSet};
+use std::ops::ControlFlow;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -82,7 +83,9 @@ use sql::statements::create::{
     CreateExternalTable, CreateFlow, CreateTable, CreateTableLike, CreateView, Partitions,
 };
 use sql::statements::statement::Statement;
-use sqlparser::ast::{Expr, Ident, UnaryOperator, Value as ParserValue};
+use sqlparser::ast::{
+    Expr, Ident, ObjectNamePart, TableFactor, UnaryOperator, Value as ParserValue, Visit, Visitor,
+};
 use store_api::metric_engine_consts::{LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME};
 use store_api::mito_engine_options::APPEND_MODE_KEY;
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
@@ -122,6 +125,84 @@ const ALLOWED_FLOW_OPTIONS: [&str; 2] = [
     DEFER_ON_MISSING_SOURCE_KEY,
     FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY,
 ];
+
+const PERSISTED_VIEW_TABLE_FUNCTION: &str = "pg_get_keywords";
+
+/// Reject table functions that cannot be reconstructed from persisted view plans.
+fn validate_view_table_functions(
+    query: &sql::statements::query::Query,
+    view_name: &str,
+) -> Result<()> {
+    struct TableFunctionValidator {
+        valid: bool,
+    }
+
+    impl Visitor for TableFunctionValidator {
+        type Break = ();
+
+        fn pre_visit_table_factor(
+            &mut self,
+            table_factor: &TableFactor,
+        ) -> ControlFlow<Self::Break> {
+            match table_factor {
+                TableFactor::Table {
+                    name,
+                    args: Some(args),
+                    with_hints,
+                    version,
+                    with_ordinality,
+                    partitions,
+                    json_path,
+                    sample,
+                    index_hints,
+                    ..
+                } => {
+                    let exact_marker = matches!(
+                        name.0.as_slice(),
+                        [ObjectNamePart::Identifier(Ident {
+                            value,
+                            quote_style: None,
+                            ..
+                        })] if value == PERSISTED_VIEW_TABLE_FUNCTION
+                    );
+                    self.valid = exact_marker
+                        && args.args.is_empty()
+                        && args.settings.is_none()
+                        && with_hints.is_empty()
+                        && version.is_none()
+                        && !with_ordinality
+                        && partitions.is_empty()
+                        && json_path.is_none()
+                        && sample.is_none()
+                        && index_hints.is_empty();
+                }
+                TableFactor::Function { .. } | TableFactor::TableFunction { .. } => {
+                    self.valid = false;
+                }
+                _ => return ControlFlow::Continue(()),
+            }
+
+            if self.valid {
+                ControlFlow::Continue(())
+            } else {
+                ControlFlow::Break(())
+            }
+        }
+    }
+
+    let mut validator = TableFunctionValidator { valid: true };
+    let _ = query.inner.visit(&mut validator);
+    ensure!(
+        validator.valid,
+        error::InvalidViewSnafu {
+            msg: format!(
+                "only {PERSISTED_VIEW_TABLE_FUNCTION}() is supported as a table function source"
+            ),
+            view_name: view_name.to_string(),
+        }
+    );
+    Ok(())
+}
 
 fn build_procedure_id_output(procedure_id: Vec<u8>) -> Result<Output> {
     let procedure_id = String::from_utf8_lossy(&procedure_id).to_string();
@@ -903,6 +984,7 @@ impl StatementExecutor {
         // convert input into logical plan
         let logical_plan = match &*create_view.query {
             Statement::Query(query) => {
+                validate_view_table_functions(query, &create_view.name.to_string())?;
                 self.plan(
                     &QueryStatement::Sql(Statement::Query(query.clone())),
                     ctx.clone(),
@@ -2682,6 +2764,51 @@ mod test {
 
     use super::*;
     use crate::expr_helper;
+
+    fn validate_create_view_query(query: &str) -> Result<()> {
+        let stmt = ParserContext::create_with_dialect(
+            &format!("CREATE VIEW test_view AS {query}"),
+            &GreptimeDbDialect {},
+            ParseOptions::default(),
+        )
+        .unwrap()
+        .pop()
+        .unwrap();
+        let Statement::CreateView(create_view) = stmt else {
+            unreachable!()
+        };
+        let Statement::Query(query) = &*create_view.query else {
+            unreachable!()
+        };
+        validate_view_table_functions(query, "test_view")
+    }
+
+    #[test]
+    fn test_validate_view_table_functions() {
+        for query in [
+            "SELECT * FROM numbers",
+            "SELECT lower('keyword') FROM numbers",
+            "SELECT generate_series(1, 2) FROM numbers",
+            "SELECT * FROM pg_get_keywords() AS keywords",
+            "WITH keywords AS (SELECT * FROM pg_get_keywords()) SELECT * FROM keywords",
+            "SELECT * FROM (SELECT * FROM pg_get_keywords() AS keywords) AS nested",
+            "SELECT * FROM numbers JOIN pg_get_keywords() AS keywords ON true",
+        ] {
+            assert!(validate_create_view_query(query).is_ok(), "{query}");
+        }
+
+        for query in [
+            "SELECT * FROM pg_get_keywords(1)",
+            "SELECT * FROM generate_series(1, 2)",
+            "SELECT * FROM PG_GET_KEYWORDS()",
+            "SELECT * FROM \"pg_get_keywords\"()",
+            "SELECT * FROM public.pg_get_keywords()",
+            "SELECT * FROM pg_get_keywords() WITH ORDINALITY",
+            "SELECT * FROM pg_get_keywords() WITH (NOLOCK)",
+        ] {
+            assert!(validate_create_view_query(query).is_err(), "{query}");
+        }
+    }
 
     #[test]
     fn test_parse_ddl_options() {

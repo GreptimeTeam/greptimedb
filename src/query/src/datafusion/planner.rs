@@ -80,7 +80,8 @@ impl DfContextProviderAdapter {
                 .config_options()
                 .sql_parser
                 .enable_ident_normalization,
-        );
+        )
+        .with_persisted_view_table_function(engine_state.table_function("pg_get_keywords"));
 
         let tables = resolve_tables(table_names, &mut table_provider).await?;
         let file_formats = SessionStateDefaults::default_file_formats()
