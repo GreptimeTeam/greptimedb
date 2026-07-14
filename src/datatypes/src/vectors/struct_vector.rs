@@ -460,10 +460,80 @@ impl ScalarVectorBuilder for StructVectorBuilder {
 
 #[cfg(test)]
 mod tests {
+    use arrow::array::{ArrayRef, Int8Array, StringArray};
+    use arrow::datatypes::Field;
+    use arrow_array::DictionaryArray;
+    use arrow_schema::Fields;
+
     use super::*;
     use crate::types::StructField;
     use crate::value::ListValue;
     use crate::value::tests::*;
+
+    #[test]
+    fn test_nested_dictionary_struct_child_materializes() {
+        let dictionary = DictionaryArray::try_new(
+            Int8Array::from(vec![Some(0), None, Some(1)]),
+            Arc::new(StringArray::from(vec![Some("nested"), None])),
+        )
+        .unwrap();
+        let fields: Fields = vec![Arc::new(Field::new(
+            "dictionary",
+            dictionary.data_type().clone(),
+            true,
+        ))]
+        .into();
+        let struct_array = StructArray::new(fields.clone(), vec![Arc::new(dictionary)], None);
+        let vector = Helper::try_into_vector(Arc::new(struct_array) as ArrayRef).unwrap();
+        let struct_type = StructType::from(&fields);
+
+        assert_eq!(
+            vector.get(0),
+            Value::Struct(StructValue::new(
+                vec![Value::String("nested".into())],
+                struct_type.clone(),
+            ))
+        );
+        assert_eq!(
+            vector.get(1),
+            Value::Struct(StructValue::new(vec![Value::Null], struct_type.clone()))
+        );
+        assert_eq!(
+            vector.get(2),
+            Value::Struct(StructValue::new(vec![Value::Null], struct_type))
+        );
+    }
+
+    #[test]
+    fn test_struct_utf8_child_materializes() {
+        let fields: Fields = vec![Arc::new(Field::new("name", ArrowDataType::Utf8, true))].into();
+        let struct_array = StructArray::new(
+            fields.clone(),
+            vec![Arc::new(StringArray::from(vec!["plain"]))],
+            None,
+        );
+        let vector = Helper::try_into_vector(Arc::new(struct_array) as ArrayRef).unwrap();
+
+        assert_eq!(
+            vector.get(0),
+            Value::Struct(StructValue::new(
+                vec![Value::String("plain".into())],
+                StructType::from(&fields),
+            ))
+        );
+    }
+
+    #[test]
+    fn test_top_level_dictionary_materializes() {
+        let dictionary = DictionaryArray::try_new(
+            Int8Array::from(vec![Some(0)]),
+            Arc::new(StringArray::from(vec!["top-level"])),
+        )
+        .unwrap();
+        let vector = Helper::try_into_vector(Arc::new(dictionary) as ArrayRef).unwrap();
+
+        assert_eq!(vector.get(0), Value::String("top-level".into()));
+    }
 
     #[test]
     fn test_struct_vector_builder() {

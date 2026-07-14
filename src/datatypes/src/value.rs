@@ -1218,12 +1218,18 @@ impl TryFrom<ScalarValue> for Value {
                     .collect::<Result<Vec<Value>>>()?;
                 Value::Struct(StructValue::try_new(items, struct_type)?)
             }
+            ScalarValue::Dictionary(_, decoded) => {
+                if decoded.is_null() {
+                    Value::Null
+                } else {
+                    (*decoded).try_into()?
+                }
+            }
             ScalarValue::Decimal32(_, _, _)
             | ScalarValue::Decimal64(_, _, _)
             | ScalarValue::Decimal256(_, _, _)
             | ScalarValue::FixedSizeList(_)
             | ScalarValue::LargeList(_)
-            | ScalarValue::Dictionary(_, _)
             | ScalarValue::Union(_, _, _)
             | ScalarValue::Float16(_)
             | ScalarValue::Utf8View(_)
@@ -2085,6 +2091,59 @@ pub(crate) mod tests {
         assert_eq!(
             Value::Struct(struct_value),
             scalar_struct_value.try_into().unwrap()
+        );
+    }
+
+    #[test]
+    fn test_try_from_dictionary_scalar_value() {
+        let key_type = Box::new(ArrowDataType::Int8);
+
+        assert_eq!(
+            Value::String("dictionary string".into()),
+            ScalarValue::Dictionary(
+                key_type.clone(),
+                Box::new(ScalarValue::Utf8(Some("dictionary string".into())))
+            )
+            .try_into()
+            .unwrap()
+        );
+        assert_eq!(
+            Value::Null,
+            ScalarValue::Dictionary(key_type.clone(), Box::new(ScalarValue::Utf8(None)))
+                .try_into()
+                .unwrap()
+        );
+        assert_eq!(
+            Value::Null,
+            ScalarValue::Dictionary(
+                key_type.clone(),
+                Box::new(ScalarValue::new_null_list(ArrowDataType::Utf8, true, 1))
+            )
+            .try_into()
+            .unwrap()
+        );
+
+        let dictionary_type =
+            ArrowDataType::Dictionary(Box::new(ArrowDataType::Int8), Box::new(ArrowDataType::Utf8));
+        let list = ScalarValue::List(ScalarValue::new_list(
+            &[ScalarValue::Dictionary(
+                key_type.clone(),
+                Box::new(ScalarValue::Utf8(Some("nested".into()))),
+            )],
+            &dictionary_type,
+            true,
+        ));
+        assert_eq!(
+            Value::List(ListValue::new(
+                vec![Value::String("nested".into())],
+                Arc::new(ConcreteDataType::dictionary_datatype(
+                    ConcreteDataType::int8_datatype(),
+                    ConcreteDataType::string_datatype(),
+                )),
+            )),
+            ScalarValue::Dictionary(key_type, Box::new(list))
+                .try_into()
+                .unwrap()
         );
     }
 
