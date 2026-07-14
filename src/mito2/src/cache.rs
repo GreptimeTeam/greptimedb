@@ -250,7 +250,7 @@ impl CachedSstMeta {
 }
 
 fn infer_loaded_page_index_policy(parquet_metadata: &ParquetMetaData) -> PageIndexPolicy {
-    if parquet_metadata.column_index().is_some() || parquet_metadata.offset_index().is_some() {
+    if parquet_metadata.offset_index().is_some() {
         PageIndexPolicy::Optional
     } else {
         PageIndexPolicy::Skip
@@ -278,12 +278,10 @@ fn strip_region_metadata_from_parquet(parquet_metadata: ParquetMetaData) -> Parq
 
     let mut builder = parquet_metadata.into_builder();
     let row_groups = builder.take_row_groups();
-    let column_index = builder.take_column_index();
     let offset_index = builder.take_offset_index();
 
     parquet::file::metadata::ParquetMetaDataBuilder::new(stripped_file_metadata)
         .set_row_groups(row_groups)
-        .set_column_index(column_index)
         .set_offset_index(offset_index)
         .build()
 }
