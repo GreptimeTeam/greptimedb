@@ -33,6 +33,7 @@ use crate::{UserInfoRef, UserProviderRef};
 
 pub(crate) const DEFAULT_USERNAME: &str = "greptime";
 pub const DEFAULT_PBKDF2_SHA256_ITERATIONS: u32 = 4096;
+pub const DEFAULT_PBKDF2_SHA256_SALT_LEN: usize = 16;
 pub const PBKDF2_SHA256_HASH_LEN: usize = 32;
 pub const MAX_PBKDF2_SHA256_ITERATIONS: u32 = 1_000_000;
 pub const MAX_PBKDF2_SHA256_SALT_LEN: usize = 1024;
@@ -303,9 +304,10 @@ impl PgScramSha256Verifier {
     /// PBKDF2 is run (avoids a CPU-exhaustion DoS keyed on unknown usernames),
     /// and the random keys guarantee the client proof never matches.
     pub fn mock_for_unknown_user(username: &[u8]) -> Self {
+        let mock_salt = hmac_sha256(PG_SCRAM_MOCK_SECRET.as_slice(), username);
         Self {
             iterations: DEFAULT_PBKDF2_SHA256_ITERATIONS,
-            salt: hmac_sha256(PG_SCRAM_MOCK_SECRET.as_slice(), username),
+            salt: mock_salt[..DEFAULT_PBKDF2_SHA256_SALT_LEN].to_vec(),
             stored_key: rand::random::<[u8; PG_SCRAM_SHA256_KEY_LEN]>().to_vec(),
             server_key: rand::random::<[u8; PG_SCRAM_SHA256_KEY_LEN]>().to_vec(),
         }
@@ -384,6 +386,14 @@ fn pg_scram_sha256_salted_password(
             )
         }
     );
+
+    let prepared_password = std::str::from_utf8(password)
+        .ok()
+        .and_then(|password| stringprep::saslprep(password).ok());
+    let password = prepared_password
+        .as_deref()
+        .map(str::as_bytes)
+        .unwrap_or(password);
 
     let mut salted_password = [0u8; PG_SCRAM_SHA256_KEY_LEN];
     pbkdf2_hmac::<Sha256>(password, salt, iterations, &mut salted_password);
@@ -492,6 +502,32 @@ mod tests {
     }
 
     #[test]
+    fn test_pg_scram_sha256_applies_saslprep() {
+        let normalized = PgScramSha256Verifier::from_password(b"pass word", b"salt", 4096).unwrap();
+        let non_breaking_space =
+            PgScramSha256Verifier::from_password("pass\u{00a0}word".as_bytes(), b"salt", 4096)
+                .unwrap();
+
+        assert_eq!(normalized, non_breaking_space);
+        assert!(
+            non_breaking_space
+                .verify_plain_password(b"pass word")
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn test_pg_scram_sha256_uses_original_bytes_when_saslprep_is_not_possible() {
+        let invalid_utf8 = b"password\xff";
+        let prohibited = b"password\x07";
+
+        for password in [invalid_utf8.as_slice(), prohibited.as_slice()] {
+            let verifier = PgScramSha256Verifier::from_password(password, b"salt", 4096).unwrap();
+            assert!(verifier.verify_plain_password(password).unwrap());
+        }
+    }
+
+    #[test]
     fn test_mock_verifier_is_stable_per_username() {
         let alice = PgScramSha256Verifier::mock_for_unknown_user(b"alice");
         let alice_again = PgScramSha256Verifier::mock_for_unknown_user(b"alice");
@@ -502,6 +538,7 @@ mod tests {
         assert_eq!(alice.salt(), alice_again.salt());
         assert_ne!(alice.salt(), bob.salt());
         assert_eq!(alice.iterations(), DEFAULT_PBKDF2_SHA256_ITERATIONS);
+        assert_eq!(alice.salt().len(), DEFAULT_PBKDF2_SHA256_SALT_LEN);
 
         // The mock verifier must never accept a client proof.
         assert!(

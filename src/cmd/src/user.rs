@@ -17,7 +17,7 @@
 use std::io;
 
 use auth::{
-    DEFAULT_PBKDF2_SHA256_ITERATIONS, MAX_PBKDF2_SHA256_SALT_LEN,
+    DEFAULT_PBKDF2_SHA256_ITERATIONS, DEFAULT_PBKDF2_SHA256_SALT_LEN, MAX_PBKDF2_SHA256_SALT_LEN,
     format_mysql_native_password_verifier, format_pbkdf2_sha256_password_verifier,
     format_pg_scram_sha256_password_verifier,
 };
@@ -71,7 +71,7 @@ pub struct HashPasswordCommand {
     iterations: u32,
 
     /// PBKDF2-SHA256 / SCRAM-SHA-256 random salt length in bytes.
-    #[clap(long, default_value_t = 16)]
+    #[clap(long, default_value_t = DEFAULT_PBKDF2_SHA256_SALT_LEN)]
     salt_len: usize,
 
     /// PBKDF2-SHA256 / SCRAM-SHA-256 salt as hex. Mainly useful for deterministic automation.

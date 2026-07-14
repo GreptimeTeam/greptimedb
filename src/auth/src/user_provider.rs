@@ -28,8 +28,9 @@ use snafu::{OptionExt, ResultExt, ensure};
 use subtle::ConstantTimeEq;
 
 use crate::common::{
-    Identity, MAX_PBKDF2_SHA256_ITERATIONS, MAX_PBKDF2_SHA256_SALT_LEN, PBKDF2_SHA256_HASH_LEN,
-    PG_SCRAM_SHA256_KEY_LEN, Password, PgScramSha256Verifier, auth_mysql_with_hash_stage_2,
+    DEFAULT_PBKDF2_SHA256_SALT_LEN, Identity, MAX_PBKDF2_SHA256_ITERATIONS,
+    MAX_PBKDF2_SHA256_SALT_LEN, PBKDF2_SHA256_HASH_LEN, PG_SCRAM_SHA256_KEY_LEN, Password,
+    PgScramSha256Verifier, auth_mysql_with_hash_stage_2,
 };
 use crate::error::{
     IllegalParamSnafu, InvalidConfigSnafu, IoSnafu, Result, UnsupportedPasswordTypeSnafu,
@@ -167,7 +168,7 @@ impl PasswordVerifier {
     /// per-connection PBKDF2. Uses [`DEFAULT_PBKDF2_SHA256_ITERATIONS`] to match
     /// the mock verifier handed to unknown users.
     fn plain_text(password: String) -> Option<Self> {
-        let salt = rand::random::<[u8; PG_SCRAM_SHA256_KEY_LEN]>();
+        let salt = rand::random::<[u8; DEFAULT_PBKDF2_SHA256_SALT_LEN]>();
         let scram = PgScramSha256Verifier::from_password(
             password.as_bytes(),
             &salt,
@@ -235,20 +236,18 @@ impl PasswordVerifier {
     }
 
     fn supports_pg_scram_sha256(&self) -> bool {
-        !matches!(self, PasswordVerifier::MysqlNativePassword { .. })
+        matches!(
+            self,
+            PasswordVerifier::PlainText { .. } | PasswordVerifier::PgScramSha256(_)
+        )
     }
 
     fn to_pg_scram_sha256_verifier(&self) -> Option<PgScramSha256Verifier> {
         match self {
             PasswordVerifier::PlainText { scram, .. } => Some(scram.clone()),
-            PasswordVerifier::Pbkdf2Sha256 {
-                iterations,
-                salt,
-                hash,
-            } => {
-                PgScramSha256Verifier::from_salted_password(hash.clone(), salt.clone(), *iterations)
-                    .ok()
-            }
+            // Legacy PBKDF2 verifiers were derived without SASLprep, and the
+            // original password is unavailable to normalize them safely.
+            PasswordVerifier::Pbkdf2Sha256 { .. } => None,
             PasswordVerifier::PgScramSha256(verifier) => Some(verifier.clone()),
             PasswordVerifier::MysqlNativePassword { .. } => None,
         }
@@ -800,6 +799,7 @@ mod tests {
         // across connections without re-running PBKDF2, otherwise the SCRAM
         // server-first message (and its timing) leaks that the user exists.
         assert_eq!(first.salt(), second.salt());
+        assert_eq!(first.salt().len(), DEFAULT_PBKDF2_SHA256_SALT_LEN);
         assert_eq!(first.iterations(), crate::DEFAULT_PBKDF2_SHA256_ITERATIONS);
 
         // The derived verifier must still accept the real password.
@@ -843,6 +843,39 @@ mod tests {
         let auth_info =
             postgres_auth_info_with_credential(&users, Identity::UserId("unknown", None)).unwrap();
         assert!(matches!(auth_info, PgAuthInfo::Cleartext));
+    }
+
+    #[test]
+    fn test_postgres_auth_info_with_pbkdf2_falls_back_to_cleartext() {
+        let iterations = 4096;
+        let salt = b"salt";
+        let password = "pass\u{00a0}word";
+        let mut hash = [0u8; PBKDF2_SHA256_HASH_LEN];
+        pbkdf2_hmac::<Sha256>(password.as_bytes(), salt, iterations, &mut hash);
+        let users = HashMap::from([(
+            "user".to_string(),
+            (
+                PasswordVerifier::Pbkdf2Sha256 {
+                    iterations,
+                    salt: salt.to_vec(),
+                    hash: hash.to_vec(),
+                },
+                PermissionMode::default(),
+            ),
+        )]);
+
+        let auth_info =
+            postgres_auth_info_with_credential(&users, Identity::UserId("user", None)).unwrap();
+        assert!(matches!(auth_info, PgAuthInfo::Cleartext));
+
+        assert!(
+            authenticate_with_credential(
+                &users,
+                Identity::UserId("user", None),
+                Password::PlainText(password.to_string().into()),
+            )
+            .is_ok()
+        );
     }
 
     #[test]

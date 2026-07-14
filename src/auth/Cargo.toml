@@ -28,6 +28,7 @@ sha1 = "0.10"
 sha2 = "0.10"
 snafu.workspace = true
 sql.workspace = true
+stringprep.workspace = true
 subtle = "2.6"
 tokio.workspace = true
 
