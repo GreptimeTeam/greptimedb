@@ -359,67 +359,116 @@ pub fn location_to_index(sql: &str, location: &sqlparser::tokenizer::Location) -
     index - 1
 }
 
+// Tracks CTE aliases as sqlparser's visitor enters their query bodies.
+struct QueryScope {
+    cte_names: Vec<String>,
+    next_cte: usize,
+    recursive: bool,
+    scope_start: usize,
+    add_to_parent_after: Option<String>,
+}
+
+struct RelationCollector<'a> {
+    names: &'a mut HashSet<ObjectName>,
+    ctes_in_scope: Vec<String>,
+    query_scopes: Vec<QueryScope>,
+    #[cfg(test)]
+    query_visits: usize,
+}
+
+impl<'a> RelationCollector<'a> {
+    fn new(names: &'a mut HashSet<ObjectName>) -> Self {
+        Self {
+            names,
+            ctes_in_scope: Vec::new(),
+            query_scopes: Vec::new(),
+            #[cfg(test)]
+            query_visits: 0,
+        }
+    }
+}
+
+impl Visitor for RelationCollector<'_> {
+    type Break = ();
+
+    fn pre_visit_query(&mut self, query: &sqlparser::ast::Query) -> ControlFlow<Self::Break> {
+        #[cfg(test)]
+        {
+            self.query_visits += 1;
+        }
+
+        // Query::visit enters WITH definitions in declaration order before its body.
+        let parent_cte = self.query_scopes.last_mut().and_then(|scope| {
+            let cte_name = scope.cte_names.get(scope.next_cte)?.clone();
+            scope.next_cte += 1;
+            Some((cte_name, scope.recursive))
+        });
+
+        let add_to_parent_after = match parent_cte {
+            Some((cte_name, true)) => {
+                self.ctes_in_scope.push(cte_name);
+                None
+            }
+            Some((cte_name, false)) => Some(cte_name),
+            None => None,
+        };
+
+        let scope_start = self.ctes_in_scope.len();
+        let (cte_names, recursive) = if let Some(with) = &query.with {
+            (
+                with.cte_tables
+                    .iter()
+                    .map(|cte| ParserContext::canonicalize_identifier(cte.alias.name.clone()).value)
+                    .collect(),
+                with.recursive,
+            )
+        } else {
+            (Vec::new(), false)
+        };
+
+        self.query_scopes.push(QueryScope {
+            cte_names,
+            next_cte: 0,
+            recursive,
+            scope_start,
+            add_to_parent_after,
+        });
+        ControlFlow::Continue(())
+    }
+
+    fn post_visit_query(&mut self, _query: &sqlparser::ast::Query) -> ControlFlow<Self::Break> {
+        let Some(scope) = self.query_scopes.pop() else {
+            return ControlFlow::Break(());
+        };
+        self.ctes_in_scope.truncate(scope.scope_start);
+        if let Some(cte_name) = scope.add_to_parent_after {
+            self.ctes_in_scope.push(cte_name);
+        }
+        ControlFlow::Continue(())
+    }
+
+    fn pre_visit_relation(&mut self, relation: &ObjectName) -> ControlFlow<Self::Break> {
+        let is_cte = matches!(
+            relation.0.as_slice(),
+            [part]
+                if part.as_ident().is_some_and(|ident| {
+                    self.ctes_in_scope.contains(
+                        &ParserContext::canonicalize_identifier(ident.clone()).value,
+                    )
+                })
+        );
+        if !is_cte {
+            self.names.insert(relation.clone());
+        }
+        ControlFlow::Continue(())
+    }
+}
+
 /// Helper function for [extract_tables_from_query].
 ///
 /// Handle [sqlparser::ast::Query].
 fn extract_tables_from_sql_query(query: &sqlparser::ast::Query, names: &mut HashSet<ObjectName>) {
-    struct RelationCollector<'a> {
-        names: &'a mut HashSet<ObjectName>,
-        ctes_in_scope: Vec<String>,
-    }
-
-    impl Visitor for RelationCollector<'_> {
-        type Break = ();
-
-        fn pre_visit_query(&mut self, query: &sqlparser::ast::Query) -> ControlFlow<Self::Break> {
-            if let Some(with) = &query.with {
-                for cte in &with.cte_tables {
-                    let cte_name =
-                        ParserContext::canonicalize_identifier(cte.alias.name.clone()).value;
-                    if !with.recursive {
-                        cte.visit(self)?;
-                    }
-                    self.ctes_in_scope.push(cte_name);
-                    if with.recursive {
-                        cte.visit(self)?;
-                    }
-                }
-            }
-            ControlFlow::Continue(())
-        }
-
-        fn post_visit_query(&mut self, query: &sqlparser::ast::Query) -> ControlFlow<Self::Break> {
-            if let Some(with) = &query.with {
-                self.ctes_in_scope.truncate(
-                    self.ctes_in_scope
-                        .len()
-                        .saturating_sub(with.cte_tables.len()),
-                );
-            }
-            ControlFlow::Continue(())
-        }
-
-        fn pre_visit_relation(&mut self, relation: &ObjectName) -> ControlFlow<Self::Break> {
-            let is_cte = matches!(
-                relation.0.as_slice(),
-                [part]
-                    if part.as_ident().is_some_and(|ident| {
-                        self.ctes_in_scope.contains(
-                            &ParserContext::canonicalize_identifier(ident.clone()).value,
-                        )
-                    })
-            );
-            if !is_cte {
-                self.names.insert(relation.clone());
-            }
-            ControlFlow::Continue(())
-        }
-    }
-
-    let _ = query.visit(&mut RelationCollector {
-        names,
-        ctes_in_scope: Vec::new(),
-    });
+    let _ = query.visit(&mut RelationCollector::new(names));
 }
 
 #[cfg(test)]
@@ -650,6 +699,15 @@ SELECT * FROM source;
             ),
             (
                 r#"
+WITH RECURSIVE source AS (
+    SELECT * FROM source
+)
+SELECT * FROM source;
+"#,
+                vec![],
+            ),
+            (
+                r#"
 WITH first_cte AS (
     SELECT * FROM physical_source
 ), second_cte AS (
@@ -699,6 +757,40 @@ SELECT * FROM (
             tables.sort();
             assert_eq!(expected_tables, tables);
         }
+    }
+
+    #[test]
+    fn test_extract_tables_from_deeply_nested_ctes_visits_each_query_once() {
+        let mut sql = "SELECT * FROM physical_source".to_string();
+        for depth in 0..20 {
+            sql = format!("WITH cte_{depth} AS ({sql}) SELECT * FROM cte_{depth}");
+        }
+
+        let mut stmts = ParserContext::create_with_dialect(
+            &sql,
+            &GreptimeDbDialect {},
+            ParseOptions::default(),
+        )
+        .unwrap();
+        let Statement::Query(query) = stmts.pop().unwrap() else {
+            unreachable!()
+        };
+
+        let mut tables = HashSet::new();
+        let query_visits = {
+            let mut collector = RelationCollector::new(&mut tables);
+            let _ = query.inner.visit(&mut collector);
+            collector.query_visits
+        };
+
+        assert_eq!(21, query_visits);
+        assert_eq!(
+            vec!["physical_source"],
+            tables
+                .into_iter()
+                .map(|table| format_raw_object_name(&table))
+                .collect_vec()
+        );
     }
 
     #[test]
