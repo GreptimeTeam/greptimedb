@@ -43,13 +43,10 @@ use datafusion::prelude as df_prelude;
 use datafusion::prelude::{Column, Expr as DfExpr, JoinType};
 use datafusion::scalar::ScalarValue;
 use datafusion::sql::TableReference;
-use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRewriter};
 use datafusion_common::{DFSchema, NullEquality};
 use datafusion_expr::expr::WindowFunctionParams;
 use datafusion_expr::utils::conjunction;
-use datafusion_expr::{
-    ExprSchemable, Literal, Projection, SortExpr, TableScan, TableSource, col, lit,
-};
+use datafusion_expr::{ExprSchemable, Literal, SortExpr, TableSource, col, lit};
 use datatypes::arrow::datatypes::{DataType as ArrowDataType, TimeUnit as ArrowTimeUnit};
 use datatypes::data_type::ConcreteDataType;
 use itertools::Itertools;
@@ -499,10 +496,7 @@ impl PromPlanner {
         // so sort by series key + time index and split into per-series batches
         // with a `SeriesDivide` first.
         let input_schema = input.schema();
-        let input_has_tsid = input_schema.fields().iter().any(|field| {
-            field.name() == DATA_SCHEMA_TSID_COLUMN_NAME
-                && field.data_type() == &ArrowDataType::UInt64
-        });
+        let input_has_tsid = Self::schema_has_tsid(input_schema);
         let (series_key_columns, mut sort_exprs) = if input_has_tsid {
             (
                 vec![DATA_SCHEMA_TSID_COLUMN_NAME.to_string()],
@@ -570,55 +564,18 @@ impl PromPlanner {
             param,
         } = aggr_expr;
 
-        let mut input = self.prom_expr_to_plan(expr, query_engine_state).await?;
-        let input_has_tsid = input.schema().fields().iter().any(|field| {
-            field.name() == DATA_SCHEMA_TSID_COLUMN_NAME
-                && field.data_type() == &ArrowDataType::UInt64
-        });
-
-        // `__tsid` based scan projection may prune tag columns. Ensure tags referenced in
-        // aggregation modifiers (`by`/`without`) are available before planning group keys.
-        let required_group_tags = match modifier {
-            None => BTreeSet::new(),
-            Some(LabelModifier::Include(labels)) => labels
-                .labels
-                .iter()
-                .filter(|label| !is_metric_engine_internal_column(label.as_str()))
-                .cloned()
-                .collect(),
-            Some(LabelModifier::Exclude(labels)) => {
-                let mut all_tags = self.collect_row_key_tag_columns_from_plan(&input)?;
-                for label in &labels.labels {
-                    let _ = all_tags.remove(label);
-                }
-                all_tags
-            }
-        };
-
-        if !required_group_tags.is_empty()
-            && required_group_tags
-                .iter()
-                .any(|tag| Self::find_case_sensitive_column(input.schema(), tag.as_str()).is_none())
-        {
-            input = self.ensure_tag_columns_available(input, &required_group_tags)?;
-            self.refresh_tag_columns_from_schema(input.schema());
-        }
+        let input = self.prom_expr_to_plan(expr, query_engine_state).await?;
+        let input_has_tsid = Self::schema_has_tsid(input.schema());
+        self.ctx
+            .tag_columns
+            .retain(|tag| input.schema().has_column_with_unqualified_name(tag));
 
         match (*op).id() {
             token::T_TOPK | token::T_BOTTOMK => {
                 self.prom_topk_bottomk_to_plan(aggr_expr, input).await
             }
             _ => {
-                // When `__tsid` is available, tag columns may have been pruned from the input plan.
-                // For `keep_tsid` decision we should compare against the full row-key label set,
-                // otherwise we may incorrectly treat label-reducing aggregates as preserving labels.
-                let input_tag_columns = if input_has_tsid {
-                    self.collect_row_key_tag_columns_from_plan(&input)?
-                        .into_iter()
-                        .collect::<Vec<_>>()
-                } else {
-                    self.ctx.tag_columns.clone()
-                };
+                let input_tag_columns = self.ctx.tag_columns.clone();
                 // calculate columns to group by
                 // Need to append time index column into group by columns
                 let mut group_exprs = self.agg_modifier_to_col(input.schema(), modifier, true)?;
@@ -691,10 +648,7 @@ impl PromPlanner {
             ..
         } = aggr_expr;
 
-        let input_has_tsid = input.schema().fields().iter().any(|field| {
-            field.name() == DATA_SCHEMA_TSID_COLUMN_NAME
-                && field.data_type() == &ArrowDataType::UInt64
-        });
+        let input_has_tsid = Self::schema_has_tsid(input.schema());
         self.ctx.use_tsid = input_has_tsid;
 
         let group_exprs = self.agg_modifier_to_col(input.schema(), modifier, false)?;
@@ -744,7 +698,11 @@ impl PromPlanner {
         let project_fields = self
             .create_field_column_exprs()?
             .into_iter()
-            .chain(self.create_output_tag_column_exprs(input.schema(), None))
+            .chain(
+                Self::available_tag_columns(&self.ctx.tag_columns, input.schema(), None)
+                    .into_iter()
+                    .map(DfExpr::Column),
+            )
             .chain(
                 self.ctx
                     .use_tsid
@@ -863,7 +821,8 @@ impl PromPlanner {
         let first_tags = leaves[0].ctx.tag_columns.iter().collect::<BTreeSet<_>>();
 
         leaves.iter().skip(1).all(|leaf| {
-            (Self::plan_has_tsid_column(&leaves[0].plan) && Self::plan_has_tsid_column(&leaf.plan))
+            (Self::schema_has_tsid(leaves[0].plan.schema())
+                && Self::schema_has_tsid(leaf.plan.schema()))
                 || leaf.ctx.tag_columns.iter().collect::<BTreeSet<_>>() == first_tags
         })
     }
@@ -876,7 +835,7 @@ impl PromPlanner {
     ) -> Result<LogicalPlan> {
         let only_join_time_index =
             first_leaf.ctx.tag_columns.is_empty() || right_leaf.ctx.tag_columns.is_empty();
-        let (mut left_keys, mut right_keys, force_empty_join) = self.binary_join_key_columns(
+        let (mut left_keys, mut right_keys, force_empty_join) = Self::binary_join_key_columns(
             left.schema(),
             right_leaf.plan.schema(),
             &first_leaf.ctx,
@@ -1050,15 +1009,12 @@ impl PromPlanner {
         self.ctx = base_ctx.clone();
 
         let schema = input.schema();
-        let tag_exprs = base_ctx
-            .tag_columns
-            .iter()
-            .filter_map(|column| {
-                Self::qualified_column_if_available(schema, Some(base_alias), column)
-                    .map(DfExpr::Column)
-            })
-            .map(Ok)
-            .collect::<Vec<_>>();
+        let tag_exprs =
+            Self::available_tag_columns(&base_ctx.tag_columns, schema, Some(base_alias))
+                .into_iter()
+                .map(DfExpr::Column)
+                .map(Ok)
+                .collect::<Vec<_>>();
         let time_expr = base_ctx.time_index_column.iter().map(|column| {
             schema
                 .qualified_field_with_name(Some(base_alias), column)
@@ -1210,7 +1166,6 @@ impl PromPlanner {
             (None, None) => {
                 let left_input = self.prom_expr_to_plan(lhs, query_engine_state).await?;
                 let left_field_columns = self.ctx.field_columns.clone();
-                let left_time_index_column = self.ctx.time_index_column.clone();
                 let mut left_table_ref = self
                     .table_ref()
                     .unwrap_or_else(|_| TableReference::bare(""));
@@ -1218,7 +1173,6 @@ impl PromPlanner {
 
                 let right_input = self.prom_expr_to_plan(rhs, query_engine_state).await?;
                 let right_field_columns = self.ctx.field_columns.clone();
-                let right_time_index_column = self.ctx.time_index_column.clone();
                 let mut right_table_ref = self
                     .table_ref()
                     .unwrap_or_else(|_| TableReference::bare(""));
@@ -1255,8 +1209,10 @@ impl PromPlanner {
                         self.ctx.table_name = Some("rhs".to_string());
                     }
                 }
-                let (output_field_columns, field_columns) =
-                    Self::align_binary_field_columns(&left_field_columns, &right_field_columns);
+                let field_columns = left_field_columns
+                    .iter()
+                    .zip(&right_field_columns)
+                    .collect::<Vec<_>>();
                 let left_aligned_field_columns = field_columns
                     .iter()
                     .map(|(left_col_name, _)| (*left_col_name).clone())
@@ -1268,19 +1224,14 @@ impl PromPlanner {
                 // PromQL binary arithmetic only combines the shared prefix of value columns.
                 // Keep the output field count aligned with that zipped prefix so planning
                 // remains stable even when the two sides have uneven multi-field schemas.
-                self.ctx.field_columns = output_field_columns;
+                self.ctx.field_columns = left_aligned_field_columns.clone();
                 let mut field_columns = field_columns.into_iter();
 
-                let join_plan = self.join_on_non_field_columns(
+                let join_plan = Self::join_on_non_field_columns(
                     left_input,
                     right_input,
                     left_table_ref.clone(),
                     right_table_ref.clone(),
-                    left_time_index_column,
-                    right_time_index_column,
-                    // if left plan or right plan tag is empty, means case like `scalar(...) + host` or `host + scalar(...)`
-                    // under this case we only join on time index
-                    left_context.tag_columns.is_empty() || right_context.tag_columns.is_empty(),
                     modifier,
                     &left_context,
                     &right_context,
@@ -1369,13 +1320,11 @@ impl PromPlanner {
         }
 
         // Project tag columns from the chosen side.
-        for tag_column in &context.tag_columns {
-            if let Some(tag_col) =
-                Self::qualified_column_if_available(schema, Some(table_ref), tag_column)
-            {
-                project_exprs.push(DfExpr::Column(tag_col));
-            }
-        }
+        project_exprs.extend(
+            Self::available_tag_columns(&context.tag_columns, schema, Some(table_ref))
+                .into_iter()
+                .map(DfExpr::Column),
+        );
 
         // Preserve `__tsid` if present, so it can still be used internally downstream. It's
         // stripped from the final output anyway.
@@ -1525,7 +1474,11 @@ impl PromPlanner {
         let mut project_exprs = Vec::with_capacity(self.ctx.tag_columns.len() + 2);
         project_exprs.push(self.create_time_index_column_expr()?);
         project_exprs.push(time_expr);
-        project_exprs.extend(self.create_output_tag_column_exprs(normalize.schema(), None));
+        project_exprs.extend(
+            Self::available_tag_columns(&self.ctx.tag_columns, normalize.schema(), None)
+                .into_iter()
+                .map(DfExpr::Column),
+        );
 
         LogicalPlanBuilder::from(normalize)
             .project(project_exprs)
@@ -1625,7 +1578,11 @@ impl PromPlanner {
         let (mut func_exprs, new_tags) =
             self.create_function_expr(func, args.literals.clone(), query_engine_state)?;
         func_exprs.insert(0, self.create_time_index_column_expr()?);
-        func_exprs.extend(self.create_output_tag_column_exprs(input.schema(), None));
+        func_exprs.extend(
+            Self::available_tag_columns(&self.ctx.tag_columns, input.schema(), None)
+                .into_iter()
+                .map(DfExpr::Column),
+        );
         if let Some(tsid_col) =
             Self::optional_tsid_projection(input.schema(), None, self.ctx.use_tsid)
         {
@@ -2290,13 +2247,12 @@ impl PromPlanner {
             if !Arc::ptr_eq(&physical_provider, &scan_provider) {
                 // Only rewrite when internal columns exist in physical schema.
                 let physical_table = self.table_from_source(&physical_provider)?;
+                let physical_schema = physical_table.schema();
 
-                let has_table_id = physical_table
-                    .schema()
+                let has_table_id = physical_schema
                     .column_schema_by_name(DATA_SCHEMA_TABLE_ID_COLUMN_NAME)
                     .is_some();
-                let has_tsid = physical_table
-                    .schema()
+                let has_tsid = physical_schema
                     .column_schema_by_name(DATA_SCHEMA_TSID_COLUMN_NAME)
                     .is_some_and(|col| matches!(col.data_type, ConcreteDataType::UInt64(_)));
 
@@ -2306,12 +2262,7 @@ impl PromPlanner {
                         .time_index_column
                         .iter()
                         .chain(&self.ctx.field_columns)
-                        .all(|column| {
-                            physical_table
-                                .schema()
-                                .column_schema_by_name(column)
-                                .is_some()
-                        });
+                        .all(|column| physical_schema.column_schema_by_name(column).is_some());
                     // The physical-table shortcut is only an optimization. It bypasses the
                     // metric-engine logical scanner, so keep it disabled when the physical schema
                     // cannot satisfy the required scan columns directly. Label matchers already
@@ -2327,36 +2278,20 @@ impl PromPlanner {
         }
 
         let scan_table = self.table_from_source(&scan_provider)?;
+        let scan_schema = scan_table.schema();
 
-        let use_tsid = table_id_filter.is_some()
-            && scan_table
-                .schema()
-                .column_schema_by_name(DATA_SCHEMA_TSID_COLUMN_NAME)
-                .is_some_and(|col| matches!(col.data_type, ConcreteDataType::UInt64(_)));
+        let use_tsid = table_id_filter.is_some();
         self.ctx.use_tsid = use_tsid;
 
-        let all_table_tags = self.ctx.tag_columns.clone();
+        if use_tsid {
+            self.ctx.tag_columns.sort_unstable();
+            self.ctx.tag_columns.dedup();
+            self.ctx
+                .tag_columns
+                .retain(|tag| scan_schema.column_schema_by_name(tag).is_some());
+        }
 
-        let scan_tag_columns = if use_tsid {
-            let mut scan_tags = self.ctx.tag_columns.clone();
-            for matcher in &self.ctx.selector_matcher {
-                if is_metric_engine_internal_column(&matcher.name) {
-                    continue;
-                }
-                if all_table_tags.iter().any(|tag| tag == &matcher.name) {
-                    scan_tags.push(matcher.name.clone());
-                }
-            }
-            scan_tags.sort_unstable();
-            scan_tags.dedup();
-            scan_tags.retain(|tag| scan_table.schema().column_schema_by_name(tag).is_some());
-            scan_tags
-        } else {
-            self.ctx.tag_columns.clone()
-        };
-
-        let is_time_index_ms = scan_table
-            .schema()
+        let is_time_index_ms = scan_schema
             .timestamp_column()
             .with_context(|| TimeIndexNotFoundSnafu {
                 table: maybe_phy_table_ref.to_quoted_string(),
@@ -2364,27 +2299,23 @@ impl PromPlanner {
             .data_type
             == ConcreteDataType::timestamp_millisecond_datatype();
 
-        let scan_projection = if table_id_filter.is_some() {
-            let mut required_columns = HashSet::new();
-            required_columns.insert(DATA_SCHEMA_TABLE_ID_COLUMN_NAME.to_string());
-            required_columns.insert(self.ctx.time_index_column.clone().with_context(|| {
-                TimeIndexNotFoundSnafu {
-                    table: maybe_phy_table_ref.to_quoted_string(),
-                }
-            })?);
-            for col in &scan_tag_columns {
-                required_columns.insert(col.clone());
-            }
-            for col in &self.ctx.field_columns {
-                required_columns.insert(col.clone());
-            }
-            if use_tsid {
-                required_columns.insert(DATA_SCHEMA_TSID_COLUMN_NAME.to_string());
-            }
+        let scan_projection = if use_tsid {
+            let mut required_columns = self.ctx.tag_columns.iter().cloned().collect::<HashSet<_>>();
+            required_columns.extend(self.ctx.field_columns.iter().cloned());
+            required_columns.extend([
+                DATA_SCHEMA_TABLE_ID_COLUMN_NAME.to_string(),
+                DATA_SCHEMA_TSID_COLUMN_NAME.to_string(),
+                self.ctx
+                    .time_index_column
+                    .clone()
+                    .with_context(|| TimeIndexNotFoundSnafu {
+                        table: maybe_phy_table_ref.to_quoted_string(),
+                    })?,
+            ]);
 
-            let arrow_schema = scan_provider.schema();
             Some(
-                arrow_schema
+                scan_provider
+                    .schema()
                     .fields()
                     .iter()
                     .enumerate()
@@ -2421,7 +2352,8 @@ impl PromPlanner {
                 .create_field_column_exprs()?
                 .into_iter()
                 .chain(
-                    scan_tag_columns
+                    self.ctx
+                        .tag_columns
                         .iter()
                         .map(|tag| DfExpr::Column(Column::from_name(tag))),
                 )
@@ -2457,7 +2389,8 @@ impl PromPlanner {
                 .create_field_column_exprs()?
                 .into_iter()
                 .chain(
-                    scan_tag_columns
+                    self.ctx
+                        .tag_columns
                         .iter()
                         .map(|tag| DfExpr::Column(Column::from_name(tag))),
                 )
@@ -2482,165 +2415,6 @@ impl PromPlanner {
             .build()
             .context(DataFusionPlanningSnafu)?;
         Ok(result)
-    }
-
-    fn collect_row_key_tag_columns_from_plan(
-        &self,
-        plan: &LogicalPlan,
-    ) -> Result<BTreeSet<String>> {
-        fn walk(
-            planner: &PromPlanner,
-            plan: &LogicalPlan,
-            out: &mut BTreeSet<String>,
-        ) -> Result<()> {
-            // Derived PromQL plans may contain non-Greptime scans without row-key metadata.
-            if let LogicalPlan::TableScan(scan) = plan
-                && let Ok(table) = planner.table_from_source(&scan.source)
-            {
-                for col in table.table_info().meta.row_key_column_names() {
-                    if col != DATA_SCHEMA_TABLE_ID_COLUMN_NAME
-                        && col != DATA_SCHEMA_TSID_COLUMN_NAME
-                        && !is_metric_engine_internal_column(col)
-                    {
-                        out.insert(col.clone());
-                    }
-                }
-            }
-
-            for input in plan.inputs() {
-                walk(planner, input, out)?;
-            }
-            Ok(())
-        }
-
-        let mut out = BTreeSet::new();
-        walk(self, plan, &mut out)?;
-        Ok(out)
-    }
-
-    fn ensure_tag_columns_available(
-        &self,
-        plan: LogicalPlan,
-        required_tags: &BTreeSet<String>,
-    ) -> Result<LogicalPlan> {
-        if required_tags.is_empty() {
-            return Ok(plan);
-        }
-
-        struct Rewriter {
-            required_tags: BTreeSet<String>,
-        }
-
-        impl TreeNodeRewriter for Rewriter {
-            type Node = LogicalPlan;
-
-            fn f_up(
-                &mut self,
-                node: Self::Node,
-            ) -> datafusion_common::Result<Transformed<Self::Node>> {
-                match node {
-                    LogicalPlan::TableScan(scan) => {
-                        let schema = scan.source.schema();
-                        let mut projection = match scan.projection.clone() {
-                            Some(p) => p,
-                            None => {
-                                // Scanning all columns already covers required tags.
-                                return Ok(Transformed::no(LogicalPlan::TableScan(scan)));
-                            }
-                        };
-
-                        let mut changed = false;
-                        for tag in &self.required_tags {
-                            if let Some((idx, _)) = schema
-                                .fields()
-                                .iter()
-                                .enumerate()
-                                .find(|(_, field)| field.name() == tag)
-                                && !projection.contains(&idx)
-                            {
-                                projection.push(idx);
-                                changed = true;
-                            }
-                        }
-
-                        if !changed {
-                            return Ok(Transformed::no(LogicalPlan::TableScan(scan)));
-                        }
-
-                        projection.sort_unstable();
-                        projection.dedup();
-
-                        let new_scan = TableScan::try_new(
-                            scan.table_name.clone(),
-                            scan.source.clone(),
-                            Some(projection),
-                            scan.filters,
-                            scan.fetch,
-                        )?;
-                        Ok(Transformed::yes(LogicalPlan::TableScan(new_scan)))
-                    }
-                    LogicalPlan::Projection(proj) => {
-                        let input_schema = proj.input.schema();
-
-                        let existing = proj
-                            .schema
-                            .fields()
-                            .iter()
-                            .map(|f| f.name().as_str())
-                            .collect::<HashSet<_>>();
-
-                        let mut expr = proj.expr.clone();
-                        let mut has_changed = false;
-                        for tag in &self.required_tags {
-                            if existing.contains(tag.as_str()) {
-                                continue;
-                            }
-
-                            if let Some(idx) = input_schema.index_of_column_by_name(None, tag) {
-                                expr.push(DfExpr::Column(Column::from(
-                                    input_schema.qualified_field(idx),
-                                )));
-                                has_changed = true;
-                            }
-                        }
-
-                        if !has_changed {
-                            return Ok(Transformed::no(LogicalPlan::Projection(proj)));
-                        }
-
-                        let new_proj = Projection::try_new(expr, proj.input)?;
-                        Ok(Transformed::yes(LogicalPlan::Projection(new_proj)))
-                    }
-                    other => Ok(Transformed::no(other)),
-                }
-            }
-        }
-
-        let mut rewriter = Rewriter {
-            required_tags: required_tags.clone(),
-        };
-        let rewritten = plan
-            .rewrite(&mut rewriter)
-            .context(DataFusionPlanningSnafu)?;
-        Ok(rewritten.data)
-    }
-
-    fn refresh_tag_columns_from_schema(&mut self, schema: &DFSchemaRef) {
-        let time_index = self.ctx.time_index_column.as_deref();
-        let field_columns = self.ctx.field_columns.iter().collect::<HashSet<_>>();
-
-        let mut tags = schema
-            .fields()
-            .iter()
-            .map(|f| f.name())
-            .filter(|name| Some(name.as_str()) != time_index)
-            .filter(|name| !field_columns.contains(name))
-            .filter(|name| !is_metric_engine_internal_column(name))
-            .cloned()
-            .collect::<Vec<_>>();
-        tags.sort_unstable();
-        tags.dedup();
-        self.ctx.tag_columns = tags;
     }
 
     /// Setup [PromPlannerContext]'s state fields.
@@ -3318,30 +3092,21 @@ impl PromPlanner {
         Ok(result)
     }
 
-    fn create_output_tag_column_exprs(
-        &self,
+    fn available_tag_columns(
+        tag_columns: &[String],
         schema: &DFSchemaRef,
         table_ref: Option<&TableReference>,
-    ) -> Vec<DfExpr> {
-        self.ctx
-            .tag_columns
+    ) -> Vec<Column> {
+        tag_columns
             .iter()
             .filter_map(|tag| {
-                Self::qualified_column_if_available(schema, table_ref, tag).map(DfExpr::Column)
+                schema
+                    .qualified_field_with_name(table_ref, tag)
+                    .or_else(|_| schema.qualified_field_with_name(None, tag))
+                    .ok()
+                    .map(Into::into)
             })
             .collect()
-    }
-
-    fn qualified_column_if_available(
-        schema: &DFSchemaRef,
-        table_ref: Option<&TableReference>,
-        name: &str,
-    ) -> Option<Column> {
-        schema
-            .qualified_field_with_name(table_ref, name)
-            .or_else(|_| schema.qualified_field_with_name(None, name))
-            .ok()
-            .map(Into::into)
     }
 
     fn create_field_column_exprs(&self) -> Result<Vec<DfExpr>> {
@@ -3601,10 +3366,10 @@ impl PromPlanner {
 
         let asc = matches!(op.id(), token::T_BOTTOMK);
 
-        let tag_sort_exprs = self
-            .create_output_tag_column_exprs(input_plan.schema(), None)
-            .into_iter()
-            .map(|expr| expr.sort(asc, true));
+        let tag_sort_exprs =
+            Self::available_tag_columns(&self.ctx.tag_columns, input_plan.schema(), None)
+                .into_iter()
+                .map(|column| DfExpr::Column(column).sort(asc, true));
 
         // perform window operation to each value column
         let exprs: Vec<DfExpr> = self
@@ -3782,12 +3547,9 @@ impl PromPlanner {
                 operator: SCALAR_FUNCTION
             },
         );
-        let scalar_tags = self
-            .ctx
-            .tag_columns
-            .iter()
-            .filter(|tag| Self::qualified_column_if_available(input.schema(), None, tag).is_some())
-            .cloned()
+        let scalar_tags = Self::available_tag_columns(&self.ctx.tag_columns, input.schema(), None)
+            .into_iter()
+            .map(|column| column.name)
             .collect::<Vec<_>>();
         let scalar_plan = LogicalPlan::Extension(Extension {
             node: Arc::new(
@@ -4029,26 +3791,11 @@ impl PromPlanner {
         )
     }
 
-    fn align_binary_field_columns<'a>(
-        left_field_columns: &'a [String],
-        right_field_columns: &'a [String],
-    ) -> (Vec<String>, Vec<(&'a String, &'a String)>) {
-        let field_pairs = left_field_columns
-            .iter()
-            .zip(right_field_columns.iter())
-            .collect::<Vec<_>>();
-        let output_field_columns = field_pairs
-            .iter()
-            .map(|(left_col_name, _)| (*left_col_name).clone())
-            .collect();
-        (output_field_columns, field_pairs)
-    }
-
-    fn plan_has_tsid_column(plan: &LogicalPlan) -> bool {
-        plan.schema()
-            .fields()
-            .iter()
-            .any(|field| field.name() == DATA_SCHEMA_TSID_COLUMN_NAME)
+    fn schema_has_tsid(schema: &DFSchemaRef) -> bool {
+        schema.fields().iter().any(|field| {
+            field.name() == DATA_SCHEMA_TSID_COLUMN_NAME
+                && field.data_type() == &ArrowDataType::UInt64
+        })
     }
 
     fn optional_tsid_projection(
@@ -4065,7 +3812,6 @@ impl PromPlanner {
     }
 
     fn binary_join_key_columns(
-        &self,
         left_schema: &DFSchemaRef,
         right_schema: &DFSchemaRef,
         left_context: &PromPlannerContext,
@@ -4073,18 +3819,12 @@ impl PromPlanner {
         only_join_time_index: bool,
         modifier: &Option<BinModifier>,
     ) -> Result<(BTreeSet<String>, BTreeSet<String>, bool)> {
-        let has_tsid = |schema: &DFSchemaRef| {
-            schema
-                .fields()
-                .iter()
-                .any(|field| field.name() == DATA_SCHEMA_TSID_COLUMN_NAME)
-        };
         let use_tsid_join = !only_join_time_index
-            && self.binary_modifier_preserves_tsid_join_key(left_context, right_context, modifier)
+            && Self::binary_modifier_preserves_tsid_join_key(left_context, right_context, modifier)
             && left_context.use_tsid
             && right_context.use_tsid
-            && has_tsid(left_schema)
-            && has_tsid(right_schema);
+            && Self::schema_has_tsid(left_schema)
+            && Self::schema_has_tsid(right_schema);
 
         let (mut left_tag_columns, mut right_tag_columns) = if use_tsid_join {
             (
@@ -4144,7 +3884,6 @@ impl PromPlanner {
     }
 
     fn binary_modifier_preserves_tsid_join_key(
-        &self,
         left_context: &PromPlannerContext,
         right_context: &PromPlannerContext,
         modifier: &Option<BinModifier>,
@@ -4183,22 +3922,20 @@ impl PromPlanner {
 
     /// Build a inner join on time index column and tag columns to concat two logical plans.
     /// When `only_join_time_index == true` we only join on the time index, because these two plan may not have the same tag columns
-    #[allow(clippy::too_many_arguments)]
     fn join_on_non_field_columns(
-        &self,
-        mut left: LogicalPlan,
-        mut right: LogicalPlan,
+        left: LogicalPlan,
+        right: LogicalPlan,
         left_table_ref: TableReference,
         right_table_ref: TableReference,
-        left_time_index_column: Option<String>,
-        right_time_index_column: Option<String>,
-        only_join_time_index: bool,
         modifier: &Option<BinModifier>,
         left_context: &PromPlannerContext,
         right_context: &PromPlannerContext,
     ) -> Result<LogicalPlan> {
-        let (mut left_tag_columns, mut right_tag_columns, force_empty_join) = self
-            .binary_join_key_columns(
+        // Scalar/vector combinations join only on their time index.
+        let only_join_time_index =
+            left_context.tag_columns.is_empty() || right_context.tag_columns.is_empty();
+        let (mut left_tag_columns, mut right_tag_columns, force_empty_join) =
+            Self::binary_join_key_columns(
                 left.schema(),
                 right.schema(),
                 left_context,
@@ -4207,23 +3944,11 @@ impl PromPlanner {
                 modifier,
             )?;
 
-        let left_required_tags = left_tag_columns
-            .iter()
-            .filter(|tag| tag.as_str() != DATA_SCHEMA_TSID_COLUMN_NAME)
-            .cloned()
-            .collect::<BTreeSet<_>>();
-        let right_required_tags = right_tag_columns
-            .iter()
-            .filter(|tag| tag.as_str() != DATA_SCHEMA_TSID_COLUMN_NAME)
-            .cloned()
-            .collect::<BTreeSet<_>>();
-        left = self.ensure_tag_columns_available(left, &left_required_tags)?;
-        right = self.ensure_tag_columns_available(right, &right_required_tags)?;
-
         // push time index column if it exists
-        if let (Some(left_time_index_column), Some(right_time_index_column)) =
-            (left_time_index_column, right_time_index_column)
-        {
+        if let (Some(left_time_index_column), Some(right_time_index_column)) = (
+            left_context.time_index_column.clone(),
+            right_context.time_index_column.clone(),
+        ) {
             left_tag_columns.insert(left_time_index_column);
             right_tag_columns.insert(right_time_index_column);
         }
@@ -4483,16 +4208,8 @@ impl PromPlanner {
         // Take the name of first field column. The length is checked above.
         let left_field_col = left_context.field_columns.first().unwrap();
         let right_field_col = right_context.field_columns.first().unwrap();
-        let left_has_tsid = left
-            .schema()
-            .fields()
-            .iter()
-            .any(|field| field.name() == DATA_SCHEMA_TSID_COLUMN_NAME);
-        let right_has_tsid = right
-            .schema()
-            .fields()
-            .iter()
-            .any(|field| field.name() == DATA_SCHEMA_TSID_COLUMN_NAME);
+        let left_has_tsid = Self::schema_has_tsid(left.schema());
+        let right_has_tsid = Self::schema_has_tsid(right.schema());
 
         // step 0: fill all columns in output schema
         let mut all_columns_set = left
@@ -4635,10 +4352,11 @@ impl PromPlanner {
         F: FnMut(&String) -> Result<DfExpr>,
     {
         let table_ref = self.ctx.table_name.clone().map(TableReference::bare);
-        let tag_columns_iter = self
-            .create_output_tag_column_exprs(input.schema(), table_ref.as_ref())
-            .into_iter()
-            .map(Ok);
+        let tag_columns_iter =
+            Self::available_tag_columns(&self.ctx.tag_columns, input.schema(), table_ref.as_ref())
+                .into_iter()
+                .map(DfExpr::Column)
+                .map(Ok);
         let time_index_iter = self
             .ctx
             .time_index_column
