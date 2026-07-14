@@ -259,10 +259,10 @@ fn extract_from_binary_expr(
             if reverse {
                 // [lit] < ts_col
                 let ts_val = ts.convert_to(ts_col_unit)?.value();
-                Some(TimestampRange::from_start(Timestamp::new(
-                    ts_val + 1,
-                    ts_col_unit,
-                )))
+                Some(match ts_val.checked_add(1) {
+                    Some(ts_val) => TimestampRange::from_start(Timestamp::new(ts_val, ts_col_unit)),
+                    None => TimestampRange::empty(),
+                })
             } else {
                 // ts_col < [lit]
                 ts.convert_to_ceil(ts_col_unit)
@@ -290,10 +290,10 @@ fn extract_from_binary_expr(
             } else {
                 // ts_col > [lit]
                 let ts_val = ts.convert_to(ts_col_unit)?.value();
-                Some(TimestampRange::from_start(Timestamp::new(
-                    ts_val + 1,
-                    ts_col_unit,
-                )))
+                Some(match ts_val.checked_add(1) {
+                    Some(ts_val) => TimestampRange::from_start(Timestamp::new(ts_val, ts_col_unit)),
+                    None => TimestampRange::empty(),
+                })
             }
         }
         Operator::GtEq => {
@@ -591,6 +591,86 @@ mod tests {
             col("ts").lt_eq(lit(ScalarValue::TimestampSecond(Some(1), None))),
             TimestampRange::until_end(Timestamp::new_millisecond(1000), true),
         );
+    }
+
+    #[test]
+    fn qbs_strict_timestamp_max_is_empty() {
+        let cases = [
+            (
+                TimeUnit::Second,
+                ScalarValue::TimestampSecond(Some(i64::MAX), None),
+            ),
+            (
+                TimeUnit::Millisecond,
+                ScalarValue::TimestampMillisecond(Some(i64::MAX), None),
+            ),
+            (
+                TimeUnit::Microsecond,
+                ScalarValue::TimestampMicrosecond(Some(i64::MAX), None),
+            ),
+            (
+                TimeUnit::Nanosecond,
+                ScalarValue::TimestampNanosecond(Some(i64::MAX), None),
+            ),
+        ];
+
+        for (unit, literal) in cases {
+            for (path, expr) in [
+                ("ts > MAX", col("ts").gt(lit(literal.clone()))),
+                ("MAX < ts", lit(literal).lt(col("ts"))),
+            ] {
+                let range = extract_time_range_from_expr("ts", unit, &expr).unwrap_or_else(|| {
+                    panic!("failed to extract range for {path}, unit: {unit:?}")
+                });
+                assert!(
+                    range.is_empty(),
+                    "strict MAX predicate must be unsatisfiable for {path}, unit: {unit:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn qbs_strict_timestamp_max_minus_one_is_singleton() {
+        let cases = [
+            (
+                TimeUnit::Second,
+                ScalarValue::TimestampSecond(Some(i64::MAX - 1), None),
+                ScalarValue::TimestampSecond(Some(i64::MAX), None),
+            ),
+            (
+                TimeUnit::Millisecond,
+                ScalarValue::TimestampMillisecond(Some(i64::MAX - 1), None),
+                ScalarValue::TimestampMillisecond(Some(i64::MAX), None),
+            ),
+            (
+                TimeUnit::Microsecond,
+                ScalarValue::TimestampMicrosecond(Some(i64::MAX - 1), None),
+                ScalarValue::TimestampMicrosecond(Some(i64::MAX), None),
+            ),
+            (
+                TimeUnit::Nanosecond,
+                ScalarValue::TimestampNanosecond(Some(i64::MAX - 1), None),
+                ScalarValue::TimestampNanosecond(Some(i64::MAX), None),
+            ),
+        ];
+
+        for (unit, max_minus_one, max) in cases {
+            let expected = TimestampRange::single(Timestamp::new(i64::MAX, unit));
+            for (path, expr) in [
+                ("ts > MAX-1", col("ts").gt(lit(max_minus_one.clone()))),
+                ("MAX-1 < ts", lit(max_minus_one).lt(col("ts"))),
+                ("ts >= MAX", col("ts").gt_eq(lit(max))),
+            ] {
+                let range = extract_time_range_from_expr("ts", unit, &expr).unwrap_or_else(|| {
+                    panic!("failed to extract range for {path}, unit: {unit:?}")
+                });
+                assert_eq!(
+                    expected, range,
+                    "unexpected range for {path}, unit: {unit:?}"
+                );
+            }
+        }
     }
 
     async fn gen_test_parquet_file(dir: &TempDir, cnt: usize) -> (String, Arc<Schema>) {
