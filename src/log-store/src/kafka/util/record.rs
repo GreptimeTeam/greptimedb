@@ -227,29 +227,24 @@ pub fn remaining_entries(
 /// - Emits a [RecordType::Full] type record immediately.
 ///
 /// For type of [Entry::MultiplePart] Entry:
-/// - Emits a complete or incomplete [Entry] while the next same [RegionId] record arrives.
+/// - Emits a complete [Entry] immediately when a [RecordType::Last] record arrives with
+///   buffered parts. A [RecordType::Last] record without buffered parts is discarded.
+/// - Emits an incomplete [Entry] when a new [RecordType::First] record replaces
+///   buffered incomplete records for the same [RegionId].
 ///
-/// **Incomplete Entry:**
-/// If the records arrive in the following order, it emits **the incomplete [Entry]** when the next record arrives.
-/// - **[RecordType::First], [RecordType::Middle]**, [RecordType::First]
-/// - **[RecordType::Middle]**, [RecordType::First]
-/// - **[RecordType::Last]**, [RecordType::First]
-///
-/// A trailing complete or incomplete entry is emitted by [`remaining_entries`].
+/// A trailing incomplete entry is emitted by [`remaining_entries`].
 pub(crate) fn maybe_emit_entry(
     provider: &Arc<KafkaProvider>,
-    mut record: Record,
-    offset: u64,
+    record: Record,
     buffered_records: &mut HashMap<RegionId, Vec<Record>>,
 ) -> Result<Option<Entry>> {
-    record.meta.entry_id = offset;
     let mut entry = None;
     match record.meta.tp {
         RecordType::Full => entry = Some(convert_to_naive_entry(provider.clone(), record)),
         RecordType::First => {
             let region_id = record.meta.ns.region_id.into();
             if let Some(records) = buffered_records.insert(region_id, vec![record]) {
-                // Emit the preceding complete or incomplete entry.
+                // Incomplete entry
                 entry = Some(convert_to_multiple_entry(
                     provider.clone(),
                     region_id,
@@ -293,22 +288,17 @@ pub(crate) fn maybe_emit_entry(
         }
         RecordType::Last => {
             let region_id = record.meta.ns.region_id.into();
-            let records = buffered_records.entry(region_id).or_default();
-            if let Some(last_record) = records.last() {
-                ensure!(
-                    last_record.meta.tp != RecordType::Last || last_record.data == record.data,
-                    IllegalSequenceSnafu {
-                        error: format!(
-                            "Illegal sequence of a last record, last record: {:?}, incoming record: {:?}",
-                            last_record.meta.tp, record.meta.tp
-                        )
-                    }
-                );
-                if last_record.meta.tp == RecordType::Last {
-                    return Ok(None);
-                }
+            if let Some(mut records) = buffered_records.remove(&region_id) {
+                records.push(record);
+                entry = Some(convert_to_multiple_entry(
+                    provider.clone(),
+                    region_id,
+                    records,
+                ));
+            } else {
+                // Intentionally discard a Last record without buffered parts. It is either a
+                // duplicate Last record or the tail of an incomplete multipart entry.
             }
-            records.push(record);
         }
     }
     Ok(entry)
@@ -335,15 +325,6 @@ mod tests {
             },
             data,
         }
-    }
-
-    fn maybe_emit_entry(
-        provider: &Arc<KafkaProvider>,
-        record: Record,
-        buffered_records: &mut HashMap<RegionId, Vec<Record>>,
-    ) -> Result<Option<Entry>> {
-        let offset = record.meta.entry_id;
-        super::maybe_emit_entry(provider, record, offset, buffered_records)
     }
 
     #[test]
@@ -402,21 +383,7 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        let incomplete_entry = remaining_entries(&provider, &mut buffer)
-            .unwrap()
-            .pop()
-            .unwrap();
-
-        assert_eq!(
-            incomplete_entry,
-            Entry::MultiplePart(MultiplePartEntry {
-                provider: Provider::Kafka(provider.clone()),
-                region_id,
-                entry_id: 1,
-                headers: vec![MultiplePartHeader::Last],
-                parts: vec![vec![1; 100]],
-            })
-        );
+        assert!(buffer.is_empty());
 
         // `First` overwrite `Middle(0)`
         let mut buffer = HashMap::new();
@@ -482,46 +449,29 @@ mod tests {
         let region_id = RegionId::new(1, 1);
         let mut buffer = HashMap::new();
 
-        for (offset, record) in [
-            (
-                10,
-                new_test_record(RecordType::First, 0, region_id.as_u64(), vec![1; 100]),
-            ),
-            (
-                11,
-                new_test_record(RecordType::Middle(1), 0, region_id.as_u64(), vec![2; 100]),
-            ),
-            (
-                12,
-                new_test_record(RecordType::Middle(1), 0, region_id.as_u64(), vec![2; 100]),
-            ),
-            (
-                13,
-                new_test_record(RecordType::Last, 0, region_id.as_u64(), vec![3; 100]),
-            ),
-            (
-                14,
-                new_test_record(RecordType::Last, 0, region_id.as_u64(), vec![3; 100]),
-            ),
+        for record in [
+            new_test_record(RecordType::First, 1, region_id.as_u64(), vec![1; 100]),
+            new_test_record(RecordType::Middle(1), 1, region_id.as_u64(), vec![2; 100]),
+            new_test_record(RecordType::Middle(1), 1, region_id.as_u64(), vec![2; 100]),
         ] {
             assert!(
-                super::maybe_emit_entry(&provider, record, offset, &mut buffer)
+                maybe_emit_entry(&provider, record, &mut buffer)
                     .unwrap()
                     .is_none()
             );
         }
 
-        let next_entry = new_test_record(RecordType::First, 0, region_id.as_u64(), vec![4; 100]);
-        let entry = super::maybe_emit_entry(&provider, next_entry, 20, &mut buffer)
+        let last = new_test_record(RecordType::Last, 1, region_id.as_u64(), vec![3; 100]);
+        let entry = maybe_emit_entry(&provider, last, &mut buffer)
             .unwrap()
             .unwrap();
 
         assert_eq!(
             entry,
             Entry::MultiplePart(MultiplePartEntry {
-                provider: Provider::Kafka(provider),
+                provider: Provider::Kafka(provider.clone()),
                 region_id,
-                entry_id: 13,
+                entry_id: 1,
                 headers: vec![
                     MultiplePartHeader::First,
                     MultiplePartHeader::Middle(1),
@@ -530,37 +480,12 @@ mod tests {
                 parts: vec![vec![1; 100], vec![2; 100], vec![3; 100]],
             })
         );
-    }
-
-    #[test]
-    fn test_remaining_entries_uses_last_record_offset() {
-        let provider = Arc::new(KafkaProvider::new("my_topic".to_string()));
-        let region_id = RegionId::new(1, 1);
-        let mut buffer = HashMap::new();
-
-        for (offset, record) in [
-            (
-                10,
-                new_test_record(RecordType::First, 0, region_id.as_u64(), vec![1; 100]),
-            ),
-            (
-                11,
-                new_test_record(RecordType::Last, 0, region_id.as_u64(), vec![2; 100]),
-            ),
-        ] {
-            assert!(
-                super::maybe_emit_entry(&provider, record, offset, &mut buffer)
-                    .unwrap()
-                    .is_none()
-            );
-        }
-
-        let entry = remaining_entries(&provider, &mut buffer)
-            .unwrap()
-            .pop()
-            .unwrap();
-
-        assert_eq!(entry.entry_id(), 11);
+        let duplicate = new_test_record(RecordType::Last, 1, region_id.as_u64(), vec![3; 100]);
+        assert!(
+            maybe_emit_entry(&provider, duplicate, &mut buffer)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -587,26 +512,28 @@ mod tests {
     }
 
     #[test]
-    fn test_maybe_emit_entry_rejects_conflicting_duplicate_last_record() {
+    fn test_maybe_emit_entry_preserves_multipart_entry_order_before_full_record() {
         let provider = Arc::new(KafkaProvider::new("my_topic".to_string()));
         let region_id = RegionId::new(1, 1);
         let mut buffer = HashMap::new();
 
-        for record in [
-            new_test_record(RecordType::First, 1, region_id.as_u64(), vec![1; 100]),
-            new_test_record(RecordType::Last, 1, region_id.as_u64(), vec![2; 100]),
-        ] {
-            assert!(
-                maybe_emit_entry(&provider, record, &mut buffer)
-                    .unwrap()
-                    .is_none()
-            );
-        }
+        let first = new_test_record(RecordType::First, 1, region_id.as_u64(), vec![1; 100]);
+        assert!(
+            maybe_emit_entry(&provider, first, &mut buffer)
+                .unwrap()
+                .is_none()
+        );
+        let last = new_test_record(RecordType::Last, 2, region_id.as_u64(), vec![2; 100]);
+        let multipart_entry = maybe_emit_entry(&provider, last, &mut buffer)
+            .unwrap()
+            .unwrap();
+        let full = new_test_record(RecordType::Full, 3, region_id.as_u64(), vec![3; 100]);
+        let full_entry = maybe_emit_entry(&provider, full, &mut buffer)
+            .unwrap()
+            .unwrap();
 
-        let duplicate = new_test_record(RecordType::Last, 1, region_id.as_u64(), vec![3; 100]);
-        let err = maybe_emit_entry(&provider, duplicate, &mut buffer).unwrap_err();
-
-        assert_matches!(err, error::Error::IllegalSequence { .. });
+        assert_eq!(multipart_entry.entry_id(), 2);
+        assert_eq!(full_entry.entry_id(), 3);
     }
 
     #[test]
