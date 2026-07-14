@@ -68,6 +68,8 @@ pub const SKIP_WAL_KEY: &str = "skip_wal";
 pub const SST_FORMAT_KEY: &str = "sst_format";
 /// Option key for the max number of rows in a parquet row group.
 pub const MAX_ROW_GROUP_ROW_COUNT: &str = "max_row_group_row_count";
+/// Upper bound for [`MAX_ROW_GROUP_ROW_COUNT`].
+pub const MAX_ROW_GROUP_ROW_COUNT_LIMIT: usize = 10 * 1024 * 1024;
 // Note: Adding new options here should also check if this option should be removed in [metric_engine::engine::create::region_options_for_metadata_region].
 
 /// Returns true if the `key` is a valid option key for the mito engine.

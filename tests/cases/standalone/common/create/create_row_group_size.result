@@ -51,6 +51,56 @@ SELECT * FROM row_group_tbl;
 | host2 | 2.0 | 2022-11-03T03:39:57.450 |
 +-------+-----+-------------------------+
 
+ALTER TABLE row_group_tbl SET 'max_row_group_row_count' = '2048';
+
+Affected Rows: 0
+
+SHOW CREATE TABLE row_group_tbl;
+
++---------------+----------------------------------------------+
+| Table         | Create Table                                 |
++---------------+----------------------------------------------+
+| row_group_tbl | CREATE TABLE IF NOT EXISTS "row_group_tbl" ( |
+|               |   "host" STRING NULL,                        |
+|               |   "cpu" DOUBLE NULL,                         |
+|               |   "ts" TIMESTAMP(3) NOT NULL,                |
+|               |   TIME INDEX ("ts"),                         |
+|               |   PRIMARY KEY ("host")                       |
+|               | )                                            |
+|               |                                              |
+|               | ENGINE=mito                                  |
+|               | WITH(                                        |
+|               |   max_row_group_row_count = '2048'           |
+|               | )                                            |
++---------------+----------------------------------------------+
+
+-- Invalid altered values are rejected.
+ALTER TABLE row_group_tbl SET 'max_row_group_row_count' = '0';
+
+Error: 1004(InvalidArguments), Invalid set table option request: Invalid set region option request, key: max_row_group_row_count, value: 0
+
+-- UNSET restores the engine default and removes the option from table metadata.
+ALTER TABLE row_group_tbl UNSET 'max_row_group_row_count';
+
+Affected Rows: 0
+
+SHOW CREATE TABLE row_group_tbl;
+
++---------------+----------------------------------------------+
+| Table         | Create Table                                 |
++---------------+----------------------------------------------+
+| row_group_tbl | CREATE TABLE IF NOT EXISTS "row_group_tbl" ( |
+|               |   "host" STRING NULL,                        |
+|               |   "cpu" DOUBLE NULL,                         |
+|               |   "ts" TIMESTAMP(3) NOT NULL,                |
+|               |   TIME INDEX ("ts"),                         |
+|               |   PRIMARY KEY ("host")                       |
+|               | )                                            |
+|               |                                              |
+|               | ENGINE=mito                                  |
+|               |                                              |
++---------------+----------------------------------------------+
+
 DROP TABLE row_group_tbl;
 
 Affected Rows: 0

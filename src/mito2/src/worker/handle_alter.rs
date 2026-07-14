@@ -28,6 +28,7 @@ use store_api::metadata::{
     RegionMetadataRef,
 };
 use store_api::mito_engine_options;
+use store_api::mito_engine_options::MAX_ROW_GROUP_ROW_COUNT_LIMIT;
 use store_api::region_request::{AlterKind, RegionAlterRequest, SetRegionOption};
 use store_api::storage::RegionId;
 
@@ -246,6 +247,23 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                         current_options.auto_flush_interval = new_interval;
                     }
                 }
+                SetRegionOption::MaxRowGroupRowCount(new_row_count) => {
+                    if let Some(row_count) = new_row_count {
+                        ensure!(
+                            row_count > 0 && row_count <= MAX_ROW_GROUP_ROW_COUNT_LIMIT,
+                            store_api::metadata::InvalidRegionRequestSnafu {
+                                region_id: region.region_id,
+                                err: format!(
+                                    "max_row_group_row_count must be in (0, \
+                                     {MAX_ROW_GROUP_ROW_COUNT_LIMIT}], got {row_count}"
+                                ),
+                            }
+                        );
+                    }
+                    if new_row_count != current_options.max_row_group_row_count {
+                        all_options_altered = false;
+                    }
+                }
             }
         }
         region.version_control.alter_options(current_options);
@@ -262,8 +280,10 @@ fn new_region_options_on_empty_memtable(
     current_options: &RegionOptions,
     kind: &AlterKind,
 ) -> Option<RegionOptions> {
-    let AlterKind::SetRegionOptions { options } = kind else {
-        return None;
+    let options = match kind {
+        AlterKind::SetRegionOptions { options } => options.clone(),
+        AlterKind::UnsetRegionOptions { keys } => keys.iter().map(Into::into).collect(),
+        _ => return None,
     };
 
     if options.is_empty() {
@@ -271,7 +291,7 @@ fn new_region_options_on_empty_memtable(
     }
 
     let mut current_options = current_options.clone();
-    for option in options {
+    for option in &options {
         match option {
             SetRegionOption::Ttl(_)
             | SetRegionOption::Twsc(_, _)
@@ -287,6 +307,9 @@ fn new_region_options_on_empty_memtable(
 
                 current_options.append_mode = true;
                 current_options.merge_mode = None;
+            }
+            SetRegionOption::MaxRowGroupRowCount(new_row_count) => {
+                current_options.max_row_group_row_count = *new_row_count;
             }
         }
     }

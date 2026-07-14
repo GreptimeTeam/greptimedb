@@ -30,7 +30,7 @@ use snafu::{OptionExt, ResultExt, ensure};
 use store_api::metric_engine_consts::PHYSICAL_TABLE_METADATA_KEY;
 use store_api::mito_engine_options::{
     APPEND_MODE_KEY, AUTO_FLUSH_INTERVAL_KEY, COMPACTION_TYPE, COMPACTION_TYPE_TWCS,
-    MERGE_MODE_KEY, SST_FORMAT_KEY,
+    MAX_ROW_GROUP_ROW_COUNT, MERGE_MODE_KEY, SST_FORMAT_KEY,
 };
 use store_api::region_request::{SetRegionOption, UnsetRegionOption};
 use store_api::storage::{ColumnDescriptor, ColumnDescriptorBuilder, ColumnId};
@@ -387,6 +387,15 @@ impl TableMeta {
                         );
                     } else {
                         new_options.extra_options.remove(AUTO_FLUSH_INTERVAL_KEY);
+                    }
+                }
+                SetRegionOption::MaxRowGroupRowCount(row_count) => {
+                    if let Some(row_count) = row_count {
+                        new_options
+                            .extra_options
+                            .insert(MAX_ROW_GROUP_ROW_COUNT.to_string(), row_count.to_string());
+                    } else {
+                        new_options.extra_options.remove(MAX_ROW_GROUP_ROW_COUNT);
                     }
                 }
             }
@@ -1947,6 +1956,50 @@ mod tests {
                 .options
                 .extra_options
                 .contains_key(AUTO_FLUSH_INTERVAL_KEY)
+        );
+    }
+
+    #[test]
+    fn test_set_and_unset_max_row_group_row_count() {
+        let meta = TableMetaBuilder::empty()
+            .schema(Arc::new(new_test_schema()))
+            .primary_key_indices(vec![0])
+            .engine("engine")
+            .next_column_id(3)
+            .options(TableOptions::default())
+            .build()
+            .unwrap();
+
+        let alter_kind = AlterKind::SetTableOptions {
+            options: vec![SetRegionOption::MaxRowGroupRowCount(Some(512))],
+        };
+        let new_meta = meta
+            .builder_with_alter_kind("my_table", &alter_kind)
+            .unwrap()
+            .build()
+            .unwrap();
+        assert_eq!(
+            Some("512"),
+            new_meta
+                .options
+                .extra_options
+                .get(MAX_ROW_GROUP_ROW_COUNT)
+                .map(String::as_str)
+        );
+
+        let alter_kind = AlterKind::UnsetTableOptions {
+            keys: vec![UnsetRegionOption::MaxRowGroupRowCount],
+        };
+        let new_meta = new_meta
+            .builder_with_alter_kind("my_table", &alter_kind)
+            .unwrap()
+            .build()
+            .unwrap();
+        assert!(
+            !new_meta
+                .options
+                .extra_options
+                .contains_key(MAX_ROW_GROUP_ROW_COUNT)
         );
     }
 
