@@ -107,12 +107,19 @@ fn split_one_value_column(
     let mut int_builder = Int64Builder::with_capacity(float_array.len());
 
     for row in 0..float_array.len() {
-        let Some(value) = logical_value(float_array, int_array, row) else {
+        if int_array.is_valid(row) {
+            float_builder.append_null();
+            int_builder.append_value(int_array.value(row));
+            continue;
+        }
+
+        if float_array.is_null(row) {
             float_builder.append_null();
             int_builder.append_null();
             continue;
-        };
+        }
 
+        let value = float_array.value(row);
         if let Some(int_value) = integer_value(value) {
             float_builder.append_null();
             int_builder.append_value(int_value);
@@ -189,16 +196,6 @@ fn split_float_only_column(float_array: &Float64Array) -> (ArrayRef, ArrayRef) {
     );
 
     (Arc::new(float_output), Arc::new(int_output))
-}
-
-fn logical_value(float_array: &Float64Array, int_array: &Int64Array, row: usize) -> Option<f64> {
-    if !int_array.is_null(row) {
-        Some(int_array.value(row) as f64)
-    } else if !float_array.is_null(row) {
-        Some(float_array.value(row))
-    } else {
-        None
-    }
 }
 
 fn integer_value(value: f64) -> Option<i64> {
@@ -346,7 +343,7 @@ mod tests {
     #[test]
     fn test_split_existing_integer_values() {
         let float_values = Float64Array::from(vec![None, Some(1.5), Some(2.0)]);
-        let int_values = Int64Array::from(vec![Some(1), None, Some(3)]);
+        let int_values = Int64Array::from(vec![Some(i64::MAX), None, Some(3)]);
 
         let (float_output, int_output) = split_one_value_column(&float_values, &int_values);
         let float_output = float_output
@@ -361,7 +358,7 @@ mod tests {
         );
         assert_eq!(
             int_output.iter().collect::<Vec<_>>(),
-            vec![Some(1), None, Some(3)]
+            vec![Some(i64::MAX), None, Some(3)]
         );
     }
 

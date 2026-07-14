@@ -340,6 +340,7 @@ where
     ) -> Result<SstInfoArray> {
         let mut results = smallvec![];
         let mut stats = SourceStats::default();
+        // Primary-key compaction batches can differ from `FlatSource::schema()`.
         let mut split_columns = None;
 
         while let Some(record_batch) = self
