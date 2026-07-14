@@ -39,6 +39,7 @@ use crate::error::{InvalidResponseHeaderSnafu, Result};
 pub struct HeartbeatConfig {
     pub interval: Duration,
     pub retry_interval: Duration,
+    pub gc_enabled: Option<bool>,
 }
 
 impl Default for HeartbeatConfig {
@@ -46,6 +47,7 @@ impl Default for HeartbeatConfig {
         Self {
             interval: BASE_HEARTBEAT_INTERVAL,
             retry_interval: BASE_HEARTBEAT_INTERVAL,
+            gc_enabled: None,
         }
     }
 }
@@ -54,8 +56,8 @@ impl fmt::Display for HeartbeatConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "interval={:?}, retry={:?}",
-            self.interval, self.retry_interval
+            "interval={:?}, retry={:?}, gc_enabled={:?}",
+            self.interval, self.retry_interval, self.gc_enabled
         )
     }
 }
@@ -68,6 +70,7 @@ impl HeartbeatConfig {
             Self {
                 interval: Duration::from_millis(cfg.heartbeat_interval_ms),
                 retry_interval: Duration::from_millis(cfg.retry_interval_ms),
+                gc_enabled: cfg.gc_enabled,
             }
         } else {
             let fallback = Self::default();
@@ -77,6 +80,11 @@ impl HeartbeatConfig {
             );
             fallback
         }
+    }
+
+    fn from_handshake_response(res: &HeartbeatResponse) -> Result<Self> {
+        util::check_response_header(res.header.as_ref()).context(InvalidResponseHeaderSnafu)?;
+        Ok(Self::from_response(res))
     }
 }
 
@@ -259,8 +267,8 @@ impl Inner {
             .map_err(error::Error::from)?
             .context(error::CreateHeartbeatStreamSnafu)?;
 
-        // Extract heartbeat configuration from handshake response
-        let config = HeartbeatConfig::from_response(&res);
+        // Validate the handshake response before trusting its configuration.
+        let config = HeartbeatConfig::from_handshake_response(&res)?;
 
         info!(
             "Handshake successful with Metasrv at {}, received config: {}",
@@ -335,5 +343,39 @@ mod test {
             let header = req.header.unwrap();
             assert_eq!(8, header.member_id);
         }
+    }
+
+    #[test]
+    fn test_heartbeat_config_preserves_gc_enabled() {
+        for gc_enabled in [Some(false), Some(true), None] {
+            let config = HeartbeatConfig::from_response(&HeartbeatResponse {
+                heartbeat_config: Some(api::v1::meta::HeartbeatConfig {
+                    gc_enabled,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            });
+            assert_eq!(gc_enabled, config.gc_enabled);
+        }
+    }
+
+    #[test]
+    fn test_handshake_response_requires_valid_header() {
+        let err = HeartbeatConfig::from_handshake_response(&HeartbeatResponse {
+            header: Some(api::v1::meta::ResponseHeader {
+                error: Some(api::v1::meta::Error {
+                    code: 500,
+                    err_msg: "handshake failed".to_string(),
+                }),
+                ..Default::default()
+            }),
+            heartbeat_config: Some(api::v1::meta::HeartbeatConfig {
+                gc_enabled: Some(true),
+                ..Default::default()
+            }),
+            ..Default::default()
+        })
+        .unwrap_err();
+        assert!(matches!(err, error::Error::InvalidResponseHeader { .. }));
     }
 }

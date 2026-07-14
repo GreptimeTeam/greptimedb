@@ -36,7 +36,7 @@ use common_stat::ResourceStatRef;
 use common_telemetry::{debug, error, info, trace, warn};
 use common_workload::DatanodeWorkloadType;
 use meta_client::MetaClientRef;
-use meta_client::client::heartbeat::HeartbeatConfig;
+use meta_client::client::heartbeat::{HeartbeatConfig, HeartbeatStream};
 use meta_client::client::{HeartbeatSender, MetaClient};
 use servers::addrs;
 use snafu::{OptionExt as _, ResultExt};
@@ -67,6 +67,32 @@ pub struct HeartbeatTask {
     region_alive_keeper: Arc<RegionAliveKeeper>,
     resource_stat: ResourceStatRef,
     env_vars: EnvVars,
+}
+
+struct RunningGuard {
+    running: Arc<AtomicBool>,
+    armed: bool,
+}
+
+impl RunningGuard {
+    fn new(running: Arc<AtomicBool>) -> Self {
+        Self {
+            running,
+            armed: true,
+        }
+    }
+
+    fn disarm(mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for RunningGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            self.running.store(false, Ordering::Release);
+        }
+    }
 }
 
 impl Drop for HeartbeatTask {
@@ -121,15 +147,19 @@ impl HeartbeatTask {
 
     pub async fn create_streams(
         meta_client: &MetaClient,
+    ) -> Result<(HeartbeatSender, HeartbeatStream, HeartbeatConfig)> {
+        meta_client.heartbeat().await.context(MetaClientInitSnafu)
+    }
+
+    fn spawn_response_handler(
+        client_id: u64,
+        mut rx: HeartbeatStream,
         running: Arc<AtomicBool>,
         handler_executor: HeartbeatResponseHandlerExecutorRef,
         mailbox: MailboxRef,
         mut notify: Option<Arc<Notify>>,
         quit_signal: Arc<Notify>,
-    ) -> Result<(HeartbeatSender, HeartbeatConfig)> {
-        let client_id = meta_client.id();
-        let (tx, mut rx, config) = meta_client.heartbeat().await.context(MetaClientInitSnafu)?;
-
+    ) {
         let mut last_received_lease = Instant::now();
 
         let _handle = common_runtime::spawn_hb(async move {
@@ -178,7 +208,25 @@ impl HeartbeatTask {
             quit_signal.notify_one();
             info!("Heartbeat handling loop exit.");
         });
-        Ok((tx, config))
+    }
+
+    fn validate_gc_config(local_gc_enabled: bool, remote_gc_enabled: Option<bool>) -> Result<()> {
+        match remote_gc_enabled {
+            Some(remote_gc_enabled) if remote_gc_enabled != local_gc_enabled => {
+                error::GcConfigMismatchSnafu {
+                    metasrv_gc_enabled: remote_gc_enabled,
+                    datanode_gc_enabled: local_gc_enabled,
+                }
+                .fail()
+            }
+            Some(_) => Ok(()),
+            None => {
+                warn!(
+                    "Metasrv did not advertise metasrv.gc.enable during the heartbeat handshake; GC configuration compatibility was not verified. Upgrade Metasrv before relying on this check."
+                );
+                Ok(())
+            }
+        }
     }
 
     async fn handle_response(
@@ -196,7 +244,7 @@ impl HeartbeatTask {
     /// Start heartbeat task, spawn background task.
     pub async fn start(
         &self,
-        event_receiver: RegionServerEventReceiver,
+        event_receiver: &mut Option<RegionServerEventReceiver>,
         notify: Option<Arc<Notify>>,
     ) -> Result<()> {
         let running = self.running.clone();
@@ -207,6 +255,7 @@ impl HeartbeatTask {
             warn!("Heartbeat task started multiple times");
             return Ok(());
         }
+        let running_guard = RunningGuard::new(running.clone());
         let node_id = self.node_id;
         let node_epoch = self.node_epoch;
         let addr = &self.peer_addr;
@@ -221,15 +270,14 @@ impl HeartbeatTask {
 
         let quit_signal = Arc::new(Notify::new());
 
-        let (mut tx, config) = Self::create_streams(
-            &meta_client,
-            running.clone(),
-            handler_executor.clone(),
-            mailbox.clone(),
-            notify,
-            quit_signal.clone(),
-        )
-        .await?;
+        let client_id = meta_client.id();
+        let (mut tx, rx, config) = Self::create_streams(&meta_client).await?;
+
+        let mito_engine = self
+            .region_server
+            .mito_engine()
+            .context(RegionEngineNotFoundSnafu { name: "mito" })?;
+        Self::validate_gc_config(mito_engine.mito_config().gc.enable, config.gc_enabled)?;
 
         let interval = config.interval.as_millis() as u64;
         let mut retry_interval = config.retry_interval;
@@ -249,19 +297,27 @@ impl HeartbeatTask {
         let epoch = self.region_alive_keeper.epoch();
         let workload_types = self.workload_types.clone();
 
-        self.region_alive_keeper.start(Some(event_receiver)).await?;
+        self.region_alive_keeper
+            .start(event_receiver.take())
+            .await?;
         let mut last_sent = Instant::now();
         let total_cpu_millicores = self.resource_stat.get_total_cpu_millicores();
         let total_memory_bytes = self.resource_stat.get_total_memory_bytes();
         let resource_stat = self.resource_stat.clone();
         let region_alive_keeper = self.region_alive_keeper.clone();
-        let gc_limiter = self
-            .region_server
-            .mito_engine()
-            .context(RegionEngineNotFoundSnafu { name: "mito" })?
-            .gc_limiter();
+        let gc_limiter = mito_engine.gc_limiter();
         let mut env_var_extensions = HashMap::new();
         self.env_vars.into_extensions(&mut env_var_extensions);
+
+        Self::spawn_response_handler(
+            client_id,
+            rx,
+            running.clone(),
+            handler_executor.clone(),
+            mailbox.clone(),
+            notify,
+            quit_signal.clone(),
+        );
 
         common_runtime::spawn_hb(async move {
             let sleep = tokio::time::sleep(Duration::from_millis(0));
@@ -366,19 +422,19 @@ impl HeartbeatTask {
                     debug!("Sending heartbeat request: {:?}", req);
                     if let Err(e) = tx.send(req).await {
                         error!(e; "Failed to send heartbeat to metasrv");
-                        match Self::create_streams(
-                            &meta_client,
-                            running.clone(),
-                            handler_executor.clone(),
-                            mailbox.clone(),
-                            None,
-                            quit_signal.clone(),
-                        )
-                        .await
-                        {
-                            Ok((new_tx, new_config)) => {
+                        match Self::create_streams(&meta_client).await {
+                            Ok((new_tx, new_rx, new_config)) => {
                                 info!("Reconnected to metasrv, heartbeat config: {}", new_config);
                                 tx = new_tx;
+                                Self::spawn_response_handler(
+                                    client_id,
+                                    new_rx,
+                                    running.clone(),
+                                    handler_executor.clone(),
+                                    mailbox.clone(),
+                                    None,
+                                    quit_signal.clone(),
+                                );
                                 // Update retry_interval from new config
                                 retry_interval = new_config.retry_interval;
                                 // Update region_alive_keeper's heartbeat interval
@@ -403,6 +459,7 @@ impl HeartbeatTask {
             }
         });
 
+        running_guard.disarm();
         Ok(())
     }
 
@@ -441,5 +498,38 @@ impl HeartbeatTask {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use common_error::ext::ErrorExt;
+
+    use super::*;
+
+    #[test]
+    fn test_initial_startup_gc_config_validation() {
+        assert!(HeartbeatTask::validate_gc_config(false, Some(false)).is_ok());
+        assert!(HeartbeatTask::validate_gc_config(true, Some(true)).is_ok());
+        assert!(HeartbeatTask::validate_gc_config(false, None).is_ok());
+
+        let err = HeartbeatTask::validate_gc_config(false, Some(true)).unwrap_err();
+        assert_eq!(
+            common_error::status_code::StatusCode::InvalidArguments,
+            err.status_code()
+        );
+        assert!(matches!(err, error::Error::GcConfigMismatch { .. }));
+    }
+
+    #[test]
+    fn test_running_guard_resets_state_after_initial_validation_failure() {
+        let running = Arc::new(AtomicBool::new(true));
+        let result: Result<()> = {
+            let _guard = RunningGuard::new(running.clone());
+            HeartbeatTask::validate_gc_config(false, Some(true))
+        };
+
+        assert!(result.is_err());
+        assert!(!running.load(Ordering::Acquire));
     }
 }

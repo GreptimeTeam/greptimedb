@@ -21,8 +21,8 @@ use std::time::{Duration, Instant};
 
 use api::v1::meta::mailbox_message::Payload;
 use api::v1::meta::{
-    HeartbeatRequest, HeartbeatResponse, MailboxMessage, PROTOCOL_VERSION, RegionLease,
-    ResponseHeader, Role,
+    HeartbeatConfig, HeartbeatRequest, HeartbeatResponse, MailboxMessage, PROTOCOL_VERSION,
+    RegionLease, ResponseHeader, Role,
 };
 use check_leader_handler::CheckLeaderHandler;
 use collect_cluster_info_handler::{
@@ -387,7 +387,10 @@ impl HeartbeatHandlerGroup {
 
         // Populate heartbeat_config during handshake
         let heartbeat_config = if is_handshake {
-            let config = ctx.heartbeat_options_for(role).into();
+            let mut config: HeartbeatConfig = ctx.heartbeat_options_for(role).into();
+            if role == Role::Datanode {
+                config.gc_enabled = Some(ctx.gc_enabled);
+            }
 
             info!(
                 "Handshake with {:?} node, sending config: {:?}",
@@ -886,7 +889,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use api::v1::meta::{MailboxMessage, Role};
+    use api::v1::meta::{HeartbeatRequest, MailboxMessage, RequestHeader, Role};
     use common_meta::kv_backend::memory::MemoryKvBackend;
     use common_meta::sequence::SequenceBuilder;
     use tokio::sync::mpsc;
@@ -895,8 +898,70 @@ mod tests {
     use crate::error;
     use crate::handler::collect_stats_handler::CollectStatsHandler;
     use crate::handler::response_header_handler::ResponseHeaderHandler;
+    use crate::handler::test_utils::TestEnv;
     use crate::handler::{HeartbeatHandlerGroup, HeartbeatMailbox, Pusher};
     use crate::service::mailbox::{Channel, MailboxReceiver, MailboxRef};
+
+    #[tokio::test]
+    async fn test_handshake_advertises_gc_config_to_datanode_only() {
+        let handler_group = HeartbeatHandlerGroup::default();
+
+        for gc_enabled in [false, true] {
+            let mut ctx = TestEnv::new().ctx().with_handshake(true);
+            ctx.gc_enabled = gc_enabled;
+            let response = handler_group
+                .handle(
+                    HeartbeatRequest {
+                        header: Some(RequestHeader {
+                            role: Role::Datanode.into(),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    },
+                    ctx,
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(
+                Some(gc_enabled),
+                response.heartbeat_config.unwrap().gc_enabled
+            );
+        }
+
+        for role in [Role::Frontend, Role::Flownode] {
+            let response = handler_group
+                .handle(
+                    HeartbeatRequest {
+                        header: Some(RequestHeader {
+                            role: role.into(),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    },
+                    TestEnv::new().ctx().with_handshake(true),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(None, response.heartbeat_config.unwrap().gc_enabled);
+        }
+
+        let response = handler_group
+            .handle(
+                HeartbeatRequest {
+                    header: Some(RequestHeader {
+                        role: Role::Datanode.into(),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+                TestEnv::new().ctx(),
+            )
+            .await
+            .unwrap();
+        assert!(response.heartbeat_config.is_none());
+    }
 
     #[tokio::test]
     async fn test_mailbox() {
