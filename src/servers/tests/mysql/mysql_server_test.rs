@@ -34,8 +34,8 @@ use servers::tls::{ReloadableTlsServerConfig, TlsOption};
 use table::TableRef;
 use table::test_util::MemTable;
 
+use crate::create_testing_sql_query_handler;
 use crate::mysql::{MysqlTextRow, TestingData, all_datatype_testing_data};
-use crate::{create_testing_sql_query_handler, dictionary_child_null_table};
 
 #[derive(Default)]
 struct MysqlOpts<'a> {
@@ -75,28 +75,6 @@ fn create_mysql_server(table: TableRef, opts: MysqlOpts<'_>) -> Result<Box<dyn S
         )),
         None,
     ))
-}
-
-#[tokio::test]
-async fn test_mysql_dictionary_child_null() -> Result<()> {
-    let mut mysql_server = create_mysql_server(dictionary_child_null_table(), Default::default())?;
-    mysql_server
-        .start("127.0.0.1:0".parse::<SocketAddr>().unwrap())
-        .await
-        .unwrap();
-    let server_port = mysql_server.bind_addr().unwrap().port();
-    let mut connection = create_connection_default_db_name(server_port, false)
-        .await
-        .unwrap();
-
-    let values: Vec<Option<String>> = connection
-        .query("SELECT host FROM dictionary_values")
-        .await
-        .unwrap();
-    assert_eq!(vec![None, Some("host-b".to_string())], values);
-
-    mysql_server.shutdown().await.unwrap();
-    Ok(())
 }
 
 #[tokio::test]

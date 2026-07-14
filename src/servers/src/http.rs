@@ -216,22 +216,13 @@ impl OutputSchema {
 
 impl From<SchemaRef> for OutputSchema {
     fn from(schema: SchemaRef) -> OutputSchema {
-        fn public_type_name(data_type: &datatypes::prelude::ConcreteDataType) -> String {
-            match data_type {
-                datatypes::prelude::ConcreteDataType::Dictionary(dictionary) => {
-                    public_type_name(dictionary.value_type())
-                }
-                data_type => data_type.name(),
-            }
-        }
-
         OutputSchema {
             column_schemas: schema
                 .column_schemas()
                 .iter()
                 .map(|cs| ColumnSchema {
                     name: cs.name.clone(),
-                    data_type: public_type_name(&cs.data_type),
+                    data_type: cs.data_type.name(),
                 })
                 .collect(),
         }
@@ -1366,8 +1357,6 @@ mod test {
     use std::io::Cursor;
     use std::sync::Arc;
 
-    use arrow::array::{DictionaryArray, StringArray, UInt32Array};
-    use arrow::datatypes::UInt32Type;
     use arrow_ipc::reader::StreamReader;
     use arrow_schema::DataType;
     use axum::handler::Handler;
@@ -1378,7 +1367,7 @@ mod test {
     use datafusion_expr::LogicalPlan;
     use datatypes::prelude::*;
     use datatypes::schema::{ColumnSchema, Schema};
-    use datatypes::vectors::{DictionaryVector, StringVector, UInt32Vector};
+    use datatypes::vectors::{StringVector, UInt32Vector};
     use header::constants::GREPTIME_DB_HEADER_TIMEOUT;
     use query::parser::PromQuery;
     use query::query_engine::DescribeResult;
@@ -1435,40 +1424,6 @@ mod test {
 
     fn timeout() -> DynamicTimeoutLayer {
         DynamicTimeoutLayer::new(Duration::from_millis(10))
-    }
-
-    fn dictionary_record_batch() -> (SchemaRef, RecordBatch) {
-        let data_type = ConcreteDataType::dictionary_datatype(
-            ConcreteDataType::uint32_datatype(),
-            ConcreteDataType::string_datatype(),
-        );
-        let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
-            "host", data_type, true,
-        )]));
-        let dictionary = DictionaryArray::<UInt32Type>::new(
-            UInt32Array::from(vec![0, 1]),
-            Arc::new(StringArray::from(vec![Some("host-a"), None])),
-        );
-        let vector = Arc::new(DictionaryVector::try_from(dictionary).unwrap()) as VectorRef;
-        let batch = RecordBatch::new(schema.clone(), vec![vector]).unwrap();
-        (schema, batch)
-    }
-
-    #[test]
-    fn test_http_dictionary_output_uses_logical_string_type() {
-        let (schema, batch) = dictionary_record_batch();
-        let output = HttpRecordsOutput::try_new(schema.clone(), vec![batch]).unwrap();
-
-        assert_eq!("String", output.schema.column_schemas[0].data_type);
-        assert_eq!(
-            serde_json::Value::String("host-a".to_string()),
-            output.rows[0][0]
-        );
-        assert_eq!(serde_json::Value::Null, output.rows[1][0]);
-
-        let empty = HttpRecordsOutput::try_new(schema, vec![]).unwrap();
-        assert_eq!("String", empty.schema.column_schemas[0].data_type);
-        assert!(empty.rows.is_empty());
     }
 
     async fn forever() {

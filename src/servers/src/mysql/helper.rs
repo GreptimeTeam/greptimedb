@@ -19,7 +19,7 @@ use chrono::NaiveDate;
 use common_query::prelude::ScalarValue;
 use common_sql::convert::sql_value_to_value;
 use common_time::{Date, Timestamp};
-use datatypes::prelude::ConcreteDataType;
+use datatypes::prelude::{ConcreteDataType, DataType};
 use datatypes::schema::ColumnSchema;
 use datatypes::types::TimestampType;
 use datatypes::value::{self, Value};
@@ -138,6 +138,13 @@ where
 /// Convert [`ParamValue`] into [`Value`] according to param type.
 /// It will try it's best to do type conversions if possible
 pub fn convert_value(param: &ParamValue, t: &ConcreteDataType) -> Result<ScalarValue> {
+    if let ConcreteDataType::Dictionary(dictionary) = t {
+        return Ok(ScalarValue::Dictionary(
+            Box::new(dictionary.key_type().as_arrow_type()),
+            Box::new(convert_value(param, dictionary.value_type())?),
+        ));
+    }
+
     match param.value.into_inner() {
         ValueInner::Int(i) => match t {
             ConcreteDataType::Int8(_) => Ok(ScalarValue::Int8(Some(i as i8))),
@@ -258,6 +265,16 @@ pub fn convert_value(param: &ParamValue, t: &ConcreteDataType) -> Result<ScalarV
 /// Convert an MySQL expression to a scalar value.
 /// It automatically handles the conversion of strings to numeric values.
 pub fn convert_expr_to_scalar_value(param: &Expr, t: &ConcreteDataType) -> Result<ScalarValue> {
+    if let ConcreteDataType::Dictionary(dictionary) = t {
+        return Ok(ScalarValue::Dictionary(
+            Box::new(dictionary.key_type().as_arrow_type()),
+            Box::new(convert_expr_to_scalar_value(
+                param,
+                dictionary.value_type(),
+            )?),
+        ));
+    }
+
     let column_schema = ColumnSchema::new("", t.clone(), true);
     match param {
         Expr::Value(v) => {
@@ -463,6 +480,19 @@ mod tests {
         let t = ConcreteDataType::string_datatype();
         let v = convert_expr_to_scalar_value(&expr, &t).unwrap();
         assert_eq!(ScalarValue::Utf8(Some("hello".to_string())), v);
+
+        let t = ConcreteDataType::dictionary_datatype(
+            ConcreteDataType::uint32_datatype(),
+            ConcreteDataType::string_datatype(),
+        );
+        let v = convert_expr_to_scalar_value(&expr, &t).unwrap();
+        assert_eq!(
+            ScalarValue::Dictionary(
+                Box::new(arrow_schema::DataType::UInt32),
+                Box::new(ScalarValue::Utf8(Some("hello".to_string()))),
+            ),
+            v
+        );
 
         let expr = Expr::Value(ValueExpr::Null.into());
         let t = ConcreteDataType::time_microsecond_datatype();

@@ -26,7 +26,7 @@ use session::context::{QueryContext, QueryContextRef};
 use snafu::ResultExt;
 use tonic::async_trait;
 
-use crate::instance::Instance;
+use crate::instance::{Instance, map_query_output};
 
 #[async_trait]
 impl LogQueryHandler for Instance {
@@ -64,7 +64,10 @@ impl LogQueryHandler for Instance {
             .map_err(BoxedError::new)
             .context(ExecuteQuerySnafu)?;
 
-        Ok(interceptor.as_ref().post_query(output, ctx.clone())?)
+        let output = interceptor.as_ref().post_query(output, ctx.clone())?;
+        map_query_output(output)
+            .map_err(BoxedError::new)
+            .context(ExecuteQuerySnafu)
     }
 
     fn catalog_manager(&self, _ctx: &QueryContext) -> ServerResult<&dyn catalog::CatalogManager> {

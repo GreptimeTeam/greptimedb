@@ -408,7 +408,9 @@ async fn query_trace_table(
         RecordBatchStreamAdapter::try_new(stream).context(CollectRecordbatchSnafu)?,
     ));
 
-    Ok(output)
+    output
+        .map_dictionary_to_values()
+        .context(CollectRecordbatchSnafu)
 }
 
 async fn get_table(
@@ -485,7 +487,9 @@ async fn find_traces_rank_3(
         RecordBatchStreamAdapter::try_new(stream).context(CollectRecordbatchSnafu)?,
     ));
 
-    Ok(output)
+    output
+        .map_dictionary_to_values()
+        .context(CollectRecordbatchSnafu)
 }
 
 // The current implementation registers UDFs during the planning stage, which makes it difficult

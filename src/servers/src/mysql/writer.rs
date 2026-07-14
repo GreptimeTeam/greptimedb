@@ -42,7 +42,7 @@ use session::context::QueryContextRef;
 use snafu::prelude::*;
 use tokio::io::AsyncWrite;
 
-use crate::error::{ConvertSqlValueSnafu, DataFusionSnafu, NotSupportedSnafu, Result};
+use crate::error::{self, ConvertSqlValueSnafu, DataFusionSnafu, NotSupportedSnafu, Result};
 use crate::metrics::*;
 
 /// Try to write multiple output to the writer if possible.
@@ -249,20 +249,6 @@ impl MysqlResultWriter {
                         let v = datatypes::arrow_array::string_array_value(column, i);
                         row_writer.write_col(v)?;
                     }
-                    DataType::Dictionary(_, value_type)
-                        if matches!(
-                            value_type.as_ref(),
-                            DataType::Utf8 | DataType::Utf8View | DataType::LargeUtf8
-                        ) =>
-                    {
-                        if let Some(v) =
-                            datatypes::arrow_array::string_array_value_at_index(column, i)
-                        {
-                            row_writer.write_col(v)?;
-                        } else {
-                            row_writer.write_col(None::<u8>)?;
-                        }
-                    }
                     DataType::Binary | DataType::BinaryView | DataType::LargeBinary => {
                         let v = datatypes::arrow_array::binary_array_value(column, i);
                         if let ConcreteDataType::Json(_) = &schema.column_schemas()[j].data_type {
@@ -378,9 +364,11 @@ pub(crate) fn create_mysql_column(
         ConcreteDataType::Vector(_) => Ok(ColumnType::MYSQL_TYPE_BLOB),
         ConcreteDataType::List(_) => Ok(ColumnType::MYSQL_TYPE_VARCHAR),
         ConcreteDataType::Struct(_) => Ok(ColumnType::MYSQL_TYPE_VARCHAR),
-        ConcreteDataType::Dictionary(dictionary) => {
-            return create_mysql_column(dictionary.value_type(), column_name);
+        _ => error::UnsupportedDataTypeSnafu {
+            data_type,
+            reason: "not implemented",
         }
+        .fail(),
     };
     let mut colflags = ColumnFlags::empty();
     match data_type {

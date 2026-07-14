@@ -95,9 +95,9 @@ use table::requests::{OTLP_METRIC_COMPAT_KEY, OTLP_METRIC_COMPAT_PROM};
 use tracing::Span;
 
 use crate::error::{
-    self, Error, ExecLogicalPlanSnafu, ExecutePromqlSnafu, ExternalSnafu, InvalidSqlSnafu,
-    ParseSqlSnafu, PermissionSnafu, PlanStatementSnafu, Result, SqlExecInterceptedSnafu,
-    StatementTimeoutSnafu, TableOperationSnafu,
+    self, CollectRecordbatchSnafu, Error, ExecLogicalPlanSnafu, ExecutePromqlSnafu, ExternalSnafu,
+    InvalidSqlSnafu, ParseSqlSnafu, PermissionSnafu, PlanStatementSnafu, Result,
+    SqlExecInterceptedSnafu, StatementTimeoutSnafu, TableOperationSnafu,
 };
 use crate::service_config::InfluxdbMergeMode;
 use crate::stream_wrapper::CancellableStreamWrapper;
@@ -885,7 +885,12 @@ impl SqlQueryHandler for Instance {
         self.do_query_inner(query, query_ctx)
             .await
             .into_iter()
-            .map(|result| result.map_err(BoxedError::new).context(ExecuteQuerySnafu))
+            .map(|result| {
+                result
+                    .and_then(map_query_output)
+                    .map_err(BoxedError::new)
+                    .context(ExecuteQuerySnafu)
+            })
             .collect()
     }
 
@@ -896,6 +901,7 @@ impl SqlQueryHandler for Instance {
     ) -> server_error::Result<Output> {
         self.do_analyze_stream_query_inner(query, query_ctx)
             .await
+            .and_then(map_query_output)
             .map_err(BoxedError::new)
             .context(ExecuteQuerySnafu)
     }
@@ -908,6 +914,7 @@ impl SqlQueryHandler for Instance {
     ) -> server_error::Result<Output> {
         self.do_exec_plan_inner(plan, stmt, query_ctx)
             .await
+            .and_then(map_query_output)
             .map_err(BoxedError::new)
             .context(server_error::ExecutePlanSnafu)
     }
@@ -920,7 +927,12 @@ impl SqlQueryHandler for Instance {
         self.do_promql_query_inner(query, query_ctx)
             .await
             .into_iter()
-            .map(|result| result.map_err(BoxedError::new).context(ExecuteQuerySnafu))
+            .map(|result| {
+                result
+                    .and_then(map_query_output)
+                    .map_err(BoxedError::new)
+                    .context(ExecuteQuerySnafu)
+            })
             .collect()
     }
 
@@ -941,6 +953,13 @@ impl SqlQueryHandler for Instance {
             .map_err(BoxedError::new)
             .context(server_error::CheckDatabaseValiditySnafu)
     }
+}
+
+/// Expands scan-time dictionaries only when a query result leaves the frontend.
+pub(crate) fn map_query_output(output: Output) -> Result<Output> {
+    output
+        .map_dictionary_to_values()
+        .context(CollectRecordbatchSnafu)
 }
 
 /// Attaches a timer to the output and observes it once the output is exhausted.
@@ -1048,7 +1067,10 @@ impl PrometheusHandler for Instance {
             .map_err(BoxedError::new)
             .context(ExecuteQuerySnafu)?;
 
-        Ok(interceptor.post_execute(output, query_ctx)?)
+        let output = interceptor.post_execute(output, query_ctx)?;
+        map_query_output(output)
+            .map_err(BoxedError::new)
+            .context(ExecuteQuerySnafu)
     }
 
     async fn query_metric_names(

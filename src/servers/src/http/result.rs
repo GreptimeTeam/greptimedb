@@ -179,21 +179,6 @@ impl HttpOutputWriter {
                         let v = datatypes::arrow_array::string_array_value(array, i);
                         self.write_value(v)?;
                     }
-                    DataType::Dictionary(key_type, value_type)
-                        if key_type.as_ref() == &DataType::UInt32
-                            && matches!(
-                                value_type.as_ref(),
-                                DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View
-                            ) =>
-                    {
-                        if let Some(v) =
-                            datatypes::arrow_array::string_array_value_at_index(array, i)
-                        {
-                            self.write_value(v)?;
-                        } else {
-                            self.write_value(Value::Null)?;
-                        }
-                    }
                     DataType::Binary | DataType::LargeBinary | DataType::BinaryView => {
                         let v = datatypes::arrow_array::binary_array_value(array, i);
                         self.write_bytes(v, &schema.data_type)?;

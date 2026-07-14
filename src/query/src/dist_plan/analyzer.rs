@@ -167,10 +167,6 @@ impl AnalyzerRule for DistPlannerAnalyzer {
                 }
             }
         };
-        let plan = plan
-            .transform_down_with_subqueries(&Self::unwrap_dictionary_literals)?
-            .data;
-
         let result = match self.try_push_down(plan.clone()) {
             Ok(plan) => plan,
             Err(err) => {
@@ -738,9 +734,16 @@ impl PlanRewriter {
             self.partition_cols
         );
 
+        // Substrait does not encode dictionary literals. Only unwrap literals in the remote
+        // input; rewriting the whole plan also changes DML Values without rebuilding its schema.
+        let remote_input = on_node
+            .clone()
+            .transform_down_with_subqueries(&DistPlannerAnalyzer::unwrap_dictionary_literals)?
+            .data;
+
         // add merge scan as the new root
         let mut node = MergeScanLogicalPlan::new(
-            on_node.clone(),
+            remote_input,
             false,
             // at this stage, the partition cols should be set
             // treat it as non-partitioned if None

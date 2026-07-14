@@ -51,7 +51,7 @@ use crate::error::{
     NotSupportedSnafu, PermissionSnafu, PlanStatementSnafu, Result,
     SubstraitDecodeLogicalPlanSnafu, TableNotFoundSnafu, TableOperationSnafu,
 };
-use crate::instance::{Instance, attach_timer};
+use crate::instance::{Instance, attach_timer, map_query_output};
 use crate::metrics::{
     GRPC_HANDLE_PLAN_ELAPSED, GRPC_HANDLE_PROMQL_ELAPSED, GRPC_HANDLE_SQL_ELAPSED,
 };
@@ -251,7 +251,7 @@ impl GrpcQueryHandler for Instance {
             };
 
             let output = interceptor.post_execute(output, ctx)?;
-            Ok(output)
+            map_query_output(output)
         }
         .await;
 

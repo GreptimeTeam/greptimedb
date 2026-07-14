@@ -893,21 +893,6 @@ impl RowWriter {
                         let v = datatypes::arrow_array::string_array_value(array, i);
                         self.insert(column, v);
                     }
-                    DataType::Dictionary(key_type, value_type)
-                        if key_type.as_ref() == &DataType::UInt32
-                            && matches!(
-                                value_type.as_ref(),
-                                DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View
-                            ) =>
-                    {
-                        if let Some(v) =
-                            datatypes::arrow_array::string_array_value_at_index(array, i)
-                        {
-                            self.insert(column, v);
-                        } else {
-                            self.insert(column, "Null");
-                        }
-                    }
                     DataType::Binary | DataType::LargeBinary | DataType::BinaryView => {
                         let v = datatypes::arrow_array::binary_array_value(array, i);
                         let column_schema = &schema.column_schemas()[j];
@@ -1697,14 +1682,10 @@ mod tests {
     use std::collections::HashSet;
     use std::sync::Arc;
 
-    use arrow::array::{DictionaryArray, StringArray, UInt32Array};
-    use arrow::datatypes::UInt32Type;
     use catalog::memory::MemoryCatalogManager;
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
-    use common_recordbatch::RecordBatches;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, Schema};
-    use datatypes::vectors::{DictionaryVector, VectorRef};
     use promql_parser::parser::value::ValueType;
     use table::metadata::{TableInfoBuilder, TableMetaBuilder, TableType, TableVersion};
     use table::test_util::EmptyTable;
@@ -1717,43 +1698,6 @@ mod tests {
         expected_metric: Option<&'static str>,
         expected_type: ValueType,
         should_error: bool,
-    }
-
-    #[test]
-    fn test_record_batches_to_series_with_dictionary_labels() {
-        let data_type = ConcreteDataType::dictionary_datatype(
-            ConcreteDataType::uint32_datatype(),
-            ConcreteDataType::string_datatype(),
-        );
-        let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
-            "host", data_type, true,
-        )]));
-        let dictionary = DictionaryArray::<UInt32Type>::new(
-            UInt32Array::from(vec![0, 1]),
-            Arc::new(StringArray::from(vec![Some("host-a"), None])),
-        );
-        let vector = Arc::new(DictionaryVector::try_from(dictionary).unwrap()) as VectorRef;
-        let batch = RecordBatch::new(schema.clone(), vec![vector]).unwrap();
-        let batches = RecordBatches::try_new(schema, vec![batch]).unwrap();
-        let mut series = Vec::new();
-
-        record_batches_to_series(
-            batches,
-            &mut series,
-            "metric",
-            &HashSet::from(["host".to_string()]),
-        )
-        .unwrap();
-
-        assert_eq!(2, series.len());
-        assert_eq!(
-            Some("host-a"),
-            series[0].get(&Column::from("host")).map(String::as_str)
-        );
-        assert_eq!(
-            Some("Null"),
-            series[1].get(&Column::from("host")).map(String::as_str)
-        );
     }
 
     #[test]
