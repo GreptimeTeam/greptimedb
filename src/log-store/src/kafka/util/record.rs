@@ -238,9 +238,11 @@ pub fn remaining_entries(
 /// A trailing complete or incomplete entry is emitted by [`remaining_entries`].
 pub(crate) fn maybe_emit_entry(
     provider: &Arc<KafkaProvider>,
-    record: Record,
+    mut record: Record,
+    offset: u64,
     buffered_records: &mut HashMap<RegionId, Vec<Record>>,
 ) -> Result<Option<Entry>> {
+    record.meta.entry_id = offset;
     let mut entry = None;
     match record.meta.tp {
         RecordType::Full => entry = Some(convert_to_naive_entry(provider.clone(), record)),
@@ -324,6 +326,15 @@ mod tests {
             },
             data,
         }
+    }
+
+    fn maybe_emit_entry(
+        provider: &Arc<KafkaProvider>,
+        record: Record,
+        buffered_records: &mut HashMap<RegionId, Vec<Record>>,
+    ) -> Result<Option<Entry>> {
+        let offset = record.meta.entry_id;
+        super::maybe_emit_entry(provider, record, offset, buffered_records)
     }
 
     #[test]
@@ -462,22 +473,37 @@ mod tests {
         let region_id = RegionId::new(1, 1);
         let mut buffer = HashMap::new();
 
-        for record in [
-            new_test_record(RecordType::First, 1, region_id.as_u64(), vec![1; 100]),
-            new_test_record(RecordType::Middle(1), 1, region_id.as_u64(), vec![2; 100]),
-            new_test_record(RecordType::Middle(1), 1, region_id.as_u64(), vec![2; 100]),
-            new_test_record(RecordType::Last, 1, region_id.as_u64(), vec![3; 100]),
-            new_test_record(RecordType::Last, 1, region_id.as_u64(), vec![3; 100]),
+        for (offset, record) in [
+            (
+                10,
+                new_test_record(RecordType::First, 0, region_id.as_u64(), vec![1; 100]),
+            ),
+            (
+                11,
+                new_test_record(RecordType::Middle(1), 0, region_id.as_u64(), vec![2; 100]),
+            ),
+            (
+                12,
+                new_test_record(RecordType::Middle(1), 0, region_id.as_u64(), vec![2; 100]),
+            ),
+            (
+                13,
+                new_test_record(RecordType::Last, 0, region_id.as_u64(), vec![3; 100]),
+            ),
+            (
+                14,
+                new_test_record(RecordType::Last, 0, region_id.as_u64(), vec![3; 100]),
+            ),
         ] {
             assert!(
-                maybe_emit_entry(&provider, record, &mut buffer)
+                super::maybe_emit_entry(&provider, record, offset, &mut buffer)
                     .unwrap()
                     .is_none()
             );
         }
 
-        let next_entry = new_test_record(RecordType::First, 2, region_id.as_u64(), vec![4; 100]);
-        let entry = maybe_emit_entry(&provider, next_entry, &mut buffer)
+        let next_entry = new_test_record(RecordType::First, 0, region_id.as_u64(), vec![4; 100]);
+        let entry = super::maybe_emit_entry(&provider, next_entry, 20, &mut buffer)
             .unwrap()
             .unwrap();
 
@@ -486,7 +512,7 @@ mod tests {
             Entry::MultiplePart(MultiplePartEntry {
                 provider: Provider::Kafka(provider),
                 region_id,
-                entry_id: 1,
+                entry_id: 13,
                 headers: vec![
                     MultiplePartHeader::First,
                     MultiplePartHeader::Middle(1),
@@ -495,6 +521,37 @@ mod tests {
                 parts: vec![vec![1; 100], vec![2; 100], vec![3; 100]],
             })
         );
+    }
+
+    #[test]
+    fn test_remaining_entries_uses_last_record_offset() {
+        let provider = Arc::new(KafkaProvider::new("my_topic".to_string()));
+        let region_id = RegionId::new(1, 1);
+        let mut buffer = HashMap::new();
+
+        for (offset, record) in [
+            (
+                10,
+                new_test_record(RecordType::First, 0, region_id.as_u64(), vec![1; 100]),
+            ),
+            (
+                11,
+                new_test_record(RecordType::Last, 0, region_id.as_u64(), vec![2; 100]),
+            ),
+        ] {
+            assert!(
+                super::maybe_emit_entry(&provider, record, offset, &mut buffer)
+                    .unwrap()
+                    .is_none()
+            );
+        }
+
+        let entry = remaining_entries(&provider, &mut buffer)
+            .unwrap()
+            .pop()
+            .unwrap();
+
+        assert_eq!(entry.entry_id(), 11);
     }
 
     #[test]
