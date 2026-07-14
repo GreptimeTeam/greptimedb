@@ -164,15 +164,16 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             let Some(region) = self.regions.get_region(*region_id) else {
                 return false;
             };
+            if !region.is_writable() {
+                return false;
+            }
+
             let (should_flush, should_stall) = region_write_buffer_status(
                 &region.version(),
                 self.config.default_region_write_buffer_size,
             );
 
-            if should_flush
-                && !self.flush_scheduler.is_flush_requested(region.region_id)
-                && region.is_writable()
-            {
+            if should_flush && !self.flush_scheduler.is_flush_requested(region.region_id) {
                 let task = self.new_flush_task(
                     &region,
                     FlushReason::RegionFull,

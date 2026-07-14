@@ -14,6 +14,7 @@
 
 //! Flush tests for mito engine.
 
+use std::assert_matches;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
@@ -31,10 +32,10 @@ use rstest_reuse::{self, apply};
 use store_api::ManifestVersion;
 use store_api::metadata::RegionMetadataRef;
 use store_api::mito_engine_options::WRITE_BUFFER_SIZE_KEY;
-use store_api::region_engine::RegionEngine;
+use store_api::region_engine::{RegionEngine, RegionRole};
 use store_api::region_request::{
-    PathType, RegionCloseRequest, RegionFlushRequest, RegionOpenRequest, RegionRequest,
-    ReplayCheckpoint,
+    PathType, RegionCloseRequest, RegionFlushRequest, RegionOpenRequest, RegionPutRequest,
+    RegionRequest, ReplayCheckpoint,
 };
 use store_api::storage::{RegionId, ScanRequest};
 use tokio::sync::Notify;
@@ -42,6 +43,7 @@ use tokio::sync::Notify;
 use crate::config::MitoConfig;
 use crate::engine::listener::{EventListener, FlushListener, StallListener};
 use crate::engine::region_hook::{RegionHook, RegionHookRef, SstFileInfo};
+use crate::error::Error;
 use crate::manifest::action::RegionMetaActionList;
 use crate::test_util::{
     CreateRequestBuilder, LogStoreFactory, MockWriteBufferManager, TestEnv, build_rows,
@@ -563,6 +565,61 @@ async fn test_region_write_buffer_stall_does_not_block_other_region() {
         .unwrap();
     assert_eq!(0, scanner.num_files());
     assert_eq!(1, scanner.num_memtables());
+}
+
+#[tokio::test]
+async fn test_region_write_buffer_does_not_stall_follower_write() {
+    let mut env = TestEnv::new().await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_region_write_buffer_size: ReadableSize(1),
+            ..Default::default()
+        })
+        .await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+    let schema = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: schema.clone(),
+            rows: build_rows_for_key("follower", 0, 2, 0),
+        },
+    )
+    .await;
+
+    engine
+        .set_region_role(region_id, RegionRole::Follower)
+        .unwrap();
+
+    let err = tokio::time::timeout(
+        Duration::from_secs(1),
+        engine.handle_request(
+            region_id,
+            RegionRequest::Put(RegionPutRequest {
+                rows: Rows {
+                    schema,
+                    rows: build_rows_for_key("follower", 2, 4, 0),
+                },
+                hint: None,
+                partition_expr_version: None,
+            }),
+        ),
+    )
+    .await
+    .expect("write to follower should not remain stalled")
+    .unwrap_err();
+    assert_matches!(
+        err.into_inner().as_any().downcast_ref::<Error>().unwrap(),
+        Error::RegionState { .. }
+    );
 }
 
 #[tokio::test]
