@@ -175,7 +175,7 @@ impl From<HeartbeatOptions> for HeartbeatConfig {
         Self {
             heartbeat_interval_ms: opts.interval.as_millis() as u64,
             retry_interval_ms: opts.retry_interval.as_millis() as u64,
-            gc_enabled: None,
+            gc_enabled: false,
         }
     }
 }

@@ -110,11 +110,10 @@ impl Datanode {
 
     pub async fn start_heartbeat(&mut self) -> Result<()> {
         if let Some(task) = &self.heartbeat_task {
-            task.start(
-                &mut self.region_event_receiver,
-                self.leases_notifier.clone(),
-            )
-            .await?;
+            // Safety: The event_receiver must exist.
+            let receiver = self.region_event_receiver.take().unwrap();
+
+            task.start(receiver, self.leases_notifier.clone()).await?;
         }
         Ok(())
     }
@@ -274,7 +273,13 @@ impl DatanodeBuilder {
             schema_cache,
         ));
 
-        let gc_enabled = self.effective_mito_config().gc.enable;
+        let gc_enabled = self.opts.region_engine.iter().any(|engine| {
+            if let RegionEngineConfig::Mito(config) = engine {
+                config.gc.enable
+            } else {
+                false
+            }
+        });
 
         let file_ref_manager = Arc::new(FileReferenceManager::with_gc_enabled(
             Some(node_id),
@@ -478,19 +483,6 @@ impl DatanodeBuilder {
 
     // internal utils
 
-    fn effective_mito_config(&self) -> MitoConfig {
-        self.opts
-            .region_engine
-            .iter()
-            .filter_map(|engine| match engine {
-                RegionEngineConfig::Mito(config) => Some(config),
-                _ => None,
-            })
-            .next_back()
-            .cloned()
-            .unwrap_or_default()
-    }
-
     /// Builds [RegionEngineRef] from `store_engine` section in `opts`
     async fn build_store_engines(
         &mut self,
@@ -500,11 +492,14 @@ impl DatanodeBuilder {
         plugins: Plugins,
     ) -> Result<Vec<RegionEngineRef>> {
         let mut metric_engine_config = metric_engine::config::EngineConfig::default();
+        let mut mito_engine_config = MitoConfig::default();
         let mut file_engine_config = file_engine::config::EngineConfig::default();
 
         for engine in &self.opts.region_engine {
             match engine {
-                RegionEngineConfig::Mito(_) => {}
+                RegionEngineConfig::Mito(config) => {
+                    mito_engine_config = config.clone();
+                }
                 RegionEngineConfig::File(config) => {
                     file_engine_config = config.clone();
                 }
@@ -519,7 +514,7 @@ impl DatanodeBuilder {
         let mito_engine = self
             .build_mito_engine(
                 object_store_manager.clone(),
-                self.effective_mito_config(),
+                mito_engine_config,
                 schema_metadata_manager.clone(),
                 file_ref_manager.clone(),
                 fetcher.clone(),
@@ -830,12 +825,11 @@ mod tests {
     use common_meta::key::datanode_table::DatanodeTableManager;
     use common_meta::kv_backend::KvBackendRef;
     use common_meta::kv_backend::memory::MemoryKvBackend;
-    use mito2::config::MitoConfig;
     use mito2::engine::MITO_ENGINE_NAME;
     use store_api::region_request::RegionRequest;
     use store_api::storage::RegionId;
 
-    use crate::config::{DatanodeOptions, RegionEngineConfig};
+    use crate::config::DatanodeOptions;
     use crate::datanode::DatanodeBuilder;
     use crate::tests::{MockRegionEngine, mock_region_server};
 
@@ -854,27 +848,6 @@ mod tests {
 
         let r = kv.txn(txn).await.unwrap();
         assert!(r.succeeded);
-    }
-
-    #[test]
-    fn test_effective_mito_config_uses_last_entry() {
-        let mut first = MitoConfig::default();
-        first.gc.enable = true;
-        let mut last = MitoConfig::default();
-        last.gc.enable = false;
-        let builder = DatanodeBuilder::new(
-            DatanodeOptions {
-                region_engine: vec![
-                    RegionEngineConfig::Mito(first),
-                    RegionEngineConfig::Mito(last),
-                ],
-                ..Default::default()
-            },
-            Plugins::default(),
-            Arc::new(MemoryKvBackend::new()),
-        );
-
-        assert!(!builder.effective_mito_config().gc.enable);
     }
 
     #[tokio::test]
