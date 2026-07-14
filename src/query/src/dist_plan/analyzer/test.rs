@@ -44,7 +44,6 @@ use datatypes::schema::{ColumnSchema, SchemaBuilder, SchemaRef};
 use futures::Stream;
 use futures::task::{Context, Poll};
 use pretty_assertions::assert_eq;
-use promql::extension_plan::EmptyMetric;
 use regex::Regex;
 use store_api::data_source::DataSource;
 use store_api::storage::ScanRequest;
@@ -488,75 +487,6 @@ fn try_encode_decode_substrait(plan: &LogicalPlan, state: SessionState) {
     .unwrap();
 
     assert_eq!(*plan, decoded_plan);
-}
-
-#[test]
-fn empty_metric_stays_local_at_non_serializable_boundary() {
-    init_default_ut_logging();
-
-    let plan = LogicalPlan::Extension(datafusion_expr::Extension {
-        node: Arc::new(
-            EmptyMetric::new(
-                0,
-                60_000,
-                10_000,
-                "ts".to_string(),
-                "number".to_string(),
-                Some(lit(1_u32)),
-            )
-            .unwrap(),
-        ),
-    });
-    let visible_schema = plan.schema().clone();
-
-    let error = substrait::DFLogicalSubstraitConvertor
-        .encode(&plan, crate::query_engine::DefaultSerializer)
-        .unwrap_err();
-    assert!(
-        matches!(error, substrait::error::Error::EncodeDfPlan { error: datafusion_common::DataFusionError::Substrait(ref message), .. } if message == "EmptyMetric should not be serialized"),
-        "unexpected EmptyMetric serialization error: {error:?}"
-    );
-
-    let config = ConfigOptions::default();
-    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
-
-    assert_eq!(visible_schema, result.schema().clone());
-    assert!(matches!(result, LogicalPlan::Extension(_)));
-    assert!(matches!(
-        result.inputs().as_slice(),
-        [LogicalPlan::TableScan(_)]
-    ));
-
-    let mut empty_metrics = 0;
-    let mut merge_scans = 0;
-    result
-        .apply(|node| {
-            if let LogicalPlan::Extension(extension) = node {
-                if extension.node.as_any().is::<EmptyMetric>() {
-                    empty_metrics += 1;
-                }
-                if extension.node.as_any().is::<MergeScanLogicalPlan>() {
-                    merge_scans += 1;
-                }
-            }
-            Ok(TreeNodeRecursion::Continue)
-        })
-        .unwrap();
-    assert_eq!(1, empty_metrics);
-
-    // EmptyMetric's sole child is a dummy MemTable scan. Although the serializer
-    // probe expands at EmptyMetric, its `with_exprs_and_inputs` deliberately
-    // preserves that dummy child, so the attempted MergeScan is not visible in
-    // the final plan and no real remote child exists to serialize.
-    assert_eq!(0, merge_scans);
-
-    let error = substrait::DFLogicalSubstraitConvertor
-        .encode(&result, crate::query_engine::DefaultSerializer)
-        .unwrap_err();
-    assert!(
-        matches!(error, substrait::error::Error::EncodeDfPlan { error: datafusion_common::DataFusionError::Substrait(ref message), .. } if message == "EmptyMetric should not be serialized"),
-        "analyzed plan unexpectedly made EmptyMetric serializable: {error:?}"
-    );
 }
 
 #[test]

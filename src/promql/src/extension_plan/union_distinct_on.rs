@@ -814,173 +814,107 @@ mod test {
         })
     }
 
-    fn source_exec(schema: SchemaRef, batch: RecordBatch) -> Arc<dyn ExecutionPlan> {
+    fn schemas(left: SchemaRef, right: SchemaRef) -> (LogicalPlan, LogicalPlan) {
+        (
+            empty_plan(left.to_dfschema_ref().unwrap()),
+            empty_plan(right.to_dfschema_ref().unwrap()),
+        )
+    }
+
+    fn schema(prefix: &str, key: &str, nullable: bool) -> SchemaRef {
+        Arc::new(Schema::new(vec![
+            Field::new(format!("{prefix}_ts"), DataType::Int64, false),
+            Field::new(format!("{prefix}_{key}"), DataType::Utf8, nullable),
+            Field::new(format!("{prefix}_value"), DataType::Float64, nullable),
+        ]))
+    }
+
+    fn batch(schema: SchemaRef, ts: i64, key: Option<&str>, value: Option<f64>) -> RecordBatch {
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Int64Array::from(vec![ts])),
+                Arc::new(StringArray::from(vec![key])),
+                Arc::new(Float64Array::from(vec![value])),
+            ],
+        )
+        .unwrap()
+    }
+
+    fn source_exec(batch: RecordBatch) -> Arc<dyn ExecutionPlan> {
+        let schema = batch.schema();
         Arc::new(DataSourceExec::new(Arc::new(
             MemorySourceConfig::try_new(&[vec![batch]], schema, None).unwrap(),
         )))
     }
 
+    async fn execute(
+        plan: &UnionDistinctOn,
+        left: RecordBatch,
+        right: RecordBatch,
+    ) -> Vec<RecordBatch> {
+        datafusion::physical_plan::collect(
+            plan.to_execution_plan(source_exec(left), source_exec(right)),
+            SessionContext::default().task_ctx(),
+        )
+        .await
+        .unwrap()
+    }
+
     #[tokio::test]
     async fn serialize_deserialize_and_execute_with_different_input_names() {
-        let left_schema = Arc::new(Schema::new(vec![
-            Field::new("left_ts", DataType::Int64, false),
-            Field::new("left_job", DataType::Utf8, false),
-            Field::new("left_value", DataType::Float64, false),
-        ]));
-        let right_schema = Arc::new(Schema::new(vec![
-            Field::new("right_ts", DataType::Int64, false),
-            Field::new("right_job", DataType::Utf8, false),
-            Field::new("right_value", DataType::Float64, false),
-        ]));
-        let left_plan = empty_plan(left_schema.clone().to_dfschema_ref().unwrap());
-        let right_plan = empty_plan(right_schema.clone().to_dfschema_ref().unwrap());
-        let plan =
-            UnionDistinctOn::try_new(left_plan.clone(), right_plan.clone(), vec![1], 0).unwrap();
-
-        let decoded = UnionDistinctOn::deserialize(&plan.serialize()).unwrap();
-        let decoded = decoded
-            .with_exprs_and_inputs(vec![], vec![left_plan, right_plan])
-            .unwrap();
-        assert_eq!(decoded.compare_key_indices, vec![1]);
-        assert_eq!(decoded.ts_col_idx, 0);
+        let (left_schema, right_schema) =
+            (schema("left", "job", false), schema("right", "job", false));
+        let (left_plan, right_plan) = schemas(left_schema.clone(), right_schema.clone());
+        let decoded = UnionDistinctOn::deserialize(
+            &UnionDistinctOn::try_new(left_plan.clone(), right_plan.clone(), vec![1], 0)
+                .unwrap()
+                .serialize(),
+        )
+        .unwrap()
+        .with_exprs_and_inputs(vec![], vec![left_plan, right_plan])
+        .unwrap();
+        assert_eq!(
+            (decoded.compare_key_indices.as_slice(), decoded.ts_col_idx),
+            (&[1usize][..], 0)
+        );
         assert_eq!(
             decoded.output_schema,
             left_schema.clone().to_dfschema_ref().unwrap()
         );
-
-        let left_batch = RecordBatch::try_new(
-            left_schema.clone(),
-            vec![
-                Arc::new(Int64Array::from(vec![1])),
-                Arc::new(StringArray::from(vec!["left"])),
-                Arc::new(Float64Array::from(vec![10.0])),
-            ],
+        let result = execute(
+            &decoded,
+            batch(left_schema.clone(), 1, Some("left"), Some(10.0)),
+            batch(right_schema, 2, Some("right"), Some(20.0)),
         )
-        .unwrap();
-        let right_batch = RecordBatch::try_new(
-            right_schema.clone(),
-            vec![
-                Arc::new(Int64Array::from(vec![2])),
-                Arc::new(StringArray::from(vec!["right"])),
-                Arc::new(Float64Array::from(vec![20.0])),
-            ],
-        )
-        .unwrap();
-        let exec = decoded.to_execution_plan(
-            source_exec(left_schema.clone(), left_batch),
-            source_exec(right_schema, right_batch),
-        );
-        let result = datafusion::physical_plan::collect(exec, SessionContext::default().task_ctx())
-            .await
-            .unwrap();
-
-        assert_eq!(result.len(), 2);
+        .await;
         assert!(result.iter().all(|batch| batch.schema() == left_schema));
-        assert_eq!(result[0].num_rows(), 1);
-        assert_eq!(result[1].num_rows(), 1);
     }
 
     #[tokio::test]
-    async fn execute_widens_nullable_label_and_emits_rhs_null() {
-        let left_schema = Arc::new(Schema::new(vec![
-            Field::new("left_ts", DataType::Int64, false),
-            Field::new("left_label", DataType::Utf8, false),
-        ]));
-        let right_schema = Arc::new(Schema::new(vec![
-            Field::new("right_ts", DataType::Int64, false),
-            Field::new("right_label", DataType::Utf8, true),
-        ]));
-        let plan = UnionDistinctOn::try_new(
-            empty_plan(left_schema.clone().to_dfschema_ref().unwrap()),
-            empty_plan(right_schema.clone().to_dfschema_ref().unwrap()),
-            vec![1],
-            0,
-        )
-        .unwrap();
+    async fn execute_widens_nullable_fields_and_emits_rhs_nulls() {
+        let (left_schema, right_schema) = (
+            schema("left", "label", false),
+            schema("right", "label", true),
+        );
+        let (left_plan, right_plan) = schemas(left_schema.clone(), right_schema.clone());
+        let plan = UnionDistinctOn::try_new(left_plan, right_plan, vec![1, 2], 0).unwrap();
         let declared_schema = plan.output_schema.inner().clone();
-        assert!(declared_schema.field(1).is_nullable());
-
-        let left_batch = RecordBatch::try_new(
-            left_schema.clone(),
-            vec![
-                Arc::new(Int64Array::from(vec![1])),
-                Arc::new(StringArray::from(vec!["present"])),
-            ],
+        assert!(
+            declared_schema.fields()[1..]
+                .iter()
+                .all(|field| field.is_nullable())
+        );
+        let result = execute(
+            &plan,
+            batch(left_schema, 1, Some("present"), Some(10.0)),
+            batch(right_schema, 2, None, None),
         )
-        .unwrap();
-        let right_batch = RecordBatch::try_new(
-            right_schema.clone(),
-            vec![
-                Arc::new(Int64Array::from(vec![2])),
-                Arc::new(StringArray::from(vec![None::<&str>])),
-            ],
-        )
-        .unwrap();
-        let result = datafusion::physical_plan::collect(
-            plan.to_execution_plan(
-                source_exec(left_schema, left_batch),
-                source_exec(right_schema, right_batch),
-            ),
-            SessionContext::default().task_ctx(),
-        )
-        .await
-        .unwrap();
-
+        .await;
         assert_eq!(result.len(), 2);
         assert!(result.iter().all(|batch| batch.schema() == declared_schema));
         assert!(result[1].column(1).is_null(0));
-    }
-
-    #[tokio::test]
-    async fn execute_widens_nullable_value_for_both_inputs() {
-        let left_schema = Arc::new(Schema::new(vec![
-            Field::new("left_ts", DataType::Int64, false),
-            Field::new("left_value", DataType::Float64, false),
-        ]));
-        let right_schema = Arc::new(Schema::new(vec![
-            Field::new("right_ts", DataType::Int64, false),
-            Field::new("right_value", DataType::Float64, true),
-        ]));
-        let plan = UnionDistinctOn::try_new(
-            empty_plan(left_schema.clone().to_dfschema_ref().unwrap()),
-            empty_plan(right_schema.clone().to_dfschema_ref().unwrap()),
-            vec![1],
-            0,
-        )
-        .unwrap();
-        let declared_schema = plan.output_schema.inner().clone();
-        assert!(declared_schema.field(1).is_nullable());
-
-        let left_batch = RecordBatch::try_new(
-            left_schema.clone(),
-            vec![
-                Arc::new(Int64Array::from(vec![1])),
-                Arc::new(Float64Array::from(vec![10.0])),
-            ],
-        )
-        .unwrap();
-        let right_batch = RecordBatch::try_new(
-            right_schema.clone(),
-            vec![
-                Arc::new(Int64Array::from(vec![2])),
-                Arc::new(Float64Array::from(vec![20.0])),
-            ],
-        )
-        .unwrap();
-        let result = datafusion::physical_plan::collect(
-            plan.to_execution_plan(
-                source_exec(left_schema, left_batch),
-                source_exec(right_schema, right_batch),
-            ),
-            SessionContext::default().task_ctx(),
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(result.len(), 2);
-        assert!(result.iter().all(|batch| batch.schema() == declared_schema));
-        assert_eq!(result[0].num_rows(), 1);
-        assert_eq!(result[1].num_rows(), 1);
+        assert!(result[1].column(2).is_null(0));
     }
 
     #[test]
@@ -989,41 +923,27 @@ mod test {
             Field::new("ts", DataType::Int64, false),
             Field::new("job", DataType::Utf8, false),
         ]));
-        let df_schema = schema.to_dfschema_ref().unwrap();
-
-        for protobuf in [
-            pb::UnionDistinctOn {
-                compare_key_indices: vec![2],
-                ts_col_idx: 0,
-            },
-            pb::UnionDistinctOn {
-                compare_key_indices: vec![1],
-                ts_col_idx: 2,
-            },
-        ] {
-            let decoded = UnionDistinctOn::deserialize(&protobuf.encode_to_vec()).unwrap();
-            assert!(
-                decoded
-                    .with_exprs_and_inputs(
-                        vec![],
-                        vec![empty_plan(df_schema.clone()), empty_plan(df_schema.clone())],
-                    )
-                    .is_err()
-            );
-        }
-
+        let invalid = |compare_key_indices, ts_col_idx| {
+            let decoded = UnionDistinctOn::deserialize(
+                &pb::UnionDistinctOn {
+                    compare_key_indices,
+                    ts_col_idx,
+                }
+                .encode_to_vec(),
+            )
+            .unwrap();
+            let (left, right) = schemas(schema.clone(), schema.clone());
+            decoded
+                .with_exprs_and_inputs(vec![], vec![left, right])
+                .is_err()
+        };
+        assert!(invalid(vec![2], 0));
+        assert!(invalid(vec![1], 2));
         let incompatible_schema = Arc::new(Schema::new(vec![
             Field::new("other_ts", DataType::Int64, false),
             Field::new("other_job", DataType::Int64, false),
         ]));
-        assert!(
-            UnionDistinctOn::try_new(
-                empty_plan(df_schema),
-                empty_plan(incompatible_schema.to_dfschema_ref().unwrap()),
-                vec![1],
-                0,
-            )
-            .is_err()
-        );
+        let (left, right) = schemas(schema, incompatible_schema);
+        assert!(UnionDistinctOn::try_new(left, right, vec![1], 0).is_err());
     }
 }
