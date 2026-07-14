@@ -33,27 +33,19 @@ use crate::vectors::operations::VectorOp;
 use crate::vectors::{self, Helper, MutableVector, Validity, Vector, VectorRef};
 
 /// Builder for `Dictionary<UInt32, Utf8>` vectors.
-pub struct StringDictionaryVectorBuilder {
+pub(crate) struct StringDictionaryVectorBuilder {
     builder: StringDictionaryBuilder<UInt32Type>,
 }
 
 impl StringDictionaryVectorBuilder {
-    pub fn with_capacity(capacity: usize) -> Self {
+    pub(crate) fn with_capacity(capacity: usize) -> Self {
         Self {
             builder: StringDictionaryBuilder::with_capacity(capacity, 0, 0),
         }
     }
 
-    fn finish(&mut self) -> DictionaryVector<UInt32Type> {
-        DictionaryVector::new(self.builder.finish(), ConcreteDataType::string_datatype()).unwrap()
-    }
-
-    fn finish_cloned(&self) -> DictionaryVector<UInt32Type> {
-        DictionaryVector::new(
-            self.builder.finish_cloned(),
-            ConcreteDataType::string_datatype(),
-        )
-        .unwrap()
+    fn vector(array: DictionaryArray<UInt32Type>) -> VectorRef {
+        Arc::new(DictionaryVector::new(array, ConcreteDataType::string_datatype()).unwrap())
     }
 }
 
@@ -78,11 +70,11 @@ impl MutableVector for StringDictionaryVectorBuilder {
     }
 
     fn to_vector(&mut self) -> VectorRef {
-        Arc::new(self.finish())
+        Self::vector(self.builder.finish())
     }
 
     fn to_vector_cloned(&self) -> VectorRef {
-        Arc::new(self.finish_cloned())
+        Self::vector(self.builder.finish_cloned())
     }
 
     fn try_push_value_ref(&mut self, value: &ValueRef) -> Result<()> {

@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use api::v1::CreateTableExpr;
+use common_recordbatch::map_dictionary_to_values_data_type;
 use datafusion_common::tree_node::TreeNode;
 use datafusion_expr::LogicalPlan;
 use datatypes::prelude::ConcreteDataType;
@@ -63,7 +64,9 @@ pub(super) fn create_table_with_expr(
     let mut column_schemas = Vec::new();
     for field in plan.schema().fields() {
         let name = field.name();
-        let ty = ConcreteDataType::from_arrow_type(field.data_type());
+        let ty = map_dictionary_to_values_data_type(&ConcreteDataType::from_arrow_type(
+            field.data_type(),
+        ));
         let col_schema = if first_time_stamp == Some(name.clone()) {
             ColumnSchema::new(name, ty, false).with_time_index(true)
         } else {
@@ -164,7 +167,9 @@ fn build_by_tql_schema(plan: &LogicalPlan) -> Result<TableDef, Error> {
         .fields()
         .iter()
         .filter_map(|f| {
-            if is_tql_label_type(&ConcreteDataType::from_arrow_type(f.data_type())) {
+            if map_dictionary_to_values_data_type(&ConcreteDataType::from_arrow_type(f.data_type()))
+                .is_string()
+            {
                 Some(f.name().clone())
             } else {
                 None
@@ -176,14 +181,6 @@ fn build_by_tql_schema(plan: &LogicalPlan) -> Result<TableDef, Error> {
         ts_col: first_time_stamp,
         pks: string_columns,
     })
-}
-
-fn is_tql_label_type(data_type: &ConcreteDataType) -> bool {
-    data_type.is_string()
-        || matches!(
-            data_type,
-            ConcreteDataType::Dictionary(dictionary) if dictionary.value_type().is_string()
-        )
 }
 
 struct TableDef {

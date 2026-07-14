@@ -283,6 +283,9 @@ impl Instance {
             .await
             .map_err(BoxedError::new)
             .context(ExecuteQuerySnafu)?;
+        let output = output
+            .map_dictionary_to_values()
+            .context(CollectRecordbatchSnafu)?;
 
         let stream = match output.data {
             OutputData::Stream(stream) => stream,

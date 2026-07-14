@@ -18,14 +18,14 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use api::v1::{AffectedRows, FlightMetadata, Metrics};
-use arrow_flight::FlightData;
 use arrow_flight::utils::flight_data_to_arrow_batch;
+use arrow_flight::{FlightData, SchemaAsIpc};
 use common_base::bytes::Bytes;
 use common_recordbatch::DfRecordBatch;
 use datatypes::arrow;
-use datatypes::arrow::array::{Array, ArrayRef, DictionaryArray, StringArray, UInt32Array};
+use datatypes::arrow::array::ArrayRef;
 use datatypes::arrow::buffer::Buffer;
-use datatypes::arrow::datatypes::{DataType, Schema as ArrowSchema, SchemaRef, UInt32Type};
+use datatypes::arrow::datatypes::{DataType, Schema as ArrowSchema, SchemaRef};
 use datatypes::arrow::error::ArrowError;
 use datatypes::arrow::ipc::{MessageHeader, convert, reader, root_as_message, writer};
 use flatbuffers::FlatBufferBuilder;
@@ -57,87 +57,18 @@ pub struct FlightEncoder {
     write_options: writer::IpcWriteOptions,
     data_gen: writer::IpcDataGenerator,
     dictionary_tracker: writer::DictionaryTracker,
-    string_dictionaries: HashMap<usize, StringDictionaryState>,
-}
-
-#[derive(Default)]
-struct StringDictionaryState {
-    indices: HashMap<Option<String>, u32>,
-    values: Vec<Option<String>>,
-    array: Option<ArrayRef>,
-    disabled: bool,
-}
-
-impl StringDictionaryState {
-    fn normalize(&mut self, dictionary: &DictionaryArray<UInt32Type>) -> ArrayRef {
-        const MAX_CUMULATIVE_VALUES: usize = 4096;
-
-        if self.disabled {
-            return Arc::new(dictionary.clone());
-        }
-        let values = dictionary
-            .values()
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .unwrap();
-        if self.values.len() + values.len() > MAX_CUMULATIVE_VALUES {
-            self.disabled = true;
-            self.indices.clear();
-            self.values.clear();
-            self.array = None;
-            return Arc::new(dictionary.clone());
-        }
-        let mut remap = Vec::with_capacity(values.len());
-        let mut changed = false;
-        for index in 0..values.len() {
-            let value = values
-                .is_valid(index)
-                .then(|| values.value(index).to_string());
-            let key = if let Some(key) = self.indices.get(&value) {
-                *key
-            } else {
-                let key = self.values.len() as u32;
-                self.indices.insert(value.clone(), key);
-                self.values.push(value);
-                changed = true;
-                key
-            };
-            remap.push(key);
-        }
-
-        if changed || self.array.is_none() {
-            self.array = Some(Arc::new(StringArray::from(self.values.clone())));
-        }
-
-        let keys = if remap
-            .iter()
-            .enumerate()
-            .all(|(index, key)| index == *key as usize)
-        {
-            dictionary.keys().clone()
-        } else {
-            dictionary
-                .keys()
-                .iter()
-                .map(|key| key.map(|key| remap[key as usize]))
-                .collect::<UInt32Array>()
-        };
-        Arc::new(DictionaryArray::new(keys, self.array.clone().unwrap()))
-    }
 }
 
 impl Default for FlightEncoder {
     fn default() -> Self {
         let write_options = writer::IpcWriteOptions::default()
             .try_with_compression(Some(arrow::ipc::CompressionType::LZ4_FRAME))
-            .unwrap()
-            .with_dictionary_handling(writer::DictionaryHandling::Delta);
+            .unwrap();
 
         Self {
             write_options,
             data_gen: writer::IpcDataGenerator::default(),
             dictionary_tracker: writer::DictionaryTracker::new(false),
-            string_dictionaries: HashMap::new(),
         }
     }
 }
@@ -147,50 +78,17 @@ impl FlightEncoder {
     pub fn with_compression_disabled() -> Self {
         let write_options = writer::IpcWriteOptions::default()
             .try_with_compression(None)
-            .unwrap()
-            .with_dictionary_handling(writer::DictionaryHandling::Delta);
+            .unwrap();
 
         Self {
             write_options,
             data_gen: writer::IpcDataGenerator::default(),
             dictionary_tracker: writer::DictionaryTracker::new(false),
-            string_dictionaries: HashMap::new(),
         }
     }
 
-    fn normalize_dictionaries(&mut self, record_batch: DfRecordBatch) -> DfRecordBatch {
-        let mut changed = false;
-        let columns = record_batch
-            .columns()
-            .iter()
-            .enumerate()
-            .map(|(index, column)| match column.data_type() {
-                DataType::Dictionary(key, value)
-                    if key.as_ref() == &DataType::UInt32 && value.as_ref() == &DataType::Utf8 =>
-                {
-                    changed = true;
-                    let dictionary = column
-                        .as_any()
-                        .downcast_ref::<DictionaryArray<UInt32Type>>()
-                        .unwrap();
-                    self.string_dictionaries
-                        .entry(index)
-                        .or_default()
-                        .normalize(dictionary)
-                }
-                _ => column.clone(),
-            })
-            .collect();
-
-        if changed {
-            DfRecordBatch::try_new(record_batch.schema(), columns).unwrap()
-        } else {
-            record_batch
-        }
-    }
-
-    /// Encode the Arrow schema to [FlightData].
-    pub fn encode_schema(&mut self, schema: &ArrowSchema) -> FlightData {
+    /// Encodes a query-result schema and tracks dictionaries recursively.
+    pub fn encode_query_schema(&mut self, schema: &ArrowSchema) -> FlightData {
         self.data_gen
             .schema_to_bytes_with_dictionary_tracker(
                 schema,
@@ -198,6 +96,11 @@ impl FlightEncoder {
                 &self.write_options,
             )
             .into()
+    }
+
+    /// Encode the Arrow schema to [FlightData].
+    pub fn encode_schema(&self, schema: &ArrowSchema) -> FlightData {
+        SchemaAsIpc::new(schema, &self.write_options).into()
     }
 
     /// Encode the [FlightMessage] to a list (at least one element) of [FlightData]s.
@@ -208,10 +111,15 @@ impl FlightEncoder {
     pub fn encode(&mut self, flight_message: FlightMessage) -> Vec1<FlightData> {
         match flight_message {
             FlightMessage::Schema(schema) => {
+                schema.fields().iter().for_each(|x| {
+                    if matches!(x.data_type(), DataType::Dictionary(_, _)) {
+                        self.dictionary_tracker.next_dict_id();
+                    }
+                });
+
                 vec1![self.encode_schema(schema.as_ref())]
             }
             FlightMessage::RecordBatch(record_batch) => {
-                let record_batch = self.normalize_dictionaries(record_batch);
                 let (encoded_dictionaries, encoded_batch) = self
                     .data_gen
                     .encode(
@@ -500,6 +408,7 @@ mod test {
             vec![Arc::new(Int32Array::from(vec![None, Some(5)])) as _],
         )
         .unwrap();
+
         let flight_data =
             batches_to_flight_data(&schema, vec![batch1.clone(), batch2.clone()]).unwrap();
         assert_eq!(flight_data.len(), 3);
@@ -654,36 +563,21 @@ mod test {
             ],
         )
         .unwrap();
-        let batch3 = DfRecordBatch::try_new(
-            schema.clone(),
-            vec![
-                Arc::new(UInt8Array::from_iter_values(vec![9, 10])) as _,
-                Arc::new(DictionaryArray::new(
-                    UInt32Array::from_iter_values([0, 1]),
-                    Arc::new(StringArray::from_iter_values(["o", "x"])),
-                )) as _,
-            ],
-        )
-        .unwrap();
 
         let message_1 = FlightMessage::Schema(schema.clone());
         let message_2 = FlightMessage::RecordBatch(batch1);
         let message_3 = FlightMessage::RecordBatch(batch2);
-        let message_4 = FlightMessage::RecordBatch(batch3);
 
         let mut encoder = FlightEncoder::default();
         let encoded_1 = encoder.encode(message_1);
         let encoded_2 = encoder.encode(message_2);
         let encoded_3 = encoder.encode(message_3);
-        let encoded_4 = encoder.encode(message_4);
         // message 1 is Arrow Schema, should be encoded to one FlightData:
         assert_eq!(encoded_1.len(), 1);
         // message 2 and 3 are Arrow RecordBatch with dictionary arrays, should be encoded to
         // multiple FlightData:
         assert_eq!(encoded_2.len(), 2);
         assert_eq!(encoded_3.len(), 2);
-        // The fourth message only uses values already sent by the cumulative dictionary.
-        assert_eq!(encoded_4.len(), 1);
 
         let mut decoder = FlightDecoder::default();
         let decoded_1 = decoder.try_decode(encoded_1.first())?;
@@ -703,34 +597,29 @@ mod test {
         let Some(FlightMessage::RecordBatch(decoded_3)) = decoder.try_decode(&encoded_3[1])? else {
             unreachable!()
         };
-        let Some(FlightMessage::RecordBatch(decoded_4)) = decoder.try_decode(&encoded_4[0])? else {
-            unreachable!()
-        };
-        let actual = arrow::util::pretty::pretty_format_batches(&[decoded_2, decoded_3, decoded_4])
+        let actual = arrow::util::pretty::pretty_format_batches(&[decoded_2, decoded_3])
             .unwrap()
             .to_string();
         let expected = r"
-+----+---+
-| i  | s |
-+----+---+
-| 1  | x |
-| 2  | x |
-| 3  | x |
-| 4  | h |
-| 5  | e |
-| 6  | l |
-| 7  | l |
-| 8  | o |
-| 9  | o |
-| 10 | x |
-+----+---+";
++---+---+
+| i | s |
++---+---+
+| 1 | x |
+| 2 | x |
+| 3 | x |
+| 4 | h |
+| 5 | e |
+| 6 | l |
+| 7 | l |
+| 8 | o |
++---+---+";
         assert_eq!(actual, expected.trim());
         Ok(())
     }
 
     #[test]
-    fn test_flight_encode_decode_with_nested_dictionary_array() -> Result<()> {
-        let item_field = Arc::new(Field::new_dictionary(
+    fn test_query_schema_with_nested_dictionary_array() -> Result<()> {
+        let item = Arc::new(Field::new_dictionary(
             "item",
             DataType::UInt32,
             DataType::Utf8,
@@ -738,7 +627,7 @@ mod test {
         ));
         let schema = Arc::new(Schema::new(vec![Field::new(
             "tags",
-            DataType::List(item_field.clone()),
+            DataType::List(item.clone()),
             true,
         )]));
         let values = DictionaryArray::new(
@@ -746,7 +635,7 @@ mod test {
             Arc::new(StringArray::from_iter_values(["host-a", "host-b"])),
         );
         let list = ListArray::new(
-            item_field,
+            item,
             OffsetBuffer::from_lengths([2, 1]),
             Arc::new(values),
             None,
@@ -754,22 +643,21 @@ mod test {
         let batch = DfRecordBatch::try_new(schema.clone(), vec![Arc::new(list)]).unwrap();
 
         let mut encoder = FlightEncoder::default();
-        let encoded_schema = encoder.encode(FlightMessage::Schema(schema.clone()));
+        let encoded_schema = encoder.encode_query_schema(&schema);
         let encoded_batch = encoder.encode(FlightMessage::RecordBatch(batch.clone()));
 
         let mut decoder = FlightDecoder::default();
         assert!(matches!(
-            decoder.try_decode(encoded_schema.first())?,
+            decoder.try_decode(&encoded_schema)?,
             Some(FlightMessage::Schema(actual)) if actual == schema
         ));
-
-        let mut decoded_batch = None;
-        for data in encoded_batch {
-            if let Some(FlightMessage::RecordBatch(decoded)) = decoder.try_decode(&data)? {
-                decoded_batch = Some(decoded);
-            }
+        for data in encoded_batch.iter().take(encoded_batch.len() - 1) {
+            assert!(decoder.try_decode(data)?.is_none());
         }
-        assert_eq!(Some(batch), decoded_batch);
+        assert!(matches!(
+            decoder.try_decode(encoded_batch.last())?,
+            Some(FlightMessage::RecordBatch(actual)) if actual == batch
+        ));
         Ok(())
     }
 

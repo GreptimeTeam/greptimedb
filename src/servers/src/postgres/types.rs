@@ -234,6 +234,8 @@ where
 }
 
 pub(super) fn type_gt_to_pg(origin: &ConcreteDataType) -> Result<Type> {
+    let logical_type = map_dictionary_to_values_data_type(origin);
+    let origin = &logical_type;
     match origin {
         &ConcreteDataType::Null(_) => Ok(Type::UNKNOWN),
         &ConcreteDataType::Boolean(_) => Ok(Type::BOOL),
@@ -416,8 +418,7 @@ pub(super) fn parameters_to_scalar_values(
         let client_type = if let Some(Some(client_given_type)) = client_param_types.get(idx) {
             client_given_type.clone()
         } else if let Some(server_provided_type) = &server_type {
-            type_gt_to_pg(&map_dictionary_to_values_data_type(server_provided_type))
-                .map_err(convert_err)?
+            type_gt_to_pg(server_provided_type).map_err(convert_err)?
         } else {
             return Err(invalid_parameter_error(
                 "unknown_parameter_type",
@@ -1233,7 +1234,7 @@ pub(super) fn param_types_to_pg_types(
     let mut types = Vec::with_capacity(param_count);
     for i in 0..param_count {
         if let Some(Some(param_type)) = param_types.get(&format!("${}", i + 1)) {
-            let pg_type = type_gt_to_pg(&map_dictionary_to_values_data_type(param_type))?;
+            let pg_type = type_gt_to_pg(param_type)?;
             types.push(pg_type);
         } else {
             types.push(Type::UNKNOWN);

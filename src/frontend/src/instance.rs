@@ -304,14 +304,15 @@ impl Instance {
                 )
                 .await
                 .map_err(|_| StatementTimeoutSnafu.build())??;
+                let output = map_query_output(output)?;
                 // compute remaining timeout
                 let remaining_timeout = timeout.checked_sub(start.elapsed()).unwrap_or_default();
                 attach_timeout(output, remaining_timeout)
             }
-            None => {
-                self.exec_statement(stmt, query_ctx, query_interceptor)
-                    .await
-            }
+            None => self
+                .exec_statement(stmt, query_ctx, query_interceptor)
+                .await
+                .and_then(map_query_output),
         }
     }
 
@@ -726,10 +727,14 @@ impl Instance {
                 let output = tokio::time::timeout(timeout, self.exec_plan(plan, query_ctx))
                     .await
                     .map_err(|_| StatementTimeoutSnafu.build())??;
+                let output = map_query_output(output)?;
                 let remaining_timeout = timeout.checked_sub(start.elapsed()).unwrap_or_default();
                 attach_timeout(output, remaining_timeout)
             }
-            None => self.exec_plan(plan, query_ctx).await,
+            None => self
+                .exec_plan(plan, query_ctx)
+                .await
+                .and_then(map_query_output),
         }
     }
 
@@ -885,12 +890,7 @@ impl SqlQueryHandler for Instance {
         self.do_query_inner(query, query_ctx)
             .await
             .into_iter()
-            .map(|result| {
-                result
-                    .and_then(map_query_output)
-                    .map_err(BoxedError::new)
-                    .context(ExecuteQuerySnafu)
-            })
+            .map(|result| result.map_err(BoxedError::new).context(ExecuteQuerySnafu))
             .collect()
     }
 
@@ -901,7 +901,6 @@ impl SqlQueryHandler for Instance {
     ) -> server_error::Result<Output> {
         self.do_analyze_stream_query_inner(query, query_ctx)
             .await
-            .and_then(map_query_output)
             .map_err(BoxedError::new)
             .context(ExecuteQuerySnafu)
     }
@@ -914,7 +913,6 @@ impl SqlQueryHandler for Instance {
     ) -> server_error::Result<Output> {
         self.do_exec_plan_inner(plan, stmt, query_ctx)
             .await
-            .and_then(map_query_output)
             .map_err(BoxedError::new)
             .context(server_error::ExecutePlanSnafu)
     }
@@ -927,12 +925,7 @@ impl SqlQueryHandler for Instance {
         self.do_promql_query_inner(query, query_ctx)
             .await
             .into_iter()
-            .map(|result| {
-                result
-                    .and_then(map_query_output)
-                    .map_err(BoxedError::new)
-                    .context(ExecuteQuerySnafu)
-            })
+            .map(|result| result.map_err(BoxedError::new).context(ExecuteQuerySnafu))
             .collect()
     }
 
@@ -1054,23 +1047,20 @@ impl PrometheusHandler for Instance {
         let output = CancellableFuture::new(query_fut, ticket.cancellation_handle.clone())
             .await
             .map_err(|_| servers::error::CancelledSnafu.build())?
-            .map(|output| {
-                let Output { meta, data } = output;
-                let data = match data {
-                    OutputData::Stream(stream) => {
-                        OutputData::Stream(Box::pin(CancellableStreamWrapper::new(stream, ticket)))
-                    }
-                    other => other,
-                };
-                Output { data, meta }
-            })
             .map_err(BoxedError::new)
             .context(ExecuteQuerySnafu)?;
-
-        let output = interceptor.post_execute(output, query_ctx)?;
-        map_query_output(output)
+        let output = map_query_output(output)
             .map_err(BoxedError::new)
-            .context(ExecuteQuerySnafu)
+            .context(ExecuteQuerySnafu)?;
+        let Output { meta, data } = output;
+        let data = match data {
+            OutputData::Stream(stream) => {
+                OutputData::Stream(Box::pin(CancellableStreamWrapper::new(stream, ticket)))
+            }
+            other => other,
+        };
+        let output = Output { data, meta };
+        Ok(interceptor.post_execute(output, query_ctx)?)
     }
 
     async fn query_metric_names(

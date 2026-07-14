@@ -693,6 +693,7 @@ async fn test_series_scan_with_format(flat_format: bool) {
 
     let request = ScanRequest {
         distribution: Some(TimeSeriesDistribution::PerSeries),
+        preserve_pk_dictionary_encoding: true,
         ..Default::default()
     };
     let scanner = engine.scanner(region_id, request).await.unwrap();

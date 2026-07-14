@@ -418,6 +418,10 @@ impl RefillTask {
             .await
             .map_err(BoxedError::new)
             .context(ExternalSnafu)?;
+        let output_data = output_data
+            .map_dictionary_to_values()
+            .map_err(BoxedError::new)
+            .context(ExternalSnafu)?;
 
         let output_stream = QueryStream::try_from(output_data)?;
         let output_stream = output_stream.try_into_stream()?;

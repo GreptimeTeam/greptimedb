@@ -17,10 +17,8 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use datafusion::arrow::array::{
-    Array, DictionaryArray, LargeStringArray, StringArray, StringViewArray, UInt64Array,
-};
-use datafusion::arrow::datatypes::{DataType, SchemaRef, UInt32Type};
+use datafusion::arrow::array::{Array, ArrayRef, UInt64Array};
+use datafusion::arrow::datatypes::{DataType, SchemaRef};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::{DFSchema, DFSchemaRef};
 use datafusion::error::Result as DataFusionResult;
@@ -37,6 +35,7 @@ use datafusion::physical_plan::{
 };
 use datafusion_expr::col;
 use datatypes::arrow::compute;
+use datatypes::arrow_array::string_array_value_at_index;
 use datatypes::compute::SortOptions;
 use futures::{Stream, StreamExt, ready};
 use greptime_proto::substrait_extension as pb;
@@ -71,13 +70,13 @@ impl<'a> TagIdentifier<'a> {
                         })?;
                     Ok(Self::Id(array))
                 } else {
-                    Ok(Self::Raw(vec![RawTagColumn::try_new(array.as_ref())?]))
+                    Ok(Self::Raw(vec![RawTagColumn::try_new(array)?]))
                 }
             }
             indices => Ok(Self::Raw(
                 indices
                     .iter()
-                    .map(|index| RawTagColumn::try_new(batch.column(*index).as_ref()))
+                    .map(|index| RawTagColumn::try_new(batch.column(*index)))
                     .collect::<DataFusionResult<Vec<_>>>()?,
             )),
         }
@@ -101,7 +100,7 @@ impl<'a> TagIdentifier<'a> {
                 }
 
                 for (left_column, right_column) in left.iter().zip(right.iter()) {
-                    if !left_column.equal_at(left_row, right_column, right_row)? {
+                    if !left_column.equal_at(left_row, right_column, right_row) {
                         return Ok(false);
                     }
                 }
@@ -123,64 +122,16 @@ impl<'a> TagIdentifier<'a> {
     }
 }
 
-enum RawTagColumn<'a> {
-    Utf8(&'a StringArray),
-    LargeUtf8(&'a LargeStringArray),
-    Utf8View(&'a StringViewArray),
-    Dictionary(&'a DictionaryArray<UInt32Type>, &'a StringArray),
-}
+struct RawTagColumn<'a>(&'a ArrayRef);
 
 impl<'a> RawTagColumn<'a> {
-    fn try_new(array: &'a dyn Array) -> DataFusionResult<Self> {
+    fn try_new(array: &'a ArrayRef) -> DataFusionResult<Self> {
         match array.data_type() {
-            DataType::Utf8 => array
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .map(Self::Utf8)
-                .ok_or_else(|| {
-                    datafusion::error::DataFusionError::Internal(
-                        "Failed to downcast tag column to StringArray".to_string(),
-                    )
-                }),
-            DataType::LargeUtf8 => array
-                .as_any()
-                .downcast_ref::<LargeStringArray>()
-                .map(Self::LargeUtf8)
-                .ok_or_else(|| {
-                    datafusion::error::DataFusionError::Internal(
-                        "Failed to downcast tag column to LargeStringArray".to_string(),
-                    )
-                }),
-            DataType::Utf8View => array
-                .as_any()
-                .downcast_ref::<StringViewArray>()
-                .map(Self::Utf8View)
-                .ok_or_else(|| {
-                    datafusion::error::DataFusionError::Internal(
-                        "Failed to downcast tag column to StringViewArray".to_string(),
-                    )
-                }),
+            DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View => Ok(Self(array)),
             DataType::Dictionary(key, value)
                 if key.as_ref() == &DataType::UInt32 && value.as_ref() == &DataType::Utf8 =>
             {
-                let dictionary = array
-                    .as_any()
-                    .downcast_ref::<DictionaryArray<UInt32Type>>()
-                    .ok_or_else(|| {
-                        datafusion::error::DataFusionError::Internal(
-                            "Failed to downcast tag column to DictionaryArray<UInt32>".to_string(),
-                        )
-                    })?;
-                let values = dictionary
-                    .values()
-                    .as_any()
-                    .downcast_ref::<StringArray>()
-                    .ok_or_else(|| {
-                        datafusion::error::DataFusionError::Internal(
-                            "Failed to downcast dictionary values to StringArray".to_string(),
-                        )
-                    })?;
-                Ok(Self::Dictionary(dictionary, values))
+                Ok(Self(array))
             }
             other => Err(datafusion::error::DataFusionError::Internal(format!(
                 "Unsupported tag column type: {other:?}"
@@ -188,30 +139,9 @@ impl<'a> RawTagColumn<'a> {
         }
     }
 
-    fn is_null(&self, row: usize) -> bool {
-        match self {
-            Self::Utf8(array) => array.is_null(row),
-            Self::LargeUtf8(array) => array.is_null(row),
-            Self::Utf8View(array) => array.is_null(row),
-            Self::Dictionary(array, values) => array.key(row).is_none_or(|key| values.is_null(key)),
-        }
-    }
-
-    fn value(&self, row: usize) -> &str {
-        match self {
-            Self::Utf8(array) => array.value(row),
-            Self::LargeUtf8(array) => array.value(row),
-            Self::Utf8View(array) => array.value(row),
-            Self::Dictionary(array, values) => values.value(array.key(row).unwrap()),
-        }
-    }
-
-    fn equal_at(&self, left_row: usize, other: &Self, right_row: usize) -> DataFusionResult<bool> {
-        if self.is_null(left_row) || other.is_null(right_row) {
-            return Ok(self.is_null(left_row) && other.is_null(right_row));
-        }
-
-        Ok(self.value(left_row) == other.value(right_row))
+    fn equal_at(&self, left_row: usize, other: &Self, right_row: usize) -> bool {
+        string_array_value_at_index(self.0, left_row)
+            == string_array_value_at_index(other.0, right_row)
     }
 }
 
@@ -695,8 +625,10 @@ impl SeriesDivideStream {
 
 #[cfg(test)]
 mod test {
-    use datafusion::arrow::array::UInt32Array;
-    use datafusion::arrow::datatypes::{DataType, Field, Schema};
+    use datafusion::arrow::array::{
+        DictionaryArray, LargeStringArray, StringArray, StringViewArray, UInt32Array,
+    };
+    use datafusion::arrow::datatypes::{DataType, Field, Schema, UInt32Type};
     use datafusion::common::ToDFSchema;
     use datafusion::datasource::memory::MemorySourceConfig;
     use datafusion::datasource::source::DataSourceExec;
@@ -707,15 +639,15 @@ mod test {
 
     #[test]
     fn test_dictionary_tag_child_null_comparison() {
-        let dictionary = DictionaryArray::<UInt32Type>::new(
+        let dictionary: ArrayRef = Arc::new(DictionaryArray::<UInt32Type>::new(
             UInt32Array::from(vec![Some(0), None, Some(1)]),
             Arc::new(StringArray::from(vec![None, Some("")])),
-        );
+        ));
         let tags = RawTagColumn::try_new(&dictionary).unwrap();
 
-        assert!(tags.equal_at(0, &tags, 1).unwrap());
-        assert!(!tags.equal_at(0, &tags, 2).unwrap());
-        assert!(!tags.equal_at(1, &tags, 2).unwrap());
+        assert!(tags.equal_at(0, &tags, 1));
+        assert!(!tags.equal_at(0, &tags, 2));
+        assert!(!tags.equal_at(1, &tags, 2));
     }
 
     fn prepare_test_data() -> DataSourceExec {

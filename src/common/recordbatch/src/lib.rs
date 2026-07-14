@@ -41,7 +41,7 @@ use datatypes::arrow::compute::SortOptions;
 pub use datatypes::arrow::record_batch::RecordBatch as DfRecordBatch;
 use datatypes::arrow::util::pretty;
 use datatypes::prelude::{ConcreteDataType, DataType, VectorRef};
-use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
+use datatypes::schema::{ColumnSchema, Schema, SchemaBuilder, SchemaRef};
 use datatypes::types::{JsonFormat, StructField, StructType, jsonb_to_string};
 use error::Result;
 use futures::task::{Context, Poll};
@@ -194,7 +194,7 @@ pub fn map_dictionary_to_values_data_type(data_type: &ConcreteDataType) -> Concr
 /// Maps dictionary columns in a schema to their value types.
 pub fn map_dictionary_to_values_schema(schema: SchemaRef) -> (SchemaRef, bool) {
     let mut apply_mapper = false;
-    let columns = schema
+    let columns: Vec<_> = schema
         .column_schemas()
         .iter()
         .map(|column| {
@@ -206,10 +206,17 @@ pub fn map_dictionary_to_values_schema(schema: SchemaRef) -> (SchemaRef, bool) {
         })
         .collect();
 
-    (
-        Arc::new(Schema::new_with_version(columns, schema.version())),
-        apply_mapper,
-    )
+    if !apply_mapper {
+        return (schema, false);
+    }
+
+    let builder = schema.metadata().iter().fold(
+        SchemaBuilder::try_from(columns)
+            .unwrap()
+            .version(schema.version()),
+        |builder, (key, value)| builder.add_metadata(key, value),
+    );
+    (Arc::new(builder.build().unwrap()), true)
 }
 
 /// Expands dictionary arrays to their value arrays according to `mapped_schema`.

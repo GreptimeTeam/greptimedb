@@ -23,7 +23,6 @@ use api::v1::SemanticType;
 use async_trait::async_trait;
 use catalog::error::Result as CatalogResult;
 use catalog::{CatalogManager, CatalogManagerRef};
-use common_catalog::consts::{METRIC_ENGINE, MITO_ENGINE, MITO2_ENGINE};
 use common_recordbatch::OrderOption;
 use common_recordbatch::filter::SimpleFilterEvaluator;
 use datafusion::catalog::{CatalogProvider, CatalogProviderList, SchemaProvider, Session};
@@ -31,7 +30,7 @@ use datafusion::datasource::TableProvider;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion_common::DataFusionError;
 use datafusion_expr::{Expr, TableProviderFilterPushDown, TableType};
-use datatypes::arrow::datatypes::{DataType, Schema, SchemaRef};
+use datatypes::arrow::datatypes::SchemaRef;
 use datatypes::types::json_type::JsonNativeType;
 use futures::stream::BoxStream;
 use session::context::{QueryContext, QueryContextRef};
@@ -43,6 +42,7 @@ use store_api::storage::{
 };
 use table::TableRef;
 use table::metadata::{TableId, TableInfoRef};
+use table::table::adapter::{dictionary_encode_string_columns, supports_pk_dictionary_encoding};
 use table::table::scan::RegionScanExec;
 
 use crate::error::{GetRegionMetadataSnafu, Result};
@@ -168,29 +168,12 @@ impl TableProvider for DummyTableProvider {
 
     fn schema(&self) -> SchemaRef {
         let schema = self.metadata.schema.arrow_schema();
-        if !matches!(
-            self.engine.name(),
-            MITO_ENGINE | MITO2_ENGINE | METRIC_ENGINE
-        ) {
+        if !supports_pk_dictionary_encoding(self.engine.name()) {
             return schema.clone();
         }
-        let fields = schema
-            .fields()
-            .iter()
-            .zip(&self.metadata.column_metadatas)
-            .map(|(field, column)| {
-                if column.semantic_type == SemanticType::Tag && field.data_type() == &DataType::Utf8
-                {
-                    Arc::new(field.as_ref().clone().with_data_type(DataType::Dictionary(
-                        Box::new(DataType::UInt32),
-                        Box::new(DataType::Utf8),
-                    )))
-                } else {
-                    field.clone()
-                }
-            })
-            .collect::<Vec<_>>();
-        Arc::new(Schema::new_with_metadata(fields, schema.metadata().clone()))
+        dictionary_encode_string_columns(schema, |index| {
+            self.metadata.column_metadatas[index].semantic_type == SemanticType::Tag
+        })
     }
 
     fn table_type(&self) -> TableType {
@@ -271,11 +254,15 @@ impl TableProvider for DummyTableProvider {
 impl DummyTableProvider {
     /// Creates a new provider.
     pub fn new(region_id: RegionId, engine: RegionEngineRef, metadata: RegionMetadataRef) -> Self {
+        let preserve_pk_dictionary_encoding = supports_pk_dictionary_encoding(engine.name());
         Self {
             region_id,
             engine,
             metadata,
-            scan_request: Default::default(),
+            scan_request: Arc::new(Mutex::new(ScanRequest {
+                preserve_pk_dictionary_encoding,
+                ..Default::default()
+            })),
             query_ctx: None,
         }
     }
@@ -340,11 +327,13 @@ impl DummyTableProviderFactory {
                     region_id,
                 })?;
 
-        let scan_request = if let Some(ctx) = query_ctx.as_ref() {
+        let mut scan_request = if let Some(ctx) = query_ctx.as_ref() {
             scan_request_from_query_context(region_id, ctx)?
         } else {
             ScanRequest::default()
         };
+        scan_request.preserve_pk_dictionary_encoding =
+            supports_pk_dictionary_encoding(engine.name());
 
         Ok(DummyTableProvider {
             region_id,

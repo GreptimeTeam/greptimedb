@@ -91,7 +91,7 @@ impl DataType for DictionaryType {
         {
             Box::new(StringDictionaryVectorBuilder::with_capacity(capacity))
         } else {
-            unimplemented!("mutable vector for {}", self.name())
+            unimplemented!()
         }
     }
 

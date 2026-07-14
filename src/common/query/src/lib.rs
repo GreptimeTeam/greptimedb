@@ -122,11 +122,16 @@ impl Output {
                 }
             }
             OutputData::Stream(stream) => {
-                OutputData::Stream(Box::pin(SendableRecordBatchMapper::new(
-                    stream,
-                    map_dictionary_to_values,
-                    map_dictionary_to_values_schema,
-                )))
+                let (_, apply_mapper) = map_dictionary_to_values_schema(stream.schema());
+                if apply_mapper {
+                    OutputData::Stream(Box::pin(SendableRecordBatchMapper::new(
+                        stream,
+                        map_dictionary_to_values,
+                        map_dictionary_to_values_schema,
+                    )))
+                } else {
+                    OutputData::Stream(stream)
+                }
             }
         };
         Ok(Self { data, meta })

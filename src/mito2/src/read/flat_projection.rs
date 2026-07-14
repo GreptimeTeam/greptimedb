@@ -114,12 +114,6 @@ impl FlatProjectionMapper {
             output_col_ids.push(col.column_id);
 
             let mut schema = col.column_schema.clone();
-            if col.semantic_type == SemanticType::Tag && schema.data_type.is_string() {
-                schema.data_type = ConcreteDataType::dictionary_datatype(
-                    ConcreteDataType::uint32_datatype(),
-                    schema.data_type.clone(),
-                );
-            }
             if let Some(concretized) = json_type_hint
                 .and_then(|x| x.get(&schema.name))
                 .cloned()
@@ -217,6 +211,41 @@ impl FlatProjectionMapper {
     /// Returns a new mapper without projection.
     pub fn all(metadata: &RegionMetadataRef) -> Result<Self> {
         FlatProjectionMapper::new(metadata, 0..metadata.column_metadatas.len())
+    }
+
+    /// Keeps projected string primary-key columns in their flat-format dictionary encoding.
+    pub(crate) fn with_pk_dictionary_encoding(mut self) -> Self {
+        let mut changed = false;
+        let columns = self
+            .output_schema
+            .column_schemas()
+            .iter()
+            .map(|column| {
+                let mut column = column.clone();
+                if column.data_type == ConcreteDataType::string_datatype()
+                    && self
+                        .metadata
+                        .column_by_name(&column.name)
+                        .is_some_and(|metadata| {
+                            self.metadata.primary_key.contains(&metadata.column_id)
+                        })
+                {
+                    changed = true;
+                    column.data_type = ConcreteDataType::dictionary_datatype(
+                        ConcreteDataType::uint32_datatype(),
+                        column.data_type.clone(),
+                    );
+                }
+                column
+            })
+            .collect();
+        if changed {
+            self.output_schema = Arc::new(Schema::new_with_version(
+                columns,
+                self.output_schema.version(),
+            ));
+        }
+        self
     }
 
     /// Returns the metadata that created the mapper.
@@ -621,6 +650,12 @@ mod tests {
         let metadata = Arc::new(builder.build().unwrap());
 
         let mapper = FlatProjectionMapper::new(&metadata, [0, 1]).unwrap();
+        assert_eq!(
+            &ArrowDataType::Utf8,
+            mapper.output_schema().arrow_schema().field(0).data_type()
+        );
+
+        let mapper = mapper.with_pk_dictionary_encoding();
         assert_eq!(
             &ArrowDataType::Dictionary(
                 Box::new(ArrowDataType::UInt32),

@@ -303,10 +303,10 @@ impl RecordBatch {
             }
             _ => {
                 if let Ok(column) = Helper::try_into_vector(column) {
-                    Box::new((0..column.len()).map(move |i| {
-                        let value = column.get_ref(i);
-                        (!value.is_null()).then(|| column.get(i).to_string())
-                    }))
+                    Box::new(
+                        (0..column.len())
+                            .map(move |i| (!column.is_null(i)).then(|| column.get(i).to_string())),
+                    )
                 } else {
                     Box::new(std::iter::empty())
                 }
@@ -382,13 +382,13 @@ fn maybe_align_json_array_with_schema(
 mod tests {
     use std::sync::Arc;
 
-    use datatypes::arrow::array::{AsArray, BinaryArray, DictionaryArray, UInt32Array};
+    use datatypes::arrow::array::{AsArray, BinaryArray, UInt32Array};
     use datatypes::arrow::datatypes::{DataType, Field, Schema as ArrowSchema, UInt32Type};
     use datatypes::arrow_array::StringArray;
     use datatypes::data_type::ConcreteDataType;
     use datatypes::extension::json::{JsonExtensionType, JsonMetadata};
     use datatypes::schema::{ColumnSchema, Schema};
-    use datatypes::vectors::{DictionaryVector, StringVector, UInt32Vector};
+    use datatypes::vectors::{StringVector, UInt32Vector};
 
     use super::*;
 
@@ -473,28 +473,6 @@ mod tests {
         assert_eq!(expected, actual);
 
         assert!(recordbatch.slice(1, 5).is_err());
-    }
-
-    #[test]
-    fn test_iter_dictionary_column_uses_logical_nulls() {
-        let data_type = ConcreteDataType::dictionary_datatype(
-            ConcreteDataType::uint32_datatype(),
-            ConcreteDataType::string_datatype(),
-        );
-        let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
-            "host", data_type, true,
-        )]));
-        let dictionary = DictionaryArray::<UInt32Type>::new(
-            UInt32Array::from(vec![Some(0), Some(1), None]),
-            Arc::new(StringArray::from(vec![None, Some("host-b")])),
-        );
-        let vector = Arc::new(DictionaryVector::try_from(dictionary).unwrap()) as VectorRef;
-        let batch = RecordBatch::new(schema, vec![vector]).unwrap();
-
-        assert_eq!(
-            vec![None, Some("host-b".to_string()), None],
-            batch.iter_column_as_string(0).collect::<Vec<_>>()
-        );
     }
 
     #[test]

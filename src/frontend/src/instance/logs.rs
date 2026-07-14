@@ -64,10 +64,10 @@ impl LogQueryHandler for Instance {
             .map_err(BoxedError::new)
             .context(ExecuteQuerySnafu)?;
 
-        let output = interceptor.as_ref().post_query(output, ctx.clone())?;
-        map_query_output(output)
+        let output = map_query_output(output)
             .map_err(BoxedError::new)
-            .context(ExecuteQuerySnafu)
+            .context(ExecuteQuerySnafu)?;
+        Ok(interceptor.as_ref().post_query(output, ctx.clone())?)
     }
 
     fn catalog_manager(&self, _ctx: &QueryContext) -> ServerResult<&dyn catalog::CatalogManager> {

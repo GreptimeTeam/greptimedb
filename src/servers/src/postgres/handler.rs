@@ -18,8 +18,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use common_query::{Output, OutputData};
+use common_recordbatch::RecordBatch;
 use common_recordbatch::error::Result as RecordBatchResult;
-use common_recordbatch::{RecordBatch, map_dictionary_to_values_schema};
 use common_telemetry::{debug, info, tracing};
 use datafusion::sql::sqlparser::ast::{CopyOption, CopyTarget, Statement as SqlParserStatement};
 use datafusion_common::ParamValues;
@@ -557,7 +557,6 @@ fn describe_fields(
         // query
         SqlPlan::Plan(plan, _) if !matches!(plan, LogicalPlan::Dml(_) | LogicalPlan::Ddl(_)) => {
             let schema: Schema = plan.schema().clone().try_into().map_err(convert_err)?;
-            let (schema, _) = map_dictionary_to_values_schema(Arc::new(schema));
             schema_to_pg(&schema, format, None).map_err(convert_err)
         }
         // We can cover only part of show statements

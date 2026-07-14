@@ -156,11 +156,7 @@ pub fn string_array_value_at_index(array: &ArrayRef, i: usize) -> Option<&str> {
             array.is_valid(i).then(|| array.value(i))
         }
         DataType::Dictionary(key_type, value_type)
-            if key_type.as_ref() == &DataType::UInt32
-                && matches!(
-                    value_type.as_ref(),
-                    DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View
-                ) =>
+            if key_type.as_ref() == &DataType::UInt32 && value_type.as_ref() == &DataType::Utf8 =>
         {
             let array = array
                 .as_any()
@@ -171,7 +167,7 @@ pub fn string_array_value_at_index(array: &ArrayRef, i: usize) -> Option<&str> {
     }
 }
 
-/// Get the string value at index `i` for string or dictionary-encoded string arrays.
+/// Get the string value at index `i` for `Utf8`, `LargeUtf8`, or `Utf8View` arrays.
 ///
 /// Note: This method does not check for nulls and the value is arbitrary
 /// if [`is_null`](arrow::array::Array::is_null) returns true for the index.
@@ -184,19 +180,6 @@ pub fn string_array_value(array: &ArrayRef, i: usize) -> &str {
         DataType::Utf8 => array.as_string::<i32>().value(i),
         DataType::LargeUtf8 => array.as_string::<i64>().value(i),
         DataType::Utf8View => array.as_string_view().value(i),
-        DataType::Dictionary(key_type, value_type)
-            if key_type.as_ref() == &DataType::UInt32
-                && matches!(
-                    value_type.as_ref(),
-                    DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View
-                ) =>
-        {
-            let array = array
-                .as_any()
-                .downcast_ref::<DictionaryArray<UInt32Type>>()
-                .unwrap();
-            string_array_value(array.values(), array.key(i).unwrap())
-        }
         _ => unreachable!(),
     }
 }
@@ -298,6 +281,5 @@ mod tests {
         assert_eq!(Some("bar"), string_array_value_at_index(&array, 1));
         assert_eq!(Some("foo"), string_array_value_at_index(&array, 2));
         assert_eq!(None, string_array_value_at_index(&array, 3));
-        assert_eq!("bar", string_array_value(&array, 1));
     }
 }

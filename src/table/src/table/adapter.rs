@@ -40,9 +40,14 @@ pub struct DfTableProviderAdapter {
 
 impl DfTableProviderAdapter {
     pub fn new(table: TableRef) -> Self {
+        let preserve_pk_dictionary_encoding =
+            supports_pk_dictionary_encoding(&table.table_info().meta.engine);
         Self {
             table,
-            scan_req: Arc::default(),
+            scan_req: Arc::new(Mutex::new(ScanRequest {
+                preserve_pk_dictionary_encoding,
+                ..Default::default()
+            })),
         }
     }
 
@@ -62,38 +67,44 @@ impl DfTableProviderAdapter {
         self.scan_req.lock().unwrap().vector_search.clone()
     }
 
-    fn physical_schema(&self) -> DfSchemaRef {
-        let table_schema = self.table.schema();
-        let table_info = self.table.table_info();
-        let schema = table_schema.arrow_schema();
-        if !matches!(
-            table_info.meta.engine.as_str(),
-            MITO_ENGINE | MITO2_ENGINE | METRIC_ENGINE
-        ) {
-            return schema.clone();
-        }
-        let primary_keys = &table_info.meta.primary_key_indices;
-        let fields = schema
-            .fields()
-            .iter()
-            .enumerate()
-            .map(|(index, field)| {
-                if primary_keys.contains(&index) && field.data_type() == &DataType::Utf8 {
-                    Arc::new(field.as_ref().clone().with_data_type(DataType::Dictionary(
-                        Box::new(DataType::UInt32),
-                        Box::new(DataType::Utf8),
-                    )))
-                } else {
-                    field.clone()
-                }
-            })
-            .collect::<Vec<_>>();
-        Arc::new(Schema::new_with_metadata(fields, schema.metadata().clone()))
-    }
-
     #[cfg(feature = "testing")]
     pub fn get_scan_req(&self) -> ScanRequest {
         self.scan_req.lock().unwrap().clone()
+    }
+}
+
+/// Returns whether the engine can expose its primary-key strings as dictionaries during scans.
+pub fn supports_pk_dictionary_encoding(engine: &str) -> bool {
+    matches!(engine, MITO_ENGINE | MITO2_ENGINE | METRIC_ENGINE)
+}
+
+/// Returns a schema that dictionary encodes selected UTF-8 columns.
+pub fn dictionary_encode_string_columns(
+    schema: &DfSchemaRef,
+    mut should_encode: impl FnMut(usize) -> bool,
+) -> DfSchemaRef {
+    let mut changed = false;
+    let fields = schema
+        .fields()
+        .iter()
+        .enumerate()
+        .map(|(index, field)| {
+            if should_encode(index) && field.data_type() == &DataType::Utf8 {
+                changed = true;
+                Arc::new(field.as_ref().clone().with_data_type(DataType::Dictionary(
+                    Box::new(DataType::UInt32),
+                    Box::new(DataType::Utf8),
+                )))
+            } else {
+                field.clone()
+            }
+        })
+        .collect::<Vec<_>>();
+
+    if changed {
+        Arc::new(Schema::new_with_metadata(fields, schema.metadata().clone()))
+    } else {
+        schema.clone()
     }
 }
 
@@ -112,7 +123,13 @@ impl TableProvider for DfTableProviderAdapter {
     }
 
     fn schema(&self) -> DfSchemaRef {
-        self.physical_schema()
+        let table_info = self.table.table_info();
+        let schema = self.table.schema().arrow_schema().clone();
+        if !supports_pk_dictionary_encoding(&table_info.meta.engine) {
+            return schema;
+        }
+        let primary_keys = &table_info.meta.primary_key_indices;
+        dictionary_encode_string_columns(&schema, |index| primary_keys.contains(&index))
     }
 
     fn table_type(&self) -> DfTableType {

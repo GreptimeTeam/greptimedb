@@ -24,7 +24,6 @@ use chrono::{NaiveDate, NaiveDateTime};
 use common_catalog::parse_optional_catalog_and_schema_from_db_string;
 use common_error::ext::ErrorExt;
 use common_query::Output;
-use common_recordbatch::map_dictionary_to_values_data_type;
 use common_telemetry::{debug, error, tracing, warn};
 use datafusion_common::ParamValues;
 use datafusion_expr::LogicalPlan;
@@ -234,10 +233,7 @@ impl MysqlInstanceShim {
                         .column_schemas()
                         .iter()
                         .map(|column_schema| {
-                            create_mysql_column(
-                                &map_dictionary_to_values_data_type(&column_schema.data_type),
-                                &column_schema.name,
-                            )
+                            create_mysql_column(&column_schema.data_type, &column_schema.name)
                         })
                         .collect::<Result<Vec<_>>>()
                 })
@@ -910,7 +906,7 @@ fn prepared_params(
     // Placeholder index starts from 1
     for i in 1..param_num {
         let column = if let Some(Some(t)) = param_types.get(&format_placeholder(i)) {
-            create_mysql_column(&map_dictionary_to_values_data_type(t), "")?
+            create_mysql_column(t, "")?
         } else {
             create_mysql_column(&ConcreteDataType::null_datatype(), "")?
         };

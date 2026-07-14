@@ -167,6 +167,7 @@ impl AnalyzerRule for DistPlannerAnalyzer {
                 }
             }
         };
+
         let result = match self.try_push_down(plan.clone()) {
             Ok(plan) => plan,
             Err(err) => {
@@ -223,18 +224,18 @@ fn pre_merge_scan_optimizer() -> Optimizer {
     ])
 }
 
-impl DistPlannerAnalyzer {
-    fn unwrap_dictionary_literals(plan: LogicalPlan) -> DfResult<Transformed<LogicalPlan>> {
-        plan.map_expressions(|expr| {
-            expr.transform_up(|expr| match expr {
-                Expr::Literal(ScalarValue::Dictionary(_, value), metadata) => {
-                    Ok(Transformed::yes(Expr::Literal(*value, metadata)))
-                }
-                _ => Ok(Transformed::no(expr)),
-            })
+fn unwrap_dictionary_literals(plan: LogicalPlan) -> DfResult<Transformed<LogicalPlan>> {
+    plan.map_expressions(|expr| {
+        expr.transform_up(|expr| match expr {
+            Expr::Literal(ScalarValue::Dictionary(_, value), metadata) => {
+                Ok(Transformed::yes(Expr::Literal(*value, metadata)))
+            }
+            _ => Ok(Transformed::no(expr)),
         })
-    }
+    })
+}
 
+impl DistPlannerAnalyzer {
     /// Try push down as many nodes as possible
     fn try_push_down(&self, plan: LogicalPlan) -> DfResult<LogicalPlan> {
         let plan = plan.transform(&Self::inspect_plan_with_subquery)?;
@@ -738,7 +739,7 @@ impl PlanRewriter {
         // input; rewriting the whole plan also changes DML Values without rebuilding its schema.
         let remote_input = on_node
             .clone()
-            .transform_down_with_subqueries(&DistPlannerAnalyzer::unwrap_dictionary_literals)?
+            .transform_down_with_subqueries(&unwrap_dictionary_literals)?
             .data;
 
         // add merge scan as the new root
