@@ -15,8 +15,8 @@
 use std::collections::{HashMap, HashSet};
 
 use api::v1::region::{
-    CloseRequest as PbCloseRegionRequest, DropRequest as PbDropRegionRequest, RegionRequest,
-    RegionRequestHeader, region_request,
+    CleanUpRequest as PbCleanUpRequest, CloseRequest as PbCloseRegionRequest,
+    DropRequest as PbDropRegionRequest, RegionRequest, RegionRequestHeader, region_request,
 };
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
@@ -26,12 +26,14 @@ use common_wal::options::WalOptions;
 use futures::future::join_all;
 use snafu::ensure;
 use store_api::storage::{RegionId, RegionNumber};
-use table::metadata::TableId;
+use table::metadata::{TableId, TableInfo};
 use table::table_name::TableName;
 
 use crate::cache_invalidator::Context;
-use crate::ddl::DdlContext;
-use crate::ddl::utils::{add_peer_context_if_needed, convert_region_routes_to_detecting_regions};
+use crate::ddl::utils::{
+    add_peer_context_if_needed, convert_region_routes_to_detecting_regions, region_storage_path,
+};
+use crate::ddl::{CreateRequestBuilder, DdlContext, build_template_from_raw_table_info};
 use crate::error::{self, Result};
 use crate::instruction::CacheIdent;
 use crate::key::table_name::TableNameKey;
@@ -342,6 +344,74 @@ impl DropTableExecutor {
         }
 
         // Deletes the leader region from registry.
+        let region_ids = operating_leader_regions(region_routes);
+        leader_region_registry.batch_delete(region_ids.into_iter().map(|(region_id, _)| region_id));
+
+        Ok(())
+    }
+
+    /// Cleans leader regions on datanodes without reopening them as live regions.
+    pub async fn on_cleanup_regions_offline(
+        &self,
+        node_manager: &NodeManagerRef,
+        leader_region_registry: &LeaderRegionRegistryRef,
+        table_info: &TableInfo,
+        region_routes: &[RegionRoute],
+        region_wal_options: &HashMap<RegionNumber, WalOptions>,
+    ) -> Result<()> {
+        let template = build_template_from_raw_table_info(table_info)?;
+        let builder = CreateRequestBuilder::new(template, None);
+        let storage_path = region_storage_path(&self.table.catalog_name, &self.table.schema_name);
+
+        let leaders = find_leaders(region_routes);
+        let mut cleanup_region_tasks = Vec::with_capacity(leaders.len());
+        let table_id = self.table_id;
+        for datanode in leaders {
+            let requester = node_manager.datanode(&datanode).await;
+            let regions = find_leader_regions(region_routes, &datanode);
+            let region_ids = regions
+                .iter()
+                .map(|region_number| RegionId::new(table_id, *region_number))
+                .collect::<Vec<_>>();
+
+            for region_id in region_ids {
+                debug!("Cleaning region {region_id} offline on Datanode {datanode:?}");
+                let create_request = builder.build_one(
+                    region_id,
+                    storage_path.clone(),
+                    region_wal_options,
+                    &HashMap::new(),
+                )?;
+                let request = RegionRequest {
+                    header: Some(RegionRequestHeader {
+                        tracing_context: TracingContext::from_current_span().to_w3c(),
+                        ..Default::default()
+                    }),
+                    body: Some(region_request::Body::CleanUp(PbCleanUpRequest {
+                        region_id: create_request.region_id,
+                        engine: create_request.engine,
+                        path: create_request.path,
+                        options: create_request.options,
+                    })),
+                };
+                let datanode = datanode.clone();
+                let requester = requester.clone();
+                cleanup_region_tasks.push(async move {
+                    if let Err(err) = requester.handle(request).await
+                        && err.status_code() != StatusCode::RegionNotFound
+                    {
+                        return Err(add_peer_context_if_needed(datanode)(err));
+                    }
+                    Ok(())
+                });
+            }
+        }
+
+        join_all(cleanup_region_tasks)
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>>>()?;
+
         let region_ids = operating_leader_regions(region_routes);
         leader_region_registry.batch_delete(region_ids.into_iter().map(|(region_id, _)| region_id));
 
