@@ -275,6 +275,9 @@ impl RecordBatch {
     /// backing buffers. View out-of-line payloads and nested custom payloads are not separately
     /// traversed or accounted. It is not an exact measure of live physical memory. If Arrow cannot
     /// calculate a slice's size, the full buffer size is used conservatively.
+    ///
+    /// Mito's current scan paths do not produce top-level View arrays. If they do in the future,
+    /// their out-of-line payload accounting must be reassessed here.
     pub fn logical_slice_memory_size(&self) -> usize {
         self.df_record_batch
             .columns()
