@@ -229,6 +229,8 @@ impl IslandExpr {
                 !modifier.return_bool
                     && modifier.matching.is_none()
                     && matches!(modifier.card, VectorMatchCardinality::OneToOne)
+                    && modifier.fill_values.lhs.is_none()
+                    && modifier.fill_values.rhs.is_none()
             }) =>
             {
                 let lhs = Self::try_new(lhs, env)?;
@@ -1093,6 +1095,18 @@ impl PromPlanner {
         query_engine_state: &QueryEngineState,
         binary_expr: &PromBinaryExpr,
     ) -> Result<LogicalPlan> {
+        // promql-parser accepts fill modifiers, but Greptime does not implement the
+        // required outer joins and missing-value substitution. Reject them before the
+        // binary-island fast path so they cannot silently behave like normal inner joins.
+        if let Some(modifier) = &binary_expr.modifier {
+            ensure!(
+                modifier.fill_values.lhs.is_none() && modifier.fill_values.rhs.is_none(),
+                UnsupportedExprSnafu {
+                    name: "PromQL fill modifiers"
+                }
+            );
+        }
+
         if let Some(plan) = self.try_plan_binary_island(binary_expr).await? {
             return Ok(plan);
         }
@@ -5540,6 +5554,33 @@ mod test {
             !plan_str.contains("some_metric.tag_0 = some_alt_metric.tag_0"),
             "{plan_str}"
         );
+    }
+
+    #[tokio::test]
+    async fn reject_binary_fill_modifiers() {
+        let state = build_query_engine_state();
+
+        for query in [
+            "some_metric + fill(0) some_alt_metric",
+            "some_metric + fill_left(0) some_alt_metric",
+            "some_metric + fill_right(0) some_alt_metric",
+            "(some_metric + fill(0) some_alt_metric) + some_metric",
+        ] {
+            let eval_stmt = build_eval_stmt(query);
+            let table_provider = build_test_table_provider(&[], 0, 0).await;
+            let err = PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &state)
+                .await
+                .unwrap_err();
+
+            assert!(
+                matches!(
+                    &err,
+                    crate::promql::error::Error::UnsupportedExpr { name, .. }
+                        if name == "PromQL fill modifiers"
+                ),
+                "{err}"
+            );
+        }
     }
 
     #[tokio::test]

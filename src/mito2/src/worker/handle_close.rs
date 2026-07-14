@@ -89,5 +89,13 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         // clean index build status.
         self.index_build_scheduler.on_region_closed(region_id).await;
         self.region_count.dec();
+
+        // Notify the region hook that the region has been closed. The region is
+        // fully stopped and unregistered, but its files/manifest are preserved.
+        // Runs inline; the hook contract requires it to be fast.
+        if let Some(hook) = region.manifest_ctx.hook() {
+            let metadata = region.metadata();
+            hook.on_region_closed(region_id, &metadata).await;
+        }
     }
 }

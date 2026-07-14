@@ -32,6 +32,8 @@ use tokio::sync::oneshot;
 
 use crate::compaction::compactor::{OpenCompactionRegionRequest, open_compaction_region};
 use crate::config::MitoConfig;
+use crate::engine::flush_test::MockRegionHook;
+use crate::engine::region_hook::RegionHookRef;
 use crate::error;
 use crate::region::opener::{PartitionExprFetcher, PartitionExprFetcherRef};
 use crate::region::options::RegionOptions;
@@ -804,4 +806,37 @@ async fn test_open_keeps_none_without_fetcher() {
 
     let meta = engine.get_region(region_id).unwrap().metadata();
     assert!(meta.partition_expr.is_none());
+}
+
+#[tokio::test]
+async fn test_region_hook_on_open() {
+    common_telemetry::init_default_ut_logging();
+    let mut env = TestEnv::with_prefix("open_hook").await;
+
+    let hook = Arc::new(MockRegionHook::new());
+    let plugins = Plugins::new();
+    plugins.insert(hook.clone() as RegionHookRef);
+
+    let engine = env
+        .create_engine_with_plugins(MitoConfig::default(), plugins)
+        .await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+    let table_dir = request.table_dir.clone();
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    // Creating a region fires on_region_opened exactly once.
+    assert_eq!(hook.opened_count.load(Ordering::Relaxed), 1);
+    assert_eq!(hook.closed_count.load(Ordering::Relaxed), 0);
+
+    // `reopen_region` closes then opens; the open must fire the hook again.
+    reopen_region(&engine, region_id, table_dir, false, Default::default()).await;
+
+    assert_eq!(hook.opened_count.load(Ordering::Relaxed), 2);
+    assert_eq!(hook.closed_count.load(Ordering::Relaxed), 1);
+    assert_eq!(hook.dropped_count.load(Ordering::Relaxed), 0);
 }

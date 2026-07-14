@@ -12,12 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![allow(clippy::print_stderr, clippy::print_stdout)]
+use std::path::Path;
 
-#[path = "query_perf_fixture/mod.rs"]
-mod query_perf_fixture;
-
-#[tokio::main]
-async fn main() {
-    query_perf_fixture::run().await;
+pub(super) fn case_name_from_path(path: &Path) -> String {
+    path.parent()
+        .and_then(Path::file_name)
+        .and_then(|name| name.to_str())
+        .unwrap_or("query_perf_case")
+        .to_string()
 }

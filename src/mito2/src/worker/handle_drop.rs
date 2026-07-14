@@ -23,10 +23,12 @@ use object_store::util::join_path;
 use object_store::{EntryMode, ObjectStore};
 use snafu::ResultExt;
 use store_api::logstore::LogStore;
+use store_api::metadata::RegionMetadataRef;
 use store_api::region_request::{AffectedRows, PathType};
 use store_api::storage::RegionId;
 use tokio::time::sleep;
 
+use crate::engine::region_hook::RegionHookRef;
 use crate::error::{OpenDalSnafu, Result};
 use crate::region::{RegionLeaderState, RegionMapRef};
 use crate::worker::{DROPPING_MARKER_FILE, RegionWorkerLoop};
@@ -106,6 +108,22 @@ where
 
         self.region_count.dec();
 
+        // Notify registered hooks that the region has been logically dropped, and
+        // prepare a payload for the background GC task to fire the terminal
+        // `on_region_files_removed`. When no hook is registered this allocates
+        // nothing — no metadata snapshot is taken and no payload is built.
+        let hook_payload = match region.manifest_ctx.hook() {
+            Some(hook) => {
+                let region_metadata = region.metadata();
+                hook.on_region_dropped(region_id, &region_metadata).await;
+                Some(DropHookPayload {
+                    hook,
+                    metadata: region_metadata,
+                })
+            }
+            None => None,
+        };
+
         let object_store = region.access_layer.object_store().clone();
         let dropping_regions = self.dropping_regions.clone();
         let listener = self.listener.clone();
@@ -122,6 +140,7 @@ where
                     object_store,
                     dropping_regions,
                     partial_drop,
+                    hook_payload.as_ref(),
                 )
                 .await
             } else {
@@ -135,6 +154,7 @@ where
                     object_store,
                     dropping_regions,
                     gc_duration,
+                    hook_payload.as_ref(),
                 )
                 .await
             };
@@ -156,6 +176,19 @@ where
     }
 }
 
+/// Carries the region hook and region metadata into the background GC task so
+/// it can fire [`RegionHook::on_region_files_removed`] once the dropped region's
+/// directory is physically deleted.
+///
+/// Only constructed when a hook is registered; the task receives it as
+/// `Option<&DropHookPayload>` so the no-hook path allocates nothing.
+///
+/// [`RegionHook::on_region_files_removed`]: crate::engine::region_hook::RegionHook::on_region_files_removed
+struct DropHookPayload {
+    hook: RegionHookRef,
+    metadata: RegionMetadataRef,
+}
+
 /// Background GC task to remove the entire region path once one of the following
 /// conditions is true:
 /// - It finds there is no parquet file left.
@@ -172,6 +205,7 @@ async fn later_drop_task_without_global_gc(
     object_store: ObjectStore,
     dropping_regions: RegionMapRef,
     gc_duration: Duration,
+    hook_payload: Option<&DropHookPayload>,
 ) -> bool {
     remove_region_with_retry(
         region_id,
@@ -180,6 +214,7 @@ async fn later_drop_task_without_global_gc(
         dropping_regions,
         Some(gc_duration),
         false,
+        hook_payload,
     )
     .await
 }
@@ -191,6 +226,7 @@ async fn remove_region_with_retry(
     dropping_regions: std::sync::Arc<crate::region::RegionMap>,
     gc_duration: Option<Duration>,
     mut force: bool,
+    hook_payload: Option<&DropHookPayload>,
 ) -> bool {
     for _ in 0..MAX_RETRY_TIMES {
         let result = remove_region_dir_once(&region_path, &object_store, force).await;
@@ -204,6 +240,15 @@ async fn remove_region_with_retry(
             Ok(true) => {
                 dropping_regions.remove_region(region_id);
                 info!("Region {} is dropped, force: {}", region_path, force);
+                // The region directory has been physically deleted; fire the
+                // terminal file-lifecycle event. The partial-drop/global-GC path
+                // never reaches here (it does not delete the directory itself).
+                if let Some(hook_payload) = hook_payload {
+                    hook_payload
+                        .hook
+                        .on_region_files_removed(region_id, &hook_payload.metadata)
+                        .await;
+                }
                 return true;
             }
             Ok(false) => (),
@@ -230,6 +275,7 @@ async fn later_drop_task_with_global_gc(
     object_store: ObjectStore,
     dropping_regions: RegionMapRef,
     partial_drop: bool,
+    hook_payload: Option<&DropHookPayload>,
 ) -> bool {
     // For metadata regions or regions marked for full deletion (such as when dropping a table)
     // the region directory is forcefully removed immediately.
@@ -243,6 +289,7 @@ async fn later_drop_task_with_global_gc(
             dropping_regions,
             None,
             true,
+            hook_payload,
         )
         .await
     } else {

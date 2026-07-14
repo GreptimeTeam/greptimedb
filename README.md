@@ -209,7 +209,13 @@ Read the [v1.0 highlights](https://greptime.com/blogs/2025-11-05-greptimedb-v1-h
 
 If GreptimeDB is useful to you, please star the repo.
 
-[![Star History Chart](https://api.star-history.com/svg?repos=GreptimeTeam/GreptimeDB&type=Date)](https://www.star-history.com/#GreptimeTeam/GreptimeDB&Date)
+<a href="https://www.star-history.com/?repos=GreptimeTeam%2FGreptimeDB&type=date&legend=top-left">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=GreptimeTeam/GreptimeDB&type=date&theme=dark&legend=top-left&sealed_token=1kD9cyZVPnWvxbpbPPTWo_r7W351gDAhGx9_55zfD1vSIfHsdTRfH6NAtdPVX_M2ac8sjNxiuw7-0Vk4WvbyXmOuufxlAoU3QF7z4onyltr0o0c9xVfUnPKltz7llUc3nEDW7l_r2fHBBMtJGf1-jsitNozdAUpb8eb7OJp9N1LqEnMQK78ESp2zgjyr" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=GreptimeTeam/GreptimeDB&type=date&legend=top-left&sealed_token=1kD9cyZVPnWvxbpbPPTWo_r7W351gDAhGx9_55zfD1vSIfHsdTRfH6NAtdPVX_M2ac8sjNxiuw7-0Vk4WvbyXmOuufxlAoU3QF7z4onyltr0o0c9xVfUnPKltz7llUc3nEDW7l_r2fHBBMtJGf1-jsitNozdAUpb8eb7OJp9N1LqEnMQK78ESp2zgjyr" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=GreptimeTeam/GreptimeDB&type=date&legend=top-left&sealed_token=1kD9cyZVPnWvxbpbPPTWo_r7W351gDAhGx9_55zfD1vSIfHsdTRfH6NAtdPVX_M2ac8sjNxiuw7-0Vk4WvbyXmOuufxlAoU3QF7z4onyltr0o0c9xVfUnPKltz7llUc3nEDW7l_r2fHBBMtJGf1-jsitNozdAUpb8eb7OJp9N1LqEnMQK78ESp2zgjyr" />
+ </picture>
+</a>
 
 <img alt="Known Users" src="https://greptime.com/logo/img/users.png"/>
 
