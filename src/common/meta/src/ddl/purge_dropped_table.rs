@@ -79,6 +79,9 @@ impl PurgeDroppedTableProcedure {
             return Ok(Status::done());
         };
         if self.data.check_expired {
+            if !self.context.soft_drop_enabled {
+                return Ok(Status::done());
+            }
             let retention_millis = self
                 .context
                 .soft_drop_retention
@@ -88,7 +91,7 @@ impl PurgeDroppedTableProcedure {
                     retention_millis.and_then(|retention| dropped_at.checked_add(retention))
                 })
             });
-            if !expires_at.is_some_and(|expires_at| expires_at <= current_time_millis()) {
+            if expires_at.is_none_or(|expires_at| expires_at > current_time_millis()) {
                 return Ok(Status::done());
             }
         }

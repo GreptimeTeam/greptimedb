@@ -58,7 +58,7 @@ use crate::cache_invalidator::MetasrvCacheInvalidator;
 use crate::cluster::MetaPeerClientRef;
 use crate::error::{self, BuildWalProviderSnafu, OtherSnafu, Result};
 use crate::events::EventHandlerImpl;
-use crate::gc::{DefaultGcSchedulerCtx, GcScheduler};
+use crate::gc::{DefaultGcSchedulerCtx, EXPERIMENTAL_SOFT_DROP_ENABLED, GcScheduler};
 use crate::greptimedb_telemetry::get_greptimedb_telemetry_task;
 use crate::handler::failure_handler::RegionFailureHandler;
 use crate::handler::flow_state_handler::FlowStateHandler;
@@ -694,12 +694,12 @@ fn build_procedure_manager(
 
 /// Resolves if soft-drop is enabled from metasrv options.
 fn ddl_soft_drop_enabled(options: &MetasrvOptions) -> bool {
-    options.gc.soft_drop.enable
+    EXPERIMENTAL_SOFT_DROP_ENABLED && options.gc.experimental_soft_drop.enable
 }
 
 /// Returns validated soft-drop retention for new procedures and recovery.
 fn ddl_soft_drop_retention(options: &MetasrvOptions) -> Option<Duration> {
-    Some(options.gc.soft_drop.retention)
+    EXPERIMENTAL_SOFT_DROP_ENABLED.then_some(options.gc.experimental_soft_drop.retention)
 }
 
 impl Default for MetasrvBuilder {
@@ -719,12 +719,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_ddl_soft_drop_uses_metasrv_gc_config() {
+    fn test_ddl_soft_drop_ignores_metasrv_gc_config() {
         let mut options = MetasrvOptions::default();
         options.gc.enable = true;
-        options.gc.soft_drop.enable = true;
+        options.gc.experimental_soft_drop.enable = true;
+        options.gc.experimental_soft_drop.retention = Duration::from_secs(123);
 
-        assert!(ddl_soft_drop_enabled(&options));
+        assert!(!ddl_soft_drop_enabled(&options));
+        assert_eq!(None, ddl_soft_drop_retention(&options));
     }
 
     #[test]
@@ -733,30 +735,11 @@ mod tests {
     }
 
     #[test]
-    fn test_disabled_soft_drop_still_provides_retention_for_recovery() {
+    fn test_ignored_soft_drop_options_are_not_validated() {
         let mut options = MetasrvOptions::default();
-        options.gc.soft_drop.enable = false;
-        options.gc.soft_drop.retention = Duration::from_secs(123);
+        options.gc.experimental_soft_drop.enable = true;
+        options.gc.experimental_soft_drop.retention = Duration::ZERO;
 
-        let retention = ddl_soft_drop_retention(&options);
-
-        assert_eq!(Some(Duration::from_secs(123)), retention);
-    }
-
-    #[tokio::test]
-    async fn test_builder_validates_gc_before_skipping_disabled_gc() {
-        let mut options = MetasrvOptions::default();
-        options.gc.soft_drop.retention = Duration::ZERO;
-
-        let error = match MetasrvBuilder::new().options(options).build().await {
-            Ok(_) => panic!("invalid GC options should fail before building metasrv"),
-            Err(error) => error,
-        };
-
-        assert!(
-            error
-                .to_string()
-                .contains("soft_drop.retention must be at least 1ms")
-        );
+        assert!(options.gc.validate().is_ok());
     }
 }

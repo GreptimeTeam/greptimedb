@@ -23,18 +23,21 @@ use crate::error::{self, Result};
 #[allow(unused)]
 pub(crate) const TICKER_INTERVAL: Duration = Duration::from_secs(60 * 5);
 
-/// Configuration for garbage collecting soft-dropped tables.
+/// Soft drop remains disconnected from user configuration until it is ready.
+pub(crate) const EXPERIMENTAL_SOFT_DROP_ENABLED: bool = false;
+
+/// Reserved configuration for garbage collecting soft-dropped tables.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
-pub struct SoftDropGcOptions {
-    /// Whether soft drop and automatic purging are enabled.
+pub struct ExperimentalSoftDropGcOptions {
+    /// Reserved. This option is currently ignored.
     pub enable: bool,
-    /// How long a soft-dropped table is retained before it can be purged.
+    /// Reserved retention duration. This option is currently ignored.
     #[serde(with = "humantime_serde")]
     pub retention: Duration,
 }
 
-impl Default for SoftDropGcOptions {
+impl Default for ExperimentalSoftDropGcOptions {
     fn default() -> Self {
         Self {
             enable: false,
@@ -53,8 +56,8 @@ pub struct GcSchedulerOptions {
     /// If set to false, no GC will be performed, and potentially some
     /// files from datanodes will never be deleted.
     pub enable: bool,
-    /// Soft-drop garbage collection options.
-    pub soft_drop: SoftDropGcOptions,
+    /// Reserved experimental soft-drop garbage collection options.
+    pub experimental_soft_drop: ExperimentalSoftDropGcOptions,
     /// Maximum number of tables to process concurrently.
     pub max_concurrent_tables: usize,
     /// Maximum number of retries per region when GC fails.
@@ -95,7 +98,7 @@ impl Default for GcSchedulerOptions {
     fn default() -> Self {
         Self {
             enable: false,
-            soft_drop: SoftDropGcOptions::default(),
+            experimental_soft_drop: ExperimentalSoftDropGcOptions::default(),
             max_concurrent_tables: 10,
             max_retries_per_region: 3,
             retry_backoff_duration: Duration::from_secs(5),
@@ -117,27 +120,6 @@ impl Default for GcSchedulerOptions {
 impl GcSchedulerOptions {
     /// Validates the configuration options.
     pub fn validate(&self) -> Result<()> {
-        ensure!(
-            !self.soft_drop.enable || self.enable,
-            error::InvalidArgumentsSnafu {
-                err_msg: "soft_drop.enable requires gc.enable",
-            }
-        );
-
-        ensure!(
-            self.soft_drop.retention >= Duration::from_millis(1),
-            error::InvalidArgumentsSnafu {
-                err_msg: "soft_drop.retention must be at least 1ms",
-            }
-        );
-
-        ensure!(
-            self.soft_drop.retention.as_millis() <= i64::MAX as u128,
-            error::InvalidArgumentsSnafu {
-                err_msg: "soft_drop.retention milliseconds must fit in i64",
-            }
-        );
-
         ensure!(
             self.max_concurrent_tables > 0,
             error::InvalidArgumentsSnafu {
@@ -224,18 +206,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_soft_drop_defaults() {
+    fn test_experimental_soft_drop_defaults() {
         let options = GcSchedulerOptions::default();
 
-        assert!(!options.soft_drop.enable);
-        assert_eq!(Duration::from_days(7), options.soft_drop.retention);
+        assert!(!options.experimental_soft_drop.enable);
+        assert_eq!(
+            Duration::from_days(7),
+            options.experimental_soft_drop.retention
+        );
     }
 
     #[test]
-    fn test_soft_drop_valid_when_both_gc_and_soft_drop_are_enabled() {
+    fn test_experimental_soft_drop_valid_when_gc_is_enabled() {
         let options = GcSchedulerOptions {
             enable: true,
-            soft_drop: SoftDropGcOptions {
+            experimental_soft_drop: ExperimentalSoftDropGcOptions {
                 enable: true,
                 retention: Duration::from_days(1),
             },
@@ -246,74 +231,15 @@ mod tests {
     }
 
     #[test]
-    fn test_soft_drop_requires_gc() {
+    fn test_experimental_soft_drop_options_are_ignored_by_validation() {
         let options = GcSchedulerOptions {
-            soft_drop: SoftDropGcOptions {
+            experimental_soft_drop: ExperimentalSoftDropGcOptions {
                 enable: true,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-
-        let error = options.validate().unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("soft_drop.enable requires gc.enable")
-        );
-    }
-
-    #[test]
-    fn test_soft_drop_retention_must_be_non_zero_even_when_disabled() {
-        let options = GcSchedulerOptions {
-            soft_drop: SoftDropGcOptions {
                 retention: Duration::ZERO,
-                ..Default::default()
             },
             ..Default::default()
         };
 
-        let error = options.validate().unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("soft_drop.retention must be at least 1ms")
-        );
-    }
-
-    #[test]
-    fn test_soft_drop_retention_must_be_at_least_one_millisecond() {
-        let options = GcSchedulerOptions {
-            soft_drop: SoftDropGcOptions {
-                retention: Duration::from_nanos(1),
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-
-        let error = options.validate().unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("soft_drop.retention must be at least 1ms")
-        );
-    }
-
-    #[test]
-    fn test_soft_drop_retention_milliseconds_must_fit_i64() {
-        let options = GcSchedulerOptions {
-            soft_drop: SoftDropGcOptions {
-                retention: Duration::from_millis(i64::MAX as u64 + 1),
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-
-        let error = options.validate().unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("soft_drop.retention milliseconds must fit in i64")
-        );
+        assert!(options.validate().is_ok());
     }
 }

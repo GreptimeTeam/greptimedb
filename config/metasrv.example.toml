@@ -326,12 +326,10 @@ enable = false
 ## Cooldown period between GC operations on the same region.
 gc_cooldown_period = "5m"
 
-[gc.soft_drop]
-## Whether soft drop and automatic purging of expired dropped tables are enabled.
-## Requires `gc.enable = true`.
+[gc.experimental_soft_drop]
+## Reserved experimental option. Currently ignored.
 enable = false
-## How long a soft-dropped table is retained before it can be purged.
-## Must be at least 1ms and fit in a signed 64-bit millisecond value.
+## Reserved retention duration. Currently ignored.
 retention = "7d"
 
 ## The logging options.
