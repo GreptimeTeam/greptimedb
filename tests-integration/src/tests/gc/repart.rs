@@ -19,7 +19,7 @@ use common_meta::key::table_repart::TableRepartValue;
 use common_procedure::{Procedure, Status};
 use common_procedure_test::new_test_procedure_context;
 use meta_srv::gc::BatchGcProcedure;
-use store_api::storage::{FileId, FileRef, FileRefsManifest, RegionId};
+use store_api::storage::{FileId, FileRef, FileRefsManifest, GcReport, RegionId};
 
 use crate::test_util::{StorageType, execute_sql};
 use crate::tests::gc::{distributed_with_gc, get_table_route};
@@ -98,7 +98,27 @@ CREATE TABLE test_cleanup_repartition (
 
     let procedure_ctx = new_test_procedure_context();
     let status = procedure.execute(&procedure_ctx).await.unwrap();
-    assert!(matches!(status, Status::Done { .. }));
+    let Status::Done {
+        output: Some(output),
+    } = status
+    else {
+        panic!("expected a completed GC report");
+    };
+    assert_eq!(
+        output.downcast_ref::<GcReport>(),
+        Some(&GcReport::default())
+    );
+    let retry_status = procedure.execute(&procedure_ctx).await.unwrap();
+    let Status::Done {
+        output: Some(output),
+    } = retry_status
+    else {
+        panic!("expected a retained GC report on re-execution");
+    };
+    assert_eq!(
+        output.downcast_ref::<GcReport>(),
+        Some(&GcReport::default())
+    );
 
     let repart_after = repart_mgr.get(table_id).await.unwrap().unwrap();
     assert_eq!(

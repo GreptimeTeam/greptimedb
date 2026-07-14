@@ -27,7 +27,7 @@ use common_meta::peer::Peer;
 use common_procedure::error::ToJsonSnafu;
 use common_procedure::{
     Context as ProcedureContext, Error as ProcedureError, LockKey, Procedure,
-    Result as ProcedureResult, Status,
+    Result as ProcedureResult, Status, UserMetadata,
 };
 use common_telemetry::tracing::Instrument as _;
 use common_telemetry::tracing_context::TracingContext;
@@ -40,6 +40,7 @@ use store_api::storage::{FileRefsManifest, GcReport, RegionId};
 use table::metadata::TableId;
 
 use crate::error::{self, KvBackendSnafu, Result, SerializeToJsonSnafu, TableMetadataManagerSnafu};
+use crate::events::batch_gc_event::BatchGcEventContext;
 use crate::gc::util::table_route_to_region;
 use crate::gc::{Peer2Regions, Region2Peers};
 use crate::handler::HeartbeatMailbox;
@@ -176,6 +177,7 @@ pub struct BatchGcProcedure {
     mailbox: MailboxRef,
     table_metadata_manager: TableMetadataManagerRef,
     data: BatchGcData,
+    event_context: Arc<BatchGcEventContext>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -224,6 +226,7 @@ impl BatchGcProcedure {
         timeout: Duration,
         region_routes_override: Region2Peers,
     ) -> Self {
+        let event_context = BatchGcEventContext::new(full_file_listing, &regions, timeout);
         Self {
             mailbox,
             table_metadata_manager,
@@ -239,6 +242,7 @@ impl BatchGcProcedure {
                 file_refs: FileRefsManifest::default(),
                 gc_report: None,
             },
+            event_context,
         }
     }
 
@@ -254,6 +258,8 @@ impl BatchGcProcedure {
         file_refs: FileRefsManifest,
         timeout: Duration,
     ) -> Self {
+        let event_context = BatchGcEventContext::new(false, &regions, timeout);
+        event_context.update(&GcReport::default());
         Self {
             mailbox,
             table_metadata_manager,
@@ -269,6 +275,7 @@ impl BatchGcProcedure {
                 file_refs,
                 gc_report: Some(GcReport::default()),
             },
+            event_context,
         }
     }
 
@@ -950,6 +957,7 @@ impl Procedure for BatchGcProcedure {
                             report.need_retry_regions.len()
                         );
                         self.data.state = State::UpdateRepartition;
+                        self.event_context.update(&report);
                         self.data.gc_report = Some(report);
                         Ok(Status::executing(false))
                     }
@@ -981,7 +989,7 @@ impl Procedure for BatchGcProcedure {
                         "Batch GC completed successfully for regions {:?}",
                         self.data.regions
                     );
-                    let Some(report) = self.data.gc_report.take() else {
+                    let Some(report) = self.data.gc_report.clone() else {
                         return common_procedure::error::UnexpectedSnafu {
                             err_msg: "GC report should be present after GC completion".to_string(),
                         }
@@ -1014,5 +1022,9 @@ impl Procedure for BatchGcProcedure {
             .collect();
 
         LockKey::new(lock_key)
+    }
+
+    fn user_metadata(&self) -> Option<UserMetadata> {
+        Some(UserMetadata::new(self.event_context.clone()))
     }
 }

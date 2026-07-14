@@ -13,11 +13,16 @@
 // limitations under the License.
 
 use std::collections::HashSet;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use api::v1::value::ValueData;
+use common_event_recorder::{Event, EventRecorder, EventRecorderRef};
 use common_meta::key::TableMetadataManagerRef;
-use common_procedure::ProcedureWithId;
+use common_procedure::local::{LocalManager, ManagerConfig};
+use common_procedure::store::state_store::ObjectStateStore;
+use common_procedure::test_util::InMemoryPoisonStore;
+use common_procedure::{ProcedureEvent, ProcedureManager, ProcedureState, ProcedureWithId};
 use common_telemetry::info;
 use common_test_util::recordbatch::check_output_stream;
 use common_test_util::temp_dir::create_temp_dir;
@@ -26,15 +31,30 @@ use futures::TryStreamExt as _;
 use itertools::Itertools;
 use meta_srv::gc::{BatchGcProcedure, GcSchedulerOptions, Region2Peers};
 use mito2::gc::GcConfig;
+use object_store::ObjectStore;
+use object_store::services::Fs as ObjectStoreBuilder;
 use store_api::storage::RegionId;
 use table::metadata::TableId;
 
 use crate::cluster::GreptimeDbClusterBuilder;
 use crate::test_util::{StorageType, TempDirGuard, execute_sql, get_test_store_config};
-use crate::tests::test_util::{MockInstanceBuilder, TestContext, wait_procedure};
+use crate::tests::test_util::{MockInstanceBuilder, TestContext};
 
 mod admin;
 mod repart;
+
+#[derive(Debug, Default)]
+struct CapturingEventRecorder {
+    events: Mutex<Vec<Box<dyn Event>>>,
+}
+
+impl EventRecorder for CapturingEventRecorder {
+    fn record(&self, event: Box<dyn Event>) {
+        self.events.lock().unwrap().push(event);
+    }
+
+    fn close(&self) {}
+}
 
 /// Helper function to get table route information for GC procedure
 pub(super) async fn get_table_route(
@@ -215,18 +235,78 @@ async fn test_gc_basic(store_type: &StorageType) {
         Default::default(),
     );
 
-    // Submit the procedure to the procedure manager
+    let procedure_state_dir = create_temp_dir("test_gc_procedure_events");
+    let state_store = Arc::new(ObjectStateStore::new(
+        ObjectStore::new(
+            ObjectStoreBuilder::default().root(procedure_state_dir.path().to_str().unwrap()),
+        )
+        .unwrap()
+        .finish(),
+    ));
+    let event_recorder = Arc::new(CapturingEventRecorder::default());
+    let procedure_manager = LocalManager::new(
+        ManagerConfig::default(),
+        state_store,
+        Arc::new(InMemoryPoisonStore::default()),
+        None,
+        Some(event_recorder.clone() as EventRecorderRef),
+    );
+    procedure_manager.start().await.unwrap();
+
+    // Submit the real BatchGcProcedure to a manager with a synchronous test recorder.
     let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
     let procedure_id = procedure_with_id.id;
+    let mut watcher = procedure_manager.submit(procedure_with_id).await.unwrap();
+    common_procedure::watcher::wait(&mut watcher).await.unwrap();
 
-    let _watcher = metasrv
-        .procedure_manager()
-        .submit(procedure_with_id)
-        .await
-        .unwrap();
+    {
+        let captured_events = event_recorder.events.lock().unwrap();
+        let events = captured_events
+            .iter()
+            .filter_map(|event| event.as_any().downcast_ref::<ProcedureEvent>())
+            .filter(|event| {
+                event.procedure_id == procedure_id
+                    && event.internal_event.event_type() == "batch_gc"
+            })
+            .collect::<Vec<_>>();
+        let running = events
+            .iter()
+            .find(|event| matches!(event.state, ProcedureState::Running))
+            .expect("batch GC should emit a Running event");
+        let running_row = &running.extra_rows().unwrap()[0];
+        assert_eq!(
+            running_row.values[5].value_data,
+            Some(ValueData::BoolValue(false))
+        );
+        assert_eq!(
+            running_row.values[8].value_data,
+            Some(ValueData::U64Value(0))
+        );
+        assert_eq!(
+            running.json_payload().unwrap()["deleted_files_sample"],
+            serde_json::Value::Null
+        );
 
-    // Wait for the procedure to complete
-    wait_procedure(metasrv.procedure_manager(), procedure_id).await;
+        let done_events = events
+            .iter()
+            .filter(|event| matches!(event.state, ProcedureState::Done { .. }))
+            .collect::<Vec<_>>();
+        assert_eq!(done_events.len(), 1, "batch GC should emit one Done event");
+        let done = done_events[0];
+        let done_row = &done.extra_rows().unwrap()[0];
+        assert_eq!(
+            done_row.values[5].value_data,
+            Some(ValueData::BoolValue(true))
+        );
+        assert_eq!(done_row.values[8].value_data, Some(ValueData::U64Value(4)));
+        let done_payload = done.json_payload().unwrap();
+        let deleted_files_sample = done_payload["deleted_files_sample"].as_array().unwrap();
+        assert_eq!(deleted_files_sample.len(), 4);
+        assert!(deleted_files_sample.iter().all(|sample| {
+            sample.get("region_id").is_some() && sample["file_id"].as_str().is_some()
+        }));
+    }
+    procedure_manager.stop().await.unwrap();
 
     // Step 7: Verify GC results
     let sst_files_after_gc = list_sst_files(&test_context).await;

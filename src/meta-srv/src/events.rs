@@ -20,6 +20,7 @@ use common_event_recorder::error::{InsertEventsSnafu, Result};
 use common_event_recorder::{Event, EventHandler, build_row_inserts_request, group_events_by_type};
 use snafu::ResultExt;
 
+pub mod batch_gc_event;
 pub mod region_migration_event;
 
 /// EventHandlerImpl is the default event handler implementation in metasrv.
