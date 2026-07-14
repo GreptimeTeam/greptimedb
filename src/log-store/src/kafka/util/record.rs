@@ -233,7 +233,9 @@ pub fn remaining_entries(
 /// If the records arrive in the following order, it emits **the incomplete [Entry]** when the next record arrives.
 /// - **[RecordType::First], [RecordType::Middle]**, [RecordType::First]
 /// - **[RecordType::Middle]**, [RecordType::First]
-/// - **[RecordType::Last]**
+/// - **[RecordType::Last]**, [RecordType::First]
+///
+/// A trailing complete or incomplete entry is emitted by [`remaining_entries`].
 pub(crate) fn maybe_emit_entry(
     provider: &Arc<KafkaProvider>,
     record: Record,
@@ -245,7 +247,7 @@ pub(crate) fn maybe_emit_entry(
         RecordType::First => {
             let region_id = record.meta.ns.region_id.into();
             if let Some(records) = buffered_records.insert(region_id, vec![record]) {
-                // Incomplete entry
+                // Emit the preceding complete or incomplete entry.
                 entry = Some(convert_to_multiple_entry(
                     provider.clone(),
                     region_id,
@@ -261,6 +263,11 @@ pub(crate) fn maybe_emit_entry(
             if !records.is_empty() {
                 // Safety: the records are guaranteed not empty if the key exists.
                 let last_record = records.last().unwrap();
+                if matches!(last_record.meta.tp, RecordType::Middle(last_seq) if last_seq == seq)
+                    && last_record.data == record.data
+                {
+                    return Ok(None);
+                }
                 let legal = match last_record.meta.tp {
                     // Legal if this record follows a First record.
                     RecordType::First => seq == 1,
@@ -284,21 +291,13 @@ pub(crate) fn maybe_emit_entry(
         }
         RecordType::Last => {
             let region_id = record.meta.ns.region_id.into();
-            if let Some(mut records) = buffered_records.remove(&region_id) {
-                records.push(record);
-                entry = Some(convert_to_multiple_entry(
-                    provider.clone(),
-                    region_id,
-                    records,
-                ))
-            } else {
-                // Incomplete entry
-                entry = Some(convert_to_multiple_entry(
-                    provider.clone(),
-                    region_id,
-                    vec![record],
-                ))
+            let records = buffered_records.entry(region_id).or_default();
+            if records.last().is_some_and(|last_record| {
+                last_record.meta.tp == RecordType::Last && last_record.data == record.data
+            }) {
+                return Ok(None);
             }
+            records.push(record);
         }
     }
     Ok(entry)
@@ -375,11 +374,17 @@ mod tests {
             })
         );
 
-        // `Last` overwrite `None`
+        // `Last` after `None`
         let mut buffer = HashMap::new();
         let record = new_test_record(RecordType::Last, 1, region_id.as_u64(), vec![1; 100]);
-        let incomplete_entry = maybe_emit_entry(&provider, record, &mut buffer)
+        assert!(
+            maybe_emit_entry(&provider, record, &mut buffer)
+                .unwrap()
+                .is_none()
+        );
+        let incomplete_entry = remaining_entries(&provider, &mut buffer)
             .unwrap()
+            .pop()
             .unwrap();
 
         assert_eq!(
@@ -448,6 +453,70 @@ mod tests {
         );
         let record = new_test_record(RecordType::Middle(3), 1, region_id.as_u64(), vec![2; 100]);
         let err = maybe_emit_entry(&provider, record, &mut buffer).unwrap_err();
+        assert_matches!(err, error::Error::IllegalSequence { .. });
+    }
+
+    #[test]
+    fn test_maybe_emit_entry_deduplicates_multipart_records() {
+        let provider = Arc::new(KafkaProvider::new("my_topic".to_string()));
+        let region_id = RegionId::new(1, 1);
+        let mut buffer = HashMap::new();
+
+        for record in [
+            new_test_record(RecordType::First, 1, region_id.as_u64(), vec![1; 100]),
+            new_test_record(RecordType::Middle(1), 1, region_id.as_u64(), vec![2; 100]),
+            new_test_record(RecordType::Middle(1), 1, region_id.as_u64(), vec![2; 100]),
+            new_test_record(RecordType::Last, 1, region_id.as_u64(), vec![3; 100]),
+            new_test_record(RecordType::Last, 1, region_id.as_u64(), vec![3; 100]),
+        ] {
+            assert!(
+                maybe_emit_entry(&provider, record, &mut buffer)
+                    .unwrap()
+                    .is_none()
+            );
+        }
+
+        let next_entry = new_test_record(RecordType::First, 2, region_id.as_u64(), vec![4; 100]);
+        let entry = maybe_emit_entry(&provider, next_entry, &mut buffer)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            entry,
+            Entry::MultiplePart(MultiplePartEntry {
+                provider: Provider::Kafka(provider),
+                region_id,
+                entry_id: 1,
+                headers: vec![
+                    MultiplePartHeader::First,
+                    MultiplePartHeader::Middle(1),
+                    MultiplePartHeader::Last,
+                ],
+                parts: vec![vec![1; 100], vec![2; 100], vec![3; 100]],
+            })
+        );
+    }
+
+    #[test]
+    fn test_maybe_emit_entry_rejects_conflicting_duplicate_middle_record() {
+        let provider = Arc::new(KafkaProvider::new("my_topic".to_string()));
+        let region_id = RegionId::new(1, 1);
+        let mut buffer = HashMap::new();
+
+        for record in [
+            new_test_record(RecordType::First, 1, region_id.as_u64(), vec![1; 100]),
+            new_test_record(RecordType::Middle(1), 1, region_id.as_u64(), vec![2; 100]),
+        ] {
+            assert!(
+                maybe_emit_entry(&provider, record, &mut buffer)
+                    .unwrap()
+                    .is_none()
+            );
+        }
+
+        let duplicate = new_test_record(RecordType::Middle(1), 1, region_id.as_u64(), vec![3; 100]);
+        let err = maybe_emit_entry(&provider, duplicate, &mut buffer).unwrap_err();
+
         assert_matches!(err, error::Error::IllegalSequence { .. });
     }
 
