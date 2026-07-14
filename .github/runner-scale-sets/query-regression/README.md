@@ -81,20 +81,23 @@ docker push greptime-registry.cn-hangzhou.cr.aliyuncs.com/greptime/greptimedb-qu
 Deploy by digest, not mutable tag, by updating `values-8-cores.yaml` after a
 rebuild. If the registry is private, use a dedicated read-only pull secret only
 as `imagePullSecrets`; never expose registry credentials to runner containers.
+Both digest-pinned init and runner containers use `IfNotPresent`: the immutable
+digest makes a cached image safe and avoids adding a registry dependency to every
+runner startup.
 
-Before Rust setup, the workflow asserts UID/GID 1001 and exact image tool
-versions: `libprotoc 3.21.12`, `uv 0.11.26`, `mold 2.30.0`, `Python 3.12.3`,
-and `sccache 0.16.0`.
-Rustup is intentionally absent from the base image. The workflow adds
-`${CARGO_HOME}/bin` to `GITHUB_PATH`, then keeps
-`actions-rust-lang/setup-rust-toolchain@v1` with `rust-src-dir: src`,
-`cache: false`, and mold warning-denying rustflags. It logs Rustup, Rustc, and
-Cargo versions after setup.
+Before builds, the workflow asserts UID/GID 1001 and exact image tool versions:
+`libprotoc 3.21.12`, `uv 0.11.26`, `mold 2.30.0`, `Python 3.12.3`, `sccache
+0.16.0`, root-owned `rustup 1.29.0`, and the image-baked
+`nightly-2026-03-21` Rust toolchain. Rustup, Cargo, and Rustc must resolve from
+`/opt/cargo/bin`; the runner cannot write `/opt/rustup` or `/opt/cargo/bin`.
+`actions-rust-lang/setup-rust-toolchain@v1` is intentionally removed. The
+workflow sets its warning-denying mold `RUSTFLAGS` directly, disables automatic
+Rustup installation, and performs no runtime toolchain downloads.
 
-The workflow no longer uses GitHub `rust-cache`, `setup-protoc`, or `setup-uv`:
-the PVC supplies Rust/Cargo build state and the image assertions establish the
-tool contract. Do not reintroduce those actions unless the corresponding cache
-or image contract changes.
+The workflow no longer uses GitHub `rust-cache`, `setup-protoc`, `setup-uv`, or
+runtime Rust setup: the image establishes immutable executable state and the PVC
+supplies only reusable Cargo data. Do not reintroduce those actions unless the
+corresponding cache or image contract changes.
 
 ## Capacity and persistent cache
 
@@ -116,20 +119,29 @@ versioned subpaths as non-root UID/GID 1001, and the runner mounts them as:
 
 | Persistent state | PVC subpath | Runner mount |
 | --- | --- | --- |
-| Cargo home | `cargo-home-v1` | `/home/runner/.cargo` |
-| Rustup home | `rustup-home-v1` | `/home/runner/.rustup` |
+| Ephemeral Cargo home | `emptyDir` | `/home/runner/.cargo` |
+| Cargo registry data | `cargo-registry-v1` | `/home/runner/.cargo/registry` |
+| Cargo Git data | `cargo-git-v1` | `/home/runner/.cargo/git` |
 | Cargo target | `query-regression-target-v1` | `/home/runner/query-regression-target` |
 | Cache metadata | `meta-v1` | `/home/runner/query-regression-cache-meta` |
 | sccache local disk cache | `sccache-v1` | `/home/runner/.cache/sccache` |
+| Immutable Rust toolchain | image-owned | `/opt/rustup`, `/opt/cargo/bin` |
 
 The Pod security context uses UID/GID and `fsGroup` 1001 with
 `fsGroupChangePolicy: OnRootMismatch`; no privileged `chown` or raw `hostPath`
-is used. `CARGO_HOME`, `RUSTUP_HOME`, `CARGO_TARGET_DIR`, cache metadata, and
+is used. `CARGO_HOME` is a per-Pod `emptyDir`; only its nested `registry` and
+`git` mounts are persistent. `RUSTUP_HOME=/opt/rustup` and `/opt/cargo/bin` are
+image-owned immutable paths, while `CARGO_TARGET_DIR`, cache metadata, and
 `SCCACHE_DIR` are persistent absolute paths. The runner sets
 `RUSTC_WRAPPER=/usr/local/bin/sccache`,
 `SCCACHE_DIR=/home/runner/.cache/sccache`, `SCCACHE_CACHE_SIZE=40G`, and
 `CARGO_INCREMENTAL=0`. sccache uses its local PVC disk backend and self-evicts
 at 40G; do not add runtime downloads, object storage, or a shared backend.
+
+The repository's `.cargo/config.toml` remains a trusted per-revision build input.
+In contrast, `$CARGO_HOME/config*`, credentials, installed bins, and Cargo
+metadata outside the persistent `registry` and `git` data mounts are ephemeral
+and cannot survive to another Pod.
 
 The local disk backend has a one-server constraint. `maxRunners=1` and the
 unchanged `query-regression-persistent-cache-v1` workflow concurrency group
@@ -155,17 +167,20 @@ availability before builds and in an always-run report. Its cleanup is narrow
 and non-destructive:
 
 - warn at target size 400GiB; at 450GiB clear only the complete target root;
-- warn at Cargo size 60GiB; at 80GiB remove only `registry/src` and
-  `git/checkouts`, then abort if Cargo remains at least 80GiB;
+- warn at Cargo registry-plus-Git data size 60GiB; at 80GiB remove only
+  `registry/src` and `git/checkouts`, then abort if that persistent data remains
+  at least 80GiB;
 - below 300GiB backing free space, clear the complete target root first,
   remeasure, then remove only those Cargo extracted trees and checkouts; abort
   if free space is still below 300GiB;
-- never automatically remove Cargo registry cache/index, Git database, Cargo
-  bin, Rustup, cache metadata, the self-evicting sccache directory, or the PVC.
+- never automatically remove Cargo registry cache/index, Git database, the
+  image-owned Cargo bin or Rustup toolchain, cache metadata, the self-evicting
+  sccache directory, or the PVC.
 
 The target clear uses fixed absolute roots and removes all entries, including
-dotfiles. Remove old versioned subpaths only in explicit maintenance while ARC
-is 0/0 and no runner Pod exists.
+dotfiles. After migration validation, remove obsolete `cargo-home-v1` and
+`rustup-home-v1` only in explicit maintenance while ARC is 0/0 and no runner Pod
+exists; they are not mounted by the current configuration.
 
 ## Deploy and pause safely
 
@@ -245,6 +260,9 @@ With explicit approval, run two identical `workflow_dispatch` canaries on
 and `cargo_profile=nightly`. The first is the cold fill; the second verifies warm
 reuse. Record the workflow's base/candidate build elapsed logs and cache
 ABI-marker output, initial/base/candidate sccache statistics, and cache report.
+Confirm the image tool contract (root-owned Rustup/Cargo paths, baked nightly,
+and non-writable `/opt` roots) and that the ephemeral Cargo home contains only
+the mounted registry/Git data before Cargo creates per-Pod state.
 Obtain dependency and tool network byte counters from the
 identified `.2` counter source, filtered to `minipc-3` and the dependency/tool
 destinations.
@@ -254,7 +272,8 @@ Accept the canary only when all of the following hold:
 - exactly one runner Pod runs on `minipc-3`, and both jobs use the same bound PV;
 - UID/GID 1001 cache mounts are writable; the warm run does not invalidate the
   target or bulk-redownload crates or toolchains; sccache reports separate base
-  and candidate build statistics without server or cache-path errors;
+  and candidate build statistics without server or cache-path errors; immutable
+  Rustup/Cargo roots remain non-writable and only registry/Git data persists;
 - warm base build time is at most 50% of cold base build time;
 - warm dependency/tool network bytes are at most 10% of cold fill bytes;
 - cache sizes remain below soft watermarks, node free space remains at least

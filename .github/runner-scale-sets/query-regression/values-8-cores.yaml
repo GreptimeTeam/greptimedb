@@ -20,19 +20,21 @@ template:
       seccompProfile:
         type: RuntimeDefault
     volumes:
+      - name: cargo-home
+        emptyDir: {}
       - name: build-cache
         persistentVolumeClaim:
           claimName: query-regression-build-cache
     initContainers:
       - name: initialize-build-cache
-        image: greptime-registry.cn-hangzhou.cr.aliyuncs.com/greptime/greptimedb-query-regression-runner@sha256:c6a171ea47e44c001109833d67ff947b04e9e2b879ec222e4c07a9987158ee4c
-        imagePullPolicy: Always
+        image: greptime-registry.cn-hangzhou.cr.aliyuncs.com/greptime/greptimedb-query-regression-runner@sha256:7022b551771dc82ec4c493f0c3db6ee3050ececd336598690a2165240ebe953e
+        imagePullPolicy: IfNotPresent
         command:
           - /bin/sh
           - -ec
           - |
             umask 0002
-            for directory in cargo-home-v1 rustup-home-v1 query-regression-target-v1 meta-v1 sccache-v1; do
+            for directory in cargo-registry-v1 cargo-git-v1 query-regression-target-v1 meta-v1 sccache-v1; do
               cache_directory="/cache/${directory}"
               mkdir -p "${cache_directory}"
               test -w "${cache_directory}"
@@ -63,14 +65,18 @@ template:
             mountPath: /cache
     containers:
       - name: runner
-        image: greptime-registry.cn-hangzhou.cr.aliyuncs.com/greptime/greptimedb-query-regression-runner@sha256:c6a171ea47e44c001109833d67ff947b04e9e2b879ec222e4c07a9987158ee4c
-        imagePullPolicy: Always
+        image: greptime-registry.cn-hangzhou.cr.aliyuncs.com/greptime/greptimedb-query-regression-runner@sha256:7022b551771dc82ec4c493f0c3db6ee3050ececd336598690a2165240ebe953e
+        imagePullPolicy: IfNotPresent
         command: ["/home/runner/run.sh"]
         env:
           - name: CARGO_HOME
             value: /home/runner/.cargo
           - name: RUSTUP_HOME
-            value: /home/runner/.rustup
+            value: /opt/rustup
+          - name: RUSTUP_TOOLCHAIN
+            value: nightly-2026-03-21
+          - name: RUSTUP_AUTO_INSTALL
+            value: "0"
           - name: CARGO_TARGET_DIR
             value: /home/runner/query-regression-target
           - name: QUERY_REGRESSION_CACHE_META
@@ -101,12 +107,14 @@ template:
             memory: 24Gi
             ephemeral-storage: 80Gi
         volumeMounts:
-          - name: build-cache
+          - name: cargo-home
             mountPath: /home/runner/.cargo
-            subPath: cargo-home-v1
           - name: build-cache
-            mountPath: /home/runner/.rustup
-            subPath: rustup-home-v1
+            mountPath: /home/runner/.cargo/registry
+            subPath: cargo-registry-v1
+          - name: build-cache
+            mountPath: /home/runner/.cargo/git
+            subPath: cargo-git-v1
           - name: build-cache
             mountPath: /home/runner/query-regression-target
             subPath: query-regression-target-v1

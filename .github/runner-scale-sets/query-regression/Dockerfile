@@ -5,6 +5,16 @@ USER root
 
 ARG SCCACHE_VERSION=0.16.0
 ARG SCCACHE_SHA256=aec995a83ad3dff3d14b6314e08858b7b73d35ca85a5bcf3d3a9ec07dee35588
+ARG RUSTUP_INIT_VERSION=1.29.0
+ARG RUSTUP_INIT_TARGET=x86_64-unknown-linux-gnu
+ARG RUSTUP_INIT_SHA256=4acc9acc76d5079515b46346a485974457b5a79893cfb01112423c89aeb5aa10
+ARG RUST_TOOLCHAIN=nightly-2026-03-21
+
+ENV RUSTUP_HOME=/opt/rustup \
+    CARGO_HOME=/opt/cargo \
+    RUSTUP_TOOLCHAIN=${RUST_TOOLCHAIN} \
+    RUSTUP_AUTO_INSTALL=0 \
+    PATH=/opt/cargo/bin:${PATH}
 
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
@@ -44,4 +54,31 @@ RUN curl --fail --location --silent --show-error \
     && install --mode=0755 /tmp/sccache/sccache /usr/local/bin/sccache \
     && rm -rf /tmp/sccache.tar.gz /tmp/sccache
 
+RUN curl --fail --location --silent --show-error \
+        --output /tmp/rustup-init \
+        "https://static.rust-lang.org/rustup/archive/${RUSTUP_INIT_VERSION}/${RUSTUP_INIT_TARGET}/rustup-init" \
+    && echo "${RUSTUP_INIT_SHA256}  /tmp/rustup-init" | sha256sum --check --status - \
+    && chmod 0755 /tmp/rustup-init \
+    && /tmp/rustup-init -y --profile minimal --default-toolchain "${RUST_TOOLCHAIN}" --no-modify-path \
+    && rm -f /tmp/rustup-init \
+    && chown -R root:root /opt/rustup /opt/cargo \
+    && chmod -R go-w /opt/rustup /opt/cargo \
+    && find /opt/rustup /opt/cargo -type d -exec chmod 0755 {} + \
+    && find /opt/rustup /opt/cargo -type f -exec chmod a+r {} +
+
 USER runner
+
+RUN set -eu \
+    && test "$(id -u)" = "1001" \
+    && temporary_cargo_home="$(mktemp --directory)" \
+    && trap 'rm -rf "${temporary_cargo_home}"' 0 \
+    && export CARGO_HOME="${temporary_cargo_home}" \
+    && test "${RUSTUP_AUTO_INSTALL}" = "0" \
+    && rustup --version \
+    && cargo --version \
+    && rustc --version \
+    && active_toolchain="$(rustup show active-toolchain)" \
+    && printf 'Active toolchain: %s\n' "${active_toolchain}" \
+    && case "${active_toolchain}" in "${RUST_TOOLCHAIN}-x86_64-unknown-linux-gnu"|"${RUST_TOOLCHAIN}-x86_64-unknown-linux-gnu "*) ;; *) exit 1;; esac \
+    && test ! -w /opt/rustup \
+    && test ! -w /opt/cargo/bin

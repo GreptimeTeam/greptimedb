@@ -62,13 +62,16 @@ jobs:
     env:
       CARGO_PROFILE: ${{ github.event_name == 'pull_request' && 'nightly' || inputs.cargo_profile }}
       CARGO_HOME: /home/runner/.cargo
-      RUSTUP_HOME: /home/runner/.rustup
+      RUSTUP_HOME: /opt/rustup
+      RUSTUP_TOOLCHAIN: nightly-2026-03-21
+      RUSTUP_AUTO_INSTALL: "0"
       CARGO_TARGET_DIR: /home/runner/query-regression-target
       QUERY_REGRESSION_CACHE_META: /home/runner/query-regression-cache-meta
       RUSTC_WRAPPER: /usr/local/bin/sccache
       SCCACHE_DIR: /home/runner/.cache/sccache
       SCCACHE_CACHE_SIZE: 40G
       CARGO_INCREMENTAL: "0"
+      RUSTFLAGS: -D warnings -C link-arg=-fuse-ld=mold
       QUERY_REGRESSION_CACHE_EPOCH: "1"
       BASE_REF: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || inputs.base_ref }}
       CANDIDATE_REF: ${{ github.event_name == 'workflow_dispatch' && (inputs.candidate_ref || github.ref) || '' }}
@@ -180,29 +183,26 @@ jobs:
           [[ "$(python3 --version)" == "Python 3.12.3" ]]
           sccache_version="$(sccache --version)"
           [[ "${sccache_version}" =~ ^sccache[[:space:]]0\.16\.0([[:space:]]|$) ]]
-          printf '%s\n' "${CARGO_HOME}/bin" >> "${GITHUB_PATH}"
-
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          rust-src-dir: src
-          cache: false
-          rustflags: -D warnings -C link-arg=-fuse-ld=mold
-
-      - name: Verify Rust toolchain
-        shell: bash
-        working-directory: src
-        run: |
-          set -euo pipefail
-          command -v rustup
-          command -v rustc
-          command -v cargo
-          rustup --version
-          rustc -Vv
-          if cargo -Vv >/dev/null 2>&1; then
-            cargo -Vv
-          else
-            cargo -V
-          fi
+          [[ "$(command -v rustup)" == "/opt/cargo/bin/rustup" ]]
+          [[ "$(command -v cargo)" == "/opt/cargo/bin/cargo" ]]
+          [[ "$(command -v rustc)" == "/opt/cargo/bin/rustc" ]]
+          [[ "$(rustup --version)" =~ ^rustup[[:space:]]1\.29\.0([[:space:]]|$) ]]
+          cargo_version="$(cargo --version)"
+          [[ "${cargo_version}" =~ ^cargo[[:space:]]1\.96\.0-nightly[[:space:]]\(cbb9bb8bd[[:space:]][0-9]{4}-[0-9]{2}-[0-9]{2}\)$ ]]
+          rustc_version="$(rustc --version)"
+          [[ "${rustc_version}" =~ ^rustc[[:space:]]1\.96\.0-nightly[[:space:]]\(ac7f9ec7d[[:space:]][0-9]{4}-[0-9]{2}-[0-9]{2}\)$ ]]
+          active_toolchain="$(rustup show active-toolchain)"
+          [[ "${active_toolchain}" =~ ^nightly-2026-03-21-x86_64-unknown-linux-gnu([[:space:]]|$) ]]
+          [[ "${RUSTUP_HOME}" == "/opt/rustup" ]]
+          [[ "${RUSTUP_TOOLCHAIN}" == "nightly-2026-03-21" ]]
+          [[ "${RUSTUP_AUTO_INSTALL}" == "0" ]]
+          test -r /opt/rustup && test -x /opt/rustup
+          test ! -w /opt/rustup
+          test ! -w /opt/cargo/bin
+          for entry in config config.toml credentials credentials.toml bin .crates.toml .crates2.json .global-cache .package-cache; do
+            test ! -e "${CARGO_HOME}/${entry}"
+          done
+          mkdir -p "${CARGO_HOME}/registry" "${CARGO_HOME}/git"
 
       - name: Prepare persistent query regression cache
         shell: bash
@@ -211,13 +211,15 @@ jobs:
           set -euo pipefail
 
           readonly EXPECTED_CARGO_HOME="/home/runner/.cargo"
-          readonly EXPECTED_RUSTUP_HOME="/home/runner/.rustup"
+          readonly EXPECTED_CARGO_REGISTRY="/home/runner/.cargo/registry"
+          readonly EXPECTED_CARGO_GIT="/home/runner/.cargo/git"
+          readonly EXPECTED_RUSTUP_HOME="/opt/rustup"
           readonly EXPECTED_TARGET_DIR="/home/runner/query-regression-target"
           readonly EXPECTED_CACHE_META="/home/runner/query-regression-cache-meta"
           readonly EXPECTED_SCCACHE_DIR="/home/runner/.cache/sccache"
           readonly EXPECTED_RUSTC_WRAPPER="/usr/local/bin/sccache"
-          readonly RUNNER_IMAGE_DIGEST="sha256:c6a171ea47e44c001109833d67ff947b04e9e2b879ec222e4c07a9987158ee4c"
-          readonly RUNNER_IMAGE_EPOCH="2"
+          readonly RUNNER_IMAGE_DIGEST="sha256:7022b551771dc82ec4c493f0c3db6ee3050ececd336598690a2165240ebe953e"
+          readonly RUNNER_IMAGE_EPOCH="3"
 
           require_expected_root() {
             local name="$1"
@@ -246,12 +248,13 @@ jobs:
           }
 
           clear_cargo_extracted_trees() {
-            require_expected_root CARGO_HOME "${CARGO_HOME}" "${EXPECTED_CARGO_HOME}"
+            require_expected_root CARGO_REGISTRY "${CARGO_HOME}/registry" "${EXPECTED_CARGO_REGISTRY}"
+            require_expected_root CARGO_GIT "${CARGO_HOME}/git" "${EXPECTED_CARGO_GIT}"
             rm -rf -- "${CARGO_HOME}/registry/src" "${CARGO_HOME}/git/checkouts"
           }
 
           cargo_size_kib() {
-            du -sk -- "${CARGO_HOME}" | cut -f1
+            du -sk -- "${CARGO_HOME}/registry" "${CARGO_HOME}/git" | awk '{ total += $1 } END { print total }'
           }
 
           target_size_kib() {
@@ -263,13 +266,16 @@ jobs:
           }
 
           report_cache_usage() {
-            du -sh -- "${CARGO_HOME}" "${RUSTUP_HOME}" "${CARGO_TARGET_DIR}" "${QUERY_REGRESSION_CACHE_META}" "${SCCACHE_DIR}"
+            du -sh -- "${CARGO_HOME}" "${CARGO_HOME}/registry" "${CARGO_HOME}/git" \
+              "${RUSTUP_HOME}" "${CARGO_TARGET_DIR}" "${QUERY_REGRESSION_CACHE_META}" "${SCCACHE_DIR}"
             df -P "${CARGO_TARGET_DIR}"
             df -hP "${CARGO_TARGET_DIR}"
             df -Pi "${CARGO_TARGET_DIR}"
           }
 
           require_expected_root CARGO_HOME "${CARGO_HOME}" "${EXPECTED_CARGO_HOME}"
+          require_expected_root CARGO_REGISTRY "${CARGO_HOME}/registry" "${EXPECTED_CARGO_REGISTRY}"
+          require_expected_root CARGO_GIT "${CARGO_HOME}/git" "${EXPECTED_CARGO_GIT}"
           require_expected_root RUSTUP_HOME "${RUSTUP_HOME}" "${EXPECTED_RUSTUP_HOME}"
           require_expected_root CARGO_TARGET_DIR "${CARGO_TARGET_DIR}" "${EXPECTED_TARGET_DIR}"
           require_expected_root QUERY_REGRESSION_CACHE_META "${QUERY_REGRESSION_CACHE_META}" "${EXPECTED_CACHE_META}"
@@ -286,8 +292,13 @@ jobs:
             printf 'Refusing unexpected CARGO_INCREMENTAL: %s\n' "${CARGO_INCREMENTAL}" >&2
             exit 1
           }
-          mkdir -p "${CARGO_HOME}" "${RUSTUP_HOME}" "${CARGO_TARGET_DIR}" "${QUERY_REGRESSION_CACHE_META}" "${SCCACHE_DIR}"
-          for root in "${CARGO_HOME}" "${RUSTUP_HOME}" "${CARGO_TARGET_DIR}" "${QUERY_REGRESSION_CACHE_META}" "${SCCACHE_DIR}"; do
+          test -r "${RUSTUP_HOME}"
+          test -x "${RUSTUP_HOME}"
+          test ! -w "${RUSTUP_HOME}"
+          mkdir -p "${CARGO_HOME}" "${CARGO_HOME}/registry" "${CARGO_HOME}/git" \
+            "${CARGO_TARGET_DIR}" "${QUERY_REGRESSION_CACHE_META}" "${SCCACHE_DIR}"
+          for root in "${CARGO_HOME}" "${CARGO_HOME}/registry" "${CARGO_HOME}/git" \
+            "${CARGO_TARGET_DIR}" "${QUERY_REGRESSION_CACHE_META}" "${SCCACHE_DIR}"; do
             test -w "${root}"
             touch "${root}/.query-regression-write-test"
             rm -f "${root}/.query-regression-write-test"
@@ -310,6 +321,11 @@ jobs:
           mold_version="$(mold --version | grep -m1 .)"
           protoc_version="$(protoc --version)"
           sccache_version="$(sccache --version)"
+          rustup_version="$(rustup --version)"
+          active_toolchain="$(rustup show active-toolchain)"
+          rustup_path="$(command -v rustup)"
+          cargo_path="$(command -v cargo)"
+          rustc_path="$(command -v rustc)"
           profile_target_dir="${CARGO_TARGET_DIR}/${target_profile}"
           marker="${QUERY_REGRESSION_CACHE_META}/target-${target_profile}.abi"
           new_marker="$(mktemp "${QUERY_REGRESSION_CACHE_META}/.${target_profile}.abi.XXXXXX")"
@@ -327,12 +343,21 @@ jobs:
             printf 'RUSTC_WRAPPER=%s\n' "${RUSTC_WRAPPER-}"
             printf 'SCCACHE_DIR=%s\n' "${SCCACHE_DIR-}"
             printf 'SCCACHE_CACHE_SIZE=%s\n' "${SCCACHE_CACHE_SIZE-}"
+            printf 'RUSTUP_HOME=%s\n' "${RUSTUP_HOME-}"
+            printf 'RUSTUP_TOOLCHAIN=%s\n' "${RUSTUP_TOOLCHAIN-}"
+            printf 'RUSTUP_AUTO_INSTALL=%s\n' "${RUSTUP_AUTO_INSTALL-}"
+            printf 'PATH=%s\n' "${PATH-}"
             printf '%s\n' "rustc_vV=${rustc_vv}"
             printf '%s\n' "cargo_vV=${cargo_vv}"
             printf '%s\n' "cc_version=${cc_version}"
             printf '%s\n' "mold_version=${mold_version}"
             printf '%s\n' "protoc_version=${protoc_version}"
             printf '%s\n' "sccache_version=${sccache_version}"
+            printf '%s\n' "rustup_version=${rustup_version}"
+            printf '%s\n' "active_toolchain=${active_toolchain}"
+            printf '%s\n' "rustup_path=${rustup_path}"
+            printf '%s\n' "cargo_path=${cargo_path}"
+            printf '%s\n' "rustc_path=${rustc_path}"
           } > "${new_marker}"
 
           if ! cmp -s "${marker}" "${new_marker}"; then
@@ -512,7 +537,9 @@ jobs:
           set -euo pipefail
           for root in \
             /home/runner/.cargo \
-            /home/runner/.rustup \
+            /home/runner/.cargo/registry \
+            /home/runner/.cargo/git \
+            /opt/rustup \
             /home/runner/query-regression-target \
             /home/runner/query-regression-cache-meta \
             /home/runner/.cache/sccache; do
@@ -522,6 +549,13 @@ jobs:
               printf 'Missing cache path (report only): %s\n' "${root}"
             fi
           done
+          if [[ -e /opt/rustup ]]; then
+            if [[ -w /opt/rustup ]]; then
+              printf 'Immutable Rustup path is unexpectedly writable: /opt/rustup\n' >&2
+            else
+              printf 'Immutable Rustup path is read-only to runner: /opt/rustup\n'
+            fi
+          fi
           report_root=/home/runner/query-regression-target
           if [[ ! -e "${report_root}" ]]; then
             report_root=/home/runner
