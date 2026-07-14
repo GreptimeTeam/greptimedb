@@ -25,6 +25,8 @@ use datafusion::physical_plan::{ExecutionPlan, ExecutionPlanProperties};
 use datafusion_common::Result as DfResult;
 use datafusion_physical_expr::{Distribution, OrderingRequirements, Partitioning};
 
+use crate::dist_plan::MergeSortExec;
+
 #[derive(Debug)]
 pub struct EnsureGlobalLimitForFetch;
 
@@ -149,7 +151,8 @@ fn provided_global_fetch(plan: &Arc<dyn ExecutionPlan>) -> Option<usize> {
     let fetch = plan.fetch()?;
     (plan.as_any().is::<GlobalLimitExec>()
         || plan.as_any().is::<CoalescePartitionsExec>()
-        || plan.as_any().is::<SortPreservingMergeExec>())
+        || plan.as_any().is::<SortPreservingMergeExec>()
+        || plan.as_any().is::<MergeSortExec>())
     .then_some(fetch)
 }
 
@@ -325,6 +328,36 @@ mod tests {
         assert!(optimized.as_any().is::<SortPreservingMergeExec>());
         assert!(child.as_any().is::<SortPreservingMergeExec>());
         assert_eq!(child.fetch(), Some(5));
+    }
+
+    #[test]
+    fn keeps_filter_under_parent_merge_sort_fetch() {
+        let (input, ordering) = ordered_input();
+        let filter = filter_fetch(input, 1);
+        let merge = merge_sort_fetch(ordering, filter, 1);
+
+        let optimized =
+            EnsureGlobalLimitForFetch::optimize_plan(merge, ParentContext::default()).unwrap();
+        let child = optimized.children()[0];
+
+        assert!(optimized.as_any().is::<MergeSortExec>());
+        assert!(child.as_any().is::<FilterExec>());
+    }
+
+    #[test]
+    fn adds_tighter_global_fetch_under_looser_merge_sort_fetch() {
+        let (input, ordering) = ordered_input();
+        let filter = filter_fetch(input, 5);
+        let merge = merge_sort_fetch(ordering, filter, 10);
+
+        let optimized =
+            EnsureGlobalLimitForFetch::optimize_plan(merge, ParentContext::default()).unwrap();
+        let child = optimized.children()[0];
+
+        assert!(optimized.as_any().is::<MergeSortExec>());
+        assert!(child.as_any().is::<SortPreservingMergeExec>());
+        assert_eq!(child.fetch(), Some(5));
+        assert!(child.children()[0].as_any().is::<FilterExec>());
     }
 
     #[test]
@@ -550,6 +583,14 @@ mod tests {
                 .build()
                 .unwrap(),
         )
+    }
+
+    fn merge_sort_fetch(
+        ordering: LexOrdering,
+        input: Arc<dyn ExecutionPlan>,
+        fetch: usize,
+    ) -> Arc<dyn ExecutionPlan> {
+        Arc::new(MergeSortExec::new(ordering, input, Some(fetch)))
     }
 
     fn hash_repartition(input: Arc<dyn ExecutionPlan>) -> Arc<dyn ExecutionPlan> {
