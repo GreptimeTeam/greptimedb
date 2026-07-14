@@ -103,10 +103,12 @@ impl JsonGetResultBuilder for StringResultBuilder {
                 }
             }
             JsonResultValue::JsonStructByValue(value) => {
-                if let Some(s) = value.as_str() {
-                    self.0.append_value(s)
+                if value.is_null() {
+                    self.0.append_null();
+                } else if let Some(s) = value.as_str() {
+                    self.0.append_value(s);
                 } else {
-                    self.0.append_value(value.to_string())
+                    self.0.append_value(value.to_string());
                 }
             }
         }
