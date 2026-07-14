@@ -138,5 +138,10 @@ required-features = ["test"]
 name = "bench_wal_encode"
 harness = false
 
+[[bench]]
+name = "bench_value_split"
+harness = false
+required-features = ["test"]
+
 [package.metadata.cargo-udeps.ignore]
 normal = ["aquamarine"]
