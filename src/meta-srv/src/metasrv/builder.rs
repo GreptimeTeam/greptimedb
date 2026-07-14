@@ -28,7 +28,9 @@ use common_meta::ddl::table_meta::{TableMetadataAllocator, TableMetadataAllocato
 use common_meta::ddl::{
     DdlContext, NoopRegionFailureDetectorControl, RegionFailureDetectorControllerRef,
 };
-use common_meta::ddl_manager::{DdlManager, DdlManagerConfiguratorRef};
+use common_meta::ddl_manager::{
+    DdlManager, DdlManagerConfiguratorRef, RepartitionProcedureFactoryRef,
+};
 use common_meta::distributed_time_constants::default_distributed_time_constants;
 use common_meta::key::TableMetadataManager;
 use common_meta::key::flow::FlowMetadataManager;
@@ -70,7 +72,9 @@ use crate::metasrv::{
 use crate::peer::MetasrvPeerAllocator;
 use crate::procedure::region_migration::DefaultContextFactory;
 use crate::procedure::region_migration::manager::RegionMigrationManager;
-use crate::procedure::repartition::DefaultRepartitionProcedureFactory;
+use crate::procedure::repartition::{
+    DefaultRepartitionProcedureFactory, GcDisabledRepartitionProcedureFactory,
+};
 use crate::procedure::wal_prune::Context as WalPruneContext;
 use crate::procedure::wal_prune::manager::{WalPruneManager, WalPruneTicker};
 use crate::region::flush_trigger::RegionFlushTrigger;
@@ -428,10 +432,17 @@ impl MetasrvBuilder {
             soft_drop_enabled: ddl_soft_drop_enabled(&options),
         };
         let procedure_manager_c = procedure_manager.clone();
-        let repartition_procedure_factory = Arc::new(DefaultRepartitionProcedureFactory::new(
-            mailbox.clone(),
-            options.grpc.server_addr.clone(),
-        ));
+        let repartition_procedure_factory: RepartitionProcedureFactoryRef = if options.gc.enable {
+            Arc::new(DefaultRepartitionProcedureFactory::new(
+                mailbox.clone(),
+                options.grpc.server_addr.clone(),
+            ))
+        } else {
+            Arc::new(GcDisabledRepartitionProcedureFactory::new(
+                mailbox.clone(),
+                options.grpc.server_addr.clone(),
+            ))
+        };
         let ddl_manager = DdlManager::try_new(
             ddl_context,
             procedure_manager_c,

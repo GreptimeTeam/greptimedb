@@ -12,6 +12,7 @@ CREATE TABLE alter_repartition_table(
 
 Affected Rows: 0
 
+-- Repartition requires metasrv GC. Verify split requests are rejected when it is disabled.
 ALTER TABLE alter_repartition_table REPARTITION (
   device_id < 100
 ) INTO (
@@ -19,7 +20,7 @@ ALTER TABLE alter_repartition_table REPARTITION (
   device_id < 100 AND area >= 'South'
 );
 
-Affected Rows: 0
+Error: 1004(InvalidArguments), Invalid arguments: Repartition requires metasrv GC to be enabled
 
 SHOW CREATE TABLE alter_repartition_table;
 
@@ -35,21 +36,21 @@ SHOW CREATE TABLE alter_repartition_table;
 |                         |   PRIMARY KEY ("device_id")                            |
 |                         | )                                                      |
 |                         | PARTITION ON COLUMNS ("device_id", "area") (           |
-|                         |   device_id < 100 AND area < 'South',                  |
+|                         |   device_id < 100,                                     |
 |                         |   device_id >= 100 AND device_id < 200,                |
-|                         |   device_id >= 200,                                    |
-|                         |   device_id < 100 AND area >= 'South'                  |
+|                         |   device_id >= 200                                     |
 |                         | )                                                      |
 |                         | ENGINE=mito                                            |
 |                         |                                                        |
 +-------------------------+--------------------------------------------------------+
 
+-- Repartition requires metasrv GC. Verify split requests are rejected when it is disabled.
 ALTER TABLE alter_repartition_table MERGE PARTITION (
-  device_id < 100 AND area < 'South',
-  device_id < 100 AND area >= 'South'
+  device_id < 100,
+  device_id >= 100 AND device_id < 200,
 );
 
-Affected Rows: 0
+Error: 1004(InvalidArguments), Invalid arguments: Repartition requires metasrv GC to be enabled
 
 SHOW CREATE TABLE alter_repartition_table;
 
@@ -124,11 +125,7 @@ ALTER TABLE alter_repartition_table_with_options REPARTITION (
   WAIT = false
 );
 
-+--------------------------------------+
-| Procedure ID                         |
-+--------------------------------------+
-| PROC_ID |
-+--------------------------------------+
+Error: 1004(InvalidArguments), Invalid arguments: Repartition requires metasrv GC to be enabled
 
 DROP TABLE alter_repartition_table_with_options;
 
@@ -177,7 +174,7 @@ WITH (
 
 Affected Rows: 0
 
--- Split physical table partition
+-- Repartition requires metasrv GC. Verify split requests are rejected when it is disabled.
 ALTER TABLE metric_physical_table SPLIT PARTITION (
     host < 'h1'
 ) INTO (
@@ -185,7 +182,7 @@ ALTER TABLE metric_physical_table SPLIT PARTITION (
     host >= 'h0' AND host < 'h1'
 );
 
-Affected Rows: 0
+Error: 1004(InvalidArguments), Invalid arguments: Repartition requires metasrv GC to be enabled
 
 SHOW CREATE TABLE metric_physical_table;
 
@@ -200,10 +197,9 @@ SHOW CREATE TABLE metric_physical_table;
 |                       |   PRIMARY KEY ("host")                               |
 |                       | )                                                    |
 |                       | PARTITION ON COLUMNS ("host") (                      |
-|                       |   host < 'h0',                                       |
+|                       |   host < 'h1',                                       |
 |                       |   host >= 'h1' AND host < 'h2',                      |
-|                       |   host >= 'h2',                                      |
-|                       |   host >= 'h0' AND host < 'h1'                       |
+|                       |   host >= 'h2'                                       |
 |                       | )                                                    |
 |                       | ENGINE=metric                                        |
 |                       | WITH(                                                |
@@ -227,13 +223,13 @@ SELECT * FROM logical_table_v2;
 ++
 ++
 
--- Merge physical table partition
+-- Repartition requires metasrv GC. Verify split requests are rejected when it is disabled.
 ALTER TABLE metric_physical_table MERGE PARTITION (
-    host < 'h0',
-    host >= 'h0' AND host < 'h1'
+    host < 'h1',
+    host >= 'h1' AND host < 'h2'
 );
 
-Affected Rows: 0
+Error: 1004(InvalidArguments), Invalid arguments: Repartition requires metasrv GC to be enabled
 
 SHOW CREATE TABLE metric_physical_table;
 
