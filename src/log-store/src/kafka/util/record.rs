@@ -228,9 +228,14 @@ pub fn remaining_entries(
 ///
 /// For type of [Entry::MultiplePart] Entry:
 /// - Emits a complete [Entry] immediately when a [RecordType::Last] record arrives with
-///   buffered parts. A [RecordType::Last] record without buffered parts is discarded.
+///   buffered parts.
 /// - Emits an incomplete [Entry] when a new [RecordType::First] record replaces
 ///   buffered incomplete records for the same [RegionId].
+///
+/// **Discarded records:**
+/// - A standalone [RecordType::First] record is discarded when another [RecordType::First]
+///   record with the same payload for the same [RegionId] arrives.
+/// - A [RecordType::Last] record without buffered parts is discarded.
 ///
 /// A trailing incomplete entry is emitted by [`remaining_entries`].
 pub(crate) fn maybe_emit_entry(
@@ -243,7 +248,16 @@ pub(crate) fn maybe_emit_entry(
         RecordType::Full => entry = Some(convert_to_naive_entry(provider.clone(), record)),
         RecordType::First => {
             let region_id = record.meta.ns.region_id.into();
+            let duplicate = buffered_records.get(&region_id).is_some_and(|records| {
+                records.len() == 1
+                    && records[0].meta.tp == RecordType::First
+                    && records[0].data == record.data
+            });
             if let Some(records) = buffered_records.insert(region_id, vec![record]) {
+                if duplicate {
+                    // A duplicate standalone First cannot form a complete entry.
+                    return Ok(None);
+                }
                 // Incomplete entry
                 entry = Some(convert_to_multiple_entry(
                     provider.clone(),
@@ -359,7 +373,16 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        let record = new_test_record(RecordType::First, 2, region_id.as_u64(), vec![2; 100]);
+        let record = new_test_record(RecordType::First, 2, region_id.as_u64(), vec![1; 100]);
+        // An identical First is a duplicate and does not emit an incomplete entry.
+        assert!(
+            maybe_emit_entry(&provider, record, &mut buffer)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(buffer[&region_id][0].meta.entry_id, 2);
+
+        let record = new_test_record(RecordType::First, 3, region_id.as_u64(), vec![2; 100]);
         let incomplete_entry = maybe_emit_entry(&provider, record, &mut buffer)
             .unwrap()
             .unwrap();
@@ -369,7 +392,7 @@ mod tests {
             Entry::MultiplePart(MultiplePartEntry {
                 provider: Provider::Kafka(provider.clone()),
                 region_id,
-                entry_id: 1,
+                entry_id: 2,
                 headers: vec![MultiplePartHeader::First],
                 parts: vec![vec![1; 100]],
             })
