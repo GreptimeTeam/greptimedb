@@ -1005,7 +1005,7 @@ mod tests {
     use datafusion::execution::SessionStateBuilder;
     use datafusion::physical_plan::filter_pushdown::ChildFilterPushdownResult;
     use datafusion_common::TableReference;
-    use datafusion_expr::{LogicalPlanBuilder, lit};
+    use datafusion_expr::{LogicalPlanBuilder, col, lit};
     use datafusion_physical_expr::Distribution;
     use datafusion_physical_expr::expressions::{
         Column, DynamicFilterPhysicalExpr, lit as physical_lit,
@@ -1022,6 +1022,64 @@ mod tests {
 
     fn test_query_id(value: u128) -> QueryId {
         QueryId::from(Uuid::from_u128(value))
+    }
+
+    fn merge_scan_exec_with_sorted_input(
+        region_count: u64,
+        target_partition: usize,
+    ) -> MergeScanExec {
+        let session_state = SessionStateBuilder::new().build();
+        let plan = LogicalPlanBuilder::empty(true)
+            .project(vec![lit(1i64).alias("ts")])
+            .unwrap()
+            .sort(vec![col("ts").sort(false, true)])
+            .unwrap()
+            .build()
+            .unwrap();
+        let schema = plan.schema().as_arrow().clone();
+        let regions = (0..region_count)
+            .map(|region_number| RegionId::new(1024, region_number as u32))
+            .collect();
+
+        MergeScanExec::new(
+            &session_state,
+            // The table name is not relevant to these ordering metadata tests;
+            // `MergeScanExec::new` requires one to model the production plan.
+            TableName::new("catalog", "schema", "table"),
+            regions,
+            plan,
+            &schema,
+            Arc::new(TestRegionQueryHandler),
+            QueryContext::arc(),
+            target_partition,
+            AliasMapping::new(),
+            None,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn merge_scan_does_not_advertise_ordering_when_partition_may_merge_regions() {
+        let exec = merge_scan_exec_with_sorted_input(3, 2);
+
+        assert!(
+            exec.properties().output_ordering().is_none(),
+            "target_partition < region_count means one output partition may concatenate multiple sorted region streams"
+        );
+    }
+
+    #[test]
+    fn merge_scan_advertises_ordering_when_each_partition_reads_at_most_one_region() {
+        let exec = merge_scan_exec_with_sorted_input(3, 3);
+
+        assert!(exec.properties().output_ordering().is_some());
+    }
+
+    #[test]
+    fn merge_scan_advertises_ordering_when_partitions_exceed_regions() {
+        let exec = merge_scan_exec_with_sorted_input(3, 4);
+
+        assert!(exec.properties().output_ordering().is_some());
     }
 
     #[test]

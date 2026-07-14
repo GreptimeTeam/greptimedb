@@ -240,7 +240,7 @@ order by ordered_host;
 |_|_Aggregate: groupBy=[[t.host]], aggr=[[last_value(t.host) ORDER BY [t.ts ASC NULLS LAST], last_value(t.not_pk) ORDER BY [t.ts ASC NULLS LAST], last_value(t.val) ORDER BY [t.ts ASC NULLS LAST]]] |
 |_|_TableScan: t_|
 |_| ]]_|
-| physical_plan | SortPreservingMergeExec: [ordered_host@0 ASC NULLS LAST]_|
+| physical_plan | MergeSortExec: [ordered_host@0 ASC NULLS LAST]_|
 |_|_MergeScanExec: REDACTED
 |_|_|
 +-+-+
@@ -267,7 +267,7 @@ order by ordered_host;
 +-+-+-+
 | stage | node | plan_|
 +-+-+-+
-| 0_| 0_|_SortPreservingMergeExec: [ordered_host@0 ASC NULLS LAST] REDACTED
+| 0_| 0_|_MergeSortExec: [ordered_host@0 ASC NULLS LAST] REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
 | 1_| 0_|_SortPreservingMergeExec: [ordered_host@0 ASC NULLS LAST] REDACTED
@@ -603,7 +603,7 @@ order by ordered_host;
 |_|_Aggregate: groupBy=[[t1.host]], aggr=[[last_value(t1.host) ORDER BY [t1.ts ASC NULLS LAST], last_value(t1.val) ORDER BY [t1.ts ASC NULLS LAST]]] |
 |_|_TableScan: t1_|
 |_| ]]_|
-| physical_plan | SortPreservingMergeExec: [ordered_host@0 ASC NULLS LAST]_|
+| physical_plan | MergeSortExec: [ordered_host@0 ASC NULLS LAST]_|
 |_|_MergeScanExec: REDACTED
 |_|_|
 +-+-+
@@ -629,7 +629,7 @@ order by ordered_host;
 +-+-+-+
 | stage | node | plan_|
 +-+-+-+
-| 0_| 0_|_SortPreservingMergeExec: [ordered_host@0 ASC NULLS LAST] REDACTED
+| 0_| 0_|_MergeSortExec: [ordered_host@0 ASC NULLS LAST] REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
 | 1_| 0_|_SortPreservingMergeExec: [ordered_host@0 ASC NULLS LAST] REDACTED
