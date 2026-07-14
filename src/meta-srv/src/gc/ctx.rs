@@ -243,7 +243,7 @@ impl SchedulerCtx for DefaultGcSchedulerCtx {
 
     async fn purge_dropped_table(&self, table_id: TableId) -> Result<()> {
         self.ddl_manager
-            .submit_purge_dropped_table_task(PurgeDroppedTableTask { table_id })
+            .submit_expired_purge_dropped_table_task(PurgeDroppedTableTask { table_id })
             .await
             .context(error::SubmitDdlTaskSnafu)?;
         Ok(())

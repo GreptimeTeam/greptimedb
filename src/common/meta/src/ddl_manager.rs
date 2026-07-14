@@ -272,6 +272,18 @@ impl DdlManager {
                 .context(RegisterProcedureLoaderSnafu { type_name })?;
         }
 
+        let type_name = PurgeDroppedTableProcedure::EXPIRED_TYPE_NAME;
+        let context = self.create_context();
+        self.procedure_manager
+            .register_loader(
+                type_name,
+                Box::new(move |json: &str| {
+                    PurgeDroppedTableProcedure::from_json(json, context.clone())
+                        .map(|procedure| Box::new(procedure) as _)
+                }),
+            )
+            .context(RegisterProcedureLoaderSnafu { type_name })?;
+
         self.repartition_procedure_factory
             .register_loaders(&self.ddl_context, &self.procedure_manager)
             .context(RegisterRepartitionProcedureLoaderSnafu)?;
@@ -506,6 +518,20 @@ impl DdlManager {
     ) -> Result<(ProcedureId, Option<Output>)> {
         let context = self.create_context();
         let procedure = PurgeDroppedTableProcedure::new(purge_dropped_table_task, context);
+        let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
+
+        self.execute_procedure_and_wait(procedure_with_id).await
+    }
+
+    /// Submits and executes a purge task that first rechecks the tombstone deadline.
+    #[tracing::instrument(skip_all)]
+    pub async fn submit_expired_purge_dropped_table_task(
+        &self,
+        purge_dropped_table_task: PurgeDroppedTableTask,
+    ) -> Result<(ProcedureId, Option<Output>)> {
+        let context = self.create_context();
+        let procedure =
+            PurgeDroppedTableProcedure::new_if_expired(purge_dropped_table_task, context);
         let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
 
         self.execute_procedure_and_wait(procedure_with_id).await

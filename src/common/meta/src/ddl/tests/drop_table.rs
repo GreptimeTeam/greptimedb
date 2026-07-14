@@ -1612,6 +1612,136 @@ async fn test_purge_dropped_table_cleans_regions_offline_and_deletes_tombstone()
 }
 
 #[tokio::test]
+async fn test_automatic_purge_rechecks_unexpired_tombstone() {
+    let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
+    let ddl_context = new_ddl_context(node_manager);
+    let table_id = 1024;
+    let table_name = test_create_table_task("foo", table_id).table_name();
+    let table_route_value = TableRouteValue::physical(vec![]);
+    ddl_context
+        .table_metadata_manager
+        .create_table_metadata(
+            test_create_table_task("foo", table_id).table_info,
+            table_route_value.clone(),
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+    ddl_context
+        .table_metadata_manager
+        .delete_table_metadata_with_retention(
+            table_id,
+            &table_name,
+            &table_route_value,
+            &HashMap::new(),
+            Some(1),
+            Some(i64::MAX),
+        )
+        .await
+        .unwrap();
+
+    let procedure = PurgeDroppedTableProcedure::new(
+        new_purge_dropped_table_task(table_id),
+        ddl_context.clone(),
+    );
+    let mut data: serde_json::Value = serde_json::from_str(&procedure.dump().unwrap()).unwrap();
+    data["check_expired"] = true.into();
+    let mut procedure =
+        PurgeDroppedTableProcedure::from_json(&data.to_string(), ddl_context.clone()).unwrap();
+    assert_eq!(
+        procedure.type_name(),
+        PurgeDroppedTableProcedure::EXPIRED_TYPE_NAME
+    );
+
+    execute_procedure_until_done(&mut procedure).await;
+
+    assert!(
+        ddl_context
+            .table_metadata_manager
+            .get_dropped_table_by_id(table_id)
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn test_recovered_automatic_purge_rechecks_unexpired_tombstone() {
+    let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
+    let ddl_context = new_ddl_context(node_manager);
+    let table_id = 1024;
+    let table_name = test_create_table_task("foo", table_id).table_name();
+    let table_route_value = TableRouteValue::physical(vec![]);
+    ddl_context
+        .table_metadata_manager
+        .create_table_metadata(
+            test_create_table_task("foo", table_id).table_info,
+            table_route_value.clone(),
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+    ddl_context
+        .table_metadata_manager
+        .delete_table_metadata_with_retention(
+            table_id,
+            &table_name,
+            &table_route_value,
+            &HashMap::new(),
+            Some(0),
+            Some(0),
+        )
+        .await
+        .unwrap();
+
+    let procedure = PurgeDroppedTableProcedure::new(
+        new_purge_dropped_table_task(table_id),
+        ddl_context.clone(),
+    );
+    let mut data: serde_json::Value = serde_json::from_str(&procedure.dump().unwrap()).unwrap();
+    data["check_expired"] = true.into();
+    let mut procedure =
+        PurgeDroppedTableProcedure::from_json(&data.to_string(), ddl_context.clone()).unwrap();
+    procedure
+        .execute(&new_test_procedure_context())
+        .await
+        .unwrap();
+    let persisted = procedure.dump().unwrap();
+
+    ddl_context
+        .table_metadata_manager
+        .restore_table_metadata(table_id, &table_name, &table_route_value, &HashMap::new())
+        .await
+        .unwrap();
+    ddl_context
+        .table_metadata_manager
+        .delete_table_metadata_with_retention(
+            table_id,
+            &table_name,
+            &table_route_value,
+            &HashMap::new(),
+            Some(1),
+            Some(i64::MAX),
+        )
+        .await
+        .unwrap();
+
+    let mut recovered =
+        PurgeDroppedTableProcedure::from_json(&persisted, ddl_context.clone()).unwrap();
+    recovered.recover().unwrap();
+    execute_procedure_until_done(&mut recovered).await;
+
+    assert!(
+        ddl_context
+            .table_metadata_manager
+            .get_dropped_table_by_id(table_id)
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[tokio::test]
 async fn test_legacy_unmarked_tombstone_can_be_undropped_and_purged() {
     let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
     let ddl_context = new_ddl_context(node_manager);

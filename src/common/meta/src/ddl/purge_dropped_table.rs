@@ -19,6 +19,7 @@ use common_procedure::error::{FromJsonSnafu, ToJsonSnafu};
 use common_procedure::{
     Context as ProcedureContext, LockKey, Procedure, Result as ProcedureResult, Status,
 };
+use common_time::util::current_time_millis;
 use common_wal::options::WalOptions;
 use serde::{Deserialize, Serialize};
 use snafu::{ResultExt, ensure};
@@ -46,11 +47,19 @@ pub struct PurgeDroppedTableProcedure {
 
 impl PurgeDroppedTableProcedure {
     pub const TYPE_NAME: &'static str = "metasrv-procedure::PurgeDroppedTable";
+    pub const EXPIRED_TYPE_NAME: &'static str = "metasrv-procedure::PurgeExpiredDroppedTable";
 
     pub fn new(task: PurgeDroppedTableTask, context: DdlContext) -> Self {
         Self {
             context,
             data: PurgeDroppedTableData::new(task),
+        }
+    }
+
+    pub fn new_if_expired(task: PurgeDroppedTableTask, context: DdlContext) -> Self {
+        Self {
+            context,
+            data: PurgeDroppedTableData::new_if_expired(task),
         }
     }
 
@@ -69,6 +78,20 @@ impl PurgeDroppedTableProcedure {
         let Some(dropped_table) = dropped_table else {
             return Ok(Status::done());
         };
+        if self.data.check_expired {
+            let retention_millis = self
+                .context
+                .soft_drop_retention
+                .and_then(|retention| i64::try_from(retention.as_millis()).ok());
+            let expires_at = dropped_table.retention_expires_at.or_else(|| {
+                dropped_table.dropped_at.and_then(|dropped_at| {
+                    retention_millis.and_then(|retention| dropped_at.checked_add(retention))
+                })
+            });
+            if !expires_at.is_some_and(|expires_at| expires_at <= current_time_millis()) {
+                return Ok(Status::done());
+            }
+        }
         ensure!(
             !is_metric_engine_logical_table(
                 &dropped_table.table_info_value.table_info,
@@ -129,10 +152,19 @@ impl PurgeDroppedTableProcedure {
 #[async_trait]
 impl Procedure for PurgeDroppedTableProcedure {
     fn type_name(&self) -> &str {
-        Self::TYPE_NAME
+        if self.data.check_expired {
+            Self::EXPIRED_TYPE_NAME
+        } else {
+            Self::TYPE_NAME
+        }
     }
 
     fn recover(&mut self) -> ProcedureResult<()> {
+        // Recovery reacquires TableLock, so automatic purges must re-read the
+        // tombstone in case it was undropped and dropped again while unlocked.
+        if self.data.check_expired {
+            self.data.state = PurgeDroppedTableState::Prepare;
+        }
         Ok(())
     }
 
@@ -164,6 +196,8 @@ pub struct PurgeDroppedTableData {
     table_route_value: Option<TableRouteValue>,
     #[serde(default)]
     region_wal_options: HashMap<RegionNumber, WalOptions>,
+    #[serde(default)]
+    check_expired: bool,
 }
 
 impl PurgeDroppedTableData {
@@ -176,6 +210,14 @@ impl PurgeDroppedTableData {
             table_info: None,
             table_route_value: None,
             region_wal_options: HashMap::new(),
+            check_expired: false,
+        }
+    }
+
+    fn new_if_expired(task: PurgeDroppedTableTask) -> Self {
+        Self {
+            check_expired: true,
+            ..Self::new(task)
         }
     }
 
