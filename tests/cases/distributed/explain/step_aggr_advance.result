@@ -37,7 +37,7 @@ tql explain (1752591864, 1752592164, '30s') max by (a, b, c) (max_over_time(aggr
 |               |                 Filter: aggr_optimize_not.greptime_timestamp >= TimestampMillisecond(1752591744001, None) AND aggr_optimize_not.greptime_timestamp <= TimestampMillisecond(1752592164000, None)                                                                         |
 |               |                   TableScan: aggr_optimize_not, partial_filters=[aggr_optimize_not.greptime_timestamp >= TimestampMillisecond(1752591744001, None), aggr_optimize_not.greptime_timestamp <= TimestampMillisecond(1752592164000, None)]                                  |
 |               | ]]                                                                                                                                                                                                                                                                      |
-| physical_plan | SortPreservingMergeExec: [a@0 ASC NULLS LAST, b@1 ASC NULLS LAST, c@2 ASC NULLS LAST, greptime_timestamp@3 ASC NULLS LAST]                                                                                                                                              |
+| physical_plan | MergeSortExec: [a@0 ASC NULLS LAST, b@1 ASC NULLS LAST, c@2 ASC NULLS LAST, greptime_timestamp@3 ASC NULLS LAST]                                                                                                                                                        |
 |               |   MergeScanExec: REDACTED
 |               |                                                                                                                                                                                                                                                                         |
 +---------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
@@ -54,7 +54,7 @@ tql analyze (1752591864, 1752592164, '30s') max by (a, b, c) (max_over_time(aggr
 +-+-+-+
 | stage | node | plan_|
 +-+-+-+
-| 0_| 0_|_SortPreservingMergeExec: [a@0 ASC NULLS LAST, b@1 ASC NULLS LAST, c@2 ASC NULLS LAST, greptime_timestamp@3 ASC NULLS LAST] REDACTED
+| 0_| 0_|_MergeSortExec: [a@0 ASC NULLS LAST, b@1 ASC NULLS LAST, c@2 ASC NULLS LAST, greptime_timestamp@3 ASC NULLS LAST] REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
 | 1_| 0_|_SortPreservingMergeExec: [a@0 ASC NULLS LAST, b@1 ASC NULLS LAST, c@2 ASC NULLS LAST, greptime_timestamp@3 ASC NULLS LAST] REDACTED
@@ -244,7 +244,7 @@ tql explain (1752591864, 1752592164, '30s') count by (a, b, c, d) (max_over_time
 |               |                 Filter: aggr_optimize_not.greptime_timestamp >= TimestampMillisecond(1752591744001, None) AND aggr_optimize_not.greptime_timestamp <= TimestampMillisecond(1752592164000, None)                                                                         |
 |               |                   TableScan: aggr_optimize_not, partial_filters=[aggr_optimize_not.greptime_timestamp >= TimestampMillisecond(1752591744001, None), aggr_optimize_not.greptime_timestamp <= TimestampMillisecond(1752592164000, None)]                                  |
 |               | ]]                                                                                                                                                                                                                                                                      |
-| physical_plan | SortPreservingMergeExec: [a@0 ASC NULLS LAST, b@1 ASC NULLS LAST, c@2 ASC NULLS LAST, d@3 ASC NULLS LAST, greptime_timestamp@4 ASC NULLS LAST]                                                                                                                          |
+| physical_plan | MergeSortExec: [a@0 ASC NULLS LAST, b@1 ASC NULLS LAST, c@2 ASC NULLS LAST, d@3 ASC NULLS LAST, greptime_timestamp@4 ASC NULLS LAST]                                                                                                                                    |
 |               |   MergeScanExec: REDACTED
 |               |                                                                                                                                                                                                                                                                         |
 +---------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
@@ -261,7 +261,7 @@ tql analyze (1752591864, 1752592164, '30s') count by (a, b, c, d) (max_over_time
 +-+-+-+
 | stage | node | plan_|
 +-+-+-+
-| 0_| 0_|_SortPreservingMergeExec: [a@0 ASC NULLS LAST, b@1 ASC NULLS LAST, c@2 ASC NULLS LAST, d@3 ASC NULLS LAST, greptime_timestamp@4 ASC NULLS LAST] REDACTED
+| 0_| 0_|_MergeSortExec: [a@0 ASC NULLS LAST, b@1 ASC NULLS LAST, c@2 ASC NULLS LAST, d@3 ASC NULLS LAST, greptime_timestamp@4 ASC NULLS LAST] REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
 | 1_| 0_|_SortPreservingMergeExec: [a@0 ASC NULLS LAST, b@1 ASC NULLS LAST, c@2 ASC NULLS LAST, d@3 ASC NULLS LAST, greptime_timestamp@4 ASC NULLS LAST] REDACTED
@@ -485,9 +485,10 @@ tql explain (1752591864, 1752592164, '30s') sum by (a, b, c) (rate(aggr_optimize
 |               |                 PromSeriesDivideExec: tags=["a", "b", "c", "d"]                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 |               |                   SortExec: expr=[a@0 ASC, b@1 ASC, c@2 ASC, d@3 ASC, greptime_timestamp@4 ASC], preserve_partitioning=[true]                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 |               |                     MergeScanExec: REDACTED
-|               |     SortExec: expr=[a@0 ASC NULLS LAST, b@1 ASC NULLS LAST, c@2 ASC NULLS LAST, greptime_timestamp@3 ASC NULLS LAST], preserve_partitioning=[true]                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-|               |       CooperativeExec                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
-|               |         MergeScanExec: REDACTED
+|               |     RepartitionExec: partitioning=REDACTED
+|               |       MergeSortExec: [a@0 ASC NULLS LAST, b@1 ASC NULLS LAST, c@2 ASC NULLS LAST, greptime_timestamp@3 ASC NULLS LAST]                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+|               |         SortExec: expr=[a@0 ASC NULLS LAST, b@1 ASC NULLS LAST, c@2 ASC NULLS LAST, greptime_timestamp@3 ASC NULLS LAST], preserve_partitioning=[true]                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+|               |           MergeScanExec: REDACTED
 |               |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 +---------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 
@@ -514,8 +515,9 @@ tql analyze (1752591864, 1752592164, '30s') sum by (a, b, c) (rate(aggr_optimize
 |_|_|_PromSeriesDivideExec: tags=["a", "b", "c", "d"] REDACTED
 |_|_|_SortExec: expr=[a@0 ASC, b@1 ASC, c@2 ASC, d@3 ASC, greptime_timestamp@4 ASC], preserve_partitioning=[true] REDACTED
 |_|_|_MergeScanExec: REDACTED
+|_|_|_RepartitionExec: partitioning=REDACTED
+|_|_|_MergeSortExec: [a@0 ASC NULLS LAST, b@1 ASC NULLS LAST, c@2 ASC NULLS LAST, greptime_timestamp@3 ASC NULLS LAST] REDACTED
 |_|_|_SortExec: expr=[a@0 ASC NULLS LAST, b@1 ASC NULLS LAST, c@2 ASC NULLS LAST, greptime_timestamp@3 ASC NULLS LAST], preserve_partitioning=[true] REDACTED
-|_|_|_CooperativeExec REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
 | 1_| 0_|_CooperativeExec REDACTED
@@ -974,7 +976,7 @@ EXPLAIN SELECT pk_col_1, pk_col_2, sum(val_col_1) FROM step_aggr_extended GROUP 
 |_|_Aggregate: groupBy=[[step_aggr_extended.pk_col_1, step_aggr_extended.pk_col_2]], aggr=[[sum(step_aggr_extended.val_col_1)]] |
 |_|_TableScan: step_aggr_extended_|
 |_| ]]_|
-| physical_plan | SortPreservingMergeExec: [pk_col_1@0 ASC NULLS LAST, pk_col_2@1 ASC NULLS LAST]_|
+| physical_plan | MergeSortExec: [pk_col_1@0 ASC NULLS LAST, pk_col_2@1 ASC NULLS LAST]_|
 |_|_MergeScanExec: REDACTED
 |_|_|
 +-+-+

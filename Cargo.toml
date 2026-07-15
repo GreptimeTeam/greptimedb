@@ -158,7 +158,7 @@ fs2 = "0.4"
 fst = "0.4.7"
 futures = "0.3"
 futures-util = "0.3"
-greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "4a69c9e75240a76afeb0796798085813669288f8" }
+greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "c6f92ee9e12ee7bd5ee3c0956b1c9caa39be3f76" }
 hex = "0.4"
 http = "1"
 humantime = "2.1"
@@ -198,7 +198,7 @@ paste = "1.0"
 pin-project = "1.0"
 pretty_assertions = "1.4.0"
 prometheus = { version = "0.14", features = ["process"] }
-promql-parser = { version = "0.7.3", features = ["ser"] }
+promql-parser = { version = "0.10.0", features = ["ser"] }
 prost = { version = "0.14", features = ["no-recursion-limit"] }
 prost-types = "0.14"
 raft-engine = { version = "0.4.1", default-features = false }

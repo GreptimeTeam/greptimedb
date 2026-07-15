@@ -17,6 +17,7 @@ use std::time::Duration;
 
 use cmd::options::GreptimeOptions;
 use common_base::memory_limit::MemoryLimit;
+use common_base::readable_size::ReadableSize;
 use common_config::{Configurable, DEFAULT_DATA_HOME, ENV_VAR_SEP};
 use common_options::datanode::{ClientOptions, DatanodeClientOptions};
 use common_telemetry::logging::{DEFAULT_LOGGING_DIR, DEFAULT_OTLP_HTTP_ENDPOINT, LoggingOptions};
@@ -92,6 +93,7 @@ fn test_load_datanode_example_config() {
             region_engine: vec![
                 RegionEngineConfig::Mito(MitoConfig {
                     auto_flush_interval: Duration::from_secs(3600),
+                    default_region_write_buffer_size: ReadableSize::mb(0),
                     write_cache_ttl: Some(Duration::from_secs(60 * 60 * 8)),
                     scan_memory_limit: MemoryLimit::Unlimited,
                     ..Default::default()
@@ -109,6 +111,7 @@ fn test_load_datanode_example_config() {
                 level: Some("info".to_string()),
                 dir: format!("{}/{}", DEFAULT_DATA_HOME, DEFAULT_LOGGING_DIR),
                 otlp_endpoint: Some(DEFAULT_OTLP_HTTP_ENDPOINT.to_string()),
+                otlp_export_protocol: Some(common_telemetry::logging::OtlpExportProtocol::Http),
                 tracing_sample_ratio: Some(Default::default()),
                 ..Default::default()
             },
@@ -148,6 +151,7 @@ fn test_load_frontend_example_config() {
                 level: Some("info".to_string()),
                 dir: format!("{}/{}", DEFAULT_DATA_HOME, DEFAULT_LOGGING_DIR),
                 otlp_endpoint: Some(DEFAULT_OTLP_HTTP_ENDPOINT.to_string()),
+                otlp_export_protocol: Some(common_telemetry::logging::OtlpExportProtocol::Http),
                 tracing_sample_ratio: Some(Default::default()),
                 ..Default::default()
             },
@@ -198,6 +202,7 @@ fn test_load_metasrv_example_config() {
                 dir: format!("{}/{}", DEFAULT_DATA_HOME, DEFAULT_LOGGING_DIR),
                 level: Some("info".to_string()),
                 otlp_endpoint: Some(DEFAULT_OTLP_HTTP_ENDPOINT.to_string()),
+                otlp_export_protocol: Some(common_telemetry::logging::OtlpExportProtocol::Http),
                 tracing_sample_ratio: Some(Default::default()),
                 ..Default::default()
             },
@@ -297,6 +302,7 @@ fn test_load_standalone_example_config() {
             region_engine: vec![
                 RegionEngineConfig::Mito(MitoConfig {
                     auto_flush_interval: Duration::from_secs(3600),
+                    default_region_write_buffer_size: ReadableSize::mb(0),
                     write_cache_ttl: Some(Duration::from_secs(60 * 60 * 8)),
                     scan_memory_limit: MemoryLimit::Unlimited,
                     ..Default::default()
@@ -314,6 +320,7 @@ fn test_load_standalone_example_config() {
                 level: Some("info".to_string()),
                 dir: format!("{}/{}", DEFAULT_DATA_HOME, DEFAULT_LOGGING_DIR),
                 otlp_endpoint: Some(DEFAULT_OTLP_HTTP_ENDPOINT.to_string()),
+                otlp_export_protocol: Some(common_telemetry::logging::OtlpExportProtocol::Http),
                 tracing_sample_ratio: Some(Default::default()),
                 ..Default::default()
             },

@@ -46,6 +46,7 @@ use common_procedure::ProcedureInfo;
 use common_recordbatch::SendableRecordBatchStream;
 use datafusion::error::DataFusionError;
 use datafusion::logical_expr::LogicalPlan;
+use datafusion::physical_plan::ExecutionPlan;
 use datatypes::schema::SchemaRef;
 use lazy_static::lazy_static;
 use paste::paste;
@@ -420,6 +421,10 @@ pub trait InformationTable {
 
     fn to_stream(&self, request: ScanRequest) -> Result<SendableRecordBatchStream>;
 
+    fn scan_plan(&self, _request: ScanRequest) -> Result<Option<Arc<dyn ExecutionPlan>>> {
+        Ok(None)
+    }
+
     fn table_type(&self) -> TableType {
         TableType::Temporary
     }
@@ -449,6 +454,10 @@ where
     fn to_stream(&self, request: ScanRequest) -> Result<SendableRecordBatchStream> {
         InformationTable::to_stream(self, request)
     }
+
+    fn scan_plan(&self, request: ScanRequest) -> Result<Option<Arc<dyn ExecutionPlan>>> {
+        InformationTable::scan_plan(self, request)
+    }
 }
 
 pub type InformationExtensionRef = Arc<dyn InformationExtension<Error = Error> + Send + Sync>;
@@ -475,6 +484,16 @@ pub trait InformationExtension {
         &self,
         request: DatanodeInspectRequest,
     ) -> std::result::Result<SendableRecordBatchStream, Self::Error>;
+
+    /// Builds a physical plan for datanode inspect if the extension can expose
+    /// the distributed fan-in semantics to DataFusion.
+    fn inspect_datanode_plan(
+        &self,
+        _request: DatanodeInspectRequest,
+        _schema: SchemaRef,
+    ) -> std::result::Result<Option<Arc<dyn ExecutionPlan>>, Self::Error> {
+        Ok(None)
+    }
 }
 
 /// The request to inspect the datanode.

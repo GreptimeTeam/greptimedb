@@ -237,6 +237,9 @@ impl RegionEngine for MetricEngine {
             }
             RegionRequest::Drop(drop) => self.inner.drop_region(region_id, drop).await,
             RegionRequest::Open(open) => self.inner.open_region(region_id, open).await,
+            RegionRequest::CleanUp(clean_up) => {
+                self.inner.clean_up_region(region_id, clean_up).await
+            }
             RegionRequest::Close(close) => self.inner.close_region(region_id, close).await,
             RegionRequest::Alter(alter) => {
                 self.inner
@@ -578,8 +581,8 @@ mod test {
     use store_api::metric_engine_consts::PHYSICAL_TABLE_METADATA_KEY;
     use store_api::mito_engine_options::WAL_OPTIONS_KEY;
     use store_api::region_request::{
-        PathType, RegionCloseRequest, RegionDropRequest, RegionFlushRequest, RegionOpenRequest,
-        RegionRequest,
+        PathType, RegionCleanUpRequest, RegionCloseRequest, RegionDropRequest, RegionFlushRequest,
+        RegionOpenRequest, RegionRequest,
     };
 
     use super::*;
@@ -597,7 +600,7 @@ mod test {
         engine
             .handle_request(
                 physical_region_id,
-                RegionRequest::Close(RegionCloseRequest {}),
+                RegionRequest::Close(RegionCloseRequest::default()),
             )
             .await
             .unwrap();
@@ -625,7 +628,7 @@ mod test {
         engine
             .handle_request(
                 nonexistent_region_id,
-                RegionRequest::Close(RegionCloseRequest {}),
+                RegionRequest::Close(RegionCloseRequest::default()),
             )
             .await
             .unwrap();
@@ -647,6 +650,58 @@ mod test {
             )
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_offline_cleanup_physical_region() {
+        let env = TestEnv::new().await;
+        env.init_metric_region().await;
+        let engine = env.metric();
+        let mito = env.mito();
+        let physical_region_id = env.default_physical_region_id();
+        let metadata_region_id = crate::utils::to_metadata_region_id(physical_region_id);
+        let data_region_id = crate::utils::to_data_region_id(physical_region_id);
+
+        engine
+            .handle_request(
+                physical_region_id,
+                RegionRequest::Close(RegionCloseRequest::default()),
+            )
+            .await
+            .unwrap();
+
+        let object_store = env.get_object_store().unwrap();
+        let metadata_region_dir = region_dir_from_table_dir(
+            &TestEnv::default_table_dir(),
+            metadata_region_id,
+            PathType::Metadata,
+        );
+        let data_region_dir = region_dir_from_table_dir(
+            &TestEnv::default_table_dir(),
+            data_region_id,
+            PathType::Data,
+        );
+        assert!(object_store.exists(&metadata_region_dir).await.unwrap());
+        assert!(object_store.exists(&data_region_dir).await.unwrap());
+
+        let physical_region_option = [(PHYSICAL_TABLE_METADATA_KEY.to_string(), String::new())]
+            .into_iter()
+            .collect();
+        let clean_up_request = RegionCleanUpRequest {
+            engine: METRIC_ENGINE_NAME.to_string(),
+            table_dir: TestEnv::default_table_dir(),
+            path_type: PathType::Bare,
+            options: physical_region_option,
+        };
+        engine
+            .handle_request(physical_region_id, RegionRequest::CleanUp(clean_up_request))
+            .await
+            .unwrap();
+
+        assert!(!mito.is_region_exists(metadata_region_id));
+        assert!(!mito.is_region_exists(data_region_id));
+        assert!(!object_store.exists(&metadata_region_dir).await.unwrap());
+        assert!(!object_store.exists(&data_region_dir).await.unwrap());
     }
 
     #[tokio::test]
@@ -729,7 +784,7 @@ mod test {
         metric_engine
             .handle_request(
                 physical_region_id,
-                RegionRequest::Close(RegionCloseRequest {}),
+                RegionRequest::Close(RegionCloseRequest::default()),
             )
             .await
             .unwrap();
@@ -821,7 +876,10 @@ mod test {
         // Closes all regions
         for region_id in logical_region_ids.iter().chain(physical_region_ids.iter()) {
             metric_engine
-                .handle_request(*region_id, RegionRequest::Close(RegionCloseRequest {}))
+                .handle_request(
+                    *region_id,
+                    RegionRequest::Close(RegionCloseRequest::default()),
+                )
                 .await
                 .unwrap();
         }

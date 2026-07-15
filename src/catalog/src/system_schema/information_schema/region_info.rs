@@ -18,6 +18,7 @@ use common_catalog::consts::INFORMATION_SCHEMA_REGION_INFO_TABLE_ID;
 use common_error::ext::BoxedError;
 use common_recordbatch::SendableRecordBatchStream;
 use common_recordbatch::adapter::AsyncRecordBatchStreamAdapter;
+use datafusion::physical_plan::ExecutionPlan;
 use datatypes::schema::SchemaRef;
 use snafu::ResultExt;
 use store_api::region_info::RegionInfoEntry;
@@ -82,5 +83,21 @@ impl InformationTable for InformationSchemaRegionInfo {
             schema,
             Box::pin(future),
         )))
+    }
+
+    fn scan_plan(&self, request: ScanRequest) -> Result<Option<Arc<dyn ExecutionPlan>>> {
+        let schema = if let Some(p) = request.projection_indices() {
+            Arc::new(self.schema.try_project(p).context(ProjectSchemaSnafu)?)
+        } else {
+            self.schema.clone()
+        };
+
+        let info_ext = utils::information_extension(&self.catalog_manager)?;
+        let req = DatanodeInspectRequest {
+            kind: DatanodeInspectKind::RegionInfo,
+            scan: request,
+        };
+
+        info_ext.inspect_datanode_plan(req, schema)
     }
 }

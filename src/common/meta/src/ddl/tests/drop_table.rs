@@ -14,19 +14,17 @@
 
 use std::assert_matches;
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::Arc;
 
-use api::region::RegionResponse;
 use api::v1::region::{RegionRequest, region_request};
 use async_trait::async_trait;
-use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
-use common_error::ext::{BoxedError, ErrorExt, StackError};
+use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, FILE_ENGINE};
+use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
-use common_procedure::Procedure;
+use common_procedure::{Procedure, StringKey};
 use common_procedure_test::{
     execute_procedure_until, execute_procedure_until_done, new_test_procedure_context,
 };
-use snafu::ResultExt;
 use store_api::region_engine::RegionRole;
 use store_api::storage::RegionId;
 use table::metadata::TableId;
@@ -44,7 +42,7 @@ use crate::ddl::test_util::{
 };
 use crate::ddl::undrop_table::UndropTableProcedure;
 use crate::ddl::{DetectingRegion, RegionFailureDetectorController, TableMetadata};
-use crate::error::{self, Error};
+use crate::error::Error;
 use crate::key::table_name::TableNameKey;
 use crate::key::table_route::TableRouteValue;
 use crate::kv_backend::memory::MemoryKvBackend;
@@ -293,16 +291,16 @@ async fn test_soft_drop_closes_regions_and_keeps_tombstone() {
         let Some(region_request::Body::Close(req)) = request.body else {
             unreachable!();
         };
-        requests.push((peer.id, req.region_id));
+        requests.push((peer.id, req.region_id, req.flush_on_close));
     }
     requests.sort_unstable();
     assert_eq!(
         requests,
         vec![
-            (1, RegionId::new(table_id, 1).as_u64()),
-            (1, RegionId::new(table_id, 2).as_u64()),
-            (2, RegionId::new(table_id, 1).as_u64()),
-            (2, RegionId::new(table_id, 2).as_u64()),
+            (1, RegionId::new(table_id, 1).as_u64(), true),
+            (1, RegionId::new(table_id, 2).as_u64(), false),
+            (2, RegionId::new(table_id, 1).as_u64(), false),
+            (2, RegionId::new(table_id, 2).as_u64(), true),
         ]
     );
     assert!(rx.try_recv().is_err());
@@ -742,6 +740,34 @@ async fn test_soft_drop_metric_logical_table_fails() {
 }
 
 #[tokio::test]
+async fn test_soft_drop_file_engine_table_fails() {
+    let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
+    let mut ddl_context = new_ddl_context(node_manager);
+    ddl_context.soft_drop_enabled = true;
+    let table_id = 1024;
+    let table_name = "foo";
+    let mut task = test_create_table_task(table_name, table_id);
+    task.table_info.meta.engine = FILE_ENGINE.to_string();
+    ddl_context
+        .table_metadata_manager
+        .create_table_metadata(
+            task.table_info.clone(),
+            TableRouteValue::physical(vec![]),
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+
+    let mut procedure = DropTableProcedure::new(
+        new_drop_table_task(table_name, table_id, false),
+        ddl_context,
+    );
+    let err = procedure.on_prepare().await.unwrap_err();
+
+    assert_eq!(err.status_code(), StatusCode::Unsupported);
+}
+
+#[tokio::test]
 async fn test_undrop_metric_logical_table_fails() {
     let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
     let ddl_context = new_ddl_context(node_manager);
@@ -873,6 +899,174 @@ async fn test_undrop_table_fails_when_live_name_is_created_after_prepare() {
 }
 
 #[tokio::test]
+async fn test_undrop_table_closes_opened_regions_when_restore_metadata_races_with_create() {
+    let (tx, mut rx) = mpsc::channel(8);
+    let datanode_handler = DatanodeWatcher::new(tx);
+    let node_manager = Arc::new(MockDatanodeManager::new(datanode_handler));
+    let detector_controller = Arc::new(RecordingRegionFailureDetectorController::default());
+    let mut ddl_context = new_ddl_context(node_manager);
+    ddl_context.soft_drop_enabled = true;
+    ddl_context.region_failure_detector_controller = detector_controller.clone();
+    let dropped_table_id = 1024;
+    let live_table_id = 1025;
+    let table_name = "foo";
+    let task = test_create_table_task(table_name, dropped_table_id);
+    ddl_context
+        .table_metadata_manager
+        .create_table_metadata(
+            task.table_info.clone(),
+            TableRouteValue::physical(vec![RegionRoute {
+                region: Region::new_test(RegionId::new(dropped_table_id, 1)),
+                leader_peer: Some(Peer::empty(1)),
+                follower_peers: vec![Peer::empty(2)],
+                leader_state: None,
+                leader_down_since: None,
+                write_route_policy: None,
+            }]),
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+    let mut drop_procedure = DropTableProcedure::new(
+        new_drop_table_task(table_name, dropped_table_id, false),
+        ddl_context.clone(),
+    );
+    execute_procedure_until_done(&mut drop_procedure).await;
+    while rx.try_recv().is_ok() {}
+    detector_controller.clear().await;
+
+    let mut procedure =
+        UndropTableProcedure::new(new_undrop_table_task(dropped_table_id), ddl_context.clone());
+    let ctx = new_test_procedure_context();
+    procedure.execute(&ctx).await.unwrap();
+    procedure.execute(&ctx).await.unwrap();
+
+    let mut opened_regions = HashSet::new();
+    for _ in 0..2 {
+        let (peer, request) = rx.try_recv().unwrap();
+        let Some(region_request::Body::Open(req)) = request.body else {
+            unreachable!();
+        };
+        opened_regions.insert((peer.id, req.region_id));
+    }
+    assert_eq!(
+        opened_regions,
+        HashSet::from([
+            (1, RegionId::new(dropped_table_id, 1).as_u64()),
+            (2, RegionId::new(dropped_table_id, 1).as_u64()),
+        ])
+    );
+    assert_eq!(
+        detector_controller.registered().await,
+        vec![(1, RegionId::new(dropped_table_id, 1))]
+    );
+
+    ddl_context
+        .table_metadata_manager
+        .create_table_metadata(
+            test_create_table_task(table_name, live_table_id).table_info,
+            TableRouteValue::physical(vec![]),
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+
+    let err = procedure.execute(&ctx).await.unwrap_err();
+    assert_eq!(err.status_code(), StatusCode::TableAlreadyExists);
+
+    let mut closed_regions = HashSet::new();
+    for _ in 0..2 {
+        let (peer, request) = rx.try_recv().unwrap();
+        let Some(region_request::Body::Close(req)) = request.body else {
+            unreachable!();
+        };
+        closed_regions.insert((peer.id, req.region_id));
+    }
+    assert_eq!(
+        closed_regions,
+        HashSet::from([
+            (1, RegionId::new(dropped_table_id, 1).as_u64()),
+            (2, RegionId::new(dropped_table_id, 1).as_u64()),
+        ])
+    );
+    assert!(rx.try_recv().is_err());
+    assert_eq!(
+        detector_controller.deregistered().await,
+        vec![(1, RegionId::new(dropped_table_id, 1))]
+    );
+
+    let live_table = ddl_context
+        .table_metadata_manager
+        .table_name_manager()
+        .get(TableNameKey::new(
+            DEFAULT_CATALOG_NAME,
+            DEFAULT_SCHEMA_NAME,
+            table_name,
+        ))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(live_table.table_id(), live_table_id);
+}
+
+#[tokio::test]
+async fn test_undrop_table_lock_key_includes_original_table_name_before_prepare() {
+    let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
+    let mut ddl_context = new_ddl_context(node_manager);
+    ddl_context.soft_drop_enabled = true;
+    let table_id = 1024;
+    let table_name = "foo";
+    let task = test_create_table_task(table_name, table_id);
+    ddl_context
+        .table_metadata_manager
+        .create_table_metadata(
+            task.table_info.clone(),
+            TableRouteValue::physical(vec![]),
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+    let mut drop_procedure = DropTableProcedure::new(
+        new_drop_table_task(table_name, table_id, false),
+        ddl_context.clone(),
+    );
+    execute_procedure_until_done(&mut drop_procedure).await;
+
+    let original_table_name = ddl_context
+        .table_metadata_manager
+        .get_dropped_table_by_id(table_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .table_name;
+    let procedure = UndropTableProcedure::new_with_original_table_name(
+        new_undrop_table_task(table_id),
+        ddl_context,
+        Some(original_table_name),
+    );
+
+    let keys = procedure
+        .lock_key()
+        .keys_to_lock()
+        .cloned()
+        .collect::<Vec<_>>();
+    assert!(
+        keys.iter().any(|key| matches!(
+            key,
+            StringKey::Exclusive(key) if key == "__table_name_lock/greptime.public.foo"
+        )),
+        "undrop lock keys should include the original table name: {keys:?}"
+    );
+    assert!(
+        keys.iter().any(|key| matches!(
+            key,
+            StringKey::Exclusive(key) if key == "__table_lock/1024"
+        )),
+        "undrop lock keys should include the dropped table id: {keys:?}"
+    );
+}
+
+#[tokio::test]
 async fn test_undrop_table_replayed_restore_metadata_is_idempotent() {
     let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
     let mut ddl_context = new_ddl_context(node_manager);
@@ -921,7 +1115,7 @@ async fn test_undrop_table_replayed_restore_metadata_is_idempotent() {
 }
 
 #[tokio::test]
-async fn test_purge_dropped_table_drops_regions_and_deletes_tombstone() {
+async fn test_purge_dropped_table_cleans_regions_offline_and_deletes_tombstone() {
     let (tx, mut rx) = mpsc::channel(8);
     let datanode_handler = DatanodeWatcher::new(tx);
     let node_manager = Arc::new(MockDatanodeManager::new(datanode_handler));
@@ -963,15 +1157,16 @@ async fn test_purge_dropped_table_drops_regions_and_deletes_tombstone() {
     execute_procedure_until_done(&mut procedure).await;
 
     let mut requests = Vec::new();
-    for _ in 0..4 {
+    for _ in 0..1 {
         let (peer, request) = rx.try_recv().unwrap();
         requests.push((peer.id, request.body.unwrap()));
     }
     requests.sort_unstable_by_key(|(peer_id, _)| *peer_id);
-    assert_matches!(requests[0].1, region_request::Body::Open(_));
-    assert_matches!(requests[1].1, region_request::Body::Drop(_));
-    assert_matches!(requests[2].1, region_request::Body::Open(_));
-    assert_matches!(requests[3].1, region_request::Body::Close(_));
+    let region_request::Body::CleanUp(req) = &requests[0].1 else {
+        unreachable!();
+    };
+    assert_eq!(requests[0].0, 1);
+    assert_eq!(req.region_id, RegionId::new(table_id, 1).as_u64());
     assert!(rx.try_recv().is_err());
     assert!(
         ddl_context
@@ -1050,117 +1245,11 @@ async fn test_purge_dropped_table_by_id_selects_tombstone_when_live_table_exists
     assert_eq!(live_table.table_id(), live_table_id);
 
     let (_, request) = rx.try_recv().unwrap();
-    let Some(region_request::Body::Open(req)) = request.body else {
-        unreachable!();
-    };
-    assert_eq!(req.region_id, RegionId::new(dropped_table_id, 1).as_u64());
-
-    let (_, request) = rx.try_recv().unwrap();
-    let Some(region_request::Body::Drop(req)) = request.body else {
+    let Some(region_request::Body::CleanUp(req)) = request.body else {
         unreachable!();
     };
     assert_eq!(req.region_id, RegionId::new(dropped_table_id, 1).as_u64());
     assert!(rx.try_recv().is_err());
-}
-
-#[tokio::test]
-async fn test_purge_dropped_table_replayed_open_regions_ignores_dropped_regions() {
-    let (tx, mut rx) = mpsc::channel(8);
-    let dropped_regions = Arc::new(StdMutex::new(HashSet::new()));
-    let datanode_handler = DatanodeWatcher::new(tx).with_handler({
-        let dropped_regions = dropped_regions.clone();
-        move |_peer, request| {
-            let Some(body) = request.body.as_ref() else {
-                return Ok(RegionResponse::new(0));
-            };
-            match body {
-                region_request::Body::Open(req)
-                    if dropped_regions.lock().unwrap().contains(&req.region_id) =>
-                {
-                    Err::<RegionResponse, _>(BoxedError::new(MockRegionNotFoundError))
-                        .context(error::ExternalSnafu)
-                }
-                region_request::Body::Drop(req) => {
-                    dropped_regions.lock().unwrap().insert(req.region_id);
-                    Ok(RegionResponse::new(0))
-                }
-                _ => Ok(RegionResponse::new(0)),
-            }
-        }
-    });
-    let node_manager = Arc::new(MockDatanodeManager::new(datanode_handler));
-    let mut ddl_context = new_ddl_context(node_manager);
-    ddl_context.soft_drop_enabled = true;
-    let table_id = 1024;
-    let table_name = "foo";
-    let task = test_create_table_task(table_name, table_id);
-    ddl_context
-        .table_metadata_manager
-        .create_table_metadata(
-            task.table_info.clone(),
-            TableRouteValue::physical(vec![RegionRoute {
-                region: Region::new_test(RegionId::new(table_id, 1)),
-                leader_peer: Some(Peer::empty(1)),
-                follower_peers: vec![],
-                leader_state: None,
-                leader_down_since: None,
-                write_route_policy: None,
-            }]),
-            HashMap::new(),
-        )
-        .await
-        .unwrap();
-    let mut drop_procedure = DropTableProcedure::new(
-        new_drop_table_task(table_name, table_id, false),
-        ddl_context.clone(),
-    );
-    execute_procedure_until_done(&mut drop_procedure).await;
-    while rx.try_recv().is_ok() {}
-
-    let mut procedure = PurgeDroppedTableProcedure::new(
-        new_purge_dropped_table_task(table_id),
-        ddl_context.clone(),
-    );
-    let ctx = new_test_procedure_context();
-    procedure.execute(&ctx).await.unwrap();
-    let open_regions_data = procedure.dump().unwrap();
-    procedure.execute(&ctx).await.unwrap();
-    procedure.execute(&ctx).await.unwrap();
-
-    let mut replayed =
-        PurgeDroppedTableProcedure::from_json(&open_regions_data, ddl_context.clone()).unwrap();
-    execute_procedure_until_done(&mut replayed).await;
-
-    assert!(
-        ddl_context
-            .table_metadata_manager
-            .get_dropped_table(&drop_procedure.data.task.table_name())
-            .await
-            .unwrap()
-            .is_none()
-    );
-}
-
-#[derive(Debug, snafu::Snafu)]
-#[snafu(display("mock region not found"))]
-struct MockRegionNotFoundError;
-
-impl StackError for MockRegionNotFoundError {
-    fn debug_fmt(&self, _: usize, _: &mut Vec<String>) {}
-
-    fn next(&self) -> Option<&dyn StackError> {
-        None
-    }
-}
-
-impl ErrorExt for MockRegionNotFoundError {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
-    fn status_code(&self) -> StatusCode {
-        StatusCode::RegionNotFound
-    }
 }
 
 #[tokio::test]

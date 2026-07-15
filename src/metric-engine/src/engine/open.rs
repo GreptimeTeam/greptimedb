@@ -22,14 +22,17 @@ use datafusion::common::HashMap;
 use mito2::engine::MITO_ENGINE_NAME;
 use snafu::{OptionExt, ResultExt};
 use store_api::region_engine::{BatchResponses, RegionEngine};
-use store_api::region_request::{AffectedRows, PathType, RegionOpenRequest, ReplayCheckpoint};
+use store_api::region_request::{
+    AffectedRows, PathType, RegionCleanUpRequest, RegionOpenRequest, RegionRequest,
+    ReplayCheckpoint,
+};
 use store_api::storage::RegionId;
 
 use crate::engine::MetricEngineInner;
 use crate::engine::create::region_options_for_metadata_region;
 use crate::engine::options::{PhysicalRegionOptions, set_data_region_options};
 use crate::error::{
-    BatchOpenMitoRegionSnafu, NoOpenRegionResultSnafu, OpenMitoRegionSnafu,
+    BatchOpenMitoRegionSnafu, CleanUpMitoRegionSnafu, NoOpenRegionResultSnafu, OpenMitoRegionSnafu,
     PhysicalRegionNotFoundSnafu, Result,
 };
 use crate::metrics::{LOGICAL_REGION_COUNT, PHYSICAL_REGION_COUNT};
@@ -105,7 +108,7 @@ impl MetricEngineInner {
             utils::to_metadata_region_id(physical_region_id),
             utils::to_data_region_id(physical_region_id)
         );
-        if let Err(err) = self.close_physical_region(physical_region_id).await {
+        if let Err(err) = self.close_physical_region(physical_region_id, false).await {
             error!(err; "Failed to close physical region {}", physical_region_id);
         }
     }
@@ -198,6 +201,94 @@ impl MetricEngineInner {
             // yet. Thus simply return `Ok` here to ignore all those errors.
             Ok(0)
         }
+    }
+
+    pub async fn clean_up_region(
+        &self,
+        region_id: RegionId,
+        request: RegionCleanUpRequest,
+    ) -> Result<AffectedRows> {
+        if request.is_physical_table() {
+            self.cleanup_physical_region_offline(region_id, request)
+                .await
+        } else {
+            Ok(0)
+        }
+    }
+
+    async fn cleanup_physical_region_offline(
+        &self,
+        region_id: RegionId,
+        request: RegionCleanUpRequest,
+    ) -> Result<AffectedRows> {
+        let metadata_region_id = utils::to_metadata_region_id(region_id);
+        let data_region_id = utils::to_data_region_id(region_id);
+        let (clean_up_metadata_region_request, clean_up_data_region_request) =
+            self.transform_clean_up_physical_region_request(request);
+        let _ = self
+            .mito
+            .handle_request(
+                metadata_region_id,
+                RegionRequest::CleanUp(clean_up_metadata_region_request),
+            )
+            .await
+            .context(CleanUpMitoRegionSnafu {
+                region_type: "metadata",
+            })?;
+        let data_region_response = self
+            .mito
+            .handle_request(
+                data_region_id,
+                RegionRequest::CleanUp(clean_up_data_region_request),
+            )
+            .await
+            .context(CleanUpMitoRegionSnafu {
+                region_type: "data",
+            })?;
+
+        if self.state.read().unwrap().exist_physical_region(region_id) {
+            self.state
+                .write()
+                .unwrap()
+                .remove_physical_region(region_id)?;
+            PHYSICAL_REGION_COUNT.dec();
+        }
+
+        Ok(data_region_response.affected_rows)
+    }
+
+    /// Transform the cleanup request to metadata region and data region cleanup requests.
+    ///
+    /// Returns:
+    /// - The cleanup request for metadata region.
+    /// - The cleanup request for data region.
+    fn transform_clean_up_physical_region_request(
+        &self,
+        request: RegionCleanUpRequest,
+    ) -> (RegionCleanUpRequest, RegionCleanUpRequest) {
+        let clean_up_metadata_region_request = RegionCleanUpRequest {
+            table_dir: request.table_dir.clone(),
+            path_type: PathType::Metadata,
+            options: region_options_for_metadata_region(&request.options),
+            engine: MITO_ENGINE_NAME.to_string(),
+        };
+
+        let mut data_region_options = request.options;
+        set_data_region_options(
+            &mut data_region_options,
+            self.config.sparse_primary_key_encoding,
+        );
+        let clean_up_data_region_request = RegionCleanUpRequest {
+            table_dir: request.table_dir,
+            path_type: PathType::Data,
+            options: data_region_options,
+            engine: MITO_ENGINE_NAME.to_string(),
+        };
+
+        (
+            clean_up_metadata_region_request,
+            clean_up_data_region_request,
+        )
     }
 
     /// Transform the open request to open metadata region and data region.

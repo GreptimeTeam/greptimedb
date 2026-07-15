@@ -52,45 +52,37 @@ pub enum QueryStatement {
 }
 
 impl QueryStatement {
-    pub fn post_process(&self, params: HashMap<String, String>) -> Result<QueryStatement> {
+    pub fn post_process(self, params: HashMap<String, String>) -> Result<QueryStatement> {
         match self {
             QueryStatement::Sql(_) => UnimplementedSnafu {
                 operation: "sql post process",
             }
             .fail(),
-            QueryStatement::Promql(eval_stmt, alias) => {
+            QueryStatement::Promql(mut eval_stmt, alias) => {
                 let node_name = match params.get("name") {
                     Some(name) => name.as_str(),
                     None => "",
                 };
-                let extension_node = Self::create_extension_node(node_name, &eval_stmt.expr);
-                Ok(QueryStatement::Promql(
-                    EvalStmt {
-                        expr: Extension(extension_node.unwrap()),
-                        start: eval_stmt.start,
-                        end: eval_stmt.end,
-                        interval: eval_stmt.interval,
-                        lookback_delta: eval_stmt.lookback_delta,
-                    },
-                    alias.clone(),
-                ))
+                let extension_node = Self::create_extension_node(node_name, eval_stmt.expr);
+                eval_stmt.expr = Extension(extension_node.unwrap());
+                Ok(QueryStatement::Promql(eval_stmt, alias))
             }
         }
     }
 
-    fn create_extension_node(node_name: &str, expr: &Expr) -> Option<NodeExtension> {
+    fn create_extension_node(node_name: &str, expr: Expr) -> Option<NodeExtension> {
         match node_name {
             ANALYZE_NODE_NAME => Some(NodeExtension {
-                expr: Arc::new(AnalyzeExpr { expr: expr.clone() }),
+                expr: Arc::new(AnalyzeExpr { expr }),
             }),
             ANALYZE_VERBOSE_NODE_NAME => Some(NodeExtension {
-                expr: Arc::new(AnalyzeVerboseExpr { expr: expr.clone() }),
+                expr: Arc::new(AnalyzeVerboseExpr { expr }),
             }),
             EXPLAIN_NODE_NAME => Some(NodeExtension {
-                expr: Arc::new(ExplainExpr { expr: expr.clone() }),
+                expr: Arc::new(ExplainExpr { expr }),
             }),
             EXPLAIN_VERBOSE_NODE_NAME => Some(NodeExtension {
-                expr: Arc::new(ExplainVerboseExpr { expr: expr.clone() }),
+                expr: Arc::new(ExplainVerboseExpr { expr }),
             }),
             _ => None,
         }
@@ -204,9 +196,10 @@ impl QueryLanguageParser {
     }
 
     pub(crate) fn apply_alias_extension(mut eval_stmt: EvalStmt, alias: &str) -> EvalStmt {
+        let expr = eval_stmt.expr;
         eval_stmt.expr = Extension(NodeExtension {
             expr: Arc::new(AliasExpr {
-                expr: eval_stmt.expr.clone(),
+                expr,
                 alias: alias.to_string(),
             }),
         });
@@ -263,6 +256,14 @@ macro_rules! define_node_ast_extension {
             fn children(&self) -> &[Expr] {
                 std::slice::from_ref(&self.expr)
             }
+
+            fn with_new_children(&self, children: Vec<Expr>) -> Arc<dyn ExtensionExpr> {
+                let mut iter = children.into_iter();
+                match (iter.next(), iter.next()) {
+                    (Some(expr), None) => Arc::new($name_expr { expr }),
+                    _ => Arc::new(self.clone()),
+                }
+            }
         }
 
         #[allow(rustdoc::broken_intra_doc_links)]
@@ -312,6 +313,16 @@ impl ExtensionExpr for AliasExpr {
     }
     fn children(&self) -> &[Expr] {
         std::slice::from_ref(&self.expr)
+    }
+    fn with_new_children(&self, children: Vec<Expr>) -> Arc<dyn ExtensionExpr> {
+        let mut iter = children.into_iter();
+        match (iter.next(), iter.next()) {
+            (Some(expr), None) => Arc::new(Self {
+                expr,
+                alias: self.alias.clone(),
+            }),
+            _ => Arc::new(self.clone()),
+        }
     }
 }
 #[derive(Debug, Clone)]

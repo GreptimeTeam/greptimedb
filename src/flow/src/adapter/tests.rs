@@ -61,3 +61,25 @@ pub fn new_test_table_info_with_name<I: IntoIterator<Item = u32>>(
 ///
 /// containing several default table info and schema
 fn mock_harness_flow_node_manager() {}
+
+#[test]
+fn test_expire_after_secs_to_millis() {
+    assert_eq!(expire_after_secs_to_millis(300).unwrap(), 300_000);
+    assert_eq!(expire_after_secs_to_millis(0).unwrap(), 0);
+
+    let max_secs = i64::MAX / 1_000;
+    assert_eq!(
+        expire_after_secs_to_millis(max_secs).unwrap(),
+        max_secs * 1_000
+    );
+}
+
+#[test]
+fn test_expire_after_secs_to_millis_invalid() {
+    let invalid_values = [i64::MAX / 1_000 + 1, -1];
+
+    for invalid_secs in invalid_values {
+        let error = expire_after_secs_to_millis(invalid_secs).unwrap_err();
+        assert!(matches!(error, Error::InvalidQuery { .. }));
+    }
+}

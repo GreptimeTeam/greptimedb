@@ -43,7 +43,14 @@ pub fn avg_over_time(_: &TimestampMillisecondArray, values: &Float64Array) -> Op
     display_name = prom_min_over_time
 )]
 pub fn min_over_time(_: &TimestampMillisecondArray, values: &Float64Array) -> Option<f64> {
-    compute::min(values)
+    let mut valid_values = values.iter().flatten();
+    let mut min = valid_values.next()?;
+    for value in valid_values {
+        if value < min || min.is_nan() {
+            min = value;
+        }
+    }
+    Some(min)
 }
 
 /// The maximum value of all points in the specified interval.
@@ -53,7 +60,14 @@ pub fn min_over_time(_: &TimestampMillisecondArray, values: &Float64Array) -> Op
     display_name = prom_max_over_time
 )]
 pub fn max_over_time(_: &TimestampMillisecondArray, values: &Float64Array) -> Option<f64> {
-    compute::max(values)
+    let mut valid_values = values.iter().flatten();
+    let mut max = valid_values.next()?;
+    for value in valid_values {
+        if value > max || max.is_nan() {
+            max = value;
+        }
+    }
+    Some(max)
 }
 
 /// The sum of all values in the specified interval.
@@ -182,6 +196,60 @@ pub fn stddev_over_time(_: &TimestampMillisecondArray, values: &Float64Array) ->
 mod test {
     use super::*;
     use crate::functions::test_util::simple_range_udf_runner;
+
+    fn assert_over_time_value(actual: Option<f64>, expected: Option<f64>) {
+        match (actual, expected) {
+            (Some(actual), Some(expected)) if expected.is_nan() => assert!(actual.is_nan()),
+            (Some(actual), Some(expected)) => assert_eq!(actual, expected),
+            (None, None) => {}
+            (actual, expected) => panic!("expected {expected:?}, got {actual:?}"),
+        }
+    }
+
+    fn assert_min_max(
+        values: Vec<Option<f64>>,
+        expected_min: Option<f64>,
+        expected_max: Option<f64>,
+    ) {
+        let timestamps = TimestampMillisecondArray::from(vec![0; values.len()]);
+        let values = Float64Array::from(values);
+
+        assert_over_time_value(min_over_time(&timestamps, &values), expected_min);
+        assert_over_time_value(max_over_time(&timestamps, &values), expected_max);
+    }
+
+    #[test]
+    fn min_max_over_time_ignore_ordinary_nan_when_finite_values_exist() {
+        let ordinary_nan = f64::from_bits(0x7ff8_0000_0000_0000);
+
+        assert_min_max(
+            vec![Some(ordinary_nan), Some(3.0), Some(-2.0)],
+            Some(-2.0),
+            Some(3.0),
+        );
+        assert_min_max(
+            vec![Some(3.0), Some(ordinary_nan), Some(-2.0)],
+            Some(-2.0),
+            Some(3.0),
+        );
+        assert_min_max(
+            vec![Some(-2.0), Some(3.0), Some(ordinary_nan)],
+            Some(-2.0),
+            Some(3.0),
+        );
+        assert_min_max(
+            vec![Some(ordinary_nan), Some(ordinary_nan)],
+            Some(ordinary_nan),
+            Some(ordinary_nan),
+        );
+        assert_min_max(
+            vec![Some(3.0), Some(-2.0), Some(1.0)],
+            Some(-2.0),
+            Some(3.0),
+        );
+        assert_min_max(vec![], None, None);
+        assert_min_max(vec![None, None], None, None);
+    }
 
     // build timestamp range and value range arrays for test
     fn build_test_range_arrays() -> (RangeArray, RangeArray) {

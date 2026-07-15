@@ -71,7 +71,11 @@ impl GrpcQueryHandler for Instance {
             self.plugins
                 .get::<PermissionCheckerRef>()
                 .as_ref()
-                .check_permission(ctx.current_user(), PermissionReq::GrpcRequest(&request))
+                .check_permission_with_context(
+                    ctx.current_user(),
+                    PermissionReq::GrpcRequest(&request),
+                    Some(&ctx.current_schema()),
+                )
                 .context(PermissionSnafu)?;
 
             let output = match request {
@@ -356,7 +360,14 @@ impl Instance {
                     plugins
                         .get::<PermissionCheckerRef>()
                         .as_ref()
-                        .check_permission(ctx.current_user(), PermissionReq::BulkInsert)
+                        .check_permission(
+                            ctx.current_user(),
+                            PermissionReq::BulkInsert {
+                                catalog: &table_name.catalog_name,
+                                schema: &table_name.schema_name,
+                                table: &table_name.table_name,
+                            },
+                        )
                         .context(PermissionSnafu)?;
 
                     // Resolve table reference

@@ -105,7 +105,10 @@ async fn test_engine_create_close_create_region_with_format(flat_format: bool) {
         .unwrap();
     // Close the region.
     engine
-        .handle_request(region_id, RegionRequest::Close(RegionCloseRequest {}))
+        .handle_request(
+            region_id,
+            RegionRequest::Close(RegionCloseRequest::default()),
+        )
         .await
         .unwrap();
     // Create the same region id again.
