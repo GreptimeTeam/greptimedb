@@ -26,6 +26,7 @@ RUN apt-get update \
         git \
         gzip \
         jq \
+        libprotobuf-dev \
         libssl-dev \
         mold \
         openssh-client \
@@ -71,7 +72,9 @@ USER runner
 RUN set -eu \
     && test "$(id -u)" = "1001" \
     && temporary_cargo_home="$(mktemp --directory)" \
-    && trap 'rm -rf "${temporary_cargo_home}"' 0 \
+    && temporary_proto_dir="" \
+    && cleanup() { rm -rf "${temporary_cargo_home}" "${temporary_proto_dir}"; } \
+    && trap cleanup 0 \
     && export CARGO_HOME="${temporary_cargo_home}" \
     && test "${RUSTUP_AUTO_INSTALL}" = "0" \
     && rustup --version \
@@ -81,4 +84,18 @@ RUN set -eu \
     && printf 'Active toolchain: %s\n' "${active_toolchain}" \
     && case "${active_toolchain}" in "${RUST_TOOLCHAIN}-x86_64-unknown-linux-gnu"|"${RUST_TOOLCHAIN}-x86_64-unknown-linux-gnu "*) ;; *) exit 1;; esac \
     && test ! -w /opt/rustup \
-    && test ! -w /opt/cargo/bin
+    && test ! -w /opt/cargo/bin \
+    && test -r /usr/include/google/protobuf/any.proto \
+    && test -r /usr/include/google/protobuf/empty.proto \
+    && temporary_proto_dir="$(mktemp --directory)" \
+    && printf '%s\n' \
+        'syntax = "proto3";' \
+        'package smoke;' \
+        'import "google/protobuf/any.proto";' \
+        'import "google/protobuf/empty.proto";' \
+        'message Smoke { google.protobuf.Any any = 1; google.protobuf.Empty empty = 2; }' \
+        > "${temporary_proto_dir}/smoke.proto" \
+    && protoc --proto_path="${temporary_proto_dir}" --proto_path=/usr/include \
+        --descriptor_set_out="${temporary_proto_dir}/smoke.pb" \
+        "${temporary_proto_dir}/smoke.proto" \
+    && test -s "${temporary_proto_dir}/smoke.pb"
