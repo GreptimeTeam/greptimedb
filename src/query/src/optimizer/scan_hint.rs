@@ -24,6 +24,7 @@ use datafusion_common::{Column, Result};
 use datafusion_expr::expr::Sort;
 use datafusion_expr::{Expr, LogicalPlan, utils};
 use datafusion_optimizer::{OptimizerConfig, OptimizerRule};
+use promql::extension_plan::InstantManipulate;
 use store_api::metric_engine_consts::DATA_SCHEMA_TSID_COLUMN_NAME;
 use store_api::storage::{TimeSeriesDistribution, TimeSeriesRowSelector};
 
@@ -99,6 +100,13 @@ impl ScanHintRule {
                                 group_by_cols,
                                 order_by_col,
                             );
+                        }
+
+                        if visitor
+                            .instant_last_row_scans
+                            .contains(&(adapter as *const DummyTableProvider as usize))
+                        {
+                            adapter.with_time_series_selector_hint(TimeSeriesRowSelector::LastRow);
                         }
 
                         #[cfg(feature = "vector_index")]
@@ -235,6 +243,10 @@ struct ScanHintVisitor {
     /// This field stores saved `group_by` columns when all aggregate functions are `last_value`
     /// and the `order_by` column which should be time index.
     ts_row_selector: Option<(HashSet<Column>, Column)>,
+    /// Nesting depth of single-evaluation PromQL instant selectors.
+    instant_selector_depth: usize,
+    /// Dummy providers scanned under a single-evaluation instant selector.
+    instant_last_row_scans: HashSet<usize>,
     #[cfg(feature = "vector_index")]
     vector_search: VectorSearchState,
 }
@@ -243,6 +255,13 @@ impl TreeNodeVisitor<'_> for ScanHintVisitor {
     type Node = LogicalPlan;
 
     fn f_down(&mut self, node: &Self::Node) -> Result<TreeNodeRecursion> {
+        if let LogicalPlan::Extension(extension) = node
+            && let Some(instant) = extension.node.as_any().downcast_ref::<InstantManipulate>()
+            && instant.is_single_evaluation()
+        {
+            self.instant_selector_depth += 1;
+        }
+
         #[cfg(feature = "vector_index")]
         if let LogicalPlan::Limit(limit) = node {
             // Track LIMIT so vector hint k can be derived within the same input chain.
@@ -349,6 +368,21 @@ impl TreeNodeVisitor<'_> for ScanHintVisitor {
             }
         }
 
+        if self.instant_selector_depth > 0
+            && let LogicalPlan::TableScan(table_scan) = node
+            && let Some(source) = table_scan
+                .source
+                .as_any()
+                .downcast_ref::<DefaultTableSource>()
+            && let Some(adapter) = source
+                .table_provider
+                .as_any()
+                .downcast_ref::<DummyTableProvider>()
+        {
+            self.instant_last_row_scans
+                .insert(adapter as *const DummyTableProvider as usize);
+        }
+
         #[cfg(feature = "vector_index")]
         if let LogicalPlan::Filter(filter) = node {
             self.vector_search.on_filter_enter(&filter.predicate);
@@ -364,6 +398,13 @@ impl TreeNodeVisitor<'_> for ScanHintVisitor {
     }
 
     fn f_up(&mut self, _node: &Self::Node) -> Result<TreeNodeRecursion> {
+        if let LogicalPlan::Extension(extension) = _node
+            && let Some(instant) = extension.node.as_any().downcast_ref::<InstantManipulate>()
+            && instant.is_single_evaluation()
+        {
+            self.instant_selector_depth -= 1;
+        }
+
         #[cfg(feature = "vector_index")]
         match _node {
             LogicalPlan::Limit(_) => {
@@ -392,7 +433,9 @@ impl TreeNodeVisitor<'_> for ScanHintVisitor {
 
 impl ScanHintVisitor {
     fn need_rewrite(&self) -> bool {
-        let base = self.order_expr.is_some() || self.ts_row_selector.is_some();
+        let base = self.order_expr.is_some()
+            || self.ts_row_selector.is_some()
+            || !self.instant_last_row_scans.is_empty();
         #[cfg(feature = "vector_index")]
         {
             base || self.vector_search.need_rewrite()
@@ -517,6 +560,70 @@ mod test {
 
         let scan_req = provider.scan_request();
         let _ = scan_req.series_row_selector.unwrap();
+    }
+
+    #[test]
+    fn single_evaluation_uses_last_row_only_for_instant_selector() {
+        let single_provider = Arc::new(mock_table_provider_with_tsid(RegionId::new(1, 1)));
+        let single_source = Arc::new(DefaultTableSource::new(single_provider.clone()));
+        let single_input = LogicalPlanBuilder::scan("single", single_source, None)
+            .unwrap()
+            .sort(vec![
+                col(DATA_SCHEMA_TSID_COLUMN_NAME).sort(true, true),
+                col("ts").sort(true, true),
+            ])
+            .unwrap()
+            .build()
+            .unwrap();
+        let single = LogicalPlan::Extension(datafusion_expr::logical_plan::Extension {
+            node: Arc::new(InstantManipulate::new(
+                1000,
+                1000,
+                300_000,
+                5_000,
+                "ts".to_string(),
+                vec![DATA_SCHEMA_TSID_COLUMN_NAME.to_string()],
+                Some("v0".to_string()),
+                single_input,
+            )),
+        });
+
+        let range_provider = Arc::new(mock_table_provider(RegionId::new(2, 1)));
+        let range_source = Arc::new(DefaultTableSource::new(range_provider.clone()));
+        let range_input = LogicalPlanBuilder::scan("range", range_source, None)
+            .unwrap()
+            .build()
+            .unwrap();
+        let range = LogicalPlan::Extension(datafusion_expr::logical_plan::Extension {
+            node: Arc::new(InstantManipulate::new(
+                1000,
+                2000,
+                300_000,
+                5_000,
+                "ts".to_string(),
+                vec!["k0".to_string()],
+                Some("v0".to_string()),
+                range_input,
+            )),
+        });
+
+        ScanHintRule
+            .rewrite(single, &OptimizerContext::default())
+            .unwrap();
+        ScanHintRule
+            .rewrite(range, &OptimizerContext::default())
+            .unwrap();
+
+        let single_request = single_provider.scan_request();
+        assert_eq!(
+            Some(TimeSeriesRowSelector::LastRow),
+            single_request.series_row_selector
+        );
+        assert_eq!(
+            Some(TimeSeriesDistribution::PerSeries),
+            single_request.distribution
+        );
+        assert_eq!(None, range_provider.scan_request().series_row_selector);
     }
 
     #[test]

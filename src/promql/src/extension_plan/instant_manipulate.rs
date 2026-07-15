@@ -222,6 +222,11 @@ impl InstantManipulate {
         "InstantManipulate"
     }
 
+    /// Returns whether this plan evaluates exactly one timestamp.
+    pub fn is_single_evaluation(&self) -> bool {
+        self.start == self.end
+    }
+
     fn resolve_tag_columns(input: &LogicalPlan, tag_columns: &[String]) -> Vec<String> {
         if !tag_columns.is_empty() {
             return tag_columns.to_vec();
