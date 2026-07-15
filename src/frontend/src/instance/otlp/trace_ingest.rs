@@ -31,9 +31,9 @@ use pipeline::{GreptimePipelineParams, PipelineWay};
 use servers::error::{self, Result as ServerResult};
 use servers::otlp;
 use servers::otlp::coerce::trace_value_datatype;
+use servers::otlp::trace::TraceAuxData;
 use servers::otlp::trace::span::{TraceSpan, TraceSpanGroup};
 use servers::otlp::trace::v1::{TraceBatchSchema, TraceBinaryType, TraceRetryColumns};
-use servers::otlp::trace::{SERVICE_NAME_COLUMN, TraceAuxData};
 use servers::query_handler::{PipelineHandlerRef, TraceIngestOutcome};
 use session::context::QueryContextRef;
 use snafu::{IntoError, ResultExt};
@@ -88,16 +88,23 @@ struct TraceIngestState {
     failure_messages: Vec<String>,
 }
 
-/// A v1 chunk request plus the metadata needed for span-level fallback.
-struct TraceChunkInsert {
-    span_metadata: Vec<TraceSpanMetadata>,
-    request: RowInsertRequest,
-    retry_columns: TraceRetryColumns,
-    schema_prepared: bool,
-    span_fallback_only: bool,
+/// How a v1 chunk should be reconciled when it is written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TraceChunkSchemaState {
+    Prepared,
+    ReconcilePerChunk,
+    SpanFallbackOnly,
 }
 
-/// Sparse retry representation of a failed v1 trace chunk.
+impl TraceChunkSchemaState {
+    fn mark_for_reconcile(&mut self) {
+        if matches!(self, Self::Prepared) {
+            *self = Self::ReconcilePerChunk;
+        }
+    }
+}
+
+/// Sparse representation retained for a v1 trace chunk.
 struct TraceChunkRetry {
     table_name: String,
     schema: Vec<ColumnSchema>,
@@ -159,17 +166,13 @@ impl TraceSpanMetadata {
 
 impl TraceChunkRetry {
     fn try_new(
-        request: &RowInsertRequest,
+        table_name: String,
+        rows: Rows,
         span_metadata: Vec<TraceSpanMetadata>,
         retry_columns: TraceRetryColumns,
     ) -> ServerResult<Self> {
-        let Some(rows) = request.rows.as_ref() else {
-            return error::InternalSnafu {
-                err_msg: "v1 trace main-table request has no rows".to_string(),
-            }
-            .fail();
-        };
-        let row_count = rows.rows.len();
+        let Rows { schema, rows } = rows;
+        let row_count = rows.len();
         if row_count != span_metadata.len() {
             return error::InternalSnafu {
                 err_msg: format!(
@@ -181,19 +184,15 @@ impl TraceChunkRetry {
             .fail();
         }
 
-        let retry_columns_by_index = rows
-            .schema
+        let retry_columns_by_index = schema
             .iter()
             .map(|column| retry_columns.get(&column.column_name))
             .collect::<Vec<_>>();
-        let mut fixed_columns = Vec::with_capacity(rows.schema.len());
-        let mut sparse_columns = vec![Vec::new(); rows.rows.len()];
-        for (column_index, column) in rows.schema.iter().enumerate() {
-            if !is_sparse_trace_column(&column.column_name) {
+        let mut fixed_columns = Vec::with_capacity(schema.len());
+        let mut sparse_columns = vec![Vec::new(); rows.len()];
+        for (column_index, retry_column) in retry_columns_by_index.iter().enumerate() {
+            let Some(retry_column) = retry_column else {
                 fixed_columns.push(column_index);
-                continue;
-            }
-            let Some(retry_column) = retry_columns_by_index[column_index] else {
                 continue;
             };
             for present_row in &retry_column.present_rows {
@@ -203,14 +202,15 @@ impl TraceChunkRetry {
             }
         }
 
-        let mut retry_rows = Vec::with_capacity(rows.rows.len());
-        for (row_index, (row, span_metadata)) in rows.rows.iter().zip(span_metadata).enumerate() {
-            if rows.schema.len() != row.values.len() {
+        let mut retry_rows = Vec::with_capacity(rows.len());
+        for (row_index, (mut row, span_metadata)) in rows.into_iter().zip(span_metadata).enumerate()
+        {
+            if row.values.len() > schema.len() {
                 return error::InternalSnafu {
                     err_msg: format!(
-                        "trace schema column count {} does not match row value count {}",
-                        rows.schema.len(),
-                        row.values.len()
+                        "trace row column count {} exceeds schema column count {}",
+                        row.values.len(),
+                        schema.len()
                     ),
                 }
                 .fail();
@@ -224,8 +224,12 @@ impl TraceChunkRetry {
 
             let mut values = Vec::with_capacity(selected_columns.len());
             for column_index in selected_columns {
-                let column = &rows.schema[column_index];
-                let value = &row.values[column_index];
+                let column = &schema[column_index];
+                let value = row
+                    .values
+                    .get_mut(column_index)
+                    .map(std::mem::take)
+                    .unwrap_or_default();
                 let value_type = value.value_data.as_ref().and_then(trace_value_datatype);
                 let binary_type = if value_type == Some(ColumnDataType::Binary) {
                     retry_columns_by_index[column_index].and_then(|retry_column| {
@@ -248,7 +252,7 @@ impl TraceChunkRetry {
                 });
                 values.push(TraceRetryValue {
                     column_index,
-                    value: value.clone(),
+                    value,
                     schema_type,
                 });
             }
@@ -259,9 +263,37 @@ impl TraceChunkRetry {
         }
 
         Ok(Self {
-            table_name: request.table_name.clone(),
-            schema: rows.schema.clone(),
+            table_name,
+            schema,
             rows: retry_rows,
+        })
+    }
+
+    fn to_request(&self) -> ServerResult<RowInsertRequest> {
+        let mut rows = Vec::with_capacity(self.rows.len());
+        for retry_row in &self.rows {
+            let mut values = vec![Value::default(); self.schema.len()];
+            for retry_value in &retry_row.values {
+                let Some(value) = values.get_mut(retry_value.column_index) else {
+                    return error::InternalSnafu {
+                        err_msg: format!(
+                            "trace retry column index {} is out of bounds",
+                            retry_value.column_index
+                        ),
+                    }
+                    .fail();
+                };
+                *value = retry_value.value.clone();
+            }
+            rows.push(api::v1::Row { values });
+        }
+
+        Ok(RowInsertRequest {
+            table_name: self.table_name.clone(),
+            rows: Some(Rows {
+                schema: self.schema.clone(),
+                rows,
+            }),
         })
     }
 
@@ -333,12 +365,6 @@ struct TraceBatchColumnObservation {
     concrete_type: ConcreteDataType,
 }
 
-/// An atomic column rewrite prepared for one trace chunk.
-struct PreparedTraceChunkRewrite {
-    chunk_index: usize,
-    rewrite: PreparedTraceColumnRewrites,
-}
-
 /// Maps incompatible columns to the chunk indexes that must use fallback.
 type TraceSchemaExclusions = HashMap<String, HashSet<usize>>;
 
@@ -364,21 +390,18 @@ impl TraceRequestSchema {
     fn observe_batch_schema(
         &mut self,
         batch_index: usize,
-        request: &RowInsertRequest,
+        schema: &[ColumnSchema],
         batch_schema: &TraceBatchSchema,
     ) {
-        let Some(rows) = request.rows.as_ref() else {
-            return;
-        };
-        for schema in &rows.schema {
-            if batch_schema.has_incompatible_logical_types_for(&schema.column_name) {
+        for column in schema {
+            if batch_schema.has_incompatible_logical_types_for(&column.column_name) {
                 continue;
             }
-            let observed_types = batch_schema.value_types(&schema.column_name);
-            self.observe_trace_column(batch_index, schema, None);
+            let observed_types = batch_schema.value_types(&column.column_name);
+            self.observe_trace_column(batch_index, column, None);
             if let Some(observed_types) = observed_types {
                 for value_type in observed_types {
-                    self.observe_trace_column(batch_index, schema, Some(*value_type));
+                    self.observe_trace_column(batch_index, column, Some(*value_type));
                 }
             }
         }
@@ -580,11 +603,13 @@ impl TraceRequestSchema {
         pending_rewrites
     }
 
-    fn remove_batches(&mut self, batch_indexes: &HashSet<usize>) {
+    fn remove_observations(&mut self, exclusions: &TraceSchemaExclusions) {
         for column in &mut self.columns {
-            column
-                .batches
-                .retain(|batch_index, _| !batch_indexes.contains(batch_index));
+            if let Some(batch_indexes) = exclusions.get(&column.schema.column_name) {
+                column
+                    .batches
+                    .retain(|batch_index, _| !batch_indexes.contains(batch_index));
+            }
             column.target_type = None;
         }
         self.columns.retain(|column| !column.batches.is_empty());
@@ -596,6 +621,7 @@ impl TraceRequestSchema {
         }
     }
 
+    #[cfg(test)]
     fn resolved_target_types(&self) -> Vec<Option<ColumnDataType>> {
         self.columns
             .iter()
@@ -760,35 +786,40 @@ impl Instance {
 
         if is_trace_v1_model {
             let mut request_schema = TraceRequestSchema::default();
-            let mut chunk_inserts = Vec::new();
-            for group in groups {
-                for chunk in chunk_owned(group.spans, self.trace_ingest_chunk_size) {
-                    let batch_index = chunk_inserts.len();
-                    let span_metadata = chunk.iter().map(TraceSpanMetadata::from).collect();
-                    let (request, batch_schema) =
-                        otlp::trace::v1::v1_to_grpc_main_insert_requests_with_schema(
-                            chunk,
-                            ingest_ctx.table_name,
-                        )?;
-                    let span_fallback_only = batch_schema.has_incompatible_logical_types();
-                    if !span_fallback_only {
-                        request_schema.observe_batch_schema(batch_index, &request, &batch_schema);
-                    }
-                    chunk_inserts.push(TraceChunkInsert {
-                        span_metadata,
-                        request,
-                        retry_columns: batch_schema.into_retry_columns(),
-                        schema_prepared: !span_fallback_only,
-                        span_fallback_only,
-                    });
-                }
+            let mut chunks = Vec::new();
+            let mut chunk_states = Vec::new();
+            // Convert each chunk once, then retain only its sparse values while
+            // request-wide schema planning runs.
+            for chunk in groups
+                .into_iter()
+                .flat_map(|group| chunk_owned(group.spans, self.trace_ingest_chunk_size))
+            {
+                let batch_index = chunks.len();
+                let span_metadata = chunk.iter().map(TraceSpanMetadata::from).collect();
+                let (table_data, batch_schema) =
+                    otlp::trace::v1::v1_to_main_table_data_with_schema(chunk)?;
+                let schema_state = if batch_schema.has_incompatible_logical_types() {
+                    TraceChunkSchemaState::SpanFallbackOnly
+                } else {
+                    TraceChunkSchemaState::Prepared
+                };
+                let (schema, rows) = table_data.into_schema_and_rows();
+                request_schema.observe_batch_schema(batch_index, &schema, &batch_schema);
+                chunks.push(TraceChunkRetry::try_new(
+                    ingest_ctx.table_name.to_string(),
+                    Rows { schema, rows },
+                    span_metadata,
+                    batch_schema.into_retry_columns(),
+                )?);
+                chunk_states.push(schema_state);
             }
 
-            if !chunk_inserts.is_empty() {
+            if !chunks.is_empty() {
                 self.ingest_trace_v1_prepared_chunks(
                     &ingest_ctx,
                     request_schema,
-                    chunk_inserts,
+                    chunks,
+                    chunk_states,
                     main_ctx.clone(),
                     &mut ingest_state,
                 )
@@ -1002,7 +1033,8 @@ impl Instance {
         &self,
         ingest_ctx: &TraceChunkIngestContext<'_>,
         mut request_schema: TraceRequestSchema,
-        mut chunk_inserts: Vec<TraceChunkInsert>,
+        chunks: Vec<TraceChunkRetry>,
+        mut chunk_states: Vec<TraceChunkSchemaState>,
         ctx: QueryContextRef,
         ingest_state: &mut TraceIngestState,
     ) -> ServerResult<()> {
@@ -1010,22 +1042,20 @@ impl Instance {
             .prepare_trace_v1_request_schema(
                 ingest_ctx.table_name,
                 &mut request_schema,
-                &mut chunk_inserts,
+                &chunks,
+                &mut chunk_states,
                 &ctx,
             )
             .await
         {
             match Self::classify_trace_chunk_failure(err.status_code()) {
                 ChunkFailureReaction::RetryPerSpan => {
-                    for chunk_insert in &mut chunk_inserts {
-                        chunk_insert.schema_prepared = false;
+                    for state in &mut chunk_states {
+                        state.mark_for_reconcile();
                     }
                 }
                 ChunkFailureReaction::DiscardChunk => {
-                    let span_count = chunk_inserts
-                        .iter()
-                        .map(|chunk_insert| chunk_insert.span_metadata.len())
-                        .sum::<usize>();
+                    let span_count = chunks.iter().map(|chunk| chunk.rows.len()).sum::<usize>();
                     ingest_state.outcome.rejected_spans += span_count;
                     Self::push_trace_failure_message(
                         &mut ingest_state.failure_messages,
@@ -1042,9 +1072,17 @@ impl Instance {
             }
         }
 
-        for chunk_insert in chunk_inserts {
-            self.ingest_trace_v1_chunk(chunk_insert, ctx.clone(), ingest_state)
-                .await?;
+        for (batch_index, (retry, schema_state)) in chunks.into_iter().zip(chunk_states).enumerate()
+        {
+            self.ingest_trace_v1_chunk(
+                &request_schema,
+                batch_index,
+                retry,
+                schema_state,
+                ctx.clone(),
+                ingest_state,
+            )
+            .await?;
         }
 
         Ok(())
@@ -1052,22 +1090,14 @@ impl Instance {
 
     async fn ingest_trace_v1_chunk(
         &self,
-        chunk_insert: TraceChunkInsert,
+        request_schema: &TraceRequestSchema,
+        batch_index: usize,
+        retry: TraceChunkRetry,
+        mut schema_state: TraceChunkSchemaState,
         ctx: QueryContextRef,
         ingest_state: &mut TraceIngestState,
     ) -> ServerResult<()> {
-        let TraceChunkInsert {
-            span_metadata,
-            request,
-            retry_columns,
-            schema_prepared,
-            span_fallback_only,
-        } = chunk_insert;
-
-        // Keep only present dynamic values in the retry copy. The main request is
-        // dense and can be much larger when spans use different attribute keys.
-        let retry = TraceChunkRetry::try_new(&request, span_metadata, retry_columns)?;
-        if span_fallback_only {
+        if schema_state == TraceChunkSchemaState::SpanFallbackOnly {
             Self::push_trace_failure_message(
                 &mut ingest_state.failure_messages,
                 ChunkFailureReaction::RetryPerSpan.as_metric_label(),
@@ -1078,18 +1108,27 @@ impl Instance {
                 .await;
         }
 
+        let mut request = retry.to_request()?;
+        let _ = Self::prepare_trace_v1_chunk_rewrite(
+            request_schema,
+            batch_index,
+            &mut request,
+            &mut schema_state,
+        )?;
         let span_count = retry.rows.len();
         let requests = RowInsertRequests {
             inserts: vec![request],
         };
-        let result = if schema_prepared {
-            self.handle_trace_inserts(requests, ctx.clone())
+        let result = match schema_state {
+            TraceChunkSchemaState::Prepared => self
+                .handle_trace_inserts(requests, ctx.clone())
                 .await
                 .map_err(BoxedError::new)
-                .context(error::ExecuteGrpcQuerySnafu)
-        } else {
-            self.insert_trace_requests(requests, true, ctx.clone())
-                .await
+                .context(error::ExecuteGrpcQuerySnafu),
+            TraceChunkSchemaState::ReconcilePerChunk | TraceChunkSchemaState::SpanFallbackOnly => {
+                self.insert_trace_requests(requests, true, ctx.clone())
+                    .await
+            }
         };
 
         match result {
@@ -1241,7 +1280,8 @@ impl Instance {
         &self,
         table_name: &str,
         request_schema: &mut TraceRequestSchema,
-        chunk_inserts: &mut [TraceChunkInsert],
+        chunks: &[TraceChunkRetry],
+        chunk_states: &mut [TraceChunkSchemaState],
         ctx: &QueryContextRef,
     ) -> ServerResult<()> {
         loop {
@@ -1257,26 +1297,27 @@ impl Instance {
                 TraceRequestSchemaPlan::IncompatibleObservations(exclusions) => {
                     Self::exclude_trace_v1_schema_observations(
                         request_schema,
-                        chunk_inserts,
+                        chunk_states,
                         &exclusions,
                     );
                     continue;
                 }
             };
             if pre_alter.requires_ddl() {
-                // Failed batches must not contribute columns to persistent DDL.
-                let (mut prepared_rewrites, exclusions) =
-                    Self::prepare_trace_v1_chunk_rewrites(request_schema, chunk_inserts)?;
+                let exclusions = Self::prevalidate_trace_v1_chunk_rewrites(
+                    request_schema,
+                    chunks,
+                    chunk_states,
+                )?;
                 if !exclusions.is_empty() {
                     Self::exclude_trace_v1_schema_observations(
                         request_schema,
-                        chunk_inserts,
+                        chunk_states,
                         &exclusions,
                     );
                     continue;
                 }
 
-                let prevalidated_targets = request_schema.resolved_target_types();
                 self.apply_trace_v1_pre_alter(ctx, table_name, pre_alter)
                     .await?;
                 let final_plan = self
@@ -1287,91 +1328,85 @@ impl Instance {
                     TraceRequestSchemaPlan::Ready(final_plan) if !final_plan.requires_ddl()
                 );
                 if !schema_converged {
-                    for chunk_insert in chunk_inserts.iter_mut() {
-                        chunk_insert.schema_prepared = false;
+                    for state in chunk_states.iter_mut() {
+                        state.mark_for_reconcile();
                     }
                     return Ok(());
                 }
 
-                let targets_unchanged =
-                    prevalidated_targets == request_schema.resolved_target_types();
-                if !targets_unchanged {
-                    prepared_rewrites =
-                        Self::prepare_trace_v1_chunk_rewrites(request_schema, chunk_inserts)?.0;
-                }
-                Self::apply_prepared_trace_v1_chunk_rewrites(chunk_inserts, prepared_rewrites);
                 return Ok(());
             }
 
-            let (prepared_rewrites, _) =
-                Self::prepare_trace_v1_chunk_rewrites(request_schema, chunk_inserts)?;
-            Self::apply_prepared_trace_v1_chunk_rewrites(chunk_inserts, prepared_rewrites);
             return Ok(());
         }
     }
 
-    fn prepare_trace_v1_chunk_rewrites(
+    fn prevalidate_trace_v1_chunk_rewrites(
         request_schema: &TraceRequestSchema,
-        chunk_inserts: &mut [TraceChunkInsert],
-    ) -> ServerResult<(Vec<PreparedTraceChunkRewrite>, TraceSchemaExclusions)> {
-        let mut prepared_rewrites = Vec::new();
+        chunks: &[TraceChunkRetry],
+        chunk_states: &mut [TraceChunkSchemaState],
+    ) -> ServerResult<TraceSchemaExclusions> {
         let mut exclusions = HashMap::<String, HashSet<usize>>::new();
-        for (chunk_index, chunk_insert) in chunk_inserts.iter_mut().enumerate() {
-            let apply_rewrites = chunk_insert.schema_prepared;
-            match request_schema.prepare_request_rewrite(chunk_index, &chunk_insert.request) {
-                Ok(Some(rewrite)) if apply_rewrites => {
-                    prepared_rewrites.push(PreparedTraceChunkRewrite {
-                        chunk_index,
-                        rewrite,
-                    })
-                }
-                Ok(_) => {}
-                Err(failure) => {
-                    if !matches!(
-                        Self::classify_trace_chunk_failure(failure.error.status_code()),
-                        ChunkFailureReaction::RetryPerSpan
-                    ) {
-                        return Err(failure.error);
-                    }
-                    chunk_insert.schema_prepared = false;
-                    exclusions
-                        .entry(failure.column_name)
-                        .or_default()
-                        .insert(chunk_index);
-                }
+        for (batch_index, (chunk, state)) in chunks.iter().zip(chunk_states).enumerate() {
+            if *state != TraceChunkSchemaState::Prepared {
+                continue;
+            }
+            let mut request = chunk.to_request()?;
+            if let Some(column_name) = Self::prepare_trace_v1_chunk_rewrite(
+                request_schema,
+                batch_index,
+                &mut request,
+                state,
+            )? {
+                exclusions
+                    .entry(column_name)
+                    .or_default()
+                    .insert(batch_index);
             }
         }
-        Ok((prepared_rewrites, exclusions))
+        Ok(exclusions)
+    }
+
+    fn prepare_trace_v1_chunk_rewrite(
+        request_schema: &TraceRequestSchema,
+        batch_index: usize,
+        request: &mut RowInsertRequest,
+        state: &mut TraceChunkSchemaState,
+    ) -> ServerResult<Option<String>> {
+        if *state != TraceChunkSchemaState::Prepared {
+            return Ok(None);
+        }
+
+        match request_schema.prepare_request_rewrite(batch_index, request) {
+            Ok(Some(rewrite)) => {
+                TraceRequestSchema::apply_request_rewrite(request, rewrite);
+                Ok(None)
+            }
+            Ok(None) => Ok(None),
+            Err(failure) => {
+                if !matches!(
+                    Self::classify_trace_chunk_failure(failure.error.status_code()),
+                    ChunkFailureReaction::RetryPerSpan
+                ) {
+                    return Err(failure.error);
+                }
+                state.mark_for_reconcile();
+                Ok(Some(failure.column_name))
+            }
+        }
     }
 
     fn exclude_trace_v1_schema_observations(
         request_schema: &mut TraceRequestSchema,
-        chunk_inserts: &mut [TraceChunkInsert],
+        chunk_states: &mut [TraceChunkSchemaState],
         exclusions: &TraceSchemaExclusions,
     ) {
-        let batch_indexes = exclusions
-            .values()
-            .flatten()
-            .copied()
-            .collect::<HashSet<_>>();
-        for batch_index in &batch_indexes {
-            if let Some(chunk_insert) = chunk_inserts.get_mut(*batch_index) {
-                chunk_insert.schema_prepared = false;
+        for batch_index in exclusions.values().flatten() {
+            if let Some(state) = chunk_states.get_mut(*batch_index) {
+                state.mark_for_reconcile();
             }
         }
-        request_schema.remove_batches(&batch_indexes);
-    }
-
-    fn apply_prepared_trace_v1_chunk_rewrites(
-        chunk_inserts: &mut [TraceChunkInsert],
-        prepared_rewrites: Vec<PreparedTraceChunkRewrite>,
-    ) {
-        for prepared_chunk in prepared_rewrites {
-            TraceRequestSchema::apply_request_rewrite(
-                &mut chunk_inserts[prepared_chunk.chunk_index].request,
-                prepared_chunk.rewrite,
-            );
-        }
+        request_schema.remove_observations(exclusions);
     }
 
     async fn apply_trace_v1_pre_alter(
@@ -1714,13 +1749,6 @@ fn trace_logical_types_incompatible(
         && (left_datatype == right_datatype
             || !is_trace_reconcile_candidate_type(left_datatype)
             || !is_trace_reconcile_candidate_type(right_datatype))
-}
-
-fn is_sparse_trace_column(column_name: &str) -> bool {
-    column_name == SERVICE_NAME_COLUMN
-        || column_name.starts_with("span_attributes.")
-        || column_name.starts_with("scope_attributes.")
-        || column_name.starts_with("resource_attributes.")
 }
 
 fn chunk_owned<T>(items: Vec<T>, chunk_size: usize) -> Vec<Vec<T>> {

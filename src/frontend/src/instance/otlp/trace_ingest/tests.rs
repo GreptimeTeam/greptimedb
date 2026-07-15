@@ -26,11 +26,16 @@ use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{
     ColumnSchema as DatatypesColumnSchema, SchemaBuilder as DatatypesSchemaBuilder,
 };
+use opentelemetry_proto::tonic::common::v1::any_value::Value as OtlpValue;
+use opentelemetry_proto::tonic::common::v1::{AnyValue, ArrayValue, KeyValue};
+use servers::otlp::trace::SERVICE_NAME_COLUMN;
+use servers::otlp::trace::attributes::Attributes;
+use servers::otlp::trace::span::{SpanEvents, SpanLinks, TraceSpan};
 use servers::otlp::trace::v1::{TraceBinaryType, TraceRetryColumn};
 use servers::query_handler::TraceIngestOutcome;
 
 use super::{
-    ChunkFailureReaction, Instance, TraceChunkInsert, TraceChunkRetry, TraceRequestSchema,
+    ChunkFailureReaction, Instance, TraceChunkRetry, TraceChunkSchemaState, TraceRequestSchema,
     TraceRequestSchemaPlan, TraceSpanMetadata, TraceTablePreAlter, chunk_owned,
     wrap_trace_alter_failure,
 };
@@ -222,6 +227,13 @@ fn field_schema(name: &str, datatype: ColumnDataType) -> ColumnSchema {
     }
 }
 
+fn tag_schema(name: &str, datatype: ColumnDataType) -> ColumnSchema {
+    ColumnSchema {
+        semantic_type: SemanticType::Tag as i32,
+        ..field_schema(name, datatype)
+    }
+}
+
 fn json_field_schema(name: &str) -> ColumnSchema {
     ColumnSchema {
         datatype_extension: Some(ColumnDataTypeExtension {
@@ -248,6 +260,36 @@ fn row_insert_request(
     RowInsertRequest {
         table_name: table_name.to_string(),
         rows: Some(Rows { schema, rows }),
+    }
+}
+
+fn trace_attribute(key: &str, value: OtlpValue) -> KeyValue {
+    KeyValue {
+        key: key.to_string(),
+        value: Some(AnyValue { value: Some(value) }),
+    }
+}
+
+fn trace_span(span_id: &str, span_attributes: Vec<KeyValue>) -> TraceSpan {
+    TraceSpan {
+        service_name: Some("service".to_string()),
+        trace_id: "trace-id".to_string(),
+        span_id: span_id.to_string(),
+        parent_span_id: None,
+        resource_attributes: Attributes::from(vec![]),
+        scope_name: "scope".to_string(),
+        scope_version: "v1".to_string(),
+        scope_attributes: Attributes::from(vec![]),
+        trace_state: String::new(),
+        span_name: "operation".to_string(),
+        span_kind: "SPAN_KIND_SERVER".to_string(),
+        span_status_code: "STATUS_CODE_UNSET".to_string(),
+        span_status_message: String::new(),
+        span_attributes: Attributes::from(span_attributes),
+        span_events: SpanEvents::from(vec![]),
+        span_links: SpanLinks::from(vec![]),
+        start_in_nanosecond: 1,
+        end_in_nanosecond: 2,
     }
 }
 
@@ -282,27 +324,50 @@ fn test_trace_chunk_retry_drops_absent_sparse_columns() {
     let requests = row_insert_request(
         "traces",
         schema,
-        vec![row(vec![
-            None,
-            None,
-            None,
-            Some(ValueData::BoolValue(true)),
-        ])],
+        vec![
+            row(vec![None, None, None, Some(ValueData::BoolValue(true))]),
+            row(vec![
+                None,
+                Some(ValueData::StringValue("service".to_string())),
+                Some(ValueData::I64Value(1)),
+                None,
+            ]),
+        ],
     );
     let retry = TraceChunkRetry::try_new(
-        &requests,
-        vec![TraceSpanMetadata {
-            trace_id: "trace-id".to_string(),
-            span_id: "span-id".to_string(),
-            operation: None,
-        }],
-        HashMap::from([(
-            "scope_attributes.present".to_string(),
-            TraceRetryColumn {
-                present_rows: vec![0],
-                binary_types: Vec::new(),
-            },
-        )]),
+        requests.table_name,
+        requests.rows.unwrap(),
+        ["span-1", "span-2"]
+            .into_iter()
+            .map(|span_id| TraceSpanMetadata {
+                trace_id: "trace-id".to_string(),
+                span_id: span_id.to_string(),
+                operation: None,
+            })
+            .collect(),
+        HashMap::from([
+            (
+                "service_name".to_string(),
+                TraceRetryColumn {
+                    present_rows: vec![1],
+                    binary_types: Vec::new(),
+                },
+            ),
+            (
+                "span_attributes.absent".to_string(),
+                TraceRetryColumn {
+                    present_rows: vec![1],
+                    binary_types: Vec::new(),
+                },
+            ),
+            (
+                "scope_attributes.present".to_string(),
+                TraceRetryColumn {
+                    present_rows: vec![0],
+                    binary_types: Vec::new(),
+                },
+            ),
+        ]),
     )
     .unwrap();
     assert_eq!(retry.rows[0].values.len(), 2);
@@ -347,7 +412,8 @@ fn test_trace_chunk_retry_restores_row_logical_types() {
         })
         .collect();
     let retry = TraceChunkRetry::try_new(
-        &requests,
+        requests.table_name,
+        requests.rows.unwrap(),
         metadata,
         HashMap::from([(
             column_name.to_string(),
@@ -378,6 +444,53 @@ fn test_trace_chunk_retry_restores_row_logical_types() {
         ColumnDataType::String as i32
     );
     assert!(projected[2].schema[0].datatype_extension.is_none());
+}
+
+#[test]
+fn test_trace_chunk_retry_reconstructs_converter_request() {
+    let spans = vec![
+        trace_span(
+            "span-1",
+            vec![
+                trace_attribute("first", OtlpValue::IntValue(1)),
+                trace_attribute("payload", OtlpValue::BytesValue(vec![1, 2, 3])),
+            ],
+        ),
+        trace_span(
+            "span-2",
+            vec![
+                trace_attribute("second", OtlpValue::DoubleValue(2.5)),
+                trace_attribute(
+                    "payload",
+                    OtlpValue::ArrayValue(ArrayValue {
+                        values: vec![AnyValue {
+                            value: Some(OtlpValue::StringValue("value".to_string())),
+                        }],
+                    }),
+                ),
+            ],
+        ),
+    ];
+    let metadata = spans.iter().map(TraceSpanMetadata::from).collect();
+    let (expected_table_data, _) =
+        servers::otlp::trace::v1::v1_to_main_table_data_with_schema(spans.clone()).unwrap();
+    let (expected_schema, mut expected_rows) = expected_table_data.into_schema_and_rows();
+    for row in &mut expected_rows {
+        row.values.resize(expected_schema.len(), Value::default());
+    }
+    let expected = row_insert_request("traces", expected_schema, expected_rows);
+    let (table_data, batch_schema) =
+        servers::otlp::trace::v1::v1_to_main_table_data_with_schema(spans).unwrap();
+    let (schema, rows) = table_data.into_schema_and_rows();
+    let retry = TraceChunkRetry::try_new(
+        "traces".to_string(),
+        Rows { schema, rows },
+        metadata,
+        batch_schema.into_retry_columns(),
+    )
+    .unwrap();
+
+    assert_eq!(retry.to_request().unwrap(), expected);
 }
 
 #[test]
@@ -488,18 +601,14 @@ fn test_trace_request_schema_isolates_unsupported_type_batches() {
         HashMap::from([(mixed_column.to_string(), HashSet::from([0, 1]))])
     );
 
-    let batch_indexes = exclusions
-        .values()
-        .flatten()
-        .copied()
-        .collect::<HashSet<_>>();
-    request_schema.remove_batches(&batch_indexes);
+    request_schema.remove_observations(&exclusions);
     let plan = ready_plan(request_schema.resolve_table_schema(None));
-    assert!(!plan.requires_ddl());
+    assert_eq!(plan.ensure_columns.len(), 1);
+    assert_eq!(plan.ensure_columns[0].column_name, unrelated_column);
 }
 
 #[test]
-fn test_trace_request_schema_drops_failed_batch() {
+fn test_trace_request_schema_keeps_unrelated_failed_batch_observations() {
     let table_name = "trace_failed_batch";
     let column_name = "span_attributes.value";
     let failed_only_column = "span_attributes.server.port";
@@ -507,83 +616,110 @@ fn test_trace_request_schema_drops_failed_batch() {
     let string_schema = field_schema(column_name, ColumnDataType::String);
     let float_schema = field_schema(column_name, ColumnDataType::Float64);
     let failed_only_schema = field_schema(failed_only_column, ColumnDataType::String);
+    let service_schema = tag_schema(SERVICE_NAME_COLUMN, ColumnDataType::String);
     let safe_schema = field_schema(safe_column, ColumnDataType::Boolean);
 
-    let good_requests = row_insert_request(
+    let mut good_request = row_insert_request(
         table_name,
         vec![string_schema.clone()],
         vec![row(vec![Some(ValueData::StringValue("1.5".to_string()))])],
     );
-    let bad_requests = row_insert_request(
+    let mut bad_request = row_insert_request(
         table_name,
         vec![
             string_schema.clone(),
             failed_only_schema.clone(),
+            service_schema.clone(),
             safe_schema.clone(),
         ],
         vec![row(vec![
             Some(ValueData::StringValue("not-a-number".to_string())),
             Some(ValueData::StringValue("invalid-port".to_string())),
+            Some(ValueData::StringValue("frontend".to_string())),
             Some(ValueData::BoolValue(true)),
         ])],
     );
+    let original_bad_request = bad_request.clone();
 
     let mut request_schema = TraceRequestSchema::default();
     request_schema.observe_trace_column(0, &string_schema, Some(ColumnDataType::String));
     request_schema.observe_trace_column(0, &float_schema, Some(ColumnDataType::Float64));
     request_schema.observe_trace_column(1, &string_schema, Some(ColumnDataType::String));
     request_schema.observe_trace_column(1, &failed_only_schema, Some(ColumnDataType::String));
+    request_schema.observe_trace_column(1, &service_schema, Some(ColumnDataType::String));
     request_schema.observe_trace_column(1, &safe_schema, Some(ColumnDataType::Boolean));
     ready_plan(request_schema.resolve_table_schema(None));
 
-    let mut chunks = vec![
-        TraceChunkInsert {
-            span_metadata: Vec::new(),
-            request: good_requests,
-            retry_columns: HashMap::new(),
-            schema_prepared: true,
-            span_fallback_only: false,
-        },
-        TraceChunkInsert {
-            span_metadata: Vec::new(),
-            request: bad_requests.clone(),
-            retry_columns: HashMap::new(),
-            schema_prepared: true,
-            span_fallback_only: false,
-        },
-    ];
-
-    let (_, exclusions) =
-        Instance::prepare_trace_v1_chunk_rewrites(&request_schema, &mut chunks).unwrap();
+    let mut good_state = TraceChunkSchemaState::Prepared;
+    let mut bad_state = TraceChunkSchemaState::Prepared;
+    assert_eq!(
+        Instance::prepare_trace_v1_chunk_rewrite(
+            &request_schema,
+            0,
+            &mut good_request,
+            &mut good_state,
+        )
+        .unwrap(),
+        None
+    );
+    let failed_column = Instance::prepare_trace_v1_chunk_rewrite(
+        &request_schema,
+        1,
+        &mut bad_request,
+        &mut bad_state,
+    )
+    .unwrap();
+    let exclusions = HashMap::from([(failed_column.unwrap(), HashSet::from([1]))]);
     assert_eq!(
         exclusions,
         HashMap::from([(column_name.to_string(), HashSet::from([1]))])
     );
-    assert!(chunks[0].schema_prepared);
-    assert!(!chunks[1].schema_prepared);
+    assert_eq!(good_state, TraceChunkSchemaState::Prepared);
+    assert_eq!(bad_state, TraceChunkSchemaState::ReconcilePerChunk);
 
-    request_schema.remove_batches(&HashSet::from([1]));
+    request_schema.remove_observations(&exclusions);
     assert!(
-        !request_schema
+        request_schema
             .column_indexes
             .contains_key(failed_only_column)
     );
-    assert!(!request_schema.column_indexes.contains_key(safe_column));
+    assert!(
+        request_schema
+            .column_indexes
+            .contains_key(SERVICE_NAME_COLUMN)
+    );
+    assert!(request_schema.column_indexes.contains_key(safe_column));
     let plan = ready_plan(request_schema.resolve_table_schema(None));
-    assert_eq!(plan.ensure_columns.len(), 1);
-    assert_eq!(plan.ensure_columns[0].column_name, column_name);
-    let (prepared, exclusions) =
-        Instance::prepare_trace_v1_chunk_rewrites(&request_schema, &mut chunks).unwrap();
-    assert!(exclusions.is_empty());
-    Instance::apply_prepared_trace_v1_chunk_rewrites(&mut chunks, prepared);
+    assert_eq!(
+        plan.ensure_columns
+            .iter()
+            .map(|column| column.column_name.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            column_name,
+            failed_only_column,
+            SERVICE_NAME_COLUMN,
+            safe_column
+        ]
+    );
+    assert_eq!(
+        Instance::prepare_trace_v1_chunk_rewrite(
+            &request_schema,
+            1,
+            &mut bad_request,
+            &mut bad_state,
+        )
+        .unwrap(),
+        None
+    );
 
-    let good_rows = chunks[0].request.rows.as_ref().unwrap();
+    let good_rows = good_request.rows.as_ref().unwrap();
     assert_eq!(good_rows.schema[0].datatype, ColumnDataType::Float64 as i32);
     assert_eq!(
         good_rows.rows[0].values[0].value_data,
         Some(ValueData::F64Value(1.5))
     );
-    assert_eq!(chunks[1].request, bad_requests);
+    assert_eq!(bad_request, original_bad_request);
 }
 
 #[test]
@@ -655,6 +791,30 @@ fn test_trace_request_schema_uses_global_columns_and_types() {
     assert_eq!(
         rows.rows[0].values[1].value_data,
         Some(ValueData::BoolValue(true))
+    );
+}
+
+#[test]
+fn test_trace_request_schema_resolves_three_compatible_types() {
+    let column_name = "span_attributes.value";
+    let mut request_schema = TraceRequestSchema::default();
+    for (batch_index, datatype) in [
+        ColumnDataType::String,
+        ColumnDataType::Int64,
+        ColumnDataType::Float64,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let schema = field_schema(column_name, datatype);
+        request_schema.observe_trace_column(batch_index, &schema, Some(datatype));
+    }
+
+    let plan = ready_plan(request_schema.resolve_table_schema(None));
+    assert_eq!(plan.ensure_columns.len(), 1);
+    assert_eq!(
+        plan.ensure_columns[0].datatype,
+        ColumnDataType::Float64 as i32
     );
 }
 

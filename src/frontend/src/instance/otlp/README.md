@@ -76,11 +76,11 @@ it to 0 disables splitting. The option is defined in
 | Model | Conversion and storage shape | Frontend behavior |
 | --- | --- | --- |
 | v0 | [`trace/v0.rs`](../../../../servers/src/otlp/trace/v0.rs) writes a fixed span schema and keeps span, scope, and resource attributes in JSON columns. | Converts and writes one chunk at a time through the legacy log insertion path. |
-| v1 | [`trace/v1.rs`](../../../../servers/src/otlp/trace/v1.rs) flattens OTLP attributes into dynamic columns and records the value types seen in each chunk. | Converts all chunks first, builds a request-wide schema plan, then writes the prepared chunks. |
+| v1 | [`trace/v1.rs`](../../../../servers/src/otlp/trace/v1.rs) flattens OTLP attributes into dynamic columns and records the value types seen in each chunk. | Scans chunks one at a time to build a request-wide schema plan, then materializes and writes one chunk at a time. |
 
 Consequently, v1 chunks from one request can have different schemas: attribute
-keys are data-dependent. The request-wide plan reconciles compatible columns
-across all non-fallback chunks. The v0 main-table schema is comparatively fixed.
+keys are data-dependent. The request-wide plan reconciles compatible column
+observations across all chunks. The v0 main-table schema is comparatively fixed.
 
 The v1 converter intentionally uses `write_column_unchecked` from
 [`row_writer.rs`](../../../../servers/src/row_writer.rs) to preserve the original
@@ -92,12 +92,15 @@ frontend schema planner is the validation and reconciliation boundary.
 
 The v1 path performs these steps before the normal chunk writes:
 
-1. Convert every chunk into a `RowInsertRequest` and a `TraceBatchSchema` that
-   records observed scalar types, sparse row presence, and binary logical types.
+1. Convert each chunk into a temporary `RowInsertRequest` and a
+   `TraceBatchSchema` that records observed scalar types, sparse row presence,
+   and binary logical types. Drop the dense request after collecting its
+   lightweight schema observations.
 2. Mark a chunk for span-only fallback if one column contains both raw OTLP
    bytes and arrays or key-value lists encoded as JSONB. Both use protobuf
    `BinaryValue`, but a Greptime column cannot represent both logical schemas.
-3. Aggregate the remaining chunk observations into `TraceRequestSchema` and
+   Other compatible columns in that chunk still contribute observations.
+3. Aggregate the compatible observations into `TraceRequestSchema` and
    compare them with the existing table schema and the fixed types in
    [`trace_semconv.rs`](trace_semconv.rs).
 4. Select a stable target type. Existing table types are authoritative when the
@@ -106,18 +109,18 @@ The v1 path performs these steps before the normal chunk writes:
    The supported existing-column widening is `Int64` to `Float64`.
 5. Use `prepare_trace_column_rewrites` in
    [`trace_types.rs`](trace_types.rs) to precompute every coercion without
-   mutating rows. A chunk whose coercion cannot be prepared is removed from the
-   request-wide plan, so it cannot contribute columns to persistent DDL.
+   mutating rows. If a coercion cannot be prepared, remove only that column's
+   observation from that chunk; unrelated columns can still contribute to DDL.
 6. Create the table or add missing columns with `ensure_trace_table_on_demand`,
    and widen planned numeric columns. The implementation is in
    [`operator/src/insert.rs`](../../../../operator/src/insert.rs).
 7. Read and plan against the table schema again after DDL to account for
-   concurrent creates or alters. Apply the prevalidated rewrites only after the
-   schema converges. Otherwise, the affected chunks use the per-request
-   reconciliation path when they are written.
+   concurrent creates or alters. Then rematerialize, rewrite, and write one
+   chunk at a time. If the schema does not converge, affected chunks use the
+   per-request reconciliation path.
 
 This ordering keeps conversion failures atomic: rows are not partly rewritten,
-and columns from an invalid chunk are not added to the table before that chunk
+and an invalid column observation is not added to the table before that chunk
 falls back.
 
 ## Writes, fallback, and accounting
