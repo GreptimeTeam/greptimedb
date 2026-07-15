@@ -21,6 +21,7 @@ use std::fmt;
 use std::sync::Arc;
 
 use datafusion::execution::TaskContext;
+use datafusion::physical_plan::execution_plan::CardinalityEffect;
 use datafusion::physical_plan::metrics::MetricsSet;
 use datafusion::physical_plan::projection::{ProjectionExec, make_with_child, update_ordering};
 use datafusion::physical_plan::sorts::sort::SortExec;
@@ -251,6 +252,10 @@ impl ExecutionPlan for MergeSortExec {
 
     fn partition_statistics(&self, partition: Option<usize>) -> Result<Statistics> {
         self.inner.partition_statistics(partition)
+    }
+
+    fn cardinality_effect(&self) -> CardinalityEffect {
+        self.inner.cardinality_effect()
     }
 
     /// Intentionally keeps DataFusion's generic limit pushdown disabled.
