@@ -262,6 +262,28 @@ impl CompactSstMeta {
     }
 }
 
+/// Decodes SST metadata without preparing a compact cache entry.
+pub(crate) async fn decode_sst_meta(
+    file_path: &str,
+    parquet_metadata: ParquetMetaData,
+    region_metadata: Option<RegionMetadataRef>,
+    page_index_policy: PageIndexPolicy,
+) -> Result<Arc<CachedSstMeta>> {
+    let file_path = file_path.to_string();
+    common_runtime::spawn_blocking_global(move || {
+        let parquet_metadata = strip_column_indexes(parquet_metadata);
+        CachedSstMeta::try_new_with_page_index_policy(
+            &file_path,
+            parquet_metadata,
+            region_metadata,
+            page_index_policy,
+        )
+        .map(Arc::new)
+    })
+    .await
+    .context(JoinSnafu)?
+}
+
 /// Decodes SST metadata and attempts to encode both cache representations on the blocking runtime.
 pub(crate) async fn prepare_sst_meta(
     file_path: &str,
@@ -271,11 +293,7 @@ pub(crate) async fn prepare_sst_meta(
 ) -> Result<SstMetaPreparation> {
     let file_path = file_path.to_string();
     common_runtime::spawn_blocking_global(move || {
-        // Defensively discard column indexes supplied by external metadata producers. Mito only
-        // consumes offset indexes.
-        let mut builder = parquet_metadata.into_builder();
-        builder.take_column_index();
-        let parquet_metadata = builder.build();
+        let parquet_metadata = strip_column_indexes(parquet_metadata);
 
         let cache_encoding = encode_compact_sst_meta(&file_path, &parquet_metadata);
         finish_sst_meta_preparation(
@@ -288,6 +306,14 @@ pub(crate) async fn prepare_sst_meta(
     })
     .await
     .context(JoinSnafu)?
+}
+
+fn strip_column_indexes(parquet_metadata: ParquetMetaData) -> ParquetMetaData {
+    // Defensively discard column indexes supplied by external metadata producers. Mito only
+    // consumes offset indexes.
+    let mut builder = parquet_metadata.into_builder();
+    builder.take_column_index();
+    builder.build()
 }
 
 fn encode_compact_sst_meta(
@@ -1034,28 +1060,37 @@ impl CacheManager {
         }
 
         let key = IndexKey::new(file_id.region_id(), file_id.file_id(), FileType::Parquet);
-        if let Some(write_cache) = &self.write_cache
-            && let Some(metadata) = write_cache
-                .file_cache()
-                .get_sst_meta_data(key, metrics, page_index_policy)
+        if let Some(write_cache) = &self.write_cache {
+            let file_cache = write_cache.file_cache();
+            if self.sst_meta_cache_enabled() {
+                if let Some(metadata) = file_cache
+                    .get_sst_meta_data(key, metrics, page_index_policy)
+                    .await
+                {
+                    metrics.file_cache_hit += 1;
+                    let decoded = metadata.decoded();
+                    match metadata {
+                        SstMetaPreparation::Prepared(metadata) => {
+                            self.put_prepared_sst_meta(file_id, metadata, true);
+                        }
+                        SstMetaPreparation::DecodedOnly { encoding_error, .. } => {
+                            warn!(
+                                encoding_error;
+                                "Failed to encode file-cached SST metadata for memory cache, region_id: {}, file_id: {}",
+                                file_id.region_id(),
+                                file_id.file_id()
+                            );
+                        }
+                    }
+                    return Some(decoded);
+                }
+            } else if let Some(decoded) = file_cache
+                .get_decoded_sst_meta_data(key, metrics, page_index_policy)
                 .await
-        {
-            metrics.file_cache_hit += 1;
-            let decoded = metadata.decoded();
-            match metadata {
-                SstMetaPreparation::Prepared(metadata) => {
-                    self.put_prepared_sst_meta(file_id, metadata, true);
-                }
-                SstMetaPreparation::DecodedOnly { encoding_error, .. } => {
-                    warn!(
-                        encoding_error;
-                        "Failed to encode file-cached SST metadata for memory cache, region_id: {}, file_id: {}",
-                        file_id.region_id(),
-                        file_id.file_id()
-                    );
-                }
+            {
+                metrics.file_cache_hit += 1;
+                return Some(decoded);
             }
-            return Some(decoded);
         }
 
         metrics.cache_miss += 1;
