@@ -19,11 +19,17 @@ use std::sync::Arc;
 
 use api::v1::SemanticType;
 use arrow_schema::DataType;
+use arrow_schema::extension::{EXTENSION_TYPE_NAME_KEY, ExtensionType};
 use common_base::readable_size::ReadableSize;
+use common_query::native_histogram::{
+    is_native_histogram_value_schema, native_histogram_list_element_id,
+    native_histogram_subfield_id,
+};
 use datatypes::arrow::datatypes::{
     DataType as ArrowDataType, Field, FieldRef, Fields, Schema, SchemaRef,
 };
 use datatypes::arrow::record_batch::RecordBatch;
+use datatypes::extension::histogram::HistogramExtensionType;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::timestamp::timestamp_array_to_primitive;
 use serde::{Deserialize, Serialize};
@@ -80,17 +86,15 @@ pub fn with_field_id(mut field: Field, column_id: u32) -> Field {
 /// fields), so external readers can identify it by extension and resolve
 /// nested fields by id.
 ///
-/// Detection is by type (not name), so any column carrying this struct type is
-/// recognized. Other struct columns are left untouched. mito2 reads SST columns
-/// by schema position, never by field metadata, so this only affects external
-/// readers.
+/// Detection is by the native-histogram column name and struct type
+/// (`is_native_histogram_value_schema`); other struct columns are left
+/// untouched. mito2 reads SST columns by schema position, never by field
+/// metadata, so this only affects external readers.
 fn stamp_native_histogram_subfield_ids(field: &mut Field) {
-    use arrow_schema::extension::{EXTENSION_TYPE_NAME_KEY, ExtensionType};
-    use common_query::native_histogram::{
-        native_histogram_list_element_id, native_histogram_subfield_id, native_histogram_value_type,
-    };
-    use datatypes::extension::histogram::HistogramExtensionType;
-    if ConcreteDataType::from_arrow_type(field.data_type()) != *native_histogram_value_type() {
+    if !is_native_histogram_value_schema(
+        field.name(),
+        &ConcreteDataType::from_arrow_type(field.data_type()),
+    ) {
         return;
     }
     // Tag the field with the greptime.histogram extension.
@@ -644,5 +648,158 @@ mod tests {
         estimator.update_flat(&batch2);
 
         assert_eq!(1, estimator.finish());
+    }
+
+    /// Asserts `field` is a stamped native-histogram struct: it carries the
+    /// `greptime.histogram` extension and every sub-field (and list element)
+    /// carries its reserved `PARQUET:field_id`.
+    fn assert_histogram_stamped(field: &Field) {
+        use arrow_schema::extension::ExtensionType;
+        use common_query::native_histogram::{
+            native_histogram_list_element_id, native_histogram_subfield_id,
+        };
+        use datatypes::extension::histogram::HistogramExtensionType;
+
+        assert_eq!(
+            field
+                .metadata()
+                .get(arrow_schema::extension::EXTENSION_TYPE_NAME_KEY)
+                .map(|s| s.as_str()),
+            Some(HistogramExtensionType::NAME),
+            "histogram field must carry the greptime.histogram extension"
+        );
+        let ArrowDataType::Struct(children) = field.data_type() else {
+            panic!("expected a struct, got {:?}", field.data_type());
+        };
+        for child in children {
+            let expected = native_histogram_subfield_id(child.name())
+                .unwrap_or_else(|| panic!("no id for sub-field {}", child.name()));
+            let got: i32 = child
+                .metadata()
+                .get(PARQUET_FIELD_ID_KEY)
+                .unwrap_or_else(|| panic!("sub-field {} missing field id", child.name()))
+                .parse()
+                .unwrap();
+            assert_eq!(got, expected, "sub-field {} id", child.name());
+            if let ArrowDataType::List(elem) = child.data_type() {
+                let elem_expected = native_histogram_list_element_id(child.name()).unwrap();
+                let elem_got: i32 = elem
+                    .metadata()
+                    .get(PARQUET_FIELD_ID_KEY)
+                    .unwrap_or_else(|| panic!("list element of {} missing id", child.name()))
+                    .parse()
+                    .unwrap();
+                assert_eq!(
+                    elem_got,
+                    elem_expected,
+                    "list element id of {}",
+                    child.name()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_maybe_wrap_schema_native_histogram() {
+        use common_query::native_histogram::{NATIVE_HISTOGRAM_FIELD, native_histogram_value_type};
+        use datatypes::data_type::DataType;
+
+        let hist_arrow = native_histogram_value_type().as_arrow_type();
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(
+                "greptime_timestamp",
+                ArrowDataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new(NATIVE_HISTOGRAM_FIELD, hist_arrow, true),
+        ]));
+
+        let wrapped = maybe_wrap_schema(&schema);
+        let hist = wrapped
+            .field_with_name(NATIVE_HISTOGRAM_FIELD)
+            .expect("histogram field present");
+        // The struct has 18 sub-fields.
+        let ArrowDataType::Struct(children) = hist.data_type() else {
+            unreachable!()
+        };
+        assert_eq!(children.len(), 18);
+        assert_histogram_stamped(hist);
+    }
+
+    #[test]
+    fn test_maybe_wrap_schema_requires_canonical_name() {
+        // Detection requires the canonical column name: a histogram-typed field
+        // named differently is left untouched.
+        use arrow_schema::extension::EXTENSION_TYPE_NAME_KEY;
+        use common_query::native_histogram::native_histogram_value_type;
+        use datatypes::data_type::DataType;
+
+        let hist_arrow = native_histogram_value_type().as_arrow_type();
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "custom_histogram",
+            hist_arrow,
+            true,
+        )]));
+
+        let wrapped = maybe_wrap_schema(&schema);
+        let hist = wrapped.field_with_name("custom_histogram").unwrap();
+        assert!(
+            hist.metadata().get(EXTENSION_TYPE_NAME_KEY).is_none(),
+            "a histogram-typed field without the canonical name must not be stamped"
+        );
+    }
+
+    #[test]
+    fn test_maybe_wrap_schema_plain_struct_not_stamped() {
+        use arrow_schema::extension::EXTENSION_TYPE_NAME_KEY;
+
+        let plain = ArrowDataType::Struct(
+            vec![
+                Arc::new(Field::new("a", ArrowDataType::Int32, true)),
+                Arc::new(Field::new("b", ArrowDataType::Utf8, true)),
+            ]
+            .into(),
+        );
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(
+                "ts",
+                ArrowDataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new("data", plain, true),
+        ]));
+
+        let wrapped = maybe_wrap_schema(&schema);
+        let data = wrapped.field_with_name("data").unwrap();
+        assert!(
+            data.metadata().get(EXTENSION_TYPE_NAME_KEY).is_none(),
+            "non-histogram struct must not get the extension"
+        );
+        if let ArrowDataType::Struct(children) = data.data_type() {
+            for child in children {
+                assert!(
+                    child.metadata().get(PARQUET_FIELD_ID_KEY).is_none(),
+                    "non-histogram sub-field {} must not get a field id",
+                    child.name()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_maybe_wrap_schema_no_struct_unchanged() {
+        let schema: Arc<Schema> = Arc::new(Schema::new(vec![
+            Field::new(
+                "ts",
+                ArrowDataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new("v", ArrowDataType::Float64, true),
+        ]));
+        let wrapped = maybe_wrap_schema(&schema);
+        assert!(
+            Arc::ptr_eq(&wrapped, &schema),
+            "a schema without any struct column must be returned unchanged"
+        );
     }
 }
