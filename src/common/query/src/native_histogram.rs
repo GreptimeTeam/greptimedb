@@ -106,12 +106,8 @@ pub fn native_histogram_value_type() -> &'static ConcreteDataType {
     &NATIVE_HISTOGRAM_VALUE_TYPE
 }
 
-/// Returns true if `data_type` is the native-histogram struct type.
-///
-/// Identification is by type, not by column name: any column carrying this
-/// exact struct type is a native-histogram column.
-pub fn is_native_histogram(data_type: &ConcreteDataType) -> bool {
-    data_type == native_histogram_value_type()
+pub fn is_native_histogram_value_schema(name: &str, data_type: &ConcreteDataType) -> bool {
+    name == NATIVE_HISTOGRAM_FIELD && data_type == native_histogram_value_type()
 }
 
 // ---------------------------------------------------------------------------
