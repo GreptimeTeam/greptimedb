@@ -601,14 +601,18 @@ fn test_trace_request_schema_isolates_unsupported_type_batches() {
         HashMap::from([(mixed_column.to_string(), HashSet::from([0, 1]))])
     );
 
-    request_schema.remove_observations(&exclusions);
+    let batch_indexes = exclusions
+        .values()
+        .flatten()
+        .copied()
+        .collect::<HashSet<_>>();
+    request_schema.remove_batches(&batch_indexes);
     let plan = ready_plan(request_schema.resolve_table_schema(None));
-    assert_eq!(plan.ensure_columns.len(), 1);
-    assert_eq!(plan.ensure_columns[0].column_name, unrelated_column);
+    assert!(!plan.requires_ddl());
 }
 
 #[test]
-fn test_trace_request_schema_keeps_unrelated_failed_batch_observations() {
+fn test_trace_request_schema_drops_failed_batch_observations() {
     let table_name = "trace_failed_batch";
     let column_name = "span_attributes.value";
     let failed_only_column = "span_attributes.server.port";
@@ -650,14 +654,16 @@ fn test_trace_request_schema_keeps_unrelated_failed_batch_observations() {
     request_schema.observe_trace_column(1, &safe_schema, Some(ColumnDataType::Boolean));
     ready_plan(request_schema.resolve_table_schema(None));
 
-    let mut good_state = TraceChunkSchemaState::Prepared;
-    let mut bad_state = TraceChunkSchemaState::Prepared;
+    let mut chunk_states = [
+        TraceChunkSchemaState::Prepared,
+        TraceChunkSchemaState::Prepared,
+    ];
     assert_eq!(
         Instance::prepare_trace_v1_chunk_rewrite(
             &request_schema,
             0,
             &mut good_request,
-            &mut good_state,
+            &mut chunk_states[0],
         )
         .unwrap(),
         None
@@ -666,7 +672,7 @@ fn test_trace_request_schema_keeps_unrelated_failed_batch_observations() {
         &request_schema,
         1,
         &mut bad_request,
-        &mut bad_state,
+        &mut chunk_states[1],
     )
     .unwrap();
     let exclusions = HashMap::from([(failed_column.unwrap(), HashSet::from([1]))]);
@@ -674,40 +680,34 @@ fn test_trace_request_schema_keeps_unrelated_failed_batch_observations() {
         exclusions,
         HashMap::from([(column_name.to_string(), HashSet::from([1]))])
     );
-    assert_eq!(good_state, TraceChunkSchemaState::Prepared);
-    assert_eq!(bad_state, TraceChunkSchemaState::ReconcilePerChunk);
+    assert_eq!(chunk_states[0], TraceChunkSchemaState::Prepared);
+    assert_eq!(chunk_states[1], TraceChunkSchemaState::ReconcilePerChunk);
 
-    request_schema.remove_observations(&exclusions);
+    Instance::exclude_trace_v1_schema_observations(
+        &mut request_schema,
+        &mut chunk_states,
+        &exclusions,
+    );
     assert!(
-        request_schema
+        !request_schema
             .column_indexes
             .contains_key(failed_only_column)
     );
     assert!(
-        request_schema
+        !request_schema
             .column_indexes
             .contains_key(SERVICE_NAME_COLUMN)
     );
-    assert!(request_schema.column_indexes.contains_key(safe_column));
+    assert!(!request_schema.column_indexes.contains_key(safe_column));
     let plan = ready_plan(request_schema.resolve_table_schema(None));
-    assert_eq!(
-        plan.ensure_columns
-            .iter()
-            .map(|column| column.column_name.as_str())
-            .collect::<Vec<_>>(),
-        vec![
-            column_name,
-            failed_only_column,
-            SERVICE_NAME_COLUMN,
-            safe_column
-        ]
-    );
+    assert_eq!(plan.ensure_columns.len(), 1);
+    assert_eq!(plan.ensure_columns[0].column_name, column_name);
     assert_eq!(
         Instance::prepare_trace_v1_chunk_rewrite(
             &request_schema,
             1,
             &mut bad_request,
-            &mut bad_state,
+            &mut chunk_states[1],
         )
         .unwrap(),
         None

@@ -603,13 +603,11 @@ impl TraceRequestSchema {
         pending_rewrites
     }
 
-    fn remove_observations(&mut self, exclusions: &TraceSchemaExclusions) {
+    fn remove_batches(&mut self, batch_indexes: &HashSet<usize>) {
         for column in &mut self.columns {
-            if let Some(batch_indexes) = exclusions.get(&column.schema.column_name) {
-                column
-                    .batches
-                    .retain(|batch_index, _| !batch_indexes.contains(batch_index));
-            }
+            column
+                .batches
+                .retain(|batch_index, _| !batch_indexes.contains(batch_index));
             column.target_type = None;
         }
         self.columns.retain(|column| !column.batches.is_empty());
@@ -804,7 +802,9 @@ impl Instance {
                     TraceChunkSchemaState::Prepared
                 };
                 let (schema, rows) = table_data.into_schema_and_rows();
-                request_schema.observe_batch_schema(batch_index, &schema, &batch_schema);
+                if schema_state == TraceChunkSchemaState::Prepared {
+                    request_schema.observe_batch_schema(batch_index, &schema, &batch_schema);
+                }
                 chunks.push(TraceChunkRetry::try_new(
                     ingest_ctx.table_name.to_string(),
                     Rows { schema, rows },
@@ -1401,12 +1401,17 @@ impl Instance {
         chunk_states: &mut [TraceChunkSchemaState],
         exclusions: &TraceSchemaExclusions,
     ) {
-        for batch_index in exclusions.values().flatten() {
+        let batch_indexes = exclusions
+            .values()
+            .flatten()
+            .copied()
+            .collect::<HashSet<_>>();
+        for batch_index in &batch_indexes {
             if let Some(state) = chunk_states.get_mut(*batch_index) {
                 state.mark_for_reconcile();
             }
         }
-        request_schema.remove_observations(exclusions);
+        request_schema.remove_batches(&batch_indexes);
     }
 
     async fn apply_trace_v1_pre_alter(

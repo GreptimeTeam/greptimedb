@@ -99,7 +99,8 @@ The v1 path performs these steps before the normal chunk writes:
 2. Mark a chunk for span-only fallback if one column contains both raw OTLP
    bytes and arrays or key-value lists encoded as JSONB. Both use protobuf
    `BinaryValue`, but a Greptime column cannot represent both logical schemas.
-   Other compatible columns in that chunk still contribute observations.
+   The chunk bypasses request-wide schema planning and is reconciled span by
+   span.
 3. Aggregate the compatible observations into `TraceRequestSchema` and
    compare them with the existing table schema and the fixed types in
    [`trace_semconv.rs`](trace_semconv.rs).
@@ -109,8 +110,8 @@ The v1 path performs these steps before the normal chunk writes:
    The supported existing-column widening is `Int64` to `Float64`.
 5. Use `prepare_trace_column_rewrites` in
    [`trace_types.rs`](trace_types.rs) to precompute every coercion without
-   mutating rows. If a coercion cannot be prepared, remove only that column's
-   observation from that chunk; unrelated columns can still contribute to DDL.
+   mutating rows. A chunk whose coercion cannot be prepared is removed from the
+   request-wide plan, so it cannot contribute columns to persistent DDL.
 6. Create the table or add missing columns with `ensure_trace_table_on_demand`,
    and widen planned numeric columns. The implementation is in
    [`operator/src/insert.rs`](../../../../operator/src/insert.rs).
@@ -120,7 +121,7 @@ The v1 path performs these steps before the normal chunk writes:
    per-request reconciliation path.
 
 This ordering keeps conversion failures atomic: rows are not partly rewritten,
-and an invalid column observation is not added to the table before that chunk
+and columns from an invalid chunk are not added to the table before that chunk
 falls back.
 
 ## Writes, fallback, and accounting
