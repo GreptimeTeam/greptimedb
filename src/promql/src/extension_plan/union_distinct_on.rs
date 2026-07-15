@@ -17,7 +17,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use ahash::{HashMap, RandomState};
+use ahash::{HashSet, RandomState};
 use datafusion::arrow::array::UInt64Array;
 use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::arrow::record_batch::RecordBatch;
@@ -48,10 +48,8 @@ use crate::error::{DataFusionPlanningSnafu, DeserializeSnafu, Result};
 /// most different part is that it treat left child and right child differently:
 /// - All columns from left child will be outputted.
 /// - Only check collisions (when not distinct) on the columns specified by `compare_keys`.
-/// - When there is a collision:
-///   - If the collision is from right child itself, only the first observed row will be
-///     preserved. All others are discarded.
-///   - If the collision is from left child, the row in right child will be discarded.
+/// - Rows from the right child with the same comparison signature are all preserved.
+/// - If a signature occurs in the left child, all matching rows from the right child are discarded.
 /// - The output order is not maintained. This plan will output left child first, then right child.
 /// - The output schema is based on the left child schema, with nullability widened from both inputs.
 ///
@@ -524,12 +522,12 @@ enum HashedDataFut {
     Empty,
 }
 
-/// ALL input batches and its hash table
+/// All right input batches and their comparison hashes.
 struct HashedData {
-    // TODO(ruihang): use `JoinHashMap` instead after upgrading to DF 34.0
-    /// Hash table for all input batches. The key is hash value, and the value
-    /// is the index of `bathc`.
-    hash_map: HashMap<u64, usize>,
+    /// Signatures not observed in the left input.
+    unmatched_hashes: HashSet<u64>,
+    /// Hash for every row in `batch`, in row order.
+    row_hashes: Vec<u64>,
     /// Output batch.
     batch: RecordBatch,
     /// The indices of the columns to be hashed.
@@ -557,7 +555,8 @@ impl HashedData {
             .await?;
 
         // Create hash for each batch
-        let mut hash_map = HashMap::default();
+        let mut unmatched_hashes = HashSet::default();
+        let mut row_hashes = Vec::new();
         let mut hashes_buffer = Vec::new();
         let mut interleave_indices = Vec::new();
         for (batch_number, batch) in batches.iter().enumerate() {
@@ -572,13 +571,9 @@ impl HashedData {
             let hash_values =
                 hash_utils::create_hashes(&arrays, &random_state, &mut hashes_buffer)?;
             for (row_number, hash_value) in hash_values.iter().enumerate() {
-                // Only keeps the first observed row for each hash value
-                if hash_map
-                    .try_insert(*hash_value, interleave_indices.len())
-                    .is_ok()
-                {
-                    interleave_indices.push((batch_number, row_number));
-                }
+                unmatched_hashes.insert(*hash_value);
+                row_hashes.push(*hash_value);
+                interleave_indices.push((batch_number, row_number));
             }
         }
 
@@ -586,15 +581,15 @@ impl HashedData {
         let batch = interleave_batches(output_schema, batches, interleave_indices)?;
 
         Ok(Self {
-            hash_map,
+            unmatched_hashes,
+            row_hashes,
             batch,
             hash_key_indices,
             random_state,
         })
     }
 
-    /// Remove rows that hash value present in the input
-    /// record batch from the hash map.
+    /// Remove signatures present in the input record batch.
     pub fn update_map(&mut self, input: &RecordBatch) -> DataFusionResult<()> {
         // get columns for hashing
         let mut hashes_buffer = Vec::new();
@@ -611,14 +606,19 @@ impl HashedData {
 
         // remove those hashes
         for hash in hash_values {
-            self.hash_map.remove(hash);
+            self.unmatched_hashes.remove(hash);
         }
 
         Ok(())
     }
 
     pub fn finish(self) -> DataFusionResult<RecordBatch> {
-        let valid_indices = self.hash_map.values().copied().collect::<Vec<_>>();
+        let valid_indices = self
+            .row_hashes
+            .iter()
+            .enumerate()
+            .filter_map(|(index, hash)| self.unmatched_hashes.contains(hash).then_some(index))
+            .collect::<Vec<_>>();
         let result = take_batch(&self.batch, &valid_indices)?;
         Ok(result)
     }
@@ -861,6 +861,42 @@ mod test {
         .unwrap()
     }
 
+    fn series_rows(batches: &[RecordBatch]) -> Vec<(i64, &str, f64, &str)> {
+        batches
+            .iter()
+            .flat_map(|batch| {
+                let timestamps = batch
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<Int64Array>()
+                    .unwrap();
+                let series = batch
+                    .column(1)
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .unwrap();
+                let values = batch
+                    .column(2)
+                    .as_any()
+                    .downcast_ref::<Float64Array>()
+                    .unwrap();
+                let keys = batch
+                    .column(3)
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .unwrap();
+                (0..batch.num_rows()).map(move |row| {
+                    (
+                        timestamps.value(row),
+                        series.value(row),
+                        values.value(row),
+                        keys.value(row),
+                    )
+                })
+            })
+            .collect()
+    }
+
     #[tokio::test]
     async fn serialize_deserialize_and_execute_with_different_input_names() {
         let (left_schema, right_schema) =
@@ -915,6 +951,103 @@ mod test {
         assert!(result.iter().all(|batch| batch.schema() == declared_schema));
         assert!(result[1].column(1).is_null(0));
         assert!(result[1].column(2).is_null(0));
+    }
+
+    #[tokio::test]
+    async fn empty_lhs_preserves_distinct_rhs_series_with_same_normalized_key() {
+        let left_schema = Arc::new(Schema::new(vec![
+            Field::new("ts", DataType::Int64, false),
+            Field::new("series", DataType::Utf8, false),
+            Field::new("value", DataType::Float64, false),
+            Field::new("__normalized_absent_label", DataType::Utf8, false),
+        ]));
+        let right_schema = Arc::new(Schema::new(vec![
+            Field::new("rhs_ts", DataType::Int64, false),
+            Field::new("rhs_series", DataType::Utf8, false),
+            Field::new("rhs_value", DataType::Float64, false),
+            Field::new("rhs_normalized_absent_label", DataType::Utf8, false),
+        ]));
+        let (left, right) = schemas(left_schema.clone(), right_schema.clone());
+        let plan = UnionDistinctOn::try_new(left, right, vec![3], 0).unwrap();
+        let declared_schema = plan.output_schema.inner().clone();
+        let rhs = RecordBatch::try_new(
+            right_schema,
+            vec![
+                Arc::new(Int64Array::from(vec![1_000, 1_000])),
+                Arc::new(StringArray::from(vec!["series_a", "series_b"])),
+                Arc::new(Float64Array::from(vec![10.0, 20.0])),
+                Arc::new(StringArray::from(vec!["", ""])),
+            ],
+        )
+        .unwrap();
+
+        let result = execute(&plan, RecordBatch::new_empty(left_schema), rhs).await;
+        assert!(result.iter().all(|batch| batch.schema() == declared_schema));
+        assert_eq!(result.iter().map(RecordBatch::num_rows).sum::<usize>(), 2);
+
+        let mut rows = series_rows(&result);
+        rows.sort_by_key(|row| row.1);
+        assert_eq!(
+            rows,
+            vec![(1_000, "series_a", 10.0, ""), (1_000, "series_b", 20.0, "")]
+        );
+    }
+
+    #[tokio::test]
+    async fn lhs_signature_suppresses_all_matching_rhs_rows_and_preserves_lhs() {
+        let left_schema = Arc::new(Schema::new(vec![
+            Field::new("ts", DataType::Int64, false),
+            Field::new("series", DataType::Utf8, false),
+            Field::new("value", DataType::Float64, false),
+            Field::new("__normalized_absent_label", DataType::Utf8, false),
+        ]));
+        let right_schema = Arc::new(Schema::new(vec![
+            Field::new("rhs_ts", DataType::Int64, false),
+            Field::new("rhs_series", DataType::Utf8, false),
+            Field::new("rhs_value", DataType::Float64, false),
+            Field::new("rhs_normalized_absent_label", DataType::Utf8, false),
+        ]));
+        let (left, right) = schemas(left_schema.clone(), right_schema.clone());
+        let plan = UnionDistinctOn::try_new(left, right, vec![3], 0).unwrap();
+        let declared_schema = plan.output_schema.inner().clone();
+        let lhs = RecordBatch::try_new(
+            left_schema,
+            vec![
+                Arc::new(Int64Array::from(vec![1_000, 2_000])),
+                Arc::new(StringArray::from(vec!["lhs_match", "lhs_only"])),
+                Arc::new(Float64Array::from(vec![1.0, 2.0])),
+                Arc::new(StringArray::from(vec!["", "left-only"])),
+            ],
+        )
+        .unwrap();
+        let rhs = RecordBatch::try_new(
+            right_schema,
+            vec![
+                Arc::new(Int64Array::from(vec![1_000, 1_000, 3_000])),
+                Arc::new(StringArray::from(vec![
+                    "rhs_match_a",
+                    "rhs_match_b",
+                    "rhs_unmatched",
+                ])),
+                Arc::new(Float64Array::from(vec![10.0, 20.0, 30.0])),
+                Arc::new(StringArray::from(vec!["", "", ""])),
+            ],
+        )
+        .unwrap();
+
+        let result = execute(&plan, lhs, rhs).await;
+        assert_eq!(result.iter().map(RecordBatch::num_rows).sum::<usize>(), 3);
+        assert!(result.iter().all(|batch| batch.schema() == declared_schema));
+        let mut rows = series_rows(&result);
+        rows.sort_by_key(|row| row.1);
+        assert_eq!(
+            rows,
+            vec![
+                (1_000, "lhs_match", 1.0, ""),
+                (2_000, "lhs_only", 2.0, "left-only"),
+                (3_000, "rhs_unmatched", 30.0, ""),
+            ]
+        );
     }
 
     #[test]
