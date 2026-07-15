@@ -479,7 +479,6 @@ impl MetricEngine {
             metadata_region,
             data_region,
             state: state.clone(),
-            config,
             row_modifier: RowModifier::default(),
             flush_task: RepeatedTask::new(
                 flush_interval,
@@ -559,11 +558,6 @@ impl MetricEngine {
     ) -> Result<common_recordbatch::SendableRecordBatchStream, BoxedError> {
         self.inner.scan_to_stream(region_id, request).await
     }
-
-    /// Returns the configuration of the engine.
-    pub fn config(&self) -> &EngineConfig {
-        &self.inner.config
-    }
 }
 
 struct MetricEngineInner {
@@ -571,7 +565,6 @@ struct MetricEngineInner {
     metadata_region: MetadataRegion,
     data_region: DataRegion,
     state: Arc<RwLock<MetricEngineState>>,
-    config: EngineConfig,
     row_modifier: RowModifier,
     flush_task: RepeatedTask<Error>,
 }

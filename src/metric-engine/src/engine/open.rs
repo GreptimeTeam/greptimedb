@@ -274,10 +274,7 @@ impl MetricEngineInner {
         };
 
         let mut data_region_options = request.options;
-        set_data_region_options(
-            &mut data_region_options,
-            self.config.sparse_primary_key_encoding,
-        );
+        set_data_region_options(&mut data_region_options);
         let clean_up_data_region_request = RegionCleanUpRequest {
             table_dir: request.table_dir,
             path_type: PathType::Data,
@@ -317,10 +314,7 @@ impl MetricEngineInner {
         };
 
         let mut data_region_options = request.options;
-        set_data_region_options(
-            &mut data_region_options,
-            self.config.sparse_primary_key_encoding,
-        );
+        set_data_region_options(&mut data_region_options);
         let open_data_region_request = RegionOpenRequest {
             table_dir: request.table_dir.clone(),
             path_type: PathType::Data,
