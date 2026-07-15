@@ -60,6 +60,7 @@ use crate::sst::parquet::format::PrimaryKeyWriteFormat;
 use crate::sst::parquet::{PARQUET_METADATA_KEY, SstInfo, WriteOptions};
 use crate::sst::{
     DEFAULT_WRITE_BUFFER_SIZE, DEFAULT_WRITE_CONCURRENCY, FlatSchemaOptions, SeriesEstimator,
+    maybe_wrap_schema,
 };
 
 /// Converts a flat RecordBatch for writing to parquet.
@@ -457,7 +458,7 @@ where
                 self.bytes_written.clone(),
             );
             let arrow_writer =
-                AsyncArrowWriter::try_new(writer, schema.clone(), Some(writer_props))
+                AsyncArrowWriter::try_new(writer, maybe_wrap_schema(schema), Some(writer_props))
                     .context(WriteParquetSnafu)?;
             self.writer = Some(arrow_writer);
 

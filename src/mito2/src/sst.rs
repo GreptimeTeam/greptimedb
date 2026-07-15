@@ -64,12 +64,100 @@ pub enum FormatType {
 /// Iceberg-compatible column field ID key stored in Parquet column metadata.
 pub const PARQUET_FIELD_ID_KEY: &str = "PARQUET:field_id";
 
-/// Adds `PARQUET:field_id` metadata to an Arrow field.
+/// Adds `PARQUET:field_id` metadata to a top-level Arrow field.
+///
+/// Native-histogram sub-field ids are stamped separately at parquet-write
+/// time by [`stamp_native_histogram_schema_ids`], not here.
 pub fn with_field_id(mut field: Field, column_id: u32) -> Field {
     field
         .metadata_mut()
         .insert(PARQUET_FIELD_ID_KEY.to_string(), column_id.to_string());
     field
+}
+
+/// Stamps the `greptime.histogram` extension and reserved `PARQUET:field_id`s
+/// onto a native-histogram struct field (and its sub-fields / list element
+/// fields), so external readers can identify it by extension and resolve
+/// nested fields by id.
+///
+/// Detection is by type (not name), so any column carrying this struct type is
+/// recognized. Other struct columns are left untouched. mito2 reads SST columns
+/// by schema position, never by field metadata, so this only affects external
+/// readers.
+fn stamp_native_histogram_subfield_ids(field: &mut Field) {
+    use arrow_schema::extension::{EXTENSION_TYPE_NAME_KEY, ExtensionType};
+    use common_query::native_histogram::{
+        native_histogram_list_element_id, native_histogram_subfield_id, native_histogram_value_type,
+    };
+    use datatypes::extension::histogram::HistogramExtensionType;
+    if ConcreteDataType::from_arrow_type(field.data_type()) != *native_histogram_value_type() {
+        return;
+    }
+    // Tag the field with the greptime.histogram extension.
+    field.metadata_mut().insert(
+        EXTENSION_TYPE_NAME_KEY.to_string(),
+        HistogramExtensionType::NAME.to_string(),
+    );
+    let ArrowDataType::Struct(children) = field.data_type().clone() else {
+        return;
+    };
+    let new_children: Fields = children
+        .iter()
+        .map(|child| {
+            let mut c = (**child).clone();
+            // Stamp the sub-field's own id.
+            if let Some(id) = native_histogram_subfield_id(c.name()) {
+                c.metadata_mut()
+                    .insert(PARQUET_FIELD_ID_KEY.to_string(), id.to_string());
+            }
+            // If the sub-field is a list, stamp its element field's id.
+            if let ArrowDataType::List(elem) = c.data_type().clone()
+                && let Some(elem_id) = native_histogram_list_element_id(c.name())
+            {
+                let mut new_elem = (*elem).clone();
+                new_elem
+                    .metadata_mut()
+                    .insert(PARQUET_FIELD_ID_KEY.to_string(), elem_id.to_string());
+                c.set_data_type(ArrowDataType::List(Arc::new(new_elem)));
+            }
+            Arc::new(c)
+        })
+        .collect();
+    field.set_data_type(ArrowDataType::Struct(new_children));
+}
+
+/// Returns a copy of `schema` with native-histogram sub-field ids stamped,
+/// for the parquet writer.
+///
+/// This is called on the schema handed to `AsyncArrowWriter`, not in
+/// [`with_field_id`], because the SST arrow schema is also the memtable's
+/// in-memory schema, whose `Struct` equality (`PartialEq`) is
+/// metadata-sensitive — stamping there would break writes. The parquet writer
+/// compares types with `DataType::equals_datatype`, which ignores field
+/// metadata, so a stamped schema accepts an unstamped batch.
+pub fn maybe_wrap_schema(schema: &SchemaRef) -> SchemaRef {
+    // Fast path: only a struct column can be a native histogram; if there are
+    // none, skip the rebuild.
+    if !schema
+        .fields()
+        .iter()
+        .any(|f| matches!(f.data_type(), ArrowDataType::Struct(_)))
+    {
+        return schema.clone();
+    }
+    let new_fields: Fields = schema
+        .fields()
+        .iter()
+        .map(|f| {
+            let mut field = (**f).clone();
+            stamp_native_histogram_subfield_ids(&mut field);
+            Arc::new(field)
+        })
+        .collect();
+    Arc::new(Schema::new_with_metadata(
+        new_fields,
+        schema.metadata().clone(),
+    ))
 }
 
 /// Parquet field ID base for internal columns (__primary_key, __sequence, __op_type).

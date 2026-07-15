@@ -106,6 +106,44 @@ pub fn native_histogram_value_type() -> &'static ConcreteDataType {
     &NATIVE_HISTOGRAM_VALUE_TYPE
 }
 
-pub fn is_native_histogram_value_schema(name: &str, data_type: &ConcreteDataType) -> bool {
-    name == NATIVE_HISTOGRAM_FIELD && data_type == native_histogram_value_type()
+/// Returns true if `data_type` is the native-histogram struct type.
+///
+/// Identification is by type, not by column name: any column carrying this
+/// exact struct type is a native-histogram column.
+pub fn is_native_histogram(data_type: &ConcreteDataType) -> bool {
+    data_type == native_histogram_value_type()
+}
+
+// ---------------------------------------------------------------------------
+// Stable Parquet field ids for native-histogram sub-fields.
+//
+// External readers resolve nested struct fields by `PARQUET:field_id`, so each
+// sub-field (and list element) needs a stable positive id. The struct schema
+// is fixed (always the same 18 fields), so ids are derived from a reserved
+// range, disjoint from user column ids and mito2 internal ids (`1 << 30`).
+// ---------------------------------------------------------------------------
+
+/// Reserved base for native-histogram struct sub-field ids.
+pub const NATIVE_HISTOGRAM_SUBFIELD_ID_BASE: i32 = 0x5000_0000;
+
+/// Reserved base for the `element-id` of list-typed native-histogram
+/// sub-fields.
+pub const NATIVE_HISTOGRAM_LIST_ELEMENT_ID_BASE: i32 = 0x5000_0100;
+
+/// Returns the stable field id for a native-histogram struct sub-field by
+/// name, or `None` if `name` is not a known sub-field.
+pub fn native_histogram_subfield_id(name: &str) -> Option<i32> {
+    NATIVE_HISTOGRAM_FIELD_NAMES
+        .iter()
+        .position(|n| *n == name)
+        .map(|i| NATIVE_HISTOGRAM_SUBFIELD_ID_BASE + i as i32)
+}
+
+/// Returns the stable list `element-id` for a list-typed native-histogram
+/// sub-field by its name, or `None` if `name` is not a known sub-field.
+pub fn native_histogram_list_element_id(name: &str) -> Option<i32> {
+    NATIVE_HISTOGRAM_FIELD_NAMES
+        .iter()
+        .position(|n| *n == name)
+        .map(|i| NATIVE_HISTOGRAM_LIST_ELEMENT_ID_BASE + i as i32)
 }
