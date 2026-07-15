@@ -37,6 +37,7 @@ use datatypes::types::jsonb_to_string;
 use futures::StreamExt;
 use opensrv_mysql::{
     Column, ColumnFlags, ColumnType, ErrorKind, OkResponse, QueryResultWriter, RowWriter,
+    ToMysqlValue,
 };
 use session::SessionRef;
 use session::context::QueryContextRef;
@@ -166,6 +167,21 @@ pub fn handle_err(e: impl ErrorExt, query_ctx: QueryContextRef) -> (ErrorKind, S
 
 struct MysqlResultWriter;
 
+struct PrecisionTimestamp<'a> {
+    formatted: &'a str,
+    datetime: chrono::NaiveDateTime,
+}
+
+impl<'a> ToMysqlValue for PrecisionTimestamp<'a> {
+    fn to_mysql_text<W: std::io::Write>(&self, w: &mut W) -> io::Result<()> {
+        self.formatted.to_mysql_text(w)
+    }
+
+    fn to_mysql_bin<W: std::io::Write>(&self, w: &mut W, c: &Column) -> io::Result<()> {
+        self.datetime.to_mysql_bin(w, c)
+    }
+}
+
 impl MysqlResultWriter {
     async fn write_affected_rows<'a, W: AsyncWrite + Unpin>(
         w: QueryResultWriter<'a, W>,
@@ -281,11 +297,15 @@ impl MysqlResultWriter {
                                 "{}",
                                 datetime.format("%Y-%m-%d %H:%M:%S%.f")
                             );
+                            row_writer.write_col(PrecisionTimestamp {
+                                formatted: &format_buf,
+                                datetime,
+                            })?;
                         } else {
                             let _ =
                                 write!(&mut format_buf, "[Timestamp{}: {}]", v.unit(), v.value());
+                            row_writer.write_col(&*format_buf)?;
                         }
-                        row_writer.write_col(&*format_buf)?;
                     }
                     DataType::Interval(interval_unit) => match interval_unit {
                         IntervalUnit::YearMonth => {
