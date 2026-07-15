@@ -582,9 +582,10 @@ pub(super) fn parameters_to_scalar_values(
                     Some(st @ ConcreteDataType::Timestamp(unit)) => {
                         to_timestamp_scalar_value(data.and_then(|n| n.to_i64()), unit, st)?
                     }
-                    Some(ConcreteDataType::UInt64(_)) | None => {
-                        ScalarValue::UInt64(data.and_then(|n| n.to_u64()))
-                    }
+                    Some(ConcreteDataType::UInt64(_)) | None => ScalarValue::UInt64(
+                        data.map(|n| n.to_u64().ok_or_else(|| numeric_out_of_range_error(n)))
+                            .transpose()?,
+                    ),
                     Some(st) => {
                         return Err(invalid_parameter_error(
                             "invalid_parameter_type",
@@ -924,21 +925,28 @@ pub(super) fn parameters_to_scalar_values(
             &Type::NUMERIC_ARRAY => {
                 let data = portal.parameter::<Vec<Option<Decimal>>>(idx, &client_type)?;
                 if let Some(data) = data {
-                    let build_u64_list = |data: Vec<Option<Decimal>>| {
+                    let build_u64_list = |data: Vec<Option<Decimal>>| -> PgWireResult<ScalarValue> {
                         let values = data
                             .into_iter()
-                            .map(|n| ScalarValue::UInt64(n.and_then(|n| n.to_u64())))
-                            .collect::<Vec<_>>();
-                        ScalarValue::List(ScalarValue::new_list(
+                            .map(|n| {
+                                Ok(ScalarValue::UInt64(
+                                    n.map(|n| {
+                                        n.to_u64().ok_or_else(|| numeric_out_of_range_error(n))
+                                    })
+                                    .transpose()?,
+                                ))
+                            })
+                            .collect::<PgWireResult<Vec<_>>>()?;
+                        Ok(ScalarValue::List(ScalarValue::new_list(
                             &values,
                             &ArrowDataType::UInt64,
                             true,
-                        ))
+                        )))
                     };
                     if let Some(server_type) = &server_type {
                         match server_type {
                             ConcreteDataType::List(list_type) => match list_type.item_type() {
-                                ConcreteDataType::UInt64(_) => build_u64_list(data),
+                                ConcreteDataType::UInt64(_) => build_u64_list(data)?,
                                 ConcreteDataType::Decimal128(dt) => {
                                     let values = data
                                         .into_iter()
@@ -975,7 +983,7 @@ pub(super) fn parameters_to_scalar_values(
                         }
                     } else {
                         // server type not provided
-                        build_u64_list(data)
+                        build_u64_list(data)?
                     }
                 } else {
                     ScalarValue::Null
@@ -2024,5 +2032,115 @@ mod test {
 
         let values = parameters_to_scalar_values(&plan, &portal).unwrap();
         assert_eq!(values[0], ScalarValue::Int8(None));
+    }
+
+    fn numeric_uint64_array_plan() -> LogicalPlan {
+        build_plan_with_params(vec![(
+            "$1",
+            DataType::List(Arc::new(Field::new("item", DataType::UInt64, true))),
+        )])
+    }
+
+    fn assert_numeric_out_of_range(result: PgWireResult<Vec<ScalarValue>>) {
+        match result.unwrap_err() {
+            PgWireError::UserError(error) => {
+                assert_eq!("22023", error.code);
+                assert_eq!("numeric_value_out_of_range", error.message);
+            }
+            error => panic!("expected numeric out-of-range error, got {error:?}"),
+        }
+    }
+
+    #[test]
+    fn test_numeric_uint64_scalar_negative_rejected() {
+        let plan = build_plan_with_params(vec![("$1", DataType::UInt64)]);
+        let portal = make_portal(vec![Some(Type::NUMERIC)], vec![s("-1")]);
+
+        assert_numeric_out_of_range(parameters_to_scalar_values(&plan, &portal));
+    }
+
+    #[test]
+    fn test_numeric_uint64_scalar_above_u64_max_rejected() {
+        let plan = build_plan_with_params(vec![("$1", DataType::UInt64)]);
+        let portal = make_portal(vec![Some(Type::NUMERIC)], vec![s("18446744073709551616")]);
+
+        assert_numeric_out_of_range(parameters_to_scalar_values(&plan, &portal));
+    }
+
+    #[test]
+    fn test_numeric_uint64_scalar_null_preserved() {
+        let plan = build_plan_with_params(vec![("$1", DataType::UInt64)]);
+        let portal = make_portal(vec![Some(Type::NUMERIC)], vec![None]);
+
+        let values = parameters_to_scalar_values(&plan, &portal).unwrap();
+        assert_eq!(ScalarValue::UInt64(None), values[0]);
+    }
+
+    #[test]
+    fn test_numeric_uint64_scalar_u64_max_preserved() {
+        let plan = build_plan_with_params(vec![("$1", DataType::UInt64)]);
+        let portal = make_portal(vec![Some(Type::NUMERIC)], vec![s(&u64::MAX.to_string())]);
+
+        let values = parameters_to_scalar_values(&plan, &portal).unwrap();
+        assert_eq!(ScalarValue::UInt64(Some(u64::MAX)), values[0]);
+    }
+
+    #[test]
+    fn test_numeric_uint64_array_outer_null_preserved() {
+        let portal = make_portal(vec![Some(Type::NUMERIC_ARRAY)], vec![None]);
+
+        let values = parameters_to_scalar_values(&numeric_uint64_array_plan(), &portal).unwrap();
+        assert_eq!(ScalarValue::Null, values[0]);
+    }
+
+    #[test]
+    fn test_numeric_uint64_array_preserves_values_and_null_slots() {
+        let portal = make_portal(
+            vec![Some(Type::NUMERIC_ARRAY)],
+            vec![s("{42,NULL,18446744073709551615}")],
+        );
+
+        let values = parameters_to_scalar_values(&numeric_uint64_array_plan(), &portal).unwrap();
+        let expected = ScalarValue::List(ScalarValue::new_list(
+            &[
+                ScalarValue::UInt64(Some(42)),
+                ScalarValue::UInt64(None),
+                ScalarValue::UInt64(Some(u64::MAX)),
+            ],
+            &ArrowDataType::UInt64,
+            true,
+        ));
+        assert_eq!(expected, values[0]);
+    }
+
+    #[test]
+    fn test_numeric_uint64_array_invalid_after_valid_and_null_prefix_rejected() {
+        let portal = make_portal(vec![Some(Type::NUMERIC_ARRAY)], vec![s("{42,NULL,-1}")]);
+
+        assert_numeric_out_of_range(parameters_to_scalar_values(
+            &numeric_uint64_array_plan(),
+            &portal,
+        ));
+    }
+
+    #[test]
+    fn test_numeric_uint64_array_above_u64_max_rejected() {
+        let portal = make_portal(
+            vec![Some(Type::NUMERIC_ARRAY)],
+            vec![s("{18446744073709551616}")],
+        );
+
+        assert_numeric_out_of_range(parameters_to_scalar_values(
+            &numeric_uint64_array_plan(),
+            &portal,
+        ));
+    }
+
+    #[test]
+    fn test_numeric_uint64_uninferred_array_invalid_value_rejected() {
+        let plan = LogicalPlanBuilder::empty(true).build().unwrap();
+        let portal = make_portal(vec![Some(Type::NUMERIC_ARRAY)], vec![s("{-1}")]);
+
+        assert_numeric_out_of_range(parameters_to_scalar_values(&plan, &portal));
     }
 }
