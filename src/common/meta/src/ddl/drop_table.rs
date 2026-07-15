@@ -40,7 +40,7 @@ use crate::ddl::DdlContext;
 use crate::ddl::utils::{convert_region_routes_to_detecting_regions, map_to_procedure_error};
 use crate::error::{self, Result};
 use crate::key::table_route::TableRouteValue;
-use crate::lock_key::{CatalogLock, SchemaLock, TableLock};
+use crate::lock_key::{CatalogLock, SchemaLock, TableLock, TableNameLock};
 use crate::metrics;
 use crate::region_keeper::OperatingRegionGuard;
 use crate::rpc::ddl::DropTableTask;
@@ -321,6 +321,7 @@ impl Procedure for DropTableProcedure {
         let lock_key = vec![
             CatalogLock::Read(table_ref.catalog).into(),
             SchemaLock::read(table_ref.catalog, table_ref.schema).into(),
+            TableNameLock::new(table_ref.catalog, table_ref.schema, table_ref.table).into(),
             TableLock::Write(table_id).into(),
         ];
 

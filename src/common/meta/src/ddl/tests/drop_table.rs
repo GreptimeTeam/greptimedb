@@ -84,6 +84,32 @@ fn test_old_drop_table_json_defaults_to_hard_drop() {
     assert_eq!(recovered_data["dropped_at"], serde_json::Value::Null);
 }
 
+#[test]
+fn test_drop_table_lock_key_includes_table_name() {
+    let context = new_ddl_context(Arc::new(MockDatanodeManager::new(())));
+    let procedure = DropTableProcedure::new(new_drop_table_task("foo", 1024, false), context);
+
+    let keys = procedure
+        .lock_key()
+        .keys_to_lock()
+        .cloned()
+        .collect::<Vec<_>>();
+    assert!(
+        keys.iter().any(|key| matches!(
+            key,
+            StringKey::Exclusive(key) if key == "__table_name_lock/greptime.public.foo"
+        )),
+        "drop lock keys should include the table name: {keys:?}"
+    );
+    assert!(
+        keys.iter().any(|key| matches!(
+            key,
+            StringKey::Exclusive(key) if key == "__table_lock/1024"
+        )),
+        "drop lock keys should include the table id: {keys:?}"
+    );
+}
+
 #[tokio::test]
 async fn test_recovered_soft_drop_preserves_persisted_mode() {
     let (tx, mut rx) = mpsc::channel(8);
@@ -783,7 +809,7 @@ async fn test_create_table_succeeds_while_tombstone_exists() {
 }
 
 #[tokio::test]
-async fn test_drop_recreated_table_fails_when_previous_tombstone_exists() {
+async fn test_hard_drop_recreated_table_fails_when_soft_tombstone_exists() {
     let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
     let mut ddl_context = new_ddl_context(node_manager);
     ddl_context.soft_drop_enabled = true;
@@ -804,6 +830,7 @@ async fn test_drop_recreated_table_fails_when_previous_tombstone_exists() {
     let drop_task = new_drop_table_task(table_name, original_table_id, false);
     let mut drop_procedure = DropTableProcedure::new(drop_task, ddl_context.clone());
     execute_procedure_until_done(&mut drop_procedure).await;
+    ddl_context.soft_drop_enabled = false;
 
     ddl_context
         .table_metadata_manager

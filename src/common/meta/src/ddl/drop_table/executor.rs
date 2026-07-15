@@ -114,12 +114,12 @@ impl DropTableExecutor {
             }
         );
 
-        if soft_drop_enabled
-            && let Some(dropped_table) = ctx
-                .table_metadata_manager
-                .get_dropped_table(&self.table)
-                .await?
+        if let Some(dropped_table) = ctx
+            .table_metadata_manager
+            .get_dropped_table(&self.table)
+            .await?
             && dropped_table.table_id != self.table_id
+            && (soft_drop_enabled || dropped_table.dropped_at.is_some())
         {
             return error::TableNameTombstoneConflictSnafu {
                 table_name: table_ref.to_string(),
