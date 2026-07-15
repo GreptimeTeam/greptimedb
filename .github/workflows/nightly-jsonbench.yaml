@@ -121,7 +121,7 @@ jobs:
           subnet-id: ${{ vars.EC2_RUNNER_SUBNET_ID }}
 
       - name: Attach JSONBench data volume
-        if: ${{ inputs.download_dataset != true }}
+        if: ${{ steps.start-linux-runner.outputs.ec2-instance-id != '' && inputs.download_dataset != true }}
         shell: bash
         env:
           INSTANCE_ID: ${{ steps.start-linux-runner.outputs.ec2-instance-id }}
@@ -160,7 +160,7 @@ jobs:
       JSONBENCH_DATA_DIR: /root/data/bluesky
     steps:
       - name: Mount JSONBench data volume
-        if: ${{ inputs.download_dataset != true }}
+        if: ${{ needs.allocate-runner.outputs.linux-ec2-runner-instance-id != '' && inputs.download_dataset != true }}
         shell: bash
         env:
           VOLUME_ID: ${{ secrets.JSONBENCH_DATA_VOLUME_ID }}
