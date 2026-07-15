@@ -151,8 +151,12 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     sender.send(result.map(|_| 0));
                     return;
                 };
+                // Acquire the publication gate before the manifest lock so promotion and active
+                // region GC use the same lock order.
+                let permit = region.manifest_ctx.lock_publication().await;
                 let mut manager = region.manifest_ctx.manifest_manager.write().await;
-                let hook_payload = match region.exit_staging_on_success(&mut manager).await {
+                let hook_payload = match region.exit_staging_on_success(&mut manager, &permit).await
+                {
                     Ok(payload) => payload,
                     Err(e) => {
                         sender.send(Err(e));
@@ -160,6 +164,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     }
                 };
                 drop(manager);
+                drop(permit);
                 if let Some(pending) = hook_payload {
                     pending.fire().await;
                 }

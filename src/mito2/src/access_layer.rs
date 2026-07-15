@@ -22,7 +22,7 @@ use object_store::services::Fs;
 use object_store::util::{join_dir, with_instrument_layers};
 use object_store::{ATOMIC_WRITE_DIR, ErrorKind, OLD_ATOMIC_WRITE_DIR, ObjectStore};
 use smallvec::SmallVec;
-use snafu::ResultExt;
+use snafu::{IntoError, ResultExt};
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_request::PathType;
 use store_api::sst_entry::StorageSstEntry;
@@ -33,12 +33,13 @@ use crate::cache::file_cache::{FileCacheRef, FileType, IndexKey};
 use crate::cache::write_cache::SstUploadRequest;
 use crate::config::{BloomFilterConfig, FulltextIndexConfig, IndexConfig, InvertedIndexConfig};
 use crate::error::{
-    CleanDirSnafu, DeleteIndexSnafu, DeleteIndexesSnafu, DeleteSstsSnafu, OpenDalSnafu, Result,
+    CleanDirSnafu, DeleteIndexSnafu, DeleteIndexesSnafu, DeleteSstsSnafu, OpenDalSnafu,
+    PublicationObjectStatSnafu, PublicationSizeMismatchSnafu, Result,
 };
 use crate::metrics::{COMPACTION_STAGE_ELAPSED, FLUSH_ELAPSED};
 use crate::read::FlatSource;
 use crate::region::options::IndexOptions;
-use crate::sst::file::{FileHandle, RegionFileId, RegionIndexId};
+use crate::sst::file::{FileHandle, FileMeta, RegionFileId, RegionIndexId};
 use crate::sst::index::IndexerBuilderImpl;
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::{PuffinManagerFactory, SstPuffinManager};
@@ -188,6 +189,69 @@ impl AccessLayer {
     /// Returns the object store of the layer.
     pub fn object_store(&self) -> &ObjectStore {
         &self.object_store
+    }
+
+    /// Validates that files about to be published by a manifest edit are visible in object storage.
+    ///
+    /// A zero expected size is treated as unknown for compatibility, but the object must still
+    /// exist. Index validation always uses the file metadata's current index version.
+    pub(crate) async fn validate_publication_files(
+        &self,
+        logical_region_id: RegionId,
+        files: &[FileMeta],
+    ) -> Result<()> {
+        for file in files {
+            let path = location::sst_file_path(&self.table_dir, file.file_id(), self.path_type);
+            self.validate_publication_object(
+                logical_region_id,
+                file.file_id().file_id(),
+                path,
+                file.file_size,
+            )
+            .await?;
+
+            if file.exists_index() {
+                let index_id = file.index_id();
+                let path = location::index_file_path(&self.table_dir, index_id, self.path_type);
+                self.validate_publication_object(
+                    logical_region_id,
+                    index_id.file_id(),
+                    path,
+                    file.index_file_size(),
+                )
+                .await?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn validate_publication_object(
+        &self,
+        logical_region_id: RegionId,
+        file_id: FileId,
+        path: String,
+        expected_size: u64,
+    ) -> Result<()> {
+        let metadata = self.object_store.stat(&path).await.map_err(|error| {
+            PublicationObjectStatSnafu {
+                region_id: logical_region_id,
+                file_id,
+                path: path.clone(),
+            }
+            .into_error(error)
+        })?;
+        let actual_size = metadata.content_length();
+        if expected_size != 0 && actual_size != expected_size {
+            return PublicationSizeMismatchSnafu {
+                region_id: logical_region_id,
+                file_id,
+                path,
+                expected_size,
+                actual_size,
+            }
+            .fail();
+        }
+        Ok(())
     }
 
     /// Returns the path type of the layer.
@@ -717,5 +781,267 @@ impl FilePathProvider for RegionFilePathFactory {
 
     fn build_sst_file_path(&self, file_id: RegionFileId) -> String {
         location::sst_file_path(&self.table_dir, file_id, self.path_type)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use common_error::ext::{ErrorExt, RetryHint};
+    use common_error::status_code::StatusCode;
+    use common_test_util::temp_dir::{TempDir, create_temp_dir};
+    use object_store::services::Fs;
+
+    use super::*;
+    use crate::sst::file::IndexType;
+    use crate::sst::index::intermediate::IntermediateManager;
+    use crate::sst::index::puffin_manager::PuffinManagerFactory;
+    use crate::test_util::scheduler_util::SchedulerEnv;
+
+    fn file_meta(region_id: RegionId, file_size: u64) -> FileMeta {
+        FileMeta {
+            region_id,
+            file_id: FileId::random(),
+            file_size,
+            ..Default::default()
+        }
+    }
+
+    async fn write_parquet(access_layer: &AccessLayer, file: &FileMeta, bytes: Vec<u8>) {
+        let path = location::sst_file_path(
+            access_layer.table_dir(),
+            file.file_id(),
+            access_layer.path_type(),
+        );
+        access_layer
+            .object_store()
+            .write(&path, bytes)
+            .await
+            .unwrap();
+    }
+
+    async fn access_layer_with_path_type(
+        table_dir: &str,
+        path_type: PathType,
+    ) -> (TempDir, AccessLayer) {
+        let data_dir = create_temp_dir("publication-validator");
+        let root = data_dir.path().display().to_string();
+        let index_aux_path = data_dir.path().join("index_aux");
+        let puffin_manager = PuffinManagerFactory::new(&index_aux_path, 4096, None, None)
+            .await
+            .unwrap();
+        let intermediate_manager = IntermediateManager::init_fs(index_aux_path.to_str().unwrap())
+            .await
+            .unwrap();
+        let access_layer = AccessLayer::new(
+            table_dir,
+            path_type,
+            ObjectStore::new(Fs::default().root(&root))
+                .unwrap()
+                .finish(),
+            puffin_manager,
+            intermediate_manager,
+        );
+        (data_dir, access_layer)
+    }
+
+    #[tokio::test]
+    async fn test_validate_publication_files_valid_parquet() {
+        let env = SchedulerEnv::new().await;
+        let region_id = RegionId::new(1, 1);
+        let file = file_meta(region_id, 0);
+        write_parquet(&env.access_layer, &file, b"sst".to_vec()).await;
+
+        env.access_layer
+            .validate_publication_files(region_id, &[file])
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_validate_publication_files_rejects_missing_parquet() {
+        let env = SchedulerEnv::new().await;
+        let region_id = RegionId::new(1, 1);
+        let file = file_meta(region_id, 3);
+
+        let err = env
+            .access_layer
+            .validate_publication_files(region_id, &[file])
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            crate::error::Error::PublicationObjectStat { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_validate_publication_files_rejects_parquet_size_mismatch() {
+        let env = SchedulerEnv::new().await;
+        let region_id = RegionId::new(1, 1);
+        let file = file_meta(region_id, 4);
+        write_parquet(&env.access_layer, &file, b"sst".to_vec()).await;
+
+        let err = env
+            .access_layer
+            .validate_publication_files(region_id, &[file.clone()])
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            &err,
+            crate::error::Error::PublicationSizeMismatch { .. }
+        ));
+        assert_eq!(err.status_code(), StatusCode::StorageUnavailable);
+        assert_eq!(err.retry_hint(), RetryHint::Retryable);
+    }
+
+    #[tokio::test]
+    async fn test_validate_publication_files_without_index_does_not_require_puffin() {
+        let env = SchedulerEnv::new().await;
+        let region_id = RegionId::new(1, 1);
+        let file = file_meta(region_id, 3);
+        write_parquet(&env.access_layer, &file, b"sst".to_vec()).await;
+
+        env.access_layer
+            .validate_publication_files(region_id, &[file])
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_validate_publication_files_rejects_missing_or_wrong_versioned_index() {
+        let env = SchedulerEnv::new().await;
+        let region_id = RegionId::new(1, 1);
+        let mut file = file_meta(region_id, 3);
+        file.available_indexes.push(IndexType::InvertedIndex);
+        file.index_version = 7;
+        file.index_file_size = 5;
+        write_parquet(&env.access_layer, &file, b"sst".to_vec()).await;
+
+        assert!(matches!(
+            env.access_layer
+                .validate_publication_files(region_id, &[file.clone()])
+                .await,
+            Err(crate::error::Error::PublicationObjectStat { .. })
+        ));
+
+        let legacy_path = location::index_file_path(
+            env.access_layer.table_dir(),
+            RegionIndexId::new(file.file_id(), 0),
+            env.access_layer.path_type(),
+        );
+        env.access_layer
+            .object_store()
+            .write(&legacy_path, b"index".to_vec())
+            .await
+            .unwrap();
+        assert!(matches!(
+            env.access_layer
+                .validate_publication_files(region_id, &[file.clone()])
+                .await,
+            Err(crate::error::Error::PublicationObjectStat { .. })
+        ));
+
+        let current_path = location::index_file_path(
+            env.access_layer.table_dir(),
+            file.index_id(),
+            env.access_layer.path_type(),
+        );
+        env.access_layer
+            .object_store()
+            .write(&current_path, b"bad".to_vec())
+            .await
+            .unwrap();
+        assert!(matches!(
+            env.access_layer
+                .validate_publication_files(region_id, &[file.clone()])
+                .await,
+            Err(crate::error::Error::PublicationSizeMismatch { .. })
+        ));
+
+        env.access_layer
+            .object_store()
+            .write(&current_path, b"index".to_vec())
+            .await
+            .unwrap();
+        env.access_layer
+            .validate_publication_files(region_id, &[file])
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_validate_publication_files_uses_file_origin_region_and_layer_path_type() {
+        let (_data_dir, access_layer) = access_layer_with_path_type("table", PathType::Data).await;
+        let logical_region_id = RegionId::new(1, 1);
+        let file_origin_region_id = RegionId::new(1, 2);
+        let file = file_meta(file_origin_region_id, 3);
+        write_parquet(&access_layer, &file, b"sst".to_vec()).await;
+
+        access_layer
+            .validate_publication_files(logical_region_id, &[file])
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_validate_publication_files_accepts_zero_expected_index_size_but_rejects_missing()
+    {
+        let env = SchedulerEnv::new().await;
+        let region_id = RegionId::new(1, 1);
+        let mut file = file_meta(region_id, 0);
+        file.available_indexes.push(IndexType::InvertedIndex);
+        file.index_version = 4;
+        write_parquet(&env.access_layer, &file, b"sst".to_vec()).await;
+
+        assert!(matches!(
+            env.access_layer
+                .validate_publication_files(region_id, &[file.clone()])
+                .await,
+            Err(crate::error::Error::PublicationObjectStat { .. })
+        ));
+
+        let path = location::index_file_path(
+            env.access_layer.table_dir(),
+            file.index_id(),
+            env.access_layer.path_type(),
+        );
+        env.access_layer
+            .object_store()
+            .write(&path, b"any-size".to_vec())
+            .await
+            .unwrap();
+        env.access_layer
+            .validate_publication_files(region_id, &[file])
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_publication_object_stat_preserves_not_found_source_and_is_retryable() {
+        let env = SchedulerEnv::new().await;
+        let logical_region_id = RegionId::new(1, 1);
+        let file = file_meta(RegionId::new(1, 2), 0);
+        let err = env
+            .access_layer
+            .validate_publication_files(logical_region_id, &[file.clone()])
+            .await
+            .unwrap_err();
+
+        match &err {
+            crate::error::Error::PublicationObjectStat {
+                region_id,
+                file_id,
+                error,
+                ..
+            } => {
+                assert_eq!(*region_id, logical_region_id);
+                assert_eq!(*file_id, file.file_id);
+                assert_eq!(error.kind(), ErrorKind::NotFound);
+            }
+            other => panic!("unexpected publication validator error: {other:?}"),
+        }
+        assert!(std::error::Error::source(&err).is_some());
+        assert_eq!(err.status_code(), StatusCode::StorageUnavailable);
+        assert_eq!(err.retry_hint(), RetryHint::Retryable);
     }
 }

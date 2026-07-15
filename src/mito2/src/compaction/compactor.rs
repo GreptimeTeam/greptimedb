@@ -184,6 +184,7 @@ pub async fn open_compaction_region(
     let hook: Option<RegionHookRef> = req.plugins.get();
     let manifest_ctx = Arc::new(ManifestContext::new(
         manifest_manager,
+        access_layer.clone(),
         RegionRoleState::Leader(RegionLeaderState::Writable),
         hook,
     ));

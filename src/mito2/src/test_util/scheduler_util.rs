@@ -143,6 +143,7 @@ impl SchedulerEnv {
             )
             .await
             .unwrap(),
+            self.access_layer.clone(),
             RegionRoleState::Leader(RegionLeaderState::Writable),
             None,
         ))

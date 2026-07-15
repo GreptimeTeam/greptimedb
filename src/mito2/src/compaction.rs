@@ -1966,6 +1966,7 @@ mod tests {
             .unwrap();
             Arc::new(ManifestContext::new(
                 manager,
+                env.access_layer.clone(),
                 RegionRoleState::Leader(RegionLeaderState::Staging),
                 None,
             ))

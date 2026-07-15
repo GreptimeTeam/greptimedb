@@ -63,6 +63,17 @@ use crate::sst::file_purger::FilePurgerRef;
 use crate::sst::location::{index_file_path, sst_file_path};
 use crate::time_provider::TimeProviderRef;
 
+pub(crate) struct PublicationGuard<'a> {
+    gate: Arc<tokio::sync::Mutex<()>>,
+    _guard: tokio::sync::MutexGuard<'a, ()>,
+}
+
+#[allow(dead_code)]
+pub(crate) struct OwnedPublicationGuard {
+    gate: Arc<tokio::sync::Mutex<()>>,
+    _guard: tokio::sync::OwnedMutexGuard<()>,
+}
+
 /// This is the approximate factor to estimate the size of wal.
 const ESTIMATED_WAL_FACTOR: f32 = 0.42825;
 
@@ -475,6 +486,13 @@ impl MitoRegion {
         &self,
         state: SettableRegionRoleState,
     ) -> Result<()> {
+        // A leader transition may publish staged files. Acquire the publication gate before the
+        // manifest lock to preserve the global lock order.
+        let publication_guard = if matches!(state, SettableRegionRoleState::Leader) {
+            Some(self.manifest_ctx.lock_publication().await)
+        } else {
+            None
+        };
         let mut manager: RwLockWriteGuard<'_, RegionManifestManager> =
             self.manifest_ctx.manifest_manager.write().await;
         let current_state = self.state();
@@ -487,7 +505,13 @@ impl MitoRegion {
                     RegionRoleState::Leader(RegionLeaderState::Staging) => {
                         info!("Exiting staging mode for region {}", self.region_id);
                         // Use the success exit path that merges all staged manifests
-                        self.exit_staging_on_success(&mut manager).await?
+                        self.exit_staging_on_success(
+                            &mut manager,
+                            publication_guard.as_ref().expect(
+                                "leader transition must hold the publication guard before the manifest lock",
+                            ),
+                        )
+                        .await?
                     }
                     RegionRoleState::Leader(RegionLeaderState::Writable) => {
                         // Already in desired state - no-op
@@ -618,6 +642,8 @@ impl MitoRegion {
         }
 
         drop(manager);
+        // Hooks may publish additional files, so release the publication gate before firing.
+        drop(publication_guard);
 
         // Merge both payloads so consumers see the complete set of actions in
         // one notification. The lock is released, so it's safe to fire.
@@ -861,6 +887,7 @@ impl MitoRegion {
     pub(crate) async fn exit_staging_on_success(
         &self,
         manager: &mut RwLockWriteGuard<'_, RegionManifestManager>,
+        permit: &PublicationGuard<'_>,
     ) -> Result<Option<PendingManifestHook>> {
         let current_state = self.manifest_ctx.current_state();
         ensure!(
@@ -929,7 +956,7 @@ impl MitoRegion {
         // Pass `false` so it saves to normal directory, not staging.
         let pending = self
             .manifest_ctx
-            .update_locked(manager, merged_actions, false)
+            .update_locked_with_publication_guard(manager, merged_actions, false, permit)
             .await?;
         let new_version = pending.version();
         info!(
@@ -1026,6 +1053,11 @@ pub(crate) struct ManifestContext {
     /// [`update_locked`](Self::update_locked) (or an [`update_manifest`](Self::update_manifest)
     /// variant) so they produce a [`PendingManifestHook`].
     pub(crate) manifest_manager: tokio::sync::RwLock<RegionManifestManager>,
+    region_id: RegionId,
+    /// Access layer used by the publication path to validate objects before manifest updates.
+    access_layer: AccessLayerRef,
+    /// Serializes local file publication with active-region GC finalization.
+    publication_gate: Arc<tokio::sync::Mutex<()>>,
     /// The state of the region. The region checks the state before updating
     /// manifest.
     state: AtomicCell<RegionRoleState>,
@@ -1041,11 +1073,16 @@ pub(crate) struct ManifestContext {
 impl ManifestContext {
     pub(crate) fn new(
         manager: RegionManifestManager,
+        access_layer: AccessLayerRef,
         state: RegionRoleState,
         hook: Option<RegionHookRef>,
     ) -> Self {
+        let region_id = manager.manifest().metadata.region_id;
         ManifestContext {
             manifest_manager: tokio::sync::RwLock::new(manager),
+            region_id,
+            access_layer,
+            publication_gate: Arc::new(tokio::sync::Mutex::new(())),
             state: AtomicCell::new(state),
             staging_partition_info: Mutex::new(None),
             hook,
@@ -1055,6 +1092,46 @@ impl ManifestContext {
     /// Returns the region hook if one is registered.
     pub(crate) fn hook(&self) -> Option<RegionHookRef> {
         self.hook.clone()
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn access_layer(&self) -> &AccessLayerRef {
+        &self.access_layer
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn publication_gate(&self) -> Arc<tokio::sync::Mutex<()>> {
+        self.publication_gate.clone()
+    }
+
+    pub(crate) async fn lock_publication(&self) -> PublicationGuard<'_> {
+        let guard = self.publication_gate.lock().await;
+        PublicationGuard {
+            gate: self.publication_gate.clone(),
+            _guard: guard,
+        }
+    }
+
+    #[allow(dead_code)]
+    pub(crate) async fn lock_publication_owned(&self) -> OwnedPublicationGuard {
+        let gate = self.publication_gate.clone();
+        let guard = gate.clone().lock_owned().await;
+        OwnedPublicationGuard {
+            gate,
+            _guard: guard,
+        }
+    }
+
+    fn files_to_publish(action_list: &RegionMetaActionList) -> Vec<FileMeta> {
+        action_list
+            .actions
+            .iter()
+            .filter_map(|action| match action {
+                RegionMetaAction::Edit(edit) => Some(edit.files_to_add.iter().cloned()),
+                _ => None,
+            })
+            .flatten()
+            .collect()
     }
 
     pub(crate) fn staging_partition_info(&self) -> Option<StagingPartitionInfo> {
@@ -1222,6 +1299,39 @@ impl ManifestContext {
         action_list: RegionMetaActionList,
         is_staging: bool,
     ) -> Result<PendingManifestHook> {
+        ensure!(
+            Self::files_to_publish(&action_list).is_empty(),
+            UnexpectedSnafu {
+                reason: "manifest updates that publish files require the publication guard"
+            }
+        );
+        self.update_locked_impl(manager, action_list, is_staging)
+            .await
+    }
+
+    pub(crate) async fn update_locked_with_publication_guard(
+        &self,
+        manager: &mut RegionManifestManager,
+        action_list: RegionMetaActionList,
+        is_staging: bool,
+        guard: &PublicationGuard<'_>,
+    ) -> Result<PendingManifestHook> {
+        ensure!(
+            Arc::ptr_eq(&guard.gate, &self.publication_gate),
+            UnexpectedSnafu {
+                reason: "publication guard belongs to a different manifest context"
+            }
+        );
+        self.update_locked_impl(manager, action_list, is_staging)
+            .await
+    }
+
+    async fn update_locked_impl(
+        &self,
+        manager: &mut RegionManifestManager,
+        action_list: RegionMetaActionList,
+        is_staging: bool,
+    ) -> Result<PendingManifestHook> {
         let region_id = manager.manifest().metadata.region_id;
         // Clone before `action_list` is moved into `update` so the hook still
         // sees what was written.
@@ -1246,6 +1356,20 @@ impl ManifestContext {
         is_staging: bool,
         check_state: impl FnOnce(RegionRoleState, RegionId) -> Result<()>,
     ) -> Result<ManifestVersion> {
+        let files_to_publish = Self::files_to_publish(&action_list);
+        // Publication validation and the manifest update share this gate with future active GC
+        // finalization. Keep it before the manifest lock to preserve the global lock order.
+        let _publication_guard = if files_to_publish.is_empty() {
+            None
+        } else {
+            Some(self.lock_publication().await)
+        };
+        if !files_to_publish.is_empty() {
+            self.access_layer
+                .validate_publication_files(self.region_id, &files_to_publish)
+                .await?;
+        }
+
         // Acquires the write lock of the manifest manager.
         let mut manager = self.manifest_manager.write().await;
         // Gets current manifest.
@@ -1307,15 +1431,29 @@ impl ManifestContext {
 
         // `update_locked` returns a `PendingManifestHook` we fire after releasing the lock.
         let region_id = manifest.metadata.region_id;
-        let pending = self
-            .update_locked(&mut manager, action_list, is_staging)
-            .await?;
+        let pending = if files_to_publish.is_empty() {
+            self.update_locked(&mut manager, action_list, is_staging)
+                .await?
+        } else {
+            self.update_locked_with_publication_guard(
+                &mut manager,
+                action_list,
+                is_staging,
+                _publication_guard
+                    .as_ref()
+                    .expect("publication guard must be held when publishing files"),
+            )
+            .await?
+        };
         let version = pending.version();
 
         // Drop the write lock before invoking the hook. Hook implementations may
         // read the manifest or send region requests that acquire this lock;
         // holding it would deadlock. Slow hooks also must not block manifest updates.
         drop(manager);
+        // Hooks are user-provided async code. Do not retain the publication gate while they run,
+        // otherwise a hook that triggers another publication path can self-deadlock.
+        drop(_publication_guard);
 
         if self.state.load() == RegionRoleState::Follower {
             warn!(
@@ -1489,6 +1627,13 @@ impl ManifestContext {
         &self,
     ) -> Option<Arc<crate::manifest::action::RegionManifest>> {
         self.manifest_manager.read().await.staging_manifest()
+    }
+}
+
+impl OwnedPublicationGuard {
+    #[allow(dead_code)]
+    pub(crate) fn belongs_to(&self, manifest_ctx: &ManifestContext) -> bool {
+        Arc::ptr_eq(&self.gate, &manifest_ctx.publication_gate)
     }
 }
 
@@ -1784,18 +1929,23 @@ pub fn parse_partition_expr(partition_expr_str: Option<&str>) -> Result<Option<P
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::time::Duration;
 
+    use async_trait::async_trait;
     use common_datasource::compression::CompressionType;
     use common_test_util::temp_dir::create_temp_dir;
     use crossbeam_utils::atomic::AtomicCell;
     use object_store::ObjectStore;
     use object_store::services::Fs;
+    use store_api::ManifestVersion;
     use store_api::logstore::provider::Provider;
-    use store_api::region_engine::RegionRole;
+    use store_api::region_engine::{RegionRole, SettableRegionRoleState};
     use store_api::region_request::PathType;
     use store_api::storage::{FileId, RegionId};
+    use tokio::sync::Semaphore;
 
     use crate::access_layer::AccessLayer;
+    use crate::engine::region_hook::{RegionHook, RegionHookRef};
     use crate::error::Error;
     use crate::manifest::action::{
         RegionChange, RegionEdit, RegionMetaAction, RegionMetaActionList, RegionPartitionExprChange,
@@ -1804,12 +1954,32 @@ mod tests {
     use crate::region::{
         ManifestContext, ManifestStats, MitoRegion, RegionLeaderState, RegionRoleState, RegionStats,
     };
-    use crate::sst::FormatType;
+    use crate::sst::file::FileMeta;
     use crate::sst::index::intermediate::IntermediateManager;
     use crate::sst::index::puffin_manager::PuffinManagerFactory;
+    use crate::sst::{FormatType, location};
     use crate::test_util::scheduler_util::SchedulerEnv;
     use crate::test_util::version_util::VersionControlBuilder;
     use crate::time_provider::StdTimeProvider;
+
+    #[derive(Debug)]
+    struct BlockingManifestHook {
+        entered: Arc<Semaphore>,
+        release: Arc<Semaphore>,
+    }
+
+    #[async_trait]
+    impl RegionHook for BlockingManifestHook {
+        async fn on_manifest_updated(
+            &self,
+            _region_id: RegionId,
+            _action_list: &RegionMetaActionList,
+            _manifest_version: ManifestVersion,
+        ) {
+            self.entered.add_permits(1);
+            self.release.acquire().await.unwrap().forget();
+        }
+    }
 
     #[test]
     fn test_region_state_lock_free() {
@@ -1834,6 +2004,13 @@ mod tests {
     }
 
     async fn build_test_region(env: &SchedulerEnv) -> MitoRegion {
+        build_test_region_with_hook(env, None).await
+    }
+
+    async fn build_test_region_with_hook(
+        env: &SchedulerEnv,
+        hook: Option<RegionHookRef>,
+    ) -> MitoRegion {
         let builder = VersionControlBuilder::new();
         let version_control = Arc::new(builder.build());
         let metadata = version_control.current().version.metadata.clone();
@@ -1857,8 +2034,9 @@ mod tests {
 
         let manifest_ctx = Arc::new(ManifestContext::new(
             manager,
+            env.access_layer.clone(),
             RegionRoleState::Leader(RegionLeaderState::Writable),
-            None,
+            hook,
         ));
 
         MitoRegion {
@@ -1877,6 +2055,36 @@ mod tests {
         }
     }
 
+    async fn build_test_manifest_context(
+        env: &SchedulerEnv,
+        hook: RegionHookRef,
+    ) -> Arc<ManifestContext> {
+        let version_control = VersionControlBuilder::new().build();
+        let metadata = version_control.current().version.metadata.clone();
+        let manager = RegionManifestManager::new(
+            metadata,
+            0,
+            RegionManifestOptions {
+                manifest_dir: "".to_string(),
+                object_store: env.access_layer.object_store().clone(),
+                compress_type: CompressionType::Uncompressed,
+                checkpoint_distance: 10,
+                remove_file_options: Default::default(),
+                manifest_cache: None,
+            },
+            FormatType::PrimaryKey,
+            &Default::default(),
+        )
+        .await
+        .unwrap();
+        Arc::new(ManifestContext::new(
+            manager,
+            env.access_layer.clone(),
+            RegionRoleState::Leader(RegionLeaderState::Writable),
+            Some(hook),
+        ))
+    }
+
     fn empty_edit() -> RegionEdit {
         RegionEdit {
             files_to_add: Vec::new(),
@@ -1890,26 +2098,288 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_manifest_hook_runs_after_publication_gate_is_released() {
+        let env = SchedulerEnv::new().await;
+        let hook = Arc::new(BlockingManifestHook {
+            entered: Arc::new(Semaphore::new(0)),
+            release: Arc::new(Semaphore::new(0)),
+        });
+        let context = build_test_manifest_context(&env, hook.clone() as RegionHookRef).await;
+        let file = FileMeta {
+            region_id: context.manifest().await.metadata.region_id,
+            file_id: FileId::random(),
+            ..Default::default()
+        };
+        let path = location::sst_file_path(
+            env.access_layer.table_dir(),
+            file.file_id(),
+            env.access_layer.path_type(),
+        );
+        env.access_layer
+            .object_store()
+            .write(&path, b"sst".to_vec())
+            .await
+            .unwrap();
+
+        let update_context = context.clone();
+        let update = tokio::spawn(async move {
+            update_context
+                .update_manifest(RegionLeaderState::Writable, add_file_edit(file), false)
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(1), hook.entered.acquire())
+            .await
+            .expect("manifest hook did not start")
+            .unwrap()
+            .forget();
+
+        let gate = tokio::time::timeout(
+            Duration::from_secs(1),
+            context.publication_gate().lock_owned(),
+        )
+        .await
+        .expect("manifest hook ran while publication gate was still held");
+        drop(gate);
+        hook.release.add_permits(1);
+        update.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_exit_staging_hook_runs_after_publication_gate_is_released() {
+        let env = SchedulerEnv::new().await;
+        let hook = Arc::new(BlockingManifestHook {
+            entered: Arc::new(Semaphore::new(0)),
+            release: Arc::new(Semaphore::new(0)),
+        });
+        let region =
+            Arc::new(build_test_region_with_hook(&env, Some(hook.clone() as RegionHookRef)).await);
+        let mut manager = region.manifest_ctx.manifest_manager.write().await;
+        region.set_staging(&mut manager).await.unwrap();
+        manager
+            .update(
+                RegionMetaActionList::new(vec![
+                    RegionMetaAction::PartitionExprChange(RegionPartitionExprChange {
+                        partition_expr: Some("expr_a".to_string()),
+                    }),
+                    RegionMetaAction::Edit(empty_edit()),
+                ]),
+                true,
+            )
+            .await
+            .unwrap();
+        drop(manager);
+
+        let promotion_region = region.clone();
+        let promotion = tokio::spawn(async move {
+            promotion_region
+                .set_role_state_gracefully(SettableRegionRoleState::Leader)
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(1), hook.entered.acquire())
+            .await
+            .expect("staging promotion hook did not start")
+            .unwrap()
+            .forget();
+
+        let gate = tokio::time::timeout(
+            Duration::from_secs(1),
+            region.manifest_ctx.publication_gate().lock_owned(),
+        )
+        .await
+        .expect("staging promotion hook ran while publication gate was still held");
+        drop(gate);
+        hook.release.add_permits(1);
+        promotion.await.unwrap().unwrap();
+    }
+
+    fn add_file_edit(file: FileMeta) -> RegionMetaActionList {
+        RegionMetaActionList::with_action(RegionMetaAction::Edit(RegionEdit {
+            files_to_add: vec![file],
+            ..empty_edit()
+        }))
+    }
+
+    #[tokio::test]
+    async fn test_update_locked_rejects_file_add_without_publication_guard() {
+        let env = SchedulerEnv::new().await;
+        let region = build_test_region(&env).await;
+        let file = FileMeta {
+            region_id: region.region_id,
+            file_id: FileId::random(),
+            ..Default::default()
+        };
+
+        let mut manager = region.manifest_ctx.manifest_manager.write().await;
+        let before = manager.manifest();
+        assert!(matches!(
+            region
+                .manifest_ctx
+                .update_locked(&mut manager, add_file_edit(file), false)
+                .await,
+            Err(Error::Unexpected { .. })
+        ));
+
+        let after = manager.manifest();
+        assert_eq!(before.manifest_version, after.manifest_version);
+        assert_eq!(before.files, after.files);
+    }
+
+    #[tokio::test]
+    async fn test_update_locked_rejects_publication_guard_from_another_context() {
+        let env = SchedulerEnv::new().await;
+        let first_region = build_test_region(&env).await;
+        let second_region = build_test_region(&env).await;
+        let file = FileMeta {
+            region_id: second_region.region_id,
+            file_id: FileId::random(),
+            ..Default::default()
+        };
+
+        let guard = first_region.manifest_ctx.lock_publication().await;
+        let mut manager = second_region.manifest_ctx.manifest_manager.write().await;
+        let before = manager.manifest();
+        assert!(matches!(
+            second_region
+                .manifest_ctx
+                .update_locked_with_publication_guard(
+                    &mut manager,
+                    add_file_edit(file),
+                    false,
+                    &guard
+                )
+                .await,
+            Err(Error::Unexpected { .. })
+        ));
+
+        let after = manager.manifest();
+        assert_eq!(before.manifest_version, after.manifest_version);
+        assert_eq!(before.files, after.files);
+    }
+
+    #[tokio::test]
+    async fn test_owned_publication_guard_rejects_another_context() {
+        let env = SchedulerEnv::new().await;
+        let first_region = build_test_region(&env).await;
+        let second_region = build_test_region(&env).await;
+
+        let guard = first_region.manifest_ctx.lock_publication_owned().await;
+        assert!(guard.belongs_to(&first_region.manifest_ctx));
+        assert!(!guard.belongs_to(&second_region.manifest_ctx));
+    }
+
+    async fn write_publication_file(region: &MitoRegion, file: &FileMeta) {
+        let path = location::sst_file_path(
+            region.access_layer.table_dir(),
+            file.file_id(),
+            region.access_layer.path_type(),
+        );
+        region
+            .access_layer
+            .object_store()
+            .write(&path, b"sst".to_vec())
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_update_manifest_rejects_missing_publication_file_without_mutation() {
+        let env = SchedulerEnv::new().await;
+        let region = build_test_region(&env).await;
+        let file = FileMeta {
+            region_id: region.region_id,
+            file_id: FileId::random(),
+            ..Default::default()
+        };
+        let before = region.manifest_ctx.manifest().await;
+
+        let err = region
+            .manifest_ctx
+            .update_manifest(RegionLeaderState::Writable, add_file_edit(file), false)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Error::PublicationObjectStat { .. }));
+
+        let after = region.manifest_ctx.manifest().await;
+        assert_eq!(before.manifest_version, after.manifest_version);
+        assert!(after.files.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_update_manifest_metadata_only_skips_publication_validation() {
+        let env = SchedulerEnv::new().await;
+        let region = build_test_region(&env).await;
+        let before = region.manifest_ctx.manifest().await;
+
+        region
+            .manifest_ctx
+            .update_manifest(
+                RegionLeaderState::Writable,
+                RegionMetaActionList::with_action(RegionMetaAction::Edit(empty_edit())),
+                false,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            before.manifest_version + 1,
+            region.manifest_ctx.manifest().await.manifest_version
+        );
+    }
+
+    #[tokio::test]
+    async fn test_update_manifest_rejects_any_missing_file_from_multiple_edits() {
+        let env = SchedulerEnv::new().await;
+        let region = build_test_region(&env).await;
+        let present = FileMeta {
+            region_id: region.region_id,
+            file_id: FileId::random(),
+            ..Default::default()
+        };
+        write_publication_file(&region, &present).await;
+        let missing = FileMeta {
+            region_id: region.region_id,
+            file_id: FileId::random(),
+            ..Default::default()
+        };
+        let before = region.manifest_ctx.manifest().await;
+        let actions = RegionMetaActionList::new(vec![
+            RegionMetaAction::Edit(RegionEdit {
+                files_to_add: vec![present],
+                ..empty_edit()
+            }),
+            RegionMetaAction::Edit(RegionEdit {
+                files_to_add: vec![missing],
+                ..empty_edit()
+            }),
+        ]);
+
+        assert!(matches!(
+            region
+                .manifest_ctx
+                .update_manifest(RegionLeaderState::Writable, actions, false)
+                .await,
+            Err(Error::PublicationObjectStat { .. })
+        ));
+        let after = region.manifest_ctx.manifest().await;
+        assert_eq!(before.manifest_version, after.manifest_version);
+        assert!(after.files.is_empty());
+    }
+
+    #[tokio::test]
     async fn test_compaction_update_manifest_allows_editing_state() {
         let env = SchedulerEnv::new().await;
         let region = build_test_region(&env).await;
         region.set_editing(RegionLeaderState::Writable).unwrap();
 
         let file_id = FileId::random();
-        let action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(RegionEdit {
-            files_to_add: vec![crate::sst::file::FileMeta {
-                region_id: region.region_id,
-                file_id,
-                level: 1,
-                ..Default::default()
-            }],
-            files_to_remove: Vec::new(),
-            timestamp_ms: None,
-            compaction_time_window: None,
-            flushed_entry_id: None,
-            flushed_sequence: None,
-            committed_sequence: None,
-        }));
+        let file = crate::sst::file::FileMeta {
+            region_id: region.region_id,
+            file_id,
+            level: 1,
+            ..Default::default()
+        };
+        write_publication_file(&region, &file).await;
+        let action_list = add_file_edit(file);
 
         region
             .manifest_ctx
@@ -1932,6 +2402,7 @@ mod tests {
         let env = SchedulerEnv::new().await;
         let region = build_test_region(&env).await;
 
+        let permit = region.manifest_ctx.lock_publication().await;
         let mut manager = region.manifest_ctx.manifest_manager.write().await;
         region.set_staging(&mut manager).await.unwrap();
         manager
@@ -1947,8 +2418,12 @@ mod tests {
             .await
             .unwrap();
 
-        let _hook_payload = region.exit_staging_on_success(&mut manager).await.unwrap();
+        let _hook_payload = region
+            .exit_staging_on_success(&mut manager, &permit)
+            .await
+            .unwrap();
         drop(manager);
+        drop(permit);
 
         assert_eq!(
             region.version().metadata.partition_expr.as_deref(),
@@ -1965,6 +2440,7 @@ mod tests {
         let env = SchedulerEnv::new().await;
         let region = build_test_region(&env).await;
 
+        let permit = region.manifest_ctx.lock_publication().await;
         let mut manager = region.manifest_ctx.manifest_manager.write().await;
         region.set_staging(&mut manager).await.unwrap();
 
@@ -1986,8 +2462,12 @@ mod tests {
             .await
             .unwrap();
 
-        let _hook_payload = region.exit_staging_on_success(&mut manager).await.unwrap();
+        let _hook_payload = region
+            .exit_staging_on_success(&mut manager, &permit)
+            .await
+            .unwrap();
         drop(manager);
+        drop(permit);
 
         assert_eq!(
             region.version().metadata.partition_expr.as_deref(),
@@ -2004,6 +2484,7 @@ mod tests {
         let env = SchedulerEnv::new().await;
         let region = build_test_region(&env).await;
 
+        let permit = region.manifest_ctx.lock_publication().await;
         let mut manager = region.manifest_ctx.manifest_manager.write().await;
         region.set_staging(&mut manager).await.unwrap();
 
@@ -2025,7 +2506,7 @@ mod tests {
             .await
             .unwrap();
 
-        let result = region.exit_staging_on_success(&mut manager).await;
+        let result = region.exit_staging_on_success(&mut manager, &permit).await;
         assert!(matches!(result, Err(Error::Unexpected { .. })));
     }
 
@@ -2034,6 +2515,7 @@ mod tests {
         let env = SchedulerEnv::new().await;
         let region = build_test_region(&env).await;
 
+        let permit = region.manifest_ctx.lock_publication().await;
         let mut manager = region.manifest_ctx.manifest_manager.write().await;
         region.set_staging(&mut manager).await.unwrap();
 
@@ -2058,7 +2540,7 @@ mod tests {
             .await
             .unwrap();
 
-        let result = region.exit_staging_on_success(&mut manager).await;
+        let result = region.exit_staging_on_success(&mut manager, &permit).await;
         assert!(matches!(result, Err(Error::Unexpected { .. })));
     }
 
@@ -2147,6 +2629,7 @@ mod tests {
             .unwrap();
             Arc::new(ManifestContext::new(
                 manager,
+                env.access_layer.clone(),
                 RegionRoleState::Leader(RegionLeaderState::Staging),
                 None,
             ))
@@ -2216,6 +2699,7 @@ mod tests {
 
         let manifest_ctx = Arc::new(ManifestContext::new(
             manager,
+            access_layer.clone(),
             RegionRoleState::Leader(RegionLeaderState::Writable),
             None,
         ));

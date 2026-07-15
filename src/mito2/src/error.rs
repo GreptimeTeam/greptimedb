@@ -67,6 +67,40 @@ pub enum Error {
         error: object_store::Error,
     },
 
+    #[snafu(display(
+        "Failed to stat published object for region {} file {} at {}",
+        region_id,
+        file_id,
+        path
+    ))]
+    PublicationObjectStat {
+        region_id: RegionId,
+        file_id: FileId,
+        path: String,
+        #[snafu(source)]
+        error: object_store::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Published object for region {} file {} at {} has size {}, expected {}",
+        region_id,
+        file_id,
+        path,
+        actual_size,
+        expected_size
+    ))]
+    PublicationSizeMismatch {
+        region_id: RegionId,
+        file_id: FileId,
+        path: String,
+        expected_size: u64,
+        actual_size: u64,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Fail to compress object by {}, path: {}", compress_type, path))]
     CompressObject {
         compress_type: CompressionType,
@@ -1324,7 +1358,10 @@ impl ErrorExt for Error {
 
         match self {
             DataTypeMismatch { source, .. } => source.status_code(),
-            OpenDal { .. } | ReadParquet { .. } => StatusCode::StorageUnavailable,
+            OpenDal { .. }
+            | ReadParquet { .. }
+            | PublicationObjectStat { .. }
+            | PublicationSizeMismatch { .. } => StatusCode::StorageUnavailable,
             WriteWal { source, .. } | ReadWal { source, .. } | DeleteWal { source, .. } => {
                 source.status_code()
             }
@@ -1513,7 +1550,9 @@ impl ErrorExt for Error {
             | UpdateManifest { .. }
             | RegionStopped { .. }
             | RegionBusy { .. }
-            | FlushableRegionState { .. } => RetryHint::Retryable,
+            | FlushableRegionState { .. }
+            | PublicationObjectStat { .. }
+            | PublicationSizeMismatch { .. } => RetryHint::Retryable,
 
             OpenDal { error, .. }
             | DeleteSsts { error, .. }

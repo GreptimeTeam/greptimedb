@@ -382,6 +382,7 @@ impl RegionOpener {
             // Region is writable after it is created.
             manifest_ctx: Arc::new(ManifestContext::new(
                 manifest_manager,
+                access_layer.clone(),
                 RegionRoleState::Leader(RegionLeaderState::Writable),
                 self.hook.clone(),
             )),
@@ -610,6 +611,7 @@ impl RegionOpener {
             // Region is always opened in read only mode.
             manifest_ctx: Arc::new(ManifestContext::new(
                 manifest_manager,
+                access_layer.clone(),
                 RegionRoleState::Follower,
                 self.hook.clone(),
             )),
