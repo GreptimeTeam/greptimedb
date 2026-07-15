@@ -650,28 +650,47 @@ pub(crate) async fn build_flat_sources(
         return Ok(None);
     }
 
-    let split_batch_size = should_split_flat_batches_for_merge(stream_ctx, range_meta);
+    let optimize_last_row = !compaction && stream_ctx.input.is_focused_last_row();
+    let split_batch_size = if optimize_last_row {
+        None
+    } else {
+        should_split_flat_batches_for_merge(stream_ctx, range_meta)
+    };
     let should_split = split_batch_size.is_some();
     sources.reserve(num_indices);
     let mut ordered_sources = Vec::with_capacity(num_indices);
     ordered_sources.resize_with(num_indices, || None);
     let mut file_scan_tasks = Vec::new();
     let pre_filter_mode = stream_ctx.range_pre_filter_mode(part_range);
+    let mut source_order = range_meta
+        .row_group_indices
+        .iter()
+        .copied()
+        .enumerate()
+        .collect::<Vec<_>>();
+    if optimize_last_row {
+        source_order.sort_by_key(|(position, index)| {
+            let file_max = stream_ctx.is_file_range_index(*index).then(|| {
+                std::cmp::Reverse(stream_ctx.input.file_from_index(*index).time_range().1)
+            });
+            (file_max.is_some(), file_max, *position)
+        });
+    }
 
-    for (position, index) in range_meta.row_group_indices.iter().enumerate() {
-        if stream_ctx.is_mem_range_index(*index) {
+    for &(position, index) in &source_order {
+        if stream_ctx.is_mem_range_index(index) {
             let stream = scan_flat_mem_ranges(
                 stream_ctx.clone(),
                 part_metrics.clone(),
-                *index,
+                index,
                 range_meta.time_range,
             );
             ordered_sources[position] = Some(Box::pin(stream) as _);
-        } else if stream_ctx.is_file_range_index(*index) {
+        } else if stream_ctx.is_file_range_index(index) {
             // Common manifest-level fast-skip shared by SeqScan and UnorderedScan.
             // Compaction should keep reading its selected input ranges completely.
             if !compaction
-                && partition_pruner.try_skip_manifest_pruned_file_range(*index, part_metrics)
+                && partition_pruner.try_skip_manifest_pruned_file_range(index, part_metrics)
             {
                 continue;
             }
@@ -681,7 +700,7 @@ pub(crate) async fn build_flat_sources(
                 let part_metrics = part_metrics.clone();
                 let partition_pruner = partition_pruner.clone();
                 let semaphore = Arc::clone(semaphore_ref);
-                let row_group_index = *index;
+                let row_group_index = index;
                 file_scan_tasks.push(async move {
                     let _permit = semaphore.acquire().await.unwrap();
                     let stream = scan_flat_file_ranges(
@@ -699,7 +718,7 @@ pub(crate) async fn build_flat_sources(
                 let stream = scan_flat_file_ranges(
                     stream_ctx.clone(),
                     part_metrics.clone(),
-                    *index,
+                    index,
                     read_type,
                     partition_pruner.clone(),
                 )
@@ -709,7 +728,7 @@ pub(crate) async fn build_flat_sources(
         } else {
             let stream = scan_util::maybe_scan_flat_other_ranges(
                 stream_ctx,
-                *index,
+                index,
                 part_metrics,
                 pre_filter_mode,
             )
@@ -725,7 +744,10 @@ pub(crate) async fn build_flat_sources(
         }
     }
 
-    for stream in ordered_sources.into_iter().flatten() {
+    for (position, _) in source_order {
+        let Some(stream) = ordered_sources[position].take() else {
+            continue;
+        };
         if should_split {
             sources.push(Box::pin(SplitRecordBatchStream::new(stream)));
         } else {

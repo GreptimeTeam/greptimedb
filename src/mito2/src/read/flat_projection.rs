@@ -14,6 +14,7 @@
 
 //! Utilities for projection on flat format.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -32,6 +33,7 @@ use datatypes::types::json_type::JsonNativeType;
 use datatypes::value::Value;
 use datatypes::vectors::Helper;
 use datatypes::vectors::json::array::JsonArray;
+use mito_codec::row_converter::build_primary_key_codec;
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 use store_api::storage::ColumnId;
@@ -40,7 +42,7 @@ use crate::cache::CacheStrategy;
 use crate::error::{InvalidRequestSnafu, RecordBatchSnafu, Result};
 use crate::read::projection::{read_column_ids_from_projection, repeated_vector_with_cache};
 use crate::read::read_columns::ReadColumns;
-use crate::sst::parquet::flat_format::sst_column_id_indices;
+use crate::sst::parquet::flat_format::{FlatConvertFormat, sst_column_id_indices};
 use crate::sst::parquet::format::FormatProjection;
 use crate::sst::{
     FlatSchemaOptions, internal_fields, tag_maybe_to_dictionary_field, to_flat_sst_arrow_schema,
@@ -70,6 +72,8 @@ pub struct FlatProjectionMapper {
     is_empty_projection: bool,
     /// The index in flat format [RecordBatch] for each column in the output [RecordBatch].
     batch_indices: Vec<usize>,
+    /// Existing flat-format decoder reused for projected tags deferred by LastRow scans.
+    deferred_tag_format: Option<FlatConvertFormat>,
     /// Precomputed Arrow schema for input batches.
     input_arrow_schema: datatypes::arrow::datatypes::SchemaRef,
 }
@@ -95,6 +99,16 @@ impl FlatProjectionMapper {
         projection: Vec<usize>,
         read_cols: ReadColumns,
         json_type_hint: Option<&HashMap<String, JsonNativeType>>,
+    ) -> Result<Self> {
+        Self::new_with_deferred_tags(metadata, projection, read_cols, json_type_hint, &[])
+    }
+
+    pub(crate) fn new_with_deferred_tags(
+        metadata: &RegionMetadataRef,
+        projection: Vec<usize>,
+        read_cols: ReadColumns,
+        json_type_hint: Option<&HashMap<String, JsonNativeType>>,
+        deferred_tags: &[ColumnId],
     ) -> Result<Self> {
         // If the original projection is empty.
         let is_empty_projection = projection.is_empty();
@@ -169,17 +183,28 @@ impl FlatProjectionMapper {
             Arc::new(Schema::new(col_schemas))
         };
 
+        let deferred_indices = metadata
+            .primary_key
+            .iter()
+            .filter(|id| deferred_tags.contains(id))
+            .enumerate()
+            .map(|(index, id)| (*id, index))
+            .collect::<HashMap<_, _>>();
         let batch_indices = if is_empty_projection {
             vec![]
         } else {
             output_col_ids
                 .iter()
                 .map(|id| {
+                    if let Some(index) = deferred_indices.get(id) {
+                        return Ok(*index);
+                    }
                     // Safety: The map is computed from the read projection.
                     format_projection
                         .column_id_to_projected_index
                         .get(id)
                         .copied()
+                        .map(|index| index + deferred_indices.len())
                         .with_context(|| {
                             let name = metadata
                                 .column_by_id(*id)
@@ -196,6 +221,21 @@ impl FlatProjectionMapper {
                 })
                 .collect::<Result<Vec<_>>>()?
         };
+        let deferred_tag_format = if deferred_tags.is_empty() {
+            None
+        } else {
+            let read_cols = ReadColumns::from_deduped_column_ids(deferred_tags.iter().copied());
+            let projection = FormatProjection::compute_format_projection(
+                &id_to_index,
+                metadata.column_metadatas.len() + 3,
+                read_cols,
+            );
+            FlatConvertFormat::new(
+                metadata.clone(),
+                &projection,
+                build_primary_key_codec(metadata),
+            )
+        };
 
         Ok(FlatProjectionMapper {
             metadata: metadata.clone(),
@@ -204,6 +244,7 @@ impl FlatProjectionMapper {
             batch_schema,
             is_empty_projection,
             batch_indices,
+            deferred_tag_format,
             input_arrow_schema,
         })
     }
@@ -293,6 +334,7 @@ impl FlatProjectionMapper {
         }
         // Construct output record batch directly from Arrow arrays to avoid
         // Arrow -> Vector -> Arrow roundtrips in the hot path.
+        let batch = self.with_deferred_tags(batch)?;
         let mut arrays = Vec::with_capacity(self.output_schema.num_columns());
         for (output_idx, index) in self.batch_indices.iter().enumerate() {
             let mut array = batch.column(*index).clone();
@@ -350,6 +392,7 @@ impl FlatProjectionMapper {
         &self,
         batch: &datatypes::arrow::record_batch::RecordBatch,
     ) -> common_recordbatch::error::Result<Vec<datatypes::vectors::VectorRef>> {
+        let batch = self.with_deferred_tags(batch)?;
         let mut columns = Vec::with_capacity(self.output_schema.num_columns());
         for index in &self.batch_indices {
             let mut array = batch.column(*index).clone();
@@ -367,6 +410,21 @@ impl FlatProjectionMapper {
             columns.push(vector);
         }
         Ok(columns)
+    }
+
+    fn with_deferred_tags<'a>(
+        &self,
+        batch: &'a datatypes::arrow::record_batch::RecordBatch,
+    ) -> common_recordbatch::error::Result<Cow<'a, datatypes::arrow::record_batch::RecordBatch>>
+    {
+        match &self.deferred_tag_format {
+            Some(format) => format
+                .convert(batch.clone())
+                .map_err(BoxedError::new)
+                .context(ExternalSnafu)
+                .map(Cow::Owned),
+            None => Ok(Cow::Borrowed(batch)),
+        }
     }
 }
 
@@ -557,11 +615,19 @@ impl DfBatchAssembler {
 
 #[cfg(test)]
 mod tests {
+    use api::v1::OpType;
+    use datatypes::arrow::array::{
+        ArrayRef, BinaryDictionaryBuilder, StringArray, TimestampMillisecondArray, UInt8Array,
+        UInt64Array,
+    };
+    use datatypes::arrow::datatypes::UInt32Type;
     use datatypes::types::json_type::JsonObjectType;
+    use store_api::codec::PrimaryKeyEncoding;
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
     use store_api::storage::RegionId;
 
     use super::*;
+    use crate::test_util::sst_util::{new_sparse_primary_key, sst_region_metadata_with_encoding};
 
     fn metadata_with_legacy_json() -> RegionMetadataRef {
         let mut builder = RegionMetadataBuilder::new(RegionId::new(1024, 0));
@@ -609,5 +675,49 @@ mod tests {
             mapper.batch_schema()[0],
             (0, ConcreteDataType::json_datatype())
         );
+    }
+
+    #[test]
+    fn test_deferred_sparse_tag_projection() {
+        let metadata = Arc::new(sst_region_metadata_with_encoding(
+            PrimaryKeyEncoding::Sparse,
+        ));
+        let schema = to_flat_sst_arrow_schema(
+            &metadata,
+            &FlatSchemaOptions::from_encoding(PrimaryKeyEncoding::Sparse),
+        );
+        let key = new_sparse_primary_key(&["a", "x"], &metadata, 1, 100);
+        let mut keys = BinaryDictionaryBuilder::<UInt32Type>::new();
+        keys.append(&key).unwrap();
+        keys.append(&key).unwrap();
+        let batch = datatypes::arrow::record_batch::RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(UInt64Array::from(vec![10, 11])) as ArrayRef,
+                Arc::new(TimestampMillisecondArray::from(vec![1, 2])) as ArrayRef,
+                Arc::new(keys.finish()) as ArrayRef,
+                Arc::new(UInt64Array::from_value(1, 2)) as ArrayRef,
+                Arc::new(UInt8Array::from_value(OpType::Put as u8, 2)) as ArrayRef,
+            ],
+        )
+        .unwrap();
+        let mapper = FlatProjectionMapper::new_with_deferred_tags(
+            &metadata,
+            vec![2, 4, 5],
+            ReadColumns::from_deduped_column_ids([2, 3]),
+            None,
+            &[0],
+        )
+        .unwrap();
+
+        let output = mapper.convert(&batch, &CacheStrategy::Disabled).unwrap();
+        let tags = output
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(["a", "a"], [tags.value(0), tags.value(1)]);
+        assert_eq!(2, output.num_rows());
+        assert_eq!(3, output.num_columns());
     }
 }

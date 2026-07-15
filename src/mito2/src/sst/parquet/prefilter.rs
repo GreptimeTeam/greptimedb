@@ -24,10 +24,12 @@ use std::sync::Arc;
 
 use api::v1::SemanticType;
 use common_recordbatch::filter::SimpleFilterEvaluator;
+use dashmap::DashMap;
 use datatypes::arrow::array::{Array, BinaryArray, BooleanArray, BooleanBufferBuilder};
 use datatypes::arrow::buffer::BooleanBuffer;
 use datatypes::arrow::datatypes::SchemaRef;
 use datatypes::arrow::record_batch::RecordBatch;
+use datatypes::timestamp::timestamp_array_to_primitive;
 use futures::StreamExt;
 use mito_codec::row_converter::{PrimaryKeyCodec, PrimaryKeyFilter};
 use parquet::arrow::ProjectionMask;
@@ -51,6 +53,31 @@ use crate::sst::parquet::reader::{
     MaybeFilter, PhysicalFilterContext, RowGroupBuildContext, RowGroupReaderBuilder,
     SimpleFilterContext,
 };
+
+/// Timestamps already found by newer SST work in one explicit LastRow scan.
+#[derive(Clone, Default)]
+pub(crate) struct LastRowCoverage(Arc<DashMap<Vec<u8>, i64>>);
+
+impl LastRowCoverage {
+    pub(crate) fn for_file(&self, max_timestamp: i64) -> LastRowCoverageFilter {
+        LastRowCoverageFilter {
+            observed: self.0.clone(),
+            max_timestamp,
+        }
+    }
+}
+
+/// A file-specific view of query-local LastRow coverage.
+#[derive(Clone)]
+pub(crate) struct LastRowCoverageFilter {
+    observed: Arc<DashMap<Vec<u8>, i64>>,
+    max_timestamp: i64,
+}
+
+struct LastRowRun {
+    key: Vec<u8>,
+    rows: usize,
+}
 
 pub(crate) fn matching_row_ranges_by_primary_key(
     input: &RecordBatch,
@@ -122,7 +149,6 @@ fn matching_row_ranges_from_dict(
         while end < key_values.len() && key_values[end] == key {
             end += 1;
         }
-
         push_matched_range(
             &mut matched_row_ranges,
             pk_filter,
@@ -159,7 +185,6 @@ fn matching_row_ranges_from_binary(
         while end < pk_array.len() && pk_array.value(end) == value {
             end += 1;
         }
-
         push_matched_range(&mut matched_row_ranges, pk_filter, value, start, end)?;
 
         start = end;
@@ -491,6 +516,12 @@ pub(crate) struct PrefilterContext {
     pk_filter_expr_strs: Option<SmallVec<[String; 1]>>,
     /// Arrow schema used to build narrowed prefilter projections.
     arrow_schema: SchemaRef,
+    /// Name of the time index in the Parquet schema.
+    time_index_name: String,
+    /// Matching keys already covered by newer files in this query.
+    last_row_coverage: Option<LastRowCoverageFilter>,
+    /// Matching PK runs carried from the first stage into timestamp selection.
+    last_row_runs: Vec<LastRowRun>,
 }
 
 /// Pre-built state for constructing [PrefilterContext] per row group.
@@ -507,6 +538,7 @@ pub(crate) struct PrefilterContextBuilder {
     metadata: RegionMetadataRef,
     schema_version: u64,
     arrow_schema: SchemaRef,
+    last_row_coverage: Option<LastRowCoverageFilter>,
 }
 
 impl PrefilterContextBuilder {
@@ -579,7 +611,12 @@ impl PrefilterContextBuilder {
             metadata: metadata.clone(),
             schema_version,
             arrow_schema: read_format.arrow_schema().clone(),
+            last_row_coverage: None,
         })
+    }
+
+    pub(crate) fn set_last_row_coverage(&mut self, coverage: LastRowCoverageFilter) {
+        self.last_row_coverage = Some(coverage);
     }
 
     /// Builds a [PrefilterContext] for a specific row group.
@@ -597,6 +634,9 @@ impl PrefilterContextBuilder {
             schema_version: self.schema_version,
             pk_filter_expr_strs: self.pk_filter_expr_strs.clone(),
             arrow_schema: self.arrow_schema.clone(),
+            time_index_name: self.metadata.time_index_column().column_schema.name.clone(),
+            last_row_coverage: self.last_row_coverage.clone(),
+            last_row_runs: Vec::new(),
         }
     }
 }
@@ -669,6 +709,12 @@ pub(crate) async fn execute_prefilter(
     reader_builder: &RowGroupReaderBuilder,
     build_ctx: &RowGroupBuildContext<'_>,
 ) -> Result<PrefilterResult> {
+    // LastRow selection depends on the complete row-group ordering and must not
+    // be stored in the predicate-result cache.
+    if prefilter_ctx.last_row_coverage.is_some() {
+        return execute_last_row_prefilter(prefilter_ctx, reader_builder, build_ctx).await;
+    }
+
     let entries = build_prefilter_cache_entries(prefilter_ctx, reader_builder, build_ctx);
 
     if entries.is_empty() {
@@ -677,6 +723,52 @@ pub(crate) async fn execute_prefilter(
     }
 
     execute_prefilter_with_result_cache(prefilter_ctx, reader_builder, build_ctx, entries).await
+}
+
+/// Runs encoded-primary-key filters before timestamp filtering and LastRow
+/// selection. Sparse metric scans can discard unrelated series before decoding
+/// the timestamp column, while the second stage still returns one candidate per
+/// matching key for the ordinary projected read.
+async fn execute_last_row_prefilter(
+    prefilter_ctx: &mut PrefilterContext,
+    reader_builder: &RowGroupReaderBuilder,
+    build_ctx: &RowGroupBuildContext<'_>,
+) -> Result<PrefilterResult> {
+    let (pk_entries, remaining): (Vec<_>, Vec<_>) = all_prefilter_entries(prefilter_ctx)
+        .into_iter()
+        .partition(|entry| matches!(entry.kind, PrefilterEntryKind::PkGroup));
+    if pk_entries.is_empty() {
+        return execute_prefilter_by_reading_columns(prefilter_ctx, reader_builder, build_ctx)
+            .await;
+    }
+
+    let pk_result =
+        build_prefilter_masks(prefilter_ctx, reader_builder, build_ctx, &pk_entries, false).await;
+    let (pk_mask, rows_before_filter) = pk_result?;
+    let pk_mask = pk_mask.unwrap_or_else(|| BooleanBuffer::new_set(rows_before_filter));
+    let pk_selection = refined_selection_from_mask(&pk_mask, &build_ctx.row_selection);
+
+    let second_stage = RowGroupBuildContext {
+        row_group_idx: build_ctx.row_group_idx,
+        row_selection: Some(pk_selection),
+        fetch_metrics: build_ctx.fetch_metrics,
+    };
+    let (last_row_mask, selected_pk_rows) = build_prefilter_masks(
+        prefilter_ctx,
+        reader_builder,
+        &second_stage,
+        &remaining,
+        true,
+    )
+    .await?;
+    let last_row_mask = last_row_mask.unwrap_or_else(|| BooleanBuffer::new_set(selected_pk_rows));
+    let refined_selection =
+        refined_selection_from_mask(&last_row_mask, &second_stage.row_selection);
+    let filtered_rows = rows_before_filter.saturating_sub(refined_selection.row_count());
+    Ok(PrefilterResult {
+        refined_selection,
+        filtered_rows,
+    })
 }
 
 async fn execute_prefilter_with_result_cache(
@@ -723,8 +815,14 @@ async fn execute_prefilter_with_result_cache(
             .copied()
             .map(|idx| PrefilterEntry::without_cache(PrefilterEntryKind::Physical(idx))),
     );
-    let (uncached_mask, read_rows) =
-        build_prefilter_masks(prefilter_ctx, reader_builder, build_ctx, &uncached_entries).await?;
+    let (uncached_mask, read_rows) = build_prefilter_masks(
+        prefilter_ctx,
+        reader_builder,
+        build_ctx,
+        &uncached_entries,
+        false,
+    )
+    .await?;
 
     let final_mask = match (hit_mask, uncached_mask) {
         (Some(hit_mask), Some(uncached_mask)) => hit_mask.bitand(&uncached_mask),
@@ -757,8 +855,12 @@ async fn build_prefilter_masks(
     reader_builder: &RowGroupReaderBuilder,
     build_ctx: &RowGroupBuildContext<'_>,
     entries: &[PrefilterEntry],
+    select_last_row: bool,
 ) -> Result<(Option<BooleanBuffer>, usize)> {
-    let prefilter_column_names = prefilter_column_names_for_entries(prefilter_ctx, entries);
+    let mut prefilter_column_names = prefilter_column_names_for_entries(prefilter_ctx, entries);
+    if select_last_row {
+        prefilter_column_names.insert(prefilter_ctx.time_index_name.clone());
+    }
     let parquet_schema = reader_builder
         .parquet_metadata()
         .file_metadata()
@@ -783,6 +885,8 @@ async fn build_prefilter_masks(
         .map(|entry| entry.key.is_some().then(|| BooleanBufferBuilder::new(0)))
         .collect::<Vec<_>>();
     let mut combined_builder = (!entries.is_empty()).then(|| BooleanBufferBuilder::new(0));
+    let mut last_row_timestamps = Vec::new();
+    let mut last_row_predicate = BooleanBufferBuilder::new(0);
     let mut rows_before_filter = 0usize;
 
     while let Some(batch_result) = stream.next().await {
@@ -806,7 +910,21 @@ async fn build_prefilter_masks(
                 builder.append_buffer(&mask);
             }
         }
-        if let Some(builder) = &mut combined_builder {
+        if select_last_row {
+            let (timestamp_index, _) = batch
+                .schema()
+                .column_with_name(&prefilter_ctx.time_index_name)
+                .context(UnexpectedSnafu {
+                    reason: "Timestamp is missing from LastRow prefilter",
+                })?;
+            let (array, _) = timestamp_array_to_primitive(batch.column(timestamp_index)).context(
+                UnexpectedSnafu {
+                    reason: "Invalid timestamp in LastRow prefilter",
+                },
+            )?;
+            last_row_timestamps.extend_from_slice(array.values());
+            last_row_predicate.append_buffer(&batch_mask);
+        } else if let Some(builder) = &mut combined_builder {
             builder.append_buffer(&batch_mask);
         }
     }
@@ -819,10 +937,23 @@ async fn build_prefilter_masks(
         }
     }
 
-    Ok((
-        combined_builder.map(|mut builder| builder.finish()),
-        rows_before_filter,
-    ))
+    let combined_mask = if select_last_row {
+        let coverage = prefilter_ctx
+            .last_row_coverage
+            .as_ref()
+            .context(UnexpectedSnafu {
+                reason: "LastRow selection requires coverage",
+            })?;
+        Some(select_last_rows(
+            &last_row_timestamps,
+            &last_row_predicate.finish(),
+            &prefilter_ctx.last_row_runs,
+            coverage,
+        )?)
+    } else {
+        combined_builder.map(|mut builder| builder.finish())
+    };
+    Ok((combined_mask, rows_before_filter))
 }
 
 fn prefilter_column_names_for_entries(
@@ -852,6 +983,105 @@ fn prefilter_column_names_for_entries(
     prefilter_column_names
 }
 
+enum PrimaryKeys<'a> {
+    Dictionary(&'a PrimaryKeyArray, &'a BinaryArray),
+    Binary(&'a BinaryArray),
+}
+
+impl<'a> PrimaryKeys<'a> {
+    fn try_new(batch: &'a RecordBatch, index: usize) -> Result<Self> {
+        let column = batch.column(index);
+        if let Some(keys) = column.as_any().downcast_ref::<PrimaryKeyArray>() {
+            let values = keys
+                .values()
+                .as_any()
+                .downcast_ref::<BinaryArray>()
+                .context(UnexpectedSnafu {
+                    reason: "Primary key dictionary values are not binary",
+                })?;
+            return Ok(Self::Dictionary(keys, values));
+        }
+        column
+            .as_any()
+            .downcast_ref::<BinaryArray>()
+            .map(Self::Binary)
+            .with_context(|| UnexpectedSnafu {
+                reason: format!("Unsupported primary key array: {:?}", column.data_type()),
+            })
+    }
+
+    fn value(&self, row: usize) -> &'a [u8] {
+        match self {
+            Self::Dictionary(keys, values) => values.value(keys.keys().value(row) as usize),
+            Self::Binary(keys) => keys.value(row),
+        }
+    }
+}
+
+fn matching_primary_key_runs<'a>(
+    batch: &'a RecordBatch,
+    index: usize,
+    filter: &mut dyn PrimaryKeyFilter,
+) -> Result<Vec<(Range<usize>, &'a [u8])>> {
+    let keys = PrimaryKeys::try_new(batch, index)?;
+    let mut runs = Vec::new();
+    let mut start = 0;
+    while start < batch.num_rows() {
+        let key = keys.value(start);
+        let mut end = start + 1;
+        while end < batch.num_rows() && keys.value(end) == key {
+            end += 1;
+        }
+        if filter.matches(key).context(DecodeSnafu)? {
+            runs.push((start..end, key));
+        }
+        start = end;
+    }
+    Ok(runs)
+}
+
+/// Narrows a timestamp predicate mask to the maximum matching timestamp of each
+/// PK run carried from the first prefilter stage. Equal timestamps are retained
+/// for the ordinary sequence/delete deduplication.
+fn select_last_rows(
+    timestamps: &[i64],
+    predicate: &BooleanBuffer,
+    runs: &[LastRowRun],
+    coverage: &LastRowCoverageFilter,
+) -> Result<BooleanBuffer> {
+    let total_rows = timestamps.len();
+    if runs.iter().map(|run| run.rows).sum::<usize>() != total_rows {
+        return UnexpectedSnafu {
+            reason: "LastRow PK runs and timestamp rows have different lengths",
+        }
+        .fail();
+    }
+    let mut output = BooleanBufferBuilder::new(total_rows);
+    output.append_n(total_rows, false);
+    let mut start = 0;
+    for run in runs {
+        let end = start + run.rows;
+        if let Some(last) = (start..end).rev().find(|row| predicate.value(*row)) {
+            let timestamp = timestamps[last];
+            for row in (start..=last)
+                .rev()
+                .take_while(|row| timestamps[*row] == timestamp)
+                .filter(|row| predicate.value(*row))
+            {
+                output.set_bit(row, true);
+            }
+            coverage
+                .observed
+                .entry(run.key.clone())
+                .and_modify(|current| *current = (*current).max(timestamp))
+                .or_insert(timestamp);
+        }
+        start = end;
+    }
+
+    Ok(output.finish())
+}
+
 async fn execute_prefilter_by_reading_columns(
     prefilter_ctx: &mut PrefilterContext,
     reader_builder: &RowGroupReaderBuilder,
@@ -859,7 +1089,7 @@ async fn execute_prefilter_by_reading_columns(
 ) -> Result<PrefilterResult> {
     let entries = all_prefilter_entries(prefilter_ctx);
     let (mask, rows_before_filter) =
-        build_prefilter_masks(prefilter_ctx, reader_builder, build_ctx, &entries).await?;
+        build_prefilter_masks(prefilter_ctx, reader_builder, build_ctx, &entries, false).await?;
 
     let final_mask = mask.unwrap_or_else(|| BooleanBuffer::new_set(rows_before_filter));
     let rows_selected = final_mask.count_set_bits();
@@ -1005,6 +1235,7 @@ fn eval_entry_mask(
     kind: PrefilterEntryKind,
     file_path: &str,
 ) -> Result<BooleanBuffer> {
+    let last_row_coverage = prefilter_ctx.last_row_coverage.clone();
     match kind {
         PrefilterEntryKind::Simple(idx) => {
             eval_simple_filter_mask(batch, &prefilter_ctx.filters[idx], file_path)
@@ -1016,7 +1247,20 @@ fn eval_entry_mask(
             let pk_filter = prefilter_ctx.pk_filter.as_mut().context(UnexpectedSnafu {
                 reason: "Missing primary key filter for prefilter cache entry",
             })?;
-            eval_pk_group_mask(batch, pk_filter.as_mut())
+            let Some(coverage) = last_row_coverage.as_ref() else {
+                return eval_pk_group_mask(batch, pk_filter.as_mut());
+            };
+            let (mask, runs) = eval_last_row_pk_mask(batch, pk_filter.as_mut(), coverage)?;
+            for run in runs {
+                if let Some(previous) = prefilter_ctx.last_row_runs.last_mut()
+                    && previous.key == run.key
+                {
+                    previous.rows += run.rows;
+                } else {
+                    prefilter_ctx.last_row_runs.push(run);
+                }
+            }
+            Ok(mask)
         }
     }
 }
@@ -1025,12 +1269,7 @@ fn eval_pk_group_mask(
     batch: &RecordBatch,
     pk_filter: &mut dyn PrimaryKeyFilter,
 ) -> Result<BooleanBuffer> {
-    let (pk_column_index, _) = batch
-        .schema()
-        .column_with_name(PRIMARY_KEY_COLUMN_NAME)
-        .context(UnexpectedSnafu {
-            reason: "Primary key column not found in prefilter batch",
-        })?;
+    let pk_column_index = primary_key_column_index(batch)?;
     let matched_row_ranges = matching_row_ranges_by_primary_key(batch, pk_column_index, pk_filter)?;
     let mut builder = BooleanBufferBuilder::new(batch.num_rows());
     builder.append_n(batch.num_rows(), false);
@@ -1040,6 +1279,45 @@ fn eval_pk_group_mask(
         }
     }
     Ok(builder.finish())
+}
+
+fn eval_last_row_pk_mask(
+    batch: &RecordBatch,
+    pk_filter: &mut dyn PrimaryKeyFilter,
+    coverage: &LastRowCoverageFilter,
+) -> Result<(BooleanBuffer, Vec<LastRowRun>)> {
+    let pk_column_index = primary_key_column_index(batch)?;
+    let matched = matching_primary_key_runs(batch, pk_column_index, pk_filter)?;
+    let mut builder = BooleanBufferBuilder::new(batch.num_rows());
+    builder.append_n(batch.num_rows(), false);
+    let mut selected_runs = Vec::new();
+    for (range, key) in matched {
+        if coverage
+            .observed
+            .get(key)
+            .is_some_and(|timestamp| *timestamp > coverage.max_timestamp)
+        {
+            continue;
+        }
+        selected_runs.push(LastRowRun {
+            key: key.to_vec(),
+            rows: range.len(),
+        });
+        for row in range {
+            builder.set_bit(row, true);
+        }
+    }
+    Ok((builder.finish(), selected_runs))
+}
+
+fn primary_key_column_index(batch: &RecordBatch) -> Result<usize> {
+    batch
+        .schema()
+        .column_with_name(PRIMARY_KEY_COLUMN_NAME)
+        .map(|(index, _)| index)
+        .context(UnexpectedSnafu {
+            reason: "Primary key column not found in prefilter batch",
+        })
 }
 
 fn eval_simple_filter_mask(
@@ -1164,6 +1442,47 @@ mod tests {
         );
 
         assert_eq!(hits.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn test_select_last_rows_after_predicate() {
+        let k1 = new_primary_key(&["a", "x"]);
+        let k2 = new_primary_key(&["b", "x"]);
+        let predicate = BooleanBuffer::collect_bool(5, |row| [true, true, true, true, false][row]);
+
+        let runs = [
+            LastRowRun { key: k1, rows: 3 },
+            LastRowRun { key: k2, rows: 2 },
+        ];
+        let coverage = LastRowCoverage::default().for_file(i64::MAX);
+        let selected = select_last_rows(&[0, 2, 2, 3, 4], &predicate, &runs, &coverage).unwrap();
+
+        assert_eq!(selected.count_set_bits(), 3);
+        assert!(selected.value(1));
+        assert!(selected.value(2));
+        assert!(selected.value(3));
+    }
+
+    #[test]
+    fn test_last_row_coverage_requires_strictly_newer_timestamp() {
+        let metadata = Arc::new(sst_region_metadata());
+        let filters = Arc::new(new_test_filters(&[col("tag_0").eq(lit("a"))]));
+        let mut pk_filter =
+            build_primary_key_codec(metadata.as_ref()).primary_key_filter(&metadata, filters);
+        let key = new_primary_key(&["a", "x"]);
+        let batch = new_prefilter_batch(&[key.as_slice(), key.as_slice()], &[9, 10]);
+        let coverage = LastRowCoverage::default();
+        coverage.0.insert(key, 10);
+
+        let (equal_mask, equal_runs) =
+            eval_last_row_pk_mask(&batch, pk_filter.as_mut(), &coverage.for_file(10)).unwrap();
+        assert_eq!(equal_mask.count_set_bits(), 2);
+        assert_eq!(equal_runs.len(), 1);
+
+        let (older_mask, older_runs) =
+            eval_last_row_pk_mask(&batch, pk_filter.as_mut(), &coverage.for_file(9)).unwrap();
+        assert_eq!(older_mask.count_set_bits(), 0);
+        assert!(older_runs.is_empty());
     }
 
     fn new_test_filters(exprs: &[datafusion_expr::Expr]) -> Vec<SimpleFilterEvaluator> {
