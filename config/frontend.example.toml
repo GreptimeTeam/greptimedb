@@ -17,9 +17,9 @@ default_column_prefix = "greptime"
 ## "pg_scram_sha256:<iterations>:<hex_salt>:<hex_stored_key>:<hex_server_key>"
 ## "pbkdf2_sha256" and "pg_scram_sha256" protect passwords at rest.
 ## "mysql_native_password" is MySQL-specific and falls back to cleartext password auth for PostgreSQL.
-## For PostgreSQL SCRAM, keep all users on the default iteration count (4096); a non-default
-## "pbkdf2_sha256"/"pg_scram_sha256" iteration count is observable in the SCRAM handshake and weakens
-## resistance to username enumeration.
+## For PostgreSQL SCRAM, keep all users on the default iteration count (4096) and salt length (16);
+## a non-default "pbkdf2_sha256"/"pg_scram_sha256" iteration count or salt length is observable in the
+## SCRAM handshake and weakens resistance to username enumeration.
 ## @toml2docs:none-default
 #+ user_provider = "static_user_provider:file:/path/to/users"
 
