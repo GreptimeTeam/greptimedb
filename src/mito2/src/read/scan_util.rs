@@ -26,10 +26,11 @@ use common_telemetry::tracing;
 use datafusion::physical_plan::metrics::{ExecutionPlanMetricsSet, MetricBuilder, Time};
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::timestamp::timestamp_array_to_primitive;
-use futures::Stream;
+use futures::{Stream, StreamExt};
 use prometheus::IntGauge;
 use smallvec::SmallVec;
 use store_api::storage::RegionId;
+use tokio::sync::mpsc;
 
 use crate::error::Result;
 use crate::memtable::MemScanMetrics;
@@ -1514,6 +1515,36 @@ pub fn build_flat_file_range_scan_stream(
     mut per_file_metrics: Option<HashMap<RegionFileId, FileScanMetrics>>,
 ) -> impl Stream<Item = Result<RecordBatch>> {
     try_stream! {
+        if stream_ctx.input.is_focused_last_row() && ranges.len() > 1 {
+            const PREFETCH_WINDOW: usize = 8;
+            if let Some(file_metrics) = per_file_metrics.as_ref() {
+                part_metrics.merge_reader_metrics(&ReaderMetrics::default(), Some(file_metrics));
+            }
+
+            let mut ranges = ranges.into_iter();
+            let spawn = |range| {
+                spawn_last_row_range(
+                    stream_ctx.clone(),
+                    range,
+                    part_metrics.clone(),
+                    read_type,
+                )
+            };
+            let mut receivers = VecDeque::with_capacity(PREFETCH_WINDOW);
+            for range in ranges.by_ref().take(PREFETCH_WINDOW) {
+                receivers.push_back(spawn(range));
+            }
+            while let Some(mut receiver) = receivers.pop_front() {
+                while let Some(batch) = receiver.recv().await {
+                    yield batch?;
+                }
+                if let Some(range) = ranges.next() {
+                    receivers.push_back(spawn(range));
+                }
+            }
+            return;
+        }
+
         let fetch_metrics = if part_metrics.explain_verbose() {
             Some(Arc::new(ParquetFetchMetrics::default()))
         } else {
@@ -1579,6 +1610,30 @@ pub fn build_flat_file_range_scan_stream(
         reader_metrics.filter_metrics.observe();
         part_metrics.merge_reader_metrics(reader_metrics, per_file_metrics.as_ref());
     }
+}
+
+fn spawn_last_row_range(
+    stream_ctx: Arc<StreamContext>,
+    range: FileRange,
+    part_metrics: PartitionMetrics,
+    read_type: &'static str,
+) -> mpsc::Receiver<Result<RecordBatch>> {
+    let (sender, receiver) = mpsc::channel(2);
+    common_runtime::spawn_query(async move {
+        let mut stream: BoxedRecordBatchStream = Box::pin(build_flat_file_range_scan_stream(
+            stream_ctx,
+            part_metrics,
+            read_type,
+            std::iter::once(range).collect(),
+            Some(HashMap::new()),
+        ));
+        while let Some(batch) = stream.next().await {
+            if sender.send(batch).await.is_err() {
+                break;
+            }
+        }
+    });
+    receiver
 }
 
 /// Build the stream of scanning the extension range in flat format denoted by the [`RowGroupIndex`].
