@@ -54,7 +54,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
         // Check region pressure before writes to match the global write buffer behavior.
         self.maybe_flush_worker();
-        let stalled_region_ids = self.maybe_flush_write_regions(write_region_ids);
+        let pressure = self.maybe_flush_write_regions(write_region_ids);
 
         if self.should_reject_write() {
             // The memory pressure is still too high, reject write requests.
@@ -62,6 +62,20 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             // Also reject all stalled requests.
             self.reject_stalled_requests();
             return;
+        }
+
+        if !pressure.rejected_region_ids.is_empty() {
+            reject_region_write_requests(
+                &pressure.rejected_region_ids,
+                write_requests,
+                bulk_requests,
+            );
+            for region_id in &pressure.rejected_region_ids {
+                self.reject_region_stalled_requests(region_id);
+            }
+            if write_requests.is_empty() && bulk_requests.is_empty() {
+                return;
+            }
         }
 
         if self.write_buffer_manager.should_stall() && allow_stall {
@@ -74,7 +88,11 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         }
 
         if allow_stall {
-            self.stall_region_write_requests(&stalled_region_ids, write_requests, bulk_requests);
+            self.stall_region_write_requests(
+                &pressure.stalled_region_ids,
+                write_requests,
+                bulk_requests,
+            );
             if write_requests.is_empty() && bulk_requests.is_empty() {
                 return;
             }
@@ -181,12 +199,15 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             .keys()
             .copied()
             .collect::<HashSet<_>>();
-        let stalled_region_ids = self.maybe_flush_write_regions(region_ids);
+        let pressure = self.maybe_flush_write_regions(region_ids);
+        for region_id in &pressure.rejected_region_ids {
+            self.reject_region_stalled_requests(region_id);
+        }
         let ready_region_ids = self
             .stalled_requests
             .requests
             .keys()
-            .filter(|region_id| !stalled_region_ids.contains(region_id))
+            .filter(|region_id| !pressure.stalled_region_ids.contains(region_id))
             .copied()
             .collect::<Vec<_>>();
 
@@ -625,6 +646,22 @@ fn reject_write_requests(
         let region_id = req.region_id;
         req.sender.send(RejectWriteSnafu { region_id }.fail());
     }
+}
+
+fn reject_region_write_requests(
+    rejected_region_ids: &HashSet<RegionId>,
+    write_requests: &mut Vec<SenderWriteRequest>,
+    bulk_requests: &mut Vec<SenderBulkRequest>,
+) {
+    let mut rejected_write_requests = write_requests
+        .extract_if(.., |req| {
+            rejected_region_ids.contains(&req.request.region_id)
+        })
+        .collect::<Vec<_>>();
+    let mut rejected_bulk_requests = bulk_requests
+        .extract_if(.., |req| rejected_region_ids.contains(&req.region_id))
+        .collect::<Vec<_>>();
+    reject_write_requests(&mut rejected_write_requests, &mut rejected_bulk_requests);
 }
 
 fn write_region_ids(

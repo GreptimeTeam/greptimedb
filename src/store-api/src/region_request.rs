@@ -1860,6 +1860,14 @@ mod tests {
         };
         SetRegionOption::try_from(&option).unwrap_err();
 
+        // Clearing the option uses UNSET. Empty SET values, including SQL NULL,
+        // remain invalid because the SQL layer does not distinguish NULL from ''.
+        let option = PbOption {
+            key: WRITE_BUFFER_SIZE_KEY.to_string(),
+            value: String::new(),
+        };
+        SetRegionOption::try_from(&option).unwrap_err();
+
         assert_eq!(
             UnsetRegionOption::WriteBufferSize,
             UnsetRegionOption::try_from(WRITE_BUFFER_SIZE_KEY).unwrap()

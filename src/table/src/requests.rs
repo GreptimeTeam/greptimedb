@@ -145,7 +145,7 @@ pub fn validate_table_option(key: &str) -> bool {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct TableOptions {
-    /// Memtable size of memtable.
+    /// Per-region write buffer stall threshold. Writes are rejected at twice this size.
     pub write_buffer_size: Option<ReadableSize>,
     /// Time-to-live of table. Expired data will be automatically purged.
     pub ttl: Option<TimeToLive>,

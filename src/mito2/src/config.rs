@@ -109,8 +109,9 @@ pub struct MitoConfig {
     pub global_write_buffer_size: ReadableSize,
     /// Global write buffer size threshold to reject write requests.
     pub global_write_buffer_reject_size: ReadableSize,
-    /// Default write buffer size for each region. Setting it to 0 disables the
-    /// region-level limit unless the table specifies `write_buffer_size`.
+    /// Default write buffer size for each region. Regions stall at this size and
+    /// reject writes at twice this size. Setting it to 0 disables both limits
+    /// unless the table specifies `write_buffer_size`.
     pub default_region_write_buffer_size: ReadableSize,
 
     // Cache configs:

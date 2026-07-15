@@ -108,7 +108,8 @@ pub struct RegionOptions {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub primary_key_encoding: Option<PrimaryKeyEncoding>,
     /// Per-region write buffer size. A positive size flushes/stalls this region
-    /// independently of the global write buffer limit; zero disables the limit.
+    /// independently of the global write buffer limit and rejects writes at twice
+    /// the configured size; zero disables both limits.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub write_buffer_size: Option<ReadableSize>,
 }
