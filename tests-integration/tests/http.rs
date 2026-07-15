@@ -40,7 +40,7 @@ use common_memory_manager::OnExhaustedPolicy;
 use common_options::plugin_options::StandaloneFlag;
 use flate2::Compression;
 use flate2::write::GzEncoder;
-use log_query::{Context, Limit, LogQuery, TimeFilter};
+use log_query::{AggFunc, Context, Limit, LogExpr, LogQuery, TimeFilter};
 use loki_proto::logproto::{EntryAdapter, LabelPairAdapter, PushRequest, StreamAdapter};
 use loki_proto::prost_types::Timestamp;
 use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
@@ -7217,6 +7217,84 @@ pub async fn test_log_query(store_type: StorageType) {
         ]
     );
 
+    let res = client
+        .get("/v1/sql?sql=create table logs_limit (`ts` timestamp time index, `message` string);")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK, "{:?}", res.text().await);
+    let res = client
+        .get("/v1/sql?sql=insert into logs_limit select number, 'hello' from numbers limit 1001;")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK, "{:?}", res.text().await);
+
+    let aggregate_query = LogQuery {
+        table: TableName::new("greptime", "public", "logs_limit"),
+        time_filter: TimeFilter {
+            start: Some("1970-01-01T00:00:00Z".to_string()),
+            end: Some("1970-01-01T00:00:02Z".to_string()),
+            span: None,
+        },
+        limit: Limit {
+            skip: None,
+            fetch: None,
+        },
+        columns: vec![],
+        filters: Default::default(),
+        context: Context::None,
+        exprs: vec![LogExpr::AggrFunc {
+            expr: vec![AggFunc::new(
+                "count".to_string(),
+                vec![LogExpr::NamedIdent("message".to_string())],
+                Some("count_result".to_string()),
+            )],
+            by: vec![],
+        }],
+    };
+    let res = client
+        .post("/v1/logs")
+        .header("Content-Type", "application/json")
+        .body(serde_json::to_string(&aggregate_query).unwrap())
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK, "{:?}", res.text().await);
+    assert_eq!(get_rows_from_output(&res.text().await), "[[1001]]");
+
+    let mut output_query = LogQuery {
+        table: TableName::new("greptime", "public", "logs_limit"),
+        time_filter: TimeFilter {
+            start: Some("1970-01-01T00:00:00Z".to_string()),
+            end: Some("1970-01-01T00:00:02Z".to_string()),
+            span: None,
+        },
+        limit: Limit {
+            skip: None,
+            fetch: None,
+        },
+        columns: vec!["ts".to_string(), "message".to_string()],
+        filters: Default::default(),
+        context: Context::None,
+        exprs: vec![],
+    };
+    let res = client
+        .post("/v1/logs")
+        .header("Content-Type", "application/json")
+        .body(serde_json::to_string(&output_query).unwrap())
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK, "{:?}", res.text().await);
+    assert_eq!(get_output_row_count(&res.text().await), 1000);
+
+    output_query.limit.fetch = Some(17);
+    let res = client
+        .post("/v1/logs")
+        .header("Content-Type", "application/json")
+        .body(serde_json::to_string(&output_query).unwrap())
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK, "{:?}", res.text().await);
+    assert_eq!(get_output_row_count(&res.text().await), 17);
+
     guard.remove_all().await;
 }
 
@@ -8997,6 +9075,18 @@ fn get_rows_from_output(output: &str) -> String {
         .and_then(|v| v.get("rows"))
         .unwrap()
         .to_string()
+}
+
+fn get_output_row_count(output: &str) -> usize {
+    let resp: Value = serde_json::from_str(output).unwrap();
+    resp.get("output")
+        .and_then(Value::as_array)
+        .and_then(|v| v.first())
+        .and_then(|v| v.get("records"))
+        .and_then(|v| v.get("rows"))
+        .and_then(Value::as_array)
+        .unwrap()
+        .len()
 }
 
 fn compress_vec_with_gzip(data: Vec<u8>) -> Vec<u8> {
