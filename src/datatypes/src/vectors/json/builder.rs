@@ -212,6 +212,28 @@ impl MutableVector for JsonVectorBuilder {
         Ok(())
     }
 
+    fn try_push_value(&mut self, value: Value) -> Result<()> {
+        let Value::Json(value) = value else {
+            return TryFromValueSnafu {
+                reason: format!("expected json value, got {value:?}"),
+            }
+            .fail();
+        };
+        let json_type = value.json_type();
+        if !matches!(json_type, JsonNativeType::Object(_) | JsonNativeType::Null) {
+            return TryFromValueSnafu {
+                reason: format!("expected json object value, got {value:?}"),
+            }
+            .fail();
+        }
+        if !is_include(&self.merged_type, json_type) {
+            self.merged_type.merge(json_type);
+        }
+
+        self.values.push(value.into_variant());
+        Ok(())
+    }
+
     fn push_null(&mut self) {
         self.values.push(JsonVariant::Null)
     }
@@ -255,7 +277,7 @@ mod tests {
         let second = parse_json_value(r#"{"id":2,"extra":true,"payload":"raw"}"#);
         builder.try_push_value_ref(&first.as_value_ref())?;
         builder.push_null();
-        builder.try_push_value_ref(&second.as_value_ref())?;
+        builder.try_push_value(second)?;
 
         let merged_type = JsonNativeType::Object(JsonObjectType::from([
             ("extra".to_string(), JsonNativeType::Bool),

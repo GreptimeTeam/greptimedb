@@ -493,13 +493,12 @@ async fn dryrun_pipeline_inner(
                             .enumerate()
                             .map(|(idx, v)| {
                                 let mut map = Map::new();
-                                let value_ref = pb_value_to_value_ref(
+                                let value = pb_value_to_value_ref(
                                     &v,
                                     result_schema[idx].datatype_extension.as_ref(),
-                                );
-                                let greptime_value: datatypes::value::Value = value_ref.into();
-                                let serde_json_value =
-                                    serde_json::Value::try_from(greptime_value).unwrap();
+                                )
+                                .into_value();
+                                let serde_json_value = serde_json::Value::try_from(value).unwrap();
                                 map.insert("value".to_string(), serde_json_value);
                                 map.insert("key".to_string(), schema[idx][name_key].clone());
                                 map.insert(

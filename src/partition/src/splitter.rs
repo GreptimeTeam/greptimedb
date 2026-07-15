@@ -121,7 +121,7 @@ impl<'a> SplitReadRowHelper<'a> {
                             &row.values[*idx],
                             self.schema[*idx].datatype_extension.as_ref(),
                         )
-                        .into()
+                        .into_value()
                     })
                 })
                 .collect()

@@ -18,7 +18,7 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use api::helper::pb_value_to_value_ref;
+use api::helper::{DecodedValue, pb_value_to_value_ref};
 use arrow::array::{
     TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
     TimestampSecondArray,
@@ -290,8 +290,11 @@ impl TimeWindowExpr {
 
             let mut vector = cdt.create_mutable_vector(rows.rows.len());
             for row in rows.rows {
-                let value = pb_value_to_value_ref(&row.values[ts_col_index], None);
-                vector.try_push_value_ref(&value).context(DataTypeSnafu {
+                let result = match pb_value_to_value_ref(&row.values[ts_col_index], None) {
+                    DecodedValue::Ref(value) => vector.try_push_value_ref(&value),
+                    DecodedValue::Owned(value) => vector.try_push_value(value),
+                };
+                result.context(DataTypeSnafu {
                     msg: "Failed to convert rows to columns",
                 })?;
             }

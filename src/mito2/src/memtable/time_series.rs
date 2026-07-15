@@ -20,6 +20,7 @@ use std::sync::atomic::{AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
+use api::helper::DecodedValue;
 use api::v1::OpType;
 use common_recordbatch::filter::SimpleFilterEvaluator;
 use common_telemetry::{debug, error};
@@ -733,13 +734,16 @@ impl Series {
     }
 
     /// Pushes a row of values into Series. Return the size of values.
-    pub(crate) fn push<'a>(
+    pub(crate) fn push<'a, T>(
         &mut self,
         ts: ValueRef<'a>,
         sequence: u64,
         op_type: OpType,
-        values: impl Iterator<Item = ValueRef<'a>>,
-    ) -> usize {
+        values: impl Iterator<Item = T>,
+    ) -> usize
+    where
+        T: Into<DecodedValue<'a>>,
+    {
         // + 10 to avoid potential reallocation.
         if self.active.len() + 10 > self.capacity {
             let region_metadata = self.region_metadata.clone();
@@ -869,13 +873,17 @@ impl ValueBuilder {
     /// Returns the size of field values.
     ///
     /// In this method, we don't check the data type of the value, because it is already checked in the caller.
-    pub(crate) fn push<'a>(
+    pub(crate) fn push<'a, T>(
         &mut self,
         ts: ValueRef,
         sequence: u64,
         op_type: u8,
-        fields: impl Iterator<Item = ValueRef<'a>>,
-    ) -> usize {
+        fields: impl Iterator<Item = T>,
+    ) -> usize
+    where
+        T: Into<DecodedValue<'a>>,
+    {
+        let fields = fields.map(Into::into);
         #[cfg(debug_assertions)]
         let fields = {
             let field_vec = fields.collect::<Vec<_>>();
@@ -894,7 +902,7 @@ impl ValueBuilder {
             if !field_value.is_null() || self.fields[idx].is_some() {
                 if let Some(field) = self.fields[idx].as_mut() {
                     field
-                        .push(field_value)
+                        .push_field(field_value)
                         .unwrap_or_else(|e| panic!("Failed to push field value: {e:?}"));
                 } else {
                     let mut mutable_vector =
@@ -908,7 +916,7 @@ impl ValueBuilder {
                         };
                     mutable_vector.push_nulls(num_rows - 1);
                     mutable_vector
-                        .push(field_value)
+                        .push_field(field_value)
                         .unwrap_or_else(|e| panic!("unexpected field value: {e:?}"));
                     self.fields[idx] = Some(mutable_vector);
                     MEMTABLE_ACTIVE_FIELD_BUILDER_COUNT.inc();

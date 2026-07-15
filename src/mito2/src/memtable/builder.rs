@@ -16,6 +16,7 @@
 
 use std::sync::Arc;
 
+use api::helper::DecodedValue;
 use datatypes::arrow;
 use datatypes::arrow::array::{
     Array, ArrayDataBuilder, BufferBuilder, GenericByteArray, NullBufferBuilder, UInt8BufferBuilder,
@@ -55,6 +56,17 @@ impl FieldBuilder {
                 Ok(())
             }
             FieldBuilder::Other(b) => b.try_push_value_ref(&value),
+        }
+    }
+
+    /// Pushes a field value into builder.
+    pub(crate) fn push_field(&mut self, value: DecodedValue) -> datatypes::error::Result<()> {
+        match value {
+            DecodedValue::Ref(value) => self.push(value),
+            DecodedValue::Owned(value) => match self {
+                FieldBuilder::String(_) => self.push(value.as_value_ref()),
+                FieldBuilder::Other(builder) => builder.try_push_value(value),
+            },
         }
     }
 

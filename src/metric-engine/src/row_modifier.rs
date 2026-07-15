@@ -101,11 +101,15 @@ impl RowModifier {
             let internal_columns = [
                 (
                     ReservedColumnId::table_id(),
-                    api::helper::pb_value_to_value_ref(&table_id_value, None),
+                    api::helper::pb_value_to_value_ref(&table_id_value, None)
+                        .into_value_ref()
+                        .expect("table id must have a borrowed value representation"),
                 ),
                 (
                     ReservedColumnId::tsid(),
-                    api::helper::pb_value_to_value_ref(&tsid, None),
+                    api::helper::pb_value_to_value_ref(&tsid, None)
+                        .into_value_ref()
+                        .expect("tsid must have a borrowed value representation"),
                 ),
             ];
             self.codec
@@ -404,7 +408,9 @@ impl RowIter<'_> {
                     api::helper::pb_value_to_value_ref(
                         &self.row.values[idx.index],
                         self.schema[idx.index].datatype_extension.as_ref(),
-                    ),
+                    )
+                    .into_value_ref()
+                    .expect("primary key must have a borrowed value representation"),
                 )
             })
     }

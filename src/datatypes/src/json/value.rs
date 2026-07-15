@@ -310,6 +310,15 @@ impl JsonValue {
         ().into()
     }
 
+    /// Creates an owned JSON value with its precomputed native type.
+    /// The native type must describe `json_variant` exactly.
+    pub fn new_with_type(json_variant: JsonVariant, json_type: JsonNativeType) -> Self {
+        Self {
+            json_type: OnceLock::from(Arc::new(json_type)),
+            json_variant,
+        }
+    }
+
     pub(crate) fn new(json_variant: JsonVariant) -> Self {
         Self {
             json_type: OnceLock::new(),

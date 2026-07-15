@@ -14,6 +14,7 @@
 
 use std::collections::HashMap;
 
+use api::helper::DecodedValue;
 use api::v1::{ColumnSchema, Mutation, OpType, Row, Rows};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::value::ValueRef;
@@ -206,13 +207,15 @@ impl KeyValue<'_> {
                 Some(i) => api::helper::pb_value_to_value_ref(
                     &self.row.values[*i],
                     self.schema[*i].datatype_extension.as_ref(),
-                ),
+                )
+                .into_value_ref()
+                .expect("primary key must have a borrowed value representation"),
                 None => ValueRef::Null,
             })
     }
 
-    /// Get field columns.
-    pub fn fields(&self) -> impl Iterator<Item = ValueRef<'_>> {
+    /// Gets field columns, decoding JSON values into owned values.
+    pub fn fields(&self) -> impl Iterator<Item = DecodedValue<'_>> {
         self.helper.indices[self.helper.num_primary_key_column + 1..]
             .iter()
             .map(|idx| match idx {
@@ -220,7 +223,7 @@ impl KeyValue<'_> {
                     &self.row.values[*i],
                     self.schema[*i].datatype_extension.as_ref(),
                 ),
-                None => ValueRef::Null,
+                None => DecodedValue::Ref(ValueRef::Null),
             })
     }
 
@@ -232,6 +235,8 @@ impl KeyValue<'_> {
             &self.row.values[index],
             self.schema[index].datatype_extension.as_ref(),
         )
+        .into_value_ref()
+        .expect("timestamp must have a borrowed value representation")
     }
 
     /// Get number of primary key columns.
@@ -443,7 +448,13 @@ mod tests {
             let actual_keys: Vec<_> = kv.primary_keys().collect();
             assert_eq!(expect_keys, actual_keys);
             let expect_values: Vec<_> = values.iter().map(|v| ValueRef::from(*v)).collect();
-            let actual_values: Vec<_> = kv.fields().collect();
+            let actual_values: Vec<_> = kv
+                .fields()
+                .map(|value| match value {
+                    DecodedValue::Ref(value) => value,
+                    DecodedValue::Owned(_) => unreachable!(),
+                })
+                .collect();
             assert_eq!(expect_values, actual_values);
         }
     }

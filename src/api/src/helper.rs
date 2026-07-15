@@ -20,13 +20,15 @@ use common_decimal::decimal128::{DECIMAL128_DEFAULT_SCALE, DECIMAL128_MAX_PRECIS
 use common_time::time::Time;
 use common_time::timestamp::TimeUnit;
 use common_time::{Date, IntervalDayTime, IntervalMonthDayNano, IntervalYearMonth, Timestamp};
-use datatypes::json::value::{JsonNumber, JsonValue, JsonValueRef, JsonVariant, JsonVariantRef};
+use datatypes::json::value::{JsonNumber, JsonValue, JsonVariant};
 use datatypes::prelude::{ConcreteDataType, ValueRef};
 use datatypes::types::json_type::JsonNativeType;
 use datatypes::types::{
     IntervalType, JsonFormat, JsonType, StructField, StructType, TimeType, TimestampType,
 };
-use datatypes::value::{ListValueRef, OrderedF32, OrderedF64, StructValueRef, Value};
+use datatypes::value::{
+    ListValue, ListValueRef, OrderedF32, OrderedF64, StructValue, StructValueRef, Value,
+};
 use datatypes::vectors::VectorRef;
 use greptime_proto::v1::column_data_type_extension::TypeExt;
 use greptime_proto::v1::ddl_request::Expr;
@@ -732,15 +734,71 @@ pub fn convert_to_pb_decimal128(v: Decimal128) -> v1::Decimal128 {
     v1::Decimal128 { hi, lo }
 }
 
+/// A protobuf value decoded without copying scalar strings and binary values.
+pub enum DecodedValue<'a> {
+    /// A value borrowing from the protobuf value.
+    Ref(ValueRef<'a>),
+    /// An owned value for representations that cannot borrow from protobuf.
+    Owned(Value),
+}
+
+impl<'a> DecodedValue<'a> {
+    /// Converts this decoded value into an owned value.
+    pub fn into_value(self) -> Value {
+        match self {
+            Self::Ref(value) => value.into(),
+            Self::Owned(value) => value,
+        }
+    }
+
+    /// Returns the decoded value ref if it does not own its representation.
+    pub fn into_value_ref(self) -> Option<ValueRef<'a>> {
+        match self {
+            Self::Ref(value) => Some(value),
+            Self::Owned(_) => None,
+        }
+    }
+
+    /// Returns whether this value is null.
+    pub fn is_null(&self) -> bool {
+        match self {
+            Self::Ref(value) => value.is_null(),
+            Self::Owned(value) => value.is_null(),
+        }
+    }
+
+    /// Returns the estimated size of the underlying data.
+    pub fn data_size(&self) -> usize {
+        match self {
+            Self::Ref(value) => value.data_size(),
+            Self::Owned(Value::Json(value)) => std::mem::size_of_val(value.as_ref()),
+            Self::Owned(value) => value.as_value_ref().data_size(),
+        }
+    }
+}
+
+impl From<DecodedValue<'_>> for Value {
+    fn from(value: DecodedValue<'_>) -> Self {
+        value.into_value()
+    }
+}
+
+impl<'a> From<ValueRef<'a>> for DecodedValue<'a> {
+    fn from(value: ValueRef<'a>) -> Self {
+        Self::Ref(value)
+    }
+}
+
+/// Decodes a protobuf value, borrowing its representation when possible.
 pub fn pb_value_to_value_ref<'a>(
     value: &'a v1::Value,
     datatype_ext: Option<&'a ColumnDataTypeExtension>,
-) -> ValueRef<'a> {
+) -> DecodedValue<'a> {
     let Some(value) = &value.value_data else {
-        return ValueRef::Null;
+        return DecodedValue::Ref(ValueRef::Null);
     };
 
-    match value {
+    let value = match value {
         ValueData::I8Value(v) => ValueRef::Int8(*v as i8),
         ValueData::I16Value(v) => ValueRef::Int16(*v as i16),
         ValueData::I32Value(v) => ValueRef::Int32(*v),
@@ -827,11 +885,21 @@ pub fn pb_value_to_value_ref<'a>(
                 })
                 .collect::<Vec<_>>();
 
-            let list_value = ListValueRef::RefList {
+            let item_datatype = Arc::new(item_type);
+            if items.iter().any(|x| matches!(x, DecodedValue::Owned(_))) {
+                return DecodedValue::Owned(Value::List(ListValue::new(
+                    items.into_iter().map(DecodedValue::into_value).collect(),
+                    item_datatype,
+                )));
+            }
+            let items = items
+                .into_iter()
+                .map(|x| x.into_value_ref().unwrap())
+                .collect();
+            ValueRef::List(ListValueRef::RefList {
                 val: items,
-                item_datatype: Arc::new(item_type.clone()),
-            };
-            ValueRef::List(list_value)
+                item_datatype,
+            })
         }
 
         ValueData::StructValue(struct_value) => {
@@ -864,20 +932,27 @@ pub fn pb_value_to_value_ref<'a>(
                 .iter()
                 .zip(struct_datatype_ext.fields.iter())
                 .map(|(item, field)| pb_value_to_value_ref(item, field.datatype_extension.as_ref()))
-                .collect::<Vec<ValueRef>>();
+                .collect::<Vec<_>>();
 
-            let struct_value_ref = StructValueRef::RefList {
-                val: items,
-                fields: StructType::new(Arc::new(struct_fields)),
-            };
-            ValueRef::Struct(struct_value_ref)
+            let fields = StructType::new(Arc::new(struct_fields));
+            if items.iter().any(|x| matches!(x, DecodedValue::Owned(_))) {
+                return DecodedValue::Owned(Value::Struct(StructValue::new(
+                    items.into_iter().map(DecodedValue::into_value).collect(),
+                    fields,
+                )));
+            }
+            let items = items
+                .into_iter()
+                .map(|x| x.into_value_ref().unwrap())
+                .collect();
+            ValueRef::Struct(StructValueRef::RefList { val: items, fields })
         }
 
-        ValueData::JsonValue(inner_value) => {
-            let value = decode_json_value(inner_value);
-            ValueRef::Json(Box::new(value))
+        ValueData::JsonValue(value) => {
+            return DecodedValue::Owned(Value::Json(Box::new(decode_json_value(value))));
         }
-    }
+    };
+    DecodedValue::Ref(value)
 }
 
 /// Returns true if the pb semantic type is valid.
@@ -930,21 +1005,21 @@ pub fn encode_json_value(value: JsonValue) -> v1::JsonValue {
     helper(value.into_variant())
 }
 
-fn decode_json_value(value: &v1::JsonValue) -> JsonValueRef<'_> {
+fn decode_json_value(value: &v1::JsonValue) -> JsonValue {
     let (variant, json_type) = decode_json_value_parts(value);
-    JsonValueRef::new_with_type(variant, json_type)
+    JsonValue::new_with_type(variant, json_type)
 }
 
-fn decode_json_value_parts(value: &v1::JsonValue) -> (JsonVariantRef<'_>, JsonNativeType) {
+fn decode_json_value_parts(value: &v1::JsonValue) -> (JsonVariant, JsonNativeType) {
     let Some(value) = &value.value else {
-        return (JsonVariantRef::Null, JsonNativeType::Null);
+        return (JsonVariant::Null, JsonNativeType::Null);
     };
     match value {
-        json_value::Value::Boolean(x) => (JsonVariantRef::Bool(*x), JsonNativeType::Bool),
+        json_value::Value::Boolean(x) => (JsonVariant::Bool(*x), JsonNativeType::Bool),
         json_value::Value::Int(x) => ((*x).into(), JsonNativeType::i64()),
         json_value::Value::Uint(x) => ((*x).into(), JsonNativeType::u64()),
         json_value::Value::Float(x) => ((*x).into(), JsonNativeType::f64()),
-        json_value::Value::Str(x) => (x.as_str().into(), JsonNativeType::String),
+        json_value::Value::Str(x) => (x.clone().into(), JsonNativeType::String),
         json_value::Value::Array(array) => {
             let mut variants = Vec::with_capacity(array.items.len());
             let mut item_type = JsonNativeType::Null;
@@ -956,34 +1031,29 @@ fn decode_json_value_parts(value: &v1::JsonValue) -> (JsonVariantRef<'_>, JsonNa
                 }
             }
             (
-                JsonVariantRef::Array(variants),
+                JsonVariant::Array(variants),
                 JsonNativeType::Array(Box::new(item_type)),
             )
         }
         json_value::Value::Object(object) => {
-            let mut variants = Vec::with_capacity(object.entries.len());
-            let mut fields = Vec::with_capacity(object.entries.len());
+            let mut variants = BTreeMap::new();
+            let mut fields = BTreeMap::new();
             for entry in &object.entries {
                 let Some(value) = &entry.value else {
                     continue;
                 };
                 let (variant, json_type) = decode_json_value_parts(value);
-                variants.push((entry.key.as_str(), variant));
-                fields.push((entry.key.clone(), json_type));
+                variants.insert(entry.key.clone(), variant);
+                fields.insert(entry.key.clone(), json_type);
             }
-            let variants = variants.into_iter().collect::<BTreeMap<_, _>>();
-            let fields = fields.into_iter().collect::<BTreeMap<_, _>>();
             let json_type = if fields.is_empty() {
                 JsonNativeType::Null
             } else {
                 JsonNativeType::Object(fields)
             };
-            (JsonVariantRef::Object(variants), json_type)
+            (JsonVariant::Object(variants), json_type)
         }
-        json_value::Value::Variant(x) => (
-            JsonVariantRef::Variant(x.as_slice()),
-            JsonNativeType::Variant,
-        ),
+        json_value::Value::Variant(x) => (JsonVariant::Variant(x.clone()), JsonNativeType::Variant),
     }
 }
 
@@ -1830,37 +1900,37 @@ mod tests {
         let proto = encode_json_value(json.clone());
         assert!(proto.value.is_none());
         let value = decode_json_value(&proto);
-        assert_eq!(json.as_ref(), value);
+        assert_eq!(json, value);
 
         let json: JsonValue = true.into();
         let proto = encode_json_value(json.clone());
         assert_eq!(proto.value, Some(json_value::Value::Boolean(true)));
         let value = decode_json_value(&proto);
-        assert_eq!(json.as_ref(), value);
+        assert_eq!(json, value);
 
         let json: JsonValue = (-1i64).into();
         let proto = encode_json_value(json.clone());
         assert_eq!(proto.value, Some(json_value::Value::Int(-1)));
         let value = decode_json_value(&proto);
-        assert_eq!(json.as_ref(), value);
+        assert_eq!(json, value);
 
         let json: JsonValue = 1u64.into();
         let proto = encode_json_value(json.clone());
         assert_eq!(proto.value, Some(json_value::Value::Uint(1)));
         let value = decode_json_value(&proto);
-        assert_eq!(json.as_ref(), value);
+        assert_eq!(json, value);
 
         let json: JsonValue = 1.0f64.into();
         let proto = encode_json_value(json.clone());
         assert_eq!(proto.value, Some(json_value::Value::Float(1.0)));
         let value = decode_json_value(&proto);
-        assert_eq!(json.as_ref(), value);
+        assert_eq!(json, value);
 
         let json: JsonValue = "s".into();
         let proto = encode_json_value(json.clone());
         assert_eq!(proto.value, Some(json_value::Value::Str("s".to_string())));
         let value = decode_json_value(&proto);
-        assert_eq!(json.as_ref(), value);
+        assert_eq!(json, value);
 
         let json: JsonValue = [1i64, 2, 3].into();
         let proto = encode_json_value(json.clone());
@@ -1885,7 +1955,7 @@ mod tests {
             decode_json_value_parts(&proto).1
         );
         let value = decode_json_value(&proto);
-        assert_eq!(json.as_ref(), value);
+        assert_eq!(json, value);
 
         let proto = v1::JsonValue {
             value: Some(json_value::Value::Array(JsonList {
@@ -1915,7 +1985,7 @@ mod tests {
             decode_json_value_parts(&proto).1
         );
         let value = decode_json_value(&proto);
-        assert_eq!(json.as_ref(), value);
+        assert_eq!(json, value);
 
         let json: JsonValue = [("k3", 3i64), ("k2", 2i64), ("k1", 1i64)].into();
         let proto = encode_json_value(json.clone());
@@ -1953,7 +2023,7 @@ mod tests {
             decode_json_value_parts(&proto).1
         );
         let value = decode_json_value(&proto);
-        assert_eq!(json.as_ref(), value);
+        assert_eq!(json, value);
 
         let json: JsonValue = [("null", ()); 0].into();
         let proto = encode_json_value(json.clone());
@@ -1963,7 +2033,7 @@ mod tests {
         );
         assert_eq!(JsonNativeType::Null, decode_json_value_parts(&proto).1);
         let value = decode_json_value(&proto);
-        assert_eq!(json.as_ref(), value);
+        assert_eq!(json, value);
 
         let json: JsonValue = [
             ("null", JsonVariant::from(())),
@@ -2050,6 +2120,13 @@ mod tests {
             }))
         );
         let value = decode_json_value(&proto);
-        assert_eq!(json.as_ref(), value);
+        assert_eq!(json, value);
+        let value = v1::Value {
+            value_data: Some(ValueData::JsonValue(proto)),
+        };
+        assert_eq!(
+            Value::Json(Box::new(json)),
+            pb_value_to_value_ref(&value, None).into_value()
+        );
     }
 }

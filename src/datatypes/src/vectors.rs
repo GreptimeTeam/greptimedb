@@ -200,6 +200,11 @@ pub trait MutableVector: Send + Sync {
     /// Try to push value ref to this mutable vector.
     fn try_push_value_ref(&mut self, value: &ValueRef) -> Result<()>;
 
+    /// Tries to push an owned value into this mutable vector.
+    fn try_push_value(&mut self, value: Value) -> Result<()> {
+        self.try_push_value_ref(&value.as_value_ref())
+    }
+
     /// Push value ref to this mutable vector.
     ///
     /// # Panics
