@@ -85,7 +85,8 @@ use crate::sst::parquet::format::{INTERNAL_COLUMN_NUM, need_override_sequence};
 use crate::sst::parquet::json_align::{NestedSchemaAligner, ProjectedRecordBatchStream};
 use crate::sst::parquet::metadata::MetadataLoader;
 use crate::sst::parquet::prefilter::{
-    CachedPrimaryKeyFilter, PrefilterContextBuilder, build_reader_filter_plan, execute_prefilter,
+    CachedPrimaryKeyFilter, LastRowCoverageFilter, PrefilterContextBuilder, build_reader_filter_plan,
+    execute_prefilter,
 };
 use crate::sst::parquet::push_decoder::{
     SstParquetRangeFetcher, build_sst_parquet_record_batch_stream,
@@ -185,6 +186,8 @@ pub struct ParquetReaderBuilder {
     pre_filter_mode: PreFilterMode,
     /// Whether to decode primary key values eagerly when reading primary key format SSTs.
     decode_primary_key_values: bool,
+    /// Query-local LastRow coverage for this file.
+    last_row_coverage: Option<LastRowCoverageFilter>,
     page_index_policy: PageIndexPolicy,
     defer_optional_page_index: bool,
     /// Scan-wide hint for rows in a decoded batch.
@@ -218,6 +221,7 @@ impl ParquetReaderBuilder {
             compaction: false,
             pre_filter_mode: PreFilterMode::All,
             decode_primary_key_values: false,
+            last_row_coverage: None,
             page_index_policy: Default::default(),
             defer_optional_page_index: false,
             batch_size: DEFAULT_READ_BATCH_SIZE,
@@ -322,6 +326,11 @@ impl ParquetReaderBuilder {
     #[must_use]
     pub(crate) fn decode_primary_key_values(mut self, decode: bool) -> Self {
         self.decode_primary_key_values = decode;
+        self
+    }
+
+    pub(crate) fn last_row_coverage(mut self, coverage: Option<LastRowCoverageFilter>) -> Self {
+        self.last_row_coverage = coverage;
         self
     }
 
@@ -493,13 +502,18 @@ impl ParquetReaderBuilder {
 
         let codec = build_primary_key_codec(read_format.metadata());
 
-        let filter_plan = build_reader_filter_plan(
+        let mut filter_plan = build_reader_filter_plan(
             self.predicate.as_ref(),
             self.expected_metadata.as_deref(),
             self.pre_filter_mode,
             &read_format,
             &codec,
         );
+        if let (Some(coverage), Some(builder)) =
+            (&self.last_row_coverage, &mut filter_plan.prefilter_builder)
+        {
+            builder.set_last_row_coverage(coverage.clone());
+        }
 
         if self.defer_optional_page_index
             && self.page_index_policy == PageIndexPolicy::Optional

@@ -42,7 +42,9 @@ use itertools::Itertools;
 use partition::expr::PartitionExpr;
 use smallvec::SmallVec;
 use snafu::{OptionExt, ResultExt};
+use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::{RegionMetadata, RegionMetadataRef};
+use store_api::metric_engine_consts::is_metric_engine_internal_column;
 use store_api::region_engine::{PartitionRange, RegionScannerRef};
 use store_api::storage::{
     ColumnId, NestedPath, RegionId, ScanRequest, SequenceNumber, SequenceRange,
@@ -83,6 +85,7 @@ use crate::sst::index::inverted_index::applier::builder::InvertedIndexApplierBui
 #[cfg(feature = "vector_index")]
 use crate::sst::index::vector_index::applier::{VectorIndexApplier, VectorIndexApplierRef};
 use crate::sst::parquet::file_range::PreFilterMode;
+use crate::sst::parquet::prefilter::{LastRowCoverage, LastRowCoverageFilter};
 use crate::sst::parquet::reader::ReaderMetrics;
 
 #[cfg(feature = "vector_index")]
@@ -417,6 +420,13 @@ impl ScanRegion {
         let sst_min_sequence = self.request.sst_min_sequence.and_then(NonZeroU64::new);
         let time_range = self.build_time_range_predicate();
         let predicate = PredicateGroup::new(metadata, &self.request.filters)?;
+        // The mapper always computes projected column ids as the schema of SSTs may change.
+        let projection = self
+            .request
+            .projection
+            .clone()
+            .unwrap_or_else(|| (0..metadata.column_metadatas.len()).collect());
+        let deferred_tags = self.focused_last_row_tags(&predicate, &projection);
 
         let read_col_ids =
             self.build_read_col_ids(self.request.projection.as_deref(), &predicate)?;
@@ -432,18 +442,18 @@ impl ScanRegion {
             .fields()
             .iter()
             .any(is_json2_extension_type);
-        let read_cols = if has_structured_json {
+        let mut read_cols = if has_structured_json {
             self.read_columns_with_json_type_hint(&read_col_ids)
         } else {
             ReadColumns::from_deduped_column_ids(read_col_ids.iter().copied())
         };
+        if let Some(deferred_tags) = &deferred_tags {
+            read_cols
+                .cols
+                .retain(|column| !deferred_tags.contains(&column.column_id));
+        }
+        let read_col_ids = read_cols.column_ids();
 
-        // The mapper always computes projected column ids as the schema of SSTs may change.
-        let projection = self
-            .request
-            .projection
-            .clone()
-            .unwrap_or_else(|| (0..metadata.column_metadatas.len()).collect());
         let json_type_hint = has_structured_json
             .then_some(&self.request.json_type_hint)
             .inspect(|json_type_hint| {
@@ -455,11 +465,12 @@ impl ScanRegion {
                         .join(", ")
                 );
             });
-        let mapper = FlatProjectionMapper::new_with_read_columns(
+        let mapper = FlatProjectionMapper::new_with_deferred_tags(
             metadata,
             projection,
             read_cols,
             json_type_hint,
+            deferred_tags.as_deref().unwrap_or_default(),
         )?;
         let mapper = if self.request.preserve_pk_dictionary_encoding {
             mapper.with_pk_dictionary_encoding()
@@ -578,6 +589,7 @@ impl ScanRegion {
             .with_filter_deleted(self.filter_deleted)
             .with_merge_mode(self.version.options.merge_mode())
             .with_series_row_selector(self.request.series_row_selector)
+            .with_last_row_coverage(deferred_tags.is_some().then(LastRowCoverage::default))
             .with_distribution(self.request.distribution)
             .with_explain_flat_format(
                 self.version.options.sst_format == Some(crate::sst::FormatType::Flat),
@@ -866,6 +878,48 @@ impl ScanRegion {
 
         Some(Arc::new(applier))
     }
+
+    /// Returns projected tags that can be reconstructed after focused LastRow selection.
+    /// `Some` also marks the complete focused path when the projection has no tags.
+    fn focused_last_row_tags(
+        &self,
+        predicate: &PredicateGroup,
+        projection: &[usize],
+    ) -> Option<Vec<ColumnId>> {
+        let metadata = &self.version.metadata;
+        let supported = !self.version.options.append_mode
+            && self.version.options.merge_mode() == MergeMode::LastRow
+            && self.request.series_row_selector == Some(TimeSeriesRowSelector::LastRow)
+            && metadata.primary_key_encoding == PrimaryKeyEncoding::Sparse
+            && predicate.region_partition_expr.is_none()
+            && predicate
+                .predicate_without_region()
+                .is_none_or(|predicate| {
+                    predicate.dyn_filters().is_empty()
+                        && predicate.exprs().iter().all(|expr| {
+                            SimpleFilterEvaluator::try_new(expr)
+                                .and_then(|filter| metadata.column_by_name(filter.column_name()))
+                                .is_some_and(|column| {
+                                    matches!(
+                                        column.semantic_type,
+                                        SemanticType::Tag | SemanticType::Timestamp
+                                    )
+                                })
+                        })
+                });
+        supported.then(|| {
+            projection
+                .iter()
+                .filter_map(|index| metadata.column_metadatas.get(*index))
+                .filter(|column| {
+                    column.semantic_type == SemanticType::Tag
+                        && metadata.primary_key.contains(&column.column_id)
+                        && !is_metric_engine_internal_column(&column.column_schema.name)
+                })
+                .map(|column| column.column_id)
+                .collect()
+        })
+    }
 }
 
 /// Returns true if the time range of a SST `file` matches the `predicate`.
@@ -927,6 +981,8 @@ pub struct ScanInput {
     pub(crate) merge_mode: MergeMode,
     /// Hint to select rows from time series.
     pub(crate) series_row_selector: Option<TimeSeriesRowSelector>,
+    /// Newer-file timestamps observed by this explicit LastRow scan.
+    last_row_coverage: Option<LastRowCoverage>,
     /// Hint for the required distribution of the scanner.
     pub(crate) distribution: Option<TimeSeriesDistribution>,
     /// Whether the region's configured SST format is flat.
@@ -970,6 +1026,7 @@ impl ScanInput {
             filter_deleted: true,
             merge_mode: MergeMode::default(),
             series_row_selector: None,
+            last_row_coverage: None,
             distribution: None,
             explain_flat_format: false,
             snapshot_sequence: None,
@@ -1157,6 +1214,16 @@ impl ScanInput {
     }
 
     #[must_use]
+    fn with_last_row_coverage(mut self, coverage: Option<LastRowCoverage>) -> Self {
+        self.last_row_coverage = coverage;
+        self
+    }
+
+    pub(crate) fn is_focused_last_row(&self) -> bool {
+        self.last_row_coverage.is_some()
+    }
+
+    #[must_use]
     pub(crate) fn with_snapshot_sequence(
         mut self,
         snapshot_sequence: Option<SequenceNumber>,
@@ -1217,6 +1284,19 @@ impl ScanInput {
             max_scalar: timestamp_to_scalar_value(time_index_unit, Some(max_ts.value())),
             time_index_col_name: time_index.column_schema.name.clone(),
         })
+    }
+
+    fn last_row_coverage_for_file(&self, file: &FileHandle) -> Option<LastRowCoverageFilter> {
+        let coverage = self.last_row_coverage.as_ref()?;
+        let unit = self
+            .region_metadata()
+            .time_index_column()
+            .column_schema
+            .data_type
+            .as_timestamp()?
+            .unit();
+        let file_max = file.time_range().1.convert_to_ceil(unit)?;
+        Some(coverage.for_file(file_max.value()))
     }
 
     /// Checks whether a file can be definitively pruned using only its manifest-level
@@ -1321,6 +1401,7 @@ impl ScanInput {
             .compaction(self.compaction)
             .pre_filter_mode(pre_filter_mode)
             .decode_primary_key_values(decode_pk_values)
+            .last_row_coverage(self.last_row_coverage_for_file(file))
             .build_reader_input(reader_metrics)
             .await;
         let read_input = match res {
@@ -1954,6 +2035,9 @@ impl StreamContext {
         self: &Arc<Self>,
         filter_exprs: Vec<Arc<dyn datafusion::physical_plan::PhysicalExpr>>,
     ) -> Vec<bool> {
+        if self.input.is_focused_last_row() {
+            return vec![false; filter_exprs.len()];
+        }
         let mut supported = Vec::with_capacity(filter_exprs.len());
         let filter_expr = filter_exprs
             .into_iter()
