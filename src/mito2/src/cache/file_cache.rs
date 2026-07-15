@@ -34,7 +34,7 @@ use store_api::storage::{FileId, RegionId};
 use tokio::sync::mpsc::{Sender, UnboundedReceiver};
 
 use crate::access_layer::TempFileCleaner;
-use crate::cache::{FILE_TYPE, INDEX_TYPE, PreparedSstMeta, prepare_sst_meta};
+use crate::cache::{FILE_TYPE, INDEX_TYPE, SstMetaPreparation, prepare_sst_meta};
 use crate::error::{self, OpenDalSnafu, Result};
 use crate::metrics::{
     CACHE_BYTES, CACHE_HIT, CACHE_MISS, WRITE_CACHE_DOWNLOAD_BYTES_TOTAL,
@@ -619,12 +619,13 @@ impl FileCache {
 
     /// Get fused SST metadata from the file cache.
     /// If the file is not in the cache, or metadata loading/decoding fails, return None.
+    /// Compact cache encoding failures return decoded-only metadata to the caller.
     pub(crate) async fn get_sst_meta_data(
         &self,
         key: IndexKey,
         cache_metrics: &mut MetadataCacheMetrics,
         page_index_policy: PageIndexPolicy,
-    ) -> Option<PreparedSstMeta> {
+    ) -> Option<SstMetaPreparation> {
         let file_path = self.inner.cache_file_path(key);
         let metadata = self
             .get_parquet_meta_data(key, cache_metrics, page_index_policy)

@@ -52,7 +52,7 @@ use table::predicate::Predicate;
 
 use self::stream::{NestedSchemaAligner, ProjectedRecordBatchStream};
 use crate::cache::index::result_cache::PredicateKey;
-use crate::cache::{CacheStrategy, CachedSstMeta, prepare_sst_meta};
+use crate::cache::{CacheStrategy, CachedSstMeta, SstMetaPreparation, prepare_sst_meta};
 #[cfg(feature = "vector_index")]
 use crate::error::ApplyVectorIndexSnafu;
 use crate::error::{
@@ -701,8 +701,19 @@ impl ParquetReaderBuilder {
         let decoded = if self.cache_strategy.sst_meta_cache_enabled() {
             let metadata = prepare_sst_meta(file_path, metadata, None, page_index_policy).await?;
             let decoded = metadata.decoded();
-            self.cache_strategy
-                .put_prepared_sst_meta(file_id, metadata, true);
+            match metadata {
+                SstMetaPreparation::Prepared(metadata) => {
+                    self.cache_strategy
+                        .put_prepared_sst_meta(file_id, metadata, true);
+                }
+                SstMetaPreparation::DecodedOnly { encoding_error, .. } => {
+                    warn!(
+                        encoding_error;
+                        "Failed to encode SST metadata for cache, using decoded metadata for {}",
+                        file_path
+                    );
+                }
+            }
             decoded
         } else {
             Arc::new(CachedSstMeta::try_new_with_page_index_policy(

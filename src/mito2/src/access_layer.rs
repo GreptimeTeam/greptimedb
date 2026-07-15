@@ -32,7 +32,7 @@ use store_api::storage::{FileId, RegionId, SequenceNumber};
 
 use crate::cache::file_cache::{FileCacheRef, FileType, IndexKey};
 use crate::cache::write_cache::SstUploadRequest;
-use crate::cache::{CacheManagerRef, prepare_sst_meta};
+use crate::cache::{CacheManagerRef, SstMetaPreparation, prepare_sst_meta};
 use crate::config::{BloomFilterConfig, FulltextIndexConfig, IndexConfig, InvertedIndexConfig};
 use crate::error::{
     CleanDirSnafu, DeleteIndexSnafu, DeleteIndexesSnafu, DeleteSstsSnafu, OpenDalSnafu, Result,
@@ -438,9 +438,14 @@ impl AccessLayer {
                         )
                         .await
                         {
-                            Ok(metadata) => {
+                            Ok(SstMetaPreparation::Prepared(metadata)) => {
                                 cache_manager.put_prepared_sst_meta(file_id, metadata, true);
                             }
+                            Ok(SstMetaPreparation::DecodedOnly { encoding_error, .. }) => warn!(
+                                encoding_error;
+                                "Failed to encode parquet metadata for cache, file: {}",
+                                file_path
+                            ),
                             Err(err) => {
                                 warn!(err; "Failed to cache parquet metadata for {}", file_path);
                             }

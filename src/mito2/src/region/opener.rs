@@ -44,7 +44,7 @@ use tokio::sync::Semaphore;
 
 use crate::access_layer::AccessLayer;
 use crate::cache::file_cache::{FileCache, FileType, IndexKey};
-use crate::cache::{CacheManagerRef, prepare_sst_meta};
+use crate::cache::{CacheManagerRef, SstMetaPreparation, prepare_sst_meta};
 use crate::config::MitoConfig;
 use crate::engine::region_hook::RegionHookRef;
 use crate::error;
@@ -1135,8 +1135,18 @@ async fn preload_parquet_meta_cache_for_files(
                 {
                     file_handle.set_primary_key_range(primary_key_range);
                 }
-                cache_manager.put_prepared_sst_meta(file_id, metadata, false);
-                loaded += 1;
+                match metadata {
+                    SstMetaPreparation::Prepared(metadata) => {
+                        cache_manager.put_prepared_sst_meta(file_id, metadata, false);
+                        loaded += 1;
+                    }
+                    SstMetaPreparation::DecodedOnly { encoding_error, .. } => warn!(
+                        encoding_error;
+                        "Failed to encode file-cached SST metadata during preload, region: {}, file: {}",
+                        region_id,
+                        file_id.file_id()
+                    ),
+                }
                 continue;
             }
         }
@@ -1166,15 +1176,21 @@ async fn preload_parquet_meta_cache_for_files(
                 )
                 .await
                 {
-                    Ok(metadata) => {
+                    Ok(SstMetaPreparation::Prepared(metadata)) => {
                         // Preload the compact canonical entry only. Query traffic promotes decoded
                         // entries into the separate acceleration tier according to actual demand.
                         cache_manager.put_prepared_sst_meta(file_id, metadata, false);
                         loaded += 1;
                     }
+                    Ok(SstMetaPreparation::DecodedOnly { encoding_error, .. }) => warn!(
+                        encoding_error;
+                        "Failed to encode preloaded parquet metadata, region: {}, file: {}",
+                        region_id,
+                        file_path
+                    ),
                     Err(err) => {
                         warn!(
-                            err; "Failed to compact preloaded parquet metadata, region: {}, file: {}",
+                            err; "Failed to prepare preloaded parquet metadata, region: {}, file: {}",
                             region_id, file_path
                         );
                     }

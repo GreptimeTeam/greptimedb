@@ -193,6 +193,27 @@ impl PreparedSstMeta {
     }
 }
 
+/// Result of decoding SST metadata and attempting to encode its compact cache entry.
+#[derive(Debug)]
+pub(crate) enum SstMetaPreparation {
+    /// Both cache representations are ready for admission.
+    Prepared(PreparedSstMeta),
+    /// The metadata is usable by the reader, but its compact cache encoding failed.
+    DecodedOnly {
+        decoded: Arc<CachedSstMeta>,
+        encoding_error: crate::error::Error,
+    },
+}
+
+impl SstMetaPreparation {
+    pub(crate) fn decoded(&self) -> Arc<CachedSstMeta> {
+        match self {
+            Self::Prepared(metadata) => metadata.decoded(),
+            Self::DecodedOnly { decoded, .. } => decoded.clone(),
+        }
+    }
+}
+
 impl CompactSstMeta {
     async fn decode(&self) -> Result<Arc<CachedSstMeta>> {
         let mut decoded_guard = self.decoded.lock().await;
@@ -241,13 +262,13 @@ impl CompactSstMeta {
     }
 }
 
-/// Encodes both cache representations on the blocking runtime.
+/// Decodes SST metadata and attempts to encode both cache representations on the blocking runtime.
 pub(crate) async fn prepare_sst_meta(
     file_path: &str,
     parquet_metadata: ParquetMetaData,
     region_metadata: Option<RegionMetadataRef>,
     page_index_policy: PageIndexPolicy,
-) -> Result<PreparedSstMeta> {
+) -> Result<SstMetaPreparation> {
     let file_path = file_path.to_string();
     common_runtime::spawn_blocking_global(move || {
         // Defensively discard column indexes supplied by external metadata producers. Mito only
@@ -256,37 +277,76 @@ pub(crate) async fn prepare_sst_meta(
         builder.take_column_index();
         let parquet_metadata = builder.build();
 
-        let mut encoded = Vec::new();
-        ParquetMetaDataWriter::new(&mut encoded, &parquet_metadata)
-            .finish()
-            .context(WriteParquetSnafu)?;
-        let decoded_size = encoded.len();
-        let encoded_metadata = zstd::bulk::compress(&encoded, 3).context(CompressObjectSnafu {
-            compress_type: CompressionType::Zstd,
-            path: file_path.clone(),
-        })?;
-
-        let decoded = Arc::new(CachedSstMeta::try_new_with_page_index_policy(
+        let cache_encoding = encode_compact_sst_meta(&file_path, &parquet_metadata);
+        finish_sst_meta_preparation(
             &file_path,
             parquet_metadata,
             region_metadata,
             page_index_policy,
-        )?);
-        let compact = Arc::new(CompactSstMeta {
-            // `zstd::bulk::compress` allocates for the compression upper bound and leaves the
-            // excess capacity in its `Vec`. Convert through a boxed slice so the retained
-            // allocation matches the cache weight.
-            encoded_metadata: Bytes::from(encoded_metadata.into_boxed_slice()),
-            decoded_size,
-            region_metadata: Arc::downgrade(&decoded.region_metadata),
-            page_index_policy,
-            decoded: tokio::sync::Mutex::new(Arc::downgrade(&decoded)),
-        });
-
-        Ok(PreparedSstMeta { compact, decoded })
+            cache_encoding,
+        )
     })
     .await
     .context(JoinSnafu)?
+}
+
+fn encode_compact_sst_meta(
+    file_path: &str,
+    parquet_metadata: &ParquetMetaData,
+) -> Result<(Bytes, usize)> {
+    let mut encoded = Vec::new();
+    ParquetMetaDataWriter::new(&mut encoded, parquet_metadata)
+        .finish()
+        .context(WriteParquetSnafu)?;
+    let decoded_size = encoded.len();
+    let encoded_metadata = zstd::bulk::compress(&encoded, 3).context(CompressObjectSnafu {
+        compress_type: CompressionType::Zstd,
+        path: file_path,
+    })?;
+
+    // `zstd::bulk::compress` allocates for the compression upper bound and leaves the excess
+    // capacity in its `Vec`. Convert through a boxed slice so the retained allocation matches the
+    // cache weight.
+    Ok((
+        Bytes::from(encoded_metadata.into_boxed_slice()),
+        decoded_size,
+    ))
+}
+
+fn finish_sst_meta_preparation(
+    file_path: &str,
+    parquet_metadata: ParquetMetaData,
+    region_metadata: Option<RegionMetadataRef>,
+    page_index_policy: PageIndexPolicy,
+    cache_encoding: Result<(Bytes, usize)>,
+) -> Result<SstMetaPreparation> {
+    let decoded = Arc::new(CachedSstMeta::try_new_with_page_index_policy(
+        file_path,
+        parquet_metadata,
+        region_metadata,
+        page_index_policy,
+    )?);
+    let (encoded_metadata, decoded_size) = match cache_encoding {
+        Ok(encoded) => encoded,
+        Err(encoding_error) => {
+            return Ok(SstMetaPreparation::DecodedOnly {
+                decoded,
+                encoding_error,
+            });
+        }
+    };
+    let compact = Arc::new(CompactSstMeta {
+        encoded_metadata,
+        decoded_size,
+        region_metadata: Arc::downgrade(&decoded.region_metadata),
+        page_index_policy,
+        decoded: tokio::sync::Mutex::new(Arc::downgrade(&decoded)),
+    });
+
+    Ok(SstMetaPreparation::Prepared(PreparedSstMeta {
+        compact,
+        decoded,
+    }))
 }
 
 impl CachedSstMeta {
@@ -982,7 +1042,19 @@ impl CacheManager {
         {
             metrics.file_cache_hit += 1;
             let decoded = metadata.decoded();
-            self.put_prepared_sst_meta(file_id, metadata, true);
+            match metadata {
+                SstMetaPreparation::Prepared(metadata) => {
+                    self.put_prepared_sst_meta(file_id, metadata, true);
+                }
+                SstMetaPreparation::DecodedOnly { encoding_error, .. } => {
+                    warn!(
+                        encoding_error;
+                        "Failed to encode file-cached SST metadata for memory cache, region_id: {}, file_id: {}",
+                        file_id.region_id(),
+                        file_id.file_id()
+                    );
+                }
+            }
             return Some(decoded);
         }
 
@@ -2134,6 +2206,9 @@ mod tests {
         let prepared = prepare_sst_meta("test.parquet", metadata, None, PageIndexPolicy::Required)
             .await
             .unwrap();
+        let SstMetaPreparation::Prepared(prepared) = prepared else {
+            panic!("valid metadata should produce a compact cache entry");
+        };
 
         // Retain only the compact form so the lookup must exercise decompression and decoding.
         cache.put_prepared_sst_meta(file_id, prepared, false);
@@ -2159,6 +2234,43 @@ mod tests {
                 .is_none_or(|key_values| key_values
                     .iter()
                     .all(|key_value| key_value.key != PARQUET_METADATA_KEY))
+        );
+    }
+
+    #[test]
+    fn test_cache_encoding_failure_preserves_decoded_metadata() {
+        let (metadata, expected_region_metadata) = sst_parquet_meta();
+        let expected_rows = metadata.file_metadata().num_rows();
+        let cache_encoding: Result<(Bytes, usize)> = Err(UnexpectedSnafu {
+            reason: "injected compact metadata encoding failure",
+        }
+        .build());
+
+        let preparation = finish_sst_meta_preparation(
+            "test.parquet",
+            Arc::unwrap_or_clone(metadata),
+            None,
+            PageIndexPolicy::Skip,
+            cache_encoding,
+        )
+        .unwrap();
+        let SstMetaPreparation::DecodedOnly {
+            decoded,
+            encoding_error,
+        } = preparation
+        else {
+            panic!("cache encoding failure should return decoded-only metadata");
+        };
+
+        assert_eq!(
+            expected_rows,
+            decoded.parquet_metadata.file_metadata().num_rows()
+        );
+        assert_eq!(expected_region_metadata, decoded.region_metadata());
+        assert!(
+            encoding_error
+                .to_string()
+                .contains("injected compact metadata encoding failure")
         );
     }
 
