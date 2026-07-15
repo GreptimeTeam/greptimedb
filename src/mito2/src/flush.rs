@@ -211,6 +211,8 @@ impl WriteBufferManager for WriteBufferManagerImpl {
 pub enum FlushReason {
     /// Engine reaches flush threshold.
     EngineFull,
+    /// Region reaches its write buffer threshold.
+    RegionFull,
     /// Manual flush.
     Manual,
     /// Flush to alter table.

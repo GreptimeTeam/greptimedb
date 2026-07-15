@@ -771,6 +771,14 @@ pub(crate) struct StalledRequests {
 }
 
 impl StalledRequests {
+    /// Returns the estimated size of stalled requests for a region.
+    pub(crate) fn estimated_size(&self, region_id: &RegionId) -> usize {
+        self.requests
+            .get(region_id)
+            .map(|(size, _, _)| *size)
+            .unwrap_or_default()
+    }
+
     /// Appends stalled requests.
     pub(crate) fn append(
         &mut self,

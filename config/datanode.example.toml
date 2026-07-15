@@ -468,6 +468,9 @@ auto_flush_interval = "1h"
 ## @toml2docs:none-default="Auto"
 #+ global_write_buffer_reject_size = "2GB"
 
+## Default write buffer size for each region. Regions stall at this size and reject writes at twice this size. Setting it to 0 disables both limits unless the table specifies `write_buffer_size`.
+#+ default_region_write_buffer_size = "0"
+
 ## Cache size for SST metadata. Setting it to 0 to disable the cache.
 ## If not set, it's default to 1/8 of OS memory with a max limitation of 512MB.
 ## @toml2docs:none-default="Auto"

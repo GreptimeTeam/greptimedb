@@ -33,6 +33,7 @@ use api::v1::{
     SemanticType, SkippingIndexType as PbSkippingIndexType, WriteHint,
 };
 pub use common_base::AffectedRows;
+use common_base::readable_size::ReadableSize;
 use common_grpc::flight::FlightDecoder;
 use common_recordbatch::DfRecordBatch;
 use common_time::{TimeToLive, Timestamp};
@@ -54,7 +55,7 @@ use crate::metric_engine_consts::PHYSICAL_TABLE_METADATA_KEY;
 use crate::metrics;
 use crate::mito_engine_options::{
     APPEND_MODE_KEY, AUTO_FLUSH_INTERVAL_KEY, SST_FORMAT_KEY, TTL_KEY, TWCS_MAX_OUTPUT_FILE_SIZE,
-    TWCS_TIME_WINDOW, TWCS_TRIGGER_FILE_NUM,
+    TWCS_TIME_WINDOW, TWCS_TRIGGER_FILE_NUM, WRITE_BUFFER_SIZE_KEY,
 };
 use crate::path_utils::table_dir;
 use crate::storage::{ColumnId, RegionId, ScanRequest};
@@ -1405,6 +1406,7 @@ impl From<v1::ModifyColumnType> for ModifyColumnType {
 
 #[derive(Debug, Eq, PartialEq, Clone, Serialize, Deserialize)]
 pub enum SetRegionOption {
+    WriteBufferSize(Option<ReadableSize>),
     Ttl(Option<TimeToLive>),
     // Modifying TwscOptions with values as (option name, new value).
     Twsc(String, String),
@@ -1422,6 +1424,12 @@ impl TryFrom<&PbOption> for SetRegionOption {
     fn try_from(value: &PbOption) -> std::result::Result<Self, Self::Error> {
         let PbOption { key, value } = value;
         match key.as_str() {
+            WRITE_BUFFER_SIZE_KEY => {
+                let size = value
+                    .parse::<ReadableSize>()
+                    .map_err(|_| InvalidSetRegionOptionRequestSnafu { key, value }.build())?;
+                Ok(Self::WriteBufferSize(Some(size)))
+            }
             TTL_KEY => {
                 let ttl = TimeToLive::from_humantime_or_str(value)
                     .map_err(|_| InvalidSetRegionOptionRequestSnafu { key, value }.build())?;
@@ -1470,6 +1478,7 @@ impl From<&UnsetRegionOption> for SetRegionOption {
                 SetRegionOption::Twsc(unset_option.to_string(), String::new())
             }
             UnsetRegionOption::Ttl => SetRegionOption::Ttl(Default::default()),
+            UnsetRegionOption::WriteBufferSize => SetRegionOption::WriteBufferSize(None),
         }
     }
 }
@@ -1480,6 +1489,7 @@ impl TryFrom<&str> for UnsetRegionOption {
     fn try_from(key: &str) -> Result<Self> {
         match key.to_ascii_lowercase().as_str() {
             TTL_KEY => Ok(Self::Ttl),
+            WRITE_BUFFER_SIZE_KEY => Ok(Self::WriteBufferSize),
             TWCS_TRIGGER_FILE_NUM => Ok(Self::TwcsTriggerFileNum),
             TWCS_MAX_OUTPUT_FILE_SIZE => Ok(Self::TwcsMaxOutputFileSize),
             TWCS_TIME_WINDOW => Ok(Self::TwcsTimeWindow),
@@ -1494,12 +1504,14 @@ pub enum UnsetRegionOption {
     TwcsMaxOutputFileSize,
     TwcsTimeWindow,
     Ttl,
+    WriteBufferSize,
 }
 
 impl UnsetRegionOption {
     pub fn as_str(&self) -> &str {
         match self {
             Self::Ttl => TTL_KEY,
+            Self::WriteBufferSize => WRITE_BUFFER_SIZE_KEY,
             Self::TwcsTriggerFileNum => TWCS_TRIGGER_FILE_NUM,
             Self::TwcsMaxOutputFileSize => TWCS_MAX_OUTPUT_FILE_SIZE,
             Self::TwcsTimeWindow => TWCS_TIME_WINDOW,
@@ -1828,6 +1840,41 @@ mod tests {
                     }]
                 },
             }
+        );
+    }
+
+    #[test]
+    fn test_write_buffer_size_region_options() {
+        let option = PbOption {
+            key: WRITE_BUFFER_SIZE_KEY.to_string(),
+            value: "128MiB".to_string(),
+        };
+        assert_eq!(
+            SetRegionOption::WriteBufferSize(Some(ReadableSize::mb(128))),
+            SetRegionOption::try_from(&option).unwrap()
+        );
+
+        let option = PbOption {
+            key: WRITE_BUFFER_SIZE_KEY.to_string(),
+            value: "invalid".to_string(),
+        };
+        SetRegionOption::try_from(&option).unwrap_err();
+
+        // Clearing the option uses UNSET. Empty SET values, including SQL NULL,
+        // remain invalid because the SQL layer does not distinguish NULL from ''.
+        let option = PbOption {
+            key: WRITE_BUFFER_SIZE_KEY.to_string(),
+            value: String::new(),
+        };
+        SetRegionOption::try_from(&option).unwrap_err();
+
+        assert_eq!(
+            UnsetRegionOption::WriteBufferSize,
+            UnsetRegionOption::try_from(WRITE_BUFFER_SIZE_KEY).unwrap()
+        );
+        assert_eq!(
+            SetRegionOption::WriteBufferSize(None),
+            SetRegionOption::from(&UnsetRegionOption::WriteBufferSize)
         );
     }
 

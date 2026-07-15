@@ -109,6 +109,10 @@ pub struct MitoConfig {
     pub global_write_buffer_size: ReadableSize,
     /// Global write buffer size threshold to reject write requests.
     pub global_write_buffer_reject_size: ReadableSize,
+    /// Default write buffer size for each region. Regions stall at this size and
+    /// reject writes at twice this size. Setting it to 0 disables both limits
+    /// unless the table specifies `write_buffer_size`.
+    pub default_region_write_buffer_size: ReadableSize,
 
     // Cache configs:
     /// Cache size for SST metadata. Setting it to 0 to disable the cache.
@@ -206,6 +210,7 @@ impl Default for MitoConfig {
             auto_flush_interval: Duration::from_secs(30 * 60),
             global_write_buffer_size: ReadableSize::gb(1),
             global_write_buffer_reject_size: ReadableSize::gb(2),
+            default_region_write_buffer_size: ReadableSize::mb(0),
             sst_meta_cache_size: ReadableSize::mb(128),
             vector_cache_size: ReadableSize::mb(512),
             page_cache_size: ReadableSize::mb(512),
