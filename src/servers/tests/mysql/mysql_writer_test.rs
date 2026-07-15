@@ -65,20 +65,76 @@ fn test_create_mysql_column_def() {
 #[test]
 fn test_create_mysql_column_type_mapping() {
     let cases: &[(&str, ConcreteDataType, ColumnType)] = &[
-        ("null_col", ConcreteDataType::null_datatype(), ColumnType::MYSQL_TYPE_NULL),
-        ("bool_col", ConcreteDataType::boolean_datatype(), ColumnType::MYSQL_TYPE_TINY),
-        ("int8_col", ConcreteDataType::int8_datatype(), ColumnType::MYSQL_TYPE_TINY),
-        ("int16_col", ConcreteDataType::int16_datatype(), ColumnType::MYSQL_TYPE_SHORT),
-        ("int32_col", ConcreteDataType::int32_datatype(), ColumnType::MYSQL_TYPE_LONG),
-        ("int64_col", ConcreteDataType::int64_datatype(), ColumnType::MYSQL_TYPE_LONGLONG),
-        ("uint8_col", ConcreteDataType::uint8_datatype(), ColumnType::MYSQL_TYPE_TINY),
-        ("uint16_col", ConcreteDataType::uint16_datatype(), ColumnType::MYSQL_TYPE_SHORT),
-        ("uint32_col", ConcreteDataType::uint32_datatype(), ColumnType::MYSQL_TYPE_LONG),
-        ("uint64_col", ConcreteDataType::uint64_datatype(), ColumnType::MYSQL_TYPE_LONGLONG),
-        ("float32_col", ConcreteDataType::float32_datatype(), ColumnType::MYSQL_TYPE_FLOAT),
-        ("float64_col", ConcreteDataType::float64_datatype(), ColumnType::MYSQL_TYPE_DOUBLE),
-        ("string_col", ConcreteDataType::string_datatype(), ColumnType::MYSQL_TYPE_VARCHAR),
-        ("binary_col", ConcreteDataType::binary_datatype(), ColumnType::MYSQL_TYPE_VARCHAR),
+        (
+            "null_col",
+            ConcreteDataType::null_datatype(),
+            ColumnType::MYSQL_TYPE_NULL,
+        ),
+        (
+            "bool_col",
+            ConcreteDataType::boolean_datatype(),
+            ColumnType::MYSQL_TYPE_TINY,
+        ),
+        (
+            "int8_col",
+            ConcreteDataType::int8_datatype(),
+            ColumnType::MYSQL_TYPE_TINY,
+        ),
+        (
+            "int16_col",
+            ConcreteDataType::int16_datatype(),
+            ColumnType::MYSQL_TYPE_SHORT,
+        ),
+        (
+            "int32_col",
+            ConcreteDataType::int32_datatype(),
+            ColumnType::MYSQL_TYPE_LONG,
+        ),
+        (
+            "int64_col",
+            ConcreteDataType::int64_datatype(),
+            ColumnType::MYSQL_TYPE_LONGLONG,
+        ),
+        (
+            "uint8_col",
+            ConcreteDataType::uint8_datatype(),
+            ColumnType::MYSQL_TYPE_TINY,
+        ),
+        (
+            "uint16_col",
+            ConcreteDataType::uint16_datatype(),
+            ColumnType::MYSQL_TYPE_SHORT,
+        ),
+        (
+            "uint32_col",
+            ConcreteDataType::uint32_datatype(),
+            ColumnType::MYSQL_TYPE_LONG,
+        ),
+        (
+            "uint64_col",
+            ConcreteDataType::uint64_datatype(),
+            ColumnType::MYSQL_TYPE_LONGLONG,
+        ),
+        (
+            "float32_col",
+            ConcreteDataType::float32_datatype(),
+            ColumnType::MYSQL_TYPE_FLOAT,
+        ),
+        (
+            "float64_col",
+            ConcreteDataType::float64_datatype(),
+            ColumnType::MYSQL_TYPE_DOUBLE,
+        ),
+        (
+            "string_col",
+            ConcreteDataType::string_datatype(),
+            ColumnType::MYSQL_TYPE_VARCHAR,
+        ),
+        (
+            "binary_col",
+            ConcreteDataType::binary_datatype(),
+            ColumnType::MYSQL_TYPE_VARCHAR,
+        ),
         (
             "ts_s_col",
             ConcreteDataType::timestamp_second_datatype(),
@@ -99,7 +155,11 @@ fn test_create_mysql_column_type_mapping() {
             ConcreteDataType::timestamp_nanosecond_datatype(),
             ColumnType::MYSQL_TYPE_TIMESTAMP,
         ),
-        ("date_col", ConcreteDataType::date_datatype(), ColumnType::MYSQL_TYPE_DATE),
+        (
+            "date_col",
+            ConcreteDataType::date_datatype(),
+            ColumnType::MYSQL_TYPE_DATE,
+        ),
         (
             "time_s_col",
             ConcreteDataType::time_second_datatype(),
@@ -153,7 +213,10 @@ fn test_create_mysql_column_type_mapping() {
         // collen == 0 means "use MySQL default length"
         assert_eq!(0, col.collen, "collen should be 0 for '{col_name}'");
         // table should be empty (not populated yet)
-        assert!(col.table.is_empty(), "table should be empty for '{col_name}'");
+        assert!(
+            col.table.is_empty(),
+            "table should be empty for '{col_name}'"
+        );
     }
 }
 
@@ -213,9 +276,9 @@ fn test_timestamp_display_precision_utc() {
     // Use UTC timezone for deterministic, timezone-independent output.
     let tz = Timezone::from_tz_string("UTC").unwrap();
 
-    // Base instant: 2026-06-02 03:50:00 UTC  (unix epoch seconds = 1748836200)
+    // Base instant: 2026-06-02 03:50:00 UTC  (unix epoch seconds = 1780372200)
     // Sub-second component: 195_123_456 ns = 195.123456 ms = 0.195123456 s
-    let base_s: i64 = 1_748_836_200;
+    let base_s: i64 = 1_780_372_200;
 
     // TIMESTAMP(0) — second precision: no fractional part
     let ts = Timestamp::new(base_s, TimeUnit::Second);
@@ -255,7 +318,7 @@ fn test_timestamp_display_precision_utc() {
 #[test]
 fn test_timestamp_display_precision_no_subseconds() {
     let tz = Timezone::from_tz_string("UTC").unwrap();
-    let base_s: i64 = 1_748_836_200; // 2026-06-02 03:50:00 UTC
+    let base_s: i64 = 1_780_372_200; // 2026-06-02 03:50:00 UTC
 
     for (unit, value) in [
         (TimeUnit::Second, base_s),
@@ -272,43 +335,44 @@ fn test_timestamp_display_precision_no_subseconds() {
     }
 }
 
-/// Trailing zeros within the subsecond part are stripped correctly.
-/// e.g. 100 ms → `.1`, not `.100` or `.100000`.
+/// Subsecond digits are rendered in groups of 3 (chrono's `%.f`): a value
+/// representable in milliseconds shows 3 digits, microseconds 6, nanoseconds 9.
+/// e.g. 100 ms → `.100` (not `.100000`), 10 ms → `.010`.
 #[test]
 fn test_timestamp_display_precision_trailing_zeros_stripped() {
     let tz = Timezone::from_tz_string("UTC").unwrap();
-    let base_s: i64 = 1_748_836_200;
+    let base_s: i64 = 1_780_372_200;
 
-    // 100 ms → ".1"
+    // 100 ms → ".100"
     let ts = Timestamp::new(base_s * 1_000 + 100, TimeUnit::Millisecond);
     assert_eq!(
         ts.to_timezone_aware_string(Some(&tz)),
-        "2026-06-02 03:50:00.1",
-        "100 ms must display as '.1'"
+        "2026-06-02 03:50:00.100",
+        "100 ms must display as '.100'"
     );
 
-    // 100_000 µs → ".1"
+    // 100_000 µs → ".100" (multiple of 1ms, so 3 digits)
     let ts = Timestamp::new(base_s * 1_000_000 + 100_000, TimeUnit::Microsecond);
     assert_eq!(
         ts.to_timezone_aware_string(Some(&tz)),
-        "2026-06-02 03:50:00.1",
-        "100_000 µs must display as '.1'"
+        "2026-06-02 03:50:00.100",
+        "100_000 µs must display as '.100'"
     );
 
-    // 100_000_000 ns → ".1"
+    // 100_000_000 ns → ".100" (multiple of 1ms, so 3 digits)
     let ts = Timestamp::new(base_s * 1_000_000_000 + 100_000_000, TimeUnit::Nanosecond);
     assert_eq!(
         ts.to_timezone_aware_string(Some(&tz)),
-        "2026-06-02 03:50:00.1",
-        "100_000_000 ns must display as '.1'"
+        "2026-06-02 03:50:00.100",
+        "100_000_000 ns must display as '.100'"
     );
 
-    // 10 ms → ".01"
+    // 10 ms → ".010"
     let ts = Timestamp::new(base_s * 1_000 + 10, TimeUnit::Millisecond);
     assert_eq!(
         ts.to_timezone_aware_string(Some(&tz)),
-        "2026-06-02 03:50:00.01",
-        "10 ms must display as '.01'"
+        "2026-06-02 03:50:00.010",
+        "10 ms must display as '.010'"
     );
 
     // 1 ms → ".001"
@@ -326,16 +390,28 @@ fn test_timestamp_display_unix_epoch() {
     let tz = Timezone::from_tz_string("UTC").unwrap();
 
     let ts_s = Timestamp::new(0, TimeUnit::Second);
-    assert_eq!(ts_s.to_timezone_aware_string(Some(&tz)), "1970-01-01 00:00:00");
+    assert_eq!(
+        ts_s.to_timezone_aware_string(Some(&tz)),
+        "1970-01-01 00:00:00"
+    );
 
     let ts_ms = Timestamp::new(0, TimeUnit::Millisecond);
-    assert_eq!(ts_ms.to_timezone_aware_string(Some(&tz)), "1970-01-01 00:00:00");
+    assert_eq!(
+        ts_ms.to_timezone_aware_string(Some(&tz)),
+        "1970-01-01 00:00:00"
+    );
 
     let ts_us = Timestamp::new(0, TimeUnit::Microsecond);
-    assert_eq!(ts_us.to_timezone_aware_string(Some(&tz)), "1970-01-01 00:00:00");
+    assert_eq!(
+        ts_us.to_timezone_aware_string(Some(&tz)),
+        "1970-01-01 00:00:00"
+    );
 
     let ts_ns = Timestamp::new(0, TimeUnit::Nanosecond);
-    assert_eq!(ts_ns.to_timezone_aware_string(Some(&tz)), "1970-01-01 00:00:00");
+    assert_eq!(
+        ts_ns.to_timezone_aware_string(Some(&tz)),
+        "1970-01-01 00:00:00"
+    );
 }
 
 /// Negative timestamps (before the Unix epoch) must format correctly.
@@ -345,18 +421,24 @@ fn test_timestamp_display_negative_value() {
 
     // -1 second = 1969-12-31 23:59:59
     let ts = Timestamp::new(-1, TimeUnit::Second);
-    assert_eq!(ts.to_timezone_aware_string(Some(&tz)), "1969-12-31 23:59:59");
+    assert_eq!(
+        ts.to_timezone_aware_string(Some(&tz)),
+        "1969-12-31 23:59:59"
+    );
 
     // -1 millisecond = 1969-12-31 23:59:59.999
     let ts = Timestamp::new(-1, TimeUnit::Millisecond);
-    assert_eq!(ts.to_timezone_aware_string(Some(&tz)), "1969-12-31 23:59:59.999");
+    assert_eq!(
+        ts.to_timezone_aware_string(Some(&tz)),
+        "1969-12-31 23:59:59.999"
+    );
 }
 
 /// Verify that timezone offset shifts the display time correctly.
 #[test]
 fn test_timestamp_display_timezone_offset() {
     // 2026-06-02 03:50:00 UTC = 2026-06-02 09:20:00 in +05:30 (India)
-    let base_s: i64 = 1_748_836_200;
+    let base_s: i64 = 1_780_372_200;
 
     let tz_utc = Timezone::from_tz_string("UTC").unwrap();
     let tz_india = Timezone::from_tz_string("+05:30").unwrap();

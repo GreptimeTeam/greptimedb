@@ -352,10 +352,7 @@ impl MysqlResultWriter {
     }
 }
 
-pub fn create_mysql_column(
-    data_type: &ConcreteDataType,
-    column_name: &str,
-) -> Result<Column> {
+pub fn create_mysql_column(data_type: &ConcreteDataType, column_name: &str) -> Result<Column> {
     let column_type = match data_type {
         ConcreteDataType::Null(_) => Ok(ColumnType::MYSQL_TYPE_NULL),
         ConcreteDataType::Boolean(_) | ConcreteDataType::Int8(_) | ConcreteDataType::UInt8(_) => {
