@@ -124,6 +124,213 @@ async fn test_repartition_multi_hop_fulltext_index_gc_file() {
     }
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn test_repartition_multi_hop_plain_gc_full_file_listing_file() {
+    if StorageType::File.test_on() {
+        common_telemetry::init_default_ut_logging();
+        test_repartition_multi_hop_plain_gc_full_file_listing().await;
+    }
+}
+
+async fn test_repartition_multi_hop_plain_gc_full_file_listing() {
+    let store_type = StorageType::File;
+    let cluster_name = "test_repartition_multi_hop_plain_gc_full_file_listing";
+    let table_name = "repartition_multi_hop_plain_table";
+    let (store_config, _guard) = get_test_store_config(&store_type);
+    let datanodes = 3u64;
+    let home_dir = create_temp_dir("test_repartition_multi_hop_plain_gc_data_home");
+
+    let cluster = GreptimeDbClusterBuilder::new(cluster_name)
+        .await
+        .with_shared_home_dir(Arc::new(home_dir))
+        .with_datanodes(datanodes as u32)
+        .with_store_config(store_config)
+        .with_datanode_wal_config(DatanodeWalConfig::Noop)
+        .with_metasrv_gc_config(GcSchedulerOptions {
+            enable: true,
+            gc_cooldown_period: Duration::from_nanos(1),
+            ..Default::default()
+        })
+        .with_datanode_gc_config(GcConfig {
+            enable: true,
+            lingering_time: Some(Duration::from_secs(0)),
+            unknown_file_lingering_time: Duration::from_secs(0),
+            ..Default::default()
+        })
+        .build(true)
+        .await;
+    let metasrv = &cluster.metasrv;
+    let ticker = metasrv.gc_ticker().unwrap();
+
+    let query_ctx = QueryContext::arc();
+    let instance = cluster.fe_instance();
+
+    run_sql(
+        instance,
+        r#"
+        CREATE TABLE `repartition_multi_hop_plain_table`(
+          `id` INT,
+          `msg` STRING,
+          `ts` TIMESTAMP TIME INDEX,
+          PRIMARY KEY(`id`)
+        ) PARTITION ON COLUMNS (`id`) (
+          `id` < 100,
+          `id` >= 100
+        ) ENGINE = mito
+          WITH ('sst_format' = 'flat');
+    "#,
+        query_ctx.clone(),
+    )
+    .await
+    .unwrap();
+
+    run_sql(
+        instance,
+        r#"
+        INSERT INTO `repartition_multi_hop_plain_table` VALUES
+          (10, 'low partition', '2022-01-01 00:00:00'),
+          (60, 'middle partition', '2022-01-01 00:00:01'),
+          (90, 'high partition', '2022-01-01 00:00:02'),
+          (120, 'outer partition', '2022-01-01 00:00:03');
+    "#,
+        query_ctx.clone(),
+    )
+    .await
+    .unwrap();
+    run_sql(
+        instance,
+        "ADMIN FLUSH_TABLE('repartition_multi_hop_plain_table')",
+        query_ctx.clone(),
+    )
+    .await
+    .unwrap();
+
+    run_sql(
+        instance,
+        r#"
+        ALTER TABLE `repartition_multi_hop_plain_table` SPLIT PARTITION (
+          `id` < 100
+        ) INTO (
+          `id` < 50,
+          `id` >= 50 AND `id` < 100
+        );
+    "#,
+        query_ctx.clone(),
+    )
+    .await
+    .unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    run_sql(
+        instance,
+        r#"
+        ALTER TABLE `repartition_multi_hop_plain_table` SPLIT PARTITION (
+          `id` >= 50 AND `id` < 100
+        ) INTO (
+          `id` >= 50 AND `id` < 75,
+          `id` >= 75 AND `id` < 100
+        );
+    "#,
+        query_ctx.clone(),
+    )
+    .await
+    .unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    run_sql(
+        instance,
+        r#"
+        INSERT INTO `repartition_multi_hop_plain_table` VALUES
+          (80, 'fresh in soon dropped source', '2022-01-01 00:00:04');
+    "#,
+        query_ctx.clone(),
+    )
+    .await
+    .unwrap();
+    run_sql(
+        instance,
+        "ADMIN FLUSH_TABLE('repartition_multi_hop_plain_table')",
+        query_ctx.clone(),
+    )
+    .await
+    .unwrap();
+
+    let query = "SELECT id, msg FROM `repartition_multi_hop_plain_table` ORDER BY id";
+    let expected = "\
++-----+------------------------------+
+| id  | msg                          |
++-----+------------------------------+
+| 10  | low partition                |
+| 60  | middle partition             |
+| 80  | fresh in soon dropped source |
+| 90  | high partition               |
+| 120 | outer partition              |
++-----+------------------------------+";
+    let result = run_sql(instance, query, query_ctx.clone()).await.unwrap();
+    check_output_stream(result.data, expected).await;
+
+    let manifest_entries = cluster_manifest_data_entries(&cluster).await;
+    assert!(
+        manifest_entries
+            .iter()
+            .any(|(_, origin_region_id, region_id)| origin_region_id != region_id),
+        "expected at least one cross-origin data SST before GC, got {manifest_entries:?}"
+    );
+
+    run_sql(
+        instance,
+        r#"
+        ALTER TABLE `repartition_multi_hop_plain_table` MERGE PARTITION (
+          `id` >= 50 AND `id` < 75,
+          `id` >= 75 AND `id` < 100
+        );
+    "#,
+        query_ctx.clone(),
+    )
+    .await
+    .unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    trigger_table_gc_with_full_file_listing(metasrv, table_name, true).await;
+    trigger_full_gc(&ticker).await;
+
+    let result = run_sql(instance, query, query_ctx.clone()).await.unwrap();
+    check_output_stream(result.data, expected).await;
+
+    let manifest_data_paths = cluster_manifest_data_paths(&cluster).await;
+    assert!(
+        !manifest_data_paths.is_empty(),
+        "expected manifest data paths after GC"
+    );
+    let storage_paths = cluster.list_sst_files_from_all_datanodes().await;
+    assert!(
+        manifest_data_paths.is_subset(&storage_paths),
+        "manifest data paths should exist in storage after GC, missing: {:?}",
+        manifest_data_paths
+            .difference(&storage_paths)
+            .collect::<Vec<_>>()
+    );
+
+    let cross_origin_data_paths = cluster_manifest_data_entries(&cluster)
+        .await
+        .into_iter()
+        .filter_map(|(file_path, origin_region_id, region_id)| {
+            (origin_region_id != region_id).then_some(file_path)
+        })
+        .collect::<BTreeSet<_>>();
+    assert!(
+        !cross_origin_data_paths.is_empty(),
+        "expected cross-origin data SSTs after GC"
+    );
+    assert!(
+        cross_origin_data_paths.is_subset(&storage_paths),
+        "cross-origin manifest data paths should exist in storage after GC, missing: {:?}",
+        cross_origin_data_paths
+            .difference(&storage_paths)
+            .collect::<Vec<_>>()
+    );
+}
+
 async fn test_repartition_multi_hop_fulltext_index_gc() {
     let store_type = StorageType::File;
     let cluster_name = "test_repartition_multi_hop_fulltext_index_gc";
@@ -780,6 +987,14 @@ ORDER BY partition_ordinal_position;",
 }
 
 async fn trigger_table_gc(metasrv: &Arc<Metasrv>, table_name: &str) {
+    trigger_table_gc_with_full_file_listing(metasrv, table_name, false).await;
+}
+
+async fn trigger_table_gc_with_full_file_listing(
+    metasrv: &Arc<Metasrv>,
+    table_name: &str,
+    full_file_listing: bool,
+) {
     info!("triggering table gc for table: {}", table_name);
     let table_metadata_manager = metasrv.table_metadata_manager();
     let table_id = table_metadata_manager
@@ -808,7 +1023,7 @@ async fn trigger_table_gc(metasrv: &Arc<Metasrv>, table_name: &str) {
         metasrv.table_metadata_manager().clone(),
         metasrv.options().grpc.server_addr.clone(),
         region_ids.clone(),
-        false,                   // full_file_listing
+        full_file_listing,
         Duration::from_secs(10), // timeout
         Default::default(),
     );
@@ -858,6 +1073,31 @@ async fn cluster_manifest_index_entries(
         );
     }
     entries
+}
+
+async fn cluster_manifest_data_entries(
+    cluster: &GreptimeDbCluster,
+) -> Vec<(String, RegionId, RegionId)> {
+    let mut entries = Vec::new();
+    for datanode in cluster.datanode_instances.values() {
+        let region_server = datanode.region_server();
+        let mito = region_server.mito_engine().unwrap();
+        entries.extend(
+            mito.all_ssts_from_manifest()
+                .await
+                .into_iter()
+                .map(|entry| (entry.file_path, entry.origin_region_id, entry.region_id)),
+        );
+    }
+    entries
+}
+
+async fn cluster_manifest_data_paths(cluster: &GreptimeDbCluster) -> BTreeSet<String> {
+    cluster_manifest_data_entries(cluster)
+        .await
+        .into_iter()
+        .map(|(file_path, _, _)| file_path)
+        .collect()
 }
 
 async fn cluster_manifest_index_paths(cluster: &GreptimeDbCluster) -> BTreeSet<String> {

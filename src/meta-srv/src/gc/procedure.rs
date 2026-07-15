@@ -47,6 +47,52 @@ use crate::metrics::{METRIC_META_GC_DATANODE_CALLS_TOTAL, METRIC_META_GC_FAILED_
 use crate::procedure::utils::{instruction_error_result, instruction_to_error};
 use crate::service::mailbox::{Channel, MailboxReceiver, MailboxRef};
 
+fn reconcile_region_repartition_mapping(
+    repartition_value: &mut TableRepartValue,
+    src_region: RegionId,
+    observed_manifest_dst_regions: &HashSet<RegionId>,
+    observed_dst_regions: Option<&HashSet<RegionId>>,
+    has_tmp_ref: bool,
+    source_gc_succeeded: bool,
+) {
+    let had_existing_entry = repartition_value.src_to_dst.contains_key(&src_region);
+    let mut next_dst_regions = repartition_value
+        .src_to_dst
+        .get(&src_region)
+        .cloned()
+        .unwrap_or_default();
+
+    if source_gc_succeeded && !has_tmp_ref {
+        // Only remove destinations whose manifest was actually observed by this GC cycle.
+        // Destinations without a manifest-version snapshot may be temporarily absent from current
+        // routes or otherwise unobserved; deleting them here would turn a partial ref snapshot
+        // into an irreversible dropped-region tombstone loss.
+        for dst_region in observed_manifest_dst_regions {
+            next_dst_regions.remove(dst_region);
+        }
+    }
+
+    if let Some(observed_dst_regions) = observed_dst_regions {
+        next_dst_regions.extend(observed_dst_regions.iter().copied());
+    }
+
+    if next_dst_regions.is_empty() {
+        if has_tmp_ref || (had_existing_entry && !source_gc_succeeded) {
+            // Keep an empty tombstone so dropped regions with only tmp refs stay discoverable by
+            // later dropped-region GC cycles.
+            repartition_value
+                .src_to_dst
+                .insert(src_region, BTreeSet::new());
+        } else {
+            repartition_value.src_to_dst.remove(&src_region);
+        }
+    } else {
+        repartition_value
+            .src_to_dst
+            .insert(src_region, next_dst_regions);
+    }
+}
+
 async fn send_get_file_refs_inner(
     mailbox: &MailboxRef,
     server_addr: &str,
@@ -427,18 +473,44 @@ impl BatchGcProcedure {
             for src_region in all_src_regions {
                 let cross_dst = cross_refs.get(&src_region);
                 let has_tmp_ref = tmp_refs.contains(&src_region);
-
-                if let Some(dst_regions) = cross_dst {
-                    let mut set = BTreeSet::new();
-                    set.extend(dst_regions.iter().copied());
-                    new_value.src_to_dst.insert(src_region, set);
-                } else if has_tmp_ref {
-                    // Keep a tombstone entry with an empty set so dropped regions that still
-                    // have tmp refs are preserved; removing it would lose the repartition trace.
-                    new_value.src_to_dst.insert(src_region, BTreeSet::new());
-                } else {
-                    new_value.src_to_dst.remove(&src_region);
+                let mut observed_manifest_dst = self
+                    .data
+                    .related_regions
+                    .get(&src_region)
+                    .into_iter()
+                    .flatten()
+                    .filter(|dst_region| {
+                        self.data
+                            .file_refs
+                            .manifest_version
+                            .contains_key(dst_region)
+                    })
+                    .copied()
+                    .collect::<HashSet<_>>();
+                if self
+                    .data
+                    .file_refs
+                    .manifest_version
+                    .contains_key(&src_region)
+                {
+                    // Reused source regions can also be repartition destinations. Query-region
+                    // manifest versions prove the source region's normal manifest was observed,
+                    // so self-mappings can be reconciled instead of being preserved forever.
+                    observed_manifest_dst.insert(src_region);
                 }
+                let source_gc_succeeded = self.data.gc_report.as_ref().is_some_and(|report| {
+                    report.processed_regions.contains(&src_region)
+                        && !report.need_retry_regions.contains(&src_region)
+                });
+
+                reconcile_region_repartition_mapping(
+                    &mut new_value,
+                    src_region,
+                    &observed_manifest_dst,
+                    cross_dst,
+                    has_tmp_ref,
+                    source_gc_succeeded,
+                );
             }
 
             // If there is no repartition info to persist, skip creating/updating the key
@@ -859,6 +931,151 @@ impl BatchGcProcedure {
         }
 
         Ok(all_report)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::{BTreeMap, BTreeSet, HashSet};
+
+    use super::*;
+
+    fn btree_set(regions: impl IntoIterator<Item = RegionId>) -> BTreeSet<RegionId> {
+        regions.into_iter().collect()
+    }
+
+    fn hash_set(regions: impl IntoIterator<Item = RegionId>) -> HashSet<RegionId> {
+        regions.into_iter().collect()
+    }
+
+    #[test]
+    fn test_reconcile_repartition_mapping_preserves_unobserved_destinations() {
+        let src = RegionId::new(1024, 1);
+        let observed = RegionId::new(1024, 2);
+        let unqueried = RegionId::new(1024, 3);
+        let mut value = TableRepartValue {
+            src_to_dst: BTreeMap::from([(src, btree_set([observed, unqueried]))]),
+        };
+
+        reconcile_region_repartition_mapping(
+            &mut value,
+            src,
+            &hash_set([observed]),
+            Some(&hash_set([observed])),
+            false,
+            true,
+        );
+
+        assert_eq!(
+            value.src_to_dst.get(&src).cloned(),
+            Some(btree_set([observed, unqueried]))
+        );
+    }
+
+    #[test]
+    fn test_reconcile_repartition_mapping_prunes_only_observed_manifest_destinations() {
+        let src = RegionId::new(1024, 1);
+        let stale_dst = RegionId::new(1024, 2);
+        let live_dst = RegionId::new(1024, 3);
+        let mut value = TableRepartValue {
+            src_to_dst: BTreeMap::from([(src, btree_set([stale_dst, live_dst]))]),
+        };
+
+        reconcile_region_repartition_mapping(
+            &mut value,
+            src,
+            &hash_set([stale_dst, live_dst]),
+            Some(&hash_set([live_dst])),
+            false,
+            true,
+        );
+
+        assert_eq!(
+            value.src_to_dst.get(&src).cloned(),
+            Some(btree_set([live_dst]))
+        );
+    }
+
+    #[test]
+    fn test_reconcile_repartition_mapping_tmp_refs_do_not_erase_existing_destinations() {
+        let src = RegionId::new(1024, 1);
+        let existing = RegionId::new(1024, 2);
+        let mut value = TableRepartValue {
+            src_to_dst: BTreeMap::from([(src, btree_set([existing]))]),
+        };
+
+        reconcile_region_repartition_mapping(
+            &mut value,
+            src,
+            &hash_set([existing]),
+            None,
+            true,
+            true,
+        );
+
+        assert_eq!(
+            value.src_to_dst.get(&src).cloned(),
+            Some(btree_set([existing]))
+        );
+    }
+
+    #[test]
+    fn test_reconcile_repartition_mapping_keeps_tmp_ref_tombstone() {
+        let src = RegionId::new(1024, 1);
+        let mut value = TableRepartValue::new();
+
+        reconcile_region_repartition_mapping(&mut value, src, &HashSet::new(), None, true, true);
+
+        assert_eq!(value.src_to_dst.get(&src), Some(&BTreeSet::new()));
+    }
+
+    #[test]
+    fn test_reconcile_repartition_mapping_keeps_mapping_without_query_proof() {
+        let src = RegionId::new(1024, 1);
+        let unqueried = RegionId::new(1024, 2);
+        let mut value = TableRepartValue {
+            src_to_dst: BTreeMap::from([(src, btree_set([unqueried]))]),
+        };
+
+        reconcile_region_repartition_mapping(&mut value, src, &HashSet::new(), None, false, false);
+
+        assert_eq!(
+            value.src_to_dst.get(&src).cloned(),
+            Some(btree_set([unqueried]))
+        );
+    }
+
+    #[test]
+    fn test_reconcile_repartition_mapping_preserves_positive_refs_on_retry() {
+        let src = RegionId::new(1024, 1);
+        let observed = RegionId::new(1024, 2);
+        let mut value = TableRepartValue::new();
+
+        reconcile_region_repartition_mapping(
+            &mut value,
+            src,
+            &hash_set([observed]),
+            Some(&hash_set([observed])),
+            false,
+            false,
+        );
+
+        assert_eq!(
+            value.src_to_dst.get(&src).cloned(),
+            Some(btree_set([observed]))
+        );
+    }
+
+    #[test]
+    fn test_reconcile_repartition_mapping_prunes_observed_self_destination() {
+        let src = RegionId::new(1024, 1);
+        let mut value = TableRepartValue {
+            src_to_dst: BTreeMap::from([(src, btree_set([src]))]),
+        };
+
+        reconcile_region_repartition_mapping(&mut value, src, &hash_set([src]), None, false, true);
+
+        assert!(!value.src_to_dst.contains_key(&src));
     }
 }
 
