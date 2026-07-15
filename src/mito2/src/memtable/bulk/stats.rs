@@ -80,6 +80,11 @@ impl BatchStats {
         }
     }
 
+    /// Clears all column statistics while preserving the batch count.
+    pub(crate) fn clear(&mut self) {
+        self.columns.clear();
+    }
+
     fn min_values(&self, column_id: ColumnId) -> Option<ArrayRef> {
         self.columns
             .get(&column_id)

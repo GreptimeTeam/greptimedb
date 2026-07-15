@@ -1391,6 +1391,14 @@ impl MultiBulkPart {
         self.batches.len()
     }
 
+    /// Clears the pre-computed column statistics.
+    ///
+    /// Reads remain correct after clearing the statistics, but they can no longer
+    /// prune batches by column min/max values.
+    pub fn clear_stats(&mut self) {
+        self.batch_stats.clear();
+    }
+
     /// Returns the estimated memory size of all batches.
     pub(crate) fn estimated_size(&self) -> usize {
         self.batches.iter().map(record_batch_estimated_size).sum()
@@ -1400,7 +1408,7 @@ impl MultiBulkPart {
     ///
     /// If a predicate is set, prunes batches whose min/max column stats don't match
     /// the predicate before creating the iterator.
-    pub(crate) fn read(
+    pub fn read(
         &self,
         context: BulkIterContextRef,
         sequence: Option<SequenceRange>,

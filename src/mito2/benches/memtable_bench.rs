@@ -20,12 +20,14 @@
 //! cargo bench -p mito2 --features test --bench memtable_bench
 //! ```
 
+use std::hint::black_box;
 use std::sync::Arc;
 
-use criterion::{Criterion, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
+use datafusion_expr::{col, lit};
 use mito_codec::row_converter::DensePrimaryKeyCodec;
 use mito2::memtable::bulk::context::BulkIterContext;
-use mito2::memtable::bulk::part::BulkPartConverter;
+use mito2::memtable::bulk::part::{BulkPartConverter, MultiBulkPart};
 use mito2::memtable::bulk::part_reader::BulkPartBatchIter;
 use mito2::memtable::bulk::{BulkMemtable, BulkMemtableConfig};
 use mito2::memtable::time_series::TimeSeriesMemtable;
@@ -36,6 +38,7 @@ use mito2::region::options::MergeMode;
 use mito2::sst::{FlatSchemaOptions, to_flat_sst_arrow_schema};
 use mito2::test_util::bench_util::{CpuDataGenerator, cpu_metadata};
 use mito2::test_util::memtable_util;
+use table::predicate::Predicate;
 
 /// Writes rows.
 fn write_rows(c: &mut Criterion) {
@@ -384,6 +387,106 @@ fn bulk_part_record_batch_iter_filter(c: &mut Criterion) {
     });
 }
 
+fn scan_multi_bulk_part(part: &MultiBulkPart, context: &Arc<BulkIterContext>) -> usize {
+    part.read(context.clone(), None, None)
+        .unwrap()
+        .map(|iter| iter.map(|batch| batch.unwrap().num_rows()).sum())
+        .unwrap_or(0)
+}
+
+fn multi_bulk_part_column_stats(c: &mut Criterion) {
+    const NUM_BATCHES: usize = 64;
+    const ROWS_PER_BATCH: usize = 8192;
+
+    let metadata = Arc::new(memtable_util::metadata_with_primary_key(vec![0, 1], false));
+    let schema = to_flat_sst_arrow_schema(&metadata, &FlatSchemaOptions::default());
+    let codec = Arc::new(DensePrimaryKeyCodec::new(&metadata));
+    let mut batches = Vec::with_capacity(NUM_BATCHES);
+
+    for batch_idx in 0..NUM_BATCHES {
+        let start = batch_idx * ROWS_PER_BATCH;
+        let timestamps = (start..start + ROWS_PER_BATCH)
+            .map(|timestamp| timestamp as i64)
+            .collect::<Vec<_>>();
+        let kvs = memtable_util::build_key_values(
+            &metadata,
+            format!("k{batch_idx:04}"),
+            batch_idx as u32,
+            &timestamps,
+            batch_idx as u64,
+        );
+        let mut converter = BulkPartConverter::new(
+            &metadata,
+            schema.clone(),
+            ROWS_PER_BATCH,
+            codec.clone(),
+            true,
+        );
+        converter.append_key_values(&kvs).unwrap();
+        batches.push(converter.convert().unwrap().batch);
+    }
+
+    let with_stats = MultiBulkPart::new(
+        batches,
+        0,
+        (NUM_BATCHES * ROWS_PER_BATCH - 1) as i64,
+        (NUM_BATCHES - 1) as u64,
+        NUM_BATCHES,
+        &metadata,
+        false,
+    );
+    let mut without_stats = with_stats.clone();
+    without_stats.clear_stats();
+
+    let matching_batch = NUM_BATCHES / 2;
+    let cases = [
+        (
+            "k1_match",
+            Predicate::new(vec![col("k1").eq(lit(matching_batch as u32))]),
+            ROWS_PER_BATCH,
+        ),
+        (
+            "k1_miss",
+            Predicate::new(vec![col("k1").eq(lit(NUM_BATCHES as u32))]),
+            0,
+        ),
+        (
+            "v1_match",
+            Predicate::new(vec![col("v1").eq(lit((matching_batch * ROWS_PER_BATCH
+                + ROWS_PER_BATCH / 2)
+                as f64))]),
+            1,
+        ),
+        (
+            "v1_miss",
+            Predicate::new(vec![col("v1").eq(lit(-1.0_f64))]),
+            0,
+        ),
+    ];
+
+    let mut group = c.benchmark_group("multi_bulk_part_column_stats");
+    group.sample_size(10);
+
+    for (case_name, predicate, expected_rows) in cases {
+        let context =
+            Arc::new(BulkIterContext::new(metadata.clone(), None, Some(predicate), false).unwrap());
+        assert_eq!(expected_rows, scan_multi_bulk_part(&with_stats, &context));
+        assert_eq!(
+            expected_rows,
+            scan_multi_bulk_part(&without_stats, &context)
+        );
+
+        group.bench_function(BenchmarkId::new(case_name, "with_stats"), |b| {
+            b.iter(|| black_box(scan_multi_bulk_part(&with_stats, &context)));
+        });
+        group.bench_function(BenchmarkId::new(case_name, "without_stats"), |b| {
+            b.iter(|| black_box(scan_multi_bulk_part(&without_stats, &context)));
+        });
+    }
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     write_rows,
@@ -391,6 +494,7 @@ criterion_group!(
     filter_1_host,
     bulk_part_converter,
     bulk_part_record_batch_iter_filter,
-    flat_merge_iterator_bench
+    flat_merge_iterator_bench,
+    multi_bulk_part_column_stats
 );
 criterion_main!(benches);
