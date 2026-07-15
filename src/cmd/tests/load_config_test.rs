@@ -403,7 +403,7 @@ fn test_load_metric_config_with_removed_sparse_primary_key_encoding() {
         GreptimeOptions::<DatanodeOptions>::load_layered_options(file.path().to_str(), "")
             .expect("config with removed 'sparse_primary_key_encoding' should load without error");
 
-    // The unknown option is ignored; the metric engine config loads with defaults.
+    // The unknown option is ignored; known metric engine options are still parsed/applied.
     let metric = options
         .component
         .region_engine
