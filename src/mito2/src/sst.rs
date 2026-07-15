@@ -97,6 +97,15 @@ fn stamp_native_histogram_subfield_ids(field: &mut Field) {
     ) {
         return;
     }
+    // Namespace sub-field ids by the parent column's field id (its
+    // `PARQUET:field_id`, stamped earlier by `with_field_id`) so several
+    // histogram columns in one table get disjoint ids. Falls back to 0 when
+    // the parent id is absent.
+    let column_id = field
+        .metadata()
+        .get(PARQUET_FIELD_ID_KEY)
+        .and_then(|s| s.parse::<i32>().ok())
+        .unwrap_or(0);
     // Tag the field with the greptime.histogram extension.
     field.metadata_mut().insert(
         EXTENSION_TYPE_NAME_KEY.to_string(),
@@ -110,13 +119,13 @@ fn stamp_native_histogram_subfield_ids(field: &mut Field) {
         .map(|child| {
             let mut c = (**child).clone();
             // Stamp the sub-field's own id.
-            if let Some(id) = native_histogram_subfield_id(c.name()) {
+            if let Some(id) = native_histogram_subfield_id(column_id, c.name()) {
                 c.metadata_mut()
                     .insert(PARQUET_FIELD_ID_KEY.to_string(), id.to_string());
             }
             // If the sub-field is a list, stamp its element field's id.
             if let ArrowDataType::List(elem) = c.data_type()
-                && let Some(elem_id) = native_histogram_list_element_id(c.name())
+                && let Some(elem_id) = native_histogram_list_element_id(column_id, c.name())
             {
                 let mut new_elem = (**elem).clone();
                 new_elem
@@ -650,10 +659,21 @@ mod tests {
         assert_eq!(1, estimator.finish());
     }
 
+    /// Build a native-histogram struct field whose top-level `PARQUET:field_id`
+    /// is `column_id` (as `with_field_id` does on the real write path).
+    fn histogram_field(name: &str, column_id: u32) -> Field {
+        use common_query::native_histogram::native_histogram_value_type;
+        use datatypes::data_type::DataType;
+        with_field_id(
+            Field::new(name, native_histogram_value_type().as_arrow_type(), true),
+            column_id,
+        )
+    }
+
     /// Asserts `field` is a stamped native-histogram struct: it carries the
     /// `greptime.histogram` extension and every sub-field (and list element)
-    /// carries its reserved `PARQUET:field_id`.
-    fn assert_histogram_stamped(field: &Field) {
+    /// carries its reserved `PARQUET:field_id` namespaced by `column_id`.
+    fn assert_histogram_stamped(field: &Field, column_id: i32) {
         use arrow_schema::extension::ExtensionType;
         use common_query::native_histogram::{
             native_histogram_list_element_id, native_histogram_subfield_id,
@@ -672,7 +692,7 @@ mod tests {
             panic!("expected a struct, got {:?}", field.data_type());
         };
         for child in children {
-            let expected = native_histogram_subfield_id(child.name())
+            let expected = native_histogram_subfield_id(column_id, child.name())
                 .unwrap_or_else(|| panic!("no id for sub-field {}", child.name()));
             let got: i32 = child
                 .metadata()
@@ -682,7 +702,8 @@ mod tests {
                 .unwrap();
             assert_eq!(got, expected, "sub-field {} id", child.name());
             if let ArrowDataType::List(elem) = child.data_type() {
-                let elem_expected = native_histogram_list_element_id(child.name()).unwrap();
+                let elem_expected =
+                    native_histogram_list_element_id(column_id, child.name()).unwrap();
                 let elem_got: i32 = elem
                     .metadata()
                     .get(PARQUET_FIELD_ID_KEY)
@@ -701,17 +722,15 @@ mod tests {
 
     #[test]
     fn test_maybe_wrap_schema_native_histogram() {
-        use common_query::native_histogram::{NATIVE_HISTOGRAM_FIELD, native_histogram_value_type};
-        use datatypes::data_type::DataType;
+        use common_query::native_histogram::NATIVE_HISTOGRAM_FIELD;
 
-        let hist_arrow = native_histogram_value_type().as_arrow_type();
         let schema = Arc::new(Schema::new(vec![
             Field::new(
                 "greptime_timestamp",
                 ArrowDataType::Timestamp(TimeUnit::Millisecond, None),
                 false,
             ),
-            Field::new(NATIVE_HISTOGRAM_FIELD, hist_arrow, true),
+            histogram_field(NATIVE_HISTOGRAM_FIELD, 1),
         ]));
 
         let wrapped = maybe_wrap_schema(&schema);
@@ -723,7 +742,32 @@ mod tests {
             unreachable!()
         };
         assert_eq!(children.len(), 18);
-        assert_histogram_stamped(hist);
+        assert_histogram_stamped(hist, 1);
+    }
+
+    #[test]
+    fn test_maybe_wrap_schema_multiple_histograms_disjoint_ids() {
+        // Two histogram columns with distinct parent column ids get disjoint
+        // sub-field ids (defensive: the metric engine yields at most one
+        // histogram column, but the scheme must stay correct if more appear).
+        use common_query::native_histogram::{
+            NATIVE_HISTOGRAM_FIELD, native_histogram_subfield_id,
+        };
+
+        let schema = Arc::new(Schema::new(vec![
+            histogram_field(NATIVE_HISTOGRAM_FIELD, 1),
+            histogram_field(NATIVE_HISTOGRAM_FIELD, 7),
+        ]));
+        let wrapped = maybe_wrap_schema(&schema);
+        let h1 = &wrapped.fields()[0];
+        let h2 = &wrapped.fields()[1];
+        assert_histogram_stamped(h1, 1);
+        assert_histogram_stamped(h2, 7);
+        // The same sub-field name resolves to different ids across columns.
+        assert_ne!(
+            native_histogram_subfield_id(1, "sum"),
+            native_histogram_subfield_id(7, "sum")
+        );
     }
 
     #[test]

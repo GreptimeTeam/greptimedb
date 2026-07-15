@@ -115,31 +115,46 @@ pub fn is_native_histogram_value_schema(name: &str, data_type: &ConcreteDataType
 //
 // External readers resolve nested struct fields by `PARQUET:field_id`, so each
 // sub-field (and list element) needs a stable positive id. The struct schema
-// is fixed (always the same 18 fields), so ids are derived from a reserved
-// range, disjoint from user column ids and mito2 internal ids (`1 << 30`).
+// is fixed (always the same 18 fields). Each histogram column owns a block of
+// ids (offset from a reserved base by the column's id), so several histogram
+// columns in one table get disjoint sub-field ids. The reserved base is
+// disjoint from user column ids and mito2 internal ids (`1 << 30`).
 // ---------------------------------------------------------------------------
 
 /// Reserved base for native-histogram struct sub-field ids.
 pub const NATIVE_HISTOGRAM_SUBFIELD_ID_BASE: i32 = 0x5000_0000;
 
-/// Reserved base for the `element-id` of list-typed native-histogram
-/// sub-fields.
-pub const NATIVE_HISTOGRAM_LIST_ELEMENT_ID_BASE: i32 = 0x5000_0100;
+/// Number of ids reserved per histogram column (18 sub-fields + headroom for
+/// list element ids), so multiple histogram columns get disjoint ids.
+pub const NATIVE_HISTOGRAM_SUBFIELD_ID_STRIDE: i32 = 64;
 
-/// Returns the stable field id for a native-histogram struct sub-field by
-/// name, or `None` if `name` is not a known sub-field.
-pub fn native_histogram_subfield_id(name: &str) -> Option<i32> {
-    NATIVE_HISTOGRAM_FIELD_NAMES
-        .iter()
-        .position(|n| *n == name)
-        .map(|i| NATIVE_HISTOGRAM_SUBFIELD_ID_BASE + i as i32)
+/// Offset of list element ids within a column's id block.
+pub const NATIVE_HISTOGRAM_LIST_ELEMENT_OFFSET: i32 = 32;
+
+/// Returns the stable field id for a native-histogram struct sub-field,
+/// namespaced by its parent `column_id`, or `None` if `name` is not a known
+/// sub-field.
+pub fn native_histogram_subfield_id(column_id: i32, name: &str) -> Option<i32> {
+    let idx = subfield_index(name)?;
+    Some(NATIVE_HISTOGRAM_SUBFIELD_ID_BASE + column_id * NATIVE_HISTOGRAM_SUBFIELD_ID_STRIDE + idx)
 }
 
 /// Returns the stable list `element-id` for a list-typed native-histogram
-/// sub-field by its name, or `None` if `name` is not a known sub-field.
-pub fn native_histogram_list_element_id(name: &str) -> Option<i32> {
+/// sub-field, namespaced by its parent `column_id`, or `None` if `name` is not
+/// a known sub-field.
+pub fn native_histogram_list_element_id(column_id: i32, name: &str) -> Option<i32> {
+    let idx = subfield_index(name)?;
+    Some(
+        NATIVE_HISTOGRAM_SUBFIELD_ID_BASE
+            + column_id * NATIVE_HISTOGRAM_SUBFIELD_ID_STRIDE
+            + NATIVE_HISTOGRAM_LIST_ELEMENT_OFFSET
+            + idx,
+    )
+}
+
+fn subfield_index(name: &str) -> Option<i32> {
     NATIVE_HISTOGRAM_FIELD_NAMES
         .iter()
         .position(|n| *n == name)
-        .map(|i| NATIVE_HISTOGRAM_LIST_ELEMENT_ID_BASE + i as i32)
+        .map(|i| i as i32)
 }
