@@ -25,7 +25,8 @@ use store_api::storage::{RegionId, ScanRequest, SequenceNumber};
 
 use crate::engine::MetricEngineInner;
 use crate::error::{
-    InvalidMetadataSnafu, LogicalRegionNotFoundSnafu, MitoReadOperationSnafu, Result,
+    InvalidMetadataSnafu, InvalidRequestSnafu, LogicalRegionNotFoundSnafu, MitoReadOperationSnafu,
+    Result,
 };
 use crate::metrics::MITO_OPERATION_ELAPSED;
 use crate::utils;
@@ -192,8 +193,16 @@ impl MetricEngineInner {
             .await?;
         let projected_logical_names = origin_projection
             .iter()
-            .map(|i| all_logical_columns[*i].clone())
-            .collect::<Vec<_>>();
+            .map(|&index| {
+                all_logical_columns
+                    .get(index)
+                    .cloned()
+                    .with_context(|| InvalidRequestSnafu {
+                        region_id: logical_region_id,
+                        reason: format!("projection index {index} is out of bounds"),
+                    })
+            })
+            .collect::<Result<Vec<_>>>()?;
 
         // generate physical projection
         let mut physical_projection = Vec::with_capacity(origin_projection.len());
@@ -302,12 +311,41 @@ impl MetricEngineInner {
 
 #[cfg(test)]
 mod test {
+    use common_error::ext::ErrorExt;
+    use common_error::status_code::StatusCode;
     use store_api::region_request::RegionRequest;
 
     use super::*;
     use crate::test_util::{
         TestEnv, alter_logical_region_add_tag_columns, create_logical_region_request,
     };
+
+    #[tokio::test]
+    async fn test_invalid_logical_projection() {
+        let env = TestEnv::new().await;
+        env.init_metric_region().await;
+
+        let logical_region_id = env.default_logical_region_id();
+        let invalid_index = usize::MAX;
+        let request = ScanRequest {
+            projection_input: Some(vec![invalid_index].into()),
+            ..Default::default()
+        };
+
+        let error =
+            match RegionEngine::handle_query(&env.metric(), logical_region_id, request).await {
+                Ok(_) => panic!("invalid logical projection unexpectedly succeeded"),
+                Err(error) => error,
+            };
+
+        assert_eq!(error.status_code(), StatusCode::InvalidArguments);
+        assert!(
+            error.to_string().contains(&format!(
+                "projection index {invalid_index} is out of bounds"
+            )),
+            "unexpected error: {error}"
+        );
+    }
 
     #[tokio::test]
     async fn test_transform_scan_req() {
