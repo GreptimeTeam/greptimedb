@@ -163,11 +163,13 @@ impl Procedure for PurgeDroppedTableProcedure {
     }
 
     fn recover(&mut self) -> ProcedureResult<()> {
-        // Recovery reacquires TableLock, so automatic purges must re-read the
+        // Recovery reacquires TableLock, so a pre-cleanup automatic purge must re-read the
         // tombstone in case it was undropped and dropped again while unlocked.
-        if self.data.check_expired {
+        if self.data.check_expired && self.data.state == PurgeDroppedTableState::DropRegions {
             self.data.state = PurgeDroppedTableState::Prepare;
         }
+        // DeleteTombstone is post-cleanup: region files may already be gone, so recovery must
+        // finish deleting the tombstone instead of leaving metadata that appears recoverable.
         Ok(())
     }
 
