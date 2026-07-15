@@ -232,20 +232,29 @@ impl GcScheduler {
                 return;
             }
         };
+        let table_count = dropped_tables.len();
+        let scan_start = self.ctx.next_purge_scan_start(table_count);
 
-        for table in dropped_tables.into_iter().filter(|table| {
-            table
-                .retention_expires_at
-                .or_else(|| {
-                    table
-                        .dropped_at
-                        .and_then(|dropped_at| dropped_at.checked_add(retention_millis))
-                })
-                .is_some_and(|expires_at| expires_at <= now_millis)
-        }) {
+        for table in dropped_tables
+            .iter()
+            .cycle()
+            .skip(scan_start)
+            .take(table_count)
+            .filter(|table| {
+                table
+                    .retention_expires_at
+                    .or_else(|| {
+                        table
+                            .dropped_at
+                            .and_then(|dropped_at| dropped_at.checked_add(retention_millis))
+                    })
+                    .is_some_and(|expires_at| expires_at <= now_millis)
+            })
+        {
+            let table_id = table.table_id;
             let Some(reservation) = self
                 .ctx
-                .try_reserve_purge(table.table_id, self.config.max_concurrent_tables)
+                .try_reserve_purge(table_id, self.config.max_concurrent_tables)
             else {
                 continue;
             };
@@ -254,11 +263,11 @@ impl GcScheduler {
                 .inc();
             let ctx = self.ctx.clone();
             common_runtime::spawn_global(async move {
-                match ctx.purge_dropped_table(table.table_id).await {
+                match ctx.purge_dropped_table(table_id).await {
                     Ok(()) => reservation.record_outcome(PurgeOutcome::Succeeded),
                     Err(error) => {
                         reservation.record_outcome(PurgeOutcome::Failed);
-                        error!(error; "Failed to purge expired soft-dropped table {}", table.table_id);
+                        error!(error; "Failed to purge expired soft-dropped table {}", table_id);
                     }
                 }
             });
@@ -487,6 +496,7 @@ mod tests {
         failed_table: StdMutex<Option<TableId>>,
         never_complete_tables: StdMutex<HashSet<TableId>>,
         in_flight_purges: Arc<StdMutex<HashSet<TableId>>>,
+        purge_scan_cursor: AtomicUsize,
         region_gc_calls: AtomicUsize,
     }
 
@@ -554,6 +564,13 @@ mod tests {
             max_in_flight: usize,
         ) -> Option<PurgeReservation> {
             PurgeReservation::try_new(self.in_flight_purges.clone(), table_id, max_in_flight)
+        }
+
+        fn next_purge_scan_start(&self, table_count: usize) -> usize {
+            if table_count == 0 {
+                return 0;
+            }
+            self.purge_scan_cursor.fetch_add(1, Ordering::Relaxed) % table_count
         }
     }
 
@@ -658,6 +675,31 @@ mod tests {
         let mut attempts = ctx.purge_attempts.lock().unwrap().clone();
         attempts.sort_unstable();
         assert_eq!(vec![1, 2, 3], attempts);
+    }
+
+    #[tokio::test]
+    async fn test_purge_scans_rotate_after_failure() {
+        let ctx = Arc::new(SoftDropSchedulerCtx::default());
+        *ctx.dropped_tables.lock().unwrap() =
+            vec![dropped_table(1, Some(0)), dropped_table(2, Some(0))];
+        *ctx.failed_table.lock().unwrap() = Some(1);
+        let mut scheduler = soft_drop_scheduler(ctx.clone());
+        scheduler.config.max_concurrent_tables = 1;
+
+        scheduler.purge_expired_soft_dropped_tables(1_000).await;
+        wait_for_purge_attempts(&ctx, 1).await;
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !ctx.in_flight_purges.lock().unwrap().is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("failed purge should release its in-flight slot");
+
+        scheduler.purge_expired_soft_dropped_tables(1_000).await;
+        wait_for_purge_attempts(&ctx, 2).await;
+
+        assert_eq!(vec![1, 2], *ctx.purge_attempts.lock().unwrap());
     }
 
     #[tokio::test]

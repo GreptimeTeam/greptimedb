@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -68,6 +69,10 @@ pub(crate) trait SchedulerCtx: Send + Sync {
         table_id: TableId,
         max_in_flight: usize,
     ) -> Option<PurgeReservation>;
+
+    fn next_purge_scan_start(&self, _table_count: usize) -> usize {
+        0
+    }
 }
 
 pub(crate) enum PurgeOutcome {
@@ -137,6 +142,7 @@ pub(crate) struct DefaultGcSchedulerCtx {
     /// Process-local reservations for purge procedures submitted by this scheduler.
     /// Procedure recovery after a metasrv restart may outlive this set.
     in_flight_purges: Arc<Mutex<HashSet<TableId>>>,
+    purge_scan_cursor: AtomicUsize,
     /// For getting `RegionStats`.
     pub(crate) meta_peer_client: MetaPeerClientRef,
     /// The mailbox to send messages.
@@ -159,6 +165,7 @@ impl DefaultGcSchedulerCtx {
             procedure_manager,
             ddl_manager,
             in_flight_purges: Arc::new(Mutex::new(HashSet::new())),
+            purge_scan_cursor: AtomicUsize::new(0),
             meta_peer_client,
             mailbox,
             server_addr,
@@ -255,6 +262,13 @@ impl SchedulerCtx for DefaultGcSchedulerCtx {
         max_in_flight: usize,
     ) -> Option<PurgeReservation> {
         PurgeReservation::try_new(self.in_flight_purges.clone(), table_id, max_in_flight)
+    }
+
+    fn next_purge_scan_start(&self, table_count: usize) -> usize {
+        if table_count == 0 {
+            return 0;
+        }
+        self.purge_scan_cursor.fetch_add(1, Ordering::Relaxed) % table_count
     }
 }
 
