@@ -24,6 +24,7 @@ use axum::http::HeaderValue;
 use axum::response::{IntoResponse, Response};
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
+use common_query::prometheus::is_prometheus_stale_nan;
 use common_query::{Output, OutputData};
 use common_recordbatch::RecordBatches;
 use datatypes::prelude::ConcreteDataType;
@@ -268,8 +269,8 @@ impl PrometheusJsonResponse {
                 // retrieve value
                 if field_column.is_valid(row_index) {
                     let v = field_column.value(row_index);
-                    // ignore all NaN values to reduce the amount of data to be sent.
-                    if v.is_nan() {
+                    // Ignore Prometheus stale markers.
+                    if is_prometheus_stale_nan(v) {
                         continue;
                     }
 
@@ -348,5 +349,61 @@ impl PrometheusJsonResponse {
         });
 
         Ok(data)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use common_recordbatch::{RecordBatch, RecordBatches};
+    use datatypes::data_type::ConcreteDataType;
+    use datatypes::schema::{ColumnSchema, Schema};
+    use datatypes::vectors::{Float64Vector, TimestampMillisecondVector};
+
+    use super::*;
+
+    #[test]
+    fn matrix_response_preserves_ordinary_nan_and_filters_stale_markers() {
+        let schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new(
+                "timestamp",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            ),
+            ColumnSchema::new("value", ConcreteDataType::float64_datatype(), true),
+        ]));
+        let batch = RecordBatch::new(
+            schema.clone(),
+            vec![
+                Arc::new(TimestampMillisecondVector::from_vec(vec![
+                    1_000, 2_000, 3_000, 4_000,
+                ])) as _,
+                Arc::new(Float64Vector::from(vec![
+                    Some(1.0),
+                    Some(f64::from_bits(0x7ff8_0000_0000_0000)),
+                    Some(f64::from_bits(0x7ff0_0000_0000_0002)),
+                    None,
+                ])) as _,
+            ],
+        )
+        .unwrap();
+        let batches = RecordBatches::try_new(schema, vec![batch]).unwrap();
+
+        let response =
+            PrometheusJsonResponse::record_batches_to_data(batches, None, ValueType::Matrix)
+                .unwrap();
+        let PrometheusResponse::PromData(data) = response else {
+            panic!("expected Prometheus data response");
+        };
+        let PromQueryResult::Matrix(series) = data.result else {
+            panic!("expected matrix result");
+        };
+
+        assert_eq!(series.len(), 1);
+        assert_eq!(
+            series[0].values,
+            vec![(1.0, "1".to_string()), (2.0, "NaN".to_string())]
+        );
     }
 }

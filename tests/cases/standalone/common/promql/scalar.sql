@@ -186,12 +186,13 @@ INSERT INTO TABLE presence_metric VALUES
     (600000, 'i1', 'cpu0', 'b', 8.0),
     (600000, 'i2', 'cpu9', 'a', 103.0);
 
--- NaN drops `cpu0` from the grouped count, while the NULL sample on `cpu2`
--- still leaves a zero-valued row in `count(...) by (cpu)`.
+-- Ordinary NaN keeps `cpu0` present in the grouped count, while the NULL sample
+-- on `cpu2` still leaves a zero-valued row in `count(...) by (cpu)`.
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 600, '200s') count(presence_metric{instance="i1"}) by (cpu);
 
--- Nested-count rewrite should preserve grouped presence after stale-NaN filtering and null-value pruning.
+-- Nested-count rewrite should preserve grouped presence after stale-marker filtering
+-- and null-value pruning.
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 600, '200s') scalar(count(count(presence_metric{instance="i1"}) by (cpu)));
 

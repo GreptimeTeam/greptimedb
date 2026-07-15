@@ -40,11 +40,14 @@ tql eval (60, 60, '1s') trigy atan2 trigx;
 
 -- eval instant at 1m trigy atan2 trigNaN
 --     trigy{} NaN
--- This query doesn't have result because `trignan` is NaN and will be filtered out.
+-- Ordinary NaN is a valid sample and propagates through `atan2`.
 tql eval (60, 60, '1s') trigy atan2 trignan;
 
-++
-++
++---------------------+------------------------------+
+| ts                  | atan2(trigy.val,trignan.val) |
++---------------------+------------------------------+
+| 1970-01-01T00:01:00 | NaN                          |
++---------------------+------------------------------+
 
 -- eval instant at 1m 10 atan2 20
 --     0.4636476090008061
