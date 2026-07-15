@@ -85,7 +85,7 @@ fn test_old_drop_table_json_defaults_to_hard_drop() {
 }
 
 #[tokio::test]
-async fn test_recovered_soft_drop_obeys_hard_runtime_context() {
+async fn test_recovered_soft_drop_preserves_persisted_mode() {
     let (tx, mut rx) = mpsc::channel(8);
     let node_manager = Arc::new(MockDatanodeManager::new(DatanodeWatcher::new(tx)));
     let kv_backend = Arc::new(MemoryKvBackend::new());
@@ -126,14 +126,14 @@ async fn test_recovered_soft_drop_obeys_hard_runtime_context() {
             .get_dropped_table_by_id(table_id)
             .await
             .unwrap()
-            .is_none()
+            .is_some()
     );
     let (_, request) = rx.try_recv().unwrap();
-    assert_matches!(request.body, Some(region_request::Body::Drop(_)));
+    assert_matches!(request.body, Some(region_request::Body::Close(_)));
 }
 
 #[tokio::test]
-async fn test_legacy_soft_drop_prepare_obeys_runtime_disable() {
+async fn test_legacy_soft_drop_prepare_preserves_persisted_mode() {
     let node_manager = Arc::new(MockDatanodeManager::new(()));
     let mut context = new_ddl_context(node_manager);
     context.soft_drop_enabled = false;
@@ -170,9 +170,10 @@ async fn test_legacy_soft_drop_prepare_obeys_runtime_disable() {
         DropTableProcedure::from_json(&persisted.to_string(), context.clone()).unwrap();
     recovered.on_prepare().await.unwrap();
 
-    assert!(!recovered.data.soft_drop_enabled);
-    assert_eq!(None, recovered.data.dropped_at);
-    assert_eq!(None, recovered.data.retention_expires_at);
+    assert!(recovered.data.soft_drop_enabled);
+    assert_eq!(Some(100), recovered.data.soft_drop_retention_millis);
+    assert!(recovered.data.dropped_at.is_some());
+    assert!(recovered.data.retention_expires_at.is_some());
 }
 
 #[tokio::test]
@@ -1117,7 +1118,8 @@ async fn test_soft_drop_metric_logical_table_fails() {
     ddl_context.soft_drop_enabled = false;
     let mut recovered =
         DropTableProcedure::from_json(&persisted_soft_drop, ddl_context.clone()).unwrap();
-    recovered.on_prepare().await.unwrap();
+    let err = recovered.on_prepare().await.unwrap_err();
+    assert_eq!(err.status_code(), StatusCode::Unsupported);
 }
 
 #[tokio::test]
@@ -1149,7 +1151,8 @@ async fn test_soft_drop_file_engine_table_fails() {
     ddl_context.soft_drop_enabled = false;
     let mut recovered =
         DropTableProcedure::from_json(&persisted_soft_drop, ddl_context.clone()).unwrap();
-    recovered.on_prepare().await.unwrap();
+    let err = recovered.on_prepare().await.unwrap_err();
+    assert_eq!(err.status_code(), StatusCode::Unsupported);
 }
 
 #[tokio::test]

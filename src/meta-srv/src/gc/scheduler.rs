@@ -224,7 +224,9 @@ impl GcScheduler {
 
     async fn purge_expired_soft_dropped_tables(&self, now_millis: i64) {
         // The scheduler is only constructed after GcSchedulerOptions::validate().
-        let retention_millis = self.config.experimental_soft_drop.retention.as_millis() as i64;
+        let retention_millis =
+            i64::try_from(self.config.experimental_soft_drop.retention.as_millis())
+                .unwrap_or(i64::MAX);
         let dropped_tables = match self.ctx.list_dropped_tables().await {
             Ok(dropped_tables) => dropped_tables,
             Err(error) => {
@@ -656,6 +658,20 @@ mod tests {
         let mut attempts = ctx.purge_attempts.lock().unwrap().clone();
         attempts.sort_unstable();
         assert_eq!(vec![1, 3], attempts);
+    }
+
+    #[tokio::test]
+    async fn test_purge_saturates_legacy_retention_that_exceeds_i64() {
+        let ctx = Arc::new(SoftDropSchedulerCtx::default());
+        *ctx.dropped_tables.lock().unwrap() = vec![dropped_table(1, Some(0))];
+        ctx.never_complete_tables.lock().unwrap().insert(1);
+        let mut scheduler = soft_drop_scheduler(ctx.clone());
+        scheduler.config.experimental_soft_drop.retention =
+            Duration::from_millis(i64::MAX as u64 + 1);
+
+        scheduler.purge_expired_soft_dropped_tables(0).await;
+
+        assert!(!ctx.in_flight_purges.lock().unwrap().contains(&1));
     }
 
     #[tokio::test]

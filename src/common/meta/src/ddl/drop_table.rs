@@ -73,9 +73,6 @@ impl DropTableProcedure {
 
     pub fn from_json(json: &str, context: DdlContext) -> ProcedureResult<Self> {
         let mut data: DropTableData = serde_json::from_str(json).context(FromJsonSnafu)?;
-        if !context.soft_drop_enabled {
-            data.soft_drop_enabled = false;
-        }
         if data.state == DropTableState::Prepare
             && data.soft_drop_enabled
             && data.dropped_at.is_none()

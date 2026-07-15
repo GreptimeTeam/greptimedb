@@ -280,6 +280,21 @@ impl TombstoneManager {
         self.kv_backend.max_txn_ops()
     }
 
+    async fn execute_extra_ops(&self, extra_ops: Vec<TxnOp>) -> Result<()> {
+        let max_txn_ops = self.max_txn_ops();
+        ensure!(
+            max_txn_ops > 0,
+            error::UnexpectedSnafu {
+                err_msg: "max_txn_ops must be greater than 0".to_string(),
+            }
+        );
+        for chunk in extra_ops.chunks(max_txn_ops) {
+            self.move_values_inner(&[], &[], false, chunk.to_vec())
+                .await?;
+        }
+        Ok(())
+    }
+
     /// Moves values to `dest_key`.
     ///
     /// Returns the number of keys that were moved.
@@ -302,9 +317,7 @@ impl TombstoneManager {
         );
         if keys.is_empty() {
             if !extra_ops.is_empty() {
-                return self
-                    .move_values_inner(&[], &[], require_dest_not_exists, extra_ops)
-                    .await;
+                self.execute_extra_ops(extra_ops).await?;
             }
             return Ok(0);
         }
@@ -326,7 +339,11 @@ impl TombstoneManager {
             !extra_ops.is_empty() && max_txn_ops.saturating_sub(txn_ops_per_key) >= extra_ops.len();
         let reserved_ops = if merge_extra_ops { extra_ops.len() } else { 0 };
         let chunk_size = (max_txn_ops - reserved_ops) / txn_ops_per_key;
-        if keys.len() > chunk_size {
+        let total_ops = keys
+            .len()
+            .saturating_mul(txn_ops_per_key)
+            .saturating_add(extra_ops.len());
+        if keys.len() > chunk_size || total_ops > max_txn_ops {
             debug!(
                 "Moving values with multiple chunks, keys len: {}, chunk_size: {}",
                 keys.len(),
@@ -349,8 +366,7 @@ impl TombstoneManager {
                     .await?;
             }
             if !extra_ops.is_empty() {
-                self.move_values_inner(&[], &[], require_dest_not_exists, extra_ops)
-                    .await?;
+                self.execute_extra_ops(extra_ops).await?;
             }
             Ok(moved_keys)
         } else {
@@ -1015,6 +1031,60 @@ mod tests {
                 .unwrap()
                 .value,
             b"1234"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_with_markers_chunks_extra_ops_after_key_move() {
+        let inner = Arc::new(MemoryKvBackend::default());
+        let kv_backend = Arc::new(TxnOpLimitKvBackend {
+            inner: inner.clone(),
+            max_txn_ops: MOVE_VALUE_TXN_OPS_PER_KEY + 1,
+            txn_op_counts: Mutex::new(Vec::new()),
+        });
+        let tombstone_manager = TombstoneManager::new(kv_backend.clone());
+        inner
+            .put(PutRequest::new().with_key(b"foo").with_value(b"bar"))
+            .await
+            .unwrap();
+
+        tombstone_manager
+            .create_with_markers(
+                vec![b"foo".to_vec()],
+                (0..6)
+                    .map(|index| (format!("marker-{index}").into_bytes(), vec![index]))
+                    .collect(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            kv_backend.txn_op_counts.lock().unwrap().as_slice(),
+            &[MOVE_VALUE_TXN_OPS_PER_KEY, 5, 1]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_with_markers_chunks_marker_only_transactions() {
+        let inner = Arc::new(MemoryKvBackend::default());
+        let kv_backend = Arc::new(TxnOpLimitKvBackend {
+            inner,
+            max_txn_ops: 2,
+            txn_op_counts: Mutex::new(Vec::new()),
+        });
+        let tombstone_manager = TombstoneManager::new(kv_backend.clone());
+        let markers = (0..5)
+            .map(|index| (format!("marker-{index}").into_bytes(), vec![index]))
+            .collect();
+
+        tombstone_manager
+            .create_with_markers(vec![], markers)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            kv_backend.txn_op_counts.lock().unwrap().as_slice(),
+            &[2, 2, 1]
         );
     }
 
