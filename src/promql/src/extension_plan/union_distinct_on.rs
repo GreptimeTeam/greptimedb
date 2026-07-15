@@ -34,8 +34,7 @@ use datafusion::physical_plan::{
 };
 use datafusion_expr::col;
 use datatypes::arrow::compute;
-use futures::future::BoxFuture;
-use futures::{Stream, StreamExt, TryStreamExt, ready};
+use futures::{Stream, StreamExt, ready};
 use greptime_proto::substrait_extension as pb;
 use prost::Message;
 use snafu::ResultExt;
@@ -50,15 +49,12 @@ use crate::error::{DataFusionPlanningSnafu, DeserializeSnafu, Result};
 /// - Only check collisions (when not distinct) on the columns specified by `compare_keys`.
 /// - Rows from the right child with the same comparison signature are all preserved.
 /// - If a signature occurs in the left child, all matching rows from the right child are discarded.
-/// - The output order is not maintained. This plan will output left child first, then right child.
+/// - Output preserves each input's batch and row order, with all left rows before right rows.
 /// - The output schema is based on the left child schema, with nullability widened from both inputs.
 ///
-/// From the implementation perspective, this operator is similar to `HashJoin`, but the
-/// probe side is the right child, and the build side is the left child. Another difference
-/// is that the probe is opting-out.
-///
-/// This plan will exhaust the right child first to build probe hash table, then streaming
-/// on left side, and use the left side to "mask" the hash table.
+/// Execution streams the left child first while retaining its comparison signatures. The
+/// right child is polled only after the left child completes, then rows whose signatures were
+/// observed on the left are omitted.
 #[derive(Debug, PartialEq, Eq, Hash)]
 pub struct UnionDistinctOn {
     left: LogicalPlan,
@@ -402,26 +398,23 @@ impl ExecutionPlan for UnionDistinctOnExec {
         context: Arc<TaskContext>,
     ) -> DataFusionResult<SendableRecordBatchStream> {
         let left_stream = self.left.execute(partition, context.clone())?;
-        let right_stream = self.right.execute(partition, context.clone())?;
 
         let mut key_indices = self.compare_key_indices.clone();
         key_indices.push(self.ts_col_idx);
 
-        // Build right hash table future.
-        let hashed_data_future = HashedDataFut::Pending(Box::pin(HashedData::new(
-            right_stream,
-            self.random_state.clone(),
-            key_indices.clone(),
-            self.output_schema.clone(),
-        )));
-
-        let baseline_metric = BaselineMetrics::new(&self.metric, partition);
         Ok(Box::pin(UnionDistinctOnStream {
             left: left_stream,
-            right: hashed_data_future,
+            right_plan: self.right.clone(),
+            right_partition: partition,
+            right_context: context,
+            right: None,
             compare_keys: key_indices,
             output_schema: self.output_schema.clone(),
-            metric: baseline_metric,
+            random_state: self.random_state.clone(),
+            lhs_signatures: HashSet::default(),
+            hashes: Vec::new(),
+            phase: StreamPhase::Left,
+            metric: BaselineMetrics::new(&self.metric, partition),
         }))
     }
 
@@ -450,50 +443,129 @@ impl DisplayAs for UnionDistinctOnExec {
     }
 }
 
-// TODO(ruihang): some unused fields are for metrics, which will be implemented later.
-#[allow(dead_code)]
 pub struct UnionDistinctOnStream {
     left: SendableRecordBatchStream,
-    right: HashedDataFut,
+    right_plan: Arc<dyn ExecutionPlan>,
+    right_partition: usize,
+    right_context: Arc<TaskContext>,
+    right: Option<SendableRecordBatchStream>,
     /// Include time index
     compare_keys: Vec<usize>,
     output_schema: SchemaRef,
+    random_state: RandomState,
+    lhs_signatures: HashSet<u64>,
+    hashes: Vec<u64>,
+    phase: StreamPhase,
     metric: BaselineMetrics,
 }
 
-impl UnionDistinctOnStream {
-    fn poll_impl(&mut self, cx: &mut Context<'_>) -> Poll<Option<<Self as Stream>::Item>> {
-        // resolve the right stream
-        let right = match self.right {
-            HashedDataFut::Pending(ref mut fut) => {
-                let right = ready!(fut.as_mut().poll(cx))?;
-                self.right = HashedDataFut::Ready(right);
-                let HashedDataFut::Ready(right_ref) = &mut self.right else {
-                    unreachable!()
-                };
-                right_ref
-            }
-            HashedDataFut::Ready(ref mut right) => right,
-            HashedDataFut::Empty => return Poll::Ready(None),
-        };
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StreamPhase {
+    Left,
+    Right,
+    Done,
+}
 
-        // poll left and probe with right
-        let next_left = ready!(self.left.poll_next_unpin(cx));
-        match next_left {
-            Some(Ok(left)) => {
-                // observe left batch and return it
-                right.update_map(&left)?;
-                Poll::Ready(Some(Ok(with_schema(left, self.output_schema.clone())?)))
+impl UnionDistinctOnStream {
+    fn hash_batch(&mut self, batch: &RecordBatch) -> DataFusionResult<()> {
+        let arrays = self
+            .compare_keys
+            .iter()
+            .map(|index| batch.column(*index).clone())
+            .collect::<Vec<_>>();
+        self.hashes.clear();
+        self.hashes.resize(batch.num_rows(), 0);
+        hash_utils::create_hashes(&arrays, &self.random_state, &mut self.hashes)?;
+        Ok(())
+    }
+
+    fn filter_rhs_batch(&mut self, batch: RecordBatch) -> DataFusionResult<Option<RecordBatch>> {
+        self.hash_batch(&batch)?;
+        let mut survivor_indices: Option<Vec<usize>> = None;
+        for (index, hash) in self.hashes.iter().enumerate() {
+            if self.lhs_signatures.contains(hash) {
+                survivor_indices.get_or_insert_with(|| (0..index).collect());
+            } else if let Some(indices) = &mut survivor_indices {
+                indices.push(index);
             }
-            Some(Err(e)) => Poll::Ready(Some(Err(e))),
+        }
+
+        match survivor_indices {
+            None => Ok(Some(with_schema(batch, self.output_schema.clone())?)),
+            Some(indices) if indices.is_empty() => Ok(None),
+            Some(indices) => Ok(Some(with_schema(
+                take_batch(&batch, &indices)?,
+                self.output_schema.clone(),
+            )?)),
+        }
+    }
+
+    fn terminal_error(&mut self, error: DataFusionError) -> Poll<Option<<Self as Stream>::Item>> {
+        self.phase = StreamPhase::Done;
+        Poll::Ready(Some(Err(error)))
+    }
+
+    fn poll_right(&mut self, cx: &mut Context<'_>) -> Poll<Option<<Self as Stream>::Item>> {
+        if self.right.is_none() {
+            let right = match self
+                .right_plan
+                .execute(self.right_partition, self.right_context.clone())
+            {
+                Ok(right) => right,
+                Err(error) => return self.terminal_error(error),
+            };
+            self.right = Some(right);
+        }
+
+        let right = self.right.as_mut().expect("right stream is initialized");
+        match ready!(right.poll_next_unpin(cx)) {
+            Some(Ok(batch)) if self.lhs_signatures.is_empty() => {
+                match with_schema(batch, self.output_schema.clone()) {
+                    Ok(batch) => Poll::Ready(Some(Ok(batch))),
+                    Err(error) => self.terminal_error(error),
+                }
+            }
+            Some(Ok(batch)) => match self.filter_rhs_batch(batch) {
+                Ok(Some(batch)) => Poll::Ready(Some(Ok(batch))),
+                Ok(None) => {
+                    // One fully filtered input batch has been consumed. Yield so a sequence
+                    // of filtered batches cannot monopolize a single downstream poll.
+                    cx.waker().wake_by_ref();
+                    Poll::Pending
+                }
+                Err(error) => self.terminal_error(error),
+            },
+            Some(Err(error)) => self.terminal_error(error),
             None => {
-                // left stream is exhausted, so we can send the right part
-                let right = std::mem::replace(&mut self.right, HashedDataFut::Empty);
-                let HashedDataFut::Ready(data) = right else {
-                    unreachable!()
-                };
-                Poll::Ready(Some(data.finish()))
+                self.phase = StreamPhase::Done;
+                Poll::Ready(None)
             }
+        }
+    }
+
+    fn poll_impl(&mut self, cx: &mut Context<'_>) -> Poll<Option<<Self as Stream>::Item>> {
+        match self.phase {
+            StreamPhase::Left => match ready!(self.left.poll_next_unpin(cx)) {
+                Some(Ok(batch)) => {
+                    if batch.num_rows() > 0 {
+                        if let Err(error) = self.hash_batch(&batch) {
+                            return self.terminal_error(error);
+                        }
+                        self.lhs_signatures.extend(self.hashes.iter().copied());
+                    }
+                    match with_schema(batch, self.output_schema.clone()) {
+                        Ok(batch) => Poll::Ready(Some(Ok(batch))),
+                        Err(error) => self.terminal_error(error),
+                    }
+                }
+                Some(Err(error)) => self.terminal_error(error),
+                None => {
+                    self.phase = StreamPhase::Right;
+                    self.poll_right(cx)
+                }
+            },
+            StreamPhase::Right => self.poll_right(cx),
+            StreamPhase::Done => Poll::Ready(None),
         }
     }
 }
@@ -508,119 +580,8 @@ impl Stream for UnionDistinctOnStream {
     type Item = DataFusionResult<RecordBatch>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        self.poll_impl(cx)
-    }
-}
-
-/// Simple future state for [HashedData]
-enum HashedDataFut {
-    /// The result is not ready
-    Pending(BoxFuture<'static, DataFusionResult<HashedData>>),
-    /// The result is ready
-    Ready(HashedData),
-    /// The result is taken
-    Empty,
-}
-
-/// All right input batches and their comparison hashes.
-struct HashedData {
-    /// Signatures not observed in the left input.
-    unmatched_hashes: HashSet<u64>,
-    /// Hash for every row in `batch`, in row order.
-    row_hashes: Vec<u64>,
-    /// Output batch.
-    batch: RecordBatch,
-    /// The indices of the columns to be hashed.
-    hash_key_indices: Vec<usize>,
-    random_state: RandomState,
-}
-
-impl HashedData {
-    pub async fn new(
-        input: SendableRecordBatchStream,
-        random_state: RandomState,
-        hash_key_indices: Vec<usize>,
-        output_schema: SchemaRef,
-    ) -> DataFusionResult<Self> {
-        // Collect all batches from the input stream
-        let initial = (Vec::new(), 0);
-        let (batches, _num_rows) = input
-            .try_fold(initial, |mut acc, batch| async {
-                // Update rowcount
-                acc.1 += batch.num_rows();
-                // Push batch to output
-                acc.0.push(batch);
-                Ok(acc)
-            })
-            .await?;
-
-        // Create hash for each batch
-        let mut unmatched_hashes = HashSet::default();
-        let mut row_hashes = Vec::new();
-        let mut hashes_buffer = Vec::new();
-        let mut interleave_indices = Vec::new();
-        for (batch_number, batch) in batches.iter().enumerate() {
-            hashes_buffer.resize(batch.num_rows(), 0);
-            // get columns for hashing
-            let arrays = hash_key_indices
-                .iter()
-                .map(|i| batch.column(*i).clone())
-                .collect::<Vec<_>>();
-
-            // compute hash
-            let hash_values =
-                hash_utils::create_hashes(&arrays, &random_state, &mut hashes_buffer)?;
-            for (row_number, hash_value) in hash_values.iter().enumerate() {
-                unmatched_hashes.insert(*hash_value);
-                row_hashes.push(*hash_value);
-                interleave_indices.push((batch_number, row_number));
-            }
-        }
-
-        // Finalize the hash map
-        let batch = interleave_batches(output_schema, batches, interleave_indices)?;
-
-        Ok(Self {
-            unmatched_hashes,
-            row_hashes,
-            batch,
-            hash_key_indices,
-            random_state,
-        })
-    }
-
-    /// Remove signatures present in the input record batch.
-    pub fn update_map(&mut self, input: &RecordBatch) -> DataFusionResult<()> {
-        // get columns for hashing
-        let mut hashes_buffer = Vec::new();
-        let arrays = self
-            .hash_key_indices
-            .iter()
-            .map(|i| input.column(*i).clone())
-            .collect::<Vec<_>>();
-
-        // compute hash
-        hashes_buffer.resize(input.num_rows(), 0);
-        let hash_values =
-            hash_utils::create_hashes(&arrays, &self.random_state, &mut hashes_buffer)?;
-
-        // remove those hashes
-        for hash in hash_values {
-            self.unmatched_hashes.remove(hash);
-        }
-
-        Ok(())
-    }
-
-    pub fn finish(self) -> DataFusionResult<RecordBatch> {
-        let valid_indices = self
-            .row_hashes
-            .iter()
-            .enumerate()
-            .filter_map(|(index, hash)| self.unmatched_hashes.contains(hash).then_some(index))
-            .collect::<Vec<_>>();
-        let result = take_batch(&self.batch, &valid_indices)?;
-        Ok(result)
+        let poll = self.poll_impl(cx);
+        self.metric.record_poll(poll)
     }
 }
 
@@ -629,66 +590,30 @@ fn with_schema(batch: RecordBatch, schema: SchemaRef) -> DataFusionResult<Record
         .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))
 }
 
-/// Utility function to interleave batches. Based on [interleave](datafusion::arrow::compute::interleave)
-fn interleave_batches(
-    schema: SchemaRef,
-    batches: Vec<RecordBatch>,
-    indices: Vec<(usize, usize)>,
-) -> DataFusionResult<RecordBatch> {
-    if batches.is_empty() {
-        if indices.is_empty() {
-            return Ok(RecordBatch::new_empty(schema));
-        } else {
-            return Err(DataFusionError::Internal(
-                "Cannot interleave empty batches with non-empty indices".to_string(),
-            ));
-        }
-    }
-
-    // transform batches into arrays
-    let mut arrays = vec![vec![]; schema.fields().len()];
-    for batch in &batches {
-        for (i, array) in batch.columns().iter().enumerate() {
-            arrays[i].push(array.as_ref());
-        }
-    }
-
-    // interleave arrays
-    let interleaved_arrays: Vec<_> = arrays
-        .into_iter()
-        .map(|array| compute::interleave(&array, &indices))
-        .collect::<std::result::Result<_, _>>()?;
-
-    // assemble new record batch
-    RecordBatch::try_new(schema, interleaved_arrays)
-        .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))
-}
-
-/// Utility function to take rows from a record batch. Based on [take](datafusion::arrow::compute::take)
+/// Utility function to take ordered rows from a record batch.
 fn take_batch(batch: &RecordBatch, indices: &[usize]) -> DataFusionResult<RecordBatch> {
-    // fast path
     if batch.num_rows() == indices.len() {
         return Ok(batch.clone());
     }
 
-    let schema = batch.schema();
-
-    let indices_array = UInt64Array::from_iter(indices.iter().map(|i| *i as u64));
+    let indices_array = UInt64Array::from_iter(indices.iter().map(|index| *index as u64));
     let arrays = batch
         .columns()
         .iter()
         .map(|array| compute::take(array, &indices_array, None))
         .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
+        .map_err(|error| DataFusionError::ArrowError(Box::new(error), None))?;
 
-    let result = RecordBatch::try_new(schema, arrays)
-        .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
-    Ok(result)
+    RecordBatch::try_new(batch.schema(), arrays)
+        .map_err(|error| DataFusionError::ArrowError(Box::new(error), None))
 }
 
 #[cfg(test)]
 mod test {
+    use std::collections::VecDeque;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::task::{Wake, Waker};
 
     use datafusion::arrow::array::{Array, Float64Array, Int32Array, Int64Array, StringArray};
     use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
@@ -697,6 +622,7 @@ mod test {
     use datafusion::datasource::source::DataSourceExec;
     use datafusion::logical_expr::{EmptyRelation, LogicalPlan};
     use datafusion::prelude::SessionContext;
+    use futures::StreamExt;
 
     use super::*;
 
@@ -724,56 +650,6 @@ mod test {
         assert_eq!(required.len(), 2);
         assert_eq!(required[0].as_slice(), &[0, 1, 2]);
         assert_eq!(required[1].as_slice(), &[0, 1, 2]);
-    }
-
-    #[test]
-    fn test_interleave_batches() {
-        let schema = Schema::new(vec![
-            Field::new("a", DataType::Int32, false),
-            Field::new("b", DataType::Int32, false),
-        ]);
-
-        let batch1 = RecordBatch::try_new(
-            Arc::new(schema.clone()),
-            vec![
-                Arc::new(Int32Array::from(vec![1, 2, 3])),
-                Arc::new(Int32Array::from(vec![4, 5, 6])),
-            ],
-        )
-        .unwrap();
-
-        let batch2 = RecordBatch::try_new(
-            Arc::new(schema.clone()),
-            vec![
-                Arc::new(Int32Array::from(vec![7, 8, 9])),
-                Arc::new(Int32Array::from(vec![10, 11, 12])),
-            ],
-        )
-        .unwrap();
-
-        let batch3 = RecordBatch::try_new(
-            Arc::new(schema.clone()),
-            vec![
-                Arc::new(Int32Array::from(vec![13, 14, 15])),
-                Arc::new(Int32Array::from(vec![16, 17, 18])),
-            ],
-        )
-        .unwrap();
-
-        let batches = vec![batch1, batch2, batch3];
-        let indices = vec![(0, 0), (1, 0), (2, 0), (0, 1), (1, 1), (2, 1)];
-        let result = interleave_batches(Arc::new(schema.clone()), batches, indices).unwrap();
-
-        let expected = RecordBatch::try_new(
-            Arc::new(schema),
-            vec![
-                Arc::new(Int32Array::from(vec![1, 7, 13, 2, 8, 14])),
-                Arc::new(Int32Array::from(vec![4, 10, 16, 5, 11, 17])),
-            ],
-        )
-        .unwrap();
-
-        assert_eq!(result, expected);
     }
 
     #[test]
@@ -842,10 +718,7 @@ mod test {
     }
 
     fn source_exec(batch: RecordBatch) -> Arc<dyn ExecutionPlan> {
-        let schema = batch.schema();
-        Arc::new(DataSourceExec::new(Arc::new(
-            MemorySourceConfig::try_new(&[vec![batch]], schema, None).unwrap(),
-        )))
+        source_exec_batches(batch.schema(), vec![batch])
     }
 
     async fn execute(
@@ -859,6 +732,245 @@ mod test {
         )
         .await
         .unwrap()
+    }
+
+    fn source_exec_batches(schema: SchemaRef, batches: Vec<RecordBatch>) -> Arc<dyn ExecutionPlan> {
+        Arc::new(DataSourceExec::new(Arc::new(
+            MemorySourceConfig::try_new(&[batches], schema, None).unwrap(),
+        )))
+    }
+
+    async fn execute_batches(
+        plan: &UnionDistinctOn,
+        left_schema: SchemaRef,
+        left: Vec<RecordBatch>,
+        right_schema: SchemaRef,
+        right: Vec<RecordBatch>,
+    ) -> Vec<RecordBatch> {
+        datafusion::physical_plan::collect(
+            plan.to_execution_plan(
+                source_exec_batches(left_schema, left),
+                source_exec_batches(right_schema, right),
+            ),
+            SessionContext::default().task_ctx(),
+        )
+        .await
+        .unwrap()
+    }
+
+    fn simple_schema(prefix: &str, nullable: bool) -> SchemaRef {
+        schema(prefix, "label", nullable)
+    }
+
+    fn simple_batch(schema: SchemaRef, rows: &[(i64, &str, f64)]) -> RecordBatch {
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Int64Array::from_iter_values(rows.iter().map(|row| row.0))),
+                Arc::new(StringArray::from_iter_values(rows.iter().map(|row| row.1))),
+                Arc::new(Float64Array::from_iter_values(rows.iter().map(|row| row.2))),
+            ],
+        )
+        .unwrap()
+    }
+
+    fn simple_rows(batches: &[RecordBatch]) -> Vec<(i64, String, f64)> {
+        batches
+            .iter()
+            .flat_map(|batch| {
+                let timestamps = batch
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<Int64Array>()
+                    .unwrap();
+                let labels = batch
+                    .column(1)
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .unwrap();
+                let values = batch
+                    .column(2)
+                    .as_any()
+                    .downcast_ref::<Float64Array>()
+                    .unwrap();
+                (0..batch.num_rows()).map(move |row| {
+                    (
+                        timestamps.value(row),
+                        labels.value(row).to_string(),
+                        values.value(row),
+                    )
+                })
+            })
+            .collect()
+    }
+
+    fn simple_plan(left_schema: SchemaRef, right_schema: SchemaRef) -> UnionDistinctOn {
+        let (left, right) = schemas(left_schema, right_schema);
+        UnionDistinctOn::try_new(left, right, vec![1], 0).unwrap()
+    }
+
+    #[derive(Clone, Debug)]
+    enum TestEvent {
+        Batch(RecordBatch),
+        Error(&'static str),
+    }
+
+    struct TestStream {
+        schema: SchemaRef,
+        events: VecDeque<TestEvent>,
+        polls: Arc<AtomicUsize>,
+    }
+
+    impl Stream for TestStream {
+        type Item = DataFusionResult<RecordBatch>;
+
+        fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            self.polls.fetch_add(1, Ordering::SeqCst);
+            match self.events.pop_front() {
+                Some(TestEvent::Batch(batch)) => Poll::Ready(Some(Ok(batch))),
+                Some(TestEvent::Error(message)) => {
+                    Poll::Ready(Some(Err(DataFusionError::Internal(message.to_string()))))
+                }
+                None => Poll::Ready(None),
+            }
+        }
+    }
+
+    impl RecordBatchStream for TestStream {
+        fn schema(&self) -> SchemaRef {
+            self.schema.clone()
+        }
+    }
+
+    struct CountingWake(AtomicUsize);
+
+    impl Wake for CountingWake {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    fn test_stream(
+        schema: SchemaRef,
+        events: Vec<TestEvent>,
+        polls: Arc<AtomicUsize>,
+    ) -> SendableRecordBatchStream {
+        Box::pin(TestStream {
+            schema,
+            events: events.into(),
+            polls,
+        })
+    }
+
+    #[derive(Debug)]
+    struct TestExec {
+        schema: SchemaRef,
+        events: Vec<TestEvent>,
+        polls: Arc<AtomicUsize>,
+        executions: Arc<AtomicUsize>,
+        execute_error: Option<&'static str>,
+        properties: Arc<PlanProperties>,
+    }
+
+    impl TestExec {
+        fn new(
+            schema: SchemaRef,
+            events: Vec<TestEvent>,
+            polls: Arc<AtomicUsize>,
+            executions: Arc<AtomicUsize>,
+        ) -> Self {
+            Self {
+                properties: Arc::new(PlanProperties::new(
+                    EquivalenceProperties::new(schema.clone()),
+                    Partitioning::UnknownPartitioning(1),
+                    EmissionType::Incremental,
+                    Boundedness::Bounded,
+                )),
+                schema,
+                events,
+                polls,
+                executions,
+                execute_error: None,
+            }
+        }
+
+        fn with_execute_error(mut self, error: &'static str) -> Self {
+            self.execute_error = Some(error);
+            self
+        }
+    }
+
+    impl DisplayAs for TestExec {
+        fn fmt_as(&self, _t: DisplayFormatType, _f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            Ok(())
+        }
+    }
+
+    impl ExecutionPlan for TestExec {
+        fn name(&self) -> &str {
+            "TestExec"
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+
+        fn properties(&self) -> &Arc<PlanProperties> {
+            &self.properties
+        }
+
+        fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
+            vec![]
+        }
+
+        fn with_new_children(
+            self: Arc<Self>,
+            _children: Vec<Arc<dyn ExecutionPlan>>,
+        ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
+            Ok(self)
+        }
+
+        fn execute(
+            &self,
+            _partition: usize,
+            _context: Arc<TaskContext>,
+        ) -> DataFusionResult<SendableRecordBatchStream> {
+            self.executions.fetch_add(1, Ordering::SeqCst);
+            if let Some(error) = self.execute_error {
+                return Err(DataFusionError::Internal(error.to_string()));
+            }
+            Ok(test_stream(
+                self.schema.clone(),
+                self.events.clone(),
+                self.polls.clone(),
+            ))
+        }
+    }
+
+    fn test_union_stream(
+        left: SendableRecordBatchStream,
+        right: Arc<dyn ExecutionPlan>,
+        output_schema: SchemaRef,
+    ) -> UnionDistinctOnStream {
+        let metrics = ExecutionPlanMetricsSet::new();
+        UnionDistinctOnStream {
+            left,
+            right_plan: right,
+            right_partition: 0,
+            right_context: SessionContext::default().task_ctx(),
+            right: None,
+            compare_keys: vec![1, 0],
+            output_schema,
+            random_state: RandomState::new(),
+            lhs_signatures: HashSet::default(),
+            hashes: Vec::new(),
+            phase: StreamPhase::Left,
+            metric: BaselineMetrics::new(&metrics, 0),
+        }
     }
 
     fn series_rows(batches: &[RecordBatch]) -> Vec<(i64, &str, f64, &str)> {
@@ -1048,6 +1160,452 @@ mod test {
                 (3_000, "rhs_unmatched", 30.0, ""),
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn empty_lhs_preserves_duplicate_rhs_rows_across_batches() {
+        let left_schema = simple_schema("left", false);
+        let right_schema = simple_schema("right", false);
+        let plan = simple_plan(left_schema.clone(), right_schema.clone());
+        let result = execute_batches(
+            &plan,
+            left_schema,
+            vec![],
+            right_schema.clone(),
+            vec![
+                simple_batch(
+                    right_schema.clone(),
+                    &[(1, "same", 10.0), (1, "same", 11.0)],
+                ),
+                simple_batch(right_schema, &[(1, "same", 12.0)]),
+            ],
+        )
+        .await;
+        assert_eq!(
+            simple_rows(&result),
+            vec![
+                (1, "same".to_string(), 10.0),
+                (1, "same".to_string(), 11.0),
+                (1, "same".to_string(), 12.0),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn lhs_signature_suppresses_rhs_duplicates_across_batches() {
+        let left_schema = simple_schema("left", false);
+        let right_schema = simple_schema("right", false);
+        let plan = simple_plan(left_schema.clone(), right_schema.clone());
+        let result = execute_batches(
+            &plan,
+            left_schema.clone(),
+            vec![simple_batch(left_schema, &[(1, "match", 1.0)])],
+            right_schema.clone(),
+            vec![
+                simple_batch(right_schema.clone(), &[(1, "match", 10.0)]),
+                simple_batch(right_schema, &[(1, "match", 11.0)]),
+            ],
+        )
+        .await;
+        assert_eq!(simple_rows(&result), vec![(1, "match".to_string(), 1.0)]);
+    }
+
+    #[tokio::test]
+    async fn hash_scratch_reset_suppresses_null_label_after_same_sized_lhs_batches() {
+        let left_schema = simple_schema("left", true);
+        let right_schema = simple_schema("right", true);
+        let plan = simple_plan(left_schema.clone(), right_schema.clone());
+        let lhs_poison = RecordBatch::try_new(
+            left_schema.clone(),
+            vec![
+                Arc::new(Int64Array::from(vec![1])),
+                Arc::new(StringArray::from(vec![Some("poison")])),
+                Arc::new(Float64Array::from(vec![1.0])),
+            ],
+        )
+        .unwrap();
+        let lhs_null = RecordBatch::try_new(
+            left_schema.clone(),
+            vec![
+                Arc::new(Int64Array::from(vec![42])),
+                Arc::new(StringArray::from(vec![None::<&str>])),
+                Arc::new(Float64Array::from(vec![2.0])),
+            ],
+        )
+        .unwrap();
+        let rhs_null = RecordBatch::try_new(
+            right_schema.clone(),
+            vec![
+                Arc::new(Int64Array::from(vec![42])),
+                Arc::new(StringArray::from(vec![None::<&str>])),
+                Arc::new(Float64Array::from(vec![999.0])),
+            ],
+        )
+        .unwrap();
+
+        let result = execute_batches(
+            &plan,
+            left_schema,
+            vec![lhs_poison, lhs_null],
+            right_schema,
+            vec![rhs_null],
+        )
+        .await;
+        assert_eq!(result.iter().map(RecordBatch::num_rows).sum::<usize>(), 2);
+        let values = result
+            .iter()
+            .flat_map(|batch| {
+                batch
+                    .column(2)
+                    .as_any()
+                    .downcast_ref::<Float64Array>()
+                    .unwrap()
+                    .values()
+                    .iter()
+                    .copied()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(values, vec![1.0, 2.0]);
+    }
+
+    #[tokio::test]
+    async fn mixed_rhs_duplicates_retain_unmatched_rows_in_order() {
+        let left_schema = simple_schema("left", false);
+        let right_schema = simple_schema("right", false);
+        let plan = simple_plan(left_schema.clone(), right_schema.clone());
+        let result = execute_batches(
+            &plan,
+            left_schema.clone(),
+            vec![simple_batch(left_schema, &[(1, "match", 1.0)])],
+            right_schema.clone(),
+            vec![simple_batch(
+                right_schema,
+                &[
+                    (1, "match", 10.0),
+                    (1, "keep", 11.0),
+                    (1, "keep", 12.0),
+                    (1, "match", 13.0),
+                    (1, "later", 14.0),
+                ],
+            )],
+        )
+        .await;
+        assert_eq!(
+            simple_rows(&result),
+            vec![
+                (1, "match".to_string(), 1.0),
+                (1, "keep".to_string(), 11.0),
+                (1, "keep".to_string(), 12.0),
+                (1, "later".to_string(), 14.0),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn same_label_at_different_timestamps_is_unmatched() {
+        let left_schema = simple_schema("left", false);
+        let right_schema = simple_schema("right", false);
+        let plan = simple_plan(left_schema.clone(), right_schema.clone());
+        let result = execute_batches(
+            &plan,
+            left_schema.clone(),
+            vec![simple_batch(left_schema, &[(1, "label", 1.0)])],
+            right_schema.clone(),
+            vec![simple_batch(right_schema, &[(2, "label", 2.0)])],
+        )
+        .await;
+        assert_eq!(
+            simple_rows(&result),
+            vec![(1, "label".to_string(), 1.0), (2, "label".to_string(), 2.0)]
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_input_combinations_complete_cleanly() {
+        let left_schema = simple_schema("left", false);
+        let right_schema = simple_schema("right", false);
+        let plan = simple_plan(left_schema.clone(), right_schema.clone());
+
+        let empty_left = execute_batches(
+            &plan,
+            left_schema.clone(),
+            vec![],
+            right_schema.clone(),
+            vec![simple_batch(right_schema.clone(), &[(1, "rhs", 1.0)])],
+        )
+        .await;
+        assert_eq!(simple_rows(&empty_left), vec![(1, "rhs".to_string(), 1.0)]);
+
+        let empty_right = execute_batches(
+            &plan,
+            left_schema.clone(),
+            vec![simple_batch(left_schema.clone(), &[(1, "lhs", 1.0)])],
+            right_schema.clone(),
+            vec![],
+        )
+        .await;
+        assert_eq!(simple_rows(&empty_right), vec![(1, "lhs".to_string(), 1.0)]);
+
+        let both_empty = execute_batches(&plan, left_schema, vec![], right_schema, vec![]).await;
+        assert!(both_empty.is_empty());
+    }
+
+    #[tokio::test]
+    async fn zero_row_batches_on_either_side_are_handled() {
+        let left_schema = simple_schema("left", false);
+        let right_schema = simple_schema("right", false);
+        let plan = simple_plan(left_schema.clone(), right_schema.clone());
+
+        let zero_row_left = execute_batches(
+            &plan,
+            left_schema.clone(),
+            vec![simple_batch(left_schema.clone(), &[])],
+            right_schema.clone(),
+            vec![simple_batch(right_schema.clone(), &[(1, "rhs", 1.0)])],
+        )
+        .await;
+        assert_eq!(
+            simple_rows(&zero_row_left),
+            vec![(1, "rhs".to_string(), 1.0)]
+        );
+
+        let zero_row_right = execute_batches(
+            &plan,
+            left_schema.clone(),
+            vec![simple_batch(left_schema, &[(1, "lhs", 1.0)])],
+            right_schema.clone(),
+            vec![simple_batch(right_schema, &[])],
+        )
+        .await;
+        assert_eq!(
+            simple_rows(&zero_row_right),
+            vec![(1, "lhs".to_string(), 1.0)]
+        );
+    }
+
+    #[tokio::test]
+    async fn metrics_record_output_rows_and_completion() {
+        let left_schema = simple_schema("left", false);
+        let right_schema = simple_schema("right", false);
+        let plan = simple_plan(left_schema.clone(), right_schema.clone());
+        let exec = plan.to_execution_plan(
+            source_exec(simple_batch(left_schema, &[(1, "lhs", 1.0)])),
+            source_exec(simple_batch(right_schema, &[(2, "rhs", 2.0)])),
+        );
+
+        let output =
+            datafusion::physical_plan::collect(exec.clone(), SessionContext::default().task_ctx())
+                .await
+                .unwrap();
+        assert_eq!(simple_rows(&output).len(), 2);
+
+        let metrics = exec.metrics().unwrap();
+        assert_eq!(metrics.output_rows(), Some(2));
+        assert!(metrics.iter().any(|metric| {
+            metric.value().name() == "end_timestamp" && metric.value().as_usize() > 0
+        }));
+    }
+
+    #[tokio::test]
+    async fn output_keeps_lhs_before_rhs_and_input_order() {
+        let left_schema = simple_schema("left", false);
+        let right_schema = simple_schema("right", false);
+        let plan = simple_plan(left_schema.clone(), right_schema.clone());
+        let result = execute_batches(
+            &plan,
+            left_schema.clone(),
+            vec![
+                simple_batch(left_schema.clone(), &[(1, "lhs-a", 1.0)]),
+                simple_batch(left_schema, &[(2, "lhs-b", 2.0)]),
+            ],
+            right_schema.clone(),
+            vec![
+                simple_batch(right_schema.clone(), &[(3, "rhs-a", 3.0)]),
+                simple_batch(right_schema, &[(4, "rhs-b", 4.0)]),
+            ],
+        )
+        .await;
+        assert_eq!(
+            simple_rows(&result),
+            vec![
+                (1, "lhs-a".to_string(), 1.0),
+                (2, "lhs-b".to_string(), 2.0),
+                (3, "rhs-a".to_string(), 3.0),
+                (4, "rhs-b".to_string(), 4.0),
+            ]
+        );
+    }
+
+    #[test]
+    fn fully_filtered_rhs_batch_wakes_before_later_unmatched_batch() {
+        let schema = simple_schema("stream", false);
+        let left_polls = Arc::new(AtomicUsize::new(0));
+        let right_polls = Arc::new(AtomicUsize::new(0));
+        let right_executions = Arc::new(AtomicUsize::new(0));
+        let left = test_stream(
+            schema.clone(),
+            vec![TestEvent::Batch(simple_batch(
+                schema.clone(),
+                &[(1, "match", 1.0)],
+            ))],
+            left_polls,
+        );
+        let right = Arc::new(TestExec::new(
+            schema.clone(),
+            vec![
+                TestEvent::Batch(simple_batch(schema.clone(), &[(1, "match", 2.0)])),
+                TestEvent::Batch(simple_batch(schema.clone(), &[(2, "keep", 3.0)])),
+            ],
+            right_polls.clone(),
+            right_executions.clone(),
+        ));
+        let mut stream = Box::pin(test_union_stream(left, right, schema));
+        let wake = Arc::new(CountingWake(AtomicUsize::new(0)));
+        let waker = Waker::from(wake.clone());
+        let mut context = Context::from_waker(&waker);
+
+        assert!(matches!(
+            stream.as_mut().poll_next(&mut context),
+            Poll::Ready(Some(Ok(_)))
+        ));
+        assert!(matches!(
+            stream.as_mut().poll_next(&mut context),
+            Poll::Pending
+        ));
+        assert_eq!(right_executions.load(Ordering::SeqCst), 1);
+        assert_eq!(right_polls.load(Ordering::SeqCst), 1);
+        assert_eq!(wake.0.load(Ordering::SeqCst), 1);
+        assert!(matches!(
+            stream.as_mut().poll_next(&mut context),
+            Poll::Ready(Some(Ok(batch)))
+                if simple_rows(std::slice::from_ref(&batch))
+                    == vec![(2, "keep".to_string(), 3.0)]
+        ));
+    }
+
+    #[tokio::test]
+    async fn rhs_is_not_polled_before_lhs_eof_and_drop_preserves_backpressure() {
+        let schema = simple_schema("stream", false);
+        let left_polls = Arc::new(AtomicUsize::new(0));
+        let right_polls = Arc::new(AtomicUsize::new(0));
+        let left = test_stream(
+            schema.clone(),
+            vec![TestEvent::Batch(simple_batch(
+                schema.clone(),
+                &[(1, "lhs", 1.0)],
+            ))],
+            left_polls.clone(),
+        );
+        let right_executions = Arc::new(AtomicUsize::new(0));
+        let right = Arc::new(TestExec::new(
+            schema.clone(),
+            vec![TestEvent::Batch(simple_batch(
+                schema.clone(),
+                &[(2, "rhs", 2.0)],
+            ))],
+            right_polls.clone(),
+            right_executions.clone(),
+        ));
+        let mut stream = Box::pin(test_union_stream(left, right, schema));
+
+        let first = stream.next().await.unwrap().unwrap();
+        assert_eq!(simple_rows(&[first]), vec![(1, "lhs".to_string(), 1.0)]);
+        assert_eq!(left_polls.load(Ordering::SeqCst), 1);
+        assert_eq!(right_polls.load(Ordering::SeqCst), 0);
+        assert_eq!(right_executions.load(Ordering::SeqCst), 0);
+        drop(stream);
+        assert_eq!(right_polls.load(Ordering::SeqCst), 0);
+        assert_eq!(right_executions.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn lhs_and_delayed_rhs_errors_propagate() {
+        let schema = simple_schema("stream", false);
+        let polls = Arc::new(AtomicUsize::new(0));
+        let mut left_error = Box::pin(test_union_stream(
+            test_stream(
+                schema.clone(),
+                vec![TestEvent::Error("left failed")],
+                polls.clone(),
+            ),
+            Arc::new(TestExec::new(
+                schema.clone(),
+                vec![],
+                polls.clone(),
+                Arc::new(AtomicUsize::new(0)),
+            )),
+            schema.clone(),
+        ));
+        assert!(left_error.next().await.unwrap().is_err());
+        assert!(left_error.next().await.is_none());
+
+        let mut right_error = Box::pin(test_union_stream(
+            test_stream(
+                schema.clone(),
+                vec![TestEvent::Batch(simple_batch(
+                    schema.clone(),
+                    &[(1, "lhs", 1.0)],
+                ))],
+                polls.clone(),
+            ),
+            Arc::new(TestExec::new(
+                schema.clone(),
+                vec![TestEvent::Error("right failed")],
+                polls,
+                Arc::new(AtomicUsize::new(0)),
+            )),
+            schema.clone(),
+        ));
+        assert!(right_error.next().await.unwrap().is_ok());
+        assert!(right_error.next().await.unwrap().is_err());
+        assert!(right_error.next().await.is_none());
+
+        let right_execute_error = Arc::new(
+            TestExec::new(
+                schema.clone(),
+                vec![],
+                Arc::new(AtomicUsize::new(0)),
+                Arc::new(AtomicUsize::new(0)),
+            )
+            .with_execute_error("right execute failed"),
+        );
+        let mut right_execute_error = Box::pin(test_union_stream(
+            test_stream(schema.clone(), vec![], Arc::new(AtomicUsize::new(0))),
+            right_execute_error,
+            schema,
+        ));
+        assert!(right_execute_error.next().await.unwrap().is_err());
+        assert!(right_execute_error.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn rhs_partial_and_full_batches_rebind_to_declared_left_schema() {
+        let left_schema = schema("left", "label", false);
+        let right_schema = schema("right", "label", true);
+        let (left, right) = schemas(left_schema.clone(), right_schema.clone());
+        let plan = UnionDistinctOn::try_new(left, right, vec![1], 0).unwrap();
+        let declared_schema = plan.output_schema.inner().clone();
+        let partial_rhs = RecordBatch::try_new(
+            right_schema.clone(),
+            vec![
+                Arc::new(Int64Array::from(vec![1, 2])),
+                Arc::new(StringArray::from(vec![Some("match"), None])),
+                Arc::new(Float64Array::from(vec![Some(10.0), None])),
+            ],
+        )
+        .unwrap();
+        let full_rhs = batch(right_schema.clone(), 3, Some("full"), Some(30.0));
+        let result = execute_batches(
+            &plan,
+            left_schema.clone(),
+            vec![batch(left_schema, 1, Some("match"), Some(1.0))],
+            right_schema,
+            vec![partial_rhs, full_rhs],
+        )
+        .await;
+        assert!(result.iter().all(|batch| batch.schema() == declared_schema));
+        assert_eq!(result.iter().map(RecordBatch::num_rows).sum::<usize>(), 3);
+        assert!(result[1].column(1).is_null(0));
     }
 
     #[test]
