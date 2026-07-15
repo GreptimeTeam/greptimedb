@@ -293,19 +293,33 @@ pub(crate) async fn prepare_sst_meta(
 ) -> Result<SstMetaPreparation> {
     let file_path = file_path.to_string();
     common_runtime::spawn_blocking_global(move || {
-        let parquet_metadata = strip_column_indexes(parquet_metadata);
-
-        let cache_encoding = encode_compact_sst_meta(&file_path, &parquet_metadata);
-        finish_sst_meta_preparation(
+        prepare_sst_meta_sync(
             &file_path,
             parquet_metadata,
             region_metadata,
             page_index_policy,
-            cache_encoding,
         )
     })
     .await
     .context(JoinSnafu)?
+}
+
+/// Synchronously prepares SST metadata. Callers must run this on a blocking runtime.
+pub(crate) fn prepare_sst_meta_sync(
+    file_path: &str,
+    parquet_metadata: ParquetMetaData,
+    region_metadata: Option<RegionMetadataRef>,
+    page_index_policy: PageIndexPolicy,
+) -> Result<SstMetaPreparation> {
+    let parquet_metadata = strip_column_indexes(parquet_metadata);
+    let cache_encoding = encode_compact_sst_meta(file_path, &parquet_metadata);
+    finish_sst_meta_preparation(
+        file_path,
+        parquet_metadata,
+        region_metadata,
+        page_index_policy,
+        cache_encoding,
+    )
 }
 
 fn strip_column_indexes(parquet_metadata: ParquetMetaData) -> ParquetMetaData {

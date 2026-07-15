@@ -32,7 +32,7 @@ use store_api::storage::{FileId, RegionId, SequenceNumber};
 
 use crate::cache::file_cache::{FileCacheRef, FileType, IndexKey};
 use crate::cache::write_cache::SstUploadRequest;
-use crate::cache::{CacheManagerRef, SstMetaPreparation, prepare_sst_meta};
+use crate::cache::{CacheManagerRef, SstMetaPreparation, prepare_sst_meta_sync};
 use crate::config::{BloomFilterConfig, FulltextIndexConfig, IndexConfig, InvertedIndexConfig};
 use crate::error::{
     CleanDirSnafu, DeleteIndexSnafu, DeleteIndexesSnafu, DeleteSstsSnafu, OpenDalSnafu, Result,
@@ -429,15 +429,16 @@ impl AccessLayer {
                     let parquet_metadata = parquet_metadata.clone();
                     let region_metadata = region_metadata.clone();
                     let cache_manager = cache_manager.clone();
-                    common_runtime::spawn_global(async move {
-                        match prepare_sst_meta(
+                    // Compact cache preparation is best-effort. Run the entire operation in one
+                    // detached blocking task so it neither blocks an async worker nor delays the
+                    // SST write.
+                    common_runtime::spawn_blocking_global(move || {
+                        match prepare_sst_meta_sync(
                             &file_path,
                             Arc::unwrap_or_clone(parquet_metadata),
                             Some(region_metadata),
                             page_index_policy,
-                        )
-                        .await
-                        {
+                        ) {
                             Ok(SstMetaPreparation::Prepared(metadata)) => {
                                 cache_manager.put_prepared_sst_meta(file_id, metadata, true);
                             }
