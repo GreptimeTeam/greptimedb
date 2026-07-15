@@ -98,7 +98,7 @@ fn stamp_native_histogram_subfield_ids(field: &mut Field) {
         EXTENSION_TYPE_NAME_KEY.to_string(),
         HistogramExtensionType::NAME.to_string(),
     );
-    let ArrowDataType::Struct(children) = field.data_type().clone() else {
+    let ArrowDataType::Struct(children) = field.data_type() else {
         return;
     };
     let new_children: Fields = children
@@ -111,10 +111,10 @@ fn stamp_native_histogram_subfield_ids(field: &mut Field) {
                     .insert(PARQUET_FIELD_ID_KEY.to_string(), id.to_string());
             }
             // If the sub-field is a list, stamp its element field's id.
-            if let ArrowDataType::List(elem) = c.data_type().clone()
+            if let ArrowDataType::List(elem) = c.data_type()
                 && let Some(elem_id) = native_histogram_list_element_id(c.name())
             {
-                let mut new_elem = (*elem).clone();
+                let mut new_elem = (**elem).clone();
                 new_elem
                     .metadata_mut()
                     .insert(PARQUET_FIELD_ID_KEY.to_string(), elem_id.to_string());
