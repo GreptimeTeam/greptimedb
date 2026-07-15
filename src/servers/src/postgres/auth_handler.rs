@@ -24,6 +24,7 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use common_catalog::parse_catalog_and_schema_from_db_string;
 use common_error::ext::ErrorExt;
+use common_error::status_code::StatusCode;
 use common_time::Timezone;
 use futures::{Sink, SinkExt};
 use pgwire::api::auth::StartupHandler;
@@ -336,6 +337,18 @@ enum PgAuthenticationResult {
 }
 
 impl PostgresServerHandlerInner {
+    /// Records a rejected SCRAM attempt in [`METRIC_AUTH_FAILURE`]. The label is
+    /// intentionally uniform (never `UserNotFound`), so the counter cannot be
+    /// used to distinguish a wrong password from an unknown user.
+    fn record_scram_failure(result: PgAuthenticationResult) -> PgAuthenticationResult {
+        if matches!(result, PgAuthenticationResult::Failed) {
+            METRIC_AUTH_FAILURE
+                .with_label_values(&[StatusCode::UserPasswordMismatch.as_ref()])
+                .inc();
+        }
+        result
+    }
+
     async fn authenticate_password_message<C>(
         &self,
         client: &mut C,
@@ -360,46 +373,53 @@ impl PostgresServerHandlerInner {
                 }
             }
             PgAuthenticationState::SaslInitial { auth_info } => {
-                let sasl_initial = pwd.into_sasl_initial_response()?;
-                if sasl_initial.auth_method != SCRAM_SHA_256_METHOD {
-                    return Ok(PgAuthenticationResult::Failed);
-                }
-                let Some(data) = sasl_initial.data else {
-                    return Ok(PgAuthenticationResult::Failed);
-                };
-                let Some(client_first) = ScramClientFirst::parse(&data) else {
-                    return Ok(PgAuthenticationResult::Failed);
-                };
-                let PgAuthInfo::ScramSha256 {
-                    verifier,
-                    user_info,
-                } = auth_info
-                else {
-                    return Ok(PgAuthenticationResult::Failed);
-                };
+                // A labeled block funnels every rejection through a single
+                // `record_scram_failure`, so failed SCRAM attempts still show up
+                // in `METRIC_AUTH_FAILURE` without sprinkling the metric call
+                // across each early return.
+                let result = 'sasl: {
+                    let sasl_initial = pwd.into_sasl_initial_response()?;
+                    if sasl_initial.auth_method != SCRAM_SHA_256_METHOD {
+                        break 'sasl PgAuthenticationResult::Failed;
+                    }
+                    let Some(data) = sasl_initial.data else {
+                        break 'sasl PgAuthenticationResult::Failed;
+                    };
+                    let Some(client_first) = ScramClientFirst::parse(&data) else {
+                        break 'sasl PgAuthenticationResult::Failed;
+                    };
+                    let PgAuthInfo::ScramSha256 {
+                        verifier,
+                        user_info,
+                    } = auth_info
+                    else {
+                        break 'sasl PgAuthenticationResult::Failed;
+                    };
 
-                let server_nonce = BASE64.encode(rand::random::<[u8; 18]>());
-                let nonce = format!("{}{}", client_first.nonce, server_nonce);
-                let server_first = format!(
-                    "r={},s={},i={}",
-                    nonce,
-                    BASE64.encode(verifier.salt()),
-                    verifier.iterations()
-                );
-                client
-                    .send(PgWireBackendMessage::Authentication(
-                        Authentication::SASLContinue(server_first.clone().into()),
-                    ))
-                    .await?;
-                *state = PgAuthenticationState::SaslFinal {
-                    verifier,
-                    user_info,
-                    channel_binding: client_first.channel_binding,
-                    nonce,
-                    client_first_bare: client_first.bare,
-                    server_first,
+                    let server_nonce = BASE64.encode(rand::random::<[u8; 18]>());
+                    let nonce = format!("{}{}", client_first.nonce, server_nonce);
+                    let server_first = format!(
+                        "r={},s={},i={}",
+                        nonce,
+                        BASE64.encode(verifier.salt()),
+                        verifier.iterations()
+                    );
+                    client
+                        .send(PgWireBackendMessage::Authentication(
+                            Authentication::SASLContinue(server_first.clone().into()),
+                        ))
+                        .await?;
+                    *state = PgAuthenticationState::SaslFinal {
+                        verifier,
+                        user_info,
+                        channel_binding: client_first.channel_binding,
+                        nonce,
+                        client_first_bare: client_first.bare,
+                        server_first,
+                    };
+                    PgAuthenticationResult::Continue
                 };
-                Ok(PgAuthenticationResult::Continue)
+                Ok(Self::record_scram_failure(result))
             }
             PgAuthenticationState::SaslFinal {
                 verifier,
@@ -409,51 +429,54 @@ impl PostgresServerHandlerInner {
                 client_first_bare,
                 server_first,
             } => {
-                let sasl_response = pwd.into_sasl_response()?;
-                let Some(client_final) = ScramClientFinal::parse(&sasl_response.data) else {
-                    return Ok(PgAuthenticationResult::Failed);
-                };
-                if client_final.channel_binding != channel_binding {
-                    return Ok(PgAuthenticationResult::Failed);
-                }
-                if client_final.nonce != nonce {
-                    return Ok(PgAuthenticationResult::Failed);
-                }
+                let result = 'sasl: {
+                    let sasl_response = pwd.into_sasl_response()?;
+                    let Some(client_final) = ScramClientFinal::parse(&sasl_response.data) else {
+                        break 'sasl PgAuthenticationResult::Failed;
+                    };
+                    if client_final.channel_binding != channel_binding {
+                        break 'sasl PgAuthenticationResult::Failed;
+                    }
+                    if client_final.nonce != nonce {
+                        break 'sasl PgAuthenticationResult::Failed;
+                    }
 
-                let auth_message = format!(
-                    "{},{},{}",
-                    client_first_bare, server_first, client_final.without_proof
-                );
-                let Ok(client_proof) = BASE64.decode(client_final.proof.as_bytes()) else {
-                    return Ok(PgAuthenticationResult::Failed);
-                };
-                let Ok(Some(server_signature)) =
-                    verifier.verify_client_proof(auth_message.as_bytes(), &client_proof)
-                else {
-                    return Ok(PgAuthenticationResult::Failed);
-                };
-                let Some(user_info) = user_info else {
-                    return Ok(PgAuthenticationResult::Failed);
-                };
+                    let auth_message = format!(
+                        "{},{},{}",
+                        client_first_bare, server_first, client_final.without_proof
+                    );
+                    let Ok(client_proof) = BASE64.decode(client_final.proof.as_bytes()) else {
+                        break 'sasl PgAuthenticationResult::Failed;
+                    };
+                    let Ok(Some(server_signature)) =
+                        verifier.verify_client_proof(auth_message.as_bytes(), &client_proof)
+                    else {
+                        break 'sasl PgAuthenticationResult::Failed;
+                    };
+                    let Some(user_info) = user_info else {
+                        break 'sasl PgAuthenticationResult::Failed;
+                    };
 
-                drop(state);
-                if self
-                    .login_verifier
-                    .authorize(login_info, &user_info)
-                    .await
-                    .is_err()
-                {
-                    return Ok(PgAuthenticationResult::Failed);
-                }
+                    drop(state);
+                    if self
+                        .login_verifier
+                        .authorize(login_info, &user_info)
+                        .await
+                        .is_err()
+                    {
+                        break 'sasl PgAuthenticationResult::Failed;
+                    }
 
-                client
-                    .send(PgWireBackendMessage::Authentication(
-                        Authentication::SASLFinal(
-                            format!("v={}", BASE64.encode(server_signature)).into(),
-                        ),
-                    ))
-                    .await?;
-                Ok(PgAuthenticationResult::Success(user_info))
+                    client
+                        .send(PgWireBackendMessage::Authentication(
+                            Authentication::SASLFinal(
+                                format!("v={}", BASE64.encode(server_signature)).into(),
+                            ),
+                        ))
+                        .await?;
+                    PgAuthenticationResult::Success(user_info)
+                };
+                Ok(Self::record_scram_failure(result))
             }
             PgAuthenticationState::Initial => Ok(PgAuthenticationResult::Failed),
         }
