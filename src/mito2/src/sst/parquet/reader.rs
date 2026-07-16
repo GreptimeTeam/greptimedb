@@ -50,7 +50,7 @@ use store_api::region_request::PathType;
 use store_api::storage::{ColumnId, FileId};
 use table::predicate::Predicate;
 
-use self::stream::{NestedSchemaAligner, ProjectedRecordBatchStream};
+use self::stream::{Json2FallbackDecoder, NestedSchemaAligner, ProjectedRecordBatchStream};
 use crate::cache::index::result_cache::PredicateKey;
 use crate::cache::{CacheStrategy, CachedSstMeta};
 #[cfg(feature = "vector_index")]
@@ -1850,6 +1850,18 @@ impl RowGroupReaderBuilder {
         if !self.has_nested_projection {
             return Ok(stream);
         }
+
+        let stream = if self.projection.json2_fallback_plan.is_empty() {
+            stream
+        } else {
+            Json2FallbackDecoder::new(
+                stream,
+                self.projection.projected_root_presence.clone(),
+                self.projection.json2_fallback_plan.clone(),
+                self.output_schema.clone(),
+            )?
+            .boxed()
+        };
 
         Ok(NestedSchemaAligner::new(
             stream,

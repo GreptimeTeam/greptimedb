@@ -13,18 +13,25 @@
 // limitations under the License.
 
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use datafusion_common::cast_column;
 use datafusion_common::format::DEFAULT_CAST_OPTIONS;
-use datatypes::arrow::array::{ArrayRef, new_null_array};
-use datatypes::arrow::datatypes::{DataType, FieldRef, SchemaRef};
+use datatypes::arrow::array::{ArrayRef, BinaryBuilder, StructArray, new_null_array};
+use datatypes::arrow::datatypes::{DataType, Field, FieldRef, Fields, Schema, SchemaRef};
 use datatypes::arrow::record_batch::RecordBatch;
+use datatypes::extension::json::is_structured_json_field;
+use datatypes::types::parse_string_to_jsonb;
+use datatypes::vectors::json::array::JsonArray;
 use futures::Stream;
 use futures::stream::BoxStream;
-use snafu::{ResultExt, ensure};
+use snafu::{OptionExt, ResultExt, ensure};
 
-use crate::error::{CastColumnSnafu, NewRecordBatchSnafu, Result, UnexpectedSnafu};
+use crate::error::{
+    CastColumnSnafu, DataTypeMismatchSnafu, NewRecordBatchSnafu, Result, UnexpectedSnafu,
+};
+use crate::sst::parquet::read_columns::{Json2FallbackItem, Json2FallbackPlan, ParquetNestedPath};
 
 /// Aligns projected batches to the expected output schema for nested projections.
 ///
@@ -63,6 +70,327 @@ pub struct NestedSchemaAligner<S> {
 }
 
 pub(crate) type ProjectedRecordBatchStream = BoxStream<'static, Result<RecordBatch>>;
+
+/// Recovers requested JSON2 nested paths from fallback parent values.
+#[derive(derive_more::Debug)]
+pub struct Json2FallbackDecoder<S> {
+    #[debug(skip)]
+    inner: S,
+    projected_root_presence: Vec<bool>,
+    plan: Json2FallbackPlan,
+    output_schema: SchemaRef,
+}
+
+impl<S> Json2FallbackDecoder<S>
+where
+    S: Stream<Item = Result<RecordBatch>>,
+{
+    pub fn new(
+        inner: S,
+        projected_root_presence: Vec<bool>,
+        plan: Json2FallbackPlan,
+        output_schema: SchemaRef,
+    ) -> Result<Json2FallbackDecoder<S>> {
+        ensure!(
+            projected_root_presence.len() == output_schema.fields().len(),
+            UnexpectedSnafu {
+                reason: format!(
+                    "Json2FallbackDecoder projected root presence len {} does not match output schema columns {}",
+                    projected_root_presence.len(),
+                    output_schema.fields().len()
+                ),
+            }
+        );
+
+        Ok(Json2FallbackDecoder {
+            inner,
+            projected_root_presence,
+            plan,
+            output_schema,
+        })
+    }
+}
+
+impl<S> Stream for Json2FallbackDecoder<S>
+where
+    S: Stream<Item = Result<RecordBatch>> + Unpin,
+{
+    type Item = Result<RecordBatch>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+
+        match Pin::new(&mut this.inner).poll_next(cx) {
+            Poll::Ready(Some(Ok(rb))) => Poll::Ready(Some(recover_json2_fallbacks(
+                rb,
+                &this.projected_root_presence,
+                &this.plan,
+                &this.output_schema,
+            ))),
+            Poll::Ready(Some(Err(err))) => Poll::Ready(Some(Err(err))),
+            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+fn recover_json2_fallbacks(
+    rb: RecordBatch,
+    projected_root_presence: &[bool],
+    plan: &Json2FallbackPlan,
+    output_schema: &SchemaRef,
+) -> Result<RecordBatch> {
+    if plan.is_empty() {
+        return Ok(rb);
+    }
+
+    let expected_input_col_num = projected_root_presence
+        .iter()
+        .filter(|matched| **matched)
+        .count();
+    ensure!(
+        rb.columns().len() == expected_input_col_num,
+        UnexpectedSnafu {
+            reason: format!(
+                "Json2FallbackDecoder expected {} input columns but got {}",
+                expected_input_col_num,
+                rb.columns().len()
+            ),
+        }
+    );
+
+    let mut columns = Vec::with_capacity(rb.num_columns());
+    let mut fields = Vec::with_capacity(rb.num_columns());
+    let mut input_idx = 0;
+
+    for (output_root_index, (field, present)) in output_schema
+        .fields()
+        .iter()
+        .zip(projected_root_presence)
+        .enumerate()
+    {
+        if !present {
+            continue;
+        }
+
+        let input = rb.column(input_idx);
+        let items = plan
+            .items
+            .iter()
+            .filter(|item| item.output_root_index == output_root_index)
+            .collect::<Vec<_>>();
+        if items.is_empty() {
+            columns.push(input.clone());
+            fields.push(Arc::new(rb.schema().field(input_idx).clone()));
+        } else {
+            let column = recover_json2_root(input, field, &items)?;
+            fields.push(field_with_data_type(field, column.data_type().clone()));
+            columns.push(column);
+        }
+
+        input_idx += 1;
+    }
+
+    RecordBatch::try_new(Arc::new(Schema::new(fields)), columns).context(NewRecordBatchSnafu)
+}
+
+fn recover_json2_root(
+    root: &ArrayRef,
+    root_field: &FieldRef,
+    items: &[&Json2FallbackItem],
+) -> Result<ArrayRef> {
+    let mut extracted = Vec::new();
+    for item in items {
+        let source = find_nested_array(root, &item.source_path[1..]);
+        for requested_path in &item.requested_paths {
+            let relative_path = requested_path
+                .strip_prefix(item.source_path.as_slice())
+                .with_context(|| UnexpectedSnafu {
+                    reason: format!(
+                        "requested path {:?} is not under fallback source {:?}",
+                        requested_path, item.source_path
+                    ),
+                })?;
+            let array = extract_jsonb_path(source.as_ref(), relative_path, root.len())?;
+            extracted.push((requested_path.clone(), array));
+        }
+    }
+
+    build_json2_root(root, root_field, &extracted)
+}
+
+fn find_nested_array(root: &ArrayRef, path: &[String]) -> Option<ArrayRef> {
+    let mut current = root.clone();
+    for name in path {
+        let struct_array = current.as_any().downcast_ref::<StructArray>()?;
+        let idx = struct_array
+            .fields()
+            .iter()
+            .position(|field| field.name() == name)?;
+        current = struct_array.column(idx).clone();
+    }
+    Some(current)
+}
+
+fn extract_jsonb_path(
+    source: Option<&ArrayRef>,
+    relative_path: &[String],
+    len: usize,
+) -> Result<ArrayRef> {
+    let Some(source) = source else {
+        return Ok(new_null_array(&DataType::Binary, len));
+    };
+
+    let json_array = JsonArray::from(source);
+    let mut values = Vec::with_capacity(len);
+    let mut total_bytes = 0;
+    for row in 0..len {
+        let value = json_array
+            .try_get_value(row)
+            .context(DataTypeMismatchSnafu)?;
+        let Some(value) = json_value_at_path(&value, relative_path) else {
+            values.push(None);
+            continue;
+        };
+        if value.is_null() {
+            values.push(None);
+            continue;
+        }
+
+        let bytes = parse_string_to_jsonb(&value.to_string()).context(DataTypeMismatchSnafu)?;
+        total_bytes += bytes.len();
+        values.push(Some(bytes));
+    }
+
+    let mut builder = BinaryBuilder::with_capacity(len, total_bytes);
+    for value in values {
+        builder.append_option(value);
+    }
+    Ok(Arc::new(builder.finish()))
+}
+
+fn json_value_at_path<'a>(
+    mut value: &'a serde_json::Value,
+    path: &[String],
+) -> Option<&'a serde_json::Value> {
+    for name in path {
+        value = value.as_object()?.get(name)?;
+    }
+    Some(value)
+}
+
+fn build_json2_root(
+    existing_root: &ArrayRef,
+    root_field: &FieldRef,
+    extracted: &[(ParquetNestedPath, ArrayRef)],
+) -> Result<ArrayRef> {
+    let DataType::Struct(fields) = root_field.data_type() else {
+        return UnexpectedSnafu {
+            reason: format!(
+                "Json2FallbackDecoder expected struct root field {}, got {}",
+                root_field.name(),
+                root_field.data_type()
+            ),
+        }
+        .fail();
+    };
+
+    build_json2_struct(existing_root, root_field.name(), fields, extracted)
+}
+
+fn build_json2_struct(
+    existing: &ArrayRef,
+    path: &str,
+    fields: &Fields,
+    extracted: &[(ParquetNestedPath, ArrayRef)],
+) -> Result<ArrayRef> {
+    let existing_struct = existing.as_any().downcast_ref::<StructArray>();
+    let mut columns = Vec::with_capacity(fields.len());
+    let mut output_fields = Vec::with_capacity(fields.len());
+
+    for field in fields {
+        let child_path = format!("{}.{}", path, field.name());
+        if let Some(array) = extracted
+            .iter()
+            .find(|(requested_path, _)| requested_path.join(".") == child_path)
+            .map(|(_, array)| array.clone())
+        {
+            output_fields.push(field_with_data_type(field, array.data_type().clone()));
+            columns.push(array);
+            continue;
+        }
+
+        let nested_extracted = extracted
+            .iter()
+            .filter(|(requested_path, _)| {
+                let requested = requested_path.join(".");
+                requested.starts_with(&format!("{child_path}."))
+            })
+            .map(|(path, array)| (path.clone(), array.clone()))
+            .collect::<Vec<_>>();
+        if !nested_extracted.is_empty() {
+            let existing_child = existing_struct.and_then(|struct_array| {
+                struct_array
+                    .fields()
+                    .iter()
+                    .position(|existing_field| existing_field.name() == field.name())
+                    .map(|idx| struct_array.column(idx).clone())
+            });
+            let existing_child =
+                existing_child.unwrap_or_else(|| new_null_array(field.data_type(), existing.len()));
+            let DataType::Struct(child_fields) = field.data_type() else {
+                return UnexpectedSnafu {
+                    reason: format!(
+                        "Json2FallbackDecoder expected struct field for nested path {child_path}, got {}",
+                        field.data_type()
+                    ),
+                }
+                .fail();
+            };
+            let child = build_json2_struct(
+                &existing_child,
+                &child_path,
+                child_fields,
+                &nested_extracted,
+            )?;
+            output_fields.push(field_with_data_type(field, child.data_type().clone()));
+            columns.push(child);
+            continue;
+        }
+
+        if let Some(existing_child) = existing_struct.and_then(|struct_array| {
+            struct_array
+                .fields()
+                .iter()
+                .position(|existing_field| existing_field.name() == field.name())
+                .map(|idx| struct_array.column(idx).clone())
+        }) {
+            output_fields.push(field_with_data_type(
+                field,
+                existing_child.data_type().clone(),
+            ));
+            columns.push(existing_child);
+        } else {
+            let nulls = new_null_array(field.data_type(), existing.len());
+            output_fields.push(field.clone());
+            columns.push(nulls);
+        }
+    }
+
+    let array = StructArray::try_new(Fields::from(output_fields), columns, None).map_err(|e| {
+        UnexpectedSnafu {
+            reason: e.to_string(),
+        }
+        .build()
+    })?;
+    Ok(Arc::new(array))
+}
+
+fn field_with_data_type(field: &FieldRef, data_type: DataType) -> FieldRef {
+    let mut output = Field::new(field.name(), data_type, field.is_nullable());
+    output.set_metadata(field.metadata().clone());
+    Arc::new(output)
+}
 
 impl<S> NestedSchemaAligner<S>
 where
@@ -199,6 +527,12 @@ fn align_array(array: &ArrayRef, field: &FieldRef) -> Result<ArrayRef> {
         return Ok(array.clone());
     }
 
+    if is_structured_json_field(field) {
+        return JsonArray::from(array)
+            .try_align(field.data_type())
+            .context(DataTypeMismatchSnafu);
+    }
+
     if !matches!(field.data_type(), DataType::Struct(_)) {
         return Ok(array.clone());
     }
@@ -210,8 +544,11 @@ fn align_array(array: &ArrayRef, field: &FieldRef) -> Result<ArrayRef> {
 mod tests {
     use std::sync::Arc;
 
-    use datatypes::arrow::array::{Array, ArrayRef, Int64Array, StringArray, StructArray};
+    use datatypes::arrow::array::{
+        Array, ArrayRef, BinaryArray, Int64Array, StringArray, StringViewArray, StructArray,
+    };
     use datatypes::arrow::datatypes::{DataType, Field, Fields, Schema};
+    use datatypes::extension::json::{JsonExtensionType, JsonMetadata};
     use futures::{StreamExt, stream};
 
     use super::*;
@@ -369,6 +706,91 @@ mod tests {
             .unwrap();
         assert_eq!(2, nested.columns().len());
         assert_eq!(2, nested.column(1).null_count());
+    }
+
+    #[tokio::test]
+    async fn test_json2_fallback_decoder_recovers_requested_paths() {
+        let source_values = [
+            Some(parse_string_to_jsonb(r#"{"b":1,"c":"x"}"#).unwrap()),
+            Some(parse_string_to_jsonb(r#"{"b":2}"#).unwrap()),
+            None,
+        ];
+        let source = Arc::new(BinaryArray::from_iter(
+            source_values.iter().map(|value| value.as_deref()),
+        )) as ArrayRef;
+        let input_fields = Fields::from(vec![Arc::new(Field::new("a", DataType::Binary, true))]);
+        let input = RecordBatch::try_new(
+            schema([Field::new(
+                "j",
+                DataType::Struct(input_fields.clone()),
+                true,
+            )]),
+            vec![Arc::new(StructArray::new(input_fields, vec![source], None))],
+        )
+        .unwrap();
+
+        let output_schema = schema([Field::new(
+            "j",
+            DataType::Struct(Fields::from(vec![Arc::new(Field::new(
+                "a",
+                DataType::Struct(Fields::from(vec![
+                    Arc::new(Field::new("b", DataType::Int64, true)),
+                    Arc::new(Field::new("c", DataType::Utf8View, true)),
+                ])),
+                true,
+            ))])),
+            true,
+        )
+        .with_extension_type(JsonExtensionType::new(Arc::new(JsonMetadata::default())))]);
+        let plan = Json2FallbackPlan {
+            items: vec![Json2FallbackItem {
+                output_root_index: 0,
+                source_path: vec!["j".to_string(), "a".to_string()],
+                requested_paths: vec![
+                    vec!["j".to_string(), "a".to_string(), "b".to_string()],
+                    vec!["j".to_string(), "a".to_string(), "c".to_string()],
+                ],
+            }],
+        };
+
+        let decoder = Json2FallbackDecoder::new(
+            stream::iter([Ok(input)]),
+            vec![true],
+            plan,
+            output_schema.clone(),
+        )
+        .unwrap();
+        let mut aligner =
+            NestedSchemaAligner::new(decoder, vec![true], output_schema.clone()).unwrap();
+        let output = aligner.next().await.unwrap().unwrap();
+
+        assert_eq!(output_schema, output.schema());
+        let j = output
+            .column(0)
+            .as_any()
+            .downcast_ref::<StructArray>()
+            .unwrap();
+        let a = j.column(0).as_any().downcast_ref::<StructArray>().unwrap();
+        assert_eq!(
+            &[Some(1), Some(2), None],
+            a.column(0)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap()
+                .iter()
+                .collect::<Vec<_>>()
+                .as_slice()
+        );
+        assert_eq!(
+            &[Some("x"), None, None],
+            a.column(1)
+                .as_any()
+                .downcast_ref::<StringViewArray>()
+                .unwrap()
+                .iter()
+                .collect::<Vec<_>>()
+                .as_slice()
+        );
     }
 
     fn schema(fields: impl IntoIterator<Item = Field>) -> SchemaRef {

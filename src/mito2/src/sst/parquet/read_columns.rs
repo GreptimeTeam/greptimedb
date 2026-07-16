@@ -179,6 +179,14 @@ pub struct ProjectionMaskPlan {
     /// A boolean mask in output schema order indicating whether each projected root
     /// has data read from the current parquet file.
     ///
+    /// - `true`: parquet reads either requested nested data or a fallback parent
+    ///   for this root.
+    /// - `false`: this root is absent and must be synthesized later.
+    ///
+    /// If a root appears in [`ProjectionMaskPlan::json2_fallback_plan`], the read
+    /// data must be recovered by the JSON2 fallback decoder before nested schema
+    /// alignment.
+    ///
     /// The length of `projected_root_presence` is always equal to the
     /// number of fields in the output schema.
     pub projected_root_presence: Vec<bool>,
@@ -201,7 +209,8 @@ impl Json2FallbackPlan {
 /// Requested paths recovered from one fallback parent.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Json2FallbackItem {
-    /// Root column position in the final output schema.
+    /// Root column position in the final output schema, including roots that may
+    /// be synthesized later. This is not a column index in the raw parquet batch.
     pub output_root_index: usize,
     /// Fallback parent path read from parquet. Includes the root name.
     pub source_path: ParquetNestedPath,
@@ -626,6 +635,36 @@ mod tests {
             plan.mask
         );
         assert!(plan.json2_fallback_plan.is_empty());
+    }
+
+    #[test]
+    fn test_mixed_exact_and_fallback_paths() {
+        let parquet_schema_desc = build_test_variant_parent_schema();
+        let nested_paths = vec![
+            vec!["j".to_string(), "a".to_string(), "x".to_string()],
+            vec!["j".to_string(), "b".to_string(), "x".to_string()],
+        ];
+        let projection = ParquetReadColumns::from_deduped(vec![
+            ParquetReadColumn::new(0)
+                .with_nested_paths(nested_paths)
+                .with_nested_path_read_strategy(NestedReadStrategy::FallbackToNearestVariantParent),
+        ]);
+
+        let plan = build_projection_plan(&projection, &parquet_schema_desc);
+
+        assert_eq!(vec![true], plan.projected_root_presence);
+        assert_eq!(
+            ProjectionMask::leaves(&parquet_schema_desc, vec![0, 1]),
+            plan.mask
+        );
+        assert_eq!(
+            vec![Json2FallbackItem {
+                output_root_index: 0,
+                source_path: vec!["j".to_string(), "a".to_string()],
+                requested_paths: vec![vec!["j".to_string(), "a".to_string(), "x".to_string()]],
+            }],
+            plan.json2_fallback_plan.items
+        );
     }
 
     #[test]
