@@ -196,7 +196,7 @@ impl MetricEngineInner {
             .map(|&index| {
                 all_logical_columns
                     .get(index)
-                    .cloned()
+                    .map(String::as_str)
                     .with_context(|| InvalidRequestSnafu {
                         region_id: logical_region_id,
                         reason: format!("projection index {index} is out of bounds"),
@@ -215,7 +215,7 @@ impl MetricEngineInner {
 
         for name in projected_logical_names {
             // Safety: logical columns is a strict subset of physical columns
-            physical_projection.push(physical_metadata.column_index_by_name(&name).unwrap());
+            physical_projection.push(physical_metadata.column_index_by_name(name).unwrap());
         }
 
         Ok(physical_projection)
