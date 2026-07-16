@@ -399,8 +399,13 @@ impl MergeScanExec {
                     &captured_remote_dyn_filters,
                 );
                 if explain_verbose {
-                    region_query_ctx
-                        .set_extension(SUPPORT_FLIGHT_METRICS_BEFORE_BATCH_EXTENSION_KEY, "true");
+                    let remote_query_id = region_query_ctx.remote_query_id().map(str::to_string);
+                    if let Some(remote_query_id) = remote_query_id {
+                        region_query_ctx.set_extension(
+                            SUPPORT_FLIGHT_METRICS_BEFORE_BATCH_EXTENSION_KEY,
+                            remote_query_id,
+                        );
+                    }
                 }
                 let request = QueryRequest {
                     header: Some(RegionRequestHeader {
