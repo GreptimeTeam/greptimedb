@@ -192,6 +192,18 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display(
+        "Cannot assign a stable field id to native histogram sub-field '{}' of column id {} (unknown sub-field name or derived id overflows i32)",
+        field_name,
+        column_id
+    ))]
+    InvalidNativeHistogramSubfield {
+        column_id: i32,
+        field_name: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Region {} not found", region_id))]
     RegionNotFound {
         region_id: RegionId,
@@ -1437,7 +1449,7 @@ impl ErrorExt for Error {
             | PuffinPurgeStager { source, .. } => source.status_code(),
             CleanDir { .. } => StatusCode::Unexpected,
             InvalidConfig { .. } => StatusCode::InvalidArguments,
-            StaleLogEntry { .. } => StatusCode::Unexpected,
+            StaleLogEntry { .. } | InvalidNativeHistogramSubfield { .. } => StatusCode::Unexpected,
 
             External { source, .. } => source.status_code(),
 

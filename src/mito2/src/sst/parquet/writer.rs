@@ -458,7 +458,7 @@ where
                 self.bytes_written.clone(),
             );
             let arrow_writer =
-                AsyncArrowWriter::try_new(writer, maybe_wrap_schema(schema), Some(writer_props))
+                AsyncArrowWriter::try_new(writer, maybe_wrap_schema(schema)?, Some(writer_props))
                     .context(WriteParquetSnafu)?;
             self.writer = Some(arrow_writer);
 
