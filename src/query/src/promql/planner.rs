@@ -4357,6 +4357,61 @@ impl PromPlanner {
         }
     }
 
+    fn string_value_data_type(data_type: &ArrowDataType) -> Option<&ArrowDataType> {
+        match data_type {
+            data_type if data_type.is_string() => Some(data_type),
+            ArrowDataType::Dictionary(_, value_type) if value_type.is_string() => Some(value_type),
+            _ => None,
+        }
+    }
+
+    fn string_scalar_value(
+        data_type: &ArrowDataType,
+        value: Option<String>,
+    ) -> Option<ScalarValue> {
+        match data_type {
+            ArrowDataType::Utf8 => Some(ScalarValue::Utf8(value)),
+            ArrowDataType::LargeUtf8 => Some(ScalarValue::LargeUtf8(value)),
+            ArrowDataType::Utf8View => Some(ScalarValue::Utf8View(value)),
+            ArrowDataType::Dictionary(key_type, value_type) => Some(ScalarValue::Dictionary(
+                key_type.clone(),
+                Box::new(Self::string_scalar_value(value_type, value)?),
+            )),
+            _ => None,
+        }
+    }
+
+    fn common_label_data_type(
+        left: Option<&ArrowDataType>,
+        right: Option<&ArrowDataType>,
+    ) -> Option<ArrowDataType> {
+        match (left, right) {
+            (Some(left), Some(right)) if left == right => {
+                Self::string_value_data_type(left).map(|_| left.clone())
+            }
+            (Some(left), Some(right))
+                if Self::string_value_data_type(left).is_some()
+                    && Self::string_value_data_type(right).is_some() =>
+            {
+                match (left, right) {
+                    (ArrowDataType::Dictionary(_, _), _) => Some(left.clone()),
+                    (_, ArrowDataType::Dictionary(_, _)) => Some(right.clone()),
+                    (ArrowDataType::LargeUtf8, _) | (_, ArrowDataType::LargeUtf8) => {
+                        Some(ArrowDataType::LargeUtf8)
+                    }
+                    (ArrowDataType::Utf8View, ArrowDataType::Utf8View) => {
+                        Some(ArrowDataType::Utf8View)
+                    }
+                    _ => Some(ArrowDataType::Utf8),
+                }
+            }
+            (Some(data_type), None) | (None, Some(data_type)) => {
+                Self::string_value_data_type(data_type).map(|_| data_type.clone())
+            }
+            (None, None) => Some(ArrowDataType::Utf8),
+        }
+    }
+
     // TODO(ruihang): change function name
     #[allow(clippy::too_many_arguments)]
     fn or_operator(
@@ -4389,14 +4444,6 @@ impl PromPlanner {
             .union(&right_tag_cols_set)
             .cloned()
             .collect::<HashSet<_>>();
-        let tags_not_in_left = all_tags
-            .difference(&left_tag_cols_set)
-            .cloned()
-            .collect::<Vec<_>>();
-        let tags_not_in_right = all_tags
-            .difference(&right_tag_cols_set)
-            .cloned()
-            .collect::<Vec<_>>();
         let left_qualifier = left.schema().qualified_field(0).0.cloned();
         let right_qualifier = right.schema().qualified_field(0).0.cloned();
         let left_qualifier_string = left_qualifier
@@ -4477,6 +4524,45 @@ impl PromPlanner {
             }
             .fail();
         };
+        let left_tag_types = left_tag_cols_set
+            .iter()
+            .map(|label| {
+                left.schema()
+                    .fields()
+                    .iter()
+                    .find(|field| field.name() == label)
+                    .map(|field| (label.clone(), field.data_type().clone()))
+                    .with_context(|| ColumnNotFoundSnafu { col: label.clone() })
+            })
+            .collect::<Result<HashMap<_, _>>>()?;
+        let right_tag_types = right_tag_cols_set
+            .iter()
+            .map(|label| {
+                right
+                    .schema()
+                    .fields()
+                    .iter()
+                    .find(|field| field.name() == label)
+                    .map(|field| (label.clone(), field.data_type().clone()))
+                    .with_context(|| ColumnNotFoundSnafu { col: label.clone() })
+            })
+            .collect::<Result<HashMap<_, _>>>()?;
+        let mut target_tag_types = HashMap::with_capacity(all_tags.len());
+        for label in &all_tags {
+            let Some(data_type) =
+                Self::common_label_data_type(left_tag_types.get(label), right_tag_types.get(label))
+            else {
+                return UnexpectedPlanExprSnafu {
+                    desc: format!(
+                        "OR label {label} has incompatible types: {:?} and {:?}",
+                        left_tag_types.get(label),
+                        right_tag_types.get(label)
+                    ),
+                }
+                .fail();
+            };
+            target_tag_types.insert(label.clone(), data_type);
+        }
         let left_has_tsid = left
             .schema()
             .fields()
@@ -4522,6 +4608,28 @@ impl PromPlanner {
             .collect::<HashSet<_>>();
 
         // step 1: align schema using project, fill non-exist columns with null
+        let aligned_label_expr = |col: &String, source_types: &HashMap<String, ArrowDataType>| {
+            let target_type = &target_tag_types[col];
+            if let Some(source_type) = source_types.get(col) {
+                let expr = DfExpr::Column(Column::new(None::<String>, col));
+                if source_type == target_type {
+                    expr
+                } else {
+                    DfExpr::Cast(Cast {
+                        expr: Box::new(expr),
+                        data_type: target_type.clone(),
+                    })
+                    .alias(col.clone())
+                }
+            } else {
+                DfExpr::Literal(
+                    Self::string_scalar_value(target_type, None)
+                        .expect("target label type is a logical string"),
+                    None,
+                )
+                .alias(col.clone())
+            }
+        };
         let left_proj_exprs = all_columns.iter().map(|col| {
             if col == left_field_col && left_field.1 != target_field_type {
                 DfExpr::Cast(Cast {
@@ -4532,8 +4640,8 @@ impl PromPlanner {
                     data_type: target_field_type.clone(),
                 })
                 .alias(left_field_col.clone())
-            } else if tags_not_in_left.contains(col) {
-                DfExpr::Literal(ScalarValue::Utf8(None), None).alias(col.clone())
+            } else if target_tag_types.contains_key(col) {
+                aligned_label_expr(col, &left_tag_types)
             } else {
                 DfExpr::Column(Column::new(None::<String>, col))
             }
@@ -4561,8 +4669,8 @@ impl PromPlanner {
                 } else {
                     expr
                 }
-            } else if tags_not_in_right.contains(col) {
-                DfExpr::Literal(ScalarValue::Utf8(None), None).alias(col.clone())
+            } else if target_tag_types.contains_key(col) {
+                aligned_label_expr(col, &right_tag_types)
             } else {
                 DfExpr::Column(Column::new(None::<String>, col))
             }
@@ -4673,16 +4781,14 @@ impl PromPlanner {
                 (Some((_, data_type)), None) | (None, Some((_, data_type))) => data_type.clone(),
                 (None, None) => ArrowDataType::Utf8,
             };
-            let empty = match data_type {
-                ArrowDataType::Utf8 => ScalarValue::Utf8(Some(String::new())),
-                ArrowDataType::LargeUtf8 => ScalarValue::LargeUtf8(Some(String::new())),
-                _ => {
-                    return UnexpectedPlanExprSnafu {
-                        desc: format!("OR match label {label} must be a string"),
-                    }
-                    .fail();
+            let Some(value_type) = Self::string_value_data_type(&data_type).cloned() else {
+                return UnexpectedPlanExprSnafu {
+                    desc: format!("OR match label {label} must be a string"),
                 }
+                .fail();
             };
+            let empty = Self::string_scalar_value(&value_type, Some(String::new()))
+                .expect("match label value type is a string");
             let internal_name = loop {
                 let name = format!("__promql_or_match_{next_internal_column}");
                 next_internal_column += 1;
@@ -4691,13 +4797,19 @@ impl PromPlanner {
                 }
             };
             let normalize = |field: Option<(Option<TableReference>, ArrowDataType)>| {
-                let expr = if let Some((qualifier, _)) = field {
+                let expr = if let Some((qualifier, data_type)) = field {
+                    let column = DfExpr::Column(Column::new(qualifier, label.clone()));
+                    let column = if data_type == value_type {
+                        column
+                    } else {
+                        DfExpr::Cast(Cast {
+                            expr: Box::new(column),
+                            data_type: value_type.clone(),
+                        })
+                    };
                     DfExpr::ScalarFunction(ScalarFunction {
                         func: coalesce(),
-                        args: vec![
-                            DfExpr::Column(Column::new(qualifier, label.clone())),
-                            DfExpr::Literal(empty.clone(), None),
-                        ],
+                        args: vec![column, DfExpr::Literal(empty.clone(), None)],
                     })
                 } else {
                     DfExpr::Literal(empty.clone(), None)
