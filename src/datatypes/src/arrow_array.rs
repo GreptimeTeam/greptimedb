@@ -20,6 +20,7 @@ use arrow::datatypes::{
     TimestampMicrosecondType, TimestampMillisecondType, TimestampNanosecondType,
     TimestampSecondType, UInt8Type, UInt16Type, UInt32Type, UInt64Type,
 };
+use arrow::downcast_dictionary_array;
 use arrow_array::Array;
 use common_time::time::Time;
 use common_time::{Duration, Timestamp};
@@ -158,7 +159,7 @@ pub fn string_array_value_at_index(array: &ArrayRef, i: usize) -> Option<&str> {
         DataType::Dictionary(key_type, value_type)
             if key_type.is_integer() && value_type.is_string() =>
         {
-            arrow::downcast_dictionary_array! {
+            downcast_dictionary_array! {
                 array => string_array_value_at_index(array.values(), array.key(i)?),
                 _ => None,
             }
