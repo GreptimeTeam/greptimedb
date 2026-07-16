@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use common_decimal::Decimal128;
@@ -1036,22 +1036,25 @@ fn decode_json_value_parts(value: &v1::JsonValue) -> (JsonVariant, JsonNativeTyp
             )
         }
         json_value::Value::Object(object) => {
-            let mut variants = BTreeMap::new();
-            let mut fields = BTreeMap::new();
+            let mut variants = Vec::with_capacity(object.entries.len());
+            let mut fields = Vec::with_capacity(object.entries.len());
             for entry in &object.entries {
                 let Some(value) = &entry.value else {
                     continue;
                 };
                 let (variant, json_type) = decode_json_value_parts(value);
-                variants.insert(entry.key.clone(), variant);
-                fields.insert(entry.key.clone(), json_type);
+                variants.push((entry.key.clone(), variant));
+                fields.push((entry.key.clone(), json_type));
             }
             let json_type = if fields.is_empty() {
                 JsonNativeType::Null
             } else {
-                JsonNativeType::Object(fields)
+                JsonNativeType::Object(fields.into_iter().collect())
             };
-            (JsonVariant::Object(variants), json_type)
+            (
+                JsonVariant::Object(variants.into_iter().collect()),
+                json_type,
+            )
         }
         json_value::Value::Variant(x) => (JsonVariant::Variant(x.clone()), JsonNativeType::Variant),
     }
