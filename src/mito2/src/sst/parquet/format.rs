@@ -1288,7 +1288,7 @@ mod tests {
         let expect_record =
             RecordBatch::try_new(build_test_flat_sst_schema_with_field_ids(), columns).unwrap();
 
-        let actual = format.convert_batch(batch).unwrap();
+        let actual = format.convert_batch(&batch).unwrap();
         assert_eq!(expect_record, actual);
     }
 
@@ -1319,7 +1319,7 @@ mod tests {
         )
         .unwrap();
 
-        let actual = format.convert_batch(batch).unwrap();
+        let actual = format.convert_batch(&batch).unwrap();
         assert_eq!(expected_record, actual);
     }
 

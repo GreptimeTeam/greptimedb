@@ -38,6 +38,7 @@ use crate::error::{
 use crate::metrics::{FORBIDDEN_OPERATION_COUNT, MITO_OPERATION_ELAPSED};
 use crate::row_modifier::{RowsIter, TableIdInput};
 use crate::utils::to_data_region_id;
+use crate::value_split::split_metric_values;
 
 impl MetricEngineInner {
     /// Dispatch region put request
@@ -147,10 +148,13 @@ impl MetricEngineInner {
             .await?;
 
         // Merge requests according to encoding strategy
-        let (merged_request, total_affected_rows) = match primary_key_encoding {
+        let (mut merged_request, total_affected_rows) = match primary_key_encoding {
             PrimaryKeyEncoding::Sparse => self.merge_sparse_batch(physical_region_id, requests)?,
             PrimaryKeyEncoding::Dense => self.merge_dense_batch(data_region_id, requests)?,
         };
+        if self.config.experimental_enable_metric_value_split {
+            split_metric_values(&mut merged_request.rows);
+        }
 
         // Write once to the physical region
         self.data_region
@@ -450,6 +454,9 @@ impl MetricEngineInner {
             &mut request.rows,
             primary_key_encoding,
         )?;
+        if self.config.experimental_enable_metric_value_split {
+            split_metric_values(&mut request.rows);
+        }
         if primary_key_encoding == PrimaryKeyEncoding::Sparse {
             request.hint = Some(WriteHint {
                 primary_key_encoding: PrimaryKeyEncodingProto::Sparse.into(),
@@ -793,7 +800,9 @@ mod tests {
     use store_api::storage::consts::PRIMARY_KEY_COLUMN_NAME;
 
     use super::*;
+    use crate::config::EngineConfig;
     use crate::test_util::{self, TestEnv};
+    use crate::value_split::{metric_value_int_column_id, metric_value_int_column_name};
 
     fn assert_merged_schema(rows: &Rows, expect_sparse: bool) {
         let column_names: HashSet<String> = rows
@@ -1204,7 +1213,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_metric_value_split_across_sst_formats_and_compaction() {
-        let env = TestEnv::new().await;
+        let env = TestEnv::with_prefix_and_config(
+            "test_metric_value_split_across_sst_formats_and_compaction",
+            EngineConfig {
+                experimental_enable_metric_value_split: true,
+                ..Default::default()
+            },
+        )
+        .await;
         env.init_metric_region().await;
 
         let schema = test_util::row_schema_with_tags(&["job"]);
@@ -1257,21 +1273,40 @@ mod tests {
             .scan_to_stream(physical_region_id, ScanRequest::default())
             .await
             .unwrap();
-        let int_column_name =
-            store_api::metric_engine_consts::metric_engine_value_int_column_name(greptime_value());
-        let visible_mito_metadata = env.mito().get_metadata(data_region_id).await.unwrap();
-        let physical_mito_metadata = env.mito().get_physical_metadata(data_region_id).unwrap();
+        let int_column_name = metric_value_int_column_name(greptime_value());
+        let visible_metric_metadata = env.metric().get_metadata(physical_region_id).await.unwrap();
+        let physical_mito_metadata = env.mito().get_metadata(data_region_id).await.unwrap();
         assert!(
-            visible_mito_metadata
+            visible_metric_metadata
                 .column_by_name(&int_column_name)
                 .is_none(),
-            "mito query metadata should hide split companion columns"
+            "metric metadata should hide split companion columns"
         );
         assert!(
             physical_mito_metadata
                 .column_by_name(&int_column_name)
                 .is_some(),
             "mito physical metadata should retain split companion columns"
+        );
+        assert_eq!(
+            physical_mito_metadata
+                .column_by_name(&int_column_name)
+                .unwrap()
+                .column_id,
+            metric_value_int_column_id(
+                physical_mito_metadata
+                    .column_by_name(greptime_value())
+                    .unwrap()
+                    .column_id
+            )
+        );
+        assert_eq!(
+            physical_mito_metadata
+                .column_by_name("job")
+                .unwrap()
+                .column_id,
+            2,
+            "the internal companion must not consume a user column ID"
         );
         assert!(
             visible_physical_stream

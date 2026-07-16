@@ -12,24 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::fmt;
 use std::sync::Arc;
 
 use api::v1::SemanticType;
-use common_error::ext::BoxedError;
-use common_recordbatch::SendableRecordBatchStream;
 use common_telemetry::{debug, error, tracing};
 use datafusion::logical_expr;
-use datafusion::physical_expr::PhysicalExpr;
-use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
-use datafusion::physical_plan::{DisplayAs, DisplayFormatType};
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::{RegionMetadataBuilder, RegionMetadataRef};
 use store_api::metric_engine_consts::DATA_SCHEMA_TABLE_ID_COLUMN_NAME;
-use store_api::region_engine::{
-    PrepareRequest, QueryScanContext, RegionEngine, RegionScanner, RegionScannerRef,
-    ScannerProperties,
-};
+use store_api::region_engine::{RegionEngine, RegionScannerRef};
 use store_api::storage::{RegionId, ScanRequest, SequenceNumber};
 
 use crate::engine::MetricEngineInner;
@@ -39,6 +30,7 @@ use crate::error::{
 };
 use crate::metrics::MITO_OPERATION_ELAPSED;
 use crate::utils;
+use crate::value_split::{MetricRegionScanner, prepare_value_split_scan, visible_region_metadata};
 
 impl MetricEngineInner {
     #[tracing::instrument(skip_all)]
@@ -63,16 +55,38 @@ impl MetricEngineInner {
     async fn read_physical_region(
         &self,
         region_id: RegionId,
-        request: ScanRequest,
+        mut request: ScanRequest,
     ) -> Result<RegionScannerRef> {
         let _timer = MITO_OPERATION_ELAPSED
             .with_label_values(&["read_physical"])
             .start_timer();
 
-        self.mito
+        let physical_metadata = self
+            .mito
+            .get_metadata(region_id)
+            .await
+            .context(MitoReadOperationSnafu)?;
+        let visible_metadata = visible_region_metadata(&physical_metadata)?;
+        let mapper = prepare_value_split_scan(
+            region_id,
+            &mut request,
+            &physical_metadata,
+            &visible_metadata,
+        )?;
+        let scanner = self
+            .mito
             .handle_query(region_id, request)
             .await
-            .context(MitoReadOperationSnafu)
+            .context(MitoReadOperationSnafu)?;
+
+        Ok(match mapper {
+            Some(mapper) => Box::new(MetricRegionScanner::new(
+                scanner,
+                Some(mapper),
+                visible_metadata,
+            )),
+            None => scanner,
+        })
     }
 
     async fn read_logical_region(
@@ -94,24 +108,29 @@ impl MetricEngineInner {
             .get_metadata(data_region_id)
             .await
             .context(MitoReadOperationSnafu)?;
-        let request = Self::transform_request_with_metadata(
+        let visible_metadata = visible_region_metadata(&physical_metadata)?;
+        let mut request = Self::transform_request_with_metadata(
             logical_region_id,
             request,
             &logical_metadata,
+            &visible_metadata,
+        )?;
+        let mapper = prepare_value_split_scan(
+            data_region_id,
+            &mut request,
             &physical_metadata,
+            &visible_metadata,
         )?;
         let mut scanner = self
             .mito
             .handle_query(data_region_id, request)
             .await
             .context(MitoReadOperationSnafu)?;
+        scanner = Box::new(MetricRegionScanner::new(scanner, mapper, logical_metadata));
         scanner.set_logical_region(true);
         scanner.set_query_load_region_id(data_region_id);
 
-        Ok(Box::new(LogicalRegionScanner {
-            inner: scanner,
-            metadata: logical_metadata,
-        }))
+        Ok(scanner)
     }
 
     pub async fn get_last_seq_num(&self, region_id: RegionId) -> Result<SequenceNumber> {
@@ -132,10 +151,12 @@ impl MetricEngineInner {
             self.state.read().unwrap().exist_physical_region(region_id);
 
         if is_reading_physical_region {
-            self.mito
+            let metadata = self
+                .mito
                 .get_metadata(region_id)
                 .await
-                .context(MitoReadOperationSnafu)
+                .context(MitoReadOperationSnafu)?;
+            visible_region_metadata(&metadata)
         } else {
             let physical_region_id = self.get_physical_region_id(region_id).await?;
             self.logical_region_metadata(physical_region_id, region_id)
@@ -176,12 +197,20 @@ impl MetricEngineInner {
             .get_metadata(utils::to_data_region_id(physical_region_id))
             .await
             .context(MitoReadOperationSnafu)?;
-        Self::transform_request_with_metadata(
+        let visible_metadata = visible_region_metadata(&physical_metadata)?;
+        let mut request = Self::transform_request_with_metadata(
             logical_region_id,
             request,
             &logical_metadata,
+            &visible_metadata,
+        )?;
+        prepare_value_split_scan(
+            physical_region_id,
+            &mut request,
             &physical_metadata,
-        )
+            &visible_metadata,
+        )?;
+        Ok(request)
     }
 
     fn transform_request_with_metadata(
@@ -253,72 +282,6 @@ impl MetricEngineInner {
             .context(InvalidMetadataSnafu)?;
 
         Ok(Arc::new(logical_metadata))
-    }
-}
-
-#[derive(Debug)]
-struct LogicalRegionScanner {
-    inner: RegionScannerRef,
-    metadata: RegionMetadataRef,
-}
-
-impl DisplayAs for LogicalRegionScanner {
-    fn fmt_as(&self, t: DisplayFormatType, f: &mut fmt::Formatter) -> fmt::Result {
-        self.inner.fmt_as(t, f)
-    }
-}
-
-impl RegionScanner for LogicalRegionScanner {
-    fn name(&self) -> &str {
-        self.inner.name()
-    }
-
-    fn properties(&self) -> &ScannerProperties {
-        self.inner.properties()
-    }
-
-    fn schema(&self) -> datatypes::schema::SchemaRef {
-        self.inner.schema()
-    }
-
-    fn metadata(&self) -> RegionMetadataRef {
-        self.metadata.clone()
-    }
-
-    fn prepare(&mut self, request: PrepareRequest) -> std::result::Result<(), BoxedError> {
-        self.inner.prepare(request)
-    }
-
-    fn scan_partition(
-        &self,
-        ctx: &QueryScanContext,
-        metrics_set: &ExecutionPlanMetricsSet,
-        partition: usize,
-    ) -> std::result::Result<SendableRecordBatchStream, BoxedError> {
-        self.inner.scan_partition(ctx, metrics_set, partition)
-    }
-
-    fn has_predicate_without_region(&self) -> bool {
-        self.inner.has_predicate_without_region()
-    }
-
-    fn add_dyn_filter_to_predicate(
-        &mut self,
-        filter_exprs: Vec<Arc<dyn PhysicalExpr>>,
-    ) -> Vec<bool> {
-        self.inner.add_dyn_filter_to_predicate(filter_exprs)
-    }
-
-    fn set_logical_region(&mut self, logical_region: bool) {
-        self.inner.set_logical_region(logical_region);
-    }
-
-    fn set_query_load_region_id(&mut self, region_id: RegionId) {
-        self.inner.set_query_load_region_id(region_id);
-    }
-
-    fn snapshot_sequence(&self) -> Option<SequenceNumber> {
-        self.inner.snapshot_sequence()
     }
 }
 

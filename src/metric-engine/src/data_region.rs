@@ -73,7 +73,9 @@ impl DataRegion {
         let region_id = utils::to_data_region_id(region_id);
 
         let num_columns = columns.len();
-        let request = self.assemble_alter_request(region_id, columns, index_options)?;
+        let request = self
+            .assemble_alter_request(region_id, columns, index_options)
+            .await?;
 
         let _timer = MITO_DDL_DURATION.start_timer();
 
@@ -90,7 +92,7 @@ impl DataRegion {
 
     /// Generate wrapped [RegionAlterRequest] with given [ColumnMetadata].
     /// This method will modify `columns` in-place.
-    fn assemble_alter_request(
+    async fn assemble_alter_request(
         &self,
         region_id: RegionId,
         columns: Vec<ColumnMetadata>,
@@ -99,7 +101,8 @@ impl DataRegion {
         // retrieve underlying version
         let region_metadata = self
             .mito
-            .get_physical_metadata(region_id)
+            .get_metadata(region_id)
+            .await
             .context(MitoReadOperationSnafu)?;
 
         // find the max column id
@@ -204,11 +207,15 @@ impl DataRegion {
             .map(|result| result.affected_rows)
     }
 
-    pub fn physical_columns(&self, physical_region_id: RegionId) -> Result<Vec<ColumnMetadata>> {
+    pub async fn physical_columns(
+        &self,
+        physical_region_id: RegionId,
+    ) -> Result<Vec<ColumnMetadata>> {
         let data_region_id = utils::to_data_region_id(physical_region_id);
         let metadata = self
             .mito
-            .get_physical_metadata(data_region_id)
+            .get_metadata(data_region_id)
+            .await
             .context(MitoReadOperationSnafu)?;
         Ok(metadata.column_metadatas.clone())
     }
@@ -261,7 +268,8 @@ mod test {
 
         let current_version = env
             .mito()
-            .get_physical_metadata(utils::to_data_region_id(env.default_physical_region_id()))
+            .get_metadata(utils::to_data_region_id(env.default_physical_region_id()))
+            .await
             .unwrap()
             .schema_version;
         // TestEnv will create a logical region which changes the version to 1.
@@ -298,19 +306,17 @@ mod test {
 
         let new_metadata = env
             .mito()
-            .get_physical_metadata(utils::to_data_region_id(env.default_physical_region_id()))
+            .get_metadata(utils::to_data_region_id(env.default_physical_region_id()))
+            .await
             .unwrap();
         let column_names = new_metadata
             .column_metadatas
             .iter()
-            .map(|c| c.column_schema.name.as_str())
+            .map(|c| &c.column_schema.name)
             .collect::<Vec<_>>();
-        let value_int_name =
-            store_api::metric_engine_consts::metric_engine_value_int_column_name(greptime_value());
         let expected = vec![
             greptime_timestamp(),
             greptime_value(),
-            value_int_name.as_str(),
             "__table_id",
             "__tsid",
             "job",

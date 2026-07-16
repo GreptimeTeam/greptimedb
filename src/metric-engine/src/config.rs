@@ -26,6 +26,9 @@ pub struct EngineConfig {
     /// Whether to use sparse primary key encoding.
     #[serde(default = "EngineConfig::default_sparse_primary_key_encoding")]
     pub sparse_primary_key_encoding: bool,
+    /// Whether to store exact integral metric values in internal Int64 columns.
+    #[serde(default)]
+    pub experimental_enable_metric_value_split: bool,
     /// The flush interval of the metadata region.
     #[serde(
         with = "humantime_serde",
@@ -39,6 +42,7 @@ impl Default for EngineConfig {
         Self {
             flush_metadata_region_interval: DEFAULT_FLUSH_METADATA_REGION_INTERVAL,
             sparse_primary_key_encoding: Self::default_sparse_primary_key_encoding(),
+            experimental_enable_metric_value_split: false,
         }
     }
 }

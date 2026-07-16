@@ -63,7 +63,6 @@ use crate::request::{
 use crate::schedule::scheduler::{Job, SchedulerRef};
 use crate::sst::file::FileMeta;
 use crate::sst::parquet::metadata::extract_primary_key_range;
-use crate::sst::parquet::metric_value_split::metric_value_split_columns;
 use crate::sst::parquet::{
     DEFAULT_READ_BATCH_SIZE, DEFAULT_ROW_GROUP_SIZE, SstInfo, WriteOptions, flat_format,
 };
@@ -645,14 +644,11 @@ impl RegionFlushTask {
         );
         let field_column_start =
             flat_format::field_column_start(&version.metadata, batch_schema.fields().len());
-        let disable_encoded_ranges =
-            !metric_value_split_columns(&version.metadata, &batch_schema).is_empty();
         let flat_sources = memtable_flat_sources(
             batch_schema,
             mem_ranges,
             &version.options,
             field_column_start,
-            disable_encoded_ranges,
         )?;
         let mut tasks = Vec::with_capacity(flat_sources.encoded.len() + flat_sources.sources.len());
         let num_encoded = flat_sources.encoded.len();
@@ -824,7 +820,6 @@ fn memtable_flat_sources(
     mem_ranges: MemtableRanges,
     options: &RegionOptions,
     field_column_start: usize,
-    disable_encoded_ranges: bool,
 ) -> Result<FlatSources> {
     let MemtableRanges { ranges } = mem_ranges;
     let mut flat_sources = FlatSources {
@@ -837,7 +832,7 @@ fn memtable_flat_sources(
 
         let only_range = ranges.into_values().next().unwrap();
         let max_sequence = only_range.stats().max_sequence();
-        if !disable_encoded_ranges && let Some(encoded) = only_range.encoded() {
+        if let Some(encoded) = only_range.encoded() {
             flat_sources.encoded.push((encoded, max_sequence));
         } else {
             let iter = only_range.build_record_batch_iter(None, None)?;
@@ -881,7 +876,7 @@ fn memtable_flat_sources(
         };
 
         for (_range_id, range) in ranges {
-            if !disable_encoded_ranges && let Some(encoded) = range.encoded() {
+            if let Some(encoded) = range.encoded() {
                 let max_sequence = range.stats().max_sequence();
                 flat_sources.encoded.push((encoded, max_sequence));
                 continue;
@@ -1937,7 +1932,6 @@ mod tests {
                 mem_ranges,
                 &options,
                 metadata.primary_key.len(),
-                false,
             )
             .unwrap();
             assert!(flat_sources.encoded.is_empty());
@@ -1964,14 +1958,9 @@ mod tests {
                 ..Default::default()
             };
 
-            let flat_sources = memtable_flat_sources(
-                schema,
-                mem_ranges,
-                &options,
-                metadata.primary_key.len(),
-                false,
-            )
-            .unwrap();
+            let flat_sources =
+                memtable_flat_sources(schema, mem_ranges, &options, metadata.primary_key.len())
+                    .unwrap();
             assert!(flat_sources.encoded.is_empty());
             assert_eq!(1, flat_sources.sources.len());
 

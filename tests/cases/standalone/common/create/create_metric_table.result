@@ -65,17 +65,16 @@ SELECT table_catalog, table_schema, table_name, table_type, engine FROM informat
 
 DESC TABLE phy;
 
-+------------------+----------------------+-----+------+---------+---------------+
-| Column           | Type                 | Key | Null | Default | Semantic Type |
-+------------------+----------------------+-----+------+---------+---------------+
-| ts               | TimestampMillisecond | PRI | NO   |         | TIMESTAMP     |
-| val              | Float64              |     | YES  |         | FIELD         |
-| __metric_int_val | Int64                |     | YES  |         | FIELD         |
-| __table_id       | UInt32               | PRI | NO   |         | TAG           |
-| __tsid           | UInt64               | PRI | NO   |         | TAG           |
-| host             | String               | PRI | YES  |         | TAG           |
-| job              | String               | PRI | YES  |         | TAG           |
-+------------------+----------------------+-----+------+---------+---------------+
++------------+----------------------+-----+------+---------+---------------+
+| Column     | Type                 | Key | Null | Default | Semantic Type |
++------------+----------------------+-----+------+---------+---------------+
+| ts         | TimestampMillisecond | PRI | NO   |         | TIMESTAMP     |
+| val        | Float64              |     | YES  |         | FIELD         |
+| __table_id | UInt32               | PRI | NO   |         | TAG           |
+| __tsid     | UInt64               | PRI | NO   |         | TAG           |
+| host       | String               | PRI | YES  |         | TAG           |
+| job        | String               | PRI | YES  |         | TAG           |
++------------+----------------------+-----+------+---------+---------------+
 
 SHOW CREATE TABLE phy;
 
@@ -126,17 +125,16 @@ Error: 1004(InvalidArguments), Physical region is busy, there are still some log
 -- metadata should be restored
 DESC TABLE phy;
 
-+------------------+----------------------+-----+------+---------+---------------+
-| Column           | Type                 | Key | Null | Default | Semantic Type |
-+------------------+----------------------+-----+------+---------+---------------+
-| ts               | TimestampMillisecond | PRI | NO   |         | TIMESTAMP     |
-| val              | Float64              |     | YES  |         | FIELD         |
-| __metric_int_val | Int64                |     | YES  |         | FIELD         |
-| __table_id       | UInt32               | PRI | NO   |         | TAG           |
-| __tsid           | UInt64               | PRI | NO   |         | TAG           |
-| host             | String               | PRI | YES  |         | TAG           |
-| job              | String               | PRI | YES  |         | TAG           |
-+------------------+----------------------+-----+------+---------+---------------+
++------------+----------------------+-----+------+---------+---------------+
+| Column     | Type                 | Key | Null | Default | Semantic Type |
++------------+----------------------+-----+------+---------+---------------+
+| ts         | TimestampMillisecond | PRI | NO   |         | TIMESTAMP     |
+| val        | Float64              |     | YES  |         | FIELD         |
+| __table_id | UInt32               | PRI | NO   |         | TAG           |
+| __tsid     | UInt64               | PRI | NO   |         | TAG           |
+| host       | String               | PRI | YES  |         | TAG           |
+| job        | String               | PRI | YES  |         | TAG           |
++------------+----------------------+-----+------+---------+---------------+
 
 DROP TABLE t1;
 

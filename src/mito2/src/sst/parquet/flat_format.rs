@@ -96,11 +96,11 @@ impl FlatWriteFormat {
     }
 
     /// Convert `batch` to a arrow record batch to store in parquet.
-    pub(crate) fn convert_batch(&self, batch: RecordBatch) -> Result<RecordBatch> {
+    pub(crate) fn convert_batch(&self, batch: &RecordBatch) -> Result<RecordBatch> {
         debug_assert_eq!(batch.num_columns(), self.arrow_schema.fields().len());
 
         let Some(override_sequence) = self.override_sequence else {
-            return Ok(batch);
+            return Ok(batch.clone());
         };
 
         let mut columns = batch.columns().to_vec();

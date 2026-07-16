@@ -33,6 +33,7 @@ use crate::error::{
     SerializeColumnMetadataSnafu, UnexpectedRequestSnafu,
 };
 use crate::utils::{append_manifest_info, encode_manifest_info_to_extensions, to_data_region_id};
+use crate::value_split::visible_column_metadatas;
 
 impl MetricEngineInner {
     pub async fn alter_regions(
@@ -167,7 +168,7 @@ impl MetricEngineInner {
             .add_columns(data_region_id, new_columns_to_add, index_options)
             .await?;
 
-        let physical_columns = self.data_region.physical_columns(data_region_id)?;
+        let physical_columns = self.data_region.physical_columns(data_region_id).await?;
         let physical_schema_map = physical_columns
             .iter()
             .map(|metadata| (metadata.column_schema.name.as_str(), metadata))
@@ -199,7 +200,8 @@ impl MetricEngineInner {
 
         extension_return_value.insert(
             ALTER_PHYSICAL_EXTENSION_KEY.to_string(),
-            ColumnMetadata::encode_list(&physical_columns).context(SerializeColumnMetadataSnafu)?,
+            ColumnMetadata::encode_list(&visible_column_metadatas(&physical_columns))
+                .context(SerializeColumnMetadataSnafu)?,
         );
 
         let mut state = self.state.write().unwrap();
@@ -275,9 +277,7 @@ mod test {
     use common_meta::ddl::test_util::assert_column_name_and_id;
     use common_meta::ddl::utils::{parse_column_metadatas, parse_manifest_infos_from_extensions};
     use common_query::prelude::{greptime_timestamp, greptime_value};
-    use store_api::metric_engine_consts::{
-        ALTER_PHYSICAL_EXTENSION_KEY, metric_engine_value_int_column_name,
-    };
+    use store_api::metric_engine_consts::ALTER_PHYSICAL_EXTENSION_KEY;
     use store_api::region_engine::RegionEngine;
     use store_api::region_request::{
         AlterKind, BatchRegionDdlRequest, RegionAlterRequest, SetRegionOption,
@@ -355,17 +355,15 @@ mod test {
         assert_eq!(timestamp_index, SemanticType::Timestamp);
         let column_metadatas =
             parse_column_metadatas(&response.extensions, ALTER_PHYSICAL_EXTENSION_KEY).unwrap();
-        let value_int_name = metric_engine_value_int_column_name(greptime_value());
         assert_column_name_and_id(
             &column_metadatas,
             &[
                 (greptime_timestamp(), 0),
                 (greptime_value(), 1),
-                (value_int_name.as_str(), 2),
                 ("__table_id", ReservedColumnId::table_id()),
                 ("__tsid", ReservedColumnId::tsid()),
-                ("job", 3),
-                ("tag1", 4),
+                ("job", 2),
+                ("tag1", 3),
             ],
         );
     }
@@ -416,17 +414,15 @@ mod test {
 
         let column_metadatas =
             parse_column_metadatas(&response.extensions, ALTER_PHYSICAL_EXTENSION_KEY).unwrap();
-        let value_int_name = metric_engine_value_int_column_name(greptime_value());
         assert_column_name_and_id(
             &column_metadatas,
             &[
                 (greptime_timestamp(), 0),
                 (greptime_value(), 1),
-                (value_int_name.as_str(), 2),
                 ("__table_id", ReservedColumnId::table_id()),
                 ("__tsid", ReservedColumnId::tsid()),
-                ("job", 3),
-                ("tag1", 4),
+                ("job", 2),
+                ("tag1", 3),
             ],
         );
     }

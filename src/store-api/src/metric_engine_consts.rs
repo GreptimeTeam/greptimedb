@@ -86,17 +86,7 @@ pub const MANIFEST_INFO_EXTENSION_KEY: &str = "MANIFEST_INFO";
 pub fn is_metric_engine_internal_column(name: &str) -> bool {
     name == DATA_SCHEMA_TABLE_ID_COLUMN_NAME
         || name == DATA_SCHEMA_TSID_COLUMN_NAME
-        || is_metric_engine_value_int_column(name)
-}
-
-/// Returns the physical integer companion column name for a metric value column.
-pub fn metric_engine_value_int_column_name(value_column_name: &str) -> String {
-    format!("{DATA_SCHEMA_VALUE_INT_COLUMN_PREFIX}{value_column_name}")
-}
-
-/// Returns true if the column is a physical integer companion for a metric value column.
-pub fn is_metric_engine_value_int_column(name: &str) -> bool {
-    name.starts_with(DATA_SCHEMA_VALUE_INT_COLUMN_PREFIX)
+        || name.starts_with(DATA_SCHEMA_VALUE_INT_COLUMN_PREFIX)
 }
 
 /// Returns true if it's metric engine

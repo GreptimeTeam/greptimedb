@@ -2354,7 +2354,7 @@ impl PromPlanner {
                 required_columns.insert(DATA_SCHEMA_TSID_COLUMN_NAME.to_string());
             }
 
-            let arrow_schema = scan_provider.schema();
+            let arrow_schema = scan_table.schema().arrow_schema().clone();
             Some(
                 arrow_schema
                     .fields()
@@ -4951,13 +4951,6 @@ mod test {
     async fn build_test_table_provider_with_tsid_tag_fields(
         table_specs: &[((String, String), usize, usize)],
     ) -> DfTableSourceProvider {
-        build_test_table_provider_with_tsid_options(table_specs, false).await
-    }
-
-    async fn build_test_table_provider_with_tsid_options(
-        table_specs: &[((String, String), usize, usize)],
-        with_value_split: bool,
-    ) -> DfTableSourceProvider {
         let catalog_list = MemoryCatalogManager::with_default_setup();
 
         let physical_table_name = "phy";
@@ -5003,42 +4996,22 @@ mod test {
                 .with_time_index(true),
             );
             for i in 0..physical_num_field {
-                let field_name = format!("field_{i}");
                 columns.push(ColumnSchema::new(
-                    field_name.clone(),
+                    format!("field_{i}"),
                     ConcreteDataType::float64_datatype(),
                     true,
                 ));
-                if with_value_split {
-                    columns.push(ColumnSchema::new(
-                        store_api::metric_engine_consts::metric_engine_value_int_column_name(
-                            &field_name,
-                        ),
-                        ConcreteDataType::int64_datatype(),
-                        true,
-                    ));
-                }
             }
 
             let schema = Arc::new(Schema::new(columns));
             let primary_key_indices = (0..(2 + physical_num_tag)).collect::<Vec<_>>();
-            let physical_value_count =
-                1 + physical_num_field * if with_value_split { 2 } else { 1 };
-            let mut physical_options = table::requests::TableOptions::default();
-            if with_value_split {
-                physical_options.extra_options.insert(
-                    store_api::metric_engine_consts::PHYSICAL_TABLE_METADATA_KEY.to_string(),
-                    "true".to_string(),
-                );
-            }
             let table_meta = TableMetaBuilder::empty()
                 .schema(schema)
                 .primary_key_indices(primary_key_indices)
                 .value_indices(
-                    (2 + physical_num_tag..2 + physical_num_tag + physical_value_count).collect(),
+                    (2 + physical_num_tag..2 + physical_num_tag + 1 + physical_num_field).collect(),
                 )
                 .engine(METRIC_ENGINE_NAME.to_string())
-                .options(physical_options)
                 .next_column_id(1024)
                 .build()
                 .unwrap();
@@ -5535,31 +5508,6 @@ mod test {
             MemorySourceConfig::try_new(&[], Arc::new(ArrowSchema::empty()), None).unwrap(),
         ))));
         assert!(format!("{exec:?}").contains("reuse_tsid_column: true"));
-    }
-
-    #[tokio::test]
-    async fn tsid_scan_uses_visible_split_value_schema() {
-        let eval_stmt = build_eval_stmt("some_metric");
-        let table_provider = build_test_table_provider_with_tsid_options(
-            &[(
-                (DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string()),
-                1,
-                1,
-            )],
-            true,
-        )
-        .await;
-
-        let plan =
-            PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
-                .await
-                .unwrap();
-        let plan_str = plan.display_indent_schema().to_string();
-
-        assert!(plan_str.contains("PromSeriesDivide: tags=[\"__tsid\"]"));
-        assert!(plan_str.contains("TableScan: phy"));
-        assert!(!plan_str.contains("TableScan: some_metric"));
-        assert!(!plan_str.contains("__metric_int_field_0"));
     }
 
     #[tokio::test]

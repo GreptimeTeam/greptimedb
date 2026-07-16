@@ -51,17 +51,16 @@ Affected Rows: 0
 
 DESC TABLE phy;
 
-+------------------+----------------------+-----+------+---------+---------------+
-| Column           | Type                 | Key | Null | Default | Semantic Type |
-+------------------+----------------------+-----+------+---------+---------------+
-| ts               | TimestampMillisecond | PRI | NO   |         | TIMESTAMP     |
-| val              | Float64              |     | YES  |         | FIELD         |
-| __metric_int_val | Int64                |     | YES  |         | FIELD         |
-| __table_id       | UInt32               | PRI | NO   |         | TAG           |
-| __tsid           | UInt64               | PRI | NO   |         | TAG           |
-| host             | String               | PRI | YES  |         | TAG           |
-| job              | String               | PRI | YES  |         | TAG           |
-+------------------+----------------------+-----+------+---------+---------------+
++------------+----------------------+-----+------+---------+---------------+
+| Column     | Type                 | Key | Null | Default | Semantic Type |
++------------+----------------------+-----+------+---------+---------------+
+| ts         | TimestampMillisecond | PRI | NO   |         | TIMESTAMP     |
+| val        | Float64              |     | YES  |         | FIELD         |
+| __table_id | UInt32               | PRI | NO   |         | TAG           |
+| __tsid     | UInt64               | PRI | NO   |         | TAG           |
+| host       | String               | PRI | YES  |         | TAG           |
+| job        | String               | PRI | YES  |         | TAG           |
++------------+----------------------+-----+------+---------+---------------+
 
 SELECT ts, val, __tsid, host, job FROM phy;
 
@@ -75,86 +74,6 @@ SELECT ts, val, __tsid, host, job FROM phy;
 +-------------------------+-----+----------------------+-------+------+
 
 DROP TABLE phy;
-
-Affected Rows: 0
-
--- Value splitting is disabled for last_non_null so the two physical value
--- columns cannot be merged independently into a stale logical value.
-CREATE TABLE phy_last_non_null (
-    ts TIMESTAMP TIME INDEX,
-    val DOUBLE
-) ENGINE = metric WITH (
-    "physical_metric_table" = "",
-    "merge_mode" = "last_non_null"
-);
-
-Affected Rows: 0
-
-CREATE TABLE metric_last_non_null (
-    ts TIMESTAMP TIME INDEX,
-    val DOUBLE,
-    host STRING PRIMARY KEY
-) ENGINE = metric WITH ("on_physical_table" = "phy_last_non_null");
-
-Affected Rows: 0
-
-INSERT INTO metric_last_non_null VALUES ('host1', 1, 1.0);
-
-Affected Rows: 1
-
-ADMIN flush_table('phy_last_non_null');
-
-+----------------------------------------+
-| ADMIN flush_table('phy_last_non_null') |
-+----------------------------------------+
-| 0                                      |
-+----------------------------------------+
-
-INSERT INTO metric_last_non_null VALUES ('host1', 1, 1.5);
-
-Affected Rows: 1
-
-SELECT host, ts, val FROM metric_last_non_null;
-
-+-------+-------------------------+-----+
-| host  | ts                      | val |
-+-------+-------------------------+-----+
-| host1 | 1970-01-01T00:00:00.001 | 1.5 |
-+-------+-------------------------+-----+
-
-ADMIN flush_table('phy_last_non_null');
-
-+----------------------------------------+
-| ADMIN flush_table('phy_last_non_null') |
-+----------------------------------------+
-| 0                                      |
-+----------------------------------------+
-
-SELECT host, ts, val FROM metric_last_non_null;
-
-+-------+-------------------------+-----+
-| host  | ts                      | val |
-+-------+-------------------------+-----+
-| host1 | 1970-01-01T00:00:00.001 | 1.5 |
-+-------+-------------------------+-----+
-
-DESC TABLE phy_last_non_null;
-
-+------------+----------------------+-----+------+---------+---------------+
-| Column     | Type                 | Key | Null | Default | Semantic Type |
-+------------+----------------------+-----+------+---------+---------------+
-| ts         | TimestampMillisecond | PRI | NO   |         | TIMESTAMP     |
-| val        | Float64              |     | YES  |         | FIELD         |
-| __table_id | UInt32               | PRI | NO   |         | TAG           |
-| __tsid     | UInt64               | PRI | NO   |         | TAG           |
-| host       | String               | PRI | YES  |         | TAG           |
-+------------+----------------------+-----+------+---------+---------------+
-
-DROP TABLE metric_last_non_null;
-
-Affected Rows: 0
-
-DROP TABLE phy_last_non_null;
 
 Affected Rows: 0
 
@@ -285,17 +204,16 @@ Affected Rows: 0
 
 DESC TABLE phy;
 
-+------------------+----------------------+-----+------+---------+---------------+
-| Column           | Type                 | Key | Null | Default | Semantic Type |
-+------------------+----------------------+-----+------+---------+---------------+
-| ts               | TimestampMillisecond | PRI | NO   |         | TIMESTAMP     |
-| val              | Float64              |     | YES  |         | FIELD         |
-| __metric_int_val | Int64                |     | YES  |         | FIELD         |
-| __table_id       | UInt32               | PRI | NO   |         | TAG           |
-| __tsid           | UInt64               | PRI | NO   |         | TAG           |
-| host             | String               | PRI | YES  |         | TAG           |
-| job              | String               | PRI | YES  |         | TAG           |
-+------------------+----------------------+-----+------+---------+---------------+
++------------+----------------------+-----+------+---------+---------------+
+| Column     | Type                 | Key | Null | Default | Semantic Type |
++------------+----------------------+-----+------+---------+---------------+
+| ts         | TimestampMillisecond | PRI | NO   |         | TIMESTAMP     |
+| val        | Float64              |     | YES  |         | FIELD         |
+| __table_id | UInt32               | PRI | NO   |         | TAG           |
+| __tsid     | UInt64               | PRI | NO   |         | TAG           |
+| host       | String               | PRI | YES  |         | TAG           |
+| job        | String               | PRI | YES  |         | TAG           |
++------------+----------------------+-----+------+---------+---------------+
 
 DROP TABLE phy;
 

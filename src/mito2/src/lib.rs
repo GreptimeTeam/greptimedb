@@ -36,7 +36,6 @@ pub mod flush;
 pub mod gc;
 pub mod manifest;
 pub mod memtable;
-mod metric_value;
 mod metrics;
 pub mod read;
 pub mod region;

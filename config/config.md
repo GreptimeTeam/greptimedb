@@ -206,6 +206,7 @@
 | `region_engine.file` | -- | -- | Enable the file engine. |
 | `region_engine.metric` | -- | -- | Metric engine options. |
 | `region_engine.metric.sparse_primary_key_encoding` | Bool | `true` | Whether to use sparse primary key encoding. |
+| `region_engine.metric.experimental_enable_metric_value_split` | Bool | `false` | Whether to store exact integral metric values in internal Int64 columns. |
 | `logging` | -- | -- | The logging options. |
 | `logging.dir` | String | `./greptimedb_data/logs` | The directory to store the log files. If set to empty, logs will not be written to files. |
 | `logging.level` | String | Unset | The log level. Can be `info`/`debug`/`warn`/`error`. |
@@ -613,6 +614,7 @@
 | `region_engine.file` | -- | -- | Enable the file engine. |
 | `region_engine.metric` | -- | -- | Metric engine options. |
 | `region_engine.metric.sparse_primary_key_encoding` | Bool | `true` | Whether to use sparse primary key encoding. |
+| `region_engine.metric.experimental_enable_metric_value_split` | Bool | `false` | Whether to store exact integral metric values in internal Int64 columns. |
 | `logging` | -- | -- | The logging options. |
 | `logging.dir` | String | `./greptimedb_data/logs` | The directory to store the log files. If set to empty, logs will not be written to files. |
 | `logging.level` | String | Unset | The log level. Can be `info`/`debug`/`warn`/`error`. |

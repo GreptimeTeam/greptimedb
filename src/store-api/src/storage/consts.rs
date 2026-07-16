@@ -90,6 +90,12 @@ pub const OP_TYPE_COLUMN_NAME: &str = "__op_type";
 /// Name for reserved column: primary_key
 pub const PRIMARY_KEY_COLUMN_NAME: &str = "__primary_key";
 
+/// Column metadata key that requests a Parquet encoding from storage engines.
+pub const COLUMN_PARQUET_ENCODING_KEY: &str = "greptime:storage:parquet_encoding";
+
+/// Value of [`COLUMN_PARQUET_ENCODING_KEY`] for Parquet delta binary packed encoding.
+pub const PARQUET_ENCODING_DELTA_BINARY_PACKED: &str = "delta_binary_packed";
+
 /// Internal Column Name
 static INTERNAL_COLUMN_VEC: [&str; 3] = [
     SEQUENCE_COLUMN_NAME,

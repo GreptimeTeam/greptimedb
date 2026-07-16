@@ -30,7 +30,6 @@ use store_api::metadata::ColumnMetadata;
 use store_api::metric_engine_consts::{
     ALTER_PHYSICAL_EXTENSION_KEY, LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME,
     PHYSICAL_TABLE_METADATA_KEY, TABLE_COLUMN_METADATA_EXTENSION_KEY,
-    metric_engine_value_int_column_name,
 };
 use store_api::path_utils::table_dir;
 use store_api::region_engine::RegionEngine;
@@ -205,7 +204,7 @@ impl TestEnv {
         let column_metadatas =
             parse_column_metadatas(&response.extensions, TABLE_COLUMN_METADATA_EXTENSION_KEY)
                 .unwrap();
-        assert_eq!(column_metadatas.len(), 5);
+        assert_eq!(column_metadatas.len(), 4);
     }
 
     /// Create logical region in [MetricEngine] with specific `physical_region_id` and `logical_region_id`.
@@ -229,7 +228,7 @@ impl TestEnv {
             .unwrap();
         let column_metadatas =
             parse_column_metadatas(&response.extensions, ALTER_PHYSICAL_EXTENSION_KEY).unwrap();
-        assert_eq!(column_metadatas.len(), 6);
+        assert_eq!(column_metadatas.len(), 5);
         let column_names = column_metadatas
             .iter()
             .map(|c| c.column_schema.name.as_str())
@@ -238,13 +237,11 @@ impl TestEnv {
             .iter()
             .map(|c| c.column_id)
             .collect::<Vec<_>>();
-        let value_int_name = metric_engine_value_int_column_name(greptime_value());
         assert_eq!(
             column_names,
             vec![
                 greptime_timestamp(),
                 greptime_value(),
-                value_int_name.as_str(),
                 "__table_id",
                 "__tsid",
                 "job",
@@ -255,10 +252,9 @@ impl TestEnv {
             vec![
                 0,
                 1,
-                2,
                 ReservedColumnId::table_id(),
                 ReservedColumnId::tsid(),
-                3,
+                2,
             ]
         );
     }

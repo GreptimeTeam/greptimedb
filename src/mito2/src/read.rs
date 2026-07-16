@@ -36,10 +36,6 @@ pub(crate) mod seq_scan;
 pub mod series_scan;
 pub mod stream;
 pub(crate) mod unordered_scan;
-#[cfg(feature = "test")]
-pub mod value_split;
-#[cfg(not(feature = "test"))]
-pub(crate) mod value_split;
 
 use std::collections::HashMap;
 use std::sync::Arc;

@@ -18,6 +18,8 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
+use api::v1::value::ValueData;
+use api::v1::{ColumnDataType, Rows, SemanticType};
 use common_error::ext::BoxedError;
 use common_recordbatch::adapter::RecordBatchMetrics;
 use common_recordbatch::error::{
@@ -41,30 +43,197 @@ use datatypes::arrow::compute::kernels::zip::zip;
 use datatypes::arrow::compute::{
     cast as cast_array, filter_record_batch as filter_df_record_batch, is_not_null,
 };
+use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
-use futures::Stream;
+use futures_util::Stream;
 use snafu::{OptionExt, ResultExt};
-use store_api::metadata::RegionMetadataRef;
-use store_api::metric_engine_consts::metric_engine_value_int_column_name;
+use store_api::metadata::{RegionMetadata, RegionMetadataBuilder, RegionMetadataRef};
+use store_api::metric_engine_consts::{
+    DATA_SCHEMA_TABLE_ID_COLUMN_NAME, DATA_SCHEMA_TSID_COLUMN_NAME,
+    DATA_SCHEMA_VALUE_INT_COLUMN_PREFIX,
+};
 use store_api::region_engine::{
     PrepareRequest, QueryScanContext, RegionScanner, RegionScannerRef, ScannerProperties,
 };
-use store_api::storage::{RegionId, ScanRequest, SequenceNumber};
+use store_api::region_request::AlterKind;
+use store_api::storage::consts::ReservedColumnId;
+use store_api::storage::{ColumnId, RegionId, ScanRequest, SequenceNumber};
 
-use crate::error::{InvalidRequestSnafu, Result};
-use crate::metric_value::{MetricValueColumn, metric_value_columns, visible_region_metadata};
+use crate::error::{InvalidMetadataSnafu, InvalidRequestSnafu, Result};
+
+const INTERNAL_COLUMN_ID_MASK: ColumnId = 1 << (ColumnId::BITS - 1);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct MetricValueColumn {
+    /// Index of the Float64 value in `RegionMetadata::column_metadatas`.
+    pub(crate) value_index: usize,
+    /// Index of its Int64 companion in `RegionMetadata::column_metadatas`.
+    pub(crate) int_index: usize,
+}
+
+/// Derives the internal companion ID without consuming an ID from the user space.
+pub(crate) const fn metric_value_int_column_id(value_column_id: ColumnId) -> ColumnId {
+    value_column_id | INTERNAL_COLUMN_ID_MASK
+}
+
+pub(crate) fn metric_value_int_column_name(value_column_name: &str) -> String {
+    format!("{DATA_SCHEMA_VALUE_INT_COLUMN_PREFIX}{value_column_name}")
+}
+
+pub(crate) fn is_metric_value_int_column(name: &str) -> bool {
+    name.starts_with(DATA_SCHEMA_VALUE_INT_COLUMN_PREFIX)
+}
+
+pub(crate) fn metric_value_columns(metadata: &RegionMetadata) -> Vec<MetricValueColumn> {
+    if !is_metric_engine_data_region(metadata) {
+        return Vec::new();
+    }
+
+    metadata
+        .column_metadatas
+        .iter()
+        .enumerate()
+        .filter(|(_, column)| {
+            column.semantic_type == SemanticType::Field
+                && column.column_schema.data_type == ConcreteDataType::float64_datatype()
+        })
+        .filter_map(|(value_index, value_column)| {
+            let int_name = metric_value_int_column_name(&value_column.column_schema.name);
+            let int_index = metadata.column_index_by_name(&int_name)?;
+            let int_column = &metadata.column_metadatas[int_index];
+            if int_column.column_id != metric_value_int_column_id(value_column.column_id)
+                || int_column.semantic_type != SemanticType::Field
+                || int_column.column_schema.data_type != ConcreteDataType::int64_datatype()
+            {
+                return None;
+            }
+
+            Some(MetricValueColumn {
+                value_index,
+                int_index,
+            })
+        })
+        .collect()
+}
+
+pub(crate) fn visible_region_metadata(metadata: &RegionMetadataRef) -> Result<RegionMetadataRef> {
+    let split_columns = metric_value_columns(metadata);
+    if split_columns.is_empty() {
+        return Ok(metadata.clone());
+    }
+
+    let names = split_columns
+        .iter()
+        .map(|column| {
+            metadata.column_metadatas[column.int_index]
+                .column_schema
+                .name
+                .clone()
+        })
+        .collect::<Vec<_>>();
+
+    let mut builder = RegionMetadataBuilder::from_existing((**metadata).clone());
+    builder
+        .alter(AlterKind::DropColumns { names })
+        .context(InvalidMetadataSnafu)?;
+    builder.build().map(Arc::new).context(InvalidMetadataSnafu)
+}
+
+pub(crate) fn visible_column_metadatas(
+    columns: &[store_api::metadata::ColumnMetadata],
+) -> Vec<store_api::metadata::ColumnMetadata> {
+    columns
+        .iter()
+        .filter(|column| !is_metric_value_int_column(&column.column_schema.name))
+        .cloned()
+        .collect()
+}
+
+fn is_metric_engine_data_region(metadata: &RegionMetadata) -> bool {
+    let has_internal_tag = |name, column_id| {
+        metadata.column_by_name(name).is_some_and(|column| {
+            column.semantic_type == SemanticType::Tag
+                && column.column_id == column_id
+                && metadata.primary_key.contains(&column_id)
+        })
+    };
+
+    has_internal_tag(
+        DATA_SCHEMA_TABLE_ID_COLUMN_NAME,
+        ReservedColumnId::table_id(),
+    ) && has_internal_tag(DATA_SCHEMA_TSID_COLUMN_NAME, ReservedColumnId::tsid())
+}
+
+/// Moves exact integral Float64 values into their Int64 companion columns.
+pub(crate) fn split_metric_values(rows: &mut Rows) {
+    let split_columns = rows
+        .schema
+        .iter()
+        .enumerate()
+        .filter(|(_, column)| column.datatype == ColumnDataType::Float64 as i32)
+        .filter_map(|(value_index, value_column)| {
+            let int_name = metric_value_int_column_name(&value_column.column_name);
+            rows.schema
+                .iter()
+                .position(|column| {
+                    column.column_name == int_name
+                        && column.datatype == ColumnDataType::Int64 as i32
+                })
+                .map(|int_index| (value_index, int_index))
+        })
+        .collect::<Vec<_>>();
+
+    for row in &mut rows.rows {
+        for &(value_index, int_index) in &split_columns {
+            if matches!(
+                row.values
+                    .get(int_index)
+                    .and_then(|value| value.value_data.as_ref()),
+                Some(ValueData::I64Value(_))
+            ) {
+                if let Some(value) = row.values.get_mut(value_index) {
+                    value.value_data = None;
+                }
+                continue;
+            }
+
+            let Some(ValueData::F64Value(value)) = row
+                .values
+                .get(value_index)
+                .and_then(|value| value.value_data.as_ref())
+            else {
+                continue;
+            };
+            let Some(int_value) = integer_value(*value) else {
+                continue;
+            };
+
+            row.values[value_index].value_data = None;
+            row.values[int_index].value_data = Some(ValueData::I64Value(int_value));
+        }
+    }
+}
+
+fn integer_value(value: f64) -> Option<i64> {
+    if !value.is_finite() || value < i64::MIN as f64 || value >= i64::MAX as f64 {
+        return None;
+    }
+
+    let int_value = value as i64;
+    ((int_value as f64) == value).then_some(int_value)
+}
 
 pub(crate) fn prepare_value_split_scan(
     region_id: RegionId,
     request: &mut ScanRequest,
     physical_metadata: &RegionMetadataRef,
+    visible_metadata: &RegionMetadataRef,
 ) -> Result<Option<ValueSplitProjectionMapper>> {
     let split_columns = metric_value_columns(physical_metadata);
     if split_columns.is_empty() {
         return Ok(None);
     }
 
-    let visible_metadata = visible_region_metadata(physical_metadata, &split_columns)?;
     let split_value_columns = split_columns
         .iter()
         .map(|column| {
@@ -147,7 +316,7 @@ pub(crate) fn prepare_value_split_scan(
 
     request.projection_input.get_or_insert_default().projection = physical_projection;
 
-    let mapper = ValueSplitProjectionMapper::new(visible_metadata, output_columns, visible_columns);
+    let mapper = ValueSplitProjectionMapper::new(output_columns, visible_columns);
     Ok(Some(mapper))
 }
 
@@ -203,7 +372,7 @@ impl TreeNodeRewriter for MetricValueFilterRewriter<'_> {
 
         let int_column = Column {
             relation: column.relation.clone(),
-            name: metric_engine_value_int_column_name(&column.name),
+            name: metric_value_int_column_name(&column.name),
             spans: column.spans.clone(),
         };
         let float_expr = Expr::Column(column);
@@ -222,7 +391,6 @@ struct ValueColumnProjection {
 
 #[derive(Clone)]
 pub(crate) struct ValueSplitProjectionMapper {
-    metadata: RegionMetadataRef,
     output_schema: SchemaRef,
     working_schema: SchemaRef,
     columns: Vec<ValueColumnProjection>,
@@ -230,11 +398,7 @@ pub(crate) struct ValueSplitProjectionMapper {
 }
 
 impl ValueSplitProjectionMapper {
-    fn new(
-        metadata: RegionMetadataRef,
-        columns: Vec<ValueColumnProjection>,
-        visible_columns: usize,
-    ) -> Self {
+    fn new(columns: Vec<ValueColumnProjection>, visible_columns: usize) -> Self {
         let has_split = columns.iter().any(|column| column.int_index.is_some());
         let working_columns = columns
             .iter()
@@ -254,7 +418,6 @@ impl ValueSplitProjectionMapper {
         };
 
         Self {
-            metadata,
             output_schema,
             working_schema,
             columns,
@@ -317,21 +480,6 @@ fn apply_value_filter(
     filter_df_record_batch(&batch, &predicate).context(ArrowComputeSnafu)
 }
 
-/// Runs the split-value conversion hot path without constructing a scanner.
-#[cfg(feature = "test")]
-pub fn benchmark_value_split(
-    float_col: &ArrayRef,
-    int_col: &ArrayRef,
-    evaluator: Option<&SimpleFilterEvaluator>,
-) -> RecordBatchResult<DfRecordBatch> {
-    let values = coalesce_value_columns(float_col, int_col)?;
-    let batch = DfRecordBatch::try_from_iter([("value", values)]).context(NewDfRecordBatchSnafu)?;
-    match evaluator {
-        Some(evaluator) => apply_value_filter(batch, 0, evaluator),
-        None => Ok(batch),
-    }
-}
-
 fn coalesce_value_columns(float_col: &ArrayRef, int_col: &ArrayRef) -> RecordBatchResult<ArrayRef> {
     let float_array = float_col
         .as_any()
@@ -351,33 +499,45 @@ fn coalesce_value_columns(float_col: &ArrayRef, int_col: &ArrayRef) -> RecordBat
     zip(&use_int, &int_as_float, float_array).context(ArrowComputeSnafu)
 }
 
-pub(crate) struct ValueSplitScanner {
+pub(crate) struct MetricRegionScanner {
     inner: RegionScannerRef,
-    mapper: ValueSplitProjectionMapper,
+    mapper: Option<ValueSplitProjectionMapper>,
+    metadata: RegionMetadataRef,
 }
 
-impl ValueSplitScanner {
-    pub(crate) fn new(inner: RegionScannerRef, mapper: ValueSplitProjectionMapper) -> Self {
-        Self { inner, mapper }
+impl MetricRegionScanner {
+    pub(crate) fn new(
+        inner: RegionScannerRef,
+        mapper: Option<ValueSplitProjectionMapper>,
+        metadata: RegionMetadataRef,
+    ) -> Self {
+        Self {
+            inner,
+            mapper,
+            metadata,
+        }
     }
 }
 
-impl fmt::Debug for ValueSplitScanner {
+impl fmt::Debug for MetricRegionScanner {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("ValueSplitScanner")
+        f.debug_struct("MetricRegionScanner")
             .field("inner", &self.inner)
-            .field("has_split", &self.mapper.has_split)
+            .field(
+                "has_split",
+                &self.mapper.as_ref().is_some_and(|mapper| mapper.has_split),
+            )
             .finish()
     }
 }
 
-impl DisplayAs for ValueSplitScanner {
+impl DisplayAs for MetricRegionScanner {
     fn fmt_as(&self, t: DisplayFormatType, f: &mut fmt::Formatter) -> fmt::Result {
         self.inner.fmt_as(t, f)
     }
 }
 
-impl RegionScanner for ValueSplitScanner {
+impl RegionScanner for MetricRegionScanner {
     fn name(&self) -> &str {
         self.inner.name()
     }
@@ -387,11 +547,14 @@ impl RegionScanner for ValueSplitScanner {
     }
 
     fn schema(&self) -> SchemaRef {
-        self.mapper.output_schema.clone()
+        self.mapper.as_ref().map_or_else(
+            || self.inner.schema(),
+            |mapper| mapper.output_schema.clone(),
+        )
     }
 
     fn metadata(&self) -> RegionMetadataRef {
-        self.mapper.metadata.clone()
+        self.metadata.clone()
     }
 
     fn prepare(&mut self, request: PrepareRequest) -> Result<(), BoxedError> {
@@ -405,10 +568,13 @@ impl RegionScanner for ValueSplitScanner {
         partition: usize,
     ) -> Result<SendableRecordBatchStream, BoxedError> {
         let stream = self.inner.scan_partition(ctx, metrics_set, partition)?;
-        Ok(Box::pin(ValueSplitRecordBatchStream {
-            inner: stream,
-            mapper: self.mapper.clone(),
-        }))
+        match &self.mapper {
+            Some(mapper) => Ok(Box::pin(ValueSplitRecordBatchStream {
+                inner: stream,
+                mapper: mapper.clone(),
+            })),
+            None => Ok(stream),
+        }
     }
 
     fn has_predicate_without_region(&self) -> bool {
@@ -419,7 +585,7 @@ impl RegionScanner for ValueSplitScanner {
         &mut self,
         filter_exprs: Vec<Arc<dyn PhysicalExpr>>,
     ) -> Vec<bool> {
-        if self.mapper.has_split {
+        if self.mapper.as_ref().is_some_and(|mapper| mapper.has_split) {
             return vec![false; filter_exprs.len()];
         }
 
@@ -504,7 +670,7 @@ mod tests {
     }
 
     fn test_metadata() -> RegionMetadataRef {
-        let int_column = metric_engine_value_int_column_name(VALUE_COLUMN);
+        let int_column = metric_value_int_column_name(VALUE_COLUMN);
         let mut builder = RegionMetadataBuilder::new(RegionId::new(1, 1));
         builder
             .push_column_metadata(column(
@@ -529,7 +695,7 @@ mod tests {
                 true,
             ))
             .push_column_metadata(column(
-                1,
+                metric_value_int_column_id(0),
                 SemanticType::Field,
                 &int_column,
                 ConcreteDataType::int64_datatype(),
@@ -566,7 +732,7 @@ mod tests {
                 Some(f64::NAN),
                 None,
             ])),
-            name if name == metric_engine_value_int_column_name(VALUE_COLUMN) => {
+            name if name == metric_value_int_column_name(VALUE_COLUMN) => {
                 Arc::new(Int64Array::from(vec![
                     Some(-2),
                     None,
@@ -603,8 +769,7 @@ mod tests {
 
     fn convert(filters: Vec<Expr>, projected_names: &[&str]) -> (ScanRequest, RecordBatch) {
         let metadata = test_metadata();
-        let split_columns = metric_value_columns(&metadata);
-        let visible_metadata = visible_region_metadata(&metadata, &split_columns).unwrap();
+        let visible_metadata = visible_region_metadata(&metadata).unwrap();
         let projection = projected_names
             .iter()
             .map(|name| visible_metadata.column_index_by_name(name).unwrap())
@@ -614,9 +779,14 @@ mod tests {
             filters,
             ..Default::default()
         };
-        let mapper = prepare_value_split_scan(metadata.region_id, &mut request, &metadata)
-            .unwrap()
-            .unwrap();
+        let mapper = prepare_value_split_scan(
+            metadata.region_id,
+            &mut request,
+            &metadata,
+            &visible_metadata,
+        )
+        .unwrap()
+        .unwrap();
         let input = projected_batch(&metadata, request.projection_indices().unwrap());
         let output = mapper.convert_batch(input).unwrap();
         (request, output)
@@ -700,5 +870,75 @@ mod tests {
         assert_eq!(row_ids(&batch), (0..7).collect::<Vec<_>>());
         assert_eq!(request.projection_indices().unwrap().len(), 1);
         assert!(request.filters[0].to_string().contains("coalesce"));
+    }
+
+    #[test]
+    fn test_split_metric_values() {
+        let int_column = metric_value_int_column_name(VALUE_COLUMN);
+        let mut rows = Rows {
+            schema: vec![
+                api::v1::ColumnSchema {
+                    column_name: VALUE_COLUMN.to_string(),
+                    datatype: ColumnDataType::Float64 as i32,
+                    semantic_type: SemanticType::Field as i32,
+                    ..Default::default()
+                },
+                api::v1::ColumnSchema {
+                    column_name: int_column,
+                    datatype: ColumnDataType::Int64 as i32,
+                    semantic_type: SemanticType::Field as i32,
+                    ..Default::default()
+                },
+            ],
+            rows: [
+                (Some(ValueData::F64Value(1.0)), None),
+                (Some(ValueData::F64Value(1.5)), None),
+                (Some(ValueData::F64Value(f64::NAN)), None),
+                (None, None),
+                (Some(ValueData::F64Value(2.0)), Some(ValueData::I64Value(3))),
+            ]
+            .into_iter()
+            .map(|(float, int)| api::v1::Row {
+                values: vec![
+                    api::v1::Value { value_data: float },
+                    api::v1::Value { value_data: int },
+                ],
+            })
+            .collect(),
+        };
+
+        split_metric_values(&mut rows);
+
+        let values = rows
+            .rows
+            .iter()
+            .map(|row| {
+                (
+                    row.values[0].value_data.clone(),
+                    row.values[1].value_data.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(values[0], (None, Some(ValueData::I64Value(1))));
+        assert_eq!(values[1], (Some(ValueData::F64Value(1.5)), None));
+        let Some(ValueData::F64Value(value)) = &values[2].0 else {
+            panic!("expected NaN Float64 value");
+        };
+        assert!(value.is_nan());
+        assert!(values[2].1.is_none());
+        assert_eq!(values[3], (None, None));
+        assert_eq!(values[4], (None, Some(ValueData::I64Value(3))));
+    }
+
+    #[test]
+    fn test_integer_value_classification() {
+        assert_eq!(integer_value(1.0), Some(1));
+        assert_eq!(integer_value(-1.0), Some(-1));
+        assert_eq!(integer_value(-0.0), Some(0));
+        assert_eq!(integer_value(i64::MIN as f64), Some(i64::MIN));
+        assert_eq!(integer_value(1.5), None);
+        assert_eq!(integer_value(f64::NAN), None);
+        assert_eq!(integer_value(f64::INFINITY), None);
+        assert_eq!(integer_value(i64::MAX as f64), None);
     }
 }

@@ -25,7 +25,6 @@ use rand::{Rng, SeedableRng};
 use rand_chacha::ChaChaRng;
 use snafu::ResultExt;
 use sqlx::{MySql, Pool};
-use store_api::metric_engine_consts::metric_engine_value_int_column_name;
 use tests_fuzz::context::TableContext;
 use tests_fuzz::error::{self, Result};
 use tests_fuzz::fake::{
@@ -93,16 +92,6 @@ async fn execute_create_logic_table(ctx: FuzzContext, input: FuzzInput) -> Resul
     info!("Create physical table: {sql}, result: {result:?}");
 
     let mut physical_table_columns = create_physical_table_expr.columns.clone();
-    let value_int_columns = physical_table_columns
-        .iter()
-        .filter(|column| column.column_type == ConcreteDataType::float64_datatype())
-        .map(|column| Column {
-            name: metric_engine_value_int_column_name(&column.name.value).into(),
-            column_type: ConcreteDataType::int64_datatype(),
-            options: vec![],
-        })
-        .collect::<Vec<_>>();
-    physical_table_columns.extend(value_int_columns);
     physical_table_columns.push({
         let column_type = ConcreteDataType::uint64_datatype();
         let options = primary_key_and_not_null_column_options_generator(&mut rng, &column_type);

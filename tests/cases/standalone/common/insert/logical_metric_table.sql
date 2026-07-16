@@ -24,36 +24,6 @@ SELECT ts, val, __tsid, host, job FROM phy;
 
 DROP TABLE phy;
 
--- Value splitting is disabled for last_non_null so the two physical value
--- columns cannot be merged independently into a stale logical value.
-CREATE TABLE phy_last_non_null (
-    ts TIMESTAMP TIME INDEX,
-    val DOUBLE
-) ENGINE = metric WITH (
-    "physical_metric_table" = "",
-    "merge_mode" = "last_non_null"
-);
-
-CREATE TABLE metric_last_non_null (
-    ts TIMESTAMP TIME INDEX,
-    val DOUBLE,
-    host STRING PRIMARY KEY
-) ENGINE = metric WITH ("on_physical_table" = "phy_last_non_null");
-
-INSERT INTO metric_last_non_null VALUES ('host1', 1, 1.0);
-ADMIN flush_table('phy_last_non_null');
-INSERT INTO metric_last_non_null VALUES ('host1', 1, 1.5);
-
-SELECT host, ts, val FROM metric_last_non_null;
-
-ADMIN flush_table('phy_last_non_null');
-
-SELECT host, ts, val FROM metric_last_non_null;
-DESC TABLE phy_last_non_null;
-
-DROP TABLE metric_last_non_null;
-DROP TABLE phy_last_non_null;
-
 CREATE TABLE phy_default (ts timestamp time index, val double default 42) engine=metric with ("physical_metric_table" = "");
 
 CREATE TABLE t_default (ts timestamp time index, val double default 42, host string primary key) engine = metric with ("on_physical_table" = "phy_default");

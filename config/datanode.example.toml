@@ -699,6 +699,8 @@ unknown_file_lingering_time = "1d"
 [region_engine.metric]
 ## Whether to use sparse primary key encoding.
 sparse_primary_key_encoding = true
+## Whether to store exact integral metric values in internal Int64 columns.
+experimental_enable_metric_value_split = false
 
 ## The logging options.
 [logging]

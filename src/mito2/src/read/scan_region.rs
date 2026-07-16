@@ -72,7 +72,6 @@ use crate::read::seq_scan::SeqScan;
 use crate::read::series_scan::SeriesScan;
 use crate::read::stream::ScanBatchStream;
 use crate::read::unordered_scan::UnorderedScan;
-use crate::read::value_split::{ValueSplitScanner, prepare_value_split_scan};
 use crate::read::{BoxedRecordBatchStream, RecordBatch};
 use crate::region::options::MergeMode;
 use crate::region::version::VersionRef;
@@ -371,17 +370,6 @@ impl ScanRegion {
                 .map(|scanner| Box::new(scanner) as _)
         } else {
             self.seq_scan().await.map(|scanner| Box::new(scanner) as _)
-        }
-    }
-
-    /// Returns a public query scanner that hides metric value companion columns.
-    pub(crate) async fn query_region_scanner(mut self) -> Result<RegionScannerRef> {
-        let mapper =
-            prepare_value_split_scan(self.region_id(), &mut self.request, &self.version.metadata)?;
-        let scanner = self.region_scanner().await?;
-        match mapper {
-            Some(mapper) => Ok(Box::new(ValueSplitScanner::new(scanner, mapper))),
-            None => Ok(scanner),
         }
     }
 

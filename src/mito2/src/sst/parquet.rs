@@ -29,7 +29,6 @@ pub mod flat_format;
 pub mod format;
 pub(crate) mod helper;
 pub mod metadata;
-pub(crate) mod metric_value_split;
 pub mod prefilter;
 pub mod push_decoder;
 pub mod read_columns;

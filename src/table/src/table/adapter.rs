@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex};
 
 use common_query::stream::StreamScanAdapter;
 use common_recordbatch::OrderOption;
-use datafusion::arrow::datatypes::{Schema as DfSchema, SchemaRef as DfSchemaRef};
+use datafusion::arrow::datatypes::SchemaRef as DfSchemaRef;
 use datafusion::catalog::Session;
 use datafusion::datasource::{TableProvider, TableType as DfTableType};
 use datafusion::error::Result as DfResult;
@@ -27,7 +27,6 @@ use datafusion_expr::TableProviderFilterPushDown as DfTableProviderFilterPushDow
 use datafusion_expr::expr::Expr;
 use datafusion_physical_expr::PhysicalSortExpr;
 use datafusion_physical_expr::expressions::Column;
-use store_api::metric_engine_consts::{METRIC_ENGINE_NAME, is_metric_engine_value_int_column};
 use store_api::storage::{ScanRequest, VectorSearchRequest};
 
 use crate::table::{TableRef, TableType};
@@ -83,29 +82,7 @@ impl TableProvider for DfTableProviderAdapter {
     }
 
     fn schema(&self) -> DfSchemaRef {
-        let table_schema = self.table.schema();
-        let schema = table_schema.arrow_schema();
-        let table_info = self.table.table_info();
-        if table_info.meta.engine != METRIC_ENGINE_NAME
-            || !table_info.is_physical_table()
-            || !schema
-                .fields()
-                .iter()
-                .any(|field| is_metric_engine_value_int_column(field.name()))
-        {
-            return schema.clone();
-        }
-
-        let fields = schema
-            .fields()
-            .iter()
-            .filter(|field| !is_metric_engine_value_int_column(field.name()))
-            .cloned()
-            .collect::<Vec<_>>();
-        Arc::new(DfSchema::new_with_metadata(
-            fields,
-            schema.metadata().clone(),
-        ))
+        self.table.schema().arrow_schema().clone()
     }
 
     fn table_type(&self) -> DfTableType {
