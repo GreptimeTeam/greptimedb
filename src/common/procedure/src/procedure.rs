@@ -228,10 +228,79 @@ pub trait Procedure: Send {
         PoisonKeys::default()
     }
 
+    /// Builds an event for a framework lifecycle trigger.
+    ///
+    /// The hook is called with the current procedure instance, so an event can
+    /// include state that was produced after the procedure was submitted. A
+    /// return value of `None` means that this trigger should not be recorded.
+    fn event(&self, _ctx: &ProcedureEventContext<'_>) -> Option<Box<dyn Event>> {
+        None
+    }
+
     /// Returns the user metadata of the procedure. If the metadata contains the eventable object, you can use [UserMetadata::to_event] to get the event and emit it to the event recorder.
     fn user_metadata(&self) -> Option<UserMetadata> {
         None
     }
+}
+
+/// Framework-owned context supplied when a procedure builds a lifecycle event.
+pub struct ProcedureEventContext<'a> {
+    /// Id of the procedure associated with the event.
+    pub procedure_id: ProcedureId,
+    /// Current framework state of the procedure.
+    pub lifecycle_state: &'a ProcedureState,
+    /// Lifecycle action that caused the event hook to be called.
+    pub trigger: ProcedureEventTrigger,
+}
+
+/// Lifecycle action that causes the framework to invoke [`Procedure::event`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProcedureEventTrigger {
+    /// The root procedure was submitted to the manager.
+    Submitted,
+    /// A child submission was attempted.
+    ChildSubmitted {
+        /// The submitted child procedure.
+        procedure_id: ProcedureId,
+        /// The result of the submission attempt.
+        outcome: ChildSubmissionOutcome,
+    },
+    /// Procedure execution is being retried.
+    Retrying {
+        /// Phase in which the retry occurs.
+        phase: RetryPhase,
+        /// Retry attempt within the current runner lifecycle.
+        attempt: u32,
+    },
+    /// Procedure rollback is starting or being retried.
+    RollingBack {
+        /// Rollback attempt within the current runner lifecycle.
+        attempt: u32,
+    },
+    /// The procedure reached a successful terminal state.
+    Succeeded,
+    /// The procedure reached a failed terminal state.
+    Failed,
+    /// The procedure was poisoned and cannot proceed.
+    Poisoned,
+}
+
+/// Phase of a procedure retry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RetryPhase {
+    /// Retrying procedure execution.
+    Execute,
+    /// Retrying procedure rollback.
+    Rollback,
+}
+
+/// Outcome of submitting a child procedure.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChildSubmissionOutcome {
+    Accepted,
+    AlreadyAccepted,
+    ManagerStopped,
+    SpawnFailed,
 }
 
 /// The user metadata injected by the procedure caller. It can be used to emit events to the event recorder.
@@ -280,6 +349,10 @@ impl<T: Procedure + ?Sized> Procedure for Box<T> {
 
     fn poison_keys(&self) -> PoisonKeys {
         (**self).poison_keys()
+    }
+
+    fn event(&self, ctx: &ProcedureEventContext<'_>) -> Option<Box<dyn Event>> {
+        (**self).event(ctx)
     }
 }
 
@@ -628,10 +701,45 @@ pub struct ProcedureInfo {
 
 #[cfg(test)]
 mod tests {
+    use async_trait::async_trait;
     use common_error::mock::MockError;
     use common_error::status_code::StatusCode;
 
     use super::*;
+
+    struct DefaultEventProcedure;
+
+    #[async_trait]
+    impl Procedure for DefaultEventProcedure {
+        fn type_name(&self) -> &str {
+            "default_event"
+        }
+
+        async fn execute(&mut self, _: &Context) -> Result<Status> {
+            Ok(Status::done())
+        }
+
+        fn dump(&self) -> Result<String> {
+            Ok(String::new())
+        }
+
+        fn lock_key(&self) -> LockKey {
+            LockKey::default()
+        }
+    }
+
+    #[test]
+    fn test_default_procedure_event_hook() {
+        let state = ProcedureState::Running;
+        let context = ProcedureEventContext {
+            procedure_id: ProcedureId::random(),
+            lifecycle_state: &state,
+            trigger: ProcedureEventTrigger::Succeeded,
+        };
+
+        assert!(DefaultEventProcedure.event(&context).is_none());
+        assert!(Box::new(DefaultEventProcedure).event(&context).is_none());
+    }
 
     #[test]
     fn test_status() {

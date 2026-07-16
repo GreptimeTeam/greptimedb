@@ -29,11 +29,10 @@ pub(crate) mod utils;
 use std::any::Any;
 use std::collections::{HashMap, HashSet};
 use std::fmt::{Debug, Display};
-use std::sync::Arc;
 use std::time::Duration;
 
 use common_error::ext::BoxedError;
-use common_event_recorder::{Event, Eventable};
+use common_event_recorder::Event;
 use common_meta::cache_invalidator::CacheInvalidatorRef;
 use common_meta::ddl::RegionFailureDetectorControllerRef;
 use common_meta::instruction::CacheIdent;
@@ -50,7 +49,7 @@ use common_procedure::error::{
     Error as ProcedureError, FromJsonSnafu, Result as ProcedureResult, ToJsonSnafu,
 };
 use common_procedure::{
-    Context as ProcedureContext, LockKey, Procedure, Status, StringKey, UserMetadata,
+    Context as ProcedureContext, LockKey, Procedure, ProcedureEventContext, Status, StringKey,
 };
 use common_telemetry::{debug, error, info};
 use manager::RegionMigrationProcedureGuard;
@@ -201,12 +200,6 @@ impl PersistentContext {
                 .push(*region_id);
         }
         table_regions
-    }
-}
-
-impl Eventable for PersistentContext {
-    fn to_event(&self) -> Option<Box<dyn Event>> {
-        Some(Box::new(RegionMigrationEvent::from_persistent_ctx(self)))
     }
 }
 
@@ -971,8 +964,10 @@ impl Procedure for RegionMigrationProcedure {
         LockKey::new(self.context.persistent_ctx.lock_key())
     }
 
-    fn user_metadata(&self) -> Option<UserMetadata> {
-        Some(UserMetadata::new(Arc::new(self.context.persistent_ctx())))
+    fn event(&self, _ctx: &ProcedureEventContext<'_>) -> Option<Box<dyn Event>> {
+        Some(Box::new(RegionMigrationEvent::from_persistent_ctx(
+            &self.context.persistent_ctx,
+        )))
     }
 }
 
@@ -1030,6 +1025,36 @@ mod tests {
         let serialized = procedure.dump().unwrap();
         let expected = r#"{"persistent_ctx":{"catalog_and_schema":[["greptime","public"]],"from_peer":{"id":1,"addr":""},"to_peer":{"id":2,"addr":""},"region_ids":[4398046511105],"timeout":"10s","trigger_reason":"Unknown"},"state":{"region_migration_state":"RegionMigrationStart"}}"#;
         assert_eq!(expected, serialized);
+    }
+
+    #[test]
+    fn test_event_hook_uses_current_persistent_context() {
+        let env = TestingEnv::new();
+        let procedure =
+            RegionMigrationProcedure::new(new_persistent_context(), env.context_factory(), vec![]);
+        let state = common_procedure::ProcedureState::Running;
+        let triggers = [
+            common_procedure::ProcedureEventTrigger::Retrying {
+                phase: common_procedure::RetryPhase::Execute,
+                attempt: 1,
+            },
+            common_procedure::ProcedureEventTrigger::RollingBack { attempt: 1 },
+            common_procedure::ProcedureEventTrigger::Succeeded,
+            common_procedure::ProcedureEventTrigger::Failed,
+            common_procedure::ProcedureEventTrigger::Poisoned,
+        ];
+
+        for trigger in triggers {
+            let event = procedure
+                .event(&ProcedureEventContext {
+                    procedure_id: common_procedure::ProcedureId::random(),
+                    lifecycle_state: &state,
+                    trigger,
+                })
+                .unwrap();
+            assert_eq!(event.event_type(), "region_migration");
+            assert_eq!(event.extra_rows().unwrap().len(), 1);
+        }
     }
 
     #[test]
