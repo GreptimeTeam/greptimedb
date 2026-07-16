@@ -114,9 +114,12 @@ pub struct ReadColumn {
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum NestedReadStrategy {
-    /// Read requested nested paths only. Missing paths stay missing.
+    /// Read parquet leaves whose paths start with the requested nested paths.
+    ///
+    /// For example, requesting `j.a` may read `j.a.b` and `j.a.c` from parquet.
+    /// If no leaf matches the requested prefix, the path stays missing.
     #[default]
-    Exact,
+    Prefix,
     /// If a requested path is missing, read the nearest variant parent.
     ///
     /// Useful for JSON schema evolution, e.g. read `j.a` when `j.a.b` is
@@ -129,7 +132,7 @@ impl NestedReadStrategy {
         match (self, other) {
             (Self::FallbackToNearestVariantParent, _)
             | (_, Self::FallbackToNearestVariantParent) => Self::FallbackToNearestVariantParent,
-            (Self::Exact, Self::Exact) => Self::Exact,
+            (Self::Prefix, Self::Prefix) => Self::Prefix,
         }
     }
 }
@@ -139,7 +142,7 @@ impl ReadColumn {
         Self {
             column_id,
             nested_paths,
-            nested_path_read_strategy: NestedReadStrategy::Exact,
+            nested_path_read_strategy: NestedReadStrategy::Prefix,
         }
     }
 
@@ -283,7 +286,7 @@ pub fn read_columns_from_projection(
         read_cols.push(ReadColumn {
             column_id: col_id,
             nested_paths,
-            nested_path_read_strategy: NestedReadStrategy::Exact,
+            nested_path_read_strategy: NestedReadStrategy::Prefix,
         });
     }
 

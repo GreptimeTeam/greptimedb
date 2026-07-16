@@ -14,6 +14,8 @@
 
 //! Parquet reader.
 
+mod json2_fallback_decoder;
+mod nested_schema_aligner;
 mod stream;
 
 #[cfg(feature = "vector_index")]

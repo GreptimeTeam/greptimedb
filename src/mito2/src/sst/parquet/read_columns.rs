@@ -284,13 +284,13 @@ fn build_parquet_leaves_indices(
     let mut matched_roots = HashSet::with_capacity(projection.cols.len());
     let mut json2_fallback_plan = Json2FallbackPlan::default();
 
-    // Tracks whether each requested nested path matched without fallback.
-    let mut exact_matched = HashMap::<usize, Vec<bool>>::new();
+    // Tracks whether each requested nested path matched by prefix without fallback.
+    let mut prefix_matched = HashMap::<usize, Vec<bool>>::new();
     for col in &projection.cols {
-        exact_matched.insert(col.root_index, vec![false; col.nested_paths.len()]);
+        prefix_matched.insert(col.root_index, vec![false; col.nested_paths.len()]);
     }
 
-    // First select exact root/nested matches.
+    // First select root/nested prefix matches.
     for (leaf_idx, leaf_col) in parquet_schema_desc.columns().iter().enumerate() {
         let root_idx = parquet_schema_desc.get_column_root_idx(leaf_idx);
         let Some(col) = map.get(&root_idx) else {
@@ -310,7 +310,7 @@ fn build_parquet_leaves_indices(
             .enumerate()
             .filter(|(_, nested_path)| leaf_path.starts_with(nested_path))
         {
-            exact_matched.get_mut(&root_idx).unwrap()[path_idx] = true;
+            prefix_matched.get_mut(&root_idx).unwrap()[path_idx] = true;
             matched = true;
         }
 
@@ -320,13 +320,13 @@ fn build_parquet_leaves_indices(
         }
     }
 
-    // Then fallback exact misses to their nearest variant parent.
+    // Then fallback prefix misses to their nearest variant parent.
     for (output_root_index, col) in projection.cols.iter().enumerate() {
         if col.nested_path_read_strategy != NestedReadStrategy::FallbackToNearestVariantParent {
             continue;
         }
         for (path_idx, nested_path) in col.nested_paths.iter().enumerate() {
-            if exact_matched[&col.root_index][path_idx] {
+            if prefix_matched[&col.root_index][path_idx] {
                 continue;
             }
 
@@ -562,7 +562,7 @@ mod tests {
 
         col.merge_nested_paths(
             vec![vec!["j".to_string(), "b".to_string()]],
-            NestedReadStrategy::Exact,
+            NestedReadStrategy::Prefix,
         );
 
         assert_eq!(
@@ -579,7 +579,7 @@ mod tests {
         let mut col = ParquetReadColumn::new(0)
             .with_nested_paths(vec![vec!["j".to_string(), "a".to_string()]]);
 
-        col.merge_nested_paths(vec![], NestedReadStrategy::Exact);
+        col.merge_nested_paths(vec![], NestedReadStrategy::Prefix);
 
         assert!(col.nested_paths().is_empty());
     }
@@ -615,7 +615,7 @@ mod tests {
     }
 
     #[test]
-    fn test_exact_match_prevents_variant_parent_fallback() {
+    fn test_prefix_match_prevents_variant_parent_fallback() {
         let parquet_schema_desc = build_test_variant_parent_schema();
         let projection = ParquetReadColumns::from_deduped(vec![
             ParquetReadColumn::new(0)
@@ -638,7 +638,7 @@ mod tests {
     }
 
     #[test]
-    fn test_mixed_exact_and_fallback_paths() {
+    fn test_mixed_prefix_and_fallback_paths() {
         let parquet_schema_desc = build_test_variant_parent_schema();
         let nested_paths = vec![
             vec!["j".to_string(), "a".to_string(), "x".to_string()],
@@ -709,7 +709,7 @@ mod tests {
     }
 
     #[test]
-    fn test_exact_strategy_does_not_fallback_to_variant_parent() {
+    fn test_prefix_strategy_does_not_fallback_to_variant_parent() {
         let parquet_schema_desc = build_test_variant_parent_schema();
         let projection =
             ParquetReadColumns::from_deduped(vec![ParquetReadColumn::new(0).with_nested_paths(
