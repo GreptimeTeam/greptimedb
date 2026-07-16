@@ -26,6 +26,7 @@ use common_procedure::{
 };
 use common_telemetry::info;
 use common_telemetry::tracing::warn;
+use common_time::util::current_time_millis;
 use common_wal::options::WalOptions;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
@@ -33,13 +34,14 @@ use store_api::storage::RegionNumber;
 use strum::AsRefStr;
 use table::metadata::TableId;
 use table::table_reference::TableReference;
+use uuid::Uuid;
 
 use self::executor::DropTableExecutor;
 use crate::ddl::DdlContext;
 use crate::ddl::utils::{convert_region_routes_to_detecting_regions, map_to_procedure_error};
 use crate::error::{self, Result};
 use crate::key::table_route::TableRouteValue;
-use crate::lock_key::{CatalogLock, SchemaLock, TableLock};
+use crate::lock_key::{CatalogLock, SchemaLock, TableLock, TableNameLock};
 use crate::metrics;
 use crate::region_keeper::OperatingRegionGuard;
 use crate::rpc::ddl::DropTableTask;
@@ -60,7 +62,7 @@ impl DropTableProcedure {
     pub const TYPE_NAME: &'static str = "metasrv-procedure::DropTable";
 
     pub fn new(task: DropTableTask, context: DdlContext) -> Self {
-        let data = DropTableData::new(task);
+        let data = DropTableData::new(task, context.soft_drop_enabled, context.soft_drop_retention);
         let executor = data.build_executor();
         Self {
             context,
@@ -71,7 +73,16 @@ impl DropTableProcedure {
     }
 
     pub fn from_json(json: &str, context: DdlContext) -> ProcedureResult<Self> {
-        let data: DropTableData = serde_json::from_str(json).context(FromJsonSnafu)?;
+        let mut data: DropTableData = serde_json::from_str(json).context(FromJsonSnafu)?;
+        if data.state == DropTableState::Prepare
+            && data.soft_drop_enabled
+            && data.dropped_at.is_none()
+            && data.soft_drop_retention_millis.is_none()
+        {
+            data.soft_drop_retention_millis = context
+                .soft_drop_retention
+                .and_then(|retention| i64::try_from(retention.as_millis()).ok());
+        }
         let executor = data.build_executor();
 
         Ok(Self {
@@ -83,10 +94,36 @@ impl DropTableProcedure {
     }
 
     pub(crate) async fn on_prepare(&mut self) -> Result<Status> {
-        if self.executor.on_prepare(&self.context).await?.stop() {
+        if self
+            .executor
+            .on_prepare(&self.context, self.data.soft_drop_enabled)
+            .await?
+            .stop()
+        {
             return Ok(Status::done());
         }
         self.fill_table_metadata().await?;
+        if self.data.soft_drop_enabled && self.data.dropped_at.is_none() {
+            let dropped_at = current_time_millis();
+            let retention_millis =
+                self.data
+                    .soft_drop_retention_millis
+                    .context(error::UnexpectedSnafu {
+                        err_msg: "Soft-drop retention is missing from the procedure".to_string(),
+                    })?;
+            let retention_expires_at = dropped_at.checked_add(retention_millis).context(
+                error::UnexpectedSnafu {
+                    err_msg: format!(
+                        "Soft-drop retention deadline overflows i64: dropped_at={dropped_at}, retention_millis={retention_millis}"
+                    ),
+                },
+            )?;
+            self.data.dropped_at = Some(dropped_at);
+            self.data.retention_expires_at = Some(retention_expires_at);
+        }
+        if self.data.soft_drop_enabled && self.data.drop_generation.is_none() {
+            self.data.drop_generation = Some(Uuid::new_v4().to_string());
+        }
         self.data.state = DropTableState::DeleteMetadata;
 
         Ok(Status::executing(true))
@@ -139,6 +176,9 @@ impl DropTableProcedure {
                 &self.context,
                 table_route_value,
                 &self.data.region_wal_options,
+                self.data.dropped_at,
+                self.data.retention_expires_at,
+                self.data.drop_generation.as_deref(),
             )
             .await?;
         info!("Deleted table metadata for table {table_id}");
@@ -173,7 +213,7 @@ impl DropTableProcedure {
                 .await?;
         }
 
-        if self.context.soft_drop_enabled {
+        if self.data.soft_drop_enabled {
             self.executor
                 .on_close_regions(
                     &self.context.node_manager,
@@ -286,6 +326,7 @@ impl Procedure for DropTableProcedure {
         let lock_key = vec![
             CatalogLock::Read(table_ref.catalog).into(),
             SchemaLock::read(table_ref.catalog, table_ref.schema).into(),
+            TableNameLock::new(table_ref.catalog, table_ref.schema, table_ref.table).into(),
             TableLock::Write(table_id).into(),
         ];
 
@@ -329,10 +370,24 @@ pub struct DropTableData {
     pub region_wal_options: HashMap<RegionNumber, WalOptions>,
     #[serde(default)]
     pub allow_rollback: bool,
+    #[serde(default)]
+    pub soft_drop_enabled: bool,
+    #[serde(default)]
+    pub dropped_at: Option<i64>,
+    #[serde(default)]
+    pub retention_expires_at: Option<i64>,
+    #[serde(default)]
+    pub soft_drop_retention_millis: Option<i64>,
+    #[serde(default)]
+    pub drop_generation: Option<String>,
 }
 
 impl DropTableData {
-    pub fn new(task: DropTableTask) -> Self {
+    pub fn new(
+        task: DropTableTask,
+        soft_drop_enabled: bool,
+        soft_drop_retention: Option<std::time::Duration>,
+    ) -> Self {
         Self {
             state: DropTableState::Prepare,
             task,
@@ -340,6 +395,12 @@ impl DropTableData {
             physical_table_id: None,
             region_wal_options: HashMap::new(),
             allow_rollback: false,
+            soft_drop_enabled,
+            dropped_at: None,
+            retention_expires_at: None,
+            soft_drop_retention_millis: soft_drop_retention
+                .and_then(|retention| i64::try_from(retention.as_millis()).ok()),
+            drop_generation: None,
         }
     }
 
