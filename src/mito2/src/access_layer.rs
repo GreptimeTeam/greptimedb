@@ -17,8 +17,7 @@ use std::time::{Duration, Instant};
 
 use async_stream::try_stream;
 use common_time::Timestamp;
-use futures::future::try_join_all;
-use futures::{Stream, TryStreamExt};
+use futures::{Stream, StreamExt, TryStreamExt};
 use object_store::services::Fs;
 use object_store::util::{join_dir, with_instrument_layers};
 use object_store::{ATOMIC_WRITE_DIR, ErrorKind, OLD_ATOMIC_WRITE_DIR, ObjectStore};
@@ -192,19 +191,20 @@ impl AccessLayer {
         &self.object_store
     }
 
-    /// Validates that files about to be published by a manifest edit are visible in object storage.
+    /// Validates local files about to be published by a normal manifest edit.
     ///
     /// A zero expected size is treated as unknown for compatibility, but the object must still
     /// exist. Index validation always uses the file metadata's current index version.
-    pub(crate) async fn validate_publication_files(
+    pub(crate) async fn validate_local_publication_files(
         &self,
         logical_region_id: RegionId,
         files: &[FileMeta],
     ) -> Result<()> {
+        debug_assert!(files.iter().all(|file| file.region_id == logical_region_id));
         let mut validations = Vec::with_capacity(files.len() * 2);
         for file in files {
             let path = location::sst_file_path(&self.table_dir, file.file_id(), self.path_type);
-            validations.push(self.validate_publication_object(
+            validations.push(self.validate_local_publication_object(
                 logical_region_id,
                 file.file_id().file_id(),
                 path,
@@ -214,7 +214,7 @@ impl AccessLayer {
             if file.exists_index() {
                 let index_id = file.index_id();
                 let path = location::index_file_path(&self.table_dir, index_id, self.path_type);
-                validations.push(self.validate_publication_object(
+                validations.push(self.validate_local_publication_object(
                     logical_region_id,
                     index_id.file_id(),
                     path,
@@ -222,11 +222,14 @@ impl AccessLayer {
                 ));
             }
         }
-        try_join_all(validations).await?;
+        futures::stream::iter(validations)
+            .buffer_unordered(8)
+            .try_collect::<Vec<_>>()
+            .await?;
         Ok(())
     }
 
-    async fn validate_publication_object(
+    async fn validate_local_publication_object(
         &self,
         logical_region_id: RegionId,
         file_id: FileId,
@@ -789,13 +792,9 @@ impl FilePathProvider for RegionFilePathFactory {
 mod tests {
     use common_error::ext::{ErrorExt, RetryHint};
     use common_error::status_code::StatusCode;
-    use common_test_util::temp_dir::{TempDir, create_temp_dir};
-    use object_store::services::Fs;
 
     use super::*;
     use crate::sst::file::IndexType;
-    use crate::sst::index::intermediate::IntermediateManager;
-    use crate::sst::index::puffin_manager::PuffinManagerFactory;
     use crate::test_util::scheduler_util::SchedulerEnv;
 
     fn file_meta(region_id: RegionId, file_size: u64) -> FileMeta {
@@ -820,53 +819,28 @@ mod tests {
             .unwrap();
     }
 
-    async fn access_layer_with_path_type(
-        table_dir: &str,
-        path_type: PathType,
-    ) -> (TempDir, AccessLayer) {
-        let data_dir = create_temp_dir("publication-validator");
-        let root = data_dir.path().display().to_string();
-        let index_aux_path = data_dir.path().join("index_aux");
-        let puffin_manager = PuffinManagerFactory::new(&index_aux_path, 4096, None, None)
-            .await
-            .unwrap();
-        let intermediate_manager = IntermediateManager::init_fs(index_aux_path.to_str().unwrap())
-            .await
-            .unwrap();
-        let access_layer = AccessLayer::new(
-            table_dir,
-            path_type,
-            ObjectStore::new(Fs::default().root(&root))
-                .unwrap()
-                .finish(),
-            puffin_manager,
-            intermediate_manager,
-        );
-        (data_dir, access_layer)
-    }
-
     #[tokio::test]
-    async fn test_validate_publication_files_valid_parquet() {
+    async fn test_validate_local_publication_files_valid_parquet() {
         let env = SchedulerEnv::new().await;
-        let region_id = RegionId::new(1, 1);
-        let file = file_meta(region_id, 0);
+        let expected_region_id = RegionId::new(1, 1);
+        let file = file_meta(expected_region_id, 0);
         write_parquet(&env.access_layer, &file, b"sst".to_vec()).await;
 
         env.access_layer
-            .validate_publication_files(region_id, &[file])
+            .validate_local_publication_files(expected_region_id, &[file])
             .await
             .unwrap();
     }
 
     #[tokio::test]
-    async fn test_validate_publication_files_rejects_missing_parquet() {
+    async fn test_validate_local_publication_files_rejects_missing_parquet() {
         let env = SchedulerEnv::new().await;
         let region_id = RegionId::new(1, 1);
         let file = file_meta(region_id, 3);
 
         let err = env
             .access_layer
-            .validate_publication_files(region_id, &[file])
+            .validate_local_publication_files(region_id, &[file])
             .await
             .unwrap_err();
         assert!(matches!(
@@ -876,7 +850,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_validate_publication_files_rejects_parquet_size_mismatch() {
+    async fn test_validate_local_publication_files_rejects_parquet_size_mismatch() {
         let env = SchedulerEnv::new().await;
         let region_id = RegionId::new(1, 1);
         let file = file_meta(region_id, 4);
@@ -884,7 +858,7 @@ mod tests {
 
         let err = env
             .access_layer
-            .validate_publication_files(region_id, &[file.clone()])
+            .validate_local_publication_files(region_id, &[file.clone()])
             .await
             .unwrap_err();
         assert!(matches!(
@@ -896,20 +870,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_validate_publication_files_without_index_does_not_require_puffin() {
+    async fn test_validate_local_publication_files_without_index_does_not_require_puffin() {
         let env = SchedulerEnv::new().await;
         let region_id = RegionId::new(1, 1);
         let file = file_meta(region_id, 3);
         write_parquet(&env.access_layer, &file, b"sst".to_vec()).await;
 
         env.access_layer
-            .validate_publication_files(region_id, &[file])
+            .validate_local_publication_files(region_id, &[file])
             .await
             .unwrap();
     }
 
     #[tokio::test]
-    async fn test_validate_publication_files_rejects_missing_or_wrong_versioned_index() {
+    async fn test_validate_local_publication_files_rejects_missing_or_wrong_versioned_index() {
         let env = SchedulerEnv::new().await;
         let region_id = RegionId::new(1, 1);
         let mut file = file_meta(region_id, 3);
@@ -920,7 +894,7 @@ mod tests {
 
         assert!(matches!(
             env.access_layer
-                .validate_publication_files(region_id, &[file.clone()])
+                .validate_local_publication_files(region_id, &[file.clone()])
                 .await,
             Err(crate::error::Error::PublicationObjectStat { .. })
         ));
@@ -937,7 +911,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             env.access_layer
-                .validate_publication_files(region_id, &[file.clone()])
+                .validate_local_publication_files(region_id, &[file.clone()])
                 .await,
             Err(crate::error::Error::PublicationObjectStat { .. })
         ));
@@ -954,7 +928,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             env.access_layer
-                .validate_publication_files(region_id, &[file.clone()])
+                .validate_local_publication_files(region_id, &[file.clone()])
                 .await,
             Err(crate::error::Error::PublicationSizeMismatch { .. })
         ));
@@ -965,28 +939,14 @@ mod tests {
             .await
             .unwrap();
         env.access_layer
-            .validate_publication_files(region_id, &[file])
+            .validate_local_publication_files(region_id, &[file])
             .await
             .unwrap();
     }
 
     #[tokio::test]
-    async fn test_validate_publication_files_uses_file_origin_region_and_layer_path_type() {
-        let (_data_dir, access_layer) = access_layer_with_path_type("table", PathType::Data).await;
-        let logical_region_id = RegionId::new(1, 1);
-        let file_origin_region_id = RegionId::new(1, 2);
-        let file = file_meta(file_origin_region_id, 3);
-        write_parquet(&access_layer, &file, b"sst".to_vec()).await;
-
-        access_layer
-            .validate_publication_files(logical_region_id, &[file])
-            .await
-            .unwrap();
-    }
-
-    #[tokio::test]
-    async fn test_validate_publication_files_accepts_zero_expected_index_size_but_rejects_missing()
-    {
+    async fn test_validate_local_publication_files_accepts_zero_expected_index_size_but_rejects_missing()
+     {
         let env = SchedulerEnv::new().await;
         let region_id = RegionId::new(1, 1);
         let mut file = file_meta(region_id, 0);
@@ -996,7 +956,7 @@ mod tests {
 
         assert!(matches!(
             env.access_layer
-                .validate_publication_files(region_id, &[file.clone()])
+                .validate_local_publication_files(region_id, &[file.clone()])
                 .await,
             Err(crate::error::Error::PublicationObjectStat { .. })
         ));
@@ -1012,7 +972,7 @@ mod tests {
             .await
             .unwrap();
         env.access_layer
-            .validate_publication_files(region_id, &[file])
+            .validate_local_publication_files(region_id, &[file])
             .await
             .unwrap();
     }
@@ -1020,11 +980,11 @@ mod tests {
     #[tokio::test]
     async fn test_publication_object_stat_preserves_not_found_source_and_is_retryable() {
         let env = SchedulerEnv::new().await;
-        let logical_region_id = RegionId::new(1, 1);
-        let file = file_meta(RegionId::new(1, 2), 0);
+        let expected_region_id = RegionId::new(1, 1);
+        let file = file_meta(expected_region_id, 0);
         let err = env
             .access_layer
-            .validate_publication_files(logical_region_id, &[file.clone()])
+            .validate_local_publication_files(expected_region_id, &[file.clone()])
             .await
             .unwrap_err();
 
@@ -1035,7 +995,7 @@ mod tests {
                 error,
                 ..
             } => {
-                assert_eq!(*region_id, logical_region_id);
+                assert_eq!(*region_id, expected_region_id);
                 assert_eq!(*file_id, file.file_id);
                 assert_eq!(error.kind(), ErrorKind::NotFound);
             }

@@ -182,11 +182,12 @@ pub async fn open_compaction_region(
     let manifest = manifest_manager.manifest();
     let region_metadata = manifest.metadata.clone();
     let hook: Option<RegionHookRef> = req.plugins.get();
-    let manifest_ctx = Arc::new(ManifestContext::new(
+    let manifest_ctx = Arc::new(ManifestContext::new_with_local_publication_protocol(
         manifest_manager,
         access_layer.clone(),
         RegionRoleState::Leader(RegionLeaderState::Writable),
         hook,
+        false,
     ));
 
     let file_purger = {

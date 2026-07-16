@@ -22,7 +22,6 @@ use async_trait::async_trait;
 use common_base::Plugins;
 use common_recordbatch::RecordBatches;
 use common_telemetry::init_default_ut_logging;
-use common_time::Timestamp;
 use futures::TryStreamExt;
 use object_store::layers::mock::{
     Error as MockError, ErrorKind, MockLayerBuilder, OpDelete, Result as ObjectStoreResult, oio,
@@ -36,18 +35,14 @@ use store_api::region_request::{
 use store_api::storage::{FileId, FileRef, FileRefsManifest, RegionId, ScanRequest};
 use tokio::sync::Semaphore;
 
-use crate::cache::file_cache::FileType;
 use crate::config::MitoConfig;
 use crate::engine::MitoEngine;
 use crate::engine::compaction_test::{delete_and_flush, put_and_flush};
 use crate::engine::region_hook::{RegionHook, RegionHookRef, SstFileInfo};
-use crate::gc::{
-    GcConfig, LocalGcWorker, ManifestLiveSet, TestFinalizationBarrier, TmpRefLiveSet,
-    should_delete_file,
-};
+use crate::gc::{GcConfig, LocalGcWorker, TestFinalizationBarrier, should_delete_file};
 use crate::manifest::action::{RegionManifest, RemovedFile};
 use crate::region::MitoRegionRef;
-use crate::sst::file::{FileMeta, IndexType, RegionFileId};
+use crate::sst::file::{RegionFileId, RegionIndexId};
 use crate::sst::location;
 use crate::test_util::{
     CreateRequestBuilder, TestEnv, build_rows, flush_region, put_rows, rows_schema,
@@ -262,119 +257,6 @@ async fn wait_until_gc_cutoff_is_after_file_mtime(store: &ObjectStore, path: &st
     });
 }
 
-fn assert_target_is_candidate(candidates: &[RemovedFile], file_id: FileId) {
-    assert!(
-        candidates
-            .iter()
-            .any(|candidate| candidate.file_id() == file_id),
-        "GC candidates do not contain target SST {file_id}: {candidates:?}"
-    );
-}
-
-fn indexed_file_meta(region_id: RegionId, file_id: FileId, index_version: u64) -> FileMeta {
-    let mut meta = FileMeta {
-        region_id,
-        file_id,
-        index_version,
-        ..Default::default()
-    };
-    meta.available_indexes.push(IndexType::InvertedIndex);
-    meta
-}
-
-#[tokio::test]
-async fn test_manifest_live_set_protects_normal_and_staging_index_versions() {
-    let mut env = TestEnv::new().await;
-    let engine = env.create_engine(MitoConfig::default()).await;
-    let region_id = RegionId::new(1, 1);
-    engine
-        .handle_request(
-            region_id,
-            RegionRequest::Create(CreateRequestBuilder::new().build()),
-        )
-        .await
-        .unwrap();
-    let region = engine.get_region(region_id).unwrap();
-    let file_id = FileId::random();
-    let mut normal = (*region.manifest_ctx.manifest().await).clone();
-    normal
-        .files
-        .insert(file_id, indexed_file_meta(region_id, file_id, 1));
-    let mut staging = normal.clone();
-    staging
-        .files
-        .insert(file_id, indexed_file_meta(region_id, file_id, 2));
-    let live_set = ManifestLiveSet::from_manifests(&normal, Some(&staging));
-
-    assert!(live_set.contains_file(file_id, FileType::Puffin(1)));
-    assert!(live_set.contains_file(file_id, FileType::Puffin(2)));
-    assert!(!live_set.contains_file(file_id, FileType::Puffin(3)));
-    assert!(live_set.contains_file(file_id, FileType::Parquet));
-}
-
-#[test]
-fn test_tmp_ref_live_set_protects_parquet_and_matching_puffin_version() {
-    let file_id = FileId::random();
-    let no_index_live_set = TmpRefLiveSet::from(&HashSet::from([(file_id, None)]));
-    assert!(no_index_live_set.contains_file(file_id, FileType::Parquet));
-    assert!(!no_index_live_set.contains_file(file_id, FileType::Puffin(1)));
-
-    let indexed_live_set = TmpRefLiveSet::from(&HashSet::from([(file_id, Some(1))]));
-
-    assert!(indexed_live_set.contains_file(file_id, FileType::Parquet));
-    assert!(indexed_live_set.contains_file(file_id, FileType::Puffin(1)));
-    assert!(!indexed_live_set.contains_file(file_id, FileType::Puffin(2)));
-}
-
-#[tokio::test]
-async fn test_fast_gc_tmp_ref_filtering_protects_parquet_and_matching_puffin() {
-    let mut env = TestEnv::new().await;
-    let engine = env
-        .create_engine(MitoConfig {
-            gc: GcConfig {
-                lingering_time: None,
-                ..Default::default()
-            },
-            ..Default::default()
-        })
-        .await;
-    let region_id = RegionId::new(1, 1);
-    engine
-        .handle_request(
-            region_id,
-            RegionRequest::Create(CreateRequestBuilder::new().build()),
-        )
-        .await
-        .unwrap();
-    let region = engine.get_region(region_id).unwrap();
-    let manifest = region.manifest_ctx.manifest().await;
-    let worker = create_gc_worker(
-        &engine,
-        BTreeMap::from([(region_id, Some(region))]),
-        &file_refs_manifest(region_id, &manifest),
-        false,
-    )
-    .await;
-    let file_id = FileId::random();
-    let removed_files = HashSet::from([
-        RemovedFile::File(file_id, None),
-        RemovedFile::Index(file_id, 1),
-        RemovedFile::Index(file_id, 2),
-    ]);
-    let deletable_files = worker
-        .list_to_be_deleted_files(
-            region_id,
-            false,
-            &ManifestLiveSet::default(),
-            &TmpRefLiveSet::from(&HashSet::from([(file_id, Some(1))])),
-            BTreeMap::from([(Timestamp::new_millisecond(0), removed_files)]),
-            vec![],
-        )
-        .unwrap();
-
-    assert_eq!(deletable_files, vec![RemovedFile::Index(file_id, 2)]);
-}
-
 async fn create_gc_worker(
     mito_engine: &MitoEngine,
     regions: BTreeMap<RegionId, Option<MitoRegionRef>>,
@@ -403,6 +285,78 @@ async fn create_gc_worker(
     )
     .await
     .unwrap()
+}
+
+#[tokio::test]
+async fn test_full_gc_tmp_refs_keep_all_live_index_versions() {
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(gc_config_with_zero_unknown_ttl()).await;
+    let region_id = RegionId::new(1, 1);
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Create(CreateRequestBuilder::new().build()),
+        )
+        .await
+        .unwrap();
+    let region = engine.get_region(region_id).unwrap();
+    let manifest = region.manifest_ctx.manifest().await;
+    let worker = create_gc_worker(
+        &engine,
+        BTreeMap::from([(region_id, Some(region))]),
+        &file_refs_manifest(region_id, &manifest),
+        true,
+    )
+    .await;
+
+    let file_id = FileId::random();
+    let parquet_path = parquet_path(worker.access_layer.table_dir(), region_id, file_id);
+    let index_paths = [1, 2, 3].map(|index_version| {
+        location::index_file_path(
+            worker.access_layer.table_dir(),
+            RegionIndexId::new(RegionFileId::new(region_id, file_id), index_version),
+            worker.access_layer.path_type(),
+        )
+    });
+    for path in &index_paths {
+        worker
+            .access_layer
+            .object_store()
+            .write(path, b"index".as_slice())
+            .await
+            .unwrap();
+    }
+    worker
+        .access_layer
+        .object_store()
+        .write(&parquet_path, b"parquet".as_slice())
+        .await
+        .unwrap();
+    wait_until_gc_cutoff_is_after_file_mtime(worker.access_layer.object_store(), &index_paths[2])
+        .await;
+
+    let mut entries = futures::future::join_all(
+        index_paths
+            .iter()
+            .map(|path| entry_at_path(worker.access_layer.object_store(), path)),
+    )
+    .await;
+    entries.push(entry_at_path(worker.access_layer.object_store(), &parquet_path).await);
+    let tmp_refs = HashSet::from([(file_id, Some(1)), (file_id, Some(2))]);
+    let deletable_files = worker
+        .list_to_be_deleted_files(
+            region_id,
+            false,
+            &HashMap::new(),
+            &tmp_refs,
+            Default::default(),
+            entries,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(deletable_files, vec![RemovedFile::Index(file_id, 3)]);
+    assert!(!deletable_files.contains(&RemovedFile::File(file_id, None)));
 }
 
 /// Test insert/flush then truncate can allow gc worker to delete files
@@ -536,6 +490,39 @@ async fn test_gc_worker_manifest_version_mismatch_needs_retry() {
     assert!(!report.processed_regions.contains(&region_id));
     assert!(!report.deleted_files.contains_key(&region_id));
     assert!(!report.deleted_indexes.contains_key(&region_id));
+}
+
+#[tokio::test]
+async fn test_gc_worker_staging_region_needs_retry() {
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let region_id = RegionId::new(1, 1);
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Create(CreateRequestBuilder::new().build()),
+        )
+        .await
+        .unwrap();
+    let region = engine.get_region(region_id).unwrap();
+    let mut manager = region.manifest_ctx.manifest_manager.write().await;
+    region.set_staging(&mut manager).await.unwrap();
+    drop(manager);
+    let manifest = region.manifest_ctx.manifest().await;
+
+    let report = create_gc_worker(
+        &engine,
+        BTreeMap::from([(region_id, Some(region))]),
+        &file_refs_manifest(region_id, &manifest),
+        true,
+    )
+    .await
+    .run()
+    .await
+    .unwrap();
+
+    assert_eq!(report.need_retry_regions, HashSet::from([region_id]));
+    assert!(!report.processed_regions.contains(&region_id));
 }
 
 /// Truncate with file refs should not delete files
@@ -858,8 +845,7 @@ async fn test_full_gc_does_not_delete_sst_published_before_finalization() {
     .await
     .with_test_finalization_barrier(barrier.clone());
     let gc = tokio::spawn(async move { gc_worker.run().await });
-    let candidates = barrier.wait_until_reached().await;
-    assert_target_is_candidate(&candidates, file_id);
+    barrier.wait_until_reached().await;
 
     hook.release();
     flush.await.unwrap().unwrap();
@@ -951,8 +937,7 @@ async fn test_full_gc_delete_before_publication_fails_closed_and_flush_can_retry
     .await
     .with_test_finalization_barrier(barrier.clone());
     let gc = tokio::spawn(async move { gc_worker.run().await });
-    let candidates = barrier.wait_until_reached().await;
-    assert_target_is_candidate(&candidates, file_id);
+    barrier.wait_until_reached().await;
     barrier.release();
     wait_for_permit(&delete_completed, "target Parquet delete completion").await;
     assert!(
@@ -1062,8 +1047,7 @@ async fn test_full_gc_delete_error_does_not_block_publisher_recovery() {
     .await
     .with_test_finalization_barrier(barrier.clone());
     let gc = tokio::spawn(async move { gc_worker.run().await });
-    let candidates = barrier.wait_until_reached().await;
-    assert_target_is_candidate(&candidates, file_id);
+    barrier.wait_until_reached().await;
     barrier.release();
     wait_for_permit(&close_attempted, "injected Parquet delete close failure").await;
     let gc_result = tokio::time::timeout(RACE_TIMEOUT, gc)

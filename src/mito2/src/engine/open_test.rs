@@ -30,7 +30,7 @@ use store_api::region_request::{
     PathType, RegionCleanUpRequest, RegionCloseRequest, RegionOpenRequest, RegionPutRequest,
     RegionRequest,
 };
-use store_api::storage::{RegionId, ScanRequest};
+use store_api::storage::{FileId, RegionId, ScanRequest};
 use tokio::sync::oneshot;
 
 use crate::compaction::compactor::{OpenCompactionRegionRequest, open_compaction_region};
@@ -38,8 +38,10 @@ use crate::config::MitoConfig;
 use crate::engine::flush_test::MockRegionHook;
 use crate::engine::region_hook::RegionHookRef;
 use crate::error;
+use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
 use crate::region::opener::{PartitionExprFetcher, PartitionExprFetcherRef};
 use crate::region::options::RegionOptions;
+use crate::sst::file::FileMeta;
 use crate::sst::location::region_dir_from_table_dir;
 use crate::test_util::{
     CreateRequestBuilder, LogStoreImpl, TestEnv, build_rows, flush_region, put_rows, reopen_region,
@@ -764,6 +766,29 @@ async fn test_open_compaction_region_with_format(flat_format: bool) {
     .unwrap();
 
     assert_eq!(region_id, compaction_region.region_id);
+
+    // Remote compaction has its own manifest context and must not validate against the local
+    // object paths before applying its manifest edit.
+    let missing_local_file = FileMeta {
+        region_id,
+        file_id: FileId::random(),
+        ..Default::default()
+    };
+    compaction_region
+        .manifest_ctx
+        .update_manifest_for_compaction(RegionMetaActionList::with_action(RegionMetaAction::Edit(
+            RegionEdit {
+                files_to_add: vec![missing_local_file],
+                files_to_remove: vec![],
+                timestamp_ms: None,
+                compaction_time_window: None,
+                flushed_entry_id: None,
+                flushed_sequence: None,
+                committed_sequence: None,
+            },
+        )))
+        .await
+        .unwrap();
 }
 
 /// Returns a dummy fetcher that returns the expr_json only once.

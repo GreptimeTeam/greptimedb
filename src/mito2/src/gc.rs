@@ -23,8 +23,6 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
-#[cfg(test)]
-use std::sync::Mutex;
 use std::time::Duration;
 
 use common_meta::datanode::GcStat;
@@ -52,7 +50,7 @@ use crate::metrics::{
     GC_DELETE_FILE_CNT, GC_DURATION_SECONDS, GC_ERRORS_TOTAL, GC_FILES_DELETED_TOTAL,
     GC_ORPHANED_INDEX_FILES, GC_RUNS_TOTAL, GC_SKIPPED_UNPARSABLE_FILES,
 };
-use crate::region::{MitoRegionRef, RegionRoleState};
+use crate::region::{MitoRegionRef, RegionLeaderState, RegionRoleState};
 use crate::sst::file::{RegionFileId, RegionIndexId, delete_files, delete_indexes};
 use crate::sst::location::{self};
 
@@ -211,86 +209,18 @@ pub struct LocalGcWorker {
     test_finalization_barrier: Option<TestFinalizationBarrier>,
 }
 
-#[derive(Default)]
-struct ManifestLiveSet {
-    parquet: HashSet<FileId>,
-    indexes: HashSet<(FileId, IndexVersion)>,
-}
-
-impl ManifestLiveSet {
-    fn from_manifest(manifest: &RegionManifest) -> Self {
-        let mut live_set = Self::default();
-        for (file_id, meta) in &manifest.files {
-            live_set.parquet.insert(*file_id);
-            if let Some(index_version) = meta.index_version() {
-                live_set.indexes.insert((*file_id, index_version));
-            }
-        }
-        live_set
-    }
-
-    fn from_manifests(normal: &RegionManifest, staging: Option<&RegionManifest>) -> Self {
-        let mut live_set = Self::from_manifest(normal);
-        if let Some(staging) = staging {
-            live_set.union(&Self::from_manifest(staging));
-        }
-        live_set
-    }
-
-    fn union(&mut self, other: &Self) {
-        self.parquet.extend(other.parquet.iter().copied());
-        self.indexes.extend(other.indexes.iter().copied());
-    }
-
-    fn contains_file(&self, file_id: FileId, file_type: FileType) -> bool {
-        match file_type {
-            FileType::Parquet => self.parquet.contains(&file_id),
-            FileType::Puffin(index_version) => self.indexes.contains(&(file_id, index_version)),
-        }
-    }
-}
-
-#[derive(Default)]
-struct TmpRefLiveSet {
-    parquet: HashSet<FileId>,
-    indexes: HashSet<(FileId, IndexVersion)>,
-}
-
-impl From<&HashSet<(FileId, Option<IndexVersion>)>> for TmpRefLiveSet {
-    fn from(tmp_ref_files: &HashSet<(FileId, Option<IndexVersion>)>) -> Self {
-        let mut live_set = Self::default();
-        for (file_id, index_version) in tmp_ref_files {
-            live_set.parquet.insert(*file_id);
-            if let Some(index_version) = index_version {
-                live_set.indexes.insert((*file_id, *index_version));
-            }
-        }
-        live_set
-    }
-}
-
-impl TmpRefLiveSet {
-    fn contains_file(&self, file_id: FileId, file_type: FileType) -> bool {
-        match file_type {
-            FileType::Parquet => self.parquet.contains(&file_id),
-            FileType::Puffin(index_version) => self.indexes.contains(&(file_id, index_version)),
-        }
-    }
-}
-
 enum RegionGcOutcome {
     Processed(Vec<RemovedFile>),
     NeedRetry,
 }
 
-/// Test-only synchronization point after full-listing GC has classified candidates and before it
-/// starts finalization.
+/// Test-only synchronization point after active-region full listing and before it takes the
+/// publication gate for finalization.
 #[cfg(test)]
 #[derive(Clone, Debug)]
 pub(crate) struct TestFinalizationBarrier {
     reached: Arc<tokio::sync::Semaphore>,
     release: Arc<tokio::sync::Semaphore>,
-    candidates: Arc<Mutex<Option<Vec<RemovedFile>>>>,
 }
 
 #[cfg(test)]
@@ -299,32 +229,22 @@ impl TestFinalizationBarrier {
         Self {
             reached: Arc::new(tokio::sync::Semaphore::new(0)),
             release: Arc::new(tokio::sync::Semaphore::new(0)),
-            candidates: Arc::new(Mutex::new(None)),
         }
     }
 
-    pub(crate) async fn wait_until_reached(&self) -> Vec<RemovedFile> {
+    pub(crate) async fn wait_until_reached(&self) {
         tokio::time::timeout(Duration::from_secs(10), self.reached.acquire())
             .await
             .expect("timed out waiting for GC finalization barrier")
             .expect("test finalization barrier must remain open")
             .forget();
-        self.candidates
-            .lock()
-            .expect("test finalization candidates lock must not be poisoned")
-            .clone()
-            .expect("GC finalization barrier must record candidates before signaling")
     }
 
     pub(crate) fn release(&self) {
         self.release.add_permits(1);
     }
 
-    async fn wait(&self, candidates: Vec<RemovedFile>) {
-        *self
-            .candidates
-            .lock()
-            .expect("test finalization candidates lock must not be poisoned") = Some(candidates);
+    async fn wait(&self) {
         self.reached.add_permits(1);
         tokio::time::timeout(Duration::from_secs(10), self.release.acquire())
             .await
@@ -598,75 +518,22 @@ impl LocalGcWorker {
             vec![]
         };
 
-        let recently_removed_files = if let Some(manifest) = &manifest {
-            self.get_removed_files_expel_times(manifest).await?
-        } else {
-            Default::default()
-        };
-
-        if recently_removed_files.is_empty() {
-            // no files to remove, skip
-            debug!("No recently removed files to gc for region {}", region_id);
-        }
-
-        let removed_file_cnt = recently_removed_files
-            .values()
-            .map(|s| s.len())
-            .sum::<usize>();
-
-        let current_files = manifest.as_ref().map(|m| &m.files);
-
-        let in_manifest = manifest
-            .as_deref()
-            .map(|manifest| ManifestLiveSet::from_manifests(manifest, None))
-            .unwrap_or_default();
-
-        let is_region_dropped = region.is_none();
-
         let tmp_ref_files = tmp_ref_files
             .iter()
             .map(|file_ref| (file_ref.file_id, file_ref.index_version))
             .collect::<HashSet<_>>();
-        let in_tmp_ref = TmpRefLiveSet::from(&tmp_ref_files);
-
-        let deletable_files = self.list_to_be_deleted_files(
-            region_id,
-            is_region_dropped,
-            &in_manifest,
-            &in_tmp_ref,
-            recently_removed_files,
-            all_entries.clone(),
-        )?;
-
-        info!(
-            "gc: for region{}{region_id}: In manifest file cnt: {}, Tmp ref file cnt: {}, recently removed files: {}, Unused files to delete count: {}",
-            if region.is_none() {
-                "(region dropped)"
-            } else {
-                ""
-            },
-            current_files.map(|c| c.len()).unwrap_or(0),
-            tmp_ref_files.len(),
-            removed_file_cnt,
-            deletable_files.len(),
-        );
-        debug!(
-            "gc: deletable files for region {}: {:?}",
-            region_id, &deletable_files
-        );
-
-        debug!(
-            "Found {} unused index files to delete for region {}",
-            deletable_files.len(),
-            region_id
-        );
-
-        #[cfg(test)]
-        if let Some(barrier) = &self.test_finalization_barrier {
-            barrier.wait(deletable_files.clone()).await;
-        }
 
         let Some(region) = region else {
+            let deletable_files = self
+                .list_to_be_deleted_files(
+                    region_id,
+                    true,
+                    &HashMap::new(),
+                    &tmp_ref_files,
+                    Default::default(),
+                    all_entries,
+                )
+                .await?;
             let _delete_timer = GC_DURATION_SECONDS
                 .with_label_values(&["delete_files"])
                 .start_timer();
@@ -674,12 +541,16 @@ impl LocalGcWorker {
             return Ok(RegionGcOutcome::Processed(deletable_files));
         };
 
-        let publication_guard = region.manifest_ctx.lock_publication_owned().await;
+        #[cfg(test)]
+        if let Some(barrier) = &self.test_finalization_barrier {
+            barrier.wait().await;
+        }
+
+        let publication_guard = region.manifest_ctx.publication_gate.lock().await;
         let manager = region.manifest_ctx.manifest_manager.write().await;
-        if !matches!(
-            region.manifest_ctx.current_state(),
-            RegionRoleState::Leader(_)
-        ) {
+        if region.manifest_ctx.current_state()
+            != RegionRoleState::Leader(RegionLeaderState::Writable)
+        {
             drop(manager);
             drop(publication_guard);
             return Ok(RegionGcOutcome::NeedRetry);
@@ -692,21 +563,39 @@ impl LocalGcWorker {
             return Ok(RegionGcOutcome::NeedRetry);
         }
 
-        let final_in_manifest = ManifestLiveSet::from_manifests(
-            &current_manifest,
-            manager.staging_manifest().as_deref(),
-        );
+        let final_in_manifest = current_manifest
+            .files
+            .iter()
+            .map(|(file_id, meta)| (*file_id, meta.index_version()))
+            .collect::<HashMap<_, _>>();
         let final_recently_removed_files = self
             .get_removed_files_expel_times(&current_manifest)
             .await?;
-        let final_deletable_files = self.list_to_be_deleted_files(
-            region_id,
-            false,
-            &final_in_manifest,
-            &in_tmp_ref,
-            final_recently_removed_files,
-            all_entries,
-        )?;
+        let removed_file_cnt = final_recently_removed_files
+            .values()
+            .map(|files| files.len())
+            .sum::<usize>();
+        let final_deletable_files = self
+            .list_to_be_deleted_files(
+                region_id,
+                false,
+                &final_in_manifest,
+                &tmp_ref_files,
+                final_recently_removed_files,
+                all_entries,
+            )
+            .await?;
+        info!(
+            "gc: for region {region_id}: In manifest file cnt: {}, Tmp ref file cnt: {}, recently removed files: {}, Unused files to delete count: {}",
+            current_manifest.files.len(),
+            tmp_ref_files.len(),
+            removed_file_cnt,
+            final_deletable_files.len(),
+        );
+        debug!(
+            "gc: deletable files for region {}: {:?}",
+            region_id, &final_deletable_files
+        );
         drop(manager);
 
         let _delete_timer = GC_DURATION_SECONDS
@@ -1021,12 +910,13 @@ impl LocalGcWorker {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn filter_deletable_files(
+    async fn filter_deletable_files(
         &self,
         is_region_dropped: bool,
         entries: Vec<Entry>,
-        in_manifest: &ManifestLiveSet,
-        in_tmp_ref: &TmpRefLiveSet,
+        in_manifest: &HashMap<FileId, Option<IndexVersion>>,
+        in_tmp_ref_parquet: &HashSet<FileId>,
+        in_tmp_ref_indexes: &HashMap<FileId, HashSet<IndexVersion>>,
         may_linger_files: &HashSet<&RemovedFile>,
         eligible_for_delete: &HashSet<&RemovedFile>,
         unknown_file_may_linger_until: chrono::DateTime<chrono::Utc>,
@@ -1062,8 +952,8 @@ impl LocalGcWorker {
 
             let should_delete = match file_type {
                 FileType::Parquet => {
-                    let is_in_manifest = in_manifest.contains_file(file_id, file_type);
-                    let is_in_tmp_ref = in_tmp_ref.contains_file(file_id, file_type);
+                    let is_in_manifest = in_manifest.contains_key(&file_id);
+                    let is_in_tmp_ref = in_tmp_ref_parquet.contains(&file_id);
                     let is_linger = may_linger_files.contains_key(&file_id);
                     let is_eligible_for_delete = eligible_for_delete.contains_key(&file_id);
 
@@ -1079,8 +969,10 @@ impl LocalGcWorker {
                 }
                 FileType::Puffin(version) => {
                     // notice need to check both file id and version
-                    let is_in_manifest = in_manifest.contains_file(file_id, file_type);
-                    let is_in_tmp_ref = in_tmp_ref.contains_file(file_id, file_type);
+                    let is_in_manifest = in_manifest.get(&file_id) == Some(&Some(version));
+                    let is_in_tmp_ref = in_tmp_ref_indexes
+                        .get(&file_id)
+                        .is_some_and(|versions| versions.contains(&version));
                     let is_linger = may_linger_files
                         .get(&file_id)
                         .map(|files| files.contains(&&RemovedFile::Index(file_id, version)))
@@ -1128,12 +1020,12 @@ impl LocalGcWorker {
     /// improves performance. When `full_file_listing` is true, it read from `all_entries` to find
     /// and delete orphan files (files not tracked in the manifest).
     ///
-    fn list_to_be_deleted_files(
+    async fn list_to_be_deleted_files(
         &self,
         region_id: RegionId,
         is_region_dropped: bool,
-        in_manifest: &ManifestLiveSet,
-        in_tmp_ref: &TmpRefLiveSet,
+        in_manifest: &HashMap<FileId, Option<IndexVersion>>,
+        in_tmp_ref: &HashSet<(FileId, Option<IndexVersion>)>,
         recently_removed_files: BTreeMap<Timestamp, HashSet<RemovedFile>>,
         all_entries: Vec<Entry>,
     ) -> Result<Vec<RemovedFile>> {
@@ -1189,14 +1081,13 @@ impl LocalGcWorker {
                 .iter()
                 .filter(|file_id| {
                     let in_use = match file_id {
-                        RemovedFile::File(file_id, _) => {
-                            in_manifest.contains_file(*file_id, FileType::Parquet)
-                                || in_tmp_ref.contains_file(*file_id, FileType::Parquet)
+                        RemovedFile::File(file_id, index_version) => {
+                            in_manifest.contains_key(file_id)
+                                || in_tmp_ref.contains(&(*file_id, *index_version))
                         }
                         RemovedFile::Index(file_id, index_version) => {
-                            in_manifest.contains_file(*file_id, FileType::Puffin(*index_version))
-                                || in_tmp_ref
-                                    .contains_file(*file_id, FileType::Puffin(*index_version))
+                            in_manifest.get(file_id) == Some(&Some(*index_version))
+                                || in_tmp_ref.contains(&(*file_id, Some(*index_version)))
                         }
                     };
                     !in_use
@@ -1213,18 +1104,36 @@ impl LocalGcWorker {
             return Ok(files_to_delete);
         }
 
+        let mut in_tmp_ref_parquet = HashSet::new();
+        let mut in_tmp_ref_indexes = HashMap::<FileId, HashSet<IndexVersion>>::new();
+        for (file_id, index_version) in in_tmp_ref {
+            in_tmp_ref_parquet.insert(*file_id);
+            match index_version {
+                Some(index_version) => {
+                    in_tmp_ref_indexes
+                        .entry(*file_id)
+                        .or_default()
+                        .insert(*index_version);
+                }
+                None => {}
+            }
+        }
+
         // Full file listing mode: get the full list of files from object store
 
         // Step 3: Filter files to determine which ones can be deleted
-        let all_unused_files_ready_for_delete = self.filter_deletable_files(
-            is_region_dropped,
-            all_entries,
-            in_manifest,
-            in_tmp_ref,
-            &all_may_linger_files,
-            &eligible_for_removal,
-            unknown_file_may_linger_until,
-        );
+        let all_unused_files_ready_for_delete = self
+            .filter_deletable_files(
+                is_region_dropped,
+                all_entries,
+                in_manifest,
+                &in_tmp_ref_parquet,
+                &in_tmp_ref_indexes,
+                &all_may_linger_files,
+                &eligible_for_removal,
+                unknown_file_may_linger_until,
+            )
+            .await;
 
         Ok(all_unused_files_ready_for_delete)
     }
