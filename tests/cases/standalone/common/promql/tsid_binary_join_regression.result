@@ -512,10 +512,10 @@ TQL ANALYZE (0, 5, '5s') (tsid_binary_join_left or tsid_binary_join_right) / tsi
 +-+-+-+
 | stage | node | plan_|
 +-+-+-+
-| 0_| 0_|_ProjectionExec: expr=[host@2 as host, job@3 as job, ts@5 as ts, __tsid@4 as __tsid, greptime_value@0 / greptime_value@1 as tsid_binary_join_right.greptime_value / tsid_binary_join_left.greptime_value] REDACTED
+| 0_| 0_|_ProjectionExec: expr=[host@2 as host, job@3 as job, ts@5 as ts, __tsid@4 as __tsid, greptime_value@0 / greptime_value@1 as lhs.greptime_value / rhs.greptime_value] REDACTED
 |_|_|_HashJoinExec: mode=CollectLeft, join_type=Inner, on=[(__tsid@1, __tsid@3), (ts@0, ts@4)], projection=[greptime_value@2, greptime_value@3, host@4, job@5, __tsid@6, ts@7], NullsEqual: true REDACTED
 |_|_|_ProjectionExec: expr=[ts@0 as ts, __tsid@1 as __tsid, greptime_value@2 as greptime_value] REDACTED
-|_|_|_UnionDistinctOnExec: on col=[["host", "job"]], ts_col=[ts] REDACTED
+|_|_|_UnionDistinctOnExec: on col=[5, 6], ts_col=0 REDACTED
 |_|_|_CoalescePartitionsExec REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_CoalescePartitionsExec REDACTED
@@ -523,14 +523,14 @@ TQL ANALYZE (0, 5, '5s') (tsid_binary_join_left or tsid_binary_join_right) / tsi
 |_|_|_CooperativeExec REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
-| 1_| 0_|_ProjectionExec: expr=[ts@4 as ts, __tsid@3 as __tsid, greptime_value@0 as greptime_value, host@1 as host, job@2 as job] REDACTED
+| 1_| 0_|_ProjectionExec: expr=[ts@4 as ts, __tsid@3 as __tsid, greptime_value@0 as greptime_value, host@1 as host, job@2 as job, CASE WHEN host@1 IS NOT NULL THEN host@1 ELSE_END as __promql_or_match_0, CASE WHEN job@2 IS NOT NULL THEN job@2 ELSE_END as __promql_or_match_1] REDACTED
 |_|_|_PromInstantManipulateExec: range=[0..5000], lookback=[300000], interval=[5000], time index=[ts] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["__tsid"] REDACTED
 |_|_|_ProjectionExec: expr=[greptime_value@1 as greptime_value, host@3 as host, job@4 as job, __tsid@2 as __tsid, ts@0 as ts] REDACTED
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries" REDACTED
 |_|_|_|
-| 1_| 0_|_ProjectionExec: expr=[ts@4 as ts, __tsid@3 as __tsid, greptime_value@0 as greptime_value, host@1 as host, job@2 as job] REDACTED
+| 1_| 0_|_ProjectionExec: expr=[ts@4 as ts, __tsid@3 as __tsid, greptime_value@0 as greptime_value, host@1 as host, job@2 as job, CASE WHEN host@1 IS NOT NULL THEN host@1 ELSE_END as __promql_or_match_0, CASE WHEN job@2 IS NOT NULL THEN job@2 ELSE_END as __promql_or_match_1] REDACTED
 |_|_|_PromInstantManipulateExec: range=[0..5000], lookback=[300000], interval=[5000], time index=[ts] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["__tsid"] REDACTED
 |_|_|_ProjectionExec: expr=[greptime_value@1 as greptime_value, host@3 as host, job@4 as job, __tsid@2 as __tsid, ts@0 as ts] REDACTED
@@ -672,14 +672,14 @@ TQL EVAL (0, 5, '5s') ((tsid_binary_join_left > bool tsid_binary_join_right) + t
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 5, '5s') (tsid_binary_join_left or tsid_binary_join_right) / tsid_binary_join_left;
 
-+-------+------+---------------------+------------------------------------------------------------------------------+
-| host  | job  | ts                  | tsid_binary_join_right.greptime_value / tsid_binary_join_left.greptime_value |
-+-------+------+---------------------+------------------------------------------------------------------------------+
-| host1 | job1 | 1970-01-01T00:00:00 | 1.0                                                                          |
-| host1 | job1 | 1970-01-01T00:00:05 | 1.0                                                                          |
-| host2 | job2 | 1970-01-01T00:00:00 | 1.0                                                                          |
-| host2 | job2 | 1970-01-01T00:00:05 | 1.0                                                                          |
-+-------+------+---------------------+------------------------------------------------------------------------------+
++-------+------+---------------------+-----------------------------------------+
+| host  | job  | ts                  | lhs.greptime_value / rhs.greptime_value |
++-------+------+---------------------+-----------------------------------------+
+| host1 | job1 | 1970-01-01T00:00:00 | 1.0                                     |
+| host1 | job1 | 1970-01-01T00:00:05 | 1.0                                     |
+| host2 | job2 | 1970-01-01T00:00:00 | 1.0                                     |
+| host2 | job2 | 1970-01-01T00:00:05 | 1.0                                     |
++-------+------+---------------------+-----------------------------------------+
 
 -- Range functions are outside the first island version; the range selector subtree must
 -- remain a barrier.

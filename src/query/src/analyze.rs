@@ -33,7 +33,7 @@ use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties, accept,
 };
 use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion};
-use datafusion_common::{DataFusionError, internal_err};
+use datafusion_common::{DataFusionError, assert_eq_or_internal_err, internal_err};
 use datafusion_physical_expr::{Distribution, EquivalenceProperties, Partitioning};
 use futures::StreamExt;
 use serde::Serialize;
@@ -172,8 +172,13 @@ impl ExecutionPlan for DistAnalyzeExec {
         self: Arc<Self>,
         mut children: Vec<Arc<dyn ExecutionPlan>>,
     ) -> DfResult<Arc<dyn ExecutionPlan>> {
+        assert_eq_or_internal_err!(
+            children.len(),
+            1,
+            "DistAnalyzeExec requires exactly one child"
+        );
         Ok(Arc::new(Self::new(
-            children.pop().unwrap(),
+            children.swap_remove(0),
             self.verbose,
             self.format,
         )))
@@ -379,5 +384,73 @@ impl JsonMetrics {
 impl Display for JsonMetrics {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", serde_json::to_string(self).unwrap())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use datafusion::physical_plan::empty::EmptyExec;
+
+    use super::*;
+
+    fn empty_plan(name: &str) -> Arc<dyn ExecutionPlan> {
+        Arc::new(EmptyExec::new(Arc::new(Schema::new(vec![Field::new(
+            name,
+            DataType::Utf8,
+            true,
+        )]))))
+    }
+
+    #[test]
+    fn qbs_dist_analyze_rejects_zero_children() {
+        let analyze = Arc::new(DistAnalyzeExec::new(
+            empty_plan("original"),
+            false,
+            AnalyzeFormat::TEXT,
+        ));
+
+        assert!(ExecutionPlan::with_new_children(analyze, vec![]).is_err());
+    }
+
+    #[test]
+    fn qbs_dist_analyze_rejects_multiple_children() {
+        let analyze = Arc::new(DistAnalyzeExec::new(
+            empty_plan("original"),
+            false,
+            AnalyzeFormat::TEXT,
+        ));
+
+        let result = ExecutionPlan::with_new_children(
+            analyze,
+            vec![empty_plan("first"), empty_plan("second")],
+        );
+
+        if let Ok(plan) = result {
+            let retained = plan
+                .as_any()
+                .downcast_ref::<DistAnalyzeExec>()
+                .unwrap()
+                .input()
+                .schema()
+                .field(0)
+                .name()
+                .clone();
+            panic!("expected an arity error for multiple children, but retained `{retained}`");
+        }
+    }
+
+    #[test]
+    fn qbs_dist_analyze_accepts_exactly_one_child() {
+        let analyze = Arc::new(DistAnalyzeExec::new(
+            empty_plan("original"),
+            false,
+            AnalyzeFormat::TEXT,
+        ));
+        let replacement = empty_plan("replacement");
+
+        let rebuilt = ExecutionPlan::with_new_children(analyze, vec![replacement]).unwrap();
+        let rebuilt = rebuilt.as_any().downcast_ref::<DistAnalyzeExec>().unwrap();
+
+        assert_eq!(rebuilt.input().schema().field(0).name(), "replacement");
     }
 }

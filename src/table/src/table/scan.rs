@@ -541,7 +541,7 @@ impl Stream for StreamWithMetricWrapper {
                     Ok(record_batch) => {
                         // we don't record elapsed time here
                         // since it's calling storage api involving I/O ops
-                        let batch_bytes = record_batch.buffer_memory_size();
+                        let batch_bytes = record_batch.logical_slice_memory_size();
                         this.metric.record_output_bytes(batch_bytes);
                         this.metric.record_output(record_batch.num_rows());
                         Poll::Ready(Some(Ok(record_batch.into_df_record_batch())))

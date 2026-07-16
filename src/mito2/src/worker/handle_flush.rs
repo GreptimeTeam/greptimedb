@@ -14,9 +14,11 @@
 
 //! Handling flush related requests.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
+use common_base::readable_size::ReadableSize;
 use common_telemetry::{debug, error, info};
 use store_api::logstore::LogStore;
 use store_api::region_request::{RegionFlushReason, RegionFlushRequest};
@@ -26,9 +28,23 @@ use crate::config::{IndexBuildMode, MitoConfig};
 use crate::error::{RegionNotFoundSnafu, Result};
 use crate::flush::{FlushReason, RegionFlushTask};
 use crate::region::MitoRegionRef;
+use crate::region::version::VersionRef;
 use crate::request::{BuildIndexRequest, FlushFailed, FlushFinished, OnFailure, OptionOutputTx};
 use crate::sst::index::IndexBuildType;
 use crate::worker::RegionWorkerLoop;
+
+#[derive(Debug, Default)]
+pub(crate) struct RegionWriteBufferPressure {
+    pub(crate) stalled_region_ids: HashSet<RegionId>,
+    pub(crate) rejected_region_ids: HashSet<RegionId>,
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct RegionWriteBufferStatus {
+    should_flush: bool,
+    should_stall: bool,
+    should_reject: bool,
+}
 
 fn resolve_flush_reason(
     request_reason: Option<RegionFlushReason>,
@@ -85,8 +101,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             }
 
             let version = region.version();
-            let region_memtable_size =
-                version.memtables.mutable_usage() + version.memtables.immutables_usage();
+            let region_memtable_size = region_memtable_usage(&version);
 
             let auto_flush_interval = version
                 .options
@@ -152,6 +167,53 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         Ok(())
     }
 
+    /// Flushes write regions that exceed their flush threshold and returns region pressure.
+    pub(crate) fn maybe_flush_write_regions(
+        &mut self,
+        region_ids: HashSet<RegionId>,
+    ) -> RegionWriteBufferPressure {
+        let mut pressure = RegionWriteBufferPressure::default();
+
+        for region_id in region_ids {
+            let Some(region) = self.regions.get_region(region_id) else {
+                continue;
+            };
+            if !region.is_writable() {
+                continue;
+            }
+
+            let status = region_write_buffer_status(
+                &region.version(),
+                self.config.default_region_write_buffer_size,
+                self.stalled_requests.estimated_size(&region_id),
+            );
+
+            if status.should_flush && !self.flush_scheduler.is_flush_requested(region.region_id) {
+                let task = self.new_flush_task(
+                    &region,
+                    FlushReason::RegionFull,
+                    None,
+                    self.config.clone(),
+                );
+                if let Err(e) = self.flush_scheduler.schedule_flush(
+                    region.region_id,
+                    &region.version_control,
+                    task,
+                ) {
+                    error!(e; "Failed to schedule flush task for region {}", region.region_id);
+                }
+            }
+
+            if status.should_reject {
+                pressure.rejected_region_ids.insert(region_id);
+            } else if status.should_stall {
+                pressure.stalled_region_ids.insert(region_id);
+            }
+        }
+
+        pressure
+    }
+
     /// Creates a flush task with specific `reason` for the `region`.
     pub(crate) fn new_flush_task(
         &self,
@@ -178,6 +240,61 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             is_staging: region.is_staging(),
             partition_expr: region.maybe_staging_partition_expr_str(),
         }
+    }
+}
+
+pub(crate) fn region_memtable_usage(version: &VersionRef) -> usize {
+    version.memtables.mutable_usage() + version.memtables.immutables_usage()
+}
+
+pub(crate) fn region_write_buffer_size(
+    version: &VersionRef,
+    default_region_write_buffer_size: ReadableSize,
+) -> Option<usize> {
+    let size = version
+        .options
+        .write_buffer_size
+        .unwrap_or(default_region_write_buffer_size);
+    (size.as_bytes() > 0).then_some(size.as_bytes() as usize)
+}
+
+/// Returns the pressure state of a region's write buffer.
+fn region_write_buffer_status(
+    version: &VersionRef,
+    default_region_write_buffer_size: ReadableSize,
+    stalled_request_size: usize,
+) -> RegionWriteBufferStatus {
+    let Some(write_buffer_size) =
+        region_write_buffer_size(version, default_region_write_buffer_size)
+    else {
+        return RegionWriteBufferStatus::default();
+    };
+
+    let mutable_usage = version.memtables.mutable_usage();
+    let memory_usage = region_memtable_usage(version);
+    region_write_buffer_status_from_usage(
+        write_buffer_size,
+        mutable_usage,
+        memory_usage,
+        stalled_request_size,
+    )
+}
+
+fn region_write_buffer_status_from_usage(
+    write_buffer_size: usize,
+    mutable_usage: usize,
+    memory_usage: usize,
+    stalled_request_size: usize,
+) -> RegionWriteBufferStatus {
+    let mutable_limit = std::cmp::max(1, write_buffer_size / 2);
+    let should_stall = memory_usage >= write_buffer_size;
+    let reject_limit = write_buffer_size.saturating_mul(2);
+    let should_reject = memory_usage.saturating_add(stalled_request_size) >= reject_limit;
+
+    RegionWriteBufferStatus {
+        should_flush: mutable_usage >= mutable_limit || should_stall,
+        should_stall,
+        should_reject,
     }
 }
 
@@ -439,5 +556,49 @@ mod tests {
     fn test_resolve_flush_reason_fallback_unchanged() {
         assert_eq!(resolve_flush_reason(None, true), FlushReason::Downgrading);
         assert_eq!(resolve_flush_reason(None, false), FlushReason::Manual);
+    }
+
+    #[test]
+    fn test_region_write_buffer_status_boundaries() {
+        assert_eq!(
+            RegionWriteBufferStatus::default(),
+            region_write_buffer_status_from_usage(100, 49, 99, 0)
+        );
+        assert_eq!(
+            RegionWriteBufferStatus {
+                should_flush: true,
+                should_stall: false,
+                should_reject: false,
+            },
+            region_write_buffer_status_from_usage(100, 50, 99, 0)
+        );
+        assert_eq!(
+            RegionWriteBufferStatus {
+                should_flush: true,
+                should_stall: true,
+                should_reject: false,
+            },
+            region_write_buffer_status_from_usage(100, 50, 100, 99)
+        );
+        assert_eq!(
+            RegionWriteBufferStatus {
+                should_flush: true,
+                should_stall: true,
+                should_reject: true,
+            },
+            region_write_buffer_status_from_usage(100, 50, 100, 100)
+        );
+    }
+
+    #[test]
+    fn test_region_write_buffer_status_saturates_reject_limit() {
+        assert_eq!(
+            RegionWriteBufferStatus {
+                should_flush: true,
+                should_stall: true,
+                should_reject: true,
+            },
+            region_write_buffer_status_from_usage(usize::MAX, usize::MAX, usize::MAX, usize::MAX,)
+        );
     }
 }

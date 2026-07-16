@@ -28,9 +28,11 @@ use store_api::region_request::{AffectedRows, PathType};
 use store_api::storage::RegionId;
 use tokio::time::sleep;
 
+use crate::cache::CacheManagerRef;
 use crate::engine::region_hook::RegionHookRef;
 use crate::error::{OpenDalSnafu, Result};
 use crate::region::{RegionLeaderState, RegionMapRef};
+use crate::sst::index::intermediate::IntermediateManager;
 use crate::worker::{DROPPING_MARKER_FILE, RegionWorkerLoop};
 
 const GC_TASK_INTERVAL_SEC: u64 = 5 * 60; // 5 minutes
@@ -90,14 +92,7 @@ where
                 &region.provider,
             )
             .await?;
-        // Notifies flush scheduler.
-        self.flush_scheduler.on_region_dropped(region_id);
-        // Notifies compaction scheduler.
-        self.compaction_scheduler.on_region_dropped(region_id);
-        // notifies index build scheduler.
-        self.index_build_scheduler
-            .on_region_dropped(region_id)
-            .await;
+        self.cleanup_dropped_region_runtime_state(region_id).await;
 
         // Marks region version as dropped
         region.version_control.mark_dropped();
@@ -159,21 +154,57 @@ where
                 .await
             };
 
-            if let Err(err) = intm_manager.prune_region_dir(&region_id).await {
-                warn!(err; "Failed to prune intermediate region directory, region_id: {}", region_id);
-            }
-
-            if let Some(write_cache) = cache_manager.write_cache()
-                && let Some(manifest_cache) = write_cache.manifest_cache()
-            {
-                manifest_cache.clean_manifests(&table_dir).await;
-            }
+            cleanup_region_file_artifacts(region_id, &table_dir, &intm_manager, &cache_manager)
+                .await;
 
             listener.on_later_drop_end(region_id, removed);
         });
 
         Ok(0)
     }
+
+    /// Cleans runtime state for a region that is no longer available to serve requests.
+    pub(crate) async fn cleanup_dropped_region_runtime_state(&mut self, region_id: RegionId) {
+        // Notifies flush scheduler.
+        self.flush_scheduler.on_region_dropped(region_id);
+        // Notifies compaction scheduler.
+        self.compaction_scheduler.on_region_dropped(region_id);
+        // Notifies index build scheduler.
+        self.index_build_scheduler
+            .on_region_dropped(region_id)
+            .await;
+    }
+}
+
+/// Cleans files and caches that are produced at runtime but are not part of the
+/// primary region directory deletion.
+pub(crate) async fn cleanup_region_file_artifacts(
+    region_id: RegionId,
+    table_dir: &str,
+    intermediate_manager: &IntermediateManager,
+    cache_manager: &CacheManagerRef,
+) {
+    if let Err(err) = intermediate_manager.prune_region_dir(&region_id).await {
+        warn!(err; "Failed to prune intermediate region directory, region_id: {}", region_id);
+    }
+
+    if let Some(write_cache) = cache_manager.write_cache()
+        && let Some(manifest_cache) = write_cache.manifest_cache()
+    {
+        manifest_cache.clean_manifests(table_dir).await;
+    }
+}
+
+/// Removes a region directory for full-drop style cleanup.
+///
+/// Full drop and purge/offline cleanup force physical deletion. Only partial
+/// drop may leave data files for global GC.
+pub(crate) async fn remove_region_dir_for_full_drop(
+    region_path: &str,
+    object_store: &ObjectStore,
+) -> Result<()> {
+    remove_region_dir_once(region_path, object_store, true).await?;
+    Ok(())
 }
 
 /// Carries the region hook and region metadata into the background GC task so
@@ -281,7 +312,7 @@ async fn later_drop_task_with_global_gc(
     // the region directory is forcefully removed immediately.
     //
     // TODO(discord9): Evaluate removing files instantly rather than waiting for the GC period.
-    if path_type == PathType::Metadata || !partial_drop {
+    if should_force_remove_region_dir(path_type, partial_drop) {
         remove_region_with_retry(
             region_id,
             region_path,
@@ -297,6 +328,10 @@ async fn later_drop_task_with_global_gc(
         dropping_regions.remove_region(region_id);
         true
     }
+}
+
+fn should_force_remove_region_dir(path_type: PathType, partial_drop: bool) -> bool {
+    path_type == PathType::Metadata || !partial_drop
 }
 
 // TODO(ruihang): place the marker in a separate dir

@@ -241,8 +241,10 @@ module.exports = async function validateQueryRegressionComment({ github, context
     '> Rendered by a trusted workflow from JSON artifacts produced by the query-regression run. Results from untrusted PR code are advisory until reviewed.',
     '',
     `- **Workflow run:** ${serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${expectedRunId}`,
-    `- **Base SHA:** \`${text(metadata.base_sha)}\``,
+    `- **Built base SHA:** \`${text(metadata.built_base_sha)}\``,
+    `- **Event base SHA:** \`${text(metadata.event_base_sha)}\``,
     `- **Head SHA:** \`${text(metadata.head_sha)}\``,
+    `- **Candidate merge SHA:** \`${text(metadata.candidate_sha)}\``,
     '',
   ].join('\n');
 

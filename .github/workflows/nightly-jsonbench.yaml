@@ -10,14 +10,19 @@ on:
         description: The nightly build workflow run id to download GreptimeDB artifacts from
         required: true
         type: string
+      download_dataset:
+        description: Download the JSONBench dataset before running the benchmark
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   actions: read
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
 
 jobs:
   resolve-artifact:
@@ -115,6 +120,34 @@ jobs:
           security-group-id: ${{ vars.EC2_RUNNER_SECURITY_GROUP_ID }}
           subnet-id: ${{ vars.EC2_RUNNER_SUBNET_ID }}
 
+      - name: Attach JSONBench data volume
+        if: ${{ steps.start-linux-runner.outputs.ec2-instance-id != '' && inputs.download_dataset != true }}
+        shell: bash
+        env:
+          INSTANCE_ID: ${{ steps.start-linux-runner.outputs.ec2-instance-id }}
+          VOLUME_ID: ${{ secrets.JSONBENCH_DATA_VOLUME_ID }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${VOLUME_ID}" ]]; then
+            echo "JSONBENCH_DATA_VOLUME_ID is not configured"
+            exit 1
+          fi
+
+          echo "Waiting for JSONBench data volume to become available"
+          aws ec2 wait volume-available --volume-ids "${VOLUME_ID}"
+
+          echo "Attaching JSONBench data volume to EC2 instance ${INSTANCE_ID} as /dev/sdf"
+          aws ec2 attach-volume \
+            --instance-id "${INSTANCE_ID}" \
+            --volume-id "${VOLUME_ID}" \
+            --device /dev/sdf \
+            > /dev/null
+
+          echo "Waiting for JSONBench data volume attachment to complete"
+          aws ec2 wait volume-in-use --volume-ids "${VOLUME_ID}"
+          echo "JSONBench data volume is attached to EC2 instance ${INSTANCE_ID}"
+
   jsonbench:
     name: Run JSONBench
     if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success') }}
@@ -123,7 +156,37 @@ jobs:
     timeout-minutes: 120
     env:
       JSONBENCH_OUTPUT_PREFIX: _linux-${{ needs.resolve-artifact.outputs.artifact-arch }}
+      JSONBENCH_DATASET: 3
+      JSONBENCH_DATA_DIR: /root/data/bluesky
     steps:
+      - name: Mount JSONBench data volume
+        if: ${{ needs.allocate-runner.outputs.linux-ec2-runner-instance-id != '' && inputs.download_dataset != true }}
+        shell: bash
+        env:
+          VOLUME_ID: ${{ secrets.JSONBENCH_DATA_VOLUME_ID }}
+        run: |
+          set -euo pipefail
+
+          volume_serial="${VOLUME_ID//-/}"
+          device=""
+          echo "Waiting for the JSONBench data volume block device"
+          for _ in {1..30}; do
+            device=$(lsblk -dpno NAME,SERIAL | awk -v serial="${volume_serial}" '$2 == serial { print $1; exit }')
+            [[ -n "${device}" ]] && break
+            sleep 2
+          done
+
+          if [[ -z "${device}" ]]; then
+            echo "Cannot find the JSONBench data volume block device"
+            exit 1
+          fi
+
+          echo "Resolved JSONBench data volume to ${device}"
+          mkdir -p "${JSONBENCH_DATA_DIR}"
+          echo "Mounting ${device} read-only at ${JSONBENCH_DATA_DIR}"
+          mount -o ro "${device}" "${JSONBENCH_DATA_DIR}"
+          echo "JSONBench data volume is mounted at ${JSONBENCH_DATA_DIR}"
+
       - name: Download GreptimeDB nightly artifact
         uses: actions/download-artifact@v4
         with:
@@ -142,26 +205,33 @@ jobs:
           chmod +x ./greptime
           rm -rf greptimedb-artifact "${{ needs.resolve-artifact.outputs.artifact-name }}"
 
-      - name: Run JSONBench
-        env:
-          # TODO(LFC): Change to "3" (100m) when JSON2 ingestion performance is optimized.
-          JSONBENCH_DATASET: 2
+      - name: Clone JSONBench
         shell: bash
         run: |
           set -euo pipefail
 
-          export JSONBENCH_DATA_DIR="/root/data/bluesky"
-          echo "Use JSONBench data directory ${JSONBENCH_DATA_DIR}"
-          echo "${JSONBENCH_DATASET}" > jsonbench.dataset
-
-          echo "Cloning JSONBench"
           git clone --branch greptimedb-new-json --depth 1 https://github.com/GreptimeTeam/JSONBench.git JSONBench
+
+      - name: Download JSONBench dataset
+        if: ${{ inputs.download_dataset == true }}
+        shell: bash
+        run: |
+          set -euo pipefail
 
           echo "Downloading JSONBench dataset choice ${JSONBENCH_DATASET} to ${JSONBENCH_DATA_DIR}"
           mkdir -p "${JSONBENCH_DATA_DIR}"
           printf "${JSONBENCH_DATASET}\n" | ./JSONBench/download_data.sh
+
+      - name: Run JSONBench
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Use JSONBench data directory ${JSONBENCH_DATA_DIR}"
+          echo "${JSONBENCH_DATASET}" > jsonbench.dataset
+
           downloaded_files=$(find "${JSONBENCH_DATA_DIR}" -type f | wc -l)
-          echo "Downloaded JSONBench dataset files: ${downloaded_files}"
+          echo "Available JSONBench dataset files: ${downloaded_files}"
 
           export GREPTIMEDB_STANDALONE__WAL__DIR=greptimedb_data/wal
           export GREPTIMEDB_STANDALONE__STORAGE__DATA_HOME=greptimedb_data

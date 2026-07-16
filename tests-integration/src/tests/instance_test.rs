@@ -28,6 +28,7 @@ use datatypes::arrow::array::{
 use frontend::error::Error;
 use frontend::instance::Instance;
 use operator::error::Error as OperatorError;
+use query::datafusion::QUERY_PARALLELISM_HINT;
 use rstest::rstest;
 use rstest_reuse::apply;
 use servers::error as server_error;
@@ -87,6 +88,98 @@ async fn test_create_database_and_insert_query(instance: Arc<dyn MockInstance>) 
         }
         _ => unreachable!(),
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_distributed_scalar_latest_with_query_parallelism_below_regions() {
+    common_telemetry::init_default_ut_logging();
+
+    let distributed = crate::tests::create_distributed_instance(
+        "test_distributed_scalar_latest_with_query_parallelism_below_regions",
+    )
+    .await;
+    let frontend = distributed.frontend();
+
+    execute_sql(
+        &frontend,
+        r#"
+CREATE TABLE cpu (
+    rack STRING NULL,
+    os STRING NULL,
+    usage_user BIGINT NULL,
+    greptime_timestamp TIMESTAMP(9) NOT NULL,
+    TIME INDEX (greptime_timestamp)
+)
+PARTITION ON COLUMNS (rack) (
+    rack < '2',
+    rack >= '2' AND rack < '4',
+    rack >= '4' AND rack < '6',
+    rack >= '6' AND rack < '8',
+    rack >= '8'
+)
+ENGINE = mito
+WITH (append_mode = 'true', sst_format = 'flat')
+"#,
+    )
+    .await;
+
+    execute_sql(
+        &frontend,
+        r#"
+INSERT INTO cpu VALUES
+    ('1', 'linux', 10, '2023-06-12 01:04:49'),
+    ('1', 'linux', 15, '2023-06-12 01:04:50'),
+    ('3', 'windows', 25, '2023-06-12 01:05:00'),
+    ('5', 'mac', 30, '2023-06-12 01:03:00'),
+    ('7', 'linux', 45, '2023-06-12 02:00:00'),
+    ('2', 'linux', 20, '2023-06-12 01:04:51'),
+    ('2', 'windows', 22, '2023-06-12 01:06:00'),
+    ('4', 'mac', 12, '2023-06-12 00:59:00'),
+    ('6', 'linux', 35, '2023-06-12 01:04:55'),
+    ('8', 'windows', 50, '2023-06-12 02:10:00')
+"#,
+    )
+    .await;
+
+    let latest_sql = r#"
+SELECT rack, os, greptime_timestamp
+FROM cpu
+WHERE greptime_timestamp = (
+    SELECT greptime_timestamp
+    FROM cpu
+    ORDER BY greptime_timestamp DESC
+    LIMIT 1
+)
+"#;
+
+    let result = execute_sql_with_query_parallelism(&frontend, latest_sql, 1)
+        .await
+        .data
+        .pretty_print()
+        .await;
+    assert_eq!(
+        result,
+        r#"+------+---------+---------------------+
+| rack | os      | greptime_timestamp  |
++------+---------+---------------------+
+| 8    | windows | 2023-06-12T02:10:00 |
++------+---------+---------------------+"#
+    );
+
+    let explain =
+        execute_sql_with_query_parallelism(&frontend, &format!("EXPLAIN {latest_sql}"), 1)
+            .await
+            .data
+            .pretty_print()
+            .await;
+    assert!(
+        explain.contains("SortExec"),
+        "query_parallelism=1 with five regions should insert SortExec below MergeSortExec; explain:\n{explain}"
+    );
+    assert!(
+        explain.contains("MergeSortExec"),
+        "query_parallelism=1 with five regions should keep the distributed merge stage stable; explain:\n{explain}"
+    );
 }
 
 #[apply(both_instances_cases)]
@@ -1098,6 +1191,10 @@ async fn test_execute_copy_from_csv_strict_headers(instance: Arc<dyn MockInstanc
     let unknown_path = tmp_dir.path().join("unknown.csv");
     let missing_path = tmp_dir.path().join("missing.csv");
     let duplicate_path = tmp_dir.path().join("duplicate.csv");
+    let matching_location = prepare_path(matching_path.to_str().unwrap());
+    let unknown_location = prepare_path(unknown_path.to_str().unwrap());
+    let missing_location = prepare_path(missing_path.to_str().unwrap());
+    let duplicate_location = prepare_path(duplicate_path.to_str().unwrap());
     std::fs::write(
         &matching_path,
         "ts,host_id,reading_value\n2024-01-01T00:00:00,1,10.5\n",
@@ -1127,7 +1224,7 @@ async fn test_execute_copy_from_csv_strict_headers(instance: Arc<dyn MockInstanc
         &instance,
         &format!(
             "COPY csv_strict_headers FROM '{}' WITH (FORMAT='csv', STRICT_HEADERS='true');",
-            matching_path.display()
+            matching_location
         ),
     )
     .await
@@ -1149,7 +1246,7 @@ async fn test_execute_copy_from_csv_strict_headers(instance: Arc<dyn MockInstanc
         &instance,
         &format!(
             "COPY csv_strict_headers FROM '{}' WITH (FORMAT='csv', STRICT_HEADERS='true');",
-            unknown_path.display()
+            unknown_location
         ),
     )
     .await
@@ -1173,7 +1270,7 @@ async fn test_execute_copy_from_csv_strict_headers(instance: Arc<dyn MockInstanc
         &instance,
         &format!(
             "COPY csv_strict_headers FROM '{}' WITH (FORMAT='csv', STRICT_HEADERS='true');",
-            missing_path.display()
+            missing_location
         ),
     )
     .await
@@ -1197,7 +1294,7 @@ async fn test_execute_copy_from_csv_strict_headers(instance: Arc<dyn MockInstanc
         &instance,
         &format!(
             "COPY csv_strict_headers FROM '{}' WITH (FORMAT='csv', STRICT_HEADERS='true');",
-            duplicate_path.display()
+            duplicate_location
         ),
     )
     .await
@@ -2870,6 +2967,16 @@ fn unwrap_frontend_error(err: &server_error::Error) -> &Error {
 
 async fn execute_sql(instance: &Arc<Instance>, sql: &str) -> Output {
     execute_sql_with(instance, sql, QueryContext::arc()).await
+}
+
+async fn execute_sql_with_query_parallelism(
+    instance: &Arc<Instance>,
+    sql: &str,
+    parallelism: usize,
+) -> Output {
+    let mut query_ctx = QueryContext::with_db_name(None);
+    query_ctx.set_extension(QUERY_PARALLELISM_HINT, parallelism.to_string());
+    execute_sql_with(instance, sql, Arc::new(query_ctx)).await
 }
 
 async fn try_execute_sql(instance: &Arc<Instance>, sql: &str) -> server_error::Result<Output> {

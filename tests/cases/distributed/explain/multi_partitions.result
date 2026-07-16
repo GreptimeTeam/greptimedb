@@ -30,7 +30,7 @@ explain SELECT * FROM multi_partitions_test_table WHERE ts > cast(1000000000 as 
 |_|_Filter: multi_partitions_test_table.ts > TimestampMillisecond(1000000000, None)_|
 |_|_TableScan: multi_partitions_test_table, partial_filters=[multi_partitions_test_table.ts > TimestampMillisecond(1000000000, None)]_|
 |_| ]]_|
-| physical_plan | SortPreservingMergeExec: [host@0 ASC NULLS LAST]_|
+| physical_plan | MergeSortExec: [host@0 ASC NULLS LAST]_|
 |_|_MergeScanExec: REDACTED
 |_|_|
 +-+-+

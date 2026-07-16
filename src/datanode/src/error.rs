@@ -287,6 +287,18 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display(
+        "GC configuration mismatch: metasrv.gc.enable={}, datanode.region_engine.mito.gc.enable={}",
+        metasrv_gc_enabled,
+        datanode_gc_enabled,
+    ))]
+    GcConfigMismatch {
+        metasrv_gc_enabled: bool,
+        datanode_gc_enabled: bool,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Unsupported output type, expected: {}", expected))]
     UnsupportedOutput {
         expected: String,
@@ -456,6 +468,7 @@ impl ErrorExt for Error {
             | ColumnNoneDefaultValue { .. }
             | MissingRequiredField { .. }
             | RegionEngineNotFound { .. }
+            | GcConfigMismatch { .. }
             | ParseAddr { .. }
             | TomlFormat { .. }
             | BuildDatanode { .. } => StatusCode::InvalidArguments,

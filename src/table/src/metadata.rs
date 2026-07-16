@@ -350,6 +350,9 @@ impl TableMeta {
 
         for request in requests {
             match request {
+                SetRegionOption::WriteBufferSize(new_write_buffer_size) => {
+                    new_options.write_buffer_size = *new_write_buffer_size;
+                }
                 SetRegionOption::Ttl(new_ttl) => {
                     new_options.ttl = *new_ttl;
                 }

@@ -78,7 +78,10 @@ async fn test_close_region_skip_wal(insert: bool) {
 
     // Close the region. This should trigger a flush.
     engine
-        .handle_request(region_id, RegionRequest::Close(RegionCloseRequest {}))
+        .handle_request(
+            region_id,
+            RegionRequest::Close(RegionCloseRequest::default()),
+        )
         .await
         .unwrap();
 
@@ -146,7 +149,10 @@ async fn test_close_follower_region_skip_wal() {
 
     // Close the region. This should trigger a flush.
     engine
-        .handle_request(region_id, RegionRequest::Close(RegionCloseRequest {}))
+        .handle_request(
+            region_id,
+            RegionRequest::Close(RegionCloseRequest::default()),
+        )
         .await
         .unwrap();
 
@@ -214,7 +220,10 @@ async fn test_close_follower_region_skip_wal_with_pending_data() {
     assert!(region.is_follower());
 
     engine
-        .handle_request(region_id, RegionRequest::Close(RegionCloseRequest {}))
+        .handle_request(
+            region_id,
+            RegionRequest::Close(RegionCloseRequest::default()),
+        )
         .await
         .unwrap();
 
@@ -268,7 +277,10 @@ async fn test_close_region_skip_wal_while_flush_in_flight_closes_region() {
     let engine_cloned = engine.clone();
     let close_job = tokio::spawn(async move {
         engine_cloned
-            .handle_request(region_id, RegionRequest::Close(RegionCloseRequest {}))
+            .handle_request(
+                region_id,
+                RegionRequest::Close(RegionCloseRequest::default()),
+            )
             .await
             .unwrap();
     });
@@ -344,7 +356,10 @@ async fn test_close_region_skip_wal_rejects_writes_queued_after_close() {
     let engine_cloned = engine.clone();
     let close_job = tokio::spawn(async move {
         engine_cloned
-            .handle_request(region_id, RegionRequest::Close(RegionCloseRequest {}))
+            .handle_request(
+                region_id,
+                RegionRequest::Close(RegionCloseRequest::default()),
+            )
             .await
             .unwrap();
     });
@@ -445,7 +460,10 @@ async fn test_concurrent_close_region_skip_wal_while_flush_in_flight_succeeds() 
     let engine_cloned = engine.clone();
     let first_close = tokio::spawn(async move {
         engine_cloned
-            .handle_request(region_id, RegionRequest::Close(RegionCloseRequest {}))
+            .handle_request(
+                region_id,
+                RegionRequest::Close(RegionCloseRequest::default()),
+            )
             .await
             .unwrap();
     });
@@ -455,7 +473,10 @@ async fn test_concurrent_close_region_skip_wal_while_flush_in_flight_succeeds() 
     let engine_cloned = engine.clone();
     let second_close = tokio::spawn(async move {
         engine_cloned
-            .handle_request(region_id, RegionRequest::Close(RegionCloseRequest {}))
+            .handle_request(
+                region_id,
+                RegionRequest::Close(RegionCloseRequest::default()),
+            )
             .await
             .unwrap();
     });
@@ -518,7 +539,10 @@ async fn test_close_region_after_truncate_skip_wal() {
     assert!(!region.version().memtables.is_empty());
 
     engine
-        .handle_request(region_id, RegionRequest::Close(RegionCloseRequest {}))
+        .handle_request(
+            region_id,
+            RegionRequest::Close(RegionCloseRequest::default()),
+        )
         .await
         .unwrap();
 

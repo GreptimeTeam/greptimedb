@@ -78,8 +78,7 @@ use table::table_name::TableName;
 use table::table_reference::TableReference;
 
 use self::set::{
-    set_bytea_output, set_datestyle, set_intervalstyle, set_search_path, set_timezone,
-    validate_client_encoding,
+    set_bytea_output, set_datestyle, set_intervalstyle, set_timezone, validate_client_encoding,
 };
 use crate::error::{
     self, CatalogSnafu, ExecLogicalPlanSnafu, ExternalSnafu, InvalidSqlSnafu, NotSupportedSnafu,
@@ -528,7 +527,10 @@ impl StatementExecutor {
             },
             "SEARCH_PATH" => {
                 if query_ctx.channel() == Channel::Postgres {
-                    set_search_path(set_var.value, query_ctx)?
+                    let search_path = set_var.search_path().context(NotSupportedSnafu {
+                        feat: "Unsupported search path in set variable statement",
+                    })?;
+                    query_ctx.set_current_schema(search_path);
                 } else {
                     return NotSupportedSnafu {
                         feat: format!("Unsupported set variable {}", var_name),

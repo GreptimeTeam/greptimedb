@@ -19,6 +19,8 @@
 pub use common_wal::options::WAL_OPTIONS_KEY;
 /// Option key for append mode.
 pub const APPEND_MODE_KEY: &str = "append_mode";
+/// Option key for the per-region write buffer size.
+pub const WRITE_BUFFER_SIZE_KEY: &str = "write_buffer_size";
 /// Option key for merge mode.
 pub const MERGE_MODE_KEY: &str = "merge_mode";
 /// Option key for TTL(time-to-live)
@@ -76,6 +78,7 @@ pub const MAX_ROW_GROUP_ROW_COUNT_LIMIT: usize = 10 * 1024 * 1024;
 pub fn is_mito_engine_option_key(key: &str) -> bool {
     [
         "ttl",
+        WRITE_BUFFER_SIZE_KEY,
         AUTO_FLUSH_INTERVAL_KEY,
         COMPACTION_TYPE,
         COMPACTION_OVERRIDE,
@@ -112,6 +115,7 @@ mod tests {
     #[test]
     fn test_is_mito_engine_option_key() {
         assert!(is_mito_engine_option_key("ttl"));
+        assert!(is_mito_engine_option_key("write_buffer_size"));
         assert!(is_mito_engine_option_key("auto_flush_interval"));
         assert!(is_mito_engine_option_key("compaction.type"));
         assert!(is_mito_engine_option_key("compaction.override"));

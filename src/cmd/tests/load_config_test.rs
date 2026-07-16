@@ -12,13 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::io::Write;
 use std::time::Duration;
 
 use cmd::options::GreptimeOptions;
 use common_base::memory_limit::MemoryLimit;
+use common_base::readable_size::ReadableSize;
 use common_config::{Configurable, DEFAULT_DATA_HOME, ENV_VAR_SEP};
 use common_options::datanode::{ClientOptions, DatanodeClientOptions};
 use common_telemetry::logging::{DEFAULT_LOGGING_DIR, DEFAULT_OTLP_HTTP_ENDPOINT, LoggingOptions};
+use common_test_util::temp_dir::create_named_temp_file;
 use common_wal::config::DatanodeWalConfig;
 use common_wal::config::raft_engine::RaftEngineConfig;
 use datanode::config::{DatanodeOptions, RegionEngineConfig, StorageConfig};
@@ -90,13 +93,13 @@ fn test_load_datanode_example_config() {
             region_engine: vec![
                 RegionEngineConfig::Mito(MitoConfig {
                     auto_flush_interval: Duration::from_secs(3600),
+                    default_region_write_buffer_size: ReadableSize::mb(0),
                     write_cache_ttl: Some(Duration::from_secs(60 * 60 * 8)),
                     scan_memory_limit: MemoryLimit::Unlimited,
                     ..Default::default()
                 }),
                 RegionEngineConfig::File(FileEngineConfig {}),
                 RegionEngineConfig::Metric(MetricEngineConfig {
-                    sparse_primary_key_encoding: true,
                     flush_metadata_region_interval: Duration::from_secs(30),
                 }),
             ],
@@ -299,13 +302,13 @@ fn test_load_standalone_example_config() {
             region_engine: vec![
                 RegionEngineConfig::Mito(MitoConfig {
                     auto_flush_interval: Duration::from_secs(3600),
+                    default_region_write_buffer_size: ReadableSize::mb(0),
                     write_cache_ttl: Some(Duration::from_secs(60 * 60 * 8)),
                     scan_memory_limit: MemoryLimit::Unlimited,
                     ..Default::default()
                 }),
                 RegionEngineConfig::File(FileEngineConfig {}),
                 RegionEngineConfig::Metric(MetricEngineConfig {
-                    sparse_primary_key_encoding: true,
                     flush_metadata_region_interval: Duration::from_secs(30),
                 }),
             ],
@@ -382,4 +385,43 @@ fn test_load_heartbeat_env_vars_from_env() {
             GreptimeOptions::<StandaloneOptions>::load_layered_options(None, env_prefix).unwrap();
         similar_asserts::assert_eq!(standalone.component.heartbeat_env_vars, expected);
     });
+}
+
+#[test]
+fn test_load_metric_config_with_removed_sparse_primary_key_encoding() {
+    // The `sparse_primary_key_encoding` option was removed from the metric
+    // engine config and is now always-on. Existing user configs that still set
+    // it must be tolerated (ignored), not rejected.
+    let mut file = create_named_temp_file();
+    let toml_str = r#"
+        node_id = 42
+
+        [meta_client]
+        metasrv_addrs = ["127.0.0.1:3002"]
+
+        [[region_engine]]
+        [region_engine.metric]
+        sparse_primary_key_encoding = false
+        flush_metadata_region_interval = "30s"
+    "#;
+    write!(file, "{}", toml_str).unwrap();
+
+    let options =
+        GreptimeOptions::<DatanodeOptions>::load_layered_options(file.path().to_str(), "")
+            .expect("config with removed 'sparse_primary_key_encoding' should load without error");
+
+    // The unknown option is ignored; known metric engine options are still parsed/applied.
+    let metric = options
+        .component
+        .region_engine
+        .iter()
+        .find_map(|c| match c {
+            RegionEngineConfig::Metric(c) => Some(c),
+            _ => None,
+        })
+        .expect("metric engine config should be present");
+    assert_eq!(
+        metric.flush_metadata_region_interval,
+        Duration::from_secs(30)
+    );
 }

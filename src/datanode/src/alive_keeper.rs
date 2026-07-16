@@ -153,7 +153,7 @@ impl RegionAliveKeeper {
 
     async fn close_staled_region(&self, region_id: RegionId) {
         info!("Closing staled region: {region_id}");
-        let request = RegionRequest::Close(RegionCloseRequest {});
+        let request = RegionRequest::Close(RegionCloseRequest::default());
         if let Err(e) = self.region_server.handle_request(region_id, request).await
             && e.status_code() != StatusCode::RegionNotFound
         {

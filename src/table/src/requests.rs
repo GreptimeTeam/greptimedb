@@ -145,7 +145,7 @@ pub fn validate_table_option(key: &str) -> bool {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct TableOptions {
-    /// Memtable size of memtable.
+    /// Per-region write buffer stall threshold. Writes are rejected at twice this size.
     pub write_buffer_size: Option<ReadableSize>,
     /// Time-to-live of table. Expired data will be automatically purged.
     pub ttl: Option<TimeToLive>,
@@ -155,7 +155,7 @@ pub struct TableOptions {
     pub extra_options: HashMap<String, String>,
 }
 
-pub const WRITE_BUFFER_SIZE_KEY: &str = "write_buffer_size";
+pub const WRITE_BUFFER_SIZE_KEY: &str = store_api::mito_engine_options::WRITE_BUFFER_SIZE_KEY;
 pub const TTL_KEY: &str = store_api::mito_engine_options::TTL_KEY;
 pub const STORAGE_KEY: &str = "storage";
 pub const COMMENT_KEY: &str = "comment";

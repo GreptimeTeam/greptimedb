@@ -179,6 +179,7 @@ impl DropTableProcedure {
                     &self.context.node_manager,
                     &self.context.leader_region_registry,
                     &self.data.physical_region_routes,
+                    true,
                 )
                 .await?;
             self.context

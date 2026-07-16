@@ -948,11 +948,14 @@ dependencies = [
  "common-test-util",
  "digest 0.10.7",
  "hex",
+ "hmac 0.12.1",
  "pbkdf2",
+ "rand 0.9.4",
  "sha1 0.10.6",
  "sha2 0.10.9",
  "snafu 0.8.6",
  "sql",
+ "stringprep",
  "subtle",
  "tokio",
 ]
@@ -5938,7 +5941,7 @@ dependencies = [
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=4a69c9e75240a76afeb0796798085813669288f8#4a69c9e75240a76afeb0796798085813669288f8"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=c6f92ee9e12ee7bd5ee3c0956b1c9caa39be3f76#c6f92ee9e12ee7bd5ee3c0956b1c9caa39be3f76"
 dependencies = [
  "prost 0.14.1",
  "prost-types 0.14.1",
@@ -11020,6 +11023,7 @@ dependencies = [
  "bytemuck",
  "common-error",
  "common-macro",
+ "common-query",
  "common-recordbatch",
  "common-telemetry",
  "criterion 0.7.0",

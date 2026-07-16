@@ -554,10 +554,7 @@ impl MetricEngineInner {
         data_region_request.primary_key = primary_key;
 
         // set data region options
-        set_data_region_options(
-            &mut data_region_request.options,
-            self.config.sparse_primary_key_encoding,
-        );
+        set_data_region_options(&mut data_region_request.options);
 
         data_region_request
     }

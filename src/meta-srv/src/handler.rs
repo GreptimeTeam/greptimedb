@@ -21,8 +21,8 @@ use std::time::{Duration, Instant};
 
 use api::v1::meta::mailbox_message::Payload;
 use api::v1::meta::{
-    HeartbeatRequest, HeartbeatResponse, MailboxMessage, PROTOCOL_VERSION, RegionLease,
-    ResponseHeader, Role,
+    HeartbeatConfig, HeartbeatRequest, HeartbeatResponse, MailboxMessage, PROTOCOL_VERSION,
+    RegionLease, ResponseHeader, Role,
 };
 use check_leader_handler::CheckLeaderHandler;
 use collect_cluster_info_handler::{
@@ -387,7 +387,8 @@ impl HeartbeatHandlerGroup {
 
         // Populate heartbeat_config during handshake
         let heartbeat_config = if is_handshake {
-            let config = ctx.heartbeat_options_for(role).into();
+            let mut config: HeartbeatConfig = ctx.heartbeat_options_for(role).into();
+            config.gc_enabled = ctx.gc_enabled;
 
             info!(
                 "Handshake with {:?} node, sending config: {:?}",
