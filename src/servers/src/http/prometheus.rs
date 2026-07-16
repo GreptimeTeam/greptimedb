@@ -1588,10 +1588,11 @@ pub async fn label_values_query(
         let mut table_names = try_call_return_response!(
             retrieve_table_names(&query_ctx, catalog_manager, matches).await
         );
-        try_call_return_response!(
+        table_names = try_call_return_response!(
             handler
-                .check_query_target_permission(
-                    current_schema_metric_targets(&query_ctx, &table_names),
+                .filter_query_metric_names(
+                    table_names,
+                    query_ctx.current_schema().as_str(),
                     &query_ctx,
                 )
                 .await

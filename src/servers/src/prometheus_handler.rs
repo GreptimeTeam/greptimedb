@@ -76,6 +76,14 @@ pub trait PrometheusHandler {
         query_ctx: &QueryContextRef,
     ) -> Result<()>;
 
+    /// Removes metric names that the current user cannot query.
+    async fn filter_query_metric_names(
+        &self,
+        metric_names: Vec<String>,
+        schema: &str,
+        query_ctx: &QueryContextRef,
+    ) -> Result<Vec<String>>;
+
     /// Query metric table names by the `__name__` matchers.
     async fn query_metric_names(
         &self,

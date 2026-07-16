@@ -107,11 +107,11 @@ impl OpenTelemetryProtocolHandler for Instance {
             .resource_metrics
             .iter()
             .flat_map(|r| r.scope_metrics.iter())
-            .flat_map(|s| s.metrics.iter().map(|m| &m.name))
+            .flat_map(|s| s.metrics.iter().map(|m| m.name.clone()))
             .collect::<Vec<_>>();
 
         // See [`OtlpMetricCtx`] for details
-        let is_legacy = self.check_otlp_legacy(&input_names, ctx.clone()).await?;
+        let is_legacy = self.check_otlp_legacy(&input_names, &ctx).await?;
 
         let mut metric_ctx = ctx
             .protocol_ctx()
@@ -124,6 +124,7 @@ impl OpenTelemetryProtocolHandler for Instance {
             otlp::metrics::to_grpc_insert_requests(request, &mut metric_ctx)?;
         self.check_row_insert_permission(&requests, &ctx, PermissionReq::Otlp)
             .context(AuthSnafu)?;
+        self.cache_otlp_legacy(&input_names, &ctx, is_legacy)?;
         OTLP_METRICS_ROWS.inc_by(rows as u64);
 
         let ctx = {

@@ -14,10 +14,7 @@
 
 use std::ops::Deref;
 
-use auth::{
-    PermissionChecker, PermissionCheckerRef, PermissionReq, PermissionTableTarget,
-    PermissionTableTargets,
-};
+use auth::{PermissionReq, PermissionTableTarget, PermissionTableTargets};
 use client::Output;
 use common_error::ext::BoxedError;
 use log_query::LogQuery;
@@ -42,15 +39,9 @@ impl LogQueryHandler for Instance {
             &request.table.schema_name,
             &request.table.table_name,
         )]);
+        let targets = self.resolve_query_permission_targets(targets, &ctx).await?;
 
-        self.plugins
-            .get::<PermissionCheckerRef>()
-            .as_ref()
-            .check_permission_with_table_targets(
-                ctx.current_user(),
-                PermissionReq::LogQuery,
-                targets,
-            )
+        self.check_table_permission(&ctx, PermissionReq::LogQuery, targets)
             .context(AuthSnafu)?;
 
         interceptor.as_ref().pre_query(&request, ctx.clone())?;

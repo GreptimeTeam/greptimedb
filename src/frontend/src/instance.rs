@@ -396,8 +396,8 @@ impl Instance {
 
     async fn check_otlp_legacy(
         &self,
-        names: &[&String],
-        ctx: QueryContextRef,
+        names: &[String],
+        ctx: &QueryContextRef,
     ) -> server_error::Result<bool> {
         let db_string = ctx.get_db_string();
         // fast cache check
@@ -436,13 +436,6 @@ impl Instance {
 
         // means no existing table is found, use new mode
         if table_ids.is_empty() {
-            let cache = self
-                .otlp_metrics_table_legacy_cache
-                .entry(db_string)
-                .or_default();
-            names.iter().for_each(|name| {
-                cache.insert((*name).clone(), false);
-            });
             return Ok(false);
         }
 
@@ -464,10 +457,6 @@ impl Instance {
                     .unwrap_or(&OTLP_LEGACY_DEFAULT_VALUE)
             })
             .collect::<Vec<_>>();
-        let cache = self
-            .otlp_metrics_table_legacy_cache
-            .entry(db_string)
-            .or_default();
         if !options.is_empty() {
             // check value consistency
             let has_prom = options.iter().any(|opt| *opt == OTLP_METRIC_COMPAT_PROM);
@@ -475,28 +464,34 @@ impl Instance {
                 .iter()
                 .any(|opt| *opt == OTLP_LEGACY_DEFAULT_VALUE.as_str());
             ensure!(!(has_prom && has_legacy), OtlpMetricModeIncompatibleSnafu);
-            let flag = has_legacy;
-            names.iter().for_each(|name| {
-                cache.insert((*name).clone(), flag);
-            });
-            Ok(flag)
+            Ok(has_legacy)
         } else {
             // no table info, use new mode
-            names.iter().for_each(|name| {
-                cache.insert((*name).clone(), false);
-            });
             Ok(false)
         }
+    }
+
+    fn cache_otlp_legacy(
+        &self,
+        names: &[String],
+        ctx: &QueryContextRef,
+        is_legacy: bool,
+    ) -> server_error::Result<()> {
+        let cache = self
+            .otlp_metrics_table_legacy_cache
+            .entry(ctx.get_db_string())
+            .or_default();
+        cache_legacy_mode(&cache, names, is_legacy)
     }
 }
 
 fn fast_legacy_check(
     cache: &DashMap<String, bool>,
-    names: &[&String],
+    names: &[String],
 ) -> server_error::Result<Option<bool>> {
     let hit_cache = names
         .iter()
-        .filter_map(|name| cache.get(*name))
+        .filter_map(|name| cache.get(name))
         .collect::<Vec<_>>();
     if !hit_cache.is_empty() {
         let hit_legacy = hit_cache.iter().any(|en| *en.value());
@@ -507,20 +502,22 @@ fn fast_legacy_check(
         // add doc links in err msg later
         ensure!(!(hit_legacy && hit_prom), OtlpMetricModeIncompatibleSnafu);
 
-        let flag = hit_legacy;
-        // drop hit_cache to release references before inserting to avoid deadlock
-        drop(hit_cache);
-
-        // set cache for all names
-        names.iter().for_each(|name| {
-            if !cache.contains_key(*name) {
-                cache.insert((*name).clone(), flag);
-            }
-        });
-        Ok(Some(flag))
+        Ok(Some(hit_legacy))
     } else {
         Ok(None)
     }
+}
+
+fn cache_legacy_mode(
+    cache: &DashMap<String, bool>,
+    names: &[String],
+    is_legacy: bool,
+) -> server_error::Result<()> {
+    for name in names {
+        let cached = cache.entry(name.clone()).or_insert(is_legacy);
+        ensure!(*cached == is_legacy, OtlpMetricModeIncompatibleSnafu);
+    }
+    Ok(())
 }
 
 /// If the relevant variables are set, the timeout is enforced for all PostgreSQL statements.
@@ -1199,16 +1196,46 @@ impl PrometheusHandler for Instance {
         Ok(())
     }
 
+    async fn filter_query_metric_names(
+        &self,
+        metric_names: Vec<String>,
+        schema: &str,
+        query_ctx: &QueryContextRef,
+    ) -> server_error::Result<Vec<String>> {
+        let mut allowed = Vec::with_capacity(metric_names.len());
+        for metric in metric_names {
+            let target =
+                PermissionTableTarget::new(query_ctx.current_catalog(), schema, metric.as_str());
+            match self
+                .check_query_target_permission(
+                    PermissionTableTargets::resolved(vec![target]),
+                    query_ctx,
+                )
+                .await
+            {
+                Ok(()) => allowed.push(metric),
+                Err(error)
+                    if error.status_code()
+                        == common_error::status_code::StatusCode::PermissionDenied => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(allowed)
+    }
+
     async fn query_metric_names(
         &self,
         matchers: Vec<Matcher>,
         schema: &str,
         ctx: &QueryContextRef,
     ) -> server_error::Result<Vec<String>> {
-        self.handle_query_metric_names(matchers, schema, ctx)
+        let metric_names = self
+            .handle_query_metric_names(matchers, schema, ctx)
             .await
             .map_err(BoxedError::new)
-            .context(ExecuteQuerySnafu)
+            .context(ExecuteQuerySnafu)?;
+        self.filter_query_metric_names(metric_names, schema, ctx)
+            .await
     }
 
     async fn query_label_values(
@@ -1479,11 +1506,9 @@ mod tests {
     use std::collections::HashMap;
     use std::future::Future;
     use std::pin::Pin;
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::{Arc, Barrier};
+    use std::sync::Arc;
     use std::task::{Context, Poll};
-    use std::thread;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     use api::prom_store::remote::label_matcher::Type as PromMatcherType;
     use api::prom_store::remote::{LabelMatcher, Query as RemoteQuery, ReadRequest};
@@ -1509,8 +1534,9 @@ mod tests {
     use datafusion_expr::{LogicalPlanBuilder, LogicalTableSource};
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, Schema as GtSchema, SchemaRef as GtSchemaRef};
+    use log_query::LogQuery;
     use query::query_engine::options::QueryOptions;
-    use servers::query_handler::PromStoreProtocolHandler;
+    use servers::query_handler::{LogQueryHandler, PromStoreProtocolHandler};
     use session::context::{Channel, ConnInfo, QueryContext, QueryContextBuilder};
     use snafu::{Location, Snafu};
     use sql::dialect::GreptimeDbDialect;
@@ -1519,6 +1545,7 @@ mod tests {
     use store_api::storage::ScanRequest;
     use strfmt::Format;
     use table::metadata::{FilterPushDownType, TableInfo, TableInfoBuilder, TableMetaBuilder};
+    use table::table_name::TableName;
     use table::test_util::EmptyTable;
     use table::{Table, TableRef};
     use tokio::sync::{mpsc, oneshot};
@@ -1710,7 +1737,13 @@ mod tests {
             _req: PermissionReq,
             targets: PermissionTableTargets,
         ) -> auth::error::Result<PermissionResp> {
-            Ok(if matches!(targets, PermissionTableTargets::Unresolved) {
+            let reject = match targets {
+                PermissionTableTargets::Unresolved => true,
+                PermissionTableTargets::Resolved(targets) => {
+                    targets.iter().any(|target| target.table == "denied")
+                }
+            };
+            Ok(if reject {
                 PermissionResp::Reject
             } else {
                 PermissionResp::Allow
@@ -2071,6 +2104,17 @@ mod tests {
                 .await
                 .unwrap()
         );
+        assert_eq!(
+            vec!["target".to_string()],
+            PrometheusHandler::filter_query_metric_names(
+                &instance,
+                vec!["target".to_string(), "denied".to_string()],
+                "public",
+                &ctx,
+            )
+            .await
+            .unwrap()
+        );
 
         let query = PromQuery {
             query: physical_table.to_string(),
@@ -2107,6 +2151,17 @@ mod tests {
             let err = results.remove(0).unwrap_err();
             assert_eq!(StatusCode::PermissionDenied, err.status_code(), "{sql}");
         }
+        let err = LogQueryHandler::query(
+            &instance,
+            LogQuery {
+                table: TableName::new("greptime", "public", physical_table),
+                ..Default::default()
+            },
+            ctx.clone(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(StatusCode::PermissionDenied, err.status_code());
         let err = instance
             .do_describe_inner(parse_one_sql("SELECT * FROM physical_metric"), ctx.clone())
             .await
@@ -2146,119 +2201,23 @@ mod tests {
     }
 
     #[test]
-    fn test_fast_legacy_check_deadlock_prevention() {
-        // Create a DashMap to simulate the cache
+    fn test_fast_legacy_check_is_read_only() {
         let cache = DashMap::new();
+        cache.insert("metric1".to_string(), true);
 
-        // Pre-populate cache with some entries
-        cache.insert("metric1".to_string(), true); // legacy mode
-        cache.insert("metric2".to_string(), false); // prom mode
-        cache.insert("metric3".to_string(), true); // legacy mode
+        let names = vec!["metric1".to_string(), "metric2".to_string()];
+        assert_eq!(Some(true), fast_legacy_check(&cache, &names).unwrap());
+        assert!(!cache.contains_key("metric2"));
 
-        // Test case 1: Normal operation with cache hits
-        let metric1 = "metric1".to_string();
-        let metric4 = "metric4".to_string();
-        let names1 = vec![&metric1, &metric4];
-        let result = fast_legacy_check(&cache, &names1);
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), Some(true)); // should return legacy mode
+        cache_legacy_mode(&cache, &names, true).unwrap();
+        assert!(*cache.get("metric2").unwrap().value());
+        assert!(cache_legacy_mode(&cache, &names, false).is_err());
+        assert!(*cache.get("metric2").unwrap().value());
 
-        // Verify that metric4 was added to cache
-        assert!(cache.contains_key("metric4"));
-        assert!(*cache.get("metric4").unwrap().value());
-
-        // Test case 2: No cache hits
-        let metric5 = "metric5".to_string();
-        let metric6 = "metric6".to_string();
-        let names2 = vec![&metric5, &metric6];
-        let result = fast_legacy_check(&cache, &names2);
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), None); // should return None as no cache hits
-
-        // Test case 3: Incompatible modes should return error
         let cache_incompatible = DashMap::new();
-        cache_incompatible.insert("metric1".to_string(), true); // legacy
-        cache_incompatible.insert("metric2".to_string(), false); // prom
-        let metric1_test = "metric1".to_string();
-        let metric2_test = "metric2".to_string();
-        let names3 = vec![&metric1_test, &metric2_test];
-        let result = fast_legacy_check(&cache_incompatible, &names3);
-        assert!(result.is_err()); // should error due to incompatible modes
-
-        // Test case 4: Intensive concurrent access to test deadlock prevention
-        // This test specifically targets the scenario where multiple threads
-        // access the same cache entries simultaneously
-        let cache_concurrent = Arc::new(DashMap::new());
-        cache_concurrent.insert("shared_metric".to_string(), true);
-
-        let num_threads = 8;
-        let operations_per_thread = 100;
-        let barrier = Arc::new(Barrier::new(num_threads));
-        let success_flag = Arc::new(AtomicBool::new(true));
-
-        let handles: Vec<_> = (0..num_threads)
-            .map(|thread_id| {
-                let cache_clone = Arc::clone(&cache_concurrent);
-                let barrier_clone = Arc::clone(&barrier);
-                let success_flag_clone = Arc::clone(&success_flag);
-
-                thread::spawn(move || {
-                    // Wait for all threads to be ready
-                    barrier_clone.wait();
-
-                    let start_time = Instant::now();
-                    for i in 0..operations_per_thread {
-                        // Each operation references existing cache entry and adds new ones
-                        let shared_metric = "shared_metric".to_string();
-                        let new_metric = format!("thread_{}_metric_{}", thread_id, i);
-                        let names = vec![&shared_metric, &new_metric];
-
-                        match fast_legacy_check(&cache_clone, &names) {
-                            Ok(_) => {}
-                            Err(_) => {
-                                success_flag_clone.store(false, Ordering::Relaxed);
-                                return;
-                            }
-                        }
-
-                        // If the test takes too long, it likely means deadlock
-                        if start_time.elapsed() > Duration::from_secs(10) {
-                            success_flag_clone.store(false, Ordering::Relaxed);
-                            return;
-                        }
-                    }
-                })
-            })
-            .collect();
-
-        // Join all threads with timeout
-        let start_time = Instant::now();
-        for (i, handle) in handles.into_iter().enumerate() {
-            let join_result = handle.join();
-
-            // Check if we're taking too long (potential deadlock)
-            if start_time.elapsed() > Duration::from_secs(30) {
-                panic!("Test timed out - possible deadlock detected!");
-            }
-
-            if join_result.is_err() {
-                panic!("Thread {} panicked during execution", i);
-            }
-        }
-
-        // Verify all operations completed successfully
-        assert!(
-            success_flag.load(Ordering::Relaxed),
-            "Some operations failed"
-        );
-
-        // Verify that many new entries were added (proving operations completed)
-        let final_count = cache_concurrent.len();
-        assert!(
-            final_count > 1 + num_threads * operations_per_thread / 2,
-            "Expected more cache entries, got {}",
-            final_count
-        );
+        cache_incompatible.insert("metric1".to_string(), true);
+        cache_incompatible.insert("metric2".to_string(), false);
+        assert!(fast_legacy_check(&cache_incompatible, &names).is_err());
     }
 
     #[test]
