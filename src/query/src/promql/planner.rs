@@ -4389,13 +4389,13 @@ impl PromPlanner {
             (Some(left), Some(right)) if left == right => {
                 Self::string_value_data_type(left).map(|_| left.clone())
             }
-            (Some(left), Some(right))
-                if Self::string_value_data_type(left).is_some()
-                    && Self::string_value_data_type(right).is_some() =>
-            {
-                match (left, right) {
-                    (ArrowDataType::Dictionary(_, _), _) => Some(left.clone()),
-                    (_, ArrowDataType::Dictionary(_, _)) => Some(right.clone()),
+            (Some(left), Some(right)) => {
+                let left_value_type = Self::string_value_data_type(left)?;
+                let right_value_type = Self::string_value_data_type(right)?;
+                // DataFusion projections can decode dictionaries, but do not encode plain strings
+                // as dictionaries. Preserve the encoding only when both inputs already share it.
+                match (left_value_type, right_value_type) {
+                    (left, right) if left == right => Some(left.clone()),
                     (ArrowDataType::LargeUtf8, _) | (_, ArrowDataType::LargeUtf8) => {
                         Some(ArrowDataType::LargeUtf8)
                     }
@@ -4406,10 +4406,9 @@ impl PromPlanner {
                 }
             }
             (Some(data_type), None) | (None, Some(data_type)) => {
-                Self::string_value_data_type(data_type).map(|_| data_type.clone())
+                Self::string_value_data_type(data_type).cloned()
             }
             (None, None) => Some(ArrowDataType::Utf8),
-            (Some(_), Some(_)) => None,
         }
     }
 
@@ -4623,22 +4622,12 @@ impl PromPlanner {
                     .alias(col.clone())
                 }
             } else {
-                let value_type = Self::string_value_data_type(target_type)
-                    .expect("target label type is a logical string");
-                let null = DfExpr::Literal(
-                    Self::string_scalar_value(value_type, None)
-                        .expect("target label value type is a string"),
+                DfExpr::Literal(
+                    Self::string_scalar_value(target_type, None)
+                        .expect("target label type is a string"),
                     None,
-                );
-                let null = if value_type == target_type {
-                    null
-                } else {
-                    DfExpr::Cast(Cast {
-                        expr: Box::new(null),
-                        data_type: target_type.clone(),
-                    })
-                };
-                null.alias(col.clone())
+                )
+                .alias(col.clone())
             }
         };
         let left_proj_exprs = all_columns.iter().map(|col| {
@@ -5143,6 +5132,35 @@ mod test {
             Plugins::default(),
             QueryOptions::default(),
         )
+    }
+
+    #[test]
+    fn common_label_type_preserves_only_shared_dictionary_encoding() {
+        let dictionary = ArrowDataType::Dictionary(
+            Box::new(ArrowDataType::UInt32),
+            Box::new(ArrowDataType::Utf8),
+        );
+        let other_dictionary = ArrowDataType::Dictionary(
+            Box::new(ArrowDataType::Int32),
+            Box::new(ArrowDataType::Utf8),
+        );
+
+        assert_eq!(
+            Some(dictionary.clone()),
+            PromPlanner::common_label_data_type(Some(&dictionary), Some(&dictionary))
+        );
+        assert_eq!(
+            Some(ArrowDataType::Utf8),
+            PromPlanner::common_label_data_type(Some(&dictionary), Some(&ArrowDataType::Utf8))
+        );
+        assert_eq!(
+            Some(ArrowDataType::Utf8),
+            PromPlanner::common_label_data_type(Some(&dictionary), Some(&other_dictionary))
+        );
+        assert_eq!(
+            Some(ArrowDataType::Utf8),
+            PromPlanner::common_label_data_type(Some(&dictionary), None)
+        );
     }
 
     async fn build_optimized_promql_plan(
