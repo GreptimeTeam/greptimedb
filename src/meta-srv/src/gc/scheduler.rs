@@ -583,6 +583,7 @@ mod tests {
             dropped_at,
             retention_expires_at: None,
             drop_generation: None,
+            purging: false,
         }
     }
 

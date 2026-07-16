@@ -226,6 +226,36 @@ async fn recycle_bin_scan_returns_scoped_sorted_rows_and_nulls() {
 }
 
 #[tokio::test]
+async fn recycle_bin_hides_purging_tables() {
+    let manager = kv_catalog_manager();
+    let metadata = manager.table_metadata_manager_ref().clone();
+    drop_table(
+        &metadata,
+        DEFAULT_CATALOG_NAME,
+        DEFAULT_SCHEMA_NAME,
+        "visible",
+        10,
+        Some(1234),
+    )
+    .await;
+    drop_table(
+        &metadata,
+        DEFAULT_CATALOG_NAME,
+        DEFAULT_SCHEMA_NAME,
+        "purging",
+        11,
+        Some(1234),
+    )
+    .await;
+    metadata.mark_dropped_table_purging(11, None).await.unwrap();
+
+    let manager: Arc<dyn CatalogManager> = manager;
+    let output = scan(&information_table(&manager, RECYCLE_BIN).await, vec![]).await;
+    assert!(output.contains("visible"), "{output}");
+    assert!(!output.contains("purging"), "{output}");
+}
+
+#[tokio::test]
 async fn recycle_bin_predicates_and_live_same_name_are_independent() {
     let manager = kv_catalog_manager();
     let metadata = manager.table_metadata_manager_ref().clone();

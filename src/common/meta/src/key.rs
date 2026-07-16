@@ -447,6 +447,8 @@ pub struct DroppedTableName {
     pub retention_expires_at: Option<i64>,
     /// Unique identity of this soft-drop generation.
     pub drop_generation: Option<String>,
+    /// Whether an automatic purge has durably claimed this dropped table.
+    pub purging: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -1128,6 +1130,7 @@ impl TableMetadataManager {
                 dropped_at: None,
                 retention_expires_at: None,
                 drop_generation: None,
+                purging: false,
             });
         }
         if dropped_tables.is_empty() {
@@ -1141,6 +1144,7 @@ impl TableMetadataManager {
                     dropped_at_key(table.table_id),
                     retention_expires_at_key(table.table_id),
                     drop_generation_key(table.table_id),
+                    purging_key(table.table_id),
                 ]
             })
             .collect::<Vec<_>>();
@@ -1157,6 +1161,7 @@ impl TableMetadataManager {
             table.drop_generation = Self::parse_drop_generation(
                 marker_values.get(&drop_generation_key(table.table_id)),
             );
+            table.purging = marker_values.contains_key(&purging_key(table.table_id));
         }
 
         Ok(dropped_tables)

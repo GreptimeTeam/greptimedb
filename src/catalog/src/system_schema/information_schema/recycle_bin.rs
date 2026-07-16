@@ -205,7 +205,8 @@ impl InformationSchemaRecycleBinBuilder {
             .list_dropped_tables()
             .await
             .context(TableMetadataManagerSnafu)?;
-        dropped_tables.retain(|table| table.table_name.catalog_name == self.catalog_name);
+        dropped_tables
+            .retain(|table| table.table_name.catalog_name == self.catalog_name && !table.purging);
         dropped_tables.sort_unstable_by(|a, b| {
             (
                 &a.table_name.catalog_name,
