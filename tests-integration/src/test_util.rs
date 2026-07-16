@@ -653,6 +653,7 @@ async fn setup_test_prom_app_with_frontend_inner(
             frontend_ref.partition_manager().clone(),
             frontend_ref.node_manager().clone(),
             frontend_ref.catalog_manager().clone(),
+            frontend_ref.table_flownode_set_cache().clone(),
             true,
             frontend_ref.clone(),
             Duration::from_millis(50),

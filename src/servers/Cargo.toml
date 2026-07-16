@@ -155,6 +155,7 @@ common-base.workspace = true
 common-test-util.workspace = true
 criterion = "0.5"
 json5 = "0.4"
+moka.workspace = true
 mysql_async = { version = "0.35", default-features = false, features = [
     "default-rustls",
 ] }
