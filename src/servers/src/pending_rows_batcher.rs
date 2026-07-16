@@ -1301,29 +1301,32 @@ async fn flush_batch(
     let elapsed = start.elapsed().as_secs_f64();
     FLUSH_ELAPSED.observe(elapsed);
 
-    if result.is_err() {
-        FLUSH_FAILURES.inc();
-        FLUSH_DROPPED_ROWS.inc_by(total_row_count as u64);
-    } else if let Ok(affected_rows) = &result {
-        FLUSH_TOTAL.inc();
-        FLUSH_ROWS.observe(total_row_count as f64);
-        operator::metrics::DIST_INGEST_ROW_COUNT
-            .with_label_values(&[db_string.as_str()])
-            .inc_by(*affected_rows as u64);
-    }
-
     debug!(
         "Pending rows batch flushed, total rows: {}, elapsed time: {}s",
         total_row_count, elapsed
     );
 
-    notify_flow_dirty_windows_after_flush(
-        &result,
-        &table_batches,
-        table_flownode_set_cache,
-        flow_node_manager,
-    );
-    notify_waiters(waiters, result.map(|_| ()));
+    match result {
+        Ok(affected_rows) => {
+            FLUSH_TOTAL.inc();
+            FLUSH_ROWS.observe(total_row_count as f64);
+            operator::metrics::DIST_INGEST_ROW_COUNT
+                .with_label_values(&[db_string.as_str()])
+                .inc_by(affected_rows as u64);
+
+            notify_flow_dirty_windows_after_flush(
+                table_batches,
+                table_flownode_set_cache,
+                flow_node_manager,
+            );
+            notify_waiters(waiters, Ok(()));
+        }
+        Err(err) => {
+            FLUSH_FAILURES.inc();
+            FLUSH_DROPPED_ROWS.inc_by(total_row_count as u64);
+            notify_waiters(waiters, Err(err));
+        }
+    }
 }
 
 fn extract_timestamps(table_batch: &TableBatch) -> Vec<i64> {
@@ -1350,16 +1353,10 @@ fn extract_timestamps(table_batch: &TableBatch) -> Vec<i64> {
 }
 
 fn notify_flow_dirty_windows_after_flush(
-    result: &Result<usize>,
-    table_batches: &[TableBatch],
+    table_batches: Vec<TableBatch>,
     table_flownode_set_cache: TableFlownodeSetCacheRef,
     node_manager: NodeManagerRef,
 ) {
-    if result.is_err() {
-        return;
-    }
-
-    let table_batches = table_batches.to_vec();
     common_runtime::spawn_global(async move {
         for table_batch in table_batches {
             let timestamps = extract_timestamps(&table_batch);
@@ -2267,12 +2264,7 @@ mod tests {
             row_count: 1,
         }];
 
-        notify_flow_dirty_windows_after_flush(
-            &Ok::<usize, Error>(1),
-            &table_batches,
-            cache,
-            node_manager,
-        );
+        notify_flow_dirty_windows_after_flush(table_batches, cache, node_manager);
 
         let requests = tokio::time::timeout(Duration::from_secs(1), requests_rx.recv())
             .await
@@ -2315,12 +2307,7 @@ mod tests {
             row_count: 2,
         }];
 
-        notify_flow_dirty_windows_after_flush(
-            &Ok::<usize, Error>(2),
-            &table_batches,
-            cache,
-            node_manager,
-        );
+        notify_flow_dirty_windows_after_flush(table_batches, cache, node_manager);
 
         let requests = tokio::time::timeout(Duration::from_secs(1), requests_rx.recv())
             .await
@@ -2341,7 +2328,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_failed_flush_does_not_notify_flownode() {
+    async fn test_flush_batch_notifies_flownode_after_successful_physical_write() {
         let table_id = 42;
         let peer = Peer {
             id: 7,
@@ -2350,29 +2337,53 @@ mod tests {
         let cache = mock_table_flownode_cache(table_id, peer).await;
         let (requests_tx, mut requests_rx) = mpsc::unbounded_channel();
         let _requests_tx = requests_tx.clone();
-        let node_manager: NodeManagerRef = Arc::new(FlowNotificationMockNodeManager {
+        let flow_node_manager: NodeManagerRef = Arc::new(FlowNotificationMockNodeManager {
             flownode: Arc::new(RecordingFlownode { requests_tx }),
         });
+        let ctx = session::context::QueryContext::arc();
         let table_batches = vec![TableBatch {
             table_name: "cpu".to_string(),
             table_id,
             batches: vec![mock_tag_batch("tag1", "host-1", 1000, 1.0)],
             row_count: 1,
         }];
+        let writes = Arc::new(AtomicUsize::new(0));
 
-        notify_flow_dirty_windows_after_flush(
-            &Err(Error::Internal {
-                err_msg: "flush failed".to_string(),
-            }),
-            &table_batches,
+        flush_batch(
+            FlushBatch {
+                table_batches,
+                total_row_count: 1,
+                db_string: ctx.get_db_string(),
+                ctx,
+                waiters: Vec::new(),
+            },
+            &MockFlushPartitionProvider {
+                partition_rule_calls: Arc::new(AtomicUsize::new(0)),
+                region_leader_calls: Arc::new(AtomicUsize::new(0)),
+            },
+            &MockFlushNodeRequester {
+                writes: writes.clone(),
+                fail: false,
+            },
+            &MockFlushCatalogProvider {
+                table: Some(mock_physical_table_metadata(1024)),
+            },
+            flow_node_manager,
             cache,
-            node_manager,
-        );
+        )
+        .await;
 
-        assert!(
-            tokio::time::timeout(Duration::from_millis(50), requests_rx.recv())
-                .await
-                .is_err()
+        assert_eq!(1, writes.load(Ordering::SeqCst));
+        let requests = tokio::time::timeout(Duration::from_secs(1), requests_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            vec![api::v1::flow::DirtyWindowRequest {
+                table_id,
+                timestamps: vec![1000],
+            }],
+            requests.requests
         );
     }
 
