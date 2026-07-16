@@ -118,6 +118,9 @@ pub enum NestedReadStrategy {
     #[default]
     Exact,
     /// If a requested path is missing, read the nearest variant parent.
+    ///
+    /// Useful for JSON schema evolution, e.g. read `j.a` when `j.a.b` is
+    /// requested but only `j.a` exists as a variant value.
     FallbackToNearestVariantParent,
 }
 
