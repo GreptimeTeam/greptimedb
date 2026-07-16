@@ -59,7 +59,6 @@ use crate::error::{
     EncodeMemtableSnafu, EncodeSnafu, InvalidMetadataSnafu, InvalidRequestSnafu,
     NewRecordBatchSnafu, Result,
 };
-use crate::memtable::bulk::MAX_UNCOMPRESSED_PART_SIZE;
 use crate::memtable::bulk::context::{BulkIterContext, BulkIterContextRef};
 use crate::memtable::bulk::json_align::Json2Aligner;
 use crate::memtable::bulk::part_reader::EncodedBulkPartIter;
@@ -393,21 +392,19 @@ impl UnorderedPart {
         self.compact_threshold
     }
 
-    /// Returns true if this part should accept the given row count and estimated size.
-    pub fn should_accept(&self, num_rows: usize, estimated_bytes: usize) -> bool {
-        num_rows < self.threshold && estimated_bytes < MAX_UNCOMPRESSED_PART_SIZE
+    /// Returns true if this part should accept the given row count.
+    pub fn should_accept(&self, num_rows: usize) -> bool {
+        num_rows < self.threshold
     }
 
-    /// Returns true if the current accumulator should be compacted before adding
-    /// `incoming_bytes`. Pass zero after a push to check the accumulated thresholds.
-    pub fn should_compact(&self, incoming_bytes: usize) -> bool {
-        if incoming_bytes == 0 {
-            self.total_rows >= self.compact_threshold
-                || self.total_bytes >= MAX_UNCOMPRESSED_PART_SIZE
-        } else {
-            !self.parts.is_empty()
-                && self.total_bytes.saturating_add(incoming_bytes) > MAX_UNCOMPRESSED_PART_SIZE
-        }
+    /// Returns true if this part should be compacted by row count.
+    pub fn should_compact(&self) -> bool {
+        self.total_rows >= self.compact_threshold
+    }
+
+    /// Returns the total estimated uncompressed bytes across all parts.
+    pub(super) fn estimated_bytes(&self) -> usize {
+        self.total_bytes
     }
 
     /// Adds a BulkPart to this unordered collection.
@@ -1690,27 +1687,22 @@ mod tests {
     }
 
     #[test]
-    fn test_unordered_part_size_limit() {
+    fn test_unordered_part_tracks_estimated_bytes() {
         let mut part = UnorderedPart::new();
-        part.total_bytes = MAX_UNCOMPRESSED_PART_SIZE - 1;
-        assert!(!part.should_compact(0));
-        assert!(!part.should_compact(2));
-
-        // The pre-add overflow check only applies to a non-empty accumulator.
-        part.parts.push(BulkPart {
+        let bulk_part = BulkPart {
             batch: RecordBatch::new_empty(Arc::new(arrow::datatypes::Schema::empty())),
             max_timestamp: 0,
             min_timestamp: 0,
             sequence: 0,
             timestamp_index: 0,
             raw_data: None,
-        });
-        assert!(part.should_compact(2));
+        };
+        let estimated_size = bulk_part.estimated_size();
 
-        part.total_bytes = MAX_UNCOMPRESSED_PART_SIZE;
-        assert!(part.should_compact(0));
+        part.push(bulk_part);
+        assert_eq!(estimated_size, part.estimated_bytes());
         part.clear();
-        assert_eq!(0, part.total_bytes);
+        assert_eq!(0, part.estimated_bytes());
         assert!(part.is_empty());
     }
 
@@ -1718,9 +1710,8 @@ mod tests {
     fn test_unordered_part_should_accept() {
         let mut part = UnorderedPart::new();
         part.set_threshold(10);
-        assert!(part.should_accept(9, MAX_UNCOMPRESSED_PART_SIZE - 1));
-        assert!(!part.should_accept(10, 1));
-        assert!(!part.should_accept(1, MAX_UNCOMPRESSED_PART_SIZE));
+        assert!(part.should_accept(9));
+        assert!(!part.should_accept(10));
     }
 
     fn encode(input: &[MutationInput]) -> EncodedBulkPart {

@@ -280,13 +280,6 @@ pub enum CompactionOptions {
 }
 
 impl CompactionOptions {
-    /// Returns the soft maximum size for a compaction output file.
-    pub(crate) fn max_output_file_size(&self) -> Option<u64> {
-        match self {
-            CompactionOptions::Twcs(opts) => opts.max_output_file_size.map(|size| size.as_bytes()),
-        }
-    }
-
     pub(crate) fn time_window(&self) -> Option<Duration> {
         match self {
             CompactionOptions::Twcs(opts) => opts.time_window,
