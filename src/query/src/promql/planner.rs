@@ -4623,12 +4623,22 @@ impl PromPlanner {
                     .alias(col.clone())
                 }
             } else {
-                DfExpr::Literal(
-                    Self::string_scalar_value(target_type, None)
-                        .expect("target label type is a logical string"),
+                let value_type = Self::string_value_data_type(target_type)
+                    .expect("target label type is a logical string");
+                let null = DfExpr::Literal(
+                    Self::string_scalar_value(value_type, None)
+                        .expect("target label value type is a string"),
                     None,
-                )
-                .alias(col.clone())
+                );
+                let null = if value_type == target_type {
+                    null
+                } else {
+                    DfExpr::Cast(Cast {
+                        expr: Box::new(null),
+                        data_type: target_type.clone(),
+                    })
+                };
+                null.alias(col.clone())
             }
         };
         let left_proj_exprs = all_columns.iter().map(|col| {

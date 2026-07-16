@@ -1124,7 +1124,7 @@ EXPLAIN SELECT MIN(pk_col_1), MAX(val_col_2) FROM step_aggr_extended;
 +-+-+
 | logical_plan_| Aggregate: groupBy=[[]], aggr=[[__min_merge(__min_state(step_aggr_extended.pk_col_1)) AS min(step_aggr_extended.pk_col_1), __max_merge(__max_state(step_aggr_extended.val_col_2)) AS max(step_aggr_extended.val_col_2)]] |
 |_|_MergeScan [is_placeholder=false, remote_input=[_|
-|_| Aggregate: groupBy=[[]], aggr=[[__min_state(step_aggr_extended.pk_col_1), __max_state(step_aggr_extended.val_col_2)]]_|
+|_| Aggregate: groupBy=[[]], aggr=[[__min_state(CAST(step_aggr_extended.pk_col_1 AS Utf8)), __max_state(step_aggr_extended.val_col_2)]]_|
 |_|_TableScan: step_aggr_extended_|
 |_| ]]_|
 | physical_plan | AggregateExec: mode=Final, gby=[], aggr=[min(step_aggr_extended.pk_col_1), max(step_aggr_extended.val_col_2)]_|
@@ -1160,8 +1160,8 @@ EXPLAIN SELECT SUM(val_col_1), COUNT(*) FROM step_aggr_extended WHERE pk_col_1 =
 |_|_Aggregate: groupBy=[[]], aggr=[[__sum_merge(__sum_state(step_aggr_extended.val_col_1)) AS sum(step_aggr_extended.val_col_1), __count_merge(__count_state(step_aggr_extended.ts)) AS count(Int64(1))]] |
 |_|_MergeScan [is_placeholder=false, remote_input=[_|
 |_| Aggregate: groupBy=[[]], aggr=[[__sum_state(step_aggr_extended.val_col_1), __count_state(step_aggr_extended.ts)]]_|
-|_|_Filter: step_aggr_extended.pk_col_1 = Utf8("non_existent")_|
-|_|_TableScan: step_aggr_extended, partial_filters=[step_aggr_extended.pk_col_1 = Utf8("non_existent")]_|
+|_|_Filter: step_aggr_extended.pk_col_1 = CAST(Utf8("non_existent") AS Dictionary(UInt32, Utf8))_|
+|_|_TableScan: step_aggr_extended, partial_filters=[step_aggr_extended.pk_col_1 = CAST(Utf8("non_existent") AS Dictionary(UInt32, Utf8))]_|
 |_| ]]_|
 | physical_plan | ProjectionExec: expr=[sum(step_aggr_extended.val_col_1)@0 as sum(step_aggr_extended.val_col_1), count(Int64(1))@1 as count(*)]_|
 |_|_AggregateExec: mode=Final, gby=[], aggr=[sum(step_aggr_extended.val_col_1), count(Int64(1))]_|

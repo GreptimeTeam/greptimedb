@@ -523,14 +523,16 @@ TQL ANALYZE (0, 5, '5s') (tsid_binary_join_left or tsid_binary_join_right) / tsi
 |_|_|_CooperativeExec REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
-| 1_| 0_|_ProjectionExec: expr=[ts@4 as ts, __tsid@3 as __tsid, greptime_value@0 as greptime_value, host@1 as host, job@2 as job, CASE WHEN host@1 IS NOT NULL THEN host@1 ELSE_END as __promql_or_match_0, CASE WHEN job@2 IS NOT NULL THEN job@2 ELSE_END as __promql_or_match_1] REDACTED
+| 1_| 0_|_ProjectionExec: expr=[ts@2 as ts, __tsid@3 as __tsid, greptime_value@4 as greptime_value, host@5 as host, job@6 as job, CASE WHEN __common_expr_1@0 IS NOT NULL THEN __common_expr_1@0 ELSE_END as __promql_or_match_0, CASE WHEN __common_expr_2@1 IS NOT NULL THEN __common_expr_2@1 ELSE_END as __promql_or_match_1] REDACTED
+|_|_|_ProjectionExec: expr=[CAST(host@1 AS Utf8) as __common_expr_1, CAST(job@2 AS Utf8) as __common_expr_2, ts@4 as ts, __tsid@3 as __tsid, greptime_value@0 as greptime_value, host@1 as host, job@2 as job] REDACTED
 |_|_|_PromInstantManipulateExec: range=[0..5000], lookback=[300000], interval=[5000], time index=[ts] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["__tsid"] REDACTED
 |_|_|_ProjectionExec: expr=[greptime_value@1 as greptime_value, host@3 as host, job@4 as job, __tsid@2 as __tsid, ts@0 as ts] REDACTED
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries" REDACTED
 |_|_|_|
-| 1_| 0_|_ProjectionExec: expr=[ts@4 as ts, __tsid@3 as __tsid, greptime_value@0 as greptime_value, host@1 as host, job@2 as job, CASE WHEN host@1 IS NOT NULL THEN host@1 ELSE_END as __promql_or_match_0, CASE WHEN job@2 IS NOT NULL THEN job@2 ELSE_END as __promql_or_match_1] REDACTED
+| 1_| 0_|_ProjectionExec: expr=[ts@2 as ts, __tsid@3 as __tsid, greptime_value@4 as greptime_value, host@5 as host, job@6 as job, CASE WHEN __common_expr_1@0 IS NOT NULL THEN __common_expr_1@0 ELSE_END as __promql_or_match_0, CASE WHEN __common_expr_2@1 IS NOT NULL THEN __common_expr_2@1 ELSE_END as __promql_or_match_1] REDACTED
+|_|_|_ProjectionExec: expr=[CAST(host@1 AS Utf8) as __common_expr_1, CAST(job@2 AS Utf8) as __common_expr_2, ts@4 as ts, __tsid@3 as __tsid, greptime_value@0 as greptime_value, host@1 as host, job@2 as job] REDACTED
 |_|_|_PromInstantManipulateExec: range=[0..5000], lookback=[300000], interval=[5000], time index=[ts] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["__tsid"] REDACTED
 |_|_|_ProjectionExec: expr=[greptime_value@1 as greptime_value, host@3 as host, job@4 as job, __tsid@2 as __tsid, ts@0 as ts] REDACTED

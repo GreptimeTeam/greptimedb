@@ -233,24 +233,24 @@ EXPLAIN WITH tql_agg(ts, summary) AS (
 )
 SELECT round(avg(summary)) as avg_sum FROM tql_agg;
 
-+---------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| plan_type     | plan                                                                                                                                                                                      |
-+---------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| logical_plan  | MergeScan [is_placeholder=false, remote_input=[                                                                                                                                           |
-|               | Projection: round(avg(tql_agg.summary)) AS avg_sum                                                                                                                                        |
-|               |   Aggregate: groupBy=[[]], aggr=[[avg(tql_agg.summary)]]                                                                                                                                  |
-|               |     SubqueryAlias: tql_agg                                                                                                                                                                |
-|               |       Projection: labels.ts AS ts, sum(labels.cpu) AS summary                                                                                                                             |
-|               |         Aggregate: groupBy=[[labels.ts]], aggr=[[sum(labels.cpu)]]                                                                                                                        |
-|               |           PromInstantManipulate: range=[0..40000], lookback=[300000], interval=[10000], time index=[ts]                                                                                   |
-|               |             PromSeriesDivide: tags=["host"]                                                                                                                                               |
-|               |               Filter: labels.host ~ Utf8("^(?:host.*)$") AND labels.ts >= TimestampMillisecond(-299999, None) AND labels.ts <= TimestampMillisecond(40000, None)                          |
-|               |                 TableScan: labels, partial_filters=[labels.host ~ Utf8("^(?:host.*)$"), labels.ts >= TimestampMillisecond(-299999, None), labels.ts <= TimestampMillisecond(40000, None)] |
-|               | ]]                                                                                                                                                                                        |
-| physical_plan | CooperativeExec                                                                                                                                                                           |
++---------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                                                                                                                    |
++---------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| logical_plan  | MergeScan [is_placeholder=false, remote_input=[                                                                                                                                                         |
+|               | Projection: round(avg(tql_agg.summary)) AS avg_sum                                                                                                                                                      |
+|               |   Aggregate: groupBy=[[]], aggr=[[avg(tql_agg.summary)]]                                                                                                                                                |
+|               |     SubqueryAlias: tql_agg                                                                                                                                                                              |
+|               |       Projection: labels.ts AS ts, sum(labels.cpu) AS summary                                                                                                                                           |
+|               |         Aggregate: groupBy=[[labels.ts]], aggr=[[sum(labels.cpu)]]                                                                                                                                      |
+|               |           PromInstantManipulate: range=[0..40000], lookback=[300000], interval=[10000], time index=[ts]                                                                                                 |
+|               |             PromSeriesDivide: tags=["host"]                                                                                                                                                             |
+|               |               Filter: CAST(labels.host AS Utf8) ~ Utf8("^(?:host.*)$") AND labels.ts >= TimestampMillisecond(-299999, None) AND labels.ts <= TimestampMillisecond(40000, None)                          |
+|               |                 TableScan: labels, partial_filters=[CAST(labels.host AS Utf8) ~ Utf8("^(?:host.*)$"), labels.ts >= TimestampMillisecond(-299999, None), labels.ts <= TimestampMillisecond(40000, None)] |
+|               | ]]                                                                                                                                                                                                      |
+| physical_plan | CooperativeExec                                                                                                                                                                                         |
 |               |   MergeScanExec: REDACTED
-|               |                                                                                                                                                                                           |
-+---------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+|               |                                                                                                                                                                                                         |
++---------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 
 -- TQL CTE with label selectors
 WITH host_metrics AS (

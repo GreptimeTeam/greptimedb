@@ -41,7 +41,7 @@ use datatypes::arrow::compute::SortOptions;
 pub use datatypes::arrow::record_batch::RecordBatch as DfRecordBatch;
 use datatypes::arrow::util::pretty;
 use datatypes::prelude::{ConcreteDataType, DataType, VectorRef};
-use datatypes::schema::{ColumnSchema, Schema, SchemaBuilder, SchemaRef};
+use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use datatypes::types::{JsonFormat, StructField, StructType, jsonb_to_string};
 use error::Result;
 use futures::task::{Context, Poll};
@@ -210,13 +210,29 @@ pub fn map_dictionary_to_values_schema(schema: SchemaRef) -> (SchemaRef, bool) {
         return (schema, false);
     }
 
-    let builder = schema.metadata().iter().fold(
-        SchemaBuilder::try_from(columns)
-            .unwrap()
-            .version(schema.version()),
-        |builder, (key, value)| builder.add_metadata(key, value),
-    );
-    (Arc::new(builder.build().unwrap()), true)
+    // Query projections may contain duplicate column names, which SchemaBuilder rejects. Preserve
+    // the existing Arrow fields and only replace their data types so field and schema metadata are
+    // retained as well.
+    let fields = schema
+        .arrow_schema()
+        .fields()
+        .iter()
+        .zip(&columns)
+        .map(|(field, column)| {
+            Arc::new(
+                field
+                    .as_ref()
+                    .clone()
+                    .with_data_type(column.data_type.as_arrow_type()),
+            )
+        })
+        .collect::<Vec<_>>();
+    let arrow_schema =
+        datatypes::arrow::datatypes::Schema::new(fields).with_metadata(schema.metadata().clone());
+    (
+        Arc::new(Schema::try_from(Arc::new(arrow_schema)).unwrap()),
+        true,
+    )
 }
 
 /// Expands dictionary arrays to their value arrays according to `mapped_schema`.
@@ -924,7 +940,9 @@ mod tests {
         DictionaryArray, Int32Array, ListArray, StringArray, UInt32Array,
     };
     use datatypes::arrow::buffer::OffsetBuffer;
-    use datatypes::arrow::datatypes::{DataType as ArrowDataType, Int32Type};
+    use datatypes::arrow::datatypes::{
+        DataType as ArrowDataType, Field, Int32Type, Schema as ArrowSchema,
+    };
     use datatypes::prelude::{ConcreteDataType, VectorRef};
     use datatypes::schema::{ColumnSchema, Schema};
     use datatypes::vectors::{BooleanVector, Int32Vector, StringVector};
@@ -1112,6 +1130,27 @@ mod tests {
             vec![Some("a"), None, Some("a")],
             tag_values.iter().collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn test_map_dictionary_to_values_schema_with_duplicate_columns() {
+        let dictionary_type = ArrowDataType::Dictionary(
+            Box::new(ArrowDataType::Int32),
+            Box::new(ArrowDataType::Utf8),
+        );
+        let arrow_schema = Arc::new(ArrowSchema::new(vec![
+            Field::new("area", dictionary_type.clone(), true),
+            Field::new("area", dictionary_type, true),
+        ]));
+        let schema = Arc::new(Schema::try_from(arrow_schema).unwrap());
+
+        let (mapped_schema, apply_mapper) = map_dictionary_to_values_schema(schema);
+        assert!(apply_mapper);
+        assert_eq!(2, mapped_schema.num_columns());
+        for field in mapped_schema.arrow_schema().fields() {
+            assert_eq!("area", field.name());
+            assert_eq!(&ArrowDataType::Utf8, field.data_type());
+        }
     }
 
     #[tokio::test]
