@@ -128,9 +128,7 @@ impl<'a> RawTagColumn<'a> {
     fn try_new(array: &'a ArrayRef) -> DataFusionResult<Self> {
         match array.data_type() {
             DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View => Ok(Self(array)),
-            DataType::Dictionary(key, value)
-                if key.as_ref() == &DataType::UInt32 && value.as_ref() == &DataType::Utf8 =>
-            {
+            DataType::Dictionary(key, value) if key.is_integer() && value.is_string() => {
                 Ok(Self(array))
             }
             other => Err(datafusion::error::DataFusionError::Internal(format!(
@@ -626,9 +624,9 @@ impl SeriesDivideStream {
 #[cfg(test)]
 mod test {
     use datafusion::arrow::array::{
-        DictionaryArray, LargeStringArray, StringArray, StringViewArray, UInt32Array,
+        DictionaryArray, Int32Array, LargeStringArray, StringArray, StringViewArray, UInt32Array,
     };
-    use datafusion::arrow::datatypes::{DataType, Field, Schema, UInt32Type};
+    use datafusion::arrow::datatypes::{DataType, Field, Int32Type, Schema, UInt32Type};
     use datafusion::common::ToDFSchema;
     use datafusion::datasource::memory::MemorySourceConfig;
     use datafusion::datasource::source::DataSourceExec;
@@ -648,6 +646,19 @@ mod test {
         assert!(tags.equal_at(0, &tags, 1));
         assert!(!tags.equal_at(0, &tags, 2));
         assert!(!tags.equal_at(1, &tags, 2));
+    }
+
+    #[test]
+    fn test_dictionary_tag_with_non_uint32_keys() {
+        let dictionary: ArrayRef = Arc::new(DictionaryArray::<Int32Type>::new(
+            Int32Array::from(vec![0, 1]),
+            Arc::new(StringArray::from(vec!["host-a", "host-b"])),
+        ));
+
+        let tags = RawTagColumn::try_new(&dictionary).unwrap();
+
+        assert!(tags.equal_at(0, &tags, 0));
+        assert!(!tags.equal_at(0, &tags, 1));
     }
 
     fn prepare_test_data() -> DataSourceExec {

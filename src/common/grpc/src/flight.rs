@@ -18,8 +18,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use api::v1::{AffectedRows, FlightMetadata, Metrics};
+use arrow_flight::FlightData;
 use arrow_flight::utils::flight_data_to_arrow_batch;
-use arrow_flight::{FlightData, SchemaAsIpc};
 use common_base::bytes::Bytes;
 use common_recordbatch::DfRecordBatch;
 use datatypes::arrow;
@@ -88,8 +88,14 @@ impl FlightEncoder {
     }
 
     /// Encode the Arrow schema to [FlightData].
-    pub fn encode_schema(&self, schema: &ArrowSchema) -> FlightData {
-        SchemaAsIpc::new(schema, &self.write_options).into()
+    pub fn encode_schema(&mut self, schema: &ArrowSchema) -> FlightData {
+        self.data_gen
+            .schema_to_bytes_with_dictionary_tracker(
+                schema,
+                &mut self.dictionary_tracker,
+                &self.write_options,
+            )
+            .into()
     }
 
     /// Encode the [FlightMessage] to a list (at least one element) of [FlightData]s.
@@ -99,15 +105,7 @@ impl FlightEncoder {
     /// be encoded to exactly one [FlightData].
     pub fn encode(&mut self, flight_message: FlightMessage) -> Vec1<FlightData> {
         match flight_message {
-            FlightMessage::Schema(schema) => vec1![
-                self.data_gen
-                    .schema_to_bytes_with_dictionary_tracker(
-                        schema.as_ref(),
-                        &mut self.dictionary_tracker,
-                        &self.write_options,
-                    )
-                    .into(),
-            ],
+            FlightMessage::Schema(schema) => vec1![self.encode_schema(schema.as_ref())],
             FlightMessage::RecordBatch(record_batch) => {
                 let (encoded_dictionaries, encoded_batch) = self
                     .data_gen
@@ -607,7 +605,7 @@ mod test {
     }
 
     #[test]
-    fn test_schema_with_nested_dictionary_array() -> Result<()> {
+    fn test_encode_schema_with_nested_dictionary_array() -> Result<()> {
         let item = Arc::new(Field::new_dictionary(
             "item",
             DataType::UInt32,
@@ -632,12 +630,12 @@ mod test {
         let batch = DfRecordBatch::try_new(schema.clone(), vec![Arc::new(list)]).unwrap();
 
         let mut encoder = FlightEncoder::default();
-        let encoded_schema = encoder.encode(FlightMessage::Schema(schema.clone()));
+        let encoded_schema = encoder.encode_schema(schema.as_ref());
         let encoded_batch = encoder.encode(FlightMessage::RecordBatch(batch.clone()));
 
         let mut decoder = FlightDecoder::default();
         assert!(matches!(
-            decoder.try_decode(&encoded_schema[0])?,
+            decoder.try_decode(&encoded_schema)?,
             Some(FlightMessage::Schema(actual)) if actual == schema
         ));
         for data in encoded_batch.iter().take(encoded_batch.len() - 1) {

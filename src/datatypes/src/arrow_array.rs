@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use arrow::array::{ArrayRef, AsArray, DictionaryArray};
+use arrow::array::{ArrayRef, AsArray};
 use arrow::datatypes::{
     DataType, DurationMicrosecondType, DurationMillisecondType, DurationNanosecondType,
     DurationSecondType, Int8Type, Int16Type, Int32Type, Int64Type, Time32MillisecondType,
@@ -156,12 +156,12 @@ pub fn string_array_value_at_index(array: &ArrayRef, i: usize) -> Option<&str> {
             array.is_valid(i).then(|| array.value(i))
         }
         DataType::Dictionary(key_type, value_type)
-            if key_type.as_ref() == &DataType::UInt32 && value_type.as_ref() == &DataType::Utf8 =>
+            if key_type.is_integer() && value_type.is_string() =>
         {
-            let array = array
-                .as_any()
-                .downcast_ref::<DictionaryArray<UInt32Type>>()?;
-            string_array_value_at_index(array.values(), array.key(i)?)
+            arrow::downcast_dictionary_array! {
+                array => string_array_value_at_index(array.values(), array.key(i)?),
+                _ => None,
+            }
         }
         _ => None,
     }
@@ -265,12 +265,12 @@ mod tests {
     use std::sync::Arc;
 
     use arrow::array::StringDictionaryBuilder;
+    use arrow::datatypes::ArrowDictionaryKeyType;
 
     use super::*;
 
-    #[test]
-    fn reads_dictionary_encoded_strings() {
-        let mut builder = StringDictionaryBuilder::<UInt32Type>::new();
+    fn assert_dictionary_key_type<K: ArrowDictionaryKeyType>() {
+        let mut builder = StringDictionaryBuilder::<K>::new();
         builder.append("foo").unwrap();
         builder.append("bar").unwrap();
         builder.append("foo").unwrap();
@@ -281,5 +281,17 @@ mod tests {
         assert_eq!(Some("bar"), string_array_value_at_index(&array, 1));
         assert_eq!(Some("foo"), string_array_value_at_index(&array, 2));
         assert_eq!(None, string_array_value_at_index(&array, 3));
+    }
+
+    #[test]
+    fn reads_dictionary_encoded_strings_with_all_key_types() {
+        assert_dictionary_key_type::<Int8Type>();
+        assert_dictionary_key_type::<Int16Type>();
+        assert_dictionary_key_type::<Int32Type>();
+        assert_dictionary_key_type::<Int64Type>();
+        assert_dictionary_key_type::<UInt8Type>();
+        assert_dictionary_key_type::<UInt16Type>();
+        assert_dictionary_key_type::<UInt32Type>();
+        assert_dictionary_key_type::<UInt64Type>();
     }
 }

@@ -50,6 +50,19 @@ impl Validity {
         }
     }
 
+    /// Creates a `Validity` from a logical null buffer.
+    pub(crate) fn from_null_buffer(bitmap: NullBuffer) -> Validity {
+        let len = bitmap.len();
+        let null_count = bitmap.null_count();
+        Validity {
+            kind: ValidityKind::Slots {
+                bitmap,
+                len,
+                null_count,
+            },
+        }
+    }
+
     /// Returns `Validity` that all elements are valid.
     pub fn all_valid(len: usize) -> Validity {
         Validity {

@@ -193,7 +193,10 @@ impl<K: ArrowDictionaryKeyType> Vector for DictionaryVector<K> {
     }
 
     fn validity(&self) -> Validity {
-        vectors::impl_validity_for_vector!(self.array)
+        self.array
+            .logical_nulls()
+            .map(Validity::from_null_buffer)
+            .unwrap_or_else(|| Validity::all_valid(self.len()))
     }
 
     fn memory_size(&self) -> usize {
@@ -201,11 +204,13 @@ impl<K: ArrowDictionaryKeyType> Vector for DictionaryVector<K> {
     }
 
     fn null_count(&self) -> usize {
-        self.array.null_count()
+        self.array.logical_null_count()
     }
 
     fn is_null(&self, row: usize) -> bool {
-        self.array.is_null(row)
+        self.array
+            .key(row)
+            .is_none_or(|key| self.item_vector.is_null(key))
     }
 
     fn slice(&self, offset: usize, length: usize) -> VectorRef {
@@ -446,6 +451,27 @@ mod tests {
         assert_eq!(dict_vec.get(1), Value::String("b".to_string().into()));
         assert_eq!(dict_vec.get(3), Value::Null);
         assert_eq!(dict_vec.get(4), Value::String("b".to_string().into()));
+    }
+
+    #[test]
+    fn test_dictionary_vector_logical_nulls() {
+        let values = StringArray::from(vec![Some("a"), None]);
+        let keys = Int64Array::from(vec![Some(0), Some(1), None, Some(1)]);
+        let dict_array = DictionaryArray::new(keys, Arc::new(values));
+        let dict_vec = DictionaryVector::<Int64Type>::try_from(dict_array).unwrap();
+
+        assert_eq!(3, dict_vec.null_count());
+        assert!(!dict_vec.is_null(0));
+        assert!(dict_vec.is_null(1));
+        assert!(dict_vec.is_null(2));
+        assert!(dict_vec.is_null(3));
+
+        let validity = dict_vec.validity();
+        assert_eq!(3, validity.null_count());
+        assert!(validity.is_set(0));
+        assert!(!validity.is_set(1));
+        assert!(!validity.is_set(2));
+        assert!(!validity.is_set(3));
     }
 
     #[test]
