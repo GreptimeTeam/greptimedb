@@ -313,6 +313,8 @@ impl MetricEngineInner {
                         .unwrap())
                     .clone();
                     if metadata.semantic_type == SemanticType::Field {
+                        // Physical split-value fields are nullable because each row uses only one
+                        // half. Preserve the user-facing field schema in logical metadata.
                         column_metadata.column_schema = metadata.column_schema.clone();
                     }
                     column_metadata
@@ -619,6 +621,8 @@ fn configure_metric_value_int_columns(
             || (metadata.semantic_type == SemanticType::Field
                 && metadata.column_schema.data_type == ConcreteDataType::float64_datatype())
         {
+            // Every split row leaves either the float or integer half null. Logical metadata
+            // retains the original nullability constraint.
             metadata.column_schema.set_nullable();
         }
         value_split_enabled || !is_int_column

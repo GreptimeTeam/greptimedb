@@ -408,10 +408,18 @@ where
         metric_value_split_columns(region_metadata, schema)
             .into_iter()
             .fold(builder, |builder, split_column| {
-                let float_col =
-                    ColumnPath::new(vec![schema.field(split_column.float_index).name().clone()]);
-                let int_col =
-                    ColumnPath::new(vec![schema.field(split_column.int_index).name().clone()]);
+                let float_col = ColumnPath::new(vec![
+                    region_metadata.column_metadatas[split_column.region_column.value_index]
+                        .column_schema
+                        .name
+                        .clone(),
+                ]);
+                let int_col = ColumnPath::new(vec![
+                    region_metadata.column_metadatas[split_column.region_column.int_index]
+                        .column_schema
+                        .name
+                        .clone(),
+                ]);
                 builder
                     .set_column_encoding(float_col.clone(), Encoding::PLAIN)
                     .set_column_dictionary_enabled(float_col, false)

@@ -29,7 +29,9 @@ use crate::error::{InvalidMetadataSnafu, Result};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct MetricValueColumn {
+    /// Index of the logical Float64 value in `RegionMetadata::column_metadatas`.
     pub(crate) value_index: usize,
+    /// Index of its Int64 companion in `RegionMetadata::column_metadatas`.
     pub(crate) int_index: usize,
 }
 

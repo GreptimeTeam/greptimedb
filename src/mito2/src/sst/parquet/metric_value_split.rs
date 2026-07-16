@@ -24,11 +24,16 @@ use snafu::{OptionExt, ResultExt};
 use store_api::metadata::RegionMetadata;
 
 use crate::error::{InvalidRecordBatchSnafu, NewRecordBatchSnafu, Result};
-use crate::metric_value::metric_value_columns;
+use crate::metric_value::{MetricValueColumn, metric_value_columns};
 
+/// Maps a split metric value pair in region metadata to an Arrow batch schema.
 #[derive(Debug, Clone)]
 pub(crate) struct MetricValueSplitColumn {
+    /// The value pair's indices in region metadata.
+    pub(crate) region_column: MetricValueColumn,
+    /// Index of the Float64 value in the Arrow batch schema.
     pub(crate) float_index: usize,
+    /// Index of the Int64 companion in the Arrow batch schema.
     pub(crate) int_index: usize,
 }
 
@@ -46,6 +51,7 @@ pub(crate) fn metric_value_split_columns(
                 .ok()?;
             let int_index = arrow_schema.index_of(&int_column.column_schema.name).ok()?;
             Some(MetricValueSplitColumn {
+                region_column: column,
                 float_index,
                 int_index,
             })
@@ -293,6 +299,10 @@ mod tests {
         let batch = split_metric_value_columns(
             &batch,
             &[MetricValueSplitColumn {
+                region_column: MetricValueColumn {
+                    value_index: 0,
+                    int_index: 1,
+                },
                 float_index: 0,
                 int_index: 1,
             }],
