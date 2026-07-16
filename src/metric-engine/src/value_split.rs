@@ -480,6 +480,27 @@ fn apply_value_filter(
     filter_df_record_batch(&batch, &predicate).context(ArrowComputeSnafu)
 }
 
+/// Runs the split-value conversion hot path without constructing a scanner.
+#[cfg(feature = "test")]
+pub fn benchmark_value_split(
+    float_col: &ArrayRef,
+    int_col: &ArrayRef,
+    evaluator: Option<&SimpleFilterEvaluator>,
+) -> RecordBatchResult<DfRecordBatch> {
+    let values = coalesce_value_columns(float_col, int_col)?;
+    let batch = DfRecordBatch::try_from_iter([("value", values)]).context(NewDfRecordBatchSnafu)?;
+    match evaluator {
+        Some(evaluator) => apply_value_filter(batch, 0, evaluator),
+        None => Ok(batch),
+    }
+}
+
+/// Runs the split-value write hot path for benchmarks.
+#[cfg(feature = "test")]
+pub fn benchmark_split_metric_values(rows: &mut Rows) {
+    split_metric_values(rows);
+}
+
 fn coalesce_value_columns(float_col: &ArrayRef, int_col: &ArrayRef) -> RecordBatchResult<ArrayRef> {
     let float_array = float_col
         .as_any()

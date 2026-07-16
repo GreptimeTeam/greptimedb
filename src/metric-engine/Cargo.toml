@@ -7,6 +7,9 @@ license.workspace = true
 [lints]
 workspace = true
 
+[features]
+test = []
+
 [dependencies]
 api.workspace = true
 aquamarine.workspace = true
@@ -57,6 +60,11 @@ partition = { workspace = true }
 [[bench]]
 name = "bench_tsid_generator"
 harness = false
+
+[[bench]]
+name = "bench_value_split"
+harness = false
+required-features = ["test"]
 
 [package.metadata.cargo-udeps.ignore]
 normal = ["aquamarine"]
