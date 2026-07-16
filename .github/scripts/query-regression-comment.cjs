@@ -57,7 +57,10 @@ function statusEmoji(status) {
 }
 
 function finiteNumber(value) {
-  if (value === null || value === undefined || (typeof value === 'string' && value.trim() === '')) {
+  if (typeof value !== 'number' && typeof value !== 'string') {
+    return null;
+  }
+  if (typeof value === 'string' && value.trim() === '') {
     return null;
   }
   const number = Number(value);
@@ -151,8 +154,22 @@ function missingMeasurementDetails(base, candidate) {
 }
 
 function collectReportRows(report, reportPath) {
+  const fallbackName = typeof reportPath === 'string'
+    ? path.basename(path.dirname(reportPath)) || 'unknown'
+    : 'unknown';
+  if (report === null || Array.isArray(report) || typeof report !== 'object') {
+    return [{
+      caseName: fallbackName,
+      query: 'N/A',
+      status: 'missing',
+      baseMedian: 'N/A',
+      candidateMedian: 'N/A',
+      regression: 'N/A',
+      threshold: 'invalid report object',
+    }];
+  }
   const caseInfo = report.case || {};
-  const name = caseInfo.name || path.basename(path.dirname(reportPath));
+  const name = caseInfo.name || fallbackName;
   const status = report.status || 'missing';
   const thresholds = Array.isArray(report.thresholds) ? report.thresholds : [];
   if (report.error) {

@@ -72,6 +72,23 @@ test('reports missing targets and empty measurements', () => {
   assert.equal(emptyMeasurements[0].threshold, 'no query measurements found');
 });
 
+test('renders null, array, and primitive reports as invalid report rows', () => {
+  for (const invalidReport of [null, [], 'not an object']) {
+    assert.deepEqual(
+      collectReportRows(invalidReport, '/reports/fallback/query-regression-report.json'),
+      [{
+        caseName: 'fallback',
+        query: 'N/A',
+        status: 'missing',
+        baseMedian: 'N/A',
+        candidateMedian: 'N/A',
+        regression: 'N/A',
+        threshold: 'invalid report object',
+      }]
+    );
+  }
+});
+
 test('rejects null medians and diagnoses missing asymmetric measurements', () => {
   const rows = collectReportRows(report('missing-values', {
     base: [
@@ -122,6 +139,37 @@ test('rejects empty, blank, NaN, and infinite medians', () => {
   assert.equal(byQuery.get('blank-base').baseMedian, 'N/A');
   assert.equal(byQuery.get('nan-candidate').candidateMedian, 'N/A');
   assert.equal(byQuery.get('infinite-candidate').candidateMedian, 'N/A');
+});
+
+test('rejects boolean, array, and object median coercions', () => {
+  const rows = collectReportRows(report('invalid-types', {
+    base: [
+      { name: 'boolean-base', latency_ms_median: true },
+      { name: 'array-base', latency_ms_median: [] },
+      { name: 'object-base', latency_ms_median: {} },
+      { name: 'boolean-candidate', latency_ms_median: 10 },
+      { name: 'array-candidate', latency_ms_median: 10 },
+      { name: 'object-candidate', latency_ms_median: 10 },
+    ],
+    candidate: [
+      { name: 'boolean-base', latency_ms_median: 10 },
+      { name: 'array-base', latency_ms_median: 10 },
+      { name: 'object-base', latency_ms_median: 10 },
+      { name: 'boolean-candidate', latency_ms_median: false },
+      { name: 'array-candidate', latency_ms_median: [] },
+      { name: 'object-candidate', latency_ms_median: {} },
+    ],
+  }), '/reports/invalid-types/query-regression-report.json');
+
+  for (const row of rows) {
+    assert.equal(row.regression, 'N/A');
+  }
+  assert.equal(rows.find(row => row.query === 'boolean-base').baseMedian, 'N/A');
+  assert.equal(rows.find(row => row.query === 'array-base').baseMedian, 'N/A');
+  assert.equal(rows.find(row => row.query === 'object-base').baseMedian, 'N/A');
+  assert.equal(rows.find(row => row.query === 'boolean-candidate').candidateMedian, 'N/A');
+  assert.equal(rows.find(row => row.query === 'array-candidate').candidateMedian, 'N/A');
+  assert.equal(rows.find(row => row.query === 'object-candidate').candidateMedian, 'N/A');
 });
 
 test('sorts the base and candidate query union and aggregates scoped thresholds', () => {
