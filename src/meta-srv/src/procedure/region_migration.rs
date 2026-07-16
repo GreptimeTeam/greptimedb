@@ -49,7 +49,7 @@ use common_procedure::error::{
     Error as ProcedureError, FromJsonSnafu, Result as ProcedureResult, ToJsonSnafu,
 };
 use common_procedure::{
-    Context as ProcedureContext, LockKey, Procedure, ProcedureEventContext, Status, StringKey,
+    Context as ProcedureContext, EventContext, LockKey, Procedure, Status, StringKey,
 };
 use common_telemetry::{debug, error, info};
 use manager::RegionMigrationProcedureGuard;
@@ -964,7 +964,7 @@ impl Procedure for RegionMigrationProcedure {
         LockKey::new(self.context.persistent_ctx.lock_key())
     }
 
-    fn event(&self, _ctx: &ProcedureEventContext<'_>) -> Option<Box<dyn Event>> {
+    fn event(&self, _ctx: &EventContext<'_>) -> Option<Box<dyn Event>> {
         Some(Box::new(RegionMigrationEvent::from_persistent_ctx(
             &self.context.persistent_ctx,
         )))
@@ -1034,19 +1034,19 @@ mod tests {
             RegionMigrationProcedure::new(new_persistent_context(), env.context_factory(), vec![]);
         let state = common_procedure::ProcedureState::Running;
         let triggers = [
-            common_procedure::ProcedureEventTrigger::Retrying {
+            common_procedure::EventTrigger::Retrying {
                 phase: common_procedure::RetryPhase::Execute,
                 attempt: 1,
             },
-            common_procedure::ProcedureEventTrigger::RollingBack { attempt: 1 },
-            common_procedure::ProcedureEventTrigger::Succeeded,
-            common_procedure::ProcedureEventTrigger::Failed,
-            common_procedure::ProcedureEventTrigger::Poisoned,
+            common_procedure::EventTrigger::RollingBack,
+            common_procedure::EventTrigger::Succeeded,
+            common_procedure::EventTrigger::Failed,
+            common_procedure::EventTrigger::Poisoned,
         ];
 
         for trigger in triggers {
             let event = procedure
-                .event(&ProcedureEventContext {
+                .event(&EventContext {
                     procedure_id: common_procedure::ProcedureId::random(),
                     lifecycle_state: &state,
                     trigger,

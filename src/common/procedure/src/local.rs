@@ -43,7 +43,7 @@ use crate::rwlock::{KeyRwLock, OwnedKeyRwLockGuard};
 use crate::store::poison_store::PoisonStoreRef;
 use crate::store::{ProcedureMessage, ProcedureMessages, ProcedureStore, StateStoreRef};
 use crate::{
-    BoxedProcedure, ContextProvider, LockKey, PoisonKey, ProcedureEventTrigger, ProcedureId,
+    BoxedProcedure, ContextProvider, EventTrigger, LockKey, PoisonKey, ProcedureId,
     ProcedureManager, ProcedureState, ProcedureWithId, StringKey, Watcher,
 };
 
@@ -717,7 +717,7 @@ impl LocalManager {
             DuplicateProcedureSnafu { procedure_id },
         );
 
-        runner.record_event(ProcedureEventTrigger::Submitted);
+        runner.record_event(EventTrigger::Submitted);
 
         let tracing_context = TracingContext::from_current_span();
 

@@ -19,7 +19,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use common_event_recorder::{Event, Eventable};
+use common_event_recorder::Event;
 use serde::{Deserialize, Serialize};
 use smallvec::{SmallVec, smallvec};
 use snafu::{ResultExt, Snafu};
@@ -233,29 +233,24 @@ pub trait Procedure: Send {
     /// The hook is called with the current procedure instance, so an event can
     /// include state that was produced after the procedure was submitted. A
     /// return value of `None` means that this trigger should not be recorded.
-    fn event(&self, _ctx: &ProcedureEventContext<'_>) -> Option<Box<dyn Event>> {
-        None
-    }
-
-    /// Returns the user metadata of the procedure. If the metadata contains the eventable object, you can use [UserMetadata::to_event] to get the event and emit it to the event recorder.
-    fn user_metadata(&self) -> Option<UserMetadata> {
+    fn event(&self, _ctx: &EventContext<'_>) -> Option<Box<dyn Event>> {
         None
     }
 }
 
 /// Framework-owned context supplied when a procedure builds a lifecycle event.
-pub struct ProcedureEventContext<'a> {
+pub struct EventContext<'a> {
     /// Id of the procedure associated with the event.
     pub procedure_id: ProcedureId,
     /// Current framework state of the procedure.
     pub lifecycle_state: &'a ProcedureState,
     /// Lifecycle action that caused the event hook to be called.
-    pub trigger: ProcedureEventTrigger,
+    pub trigger: EventTrigger,
 }
 
 /// Lifecycle action that causes the framework to invoke [`Procedure::event`].
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ProcedureEventTrigger {
+pub enum EventTrigger {
     /// The root procedure was submitted to the manager.
     Submitted,
     /// A child submission was attempted.
@@ -272,11 +267,8 @@ pub enum ProcedureEventTrigger {
         /// Retry attempt within the current runner lifecycle.
         attempt: u32,
     },
-    /// Procedure rollback is starting or being retried.
-    RollingBack {
-        /// Rollback attempt within the current runner lifecycle.
-        attempt: u32,
-    },
+    /// Procedure rollback is starting.
+    RollingBack,
     /// The procedure reached a successful terminal state.
     Succeeded,
     /// The procedure reached a failed terminal state.
@@ -303,21 +295,43 @@ pub enum ChildSubmissionOutcome {
     SpawnFailed,
 }
 
-/// The user metadata injected by the procedure caller. It can be used to emit events to the event recorder.
-#[derive(Clone, Debug)]
-pub struct UserMetadata {
-    event_object: Arc<dyn Eventable>,
+impl Display for EventTrigger {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Submitted => write!(f, "Submitted"),
+            Self::ChildSubmitted {
+                procedure_id,
+                outcome,
+            } => write!(
+                f,
+                "ChildSubmitted(procedure_id={procedure_id}, outcome={outcome})"
+            ),
+            Self::Retrying { phase, attempt } => write!(f, "Retrying({phase}, {attempt})"),
+            Self::RollingBack => write!(f, "RollingBack"),
+            Self::Succeeded => write!(f, "Succeeded"),
+            Self::Failed => write!(f, "Failed"),
+            Self::Poisoned => write!(f, "Poisoned"),
+        }
+    }
 }
 
-impl UserMetadata {
-    /// Creates a new [UserMetadata] with the given event object.
-    pub fn new(event_object: Arc<dyn Eventable>) -> Self {
-        Self { event_object }
+impl Display for RetryPhase {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Execute => write!(f, "Execute"),
+            Self::Rollback => write!(f, "Rollback"),
+        }
     }
+}
 
-    /// Returns the event of the procedure. It can be None if the procedure does not emit any event.
-    pub fn to_event(&self) -> Option<Box<dyn Event>> {
-        self.event_object.to_event()
+impl Display for ChildSubmissionOutcome {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Accepted => write!(f, "Accepted"),
+            Self::AlreadyAccepted => write!(f, "AlreadyAccepted"),
+            Self::ManagerStopped => write!(f, "ManagerStopped"),
+            Self::SpawnFailed => write!(f, "SpawnFailed"),
+        }
     }
 }
 
@@ -351,7 +365,7 @@ impl<T: Procedure + ?Sized> Procedure for Box<T> {
         (**self).poison_keys()
     }
 
-    fn event(&self, ctx: &ProcedureEventContext<'_>) -> Option<Box<dyn Event>> {
+    fn event(&self, ctx: &EventContext<'_>) -> Option<Box<dyn Event>> {
         (**self).event(ctx)
     }
 }
@@ -731,10 +745,10 @@ mod tests {
     #[test]
     fn test_default_procedure_event_hook() {
         let state = ProcedureState::Running;
-        let context = ProcedureEventContext {
+        let context = EventContext {
             procedure_id: ProcedureId::random(),
             lifecycle_state: &state,
-            trigger: ProcedureEventTrigger::Succeeded,
+            trigger: EventTrigger::Succeeded,
         };
 
         assert!(DefaultEventProcedure.event(&context).is_none());

@@ -33,8 +33,8 @@ use crate::procedure::{Output, StringKey};
 use crate::rwlock::OwnedKeyRwLockGuard;
 use crate::store::{ProcedureMessage, ProcedureStore};
 use crate::{
-    BoxedProcedure, ChildSubmissionOutcome, Context, Error, Procedure, ProcedureEventContext,
-    ProcedureEventTrigger, ProcedureId, ProcedureState, ProcedureWithId, RetryPhase, Status,
+    BoxedProcedure, ChildSubmissionOutcome, Context, Error, EventContext, EventTrigger, Procedure,
+    ProcedureId, ProcedureState, ProcedureWithId, RetryPhase, Status,
 };
 
 /// A guard to cleanup procedure state.
@@ -626,7 +626,7 @@ impl Runner {
                 ProcedureState::Running,
                 subprocedure.procedure,
             );
-            self.record_event(ProcedureEventTrigger::ChildSubmitted {
+            self.record_event(EventTrigger::ChildSubmitted {
                 procedure_id: child_id,
                 outcome,
             });
@@ -734,21 +734,26 @@ impl Runner {
         let trigger = match &state {
             ProcedureState::Retrying { .. } => {
                 self.execute_retry_attempt += 1;
-                Some(ProcedureEventTrigger::Retrying {
+                Some(EventTrigger::Retrying {
                     phase: RetryPhase::Execute,
                     attempt: self.execute_retry_attempt,
                 })
             }
             ProcedureState::RollingBack { .. } => {
-                self.rolling_back = true;
-                self.rollback_retry_attempt += 1;
-                Some(ProcedureEventTrigger::RollingBack {
-                    attempt: self.rollback_retry_attempt,
-                })
+                if self.rolling_back {
+                    self.rollback_retry_attempt += 1;
+                    Some(EventTrigger::Retrying {
+                        phase: RetryPhase::Rollback,
+                        attempt: self.rollback_retry_attempt,
+                    })
+                } else {
+                    self.rolling_back = true;
+                    Some(EventTrigger::RollingBack)
+                }
             }
-            ProcedureState::Done { .. } => Some(ProcedureEventTrigger::Succeeded),
-            ProcedureState::Failed { .. } => Some(ProcedureEventTrigger::Failed),
-            ProcedureState::Poisoned { .. } => Some(ProcedureEventTrigger::Poisoned),
+            ProcedureState::Done { .. } => Some(EventTrigger::Succeeded),
+            ProcedureState::Failed { .. } => Some(EventTrigger::Failed),
+            ProcedureState::Poisoned { .. } => Some(EventTrigger::Poisoned),
             _ => None,
         };
         self.meta.set_state(state);
@@ -759,21 +764,22 @@ impl Runner {
 
     /// Builds and dispatches an event from the live procedure. Delivery is best effort and is
     /// intentionally not part of procedure execution or persistence.
-    pub(crate) fn record_event(&self, trigger: ProcedureEventTrigger) {
+    pub(crate) fn record_event(&self, trigger: EventTrigger) {
         let Some(recorder) = self.event_recorder.as_ref() else {
             return;
         };
         let state = self.meta.state();
-        let context = ProcedureEventContext {
+        let context = EventContext {
             procedure_id: self.meta.id,
             lifecycle_state: &state,
-            trigger,
+            trigger: trigger.clone(),
         };
         if let Some(event) = self.procedure.event(&context) {
             recorder.record(Box::new(crate::event::ProcedureEvent::new(
                 self.meta.id,
                 event,
                 state,
+                trigger,
             )));
         }
     }
