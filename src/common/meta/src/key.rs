@@ -132,6 +132,7 @@ use datanode_table::{DatanodeTableKey, DatanodeTableManager, DatanodeTableValue}
 use flow::flow_route::FlowRouteValue;
 use flow::table_flow::TableFlowValue;
 use futures_util::TryStreamExt;
+use futures_util::stream::BoxStream;
 use lazy_static::lazy_static;
 use regex::Regex;
 pub use schema_metadata_manager::{SchemaMetadataManager, SchemaMetadataManagerRef};
@@ -1117,7 +1118,26 @@ impl TableMetadataManager {
 
     /// Lists dropped tables from tombstoned table-name entries.
     pub async fn list_dropped_tables(&self) -> Result<Vec<DroppedTableName>> {
-        let mut stream = self.tombstone_manager.tombstoned_table_names();
+        self.collect_dropped_tables(self.tombstone_manager.tombstoned_table_names())
+            .await
+    }
+
+    /// Lists dropped tables from tombstoned table-name entries in the provided catalog.
+    pub async fn list_dropped_tables_by_catalog(
+        &self,
+        catalog: &str,
+    ) -> Result<Vec<DroppedTableName>> {
+        self.collect_dropped_tables(
+            self.tombstone_manager
+                .tombstoned_table_names_by_catalog(catalog),
+        )
+        .await
+    }
+
+    async fn collect_dropped_tables(
+        &self,
+        mut stream: BoxStream<'static, Result<KeyValue>>,
+    ) -> Result<Vec<DroppedTableName>> {
         let mut dropped_tables = Vec::new();
 
         while let Some(kv) = stream.try_next().await? {

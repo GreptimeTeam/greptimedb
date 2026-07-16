@@ -17,11 +17,14 @@ use std::sync::Arc;
 use cache::{build_fundamental_cache_registry, with_default_composite_cache_registry};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, INFORMATION_SCHEMA_NAME};
 use common_meta::cache::{CacheRegistryBuilder, LayeredCacheRegistryBuilder};
-use common_meta::key::TableMetadataManagerRef;
+use common_meta::key::table_name::TableNameKey;
 use common_meta::key::table_route::TableRouteValue;
+use common_meta::key::tombstone::TombstoneManager;
+use common_meta::key::{MetadataKey, TableMetadataManagerRef};
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::kv_backend::memory::MemoryKvBackend;
 use common_meta::kv_backend::test_util::MockKvBackendBuilder;
+use common_meta::rpc::store::PutRequest;
 use common_meta::wal_provider::RegionWalOptions;
 use datafusion::logical_expr::{col, lit};
 use datatypes::data_type::ConcreteDataType;
@@ -253,6 +256,40 @@ async fn recycle_bin_hides_purging_tables() {
     let output = scan(&information_table(&manager, RECYCLE_BIN).await, vec![]).await;
     assert!(output.contains("visible"), "{output}");
     assert!(!output.contains("purging"), "{output}");
+}
+
+#[tokio::test]
+async fn recycle_bin_ignores_malformed_tombstones_from_other_catalogs() {
+    let backend: KvBackendRef = Arc::new(MemoryKvBackend::default());
+    let manager = kv_catalog_manager_with_backend(backend.clone());
+    let metadata = manager.table_metadata_manager_ref().clone();
+    drop_table(
+        &metadata,
+        DEFAULT_CATALOG_NAME,
+        DEFAULT_SCHEMA_NAME,
+        "visible",
+        10,
+        Some(1234),
+    )
+    .await;
+
+    let other_catalog = format!("{DEFAULT_CATALOG_NAME}_extra");
+    let table_name_key = TableNameKey::new(&other_catalog, DEFAULT_SCHEMA_NAME, "broken");
+    let tombstone_key =
+        TombstoneManager::new(backend.clone()).to_tombstone(&table_name_key.to_bytes());
+    backend
+        .put(
+            PutRequest::new()
+                .with_key(tombstone_key)
+                .with_value("invalid table-name value"),
+        )
+        .await
+        .unwrap();
+
+    let manager: Arc<dyn CatalogManager> = manager;
+    let output = scan(&information_table(&manager, RECYCLE_BIN).await, vec![]).await;
+    assert!(output.contains("visible"), "{output}");
+    assert!(!output.contains("broken"), "{output}");
 }
 
 #[tokio::test]

@@ -133,6 +133,20 @@ impl TombstoneManager {
         )
     }
 
+    /// Streams tombstoned table-name entries in the provided catalog.
+    pub fn tombstoned_table_names_by_catalog(
+        &self,
+        catalog: &str,
+    ) -> BoxStream<'static, Result<KeyValue>> {
+        self.scan_prefix(
+            format!(
+                "{}{}/{catalog}/",
+                self.tombstone_prefix, TABLE_NAME_KEY_PREFIX
+            )
+            .into_bytes(),
+        )
+    }
+
     /// Streams tombstoned entries under the provided prefix.
     fn scan_prefix(&self, prefix: Vec<u8>) -> BoxStream<'static, Result<KeyValue>> {
         let req = RangeRequest::new().with_prefix(prefix);

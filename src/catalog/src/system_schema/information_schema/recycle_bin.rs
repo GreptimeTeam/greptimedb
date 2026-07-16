@@ -202,11 +202,10 @@ impl InformationSchemaRecycleBinBuilder {
             return self.finish();
         };
         let mut dropped_tables = table_metadata_manager
-            .list_dropped_tables()
+            .list_dropped_tables_by_catalog(&self.catalog_name)
             .await
             .context(TableMetadataManagerSnafu)?;
-        dropped_tables
-            .retain(|table| table.table_name.catalog_name == self.catalog_name && !table.purging);
+        dropped_tables.retain(|table| !table.purging);
         dropped_tables.sort_unstable_by(|a, b| {
             (
                 &a.table_name.catalog_name,
