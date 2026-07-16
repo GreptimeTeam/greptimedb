@@ -49,22 +49,6 @@ impl BulkIterContext {
         projection: Option<&[ColumnId]>,
         predicate: Option<Predicate>,
         skip_auto_convert: bool,
-    ) -> Result<Self> {
-        Self::new_with_pre_filter_mode(
-            region_metadata,
-            projection,
-            predicate,
-            skip_auto_convert,
-            PreFilterMode::All,
-            DEFAULT_READ_BATCH_SIZE,
-        )
-    }
-
-    pub fn new_with_batch_size(
-        region_metadata: RegionMetadataRef,
-        projection: Option<&[ColumnId]>,
-        predicate: Option<Predicate>,
-        skip_auto_convert: bool,
         batch_size: usize,
     ) -> Result<Self> {
         Self::new_with_pre_filter_mode(

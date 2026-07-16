@@ -39,7 +39,7 @@ fn estimate_row_width(rows: u64, bytes: u64) -> Option<u64> {
         return None;
     }
 
-    Some(bytes / rows + u64::from(bytes % rows != 0))
+    Some(bytes / rows + u64::from(!bytes.is_multiple_of(rows)))
 }
 
 #[cfg(test)]

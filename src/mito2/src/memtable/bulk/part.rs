@@ -59,6 +59,7 @@ use crate::error::{
     EncodeMemtableSnafu, EncodeSnafu, InvalidMetadataSnafu, InvalidRequestSnafu,
     NewRecordBatchSnafu, Result,
 };
+use crate::memtable::bulk::MAX_UNCOMPRESSED_PART_SIZE;
 use crate::memtable::bulk::context::{BulkIterContext, BulkIterContextRef};
 use crate::memtable::bulk::json_align::Json2Aligner;
 use crate::memtable::bulk::part_reader::EncodedBulkPartIter;
@@ -337,6 +338,8 @@ pub struct UnorderedPart {
     parts: Vec<BulkPart>,
     /// Total number of rows across all parts.
     total_rows: usize,
+    /// Total estimated uncompressed bytes across all parts.
+    total_bytes: usize,
     /// Minimum timestamp across all parts.
     min_timestamp: i64,
     /// Maximum timestamp across all parts.
@@ -361,6 +364,7 @@ impl UnorderedPart {
         Self {
             parts: Vec::new(),
             total_rows: 0,
+            total_bytes: 0,
             min_timestamp: i64::MAX,
             max_timestamp: i64::MIN,
             max_sequence: 0,
@@ -389,19 +393,27 @@ impl UnorderedPart {
         self.compact_threshold
     }
 
-    /// Returns true if this part should accept the given row count.
-    pub fn should_accept(&self, num_rows: usize) -> bool {
-        num_rows < self.threshold
+    /// Returns true if this part should accept the given row count and estimated size.
+    pub fn should_accept(&self, num_rows: usize, estimated_bytes: usize) -> bool {
+        num_rows < self.threshold && estimated_bytes < MAX_UNCOMPRESSED_PART_SIZE
     }
 
-    /// Returns true if this part should be compacted.
-    pub fn should_compact(&self) -> bool {
-        self.total_rows >= self.compact_threshold
+    /// Returns true if the current accumulator should be compacted before adding
+    /// `incoming_bytes`. Pass zero after a push to check the accumulated thresholds.
+    pub fn should_compact(&self, incoming_bytes: usize) -> bool {
+        if incoming_bytes == 0 {
+            self.total_rows >= self.compact_threshold
+                || self.total_bytes >= MAX_UNCOMPRESSED_PART_SIZE
+        } else {
+            !self.parts.is_empty()
+                && self.total_bytes.saturating_add(incoming_bytes) > MAX_UNCOMPRESSED_PART_SIZE
+        }
     }
 
     /// Adds a BulkPart to this unordered collection.
     pub fn push(&mut self, part: BulkPart) {
         self.total_rows += part.num_rows();
+        self.total_bytes = self.total_bytes.saturating_add(part.estimated_size());
         self.min_timestamp = self.min_timestamp.min(part.min_timestamp);
         self.max_timestamp = self.max_timestamp.max(part.max_timestamp);
         self.max_sequence = self.max_sequence.max(part.sequence);
@@ -476,6 +488,7 @@ impl UnorderedPart {
     pub fn clear(&mut self) {
         self.parts.clear();
         self.total_rows = 0;
+        self.total_bytes = 0;
         self.min_timestamp = i64::MAX;
         self.max_timestamp = i64::MIN;
         self.max_sequence = 0;
@@ -1676,6 +1689,40 @@ mod tests {
         sequence: u64,
     }
 
+    #[test]
+    fn test_unordered_part_size_limit() {
+        let mut part = UnorderedPart::new();
+        part.total_bytes = MAX_UNCOMPRESSED_PART_SIZE - 1;
+        assert!(!part.should_compact(0));
+        assert!(!part.should_compact(2));
+
+        // The pre-add overflow check only applies to a non-empty accumulator.
+        part.parts.push(BulkPart {
+            batch: RecordBatch::new_empty(Arc::new(arrow::datatypes::Schema::empty())),
+            max_timestamp: 0,
+            min_timestamp: 0,
+            sequence: 0,
+            timestamp_index: 0,
+            raw_data: None,
+        });
+        assert!(part.should_compact(2));
+
+        part.total_bytes = MAX_UNCOMPRESSED_PART_SIZE;
+        assert!(part.should_compact(0));
+        part.clear();
+        assert_eq!(0, part.total_bytes);
+        assert!(part.is_empty());
+    }
+
+    #[test]
+    fn test_unordered_part_should_accept() {
+        let mut part = UnorderedPart::new();
+        part.set_threshold(10);
+        assert!(part.should_accept(9, MAX_UNCOMPRESSED_PART_SIZE - 1));
+        assert!(!part.should_accept(10, 1));
+        assert!(!part.should_accept(1, MAX_UNCOMPRESSED_PART_SIZE));
+    }
+
     fn encode(input: &[MutationInput]) -> EncodedBulkPart {
         let metadata = metadata_for_test();
         let kvs = input
@@ -1737,6 +1784,7 @@ mod tests {
                         Some(projection.as_slice()),
                         None,
                         false,
+                        crate::sst::parquet::DEFAULT_READ_BATCH_SIZE,
                     )
                     .unwrap(),
                 ),
@@ -1797,6 +1845,7 @@ mod tests {
                 None,
                 predicate,
                 false,
+                crate::sst::parquet::DEFAULT_READ_BATCH_SIZE,
             )
             .unwrap(),
         );
@@ -1831,6 +1880,7 @@ mod tests {
                     datafusion_expr::lit(ScalarValue::TimestampMillisecond(Some(300), None)),
                 )])),
                 false,
+                crate::sst::parquet::DEFAULT_READ_BATCH_SIZE,
             )
             .unwrap(),
         );
@@ -2811,6 +2861,7 @@ mod tests {
                     datafusion_expr::col("k0").eq(datafusion_expr::lit("m")),
                 ])),
                 false,
+                crate::sst::parquet::DEFAULT_READ_BATCH_SIZE,
             )
             .unwrap(),
         );
@@ -2830,13 +2881,23 @@ mod tests {
                     datafusion_expr::col("k0").eq(datafusion_expr::lit("nonexistent")),
                 ])),
                 false,
+                crate::sst::parquet::DEFAULT_READ_BATCH_SIZE,
             )
             .unwrap(),
         );
         assert!(multi.read(context, None, None).unwrap().is_none());
 
         // No predicate => all 6 rows.
-        let context = Arc::new(BulkIterContext::new(metadata.clone(), None, None, false).unwrap());
+        let context = Arc::new(
+            BulkIterContext::new(
+                metadata.clone(),
+                None,
+                None,
+                false,
+                crate::sst::parquet::DEFAULT_READ_BATCH_SIZE,
+            )
+            .unwrap(),
+        );
         let reader = multi
             .read(context, None, None)
             .unwrap()

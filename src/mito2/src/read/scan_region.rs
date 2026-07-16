@@ -920,9 +920,6 @@ impl ScanInput {
     #[must_use]
     pub(crate) fn with_files(mut self, files: Vec<FileHandle>) -> Self {
         self.files = files;
-        if self.compaction {
-            self.recompute_compaction_batch_size();
-        }
         self
     }
 
@@ -931,18 +928,11 @@ impl ScanInput {
         self.batch_size
     }
 
-    fn recompute_compaction_batch_size(&mut self) {
-        let file_stats = self.files.iter().map(|file| {
-            let meta = file.meta_ref();
-            if meta.num_rows == 0 || meta.num_row_groups == 0 {
-                return (0, 0);
-            }
-
-            let rows_per_group = meta.num_rows / meta.num_row_groups
-                + u64::from(meta.num_rows % meta.num_row_groups != 0);
-            (rows_per_group, meta.max_row_group_uncompressed_size)
-        });
-        self.batch_size = crate::batch_size::estimate_batch_size(file_stats);
+    /// Sets the scan-wide hint for rows in an execution batch.
+    #[must_use]
+    pub(crate) fn with_batch_size(mut self, batch_size: usize) -> Self {
+        self.batch_size = batch_size;
+        self
     }
 
     /// Sets cache for this query.
@@ -1093,11 +1083,6 @@ impl ScanInput {
     #[must_use]
     pub(crate) fn with_compaction(mut self, compaction: bool) -> Self {
         self.compaction = compaction;
-        if compaction {
-            self.recompute_compaction_batch_size();
-        } else {
-            self.batch_size = crate::sst::parquet::DEFAULT_READ_BATCH_SIZE;
-        }
         self
     }
 
@@ -2148,27 +2133,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_scan_input_estimates_batch_size_only_for_compaction() {
+    async fn test_scan_input_uses_explicit_batch_size() {
         let metadata = Arc::new(metadata_with_primary_key(vec![0, 1], false));
         let mapper = FlatProjectionMapper::new(&metadata, [0, 2, 3]).unwrap();
         let env = SchedulerEnv::new().await;
-        let known = FileHandle::new(
-            FileMeta {
-                num_rows: 64,
-                num_row_groups: 2,
-                max_row_group_uncompressed_size: 8 * 1024 * 1024,
-                ..Default::default()
-            },
-            Arc::new(crate::sst::file_purger::NoopFilePurger),
-        );
-        let unknown = FileHandle::new(
-            FileMeta::default(),
-            Arc::new(crate::sst::file_purger::NoopFilePurger),
-        );
-
-        let input = ScanInput::new(env.access_layer.clone(), mapper)
-            .with_files(vec![unknown.clone(), known.clone()])
-            .with_memtables(vec![]);
+        let input = ScanInput::new(env.access_layer.clone(), mapper);
         assert_eq!(
             crate::sst::parquet::DEFAULT_READ_BATCH_SIZE,
             input.batch_size()
@@ -2177,14 +2146,14 @@ mod tests {
         let mapper = FlatProjectionMapper::new(&metadata, [0, 2, 3]).unwrap();
         let input = ScanInput::new(env.access_layer.clone(), mapper)
             .with_compaction(true)
-            .with_memtables(vec![])
-            .with_files(vec![known.clone(), unknown.clone()]);
+            .with_batch_size(256);
         assert_eq!(256, input.batch_size());
 
         let mapper = FlatProjectionMapper::new(&metadata, [0, 2, 3]).unwrap();
         let input = ScanInput::new(env.access_layer.clone(), mapper)
-            .with_files(vec![known, unknown])
-            .with_compaction(true);
+            .with_batch_size(256)
+            .with_compaction(true)
+            .with_compaction(false);
         assert_eq!(256, input.batch_size());
     }
 
