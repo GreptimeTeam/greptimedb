@@ -1856,7 +1856,7 @@ impl RowGroupReaderBuilder {
             return Ok(stream);
         }
 
-        let output_schema =
+        let decoder_output_schema =
             json2_fallback_output_schema(&self.output_schema, &self.projection.json2_fallback_plan);
         let stream = if self.projection.json2_fallback_plan.is_empty() {
             stream
@@ -1865,7 +1865,7 @@ impl RowGroupReaderBuilder {
                 stream,
                 self.projection.projected_root_presence.clone(),
                 self.projection.json2_fallback_plan.clone(),
-                output_schema.clone(),
+                decoder_output_schema.clone(),
             )?
             .boxed()
         };
@@ -1873,7 +1873,7 @@ impl RowGroupReaderBuilder {
         Ok(NestedSchemaAligner::new(
             stream,
             self.projection.projected_root_presence.clone(),
-            output_schema,
+            decoder_output_schema,
         )?
         .boxed())
     }

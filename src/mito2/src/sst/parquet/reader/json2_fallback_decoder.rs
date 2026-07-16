@@ -589,7 +589,7 @@ mod tests {
     #[tokio::test]
     async fn test_json2_fallback_decoder_recovers_requested_paths() {
         let source_values = [
-            Some(parse_string_to_jsonb(r#"{"b":1,"c":"x"}"#).unwrap()),
+            Some(parse_string_to_jsonb("1").unwrap()),
             Some(parse_string_to_jsonb(r#"{"b":2}"#).unwrap()),
             None,
         ];
@@ -631,11 +631,12 @@ mod tests {
             }],
         };
 
+        let decoder_output_schema = json2_fallback_output_schema(&output_schema, &plan);
         let decoder = Json2FallbackDecoder::new(
             stream::iter([Ok(input)]),
             vec![true],
             plan,
-            output_schema.clone(),
+            decoder_output_schema,
         )
         .unwrap();
         let mut aligner =
@@ -650,7 +651,7 @@ mod tests {
             .unwrap();
         let a = j.column(0).as_any().downcast_ref::<StructArray>().unwrap();
         assert_eq!(
-            &[Some(1), Some(2), None],
+            &[None, Some(2), None],
             a.column(0)
                 .as_any()
                 .downcast_ref::<Int64Array>()
@@ -660,7 +661,7 @@ mod tests {
                 .as_slice()
         );
         assert_eq!(
-            &[Some("x"), None, None],
+            &[None, None, None],
             a.column(1)
                 .as_any()
                 .downcast_ref::<StringViewArray>()
