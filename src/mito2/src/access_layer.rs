@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 
 use async_stream::try_stream;
 use common_time::Timestamp;
+use futures::future::try_join_all;
 use futures::{Stream, TryStreamExt};
 use object_store::services::Fs;
 use object_store::util::{join_dir, with_instrument_layers};
@@ -200,28 +201,28 @@ impl AccessLayer {
         logical_region_id: RegionId,
         files: &[FileMeta],
     ) -> Result<()> {
+        let mut validations = Vec::with_capacity(files.len() * 2);
         for file in files {
             let path = location::sst_file_path(&self.table_dir, file.file_id(), self.path_type);
-            self.validate_publication_object(
+            validations.push(self.validate_publication_object(
                 logical_region_id,
                 file.file_id().file_id(),
                 path,
                 file.file_size,
-            )
-            .await?;
+            ));
 
             if file.exists_index() {
                 let index_id = file.index_id();
                 let path = location::index_file_path(&self.table_dir, index_id, self.path_type);
-                self.validate_publication_object(
+                validations.push(self.validate_publication_object(
                     logical_region_id,
                     index_id.file_id(),
                     path,
                     file.index_file_size(),
-                )
-                .await?;
+                ));
             }
         }
+        try_join_all(validations).await?;
         Ok(())
     }
 

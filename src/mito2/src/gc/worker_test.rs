@@ -370,7 +370,6 @@ async fn test_fast_gc_tmp_ref_filtering_protects_parquet_and_matching_puffin() {
             BTreeMap::from([(Timestamp::new_millisecond(0), removed_files)]),
             vec![],
         )
-        .await
         .unwrap();
 
     assert_eq!(deletable_files, vec![RemovedFile::Index(file_id, 2)]);

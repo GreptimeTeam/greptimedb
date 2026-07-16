@@ -68,8 +68,8 @@ pub(crate) struct PublicationGuard<'a> {
     _guard: tokio::sync::MutexGuard<'a, ()>,
 }
 
-#[allow(dead_code)]
 pub(crate) struct OwnedPublicationGuard {
+    #[cfg(test)]
     gate: Arc<tokio::sync::Mutex<()>>,
     _guard: tokio::sync::OwnedMutexGuard<()>,
 }
@@ -1094,12 +1094,7 @@ impl ManifestContext {
         self.hook.clone()
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn access_layer(&self) -> &AccessLayerRef {
-        &self.access_layer
-    }
-
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn publication_gate(&self) -> Arc<tokio::sync::Mutex<()>> {
         self.publication_gate.clone()
     }
@@ -1112,11 +1107,11 @@ impl ManifestContext {
         }
     }
 
-    #[allow(dead_code)]
     pub(crate) async fn lock_publication_owned(&self) -> OwnedPublicationGuard {
         let gate = self.publication_gate.clone();
         let guard = gate.clone().lock_owned().await;
         OwnedPublicationGuard {
+            #[cfg(test)]
             gate,
             _guard: guard,
         }
@@ -1630,8 +1625,8 @@ impl ManifestContext {
     }
 }
 
+#[cfg(test)]
 impl OwnedPublicationGuard {
-    #[allow(dead_code)]
     pub(crate) fn belongs_to(&self, manifest_ctx: &ManifestContext) -> bool {
         Arc::ptr_eq(&self.gate, &manifest_ctx.publication_gate)
     }

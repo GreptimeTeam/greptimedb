@@ -629,16 +629,14 @@ impl LocalGcWorker {
             .collect::<HashSet<_>>();
         let in_tmp_ref = TmpRefLiveSet::from(&tmp_ref_files);
 
-        let deletable_files = self
-            .list_to_be_deleted_files(
-                region_id,
-                is_region_dropped,
-                &in_manifest,
-                &in_tmp_ref,
-                recently_removed_files,
-                all_entries.clone(),
-            )
-            .await?;
+        let deletable_files = self.list_to_be_deleted_files(
+            region_id,
+            is_region_dropped,
+            &in_manifest,
+            &in_tmp_ref,
+            recently_removed_files,
+            all_entries.clone(),
+        )?;
 
         info!(
             "gc: for region{}{region_id}: In manifest file cnt: {}, Tmp ref file cnt: {}, recently removed files: {}, Unused files to delete count: {}",
@@ -701,16 +699,14 @@ impl LocalGcWorker {
         let final_recently_removed_files = self
             .get_removed_files_expel_times(&current_manifest)
             .await?;
-        let final_deletable_files = self
-            .list_to_be_deleted_files(
-                region_id,
-                false,
-                &final_in_manifest,
-                &in_tmp_ref,
-                final_recently_removed_files,
-                all_entries,
-            )
-            .await?;
+        let final_deletable_files = self.list_to_be_deleted_files(
+            region_id,
+            false,
+            &final_in_manifest,
+            &in_tmp_ref,
+            final_recently_removed_files,
+            all_entries,
+        )?;
         drop(manager);
 
         let _delete_timer = GC_DURATION_SECONDS
@@ -1132,7 +1128,7 @@ impl LocalGcWorker {
     /// improves performance. When `full_file_listing` is true, it read from `all_entries` to find
     /// and delete orphan files (files not tracked in the manifest).
     ///
-    async fn list_to_be_deleted_files(
+    fn list_to_be_deleted_files(
         &self,
         region_id: RegionId,
         is_region_dropped: bool,
