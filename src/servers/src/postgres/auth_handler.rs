@@ -464,7 +464,9 @@ impl PostgresServerHandlerInner {
                         .await
                         .is_err()
                     {
-                        break 'sasl PgAuthenticationResult::Failed;
+                        // `authorize` already recorded this failure; return early
+                        // to bypass `record_scram_failure` and avoid double-counting.
+                        return Ok(PgAuthenticationResult::Failed);
                     }
 
                     client
