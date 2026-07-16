@@ -33,7 +33,10 @@ use std::time::{Duration, SystemTime};
 
 use async_stream::stream;
 use async_trait::async_trait;
-use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
+use auth::{
+    PermissionChecker, PermissionCheckerRef, PermissionReq, PermissionTableTarget,
+    PermissionTableTargets,
+};
 use catalog::CatalogManagerRef;
 use catalog::process_manager::{
     ProcessManagerRef, QueryStatement as CatalogQueryStatement, SlowQueryTimer,
@@ -77,7 +80,7 @@ use servers::interceptor::{
     PromQueryInterceptor, PromQueryInterceptorRef, SqlQueryInterceptor, SqlQueryInterceptorRef,
 };
 use servers::otlp::metrics::legacy_normalize_otlp_name;
-use servers::prometheus_handler::PrometheusHandler;
+use servers::prometheus_handler::{PrometheusHandler, resolve_schema_from_matchers};
 use servers::query_handler::sql::SqlQueryHandler;
 use session::context::{Channel, QueryContextRef};
 use session::table_name::table_idents_to_full_name;
@@ -89,6 +92,7 @@ use sql::statements::comment::CommentObject;
 use sql::statements::copy::{CopyDatabase, CopyTable};
 use sql::statements::statement::Statement;
 use sql::statements::tql::Tql;
+use sql::util::{extract_tables_from_prom_expr_checked, extract_tables_from_statement_checked};
 use sqlparser::ast::{AnalyzeFormat, ObjectName};
 pub use standalone::StandaloneDatanodeManager;
 use table::requests::{OTLP_METRIC_COMPAT_KEY, OTLP_METRIC_COMPAT_PROM};
@@ -584,6 +588,47 @@ fn attach_timeout(output: Output, mut timeout: Duration) -> Result<Output> {
 }
 
 impl Instance {
+    async fn check_sql_permission(
+        &self,
+        stmt: &Statement,
+        query_ctx: &QueryContextRef,
+    ) -> Result<()> {
+        self.plugins
+            .get::<PermissionCheckerRef>()
+            .as_ref()
+            .check_permission_with_context(
+                query_ctx.current_user(),
+                PermissionReq::SqlStatement(stmt),
+                Some(&query_ctx.current_schema()),
+            )
+            .context(PermissionSnafu)?;
+
+        let targets = match extract_tables_from_statement_checked(stmt) {
+            Some(tables) => PermissionTableTargets::resolved(
+                tables
+                    .map(|name| {
+                        table_idents_to_full_name(&name, query_ctx).map(
+                            |(catalog, schema, table)| {
+                                PermissionTableTarget::new(catalog, schema, table)
+                            },
+                        )
+                    })
+                    .collect::<std::result::Result<Vec<_>, _>>()
+                    .map_err(BoxedError::new)
+                    .context(ExternalSnafu)?,
+            ),
+            None => PermissionTableTargets::Unresolved,
+        };
+        let targets = self
+            .resolve_query_permission_targets(targets, query_ctx)
+            .await
+            .map_err(BoxedError::new)
+            .context(ExternalSnafu)?;
+        self.check_table_permission(query_ctx, PermissionReq::SqlStatement(stmt), targets)
+            .context(PermissionSnafu)?;
+        Ok(())
+    }
+
     #[tracing::instrument(skip_all, name = "SqlQueryHandler::do_analyze_stream_query")]
     async fn do_analyze_stream_query_inner(
         &self,
@@ -608,15 +653,7 @@ impl Instance {
         validate_analyze_stream_statement(&mut stmt)?;
         query_ctx.set_explain_format(AnalyzeFormat::JSON.to_string());
 
-        let checker_ref = self.plugins.get::<PermissionCheckerRef>();
-        checker_ref
-            .as_ref()
-            .check_permission_with_context(
-                query_ctx.current_user(),
-                PermissionReq::SqlStatement(&stmt),
-                Some(&query_ctx.current_schema()),
-            )
-            .context(PermissionSnafu)?;
+        self.check_sql_permission(&stmt, &query_ctx).await?;
         check_permission(self.plugins.clone(), &stmt, &query_ctx)?;
         let catalog_name = query_ctx.current_catalog().to_string();
         let schema_name = query_ctx.current_schema();
@@ -657,9 +694,6 @@ impl Instance {
             Err(e) => return vec![Err(e)],
         };
 
-        let checker_ref = self.plugins.get::<PermissionCheckerRef>();
-        let checker = checker_ref.as_ref();
-
         match parse_stmt(query.as_ref(), query_ctx.sql_dialect())
             .and_then(|stmts| query_interceptor.post_parsing(stmts, query_ctx.clone()))
         {
@@ -675,14 +709,7 @@ impl Instance {
 
                 let mut results = Vec::with_capacity(stmts.len());
                 for stmt in stmts {
-                    if let Err(e) = checker
-                        .check_permission_with_context(
-                            query_ctx.current_user(),
-                            PermissionReq::SqlStatement(&stmt),
-                            Some(&query_ctx.current_schema()),
-                        )
-                        .context(PermissionSnafu)
-                    {
+                    if let Err(e) = self.check_sql_permission(&stmt, &query_ctx).await {
                         results.push(Err(e));
                         break;
                     }
@@ -850,15 +877,7 @@ impl Instance {
             || matches!(&stmt, Statement::Explain(explain) if is_inner_plannable(explain.statement.as_ref()));
 
         if plannable {
-            self.plugins
-                .get::<PermissionCheckerRef>()
-                .as_ref()
-                .check_permission_with_context(
-                    query_ctx.current_user(),
-                    PermissionReq::SqlStatement(&stmt),
-                    Some(&query_ctx.current_schema()),
-                )
-                .context(PermissionSnafu)?;
+            self.check_sql_permission(&stmt, &query_ctx).await?;
 
             let plan = self
                 .query_engine
@@ -965,6 +984,101 @@ pub fn attach_timer(output: Output, timer: HistogramTimer) -> Output {
     }
 }
 
+impl Instance {
+    fn check_prom_query_privilege(&self, query_ctx: &QueryContextRef) -> server_error::Result<()> {
+        self.plugins
+            .get::<PermissionCheckerRef>()
+            .as_ref()
+            .check_permission(query_ctx.current_user(), PermissionReq::PromQuery)
+            .context(AuthSnafu)?;
+        Ok(())
+    }
+
+    fn prom_expr_permission_targets(
+        &self,
+        expr: &promql_parser::parser::Expr,
+        query_ctx: &QueryContextRef,
+    ) -> server_error::Result<Option<Vec<PermissionTableTarget>>> {
+        extract_tables_from_prom_expr_checked(expr)
+            .map(|tables| {
+                tables
+                    .map(|name| {
+                        table_idents_to_full_name(&name, query_ctx).map(
+                            |(catalog, schema, table)| {
+                                PermissionTableTarget::new(catalog, schema, table)
+                            },
+                        )
+                    })
+                    .collect::<std::result::Result<Vec<_>, _>>()
+                    .map_err(BoxedError::new)
+                    .context(ExecuteQuerySnafu)
+            })
+            .transpose()
+    }
+
+    async fn resolve_query_permission_targets(
+        &self,
+        targets: PermissionTableTargets,
+        query_ctx: &QueryContextRef,
+    ) -> server_error::Result<PermissionTableTargets> {
+        let PermissionTableTargets::Resolved(targets) = targets else {
+            return Ok(PermissionTableTargets::Unresolved);
+        };
+        for target in &targets {
+            let table = self
+                .catalog_manager
+                .table(
+                    &target.catalog,
+                    &target.schema,
+                    &target.table,
+                    Some(query_ctx),
+                )
+                .await
+                .map_err(BoxedError::new)
+                .context(ExecuteQuerySnafu)?;
+            if table.is_some_and(|table| table.table_info().is_physical_table()) {
+                return Ok(PermissionTableTargets::Unresolved);
+            }
+        }
+
+        Ok(PermissionTableTargets::resolved(targets))
+    }
+
+    fn prom_queries_permission_targets(
+        &self,
+        queries: &[PromQuery],
+        query_ctx: &QueryContextRef,
+    ) -> server_error::Result<PermissionTableTargets> {
+        let mut targets = Vec::new();
+        let mut resolved = true;
+
+        for query in queries {
+            let stmt = QueryLanguageParser::parse_promql(query, query_ctx).with_context(|_| {
+                ParsePromQLSnafu {
+                    query: query.clone(),
+                }
+            })?;
+            let QueryStatement::Promql(eval_stmt, _) = stmt else {
+                unreachable!("query is parsed from promql");
+            };
+
+            if let Some(query_targets) =
+                self.prom_expr_permission_targets(&eval_stmt.expr, query_ctx)?
+            {
+                targets.extend(query_targets);
+            } else {
+                resolved = false;
+            }
+        }
+
+        Ok(if resolved {
+            PermissionTableTargets::resolved(targets)
+        } else {
+            PermissionTableTargets::Unresolved
+        })
+    }
+}
+
 #[async_trait]
 impl PrometheusHandler for Instance {
     #[tracing::instrument(skip_all)]
@@ -977,11 +1091,7 @@ impl PrometheusHandler for Instance {
             .plugins
             .get::<PromQueryInterceptorRef<server_error::Error>>();
 
-        self.plugins
-            .get::<PermissionCheckerRef>()
-            .as_ref()
-            .check_permission(query_ctx.current_user(), PermissionReq::PromQuery)
-            .context(AuthSnafu)?;
+        self.check_prom_query_privilege(&query_ctx)?;
 
         let stmt = QueryLanguageParser::parse_promql(query, &query_ctx).with_context(|_| {
             ParsePromQLSnafu {
@@ -989,16 +1099,22 @@ impl PrometheusHandler for Instance {
             }
         })?;
 
+        let QueryStatement::Promql(eval_stmt, _) = &stmt else {
+            unreachable!("query is parsed from promql");
+        };
+        let targets = match self.prom_expr_permission_targets(&eval_stmt.expr, &query_ctx)? {
+            Some(targets) => PermissionTableTargets::resolved(targets),
+            None => PermissionTableTargets::Unresolved,
+        };
+        self.check_query_target_permission(targets, &query_ctx)
+            .await?;
+
         let plan = self
             .statement_executor
             .plan(&stmt, query_ctx.clone())
             .await
             .map_err(BoxedError::new)
             .context(ExecuteQuerySnafu)?;
-
-        let QueryStatement::Promql(eval_stmt, _) = &stmt else {
-            unreachable!("query is parsed from promql");
-        };
 
         interceptor.pre_execute(query, &eval_stmt.expr, Some(&plan), query_ctx.clone())?;
 
@@ -1060,12 +1176,36 @@ impl PrometheusHandler for Instance {
         Ok(interceptor.post_execute(output, query_ctx)?)
     }
 
+    async fn check_query_permission(
+        &self,
+        queries: &[PromQuery],
+        query_ctx: &QueryContextRef,
+    ) -> server_error::Result<()> {
+        self.check_prom_query_privilege(query_ctx)?;
+        let targets = self.prom_queries_permission_targets(queries, query_ctx)?;
+        self.check_query_target_permission(targets, query_ctx).await
+    }
+
+    async fn check_query_target_permission(
+        &self,
+        targets: PermissionTableTargets,
+        query_ctx: &QueryContextRef,
+    ) -> server_error::Result<()> {
+        let targets = self
+            .resolve_query_permission_targets(targets, query_ctx)
+            .await?;
+        self.check_table_permission(query_ctx, PermissionReq::PromQuery, targets)
+            .context(AuthSnafu)?;
+        Ok(())
+    }
+
     async fn query_metric_names(
         &self,
         matchers: Vec<Matcher>,
+        schema: &str,
         ctx: &QueryContextRef,
     ) -> server_error::Result<Vec<String>> {
-        self.handle_query_metric_names(matchers, ctx)
+        self.handle_query_metric_names(matchers, schema, ctx)
             .await
             .map_err(BoxedError::new)
             .context(ExecuteQuerySnafu)
@@ -1080,7 +1220,16 @@ impl PrometheusHandler for Instance {
         end: SystemTime,
         ctx: &QueryContextRef,
     ) -> server_error::Result<Vec<String>> {
-        self.handle_query_label_values(metric, label_name, matchers, start, end, ctx)
+        let schema =
+            resolve_schema_from_matchers(&matchers)?.unwrap_or_else(|| ctx.current_schema());
+        let target = PermissionTableTarget::new(ctx.current_catalog(), schema.as_str(), &metric);
+        self.check_query_target_permission(
+            PermissionTableTargets::resolved(vec![target.clone()]),
+            ctx,
+        )
+        .await?;
+
+        self.handle_query_label_values(target, label_name, matchers, start, end, ctx)
             .await
             .map_err(BoxedError::new)
             .context(ExecuteQuerySnafu)
@@ -1336,7 +1485,10 @@ mod tests {
     use std::thread;
     use std::time::{Duration, Instant};
 
+    use api::prom_store::remote::label_matcher::Type as PromMatcherType;
+    use api::prom_store::remote::{LabelMatcher, Query as RemoteQuery, ReadRequest};
     use api::v1::meta::{ProcedureDetailResponse, ReconcileRequest, ReconcileResponse};
+    use auth::{PermissionResp, UserInfoRef};
     use catalog::process_manager::ProcessManager;
     use common_base::Plugins;
     use common_error::ext::{BoxedError, PlainError};
@@ -1358,10 +1510,12 @@ mod tests {
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, Schema as GtSchema, SchemaRef as GtSchemaRef};
     use query::query_engine::options::QueryOptions;
+    use servers::query_handler::PromStoreProtocolHandler;
     use session::context::{Channel, ConnInfo, QueryContext, QueryContextBuilder};
     use snafu::{Location, Snafu};
     use sql::dialect::GreptimeDbDialect;
     use store_api::data_source::DataSource;
+    use store_api::metric_engine_consts::PHYSICAL_TABLE_METADATA_KEY;
     use store_api::storage::ScanRequest;
     use strfmt::Format;
     use table::metadata::{FilterPushDownType, TableInfo, TableInfoBuilder, TableMetaBuilder};
@@ -1537,6 +1691,31 @@ mod tests {
                 .process_id(process_id)
                 .build(),
         )
+    }
+
+    struct RejectUnresolvedPermissionChecker;
+
+    impl PermissionChecker for RejectUnresolvedPermissionChecker {
+        fn check_permission(
+            &self,
+            _user_info: UserInfoRef,
+            _req: PermissionReq,
+        ) -> auth::error::Result<PermissionResp> {
+            Ok(PermissionResp::Allow)
+        }
+
+        fn check_permission_with_table_targets(
+            &self,
+            _user_info: UserInfoRef,
+            _req: PermissionReq,
+            targets: PermissionTableTargets,
+        ) -> auth::error::Result<PermissionResp> {
+            Ok(if matches!(targets, PermissionTableTargets::Unresolved) {
+                PermissionResp::Reject
+            } else {
+                PermissionResp::Allow
+            })
+        }
     }
 
     struct BlockingInsertSelectInterceptor {
@@ -1749,6 +1928,16 @@ mod tests {
         Ok(EmptyTable::from_table_info(&table_info))
     }
 
+    fn test_physical_table(table_id: u32, table_name: &str) -> TestResult<table::TableRef> {
+        let mut table_info = test_table_info(table_id, table_name)?;
+        table_info
+            .meta
+            .options
+            .extra_options
+            .insert(PHYSICAL_TABLE_METADATA_KEY.to_string(), String::new());
+        Ok(EmptyTable::from_table_info(&table_info))
+    }
+
     fn pending_table(
         table_id: u32,
         table_name: &str,
@@ -1843,6 +2032,117 @@ mod tests {
         results.remove(0).with_context(|_| ExecuteSqlSnafu {
             sql: sql.to_string(),
         })
+    }
+
+    #[tokio::test]
+    async fn test_physical_query_targets_fail_closed() -> TestResult<()> {
+        let physical_table = "physical_metric";
+        let plugins = Plugins::new();
+        plugins.insert::<PermissionCheckerRef>(Arc::new(RejectUnresolvedPermissionChecker));
+        let instance = test_instance_with_plugins(
+            test_physical_table(1024, physical_table)?,
+            test_table(1025, "target")?,
+            plugins,
+        )
+        .await?;
+
+        let ctx = test_query_ctx(1);
+        let logical_target = PermissionTableTarget::new("greptime", "public", "target");
+        assert_eq!(
+            PermissionTableTargets::Resolved(vec![logical_target.clone()]),
+            instance
+                .resolve_query_permission_targets(
+                    PermissionTableTargets::resolved(vec![logical_target.clone()]),
+                    &ctx,
+                )
+                .await
+                .unwrap()
+        );
+        let physical_target = PermissionTableTarget::new("greptime", "public", physical_table);
+        assert_eq!(
+            PermissionTableTargets::Unresolved,
+            instance
+                .resolve_query_permission_targets(
+                    PermissionTableTargets::resolved(
+                        vec![logical_target, physical_target.clone(),]
+                    ),
+                    &ctx,
+                )
+                .await
+                .unwrap()
+        );
+
+        let query = PromQuery {
+            query: physical_table.to_string(),
+            ..Default::default()
+        };
+        let err = PrometheusHandler::check_query_target_permission(
+            &instance,
+            PermissionTableTargets::resolved(vec![physical_target]),
+            &ctx,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(StatusCode::PermissionDenied, err.status_code());
+        let err = PrometheusHandler::check_query_permission(
+            &instance,
+            std::slice::from_ref(&query),
+            &ctx,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(StatusCode::PermissionDenied, err.status_code());
+        let err = PrometheusHandler::do_query(&instance, &query, ctx.clone())
+            .await
+            .unwrap_err();
+        assert_eq!(StatusCode::PermissionDenied, err.status_code());
+
+        for sql in [
+            "SELECT * FROM physical_metric",
+            "TQL EVAL (0, 10, '5s') physical_metric",
+            "INSERT INTO target SELECT * FROM physical_metric",
+        ] {
+            let mut results = instance.do_query_inner(sql, ctx.clone()).await;
+            assert_eq!(1, results.len(), "{sql}");
+            let err = results.remove(0).unwrap_err();
+            assert_eq!(StatusCode::PermissionDenied, err.status_code(), "{sql}");
+        }
+        let err = instance
+            .do_describe_inner(parse_one_sql("SELECT * FROM physical_metric"), ctx.clone())
+            .await
+            .unwrap_err();
+        assert_eq!(StatusCode::PermissionDenied, err.status_code());
+
+        let request = ReadRequest {
+            queries: vec![RemoteQuery {
+                matchers: vec![LabelMatcher {
+                    r#type: PromMatcherType::Eq as i32,
+                    name: servers::prom_store::METRIC_NAME_LABEL.to_string(),
+                    value: physical_table.to_string(),
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let Err(err) = PromStoreProtocolHandler::read(&instance, request, ctx.clone()).await else {
+            panic!("physical remote-read target must be rejected");
+        };
+        assert_eq!(StatusCode::PermissionDenied, err.status_code());
+
+        let err = PrometheusHandler::query_label_values(
+            &instance,
+            physical_table.to_string(),
+            "host".to_string(),
+            vec![],
+            SystemTime::UNIX_EPOCH,
+            SystemTime::UNIX_EPOCH,
+            &ctx,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(StatusCode::PermissionDenied, err.status_code());
+
+        Ok(())
     }
 
     #[test]

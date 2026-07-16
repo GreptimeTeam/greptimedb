@@ -80,6 +80,9 @@ pub trait InfluxdbLineProtocolHandler {
 
 #[async_trait]
 pub trait OpentsdbProtocolHandler {
+    /// Checks all points in one external request before per-point debug execution.
+    async fn preflight(&self, data_points: &[DataPoint], ctx: QueryContextRef) -> Result<()>;
+
     /// A successful request will not return a response.
     /// Only on error will the socket return a line of data.
     async fn exec(&self, data_points: Vec<DataPoint>, ctx: QueryContextRef) -> Result<usize>;
@@ -95,9 +98,7 @@ pub struct PromStoreResponse {
 #[async_trait]
 pub trait PromStoreProtocolHandler {
     /// Runs pre-write checks/hooks for prometheus remote write requests.
-    async fn pre_write(&self, _request: &RowInsertRequests, _ctx: QueryContextRef) -> Result<()> {
-        Ok(())
-    }
+    async fn pre_write(&self, request: &RowInsertRequests, ctx: QueryContextRef) -> Result<()>;
 
     /// Handling prometheus remote write requests
     async fn write(
@@ -106,6 +107,13 @@ pub trait PromStoreProtocolHandler {
         ctx: QueryContextRef,
         with_metric_engine: bool,
     ) -> Result<Output>;
+
+    /// Checks every batch before writing any of them.
+    async fn write_all(
+        &self,
+        requests: Vec<(QueryContextRef, RowInsertRequests)>,
+        with_metric_engine: bool,
+    ) -> Result<Vec<Result<Output>>>;
 
     /// Handling prometheus remote read requests
     async fn read(&self, request: ReadRequest, ctx: QueryContextRef) -> Result<PromStoreResponse>;
@@ -154,6 +162,12 @@ pub trait OpenTelemetryProtocolHandler: PipelineHandler {
 #[async_trait]
 pub trait PipelineHandler {
     async fn insert(&self, input: RowInsertRequests, ctx: QueryContextRef) -> Result<Output>;
+
+    /// Checks every batch before inserting any of them.
+    async fn insert_all(
+        &self,
+        inputs: Vec<(QueryContextRef, RowInsertRequests)>,
+    ) -> Result<Vec<Result<Output>>>;
 
     async fn get_pipeline(
         &self,

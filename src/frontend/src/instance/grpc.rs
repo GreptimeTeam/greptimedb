@@ -26,7 +26,9 @@ use api::v1::{
 };
 use async_stream::try_stream;
 use async_trait::async_trait;
-use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
+use auth::{
+    PermissionChecker, PermissionCheckerRef, PermissionReq, PermissionResp, PermissionTableTargets,
+};
 use common_error::ext::BoxedError;
 use common_grpc::flight::do_put::DoPutResponse;
 use common_query::Output;
@@ -332,6 +334,32 @@ fn fill_catalog_and_schema_from_context(ddl_expr: &mut DdlExpr, ctx: &QueryConte
 }
 
 impl Instance {
+    pub(crate) fn check_table_permission(
+        &self,
+        ctx: &QueryContextRef,
+        req: PermissionReq<'_>,
+        targets: PermissionTableTargets,
+    ) -> auth::error::Result<PermissionResp> {
+        self.plugins
+            .get::<PermissionCheckerRef>()
+            .as_ref()
+            .check_permission_with_table_targets(ctx.current_user(), req, targets)
+    }
+
+    /// Checks every logical table targeted by normalized row inserts.
+    pub(crate) fn check_row_insert_permission(
+        &self,
+        requests: &RowInsertRequests,
+        ctx: &QueryContextRef,
+        req: PermissionReq<'_>,
+    ) -> auth::error::Result<PermissionResp> {
+        let catalog = ctx.current_catalog();
+        let schema = ctx.current_schema();
+        let targets = PermissionTableTargets::from_row_insert_requests(catalog, &schema, requests);
+
+        self.check_table_permission(ctx, req, targets)
+    }
+
     fn handle_put_record_batch_stream_inner(
         &self,
         mut stream: servers::grpc::flight::PutRecordBatchRequestStream,

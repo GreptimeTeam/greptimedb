@@ -14,7 +14,10 @@
 
 use std::ops::Deref;
 
-use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
+use auth::{
+    PermissionChecker, PermissionCheckerRef, PermissionReq, PermissionTableTarget,
+    PermissionTableTargets,
+};
 use client::Output;
 use common_error::ext::BoxedError;
 use log_query::LogQuery;
@@ -34,11 +37,20 @@ impl LogQueryHandler for Instance {
         let interceptor = self
             .plugins
             .get::<LogQueryInterceptorRef<server_error::Error>>();
+        let targets = PermissionTableTargets::resolved(vec![PermissionTableTarget::new(
+            &request.table.catalog_name,
+            &request.table.schema_name,
+            &request.table.table_name,
+        )]);
 
         self.plugins
             .get::<PermissionCheckerRef>()
             .as_ref()
-            .check_permission(ctx.current_user(), PermissionReq::LogQuery)
+            .check_permission_with_table_targets(
+                ctx.current_user(),
+                PermissionReq::LogQuery,
+                targets,
+            )
             .context(AuthSnafu)?;
 
         interceptor.as_ref().pre_query(&request, ctx.clone())?;

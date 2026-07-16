@@ -18,7 +18,10 @@ use std::sync::Arc;
 use api::v1::greptime_request::Request;
 use auth::error::Error::InternalState;
 use auth::error::InternalStateSnafu;
-use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq, PermissionResp, UserInfoRef};
+use auth::{
+    PermissionChecker, PermissionCheckerRef, PermissionReq, PermissionResp, PermissionTableTargets,
+    UserInfoRef,
+};
 use sql::statements::show::{ShowDatabases, ShowKind};
 use sql::statements::statement::Statement;
 
@@ -38,6 +41,15 @@ impl PermissionChecker for DummyPermissionChecker {
             }
             .fail(),
         }
+    }
+
+    fn check_permission_with_table_targets(
+        &self,
+        user_info: UserInfoRef,
+        req: PermissionReq,
+        _targets: PermissionTableTargets,
+    ) -> auth::error::Result<PermissionResp> {
+        self.check_permission(user_info, req)
     }
 }
 

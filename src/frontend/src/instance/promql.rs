@@ -14,16 +14,16 @@
 
 use std::time::SystemTime;
 
+use auth::PermissionTableTarget;
 use catalog::information_schema::TABLES;
 use client::OutputData;
 use common_catalog::consts::INFORMATION_SCHEMA_NAME;
 use common_catalog::format_full_table_name;
 use common_recordbatch::util;
 use common_telemetry::tracing;
-use promql_parser::label::{MatchOp, Matcher, Matchers};
+use promql_parser::label::{Matcher, Matchers};
 use query::promql;
 use query::promql::planner::PromPlanner;
-use servers::prom_store::is_database_selection_label;
 use servers::prometheus;
 use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
@@ -41,6 +41,7 @@ impl Instance {
     pub(crate) async fn handle_query_metric_names(
         &self,
         matchers: Vec<Matcher>,
+        schema: &str,
         ctx: &QueryContextRef,
     ) -> Result<Vec<String>> {
         let _timer = crate::metrics::PROMQL_QUERY_METRICS_ELAPSED
@@ -68,8 +69,9 @@ impl Instance {
                 table_name: "greptime.information_schema.tables",
             })?;
 
-        let logical_plan = prometheus::metric_name_matchers_to_plan(dataframe, matchers, ctx)
-            .context(PrometheusMetricNamesQueryPlanSnafu)?;
+        let logical_plan =
+            prometheus::metric_name_matchers_to_plan(dataframe, matchers, schema, ctx)
+                .context(PrometheusMetricNamesQueryPlanSnafu)?;
 
         let results = self
             .query_engine
@@ -102,28 +104,18 @@ impl Instance {
     #[tracing::instrument(skip_all)]
     pub(crate) async fn handle_query_label_values(
         &self,
-        metric: String,
+        target: PermissionTableTarget,
         label_name: String,
         matchers: Vec<Matcher>,
         start: SystemTime,
         end: SystemTime,
         ctx: &QueryContextRef,
     ) -> Result<Vec<String>> {
-        let table_schema = matchers
-            .iter()
-            .find_map(|m| {
-                if is_database_selection_label(&m.name) && m.op == MatchOp::Equal {
-                    Some(m.value.clone())
-                } else {
-                    None
-                }
-            })
-            .unwrap_or_else(|| ctx.current_schema());
-
-        let full_table_name = format_full_table_name(ctx.current_catalog(), &table_schema, &metric);
+        let full_table_name =
+            format_full_table_name(&target.catalog, &target.schema, &target.table);
         let table = self
             .catalog_manager
-            .table(ctx.current_catalog(), &table_schema, &metric, Some(ctx))
+            .table(&target.catalog, &target.schema, &target.table, Some(ctx))
             .await
             .context(CatalogSnafu)?
             .with_context(|| TableNotFoundSnafu {
