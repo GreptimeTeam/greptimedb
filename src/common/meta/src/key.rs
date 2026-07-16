@@ -166,7 +166,7 @@ use crate::kv_backend::KvBackendRef;
 use crate::kv_backend::txn::{Txn, TxnOp};
 use crate::rpc::KeyValue;
 use crate::rpc::router::{LeaderState, RegionRoute, region_distribution};
-use crate::rpc::store::BatchDeleteRequest;
+use crate::rpc::store::{BatchDeleteRequest, PutRequest};
 use crate::state_store::PoisonValue;
 use crate::wal_provider::RegionWalOptions;
 
@@ -445,6 +445,8 @@ pub struct DroppedTableName {
     pub dropped_at: Option<i64>,
     /// Fixed automatic-GC deadline in Unix milliseconds.
     pub retention_expires_at: Option<i64>,
+    /// Unique identity of this soft-drop generation.
+    pub drop_generation: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -463,10 +465,21 @@ pub struct DroppedTableMetadata {
     pub dropped_at: Option<i64>,
     /// Fixed automatic-GC deadline in Unix milliseconds.
     pub retention_expires_at: Option<i64>,
+    /// Unique identity of this soft-drop generation.
+    pub drop_generation: Option<String>,
+}
+
+/// Lifecycle markers stored with a logically deleted table.
+pub struct DroppedTableLifecycle<'a> {
+    pub dropped_at: Option<i64>,
+    pub retention_expires_at: Option<i64>,
+    pub drop_generation: Option<&'a str>,
 }
 
 const DROPPED_AT_KEY_PREFIX: &str = "__dropped_at";
 const RETENTION_EXPIRES_AT_KEY_PREFIX: &str = "__retention_expires_at";
+const DROP_GENERATION_KEY_PREFIX: &str = "__drop_generation";
+const PURGING_KEY_PREFIX: &str = "__purging";
 
 fn dropped_at_key(table_id: TableId) -> Vec<u8> {
     format!("{DROPPED_AT_KEY_PREFIX}/{table_id}").into_bytes()
@@ -474,6 +487,14 @@ fn dropped_at_key(table_id: TableId) -> Vec<u8> {
 
 fn retention_expires_at_key(table_id: TableId) -> Vec<u8> {
     format!("{RETENTION_EXPIRES_AT_KEY_PREFIX}/{table_id}").into_bytes()
+}
+
+fn drop_generation_key(table_id: TableId) -> Vec<u8> {
+    format!("{DROP_GENERATION_KEY_PREFIX}/{table_id}").into_bytes()
+}
+
+fn purging_key(table_id: TableId) -> Vec<u8> {
+    format!("{PURGING_KEY_PREFIX}/{table_id}").into_bytes()
 }
 
 impl<T: DeserializeOwned + Serialize> Deref for DeserializedValueWithBytes<T> {
@@ -1041,17 +1062,46 @@ impl TableMetadataManager {
         dropped_at: Option<i64>,
         retention_expires_at: Option<i64>,
     ) -> Result<()> {
+        self.delete_table_metadata_with_retention_and_generation(
+            table_id,
+            table_name,
+            table_route_value,
+            region_wal_options,
+            DroppedTableLifecycle {
+                dropped_at,
+                retention_expires_at,
+                drop_generation: None,
+            },
+        )
+        .await
+    }
+
+    /// Deletes metadata logically and stores fixed soft-drop lifecycle markers.
+    pub async fn delete_table_metadata_with_retention_and_generation(
+        &self,
+        table_id: TableId,
+        table_name: &TableName,
+        table_route_value: &TableRouteValue,
+        region_wal_options: &HashMap<RegionNumber, WalOptions>,
+        lifecycle: DroppedTableLifecycle<'_>,
+    ) -> Result<()> {
         let keys =
             self.table_metadata_keys(table_id, table_name, table_route_value, region_wal_options)?;
-        if let Some(dropped_at) = dropped_at {
+        if let Some(dropped_at) = lifecycle.dropped_at {
             let mut markers = vec![(
                 dropped_at_key(table_id),
                 dropped_at.to_string().into_bytes(),
             )];
-            if let Some(retention_expires_at) = retention_expires_at {
+            if let Some(retention_expires_at) = lifecycle.retention_expires_at {
                 markers.push((
                     retention_expires_at_key(table_id),
                     retention_expires_at.to_string().into_bytes(),
+                ));
+            }
+            if let Some(drop_generation) = lifecycle.drop_generation {
+                markers.push((
+                    drop_generation_key(table_id),
+                    drop_generation.as_bytes().to_vec(),
                 ));
             }
             self.tombstone_manager
@@ -1077,6 +1127,7 @@ impl TableMetadataManager {
                 table_name,
                 dropped_at: None,
                 retention_expires_at: None,
+                drop_generation: None,
             });
         }
         if dropped_tables.is_empty() {
@@ -1086,9 +1137,10 @@ impl TableMetadataManager {
         let marker_keys = dropped_tables
             .iter()
             .flat_map(|table| {
-                [
+                vec![
                     dropped_at_key(table.table_id),
                     retention_expires_at_key(table.table_id),
+                    drop_generation_key(table.table_id),
                 ]
             })
             .collect::<Vec<_>>();
@@ -1102,6 +1154,9 @@ impl TableMetadataManager {
                 table.table_id,
                 marker_values.get(&retention_expires_at_key(table.table_id)),
             )?;
+            table.drop_generation = Self::parse_drop_generation(
+                marker_values.get(&drop_generation_key(table.table_id)),
+            );
         }
 
         Ok(dropped_tables)
@@ -1134,6 +1189,38 @@ impl TableMetadataManager {
         self.get_dropped_table_metadata(table_id, None).await
     }
 
+    /// Returns whether an automatic purge has durably claimed the dropped table.
+    pub async fn is_dropped_table_purging(&self, table_id: TableId) -> Result<bool> {
+        self.dropped_table_purge_claim(table_id)
+            .await
+            .map(|claim| claim.is_some())
+    }
+
+    /// Returns the soft-drop generation claimed by an automatic purge.
+    pub async fn dropped_table_purge_claim(&self, table_id: TableId) -> Result<Option<String>> {
+        self.tombstone_manager
+            .get(&purging_key(table_id))
+            .await
+            .map(|marker| marker.map(|marker| String::from_utf8_lossy(&marker.value).into_owned()))
+    }
+
+    /// Durably claims a dropped table before automatic purge starts cleaning its regions.
+    /// The caller MUST hold the table lock and revalidate the tombstone before calling this.
+    pub async fn mark_dropped_table_purging(
+        &self,
+        table_id: TableId,
+        drop_generation: Option<&str>,
+    ) -> Result<()> {
+        self.kv_backend
+            .put(
+                PutRequest::new()
+                    .with_key(self.tombstone_manager.to_tombstone(&purging_key(table_id)))
+                    .with_value(drop_generation.unwrap_or_default()),
+            )
+            .await?;
+        Ok(())
+    }
+
     /// Deletes metadata tombstone for table **permanently**.
     /// The caller MUST ensure it has the exclusive access to `TableNameKey`.
     pub async fn delete_table_metadata_tombstone(
@@ -1148,7 +1235,12 @@ impl TableMetadataManager {
         self.tombstone_manager
             .delete_with_markers(
                 table_metadata_keys,
-                vec![dropped_at_key(table_id), retention_expires_at_key(table_id)],
+                vec![
+                    dropped_at_key(table_id),
+                    retention_expires_at_key(table_id),
+                    drop_generation_key(table_id),
+                    purging_key(table_id),
+                ],
             )
             .await
             .map(|_| ())
@@ -1168,7 +1260,11 @@ impl TableMetadataManager {
         self.tombstone_manager
             .restore_with_markers(
                 keys,
-                vec![dropped_at_key(table_id), retention_expires_at_key(table_id)],
+                vec![
+                    dropped_at_key(table_id),
+                    retention_expires_at_key(table_id),
+                    drop_generation_key(table_id),
+                ],
             )
             .await
             .map(|_| ())
@@ -1234,15 +1330,21 @@ impl TableMetadataManager {
             .await?;
         let dropped_at_key = dropped_at_key(table_id);
         let retention_expires_at_key = retention_expires_at_key(table_id);
+        let drop_generation_key = drop_generation_key(table_id);
         let marker_values = self
             .tombstone_manager
-            .batch_get(&[dropped_at_key.clone(), retention_expires_at_key.clone()])
+            .batch_get(&[
+                dropped_at_key.clone(),
+                retention_expires_at_key.clone(),
+                drop_generation_key.clone(),
+            ])
             .await?;
         let dropped_at = Self::parse_dropped_at(table_id, marker_values.get(&dropped_at_key))?;
         let retention_expires_at = Self::parse_retention_expires_at(
             table_id,
             marker_values.get(&retention_expires_at_key),
         )?;
+        let drop_generation = Self::parse_drop_generation(marker_values.get(&drop_generation_key));
 
         Ok(Some(DroppedTableMetadata {
             table_id,
@@ -1252,6 +1354,7 @@ impl TableMetadataManager {
             region_wal_options,
             dropped_at,
             retention_expires_at,
+            drop_generation,
         }))
     }
 
@@ -1261,6 +1364,10 @@ impl TableMetadataManager {
 
     fn parse_retention_expires_at(table_id: TableId, kv: Option<&KeyValue>) -> Result<Option<i64>> {
         Self::parse_timestamp_marker(table_id, "retention deadline", kv)
+    }
+
+    fn parse_drop_generation(kv: Option<&KeyValue>) -> Option<String> {
+        kv.map(|kv| String::from_utf8_lossy(&kv.value).into_owned())
     }
 
     fn parse_timestamp_marker(

@@ -36,6 +36,7 @@ use crate::ddl::utils::{
 use crate::ddl::{CreateRequestBuilder, DdlContext, build_template_from_raw_table_info};
 use crate::error::{self, Result};
 use crate::instruction::CacheIdent;
+use crate::key::DroppedTableLifecycle;
 use crate::key::table_name::TableNameKey;
 use crate::key::table_route::TableRouteValue;
 use crate::node_manager::NodeManagerRef;
@@ -140,15 +141,19 @@ impl DropTableExecutor {
         region_wal_options: &HashMap<RegionNumber, WalOptions>,
         dropped_at: Option<i64>,
         retention_expires_at: Option<i64>,
+        drop_generation: Option<&str>,
     ) -> Result<()> {
         ctx.table_metadata_manager
-            .delete_table_metadata_with_retention(
+            .delete_table_metadata_with_retention_and_generation(
                 self.table_id,
                 &self.table,
                 table_route_value,
                 region_wal_options,
-                dropped_at,
-                retention_expires_at,
+                DroppedTableLifecycle {
+                    dropped_at,
+                    retention_expires_at,
+                    drop_generation,
+                },
             )
             .await
     }

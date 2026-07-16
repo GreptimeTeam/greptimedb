@@ -582,6 +582,7 @@ mod tests {
             table_name: TableName::new("greptime", "public", format!("table_{table_id}")),
             dropped_at,
             retention_expires_at: None,
+            drop_generation: None,
         }
     }
 

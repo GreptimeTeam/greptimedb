@@ -34,6 +34,7 @@ use store_api::storage::RegionNumber;
 use strum::AsRefStr;
 use table::metadata::TableId;
 use table::table_reference::TableReference;
+use uuid::Uuid;
 
 use self::executor::DropTableExecutor;
 use crate::ddl::DdlContext;
@@ -120,6 +121,9 @@ impl DropTableProcedure {
             self.data.dropped_at = Some(dropped_at);
             self.data.retention_expires_at = Some(retention_expires_at);
         }
+        if self.data.soft_drop_enabled && self.data.drop_generation.is_none() {
+            self.data.drop_generation = Some(Uuid::new_v4().to_string());
+        }
         self.data.state = DropTableState::DeleteMetadata;
 
         Ok(Status::executing(true))
@@ -174,6 +178,7 @@ impl DropTableProcedure {
                 &self.data.region_wal_options,
                 self.data.dropped_at,
                 self.data.retention_expires_at,
+                self.data.drop_generation.as_deref(),
             )
             .await?;
         info!("Deleted table metadata for table {table_id}");
@@ -373,6 +378,8 @@ pub struct DropTableData {
     pub retention_expires_at: Option<i64>,
     #[serde(default)]
     pub soft_drop_retention_millis: Option<i64>,
+    #[serde(default)]
+    pub drop_generation: Option<String>,
 }
 
 impl DropTableData {
@@ -393,6 +400,7 @@ impl DropTableData {
             retention_expires_at: None,
             soft_drop_retention_millis: soft_drop_retention
                 .and_then(|retention| i64::try_from(retention.as_millis()).ok()),
+            drop_generation: None,
         }
     }
 

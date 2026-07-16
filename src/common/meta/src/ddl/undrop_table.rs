@@ -77,6 +77,7 @@ impl UndropTableProcedure {
     }
 
     pub(crate) async fn on_prepare(&mut self) -> Result<Status> {
+        self.ensure_not_purging().await?;
         let dropped_table = self
             .context
             .table_metadata_manager
@@ -100,6 +101,10 @@ impl UndropTableProcedure {
         self.data.table_name = Some(dropped_table.table_name.clone());
         self.data.table_route_value = Some(dropped_table.table_route_value.clone());
         self.data.region_wal_options = dropped_table.region_wal_options;
+        self.data.dropped_at = dropped_table.dropped_at;
+        self.data.retention_expires_at = dropped_table.retention_expires_at;
+        self.data.drop_generation = dropped_table.drop_generation;
+        self.data.tombstone_identity_loaded = true;
         ensure!(
             !is_metric_engine_logical_table(
                 &dropped_table.table_info_value.table_info,
@@ -115,20 +120,36 @@ impl UndropTableProcedure {
     }
 
     async fn on_restore_metadata(&mut self) -> Result<Status> {
+        if !self.data.tombstone_identity_loaded
+            && self
+                .context
+                .table_metadata_manager
+                .get_dropped_table_by_id(self.data.task.table_id)
+                .await?
+                .is_some()
+            && !self.live_table_name_matches().await?
+        {
+            self.data.state = UndropTableState::Prepare;
+            return Ok(Status::executing(true));
+        }
         self.ensure_table_name_loaded().await?;
         let table_name = self.data.table_name().clone();
         let table_route_value = self.data.table_route_value();
-        if let Err(err) = self
-            .context
-            .table_metadata_manager
-            .restore_table_metadata(
-                self.data.task.table_id,
-                &table_name,
-                table_route_value,
-                &self.data.region_wal_options,
-            )
-            .await
-        {
+        let restore_result = async {
+            self.ensure_tombstone_available_for_restore().await?;
+            self.context
+                .table_metadata_manager
+                .restore_table_metadata(
+                    self.data.task.table_id,
+                    &table_name,
+                    table_route_value,
+                    &self.data.region_wal_options,
+                )
+                .await?;
+            self.ensure_live_table_metadata_restored().await
+        }
+        .await;
+        if let Err(err) = restore_result {
             let should_cleanup_opened_regions = !err.is_retry_later();
             let err = self.map_restore_metadata_error(err);
             if should_cleanup_opened_regions
@@ -160,6 +181,90 @@ impl UndropTableProcedure {
                 table_name: self.data.task.table_id.to_string(),
             })?;
         self.data.table_name = Some(dropped_table.table_name);
+        Ok(())
+    }
+
+    async fn ensure_not_purging(&self) -> Result<()> {
+        ensure!(
+            !self
+                .context
+                .table_metadata_manager
+                .is_dropped_table_purging(self.data.task.table_id)
+                .await?,
+            error::TableNotFoundSnafu {
+                table_name: self.data.task.table_id.to_string(),
+            }
+        );
+        Ok(())
+    }
+
+    async fn ensure_tombstone_available(&self) -> Result<()> {
+        self.ensure_not_purging().await?;
+        let dropped_table = self
+            .context
+            .table_metadata_manager
+            .get_dropped_table_by_id(self.data.task.table_id)
+            .await?
+            .with_context(|| error::TableNotFoundSnafu {
+                table_name: self.data.task.table_id.to_string(),
+            })?;
+        ensure!(
+            dropped_table.table_name == *self.data.table_name()
+                && dropped_table.dropped_at == self.data.dropped_at
+                && dropped_table.retention_expires_at == self.data.retention_expires_at
+                && dropped_table.drop_generation == self.data.drop_generation,
+            error::TableNotFoundSnafu {
+                table_name: self.data.task.table_id.to_string(),
+            }
+        );
+        Ok(())
+    }
+
+    async fn ensure_tombstone_available_for_restore(&self) -> Result<()> {
+        if self
+            .context
+            .table_metadata_manager
+            .get_dropped_table_by_id(self.data.task.table_id)
+            .await?
+            .is_some()
+        {
+            if !self.data.tombstone_identity_loaded && self.live_table_name_matches().await? {
+                return Ok(());
+            }
+            return self.ensure_tombstone_available().await;
+        }
+
+        ensure!(
+            self.live_table_name_matches().await?,
+            error::TableNotFoundSnafu {
+                table_name: self.data.task.table_id.to_string(),
+            }
+        );
+        Ok(())
+    }
+
+    async fn live_table_name_matches(&self) -> Result<bool> {
+        let live_table = self
+            .context
+            .table_metadata_manager
+            .table_name_manager()
+            .get(TableNameKey::from(self.data.table_name()))
+            .await?;
+        Ok(live_table.is_some_and(|table| table.table_id() == self.data.task.table_id))
+    }
+
+    async fn ensure_live_table_metadata_restored(&self) -> Result<()> {
+        let (table_info, table_route) = self
+            .context
+            .table_metadata_manager
+            .get_full_table_info(self.data.task.table_id)
+            .await?;
+        ensure!(
+            table_info.is_some() && table_route.is_some(),
+            error::TableNotFoundSnafu {
+                table_name: self.data.task.table_id.to_string(),
+            }
+        );
         Ok(())
     }
 
@@ -211,6 +316,7 @@ impl UndropTableProcedure {
     }
 
     async fn on_open_regions(&mut self) -> Result<Status> {
+        self.ensure_tombstone_available().await?;
         self.ensure_live_table_not_exists().await?;
         let TableRouteValue::Physical(route) = self.data.table_route_value() else {
             self.data.state = UndropTableState::RestoreMetadata;
@@ -274,6 +380,10 @@ impl Procedure for UndropTableProcedure {
     }
 
     fn recover(&mut self) -> ProcedureResult<()> {
+        if self.data.state == UndropTableState::OpenRegions && !self.data.tombstone_identity_loaded
+        {
+            self.data.state = UndropTableState::Prepare;
+        }
         Ok(())
     }
 
@@ -402,6 +512,14 @@ pub struct UndropTableData {
     table_route_value: Option<TableRouteValue>,
     #[serde(default)]
     region_wal_options: HashMap<RegionNumber, WalOptions>,
+    #[serde(default)]
+    dropped_at: Option<i64>,
+    #[serde(default)]
+    retention_expires_at: Option<i64>,
+    #[serde(default)]
+    drop_generation: Option<String>,
+    #[serde(default)]
+    tombstone_identity_loaded: bool,
 }
 
 impl UndropTableData {
@@ -413,6 +531,10 @@ impl UndropTableData {
             table_info: None,
             table_route_value: None,
             region_wal_options: HashMap::new(),
+            dropped_at: None,
+            retention_expires_at: None,
+            drop_generation: None,
+            tombstone_identity_loaded: false,
         }
     }
 
@@ -487,6 +609,27 @@ mod tests {
         );
 
         assert_eq!(StatusCode::TableAlreadyExists, err.status_code());
+    }
+
+    #[test]
+    fn test_recovered_legacy_snapshot_reloads_tombstone_identity() {
+        let context = new_ddl_context(Arc::new(MockDatanodeManager::new(())));
+        let mut procedure =
+            UndropTableProcedure::new(UndropTableTask { table_id: 42 }, context.clone());
+        procedure.data.state = UndropTableState::OpenRegions;
+        let mut data: serde_json::Value = serde_json::from_str(&procedure.dump().unwrap()).unwrap();
+        let data = data.as_object_mut().unwrap();
+        data.remove("dropped_at");
+        data.remove("retention_expires_at");
+        data.remove("drop_generation");
+        data.remove("tombstone_identity_loaded");
+
+        let mut recovered =
+            UndropTableProcedure::from_json(&serde_json::to_string(data).unwrap(), context)
+                .unwrap();
+        recovered.recover().unwrap();
+
+        assert_eq!(UndropTableState::Prepare, recovered.data.state);
     }
 
     #[tokio::test]

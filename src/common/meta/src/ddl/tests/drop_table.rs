@@ -42,8 +42,9 @@ use crate::ddl::test_util::{
     put_datanode_address, test_create_logical_table_task, test_create_physical_table_task,
 };
 use crate::ddl::undrop_table::UndropTableProcedure;
-use crate::ddl::{DetectingRegion, RegionFailureDetectorController, TableMetadata};
+use crate::ddl::{DdlContext, DetectingRegion, RegionFailureDetectorController, TableMetadata};
 use crate::error::Error;
+use crate::key::MetadataKey;
 use crate::key::table_name::TableNameKey;
 use crate::key::table_route::TableRouteValue;
 use crate::kv_backend::KvBackend;
@@ -51,6 +52,7 @@ use crate::kv_backend::memory::MemoryKvBackend;
 use crate::peer::Peer;
 use crate::rpc::ddl::{DropTableTask, PurgeDroppedTableTask, UndropTableTask};
 use crate::rpc::router::{Region, RegionRoute};
+use crate::rpc::store::{BatchDeleteRequest, PutRequest};
 use crate::test_util::{MockDatanodeManager, new_ddl_context, new_ddl_context_with_kv_backend};
 
 fn dropped_at_marker_key(table_id: TableId) -> String {
@@ -59,6 +61,68 @@ fn dropped_at_marker_key(table_id: TableId) -> String {
 
 fn retention_expires_at_marker_key(table_id: TableId) -> String {
     format!("__tombstone/__retention_expires_at/{table_id}")
+}
+
+fn purging_marker_key(table_id: TableId) -> String {
+    format!("__tombstone/__purging/{table_id}")
+}
+
+fn drop_generation_marker_key(table_id: TableId) -> String {
+    format!("__tombstone/__drop_generation/{table_id}")
+}
+
+async fn create_dropped_table(
+    context: &DdlContext,
+    table_id: TableId,
+    dropped_at: Option<i64>,
+    retention_expires_at: Option<i64>,
+) {
+    let task = test_create_table_task("foo", table_id);
+    let table_name = task.table_name();
+    let table_route = TableRouteValue::physical(vec![]);
+    context
+        .table_metadata_manager
+        .create_table_metadata(task.table_info, table_route.clone(), HashMap::new())
+        .await
+        .unwrap();
+    context
+        .table_metadata_manager
+        .delete_table_metadata_with_retention(
+            table_id,
+            &table_name,
+            &table_route,
+            &HashMap::new(),
+            dropped_at,
+            retention_expires_at,
+        )
+        .await
+        .unwrap();
+}
+
+async fn undrop_at_restore_metadata(
+    context: &DdlContext,
+    table_id: TableId,
+) -> UndropTableProcedure {
+    create_dropped_table(context, table_id, Some(1), Some(i64::MAX)).await;
+    let mut undrop = UndropTableProcedure::new(new_undrop_table_task(table_id), context.clone());
+    let procedure_context = new_test_procedure_context();
+    undrop.execute(&procedure_context).await.unwrap();
+    undrop.execute(&procedure_context).await.unwrap();
+    undrop
+}
+
+fn legacy_undrop_snapshot(procedure: &UndropTableProcedure) -> String {
+    let mut data: serde_json::Value = serde_json::from_str(&procedure.dump().unwrap()).unwrap();
+    let data = data.as_object_mut().unwrap();
+    for field in [
+        "dropped_at",
+        "retention_expires_at",
+        "drop_generation",
+        "tombstone_identity_loaded",
+    ] {
+        data.remove(field);
+    }
+    serde_json::to_string(data).unwrap()
 }
 
 #[test]
@@ -1508,6 +1572,7 @@ async fn test_undrop_table_replayed_restore_metadata_is_idempotent() {
         UndropTableProcedure::new(new_undrop_table_task(table_id), ddl_context.clone());
     let ctx = new_test_procedure_context();
     procedure.execute(&ctx).await.unwrap();
+    procedure.execute(&ctx).await.unwrap();
     let restore_metadata_data = procedure.dump().unwrap();
     procedure.execute(&ctx).await.unwrap();
 
@@ -1527,6 +1592,51 @@ async fn test_undrop_table_replayed_restore_metadata_is_idempotent() {
         .unwrap()
         .unwrap();
     assert_eq!(live_table.table_id(), table_id);
+}
+
+#[tokio::test]
+async fn test_legacy_undrop_replays_restore_metadata() {
+    for partial_restore in [false, true] {
+        let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
+        let kv_backend = Arc::new(MemoryKvBackend::new());
+        let mut context = new_ddl_context_with_kv_backend(node_manager, kv_backend.clone());
+        context.soft_drop_enabled = true;
+        let table_id = 1024;
+        let mut procedure = undrop_at_restore_metadata(&context, table_id).await;
+        let persisted = legacy_undrop_snapshot(&procedure);
+
+        if partial_restore {
+            let live_key =
+                TableNameKey::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "foo").to_bytes();
+            let tombstone_key = [b"__tombstone/".as_slice(), live_key.as_slice()].concat();
+            let value = kv_backend.get(&tombstone_key).await.unwrap().unwrap().value;
+            kv_backend
+                .put(PutRequest::new().with_key(live_key).with_value(value))
+                .await
+                .unwrap();
+            kv_backend
+                .batch_delete(BatchDeleteRequest::new().with_keys(vec![tombstone_key]))
+                .await
+                .unwrap();
+        } else {
+            procedure
+                .execute(&new_test_procedure_context())
+                .await
+                .unwrap();
+        }
+
+        let mut replayed = UndropTableProcedure::from_json(&persisted, context.clone()).unwrap();
+        replayed.recover().unwrap();
+        execute_procedure_until_done(&mut replayed).await;
+
+        let (table_info, table_route) = context
+            .table_metadata_manager
+            .get_full_table_info(table_id)
+            .await
+            .unwrap();
+        assert!(table_info.is_some(), "partial_restore={partial_restore}");
+        assert!(table_route.is_some(), "partial_restore={partial_restore}");
+    }
 }
 
 #[tokio::test]
@@ -1792,6 +1902,205 @@ async fn test_recovered_automatic_purge_obeys_runtime_disable() {
             .unwrap()
             .is_some()
     );
+}
+
+#[tokio::test]
+async fn test_recovered_automatic_purge_finishes_after_cleanup_is_claimed() {
+    let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
+    let kv_backend = Arc::new(MemoryKvBackend::new());
+    let mut enabled_context =
+        new_ddl_context_with_kv_backend(node_manager.clone(), kv_backend.clone());
+    enabled_context.soft_drop_enabled = true;
+    let table_id = 1024;
+    create_dropped_table(&enabled_context, table_id, Some(0), Some(0)).await;
+
+    let mut procedure = PurgeDroppedTableProcedure::new_if_expired(
+        new_purge_dropped_table_task(table_id),
+        enabled_context.clone(),
+    );
+    procedure
+        .execute(&new_test_procedure_context())
+        .await
+        .unwrap();
+    let persisted_before_cleanup = procedure.dump().unwrap();
+    procedure
+        .execute(&new_test_procedure_context())
+        .await
+        .unwrap();
+    assert!(
+        kv_backend
+            .get(purging_marker_key(table_id).as_bytes())
+            .await
+            .unwrap()
+            .is_some()
+    );
+
+    let disabled_context = new_ddl_context_with_kv_backend(node_manager, kv_backend.clone());
+    let mut recovered =
+        PurgeDroppedTableProcedure::from_json(&persisted_before_cleanup, disabled_context.clone())
+            .unwrap();
+    recovered.recover().unwrap();
+    execute_procedure_until_done(&mut recovered).await;
+
+    assert!(
+        disabled_context
+            .table_metadata_manager
+            .get_dropped_table_by_id(table_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        kv_backend
+            .get(purging_marker_key(table_id).as_bytes())
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn test_recovered_automatic_purge_ignores_foreign_generation_claim() {
+    let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
+    let kv_backend = Arc::new(MemoryKvBackend::new());
+    let mut ddl_context = new_ddl_context_with_kv_backend(node_manager.clone(), kv_backend.clone());
+    ddl_context.soft_drop_enabled = true;
+    let table_id = 1024;
+    create_dropped_table(&ddl_context, table_id, Some(0), Some(0)).await;
+    kv_backend
+        .put(
+            PutRequest::new()
+                .with_key(drop_generation_marker_key(table_id))
+                .with_value("generation-a"),
+        )
+        .await
+        .unwrap();
+
+    let mut procedure = PurgeDroppedTableProcedure::new_if_expired(
+        new_purge_dropped_table_task(table_id),
+        ddl_context.clone(),
+    );
+    procedure
+        .execute(&new_test_procedure_context())
+        .await
+        .unwrap();
+    let persisted = procedure.dump().unwrap();
+    kv_backend
+        .put(
+            PutRequest::new()
+                .with_key(purging_marker_key(table_id))
+                .with_value("generation-b"),
+        )
+        .await
+        .unwrap();
+
+    let mut recovered =
+        PurgeDroppedTableProcedure::from_json(&persisted, ddl_context.clone()).unwrap();
+    execute_procedure_until_done(&mut recovered).await;
+
+    assert!(
+        ddl_context
+            .table_metadata_manager
+            .get_dropped_table_by_id(table_id)
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn test_undrop_rejects_table_claimed_for_purge() {
+    let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
+    let kv_backend = Arc::new(MemoryKvBackend::new());
+    let ddl_context = new_ddl_context_with_kv_backend(node_manager, kv_backend.clone());
+    let table_id = 1024;
+    create_dropped_table(&ddl_context, table_id, Some(0), Some(0)).await;
+    kv_backend
+        .put(PutRequest::new().with_key(purging_marker_key(table_id)))
+        .await
+        .unwrap();
+
+    let mut procedure =
+        UndropTableProcedure::new(new_undrop_table_task(table_id), ddl_context.clone());
+    let error = procedure.on_prepare().await.unwrap_err();
+
+    assert_eq!(StatusCode::TableNotFound, error.status_code());
+    assert!(
+        ddl_context
+            .table_metadata_manager
+            .get_dropped_table_by_id(table_id)
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn test_recovered_undrop_rejects_tombstone_deleted_by_purge() {
+    let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
+    let ddl_context = new_ddl_context(node_manager);
+    let table_id = 1024;
+    create_dropped_table(&ddl_context, table_id, Some(1), Some(i64::MAX)).await;
+
+    let mut undrop =
+        UndropTableProcedure::new(new_undrop_table_task(table_id), ddl_context.clone());
+    undrop.on_prepare().await.unwrap();
+    let open_regions_state = undrop.dump().unwrap();
+    undrop.execute(&new_test_procedure_context()).await.unwrap();
+    let restore_metadata_state = undrop.dump().unwrap();
+
+    let mut purge = PurgeDroppedTableProcedure::new(
+        new_purge_dropped_table_task(table_id),
+        ddl_context.clone(),
+    );
+    execute_procedure_until_done(&mut purge).await;
+
+    for persisted in [open_regions_state, restore_metadata_state] {
+        let mut recovered =
+            UndropTableProcedure::from_json(&persisted, ddl_context.clone()).unwrap();
+        let error = recovered
+            .execute(&new_test_procedure_context())
+            .await
+            .unwrap_err();
+        assert_eq!(StatusCode::TableNotFound, error.status_code());
+    }
+}
+
+#[tokio::test]
+async fn test_recovered_undrop_rejects_replacement_generation() {
+    let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
+    let kv_backend = Arc::new(MemoryKvBackend::new());
+    let ddl_context = new_ddl_context_with_kv_backend(node_manager, kv_backend.clone());
+    let table_id = 1024;
+    create_dropped_table(&ddl_context, table_id, Some(1), Some(i64::MAX)).await;
+    kv_backend
+        .put(
+            PutRequest::new()
+                .with_key(drop_generation_marker_key(table_id))
+                .with_value("generation-a"),
+        )
+        .await
+        .unwrap();
+
+    let mut undrop =
+        UndropTableProcedure::new(new_undrop_table_task(table_id), ddl_context.clone());
+    undrop.on_prepare().await.unwrap();
+    let persisted = undrop.dump().unwrap();
+    kv_backend
+        .put(
+            PutRequest::new()
+                .with_key(drop_generation_marker_key(table_id))
+                .with_value("generation-b"),
+        )
+        .await
+        .unwrap();
+
+    let mut recovered = UndropTableProcedure::from_json(&persisted, ddl_context).unwrap();
+    let error = recovered
+        .execute(&new_test_procedure_context())
+        .await
+        .unwrap_err();
+    assert_eq!(StatusCode::TableNotFound, error.status_code());
 }
 
 #[tokio::test]
