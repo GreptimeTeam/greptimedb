@@ -61,7 +61,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         info!("Try to alter region: {}, request: {:?}", region_id, request);
 
         // Gets the version before alter.
-        let mut version = region.version();
+        let version = region.version();
 
         // fast path for memory state changes like options.
         let set_options = match &request.kind {
@@ -74,15 +74,16 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             }
             _ => Vec::new(),
         };
+        let mut new_options = None;
         if !set_options.is_empty() {
-            match self.handle_alter_region_options_fast(&region, version, set_options) {
-                Ok(new_version) => {
-                    let Some(new_version) = new_version else {
+            match self.handle_alter_region_options_fast(&region, version.clone(), set_options) {
+                Ok(staged_options) => {
+                    let Some(staged_options) = staged_options else {
                         // We don't have options to alter after flush.
                         sender.send(Ok(0));
                         return;
                     };
-                    version = new_version;
+                    new_options = Some(staged_options);
                 }
                 Err(e) => {
                     sender.send(Err(e).context(InvalidMetadataSnafu));
@@ -140,7 +141,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             "Try to alter region {}, version.metadata: {:?}, version.options: {:?}, request: {:?}",
             region_id, version.metadata, version.options, request,
         );
-        self.handle_alter_region_with_empty_memtable(region, version, request, sender);
+        self.handle_alter_region_with_empty_memtable(region, version, request, new_options, sender);
     }
 
     // TODO(yingwen): Optional new options and sst format.
@@ -150,10 +151,10 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         region: MitoRegionRef,
         version: VersionRef,
         request: RegionAlterRequest,
+        new_options: Option<RegionOptions>,
         sender: OptionOutputTx,
     ) {
         let need_index = need_change_index(&request.kind);
-        let new_options = new_region_options_on_empty_memtable(&version.options, &request.kind);
         let new_meta = match metadata_after_alteration(&version.metadata, request) {
             Ok(new_meta) => new_meta,
             Err(e) => {
@@ -176,18 +177,18 @@ impl<S: LogStore> RegionWorkerLoop<S> {
     ///
     /// If the options require empty memtable, it only does validation.
     ///
-    /// Returns a new version with the updated options if it needs further alteration.
+    /// Returns the staged options if they need further alteration.
     fn handle_alter_region_options_fast(
         &mut self,
         region: &MitoRegionRef,
         version: VersionRef,
         options: Vec<SetRegionOption>,
-    ) -> std::result::Result<Option<VersionRef>, MetadataError> {
+    ) -> std::result::Result<Option<RegionOptions>, MetadataError> {
         assert!(!options.is_empty());
 
         let mut all_options_altered = true;
         let mut current_options = version.options.clone();
-        for option in options {
+        for option in options.iter().cloned() {
             match option {
                 SetRegionOption::WriteBufferSize(new_write_buffer_size) => {
                     info!(
@@ -280,11 +281,15 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 }
             }
         }
-        region.version_control.alter_options(current_options);
         if all_options_altered {
+            region.version_control.alter_options(current_options);
             Ok(None)
         } else {
-            Ok(Some(region.version()))
+            let kind = AlterKind::SetRegionOptions { options };
+            Ok(new_region_options_on_empty_memtable(
+                &current_options,
+                &kind,
+            ))
         }
     }
 }

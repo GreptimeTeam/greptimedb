@@ -1054,6 +1054,72 @@ async fn test_alter_region_ttl_options_with_format(flat_format: bool) {
     check_ttl(&engine, &Duration::from_secs(500));
 }
 
+#[tokio::test]
+async fn test_mixed_region_options_are_published_after_flush() {
+    let mut env = TestEnv::new().await;
+    let listener = Arc::new(AlterFlushListener::default());
+    let engine = env
+        .create_engine_with(MitoConfig::default(), None, Some(listener.clone()), None)
+        .await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            region_id.table_id(),
+            "test_table",
+            "test_catalog",
+            "test_schema",
+            None,
+            env.get_kv_backend(),
+        )
+        .await;
+    let column_schemas = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: column_schemas,
+            rows: build_rows(0, 3),
+        },
+    )
+    .await;
+
+    let engine_cloned = engine.clone();
+    let alter_job = tokio::spawn(async move {
+        engine_cloned
+            .handle_request(
+                region_id,
+                RegionRequest::Alter(RegionAlterRequest {
+                    kind: AlterKind::SetRegionOptions {
+                        options: vec![
+                            SetRegionOption::Ttl(Some(Duration::from_secs(500).into())),
+                            SetRegionOption::MaxRowGroupRowCount(Some(1024)),
+                        ],
+                    },
+                }),
+            )
+            .await
+            .unwrap();
+    });
+
+    listener.wait_flush_begin().await;
+    let version = engine.get_region(region_id).unwrap().version();
+    assert_eq!(None, version.options.ttl);
+    assert_eq!(None, version.options.max_row_group_row_count);
+
+    listener.wake_flush();
+    alter_job.await.unwrap();
+
+    let version = engine.get_region(region_id).unwrap().version();
+    assert_eq!(Some(Duration::from_secs(500).into()), version.options.ttl);
+    assert_eq!(Some(1024), version.options.max_row_group_row_count);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn test_write_stall_on_altering() {
     common_telemetry::init_default_ut_logging();
