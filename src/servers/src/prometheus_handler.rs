@@ -76,8 +76,8 @@ pub trait PrometheusHandler {
         query_ctx: &QueryContextRef,
     ) -> Result<()>;
 
-    /// Removes metric names that the current user cannot query.
-    async fn filter_query_metric_names(
+    /// Removes inaccessible metric names from metadata enumeration results.
+    async fn filter_metadata_metric_names(
         &self,
         metric_names: Vec<String>,
         schema: &str,

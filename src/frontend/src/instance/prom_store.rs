@@ -407,6 +407,16 @@ impl PromStoreProtocolHandler for Instance {
         Ok(())
     }
 
+    async fn write_prepared(
+        &self,
+        request: RowInsertRequests,
+        ctx: QueryContextRef,
+        with_metric_engine: bool,
+    ) -> ServerResult<Output> {
+        self.execute_prom_store_write(request, ctx, with_metric_engine)
+            .await
+    }
+
     async fn write(
         &self,
         request: RowInsertRequests,
@@ -414,8 +424,7 @@ impl PromStoreProtocolHandler for Instance {
         with_metric_engine: bool,
     ) -> ServerResult<Output> {
         let (request, ctx) = self.prepare_prom_store_write(request, ctx).await?;
-        self.execute_prom_store_write(request, ctx, with_metric_engine)
-            .await
+        self.write_prepared(request, ctx, with_metric_engine).await
     }
 
     async fn write_all(
@@ -430,9 +439,7 @@ impl PromStoreProtocolHandler for Instance {
 
         let mut outputs = Vec::with_capacity(prepared.len());
         for (request, ctx) in prepared {
-            let output = self
-                .execute_prom_store_write(request, ctx, with_metric_engine)
-                .await;
+            let output = self.write_prepared(request, ctx, with_metric_engine).await;
             let failed = output.is_err();
             outputs.push(output);
             if failed {
@@ -615,7 +622,7 @@ impl PromStoreProtocolHandler for ExportMetricHandler {
         Ok(())
     }
 
-    async fn write(
+    async fn write_prepared(
         &self,
         request: RowInsertRequests,
         ctx: QueryContextRef,
@@ -633,6 +640,15 @@ impl PromStoreProtocolHandler for ExportMetricHandler {
             .context(error::ExecuteGrpcQuerySnafu)
     }
 
+    async fn write(
+        &self,
+        request: RowInsertRequests,
+        ctx: QueryContextRef,
+        with_metric_engine: bool,
+    ) -> ServerResult<Output> {
+        self.write_prepared(request, ctx, with_metric_engine).await
+    }
+
     async fn write_all(
         &self,
         requests: Vec<(QueryContextRef, RowInsertRequests)>,
@@ -640,7 +656,7 @@ impl PromStoreProtocolHandler for ExportMetricHandler {
     ) -> ServerResult<Vec<ServerResult<Output>>> {
         let mut outputs = Vec::with_capacity(requests.len());
         for (ctx, request) in requests {
-            let output = self.write(request, ctx, with_metric_engine).await;
+            let output = self.write_prepared(request, ctx, with_metric_engine).await;
             let failed = output.is_err();
             outputs.push(output);
             if failed {

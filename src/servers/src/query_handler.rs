@@ -100,6 +100,14 @@ pub trait PromStoreProtocolHandler {
     /// Runs pre-write checks/hooks for prometheus remote write requests.
     async fn pre_write(&self, request: &RowInsertRequests, ctx: QueryContextRef) -> Result<()>;
 
+    /// Writes one batch after [`Self::pre_write`] has succeeded for the entire request.
+    async fn write_prepared(
+        &self,
+        request: RowInsertRequests,
+        ctx: QueryContextRef,
+        with_metric_engine: bool,
+    ) -> Result<Output>;
+
     /// Handling prometheus remote write requests
     async fn write(
         &self,

@@ -1196,7 +1196,7 @@ impl PrometheusHandler for Instance {
         Ok(())
     }
 
-    async fn filter_query_metric_names(
+    async fn filter_metadata_metric_names(
         &self,
         metric_names: Vec<String>,
         schema: &str,
@@ -1229,13 +1229,10 @@ impl PrometheusHandler for Instance {
         schema: &str,
         ctx: &QueryContextRef,
     ) -> server_error::Result<Vec<String>> {
-        let metric_names = self
-            .handle_query_metric_names(matchers, schema, ctx)
+        self.handle_query_metric_names(matchers, schema, ctx)
             .await
             .map_err(BoxedError::new)
-            .context(ExecuteQuerySnafu)?;
-        self.filter_query_metric_names(metric_names, schema, ctx)
-            .await
+            .context(ExecuteQuerySnafu)
     }
 
     async fn query_label_values(
@@ -1534,6 +1531,7 @@ mod tests {
     use datafusion_expr::{LogicalPlanBuilder, LogicalTableSource};
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, Schema as GtSchema, SchemaRef as GtSchemaRef};
+    use datatypes::vectors::{StringVector, VectorRef};
     use log_query::LogQuery;
     use query::query_engine::options::QueryOptions;
     use servers::query_handler::{LogQueryHandler, PromStoreProtocolHandler};
@@ -1541,12 +1539,14 @@ mod tests {
     use snafu::{Location, Snafu};
     use sql::dialect::GreptimeDbDialect;
     use store_api::data_source::DataSource;
-    use store_api::metric_engine_consts::PHYSICAL_TABLE_METADATA_KEY;
+    use store_api::metric_engine_consts::{
+        LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME, PHYSICAL_TABLE_METADATA_KEY,
+    };
     use store_api::storage::ScanRequest;
     use strfmt::Format;
     use table::metadata::{FilterPushDownType, TableInfo, TableInfoBuilder, TableMetaBuilder};
     use table::table_name::TableName;
-    use table::test_util::EmptyTable;
+    use table::test_util::{EmptyTable, MemTable};
     use table::{Table, TableRef};
     use tokio::sync::{mpsc, oneshot};
 
@@ -1971,6 +1971,44 @@ mod tests {
         Ok(EmptyTable::from_table_info(&table_info))
     }
 
+    fn test_logical_table(table_id: u32, table_name: &str) -> TestResult<table::TableRef> {
+        let mut table_info = test_table_info(table_id, table_name)?;
+        table_info.meta.engine = METRIC_ENGINE_NAME.to_string();
+        table_info.meta.options.extra_options.insert(
+            LOGICAL_TABLE_METADATA_KEY.to_string(),
+            "physical_metric".to_string(),
+        );
+        Ok(EmptyTable::from_table_info(&table_info))
+    }
+
+    fn test_metric_names_table() -> TableRef {
+        let schema = Arc::new(GtSchema::new(vec![
+            ColumnSchema::new("table_catalog", ConcreteDataType::string_datatype(), false),
+            ColumnSchema::new("table_schema", ConcreteDataType::string_datatype(), false),
+            ColumnSchema::new("table_name", ConcreteDataType::string_datatype(), false),
+            ColumnSchema::new("engine", ConcreteDataType::string_datatype(), false),
+            ColumnSchema::new("create_options", ConcreteDataType::string_datatype(), false),
+        ]));
+        let columns: Vec<VectorRef> = vec![
+            Arc::new(StringVector::from(vec!["greptime", "greptime"])),
+            Arc::new(StringVector::from(vec!["public", "public"])),
+            Arc::new(StringVector::from(vec!["denied", "target"])),
+            Arc::new(StringVector::from(vec!["metric", "metric"])),
+            Arc::new(StringVector::from(vec![
+                "on_physical_table=physical_metric",
+                "on_physical_table=physical_metric",
+            ])),
+        ];
+        let record_batch = RecordBatch::new(schema, columns).unwrap();
+        MemTable::new_with_catalog(
+            "tables",
+            record_batch,
+            2048,
+            "greptime".to_string(),
+            "information_schema".to_string(),
+        )
+    }
+
     fn pending_table(
         table_id: u32,
         table_name: &str,
@@ -2015,6 +2053,15 @@ mod tests {
         target_table: TableRef,
         plugins: Plugins,
     ) -> TestResult<Instance> {
+        test_instance_with_plugins_and_metric_names(source_table, target_table, plugins, None).await
+    }
+
+    async fn test_instance_with_plugins_and_metric_names(
+        source_table: TableRef,
+        target_table: TableRef,
+        plugins: Plugins,
+        metric_names_table: Option<TableRef>,
+    ) -> TestResult<Instance> {
         let kv_backend = Arc::new(MemoryKvBackend::new());
         let process_manager = Arc::new(ProcessManager::new("test-frontend".to_string(), None));
         let catalog_manager = catalog::memory::MemoryCatalogManager::new_with_table(source_table);
@@ -2030,6 +2077,24 @@ mod tests {
             .with_context(|_| RegisterTableSnafu {
                 table_name: target_table_name.to_string(),
             })?;
+        if let Some(table) = metric_names_table {
+            catalog_manager
+                .deregister_table_sync(catalog::DeregisterTableRequest {
+                    catalog: "greptime".to_string(),
+                    schema: "information_schema".to_string(),
+                    table_name: "tables".to_string(),
+                })
+                .unwrap();
+            catalog_manager
+                .register_table_sync(catalog::RegisterTableRequest {
+                    catalog: "greptime".to_string(),
+                    schema: "information_schema".to_string(),
+                    table_name: "tables".to_string(),
+                    table_id: 2048,
+                    table,
+                })
+                .unwrap();
+        }
         catalog_manager.register_process_list_table(process_manager.clone());
 
         let cache_registry = test_cache_registry(kv_backend.clone())?;
@@ -2106,7 +2171,7 @@ mod tests {
         );
         assert_eq!(
             vec!["target".to_string()],
-            PrometheusHandler::filter_query_metric_names(
+            PrometheusHandler::filter_metadata_metric_names(
                 &instance,
                 vec!["target".to_string(), "denied".to_string()],
                 "public",
@@ -2195,6 +2260,53 @@ mod tests {
         )
         .await
         .unwrap_err();
+        assert_eq!(StatusCode::PermissionDenied, err.status_code());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_non_exact_query_discovery_keeps_denied_targets_for_batch_check() -> TestResult<()>
+    {
+        let plugins = Plugins::new();
+        plugins.insert::<PermissionCheckerRef>(Arc::new(RejectUnresolvedPermissionChecker));
+        let instance = test_instance_with_plugins_and_metric_names(
+            test_logical_table(1024, "denied")?,
+            test_logical_table(1025, "target")?,
+            plugins,
+            Some(test_metric_names_table()),
+        )
+        .await?;
+        let ctx = test_query_ctx(1);
+
+        let mut metric_names = PrometheusHandler::query_metric_names(
+            &instance,
+            vec![Matcher::new(
+                promql_parser::label::MatchOp::NotEqual,
+                "__name__",
+                "",
+            )],
+            "public",
+            &ctx,
+        )
+        .await
+        .unwrap();
+        metric_names.sort_unstable();
+        assert_eq!(
+            vec!["denied".to_string(), "target".to_string()],
+            metric_names
+        );
+
+        let queries = metric_names
+            .into_iter()
+            .map(|query| PromQuery {
+                query,
+                ..Default::default()
+            })
+            .collect::<Vec<_>>();
+        let err = PrometheusHandler::check_query_permission(&instance, &queries, &ctx)
+            .await
+            .unwrap_err();
         assert_eq!(StatusCode::PermissionDenied, err.status_code());
 
         Ok(())
