@@ -119,7 +119,7 @@ impl ParquetReadColumn {
         Self {
             root_index,
             nested_paths: vec![],
-            nested_path_read_strategy: NestedReadStrategy::Exact,
+            nested_path_read_strategy: NestedReadStrategy::default(),
         }
     }
 
@@ -153,8 +153,9 @@ impl ParquetReadColumn {
         } else {
             self.nested_paths.extend(nested_paths);
         }
-        self.nested_path_read_strategy =
-            merge_nested_read_strategy(self.nested_path_read_strategy, nested_path_read_strategy);
+        self.nested_path_read_strategy = self
+            .nested_path_read_strategy
+            .merge(nested_path_read_strategy);
     }
 
     pub fn root_index(&self) -> usize {
@@ -168,23 +169,6 @@ impl ParquetReadColumn {
     pub fn nested_path_read_strategy(&self) -> NestedReadStrategy {
         self.nested_path_read_strategy
     }
-}
-
-fn merge_nested_read_strategy(a: NestedReadStrategy, b: NestedReadStrategy) -> NestedReadStrategy {
-    match (a, b) {
-        (NestedReadStrategy::FallbackToNearestVariantParent, _)
-        | (_, NestedReadStrategy::FallbackToNearestVariantParent) => {
-            NestedReadStrategy::FallbackToNearestVariantParent
-        }
-        (NestedReadStrategy::Exact, NestedReadStrategy::Exact) => NestedReadStrategy::Exact,
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NestedPathFallback {
-    pub root_index: usize,
-    pub requested_path: ParquetNestedPath,
-    pub fallback_path: ParquetNestedPath,
 }
 
 /// Projection plan built for a parquet file.
@@ -204,8 +188,6 @@ pub struct ProjectionMaskPlan {
     /// The length of `projected_root_presence` is always equal to the
     /// number of fields in the output schema.
     pub projected_root_presence: Vec<bool>,
-    /// Paths read through a variant parent after the requested path missed.
-    pub nested_path_fallbacks: Vec<NestedPathFallback>,
 }
 
 /// Builds a projection mask plan for reading a parquet file.
@@ -234,11 +216,10 @@ pub fn build_projection_plan(
         return ProjectionMaskPlan {
             mask,
             projected_root_presence: vec![true; parquet_read_cols.columns().len()],
-            nested_path_fallbacks: Vec::new(),
         };
     }
 
-    let (leaf_indices, matched_roots, nested_path_fallbacks) =
+    let (leaf_indices, matched_roots) =
         build_parquet_leaves_indices(parquet_schema_desc, parquet_read_cols);
 
     let projected_root_presence = parquet_read_cols
@@ -251,7 +232,6 @@ pub fn build_projection_plan(
     ProjectionMaskPlan {
         mask,
         projected_root_presence,
-        nested_path_fallbacks,
     }
 }
 
@@ -264,7 +244,7 @@ pub fn build_projection_plan(
 fn build_parquet_leaves_indices(
     parquet_schema_desc: &SchemaDescriptor,
     projection: &ParquetReadColumns,
-) -> (Vec<usize>, HashSet<usize>, Vec<NestedPathFallback>) {
+) -> (Vec<usize>, HashSet<usize>) {
     let mut map = HashMap::with_capacity(projection.cols.len());
     for col in &projection.cols {
         map.insert(col.root_index, col);
@@ -309,7 +289,6 @@ fn build_parquet_leaves_indices(
         }
     }
 
-    let mut nested_path_fallbacks = Vec::new();
     for col in &projection.cols {
         if col.nested_path_read_strategy != NestedReadStrategy::FallbackToNearestVariantParent {
             continue;
@@ -320,7 +299,7 @@ fn build_parquet_leaves_indices(
                 continue;
             }
 
-            let Some((leaf_idx, fallback_path)) =
+            let Some(leaf_idx) =
                 find_nearest_variant_parent(parquet_schema_desc, col.root_index, nested_path)
             else {
                 continue;
@@ -330,23 +309,18 @@ fn build_parquet_leaves_indices(
                 leaf_indices.push(leaf_idx);
             }
             matched_roots.insert(col.root_index);
-            nested_path_fallbacks.push(NestedPathFallback {
-                root_index: col.root_index,
-                requested_path: nested_path.clone(),
-                fallback_path,
-            });
         }
     }
 
     leaf_indices.sort_unstable();
-    (leaf_indices, matched_roots, nested_path_fallbacks)
+    (leaf_indices, matched_roots)
 }
 
 fn find_nearest_variant_parent(
     parquet_schema_desc: &SchemaDescriptor,
     root_idx: usize,
     nested_path: &[String],
-) -> Option<(usize, ParquetNestedPath)> {
+) -> Option<usize> {
     if nested_path.len() <= 1 {
         return None;
     }
@@ -358,7 +332,7 @@ fn find_nearest_variant_parent(
                 continue;
             }
             if leaf_col.path().parts() == parent_path && is_variant_leaf(leaf_col) {
-                return Some((leaf_idx, parent_path.to_vec()));
+                return Some(leaf_idx);
             }
         }
     }
@@ -403,11 +377,10 @@ mod tests {
 
         let projection = ParquetReadColumns::from_deduped(vec![ParquetReadColumn::new(0)]);
 
-        let (leaf_indices, matched_roots, nested_path_fallbacks) =
+        let (leaf_indices, matched_roots) =
             build_parquet_leaves_indices(&parquet_schema_desc, &projection);
         assert_eq!(vec![0, 1, 2], leaf_indices);
         assert_eq!(HashSet::from([0]), matched_roots);
-        assert!(nested_path_fallbacks.is_empty());
     }
 
     #[test]
@@ -420,11 +393,10 @@ mod tests {
             ParquetReadColumn::new(1),
         ]);
 
-        let (leaf_indices, matched_roots, nested_path_fallbacks) =
+        let (leaf_indices, matched_roots) =
             build_parquet_leaves_indices(&parquet_schema_desc, &projection);
         assert_eq!(vec![1, 2, 3], leaf_indices);
         assert_eq!(HashSet::from([0, 1]), matched_roots);
-        assert!(nested_path_fallbacks.is_empty());
     }
 
     #[test]
@@ -436,11 +408,10 @@ mod tests {
                 .with_nested_paths(vec![vec!["j".to_string(), "b".to_string()]]),
         ]);
 
-        let (leaf_indices, matched_roots, nested_path_fallbacks) =
+        let (leaf_indices, matched_roots) =
             build_parquet_leaves_indices(&parquet_schema_desc, &projection);
         assert_eq!(vec![1, 2], leaf_indices);
         assert_eq!(HashSet::from([0]), matched_roots);
-        assert!(nested_path_fallbacks.is_empty());
     }
 
     #[test]
@@ -452,11 +423,10 @@ mod tests {
                 vec![vec!["j".to_string(), "b".to_string(), "c".to_string()]],
             )]);
 
-        let (leaf_indices, matched_roots, nested_path_fallbacks) =
+        let (leaf_indices, matched_roots) =
             build_parquet_leaves_indices(&parquet_schema_desc, &projection);
         assert_eq!(vec![1], leaf_indices);
         assert_eq!(HashSet::from([0]), matched_roots);
-        assert!(nested_path_fallbacks.is_empty());
     }
 
     #[test]
@@ -476,7 +446,6 @@ mod tests {
             ProjectionMask::leaves(&parquet_schema_desc, vec![3]),
             plan.mask
         );
-        assert!(plan.nested_path_fallbacks.is_empty());
     }
 
     #[test]
@@ -491,11 +460,10 @@ mod tests {
                 ],
             )]);
 
-        let (leaf_indices, matched_roots, nested_path_fallbacks) =
+        let (leaf_indices, matched_roots) =
             build_parquet_leaves_indices(&parquet_schema_desc, &projection);
         assert_eq!(vec![0, 2], leaf_indices);
         assert_eq!(HashSet::from([0]), matched_roots);
-        assert!(nested_path_fallbacks.is_empty());
     }
 
     #[test]
@@ -530,10 +498,13 @@ mod tests {
     #[test]
     fn test_fallback_to_nearest_variant_parent() {
         let parquet_schema_desc = build_test_variant_parent_schema();
-        let requested_path = vec!["j".to_string(), "a".to_string(), "x".to_string()];
         let projection = ParquetReadColumns::from_deduped(vec![
             ParquetReadColumn::new(0)
-                .with_nested_paths(vec![requested_path.clone()])
+                .with_nested_paths(vec![vec![
+                    "j".to_string(),
+                    "a".to_string(),
+                    "x".to_string(),
+                ]])
                 .with_nested_path_read_strategy(NestedReadStrategy::FallbackToNearestVariantParent),
         ]);
 
@@ -543,14 +514,6 @@ mod tests {
         assert_eq!(
             ProjectionMask::leaves(&parquet_schema_desc, vec![0]),
             plan.mask
-        );
-        assert_eq!(
-            vec![NestedPathFallback {
-                root_index: 0,
-                requested_path,
-                fallback_path: vec!["j".to_string(), "a".to_string()],
-            }],
-            plan.nested_path_fallbacks
         );
     }
 
@@ -574,7 +537,6 @@ mod tests {
             ProjectionMask::leaves(&parquet_schema_desc, vec![1]),
             plan.mask
         );
-        assert!(plan.nested_path_fallbacks.is_empty());
     }
 
     #[test]
@@ -592,7 +554,6 @@ mod tests {
             ProjectionMask::leaves(&parquet_schema_desc, Vec::<usize>::new()),
             plan.mask
         );
-        assert!(plan.nested_path_fallbacks.is_empty());
     }
 
     #[test]
@@ -611,7 +572,6 @@ mod tests {
         let plan = build_projection_plan(&projection, &parquet_schema_desc);
 
         assert_eq!(vec![false], plan.projected_root_presence);
-        assert!(plan.nested_path_fallbacks.is_empty());
     }
 
     #[test]
@@ -630,7 +590,6 @@ mod tests {
         let plan = build_projection_plan(&projection, &parquet_schema_desc);
 
         assert_eq!(vec![false], plan.projected_root_presence);
-        assert!(plan.nested_path_fallbacks.is_empty());
     }
 
     // Test schema:

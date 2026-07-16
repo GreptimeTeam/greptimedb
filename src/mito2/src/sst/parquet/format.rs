@@ -52,7 +52,7 @@ use store_api::storage::{ColumnId, SequenceNumber};
 use crate::error::{
     ConvertVectorSnafu, DecodeSnafu, InvalidRecordBatchSnafu, NewRecordBatchSnafu, Result,
 };
-use crate::read::read_columns::ReadColumns;
+use crate::read::read_columns::{NestedReadStrategy, ReadColumns};
 use crate::read::{Batch, BatchBuilder, BatchColumn};
 use crate::sst::file::{FileMeta, FileTimeRange};
 use crate::sst::parquet::read_columns::{ParquetReadColumn, ParquetReadColumns};
@@ -650,7 +650,7 @@ impl FormatProjection {
         parquet_read_cols: &mut Vec<ParquetReadColumn>,
         index_of_sst: usize,
         nested_paths: Vec<Vec<String>>,
-        nested_path_read_strategy: crate::read::read_columns::NestedReadStrategy,
+        nested_path_read_strategy: NestedReadStrategy,
     ) {
         // `projected_columns` is sorted by parquet root index, so repeated reads
         // for the same root column are always adjacent.

@@ -121,6 +121,16 @@ pub enum NestedReadStrategy {
     FallbackToNearestVariantParent,
 }
 
+impl NestedReadStrategy {
+    pub fn merge(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::FallbackToNearestVariantParent, _)
+            | (_, Self::FallbackToNearestVariantParent) => Self::FallbackToNearestVariantParent,
+            (Self::Exact, Self::Exact) => Self::Exact,
+        }
+    }
+}
+
 impl ReadColumn {
     pub fn new(column_id: ColumnId, nested_paths: Vec<NestedPath>) -> Self {
         Self {
@@ -161,10 +171,8 @@ pub fn merge(a: ReadColumns, b: ReadColumns) -> ReadColumns {
 
     for col in a.cols.into_iter().chain(b.cols) {
         if let Some((nested_paths, nested_path_read_strategy)) = merged.get_mut(&col.column_id) {
-            *nested_path_read_strategy = merge_nested_read_strategy(
-                *nested_path_read_strategy,
-                col.nested_path_read_strategy,
-            );
+            *nested_path_read_strategy =
+                nested_path_read_strategy.merge(col.nested_path_read_strategy);
             if nested_paths.is_empty() || col.nested_paths.is_empty() {
                 *nested_paths = vec![];
             } else {
@@ -193,16 +201,6 @@ pub fn merge(a: ReadColumns, b: ReadColumns) -> ReadColumns {
                 },
             )
             .collect(),
-    }
-}
-
-fn merge_nested_read_strategy(a: NestedReadStrategy, b: NestedReadStrategy) -> NestedReadStrategy {
-    match (a, b) {
-        (NestedReadStrategy::FallbackToNearestVariantParent, _)
-        | (_, NestedReadStrategy::FallbackToNearestVariantParent) => {
-            NestedReadStrategy::FallbackToNearestVariantParent
-        }
-        (NestedReadStrategy::Exact, NestedReadStrategy::Exact) => NestedReadStrategy::Exact,
     }
 }
 
