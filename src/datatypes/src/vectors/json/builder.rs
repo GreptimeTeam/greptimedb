@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::any::Any;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use arrow_schema::DataType;
@@ -23,7 +24,7 @@ use crate::json::value::{JsonNumber, JsonVariant, encode_json_variant};
 use crate::prelude::{ValueRef, Vector, VectorRef};
 use crate::types::StructType;
 use crate::types::json_type::{JsonNativeType, is_include};
-use crate::value::{ListValue, StructValue, StructValueRef, Value};
+use crate::value::{ListValue, StructValue, Value};
 use crate::vectors::{MutableVector, StructVectorBuilder};
 
 #[derive(Clone)]
@@ -57,14 +58,74 @@ impl JsonVectorBuilder {
         let mut builder =
             StructVectorBuilder::with_type_and_capacity(struct_type.clone(), self.values.len());
         for value in std::mem::take(&mut self.values) {
-            if matches!(&value, JsonVariant::Null) {
-                builder.push_null();
-                continue;
+            match value {
+                JsonVariant::Null => builder.push_null(),
+                JsonVariant::Object(object) => push_json_object(&mut builder, object)?,
+                value => {
+                    return TryFromValueSnafu {
+                        reason: format!("expected json object value, got {value:?}"),
+                    }
+                    .fail();
+                }
             }
-            let value = json_variant_into_struct_value(value, struct_type.clone())?;
-            builder.push_struct_value_ref(StructValueRef::Ref(&value))?;
         }
         Ok(builder.to_vector())
+    }
+}
+
+fn push_json_object(
+    builder: &mut StructVectorBuilder,
+    object: BTreeMap<String, JsonVariant>,
+) -> Result<()> {
+    let mut entries = object.into_iter();
+    let mut entry = entries.next();
+    builder.try_push_row_with(|builder, field_name, field_type| match entry.take() {
+        Some((name, value)) if name == field_name => {
+            entry = entries.next();
+            push_json_variant(builder, value, field_type)
+        }
+        Some((name, _)) if name.as_str() < field_name => TryFromValueSnafu {
+            reason: format!("field {name} is missing from merged JSON type"),
+        }
+        .fail(),
+        next => {
+            entry = next;
+            builder.push_null();
+            Ok(())
+        }
+    })?;
+    if let Some((name, _)) = entry {
+        return TryFromValueSnafu {
+            reason: format!("field {name} is missing from merged JSON type"),
+        }
+        .fail();
+    }
+
+    Ok(())
+}
+
+fn push_json_variant(
+    builder: &mut dyn MutableVector,
+    value: JsonVariant,
+    expected_type: &ConcreteDataType,
+) -> Result<()> {
+    match (value, expected_type) {
+        (JsonVariant::Null, _) | (_, ConcreteDataType::Null(_)) => {
+            builder.push_null();
+            Ok(())
+        }
+        (JsonVariant::Object(object), ConcreteDataType::Struct(_)) => {
+            let Some(builder) = builder.as_mut_any().downcast_mut::<StructVectorBuilder>() else {
+                return UnexpectedSnafu {
+                    reason: "JSON object field must use StructVectorBuilder",
+                }
+                .fail();
+            };
+            push_json_object(builder, object)
+        }
+        (value, expected_type) => {
+            builder.try_push_value(json_variant_into_value(value, expected_type)?)
+        }
     }
 }
 
@@ -348,6 +409,19 @@ mod tests {
                 inferred_struct_type,
             ))
         );
+
+        // Nested objects should be written directly into nested struct builders.
+        let mut nested_builder =
+            JsonVectorBuilder::new(JsonNativeType::Object(Default::default()), 1);
+        nested_builder.try_push_value(parse_json_value(r#"{"payload":{"name":"foo"}}"#))?;
+        let value = nested_builder.to_vector().get(0);
+        let Value::Struct(root) = value else {
+            panic!("expected root struct value");
+        };
+        let Value::Struct(payload) = &root.items()[0] else {
+            panic!("expected nested struct value");
+        };
+        assert_eq!(payload.items(), &[Value::String("foo".into())]);
 
         // Non-object initial types are rejected by the builder invariant.
         let result = std::panic::catch_unwind(|| JsonVectorBuilder::new(JsonNativeType::Bool, 2));

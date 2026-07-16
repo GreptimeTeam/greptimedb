@@ -104,6 +104,11 @@ impl StructType {
         self.fields.clone()
     }
 
+    /// Returns the struct fields without cloning the shared field list.
+    pub(crate) fn fields_ref(&self) -> &[StructField] {
+        &self.fields
+    }
+
     pub fn as_arrow_fields(&self) -> Fields {
         self.fields
             .iter()

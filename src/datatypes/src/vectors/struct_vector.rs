@@ -317,6 +317,19 @@ impl StructVectorBuilder {
         Ok(())
     }
 
+    /// Pushes one non-null row by writing each field directly to its child builder.
+    pub(crate) fn try_push_row_with(
+        &mut self,
+        mut push_field: impl FnMut(&mut dyn MutableVector, &str, &ConcreteDataType) -> Result<()>,
+    ) -> Result<()> {
+        for (builder, field) in self.value_builders.iter_mut().zip(self.fields.fields_ref()) {
+            push_field(builder.as_mut(), field.name(), field.data_type())?;
+        }
+        self.null_buffer.append_non_null();
+
+        Ok(())
+    }
+
     pub(crate) fn push_struct_value_ref(&mut self, struct_value: StructValueRef<'_>) -> Result<()> {
         match struct_value {
             StructValueRef::Indexed { vector, idx } => match vector.get(idx).as_struct()? {
