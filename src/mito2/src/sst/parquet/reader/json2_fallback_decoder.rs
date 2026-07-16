@@ -55,7 +55,8 @@ pub struct Json2FallbackDecoder<S> {
     #[debug(skip)]
     inner: S,
     projected_root_presence: Vec<bool>,
-    plan: Json2FallbackPlan,
+    expected_input_col_num: usize,
+    fallbacks_by_output_root: Vec<Vec<Json2FallbackItem>>,
     output_schema: SchemaRef,
 }
 
@@ -80,10 +81,31 @@ where
             }
         );
 
+        let expected_input_col_num = projected_root_presence
+            .iter()
+            .filter(|matched| **matched)
+            .count();
+
+        let mut fallbacks_by_output_root = vec![Vec::new(); output_schema.fields().len()];
+        for item in plan.items {
+            ensure!(
+                item.output_root_index < fallbacks_by_output_root.len(),
+                UnexpectedSnafu {
+                    reason: format!(
+                        "Json2FallbackDecoder fallback output root index {} out of bounds {}",
+                        item.output_root_index,
+                        fallbacks_by_output_root.len()
+                    ),
+                }
+            );
+            fallbacks_by_output_root[item.output_root_index].push(item);
+        }
+
         Ok(Json2FallbackDecoder {
             inner,
             projected_root_presence,
-            plan,
+            expected_input_col_num,
+            fallbacks_by_output_root,
             output_schema,
         })
     }
@@ -99,10 +121,11 @@ where
         let this = self.get_mut();
 
         match Pin::new(&mut this.inner).poll_next(cx) {
-            Poll::Ready(Some(Ok(rb))) => Poll::Ready(Some(recover_json2_fallbacks(
+            Poll::Ready(Some(Ok(rb))) => Poll::Ready(Some(rebuild_recordbatch_with_fallback(
                 rb,
                 &this.projected_root_presence,
-                &this.plan,
+                this.expected_input_col_num,
+                &this.fallbacks_by_output_root,
                 &this.output_schema,
             ))),
             Poll::Ready(Some(Err(err))) => Poll::Ready(Some(Err(err))),
@@ -110,6 +133,111 @@ where
             Poll::Pending => Poll::Pending,
         }
     }
+}
+
+fn rebuild_recordbatch_with_fallback(
+    rb: RecordBatch,
+    projected_root_presence: &[bool],
+    expected_input_col_num: usize,
+    fallbacks_by_output_root: &[Vec<Json2FallbackItem>],
+    output_schema: &SchemaRef,
+) -> Result<RecordBatch> {
+    if fallbacks_by_output_root.iter().all(Vec::is_empty) {
+        return Ok(rb);
+    }
+
+    ensure!(
+        rb.columns().len() == expected_input_col_num,
+        UnexpectedSnafu {
+            reason: format!(
+                "Json2FallbackDecoder expected {} input columns but got {}",
+                expected_input_col_num,
+                rb.columns().len()
+            ),
+        }
+    );
+
+    let mut columns = Vec::with_capacity(rb.num_columns());
+    let mut fields = Vec::with_capacity(rb.num_columns());
+    let mut input_idx = 0;
+
+    for (output_root_index, (field, present)) in output_schema
+        .fields()
+        .iter()
+        .zip(projected_root_presence)
+        .enumerate()
+    {
+        if !present {
+            // The input batch only contains roots read from parquet. Missing
+            // roots are synthesized later by NestedSchemaAligner.
+            continue;
+        }
+
+        let input = rb.column(input_idx);
+        let fallbacks = &fallbacks_by_output_root[output_root_index];
+        if fallbacks.is_empty() {
+            columns.push(input.clone());
+            fields.push(Arc::new(rb.schema().field(input_idx).clone()));
+        } else {
+            let column = rebuild_root_with_fallbacks(input, field, fallbacks)?;
+            fields.push(field_with_data_type(field, column.data_type().clone()));
+            columns.push(column);
+        }
+
+        input_idx += 1;
+    }
+
+    RecordBatch::try_new(Arc::new(Schema::new(fields)), columns).context(NewRecordBatchSnafu)
+}
+
+fn rebuild_root_with_fallbacks(
+    root_array: &ArrayRef,
+    root_field: &FieldRef,
+    fallbacks: &[Json2FallbackItem],
+) -> Result<ArrayRef> {
+    let mut extracted = Vec::new();
+
+    for fallback in fallbacks {
+        let source_path = fallback
+            .source_path
+            .get(1..)
+            .with_context(|| UnexpectedSnafu {
+                reason: format!(
+                    "fallback source path length must be greater than 1, got {:?}",
+                    fallback.source_path
+                ),
+            })?;
+
+        let source_array = find_nested_array(root_array, source_path);
+
+        for requested_path in &fallback.requested_paths {
+            let relative_path = requested_path
+                .strip_prefix(fallback.source_path.as_slice())
+                .with_context(|| UnexpectedSnafu {
+                    reason: format!(
+                        "requested path {:?} is not under fallback source {:?}",
+                        requested_path, fallback.source_path
+                    ),
+                })?;
+            let array = extract_jsonb_path(source_array.as_ref(), relative_path, root_array.len())?;
+            extracted.push((requested_path.clone(), array));
+        }
+    }
+
+    build_json2_root(root_array, root_field, &extracted)
+}
+
+fn find_nested_array(root: &ArrayRef, path: &[String]) -> Option<ArrayRef> {
+    let mut current = root.clone();
+    for name in path {
+        let struct_array = current.as_any().downcast_ref::<StructArray>()?;
+        let idx = struct_array
+            .fields()
+            .iter()
+            .position(|field| field.name() == name)?;
+        current = struct_array.column(idx).clone();
+    }
+    Some(current)
 }
 
 pub(crate) fn json2_fallback_output_schema(
@@ -139,66 +267,6 @@ pub(crate) fn json2_fallback_output_schema(
         })
         .collect::<Vec<_>>();
     Arc::new(Schema::new(fields))
-}
-
-fn recover_json2_fallbacks(
-    rb: RecordBatch,
-    projected_root_presence: &[bool],
-    plan: &Json2FallbackPlan,
-    output_schema: &SchemaRef,
-) -> Result<RecordBatch> {
-    if plan.is_empty() {
-        return Ok(rb);
-    }
-
-    let expected_input_col_num = projected_root_presence
-        .iter()
-        .filter(|matched| **matched)
-        .count();
-    ensure!(
-        rb.columns().len() == expected_input_col_num,
-        UnexpectedSnafu {
-            reason: format!(
-                "Json2FallbackDecoder expected {} input columns but got {}",
-                expected_input_col_num,
-                rb.columns().len()
-            ),
-        }
-    );
-
-    let mut columns = Vec::with_capacity(rb.num_columns());
-    let mut fields = Vec::with_capacity(rb.num_columns());
-    let mut input_idx = 0;
-
-    for (output_root_index, (field, present)) in output_schema
-        .fields()
-        .iter()
-        .zip(projected_root_presence)
-        .enumerate()
-    {
-        if !present {
-            continue;
-        }
-
-        let input = rb.column(input_idx);
-        let items = plan
-            .items
-            .iter()
-            .filter(|item| item.output_root_index == output_root_index)
-            .collect::<Vec<_>>();
-        if items.is_empty() {
-            columns.push(input.clone());
-            fields.push(Arc::new(rb.schema().field(input_idx).clone()));
-        } else {
-            let column = recover_json2_root(input, field, &items)?;
-            fields.push(field_with_data_type(field, column.data_type().clone()));
-            columns.push(column);
-        }
-
-        input_idx += 1;
-    }
-
-    RecordBatch::try_new(Arc::new(Schema::new(fields)), columns).context(NewRecordBatchSnafu)
 }
 
 fn expand_fallback_field(
@@ -287,44 +355,6 @@ fn requested_child_names(path: &[String], items: &[&Json2FallbackItem]) -> Vec<S
         }
     }
     names
-}
-
-fn recover_json2_root(
-    root: &ArrayRef,
-    root_field: &FieldRef,
-    items: &[&Json2FallbackItem],
-) -> Result<ArrayRef> {
-    let mut extracted = Vec::new();
-    for item in items {
-        let source = find_nested_array(root, &item.source_path[1..]);
-        for requested_path in &item.requested_paths {
-            let relative_path = requested_path
-                .strip_prefix(item.source_path.as_slice())
-                .with_context(|| UnexpectedSnafu {
-                    reason: format!(
-                        "requested path {:?} is not under fallback source {:?}",
-                        requested_path, item.source_path
-                    ),
-                })?;
-            let array = extract_jsonb_path(source.as_ref(), relative_path, root.len())?;
-            extracted.push((requested_path.clone(), array));
-        }
-    }
-
-    build_json2_root(root, root_field, &extracted)
-}
-
-fn find_nested_array(root: &ArrayRef, path: &[String]) -> Option<ArrayRef> {
-    let mut current = root.clone();
-    for name in path {
-        let struct_array = current.as_any().downcast_ref::<StructArray>()?;
-        let idx = struct_array
-            .fields()
-            .iter()
-            .position(|field| field.name() == name)?;
-        current = struct_array.column(idx).clone();
-    }
-    Some(current)
 }
 
 fn extract_jsonb_path(
