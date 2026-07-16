@@ -54,76 +54,51 @@ fn test_chunk_owned() {
 }
 
 #[test]
-fn test_classify_trace_chunk_failure() {
+fn test_classify_trace_prewrite_failure() {
+    for status in [
+        StatusCode::InvalidArguments,
+        StatusCode::InvalidSyntax,
+        StatusCode::Unsupported,
+        StatusCode::TableColumnNotFound,
+        StatusCode::TableNotFound,
+    ] {
+        assert_eq!(
+            Instance::classify_trace_prewrite_failure(status, false),
+            ChunkFailureReaction::RetryPerSpan
+        );
+    }
+
     assert_eq!(
-        Instance::classify_trace_chunk_failure(StatusCode::InvalidArguments),
-        ChunkFailureReaction::RetryPerSpan
-    );
-    assert_eq!(
-        Instance::classify_trace_chunk_failure(StatusCode::InvalidSyntax),
-        ChunkFailureReaction::RetryPerSpan
-    );
-    assert_eq!(
-        Instance::classify_trace_chunk_failure(StatusCode::Unsupported),
-        ChunkFailureReaction::RetryPerSpan
-    );
-    assert_eq!(
-        Instance::classify_trace_chunk_failure(StatusCode::TableColumnNotFound),
-        ChunkFailureReaction::RetryPerSpan
-    );
-    assert_eq!(
-        Instance::classify_trace_chunk_failure(StatusCode::TableNotFound),
-        ChunkFailureReaction::RetryPerSpan
-    );
-    assert_eq!(
-        Instance::classify_trace_chunk_failure(StatusCode::DatabaseNotFound),
+        Instance::classify_trace_prewrite_failure(StatusCode::DatabaseNotFound, false),
         ChunkFailureReaction::DiscardChunk
     );
-    assert_eq!(
-        Instance::classify_trace_chunk_failure(StatusCode::DeadlineExceeded),
-        ChunkFailureReaction::Propagate
-    );
-    assert_eq!(
-        Instance::classify_trace_chunk_failure(StatusCode::Cancelled),
-        ChunkFailureReaction::Propagate
-    );
-    assert_eq!(
-        Instance::classify_trace_chunk_failure(StatusCode::StorageUnavailable),
-        ChunkFailureReaction::Propagate
-    );
-    assert_eq!(
-        Instance::classify_trace_chunk_failure(StatusCode::Internal),
-        ChunkFailureReaction::Propagate
-    );
-    assert_eq!(
-        Instance::classify_trace_chunk_failure(StatusCode::RegionNotReady),
-        ChunkFailureReaction::Propagate
-    );
-    assert_eq!(
-        Instance::classify_trace_chunk_failure(StatusCode::TableUnavailable),
-        ChunkFailureReaction::Propagate
-    );
-    assert_eq!(
-        Instance::classify_trace_chunk_failure(StatusCode::RegionBusy),
-        ChunkFailureReaction::Propagate
-    );
-    assert_eq!(
-        Instance::classify_trace_chunk_failure(StatusCode::RuntimeResourcesExhausted),
-        ChunkFailureReaction::Propagate
-    );
-}
 
-#[test]
-fn test_classify_trace_span_failure() {
-    assert!(Instance::should_propagate_trace_span_failure(
-        StatusCode::DeadlineExceeded
-    ));
-    assert!(Instance::should_propagate_trace_span_failure(
-        StatusCode::StorageUnavailable
-    ));
-    assert!(!Instance::should_propagate_trace_span_failure(
-        StatusCode::InvalidArguments
-    ));
+    for status in [
+        StatusCode::DeadlineExceeded,
+        StatusCode::Cancelled,
+        StatusCode::StorageUnavailable,
+        StatusCode::Internal,
+        StatusCode::RegionNotReady,
+        StatusCode::TableUnavailable,
+        StatusCode::RegionBusy,
+        StatusCode::RuntimeResourcesExhausted,
+        StatusCode::Unknown,
+    ] {
+        assert_eq!(
+            Instance::classify_trace_prewrite_failure(status, false),
+            ChunkFailureReaction::Propagate
+        );
+    }
+
+    // Retry hints take precedence over status-based partial success handling.
+    assert_eq!(
+        Instance::classify_trace_prewrite_failure(StatusCode::InvalidArguments, true),
+        ChunkFailureReaction::Propagate
+    );
+    assert_eq!(
+        Instance::classify_trace_prewrite_failure(StatusCode::DatabaseNotFound, true),
+        ChunkFailureReaction::Propagate
+    );
 }
 
 #[test]
@@ -193,14 +168,6 @@ fn test_push_trace_failure_message_caps_recorded_messages() {
             "failure-2".to_string(),
             "failure-3".to_string()
         ]
-    );
-}
-
-#[test]
-fn test_classify_trace_chunk_failure_defaults_to_discard() {
-    assert_eq!(
-        Instance::classify_trace_chunk_failure(StatusCode::Unknown),
-        ChunkFailureReaction::DiscardChunk
     );
 }
 
@@ -298,6 +265,23 @@ fn ready_plan(plan: TraceRequestSchemaPlan) -> TraceTablePreAlter {
         panic!("expected a ready trace schema plan");
     };
     plan
+}
+
+fn trace_chunk_retry(request: &RowInsertRequest, span_ids: &[&str]) -> TraceChunkRetry {
+    TraceChunkRetry::try_new(
+        request.table_name.clone(),
+        request.rows.clone().unwrap(),
+        span_ids
+            .iter()
+            .map(|span_id| TraceSpanMetadata {
+                trace_id: "trace-id".to_string(),
+                span_id: (*span_id).to_string(),
+                operation: None,
+            })
+            .collect(),
+        HashMap::new(),
+    )
+    .unwrap()
 }
 
 fn prepare_and_apply(
@@ -654,7 +638,7 @@ fn test_trace_request_schema_drops_failed_batch_observations() {
     request_schema.observe_trace_column(1, &safe_schema, Some(ColumnDataType::Boolean));
     ready_plan(request_schema.resolve_table_schema(None));
 
-    let mut chunk_states = [
+    let mut chunk_states = vec![
         TraceChunkSchemaState::Prepared,
         TraceChunkSchemaState::Prepared,
     ];
@@ -683,11 +667,17 @@ fn test_trace_request_schema_drops_failed_batch_observations() {
     assert_eq!(chunk_states[0], TraceChunkSchemaState::Prepared);
     assert_eq!(chunk_states[1], TraceChunkSchemaState::ReconcilePerChunk);
 
+    let mut chunks = vec![
+        trace_chunk_retry(&good_request, &["good-span"]),
+        trace_chunk_retry(&bad_request, &["bad-span"]),
+    ];
     Instance::exclude_trace_v1_schema_observations(
         &mut request_schema,
+        &mut chunks,
         &mut chunk_states,
         &exclusions,
-    );
+    )
+    .unwrap();
     assert!(
         !request_schema
             .column_indexes
@@ -720,6 +710,195 @@ fn test_trace_request_schema_drops_failed_batch_observations() {
         Some(ValueData::F64Value(1.5))
     );
     assert_eq!(bad_request, original_bad_request);
+}
+
+#[test]
+fn test_trace_request_schema_splits_failed_chunk_before_exclusion() {
+    let table_name = "trace_failed_chunk";
+    let value_column = "span_attributes.value";
+    let port_column = "span_attributes.server.port";
+    let boolean_schema = field_schema(value_column, ColumnDataType::Boolean);
+    let int_schema = field_schema(value_column, ColumnDataType::Int64);
+    let string_schema = field_schema(value_column, ColumnDataType::String);
+    let port_string_schema = field_schema(port_column, ColumnDataType::String);
+    let port_int_schema = field_schema(port_column, ColumnDataType::Int64);
+    let requests = [
+        row_insert_request(
+            table_name,
+            vec![boolean_schema, port_string_schema],
+            vec![
+                row(vec![
+                    Some(ValueData::BoolValue(true)),
+                    Some(ValueData::StringValue("1".to_string())),
+                ]),
+                row(vec![
+                    Some(ValueData::BoolValue(false)),
+                    Some(ValueData::StringValue("bad".to_string())),
+                ]),
+            ],
+        ),
+        row_insert_request(
+            table_name,
+            vec![int_schema, port_int_schema.clone()],
+            vec![row(vec![
+                Some(ValueData::I64Value(2)),
+                Some(ValueData::I64Value(2)),
+            ])],
+        ),
+        row_insert_request(
+            table_name,
+            vec![string_schema, port_int_schema],
+            vec![row(vec![
+                Some(ValueData::StringValue("3".to_string())),
+                Some(ValueData::I64Value(3)),
+            ])],
+        ),
+    ];
+    let mut chunks = vec![
+        trace_chunk_retry(&requests[0], &["good-span", "bad-span"]),
+        trace_chunk_retry(&requests[1], &["int-span"]),
+        trace_chunk_retry(&requests[2], &["string-span"]),
+    ];
+    let mut chunk_states = vec![TraceChunkSchemaState::Prepared; chunks.len()];
+    let mut request_schema = TraceRequestSchema::default();
+    for (batch_index, chunk) in chunks.iter().enumerate() {
+        request_schema
+            .observe_retry_chunk(batch_index, chunk)
+            .unwrap();
+    }
+
+    ready_plan(request_schema.resolve_table_schema(None));
+    let value_index = request_schema.column_indexes[value_column];
+    assert_eq!(
+        request_schema.columns[value_index].target_type,
+        Some(ColumnDataType::String)
+    );
+
+    let exclusions =
+        Instance::prevalidate_trace_v1_chunk_rewrites(&request_schema, &chunks, &mut chunk_states)
+            .unwrap();
+    assert_eq!(
+        exclusions,
+        HashMap::from([(port_column.to_string(), HashSet::from([0]))])
+    );
+    Instance::exclude_trace_v1_schema_observations(
+        &mut request_schema,
+        &mut chunks,
+        &mut chunk_states,
+        &exclusions,
+    )
+    .unwrap();
+    assert_eq!(chunks.len(), 4);
+    assert!(chunks.iter().all(|chunk| chunk.rows.len() == 1));
+
+    ready_plan(request_schema.resolve_table_schema(None));
+    let exclusions =
+        Instance::prevalidate_trace_v1_chunk_rewrites(&request_schema, &chunks, &mut chunk_states)
+            .unwrap();
+    assert_eq!(
+        exclusions,
+        HashMap::from([(port_column.to_string(), HashSet::from([1]))])
+    );
+    Instance::exclude_trace_v1_schema_observations(
+        &mut request_schema,
+        &mut chunks,
+        &mut chunk_states,
+        &exclusions,
+    )
+    .unwrap();
+
+    ready_plan(request_schema.resolve_table_schema(None));
+    let value_index = request_schema.column_indexes[value_column];
+    assert_eq!(
+        request_schema.columns[value_index].target_type,
+        Some(ColumnDataType::String)
+    );
+    assert_eq!(chunk_states[0], TraceChunkSchemaState::Prepared);
+    assert_eq!(chunk_states[1], TraceChunkSchemaState::ReconcilePerChunk);
+}
+
+#[test]
+fn test_trace_request_schema_prevalidates_fixed_columns_before_conflicts() {
+    let table_name = "trace_fixed_column_conflict";
+    let conflict_column = "span_attributes.conflict";
+    let value_column = "span_attributes.value";
+    let port_column = "span_attributes.server.port";
+    let requests = [
+        row_insert_request(
+            table_name,
+            vec![
+                field_schema(conflict_column, ColumnDataType::String),
+                field_schema(value_column, ColumnDataType::Boolean),
+            ],
+            vec![row(vec![
+                Some(ValueData::StringValue("text".to_string())),
+                Some(ValueData::BoolValue(true)),
+            ])],
+        ),
+        row_insert_request(
+            table_name,
+            vec![
+                field_schema(conflict_column, ColumnDataType::Binary),
+                field_schema(port_column, ColumnDataType::String),
+            ],
+            vec![row(vec![
+                Some(ValueData::BinaryValue(vec![1])),
+                Some(ValueData::StringValue("bad".to_string())),
+            ])],
+        ),
+        row_insert_request(
+            table_name,
+            vec![field_schema(value_column, ColumnDataType::Int64)],
+            vec![row(vec![Some(ValueData::I64Value(2))])],
+        ),
+        row_insert_request(
+            table_name,
+            vec![field_schema(value_column, ColumnDataType::String)],
+            vec![row(vec![Some(ValueData::StringValue("3".to_string()))])],
+        ),
+    ];
+    let mut chunks = requests
+        .iter()
+        .map(|request| trace_chunk_retry(request, &["span"]))
+        .collect::<Vec<_>>();
+    let mut chunk_states = vec![TraceChunkSchemaState::Prepared; chunks.len()];
+    let mut request_schema = TraceRequestSchema::default();
+    for (batch_index, chunk) in chunks.iter().enumerate() {
+        request_schema
+            .observe_retry_chunk(batch_index, chunk)
+            .unwrap();
+    }
+
+    assert_eq!(
+        request_schema.incompatible_schema_observations(None),
+        HashMap::from([(conflict_column.to_string(), HashSet::from([0, 1]),)])
+    );
+    let exclusions = Instance::prevalidate_trace_v1_fixed_columns(&chunks, &chunk_states).unwrap();
+    assert_eq!(
+        exclusions,
+        HashMap::from([(port_column.to_string(), HashSet::from([1]))])
+    );
+    Instance::exclude_trace_v1_schema_observations(
+        &mut request_schema,
+        &mut chunks,
+        &mut chunk_states,
+        &exclusions,
+    )
+    .unwrap();
+
+    assert!(
+        request_schema
+            .incompatible_schema_observations(None)
+            .is_empty()
+    );
+    ready_plan(request_schema.resolve_table_schema(None));
+    let value_index = request_schema.column_indexes[value_column];
+    assert_eq!(
+        request_schema.columns[value_index].target_type,
+        Some(ColumnDataType::String)
+    );
+    assert_eq!(chunk_states[0], TraceChunkSchemaState::Prepared);
+    assert_eq!(chunk_states[1], TraceChunkSchemaState::ReconcilePerChunk);
 }
 
 #[test]
@@ -892,6 +1071,7 @@ fn test_trace_request_schema_re_resolves_after_concurrent_create() {
     request_schema.observe_trace_column(0, &string_schema, Some(ColumnDataType::String));
     let initial_plan = ready_plan(request_schema.resolve_table_schema(None));
     assert!(!initial_plan.ensure_columns.is_empty());
+    assert!(!initial_plan.alter_existing);
     let initial_targets = request_schema.resolved_target_types();
 
     let concurrent_schema =
@@ -905,6 +1085,7 @@ fn test_trace_request_schema_re_resolves_after_concurrent_create() {
         .unwrap();
     let final_plan = ready_plan(request_schema.resolve_table_schema(Some(&concurrent_schema)));
     assert!(!final_plan.requires_ddl());
+    assert!(final_plan.alter_existing);
     assert_ne!(initial_targets, request_schema.resolved_target_types());
 
     prepare_and_apply(&request_schema, 0, &mut requests);

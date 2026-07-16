@@ -110,8 +110,9 @@ The v1 path performs these steps before the normal chunk writes:
    The supported existing-column widening is `Int64` to `Float64`.
 5. Use `prepare_trace_column_rewrites` in
    [`trace_types.rs`](trace_types.rs) to precompute every coercion without
-   mutating rows. A chunk whose coercion cannot be prepared is removed from the
-   request-wide plan, so it cannot contribute columns to persistent DDL.
+   mutating rows. A chunk whose coercion cannot be prepared is split into
+   single-span planning units; only spans that still fail are removed from the
+   request-wide plan, so invalid data cannot contribute to persistent DDL.
 6. Create the table or add missing columns with `ensure_trace_table_on_demand`,
    and widen planned numeric columns. The implementation is in
    [`operator/src/insert.rs`](../../../../operator/src/insert.rs).
@@ -126,14 +127,24 @@ falls back.
 
 ## Writes, fallback, and accounting
 
-The normal path writes a whole chunk first. `classify_trace_chunk_failure` in
-[`trace_ingest.rs`](trace_ingest.rs) determines the next action:
+Schema planning and request reconciliation happen before a main-table write.
+`classify_trace_prewrite_failure` in [`trace_ingest.rs`](trace_ingest.rs)
+determines the next action when that preparation fails:
 
 | Reaction | Behavior |
 | --- | --- |
-| `RetryPerSpan` | Retry each span independently. Successful spans are accepted; deterministic per-span failures are rejected. A v1 chunk with incompatible raw-binary and JSONB values starts here without attempting a chunk write. |
+| `RetryPerSpan` | Prepare and write each span independently. Successful spans are accepted; deterministic per-span preparation failures are rejected. A v1 chunk with incompatible raw-binary and JSONB values starts here without attempting a chunk write. |
 | `DiscardChunk` | Do not retry the chunk at span granularity. Count every span in the chunk as rejected. |
-| `Propagate` | Return the error for retryable or ambiguous failures instead of reporting a partial success. |
+| `Propagate` | Return retryable or unclassified failures instead of reporting a partial success. Retry hints take precedence over status-code classification. |
+
+Span-specific invalid values are isolated before request-wide schema planning.
+Therefore, a deterministic error that escapes request-wide preparation rejects
+all remaining spans instead of repeating the same global failure per span.
+
+Once a main-table write is dispatched, any returned error is propagated. The
+distributed insert may have committed writes on some peers before another peer
+failed, so retrying or rejecting the whole chunk would risk duplicate data or
+incorrect accounting.
 
 Accounting follows the main-table write:
 
@@ -141,6 +152,8 @@ Accounting follows the main-table write:
 - only accepted spans contribute service and operation rows;
 - auxiliary rows are deduplicated and written afterwards to
   `<main_table>_services` and `<main_table>_operations`;
+- auxiliary rows accumulated by earlier successful chunks are still flushed
+  before a later main-table error is returned;
 - an auxiliary-table failure adds failure detail but does not change the
   accepted or rejected span counts; and
 - failure details are bounded before they are folded into `TraceIngestOutcome`.

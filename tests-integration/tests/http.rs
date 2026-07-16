@@ -6996,10 +6996,8 @@ pub async fn test_otlp_traces_v1(store_type: StorageType) {
         "unexpected error body: {body:?}"
     );
     assert!(
-        body.message.contains("Chunk fallback triggered by")
-            || body
-                .message
-                .contains("Discarded 2 spans after ambiguous chunk failure"),
+        body.message
+            .contains("Discarded 2 spans after pre-write request failure"),
         "unexpected error body: {body:?}"
     );
 

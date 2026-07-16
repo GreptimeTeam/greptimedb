@@ -30,7 +30,7 @@ use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
 use pipeline::{GreptimePipelineParams, PipelineWay};
 use servers::error::{self, Result as ServerResult};
 use servers::otlp;
-use servers::otlp::coerce::trace_value_datatype;
+use servers::otlp::coerce::{coerce_value_data, trace_value_datatype};
 use servers::otlp::trace::TraceAuxData;
 use servers::otlp::trace::span::{TraceSpan, TraceSpanGroup};
 use servers::otlp::trace::v1::{TraceBatchSchema, TraceBinaryType, TraceRetryColumns};
@@ -54,7 +54,7 @@ use crate::metrics::{OTLP_TRACES_FAILURE_COUNT, OTLP_TRACES_ROWS};
 
 const TRACE_FAILURE_MESSAGE_LIMIT: usize = 4;
 
-/// Determines how trace ingestion responds to a failed chunk write.
+/// Determines how trace ingestion responds to a failure before a write is dispatched.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ChunkFailureReaction {
     RetryPerSpan,
@@ -297,6 +297,25 @@ impl TraceChunkRetry {
         })
     }
 
+    fn into_single_span_chunks(self) -> ServerResult<Vec<Self>> {
+        let Self {
+            table_name,
+            schema,
+            rows,
+        } = self;
+        rows.into_iter()
+            .map(|row| {
+                let (span_metadata, rows_for_insert) = row.into_rows(&schema)?;
+                Self::try_new(
+                    table_name.clone(),
+                    rows_for_insert,
+                    vec![span_metadata],
+                    TraceRetryColumns::default(),
+                )
+            })
+            .collect()
+    }
+
     fn add_to_aux_data(self, aux_data: &mut TraceAuxData) {
         for row in self.rows {
             row.span_metadata.add_to_aux_data(aux_data);
@@ -372,6 +391,7 @@ type TraceSchemaExclusions = HashMap<String, HashSet<usize>>;
 struct TraceTablePreAlter {
     ensure_columns: Vec<ColumnSchema>,
     modify_float64_columns: Vec<String>,
+    alter_existing: bool,
 }
 
 /// Either a ready table-alter plan or the observations that cannot be unified.
@@ -405,6 +425,35 @@ impl TraceRequestSchema {
                 }
             }
         }
+    }
+
+    fn observe_retry_chunk(
+        &mut self,
+        batch_index: usize,
+        chunk: &TraceChunkRetry,
+    ) -> ServerResult<()> {
+        // Split chunks already carry row-projected schemas; untouched chunks keep
+        // their original batch schema while observations stay sparse.
+        for row in &chunk.rows {
+            for retry_value in &row.values {
+                let Some(column) = chunk.schema.get(retry_value.column_index) else {
+                    return error::InternalSnafu {
+                        err_msg: format!(
+                            "trace retry column index {} is out of bounds",
+                            retry_value.column_index
+                        ),
+                    }
+                    .fail();
+                };
+                let value_type = retry_value
+                    .value
+                    .value_data
+                    .as_ref()
+                    .and_then(trace_value_datatype);
+                self.observe_trace_column(batch_index, column, value_type);
+            }
+        }
+        Ok(())
     }
 
     fn observe_trace_column(
@@ -462,6 +511,7 @@ impl TraceRequestSchema {
         let mut pre_alter = TraceTablePreAlter {
             ensure_columns: Vec::new(),
             modify_float64_columns: Vec::new(),
+            alter_existing: table_schema.is_some(),
         };
 
         for column in &mut self.columns {
@@ -603,6 +653,7 @@ impl TraceRequestSchema {
         pending_rewrites
     }
 
+    #[cfg(test)]
     fn remove_batches(&mut self, batch_indexes: &HashSet<usize>) {
         for column in &mut self.columns {
             column
@@ -782,63 +833,68 @@ impl Instance {
             failure_messages: Vec::new(),
         };
 
-        if is_trace_v1_model {
-            let mut request_schema = TraceRequestSchema::default();
-            let mut chunks = Vec::new();
-            let mut chunk_states = Vec::new();
-            // Convert each chunk once, then retain only its sparse values while
-            // request-wide schema planning runs.
-            for chunk in groups
-                .into_iter()
-                .flat_map(|group| chunk_owned(group.spans, self.trace_ingest_chunk_size))
-            {
-                let batch_index = chunks.len();
-                let span_metadata = chunk.iter().map(TraceSpanMetadata::from).collect();
-                let (table_data, batch_schema) =
-                    otlp::trace::v1::v1_to_main_table_data_with_schema(chunk)?;
-                let schema_state = if batch_schema.has_incompatible_logical_types() {
-                    TraceChunkSchemaState::SpanFallbackOnly
-                } else {
-                    TraceChunkSchemaState::Prepared
-                };
-                let (schema, rows) = table_data.into_schema_and_rows();
-                if schema_state == TraceChunkSchemaState::Prepared {
-                    request_schema.observe_batch_schema(batch_index, &schema, &batch_schema);
+        let main_result: ServerResult<()> = async {
+            if is_trace_v1_model {
+                let mut request_schema = TraceRequestSchema::default();
+                let mut chunks = Vec::new();
+                let mut chunk_states = Vec::new();
+                // Convert each chunk once, then retain only its sparse values while
+                // request-wide schema planning runs.
+                for chunk in groups
+                    .into_iter()
+                    .flat_map(|group| chunk_owned(group.spans, self.trace_ingest_chunk_size))
+                {
+                    let batch_index = chunks.len();
+                    let span_metadata = chunk.iter().map(TraceSpanMetadata::from).collect();
+                    let (table_data, batch_schema) =
+                        otlp::trace::v1::v1_to_main_table_data_with_schema(chunk)?;
+                    let schema_state = if batch_schema.has_incompatible_logical_types() {
+                        TraceChunkSchemaState::SpanFallbackOnly
+                    } else {
+                        TraceChunkSchemaState::Prepared
+                    };
+                    let (schema, rows) = table_data.into_schema_and_rows();
+                    if schema_state == TraceChunkSchemaState::Prepared {
+                        request_schema.observe_batch_schema(batch_index, &schema, &batch_schema);
+                    }
+                    chunks.push(TraceChunkRetry::try_new(
+                        ingest_ctx.table_name.to_string(),
+                        Rows { schema, rows },
+                        span_metadata,
+                        batch_schema.into_retry_columns(),
+                    )?);
+                    chunk_states.push(schema_state);
                 }
-                chunks.push(TraceChunkRetry::try_new(
-                    ingest_ctx.table_name.to_string(),
-                    Rows { schema, rows },
-                    span_metadata,
-                    batch_schema.into_retry_columns(),
-                )?);
-                chunk_states.push(schema_state);
-            }
 
-            if !chunks.is_empty() {
-                self.ingest_trace_v1_prepared_chunks(
-                    &ingest_ctx,
-                    request_schema,
-                    chunks,
-                    chunk_states,
-                    main_ctx.clone(),
-                    &mut ingest_state,
-                )
-                .await?;
-            }
-        } else {
-            for group in groups {
-                let chunks = chunk_owned(group.spans, self.trace_ingest_chunk_size);
-                for chunk in chunks {
-                    self.ingest_trace_chunk(
+                if !chunks.is_empty() {
+                    self.ingest_trace_v1_prepared_chunks(
                         &ingest_ctx,
-                        chunk,
+                        request_schema,
+                        chunks,
+                        chunk_states,
                         main_ctx.clone(),
                         &mut ingest_state,
                     )
                     .await?;
                 }
+            } else {
+                for group in groups {
+                    let chunks = chunk_owned(group.spans, self.trace_ingest_chunk_size);
+                    for chunk in chunks {
+                        self.ingest_trace_chunk(
+                            &ingest_ctx,
+                            chunk,
+                            main_ctx.clone(),
+                            &mut ingest_state,
+                        )
+                        .await?;
+                    }
+                }
             }
+
+            Ok(())
         }
+        .await;
 
         OTLP_TRACES_ROWS.inc_by(ingest_state.outcome.accepted_spans as u64);
 
@@ -846,33 +902,49 @@ impl Instance {
             // Auxiliary trace tables are derived from spans whose main-table
             // writes are already confirmed, so they never create new accepted
             // spans and they do not affect rejected span counts.
-            let (aux_requests, _) = otlp::trace::to_grpc_insert_requests_for_aux_tables(
+            let aux_requests = otlp::trace::to_grpc_insert_requests_for_aux_tables(
                 std::mem::take(&mut ingest_state.aux_data),
                 ingest_ctx.pipeline,
                 ingest_ctx.table_name,
-            )?;
+            );
 
-            if !aux_requests.inserts.is_empty() {
-                match self
-                    .insert_trace_requests(aux_requests, ingest_ctx.is_trace_v1_model, ctx)
-                    .await
-                {
-                    Ok(output) => {
-                        Self::add_trace_write_cost(&mut ingest_state.outcome, output.meta.cost);
-                    }
-                    Err(err) => {
-                        Self::push_trace_failure_message(
-                            &mut ingest_state.failure_messages,
-                            "aux_table_update_failed",
-                            format!(
-                                "Auxiliary trace tables were not fully updated ({})",
-                                err.status_code().as_ref()
-                            ),
-                        );
+            match aux_requests {
+                Ok((aux_requests, _)) if !aux_requests.inserts.is_empty() => {
+                    match self
+                        .insert_trace_requests(aux_requests, ingest_ctx.is_trace_v1_model, ctx)
+                        .await
+                    {
+                        Ok(output) => {
+                            Self::add_trace_write_cost(&mut ingest_state.outcome, output.meta.cost);
+                        }
+                        Err(err) => {
+                            Self::push_trace_failure_message(
+                                &mut ingest_state.failure_messages,
+                                "aux_table_update_failed",
+                                format!(
+                                    "Auxiliary trace tables were not fully updated ({})",
+                                    err.status_code().as_ref()
+                                ),
+                            );
+                        }
                     }
                 }
+                // Preserve the existing conversion-error behavior after a
+                // successful main write, but never mask an earlier main error.
+                Err(err) if main_result.is_ok() => return Err(err),
+                Err(err) => Self::push_trace_failure_message(
+                    &mut ingest_state.failure_messages,
+                    "aux_table_update_failed",
+                    format!(
+                        "Auxiliary trace tables were not fully updated ({})",
+                        err.status_code().as_ref()
+                    ),
+                ),
+                Ok(_) => {}
             }
         }
+
+        main_result?;
 
         ingest_state.outcome.error_message = Self::finish_trace_failure_message(
             ingest_state.outcome.accepted_spans,
@@ -903,127 +975,30 @@ impl Instance {
             ingest_ctx.pipeline_handler.clone(),
         )?;
 
-        match self
-            .insert_trace_requests(requests, ingest_ctx.is_trace_v1_model, ctx.clone())
+        let output = match self
+            .insert_trace_requests(requests, ingest_ctx.is_trace_v1_model, ctx)
             .await
         {
-            Ok(output) => {
-                Self::add_trace_write_cost(&mut ingest_state.outcome, output.meta.cost);
-                ingest_state.outcome.accepted_spans += chunk_rows;
-                for span in &chunk {
-                    ingest_state.aux_data.observe_span(span);
-                }
+            Ok(output) => output,
+            Err(err) => {
+                // A distributed insert can partially commit before returning an
+                // error, so retrying or rejecting the whole chunk is unsafe.
+                Self::push_trace_failure_message(
+                    &mut ingest_state.failure_messages,
+                    ChunkFailureReaction::Propagate.as_metric_label(),
+                    format!(
+                        "Propagating chunk write failure ({})",
+                        err.status_code().as_ref()
+                    ),
+                );
+                return Err(err);
             }
-            Err(err) => match Self::classify_trace_chunk_failure(err.status_code()) {
-                ChunkFailureReaction::RetryPerSpan => {
-                    Self::push_trace_failure_message(
-                        &mut ingest_state.failure_messages,
-                        ChunkFailureReaction::RetryPerSpan.as_metric_label(),
-                        format!("Chunk fallback triggered by {}", err.status_code().as_ref()),
-                    );
-                    // Only deterministic failures are retried span by span.
-                    // This includes schemaless table or column creation paths for
-                    // trace ingestion. Ambiguous failures are handled below
-                    // without retrying because the chunk may already have been
-                    // ingested.
-                    self.ingest_trace_chunk_span_by_span(
-                        ingest_ctx,
-                        chunk,
-                        ctx.clone(),
-                        ingest_state,
-                    )
-                    .await?;
-                }
-                ChunkFailureReaction::DiscardChunk => {
-                    ingest_state.outcome.rejected_spans += chunk.len();
-                    Self::push_trace_failure_message(
-                        &mut ingest_state.failure_messages,
-                        ChunkFailureReaction::DiscardChunk.as_metric_label(),
-                        format!(
-                            "Discarded {} spans after ambiguous chunk failure ({})",
-                            chunk.len(),
-                            err.status_code().as_ref()
-                        ),
-                    );
-                    // TODO(shuiyisong): Add an idempotent retry-safe recovery path for
-                    // ambiguous chunk failures such as timeout-like errors.
-                }
-                // Retryable or ambiguous failures must fail the request instead of
-                // becoming partial success. This path is not retry-safe because the
-                // chunk may already have been committed before the error surfaced.
-                ChunkFailureReaction::Propagate => {
-                    Self::push_trace_failure_message(
-                        &mut ingest_state.failure_messages,
-                        ChunkFailureReaction::Propagate.as_metric_label(),
-                        format!(
-                            "Propagating retryable chunk failure ({})",
-                            err.status_code().as_ref()
-                        ),
-                    );
-                    return Err(err);
-                }
-            },
-        }
+        };
 
-        Ok(())
-    }
-
-    /// Retry spans one by one only after a deterministic chunk failure.
-    async fn ingest_trace_chunk_span_by_span(
-        &self,
-        ingest_ctx: &TraceChunkIngestContext<'_>,
-        chunk: Vec<TraceSpan>,
-        ctx: QueryContextRef,
-        ingest_state: &mut TraceIngestState,
-    ) -> ServerResult<()> {
-        for span in chunk {
-            let (requests, rows) = otlp::trace::to_grpc_insert_requests_from_spans(
-                std::slice::from_ref(&span),
-                ingest_ctx.pipeline,
-                ingest_ctx.pipeline_params,
-                ingest_ctx.table_name,
-                &ctx,
-                ingest_ctx.pipeline_handler.clone(),
-            )?;
-
-            let result = self
-                .insert_trace_requests(requests, ingest_ctx.is_trace_v1_model, ctx.clone())
-                .await;
-
-            match result {
-                Ok(output) => {
-                    Self::add_trace_write_cost(&mut ingest_state.outcome, output.meta.cost);
-                    ingest_state.outcome.accepted_spans += rows;
-                    ingest_state.aux_data.observe_span(&span);
-                }
-                Err(err) => {
-                    if Self::should_propagate_trace_span_failure(err.status_code()) {
-                        Self::push_trace_failure_message(
-                            &mut ingest_state.failure_messages,
-                            ChunkFailureReaction::Propagate.as_metric_label(),
-                            format!(
-                                "Propagating retryable span failure for {}:{} ({})",
-                                span.trace_id,
-                                span.span_id,
-                                err.status_code().as_ref()
-                            ),
-                        );
-                        return Err(err);
-                    }
-
-                    ingest_state.outcome.rejected_spans += 1;
-                    Self::push_trace_failure_message(
-                        &mut ingest_state.failure_messages,
-                        "span_rejected",
-                        format!(
-                            "Rejected span {}:{} ({})",
-                            span.trace_id,
-                            span.span_id,
-                            err.status_code().as_ref()
-                        ),
-                    );
-                }
-            }
+        Self::add_trace_write_cost(&mut ingest_state.outcome, output.meta.cost);
+        ingest_state.outcome.accepted_spans += chunk_rows;
+        for span in &chunk {
+            ingest_state.aux_data.observe_span(span);
         }
 
         Ok(())
@@ -1033,7 +1008,7 @@ impl Instance {
         &self,
         ingest_ctx: &TraceChunkIngestContext<'_>,
         mut request_schema: TraceRequestSchema,
-        chunks: Vec<TraceChunkRetry>,
+        mut chunks: Vec<TraceChunkRetry>,
         mut chunk_states: Vec<TraceChunkSchemaState>,
         ctx: QueryContextRef,
         ingest_state: &mut TraceIngestState,
@@ -1042,34 +1017,35 @@ impl Instance {
             .prepare_trace_v1_request_schema(
                 ingest_ctx.table_name,
                 &mut request_schema,
-                &chunks,
+                &mut chunks,
                 &mut chunk_states,
                 &ctx,
             )
             .await
         {
-            match Self::classify_trace_chunk_failure(err.status_code()) {
-                ChunkFailureReaction::RetryPerSpan => {
-                    for state in &mut chunk_states {
-                        state.mark_for_reconcile();
-                    }
-                }
-                ChunkFailureReaction::DiscardChunk => {
-                    let span_count = chunks.iter().map(|chunk| chunk.rows.len()).sum::<usize>();
-                    ingest_state.outcome.rejected_spans += span_count;
-                    Self::push_trace_failure_message(
-                        &mut ingest_state.failure_messages,
-                        ChunkFailureReaction::DiscardChunk.as_metric_label(),
-                        format!(
-                            "Discarded {} spans after ambiguous chunk failure ({})",
-                            span_count,
-                            err.status_code().as_ref()
-                        ),
-                    );
-                    return Ok(());
-                }
-                ChunkFailureReaction::Propagate => return Err(err),
+            if matches!(
+                Self::classify_trace_prewrite_failure(err.status_code(), err.is_retryable()),
+                ChunkFailureReaction::Propagate
+            ) {
+                return Err(err);
             }
+
+            // Span-specific conversion failures were already isolated during
+            // prevalidation. An error escaping request-wide schema preparation
+            // applies to every remaining span, so repeating it per span cannot
+            // recover valid data.
+            let span_count = chunks.iter().map(|chunk| chunk.rows.len()).sum::<usize>();
+            ingest_state.outcome.rejected_spans += span_count;
+            Self::push_trace_failure_message(
+                &mut ingest_state.failure_messages,
+                ChunkFailureReaction::DiscardChunk.as_metric_label(),
+                format!(
+                    "Discarded {} spans after pre-write request failure ({})",
+                    span_count,
+                    err.status_code().as_ref()
+                ),
+            );
+            return Ok(());
         }
 
         for (batch_index, (retry, schema_state)) in chunks.into_iter().zip(chunk_states).enumerate()
@@ -1116,36 +1092,22 @@ impl Instance {
             &mut schema_state,
         )?;
         let span_count = retry.rows.len();
-        let requests = RowInsertRequests {
+        let mut requests = RowInsertRequests {
             inserts: vec![request],
         };
-        let result = match schema_state {
-            TraceChunkSchemaState::Prepared => self
-                .handle_trace_inserts(requests, ctx.clone())
-                .await
-                .map_err(BoxedError::new)
-                .context(error::ExecuteGrpcQuerySnafu),
-            TraceChunkSchemaState::ReconcilePerChunk | TraceChunkSchemaState::SpanFallbackOnly => {
-                self.insert_trace_requests(requests, true, ctx.clone())
-                    .await
-            }
-        };
-
-        match result {
-            Ok(output) => {
-                Self::add_trace_write_cost(&mut ingest_state.outcome, output.meta.cost);
-                ingest_state.outcome.accepted_spans += span_count;
-                retry.add_to_aux_data(&mut ingest_state.aux_data);
-            }
-            Err(err) => match Self::classify_trace_chunk_failure(err.status_code()) {
+        if schema_state == TraceChunkSchemaState::ReconcilePerChunk
+            && let Err(err) = self.reconcile_trace_column_types(&mut requests, &ctx).await
+        {
+            match Self::classify_trace_prewrite_failure(err.status_code(), err.is_retryable()) {
                 ChunkFailureReaction::RetryPerSpan => {
                     Self::push_trace_failure_message(
                         &mut ingest_state.failure_messages,
                         ChunkFailureReaction::RetryPerSpan.as_metric_label(),
                         format!("Chunk fallback triggered by {}", err.status_code().as_ref()),
                     );
-                    self.ingest_trace_v1_rows_span_by_span(retry, ctx.clone(), ingest_state)
-                        .await?;
+                    return self
+                        .ingest_trace_v1_rows_span_by_span(retry, ctx, ingest_state)
+                        .await;
                 }
                 ChunkFailureReaction::DiscardChunk => {
                     ingest_state.outcome.rejected_spans += span_count;
@@ -1153,25 +1115,52 @@ impl Instance {
                         &mut ingest_state.failure_messages,
                         ChunkFailureReaction::DiscardChunk.as_metric_label(),
                         format!(
-                            "Discarded {} spans after ambiguous chunk failure ({})",
+                            "Discarded {} spans after pre-write chunk failure ({})",
                             span_count,
                             err.status_code().as_ref()
                         ),
                     );
+                    return Ok(());
                 }
                 ChunkFailureReaction::Propagate => {
                     Self::push_trace_failure_message(
                         &mut ingest_state.failure_messages,
                         ChunkFailureReaction::Propagate.as_metric_label(),
                         format!(
-                            "Propagating retryable chunk failure ({})",
+                            "Propagating pre-write chunk failure ({})",
                             err.status_code().as_ref()
                         ),
                     );
                     return Err(err);
                 }
-            },
+            }
         }
+
+        let output = match self
+            .handle_trace_inserts(requests, ctx)
+            .await
+            .map_err(BoxedError::new)
+            .context(error::ExecuteGrpcQuerySnafu)
+        {
+            Ok(output) => output,
+            Err(err) => {
+                // Do not retry after dispatch: writes to other peers may already
+                // have committed even when the aggregate request returns an error.
+                Self::push_trace_failure_message(
+                    &mut ingest_state.failure_messages,
+                    ChunkFailureReaction::Propagate.as_metric_label(),
+                    format!(
+                        "Propagating chunk write failure ({})",
+                        err.status_code().as_ref()
+                    ),
+                );
+                return Err(err);
+            }
+        };
+
+        Self::add_trace_write_cost(&mut ingest_state.outcome, output.meta.cost);
+        ingest_state.outcome.accepted_spans += span_count;
+        retry.add_to_aux_data(&mut ingest_state.aux_data);
 
         Ok(())
     }
@@ -1184,50 +1173,70 @@ impl Instance {
     ) -> ServerResult<()> {
         for row in retry.rows {
             let (span, rows) = row.into_rows(&retry.schema)?;
-            let requests = RowInsertRequests {
+            let mut requests = RowInsertRequests {
                 inserts: vec![RowInsertRequest {
                     table_name: retry.table_name.clone(),
                     rows: Some(rows),
                 }],
             };
 
-            match self
-                .insert_trace_requests(requests, true, ctx.clone())
-                .await
-            {
-                Ok(output) => {
-                    Self::add_trace_write_cost(&mut ingest_state.outcome, output.meta.cost);
-                    ingest_state.outcome.accepted_spans += 1;
-                    span.add_to_aux_data(&mut ingest_state.aux_data);
-                }
-                Err(err) => {
-                    if Self::should_propagate_trace_span_failure(err.status_code()) {
-                        Self::push_trace_failure_message(
-                            &mut ingest_state.failure_messages,
-                            ChunkFailureReaction::Propagate.as_metric_label(),
-                            format!(
-                                "Propagating retryable span failure for {}:{} ({})",
-                                span.trace_id,
-                                span.span_id,
-                                err.status_code().as_ref()
-                            ),
-                        );
-                        return Err(err);
-                    }
-
-                    ingest_state.outcome.rejected_spans += 1;
+            if let Err(err) = self.reconcile_trace_column_types(&mut requests, &ctx).await {
+                if matches!(
+                    Self::classify_trace_prewrite_failure(err.status_code(), err.is_retryable()),
+                    ChunkFailureReaction::Propagate
+                ) {
                     Self::push_trace_failure_message(
                         &mut ingest_state.failure_messages,
-                        "span_rejected",
+                        ChunkFailureReaction::Propagate.as_metric_label(),
                         format!(
-                            "Rejected span {}:{} ({})",
+                            "Propagating pre-write span failure for {}:{} ({})",
                             span.trace_id,
                             span.span_id,
                             err.status_code().as_ref()
                         ),
                     );
+                    return Err(err);
                 }
+
+                ingest_state.outcome.rejected_spans += 1;
+                Self::push_trace_failure_message(
+                    &mut ingest_state.failure_messages,
+                    "span_rejected",
+                    format!(
+                        "Rejected span {}:{} ({})",
+                        span.trace_id,
+                        span.span_id,
+                        err.status_code().as_ref()
+                    ),
+                );
+                continue;
             }
+
+            let output = match self
+                .handle_trace_inserts(requests, ctx.clone())
+                .await
+                .map_err(BoxedError::new)
+                .context(error::ExecuteGrpcQuerySnafu)
+            {
+                Ok(output) => output,
+                Err(err) => {
+                    Self::push_trace_failure_message(
+                        &mut ingest_state.failure_messages,
+                        ChunkFailureReaction::Propagate.as_metric_label(),
+                        format!(
+                            "Propagating span write failure for {}:{} ({})",
+                            span.trace_id,
+                            span.span_id,
+                            err.status_code().as_ref()
+                        ),
+                    );
+                    return Err(err);
+                }
+            };
+
+            Self::add_trace_write_cost(&mut ingest_state.outcome, output.meta.cost);
+            ingest_state.outcome.accepted_spans += 1;
+            span.add_to_aux_data(&mut ingest_state.aux_data);
         }
 
         Ok(())
@@ -1280,11 +1289,24 @@ impl Instance {
         &self,
         table_name: &str,
         request_schema: &mut TraceRequestSchema,
-        chunks: &[TraceChunkRetry],
-        chunk_states: &mut [TraceChunkSchemaState],
+        chunks: &mut Vec<TraceChunkRetry>,
+        chunk_states: &mut Vec<TraceChunkSchemaState>,
         ctx: &QueryContextRef,
     ) -> ServerResult<()> {
         loop {
+            // Fixed semconv targets are known before schema planning. Isolate invalid
+            // values before they can affect conflict resolution or DDL.
+            let exclusions = Self::prevalidate_trace_v1_fixed_columns(chunks, chunk_states)?;
+            if !exclusions.is_empty() {
+                Self::exclude_trace_v1_schema_observations(
+                    request_schema,
+                    chunks,
+                    chunk_states,
+                    &exclusions,
+                )?;
+                continue;
+            }
+
             if request_schema.columns.is_empty() {
                 return Ok(());
             }
@@ -1297,9 +1319,10 @@ impl Instance {
                 TraceRequestSchemaPlan::IncompatibleObservations(exclusions) => {
                     Self::exclude_trace_v1_schema_observations(
                         request_schema,
+                        chunks,
                         chunk_states,
                         &exclusions,
-                    );
+                    )?;
                     continue;
                 }
             };
@@ -1312,9 +1335,10 @@ impl Instance {
                 if !exclusions.is_empty() {
                     Self::exclude_trace_v1_schema_observations(
                         request_schema,
+                        chunks,
                         chunk_states,
                         &exclusions,
-                    );
+                    )?;
                     continue;
                 }
 
@@ -1339,6 +1363,58 @@ impl Instance {
 
             return Ok(());
         }
+    }
+
+    fn prevalidate_trace_v1_fixed_columns(
+        chunks: &[TraceChunkRetry],
+        chunk_states: &[TraceChunkSchemaState],
+    ) -> ServerResult<TraceSchemaExclusions> {
+        let mut exclusions = HashMap::<String, HashSet<usize>>::new();
+        for (batch_index, (chunk, state)) in chunks.iter().zip(chunk_states).enumerate() {
+            if *state != TraceChunkSchemaState::Prepared {
+                continue;
+            }
+
+            'rows: for row in &chunk.rows {
+                for retry_value in &row.values {
+                    let Some(column) = chunk.schema.get(retry_value.column_index) else {
+                        return error::InternalSnafu {
+                            err_msg: format!(
+                                "trace retry column index {} is out of bounds",
+                                retry_value.column_index
+                            ),
+                        }
+                        .fail();
+                    };
+                    let Some(target_type) = trace_semconv_fixed_type(&column.column_name) else {
+                        continue;
+                    };
+                    let Some(request_type) = retry_value
+                        .value
+                        .value_data
+                        .as_ref()
+                        .and_then(trace_value_datatype)
+                    else {
+                        continue;
+                    };
+                    if request_type != target_type
+                        && coerce_value_data(
+                            &retry_value.value.value_data,
+                            target_type,
+                            request_type,
+                        )
+                        .is_err()
+                    {
+                        exclusions
+                            .entry(column.column_name.clone())
+                            .or_default()
+                            .insert(batch_index);
+                        break 'rows;
+                    }
+                }
+            }
+        }
+        Ok(exclusions)
     }
 
     fn prevalidate_trace_v1_chunk_rewrites(
@@ -1385,7 +1461,10 @@ impl Instance {
             Ok(None) => Ok(None),
             Err(failure) => {
                 if !matches!(
-                    Self::classify_trace_chunk_failure(failure.error.status_code()),
+                    Self::classify_trace_prewrite_failure(
+                        failure.error.status_code(),
+                        failure.error.is_retryable(),
+                    ),
                     ChunkFailureReaction::RetryPerSpan
                 ) {
                     return Err(failure.error);
@@ -1398,20 +1477,56 @@ impl Instance {
 
     fn exclude_trace_v1_schema_observations(
         request_schema: &mut TraceRequestSchema,
-        chunk_states: &mut [TraceChunkSchemaState],
+        chunks: &mut Vec<TraceChunkRetry>,
+        chunk_states: &mut Vec<TraceChunkSchemaState>,
         exclusions: &TraceSchemaExclusions,
-    ) {
+    ) -> ServerResult<()> {
+        if chunks.len() != chunk_states.len() {
+            return error::InternalSnafu {
+                err_msg: format!(
+                    "trace chunk count {} does not match state count {}",
+                    chunks.len(),
+                    chunk_states.len()
+                ),
+            }
+            .fail();
+        }
+
         let batch_indexes = exclusions
             .values()
             .flatten()
             .copied()
             .collect::<HashSet<_>>();
-        for batch_index in &batch_indexes {
-            if let Some(state) = chunk_states.get_mut(*batch_index) {
+        let previous_chunks = std::mem::take(chunks);
+        let previous_states = std::mem::take(chunk_states);
+        for (batch_index, (chunk, mut state)) in
+            previous_chunks.into_iter().zip(previous_states).enumerate()
+        {
+            if !batch_indexes.contains(&batch_index) {
+                chunks.push(chunk);
+                chunk_states.push(state);
+            } else if chunk.rows.len() <= 1 {
                 state.mark_for_reconcile();
+                chunks.push(chunk);
+                chunk_states.push(state);
+            } else {
+                let split_chunks = chunk.into_single_span_chunks()?;
+                chunk_states.extend(std::iter::repeat_n(
+                    TraceChunkSchemaState::Prepared,
+                    split_chunks.len(),
+                ));
+                chunks.extend(split_chunks);
             }
         }
-        request_schema.remove_batches(&batch_indexes);
+
+        *request_schema = TraceRequestSchema::default();
+        for (batch_index, (chunk, state)) in chunks.iter().zip(chunk_states.iter()).enumerate() {
+            if *state == TraceChunkSchemaState::Prepared {
+                request_schema.observe_retry_chunk(batch_index, chunk)?;
+            }
+        }
+
+        Ok(())
     }
 
     async fn apply_trace_v1_pre_alter(
@@ -1423,6 +1538,7 @@ impl Instance {
         let TraceTablePreAlter {
             ensure_columns,
             modify_float64_columns,
+            alter_existing,
         } = pre_alter;
 
         if !ensure_columns.is_empty() {
@@ -1430,6 +1546,7 @@ impl Instance {
                 .ensure_trace_table_on_demand(
                     table_name,
                     ensure_columns,
+                    alter_existing,
                     ctx,
                     &self.statement_executor,
                 )
@@ -1446,7 +1563,14 @@ impl Instance {
         Ok(())
     }
 
-    fn classify_trace_chunk_failure(status: StatusCode) -> ChunkFailureReaction {
+    fn classify_trace_prewrite_failure(
+        status: StatusCode,
+        retryable: bool,
+    ) -> ChunkFailureReaction {
+        if retryable {
+            return ChunkFailureReaction::Propagate;
+        }
+
         match status {
             StatusCode::InvalidArguments
             | StatusCode::InvalidSyntax
@@ -1454,22 +1578,8 @@ impl Instance {
             | StatusCode::TableNotFound
             | StatusCode::TableColumnNotFound => ChunkFailureReaction::RetryPerSpan,
             StatusCode::DatabaseNotFound => ChunkFailureReaction::DiscardChunk,
-            StatusCode::Cancelled | StatusCode::DeadlineExceeded => ChunkFailureReaction::Propagate,
-            StatusCode::StorageUnavailable
-            | StatusCode::RuntimeResourcesExhausted
-            | StatusCode::Internal
-            | StatusCode::RegionNotReady
-            | StatusCode::TableUnavailable
-            | StatusCode::RegionBusy => ChunkFailureReaction::Propagate,
-            _ => ChunkFailureReaction::DiscardChunk,
+            _ => ChunkFailureReaction::Propagate,
         }
-    }
-
-    fn should_propagate_trace_span_failure(status: StatusCode) -> bool {
-        matches!(
-            Self::classify_trace_chunk_failure(status),
-            ChunkFailureReaction::Propagate
-        )
     }
 
     fn add_trace_write_cost(outcome: &mut TraceIngestOutcome, cost: usize) {
