@@ -493,7 +493,7 @@ fn timestamp_table(
     )]));
     let recordbatch = RecordBatch::new(
         schema.clone(),
-        vec![Arc::new(TimestampSecondVector::from(vec![timestamp]))],
+        vec![Arc::new(TimestampSecondVector::from(vec![timestamp])) as VectorRef],
     )
     .unwrap();
 
@@ -511,7 +511,7 @@ async fn query_timestamp_with_mysql_text_protocol(
     let result = async {
         let server_addr = mysql_server.bind_addr().unwrap();
         let mut connection = create_connection_default_db_name(server_addr.port(), false).await?;
-        let result = connection
+        let mut result = connection
             .query_iter(format!("SELECT ts FROM {table_name}"))
             .await?;
         result.collect::<MysqlTextRow>().await
