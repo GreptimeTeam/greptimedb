@@ -21,13 +21,16 @@ use datatypes::prelude::ConcreteDataType;
 use datatypes::value::{Value, ValueRef};
 use memcomparable::{Deserializer, Serializer};
 use serde::{Deserialize, Serialize};
-use snafu::ResultExt;
+use snafu::{ResultExt, ensure};
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::ColumnId;
 use store_api::storage::consts::ReservedColumnId;
 
-use crate::error::{DeserializeFieldSnafu, Result, SerializeFieldSnafu, UnsupportedOperationSnafu};
+use crate::error::{
+    DeserializeFieldSnafu, InvalidSparsePrimaryKeySnafu, Result, SerializeFieldSnafu,
+    UnsupportedOperationSnafu,
+};
 use crate::key_values::KeyValue;
 use crate::primary_key_filter::SparsePrimaryKeyFilter;
 use crate::row_converter::dense::SortField;
@@ -344,6 +347,57 @@ impl SparsePrimaryKeyCodec {
         buffer.put_u8(1);
         buffer.put_u64(tsid);
         Ok(())
+    }
+
+    /// Decodes the reserved `(table_id, tsid)` prefix from a sparse primary key.
+    pub fn decode_internal(&self, bytes: &[u8]) -> Result<(u32, u64)> {
+        // Two column IDs, two non-null markers, a u32 table ID, and a u64 TSID.
+        const INTERNAL_PREFIX_LEN: usize = 4 + 1 + 4 + 4 + 1 + 8;
+        ensure!(
+            bytes.len() >= INTERNAL_PREFIX_LEN,
+            InvalidSparsePrimaryKeySnafu {
+                reason: format!(
+                    "internal prefix requires at least {INTERNAL_PREFIX_LEN} bytes, got {}",
+                    bytes.len()
+                ),
+            }
+        );
+
+        let mut deserializer = Deserializer::new(bytes);
+
+        let table_id_column = u32::deserialize(&mut deserializer).context(DeserializeFieldSnafu)?;
+        ensure!(
+            table_id_column == RESERVED_COLUMN_ID_TABLE_ID,
+            InvalidSparsePrimaryKeySnafu {
+                reason: format!(
+                    "expected table id column {}, got {}",
+                    RESERVED_COLUMN_ID_TABLE_ID, table_id_column
+                ),
+            }
+        );
+        let table_id = self.inner.table_id_field.deserialize(&mut deserializer)?;
+
+        let tsid_column = u32::deserialize(&mut deserializer).context(DeserializeFieldSnafu)?;
+        ensure!(
+            tsid_column == RESERVED_COLUMN_ID_TSID,
+            InvalidSparsePrimaryKeySnafu {
+                reason: format!(
+                    "expected tsid column {}, got {}",
+                    RESERVED_COLUMN_ID_TSID, tsid_column
+                ),
+            }
+        );
+        let tsid = self.inner.tsid_field.deserialize(&mut deserializer)?;
+
+        match (table_id, tsid) {
+            (Value::UInt32(table_id), Value::UInt64(tsid)) => Ok((table_id, tsid)),
+            (table_id, tsid) => InvalidSparsePrimaryKeySnafu {
+                reason: format!(
+                    "expected UInt32 table id and UInt64 tsid, got {table_id:?} and {tsid:?}"
+                ),
+            }
+            .fail(),
+        }
     }
 
     /// Decodes the given bytes into a [`SparseValues`].
@@ -803,6 +857,21 @@ mod tests {
         assert!(!buffer.is_empty());
         let result = codec.decode_leftmost(&buffer).unwrap().unwrap();
         assert_eq!(result, Value::UInt32(42));
+    }
+
+    #[test]
+    fn test_decode_internal() {
+        let region_metadata = test_region_metadata();
+        let codec = SparsePrimaryKeyCodec::new(&region_metadata);
+        let mut buffer = Vec::new();
+        codec.encode_internal(42, 100, &mut buffer).unwrap();
+
+        assert_eq!((42, 100), codec.decode_internal(&buffer).unwrap());
+
+        let mut invalid = buffer.clone();
+        invalid[0..4].copy_from_slice(&1_u32.to_be_bytes());
+        assert!(codec.decode_internal(&invalid).is_err());
+        assert!(codec.decode_internal(&buffer[..buffer.len() - 1]).is_err());
     }
 
     #[test]

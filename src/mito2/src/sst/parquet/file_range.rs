@@ -49,6 +49,8 @@ use crate::sst::file::FileHandle;
 use crate::sst::parquet::flat_format::{
     DecodedPrimaryKeys, FlatReadFormat, decode_primary_keys, time_index_column_index,
 };
+use crate::sst::parquet::prefilter::CachedPrimaryKeyFilter;
+use crate::sst::parquet::reader::stream::ProjectedRecordBatchStream;
 use crate::sst::parquet::reader::{
     FlatRowGroupReader, MaybeFilter, RowGroupBuildContext, RowGroupReaderBuilder,
     SimpleFilterContext,
@@ -95,6 +97,11 @@ pub struct FileRange {
 }
 
 impl FileRange {
+    /// Builds the encoded-primary-key filter selected for this file.
+    pub(crate) fn primary_key_filter(&self) -> Option<CachedPrimaryKeyFilter> {
+        self.context.reader_builder.primary_key_filter()
+    }
+
     /// Creates a new [FileRange].
     pub(crate) fn new(
         context: FileRangeContextRef,
@@ -222,6 +229,27 @@ impl FileRange {
         };
 
         Ok(Some(flat_prune_reader))
+    }
+
+    /// Creates a reader that returns only the encoded primary-key column.
+    pub(crate) async fn primary_key_reader(
+        &self,
+        fetch_metrics: Option<&ParquetFetchMetrics>,
+    ) -> Result<Option<ProjectedRecordBatchStream>> {
+        if !self.in_dynamic_filter_range() {
+            return Ok(None);
+        }
+
+        let stream = self
+            .context
+            .reader_builder
+            .build_primary_key(self.context.build_context(
+                self.row_group_idx,
+                self.row_selection.clone(),
+                fetch_metrics,
+            ))
+            .await?;
+        Ok(Some(stream))
     }
 
     /// Returns the helper to compat batches.
