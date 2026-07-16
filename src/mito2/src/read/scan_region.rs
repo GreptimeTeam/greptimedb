@@ -65,7 +65,7 @@ use crate::read::flat_projection::FlatProjectionMapper;
 use crate::read::range::{FileRangeBuilder, MemRangeBuilder, RangeMeta, RowGroupIndex};
 use crate::read::range_cache::{ScanRequestFingerprint, implied_time_range_from_exprs};
 use crate::read::read_columns::{
-    ReadColumns, merge, merge_nested_paths, read_columns_from_predicate,
+    NestedReadStrategy, ReadColumns, merge, merge_nested_paths, read_columns_from_predicate,
     read_columns_from_projection,
 };
 use crate::read::seq_scan::SeqScan;
@@ -1500,7 +1500,8 @@ fn narrow_read_columns_by_json_type_hint(
         let mut paths = Vec::new();
         let mut current = vec![column_name.clone()];
         collect_json_nested_paths(json_type, &mut current, &mut paths);
-        merge_nested_paths(&mut read_column.nested_paths, paths)
+        merge_nested_paths(&mut read_column.nested_paths, paths);
+        read_column.nested_path_read_strategy = NestedReadStrategy::FallbackToNearestVariantParent;
     }
 }
 
@@ -2182,6 +2183,9 @@ mod tests {
                     ReadColumn::new(
                         1,
                         vec![nested_path(&["j", "a"]), nested_path(&["j", "b", "c"])]
+                    )
+                    .with_nested_path_read_strategy(
+                        NestedReadStrategy::FallbackToNearestVariantParent
                     ),
                     ReadColumn::new(0, vec![])
                 ]

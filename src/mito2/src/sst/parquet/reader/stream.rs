@@ -71,6 +71,35 @@ pub struct NestedSchemaAligner<S> {
 
 pub(crate) type ProjectedRecordBatchStream = BoxStream<'static, Result<RecordBatch>>;
 
+pub(crate) fn json2_fallback_output_schema(
+    output_schema: &SchemaRef,
+    plan: &Json2FallbackPlan,
+) -> SchemaRef {
+    if plan.is_empty() {
+        return output_schema.clone();
+    }
+
+    let fields = output_schema
+        .fields()
+        .iter()
+        .enumerate()
+        .map(|(output_root_index, field)| {
+            let items = plan
+                .items
+                .iter()
+                .filter(|item| item.output_root_index == output_root_index)
+                .collect::<Vec<_>>();
+            if items.is_empty() {
+                field.clone()
+            } else {
+                let path = vec![field.name().clone()];
+                expand_fallback_field(field, &path, &items)
+            }
+        })
+        .collect::<Vec<_>>();
+    Arc::new(Schema::new(fields))
+}
+
 /// Recovers requested JSON2 nested paths from fallback parent values.
 #[derive(derive_more::Debug)]
 pub struct Json2FallbackDecoder<S> {
@@ -192,6 +221,94 @@ fn recover_json2_fallbacks(
     }
 
     RecordBatch::try_new(Arc::new(Schema::new(fields)), columns).context(NewRecordBatchSnafu)
+}
+
+fn expand_fallback_field(
+    field: &FieldRef,
+    path: &[String],
+    items: &[&Json2FallbackItem],
+) -> FieldRef {
+    if items.iter().any(|item| item.source_path == path) {
+        return field_with_data_type(
+            field,
+            DataType::Struct(fallback_fields_from_requested_paths(path, items)),
+        );
+    }
+
+    let DataType::Struct(fields) = field.data_type() else {
+        return field.clone();
+    };
+
+    let mut expanded_fields = Vec::new();
+    let mut child_names = fields
+        .iter()
+        .map(|field| field.name().clone())
+        .collect::<Vec<_>>();
+    for name in requested_child_names(path, items) {
+        if !child_names.contains(&name) {
+            child_names.push(name);
+        }
+    }
+
+    for name in child_names {
+        let mut child_path = path.to_vec();
+        child_path.push(name.clone());
+        if let Some(field) = fields.iter().find(|field| field.name() == &name) {
+            expanded_fields.push(expand_fallback_field(field, &child_path, items));
+        } else {
+            expanded_fields.push(fallback_field_from_requested_paths(
+                &name,
+                &child_path,
+                items,
+            ));
+        }
+    }
+
+    field_with_data_type(field, DataType::Struct(Fields::from(expanded_fields)))
+}
+
+fn fallback_fields_from_requested_paths(path: &[String], items: &[&Json2FallbackItem]) -> Fields {
+    let fields = requested_child_names(path, items)
+        .into_iter()
+        .map(|name| {
+            let mut child_path = path.to_vec();
+            child_path.push(name.clone());
+            fallback_field_from_requested_paths(&name, &child_path, items)
+        })
+        .collect::<Vec<_>>();
+    Fields::from(fields)
+}
+
+fn fallback_field_from_requested_paths(
+    name: &str,
+    path: &[String],
+    items: &[&Json2FallbackItem],
+) -> FieldRef {
+    let data_type = if items.iter().any(|item| {
+        item.requested_paths
+            .iter()
+            .any(|requested_path| requested_path == path)
+    }) {
+        DataType::Binary
+    } else {
+        DataType::Struct(fallback_fields_from_requested_paths(path, items))
+    };
+    Arc::new(Field::new(name, data_type, true))
+}
+
+fn requested_child_names(path: &[String], items: &[&Json2FallbackItem]) -> Vec<String> {
+    let mut names = Vec::new();
+    for item in items {
+        for requested_path in &item.requested_paths {
+            if requested_path.starts_with(path)
+                && let Some(name) = requested_path.get(path.len())
+                && !names.contains(name)
+            {
+                names.push(name.clone());
+            }
+        }
+    }
+    names
 }
 
 fn recover_json2_root(
@@ -336,21 +453,19 @@ fn build_json2_struct(
                     .position(|existing_field| existing_field.name() == field.name())
                     .map(|idx| struct_array.column(idx).clone())
             });
-            let existing_child =
-                existing_child.unwrap_or_else(|| new_null_array(field.data_type(), existing.len()));
-            let DataType::Struct(child_fields) = field.data_type() else {
-                return UnexpectedSnafu {
-                    reason: format!(
-                        "Json2FallbackDecoder expected struct field for nested path {child_path}, got {}",
-                        field.data_type()
-                    ),
-                }
-                .fail();
+            let existing_child = existing_child.unwrap_or_else(|| {
+                let data_type = fallback_struct_type(&child_path, &nested_extracted)
+                    .unwrap_or_else(|| field.data_type().clone());
+                new_null_array(&data_type, existing.len())
+            });
+            let child_fields = match field.data_type() {
+                DataType::Struct(fields) => fields.clone(),
+                _ => fallback_struct_fields(&child_path, &nested_extracted),
             };
             let child = build_json2_struct(
                 &existing_child,
                 &child_path,
-                child_fields,
+                &child_fields,
                 &nested_extracted,
             )?;
             output_fields.push(field_with_data_type(field, child.data_type().clone()));
@@ -384,6 +499,40 @@ fn build_json2_struct(
         .build()
     })?;
     Ok(Arc::new(array))
+}
+
+fn fallback_struct_type(
+    path: &str,
+    extracted: &[(ParquetNestedPath, ArrayRef)],
+) -> Option<DataType> {
+    Some(DataType::Struct(fallback_struct_fields(path, extracted)))
+}
+
+fn fallback_struct_fields(path: &str, extracted: &[(ParquetNestedPath, ArrayRef)]) -> Fields {
+    let mut fields = Vec::new();
+    let prefix_len = path.split('.').count();
+
+    for (requested_path, array) in extracted {
+        let Some(name) = requested_path.get(prefix_len) else {
+            continue;
+        };
+        if fields
+            .iter()
+            .any(|field: &FieldRef| field.name().as_str() == name)
+        {
+            continue;
+        }
+
+        let data_type = if requested_path.len() == prefix_len + 1 {
+            array.data_type().clone()
+        } else {
+            fallback_struct_type(&format!("{path}.{name}"), extracted)
+                .unwrap_or_else(|| DataType::Binary)
+        };
+        fields.push(Arc::new(Field::new(name, data_type, true)));
+    }
+
+    Fields::from(fields)
 }
 
 fn field_with_data_type(field: &FieldRef, data_type: DataType) -> FieldRef {

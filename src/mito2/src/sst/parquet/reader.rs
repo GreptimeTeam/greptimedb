@@ -50,7 +50,10 @@ use store_api::region_request::PathType;
 use store_api::storage::{ColumnId, FileId};
 use table::predicate::Predicate;
 
-use self::stream::{Json2FallbackDecoder, NestedSchemaAligner, ProjectedRecordBatchStream};
+use self::stream::{
+    Json2FallbackDecoder, NestedSchemaAligner, ProjectedRecordBatchStream,
+    json2_fallback_output_schema,
+};
 use crate::cache::index::result_cache::PredicateKey;
 use crate::cache::{CacheStrategy, CachedSstMeta};
 #[cfg(feature = "vector_index")]
@@ -1851,6 +1854,8 @@ impl RowGroupReaderBuilder {
             return Ok(stream);
         }
 
+        let output_schema =
+            json2_fallback_output_schema(&self.output_schema, &self.projection.json2_fallback_plan);
         let stream = if self.projection.json2_fallback_plan.is_empty() {
             stream
         } else {
@@ -1858,7 +1863,7 @@ impl RowGroupReaderBuilder {
                 stream,
                 self.projection.projected_root_presence.clone(),
                 self.projection.json2_fallback_plan.clone(),
-                self.output_schema.clone(),
+                output_schema.clone(),
             )?
             .boxed()
         };
@@ -1866,7 +1871,7 @@ impl RowGroupReaderBuilder {
         Ok(NestedSchemaAligner::new(
             stream,
             self.projection.projected_root_presence.clone(),
-            self.output_schema.clone(),
+            output_schema,
         )?
         .boxed())
     }
