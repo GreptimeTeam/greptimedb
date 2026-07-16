@@ -49,9 +49,7 @@ use crate::read::range_cache::{
     build_candidate_range_cache_key, cache_flat_range_stream, cached_flat_range_stream,
 };
 use crate::read::scan_region::StreamContext;
-use crate::read::scan_util::{
-    PartitionMetrics, maybe_scan_flat_other_ranges, new_filter_metrics, scan_flat_mem_ranges,
-};
+use crate::read::scan_util::{PartitionMetrics, new_filter_metrics, scan_flat_mem_ranges};
 use crate::sst::parquet::DEFAULT_READ_BATCH_SIZE;
 use crate::sst::parquet::format::PrimaryKeyArray;
 use crate::sst::parquet::prefilter::{
@@ -85,6 +83,10 @@ pub(crate) struct SeriesCandidateScanner {
 
 #[allow(dead_code)]
 impl SeriesCandidateScanner {
+    /// Creates a candidate-series scanner for native memtable and SST ranges.
+    ///
+    /// Callers must fall back to the legacy series-scan path when the scan contains
+    /// extension ranges. Candidate-series discovery does not support other range types.
     pub(crate) fn try_new(
         stream_ctx: Arc<StreamContext>,
         partitions: Vec<Vec<PartitionRange>>,
@@ -95,6 +97,14 @@ impl SeriesCandidateScanner {
         part_metrics: PartitionMetrics,
     ) -> Result<Self> {
         validate_metric_metadata(&stream_ctx)?;
+        #[cfg(feature = "enterprise")]
+        ensure!(
+            stream_ctx.input.extension_ranges().is_empty(),
+            InvalidRequestSnafu {
+                region_id: stream_ctx.input.region_metadata().region_id,
+                reason: "candidate-series scan does not support extension ranges; use the legacy series-scan path",
+            }
+        );
         Ok(Self {
             stream_ctx,
             partitions,
@@ -154,12 +164,7 @@ impl SeriesCandidateScanner {
         let mut sources = Vec::with_capacity(range_meta.row_group_indices.len());
         for index in &range_meta.row_group_indices {
             let source = self
-                .build_source(
-                    *index,
-                    range_meta.time_range,
-                    &part_range,
-                    partition_pruner.clone(),
-                )
+                .build_source(*index, range_meta.time_range, partition_pruner.clone())
                 .await?;
             if let Some(source) = source {
                 sources.push(source);
@@ -194,7 +199,6 @@ impl SeriesCandidateScanner {
         &self,
         index: RowGroupIndex,
         time_range: crate::sst::file::FileTimeRange,
-        part_range: &PartitionRange,
         partition_pruner: Arc<PartitionPruner>,
     ) -> Result<Option<BoxedRecordBatchStream>> {
         let metadata = self.stream_ctx.input.region_metadata().clone();
@@ -265,18 +269,13 @@ impl SeriesCandidateScanner {
             return Ok(Some(candidate_primary_key_stream(raw, filter)));
         }
 
-        let raw = maybe_scan_flat_other_ranges(
-            &self.stream_ctx,
-            index,
-            &self.part_metrics,
-            self.stream_ctx.range_pre_filter_mode(part_range),
-        )
-        .await?;
-        let filter = build_primary_key_filter(
-            &metadata,
-            self.stream_ctx.input.predicate_group().predicate(),
-        );
-        Ok(Some(candidate_primary_key_stream(raw, filter)))
+        UnexpectedSnafu {
+            reason: format!(
+                "candidate-series scan received unsupported range index {}",
+                index.index
+            ),
+        }
+        .fail()
     }
 }
 
