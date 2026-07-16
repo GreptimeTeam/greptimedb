@@ -21,9 +21,11 @@ use common_catalog::consts::DEFAULT_SCHEMA_NAME;
 use common_recordbatch::RecordBatch;
 use common_runtime::Builder as RuntimeBuilder;
 use common_runtime::runtime::BuilderBuild;
+use common_time::Timestamp;
 use datatypes::prelude::VectorRef;
 use datatypes::schema::{ColumnSchema, Schema};
 use datatypes::value::Value;
+use datatypes::vectors::TimestampSecondVector;
 use mysql_async::prelude::*;
 use mysql_async::{Conn, Row, SslOpts};
 use servers::error::Result;
@@ -420,6 +422,104 @@ async fn do_test_query_all_datatypes(server_tls: TlsOption, client_tls: bool) ->
         assert_eq!(expected, &actual.values);
     }
     Ok(())
+}
+
+#[tokio::test]
+async fn test_mysql_text_protocol_out_of_range_non_nullable_timestamp() -> Result<()> {
+    let value = i64::MAX;
+    assert!(
+        Timestamp::new_second(value)
+            .to_chrono_datetime_with_timezone(None)
+            .is_none(),
+        "the target value must be outside Chrono's timestamp range"
+    );
+
+    let (table, schema) = timestamp_table("out_of_range_timestamp", Some(value), false);
+    assert!(
+        !schema.column_schemas()[0].is_nullable(),
+        "the target timestamp column must be non-nullable"
+    );
+
+    match query_timestamp_with_mysql_text_protocol(table, "out_of_range_timestamp").await {
+        Ok(rows) => {
+            assert_eq!(1, rows.len());
+            assert!(
+                matches!(rows[0].values.as_slice(), [Value::Binary(_)]),
+                "an out-of-range non-null timestamp must not be encoded as SQL NULL"
+            );
+        }
+        Err(mysql_async::Error::Server(_)) => {}
+        Err(error) => panic!("expected a MySQL server range/conversion error, got: {error}"),
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_mysql_text_protocol_in_range_timestamp_is_non_null() -> Result<()> {
+    let (table, _) = timestamp_table("in_range_timestamp", Some(0), false);
+
+    let rows = query_timestamp_with_mysql_text_protocol(table, "in_range_timestamp")
+        .await
+        .unwrap();
+    assert_eq!(1, rows.len());
+    assert!(matches!(rows[0].values.as_slice(), [Value::Binary(_)]));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_mysql_text_protocol_null_timestamp_is_sql_null() -> Result<()> {
+    let (table, _) = timestamp_table("null_timestamp", None, true);
+
+    let rows = query_timestamp_with_mysql_text_protocol(table, "null_timestamp")
+        .await
+        .unwrap();
+    assert_eq!(1, rows.len());
+    assert_eq!(vec![Value::Null], rows[0].values);
+
+    Ok(())
+}
+
+fn timestamp_table(
+    table_name: &str,
+    timestamp: Option<i64>,
+    nullable: bool,
+) -> (TableRef, Arc<Schema>) {
+    let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
+        "ts",
+        datatypes::prelude::ConcreteDataType::timestamp_second_datatype(),
+        nullable,
+    )]));
+    let recordbatch = RecordBatch::new(
+        schema.clone(),
+        vec![Arc::new(TimestampSecondVector::from(vec![timestamp]))],
+    )
+    .unwrap();
+
+    (MemTable::table(table_name, recordbatch), schema)
+}
+
+async fn query_timestamp_with_mysql_text_protocol(
+    table: TableRef,
+    table_name: &str,
+) -> mysql_async::Result<Vec<MysqlTextRow>> {
+    let mut mysql_server = create_mysql_server(table, Default::default()).unwrap();
+    let listening = "127.0.0.1:0".parse::<SocketAddr>().unwrap();
+    mysql_server.start(listening).await.unwrap();
+
+    let result = async {
+        let server_addr = mysql_server.bind_addr().unwrap();
+        let mut connection = create_connection_default_db_name(server_addr.port(), false).await?;
+        let result = connection
+            .query_iter(format!("SELECT ts FROM {table_name}"))
+            .await?;
+        result.collect::<MysqlTextRow>().await
+    }
+    .await;
+
+    mysql_server.shutdown().await.unwrap();
+    result
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
