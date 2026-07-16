@@ -34,7 +34,9 @@ use store_api::storage::{FileId, RegionId};
 use tokio::sync::mpsc::{Sender, UnboundedReceiver};
 
 use crate::access_layer::TempFileCleaner;
-use crate::cache::{CachedSstMeta, FILE_TYPE, INDEX_TYPE};
+use crate::cache::{
+    CachedSstMeta, FILE_TYPE, INDEX_TYPE, SstMetaPreparation, decode_sst_meta, prepare_sst_meta,
+};
 use crate::error::{self, OpenDalSnafu, Result};
 use crate::metrics::{
     CACHE_BYTES, CACHE_HIT, CACHE_MISS, WRITE_CACHE_DOWNLOAD_BYTES_TOTAL,
@@ -619,35 +621,56 @@ impl FileCache {
 
     /// Get fused SST metadata from the file cache.
     /// If the file is not in the cache, or metadata loading/decoding fails, return None.
+    /// Compact cache encoding failures return decoded-only metadata to the caller.
     pub(crate) async fn get_sst_meta_data(
+        &self,
+        key: IndexKey,
+        cache_metrics: &mut MetadataCacheMetrics,
+        page_index_policy: PageIndexPolicy,
+    ) -> Option<SstMetaPreparation> {
+        let file_path = self.inner.cache_file_path(key);
+        let metadata = self
+            .get_parquet_meta_data(key, cache_metrics, page_index_policy)
+            .await?;
+        match prepare_sst_meta(&file_path, metadata, None, page_index_policy).await {
+            Ok(metadata) => Some(metadata),
+            Err(err) => {
+                CACHE_MISS
+                    .with_label_values(&[key.file_type.metric_label()])
+                    .inc();
+                warn!(
+                    err; "Failed to prepare cached parquet metadata for key {:?}",
+                    key
+                );
+                None
+            }
+        }
+    }
+
+    /// Gets decoded SST metadata without preparing an in-memory cache entry.
+    pub(crate) async fn get_decoded_sst_meta_data(
         &self,
         key: IndexKey,
         cache_metrics: &mut MetadataCacheMetrics,
         page_index_policy: PageIndexPolicy,
     ) -> Option<Arc<CachedSstMeta>> {
         let file_path = self.inner.cache_file_path(key);
-        self.get_parquet_meta_data(key, cache_metrics, page_index_policy)
-            .await
-            .and_then(|metadata| {
-                match CachedSstMeta::try_new_with_page_index_policy(
-                    &file_path,
-                    metadata,
-                    None,
-                    page_index_policy,
-                ) {
-                    Ok(metadata) => Some(Arc::new(metadata)),
-                    Err(err) => {
-                        CACHE_MISS
-                            .with_label_values(&[key.file_type.metric_label()])
-                            .inc();
-                        warn!(
-                            err; "Failed to decode cached parquet metadata for key {:?}",
-                            key
-                        );
-                        None
-                    }
-                }
-            })
+        let metadata = self
+            .get_parquet_meta_data(key, cache_metrics, page_index_policy)
+            .await?;
+        match decode_sst_meta(&file_path, metadata, None, page_index_policy).await {
+            Ok(metadata) => Some(metadata),
+            Err(err) => {
+                CACHE_MISS
+                    .with_label_values(&[key.file_type.metric_label()])
+                    .inc();
+                warn!(
+                    err; "Failed to decode cached parquet metadata for key {:?}",
+                    key
+                );
+                None
+            }
+        }
     }
 
     async fn get_reader(&self, file_path: &str) -> object_store::Result<Option<Reader>> {
