@@ -39,7 +39,6 @@ use crate::kafka::producer::ProducerClient;
 pub(crate) enum WorkerRequest {
     Produce(ProduceRequest),
     TruncateIndex(TruncateIndexRequest),
-    TruncateAllIndex(TruncateAllIndexRequest),
     DumpIndex(DumpIndexRequest),
     FetchLatestOffset,
 }
@@ -78,40 +77,11 @@ impl DumpIndexRequest {
             rx,
         )
     }
-
-    #[cfg(test)]
-    pub(crate) fn apply(self, collector: &mut dyn IndexCollector) {
-        collector.dump(self.encoder.as_ref());
-        let _ = self.sender.send(());
-    }
 }
 
 pub(crate) struct TruncateIndexRequest {
     region_id: RegionId,
     entry_id: EntryId,
-}
-
-pub(crate) struct TruncateAllIndexRequest {
-    region_id: RegionId,
-    sender: oneshot::Sender<()>,
-}
-
-impl TruncateAllIndexRequest {
-    pub(crate) fn new(region_id: RegionId) -> (Self, oneshot::Receiver<()>) {
-        let (tx, rx) = oneshot::channel();
-        (
-            Self {
-                region_id,
-                sender: tx,
-            },
-            rx,
-        )
-    }
-
-    pub(crate) fn apply(self, collector: &mut dyn IndexCollector) {
-        collector.truncate_all(self.region_id);
-        let _ = self.sender.send(());
-    }
 }
 
 impl TruncateIndexRequest {
@@ -223,18 +193,12 @@ impl BackgroundProducerWorker {
     async fn handle_requests(&mut self, buffer: &mut Vec<WorkerRequest>) {
         let mut produce_requests = Vec::with_capacity(buffer.len());
         for req in buffer.drain(..) {
-            if !matches!(req, WorkerRequest::Produce(_)) && !produce_requests.is_empty() {
-                let pending_requests =
-                    self.aggregate_records(&mut produce_requests, self.max_batch_bytes);
-                self.try_flush_pending_requests(pending_requests).await;
-            }
             match req {
                 WorkerRequest::Produce(req) => produce_requests.push(req),
                 WorkerRequest::TruncateIndex(TruncateIndexRequest {
                     region_id,
                     entry_id,
                 }) => self.index_collector.truncate(region_id, entry_id),
-                WorkerRequest::TruncateAllIndex(req) => req.apply(self.index_collector.as_mut()),
                 WorkerRequest::DumpIndex(req) => self.dump_index(req).await,
                 WorkerRequest::FetchLatestOffset => {
                     self.fetch_latest_offset().await;
@@ -244,91 +208,5 @@ impl BackgroundProducerWorker {
 
         let pending_requests = self.aggregate_records(&mut produce_requests, self.max_batch_bytes);
         self.try_flush_pending_requests(pending_requests).await;
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::sync::{Arc, Mutex};
-
-    use async_trait::async_trait;
-    use rskafka::client::partition::{Compression, OffsetAt};
-
-    use super::*;
-    use crate::kafka::index::IndexCollector;
-    use crate::kafka::producer::{ProduceResult, ProducerClient};
-    use crate::kafka::test_util::record;
-
-    #[derive(Debug)]
-    struct MockClient;
-
-    #[async_trait]
-    impl ProducerClient for MockClient {
-        async fn produce(
-            &self,
-            records: Vec<Record>,
-            _compression: Compression,
-        ) -> rskafka::client::error::Result<ProduceResult> {
-            Ok(ProduceResult {
-                offsets: (0..records.len() as i64).collect(),
-                encoded_request_size: 0,
-            })
-        }
-
-        async fn get_offset(&self, _at: OffsetAt) -> rskafka::client::error::Result<i64> {
-            Ok(0)
-        }
-    }
-
-    struct RecordingCollector {
-        events: Arc<Mutex<Vec<&'static str>>>,
-    }
-
-    impl IndexCollector for RecordingCollector {
-        fn append(&mut self, _region_id: RegionId, _entry_id: EntryId) {
-            self.events.lock().unwrap().push("append");
-        }
-
-        fn truncate(&mut self, _region_id: RegionId, _entry_id: EntryId) {}
-
-        fn truncate_all(&mut self, _region_id: RegionId) {
-            self.events.lock().unwrap().push("truncate_all");
-        }
-
-        fn set_latest_entry_id(&mut self, _entry_id: EntryId) {}
-
-        fn dump(&mut self, _encoder: &dyn IndexEncoder) {}
-    }
-
-    #[tokio::test]
-    async fn test_truncate_all_is_ordered_after_earlier_produce() {
-        let region_id = RegionId::new(1, 1);
-        let events = Arc::new(Mutex::new(Vec::new()));
-        let (_tx, rx) = tokio::sync::mpsc::channel(8);
-        let mut worker = BackgroundProducerWorker {
-            provider: Arc::new(KafkaProvider::new("test_topic".to_string())),
-            client: Arc::new(MockClient),
-            compression: Compression::NoCompression,
-            receiver: rx,
-            request_batch_size: 8,
-            max_batch_bytes: 1024,
-            index_collector: Box::new(RecordingCollector {
-                events: events.clone(),
-            }),
-            topic_stats: Arc::new(DashMap::new()),
-        };
-        let (produce, produce_handle) =
-            WorkerRequest::new_produce_request(region_id, vec![record()]);
-        let (truncate_all, truncate_all_receiver) = TruncateAllIndexRequest::new(region_id);
-        let mut requests = vec![produce, WorkerRequest::TruncateAllIndex(truncate_all)];
-
-        worker.handle_requests(&mut requests).await;
-        produce_handle.wait().await.unwrap();
-        truncate_all_receiver.await.unwrap();
-
-        assert_eq!(
-            &["append", "truncate_all"],
-            events.lock().unwrap().as_slice()
-        );
     }
 }
