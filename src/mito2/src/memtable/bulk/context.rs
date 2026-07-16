@@ -26,6 +26,7 @@ use table::predicate::Predicate;
 
 use crate::error::Result;
 use crate::read::read_columns::ReadColumns;
+use crate::sst::parquet::DEFAULT_READ_BATCH_SIZE;
 use crate::sst::parquet::file_range::{PreFilterMode, RangeBase};
 use crate::sst::parquet::flat_format::FlatReadFormat;
 use crate::sst::parquet::prefilter::{CachedPrimaryKeyFilter, build_bulk_filter_plan};
@@ -39,6 +40,7 @@ pub struct BulkIterContext {
     /// Pre-extracted primary key filters for PK prefiltering.
     /// `None` if PK prefiltering is not applicable.
     pk_filters: Option<Arc<Vec<SimpleFilterEvaluator>>>,
+    batch_size: usize,
 }
 
 impl BulkIterContext {
@@ -54,6 +56,24 @@ impl BulkIterContext {
             predicate,
             skip_auto_convert,
             PreFilterMode::All,
+            DEFAULT_READ_BATCH_SIZE,
+        )
+    }
+
+    pub fn new_with_batch_size(
+        region_metadata: RegionMetadataRef,
+        projection: Option<&[ColumnId]>,
+        predicate: Option<Predicate>,
+        skip_auto_convert: bool,
+        batch_size: usize,
+    ) -> Result<Self> {
+        Self::new_with_pre_filter_mode(
+            region_metadata,
+            projection,
+            predicate,
+            skip_auto_convert,
+            PreFilterMode::All,
+            batch_size,
         )
     }
 
@@ -63,6 +83,7 @@ impl BulkIterContext {
         predicate: Option<Predicate>,
         skip_auto_convert: bool,
         pre_filter_mode: PreFilterMode,
+        batch_size: usize,
     ) -> Result<Self> {
         let codec = build_primary_key_codec(&region_metadata);
 
@@ -107,7 +128,12 @@ impl BulkIterContext {
             },
             predicate,
             pk_filters: filter_plan.pk_filters,
+            batch_size: batch_size.clamp(1, DEFAULT_READ_BATCH_SIZE),
         })
+    }
+
+    pub(crate) fn batch_size(&self) -> usize {
+        self.batch_size
     }
 
     /// Prunes row groups by stats.

@@ -62,8 +62,8 @@ use crate::memtable::{
 use crate::read::flat_dedup::{FlatDedupIterator, FlatLastNonNull, FlatLastRow};
 use crate::read::flat_merge::FlatMergeIterator;
 use crate::region::options::MergeMode;
+use crate::sst::parquet::DEFAULT_ROW_GROUP_SIZE;
 use crate::sst::parquet::flat_format::field_column_start;
-use crate::sst::parquet::{DEFAULT_READ_BATCH_SIZE, DEFAULT_ROW_GROUP_SIZE};
 
 /// Default merge threshold for triggering compaction.
 const DEFAULT_MERGE_THRESHOLD: usize = 16;
@@ -175,30 +175,37 @@ impl BulkParts {
         self.unordered_part.is_empty() && self.parts.is_empty()
     }
 
-    /// Returns true if bulk parts or encoded parts should be merged.
-    /// Uses short-circuit counting to stop early once threshold is reached.
-    fn should_merge_parts(&self, merge_threshold: usize) -> bool {
+    /// Returns true if enough small parts of the same type are available to merge.
+    fn should_merge_parts(
+        &self,
+        merge_threshold: usize,
+        max_merge_group_size: Option<usize>,
+    ) -> bool {
         let mut bulk_count = 0;
         let mut encoded_count = 0;
-
         for wrapper in &self.parts {
-            if wrapper.merging {
+            if !Self::is_merge_candidate(wrapper, max_merge_group_size) {
                 continue;
             }
-
             if wrapper.part.is_encoded() {
                 encoded_count += 1;
             } else {
                 bulk_count += 1;
             }
-
-            // Short-circuit: stop counting if either threshold is reached
             if bulk_count >= merge_threshold || encoded_count >= merge_threshold {
                 return true;
             }
         }
 
         false
+    }
+
+    /// Returns whether a part is small enough to benefit from merging.
+    fn is_merge_candidate(wrapper: &BulkPartWrapper, max_merge_group_size: Option<usize>) -> bool {
+        !wrapper.merging
+            && max_merge_group_size
+                .map(|max_size| wrapper.part.estimated_size() < max_size)
+                .unwrap_or(true)
     }
 
     /// Returns true if the unordered_part should be compacted into a BulkPart.
@@ -208,25 +215,26 @@ impl BulkParts {
 
     /// Collects unmerged parts and marks them as being merged.
     /// Only collects parts of types that meet the threshold.
-    /// Parts are pre-grouped into chunks for parallel processing.
+    /// Parts are grouped by estimated size for parallel processing.
     fn collect_parts_to_merge(
         &mut self,
         merge_threshold: usize,
         max_merge_groups: usize,
+        max_merge_group_size: Option<usize>,
     ) -> CollectedParts {
-        // First pass: collect indices and row counts for each type
+        // First pass: collect indices and estimated sizes for each type.
         let mut bulk_indices: Vec<(usize, usize)> = Vec::new();
         let mut encoded_indices: Vec<(usize, usize)> = Vec::new();
 
         for (idx, wrapper) in self.parts.iter().enumerate() {
-            if wrapper.merging {
+            if !Self::is_merge_candidate(wrapper, max_merge_group_size) {
                 continue;
             }
-            let num_rows = wrapper.part.num_rows();
+            let estimated_size = wrapper.part.estimated_size();
             if wrapper.part.is_encoded() {
-                encoded_indices.push((idx, num_rows));
+                encoded_indices.push((idx, estimated_size));
             } else {
-                bulk_indices.push((idx, num_rows));
+                bulk_indices.push((idx, estimated_size));
             }
         }
 
@@ -238,6 +246,7 @@ impl BulkParts {
                 bulk_indices,
                 merge_threshold,
                 max_merge_groups,
+                max_merge_group_size,
             ));
         }
 
@@ -247,41 +256,79 @@ impl BulkParts {
                 encoded_indices,
                 merge_threshold,
                 max_merge_groups,
+                max_merge_group_size,
             ));
         }
 
         CollectedParts { groups }
     }
 
-    /// Sorts indices by row count, groups into chunks, marks as merging, and returns groups.
+    /// Plans groups, marks their parts as merging, and returns cloned parts.
     fn collect_and_group_parts(
         &mut self,
-        mut indices: Vec<(usize, usize)>,
+        indices: Vec<(usize, usize)>,
         merge_threshold: usize,
         max_merge_groups: usize,
+        max_merge_group_size: Option<usize>,
     ) -> Vec<Vec<PartToMerge>> {
-        if indices.is_empty() {
+        Self::group_parts_by_size(
+            indices,
+            merge_threshold,
+            max_merge_groups,
+            max_merge_group_size,
+        )
+        .into_iter()
+        .map(|group| {
+            group
+                .into_iter()
+                .map(|idx| {
+                    let wrapper = &mut self.parts[idx];
+                    wrapper.merging = true;
+                    wrapper.part.clone()
+                })
+                .collect()
+        })
+        .collect()
+    }
+
+    /// Groups sorted parts by both part count and cumulative size.
+    fn group_parts_by_size(
+        mut candidates: Vec<(usize, usize)>,
+        merge_threshold: usize,
+        max_merge_groups: usize,
+        max_merge_group_size: Option<usize>,
+    ) -> Vec<Vec<usize>> {
+        if candidates.len() < merge_threshold || max_merge_groups == 0 {
             return Vec::new();
         }
 
-        // Sort by row count for better grouping
-        indices.sort_unstable_by_key(|(_, num_rows)| *num_rows);
-
-        // Group into chunks of merge_threshold size, limit to max_merge_groups
-        indices
-            .chunks(merge_threshold)
-            .take(max_merge_groups)
-            .map(|chunk| {
-                chunk
-                    .iter()
-                    .map(|(idx, _)| {
-                        let wrapper = &mut self.parts[*idx];
-                        wrapper.merging = true;
-                        wrapper.part.clone()
-                    })
-                    .collect()
-            })
-            .collect()
+        candidates.sort_unstable_by_key(|(_, size)| *size);
+        let max_size = max_merge_group_size.unwrap_or(usize::MAX);
+        let mut groups = Vec::new();
+        let mut current = Vec::with_capacity(merge_threshold);
+        let mut current_size = 0usize;
+        for (idx, size) in candidates {
+            if !current.is_empty()
+                && (current.len() >= merge_threshold
+                    || current_size.saturating_add(size) > max_size)
+            {
+                if current.len() >= 2 {
+                    groups.push(std::mem::take(&mut current));
+                    if groups.len() >= max_merge_groups {
+                        return groups;
+                    }
+                } else {
+                    current.clear();
+                }
+                current_size = 0;
+            }
+            current.push(idx);
+            current_size = current_size.saturating_add(size);
+        }
+        if current.len() >= 2 && groups.len() < max_merge_groups {
+            groups.push(current);
+        }
+        groups
     }
 
     /// Installs merged parts and removes the original parts by file ids.
@@ -393,6 +440,8 @@ pub struct BulkMemtable {
     append_mode: bool,
     /// Mode to handle duplicate rows while merging
     merge_mode: MergeMode,
+    /// Soft maximum estimated size for one part merge group.
+    max_merge_group_size: Option<usize>,
 }
 
 impl std::fmt::Debug for BulkMemtable {
@@ -497,6 +546,7 @@ impl Memtable for BulkMemtable {
             predicate.predicate().cloned(),
             options.for_flush,
             options.pre_filter_mode,
+            options.batch_size,
         )?);
 
         // Adds ranges for regular parts and encoded parts
@@ -631,10 +681,12 @@ impl Memtable for BulkMemtable {
                 metadata.region_id,
                 id,
                 self.config.clone(),
+                self.max_merge_group_size,
             ))),
             compact_dispatcher: self.compact_dispatcher.clone(),
             append_mode: self.append_mode,
             merge_mode: self.merge_mode,
+            max_merge_group_size: self.max_merge_group_size,
         })
     }
 
@@ -650,7 +702,7 @@ impl Memtable for BulkMemtable {
             .parts
             .read()
             .unwrap()
-            .should_merge_parts(self.config.merge_threshold);
+            .should_merge_parts(self.config.merge_threshold, self.max_merge_group_size);
         if should_merge {
             compactor.merge_parts(
                 &self.parts,
@@ -675,6 +727,28 @@ impl BulkMemtable {
         append_mode: bool,
         merge_mode: MergeMode,
     ) -> Self {
+        Self::new_with_max_merge_group_size(
+            id,
+            config,
+            metadata,
+            write_buffer_manager,
+            compact_dispatcher,
+            append_mode,
+            merge_mode,
+            None,
+        )
+    }
+
+    fn new_with_max_merge_group_size(
+        id: MemtableId,
+        config: BulkMemtableConfig,
+        metadata: RegionMetadataRef,
+        write_buffer_manager: Option<WriteBufferManagerRef>,
+        compact_dispatcher: Option<Arc<CompactDispatcher>>,
+        append_mode: bool,
+        merge_mode: MergeMode,
+        max_merge_group_size: Option<usize>,
+    ) -> Self {
         let config = config.sanitize();
         let region_id = metadata.region_id;
         Self {
@@ -687,10 +761,16 @@ impl BulkMemtable {
             min_timestamp: AtomicI64::new(i64::MAX),
             max_sequence: AtomicU64::new(0),
             num_rows: AtomicUsize::new(0),
-            compactor: Arc::new(Mutex::new(MemtableCompactor::new(region_id, id, config))),
+            compactor: Arc::new(Mutex::new(MemtableCompactor::new(
+                region_id,
+                id,
+                config,
+                max_merge_group_size,
+            ))),
             compact_dispatcher,
             append_mode,
             merge_mode,
+            max_merge_group_size,
         }
     }
 
@@ -743,7 +823,7 @@ impl BulkMemtable {
     /// Returns whether the memtable should be compacted.
     fn should_compact(&self) -> bool {
         let parts = self.parts.read().unwrap();
-        parts.should_merge_parts(self.config.merge_threshold)
+        parts.should_merge_parts(self.config.merge_threshold, self.max_merge_group_size)
     }
 
     /// Schedules a compaction task using the CompactDispatcher.
@@ -1060,15 +1140,22 @@ struct MemtableCompactor {
     memtable_id: MemtableId,
     /// Configuration for the bulk memtable.
     config: BulkMemtableConfig,
+    max_merge_group_size: Option<usize>,
 }
 
 impl MemtableCompactor {
     /// Creates a new MemtableCompactor.
-    fn new(region_id: RegionId, memtable_id: MemtableId, config: BulkMemtableConfig) -> Self {
+    fn new(
+        region_id: RegionId,
+        memtable_id: MemtableId,
+        config: BulkMemtableConfig,
+        max_merge_group_size: Option<usize>,
+    ) -> Self {
         Self {
             region_id,
             memtable_id,
             config,
+            max_merge_group_size,
         }
     }
 
@@ -1083,10 +1170,11 @@ impl MemtableCompactor {
         let start = Instant::now();
 
         // Collect pre-grouped parts
-        let collected = bulk_parts
-            .write()
-            .unwrap()
-            .collect_parts_to_merge(self.config.merge_threshold, self.config.max_merge_groups);
+        let collected = bulk_parts.write().unwrap().collect_parts_to_merge(
+            self.config.merge_threshold,
+            self.config.max_merge_groups,
+            self.max_merge_group_size,
+        );
 
         if collected.groups.is_empty() {
             return Ok(());
@@ -1183,11 +1271,16 @@ impl MemtableCompactor {
             .max()
             .unwrap_or(0);
 
-        let context = Arc::new(BulkIterContext::new(
+        let batch_size = crate::batch_size::estimate_batch_size([(
+            estimated_total_rows as u64,
+            estimated_total_bytes as u64,
+        )]);
+        let context = Arc::new(BulkIterContext::new_with_batch_size(
             metadata.clone(),
             None, // No column projection for merging
             None, // No predicate for merging
             true,
+            batch_size,
         )?);
 
         let aligner = Json2Aligner::try_new(parts_to_merge.iter().map(PartToMerge::arrow_schema))?;
@@ -1202,8 +1295,7 @@ impl MemtableCompactor {
             return Ok(None);
         }
 
-        let merged_iter =
-            FlatMergeIterator::new(aligner.schema().clone(), iterators, DEFAULT_READ_BATCH_SIZE)?;
+        let merged_iter = FlatMergeIterator::new(aligner.schema().clone(), iterators, batch_size)?;
 
         let boxed_iter: BoxedRecordBatchIterator = if dedup {
             match merge_mode {
@@ -1301,7 +1393,7 @@ impl MemCompactTask {
             .parts
             .read()
             .unwrap()
-            .should_merge_parts(self.config.merge_threshold);
+            .should_merge_parts(self.config.merge_threshold, compactor.max_merge_group_size);
         if should_merge {
             compactor.merge_parts(
                 &self.parts,
@@ -1355,6 +1447,7 @@ pub struct BulkMemtableBuilder {
     compact_dispatcher: Option<Arc<CompactDispatcher>>,
     append_mode: bool,
     merge_mode: MergeMode,
+    max_merge_group_size: Option<usize>,
 }
 
 impl BulkMemtableBuilder {
@@ -1370,6 +1463,7 @@ impl BulkMemtableBuilder {
             compact_dispatcher: None,
             append_mode,
             merge_mode,
+            max_merge_group_size: None,
         }
     }
 
@@ -1385,6 +1479,12 @@ impl BulkMemtableBuilder {
         self
     }
 
+    /// Sets the soft maximum estimated size for one part merge group.
+    pub(crate) fn with_max_merge_group_size(mut self, max_size: Option<u64>) -> Self {
+        self.max_merge_group_size = max_size.and_then(|size| usize::try_from(size).ok());
+        self
+    }
+
     #[cfg(test)]
     pub(crate) fn config(&self) -> &BulkMemtableConfig {
         &self.config
@@ -1393,7 +1493,7 @@ impl BulkMemtableBuilder {
 
 impl MemtableBuilder for BulkMemtableBuilder {
     fn build(&self, id: MemtableId, metadata: &RegionMetadataRef) -> MemtableRef {
-        Arc::new(BulkMemtable::new(
+        Arc::new(BulkMemtable::new_with_max_merge_group_size(
             id,
             self.config.clone(),
             metadata.clone(),
@@ -1401,6 +1501,7 @@ impl MemtableBuilder for BulkMemtableBuilder {
             self.compact_dispatcher.clone(),
             self.append_mode,
             self.merge_mode,
+            self.max_merge_group_size,
         ))
     }
 
@@ -2249,7 +2350,7 @@ mod tests {
         }
 
         // Should not trigger merge since we have only 7 parts
-        assert!(!bulk_parts.should_merge_parts(DEFAULT_MERGE_THRESHOLD));
+        assert!(!bulk_parts.should_merge_parts(DEFAULT_MERGE_THRESHOLD, None));
     }
 
     #[test]
@@ -2271,7 +2372,33 @@ mod tests {
         }
 
         // Should trigger merge since we have 8 parts
-        assert!(bulk_parts.should_merge_parts(merge_threshold));
+        assert!(bulk_parts.should_merge_parts(merge_threshold, None));
+    }
+
+    #[test]
+    fn test_large_parts_are_not_merge_candidates() {
+        let mut bulk_parts = BulkParts::default();
+        let merge_threshold = 4;
+        for i in 0..merge_threshold {
+            let part = create_bulk_part_with_converter(
+                &format!("key_{}", i),
+                i as u32,
+                vec![1000 + i as i64],
+                vec![Some(i as f64)],
+                100 + i as u64,
+            )
+            .unwrap();
+            bulk_parts.parts.push(create_bulk_part_wrapper(part));
+        }
+
+        let max_size = bulk_parts.parts[0].part.estimated_size();
+        assert!(!bulk_parts.should_merge_parts(merge_threshold, Some(max_size)));
+        assert!(
+            bulk_parts
+                .collect_parts_to_merge(merge_threshold, 1, Some(max_size))
+                .groups
+                .is_empty()
+        );
     }
 
     #[test]
@@ -2293,7 +2420,7 @@ mod tests {
         }
 
         // Should trigger merge since we have 10 parts
-        assert!(bulk_parts.should_merge_parts(merge_threshold));
+        assert!(bulk_parts.should_merge_parts(merge_threshold, None));
 
         // Mark first 3 parts as merging
         for wrapper in bulk_parts.parts.iter_mut().take(3) {
@@ -2301,7 +2428,7 @@ mod tests {
         }
 
         // Now only 7 parts are available for merging, should not trigger
-        assert!(!bulk_parts.should_merge_parts(merge_threshold));
+        assert!(!bulk_parts.should_merge_parts(merge_threshold, None));
     }
 
     #[test]
@@ -2328,11 +2455,14 @@ mod tests {
         }
 
         // Should trigger merge since we have 16 parts
-        assert!(bulk_parts.should_merge_parts(DEFAULT_MERGE_THRESHOLD));
+        assert!(bulk_parts.should_merge_parts(DEFAULT_MERGE_THRESHOLD, None));
 
         // Collect parts to merge
-        let collected =
-            bulk_parts.collect_parts_to_merge(DEFAULT_MERGE_THRESHOLD, DEFAULT_MAX_MERGE_GROUPS);
+        let collected = bulk_parts.collect_parts_to_merge(
+            DEFAULT_MERGE_THRESHOLD,
+            DEFAULT_MAX_MERGE_GROUPS,
+            None,
+        );
 
         // Should have groups
         assert!(!collected.groups.is_empty());
@@ -2345,6 +2475,19 @@ mod tests {
         // Total parts collected should be 16
         let total_parts: usize = collected.groups.iter().map(|g| g.len()).sum();
         assert_eq!(16, total_parts);
+    }
+
+    #[test]
+    fn test_group_parts_by_size() {
+        let groups =
+            BulkParts::group_parts_by_size(vec![(0, 4), (1, 4), (2, 4), (3, 4)], 4, 4, Some(8));
+        assert_eq!(vec![vec![0, 1], vec![2, 3]], groups);
+    }
+
+    #[test]
+    fn test_group_parts_by_size_ignores_unmergeable_leftovers() {
+        let candidates = vec![(0, 9), (1, 9), (2, 9), (3, 20)];
+        assert!(BulkParts::group_parts_by_size(candidates, 4, 4, Some(10)).is_empty());
     }
 
     #[test]

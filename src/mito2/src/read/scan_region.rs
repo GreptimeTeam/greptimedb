@@ -813,6 +813,8 @@ pub struct ScanInput {
     pub(crate) memtables: Vec<MemRangeBuilder>,
     /// Handles to SST files to scan.
     pub(crate) files: Vec<FileHandle>,
+    /// Scan-wide hint for rows in an execution batch.
+    batch_size: usize,
     /// Cache.
     pub(crate) cache_strategy: CacheStrategy,
     /// Ignores file not found error.
@@ -866,6 +868,7 @@ impl ScanInput {
             region_partition_expr: None,
             memtables: Vec::new(),
             files: Vec::new(),
+            batch_size: crate::sst::parquet::DEFAULT_READ_BATCH_SIZE,
             cache_strategy: CacheStrategy::Disabled,
             ignore_file_not_found: false,
             max_concurrent_scan_files: DEFAULT_MAX_CONCURRENT_SCAN_FILES,
@@ -917,7 +920,29 @@ impl ScanInput {
     #[must_use]
     pub(crate) fn with_files(mut self, files: Vec<FileHandle>) -> Self {
         self.files = files;
+        if self.compaction {
+            self.recompute_compaction_batch_size();
+        }
         self
+    }
+
+    /// Returns the scan-wide hint for rows in an execution batch.
+    pub(crate) fn batch_size(&self) -> usize {
+        self.batch_size
+    }
+
+    fn recompute_compaction_batch_size(&mut self) {
+        let file_stats = self.files.iter().map(|file| {
+            let meta = file.meta_ref();
+            if meta.num_rows == 0 || meta.num_row_groups == 0 {
+                return (0, 0);
+            }
+
+            let rows_per_group = meta.num_rows / meta.num_row_groups
+                + u64::from(meta.num_rows % meta.num_row_groups != 0);
+            (rows_per_group, meta.max_row_group_uncompressed_size)
+        });
+        self.batch_size = crate::batch_size::estimate_batch_size(file_stats);
     }
 
     /// Sets cache for this query.
@@ -1068,6 +1093,11 @@ impl ScanInput {
     #[must_use]
     pub(crate) fn with_compaction(mut self, compaction: bool) -> Self {
         self.compaction = compaction;
+        if compaction {
+            self.recompute_compaction_batch_size();
+        } else {
+            self.batch_size = crate::sst::parquet::DEFAULT_READ_BATCH_SIZE;
+        }
         self
     }
 
@@ -1202,6 +1232,7 @@ impl ScanInput {
             .inverted_index_appliers(self.inverted_index_appliers.clone())
             .bloom_filter_index_appliers(self.bloom_filter_index_appliers.clone())
             .fulltext_index_appliers(self.fulltext_index_appliers.clone());
+        let reader = reader.batch_size(self.batch_size);
         let reader = if !self.compaction && may_build_selective_row_selection {
             reader.deferred_optional_page_index()
         } else {
@@ -2114,6 +2145,47 @@ mod tests {
             },
             Arc::new(crate::sst::file_purger::NoopFilePurger),
         )
+    }
+
+    #[tokio::test]
+    async fn test_scan_input_estimates_batch_size_only_for_compaction() {
+        let metadata = Arc::new(metadata_with_primary_key(vec![0, 1], false));
+        let mapper = FlatProjectionMapper::new(&metadata, [0, 2, 3]).unwrap();
+        let env = SchedulerEnv::new().await;
+        let known = FileHandle::new(
+            FileMeta {
+                num_rows: 64,
+                num_row_groups: 2,
+                max_row_group_uncompressed_size: 8 * 1024 * 1024,
+                ..Default::default()
+            },
+            Arc::new(crate::sst::file_purger::NoopFilePurger),
+        );
+        let unknown = FileHandle::new(
+            FileMeta::default(),
+            Arc::new(crate::sst::file_purger::NoopFilePurger),
+        );
+
+        let input = ScanInput::new(env.access_layer.clone(), mapper)
+            .with_files(vec![unknown.clone(), known.clone()])
+            .with_memtables(vec![]);
+        assert_eq!(
+            crate::sst::parquet::DEFAULT_READ_BATCH_SIZE,
+            input.batch_size()
+        );
+
+        let mapper = FlatProjectionMapper::new(&metadata, [0, 2, 3]).unwrap();
+        let input = ScanInput::new(env.access_layer.clone(), mapper)
+            .with_compaction(true)
+            .with_memtables(vec![])
+            .with_files(vec![known.clone(), unknown.clone()]);
+        assert_eq!(256, input.batch_size());
+
+        let mapper = FlatProjectionMapper::new(&metadata, [0, 2, 3]).unwrap();
+        let input = ScanInput::new(env.access_layer.clone(), mapper)
+            .with_files(vec![known, unknown])
+            .with_compaction(true);
+        assert_eq!(256, input.batch_size());
     }
 
     #[test]

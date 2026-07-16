@@ -80,6 +80,8 @@ pub struct RangesOptions {
     pub predicate: PredicateGroup,
     /// Sequence range to filter the data.
     pub sequence: Option<SequenceRange>,
+    /// Maximum number of rows readers should produce in one batch.
+    pub batch_size: usize,
 }
 
 impl Default for RangesOptions {
@@ -89,6 +91,7 @@ impl Default for RangesOptions {
             pre_filter_mode: PreFilterMode::All,
             predicate: PredicateGroup::default(),
             sequence: None,
+            batch_size: crate::sst::parquet::DEFAULT_READ_BATCH_SIZE,
         }
     }
 }
@@ -101,6 +104,7 @@ impl RangesOptions {
             pre_filter_mode: PreFilterMode::All,
             predicate: PredicateGroup::default(),
             sequence: None,
+            batch_size: crate::sst::parquet::DEFAULT_READ_BATCH_SIZE,
         }
     }
 
@@ -122,6 +126,13 @@ impl RangesOptions {
     #[must_use]
     pub fn with_sequence(mut self, sequence: Option<SequenceRange>) -> Self {
         self.sequence = sequence;
+        self
+    }
+
+    /// Sets the maximum number of rows readers should produce in one batch.
+    #[must_use]
+    pub fn with_batch_size(mut self, batch_size: usize) -> Self {
+        self.batch_size = batch_size.clamp(1, crate::sst::parquet::DEFAULT_READ_BATCH_SIZE);
         self
     }
 }
@@ -441,6 +452,8 @@ impl MemtableBuilderProvider {
             Some(MemtableOptions::Bulk(config)) => Arc::new(
                 BulkMemtableBuilder::new(self.write_buffer_manager.clone(), !dedup, merge_mode)
                     .with_config(config.clone())
+                    // TODO(yingwen): How to change this when we changing the compaction max output file size?
+                    .with_max_merge_group_size(options.compaction.max_output_file_size())
                     .with_compact_dispatcher(self.compact_dispatcher.clone()),
             ),
             Some(MemtableOptions::TimeSeries) => Arc::new(TimeSeriesMemtableBuilder::new(
@@ -463,6 +476,7 @@ impl MemtableBuilderProvider {
             !dedup, // append_mode: true if not dedup, false if dedup
             merge_mode,
         )
+        .with_max_merge_group_size(options.compaction.max_output_file_size())
         .with_compact_dispatcher(self.compact_dispatcher.clone());
 
         if let Some(MemtableOptions::Bulk(config)) = &options.memtable {
