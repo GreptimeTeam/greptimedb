@@ -4409,6 +4409,7 @@ impl PromPlanner {
                 Self::string_value_data_type(data_type).map(|_| data_type.clone())
             }
             (None, None) => Some(ArrowDataType::Utf8),
+            (Some(_), Some(_)) => None,
         }
     }
 
