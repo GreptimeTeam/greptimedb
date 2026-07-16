@@ -528,7 +528,7 @@ HAVING count(*) > 1;
 | logical_plan  | MergeScan [is_placeholder=false, remote_input=[                                                                                                       |
 |               | Projection: date_trunc(Utf8("minute"),tql_grouped.ts) AS minute, count(Int64(1)) AS count(*) AS point_count                                           |
 |               |   Filter: count(Int64(1)) > Int64(1)                                                                                                                  |
-|               |     Aggregate: groupBy=[[date_trunc(Utf8("minute"), tql_grouped.ts)]], aggr=[[count(tql_grouped.ts) AS count(Int64(1))]]                              |
+|               |     Aggregate: groupBy=[[date_trunc(Utf8("minute"), tql_grouped.ts)]], aggr=[[count(Int64(1))]]                                                       |
 |               |       SubqueryAlias: tql_grouped                                                                                                                      |
 |               |         Projection: labels.ts AS ts, labels.host AS host, labels.cpu AS cpu                                                                           |
 |               |           PromInstantManipulate: range=[0..40000], lookback=[300000], interval=[10000], time index=[ts]                                               |

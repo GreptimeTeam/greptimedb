@@ -93,9 +93,7 @@ impl CountWildcardToTimeIndexRule {
             if plan.inputs().len() > 1 {
                 return None;
             }
-            let Some(input) = plan.inputs().first().copied() else {
-                return None;
-            };
+            let input = plan.inputs().first().copied()?;
             let Ok((_, field)) = input.schema().qualified_field_from_column(col) else {
                 return None;
             };
@@ -155,7 +153,8 @@ impl TreeNodeVisitor<'_> for TimeIndexFinder {
         }
 
         if let LogicalPlan::SubqueryAlias(subquery_alias) = node {
-            self.table_alias = Some(subquery_alias.alias.clone());
+            self.table_alias
+                .get_or_insert_with(|| subquery_alias.alias.clone());
         }
 
         if let LogicalPlan::TableScan(table_scan) = &node
@@ -354,6 +353,20 @@ mod test {
             .analyze(simple_alias, &config)
             .unwrap();
         assert_count_argument_column(&simple_alias, "projected", "ts");
+
+        let nested_alias = count_star(
+            LogicalPlanBuilder::from(qp_026_source_plan("source"))
+                .alias("inner")
+                .unwrap()
+                .alias("outer")
+                .unwrap()
+                .build()
+                .unwrap(),
+        );
+        let nested_alias = CountWildcardToTimeIndexRule
+            .analyze(nested_alias, &config)
+            .unwrap();
+        assert_count_argument_column(&nested_alias, "outer", "ts");
 
         let nested_rename = count_star(
             LogicalPlanBuilder::from(qp_026_source_plan("source"))
