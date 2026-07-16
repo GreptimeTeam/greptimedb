@@ -733,6 +733,35 @@ impl TraceColumnRequestSchema {
             return incompatible_batches;
         }
 
+        let mut reconcile_candidates = Vec::<&TraceBatchColumnObservation>::new();
+        for observation in self
+            .batches
+            .values()
+            .filter(|observation| is_trace_reconcile_candidate_type(observation.schema_type))
+        {
+            if !reconcile_candidates.iter().any(|candidate| {
+                candidate.schema_type == observation.schema_type
+                    && candidate.concrete_type == observation.concrete_type
+            }) {
+                reconcile_candidates.push(observation);
+            }
+        }
+        if !reconcile_candidates.is_empty() {
+            for (batch_index, observation) in &self.batches {
+                if reconcile_candidates.iter().any(|candidate| {
+                    trace_logical_types_incompatible(
+                        observation.schema_type,
+                        &observation.concrete_type,
+                        candidate.schema_type,
+                        &candidate.concrete_type,
+                    )
+                }) {
+                    incompatible_batches.insert(*batch_index);
+                }
+            }
+            return incompatible_batches;
+        }
+
         let mut schemas = Vec::<(ColumnDataType, ConcreteDataType, bool)>::new();
         for observation in self.batches.values() {
             if schemas.iter().any(|(observed_datatype, observed_type, _)| {

@@ -563,6 +563,49 @@ fn test_trace_request_schema_isolates_non_candidate_batch() {
 }
 
 #[test]
+fn test_trace_request_schema_isolates_non_candidate_new_column_batch() {
+    let column_name = "span_attributes.payload";
+    for datatypes in [
+        [
+            ColumnDataType::String,
+            ColumnDataType::Int64,
+            ColumnDataType::Binary,
+        ],
+        [
+            ColumnDataType::Binary,
+            ColumnDataType::Int64,
+            ColumnDataType::String,
+        ],
+    ] {
+        let binary_batch = datatypes
+            .iter()
+            .position(|datatype| *datatype == ColumnDataType::Binary)
+            .unwrap();
+        let mut request_schema = TraceRequestSchema::default();
+        for (batch_index, datatype) in datatypes.into_iter().enumerate() {
+            request_schema.observe_trace_column(
+                batch_index,
+                &field_schema(column_name, datatype),
+                Some(datatype),
+            );
+        }
+
+        assert_eq!(
+            request_schema.incompatible_schema_observations(None),
+            HashMap::from([(column_name.to_string(), HashSet::from([binary_batch]),)])
+        );
+
+        request_schema.remove_batches(&HashSet::from([binary_batch]));
+        let plan = ready_plan(request_schema.resolve_table_schema(None));
+        assert_eq!(plan.ensure_columns.len(), 1);
+        assert_eq!(
+            plan.ensure_columns[0].datatype,
+            ColumnDataType::Int64 as i32
+        );
+    }
+}
+
+#[test]
 fn test_trace_request_schema_isolates_unsupported_type_batches() {
     let mixed_column = "span_attributes.mixed";
     let unrelated_column = "span_attributes.unrelated";
@@ -871,7 +914,7 @@ fn test_trace_request_schema_prevalidates_fixed_columns_before_conflicts() {
 
     assert_eq!(
         request_schema.incompatible_schema_observations(None),
-        HashMap::from([(conflict_column.to_string(), HashSet::from([0, 1]),)])
+        HashMap::from([(conflict_column.to_string(), HashSet::from([1]),)])
     );
     let exclusions = Instance::prevalidate_trace_v1_fixed_columns(&chunks, &chunk_states).unwrap();
     assert_eq!(
