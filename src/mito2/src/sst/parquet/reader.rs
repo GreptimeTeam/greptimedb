@@ -952,12 +952,24 @@ impl ParquetReaderBuilder {
                 .await;
 
             let selection = match apply_res {
-                Ok(apply_output) => RowGroupSelection::from_inverted_index_apply_output(
-                    row_group_size,
-                    num_row_groups,
-                    total_row_count,
-                    apply_output,
-                ),
+                Ok(apply_output) => {
+                    let index_row_count = apply_output.total_row_count;
+                    let Some(selection) = RowGroupSelection::from_inverted_index_apply_output(
+                        row_group_size,
+                        num_row_groups,
+                        total_row_count,
+                        apply_output,
+                    ) else {
+                        warn!(
+                            "Ignore inverted index with mismatched row count, file_id: {:?}, index_row_count: {}, parquet_row_count: {}",
+                            self.file_handle.file_id(),
+                            index_row_count,
+                            total_row_count,
+                        );
+                        continue;
+                    };
+                    selection
+                }
                 Err(err) => {
                     handle_index_error!(err, self.file_handle, INDEX_TYPE_INVERTED);
                     continue;

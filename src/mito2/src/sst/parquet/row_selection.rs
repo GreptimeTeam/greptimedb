@@ -157,12 +157,18 @@ impl RowGroupSelection {
     /// # Assumptions
     /// * All row groups (except possibly the last one) have the same number of rows
     /// * The last row group may have fewer rows than `row_group_size`
+    ///
+    /// Returns `None` if the index and Parquet file have different row counts.
     pub fn from_inverted_index_apply_output(
         row_group_size: usize,
         num_row_groups: usize,
         total_row_count: usize,
         apply_output: ApplyOutput,
-    ) -> Self {
+    ) -> Option<Self> {
+        if apply_output.total_row_count != total_row_count {
+            return None;
+        }
+
         // Step 1: Convert segment IDs to row ranges within row groups.
         // A segment may span more than one row group when `row_group_size` is not a multiple
         // of `segment_row_count`, so we split each matched segment's global row range across
@@ -224,11 +230,11 @@ impl RowGroupSelection {
 
         Self::fill_missing_row_groups(&mut selection_in_rg, num_row_groups);
 
-        Self {
+        Some(Self {
             selection_in_rg,
             row_count: selected_row_count,
             selector_len: total_selector_len,
-        }
+        })
     }
 
     /// Creates a new `RowGroupSelection` from a set of row IDs.
@@ -754,7 +760,8 @@ mod tests {
             2,
             16,
             apply_output(&[1, 2], 4, 16),
-        );
+        )
+        .unwrap();
         assert_eq!(selection.row_count(), 8);
         assert_eq!(
             selection.get(0),
@@ -779,7 +786,8 @@ mod tests {
             2,
             20,
             apply_output(&[2], 4, 20),
-        );
+        )
+        .unwrap();
         assert_eq!(selection.row_count(), 4);
         assert_eq!(
             selection.get(0),
@@ -803,7 +811,8 @@ mod tests {
             2,
             18,
             apply_output(&[4], 4, 18),
-        );
+        )
+        .unwrap();
         assert_eq!(selection.row_count(), 2);
         assert_eq!(selection.get(2), None);
         // Rows [16, 18) land in row group 1 at offset [6, 8).
@@ -814,6 +823,17 @@ mod tests {
                 RowSelector::select(2),
             ]))
         );
+    }
+
+    #[test]
+    fn test_from_inverted_index_rejects_mismatched_row_count() {
+        let selection = RowGroupSelection::from_inverted_index_apply_output(
+            10,
+            2,
+            20,
+            apply_output(&[0], 4, 16),
+        );
+        assert!(selection.is_none());
     }
 
     #[test]
