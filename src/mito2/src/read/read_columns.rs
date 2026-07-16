@@ -50,13 +50,13 @@ use crate::read::scan_region::PredicateGroup;
 /// may produce read columns like:
 ///
 /// ```text
-/// ReadColumn {
-///     column_id: 9,
-///     nested_paths: [
-///         ["j", "a"],
-///         ["j", "b", "c"],
-///     ]
-/// }
+/// ReadColumn::new(
+///     9,
+///     vec![
+///         vec!["j".to_string(), "a".to_string()],
+///         vec!["j".to_string(), "b".to_string(), "c".to_string()],
+///     ],
+/// )
 /// ```
 ///
 /// If `nested_paths` is empty, the whole column will be read.
