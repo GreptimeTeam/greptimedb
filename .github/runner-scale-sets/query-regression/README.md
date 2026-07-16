@@ -56,13 +56,14 @@ egress to required GitHub Actions, artifact/cache, Rust/crate/toolchain, DNS,
 and image-registry endpoints; block unrelated cluster services, private ranges,
 and metadata endpoints unless a case requires them.
 
-### Office routing prerequisite
+### Network routing prerequisite
 
-Direct split routing through `.2` is an **external office-network prerequisite**.
-The gateway at `192.168.50.2` must route GitHub Actions, GitHub content,
-artifact/cache, crates.io, Rust toolchain, and image-registry traffic directly
-rather than through the VPN. Neither this repository nor Kubernetes configures
-that route. Verify it with the responsible network operator before any canary.
+Required split routing is an **external environment-specific prerequisite**. The
+responsible network operator must route GitHub Actions, GitHub content,
+artifact/cache, crates.io, Rust toolchain, and image-registry traffic through
+the approved path rather than the VPN where applicable. Neither this repository
+nor Kubernetes configures that route. Verify it with the responsible network
+operator before any canary.
 
 ## Runner image and workflow tools
 
@@ -85,11 +86,20 @@ Both digest-pinned init and runner containers use `IfNotPresent`: the immutable
 digest makes a cached image safe and avoids adding a registry dependency to every
 runner startup.
 
+The runner optionally imports only the non-sensitive `HTTP_PROXY`,
+`HTTPS_PROXY`, and `NO_PROXY` variables from the
+`query-regression-runner-local-env` ConfigMap. Manage that ConfigMap locally in
+the target namespace; private endpoint configuration must not be committed, and
+credentials or secrets must never be placed in a ConfigMap.
+
 Before builds, the workflow asserts UID/GID 1001 and exact image tool versions:
 `libprotoc 3.21.12`, `uv 0.11.26`, `mold 2.30.0`, `Python 3.12.3`, `sccache
 0.16.0`, root-owned `rustup 1.29.0`, and the image-baked
 `nightly-2026-03-21` Rust toolchain. Rustup, Cargo, and Rustc must resolve from
 `/opt/cargo/bin`; the runner cannot write `/opt/rustup` or `/opt/cargo/bin`.
+Protobuf well-known includes, including `google/protobuf/any.proto` and
+`google/protobuf/empty.proto`, are an image contract and must compile with
+`protoc`.
 `actions-rust-lang/setup-rust-toolchain@v1` is intentionally removed. The
 workflow sets its warning-denying mold `RUSTFLAGS` directly, disables automatic
 Rustup installation, and performs no runtime toolchain downloads.
@@ -107,6 +117,9 @@ corresponding cache or image contract changes.
 `queue: max`, and `cancel-in-progress: false`; admitted jobs queue rather than
 replacing older pending jobs. During maintenance, cancel admitted queued runs as
 well as pausing ARC. Runner Pods have `activeDeadlineSeconds=12600`.
+The runner requests 6 CPU and limits at 8 CPU to preserve `minipc-3`
+allocatable-capacity scheduling headroom; do not reset the request to 8 CPU
+without revalidating scheduling capacity.
 
 The cache claim `query-regression-build-cache` is a nominal 600Gi `local-path`
 PVC in `arc-runners`. It is `ReadWriteOnce`; `local-path` uses
@@ -184,7 +197,7 @@ exists; they are not mounted by the current configuration.
 
 ## Deploy and pause safely
 
-First verify external `.2` routing and the disk preflight. Apply the PVC; while
+First verify the configured external network route and the disk preflight. Apply the PVC; while
 the scale set is paused, it is expected to remain `Pending` because
 WaitForFirstConsumer has no scheduled runner:
 
@@ -263,8 +276,8 @@ ABI-marker output, initial/base/candidate sccache statistics, and cache report.
 Confirm the image tool contract (root-owned Rustup/Cargo paths, baked nightly,
 and non-writable `/opt` roots) and that the ephemeral Cargo home contains only
 the mounted registry/Git data before Cargo creates per-Pod state.
-Obtain dependency and tool network byte counters from the
-identified `.2` counter source, filtered to `minipc-3` and the dependency/tool
+Obtain dependency and tool network byte counters from the configured
+environment counter source, filtered to `minipc-3` and the dependency/tool
 destinations.
 
 Accept the canary only when all of the following hold:
@@ -278,7 +291,8 @@ Accept the canary only when all of the following hold:
 - warm dependency/tool network bytes are at most 10% of cold fill bytes;
 - cache sizes remain below soft watermarks, node free space remains at least
   300GiB, and the benchmark is correct without TLS EOFs or timeouts;
-- `.2` confirms this traffic is outside VPN accounting.
+- the configured environment counter source confirms this traffic is outside VPN
+  accounting.
 
 Immediately return to 0/0 after either canary unless ongoing normal operation
 has been explicitly approved; return immediately on any traffic, cache, disk,

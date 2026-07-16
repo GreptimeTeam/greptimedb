@@ -27,7 +27,7 @@ template:
           claimName: query-regression-build-cache
     initContainers:
       - name: initialize-build-cache
-        image: greptime-registry.cn-hangzhou.cr.aliyuncs.com/greptime/greptimedb-query-regression-runner@sha256:7022b551771dc82ec4c493f0c3db6ee3050ececd336598690a2165240ebe953e
+        image: greptime-registry.cn-hangzhou.cr.aliyuncs.com/greptime/greptimedb-query-regression-runner@sha256:2436278bf0756700c718927907cdbedac64d55c593f80b515acb44dec8b02cc1
         imagePullPolicy: IfNotPresent
         command:
           - /bin/sh
@@ -65,12 +65,32 @@ template:
             mountPath: /cache
     containers:
       - name: runner
-        image: greptime-registry.cn-hangzhou.cr.aliyuncs.com/greptime/greptimedb-query-regression-runner@sha256:7022b551771dc82ec4c493f0c3db6ee3050ececd336598690a2165240ebe953e
+        image: greptime-registry.cn-hangzhou.cr.aliyuncs.com/greptime/greptimedb-query-regression-runner@sha256:2436278bf0756700c718927907cdbedac64d55c593f80b515acb44dec8b02cc1
         imagePullPolicy: IfNotPresent
         command: ["/home/runner/run.sh"]
         env:
           - name: CARGO_HOME
             value: /home/runner/.cargo
+          - name: HTTP_PROXY
+            valueFrom:
+              configMapKeyRef:
+                name: query-regression-runner-local-env
+                key: HTTP_PROXY
+                optional: true
+          - name: HTTPS_PROXY
+            valueFrom:
+              configMapKeyRef:
+                name: query-regression-runner-local-env
+                key: HTTPS_PROXY
+                optional: true
+          - name: NO_PROXY
+            valueFrom:
+              configMapKeyRef:
+                name: query-regression-runner-local-env
+                key: NO_PROXY
+                optional: true
+          - name: UV_CACHE_DIR
+            value: /home/runner/.cargo/uv-cache
           - name: RUSTUP_HOME
             value: /opt/rustup
           - name: RUSTUP_TOOLCHAIN
@@ -99,7 +119,7 @@ template:
               - ALL
         resources:
           requests:
-            cpu: "8"
+            cpu: "6"
             memory: 24Gi
             ephemeral-storage: 80Gi
           limits:

@@ -62,6 +62,7 @@ jobs:
     env:
       CARGO_PROFILE: ${{ github.event_name == 'pull_request' && 'nightly' || inputs.cargo_profile }}
       CARGO_HOME: /home/runner/.cargo
+      UV_CACHE_DIR: /home/runner/.cargo/uv-cache
       RUSTUP_HOME: /opt/rustup
       RUSTUP_TOOLCHAIN: nightly-2026-03-21
       RUSTUP_AUTO_INSTALL: "0"
@@ -111,6 +112,29 @@ jobs:
             [[ "$1" =~ ^[[:xdigit:]]{40}$ ]]
           }
 
+          fetch_with_retry() {
+            local ref="$1"
+            local depth="$2"
+            local attempt=1
+            local max_attempts=5
+            local delay
+
+            while (( attempt <= max_attempts )); do
+              if git fetch --no-tags --prune --depth="${depth}" origin "${ref}"; then
+                return 0
+              fi
+              printf 'Git fetch failed for %s (attempt %d/%d).\n' \
+                "${ref}" "${attempt}" "${max_attempts}" >&2
+              if (( attempt < max_attempts )); then
+                delay=$(( 2 ** (attempt - 1) ))
+                printf 'Retrying git fetch for %s in %d seconds.\n' "${ref}" "${delay}" >&2
+                sleep "${delay}"
+              fi
+              ((attempt += 1))
+            done
+            return 1
+          }
+
           initially_checked_out_base_sha="$(git rev-parse --verify HEAD)"
           is_full_sha "${initially_checked_out_base_sha}" || {
             printf 'Could not resolve initially checked-out BASE_REF commit.\n' >&2
@@ -123,7 +147,7 @@ jobs:
               is_full_sha "${value}" || fail_closed "Missing or invalid ${identity}."
             done
 
-            if ! git fetch --no-tags --prune --depth=2 origin "${EVENT_MERGE_SHA}"; then
+            if ! fetch_with_retry "${EVENT_MERGE_SHA}" 2; then
               fail_closed "Could not fetch event merge SHA ${EVENT_MERGE_SHA}."
             fi
             fetched_sha="$(git rev-parse --verify FETCH_HEAD 2>/dev/null)" \
@@ -148,7 +172,10 @@ jobs:
               || fail_closed "Event merge SHA has no non-head parent for the base build."
             VERIFIED_CANDIDATE_SHA="${fetched_sha,,}"
           else
-            git fetch --no-tags --prune --depth=1 origin "${CANDIDATE_REF}"
+            if ! fetch_with_retry "${CANDIDATE_REF}" 1; then
+              printf 'Could not fetch candidate ref %s.\n' "${CANDIDATE_REF}" >&2
+              exit 1
+            fi
             VERIFIED_CANDIDATE_SHA="$(git rev-parse --verify FETCH_HEAD)"
             VERIFIED_BASE_SHA="${initially_checked_out_base_sha}"
           fi
@@ -176,7 +203,23 @@ jobs:
           set -euo pipefail
           [[ "$(id -u)" == "1001" ]]
           [[ "$(id -g)" == "1001" ]]
+          [[ "${UV_CACHE_DIR}" == "/home/runner/.cargo/uv-cache" ]]
           [[ "$(protoc --version)" == "libprotoc 3.21.12" ]]
+          temporary_proto_dir="$(mktemp --directory)"
+          trap 'rm -rf "${temporary_proto_dir}"' EXIT
+          test -r /usr/include/google/protobuf/any.proto
+          test -r /usr/include/google/protobuf/empty.proto
+          printf '%s\n' \
+            'syntax = "proto3";' \
+            'package smoke;' \
+            'import "google/protobuf/any.proto";' \
+            'import "google/protobuf/empty.proto";' \
+            'message Smoke { google.protobuf.Any any = 1; google.protobuf.Empty empty = 2; }' \
+            > "${temporary_proto_dir}/smoke.proto"
+          protoc --proto_path="${temporary_proto_dir}" --proto_path=/usr/include \
+            --descriptor_set_out="${temporary_proto_dir}/smoke.pb" \
+            "${temporary_proto_dir}/smoke.proto"
+          test -s "${temporary_proto_dir}/smoke.pb"
           [[ "$(uv --version)" =~ ^uv[[:space:]]0\.11\.26([[:space:]]|$) ]]
           mold_version="$(mold --version)"
           [[ "${mold_version}" =~ ^mold[[:space:]]2\.30\.0([[:space:]]|$) ]]
@@ -213,13 +256,14 @@ jobs:
           readonly EXPECTED_CARGO_HOME="/home/runner/.cargo"
           readonly EXPECTED_CARGO_REGISTRY="/home/runner/.cargo/registry"
           readonly EXPECTED_CARGO_GIT="/home/runner/.cargo/git"
+          readonly EXPECTED_UV_CACHE_DIR="/home/runner/.cargo/uv-cache"
           readonly EXPECTED_RUSTUP_HOME="/opt/rustup"
           readonly EXPECTED_TARGET_DIR="/home/runner/query-regression-target"
           readonly EXPECTED_CACHE_META="/home/runner/query-regression-cache-meta"
           readonly EXPECTED_SCCACHE_DIR="/home/runner/.cache/sccache"
           readonly EXPECTED_RUSTC_WRAPPER="/usr/local/bin/sccache"
-          readonly RUNNER_IMAGE_DIGEST="sha256:7022b551771dc82ec4c493f0c3db6ee3050ececd336598690a2165240ebe953e"
-          readonly RUNNER_IMAGE_EPOCH="3"
+          readonly RUNNER_IMAGE_DIGEST="sha256:2436278bf0756700c718927907cdbedac64d55c593f80b515acb44dec8b02cc1"
+          readonly RUNNER_IMAGE_EPOCH="4"
 
           require_expected_root() {
             local name="$1"
@@ -276,6 +320,7 @@ jobs:
           require_expected_root CARGO_HOME "${CARGO_HOME}" "${EXPECTED_CARGO_HOME}"
           require_expected_root CARGO_REGISTRY "${CARGO_HOME}/registry" "${EXPECTED_CARGO_REGISTRY}"
           require_expected_root CARGO_GIT "${CARGO_HOME}/git" "${EXPECTED_CARGO_GIT}"
+          require_expected_root UV_CACHE_DIR "${UV_CACHE_DIR}" "${EXPECTED_UV_CACHE_DIR}"
           require_expected_root RUSTUP_HOME "${RUSTUP_HOME}" "${EXPECTED_RUSTUP_HOME}"
           require_expected_root CARGO_TARGET_DIR "${CARGO_TARGET_DIR}" "${EXPECTED_TARGET_DIR}"
           require_expected_root QUERY_REGRESSION_CACHE_META "${QUERY_REGRESSION_CACHE_META}" "${EXPECTED_CACHE_META}"
@@ -295,10 +340,10 @@ jobs:
           test -r "${RUSTUP_HOME}"
           test -x "${RUSTUP_HOME}"
           test ! -w "${RUSTUP_HOME}"
-          mkdir -p "${CARGO_HOME}" "${CARGO_HOME}/registry" "${CARGO_HOME}/git" \
+          mkdir -p "${CARGO_HOME}" "${CARGO_HOME}/registry" "${CARGO_HOME}/git" "${UV_CACHE_DIR}" \
             "${CARGO_TARGET_DIR}" "${QUERY_REGRESSION_CACHE_META}" "${SCCACHE_DIR}"
           for root in "${CARGO_HOME}" "${CARGO_HOME}/registry" "${CARGO_HOME}/git" \
-            "${CARGO_TARGET_DIR}" "${QUERY_REGRESSION_CACHE_META}" "${SCCACHE_DIR}"; do
+            "${UV_CACHE_DIR}" "${CARGO_TARGET_DIR}" "${QUERY_REGRESSION_CACHE_META}" "${SCCACHE_DIR}"; do
             test -w "${root}"
             touch "${root}/.query-regression-write-test"
             rm -f "${root}/.query-regression-write-test"
