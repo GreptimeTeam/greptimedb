@@ -26,7 +26,7 @@ use serde::Serialize;
 use snafu::ensure;
 use sqlparser::ast::{
     Array, Expr, Ident, ObjectName, ObjectNamePart, SqlOption, Value, ValueWithSpan,
-    Visit as AstVisit, Visitor, visit_relations,
+    Visit as AstVisit, Visitor,
 };
 use sqlparser_derive::{Visit, VisitMut};
 
@@ -333,10 +333,7 @@ fn extract_tables_from_sql_or_tql(query: &SqlOrTql, names: &mut HashSet<ObjectNa
 }
 
 fn collect_relations(ast: &impl AstVisit, names: &mut HashSet<ObjectName>) {
-    let _ = visit_relations(ast, |relation| {
-        names.insert(relation.clone());
-        ControlFlow::<()>::Continue(())
-    });
+    let _ = ast.visit(&mut RelationCollector::new(names));
 }
 
 fn metadata_table_name(table: &str, database: Option<&str>) -> ObjectName {
@@ -788,6 +785,10 @@ TQL EVAL (now() - '15s'::interval, now(), '5s') count_values("status_code", {__n
             ("SELECT * FROM physical_metric", vec!["physical_metric"]),
             (
                 "INSERT INTO target SELECT * FROM physical_metric",
+                vec!["physical_metric", "target"],
+            ),
+            (
+                "INSERT INTO target WITH cte AS (SELECT * FROM physical_metric) SELECT * FROM cte",
                 vec!["physical_metric", "target"],
             ),
             (
