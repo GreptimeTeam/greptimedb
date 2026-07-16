@@ -317,11 +317,12 @@ fn new_region_options_on_empty_memtable(
                 current_options.sst_format = Some(new_format);
             }
             SetRegionOption::AppendMode(new_append_mode) => {
-                // Safety: handle_alter_region_options_fast() has validated this.
-                assert!(*new_append_mode && !current_options.append_mode);
-
-                current_options.append_mode = true;
-                current_options.merge_mode = None;
+                if *new_append_mode != current_options.append_mode {
+                    // Safety: handle_alter_region_options_fast() has validated that the only
+                    // supported transition is from false to true.
+                    current_options.append_mode = *new_append_mode;
+                    current_options.merge_mode = None;
+                }
             }
             SetRegionOption::MaxRowGroupRowCount(new_row_count) => {
                 current_options.max_row_group_row_count = *new_row_count;
@@ -426,5 +427,25 @@ fn need_change_index(kind: &AlterKind) -> bool {
         // Index files still need to be rebuilt after schema changes,
         // but this will happen automatically during flush or compaction.
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_new_region_options_with_idempotent_append_mode() {
+        let current_options = RegionOptions::default();
+        let kind = AlterKind::SetRegionOptions {
+            options: vec![
+                SetRegionOption::AppendMode(false),
+                SetRegionOption::MaxRowGroupRowCount(Some(1024)),
+            ],
+        };
+
+        let new_options = new_region_options_on_empty_memtable(&current_options, &kind).unwrap();
+        assert!(!new_options.append_mode);
+        assert_eq!(Some(1024), new_options.max_row_group_row_count);
     }
 }
