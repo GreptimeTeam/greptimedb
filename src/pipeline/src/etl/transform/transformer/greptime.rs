@@ -29,6 +29,7 @@ use common_query::prelude::{greptime_timestamp, greptime_value};
 use common_telemetry::warn;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::extension::json::JsonExtensionType;
+use datatypes::json::value::JsonVariant;
 use datatypes::value::Value;
 use greptime_proto::v1::{ColumnSchema, Row, Rows, Value as GreptimeValue};
 use itertools::Itertools;
@@ -39,7 +40,6 @@ use session::context::Channel;
 use snafu::OptionExt;
 use table::Table;
 use vrl::prelude::{Bytes, VrlValueConvert};
-use vrl::value::value::StdError;
 use vrl::value::{KeyString, Value as VrlValue};
 
 use crate::error::{
@@ -47,6 +47,7 @@ use crate::error::{
     IdentifyPipelineColumnTypeMismatchSnafu, InvalidTimestampSnafu, Result,
     TimeIndexMustBeNonNullSnafu, TransformColumnNameMustBeUniqueSnafu,
     TransformMultipleTimestampIndexSnafu, TransformTimestampIndexCountSnafu, ValueMustBeMapSnafu,
+    VrlRegexValueSnafu,
 };
 use crate::etl::PipelineDocVersion;
 use crate::etl::ctx_req::ContextOpt;
@@ -710,10 +711,7 @@ fn resolve_value(
                 let settings = json_extension_type
                     .and_then(|x| x.metadata().json_settings.clone())
                     .unwrap_or_default();
-                let value: serde_json::Value = value.try_into().map_err(|e: StdError| {
-                    CoerceIncompatibleTypesSnafu { msg: e.to_string() }.build()
-                })?;
-                let value = settings.encode(value)?;
+                let value = settings.encode_variant(vrl_value_into_json_variant(value)?)?;
 
                 resolve_schema(
                     index,
@@ -773,6 +771,33 @@ fn vrl_value_to_jsonb_value<'a>(value: &'a VrlValue) -> jsonb::Value<'a> {
                 .collect(),
         ),
         VrlValue::Null => jsonb::Value::Null,
+    }
+}
+
+fn vrl_value_into_json_variant(value: VrlValue) -> Result<JsonVariant> {
+    match value {
+        VrlValue::Null => Ok(JsonVariant::Null),
+        VrlValue::Boolean(value) => Ok(value.into()),
+        VrlValue::Integer(value) => Ok(value.into()),
+        VrlValue::Float(value) => Ok(value.into_inner().into()),
+        VrlValue::Bytes(value) => Ok(String::from_utf8_lossy_owned(value.to_vec()).into()),
+        VrlValue::Array(values) => values
+            .into_iter()
+            .map(vrl_value_into_json_variant)
+            .collect::<Result<_>>()
+            .map(JsonVariant::Array),
+        VrlValue::Object(values) => values
+            .into_iter()
+            .map(|(key, value)| {
+                vrl_value_into_json_variant(value).map(|value| (key.to_string(), value))
+            })
+            .collect::<Result<_>>()
+            .map(JsonVariant::Object),
+        VrlValue::Regex(_) => VrlRegexValueSnafu.fail(),
+        VrlValue::Timestamp(_) => CoerceIncompatibleTypesSnafu {
+            msg: "timestamp is not supported in JSON2 values",
+        }
+        .fail(),
     }
 }
 
@@ -977,6 +1002,38 @@ mod tests {
 
     use super::*;
     use crate::{PipelineDefinition, identity_pipeline};
+
+    #[test]
+    fn test_vrl_value_into_json_variant() {
+        let json = serde_json::json!({
+            "array": [1, 2.5, null],
+            "boolean": true,
+            "integer": 42,
+            "string": "value"
+        });
+        let value: VrlValue = json.clone().into();
+        assert_eq!(
+            vrl_value_into_json_variant(value).unwrap(),
+            JsonVariant::from(json)
+        );
+
+        let value = VrlValue::Array(vec![VrlValue::Regex(
+            regex::Regex::new("value").unwrap().into(),
+        )]);
+        assert!(matches!(
+            vrl_value_into_json_variant(value),
+            Err(crate::error::Error::VrlRegexValue { .. })
+        ));
+
+        let value = VrlValue::Object(BTreeMap::from([(
+            KeyString::from("timestamp"),
+            VrlValue::Timestamp(chrono::Utc::now()),
+        )]));
+        assert!(matches!(
+            vrl_value_into_json_variant(value),
+            Err(crate::error::Error::CoerceIncompatibleTypes { .. })
+        ));
+    }
 
     #[test]
     fn test_identify_pipeline() {

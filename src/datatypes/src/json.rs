@@ -30,7 +30,7 @@ use snafu::ResultExt;
 
 use crate::data_type::ConcreteDataType;
 use crate::error::{self, Result, UnsupportedJsonTypeSnafu};
-use crate::json::value::{JsonValue, JsonVariant};
+use crate::json::value::{JsonNumber, JsonValue, JsonVariant};
 use crate::schema::ColumnDefaultConstraint;
 use crate::types::json_type::JsonNativeType;
 use crate::value::{ListValue, StructValue, Value};
@@ -91,11 +91,16 @@ impl JsonSettings {
 
     /// Encode a serde_json::Value into a Value::Json using current settings.
     pub fn encode(&self, json: Json) -> Result<Value> {
+        self.encode_variant(json.into())
+    }
+
+    /// Encode a JsonVariant into a Value::Json using current settings.
+    pub fn encode_variant(&self, json: JsonVariant) -> Result<Value> {
         let mut context = JsonContext {
             path: Vec::new(),
             settings: self,
         };
-        encode_json_with_context(json, &mut context).map(|v| Value::Json(Box::new(v)))
+        encode_json_variant_with_context(json, &mut context).map(|v| Value::Json(Box::new(v)))
     }
 }
 
@@ -120,38 +125,40 @@ fn with_key_context<T>(
 }
 
 /// Main encoding function with key path tracking
-fn encode_json_with_context(json: Json, context: &mut JsonContext) -> Result<JsonValue> {
-    if context.path.is_empty() && !matches!(json, Json::Object(_)) {
+fn encode_json_variant_with_context(
+    json: JsonVariant,
+    context: &mut JsonContext,
+) -> Result<JsonValue> {
+    if context.path.is_empty() && !matches!(json, JsonVariant::Object(_)) {
         return UnsupportedJsonTypeSnafu.fail();
     }
 
     match json {
-        Json::Object(json_object) => encode_json_object_with_context(json_object, context),
-        Json::Array(json_array) => encode_json_array_with_context(json_array, context),
-        _ => encode_json_value_with_context(json, context),
+        JsonVariant::Object(json_object) => encode_json_object_with_context(json_object, context),
+        JsonVariant::Array(json_array) => encode_json_array_with_context(json_array, context),
+        _ => encode_json_variant_value_with_context(json, context),
     }
 }
 
 fn encode_json_object_with_context<'a>(
-    json_object: Map<String, Json>,
+    mut json_object: BTreeMap<String, JsonVariant>,
     context: &mut JsonContext<'a>,
 ) -> Result<JsonValue> {
-    let mut object = BTreeMap::new();
-    for (key, value) in json_object {
-        let value = with_key_context(context, &key, |context| {
+    for (key, slot) in &mut json_object {
+        let value = std::mem::take(slot);
+        let value = with_key_context(context, key, |context| {
             if let Some(hint) = context.type_hint() {
                 encode_json_value_with_hint(value, hint, context)
             } else {
-                encode_json_value_with_context(value, context)
+                encode_json_variant_value_with_context(value, context)
             }
         })?;
-
-        object.insert(key, value.into_variant());
+        *slot = value.into_variant();
     }
 
-    apply_missing_type_hints(&mut object, context)?;
+    apply_missing_type_hints(&mut json_object, context)?;
 
-    Ok(JsonValue::new(JsonVariant::Object(object)))
+    Ok(JsonValue::new(JsonVariant::Object(json_object)))
 }
 
 fn apply_missing_type_hints(
@@ -217,7 +224,7 @@ fn encode_missing_type_hint_value(
     if let Some(default_constraint) = &hint.default_constraint {
         let value = default_constraint.create_default(&hint.data_type, hint.nullable)?;
         let json = decode_primitive_value(value)?;
-        return encode_json_value_with_hint(json, hint, context);
+        return encode_json_value_with_hint(json.into(), hint, context);
     }
 
     if hint.nullable {
@@ -234,11 +241,11 @@ fn encode_missing_type_hint_value(
 }
 
 fn encode_json_value_with_hint(
-    json: Json,
+    json: JsonVariant,
     hint: &JsonTypeHint,
     context: &mut JsonContext,
 ) -> Result<JsonValue> {
-    if json.is_null() {
+    if matches!(json, JsonVariant::Null) {
         return if hint.nullable {
             Ok(JsonValue::null())
         } else {
@@ -264,13 +271,13 @@ fn encode_json_value_with_hint(
     };
 
     match (&hint.data_type, json) {
-        (ConcreteDataType::String(_), Json::String(v)) => Ok(v.into()),
+        (ConcreteDataType::String(_), JsonVariant::String(v)) => Ok(v.into()),
         (
             ConcreteDataType::Int8(_)
             | ConcreteDataType::Int16(_)
             | ConcreteDataType::Int32(_)
             | ConcreteDataType::Int64(_),
-            Json::Number(v),
+            v @ JsonVariant::Number(_),
         ) => match v.as_i64() {
             Some(v) => Ok(v.into()),
             None => invalid_type(),
@@ -280,34 +287,34 @@ fn encode_json_value_with_hint(
             | ConcreteDataType::UInt16(_)
             | ConcreteDataType::UInt32(_)
             | ConcreteDataType::UInt64(_),
-            Json::Number(v),
+            v @ JsonVariant::Number(_),
         ) => match v.as_u64() {
             Some(v) => Ok(v.into()),
             None => invalid_type(),
         },
-        (ConcreteDataType::Float32(_) | ConcreteDataType::Float64(_), Json::Number(v)) => {
-            match v.as_f64() {
-                Some(v) => Ok(v.into()),
-                None => invalid_type(),
-            }
+        (ConcreteDataType::Float32(_) | ConcreteDataType::Float64(_), JsonVariant::Number(v)) => {
+            let value = match v {
+                JsonNumber::PosInt(v) => v as f64,
+                JsonNumber::NegInt(v) => v as f64,
+                JsonNumber::Float(v) => v.0,
+            };
+            Ok(value.into())
         }
-        (ConcreteDataType::Boolean(_), Json::Bool(v)) => Ok(v.into()),
+        (ConcreteDataType::Boolean(_), JsonVariant::Bool(v)) => Ok(v.into()),
         _ => invalid_type(),
     }
 }
 
 fn encode_json_array_with_context<'a>(
-    json_array: Vec<Json>,
+    mut json_array: Vec<JsonVariant>,
     context: &mut JsonContext<'a>,
 ) -> Result<JsonValue> {
-    let json_array_len = json_array.len();
-    let mut items = Vec::with_capacity(json_array_len);
-
-    for (index, value) in json_array.into_iter().enumerate() {
+    for (index, slot) in json_array.iter_mut().enumerate() {
+        let value = std::mem::take(slot);
         let item_value = with_key_context(context, &index.to_string(), |context| {
-            encode_json_value_with_context(value, context)
+            encode_json_variant_value_with_context(value, context)
         })?;
-        items.push(item_value);
+        *slot = item_value.into_variant();
     }
 
     // In specification, it's valid for a JSON array to have different types of items, for example,
@@ -315,54 +322,37 @@ fn encode_json_array_with_context<'a>(
     // array, which requires all items have exactly the same type. So we merge out the maybe
     // different item types to a unified type, and align all the item values to it.
 
-    let merged_item_type = if let Some((first, rests)) = items.split_first() {
-        let mut merged = first.json_type().clone();
-        for rest in rests.iter().map(|x| x.json_type()) {
+    let merged_item_type = if let Some((first, rests)) = json_array.split_first() {
+        let mut merged = first.native_type();
+        for rest in rests.iter().map(JsonVariant::native_type) {
             if matches!(merged, JsonNativeType::Variant) {
                 break;
             }
-            merged.merge(rest);
+            merged.merge(&rest);
         }
         Some(merged)
     } else {
         None
     };
     if let Some(unified_item_type) = merged_item_type {
-        for item in &mut items {
-            item.try_align(&unified_item_type)?;
+        for item in &mut json_array {
+            let mut value = JsonValue::new(std::mem::take(item));
+            value.try_align(&unified_item_type)?;
+            *item = value.into_variant();
         }
     }
-    let items = items
-        .into_iter()
-        .map(|x| x.into_variant())
-        .collect::<Vec<_>>();
-    Ok(JsonValue::new(JsonVariant::Array(items)))
+    Ok(JsonValue::new(JsonVariant::Array(json_array)))
 }
 
 /// Helper function to encode a JSON value to a Value and determine its ConcreteDataType with context
-fn encode_json_value_with_context(json: Json, context: &mut JsonContext) -> Result<JsonValue> {
+fn encode_json_variant_value_with_context(
+    json: JsonVariant,
+    context: &mut JsonContext,
+) -> Result<JsonValue> {
     match json {
-        Json::Null => Ok(JsonValue::null()),
-        Json::Bool(b) => Ok(b.into()),
-        Json::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                Ok(i.into())
-            } else if let Some(u) = n.as_u64() {
-                if u <= i64::MAX as u64 {
-                    Ok((u as i64).into())
-                } else {
-                    Ok(u.into())
-                }
-            } else if let Some(f) = n.as_f64() {
-                Ok(f.into())
-            } else {
-                // Fallback to string representation
-                Ok(n.to_string().into())
-            }
-        }
-        Json::String(s) => Ok(s.into()),
-        Json::Array(arr) => encode_json_array_with_context(arr, context),
-        Json::Object(obj) => encode_json_object_with_context(obj, context),
+        JsonVariant::Array(arr) => encode_json_array_with_context(arr, context),
+        JsonVariant::Object(obj) => encode_json_object_with_context(obj, context),
+        value => Ok(JsonValue::new(value)),
     }
 }
 
@@ -570,6 +560,32 @@ mod tests {
                 "{name}: {err:?}"
             );
         }
+    }
+
+    #[test]
+    fn test_encode_json_variant() {
+        let settings = JsonSettings::new(vec![JsonTypeHint {
+            path: vec!["count".to_string()],
+            data_type: ConcreteDataType::uint64_datatype(),
+            nullable: false,
+            default_constraint: None,
+            inverted_index: false,
+        }]);
+        let value = JsonVariant::from(json!({
+            "count": 42,
+            "nested": { "enabled": true },
+            "values": [1, 2, 3]
+        }));
+
+        let result = settings
+            .encode_variant(value)
+            .unwrap()
+            .into_json_inner()
+            .unwrap();
+        let Value::Struct(result) = result else {
+            panic!("Expected Struct value");
+        };
+        assert_eq!(struct_field_value(&result, "count"), &Value::UInt64(42));
     }
 
     #[test]
