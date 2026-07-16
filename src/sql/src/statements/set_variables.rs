@@ -15,7 +15,7 @@
 use std::fmt::Display;
 
 use serde::Serialize;
-use sqlparser::ast::{Expr, ObjectName};
+use sqlparser::ast::{Expr, ObjectName, ObjectNamePart, Value, ValueWithSpan};
 use sqlparser_derive::{Visit, VisitMut};
 
 /// SET variables statement.
@@ -23,6 +23,27 @@ use sqlparser_derive::{Visit, VisitMut};
 pub struct SetVariables {
     pub variable: ObjectName,
     pub value: Vec<Expr>,
+}
+
+impl SetVariables {
+    /// Returns the first supported `search_path` value.
+    pub fn search_path(&self) -> Option<&str> {
+        let [ObjectNamePart::Identifier(variable)] = self.variable.0.as_slice() else {
+            return None;
+        };
+        if variable.quote_style.is_some() || !variable.value.eq_ignore_ascii_case("search_path") {
+            return None;
+        }
+
+        match self.value.first()? {
+            Expr::Value(ValueWithSpan {
+                value: Value::SingleQuotedString(value) | Value::DoubleQuotedString(value),
+                ..
+            }) => Some(value),
+            Expr::Identifier(value) => Some(&value.value),
+            _ => None,
+        }
+    }
 }
 
 impl Display for SetVariables {
@@ -68,6 +89,28 @@ SET delayed_insert_timeout = 300"#,
             _ => {
                 unreachable!();
             }
+        }
+    }
+
+    #[test]
+    fn test_search_path() {
+        for (sql, expected) in [
+            ("SET search_path TO public", Some("public")),
+            ("SET SEARCH_PATH TO 'private'", Some("private")),
+            ("SET search_path TO \"quoted\"", Some("quoted")),
+            ("SET \"search_path\" TO private", None),
+            ("SET timezone TO 'UTC'", None),
+        ] {
+            let statements = ParserContext::create_with_dialect(
+                sql,
+                &GreptimeDbDialect {},
+                ParseOptions::default(),
+            )
+            .unwrap();
+            let [Statement::SetVariables(set)] = statements.as_slice() else {
+                unreachable!()
+            };
+            assert_eq!(expected, set.search_path());
         }
     }
 }

@@ -55,6 +55,25 @@ SHOW CREATE TABLE ato;
 
 DROP TABLE ato;
 
+CREATE TABLE write_buffer_size_options(
+    i INTEGER,
+    ts TIMESTAMP TIME INDEX,
+    PRIMARY KEY(i)
+);
+
+ALTER TABLE write_buffer_size_options SET 'write_buffer_size' = '128MiB';
+
+SHOW CREATE TABLE write_buffer_size_options;
+
+-- SQLNESS ARG restart=true
+SHOW CREATE TABLE write_buffer_size_options;
+
+ALTER TABLE write_buffer_size_options UNSET 'write_buffer_size';
+
+SHOW CREATE TABLE write_buffer_size_options;
+
+DROP TABLE write_buffer_size_options;
+
 CREATE TABLE phy (ts timestamp time index, val double) engine=metric with ("physical_metric_table" = "");
 
 ALTER TABLE phy set ttl='2years';

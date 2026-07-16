@@ -436,31 +436,7 @@ impl RegionOpener {
     }
 
     fn provider<S: LogStore>(&self, wal_options: &WalOptions) -> Result<Provider> {
-        match wal_options {
-            WalOptions::RaftEngine => {
-                ensure!(
-                    TypeId::of::<RaftEngineLogStore>() == TypeId::of::<S>()
-                        || TypeId::of::<NoopLogStore>() == TypeId::of::<S>(),
-                    error::IncompatibleWalProviderChangeSnafu {
-                        global: "`kafka`",
-                        region: "`raft_engine`",
-                    }
-                );
-                Ok(Provider::raft_engine_provider(self.region_id.as_u64()))
-            }
-            WalOptions::Kafka(options) => {
-                ensure!(
-                    TypeId::of::<KafkaLogStore>() == TypeId::of::<S>()
-                        || TypeId::of::<NoopLogStore>() == TypeId::of::<S>(),
-                    error::IncompatibleWalProviderChangeSnafu {
-                        global: "`raft_engine`",
-                        region: "`kafka`",
-                    }
-                );
-                Ok(Provider::kafka_provider(options.topic.clone()))
-            }
-            WalOptions::Noop => Ok(Provider::noop_provider()),
-        }
+        provider_from_wal_options::<S>(self.region_id, wal_options)
     }
 
     /// Tries to open the region and returns `None` if the region directory is empty.
@@ -653,6 +629,37 @@ impl RegionOpener {
         maybe_preload_parquet_meta_cache(&region, config, &self.cache_manager);
 
         Ok(Some(region))
+    }
+}
+
+pub(crate) fn provider_from_wal_options<S: LogStore>(
+    region_id: RegionId,
+    wal_options: &WalOptions,
+) -> Result<Provider> {
+    match wal_options {
+        WalOptions::RaftEngine => {
+            ensure!(
+                TypeId::of::<RaftEngineLogStore>() == TypeId::of::<S>()
+                    || TypeId::of::<NoopLogStore>() == TypeId::of::<S>(),
+                error::IncompatibleWalProviderChangeSnafu {
+                    global: "`kafka`",
+                    region: "`raft_engine`",
+                }
+            );
+            Ok(Provider::raft_engine_provider(region_id.as_u64()))
+        }
+        WalOptions::Kafka(options) => {
+            ensure!(
+                TypeId::of::<KafkaLogStore>() == TypeId::of::<S>()
+                    || TypeId::of::<NoopLogStore>() == TypeId::of::<S>(),
+                error::IncompatibleWalProviderChangeSnafu {
+                    global: "`raft_engine`",
+                    region: "`kafka`",
+                }
+            );
+            Ok(Provider::kafka_provider(options.topic.clone()))
+        }
+        WalOptions::Noop => Ok(Provider::noop_provider()),
     }
 }
 

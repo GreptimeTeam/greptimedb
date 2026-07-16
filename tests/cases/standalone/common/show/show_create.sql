@@ -15,7 +15,7 @@ PARTITION ON COLUMNS (`id`) (
 ENGINE=mito
 WITH(
   ttl = '7d',
-  write_buffer_size = 1024
+  write_buffer_size = '1KiB'
 );
 
 SHOW CREATE TABLE system_metrics;

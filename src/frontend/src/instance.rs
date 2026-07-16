@@ -612,7 +612,11 @@ impl Instance {
         let checker_ref = self.plugins.get::<PermissionCheckerRef>();
         checker_ref
             .as_ref()
-            .check_permission(query_ctx.current_user(), PermissionReq::SqlStatement(&stmt))
+            .check_permission_with_context(
+                query_ctx.current_user(),
+                PermissionReq::SqlStatement(&stmt),
+                Some(&query_ctx.current_schema()),
+            )
             .context(PermissionSnafu)?;
         check_permission(self.plugins.clone(), &stmt, &query_ctx)?;
         let catalog_name = query_ctx.current_catalog().to_string();
@@ -673,9 +677,10 @@ impl Instance {
                 let mut results = Vec::with_capacity(stmts.len());
                 for stmt in stmts {
                     if let Err(e) = checker
-                        .check_permission(
+                        .check_permission_with_context(
                             query_ctx.current_user(),
                             PermissionReq::SqlStatement(&stmt),
+                            Some(&query_ctx.current_schema()),
                         )
                         .context(PermissionSnafu)
                     {
@@ -853,7 +858,11 @@ impl Instance {
             self.plugins
                 .get::<PermissionCheckerRef>()
                 .as_ref()
-                .check_permission(query_ctx.current_user(), PermissionReq::SqlStatement(&stmt))
+                .check_permission_with_context(
+                    query_ctx.current_user(),
+                    PermissionReq::SqlStatement(&stmt),
+                    Some(&query_ctx.current_schema()),
+                )
                 .context(PermissionSnafu)?;
 
             let plan = self

@@ -317,13 +317,6 @@ impl JsonValue {
         }
     }
 
-    pub(crate) fn new_with(json_variant: JsonVariant, json_type: Arc<JsonNativeType>) -> Self {
-        Self {
-            json_type: OnceLock::from(json_type),
-            json_variant,
-        }
-    }
-
     pub(crate) fn data_type(&self) -> ConcreteDataType {
         ConcreteDataType::json2(self.json_type().clone())
     }
@@ -381,10 +374,6 @@ impl JsonValue {
 
     pub fn into_variant(self) -> JsonVariant {
         self.json_variant
-    }
-
-    pub(crate) fn variant(&self) -> &JsonVariant {
-        &self.json_variant
     }
 
     pub(crate) fn into_value(self) -> Value {
@@ -826,6 +815,15 @@ pub struct JsonValueRef<'a> {
 impl<'a> JsonValueRef<'a> {
     pub fn null() -> Self {
         ().into()
+    }
+
+    /// Creates a JSON value reference with its precomputed native type.
+    /// The native type must describe `json_variant` exactly.
+    pub fn new_with_type(json_variant: JsonVariantRef<'a>, json_type: JsonNativeType) -> Self {
+        Self {
+            json_type: OnceLock::from(Arc::new(json_type)),
+            json_variant,
+        }
     }
 
     pub(crate) fn data_type(&self) -> ConcreteDataType {

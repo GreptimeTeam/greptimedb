@@ -38,9 +38,10 @@ use store_api::region_engine::{
 };
 use store_api::region_request::{
     AffectedRows, ApplyStagingManifestRequest, EnterStagingRequest, RegionAlterRequest,
-    RegionBuildIndexRequest, RegionBulkInsertsRequest, RegionCatchupRequest, RegionCloseRequest,
-    RegionCompactRequest, RegionCreateRequest, RegionDropRequest, RegionFlushRequest,
-    RegionOpenRequest, RegionRequest, RegionTruncateRequest, StagingPartitionDirective,
+    RegionBuildIndexRequest, RegionBulkInsertsRequest, RegionCatchupRequest, RegionCleanUpRequest,
+    RegionCloseRequest, RegionCompactRequest, RegionCreateRequest, RegionDropRequest,
+    RegionFlushRequest, RegionOpenRequest, RegionRequest, RegionTruncateRequest,
+    StagingPartitionDirective,
 };
 use store_api::storage::{FileId, RegionId};
 use tokio::sync::oneshot::{self, Receiver, Sender};
@@ -711,6 +712,11 @@ impl WorkerRequest {
                 sender: sender.into(),
                 request: DdlRequest::Open((v, None)),
             }),
+            RegionRequest::CleanUp(v) => WorkerRequest::Ddl(SenderDdlRequest {
+                region_id,
+                sender: sender.into(),
+                request: DdlRequest::OfflineCleanup(v),
+            }),
             RegionRequest::Close(v) => WorkerRequest::Ddl(SenderDdlRequest {
                 region_id,
                 sender: sender.into(),
@@ -863,6 +869,7 @@ pub(crate) enum DdlRequest {
     Create(RegionCreateRequest),
     Drop(RegionDropRequest),
     Open((RegionOpenRequest, Option<WalEntryReceiver>)),
+    OfflineCleanup(RegionCleanUpRequest),
     Close(RegionCloseRequest),
     Alter(RegionAlterRequest),
     Flush(RegionFlushRequest),

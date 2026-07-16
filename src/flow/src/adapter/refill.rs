@@ -85,7 +85,10 @@ impl StreamingEngine {
                 }
             }
 
-            let expire_after = info.expire_after();
+            let expire_after = info
+                .expire_after()
+                .map(super::expire_after_secs_to_millis)
+                .transpose()?;
             // TODO(discord9): better way to get last point
             let now = self.tick_manager.tick();
             let plan = self

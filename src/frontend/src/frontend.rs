@@ -237,6 +237,7 @@ mod tests {
                             is_handshake.then_some(api::v1::meta::HeartbeatConfig {
                                 heartbeat_interval_ms,
                                 retry_interval_ms: heartbeat_interval_ms,
+                                gc_enabled: false,
                             });
                         is_handshake = false;
                         let response = HeartbeatResponse {

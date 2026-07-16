@@ -1307,7 +1307,10 @@ pub async fn reopen_region(
 ) {
     // Close the region.
     engine
-        .handle_request(region_id, RegionRequest::Close(RegionCloseRequest {}))
+        .handle_request(
+            region_id,
+            RegionRequest::Close(RegionCloseRequest::default()),
+        )
         .await
         .unwrap();
 

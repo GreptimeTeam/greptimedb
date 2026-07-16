@@ -808,6 +808,50 @@ impl DefaultRepartitionProcedureFactory {
     }
 }
 
+/// Rejects new repartition requests when metasrv GC is disabled.
+///
+/// Procedure loaders are still delegated to the enabled factory so procedures
+/// persisted before a metasrv restart can be recovered.
+pub struct GcDisabledRepartitionProcedureFactory {
+    enabled_factory: DefaultRepartitionProcedureFactory,
+}
+
+impl GcDisabledRepartitionProcedureFactory {
+    pub fn new(mailbox: MailboxRef, server_addr: String) -> Self {
+        Self {
+            enabled_factory: DefaultRepartitionProcedureFactory::new(mailbox, server_addr),
+        }
+    }
+}
+
+impl RepartitionProcedureFactory for GcDisabledRepartitionProcedureFactory {
+    fn create(
+        &self,
+        _ddl_ctx: &DdlContext,
+        _table_name: TableName,
+        _table_id: TableId,
+        _source: RepartitionSource,
+        _to_exprs: Vec<String>,
+        _timeout: Option<Duration>,
+    ) -> std::result::Result<BoxedProcedure, BoxedError> {
+        Err(BoxedError::new(
+            error::InvalidArgumentsSnafu {
+                err_msg: "Repartition requires metasrv GC to be enabled".to_string(),
+            }
+            .build(),
+        ))
+    }
+
+    fn register_loaders(
+        &self,
+        ddl_ctx: &DdlContext,
+        procedure_manager: &ProcedureManagerRef,
+    ) -> std::result::Result<(), BoxedError> {
+        self.enabled_factory
+            .register_loaders(ddl_ctx, procedure_manager)
+    }
+}
+
 impl RepartitionProcedureFactory for DefaultRepartitionProcedureFactory {
     fn create(
         &self,
@@ -919,7 +963,7 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    use common_error::ext::BoxedError;
+    use common_error::ext::{BoxedError, ErrorExt};
     use common_error::mock::MockError;
     use common_error::status_code::StatusCode;
     use common_meta::ddl::test_util::datanode_handler::{
@@ -1048,6 +1092,37 @@ mod tests {
             env.server_addr.clone(),
             persistent_ctx,
         )
+    }
+
+    #[test]
+    fn test_gc_disabled_factory_rejects_repartition() {
+        let env = TestingEnv::new();
+        let node_manager = Arc::new(MockDatanodeManager::new(UnexpectedErrorDatanodeHandler));
+        let ddl_ctx = env.ddl_context(node_manager);
+        let factory = GcDisabledRepartitionProcedureFactory::new(
+            env.mailbox_ctx.mailbox().clone(),
+            env.server_addr.clone(),
+        );
+
+        let err = factory
+            .create(
+                &ddl_ctx,
+                TableName::new("test_catalog", "test_schema", "test_table"),
+                1024,
+                RepartitionSource::Unpartitioned {
+                    partition_columns: vec![],
+                },
+                vec![],
+                None,
+            )
+            .err()
+            .expect("GC-disabled factory must reject repartition");
+
+        assert_eq!(StatusCode::InvalidArguments, err.status_code());
+        assert_eq!(
+            "Invalid arguments: Repartition requires metasrv GC to be enabled",
+            err.to_string()
+        );
     }
 
     #[test]

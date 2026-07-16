@@ -159,6 +159,28 @@ impl<S: LogStore> Wal<S> {
             .map_err(BoxedError::new)
             .context(DeleteWalSnafu { region_id })
     }
+
+    /// Deletes all WAL entries in the namespace represented by `provider`.
+    pub async fn delete_namespace(&self, region_id: RegionId, provider: &Provider) -> Result<()> {
+        if let Provider::Noop = provider {
+            return Ok(());
+        }
+        self.store
+            .delete_namespace(provider)
+            .await
+            .map_err(BoxedError::new)
+            .context(DeleteWalSnafu { region_id })
+    }
+
+    /// Marks all WAL entries of a region as obsolete and removes its dedicated namespace when
+    /// supported by the backend.
+    pub async fn obsolete_all(&self, region_id: RegionId, provider: &Provider) -> Result<()> {
+        self.store
+            .obsolete_all(provider, region_id)
+            .await
+            .map_err(BoxedError::new)
+            .context(DeleteWalSnafu { region_id })
+    }
 }
 
 /// WAL batch writer.

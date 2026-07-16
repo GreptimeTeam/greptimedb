@@ -175,6 +175,7 @@ impl From<HeartbeatOptions> for HeartbeatConfig {
         Self {
             heartbeat_interval_ms: opts.interval.as_millis() as u64,
             retry_interval_ms: opts.retry_interval.as_millis() as u64,
+            gc_enabled: false,
         }
     }
 }
@@ -438,6 +439,7 @@ pub struct Context {
     pub leader_region_registry: LeaderRegionRegistryRef,
     pub topic_stats_registry: TopicStatsRegistryRef,
     pub heartbeat_interval: Duration,
+    pub gc_enabled: bool,
     pub is_handshake: bool,
 }
 
@@ -932,6 +934,7 @@ impl Metasrv {
             leader_region_registry,
             topic_stats_registry,
             heartbeat_interval: self.options().heartbeat_interval,
+            gc_enabled: self.options().gc.enable,
             is_handshake: false,
         }
     }

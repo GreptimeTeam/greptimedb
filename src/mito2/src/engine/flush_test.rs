@@ -14,6 +14,7 @@
 
 //! Flush tests for mito engine.
 
+use std::assert_matches;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
@@ -22,6 +23,7 @@ use std::time::Duration;
 use api::v1::Rows;
 use async_trait::async_trait;
 use common_base::Plugins;
+use common_base::readable_size::ReadableSize;
 use common_recordbatch::RecordBatches;
 use common_time::util::current_time_millis;
 use common_wal::options::{KafkaWalOptions, WAL_OPTIONS_KEY, WalOptions};
@@ -29,17 +31,20 @@ use rstest::rstest;
 use rstest_reuse::{self, apply};
 use store_api::ManifestVersion;
 use store_api::metadata::RegionMetadataRef;
-use store_api::region_engine::RegionEngine;
+use store_api::mito_engine_options::WRITE_BUFFER_SIZE_KEY;
+use store_api::region_engine::{RegionEngine, RegionRole};
 use store_api::region_request::{
-    PathType, RegionCloseRequest, RegionFlushRequest, RegionOpenRequest, RegionRequest,
-    ReplayCheckpoint,
+    AlterKind, PathType, RegionAlterRequest, RegionCloseRequest, RegionFlushRequest,
+    RegionOpenRequest, RegionPutRequest, RegionRequest, ReplayCheckpoint, SetRegionOption,
 };
 use store_api::storage::{RegionId, ScanRequest};
 use tokio::sync::Notify;
 
 use crate::config::MitoConfig;
-use crate::engine::listener::{FlushListener, StallListener};
+use crate::engine::MitoEngine;
+use crate::engine::listener::{EventListener, FlushListener, StallListener};
 use crate::engine::region_hook::{RegionHook, RegionHookRef, SstFileInfo};
+use crate::error::Error;
 use crate::manifest::action::RegionMetaActionList;
 use crate::test_util::{
     CreateRequestBuilder, LogStoreFactory, MockWriteBufferManager, TestEnv, build_rows,
@@ -49,6 +54,73 @@ use crate::test_util::{
 };
 use crate::time_provider::TimeProvider;
 use crate::worker::MAX_INITIAL_CHECK_DELAY_SECS;
+
+async fn set_write_buffer_size_to_current_usage(engine: &MitoEngine, region_id: RegionId) {
+    let version = engine.get_region(region_id).unwrap().version();
+    let memory_usage = version.memtables.mutable_usage() + version.memtables.immutables_usage();
+    assert!(memory_usage > 0);
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Alter(RegionAlterRequest {
+                kind: AlterKind::SetRegionOptions {
+                    options: vec![SetRegionOption::WriteBufferSize(Some(ReadableSize(
+                        memory_usage as u64,
+                    )))],
+                },
+            }),
+        )
+        .await
+        .unwrap();
+}
+
+struct RegionFlushGate {
+    blocked_region_id: RegionId,
+    observed_region_id: RegionId,
+    blocked_flush_started: Notify,
+    resume_blocked_flush: Notify,
+    observed_flush_finished: Notify,
+}
+
+impl RegionFlushGate {
+    fn new(blocked_region_id: RegionId, observed_region_id: RegionId) -> Self {
+        Self {
+            blocked_region_id,
+            observed_region_id,
+            blocked_flush_started: Notify::new(),
+            resume_blocked_flush: Notify::new(),
+            observed_flush_finished: Notify::new(),
+        }
+    }
+
+    async fn wait_blocked_flush_started(&self) {
+        self.blocked_flush_started.notified().await;
+    }
+
+    fn resume_blocked_flush(&self) {
+        self.resume_blocked_flush.notify_one();
+    }
+
+    async fn wait_observed_flush_finished(&self) {
+        self.observed_flush_finished.notified().await;
+    }
+}
+
+#[async_trait]
+impl EventListener for RegionFlushGate {
+    fn on_flush_success(&self, region_id: RegionId) {
+        if region_id == self.observed_region_id {
+            self.observed_flush_finished.notify_one();
+        }
+    }
+
+    async fn on_flush_begin(&self, region_id: RegionId) {
+        if region_id == self.blocked_region_id {
+            self.blocked_flush_started.notify_one();
+            self.resume_blocked_flush.notified().await;
+        }
+    }
+}
 
 #[tokio::test]
 async fn test_manual_flush() {
@@ -274,6 +346,503 @@ async fn test_write_stall_with_format(flat_format: bool) {
 }
 
 #[tokio::test]
+async fn test_region_write_buffer_limit_flushes_hot_region() {
+    let mut env = TestEnv::new().await;
+    let listener = Arc::new(FlushListener::default());
+    let engine = env
+        .create_engine_with(MitoConfig::default(), None, Some(listener.clone()), None)
+        .await;
+
+    let hot_region_id = RegionId::new(1, 1);
+    let normal_region_id = RegionId::new(2, 1);
+    let idle_region_id = RegionId::new(3, 1);
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            hot_region_id.table_id(),
+            "hot_table",
+            "test_catalog",
+            "test_schema",
+            None,
+            env.get_kv_backend(),
+        )
+        .await;
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            idle_region_id.table_id(),
+            "idle_table",
+            "test_catalog",
+            "test_schema",
+            None,
+            env.get_kv_backend(),
+        )
+        .await;
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            normal_region_id.table_id(),
+            "normal_table",
+            "test_catalog",
+            "test_schema",
+            None,
+            env.get_kv_backend(),
+        )
+        .await;
+
+    // The hot region sets its limit to its memory usage after the initial write.
+    let hot_request = CreateRequestBuilder::new().build();
+    let hot_schema = rows_schema(&hot_request);
+    engine
+        .handle_request(hot_region_id, RegionRequest::Create(hot_request))
+        .await
+        .unwrap();
+
+    // An explicit table option takes precedence over the engine-level default.
+    let normal_request = CreateRequestBuilder::new()
+        .table_dir("normal")
+        .insert_option(WRITE_BUFFER_SIZE_KEY, "1GiB")
+        .build();
+    let normal_schema = rows_schema(&normal_request);
+    engine
+        .handle_request(normal_region_id, RegionRequest::Create(normal_request))
+        .await
+        .unwrap();
+
+    let idle_request = CreateRequestBuilder::new()
+        .table_dir("idle")
+        .insert_option(WRITE_BUFFER_SIZE_KEY, "1B")
+        .build();
+    let idle_schema = rows_schema(&idle_request);
+    engine
+        .handle_request(idle_region_id, RegionRequest::Create(idle_request))
+        .await
+        .unwrap();
+
+    put_rows(
+        &engine,
+        hot_region_id,
+        Rows {
+            schema: hot_schema.clone(),
+            rows: build_rows_for_key("hot", 0, 2, 0),
+        },
+    )
+    .await;
+    set_write_buffer_size_to_current_usage(&engine, hot_region_id).await;
+    put_rows(
+        &engine,
+        normal_region_id,
+        Rows {
+            schema: normal_schema,
+            rows: build_rows_for_key("normal", 0, 2, 0),
+        },
+    )
+    .await;
+    put_rows(
+        &engine,
+        idle_region_id,
+        Rows {
+            schema: idle_schema,
+            rows: build_rows_for_key("idle", 0, 2, 0),
+        },
+    )
+    .await;
+
+    // The next write triggers a flush after the first write crosses the threshold.
+    put_rows(
+        &engine,
+        hot_region_id,
+        Rows {
+            schema: hot_schema,
+            rows: build_rows_for_key("hot", 2, 2, 0),
+        },
+    )
+    .await;
+    listener.wait().await;
+
+    let scanner = engine
+        .scanner(hot_region_id, ScanRequest::default())
+        .await
+        .unwrap();
+    assert_eq!(1, scanner.num_files());
+
+    let scanner = engine
+        .scanner(normal_region_id, ScanRequest::default())
+        .await
+        .unwrap();
+    assert_eq!(0, scanner.num_files());
+    assert_eq!(1, scanner.num_memtables());
+
+    let scanner = engine
+        .scanner(idle_region_id, ScanRequest::default())
+        .await
+        .unwrap();
+    assert_eq!(0, scanner.num_files());
+    assert_eq!(1, scanner.num_memtables());
+}
+
+#[tokio::test]
+async fn test_region_write_buffer_stall_does_not_block_other_region() {
+    let mut env = TestEnv::new().await;
+    let listener = Arc::new(StallListener::default());
+    let engine = env
+        .create_engine_with(MitoConfig::default(), None, Some(listener.clone()), None)
+        .await;
+
+    let stalled_region_id = RegionId::new(1, 1);
+    let normal_region_id = RegionId::new(2, 1);
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            stalled_region_id.table_id(),
+            "stalled_table",
+            "test_catalog",
+            "test_schema",
+            None,
+            env.get_kv_backend(),
+        )
+        .await;
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            normal_region_id.table_id(),
+            "normal_table",
+            "test_catalog",
+            "test_schema",
+            None,
+            env.get_kv_backend(),
+        )
+        .await;
+
+    let stalled_request = CreateRequestBuilder::new().build();
+    let stalled_schema = rows_schema(&stalled_request);
+    engine
+        .handle_request(stalled_region_id, RegionRequest::Create(stalled_request))
+        .await
+        .unwrap();
+
+    let normal_request = CreateRequestBuilder::new()
+        .table_dir("normal")
+        .insert_option(WRITE_BUFFER_SIZE_KEY, "1GiB")
+        .build();
+    let normal_schema = rows_schema(&normal_request);
+    engine
+        .handle_request(normal_region_id, RegionRequest::Create(normal_request))
+        .await
+        .unwrap();
+
+    put_rows(
+        &engine,
+        stalled_region_id,
+        Rows {
+            schema: stalled_schema.clone(),
+            rows: build_rows_for_key("stalled", 0, 2, 0),
+        },
+    )
+    .await;
+    set_write_buffer_size_to_current_usage(&engine, stalled_region_id).await;
+
+    let engine_cloned = engine.clone();
+    let stalled_write = tokio::spawn(async move {
+        put_rows(
+            &engine_cloned,
+            stalled_region_id,
+            Rows {
+                schema: stalled_schema,
+                rows: build_rows_for_key("stalled", 2, 2, 0),
+            },
+        )
+        .await;
+    });
+
+    listener.wait().await;
+
+    put_rows(
+        &engine,
+        normal_region_id,
+        Rows {
+            schema: normal_schema,
+            rows: build_rows_for_key("normal", 0, 2, 0),
+        },
+    )
+    .await;
+
+    flush_region(&engine, stalled_region_id, None).await;
+    stalled_write.await.unwrap();
+
+    let scanner = engine
+        .scanner(normal_region_id, ScanRequest::default())
+        .await
+        .unwrap();
+    assert_eq!(0, scanner.num_files());
+    assert_eq!(1, scanner.num_memtables());
+}
+
+#[tokio::test]
+async fn test_region_write_buffer_does_not_stall_follower_write() {
+    let mut env = TestEnv::new().await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_region_write_buffer_size: ReadableSize(1),
+            ..Default::default()
+        })
+        .await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+    let schema = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: schema.clone(),
+            rows: build_rows_for_key("follower", 0, 2, 0),
+        },
+    )
+    .await;
+
+    engine
+        .set_region_role(region_id, RegionRole::Follower)
+        .unwrap();
+
+    let err = tokio::time::timeout(
+        Duration::from_secs(1),
+        engine.handle_request(
+            region_id,
+            RegionRequest::Put(RegionPutRequest {
+                rows: Rows {
+                    schema,
+                    rows: build_rows_for_key("follower", 2, 4, 0),
+                },
+                hint: None,
+                partition_expr_version: None,
+            }),
+        ),
+    )
+    .await
+    .expect("write to follower should not remain stalled")
+    .unwrap_err();
+    assert_matches!(
+        err.into_inner().as_any().downcast_ref::<Error>().unwrap(),
+        Error::RegionState { .. }
+    );
+}
+
+#[tokio::test]
+async fn test_unrelated_flush_does_not_resume_region_stalled_write() {
+    let mut env = TestEnv::new().await;
+    let stalled_region_id = RegionId::new(1, 1);
+    let normal_region_id = RegionId::new(2, 1);
+    let listener = Arc::new(RegionFlushGate::new(stalled_region_id, normal_region_id));
+    let engine = env
+        .create_engine_with(
+            MitoConfig {
+                max_background_flushes: 2,
+                ..Default::default()
+            },
+            None,
+            Some(listener.clone()),
+            None,
+        )
+        .await;
+
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            stalled_region_id.table_id(),
+            "stalled_table",
+            "test_catalog",
+            "test_schema",
+            None,
+            env.get_kv_backend(),
+        )
+        .await;
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            normal_region_id.table_id(),
+            "normal_table",
+            "test_catalog",
+            "test_schema",
+            None,
+            env.get_kv_backend(),
+        )
+        .await;
+
+    let stalled_request = CreateRequestBuilder::new().build();
+    let stalled_schema = rows_schema(&stalled_request);
+    engine
+        .handle_request(stalled_region_id, RegionRequest::Create(stalled_request))
+        .await
+        .unwrap();
+
+    let normal_request = CreateRequestBuilder::new()
+        .table_dir("normal")
+        .insert_option(WRITE_BUFFER_SIZE_KEY, "1GiB")
+        .build();
+    let normal_schema = rows_schema(&normal_request);
+    engine
+        .handle_request(normal_region_id, RegionRequest::Create(normal_request))
+        .await
+        .unwrap();
+
+    put_rows(
+        &engine,
+        stalled_region_id,
+        Rows {
+            schema: stalled_schema.clone(),
+            rows: build_rows_for_key("stalled", 0, 2, 0),
+        },
+    )
+    .await;
+    set_write_buffer_size_to_current_usage(&engine, stalled_region_id).await;
+    put_rows(
+        &engine,
+        normal_region_id,
+        Rows {
+            schema: normal_schema,
+            rows: build_rows_for_key("normal", 0, 2, 0),
+        },
+    )
+    .await;
+
+    let engine_cloned = engine.clone();
+    let mut stalled_write = tokio::spawn(async move {
+        put_rows(
+            &engine_cloned,
+            stalled_region_id,
+            Rows {
+                schema: stalled_schema,
+                rows: build_rows_for_key("stalled", 2, 2, 0),
+            },
+        )
+        .await;
+    });
+
+    listener.wait_blocked_flush_started().await;
+    flush_region(&engine, normal_region_id, None).await;
+    listener.wait_observed_flush_finished().await;
+
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), &mut stalled_write)
+            .await
+            .is_err(),
+        "an unrelated region flush resumed the region-stalled write"
+    );
+
+    listener.resume_blocked_flush();
+    tokio::time::timeout(Duration::from_secs(10), &mut stalled_write)
+        .await
+        .expect("the stalled write should resume after its region flushes")
+        .unwrap();
+}
+
+#[tokio::test]
+async fn test_region_write_buffer_rejects_only_full_region_queue() {
+    let mut env = TestEnv::new().await;
+    let hot_region_id = RegionId::new(1, 1);
+    let normal_region_id = RegionId::new(2, 1);
+    let listener = Arc::new(RegionFlushGate::new(hot_region_id, hot_region_id));
+    let engine = env
+        .create_engine_with(
+            MitoConfig {
+                max_background_flushes: 2,
+                ..Default::default()
+            },
+            None,
+            Some(listener.clone()),
+            None,
+        )
+        .await;
+
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            hot_region_id.table_id(),
+            "hot_table",
+            "test_catalog",
+            "test_schema",
+            None,
+            env.get_kv_backend(),
+        )
+        .await;
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            normal_region_id.table_id(),
+            "normal_table",
+            "test_catalog",
+            "test_schema",
+            None,
+            env.get_kv_backend(),
+        )
+        .await;
+
+    let hot_request = CreateRequestBuilder::new().build();
+    let hot_schema = rows_schema(&hot_request);
+    engine
+        .handle_request(hot_region_id, RegionRequest::Create(hot_request))
+        .await
+        .unwrap();
+    let normal_request = CreateRequestBuilder::new().table_dir("normal").build();
+    let normal_schema = rows_schema(&normal_request);
+    engine
+        .handle_request(normal_region_id, RegionRequest::Create(normal_request))
+        .await
+        .unwrap();
+
+    put_rows(
+        &engine,
+        hot_region_id,
+        Rows {
+            schema: hot_schema.clone(),
+            rows: build_rows_for_key("hot", 0, 2, 0),
+        },
+    )
+    .await;
+    set_write_buffer_size_to_current_usage(&engine, hot_region_id).await;
+
+    let engine_cloned = engine.clone();
+    let stalled_schema = hot_schema.clone();
+    let stalled_write = tokio::spawn(async move {
+        engine_cloned
+            .handle_request(
+                hot_region_id,
+                RegionRequest::Put(RegionPutRequest {
+                    rows: Rows {
+                        schema: stalled_schema,
+                        rows: build_rows_for_key("hot", 2, 1026, 2),
+                    },
+                    hint: None,
+                    partition_expr_version: None,
+                }),
+            )
+            .await
+    });
+
+    listener.wait_blocked_flush_started().await;
+
+    put_rows(
+        &engine,
+        normal_region_id,
+        Rows {
+            schema: normal_schema,
+            rows: build_rows_for_key("normal", 0, 2, 0),
+        },
+    )
+    .await;
+
+    listener.resume_blocked_flush();
+    listener.wait_observed_flush_finished().await;
+
+    let err = tokio::time::timeout(Duration::from_secs(1), stalled_write)
+        .await
+        .expect("the stalled queue should be rejected at the region hard limit")
+        .unwrap()
+        .unwrap_err();
+    assert_matches!(
+        err.into_inner().as_any().downcast_ref::<Error>().unwrap(),
+        Error::RejectWrite { .. }
+    );
+}
+
+#[tokio::test]
 async fn test_flush_empty() {
     test_flush_empty_with_format(false).await;
     test_flush_empty_with_format(true).await;
@@ -447,7 +1016,10 @@ async fn test_skip_remote_wal_replay_sets_topic_latest_entry_id(factory: Option<
     assert_eq!(1, region.topic_latest_entry_id.load(Ordering::Relaxed));
 
     engine
-        .handle_request(region_id, RegionRequest::Close(RegionCloseRequest {}))
+        .handle_request(
+            region_id,
+            RegionRequest::Close(RegionCloseRequest::default()),
+        )
         .await
         .unwrap();
 
@@ -589,7 +1161,10 @@ async fn test_remote_wal_open_without_replayed_memtable_sets_topic_latest_entry_
     // The empty flush updates `topic_latest_entry_id` from KafkaLogStore's topic stats.
     flush_region(&engine, region_id, None).await;
     engine
-        .handle_request(region_id, RegionRequest::Close(RegionCloseRequest {}))
+        .handle_request(
+            region_id,
+            RegionRequest::Close(RegionCloseRequest::default()),
+        )
         .await
         .unwrap();
 
