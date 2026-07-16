@@ -1546,6 +1546,86 @@ async fn test_undrop_table_lock_key_includes_original_table_name_before_prepare(
 }
 
 #[tokio::test]
+async fn test_undrop_rejects_stale_id_after_name_tombstone_is_consumed() {
+    let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
+    let ddl_context = new_ddl_context(node_manager);
+    let original_table_id = 1024;
+    let recreated_table_id = 1025;
+    let table_name = "foo";
+    let original_table_name = test_create_table_task(table_name, original_table_id).table_name();
+    let table_route_value = TableRouteValue::physical(vec![]);
+    ddl_context
+        .table_metadata_manager
+        .create_table_metadata(
+            test_create_table_task(table_name, original_table_id).table_info,
+            table_route_value.clone(),
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+    ddl_context
+        .table_metadata_manager
+        .delete_table_metadata(
+            original_table_id,
+            &original_table_name,
+            &table_route_value,
+            &HashMap::new(),
+            None,
+        )
+        .await
+        .unwrap();
+    ddl_context
+        .table_metadata_manager
+        .create_table_metadata(
+            test_create_table_task(table_name, recreated_table_id).table_info,
+            TableRouteValue::physical(vec![]),
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+
+    let mut stale_undrop = UndropTableProcedure::new_with_original_table_name(
+        new_undrop_table_task(original_table_id),
+        ddl_context.clone(),
+        Some(original_table_name.clone()),
+    );
+    let mut hard_drop = DropTableProcedure::new(
+        new_drop_table_task(table_name, recreated_table_id, false),
+        ddl_context.clone(),
+    );
+    execute_procedure_until_done(&mut hard_drop).await;
+    assert!(
+        ddl_context
+            .table_metadata_manager
+            .get_dropped_table(&original_table_name)
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    let err = stale_undrop.on_prepare().await.unwrap_err();
+
+    assert_eq!(err.status_code(), StatusCode::TableNotFound);
+    assert!(
+        ddl_context
+            .table_metadata_manager
+            .table_name_manager()
+            .get(TableNameKey::from(&original_table_name))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        ddl_context
+            .table_metadata_manager
+            .get_dropped_table_by_id(original_table_id)
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[tokio::test]
 async fn test_undrop_table_replayed_restore_metadata_is_idempotent() {
     let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
     let mut ddl_context = new_ddl_context(node_manager);

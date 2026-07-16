@@ -78,14 +78,21 @@ impl UndropTableProcedure {
 
     pub(crate) async fn on_prepare(&mut self) -> Result<Status> {
         self.ensure_not_purging().await?;
-        let dropped_table = self
-            .context
-            .table_metadata_manager
-            .get_dropped_table_by_id(self.data.task.table_id)
-            .await?
-            .with_context(|| error::TableNotFoundSnafu {
-                table_name: self.data.task.table_id.to_string(),
-            })?;
+        let dropped_table = if let Some(table_name) = &self.data.table_name {
+            self.context
+                .table_metadata_manager
+                .get_dropped_table(table_name)
+                .await?
+                .filter(|dropped_table| dropped_table.table_id == self.data.task.table_id)
+        } else {
+            self.context
+                .table_metadata_manager
+                .get_dropped_table_by_id(self.data.task.table_id)
+                .await?
+        }
+        .with_context(|| error::TableNotFoundSnafu {
+            table_name: self.data.task.table_id.to_string(),
+        })?;
         let table_name = &dropped_table.table_name;
         ensure!(
             !self
