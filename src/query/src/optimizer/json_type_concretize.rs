@@ -50,11 +50,7 @@ impl OptimizerRule for JsonTypeConcretizeRule {
 
         plan.transform_down(|plan| match &plan {
             LogicalPlan::TableScan(table_scan) => {
-                let Some(source) = table_scan
-                    .source
-                    .as_any()
-                    .downcast_ref::<DefaultTableSource>()
-                else {
+                let Some(source) = table_scan.source.downcast_ref::<DefaultTableSource>() else {
                     return Ok(Transformed::no(plan));
                 };
 

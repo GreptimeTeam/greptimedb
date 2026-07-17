@@ -1318,10 +1318,8 @@ impl PromPlanner {
                 let mut field_expr = field_expr_builder(lhs, rhs)?;
 
                 if is_comparison_op && should_return_bool {
-                    field_expr = DfExpr::Cast(Cast {
-                        expr: Box::new(field_expr),
-                        data_type: ArrowDataType::Float64,
-                    });
+                    field_expr =
+                        DfExpr::Cast(Cast::new(Box::new(field_expr), ArrowDataType::Float64));
                 }
 
                 Ok(LogicalPlan::Extension(Extension {
@@ -1387,10 +1385,8 @@ impl PromPlanner {
                     };
 
                     if is_comparison_op && should_return_bool {
-                        binary_expr = DfExpr::Cast(Cast {
-                            expr: Box::new(binary_expr),
-                            data_type: ArrowDataType::Float64,
-                        });
+                        binary_expr =
+                            DfExpr::Cast(Cast::new(Box::new(binary_expr), ArrowDataType::Float64));
                     }
                     Ok(binary_expr)
                 };
@@ -1456,10 +1452,8 @@ impl PromPlanner {
                     };
 
                     if is_comparison_op && should_return_bool {
-                        binary_expr = DfExpr::Cast(Cast {
-                            expr: Box::new(binary_expr),
-                            data_type: ArrowDataType::Float64,
-                        });
+                        binary_expr =
+                            DfExpr::Cast(Cast::new(Box::new(binary_expr), ArrowDataType::Float64));
                     }
                     Ok(binary_expr)
                 };
@@ -1665,10 +1659,10 @@ impl PromPlanner {
                                 None => binary_expr_builder(lhs, rhs)?,
                             };
                             if is_comparison_op && should_return_bool {
-                                binary_expr = DfExpr::Cast(Cast {
-                                    expr: Box::new(binary_expr),
-                                    data_type: ArrowDataType::Float64,
-                                });
+                                binary_expr = DfExpr::Cast(Cast::new(
+                                    Box::new(binary_expr),
+                                    ArrowDataType::Float64,
+                                ));
                             }
                             Ok(binary_expr)
                         })
@@ -2636,11 +2630,9 @@ impl PromPlanner {
 
     fn table_from_source(&self, source: &Arc<dyn TableSource>) -> Result<table::TableRef> {
         Ok(source
-            .as_any()
             .downcast_ref::<DefaultTableSource>()
             .context(UnknownTableSnafu)?
             .table_provider
-            .as_any()
             .downcast_ref::<DfTableProviderAdapter>()
             .context(UnknownTableSnafu)?
             .table())
@@ -2904,10 +2896,10 @@ impl PromPlanner {
                     DATA_SCHEMA_TSID_COLUMN_NAME.to_string(),
                 ))))
                 .chain(Some(DfExpr::Alias(Alias {
-                    expr: Box::new(DfExpr::Cast(Cast {
-                        expr: Box::new(self.create_time_index_column_expr()?),
-                        data_type: ArrowDataType::Timestamp(ArrowTimeUnit::Millisecond, None),
-                    })),
+                    expr: Box::new(DfExpr::Cast(Cast::new(
+                        Box::new(self.create_time_index_column_expr()?),
+                        ArrowDataType::Timestamp(ArrowTimeUnit::Millisecond, None),
+                    ))),
                     relation: Some(table_ref.clone()),
                     name: self
                         .ctx
@@ -3534,10 +3526,10 @@ impl PromPlanner {
                 if all_field_columns_are_native_histogram_ranges {
                     ScalarFunc::Udf(native_histogram_drop_udf(func.name))
                 } else {
-                    other_input_exprs[0] = DfExpr::Cast(Cast {
-                        expr: Box::new(other_input_exprs[0].clone()),
-                        data_type: ArrowDataType::Int64,
-                    });
+                    other_input_exprs[0] = DfExpr::Cast(Cast::new(
+                        Box::new(other_input_exprs[0].clone()),
+                        ArrowDataType::Int64,
+                    ));
                     ScalarFunc::Udf(Arc::new(PredictLinear::scalar_udf()))
                 }
             }
@@ -5039,10 +5031,10 @@ impl PromPlanner {
                     false
                 };
                 if is_comparison_op && should_return_bool {
-                    Some(DfExpr::Cast(Cast {
-                        expr: Box::new(expr),
-                        data_type: ArrowDataType::Float64,
-                    }))
+                    Some(DfExpr::Cast(Cast::new(
+                        Box::new(expr),
+                        ArrowDataType::Float64,
+                    )))
                 } else {
                     Some(expr)
                 }
@@ -5137,18 +5129,12 @@ impl PromPlanner {
         let cast_float = |expr| {
             if matches!(
                 &expr,
-                DfExpr::Cast(Cast {
-                    data_type: ArrowDataType::Float64,
-                    ..
-                })
+                DfExpr::Cast(Cast { field, .. }) if field.data_type() == &ArrowDataType::Float64
             ) || matches!(&expr, DfExpr::Literal(ScalarValue::Float64(_), _))
             {
                 expr
             } else {
-                DfExpr::Cast(Cast {
-                    expr: Box::new(expr),
-                    data_type: ArrowDataType::Float64,
-                })
+                DfExpr::Cast(Cast::new(Box::new(expr), ArrowDataType::Float64))
             }
         };
         match token.id() {

@@ -137,9 +137,7 @@ fn portable_remote_dyn_filter_expr(
     bounds_only: bool,
 ) -> DataFusionResult<Arc<dyn PhysicalExpr>> {
     expr.transform_up(|node| {
-        if node.as_any().is::<HashTableLookupExpr>()
-            || (bounds_only && node.as_any().is::<InListExpr>())
-        {
+        if node.is::<HashTableLookupExpr>() || (bounds_only && node.is::<InListExpr>()) {
             Ok(Transformed::yes(lit(true)))
         } else {
             Ok(Transformed::no(node))
@@ -183,7 +181,7 @@ fn validate_payload_size(
 
 fn validate_supported_payload_expr(expr: &Arc<dyn PhysicalExpr>) -> DataFusionResult<()> {
     expr.apply(|node| {
-        if node.as_any().is::<HashTableLookupExpr>() {
+        if node.is::<HashTableLookupExpr>() {
             return Err(DataFusionError::Plan(
                 "HashTableLookupExpr cannot be encoded into DynFilterPayload::Datafusion"
                     .to_string(),
@@ -207,7 +205,7 @@ fn validate_decoded_payload_expr(
     input_schema: &datafusion::arrow::datatypes::Schema,
 ) -> DataFusionResult<()> {
     expr.apply(|node| {
-        if let Some(column) = node.as_any().downcast_ref::<Column>() {
+        if let Some(column) = node.downcast_ref::<Column>() {
             let Some(field) = input_schema.fields().get(column.index()) else {
                 return Err(DataFusionError::Plan(format!(
                     "Decoded Column '{}' references out-of-bounds index {} for input schema of size {}",

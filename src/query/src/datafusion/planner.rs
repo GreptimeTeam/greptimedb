@@ -33,7 +33,7 @@ use datafusion_common::config::ConfigOptions;
 use datafusion_common::file_options::file_type::FileType;
 use datafusion_expr::planner::{ExprPlanner, TypePlanner};
 use datafusion_expr::var_provider::is_system_variables;
-use datafusion_expr::{AggregateUDF, ScalarUDF, TableSource, WindowUDF};
+use datafusion_expr::{AggregateUDF, HigherOrderUDF, ScalarUDF, TableSource, WindowUDF};
 use datafusion_sql::parser::Statement as DfStatement;
 use session::context::QueryContextRef;
 use snafu::{Location, ResultExt};
@@ -161,6 +161,13 @@ impl ContextProvider for DfContextProviderAdapter {
         )
     }
 
+    fn get_higher_order_meta(&self, name: &str) -> Option<Arc<HigherOrderUDF>> {
+        self.session_state
+            .higher_order_functions()
+            .get(name)
+            .cloned()
+    }
+
     fn get_aggregate_meta(&self, name: &str) -> Option<Arc<AggregateUDF>> {
         self.engine_state.aggr_function(name).map_or_else(
             || self.session_state.aggregate_functions().get(name).cloned(),
@@ -198,6 +205,14 @@ impl ContextProvider for DfContextProviderAdapter {
         let mut names = self.engine_state.scalar_names();
         names.extend(self.session_state.scalar_functions().keys().cloned());
         names
+    }
+
+    fn higher_order_function_names(&self) -> Vec<String> {
+        self.session_state
+            .higher_order_functions()
+            .keys()
+            .cloned()
+            .collect()
     }
 
     fn udaf_names(&self) -> Vec<String> {

@@ -21,7 +21,6 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use ahash::RandomState;
 use arrow::compute::{self, CastOptions, cast_with_options, take_arrays};
 use arrow_schema::{DataType, Field, Schema, SchemaRef, SortOptions, TimeUnit};
 use common_function::aggrs::aggr_wrapper::get_aggr_func;
@@ -36,7 +35,7 @@ use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties, RecordBatchStream,
     SendableRecordBatchStream,
 };
-use datafusion_common::hash_utils::create_hashes;
+use datafusion_common::hash_utils::{RandomState, create_hashes};
 use datafusion_common::{DFSchema, DFSchemaRef, DataFusionError, ScalarValue};
 use datafusion_expr::utils::{COUNT_STAR_EXPANSION, exprlist_to_fields};
 use datafusion_expr::{
@@ -790,10 +789,6 @@ impl DisplayAs for RangeSelectExec {
 }
 
 impl ExecutionPlan for RangeSelectExec {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     fn schema(&self) -> SchemaRef {
         self.schema.clone()
     }
@@ -858,7 +853,7 @@ impl ExecutionPlan for RangeSelectExec {
             schema: self.schema.clone(),
             range_exec: self.range_exec.clone(),
             input,
-            random_state: RandomState::new(),
+            random_state: RandomState::default(),
             time_index,
             align: self.align,
             align_to: self.align_to,
