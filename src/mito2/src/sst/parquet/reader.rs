@@ -80,6 +80,7 @@ use crate::sst::index::vector_index::applier::VectorIndexApplierRef;
 use crate::sst::parquet::DEFAULT_READ_BATCH_SIZE;
 use crate::sst::parquet::file_range::{
     FileRangeContext, FileRangeContextRef, PartitionFilterContext, PreFilterMode, RangeBase,
+    row_group_contains_delete,
 };
 use crate::sst::parquet::flat_format::{FlatReadFormat, primary_key_column_index};
 use crate::sst::parquet::format::{INTERNAL_COLUMN_NUM, need_override_sequence};
@@ -497,8 +498,15 @@ impl ParquetReaderBuilder {
             &read_format,
             &codec,
         );
+        let last_row_coverage = self.last_row_coverage.as_ref().filter(|_| {
+            selection.iter().all(|(row_group, _)| {
+                row_group_contains_delete(&parquet_meta, *row_group, &file_path)
+                    .map(|contains_delete| !contains_delete)
+                    .unwrap_or(false)
+            })
+        });
         if let (Some(coverage), Some(builder)) =
-            (&self.last_row_coverage, &mut filter_plan.prefilter_builder)
+            (last_row_coverage, &mut filter_plan.prefilter_builder)
         {
             builder.set_last_row_coverage(coverage.clone());
         }

@@ -448,6 +448,12 @@ pub(crate) fn build_range_cache_key(
     stream_ctx: &StreamContext,
     part_range: &PartitionRange,
 ) -> Option<RangeScanCacheKey> {
+    // Focused LastRow pruning depends on query-local coverage accumulated while
+    // scanning newer files, which is not represented by a partition cache key.
+    if stream_ctx.input.is_focused_last_row() {
+        return None;
+    }
+
     if !stream_ctx.input.cache_strategy.has_range_result_cache() {
         return None;
     }
