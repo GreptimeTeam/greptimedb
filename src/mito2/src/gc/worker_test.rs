@@ -14,18 +14,24 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use api::v1::Rows;
+use async_trait::async_trait;
+use common_base::Plugins;
 use common_telemetry::init_default_ut_logging;
 use futures::TryStreamExt;
 use object_store::{Entry, ObjectStore, services};
+use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::RegionEngine as _;
 use store_api::region_request::{RegionCompactRequest, RegionRequest};
 use store_api::storage::{FileRef, FileRefsManifest, RegionId};
 
+use crate::access_layer::AccessLayerRef;
 use crate::config::MitoConfig;
 use crate::engine::MitoEngine;
 use crate::engine::compaction_test::{delete_and_flush, put_and_flush};
+use crate::engine::region_hook::{RegionGcInfo, RegionHook, RegionHookRef};
 use crate::gc::{GcConfig, LocalGcWorker, should_delete_file};
 use crate::manifest::action::RemovedFile;
 use crate::region::MitoRegionRef;
@@ -58,6 +64,7 @@ async fn create_gc_worker(
         file_ref_manifest.clone(),
         &mito_engine.gc_limiter(),
         full_file_listing,
+        mito_engine.region_hook(),
     )
     .await
     .unwrap()
@@ -736,5 +743,103 @@ async fn test_file_in_tmp_ref_old_mtime_kept() {
     assert!(
         !should_delete,
         "File in tmp_ref should NOT be deleted even with old last-modified time"
+    );
+}
+
+/// A region hook that only records `on_region_gc` calls, for testing the GC hook.
+#[derive(Debug, Default)]
+struct GcCountingHook {
+    gc_calls: AtomicUsize,
+    last_is_region_dropped: AtomicBool,
+}
+
+#[async_trait]
+impl RegionHook for GcCountingHook {
+    async fn on_region_gc(
+        &self,
+        _region_id: RegionId,
+        _region_metadata: Option<&RegionMetadataRef>,
+        _access_layer: &AccessLayerRef,
+        info: &RegionGcInfo<'_>,
+    ) {
+        self.gc_calls.fetch_add(1, Ordering::Relaxed);
+        self.last_is_region_dropped
+            .store(info.is_region_dropped, Ordering::Relaxed);
+    }
+}
+
+/// `on_region_gc` fires after a GC pass for a live region.
+#[tokio::test]
+async fn test_on_region_gc_fires_on_gc_pass() {
+    init_default_ut_logging();
+
+    let mut env = TestEnv::new().await;
+
+    let hook = Arc::new(GcCountingHook::default());
+    let plugins = Plugins::new();
+    plugins.insert(hook.clone() as RegionHookRef);
+
+    let engine = env
+        .create_engine_with_plugins(
+            MitoConfig {
+                gc: GcConfig {
+                    enable: true,
+                    lingering_time: None,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            plugins,
+        )
+        .await;
+
+    let region_id = RegionId::new(1, 1);
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            region_id.table_id(),
+            "test_table",
+            "test_catalog",
+            "test_schema",
+            None,
+            env.get_kv_backend(),
+        )
+        .await;
+
+    let request = CreateRequestBuilder::new().build();
+    engine
+        .handle_request(region_id, RegionRequest::Create(request.clone()))
+        .await
+        .unwrap();
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: rows_schema(&request),
+            rows: build_rows(0, 3),
+        },
+    )
+    .await;
+    flush_region(&engine, region_id, None).await;
+
+    let region = engine.get_region(region_id).unwrap();
+    let version = region.manifest_ctx.manifest().await.manifest_version;
+    let regions = BTreeMap::from([(region_id, Some(region.clone()))]);
+    let file_ref_manifest = FileRefsManifest {
+        file_refs: Default::default(),
+        manifest_version: [(region_id, version)].into(),
+        cross_region_refs: HashMap::new(),
+    };
+
+    let gc_worker = create_gc_worker(&engine, regions, &file_ref_manifest, true).await;
+    gc_worker.run().await.unwrap();
+
+    assert!(
+        hook.gc_calls.load(Ordering::Relaxed) >= 1,
+        "on_region_gc should fire after a GC pass"
+    );
+    assert_eq!(
+        hook.last_is_region_dropped.load(Ordering::Relaxed),
+        false,
+        "a live region's GC pass must report is_region_dropped=false"
     );
 }

@@ -41,6 +41,7 @@ use crate::access_layer::AccessLayerRef;
 use crate::cache::CacheManagerRef;
 use crate::cache::file_cache::FileType;
 use crate::config::MitoConfig;
+use crate::engine::region_hook::{RegionGcInfo, RegionHookRef};
 use crate::error::{
     DurationOutOfRangeSnafu, InvalidRequestSnafu, JoinSnafu, OpenDalSnafu, Result,
     TooManyGcJobsSnafu, UnexpectedSnafu,
@@ -205,6 +206,9 @@ pub struct LocalGcWorker {
     /// Set to false for regular GC operations to optimize performance.
     /// Set to true periodically or when you need to clean up orphan files.
     pub full_file_listing: bool,
+    /// The region hook (if any), fired via `on_region_gc` after each GC pass so
+    /// extensions with sidecar files outside the mito2 region dir can clean up.
+    pub(crate) hook: Option<RegionHookRef>,
 }
 
 pub struct ManifestOpenConfig {
@@ -240,6 +244,7 @@ impl LocalGcWorker {
         file_ref_manifest: FileRefsManifest,
         limiter: &GcLimiterRef,
         full_file_listing: bool,
+        hook: Option<RegionHookRef>,
     ) -> Result<Self> {
         if let Some(first_region_id) = regions_to_gc.keys().next() {
             let table_id = first_region_id.table_id();
@@ -267,6 +272,7 @@ impl LocalGcWorker {
             file_ref_manifest,
             _permit: permit,
             full_file_listing,
+            hook,
         })
     }
 
@@ -537,6 +543,25 @@ impl LocalGcWorker {
                 .start_timer();
             self.update_manifest_removed_files(region, deletable_files.clone())
                 .await?;
+        }
+
+        // Notify extensions (e.g. an Iceberg manifest tree under a separate
+        // warehouse root) that GC reclaimed these files, so they can clean up
+        // their own residual sidecar files. Fires for both live regions and
+        // dropped/repartitioned regions (`is_region_dropped`).
+        if let Some(hook) = &self.hook {
+            let region_metadata = region.as_ref().map(|r| r.metadata());
+            hook.on_region_gc(
+                region_id,
+                region_metadata.as_ref(),
+                &self.access_layer,
+                &RegionGcInfo {
+                    removed_files: &deletable_files,
+                    is_region_dropped,
+                    full_file_listing: self.full_file_listing,
+                },
+            )
+            .await;
         }
 
         Ok(deletable_files)
