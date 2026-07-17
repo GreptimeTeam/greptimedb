@@ -47,6 +47,14 @@ use crate::region_keeper::OperatingRegionGuard;
 use crate::rpc::ddl::DropTableTask;
 use crate::rpc::router::{RegionRoute, operating_leader_region_roles};
 
+fn ensure_retry_later(err: error::Error) -> error::Error {
+    if err.is_retry_later() {
+        err
+    } else {
+        error::Error::retry_later(err)
+    }
+}
+
 pub struct DropTableProcedure {
     /// The context of procedure runtime.
     pub context: DdlContext,
@@ -153,12 +161,34 @@ impl DropTableProcedure {
         Ok(())
     }
 
-    /// Removes the table metadata.
+    /// Closes soft-drop regions before removing the table metadata.
+    ///
+    /// Both operations stay in this procedure state so retries always close and flush regions
+    /// before moving their live metadata to tombstones.
     pub(crate) async fn on_delete_metadata(&mut self) -> Result<Status> {
         self.register_dropping_regions()?;
-        // NOTES: If the meta server is crashed after the `RemoveMetadata`,
-        // Corresponding regions of this table on the Datanode will be closed automatically.
-        // Then any future dropping operation will fail.
+        if self.data.soft_drop_enabled {
+            let storage = self
+                .context
+                .table_metadata_manager
+                .table_route_manager()
+                .table_route_storage();
+            storage
+                .remap_region_routes(&mut self.data.physical_region_routes)
+                .await
+                .map_err(ensure_retry_later)?;
+            self.executor
+                .on_close_regions(
+                    &self.context.node_manager,
+                    &self.context.leader_region_registry,
+                    &self.data.physical_region_routes,
+                    true,
+                )
+                .await
+                .map_err(ensure_retry_later)?;
+        }
+        // Hard drop still relies on regions being closed automatically if metasrv crashes after
+        // metadata removal. Soft drop has already closed them above.
 
         // TODO(weny): Considers introducing a RegionStatus to indicate the region is dropping.
         let table_id = self.data.table_id();
@@ -169,7 +199,8 @@ impl DropTableProcedure {
             self.data.physical_region_routes.clone(),
         );
         // Deletes table metadata logically.
-        self.executor
+        let result = self
+            .executor
             .on_delete_metadata(
                 &self.context,
                 table_route_value,
@@ -178,7 +209,12 @@ impl DropTableProcedure {
                 self.data.retention_expires_at,
                 self.data.drop_generation.as_deref(),
             )
-            .await?;
+            .await;
+        if self.data.soft_drop_enabled {
+            result.map_err(ensure_retry_later)?;
+        } else {
+            result?;
+        }
         info!("Deleted table metadata for table {table_id}");
         self.data.state = DropTableState::InvalidateTableCache;
         Ok(Status::executing(true))
@@ -212,14 +248,6 @@ impl DropTableProcedure {
         }
 
         if self.data.soft_drop_enabled {
-            self.executor
-                .on_close_regions(
-                    &self.context.node_manager,
-                    &self.context.leader_region_registry,
-                    &self.data.physical_region_routes,
-                    true,
-                )
-                .await?;
             self.context
                 .deregister_failure_detectors(convert_region_routes_to_detecting_regions(
                     &self.data.physical_region_routes,

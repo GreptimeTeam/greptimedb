@@ -15,8 +15,10 @@
 use std::assert_matches;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use api::region::RegionResponse;
 use api::v1::region::{RegionRequest, region_request};
 use async_trait::async_trait;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, FILE_ENGINE};
@@ -43,7 +45,7 @@ use crate::ddl::test_util::{
 };
 use crate::ddl::undrop_table::UndropTableProcedure;
 use crate::ddl::{DdlContext, DetectingRegion, RegionFailureDetectorController, TableMetadata};
-use crate::error::Error;
+use crate::error::{self, Error};
 use crate::key::MetadataKey;
 use crate::key::table_name::TableNameKey;
 use crate::key::table_route::TableRouteValue;
@@ -707,6 +709,110 @@ async fn test_soft_drop_closes_regions_and_keeps_tombstone() {
             (1, RegionId::new(table_id, 1)),
             (2, RegionId::new(table_id, 2))
         ]
+    );
+}
+
+#[tokio::test]
+async fn test_soft_drop_keeps_metadata_live_until_regions_close() {
+    let (tx, mut rx) = mpsc::channel(2);
+    let fail_close = AtomicBool::new(true);
+    let datanode_handler = DatanodeWatcher::new(tx).with_handler(move |_, _| {
+        if fail_close.swap(false, Ordering::SeqCst) {
+            return error::UnexpectedSnafu {
+                err_msg: "mock close error".to_string(),
+            }
+            .fail();
+        }
+
+        Ok(RegionResponse::new(0))
+    });
+    let node_manager = Arc::new(MockDatanodeManager::new(datanode_handler));
+    let mut ddl_context = new_ddl_context(node_manager);
+    ddl_context.soft_drop_enabled = true;
+    let table_id = 1024;
+    let table_name = "foo";
+    let task = test_create_table_task(table_name, table_id);
+    ddl_context
+        .table_metadata_manager
+        .create_table_metadata(
+            task.table_info.clone(),
+            TableRouteValue::physical(vec![RegionRoute {
+                region: Region::new_test(RegionId::new(table_id, 1)),
+                leader_peer: Some(Peer::new(1, "old-leader")),
+                follower_peers: vec![],
+                leader_state: None,
+                leader_down_since: None,
+                write_route_policy: None,
+            }]),
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+
+    let task = new_drop_table_task(table_name, table_id, false);
+    let mut procedure = DropTableProcedure::new(task, ddl_context.clone());
+    let ctx = new_test_procedure_context();
+    procedure.execute(&ctx).await.unwrap();
+    put_datanode_address(&ddl_context, 1, "new-leader").await;
+    let error = procedure.execute(&ctx).await.unwrap_err();
+    assert!(error.is_retry_later());
+
+    let (peer, request) = rx.try_recv().unwrap();
+    assert_eq!(peer.addr, "new-leader");
+    let Some(region_request::Body::Close(request)) = request.body else {
+        unreachable!();
+    };
+    assert!(request.flush_on_close);
+    assert!(rx.try_recv().is_err());
+    assert!(
+        ddl_context
+            .table_metadata_manager
+            .table_name_manager()
+            .get(TableNameKey::new(
+                DEFAULT_CATALOG_NAME,
+                DEFAULT_SCHEMA_NAME,
+                table_name,
+            ))
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        ddl_context
+            .table_metadata_manager
+            .get_dropped_table_by_id(table_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    put_datanode_address(&ddl_context, 1, "newer-leader").await;
+    execute_procedure_until_done(&mut procedure).await;
+
+    let (peer, request) = rx.try_recv().unwrap();
+    assert_eq!(peer.addr, "newer-leader");
+    assert_matches!(request.body, Some(region_request::Body::Close(_)));
+    assert!(rx.try_recv().is_err());
+    assert!(
+        ddl_context
+            .table_metadata_manager
+            .table_name_manager()
+            .get(TableNameKey::new(
+                DEFAULT_CATALOG_NAME,
+                DEFAULT_SCHEMA_NAME,
+                table_name,
+            ))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        ddl_context
+            .table_metadata_manager
+            .get_dropped_table_by_id(table_id)
+            .await
+            .unwrap()
+            .is_some()
     );
 }
 
