@@ -42,6 +42,11 @@ use crate::tls::ReloadableTlsServerConfig;
 // Default size of ResultSet write buffer: 100KB
 const DEFAULT_RESULT_SET_WRITE_BUFFER_SIZE: usize = 100 * 1024;
 
+const CLIENT_DISCONNECT_ERROR_KINDS: &[std::io::ErrorKind] = &[
+    std::io::ErrorKind::ConnectionAborted,
+    std::io::ErrorKind::ConnectionReset,
+];
+
 /// [`MysqlSpawnRef`] stores arc refs
 /// that should be passed to new [`MysqlInstanceShim`]s.
 pub struct MysqlSpawnRef {
@@ -181,7 +186,7 @@ impl MysqlServer {
         crate::metrics::METRIC_MYSQL_CONNECTIONS.inc();
         if let Err(e) = Self::do_handle(stream, spawn_ref, spawn_config, process_id).await {
             if let Error::InternalIo { error } = &e
-                && error.kind() == std::io::ErrorKind::ConnectionAborted
+                && CLIENT_DISCONNECT_ERROR_KINDS.contains(&error.kind())
             {
                 // This is a client-side error, we don't need to log it.
             } else {
@@ -230,6 +235,17 @@ impl MysqlServer {
             }
             _ => plain_run_with_options(shim, w, ops, init_params).await,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CLIENT_DISCONNECT_ERROR_KINDS;
+
+    #[test]
+    fn test_client_disconnect_error_kinds() {
+        assert!(CLIENT_DISCONNECT_ERROR_KINDS.contains(&std::io::ErrorKind::ConnectionAborted));
+        assert!(CLIENT_DISCONNECT_ERROR_KINDS.contains(&std::io::ErrorKind::ConnectionReset));
     }
 }
 
