@@ -39,6 +39,8 @@ pub struct ReservedColumnId;
 impl ReservedColumnId {
     // Set MSB to 1.
     const BASE: ColumnId = 1 << (ColumnId::BITS - 1);
+    // Keep metric value companions separate from fixed reserved IDs, whose prefix is `10`.
+    const METRIC_VALUE_INT_BASE: ColumnId = 3 << (ColumnId::BITS - 2);
 
     /// Column id for version column.
     /// Version column is a special reserved column that is enabled by user and
@@ -69,6 +71,11 @@ impl ReservedColumnId {
     /// Used by: metric engine
     pub const fn table_id() -> ColumnId {
         Self::BASE | ReservedColumnType::TableId as ColumnId
+    }
+
+    /// Derives the internal Int64 companion ID for a metric value column.
+    pub const fn metric_value_int(value_column_id: ColumnId) -> ColumnId {
+        Self::METRIC_VALUE_INT_BASE | value_column_id
     }
 
     /// Test if the column id is reserved.
@@ -118,6 +125,14 @@ mod tests {
         assert_eq!(0x80000000, ReservedColumnId::version());
         assert_eq!(0x80000001, ReservedColumnId::sequence());
         assert_eq!(0x80000002, ReservedColumnId::op_type());
+        assert_eq!(0xc000002a, ReservedColumnId::metric_value_int(42));
+        assert_ne!(
+            ReservedColumnId::metric_value_int(1),
+            ReservedColumnId::sequence()
+        );
+        assert!(ReservedColumnId::is_reserved(
+            ReservedColumnId::metric_value_int(42)
+        ));
     }
 
     #[test]

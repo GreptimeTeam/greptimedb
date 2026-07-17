@@ -61,8 +61,6 @@ use store_api::storage::{ColumnId, RegionId, ScanRequest, SequenceNumber};
 
 use crate::error::{InvalidMetadataSnafu, InvalidRequestSnafu, Result};
 
-const INTERNAL_COLUMN_ID_MASK: ColumnId = 1 << (ColumnId::BITS - 1);
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct MetricValueColumn {
     /// Index of the Float64 value in `RegionMetadata::column_metadatas`.
@@ -73,7 +71,7 @@ pub(crate) struct MetricValueColumn {
 
 /// Derives the internal companion ID without consuming an ID from the user space.
 pub(crate) const fn metric_value_int_column_id(value_column_id: ColumnId) -> ColumnId {
-    value_column_id | INTERNAL_COLUMN_ID_MASK
+    ReservedColumnId::metric_value_int(value_column_id)
 }
 
 pub(crate) fn metric_value_int_column_name(value_column_name: &str) -> String {
@@ -165,6 +163,9 @@ fn is_metric_engine_data_region(metadata: &RegionMetadata) -> bool {
 }
 
 /// Moves exact integral Float64 values into their Int64 companion columns.
+///
+/// Write paths align rows to the physical schema before calling this function. A schema without
+/// a companion is an unsplit region, so its Float64 value is intentionally left unchanged.
 pub(crate) fn split_metric_values(rows: &mut Rows) {
     let split_columns = rows
         .schema
@@ -223,6 +224,10 @@ fn integer_value(value: f64) -> Option<i64> {
     ((int_value as f64) == value).then_some(int_value)
 }
 
+/// Prepares schema-driven reconstruction for a split region.
+///
+/// The process option gates region creation and writes, not decoding: a process started with the
+/// option disabled must still read regions previously created with splitting enabled.
 pub(crate) fn prepare_value_split_scan(
     region_id: RegionId,
     request: &mut ScanRequest,
