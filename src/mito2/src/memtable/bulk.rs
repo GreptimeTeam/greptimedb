@@ -1029,6 +1029,32 @@ impl PartToMerge {
         }
     }
 
+    /// Returns `(num_rows, estimated_decoded_bytes)` for batch sizing.
+    fn batch_size_statistic(&self) -> Option<(u64, u64)> {
+        match self {
+            PartToMerge::Bulk { part, .. } => {
+                Some((part.num_rows() as u64, part.estimated_size() as u64))
+            }
+            PartToMerge::Multi { part, .. } => {
+                Some((part.num_rows() as u64, part.estimated_size() as u64))
+            }
+            PartToMerge::Encoded { part, .. } => part
+                .metadata()
+                .parquet_metadata
+                .row_groups()
+                .iter()
+                .map(|row_group| {
+                    let uncompressed_bytes = row_group
+                        .columns()
+                        .iter()
+                        .map(|column| column.uncompressed_size() as u64)
+                        .sum();
+                    (row_group.num_rows() as u64, uncompressed_bytes)
+                })
+                .max_by_key(|(_, uncompressed_bytes)| *uncompressed_bytes),
+        }
+    }
+
     /// Converts this part to `MemtableStats`.
     fn to_memtable_stats(&self, region_metadata: &RegionMetadataRef) -> MemtableStats {
         match self {
@@ -1204,10 +1230,11 @@ impl MemtableCompactor {
             .max()
             .unwrap_or(0);
 
-        let batch_size = crate::batch_size::estimate_batch_size([(
-            estimated_total_rows as u64,
-            estimated_total_bytes as u64,
-        )]);
+        let batch_size = crate::batch_size::estimate_batch_size(
+            parts_to_merge
+                .iter()
+                .filter_map(PartToMerge::batch_size_statistic),
+        );
         let context = Arc::new(BulkIterContext::new(
             metadata.clone(),
             None, // No column projection for merging
@@ -2460,6 +2487,47 @@ mod tests {
         assert!(BulkParts::is_merge_candidate_by_size(false, usize::MAX, 8));
         assert!(BulkParts::is_merge_candidate_by_size(true, 8, 8));
         assert!(!BulkParts::is_merge_candidate_by_size(true, 9, 8));
+    }
+
+    #[test]
+    fn test_encoded_part_batch_size_uses_largest_uncompressed_row_group() {
+        const NUM_ROWS: usize = 14;
+        const ROW_GROUP_SIZE: usize = 4;
+
+        let metadata = metadata_for_test();
+        let timestamps = (0..NUM_ROWS as i64).collect::<Vec<_>>();
+        let field_values = (0..NUM_ROWS)
+            .map(|value| Some(value as f64))
+            .collect::<Vec<_>>();
+        let bulk_part =
+            create_bulk_part_with_converter("key", 0, timestamps, field_values, 0).unwrap();
+        let encoder = BulkPartEncoder::new(metadata, ROW_GROUP_SIZE).unwrap();
+        let encoded_part = encoder.encode_part(&bulk_part).unwrap().unwrap();
+        let max_row_group = encoded_part
+            .metadata()
+            .parquet_metadata
+            .row_groups()
+            .iter()
+            .max_by_key(|row_group| {
+                row_group
+                    .columns()
+                    .iter()
+                    .map(|column| column.uncompressed_size() as u64)
+                    .sum::<u64>()
+            })
+            .unwrap();
+        let max_uncompressed_size = max_row_group
+            .columns()
+            .iter()
+            .map(|column| column.uncompressed_size() as u64)
+            .sum();
+        let expected = (max_row_group.num_rows() as u64, max_uncompressed_size);
+        let part = PartToMerge::Encoded {
+            part: encoded_part,
+            file_id: FileId::random(),
+        };
+
+        assert_eq!(Some(expected), part.batch_size_statistic());
     }
 
     #[test]
