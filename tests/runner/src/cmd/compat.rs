@@ -345,6 +345,7 @@ impl CompatCommand {
             setup_pg: None,
             setup_mysql: None,
             enable_flat_format: false,
+            enable_gc: false,
         };
 
         let env = Env::new(

@@ -798,10 +798,9 @@ jobs:
       - if: matrix.mode.name == 'Basic'
         name: Run soft-drop lifecycle sqlness
         env:
-          GREPTIMEDB_METASRV__GC__ENABLE: "true"
           GREPTIMEDB_METASRV__GC__SOFT_DROP__ENABLE: "true"
           GREPTIMEDB_METASRV__GC__SOFT_DROP__RETENTION: "7d"
-        run: RUST_BACKTRACE=1 ./bins/sqlness-runner bare -c ./tests/cases-soft-drop --bins-dir ./bins --preserve-state -t soft_drop_table
+        run: RUST_BACKTRACE=1 ./bins/sqlness-runner bare --enable-gc -c ./tests/cases-soft-drop --bins-dir ./bins --preserve-state -t soft_drop_table
       - name: Upload sqlness logs
         if: failure()
         uses: actions/upload-artifact@v4

@@ -8,6 +8,10 @@ rpc_runtime_size = 8
 {{ if enable_flat_format }}
 default_flat_format = true
 {{ endif }}
+{{ if enable_gc }}
+[region_engine.mito.gc]
+enable = true
+{{ endif }}
 
 [wal]
 {{ if is_raft_engine }}
