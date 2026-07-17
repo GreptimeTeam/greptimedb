@@ -244,6 +244,10 @@ fn extract_tables_from_statement(stmt: &Statement, names: &mut HashSet<ObjectNam
             names.extend(drop.table_names().iter().cloned());
             true
         }
+        Statement::UndropTable(undrop) => {
+            names.insert(undrop.table_name().clone());
+            true
+        }
         Statement::TruncateTable(truncate) => {
             names.insert(truncate.table_name().clone());
             true
@@ -827,6 +831,7 @@ TQL EVAL (now() - '15s'::interval, now(), '5s') count_values("status_code", {__n
                 vec!["physical_metric", "target"],
             ),
             ("ALTER TABLE old RENAME new", vec!["new", "old"]),
+            ("UNDROP TABLE restored", vec!["restored"]),
             ("SHOW TABLES", vec![]),
         ] {
             let stmt = ParserContext::create_with_dialect(
