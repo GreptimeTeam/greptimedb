@@ -211,6 +211,8 @@ impl WriteBufferManager for WriteBufferManagerImpl {
 pub enum FlushReason {
     /// Engine reaches flush threshold.
     EngineFull,
+    /// Region reaches its write buffer threshold.
+    RegionFull,
     /// Manual flush.
     Manual,
     /// Flush to alter table.
@@ -2107,7 +2109,7 @@ mod tests {
         scheduler.add_ddl_request_to_pending(SenderDdlRequest {
             sender: OptionOutputTx::from(sender),
             region_id: builder.region_id(),
-            request: DdlRequest::Close(store_api::region_request::RegionCloseRequest {}),
+            request: DdlRequest::Close(store_api::region_request::RegionCloseRequest::default()),
         });
 
         let version_data = version_control.current();

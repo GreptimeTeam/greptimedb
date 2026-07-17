@@ -145,18 +145,13 @@ mod tests {
         )
     }
 
-    #[tokio::test]
-    async fn test_flush_metadata_region_sanitize() {
-        let env = TestEnv::with_prefix_and_config(
-            "test_flush_metadata_region_sanitize",
-            EngineConfig {
-                flush_metadata_region_interval: Duration::from_secs(0),
-                ..Default::default()
-            },
-        )
-        .await;
-        let metric = env.metric();
-        let config = metric.config();
+    #[test]
+    fn test_flush_metadata_region_sanitize() {
+        let mut config = EngineConfig {
+            flush_metadata_region_interval: Duration::from_secs(0),
+            ..Default::default()
+        };
+        config.sanitize();
         assert_eq!(
             config.flush_metadata_region_interval,
             DEFAULT_FLUSH_METADATA_REGION_INTERVAL

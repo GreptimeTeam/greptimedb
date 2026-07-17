@@ -45,10 +45,6 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
-  cancel-in-progress: true
-
 jobs:
   query-regression:
     if: >-
@@ -59,12 +55,30 @@ jobs:
             (github.event.action != 'labeled' || github.event.label.name == 'query-regression')) }}
     runs-on: ${{ github.event_name == 'workflow_dispatch' && inputs.runner || 'perf-regression-8-cores' }}
     timeout-minutes: 180
+    concurrency:
+      group: query-regression-persistent-cache-v1
+      queue: max
+      cancel-in-progress: false
     env:
       CARGO_PROFILE: ${{ github.event_name == 'pull_request' && 'nightly' || inputs.cargo_profile }}
-      CARGO_TARGET_DIR: ${{ github.workspace }}/query-regression-target
-      CARGO_BUILD_RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
+      CARGO_HOME: /home/runner/.cargo
+      UV_CACHE_DIR: /home/runner/.cargo/uv-cache
+      RUSTUP_HOME: /opt/rustup
+      RUSTUP_TOOLCHAIN: nightly-2026-03-21
+      RUSTUP_AUTO_INSTALL: "0"
+      CARGO_TARGET_DIR: /home/runner/query-regression-target
+      QUERY_REGRESSION_CACHE_META: /home/runner/query-regression-cache-meta
+      RUSTC_WRAPPER: /usr/local/bin/sccache
+      SCCACHE_DIR: /home/runner/.cache/sccache
+      SCCACHE_CACHE_SIZE: 40G
+      CARGO_INCREMENTAL: "0"
+      RUSTFLAGS: -D warnings -C link-arg=-fuse-ld=mold
+      QUERY_REGRESSION_CACHE_EPOCH: "1"
       BASE_REF: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || inputs.base_ref }}
-      CANDIDATE_REF: ${{ github.event_name == 'pull_request' && format('refs/pull/{0}/merge', github.event.pull_request.number) || inputs.candidate_ref || github.ref }}
+      CANDIDATE_REF: ${{ github.event_name == 'workflow_dispatch' && (inputs.candidate_ref || github.ref) || '' }}
+      EVENT_MERGE_SHA: ${{ github.event_name == 'pull_request' && github.sha || '' }}
+      EVENT_HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || '' }}
+      EVENT_BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || '' }}
     steps:
       - name: Checkout base source
         uses: actions/checkout@v4
@@ -82,28 +96,382 @@ jobs:
           cp src/.github/scripts/query-regression-summary.py \
             query-regression-trusted-scripts/query-regression-summary.py
 
-      - uses: arduino/setup-protoc@v3
-        with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Resolve immutable candidate and build base
+        working-directory: src
+        shell: bash
+        run: |
+          set -euo pipefail
 
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          cache: false
+          fail_closed() {
+            printf '%s\n' \
+              "PR changed or merge result unavailable; maintainer must remove and re-add query-regression after reviewing current revision. $1" >&2
+            exit 1
+          }
 
-      - uses: astral-sh/setup-uv@v5
+          is_full_sha() {
+            [[ "$1" =~ ^[[:xdigit:]]{40}$ ]]
+          }
 
-      - name: Rust cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: src
-          shared-key: query-regression
-          cache-all-crates: "true"
-          save-if: false
+          fetch_with_retry() {
+            local ref="$1"
+            local depth="$2"
+            local attempt=1
+            local max_attempts=5
+            local delay
+
+            while (( attempt <= max_attempts )); do
+              if git fetch --no-tags --prune --depth="${depth}" origin "${ref}"; then
+                return 0
+              fi
+              printf 'Git fetch failed for %s (attempt %d/%d).\n' \
+                "${ref}" "${attempt}" "${max_attempts}" >&2
+              if (( attempt < max_attempts )); then
+                delay=$(( 2 ** (attempt - 1) ))
+                printf 'Retrying git fetch for %s in %d seconds.\n' "${ref}" "${delay}" >&2
+                sleep "${delay}"
+              fi
+              ((attempt += 1))
+            done
+            return 1
+          }
+
+          initially_checked_out_base_sha="$(git rev-parse --verify HEAD)"
+          is_full_sha "${initially_checked_out_base_sha}" || {
+            printf 'Could not resolve initially checked-out BASE_REF commit.\n' >&2
+            exit 1
+          }
+
+          if [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
+            for identity in EVENT_MERGE_SHA EVENT_HEAD_SHA EVENT_BASE_SHA; do
+              value="${!identity-}"
+              is_full_sha "${value}" || fail_closed "Missing or invalid ${identity}."
+            done
+
+            if ! fetch_with_retry "${EVENT_MERGE_SHA}" 2; then
+              fail_closed "Could not fetch event merge SHA ${EVENT_MERGE_SHA}."
+            fi
+            fetched_sha="$(git rev-parse --verify FETCH_HEAD 2>/dev/null)" \
+              || fail_closed "Fetched event merge SHA could not be resolved."
+            [[ "${fetched_sha,,}" == "${EVENT_MERGE_SHA,,}" ]] \
+              || fail_closed "FETCH_HEAD ${fetched_sha} does not match event merge SHA ${EVENT_MERGE_SHA}."
+
+            read -r -a parents <<< "$(git show -s --format=%P FETCH_HEAD)"
+            (( ${#parents[@]} == 2 )) \
+              || fail_closed "Event merge SHA ${EVENT_MERGE_SHA} is not a two-parent merge commit."
+            head_parent_count=0
+            for parent in "${parents[@]}"; do
+              if [[ "${parent,,}" == "${EVENT_HEAD_SHA,,}" ]]; then
+                ((head_parent_count += 1))
+              else
+                VERIFIED_BASE_SHA="${parent,,}"
+              fi
+            done
+            (( head_parent_count == 1 )) \
+              || fail_closed "Event merge SHA must have exactly one EVENT_HEAD_SHA parent."
+            is_full_sha "${VERIFIED_BASE_SHA-}" \
+              || fail_closed "Event merge SHA has no non-head parent for the base build."
+            VERIFIED_CANDIDATE_SHA="${fetched_sha,,}"
+          else
+            if ! fetch_with_retry "${CANDIDATE_REF}" 1; then
+              printf 'Could not fetch candidate ref %s.\n' "${CANDIDATE_REF}" >&2
+              exit 1
+            fi
+            VERIFIED_CANDIDATE_SHA="$(git rev-parse --verify FETCH_HEAD)"
+            VERIFIED_BASE_SHA="${initially_checked_out_base_sha}"
+          fi
+
+          is_full_sha "${VERIFIED_CANDIDATE_SHA}" || {
+            printf 'Could not resolve candidate SHA.\n' >&2
+            exit 1
+          }
+          is_full_sha "${VERIFIED_BASE_SHA}" || {
+            printf 'Could not resolve build base SHA.\n' >&2
+            exit 1
+          }
+          printf 'VERIFIED_CANDIDATE_SHA=%s\n' "${VERIFIED_CANDIDATE_SHA,,}" >> "${GITHUB_ENV}"
+          printf 'VERIFIED_BASE_SHA=%s\n' "${VERIFIED_BASE_SHA,,}" >> "${GITHUB_ENV}"
+          printf 'Verified candidate SHA: %s\n' "${VERIFIED_CANDIDATE_SHA,,}"
+          printf 'Verified build base SHA: %s\n' "${VERIFIED_BASE_SHA,,}"
+          printf -- '- Verified candidate SHA: `%s`; built base SHA: `%s`\n' \
+            "${VERIFIED_CANDIDATE_SHA,,}" "${VERIFIED_BASE_SHA,,}" >> "${GITHUB_STEP_SUMMARY}"
+          git reset --hard "${VERIFIED_BASE_SHA}"
+          git clean -ffdx
+
+      - name: Verify runner image tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$(id -u)" == "1001" ]]
+          [[ "$(id -g)" == "1001" ]]
+          [[ "${UV_CACHE_DIR}" == "/home/runner/.cargo/uv-cache" ]]
+          [[ "$(protoc --version)" == "libprotoc 3.21.12" ]]
+          temporary_proto_dir="$(mktemp --directory)"
+          trap 'rm -rf "${temporary_proto_dir}"' EXIT
+          test -r /usr/include/google/protobuf/any.proto
+          test -r /usr/include/google/protobuf/empty.proto
+          printf '%s\n' \
+            'syntax = "proto3";' \
+            'package smoke;' \
+            'import "google/protobuf/any.proto";' \
+            'import "google/protobuf/empty.proto";' \
+            'message Smoke { google.protobuf.Any any = 1; google.protobuf.Empty empty = 2; }' \
+            > "${temporary_proto_dir}/smoke.proto"
+          protoc --proto_path="${temporary_proto_dir}" --proto_path=/usr/include \
+            --descriptor_set_out="${temporary_proto_dir}/smoke.pb" \
+            "${temporary_proto_dir}/smoke.proto"
+          test -s "${temporary_proto_dir}/smoke.pb"
+          [[ "$(uv --version)" =~ ^uv[[:space:]]0\.11\.26([[:space:]]|$) ]]
+          mold_version="$(mold --version)"
+          [[ "${mold_version}" =~ ^mold[[:space:]]2\.30\.0([[:space:]]|$) ]]
+          [[ "$(python3 --version)" == "Python 3.12.3" ]]
+          sccache_version="$(sccache --version)"
+          [[ "${sccache_version}" =~ ^sccache[[:space:]]0\.16\.0([[:space:]]|$) ]]
+          [[ "$(command -v rustup)" == "/opt/cargo/bin/rustup" ]]
+          [[ "$(command -v cargo)" == "/opt/cargo/bin/cargo" ]]
+          [[ "$(command -v rustc)" == "/opt/cargo/bin/rustc" ]]
+          [[ "$(rustup --version)" =~ ^rustup[[:space:]]1\.29\.0([[:space:]]|$) ]]
+          cargo_version="$(cargo --version)"
+          [[ "${cargo_version}" =~ ^cargo[[:space:]]1\.96\.0-nightly[[:space:]]\(cbb9bb8bd[[:space:]][0-9]{4}-[0-9]{2}-[0-9]{2}\)$ ]]
+          rustc_version="$(rustc --version)"
+          [[ "${rustc_version}" =~ ^rustc[[:space:]]1\.96\.0-nightly[[:space:]]\(ac7f9ec7d[[:space:]][0-9]{4}-[0-9]{2}-[0-9]{2}\)$ ]]
+          active_toolchain="$(rustup show active-toolchain)"
+          [[ "${active_toolchain}" =~ ^nightly-2026-03-21-x86_64-unknown-linux-gnu([[:space:]]|$) ]]
+          [[ "${RUSTUP_HOME}" == "/opt/rustup" ]]
+          [[ "${RUSTUP_TOOLCHAIN}" == "nightly-2026-03-21" ]]
+          [[ "${RUSTUP_AUTO_INSTALL}" == "0" ]]
+          test -r /opt/rustup && test -x /opt/rustup
+          test ! -w /opt/rustup
+          test ! -w /opt/cargo/bin
+          for entry in config config.toml credentials credentials.toml bin .crates.toml .crates2.json .global-cache .package-cache; do
+            test ! -e "${CARGO_HOME}/${entry}"
+          done
+          mkdir -p "${CARGO_HOME}/registry" "${CARGO_HOME}/git"
+
+      - name: Prepare persistent query regression cache
+        shell: bash
+        working-directory: src
+        run: |
+          set -euo pipefail
+
+          readonly EXPECTED_CARGO_HOME="/home/runner/.cargo"
+          readonly EXPECTED_CARGO_REGISTRY="/home/runner/.cargo/registry"
+          readonly EXPECTED_CARGO_GIT="/home/runner/.cargo/git"
+          readonly EXPECTED_UV_CACHE_DIR="/home/runner/.cargo/uv-cache"
+          readonly EXPECTED_RUSTUP_HOME="/opt/rustup"
+          readonly EXPECTED_TARGET_DIR="/home/runner/query-regression-target"
+          readonly EXPECTED_CACHE_META="/home/runner/query-regression-cache-meta"
+          readonly EXPECTED_SCCACHE_DIR="/home/runner/.cache/sccache"
+          readonly EXPECTED_RUSTC_WRAPPER="/usr/local/bin/sccache"
+          readonly RUNNER_IMAGE_DIGEST="sha256:2436278bf0756700c718927907cdbedac64d55c593f80b515acb44dec8b02cc1"
+          readonly RUNNER_IMAGE_EPOCH="4"
+
+          require_expected_root() {
+            local name="$1"
+            local actual="$2"
+            local expected="$3"
+            [[ "${actual}" == /* && "${actual}" == "${expected}" ]] || {
+              printf 'Refusing unexpected %s root: %s\n' "${name}" "${actual}" >&2
+              exit 1
+            }
+          }
+
+          clear_directory() {
+            local root="$1"
+            [[ "${root}" == /* && "${root}" != "/" ]] || {
+              printf 'Refusing to clear non-absolute or root path: %s\n' "${root}" >&2
+              exit 1
+            }
+            case "${root}" in
+              "${EXPECTED_TARGET_DIR}"|"${EXPECTED_TARGET_DIR}/debug"|"${EXPECTED_TARGET_DIR}/release"|"${EXPECTED_TARGET_DIR}/nightly") ;;
+              *)
+                printf 'Refusing to clear unexpected cache path: %s\n' "${root}" >&2
+                exit 1
+                ;;
+            esac
+            find "${root}" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
+          }
+
+          clear_cargo_extracted_trees() {
+            require_expected_root CARGO_REGISTRY "${CARGO_HOME}/registry" "${EXPECTED_CARGO_REGISTRY}"
+            require_expected_root CARGO_GIT "${CARGO_HOME}/git" "${EXPECTED_CARGO_GIT}"
+            rm -rf -- "${CARGO_HOME}/registry/src" "${CARGO_HOME}/git/checkouts"
+          }
+
+          cargo_size_kib() {
+            du -sk -- "${CARGO_HOME}/registry" "${CARGO_HOME}/git" | awk '{ total += $1 } END { print total }'
+          }
+
+          target_size_kib() {
+            du -sk -- "${CARGO_TARGET_DIR}" | cut -f1
+          }
+
+          free_kib() {
+            df -Pk "${CARGO_TARGET_DIR}" | awk 'NR == 2 { print $4 }'
+          }
+
+          report_cache_usage() {
+            du -sh -- "${CARGO_HOME}" "${CARGO_HOME}/registry" "${CARGO_HOME}/git" \
+              "${RUSTUP_HOME}" "${CARGO_TARGET_DIR}" "${QUERY_REGRESSION_CACHE_META}" "${SCCACHE_DIR}"
+            df -P "${CARGO_TARGET_DIR}"
+            df -hP "${CARGO_TARGET_DIR}"
+            df -Pi "${CARGO_TARGET_DIR}"
+          }
+
+          require_expected_root CARGO_HOME "${CARGO_HOME}" "${EXPECTED_CARGO_HOME}"
+          require_expected_root CARGO_REGISTRY "${CARGO_HOME}/registry" "${EXPECTED_CARGO_REGISTRY}"
+          require_expected_root CARGO_GIT "${CARGO_HOME}/git" "${EXPECTED_CARGO_GIT}"
+          require_expected_root UV_CACHE_DIR "${UV_CACHE_DIR}" "${EXPECTED_UV_CACHE_DIR}"
+          require_expected_root RUSTUP_HOME "${RUSTUP_HOME}" "${EXPECTED_RUSTUP_HOME}"
+          require_expected_root CARGO_TARGET_DIR "${CARGO_TARGET_DIR}" "${EXPECTED_TARGET_DIR}"
+          require_expected_root QUERY_REGRESSION_CACHE_META "${QUERY_REGRESSION_CACHE_META}" "${EXPECTED_CACHE_META}"
+          require_expected_root SCCACHE_DIR "${SCCACHE_DIR}" "${EXPECTED_SCCACHE_DIR}"
+          [[ "${RUSTC_WRAPPER}" == "${EXPECTED_RUSTC_WRAPPER}" ]] || {
+            printf 'Refusing unexpected RUSTC_WRAPPER: %s\n' "${RUSTC_WRAPPER}" >&2
+            exit 1
+          }
+          [[ "${SCCACHE_CACHE_SIZE}" == "40G" ]] || {
+            printf 'Refusing unexpected SCCACHE_CACHE_SIZE: %s\n' "${SCCACHE_CACHE_SIZE}" >&2
+            exit 1
+          }
+          [[ "${CARGO_INCREMENTAL}" == "0" ]] || {
+            printf 'Refusing unexpected CARGO_INCREMENTAL: %s\n' "${CARGO_INCREMENTAL}" >&2
+            exit 1
+          }
+          test -r "${RUSTUP_HOME}"
+          test -x "${RUSTUP_HOME}"
+          test ! -w "${RUSTUP_HOME}"
+          mkdir -p "${CARGO_HOME}" "${CARGO_HOME}/registry" "${CARGO_HOME}/git" "${UV_CACHE_DIR}" \
+            "${CARGO_TARGET_DIR}" "${QUERY_REGRESSION_CACHE_META}" "${SCCACHE_DIR}"
+          for root in "${CARGO_HOME}" "${CARGO_HOME}/registry" "${CARGO_HOME}/git" \
+            "${UV_CACHE_DIR}" "${CARGO_TARGET_DIR}" "${QUERY_REGRESSION_CACHE_META}" "${SCCACHE_DIR}"; do
+            test -w "${root}"
+            touch "${root}/.query-regression-write-test"
+            rm -f "${root}/.query-regression-write-test"
+          done
+
+          case "${CARGO_PROFILE}" in
+            dev) target_profile="debug" ;;
+            release|nightly) target_profile="${CARGO_PROFILE}" ;;
+            *) printf 'Unsupported CARGO_PROFILE: %s\n' "${CARGO_PROFILE}" >&2; exit 1 ;;
+          esac
+
+          rustc_vv="$(rustc -vV)"
+          if cargo -Vv >/dev/null 2>&1; then
+            cargo_vv="$(cargo -Vv)"
+          else
+            cargo_vv="$(cargo -V)"
+          fi
+          host_triple="$(printf '%s\n' "${rustc_vv}" | grep '^host: ' | cut -d' ' -f2-)"
+          cc_version="$(cc --version)"
+          mold_version="$(mold --version | grep -m1 .)"
+          protoc_version="$(protoc --version)"
+          sccache_version="$(sccache --version)"
+          rustup_version="$(rustup --version)"
+          active_toolchain="$(rustup show active-toolchain)"
+          rustup_path="$(command -v rustup)"
+          cargo_path="$(command -v cargo)"
+          rustc_path="$(command -v rustc)"
+          profile_target_dir="${CARGO_TARGET_DIR}/${target_profile}"
+          marker="${QUERY_REGRESSION_CACHE_META}/target-${target_profile}.abi"
+          new_marker="$(mktemp "${QUERY_REGRESSION_CACHE_META}/.${target_profile}.abi.XXXXXX")"
+          {
+            printf 'cache_epoch=%s\n' "${QUERY_REGRESSION_CACHE_EPOCH}"
+            printf 'runner_image_digest=%s\n' "${RUNNER_IMAGE_DIGEST}"
+            printf 'runner_image_epoch=%s\n' "${RUNNER_IMAGE_EPOCH}"
+            printf 'host_triple=%s\n' "${host_triple}"
+            printf 'architecture=%s\n' "$(uname -m)"
+            printf 'cargo_profile=%s\n' "${CARGO_PROFILE}"
+            printf 'target_profile=%s\n' "${target_profile}"
+            printf 'RUSTFLAGS=%s\n' "${RUSTFLAGS-}"
+            printf 'CARGO_ENCODED_RUSTFLAGS=%s\n' "${CARGO_ENCODED_RUSTFLAGS-}"
+            printf 'CARGO_INCREMENTAL=%s\n' "${CARGO_INCREMENTAL-}"
+            printf 'RUSTC_WRAPPER=%s\n' "${RUSTC_WRAPPER-}"
+            printf 'SCCACHE_DIR=%s\n' "${SCCACHE_DIR-}"
+            printf 'SCCACHE_CACHE_SIZE=%s\n' "${SCCACHE_CACHE_SIZE-}"
+            printf 'RUSTUP_HOME=%s\n' "${RUSTUP_HOME-}"
+            printf 'RUSTUP_TOOLCHAIN=%s\n' "${RUSTUP_TOOLCHAIN-}"
+            printf 'RUSTUP_AUTO_INSTALL=%s\n' "${RUSTUP_AUTO_INSTALL-}"
+            printf 'PATH=%s\n' "${PATH-}"
+            printf '%s\n' "rustc_vV=${rustc_vv}"
+            printf '%s\n' "cargo_vV=${cargo_vv}"
+            printf '%s\n' "cc_version=${cc_version}"
+            printf '%s\n' "mold_version=${mold_version}"
+            printf '%s\n' "protoc_version=${protoc_version}"
+            printf '%s\n' "sccache_version=${sccache_version}"
+            printf '%s\n' "rustup_version=${rustup_version}"
+            printf '%s\n' "active_toolchain=${active_toolchain}"
+            printf '%s\n' "rustup_path=${rustup_path}"
+            printf '%s\n' "cargo_path=${cargo_path}"
+            printf '%s\n' "rustc_path=${rustc_path}"
+          } > "${new_marker}"
+
+          if ! cmp -s "${marker}" "${new_marker}"; then
+            printf 'Cache ABI marker mismatch; invalidating target profile: %s\n' "${target_profile}"
+            mkdir -p "${profile_target_dir}"
+            clear_directory "${profile_target_dir}"
+          else
+            printf 'Cache ABI marker match; reusing target profile: %s\n' "${target_profile}"
+          fi
+          mv -f "${new_marker}" "${marker}"
+
+          report_cache_usage
+
+          target_size="$(target_size_kib)"
+          if (( target_size >= 400 * 1024 * 1024 )); then
+            printf 'Warning: target cache is at least 400 GiB (%s KiB)\n' "${target_size}" >&2
+          fi
+          if (( target_size >= 450 * 1024 * 1024 )); then
+            printf 'Target cache is at least 450 GiB; clearing complete target root\n' >&2
+            clear_directory "${CARGO_TARGET_DIR}"
+          fi
+
+          cargo_size="$(cargo_size_kib)"
+          if (( cargo_size >= 60 * 1024 * 1024 )); then
+            printf 'Warning: Cargo cache is at least 60 GiB (%s KiB)\n' "${cargo_size}" >&2
+          fi
+          if (( cargo_size >= 80 * 1024 * 1024 )); then
+            printf 'Cargo cache is at least 80 GiB; removing extracted sources and checkouts\n' >&2
+            clear_cargo_extracted_trees
+            cargo_size="$(cargo_size_kib)"
+            if (( cargo_size >= 80 * 1024 * 1024 )); then
+              printf 'Cargo cache remains at least 80 GiB after cleanup (%s KiB)\n' "${cargo_size}" >&2
+              exit 1
+            fi
+          fi
+
+          free_space="$(free_kib)"
+          if (( free_space < 300 * 1024 * 1024 )); then
+            printf 'Free space is below 300 GiB; clearing complete target root\n' >&2
+            clear_directory "${CARGO_TARGET_DIR}"
+            free_space="$(free_kib)"
+            if (( free_space < 300 * 1024 * 1024 )); then
+              printf 'Free space remains below 300 GiB; removing Cargo extracted sources and checkouts\n' >&2
+              clear_cargo_extracted_trees
+              free_space="$(free_kib)"
+              if (( free_space < 300 * 1024 * 1024 )); then
+                printf 'Free space remains below 300 GiB after cleanup (%s KiB)\n' "${free_space}" >&2
+                exit 1
+              fi
+            fi
+          fi
+
+          report_cache_usage
+
+          sccache --start-server
+          sccache --zero-stats
+          sccache --show-stats
 
       - name: Build base greptime
         working-directory: src
         run: |
+          set -euo pipefail
+          SECONDS=0
           cargo build --profile "${CARGO_PROFILE}" -p cmd --bin greptime
+          base_build_elapsed="${SECONDS}"
+          printf 'Base greptime cargo build elapsed: %s seconds\n' "${base_build_elapsed}"
+          printf -- '- Base greptime cargo build: %s seconds\n' "${base_build_elapsed}" >> "${GITHUB_STEP_SUMMARY}"
+          sccache --show-stats
+          sccache --zero-stats
           target_dir="${CARGO_PROFILE}"
           if [[ "${CARGO_PROFILE}" == "dev" ]]; then
             target_dir="debug"
@@ -114,15 +482,35 @@ jobs:
 
       - name: Switch source to candidate
         working-directory: src
+        shell: bash
         run: |
-          git fetch --no-tags --prune --depth=1 origin "${CANDIDATE_REF}"
-          git reset --hard FETCH_HEAD
+          set -euo pipefail
+          [[ "${VERIFIED_CANDIDATE_SHA}" =~ ^[[:xdigit:]]{40}$ ]] || {
+            printf 'Verified candidate SHA is missing or invalid.\n' >&2
+            exit 1
+          }
+          git cat-file -e "${VERIFIED_CANDIDATE_SHA}^{commit}" || {
+            printf 'Verified candidate SHA is unavailable in the local repository.\n' >&2
+            exit 1
+          }
+          git reset --hard "${VERIFIED_CANDIDATE_SHA}"
           git clean -ffdx
+
+      - name: Test query regression runner lifecycle
+        working-directory: src
+        run: uv run --no-project python tests/perf/test_query_regression_runner_compaction_toctou.py
 
       - name: Build candidate greptime and fixture generators
         working-directory: src
         run: |
-          cargo build --profile "${CARGO_PROFILE}" -p cmd --bin greptime --bin query_perf_fixture --bin prom_remote_write_fixture
+          set -euo pipefail
+          SECONDS=0
+          cargo build --profile "${CARGO_PROFILE}" -p cmd --bin greptime
+          cargo build --profile "${CARGO_PROFILE}" -p cmd --bin query_perf_fixture --features dev-tools
+          candidate_build_elapsed="${SECONDS}"
+          printf 'Candidate greptime and fixture generator cargo builds elapsed: %s seconds\n' "${candidate_build_elapsed}"
+          printf -- '- Candidate greptime and fixture generator cargo builds: %s seconds\n' "${candidate_build_elapsed}" >> "${GITHUB_STEP_SUMMARY}"
+          sccache --show-stats
           target_dir="${CARGO_PROFILE}"
           if [[ "${CARGO_PROFILE}" == "dev" ]]; then
             target_dir="debug"
@@ -132,8 +520,6 @@ jobs:
             "${GITHUB_WORKSPACE}/query-regression-bins/candidate/greptime"
           cp "${CARGO_TARGET_DIR}/${target_dir}/query_perf_fixture" \
             "${GITHUB_WORKSPACE}/query-regression-bins/candidate/query_perf_fixture"
-          cp "${CARGO_TARGET_DIR}/${target_dir}/prom_remote_write_fixture" \
-            "${GITHUB_WORKSPACE}/query-regression-bins/candidate/prom_remote_write_fixture"
 
       - name: Run query regression
         id: run
@@ -146,7 +532,6 @@ jobs:
           BASE_BIN: ${{ github.workspace }}/query-regression-bins/base/greptime
           CANDIDATE_BIN: ${{ github.workspace }}/query-regression-bins/candidate/greptime
           FIXTURE_GENERATOR: ${{ github.workspace }}/query-regression-bins/candidate/query_perf_fixture
-          REMOTE_WRITE_GENERATOR: ${{ github.workspace }}/query-regression-bins/candidate/prom_remote_write_fixture
         run: >-
           uv run --no-project python src/.github/scripts/query-regression-run.py
           --base-src src
@@ -171,9 +556,13 @@ jobs:
         with:
           name: query-regression-report
           path: |
-            query-regression-work/**
+            query-regression-work/**/query-regression-report.json
+            query-regression-work/**/base/report.json
+            query-regression-work/**/candidate/report.json
+            query-regression-work/**/logs/**
             query-regression-summary.md
           if-no-files-found: warn
+          retention-days: 7
 
       - name: Upload trusted comment artifact
         if: ${{ always() && github.event_name == 'pull_request' }}
@@ -185,6 +574,46 @@ jobs:
             query-regression-work/**/query-regression-report.json
           if-no-files-found: warn
           retention-days: 7
+
+      - name: Report persistent cache usage
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          for root in \
+            /home/runner/.cargo \
+            /home/runner/.cargo/registry \
+            /home/runner/.cargo/git \
+            /opt/rustup \
+            /home/runner/query-regression-target \
+            /home/runner/query-regression-cache-meta \
+            /home/runner/.cache/sccache; do
+            if [[ -e "${root}" ]]; then
+              du -sh -- "${root}"
+            else
+              printf 'Missing cache path (report only): %s\n' "${root}"
+            fi
+          done
+          if [[ -e /opt/rustup ]]; then
+            if [[ -w /opt/rustup ]]; then
+              printf 'Immutable Rustup path is unexpectedly writable: /opt/rustup\n' >&2
+            else
+              printf 'Immutable Rustup path is read-only to runner: /opt/rustup\n'
+            fi
+          fi
+          report_root=/home/runner/query-regression-target
+          if [[ ! -e "${report_root}" ]]; then
+            report_root=/home/runner
+            printf 'Target cache path is missing; reporting its filesystem through %s\n' "${report_root}"
+          fi
+          df -P "${report_root}"
+          df -hP "${report_root}"
+          df -Pi "${report_root}"
+          if command -v sccache >/dev/null 2>&1; then
+            sccache --show-stats || printf 'Unable to show sccache statistics (report only)\n' >&2
+          else
+            printf 'sccache is unavailable (report only)\n' >&2
+          fi
 
       - name: Fail on regression failure
         if: ${{ steps.run.outputs.status != '0' }}

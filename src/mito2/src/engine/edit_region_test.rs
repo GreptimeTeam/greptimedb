@@ -419,7 +419,10 @@ async fn test_stalled_write_fails_fast_if_region_closed_during_editing() {
     let close_engine = engine.clone();
     let close_task = tokio::spawn(async move {
         close_engine
-            .handle_request(region_id, RegionRequest::Close(RegionCloseRequest {}))
+            .handle_request(
+                region_id,
+                RegionRequest::Close(RegionCloseRequest::default()),
+            )
             .await
     });
 

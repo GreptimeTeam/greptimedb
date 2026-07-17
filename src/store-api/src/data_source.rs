@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 use common_error::ext::BoxedError;
 use common_recordbatch::SendableRecordBatchStream;
+use datafusion_physical_plan::ExecutionPlan;
 
 use crate::storage::ScanRequest;
 
@@ -24,6 +25,15 @@ use crate::storage::ScanRequest;
 pub trait DataSource {
     /// Retrieves a stream of record batches based on the provided scan request.
     fn get_stream(&self, request: ScanRequest) -> Result<SendableRecordBatchStream, BoxedError>;
+
+    /// Builds a physical plan for the scan request if the data source needs to
+    /// expose its execution semantics to DataFusion.
+    fn get_physical_plan(
+        &self,
+        _request: ScanRequest,
+    ) -> Result<Option<Arc<dyn ExecutionPlan>>, BoxedError> {
+        Ok(None)
+    }
 }
 
 pub type DataSourceRef = Arc<dyn DataSource + Send + Sync>;

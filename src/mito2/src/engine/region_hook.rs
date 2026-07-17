@@ -16,15 +16,24 @@
 //!
 //! ## Design
 //!
-//! The [`RegionHook`] trait provides two methods with clear separation of concerns:
+//! The [`RegionHook`] trait observes region activity through two categories of
+//! callbacks — manifest/file observation and region lifecycle:
 //!
 //! - [`on_sst_files_written`]: Fires when mito2 physically writes SST **data files**.
 //!   Provides per-file [`SstInfo`] + [`FileMeta`]; metadata richness varies by path
 //!   (see [`SstFileInfo`] and the coverage footnote).
 //!
-//! - [`on_manifest_updated`]: Fires after **any** manifest write is successfully committed.
-//!   Receives the full [`RegionMetaActionList`] so consumers can inspect what changed
-//!   (file additions/removals, schema changes, truncation, partition expression changes, etc.).
+//! - [`on_manifest_updated`]: Fires after a manifest write is committed to the **live**
+//!   (normal) manifest directory. Writes to the staging directory (enter staging,
+//!   operations during staging, the intermediate apply-staging edit) are suppressed —
+//!   their effects are accumulated and delivered in a single notification when the
+//!   staged actions are promoted to the live manifest. Receives the full
+//!   [`RegionMetaActionList`] so consumers can inspect what changed (file additions/
+//!   removals, schema changes, truncation, partition expression changes, etc.).
+//!
+//! - [`on_region_opened`] / [`on_region_closed`] / [`on_region_dropped`] / [`on_region_files_removed`]:
+//!   Region **lifecycle** callbacks for open, close, logical drop, and physical file removal.
+//!   See [Region lifecycle](#region-lifecycle) below.
 //!
 //! Hook implementations are registered via the [`Plugins`](common_base::Plugins) system:
 //! ```ignore
@@ -33,6 +42,12 @@
 //!
 //! ## Coverage
 //!
+//! Only manifest writes to the **normal** (live) manifest directory trigger
+//! `on_manifest_updated`. Writes to the staging manifest directory (operations
+//! that happen while the region is in staging mode) are intentionally suppressed:
+//! their effects are accumulated and delivered in a single notification when
+//! the staged actions are promoted to the live manifest via `exit_staging_on_success`.
+//!
 //! | Scenario                     | `on_sst_files_written` | `on_manifest_updated` |
 //! |------------------------------|:----------------------:|:---------------------:|
 //! | Flush (memtable → SST)       | ✅ Yes                 | ✅ Yes                |
@@ -40,23 +55,57 @@
 //! | Remote compaction            | ✅ (compactor node) ¹     | ✅ (compactor node) ¹    |
 //! | RegionEdit / bulk ingestion  | ❌ (files pre-written)  | ✅ Yes                |
 //! | Copy region                  | ❌ (object-store copy)  | ✅ Yes                |
-//! | Apply staging                | ❌ (delegates to edit)  | ✅ Yes ²               |
+//! | Apply staging (promote)      | ❌ (delegates to edit)  | ✅ Yes ²               |
 //! | Alter (schema change)        | ❌ (no SST files)       | ✅ Yes                |
 //! | Truncate                     | ❌ (removes files)      | ✅ Yes                |
-//! | Enter staging                | ❌ (no SST files)       | ✅ Yes                |
+//! | Enter staging                | ❌ (no SST files)       | ❌ (staging dir)      |
+//! | Operations during staging    | N/A                    | ❌ (staging dir)      |
 //! | Async index build            | ❌ (index files only)   | ✅ Yes                |
 //!
 //! ¹ Remote compaction runs on a dedicated compactor node via `open_compaction_region()`;
 //!   pass plugins via `OpenCompactionRegionRequest` to enable hooks there. `sst_infos` is
 //!   `#[serde(skip)]` over the wire, so each [`SstInfo`] is rebuilt from [`FileMeta`] with
 //!   empty footer/index — see [`SstFileInfo`] for field-level detail.
-//! ² Apply staging fires `on_manifest_updated` twice: once when the staging SST files are
-//!   committed via `RegionEdit`, and once when `exit_staging_on_success` merges all staged
-//!   manifest actions into the live manifest.
+//! ² Apply staging fires `on_manifest_updated` once when `exit_staging_on_success` promotes
+//!   all staged manifest actions (including the SST file additions) into the live manifest.
+//!   The intermediate staging `RegionEdit` is written to the staging directory and does not
+//!   fire the hook — its file list is included in the promote notification.
 //!
 //! The following paths do **not** trigger any hook:
 //! - Follower region sync / catchup (manifest read-only; followers don't author changes)
-//! - GC / checkpoint / drop / remap (internal bookkeeping, not logical state changes)
+//! - GC / checkpoint / remap (internal bookkeeping, not logical state changes)
+//!
+//! An explicit region **drop** does fire lifecycle hooks — see
+//! [Region lifecycle](#region-lifecycle).
+//!
+//! ## Region lifecycle
+//!
+//! Beyond manifest/SST observation, the hook observes the high-level lifecycle of an
+//! active region:
+//!
+//! | Event | Method | When |
+//! |-------|--------|------|
+//! | Open | [`on_region_opened`] | A create or open request registers the region as active (the counterpart to close/drop). Does not fire for the compactor's transient regions or the catch-up reopen. |
+//! | Close | [`on_region_closed`] | A close request (or a close-after-flush) removes the region from the active set. Data files, manifest and WAL state are **preserved**; the region may be reopened. |
+//! | Logical drop | [`on_region_dropped`] | A drop request has been handled: the region leaves the active set and its WAL entries are marked obsolete. Data files are **not yet deleted**. |
+//! | Physical file removal | [`on_region_files_removed`] | The drop GC worker has deleted the region directory. Terminal file-lifecycle event. |
+//!
+//! Notes:
+//! - `on_region_closed` / `on_region_dropped` run **inline in the region worker loop**,
+//!   so implementations must be fast (same contract as `on_manifest_updated`).
+//! - `on_region_opened` runs inline in the worker loop on the **create** path, but on the
+//!   **open** path it fires inside the spawned open task (`common_runtime::spawn_global`),
+//!   i.e. concurrently with the worker loop — after WAL replay, before the region is
+//!   registered and its open request is acknowledged. Implementations must still be fast
+//!   and must not assume worker-loop-thread affinity or strict ordering against concurrent
+//!   requests to other regions.
+//! - `on_region_files_removed` runs on the background drop GC task, outside the worker loop.
+//! - When global GC is enabled and a normal table region is dropped with `partial_drop`, its
+//!   directory is left for global reclamation and `on_region_files_removed` is **not** fired
+//!   by the drop worker (observe it via the global GC path instead).
+//! - Logical file removal (compaction, region edit, truncate) is already observable via
+//!   [`on_manifest_updated`] (`Edit.files_to_remove` / `Truncate` action); only the drop
+//!   worker's physical directory deletion needs a dedicated file hook.
 //!
 //! ## Invocation points
 //!
@@ -77,11 +126,18 @@
 //!
 //! ## Future work
 //!
-//! A future `on_files_removed` hook may be added to observe file lifecycle end
-//! (GC, drop, truncate, compaction removal). This is not yet implemented.
+//! `on_region_files_removed` currently covers only the **drop** GC worker's physical
+//! directory removal. A broader per-file `on_files_removed` hook covering compaction
+//! removal, truncate, and the global GC reclamation path is not yet implemented
+//! (though logical file removal is already observable via `on_manifest_updated`).
+//! Role/leadership transitions (`on_region_role_changed`) are also not hooked.
 //!
 //! [`on_sst_files_written`]: RegionHook::on_sst_files_written
 //! [`on_manifest_updated`]: RegionHook::on_manifest_updated
+//! [`on_region_opened`]: RegionHook::on_region_opened
+//! [`on_region_closed`]: RegionHook::on_region_closed
+//! [`on_region_dropped`]: RegionHook::on_region_dropped
+//! [`on_region_files_removed`]: RegionHook::on_region_files_removed
 //! [`RegionManifestManager::update`]: crate::manifest::manager::RegionManifestManager::update
 //! [`ManifestContext::update_locked`]: crate::region::ManifestContext::update_locked
 //! [`ManifestContext::update_manifest`]: crate::region::ManifestContext::update_manifest
@@ -103,6 +159,13 @@ use crate::sst::parquet::SstInfo;
 ///
 /// Must be [`fire`](Self::fire)d **after** the manifest write lock is released
 /// (the hook may read the manifest). `#[must_use]` so a forgotten receipt warns.
+///
+/// ## Staging suppression
+///
+/// When `is_staging` is `true`, [`fire`](Self::fire) is a no-op — the write went to
+/// the staging manifest directory. The hook only observes writes to the live (normal)
+/// manifest directory. Staging actions are accumulated and delivered in a single
+/// notification when `exit_staging_on_success` promotes them (`is_staging = false`).
 #[must_use = "the region hook must be fired after releasing the manifest write lock"]
 pub(crate) struct PendingManifestHook {
     region_id: RegionId,
@@ -110,6 +173,9 @@ pub(crate) struct PendingManifestHook {
     action_list: Option<RegionMetaActionList>,
     version: ManifestVersion,
     hook: Option<RegionHookRef>,
+    /// Whether the manifest write went to the staging directory.
+    /// When `true`, `fire()` is suppressed — the hook only observes live manifest writes.
+    is_staging: bool,
 }
 
 impl PendingManifestHook {
@@ -118,12 +184,14 @@ impl PendingManifestHook {
         action_list: Option<RegionMetaActionList>,
         version: ManifestVersion,
         hook: Option<RegionHookRef>,
+        is_staging: bool,
     ) -> Self {
         Self {
             region_id,
             action_list,
             version,
             hook,
+            is_staging,
         }
     }
 
@@ -132,9 +200,13 @@ impl PendingManifestHook {
         self.version
     }
 
-    /// Fires the hook if one is registered. Safe to call unconditionally: it is
-    /// a no-op when no hook is registered.
+    /// Fires the hook if one is registered, **unless** the write went to the staging
+    /// manifest directory (`is_staging = true`). Safe to call unconditionally:
+    /// it is a no-op when no hook is registered or when the write is staging-only.
     pub(crate) async fn fire(self) {
+        if self.is_staging {
+            return;
+        }
         if let (Some(hook), Some(action_list)) = (self.hook, self.action_list) {
             hook.on_manifest_updated(self.region_id, &action_list, self.version)
                 .await;
@@ -146,6 +218,9 @@ impl PendingManifestHook {
     /// keeps `self`'s actions followed by `other`'s, and the *later* manifest
     /// version wins. Used when a sequence of writes (e.g. staging-exit followed
     /// by metadata backfill) should notify the hook exactly once.
+    ///
+    /// `is_staging` is `true` only if **both** sides are staging; if either side
+    /// is a live write, the merged result is also live.
     pub(crate) fn merge(self, other: PendingManifestHook) -> PendingManifestHook {
         debug_assert_eq!(
             self.region_id, other.region_id,
@@ -164,6 +239,7 @@ impl PendingManifestHook {
             },
             version: self.version.max(other.version),
             hook: self.hook.or(other.hook),
+            is_staging: self.is_staging && other.is_staging,
         }
     }
 }
@@ -211,10 +287,14 @@ pub trait RegionHook: Send + Sync + Debug {
         let _ = (region_id, region_metadata, files);
     }
 
-    /// Called after the region manifest is successfully committed.
+    /// Called after the region manifest is successfully committed to the **live**
+    /// (normal) manifest directory.
     ///
-    /// Fires for **all** manifest write paths: flush, compaction, region edit,
-    /// copy region, alter, truncate, enter staging, index build, etc.
+    /// Fires for: flush, compaction, region edit, copy region, alter, truncate,
+    /// async index build, and apply-staging promote. Does **not** fire for writes
+    /// to the staging manifest directory (enter staging, operations during staging,
+    /// the intermediate apply-staging edit) — those are suppressed because their
+    /// effects are accumulated and delivered in a single promote notification.
     ///
     /// Does **not** fire for:
     /// - Manifest reads / follower sync (no write)
@@ -227,6 +307,80 @@ pub trait RegionHook: Send + Sync + Debug {
         manifest_version: ManifestVersion,
     ) {
         let _ = (region_id, action_list, manifest_version);
+    }
+
+    /// Called once a region **open** or **create** succeeds, but **before** the
+    /// region is registered in the engine's active set (`insert_region` runs
+    /// immediately afterwards).
+    ///
+    /// Fires once when a region becomes active via a create or open request —
+    /// the natural counterpart to [`on_region_closed`] / [`on_region_dropped`].
+    /// It does **not** fire for the compactor's transient compaction regions
+    /// (`open_compaction_region`), nor for the internal reopen performed during
+    /// follower catch-up / leadership promotion.
+    ///
+    /// On the **create** path it runs inline in the region worker loop; on the
+    /// **open** path it runs inside the spawned open task
+    /// (`common_runtime::spawn_global`), concurrently with the worker loop
+    /// (after WAL replay, before the region is registered/acknowledged).
+    /// Implementations must be fast and must **not** assume worker-loop-thread
+    /// affinity or strict ordering against concurrent requests to other regions.
+    ///
+    /// [`on_region_closed`]: RegionHook::on_region_closed
+    /// [`on_region_dropped`]: RegionHook::on_region_dropped
+    async fn on_region_opened(&self, region_id: RegionId, region_metadata: &RegionMetadataRef) {
+        let _ = (region_id, region_metadata);
+    }
+
+    /// Called after a region is **closed** via a close request.
+    ///
+    /// The region is removed from the engine's active set, but its data files,
+    /// manifest, and WAL state are **preserved**; the region may be reopened
+    /// later. Fires once per successful close, after the region's background
+    /// tasks (flush/compaction) have been stopped.
+    ///
+    /// Fires for a region of **any** role (leader or follower) that is closed.
+    /// Does **not** fire when a region is dropped (see [`on_region_dropped`]).
+    ///
+    /// Runs inline in the region worker loop; implementations should be fast.
+    ///
+    /// [`on_region_dropped`]: RegionHook::on_region_dropped
+    async fn on_region_closed(&self, region_id: RegionId, region_metadata: &RegionMetadataRef) {
+        let _ = (region_id, region_metadata);
+    }
+
+    /// Called after a region is **logically dropped** (a drop request has been
+    /// handled).
+    ///
+    /// The region is removed from the active set and its WAL entries are marked
+    /// obsolete. Its data files are **not yet deleted** — they are scheduled for
+    /// asynchronous removal by the GC worker. Observe physical deletion via
+    /// [`on_region_files_removed`].
+    ///
+    /// Runs inline in the region worker loop; implementations should be fast.
+    ///
+    /// [`on_region_files_removed`]: RegionHook::on_region_files_removed
+    async fn on_region_dropped(&self, region_id: RegionId, region_metadata: &RegionMetadataRef) {
+        let _ = (region_id, region_metadata);
+    }
+
+    /// Called after a dropped region's data files are **physically removed** by
+    /// the drop GC worker (the region directory has been deleted).
+    ///
+    /// This is the terminal event in a region's file lifecycle; no further
+    /// callbacks fire for this region id afterwards. Fires only when the drop
+    /// worker itself deletes the directory. When global GC is enabled and the
+    /// region is a normal table region dropped with `partial_drop`, the
+    /// directory is left for global reclamation and this hook is **not** fired
+    /// by the drop worker.
+    ///
+    /// Runs on a background task, outside the region worker loop.
+    async fn on_region_files_removed(
+        &self,
+        region_id: RegionId,
+        region_metadata: &RegionMetadataRef,
+    ) {
+        let _ = (region_id, region_metadata);
     }
 }
 

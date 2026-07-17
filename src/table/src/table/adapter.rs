@@ -113,6 +113,11 @@ impl TableProvider for DfTableProviderAdapter {
             request.limit = limit;
             request.clone()
         };
+
+        if let Some(plan) = self.table.scan_to_plan(request.clone())? {
+            return Ok(plan);
+        }
+
         let stream = self.table.scan_to_stream(request).await?;
 
         // build sort physical expr

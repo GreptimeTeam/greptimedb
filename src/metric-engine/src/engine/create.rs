@@ -551,7 +551,7 @@ impl MetricEngineInner {
 
         let table_id_col_def = request.column_metadatas.iter().any(is_metric_name_col);
         let tsid_col_def = request.column_metadatas.iter().any(is_tsid_col);
-        let value_split_enabled = self.config.experimental_enable_metric_value_split
+        let value_split_enabled = self.enable_metric_value_split
             && request
                 .options
                 .get(MERGE_MODE_KEY)
@@ -585,10 +585,7 @@ impl MetricEngineInner {
         data_region_request.primary_key = primary_key;
 
         // set data region options
-        set_data_region_options(
-            &mut data_region_request.options,
-            self.config.sparse_primary_key_encoding,
-        );
+        set_data_region_options(&mut data_region_request.options);
 
         data_region_request
     }

@@ -187,6 +187,14 @@ mod tests {
             unreachable!()
         }
 
+        async fn obsolete_all(
+            &self,
+            _provider: &Provider,
+            _region_id: RegionId,
+        ) -> Result<(), Self::Error> {
+            unreachable!()
+        }
+
         fn entry(
             &self,
             _data: Vec<u8>,

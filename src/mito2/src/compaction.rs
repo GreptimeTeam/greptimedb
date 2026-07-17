@@ -64,7 +64,9 @@ use crate::error::{
     RegionClosedSnafu, RegionDroppedSnafu, RegionTruncatedSnafu, RemoteCompactionSnafu, Result,
     TimeRangePredicateOverflowSnafu, TimeoutSnafu,
 };
-use crate::metrics::{COMPACTION_STAGE_ELAPSED, INFLIGHT_COMPACTION_COUNT};
+use crate::metrics::{
+    COMPACTION_MEMORY_REJECTED, COMPACTION_STAGE_ELAPSED, INFLIGHT_COMPACTION_COUNT,
+};
 use crate::read::FlatSource;
 use crate::read::flat_projection::FlatProjectionMapper;
 use crate::read::read_columns::ReadColumns;
@@ -613,8 +615,21 @@ impl CompactionScheduler {
             waiters
         };
 
-        // Create a local compaction task.
+        // Check whether this local compaction can ever fit before submitting it.
         let estimated_bytes = estimate_compaction_bytes(&picker_output);
+        if let Some(limit_bytes) = self.exceeds_compaction_memory_limit(estimated_bytes) {
+            COMPACTION_MEMORY_REJECTED
+                .with_label_values(&["oversized"])
+                .inc();
+            warn!(
+                "Skip compaction for region {} because estimated memory {} bytes exceeds compaction memory limit {} bytes",
+                region_id, estimated_bytes, limit_bytes,
+            );
+            for waiter in waiters {
+                waiter.send(Ok(0));
+            }
+            return Ok(None);
+        }
 
         let cancel_handle = Arc::new(CancellationHandle::default());
         let state = LocalCompactionState::new(cancel_handle.clone());
@@ -650,6 +665,15 @@ impl CompactionScheduler {
             .inspect_err(
                 |e| error!(e; "Failed to submit compaction request for region {}", region_id),
             )
+    }
+
+    fn exceeds_compaction_memory_limit(&self, estimated_bytes: u64) -> Option<u64> {
+        let limit_bytes = self.memory_manager.limit_bytes();
+        if limit_bytes > 0 && estimated_bytes > limit_bytes {
+            Some(limit_bytes)
+        } else {
+            None
+        }
     }
 
     fn remove_region_on_failure(&mut self, region_id: RegionId, err: Arc<Error>) {
@@ -1549,6 +1573,65 @@ mod tests {
         assert!(scheduled);
         assert_eq!(1, job_scheduler.num_jobs());
         assert!(scheduler.region_status.contains_key(&region_id));
+    }
+
+    #[tokio::test]
+    async fn test_schedule_compaction_skips_task_exceeding_memory_limit() {
+        let job_scheduler = Arc::new(VecScheduler::default());
+        let env = SchedulerEnv::new().await.scheduler(job_scheduler.clone());
+        let (tx, _rx) = mpsc::channel(4);
+        let mut scheduler = env.mock_compaction_scheduler(tx);
+        scheduler.memory_manager = Arc::new(new_compaction_memory_manager(1024 * 1024));
+
+        let mut builder = VersionControlBuilder::new();
+        let region_id = builder.region_id();
+        let end = 1000 * 1000;
+        let version_control = Arc::new(
+            builder
+                .push_l0_file_with_max_row_group_size(0, end, 1024 * 1024)
+                .push_l0_file_with_max_row_group_size(10, end, 1024 * 1024)
+                .push_l0_file_with_max_row_group_size(50, end, 1024 * 1024)
+                .push_l0_file_with_max_row_group_size(80, end, 1024 * 1024)
+                .push_l0_file_with_max_row_group_size(90, end, 1024 * 1024)
+                .build(),
+        );
+        let manifest_ctx = env
+            .mock_manifest_context(version_control.current().version.metadata.clone())
+            .await;
+        let (schema_metadata_manager, kv_backend) = mock_schema_metadata_manager();
+        schema_metadata_manager
+            .register_region_table_info(
+                region_id.table_id(),
+                "test_table",
+                "test_catalog",
+                "test_schema",
+                None,
+                kv_backend,
+            )
+            .await;
+        let (output_tx, output_rx) = oneshot::channel();
+        let rejected = COMPACTION_MEMORY_REJECTED.with_label_values(&["oversized"]);
+        let rejected_before = rejected.get();
+
+        let scheduled = scheduler
+            .schedule_compaction(
+                region_id,
+                Options::Regular(Default::default()),
+                &version_control,
+                &env.access_layer,
+                OptionOutputTx::from(output_tx),
+                &manifest_ctx,
+                schema_metadata_manager,
+                1,
+            )
+            .await
+            .unwrap();
+
+        assert!(!scheduled);
+        assert_eq!(output_rx.await.unwrap().unwrap(), 0);
+        assert_eq!(rejected_before + 1, rejected.get());
+        assert_eq!(0, job_scheduler.num_jobs());
+        assert!(!scheduler.region_status.contains_key(&region_id));
     }
 
     #[tokio::test]

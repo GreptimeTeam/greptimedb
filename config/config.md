@@ -15,7 +15,7 @@
 | `default_timezone` | String | Unset | The default timezone of the server. |
 | `default_column_prefix` | String | Unset | The default column prefix for auto-created time index and value columns. |
 | `auto_create_table` | Bool | `true` | Server-side global switch for auto table creation on write.<br/>When `false`, a missing table is never auto-created even if the request sets the `auto_create_table` hint to `true`. Default: `true`. |
-| `user_provider` | String | Unset | The user provider for authentication.<br/>Examples: "static_user_provider:file:/path/to/users", "static_user_provider:cmd:greptime_user=greptime_pwd"<br/>Password verifier formats: "plain:<password>", "pbkdf2_sha256:<iterations>:<hex_salt>:<hex_hash>",<br/>"mysql_native_password:<hex_sha1_sha1_password>"<br/>"pbkdf2_sha256" protects passwords at rest but is not compatible with mysql_native_password. |
+| `user_provider` | String | Unset | The user provider for authentication.<br/>Examples: "static_user_provider:file:/path/to/users", "static_user_provider:cmd:greptime_user=greptime_pwd"<br/>Password verifier formats: "plain:<password>", "pbkdf2_sha256:<iterations>:<hex_salt>:<hex_hash>",<br/>"mysql_native_password:<hex_sha1_sha1_password>",<br/>"pg_scram_sha256:<iterations>:<hex_salt>:<hex_stored_key>:<hex_server_key>"<br/>"pbkdf2_sha256" and "pg_scram_sha256" protect passwords at rest, but cannot authenticate over MySQL's<br/>native password handshake; a MySQL client must send the password in cleartext for such users.<br/>"mysql_native_password" is MySQL-specific and cannot authenticate over PostgreSQL at all.<br/>PostgreSQL SCRAM only covers "plain" and "pg_scram_sha256" users; if any user is "pbkdf2_sha256" or<br/>"mysql_native_password", PostgreSQL falls back to cleartext password auth for every user.<br/>For "pg_scram_sha256" users, keep the default iteration count (4096) and salt length (16): both are<br/>observable in the SCRAM server-first message, and non-default values weaken resistance to username<br/>enumeration. |
 | `max_in_flight_write_bytes` | String | Unset | Maximum total memory for all concurrent write request bodies and messages (HTTP, gRPC, Flight).<br/>Set to 0 to disable the limit. Default: "0" (unlimited) |
 | `write_bytes_exhausted_policy` | String | Unset | Policy when write bytes quota is exhausted.<br/>Options: "wait" (default, 10s timeout), "wait(<duration>)" (e.g., "wait(30s)"), "fail" |
 | `init_regions_in_background` | Bool | `false` | Initialize all regions in the background during the startup.<br/>By default, it provides services after all regions have been initialized. |
@@ -157,7 +157,8 @@
 | `region_engine.mito.auto_flush_interval` | String | `1h` | Interval to auto flush a region if it has not flushed yet. |
 | `region_engine.mito.global_write_buffer_size` | String | Auto | Global write buffer size for all regions. If not set, it's default to 1/8 of OS memory with a max limitation of 1GB. |
 | `region_engine.mito.global_write_buffer_reject_size` | String | Auto | Global write buffer size threshold to reject write requests. If not set, it's default to 2 times of `global_write_buffer_size`. |
-| `region_engine.mito.sst_meta_cache_size` | String | Auto | Cache size for SST metadata. Setting it to 0 to disable the cache.<br/>If not set, it's default to 1/32 of OS memory with a max limitation of 128MB. |
+| `region_engine.mito.default_region_write_buffer_size` | String | `0` | Default write buffer size for each region. Regions stall at this size and reject writes at twice this size. Setting it to 0 disables both limits unless the table specifies `write_buffer_size`. |
+| `region_engine.mito.sst_meta_cache_size` | String | Auto | Cache size for SST metadata. Setting it to 0 to disable the cache.<br/>If not set, it's default to 1/8 of OS memory with a max limitation of 512MB. |
 | `region_engine.mito.vector_cache_size` | String | Auto | Cache size for vectors and arrow arrays. Setting it to 0 to disable the cache.<br/>If not set, it's default to 1/16 of OS memory with a max limitation of 512MB. |
 | `region_engine.mito.page_cache_size` | String | Auto | Cache size for pages of SST row groups. Setting it to 0 to disable the cache.<br/>If not set, it's default to 1/8 of OS memory. |
 | `region_engine.mito.selector_result_cache_size` | String | Auto | Cache size for time series selector (e.g. `last_value()`). Setting it to 0 to disable the cache.<br/>If not set, it's default to 1/16 of OS memory with a max limitation of 512MB. |
@@ -205,7 +206,6 @@
 | `region_engine.mito.bloom_filter_index.mem_threshold_on_create` | String | `auto` | Memory threshold for bloom filter creation.<br/>- `auto`: automatically determine the threshold based on the system memory size (default)<br/>- `unlimited`: no memory limit<br/>- `[size]` e.g. `64MB`: fixed memory threshold |
 | `region_engine.file` | -- | -- | Enable the file engine. |
 | `region_engine.metric` | -- | -- | Metric engine options. |
-| `region_engine.metric.sparse_primary_key_encoding` | Bool | `true` | Whether to use sparse primary key encoding. |
 | `region_engine.metric.experimental_enable_metric_value_split` | Bool | `false` | Whether to store exact integral metric values in internal Int64 columns. |
 | `logging` | -- | -- | The logging options. |
 | `logging.dir` | String | `./greptimedb_data/logs` | The directory to store the log files. If set to empty, logs will not be written to files. |
@@ -240,7 +240,7 @@
 | `default_timezone` | String | Unset | The default timezone of the server. |
 | `default_column_prefix` | String | Unset | The default column prefix for auto-created time index and value columns. |
 | `auto_create_table` | Bool | `true` | Server-side global switch for auto table creation on write.<br/>When `false`, a missing table is never auto-created even if the request sets the `auto_create_table` hint to `true`. Default: `true`. |
-| `user_provider` | String | Unset | The user provider for authentication.<br/>Examples: "static_user_provider:file:/path/to/users", "static_user_provider:cmd:greptime_user=greptime_pwd"<br/>Password verifier formats: "plain:<password>", "pbkdf2_sha256:<iterations>:<hex_salt>:<hex_hash>",<br/>"mysql_native_password:<hex_sha1_sha1_password>"<br/>"pbkdf2_sha256" protects passwords at rest but is not compatible with mysql_native_password. |
+| `user_provider` | String | Unset | The user provider for authentication.<br/>Examples: "static_user_provider:file:/path/to/users", "static_user_provider:cmd:greptime_user=greptime_pwd"<br/>Password verifier formats: "plain:<password>", "pbkdf2_sha256:<iterations>:<hex_salt>:<hex_hash>",<br/>"mysql_native_password:<hex_sha1_sha1_password>",<br/>"pg_scram_sha256:<iterations>:<hex_salt>:<hex_stored_key>:<hex_server_key>"<br/>"pbkdf2_sha256" and "pg_scram_sha256" protect passwords at rest, but cannot authenticate over MySQL's<br/>native password handshake; a MySQL client must send the password in cleartext for such users.<br/>"mysql_native_password" is MySQL-specific and cannot authenticate over PostgreSQL at all.<br/>PostgreSQL SCRAM only covers "plain" and "pg_scram_sha256" users; if any user is "pbkdf2_sha256" or<br/>"mysql_native_password", PostgreSQL falls back to cleartext password auth for every user.<br/>For "pg_scram_sha256" users, keep the default iteration count (4096) and salt length (16): both are<br/>observable in the SCRAM server-first message, and non-default values weaken resistance to username<br/>enumeration. |
 | `max_in_flight_write_bytes` | String | Unset | Maximum total memory for all concurrent write request bodies and messages (HTTP, gRPC, Flight).<br/>Set to 0 to disable the limit. Default: "0" (unlimited) |
 | `write_bytes_exhausted_policy` | String | Unset | Policy when write bytes quota is exhausted.<br/>Options: "wait" (default, 10s timeout), "wait(<duration>)" (e.g., "wait(30s)"), "fail" |
 | `runtime` | -- | -- | The runtime options. |
@@ -438,6 +438,9 @@
 | `gc` | -- | -- | -- |
 | `gc.enable` | Bool | `false` | Whether GC is enabled. Default to false. Need to be the same with datanode's `mito.gc.enable`<br/>If set to false, no GC will be performed |
 | `gc.gc_cooldown_period` | String | `5m` | Cooldown period between GC operations on the same region. |
+| `gc.experimental_soft_drop` | -- | -- | -- |
+| `gc.experimental_soft_drop.enable` | Bool | `false` | Reserved experimental option. Currently ignored. |
+| `gc.experimental_soft_drop.retention` | String | `7d` | Reserved retention duration. Currently ignored. |
 | `logging` | -- | -- | The logging options. |
 | `logging.dir` | String | `./greptimedb_data/logs` | The directory to store the log files. If set to empty, logs will not be written to files. |
 | `logging.level` | String | Unset | The log level. Can be `info`/`debug`/`warn`/`error`. |
@@ -515,7 +518,7 @@
 | `wal.timeout` | String | `3s` | The timeout for kafka client.<br/>**It's only used when the provider is `kafka`**. |
 | `wal.max_batch_bytes` | String | `1MB` | The max size of a single producer batch.<br/>Warning: Kafka has a default limit of 1MB per message in a topic.<br/>**It's only used when the provider is `kafka`**. |
 | `wal.consumer_wait_timeout` | String | `100ms` | The consumer wait timeout.<br/>**It's only used when the provider is `kafka`**. |
-| `wal.create_index` | Bool | `true` | Whether to enable WAL index creation.<br/>**It's only used when the provider is `kafka`**. |
+| `wal.create_index` | Bool | `false` | Whether to enable WAL index creation.<br/>**It's only used when the provider is `kafka`**. |
 | `wal.dump_index_interval` | String | `60s` | The interval for dumping WAL indexes.<br/>**It's only used when the provider is `kafka`**. |
 | `wal.overwrite_entry_start_id` | Bool | `false` | Ignore missing entries during read WAL.<br/>**It's only used when the provider is `kafka`**.<br/><br/>This option ensures that when Kafka messages are deleted, the system<br/>can still successfully replay memtable data without throwing an<br/>out-of-range error.<br/>However, enabling this option might lead to unexpected data loss,<br/>as the system will skip over missing entries instead of treating<br/>them as critical errors. |
 | `query` | -- | -- | The query engine options. |
@@ -561,7 +564,8 @@
 | `region_engine.mito.auto_flush_interval` | String | `1h` | Interval to auto flush a region if it has not flushed yet. |
 | `region_engine.mito.global_write_buffer_size` | String | Auto | Global write buffer size for all regions. If not set, it's default to 1/8 of OS memory with a max limitation of 1GB. |
 | `region_engine.mito.global_write_buffer_reject_size` | String | Auto | Global write buffer size threshold to reject write requests. If not set, it's default to 2 times of `global_write_buffer_size` |
-| `region_engine.mito.sst_meta_cache_size` | String | Auto | Cache size for SST metadata. Setting it to 0 to disable the cache.<br/>If not set, it's default to 1/32 of OS memory with a max limitation of 128MB. |
+| `region_engine.mito.default_region_write_buffer_size` | String | `0` | Default write buffer size for each region. Regions stall at this size and reject writes at twice this size. Setting it to 0 disables both limits unless the table specifies `write_buffer_size`. |
+| `region_engine.mito.sst_meta_cache_size` | String | Auto | Cache size for SST metadata. Setting it to 0 to disable the cache.<br/>If not set, it's default to 1/8 of OS memory with a max limitation of 512MB. |
 | `region_engine.mito.vector_cache_size` | String | Auto | Cache size for vectors and arrow arrays. Setting it to 0 to disable the cache.<br/>If not set, it's default to 1/16 of OS memory with a max limitation of 512MB. |
 | `region_engine.mito.page_cache_size` | String | Auto | Cache size for pages of SST row groups. Setting it to 0 to disable the cache.<br/>If not set, it's default to 1/8 of OS memory. |
 | `region_engine.mito.selector_result_cache_size` | String | Auto | Cache size for time series selector (e.g. `last_value()`). Setting it to 0 to disable the cache.<br/>If not set, it's default to 1/16 of OS memory with a max limitation of 512MB. |
@@ -613,7 +617,6 @@
 | `region_engine.mito.gc.unknown_file_lingering_time` | String | `1d` | Lingering time before deleting unknown files (files with undetermined expel time).<br/>Only applies during full file listing GC.<br/>This uses the object's last-modified timestamp as a heuristic (strict less-than comparison);<br/>do not configure this value too small in production to avoid deleting pre-manifest files<br/>from in-progress compaction or flush.<br/>For active/open regions, an unknown file is deleted only if its object last-modified time exceeds this TTL.<br/>If the object store does not provide a last-modified timestamp, the file is conservatively kept.<br/>For dropped regions, unknown files are deleted immediately. |
 | `region_engine.file` | -- | -- | Enable the file engine. |
 | `region_engine.metric` | -- | -- | Metric engine options. |
-| `region_engine.metric.sparse_primary_key_encoding` | Bool | `true` | Whether to use sparse primary key encoding. |
 | `region_engine.metric.experimental_enable_metric_value_split` | Bool | `false` | Whether to store exact integral metric values in internal Int64 columns. |
 | `logging` | -- | -- | The logging options. |
 | `logging.dir` | String | `./greptimedb_data/logs` | The directory to store the log files. If set to empty, logs will not be written to files. |

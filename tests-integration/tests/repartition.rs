@@ -345,6 +345,17 @@ pub async fn test_partition_unpartitioned_mito(store_type: StorageType) {
         .with_datanodes(datanodes as u32)
         .with_store_config(store_config)
         .with_datanode_wal_config(DatanodeWalConfig::Noop)
+        .with_metasrv_gc_config(GcSchedulerOptions {
+            enable: true,
+            gc_cooldown_period: Duration::from_nanos(1),
+            ..Default::default()
+        })
+        .with_datanode_gc_config(GcConfig {
+            enable: true,
+            lingering_time: Some(Duration::from_secs(0)),
+            unknown_file_lingering_time: Duration::from_secs(0),
+            ..Default::default()
+        })
         .build(true)
         .await;
 
@@ -472,6 +483,17 @@ pub async fn test_repartition_on_columns_metadata_mito(store_type: StorageType) 
         .with_datanodes(datanodes as u32)
         .with_store_config(store_config)
         .with_datanode_wal_config(DatanodeWalConfig::Noop)
+        .with_metasrv_gc_config(GcSchedulerOptions {
+            enable: true,
+            gc_cooldown_period: Duration::from_nanos(1),
+            ..Default::default()
+        })
+        .with_datanode_gc_config(GcConfig {
+            enable: true,
+            lingering_time: Some(Duration::from_secs(0)),
+            unknown_file_lingering_time: Duration::from_secs(0),
+            ..Default::default()
+        })
         .build(true)
         .await;
 
@@ -557,6 +579,17 @@ pub async fn test_repartition_on_columns_data_correctness_mito(store_type: Stora
         .with_datanodes(datanodes as u32)
         .with_store_config(store_config)
         .with_datanode_wal_config(DatanodeWalConfig::Noop)
+        .with_metasrv_gc_config(GcSchedulerOptions {
+            enable: true,
+            gc_cooldown_period: Duration::from_nanos(1),
+            ..Default::default()
+        })
+        .with_datanode_gc_config(GcConfig {
+            enable: true,
+            lingering_time: Some(Duration::from_secs(0)),
+            unknown_file_lingering_time: Duration::from_secs(0),
+            ..Default::default()
+        })
         .build(true)
         .await;
 
@@ -612,6 +645,17 @@ pub async fn test_partition_unpartitioned_metric(store_type: StorageType) {
         .with_datanodes(datanodes as u32)
         .with_store_config(store_config)
         .with_datanode_wal_config(DatanodeWalConfig::Noop)
+        .with_metasrv_gc_config(GcSchedulerOptions {
+            enable: true,
+            gc_cooldown_period: Duration::from_nanos(1),
+            ..Default::default()
+        })
+        .with_datanode_gc_config(GcConfig {
+            enable: true,
+            lingering_time: Some(Duration::from_secs(0)),
+            unknown_file_lingering_time: Duration::from_secs(0),
+            ..Default::default()
+        })
         .build(true)
         .await;
 

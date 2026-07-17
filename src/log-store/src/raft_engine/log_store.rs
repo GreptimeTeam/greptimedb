@@ -484,6 +484,12 @@ impl LogStore for RaftEngineLogStore {
         Ok(())
     }
 
+    async fn obsolete_all(&self, provider: &Provider, region_id: RegionId) -> Result<()> {
+        let latest_entry_id = self.latest_entry_id(provider)?;
+        self.obsolete(provider, region_id, latest_entry_id).await?;
+        self.delete_namespace(provider).await
+    }
+
     fn latest_entry_id(&self, provider: &Provider) -> Result<EntryId> {
         let ns = provider
             .as_raft_engine_provider()
@@ -573,6 +579,38 @@ mod tests {
             .delete_namespace(&Provider::raft_engine_provider(42))
             .await
             .unwrap();
+        assert!(logstore.list_namespaces().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_obsolete_all_removes_entries_and_namespace() {
+        let dir = create_temp_dir("raft-engine-logstore-test");
+        let logstore = RaftEngineLogStore::try_new(
+            dir.path().to_str().unwrap().to_string(),
+            &RaftEngineConfig::default(),
+        )
+        .await
+        .unwrap();
+        let region_id = RegionId::new(1, 1);
+        let provider = Provider::raft_engine_provider(region_id.as_u64());
+        logstore.create_namespace(&provider).await.unwrap();
+        for entry_id in 1..=3 {
+            logstore
+                .append(
+                    EntryImpl::create(
+                        entry_id,
+                        region_id.as_u64(),
+                        entry_id.to_string().into_bytes(),
+                    )
+                    .into(),
+                )
+                .await
+                .unwrap();
+        }
+
+        logstore.obsolete_all(&provider, region_id).await.unwrap();
+
+        assert_eq!(0, logstore.latest_entry_id(&provider).unwrap());
         assert!(logstore.list_namespaces().await.unwrap().is_empty());
     }
 

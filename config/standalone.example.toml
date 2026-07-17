@@ -13,8 +13,16 @@ default_column_prefix = "greptime"
 ## The user provider for authentication.
 ## Examples: "static_user_provider:file:/path/to/users", "static_user_provider:cmd:greptime_user=greptime_pwd"
 ## Password verifier formats: "plain:<password>", "pbkdf2_sha256:<iterations>:<hex_salt>:<hex_hash>",
-## "mysql_native_password:<hex_sha1_sha1_password>"
-## "pbkdf2_sha256" protects passwords at rest but is not compatible with mysql_native_password.
+## "mysql_native_password:<hex_sha1_sha1_password>",
+## "pg_scram_sha256:<iterations>:<hex_salt>:<hex_stored_key>:<hex_server_key>"
+## "pbkdf2_sha256" and "pg_scram_sha256" protect passwords at rest, but cannot authenticate over MySQL's
+## native password handshake; a MySQL client must send the password in cleartext for such users.
+## "mysql_native_password" is MySQL-specific and cannot authenticate over PostgreSQL at all.
+## PostgreSQL SCRAM only covers "plain" and "pg_scram_sha256" users; if any user is "pbkdf2_sha256" or
+## "mysql_native_password", PostgreSQL falls back to cleartext password auth for every user.
+## For "pg_scram_sha256" users, keep the default iteration count (4096) and salt length (16): both are
+## observable in the SCRAM server-first message, and non-default values weaken resistance to username
+## enumeration.
 ## @toml2docs:none-default
 #+ user_provider = "static_user_provider:file:/path/to/users"
 
@@ -597,10 +605,13 @@ auto_flush_interval = "1h"
 ## @toml2docs:none-default="Auto"
 #+ global_write_buffer_reject_size = "2GB"
 
+## Default write buffer size for each region. Regions stall at this size and reject writes at twice this size. Setting it to 0 disables both limits unless the table specifies `write_buffer_size`.
+#+ default_region_write_buffer_size = "0"
+
 ## Cache size for SST metadata. Setting it to 0 to disable the cache.
-## If not set, it's default to 1/32 of OS memory with a max limitation of 128MB.
+## If not set, it's default to 1/8 of OS memory with a max limitation of 512MB.
 ## @toml2docs:none-default="Auto"
-#+ sst_meta_cache_size = "128MB"
+#+ sst_meta_cache_size = "512MB"
 
 ## Cache size for vectors and arrow arrays. Setting it to 0 to disable the cache.
 ## If not set, it's default to 1/16 of OS memory with a max limitation of 512MB.
@@ -807,8 +818,6 @@ mem_threshold_on_create = "auto"
 [[region_engine]]
 ## Metric engine options.
 [region_engine.metric]
-## Whether to use sparse primary key encoding.
-sparse_primary_key_encoding = true
 ## Whether to store exact integral metric values in internal Int64 columns.
 experimental_enable_metric_value_split = false
 

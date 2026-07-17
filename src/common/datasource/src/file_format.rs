@@ -63,6 +63,7 @@ pub const FORMAT_SCHEMA_INFER_MAX_RECORD: &str = "schema_infer_max_record";
 pub const FORMAT_HEADERS: &str = "headers";
 pub const FORMAT_HAS_HEADER: &str = "has_header";
 pub const FORMAT_SKIP_BAD_RECORDS: &str = "skip_bad_records";
+pub const FORMAT_STRICT_HEADERS: &str = "strict_headers";
 pub const FORMAT_TYPE: &str = "format";
 pub const FILE_PATTERN: &str = "pattern";
 pub const TIMESTAMP_FORMAT: &str = "timestamp_format";

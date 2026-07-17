@@ -36,7 +36,11 @@ pub enum PermissionReq<'a> {
     PromStoreRead,
     Otlp,
     LogWrite,
-    BulkInsert,
+    BulkInsert {
+        catalog: &'a str,
+        schema: &'a str,
+        table: &'a str,
+    },
 }
 
 impl<'a> PermissionReq<'a> {
@@ -57,7 +61,7 @@ impl<'a> PermissionReq<'a> {
             | PermissionReq::PromStoreWrite
             | PermissionReq::Otlp
             | PermissionReq::LogWrite
-            | PermissionReq::BulkInsert => false,
+            | PermissionReq::BulkInsert { .. } => false,
         }
     }
 
@@ -79,6 +83,15 @@ pub trait PermissionChecker: Send + Sync {
         user_info: UserInfoRef,
         req: PermissionReq,
     ) -> Result<PermissionResp>;
+
+    fn check_permission_with_context(
+        &self,
+        user_info: UserInfoRef,
+        req: PermissionReq,
+        _current_schema: Option<&str>,
+    ) -> Result<PermissionResp> {
+        self.check_permission(user_info, req)
+    }
 }
 
 impl PermissionChecker for Option<&PermissionCheckerRef> {
@@ -87,12 +100,23 @@ impl PermissionChecker for Option<&PermissionCheckerRef> {
         user_info: UserInfoRef,
         req: PermissionReq,
     ) -> Result<PermissionResp> {
+        self.check_permission_with_context(user_info, req, None)
+    }
+
+    fn check_permission_with_context(
+        &self,
+        user_info: UserInfoRef,
+        req: PermissionReq,
+        current_schema: Option<&str>,
+    ) -> Result<PermissionResp> {
         match self {
-            Some(checker) => match checker.check_permission(user_info, req) {
-                Ok(PermissionResp::Reject) => PermissionDeniedSnafu.fail(),
-                Ok(PermissionResp::Allow) => Ok(PermissionResp::Allow),
-                Err(e) => Err(e),
-            },
+            Some(checker) => {
+                match checker.check_permission_with_context(user_info, req, current_schema) {
+                    Ok(PermissionResp::Reject) => PermissionDeniedSnafu.fail(),
+                    Ok(PermissionResp::Allow) => Ok(PermissionResp::Allow),
+                    Err(e) => Err(e),
+                }
+            }
             None => Ok(PermissionResp::Allow),
         }
     }
@@ -206,6 +230,17 @@ mod tests {
             query: Some(Query::InsertIntoPlan(api::v1::InsertIntoPlan::default())),
         });
         let req = PermissionReq::GrpcRequest(&request);
+
+        assert!(req.is_write());
+    }
+
+    #[test]
+    fn test_bulk_insert_is_write_request() {
+        let req = PermissionReq::BulkInsert {
+            catalog: "greptime",
+            schema: "public",
+            table: "metrics",
+        };
 
         assert!(req.is_write());
     }

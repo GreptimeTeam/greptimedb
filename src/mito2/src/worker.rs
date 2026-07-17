@@ -771,6 +771,14 @@ pub(crate) struct StalledRequests {
 }
 
 impl StalledRequests {
+    /// Returns the estimated size of stalled requests for a region.
+    pub(crate) fn estimated_size(&self, region_id: &RegionId) -> usize {
+        self.requests
+            .get(region_id)
+            .map(|(size, _, _)| *size)
+            .unwrap_or_default()
+    }
+
     /// Appends stalled requests.
     pub(crate) fn append(
         &mut self,
@@ -1148,8 +1156,13 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                         .await;
                     continue;
                 }
-                DdlRequest::Close(_) => {
-                    self.handle_close_request(ddl.region_id, ddl.sender).await;
+                DdlRequest::OfflineCleanup(req) => {
+                    self.handle_offline_cleanup_request(ddl.region_id, req)
+                        .await
+                }
+                DdlRequest::Close(req) => {
+                    self.handle_close_request(ddl.region_id, req, ddl.sender)
+                        .await;
                     continue;
                 }
                 DdlRequest::Alter(req) => {

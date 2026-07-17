@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use store_api::storage::{RegionId, TableId};
 
@@ -121,6 +122,8 @@ pub struct DdlContext {
     pub region_failure_detector_controller: RegionFailureDetectorControllerRef,
     /// Whether table drops should stop after tombstoning metadata.
     pub soft_drop_enabled: bool,
+    /// Fixed retention used to calculate new soft-drop deadlines.
+    pub soft_drop_retention: Option<Duration>,
 }
 
 impl DdlContext {

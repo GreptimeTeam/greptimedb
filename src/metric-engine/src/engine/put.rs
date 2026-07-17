@@ -152,7 +152,7 @@ impl MetricEngineInner {
             PrimaryKeyEncoding::Sparse => self.merge_sparse_batch(physical_region_id, requests)?,
             PrimaryKeyEncoding::Dense => self.merge_dense_batch(data_region_id, requests)?,
         };
-        if self.config.experimental_enable_metric_value_split {
+        if self.enable_metric_value_split {
             split_metric_values(&mut merged_request.rows);
         }
 
@@ -454,7 +454,7 @@ impl MetricEngineInner {
             &mut request.rows,
             primary_key_encoding,
         )?;
-        if self.config.experimental_enable_metric_value_split {
+        if self.enable_metric_value_split {
             split_metric_values(&mut request.rows);
         }
         if primary_key_encoding == PrimaryKeyEncoding::Sparse {

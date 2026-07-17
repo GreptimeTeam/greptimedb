@@ -86,6 +86,14 @@ pub trait LogStore: Send + Sync + 'static + std::fmt::Debug {
         entry_id: EntryId,
     ) -> Result<(), Self::Error>;
 
+    /// Marks all entries of a region as obsolete and removes its dedicated namespace when
+    /// supported by the backend.
+    async fn obsolete_all(
+        &self,
+        provider: &Provider,
+        region_id: RegionId,
+    ) -> Result<(), Self::Error>;
+
     /// Makes an entry instance of the associated Entry type
     fn entry(
         &self,

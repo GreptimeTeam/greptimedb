@@ -169,11 +169,17 @@ mod tests {
             .await
             .unwrap();
         region_server
-            .handle_request(region_id, RegionRequest::Close(RegionCloseRequest {}))
+            .handle_request(
+                region_id,
+                RegionRequest::Close(RegionCloseRequest::default()),
+            )
             .await
             .unwrap();
         region_server
-            .handle_request(region_id, RegionRequest::Close(RegionCloseRequest {}))
+            .handle_request(
+                region_id,
+                RegionRequest::Close(RegionCloseRequest::default()),
+            )
             .await
             .unwrap();
 
