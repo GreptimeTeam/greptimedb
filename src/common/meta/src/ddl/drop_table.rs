@@ -94,15 +94,13 @@ impl DropTableProcedure {
     }
 
     pub(crate) async fn on_prepare(&mut self) -> Result<Status> {
-        if self
-            .executor
-            .on_prepare(&self.context, self.data.soft_drop_enabled)
-            .await?
-            .stop()
-        {
+        if self.executor.on_prepare(&self.context).await?.stop() {
             return Ok(Status::done());
         }
         self.fill_table_metadata().await?;
+        self.executor
+            .check_tombstone_conflict(&self.context, self.data.soft_drop_enabled)
+            .await?;
         if self.data.soft_drop_enabled && self.data.dropped_at.is_none() {
             let dropped_at = current_time_millis();
             let retention_millis =
