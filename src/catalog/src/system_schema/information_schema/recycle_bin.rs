@@ -237,34 +237,32 @@ impl InformationSchemaRecycleBinBuilder {
         let retention_expires_at = dropped_table
             .retention_expires_at
             .map(|value| TimestampMillisecond(Timestamp::new_millisecond(value)));
-        let mut row = vec![
-            (OBJECT_ID, Value::from(object_id)),
-            (OBJECT_TYPE, Value::from(TABLE_OBJECT_TYPE)),
-            (
-                ORIGINAL_OBJECT_NAME,
-                Value::from(table_name.table_name.as_str()),
-            ),
-            (
-                ORIGINAL_CATALOG_NAME,
-                Value::from(table_name.catalog_name.as_str()),
-            ),
-            (
-                ORIGINAL_SCHEMA_NAME,
-                Value::from(table_name.schema_name.as_str()),
-            ),
-            (PURGE_STATUS, Value::from(ACTIVE_PURGE_STATUS)),
-            (RESTORABLE, Value::from(true)),
-        ];
-        if let Some(dropped_at) = dropped_at {
-            row.push((DROPPED_AT, Value::from(dropped_at)));
+        let object_id_value = Value::from(object_id);
+        let object_type_value = Value::from(TABLE_OBJECT_TYPE);
+        let object_name_value = Value::from(table_name.table_name.as_str());
+        let catalog_name_value = Value::from(table_name.catalog_name.as_str());
+        let schema_name_value = Value::from(table_name.schema_name.as_str());
+        let purge_status_value = Value::from(ACTIVE_PURGE_STATUS);
+        let restorable_value = Value::from(true);
+        let dropped_at_value = dropped_at.map(Value::from);
+        let retention_expires_at_value = retention_expires_at.map(Value::from);
+
+        let mut row = Vec::with_capacity(9);
+        row.extend([
+            (OBJECT_ID, &object_id_value),
+            (OBJECT_TYPE, &object_type_value),
+            (ORIGINAL_OBJECT_NAME, &object_name_value),
+            (ORIGINAL_CATALOG_NAME, &catalog_name_value),
+            (ORIGINAL_SCHEMA_NAME, &schema_name_value),
+            (PURGE_STATUS, &purge_status_value),
+            (RESTORABLE, &restorable_value),
+        ]);
+        if let Some(value) = &dropped_at_value {
+            row.push((DROPPED_AT, value));
         }
-        if let Some(retention_expires_at) = retention_expires_at {
-            row.push((RETENTION_EXPIRES_AT, Value::from(retention_expires_at)));
+        if let Some(value) = &retention_expires_at_value {
+            row.push((RETENTION_EXPIRES_AT, value));
         }
-        let row = row
-            .iter()
-            .map(|(name, value)| (*name, value))
-            .collect::<Vec<_>>();
         if !predicates.eval(&row) {
             return;
         }

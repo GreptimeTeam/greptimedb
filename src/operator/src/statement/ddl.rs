@@ -2723,14 +2723,14 @@ async fn execute_undrop_table(
             &Context::default(),
             &[
                 CacheIdent::TableId(dropped.table_id),
-                CacheIdent::TableName(table_name.clone()),
+                CacheIdent::TableName(table_name),
             ],
         )
         .await
     {
         warn!(
             "Failed to invalidate cache after restoring table '{}' (id={}): {}",
-            table_name, dropped.table_id, err
+            dropped.table_name, dropped.table_id, err
         );
     }
 
