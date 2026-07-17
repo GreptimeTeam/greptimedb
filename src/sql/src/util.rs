@@ -317,7 +317,34 @@ fn extract_tables_from_statement(stmt: &Statement, names: &mut HashSet<ObjectNam
         Statement::Copy(Copy::CopyQueryTo(copy)) => {
             extract_tables_from_statement(&copy.query, names)
         }
-        _ => true,
+        Statement::Copy(Copy::CopyDatabase(_)) => true,
+        Statement::DropDatabase(_)
+        | Statement::DropFlow(_)
+        | Statement::CreateDatabase(_)
+        | Statement::AlterDatabase(_)
+        | Statement::ShowDatabases(_)
+        | Statement::ShowTables(_)
+        | Statement::ShowTableStatus(_)
+        | Statement::ShowCharset(_)
+        | Statement::ShowCollation(_)
+        | Statement::ShowCreateDatabase(_)
+        | Statement::ShowCreateFlow(_)
+        | Statement::ShowFlows(_)
+        | Statement::ShowStatus(_)
+        | Statement::ShowSearchPath(_)
+        | Statement::ShowViews(_)
+        | Statement::SetVariables(_)
+        | Statement::ShowVariables(_)
+        | Statement::Use(_)
+        | Statement::Admin(_)
+        | Statement::FetchCursor(_)
+        | Statement::CloseCursor(_)
+        | Statement::Kill(_)
+        | Statement::ShowProcesslist(_) => true,
+        #[cfg(feature = "enterprise")]
+        Statement::DropTrigger(_)
+        | Statement::ShowCreateTrigger(_)
+        | Statement::ShowTriggers(_) => true,
     }
 }
 
@@ -800,6 +827,7 @@ TQL EVAL (now() - '15s'::interval, now(), '5s') count_values("status_code", {__n
                 vec!["physical_metric", "target"],
             ),
             ("ALTER TABLE old RENAME new", vec!["new", "old"]),
+            ("SHOW TABLES", vec![]),
         ] {
             let stmt = ParserContext::create_with_dialect(
                 sql,

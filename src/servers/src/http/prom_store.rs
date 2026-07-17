@@ -280,11 +280,16 @@ async fn remote_write_v2(
     };
     debug_assert_eq!(outcome.samples_written, sample_count);
     debug_assert_eq!(outcome.histograms_written, histogram_count);
-    record_remote_write_samples(&db, sample_count);
-    record_remote_write_histograms(&db, histogram_count);
+    record_remote_write_samples(&db, outcome.samples_written);
+    record_remote_write_histograms(&db, outcome.histograms_written);
 
     let mut headers = write_cost_header_map(outcome.write_cost);
-    append_remote_write_v2_written_headers(&mut headers, sample_count, histogram_count, 0);
+    append_remote_write_v2_written_headers(
+        &mut headers,
+        outcome.samples_written,
+        outcome.histograms_written,
+        0,
+    );
 
     Ok((StatusCode::NO_CONTENT, headers).into_response())
 }

@@ -2016,6 +2016,52 @@ pub async fn series_query(
             alias: None,
         })
         .collect::<Vec<_>>();
+    let mut expanded_queries = Vec::new();
+    for prom_query in prom_queries {
+        let promql_expr = try_call_return_response!(
+            promql_parser::parser::parse(&prom_query.query),
+            StatusCode::InvalidArguments
+        );
+        let Some(discovery) =
+            try_call_return_response!(find_metric_name_not_equal_matchers(&promql_expr))
+        else {
+            expanded_queries.push(prom_query);
+            continue;
+        };
+
+        try_call_return_response!(handler.check_query_permission(&[], &query_ctx).await);
+        let (static_targets, unresolved_selectors) =
+            try_call_return_response!(static_promql_targets(&promql_expr, &query_ctx));
+        try_call_return_response!(
+            handler
+                .check_query_target_permission(static_targets, &query_ctx)
+                .await
+        );
+        if unresolved_selectors != 1 {
+            try_call_return_response!(
+                handler
+                    .check_query_target_permission(PermissionTableTargets::Unresolved, &query_ctx)
+                    .await
+            );
+            expanded_queries.push(prom_query);
+            continue;
+        }
+
+        let schema = discovery
+            .schema
+            .unwrap_or_else(|| query_ctx.current_schema());
+        let metric_names = try_call_return_response!(
+            handler
+                .query_metric_names(discovery.name_matchers, &schema, &query_ctx)
+                .await
+        );
+        expanded_queries.extend(expand_metric_name_queries(
+            &prom_query,
+            &promql_expr,
+            metric_names,
+        ));
+    }
+    let prom_queries = expanded_queries;
     try_call_return_response!(
         handler
             .check_query_permission(&prom_queries, &query_ctx)
@@ -2090,7 +2136,7 @@ pub async fn parse_query(
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
 
     use catalog::memory::MemoryCatalogManager;
     use catalog::{RegisterSchemaRequest, RegisterTableRequest};
@@ -2114,14 +2160,18 @@ mod tests {
         should_error: bool,
     }
 
-    struct DenyTablePrometheusHandler {
+    struct TestPrometheusHandler {
         catalog_manager: CatalogManagerRef,
+        denied_table: Option<&'static str>,
+        metric_names: Vec<String>,
+        queries: Mutex<Vec<String>>,
     }
 
     #[async_trait::async_trait]
-    impl PrometheusHandler for DenyTablePrometheusHandler {
-        async fn do_query(&self, _: &PromQuery, _: QueryContextRef) -> Result<Output> {
-            unreachable!()
+    impl PrometheusHandler for TestPrometheusHandler {
+        async fn do_query(&self, query: &PromQuery, _: QueryContextRef) -> Result<Output> {
+            self.queries.lock().unwrap().push(query.query.clone());
+            Ok(Output::new_with_record_batches(RecordBatches::empty()))
         }
 
         async fn check_query_permission(&self, _: &[PromQuery], _: &QueryContextRef) -> Result<()> {
@@ -2136,7 +2186,9 @@ mod tests {
             if matches!(
                 targets,
                 PermissionTableTargets::Resolved(targets)
-                    if targets.iter().any(|target| target.table == "denied")
+                    if self.denied_table.is_some_and(|denied| {
+                        targets.iter().any(|target| target.table == denied)
+                    })
             ) {
                 return auth::error::PermissionDeniedSnafu
                     .fail()
@@ -2163,7 +2215,7 @@ mod tests {
             _: &str,
             _: &QueryContextRef,
         ) -> Result<Vec<String>> {
-            unreachable!()
+            Ok(self.metric_names.clone())
         }
 
         async fn query_label_values(
@@ -2238,8 +2290,11 @@ mod tests {
         );
 
         let response = label_values_query(
-            State(Arc::new(DenyTablePrometheusHandler {
+            State(Arc::new(TestPrometheusHandler {
                 catalog_manager: manager,
+                denied_table: Some("denied"),
+                metric_names: Vec::new(),
+                queries: Mutex::new(Vec::new()),
             })),
             Path(FIELD_NAME_LABEL.to_string()),
             Extension(query_ctx),
@@ -2252,6 +2307,78 @@ mod tests {
             axum::http::StatusCode::FORBIDDEN,
             response.into_response().status()
         );
+    }
+
+    #[tokio::test]
+    async fn test_series_query_expands_metric_name_regex() {
+        let cpu_user = test_table_info(
+            1024,
+            "cpu_user",
+            DEFAULT_SCHEMA_NAME,
+            DEFAULT_CATALOG_NAME,
+            Arc::new(Schema::new(vec![])),
+        );
+        let manager = MemoryCatalogManager::new_with_table(EmptyTable::from_table_info(&cpu_user));
+        let mut cpu_system = cpu_user.clone();
+        cpu_system.ident.table_id = 1025;
+        cpu_system.name = "cpu_system".to_string();
+        manager
+            .register_table_sync(RegisterTableRequest {
+                catalog: DEFAULT_CATALOG_NAME.to_string(),
+                schema: DEFAULT_SCHEMA_NAME.to_string(),
+                table_name: cpu_system.name.clone(),
+                table_id: cpu_system.table_id(),
+                table: EmptyTable::from_table_info(&cpu_system),
+            })
+            .unwrap();
+
+        let handler = Arc::new(TestPrometheusHandler {
+            catalog_manager: manager,
+            denied_table: None,
+            metric_names: vec!["cpu_user".to_string(), "cpu_system".to_string()],
+            queries: Mutex::new(Vec::new()),
+        });
+        let state: PrometheusHandlerRef = handler.clone();
+        let query_ctx = QueryContext::with(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME);
+        let target_ctx = Arc::new(query_ctx.clone());
+        let response = series_query(
+            State(state),
+            Query(SeriesQuery {
+                matches: Matches(vec![r#"{__name__=~"cpu_.*"}"#.to_string()]),
+                ..Default::default()
+            }),
+            Extension(query_ctx),
+            Form(SeriesQuery::default()),
+        )
+        .await;
+
+        assert!(
+            response.status_code.is_none(),
+            "status={:?}, error={:?}",
+            response.status_code,
+            response.error
+        );
+        let mut targets = handler
+            .queries
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|query| {
+                resolved_promql_targets(
+                    &[PromQuery {
+                        query: query.clone(),
+                        ..Default::default()
+                    }],
+                    &target_ctx,
+                )
+                .unwrap()
+                .pop()
+                .unwrap()
+                .table
+            })
+            .collect_vec();
+        targets.sort_unstable();
+        assert_eq!(vec!["cpu_system", "cpu_user"], targets);
     }
 
     #[test]

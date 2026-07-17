@@ -53,8 +53,9 @@ impl PermissionTableTarget {
 
 /// The result of resolving every table target in a permission request.
 ///
-/// `Resolved(vec![])` means the request contains no table targets, while
-/// [`PermissionTableTargets::Unresolved`] means its targets could not be
+/// `Resolved(vec![])` means the request contains no table targets. The operation
+/// privilege must still be checked, but there are no table ACLs to evaluate.
+/// [`PermissionTableTargets::Unresolved`] means the targets could not be
 /// determined safely.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PermissionTableTargets {
@@ -171,6 +172,9 @@ pub trait PermissionChecker: Send + Sync {
     }
 
     /// Checks the operation privilege and its resolved user-visible table targets.
+    ///
+    /// [`PermissionTableTargets::Resolved`] with an empty vector still requires
+    /// checking the operation privilege in `req`, but has no table ACLs to check.
     ///
     /// ACL-aware implementations must apply any admin bypass first, then reject
     /// [`PermissionTableTargets::Unresolved`] for non-admin users.
@@ -313,9 +317,12 @@ mod tests {
         fn check_permission_with_table_targets(
             &self,
             _user_info: UserInfoRef,
-            _req: PermissionReq,
+            req: PermissionReq,
             targets: PermissionTableTargets,
         ) -> Result<PermissionResp> {
+            if !matches!(req, PermissionReq::PromStoreRead) {
+                return Ok(PermissionResp::Reject);
+            }
             let PermissionTableTargets::Resolved(targets) = targets else {
                 return Ok(PermissionResp::Reject);
             };
@@ -325,13 +332,11 @@ mod tests {
                 }
                 .fail();
             }
-            Ok(
-                if !targets.is_empty() && targets.iter().all(|target| target.table == "allowed") {
-                    PermissionResp::Allow
-                } else {
-                    PermissionResp::Reject
-                },
-            )
+            Ok(if targets.iter().all(|target| target.table == "allowed") {
+                PermissionResp::Allow
+            } else {
+                PermissionResp::Reject
+            })
         }
     }
 
@@ -498,6 +503,25 @@ mod tests {
             )
             .unwrap();
         assert!(matches!(allowed, PermissionResp::Allow));
+
+        let empty = checker
+            .check_permission_with_table_targets(
+                crate::userinfo_by_name(None),
+                PermissionReq::PromStoreRead,
+                PermissionTableTargets::resolved(Vec::new()),
+            )
+            .unwrap();
+        assert!(matches!(empty, PermissionResp::Allow));
+
+        let rejected_operation = checker.check_permission_with_table_targets(
+            crate::userinfo_by_name(None),
+            PermissionReq::PromStoreWrite,
+            PermissionTableTargets::resolved(Vec::new()),
+        );
+        assert!(matches!(
+            rejected_operation,
+            Err(Error::PermissionDenied { .. })
+        ));
 
         let rejected = checker.check_permission_with_table_targets(
             crate::userinfo_by_name(None),
