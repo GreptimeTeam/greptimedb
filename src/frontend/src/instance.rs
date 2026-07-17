@@ -1198,6 +1198,9 @@ pub fn check_permission(
                 validate_param(table_name, query_ctx)?;
             }
         }
+        Statement::UndropTable(stmt) => {
+            validate_param(stmt.table_name(), query_ctx)?;
+        }
         Statement::DropView(stmt) => {
             validate_param(&stmt.view_name, query_ctx)?;
         }
@@ -2179,6 +2182,10 @@ mod tests {
 
         // test drop table
         let sql = "DROP TABLE {catalog}{schema}demo;";
+        replace_test(sql, plugins.clone(), &query_ctx);
+
+        // test undrop table
+        let sql = "UNDROP TABLE {catalog}{schema}demo;";
         replace_test(sql, plugins.clone(), &query_ctx);
 
         // test show tables

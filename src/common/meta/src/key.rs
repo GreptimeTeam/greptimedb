@@ -132,6 +132,7 @@ use datanode_table::{DatanodeTableKey, DatanodeTableManager, DatanodeTableValue}
 use flow::flow_route::FlowRouteValue;
 use flow::table_flow::TableFlowValue;
 use futures_util::TryStreamExt;
+use futures_util::stream::BoxStream;
 use lazy_static::lazy_static;
 use regex::Regex;
 pub use schema_metadata_manager::{SchemaMetadataManager, SchemaMetadataManagerRef};
@@ -447,6 +448,8 @@ pub struct DroppedTableName {
     pub retention_expires_at: Option<i64>,
     /// Unique identity of this soft-drop generation.
     pub drop_generation: Option<String>,
+    /// Whether an automatic purge has durably claimed this dropped table.
+    pub purging: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -1115,7 +1118,26 @@ impl TableMetadataManager {
 
     /// Lists dropped tables from tombstoned table-name entries.
     pub async fn list_dropped_tables(&self) -> Result<Vec<DroppedTableName>> {
-        let mut stream = self.tombstone_manager.tombstoned_table_names();
+        self.collect_dropped_tables(self.tombstone_manager.tombstoned_table_names())
+            .await
+    }
+
+    /// Lists dropped tables from tombstoned table-name entries in the provided catalog.
+    pub async fn list_dropped_tables_by_catalog(
+        &self,
+        catalog: &str,
+    ) -> Result<Vec<DroppedTableName>> {
+        self.collect_dropped_tables(
+            self.tombstone_manager
+                .tombstoned_table_names_by_catalog(catalog),
+        )
+        .await
+    }
+
+    async fn collect_dropped_tables(
+        &self,
+        mut stream: BoxStream<'static, Result<KeyValue>>,
+    ) -> Result<Vec<DroppedTableName>> {
         let mut dropped_tables = Vec::new();
 
         while let Some(kv) = stream.try_next().await? {
@@ -1128,6 +1150,7 @@ impl TableMetadataManager {
                 dropped_at: None,
                 retention_expires_at: None,
                 drop_generation: None,
+                purging: false,
             });
         }
         if dropped_tables.is_empty() {
@@ -1141,6 +1164,7 @@ impl TableMetadataManager {
                     dropped_at_key(table.table_id),
                     retention_expires_at_key(table.table_id),
                     drop_generation_key(table.table_id),
+                    purging_key(table.table_id),
                 ]
             })
             .collect::<Vec<_>>();
@@ -1157,6 +1181,7 @@ impl TableMetadataManager {
             table.drop_generation = Self::parse_drop_generation(
                 marker_values.get(&drop_generation_key(table.table_id)),
             );
+            table.purging = marker_values.contains_key(&purging_key(table.table_id));
         }
 
         Ok(dropped_tables)

@@ -65,6 +65,28 @@ impl Display for DropTable {
     }
 }
 
+/// `UNDROP TABLE` statement.
+#[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
+pub struct UndropTable {
+    table_name: ObjectName,
+}
+
+impl UndropTable {
+    pub fn new(table_name: ObjectName) -> Self {
+        Self { table_name }
+    }
+
+    pub fn table_name(&self) -> &ObjectName {
+        &self.table_name
+    }
+}
+
+impl Display for UndropTable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "UNDROP TABLE {}", self.table_name)
+    }
+}
+
 /// DROP DATABASE statement.
 #[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
 pub struct DropDatabase {
