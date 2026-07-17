@@ -76,7 +76,7 @@ pub trait PrometheusHandler {
         query_ctx: &QueryContextRef,
     ) -> Result<()>;
 
-    /// Removes inaccessible metric names from metadata enumeration results.
+    /// Removes inaccessible metric names from logical-table metadata enumeration results.
     async fn filter_metadata_metric_names(
         &self,
         metric_names: Vec<String>,

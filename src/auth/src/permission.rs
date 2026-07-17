@@ -29,7 +29,7 @@ use crate::{PermissionCheckerRef, UserInfo, UserInfoRef};
 ///
 /// Use [`PermissionTableTargets::resolved`] to validate that all components are
 /// non-empty before passing targets to a permission checker.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PermissionTableTarget {
     pub catalog: String,
     pub schema: String,
@@ -161,6 +161,15 @@ pub trait PermissionChecker: Send + Sync {
         self.check_permission(user_info, req)
     }
 
+    /// Returns whether authorization depends on resolved table targets.
+    ///
+    /// The conservative default keeps target resolution enabled. Implementations
+    /// may return `false` only when their authorization result is independent of
+    /// the `targets` passed to [`Self::check_permission_with_table_targets`].
+    fn uses_table_targets(&self) -> bool {
+        true
+    }
+
     /// Checks the operation privilege and its resolved user-visible table targets.
     ///
     /// ACL-aware implementations must apply any admin bypass first, then reject
@@ -203,6 +212,13 @@ impl PermissionChecker for Option<&PermissionCheckerRef> {
                 current_schema,
             )),
             None => Ok(PermissionResp::Allow),
+        }
+    }
+
+    fn uses_table_targets(&self) -> bool {
+        match self {
+            Some(checker) => checker.uses_table_targets(),
+            None => false,
         }
     }
 
@@ -262,6 +278,10 @@ impl PermissionChecker for DefaultPermissionChecker {
 
         // default allow all
         Ok(PermissionResp::Allow)
+    }
+
+    fn uses_table_targets(&self) -> bool {
+        false
     }
 
     fn check_permission_with_table_targets(
@@ -468,6 +488,7 @@ mod tests {
     fn test_table_target_permission_forwarding() {
         let checker: PermissionCheckerRef = Arc::new(TargetAwarePermissionChecker);
         let checker = Some(&checker);
+        assert!(checker.uses_table_targets());
 
         let allowed = checker
             .check_permission_with_table_targets(
@@ -503,6 +524,7 @@ mod tests {
         assert!(matches!(error, Err(Error::InternalState { msg }) if msg == "testing"));
 
         let no_checker: Option<&PermissionCheckerRef> = None;
+        assert!(!no_checker.uses_table_targets());
         let allowed = no_checker
             .check_permission_with_table_targets(
                 crate::userinfo_by_name(None),
@@ -516,6 +538,7 @@ mod tests {
     #[test]
     fn test_default_permission_checker_table_target_parity() {
         let checker = DefaultPermissionChecker;
+        assert!(!checker.uses_table_targets());
 
         for (permission, req) in [
             (PermissionMode::ReadOnly, PermissionReq::PromQuery),
