@@ -820,36 +820,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_validate_local_publication_files_valid_parquet() {
-        let env = SchedulerEnv::new().await;
-        let expected_region_id = RegionId::new(1, 1);
-        let file = file_meta(expected_region_id, 0);
-        write_parquet(&env.access_layer, &file, b"sst".to_vec()).await;
-
-        env.access_layer
-            .validate_local_publication_files(expected_region_id, &[file])
-            .await
-            .unwrap();
-    }
-
-    #[tokio::test]
-    async fn test_validate_local_publication_files_rejects_missing_parquet() {
-        let env = SchedulerEnv::new().await;
-        let region_id = RegionId::new(1, 1);
-        let file = file_meta(region_id, 3);
-
-        let err = env
-            .access_layer
-            .validate_local_publication_files(region_id, &[file])
-            .await
-            .unwrap_err();
-        assert!(matches!(
-            err,
-            crate::error::Error::PublicationObjectStat { .. }
-        ));
-    }
-
-    #[tokio::test]
     async fn test_validate_local_publication_files_rejects_parquet_size_mismatch() {
         let env = SchedulerEnv::new().await;
         let region_id = RegionId::new(1, 1);
@@ -870,7 +840,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_validate_local_publication_files_without_index_does_not_require_puffin() {
+    async fn test_validate_local_publication_files_valid_parquet_without_index() {
         let env = SchedulerEnv::new().await;
         let region_id = RegionId::new(1, 1);
         let file = file_meta(region_id, 3);

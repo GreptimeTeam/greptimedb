@@ -524,16 +524,14 @@ impl LocalGcWorker {
             .collect::<HashSet<_>>();
 
         let Some(region) = region else {
-            let deletable_files = self
-                .list_to_be_deleted_files(
-                    region_id,
-                    true,
-                    &HashMap::new(),
-                    &tmp_ref_files,
-                    Default::default(),
-                    all_entries,
-                )
-                .await?;
+            let deletable_files = self.list_to_be_deleted_files(
+                region_id,
+                true,
+                &HashMap::new(),
+                &tmp_ref_files,
+                Default::default(),
+                all_entries,
+            )?;
             let _delete_timer = GC_DURATION_SECONDS
                 .with_label_values(&["delete_files"])
                 .start_timer();
@@ -575,16 +573,14 @@ impl LocalGcWorker {
             .values()
             .map(|files| files.len())
             .sum::<usize>();
-        let final_deletable_files = self
-            .list_to_be_deleted_files(
-                region_id,
-                false,
-                &final_in_manifest,
-                &tmp_ref_files,
-                final_recently_removed_files,
-                all_entries,
-            )
-            .await?;
+        let final_deletable_files = self.list_to_be_deleted_files(
+            region_id,
+            false,
+            &final_in_manifest,
+            &tmp_ref_files,
+            final_recently_removed_files,
+            all_entries,
+        )?;
         info!(
             "gc: for region {region_id}: In manifest file cnt: {}, Tmp ref file cnt: {}, recently removed files: {}, Unused files to delete count: {}",
             current_manifest.files.len(),
@@ -910,7 +906,7 @@ impl LocalGcWorker {
     }
 
     #[allow(clippy::too_many_arguments)]
-    async fn filter_deletable_files(
+    fn filter_deletable_files(
         &self,
         is_region_dropped: bool,
         entries: Vec<Entry>,
@@ -1020,7 +1016,7 @@ impl LocalGcWorker {
     /// improves performance. When `full_file_listing` is true, it read from `all_entries` to find
     /// and delete orphan files (files not tracked in the manifest).
     ///
-    async fn list_to_be_deleted_files(
+    fn list_to_be_deleted_files(
         &self,
         region_id: RegionId,
         is_region_dropped: bool,
@@ -1108,32 +1104,27 @@ impl LocalGcWorker {
         let mut in_tmp_ref_indexes = HashMap::<FileId, HashSet<IndexVersion>>::new();
         for (file_id, index_version) in in_tmp_ref {
             in_tmp_ref_parquet.insert(*file_id);
-            match index_version {
-                Some(index_version) => {
-                    in_tmp_ref_indexes
-                        .entry(*file_id)
-                        .or_default()
-                        .insert(*index_version);
-                }
-                None => {}
+            if let Some(index_version) = index_version {
+                in_tmp_ref_indexes
+                    .entry(*file_id)
+                    .or_default()
+                    .insert(*index_version);
             }
         }
 
         // Full file listing mode: get the full list of files from object store
 
         // Step 3: Filter files to determine which ones can be deleted
-        let all_unused_files_ready_for_delete = self
-            .filter_deletable_files(
-                is_region_dropped,
-                all_entries,
-                in_manifest,
-                &in_tmp_ref_parquet,
-                &in_tmp_ref_indexes,
-                &all_may_linger_files,
-                &eligible_for_removal,
-                unknown_file_may_linger_until,
-            )
-            .await;
+        let all_unused_files_ready_for_delete = self.filter_deletable_files(
+            is_region_dropped,
+            all_entries,
+            in_manifest,
+            &in_tmp_ref_parquet,
+            &in_tmp_ref_indexes,
+            &all_may_linger_files,
+            &eligible_for_removal,
+            unknown_file_may_linger_until,
+        );
 
         Ok(all_unused_files_ready_for_delete)
     }

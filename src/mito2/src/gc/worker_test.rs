@@ -32,7 +32,7 @@ use store_api::region_engine::RegionEngine as _;
 use store_api::region_request::{
     PathType, RegionCompactRequest, RegionFlushRequest, RegionRequest,
 };
-use store_api::storage::{FileId, FileRef, FileRefsManifest, RegionId, ScanRequest};
+use store_api::storage::{FileId, FileRef, FileRefsManifest, GcReport, RegionId, ScanRequest};
 use tokio::sync::Semaphore;
 
 use crate::config::MitoConfig;
@@ -287,6 +287,76 @@ async fn create_gc_worker(
     .unwrap()
 }
 
+struct PublicationRace {
+    region_id: RegionId,
+    region: MitoRegionRef,
+    file_id: FileId,
+    path: String,
+    barrier: TestFinalizationBarrier,
+    flush: tokio::task::JoinHandle<std::result::Result<(), String>>,
+    gc: tokio::task::JoinHandle<crate::error::Result<GcReport>>,
+}
+
+async fn arrange_publication_race(
+    engine: &MitoEngine,
+    hook: &PauseAfterSstWritten,
+) -> PublicationRace {
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+    let table_dir = request.table_dir.clone();
+    engine
+        .handle_request(region_id, RegionRequest::Create(request.clone()))
+        .await
+        .unwrap();
+    put_rows(
+        engine,
+        region_id,
+        Rows {
+            schema: rows_schema(&request),
+            rows: build_rows(0, 3),
+        },
+    )
+    .await;
+
+    let region = engine.get_region(region_id).unwrap();
+    let manifest_before_flush = region.manifest_ctx.manifest().await;
+    let flush_engine = engine.clone();
+    let flush = tokio::spawn(async move {
+        flush_engine
+            .handle_request(
+                region_id,
+                RegionRequest::Flush(RegionFlushRequest::default()),
+            )
+            .await
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    });
+    let file_id = hook.wait_until_written().await;
+    let path = parquet_path(&table_dir, region_id, file_id);
+    wait_until_gc_cutoff_is_after_file_mtime(region.access_layer.object_store(), &path).await;
+
+    let barrier = TestFinalizationBarrier::new();
+    let gc_worker = create_gc_worker(
+        engine,
+        BTreeMap::from([(region_id, Some(region.clone()))]),
+        &file_refs_manifest(region_id, &manifest_before_flush),
+        true,
+    )
+    .await
+    .with_test_finalization_barrier(barrier.clone());
+    let gc = tokio::spawn(async move { gc_worker.run().await });
+
+    PublicationRace {
+        region_id,
+        region,
+        file_id,
+        path,
+        barrier,
+        flush,
+        gc,
+    }
+}
+
 #[tokio::test]
 async fn test_full_gc_tmp_refs_keep_all_live_index_versions() {
     let mut env = TestEnv::new().await;
@@ -352,7 +422,6 @@ async fn test_full_gc_tmp_refs_keep_all_live_index_versions() {
             Default::default(),
             entries,
         )
-        .await
         .unwrap();
 
     assert_eq!(deletable_files, vec![RemovedFile::Index(file_id, 3)]);
@@ -802,49 +871,15 @@ async fn test_full_gc_does_not_delete_sst_published_before_finalization() {
         .create_engine_with_plugins(gc_config_with_zero_unknown_ttl(), plugins)
         .await;
 
-    let region_id = RegionId::new(1, 1);
-    let request = CreateRequestBuilder::new().build();
-    let table_dir = request.table_dir.clone();
-    let column_schemas = rows_schema(&request);
-    engine
-        .handle_request(region_id, RegionRequest::Create(request))
-        .await
-        .unwrap();
-    put_rows(
-        &engine,
+    let PublicationRace {
         region_id,
-        Rows {
-            schema: column_schemas,
-            rows: build_rows(0, 3),
-        },
-    )
-    .await;
-
-    let region = engine.get_region(region_id).unwrap();
-    let manifest_before_flush = region.manifest_ctx.manifest().await;
-    let flush_engine = engine.clone();
-    let flush = tokio::spawn(async move {
-        flush_engine
-            .handle_request(
-                region_id,
-                RegionRequest::Flush(RegionFlushRequest::default()),
-            )
-            .await
-    });
-    let file_id = hook.wait_until_written().await;
-    let path = parquet_path(&table_dir, region_id, file_id);
-    wait_until_gc_cutoff_is_after_file_mtime(region.access_layer.object_store(), &path).await;
-
-    let barrier = TestFinalizationBarrier::new();
-    let gc_worker = create_gc_worker(
-        &engine,
-        BTreeMap::from([(region_id, Some(region.clone()))]),
-        &file_refs_manifest(region_id, &manifest_before_flush),
-        true,
-    )
-    .await
-    .with_test_finalization_barrier(barrier.clone());
-    let gc = tokio::spawn(async move { gc_worker.run().await });
+        region,
+        file_id,
+        path,
+        barrier,
+        flush,
+        gc,
+    } = arrange_publication_race(&engine, &hook).await;
     barrier.wait_until_reached().await;
 
     hook.release();
@@ -894,49 +929,15 @@ async fn test_full_gc_delete_before_publication_fails_closed_and_flush_can_retry
         .create_engine_with_plugins(gc_config_with_zero_unknown_ttl(), plugins)
         .await;
 
-    let region_id = RegionId::new(1, 1);
-    let request = CreateRequestBuilder::new().build();
-    let table_dir = request.table_dir.clone();
-    let column_schemas = rows_schema(&request);
-    engine
-        .handle_request(region_id, RegionRequest::Create(request))
-        .await
-        .unwrap();
-    put_rows(
-        &engine,
+    let PublicationRace {
         region_id,
-        Rows {
-            schema: column_schemas,
-            rows: build_rows(0, 3),
-        },
-    )
-    .await;
-
-    let region = engine.get_region(region_id).unwrap();
-    let manifest_before_flush = region.manifest_ctx.manifest().await;
-    let flush_engine = engine.clone();
-    let flush = tokio::spawn(async move {
-        flush_engine
-            .handle_request(
-                region_id,
-                RegionRequest::Flush(RegionFlushRequest::default()),
-            )
-            .await
-    });
-    let file_id = hook.wait_until_written().await;
-    let path = parquet_path(&table_dir, region_id, file_id);
-    wait_until_gc_cutoff_is_after_file_mtime(region.access_layer.object_store(), &path).await;
-
-    let barrier = TestFinalizationBarrier::new();
-    let gc_worker = create_gc_worker(
-        &engine,
-        BTreeMap::from([(region_id, Some(region.clone()))]),
-        &file_refs_manifest(region_id, &manifest_before_flush),
-        true,
-    )
-    .await
-    .with_test_finalization_barrier(barrier.clone());
-    let gc = tokio::spawn(async move { gc_worker.run().await });
+        region,
+        file_id,
+        path,
+        barrier,
+        flush,
+        gc,
+    } = arrange_publication_race(&engine, &hook).await;
     barrier.wait_until_reached().await;
     barrier.release();
     wait_for_permit(&delete_completed, "target Parquet delete completion").await;
@@ -1004,49 +1005,15 @@ async fn test_full_gc_delete_error_does_not_block_publisher_recovery() {
         .create_engine_with_plugins(gc_config_with_zero_unknown_ttl(), plugins)
         .await;
 
-    let region_id = RegionId::new(1, 1);
-    let request = CreateRequestBuilder::new().build();
-    let table_dir = request.table_dir.clone();
-    let column_schemas = rows_schema(&request);
-    engine
-        .handle_request(region_id, RegionRequest::Create(request))
-        .await
-        .unwrap();
-    put_rows(
-        &engine,
-        region_id,
-        Rows {
-            schema: column_schemas,
-            rows: build_rows(0, 3),
-        },
-    )
-    .await;
-
-    let region = engine.get_region(region_id).unwrap();
-    let manifest_before_flush = region.manifest_ctx.manifest().await;
-    let flush_engine = engine.clone();
-    let flush = tokio::spawn(async move {
-        flush_engine
-            .handle_request(
-                region_id,
-                RegionRequest::Flush(RegionFlushRequest::default()),
-            )
-            .await
-    });
-    let file_id = hook.wait_until_written().await;
-    let path = parquet_path(&table_dir, region_id, file_id);
-    wait_until_gc_cutoff_is_after_file_mtime(region.access_layer.object_store(), &path).await;
-
-    let barrier = TestFinalizationBarrier::new();
-    let gc_worker = create_gc_worker(
-        &engine,
-        BTreeMap::from([(region_id, Some(region.clone()))]),
-        &file_refs_manifest(region_id, &manifest_before_flush),
-        true,
-    )
-    .await
-    .with_test_finalization_barrier(barrier.clone());
-    let gc = tokio::spawn(async move { gc_worker.run().await });
+    let PublicationRace {
+        region_id: _,
+        region,
+        file_id,
+        path,
+        barrier,
+        flush,
+        gc,
+    } = arrange_publication_race(&engine, &hook).await;
     barrier.wait_until_reached().await;
     barrier.release();
     wait_for_permit(&close_attempted, "injected Parquet delete close failure").await;

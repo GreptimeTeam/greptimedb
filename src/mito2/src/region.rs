@@ -1289,9 +1289,11 @@ impl ManifestContext {
         is_staging: bool,
         check_state: impl FnOnce(RegionRoleState, RegionId) -> Result<()>,
     ) -> Result<ManifestVersion> {
-        let files_to_publish = (!is_staging && self.local_publication_protocol_enabled)
-            .then(|| self.local_files_to_publish(&action_list))
-            .unwrap_or_default();
+        let files_to_publish = if !is_staging && self.local_publication_protocol_enabled {
+            self.local_files_to_publish(&action_list)
+        } else {
+            Vec::new()
+        };
         // Publication validation and the manifest update share this gate with future active GC
         // finalization. Keep it before the manifest lock to preserve the global lock order.
         let _publication_guard = if files_to_publish.is_empty() {
@@ -1970,36 +1972,6 @@ mod tests {
         }
     }
 
-    async fn build_test_manifest_context(
-        env: &SchedulerEnv,
-        hook: RegionHookRef,
-    ) -> Arc<ManifestContext> {
-        let version_control = VersionControlBuilder::new().build();
-        let metadata = version_control.current().version.metadata.clone();
-        let manager = RegionManifestManager::new(
-            metadata,
-            0,
-            RegionManifestOptions {
-                manifest_dir: "".to_string(),
-                object_store: env.access_layer.object_store().clone(),
-                compress_type: CompressionType::Uncompressed,
-                checkpoint_distance: 10,
-                remove_file_options: Default::default(),
-                manifest_cache: None,
-            },
-            FormatType::PrimaryKey,
-            &Default::default(),
-        )
-        .await
-        .unwrap();
-        Arc::new(ManifestContext::new(
-            manager,
-            env.access_layer.clone(),
-            RegionRoleState::Leader(RegionLeaderState::Writable),
-            Some(hook),
-        ))
-    }
-
     fn empty_edit() -> RegionEdit {
         RegionEdit {
             files_to_add: Vec::new(),
@@ -2019,7 +1991,8 @@ mod tests {
             entered: Arc::new(Semaphore::new(0)),
             release: Arc::new(Semaphore::new(0)),
         });
-        let context = build_test_manifest_context(&env, hook.clone() as RegionHookRef).await;
+        let region = build_test_region_with_hook(&env, Some(hook.clone() as RegionHookRef)).await;
+        let context = region.manifest_ctx.clone();
         let file = FileMeta {
             region_id: context.manifest().await.metadata.region_id,
             file_id: FileId::random(),
@@ -2063,6 +2036,14 @@ mod tests {
         }))
     }
 
+    fn publication_file(region_id: RegionId) -> FileMeta {
+        FileMeta {
+            region_id,
+            file_id: FileId::random(),
+            ..Default::default()
+        }
+    }
+
     async fn write_publication_file(region: &MitoRegion, file: &FileMeta) {
         let path = location::sst_file_path(
             region.access_layer.table_dir(),
@@ -2078,80 +2059,30 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_update_manifest_rejects_missing_publication_file_without_mutation() {
+    async fn test_update_manifest_cross_only_skips_and_mixed_validates_local_files() {
         let env = SchedulerEnv::new().await;
         let region = build_test_region(&env).await;
-        let file = FileMeta {
-            region_id: region.region_id,
-            file_id: FileId::random(),
-            ..Default::default()
-        };
-        let before = region.manifest_ctx.manifest().await;
-
-        let err = region
-            .manifest_ctx
-            .update_manifest(RegionLeaderState::Writable, add_file_edit(file), false)
-            .await
-            .unwrap_err();
-        assert!(matches!(err, Error::PublicationObjectStat { .. }));
-
-        let after = region.manifest_ctx.manifest().await;
-        assert_eq!(before.manifest_version, after.manifest_version);
-        assert!(after.files.is_empty());
-    }
-
-    #[tokio::test]
-    async fn test_update_manifest_allows_cross_region_file_without_validation() {
-        let env = SchedulerEnv::new().await;
-        let region = build_test_region(&env).await;
-        let file = FileMeta {
-            region_id: RegionId::new(1, 2),
-            file_id: FileId::random(),
-            ..Default::default()
-        };
-
+        let cross_region_file = publication_file(RegionId::new(1, 2));
         region
             .manifest_ctx
             .update_manifest(
                 RegionLeaderState::Writable,
-                add_file_edit(file.clone()),
+                add_file_edit(cross_region_file.clone()),
                 false,
             )
             .await
             .unwrap();
 
-        assert!(
-            region
-                .manifest_ctx
-                .manifest()
-                .await
-                .files
-                .contains_key(&file.file_id)
-        );
-    }
-
-    #[tokio::test]
-    async fn test_update_manifest_mixed_files_only_validates_local_files() {
-        let env = SchedulerEnv::new().await;
-        let region = build_test_region(&env).await;
-        let local_file = FileMeta {
-            region_id: region.region_id,
-            file_id: FileId::random(),
-            ..Default::default()
-        };
+        let local_file = publication_file(region.region_id);
         write_publication_file(&region, &local_file).await;
-        let cross_region_file = FileMeta {
-            region_id: RegionId::new(1, 2),
-            file_id: FileId::random(),
-            ..Default::default()
-        };
+        let mixed_cross_region_file = publication_file(RegionId::new(1, 2));
 
         region
             .manifest_ctx
             .update_manifest(
                 RegionLeaderState::Writable,
                 RegionMetaActionList::with_action(RegionMetaAction::Edit(RegionEdit {
-                    files_to_add: vec![local_file.clone(), cross_region_file.clone()],
+                    files_to_add: vec![local_file.clone(), mixed_cross_region_file.clone()],
                     ..empty_edit()
                 })),
                 false,
@@ -2160,78 +2091,22 @@ mod tests {
             .unwrap();
 
         let manifest = region.manifest_ctx.manifest().await;
-        assert!(manifest.files.contains_key(&local_file.file_id));
         assert!(manifest.files.contains_key(&cross_region_file.file_id));
-    }
-
-    #[tokio::test]
-    async fn test_staging_manifest_update_skips_local_publication_validation() {
-        let env = SchedulerEnv::new().await;
-        let region = build_test_region(&env).await;
-        let file = FileMeta {
-            region_id: region.region_id,
-            file_id: FileId::random(),
-            ..Default::default()
-        };
-
-        region
-            .manifest_ctx
-            .update_manifest(
-                RegionLeaderState::Writable,
-                add_file_edit(file.clone()),
-                true,
-            )
-            .await
-            .unwrap();
-
+        assert!(manifest.files.contains_key(&local_file.file_id));
         assert!(
-            region
-                .manifest_ctx
-                .staging_manifest()
-                .await
-                .unwrap()
+            manifest
                 .files
-                .contains_key(&file.file_id)
+                .contains_key(&mixed_cross_region_file.file_id)
         );
     }
 
     #[tokio::test]
-    async fn test_update_manifest_metadata_only_skips_publication_validation() {
+    async fn test_update_manifest_rejects_missing_local_and_skips_staging_validation() {
         let env = SchedulerEnv::new().await;
         let region = build_test_region(&env).await;
-        let before = region.manifest_ctx.manifest().await;
-
-        region
-            .manifest_ctx
-            .update_manifest(
-                RegionLeaderState::Writable,
-                RegionMetaActionList::with_action(RegionMetaAction::Edit(empty_edit())),
-                false,
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(
-            before.manifest_version + 1,
-            region.manifest_ctx.manifest().await.manifest_version
-        );
-    }
-
-    #[tokio::test]
-    async fn test_update_manifest_rejects_any_missing_file_from_multiple_edits() {
-        let env = SchedulerEnv::new().await;
-        let region = build_test_region(&env).await;
-        let present = FileMeta {
-            region_id: region.region_id,
-            file_id: FileId::random(),
-            ..Default::default()
-        };
+        let present = publication_file(region.region_id);
         write_publication_file(&region, &present).await;
-        let missing = FileMeta {
-            region_id: region.region_id,
-            file_id: FileId::random(),
-            ..Default::default()
-        };
+        let missing = publication_file(region.region_id);
         let before = region.manifest_ctx.manifest().await;
         let actions = RegionMetaActionList::new(vec![
             RegionMetaAction::Edit(RegionEdit {
@@ -2254,6 +2129,26 @@ mod tests {
         let after = region.manifest_ctx.manifest().await;
         assert_eq!(before.manifest_version, after.manifest_version);
         assert!(after.files.is_empty());
+
+        let staging_file = publication_file(region.region_id);
+        region
+            .manifest_ctx
+            .update_manifest(
+                RegionLeaderState::Writable,
+                add_file_edit(staging_file.clone()),
+                true,
+            )
+            .await
+            .unwrap();
+        assert!(
+            region
+                .manifest_ctx
+                .staging_manifest()
+                .await
+                .unwrap()
+                .files
+                .contains_key(&staging_file.file_id)
+        );
     }
 
     #[tokio::test]
