@@ -117,7 +117,10 @@ impl FlatCompatBatch {
         }
 
         let expect_schema = mapper.batch_schema();
-        if expect_schema == actual_schema {
+        let primary_key_matches = mapper.metadata().primary_key_encoding
+            == actual.primary_key_encoding
+            && is_primary_key_same(mapper.metadata(), actual)?;
+        if expect_schema == actual_schema && primary_key_matches {
             // Although the SST has a different schema, but the schema after projection is the same
             // as expected schema.
             return Ok(None);
@@ -612,13 +615,13 @@ mod tests {
 
     use api::v1::{OpType, SemanticType};
     use datatypes::arrow::array::{
-        ArrayRef, BinaryDictionaryBuilder, Int64Array, StringDictionaryBuilder,
+        ArrayRef, BinaryDictionaryBuilder, Int64Array, StringArray, StringDictionaryBuilder,
         TimestampMillisecondArray, UInt8Array, UInt64Array,
     };
     use datatypes::arrow::datatypes::UInt32Type;
     use datatypes::arrow::record_batch::RecordBatch;
     use datatypes::prelude::ConcreteDataType;
-    use datatypes::schema::ColumnSchema;
+    use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema};
     use datatypes::value::ValueRef;
     use mito_codec::row_converter::{
         DensePrimaryKeyCodec, PrimaryKeyCodecExt, SparsePrimaryKeyCodec,
@@ -628,10 +631,12 @@ mod tests {
     use store_api::storage::RegionId;
 
     use super::*;
+    use crate::cache::CacheStrategy;
     use crate::read::flat_projection::FlatProjectionMapper;
     use crate::read::read_columns::ReadColumns;
     use crate::sst::parquet::flat_format::FlatReadFormat;
     use crate::sst::{FlatSchemaOptions, to_flat_sst_arrow_schema};
+    use crate::test_util::sst_util::{new_sparse_primary_key, sst_region_metadata_with_encoding};
 
     /// Creates a new [RegionMetadata].
     fn new_metadata(
@@ -878,6 +883,77 @@ mod tests {
         let expected_batch = RecordBatch::try_new(expected_schema, expected_columns).unwrap();
 
         assert_eq!(expected_batch, result);
+    }
+
+    #[test]
+    fn test_flat_compat_rewrites_key_before_deferred_tag_decode() {
+        let actual_metadata = Arc::new(sst_region_metadata_with_encoding(
+            PrimaryKeyEncoding::Sparse,
+        ));
+        let mut expected_builder = RegionMetadataBuilder::from_existing((*actual_metadata).clone());
+        let mut expected_primary_key = actual_metadata.primary_key.clone();
+        expected_primary_key.push(4);
+        expected_builder
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new("host", ConcreteDataType::string_datatype(), true)
+                    .with_default_constraint(Some(ColumnDefaultConstraint::Value(Value::from(""))))
+                    .unwrap(),
+                semantic_type: SemanticType::Tag,
+                column_id: 4,
+            })
+            .primary_key(expected_primary_key);
+        let expected_metadata = Arc::new(expected_builder.build().unwrap());
+        let host_index = expected_metadata.column_index_by_id(4).unwrap();
+
+        // The focused path reads the field and encoded key, then materializes host
+        // only after LastRow selection.
+        let mapper = FlatProjectionMapper::new_with_deferred_tags(
+            &expected_metadata,
+            vec![host_index],
+            ReadColumns::from_deduped_column_ids([2]),
+            None,
+            &[4],
+        )
+        .unwrap();
+        let read_format = FlatReadFormat::new(
+            actual_metadata.clone(),
+            ReadColumns::from_deduped_column_ids([2]),
+            None,
+            "test",
+            false,
+        )
+        .unwrap();
+
+        let compat_batch = FlatCompatBatch::try_new(&mapper, &read_format, false)
+            .unwrap()
+            .expect("primary key evolution requires compatibility");
+        let old_key = new_sparse_primary_key(&["tag0", "tag1"], &actual_metadata, 1, 100);
+        let input_schema = read_format.arrow_schema().clone();
+        let input_batch = RecordBatch::try_new(
+            input_schema,
+            vec![
+                Arc::new(UInt64Array::from(vec![100, 200])),
+                Arc::new(TimestampMillisecondArray::from_iter_values([1000, 2000])),
+                build_flat_test_pk_array(&[&old_key, &old_key]),
+                Arc::new(UInt64Array::from_iter_values([1, 2])),
+                Arc::new(UInt8Array::from_iter_values([
+                    OpType::Put as u8,
+                    OpType::Put as u8,
+                ])),
+            ],
+        )
+        .unwrap();
+
+        let compatible = compat_batch.compat(input_batch).unwrap();
+        let output = mapper
+            .convert(&compatible, &CacheStrategy::Disabled)
+            .unwrap();
+        let tag = output
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(["", ""], [tag.value(0), tag.value(1)]);
     }
 
     #[test]
