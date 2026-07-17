@@ -37,7 +37,7 @@ use object_store::{FuturesAsyncWriter, ObjectStore};
 use parquet::arrow::AsyncArrowWriter;
 use parquet::basic::{Compression, Encoding, ZstdLevel};
 use parquet::file::metadata::KeyValue;
-use parquet::file::properties::{WriterProperties, WriterPropertiesBuilder};
+use parquet::file::properties::WriterProperties;
 use parquet::schema::types::ColumnPath;
 use smallvec::smallvec;
 use snafu::ResultExt;
@@ -57,7 +57,9 @@ use crate::sst::file::RegionFileId;
 use crate::sst::index::{IndexOutput, Indexer, IndexerBuilder};
 use crate::sst::parquet::flat_format::{FlatWriteFormat, time_index_column_index};
 use crate::sst::parquet::format::PrimaryKeyWriteFormat;
-use crate::sst::parquet::{PARQUET_METADATA_KEY, SstInfo, WriteOptions};
+use crate::sst::parquet::{
+    FloatFieldEncoding, PARQUET_METADATA_KEY, SstInfo, WriteOptions, apply_float_field_encoding,
+};
 use crate::sst::{
     DEFAULT_WRITE_BUFFER_SIZE, DEFAULT_WRITE_CONCURRENCY, FlatSchemaOptions, SeriesEstimator,
 };
@@ -105,6 +107,7 @@ pub struct ParquetWriter<'a, F: WriterFactory, I: IndexerBuilder, P: FilePathPro
     file_cleaner: Option<TempFileCleaner>,
     /// Write metrics
     metrics: &'a mut Metrics,
+    float_field_encoding: FloatFieldEncoding,
 }
 
 pub trait WriterFactory {
@@ -158,6 +161,14 @@ where
         self.file_cleaner = Some(cleaner);
         self
     }
+
+    pub(crate) fn with_float_field_encoding(
+        mut self,
+        float_field_encoding: FloatFieldEncoding,
+    ) -> Self {
+        self.float_field_encoding = float_field_encoding;
+        self
+    }
 }
 
 impl<'a, F, I, P> ParquetWriter<'a, F, I, P>
@@ -190,6 +201,7 @@ where
             bytes_written: Arc::new(AtomicUsize::new(0)),
             file_cleaner: None,
             metrics,
+            float_field_encoding: FloatFieldEncoding::Default,
         }
     }
 
@@ -377,29 +389,6 @@ where
         Ok(results)
     }
 
-    /// Customizes per-column config according to schema and maybe column cardinality.
-    fn customize_column_config(
-        builder: WriterPropertiesBuilder,
-        region_metadata: &RegionMetadataRef,
-    ) -> WriterPropertiesBuilder {
-        let ts_col = ColumnPath::new(vec![
-            region_metadata
-                .time_index_column()
-                .column_schema
-                .name
-                .clone(),
-        ]);
-        let seq_col = ColumnPath::new(vec![SEQUENCE_COLUMN_NAME.to_string()]);
-        let op_type_col = ColumnPath::new(vec![OP_TYPE_COLUMN_NAME.to_string()]);
-
-        builder
-            .set_column_encoding(seq_col.clone(), Encoding::DELTA_BINARY_PACKED)
-            .set_column_dictionary_enabled(seq_col, false)
-            .set_column_encoding(ts_col.clone(), Encoding::DELTA_BINARY_PACKED)
-            .set_column_dictionary_enabled(ts_col, false)
-            .set_column_compression(op_type_col, Compression::UNCOMPRESSED)
-    }
-
     async fn write_next_flat_batch(
         &mut self,
         source: &mut FlatSource,
@@ -425,6 +414,29 @@ where
         Ok(Some(record_batch))
     }
 
+    /// Applies the standard Parquet properties for Mito SST internal columns.
+    fn customize_column_config(
+        builder: parquet::file::properties::WriterPropertiesBuilder,
+        region_metadata: &RegionMetadataRef,
+    ) -> parquet::file::properties::WriterPropertiesBuilder {
+        let ts_col = ColumnPath::new(vec![
+            region_metadata
+                .time_index_column()
+                .column_schema
+                .name
+                .clone(),
+        ]);
+        let seq_col = ColumnPath::new(vec![SEQUENCE_COLUMN_NAME.to_string()]);
+        let op_type_col = ColumnPath::new(vec![OP_TYPE_COLUMN_NAME.to_string()]);
+
+        builder
+            .set_column_encoding(seq_col.clone(), Encoding::DELTA_BINARY_PACKED)
+            .set_column_dictionary_enabled(seq_col, false)
+            .set_column_encoding(ts_col.clone(), Encoding::DELTA_BINARY_PACKED)
+            .set_column_dictionary_enabled(ts_col, false)
+            .set_column_compression(op_type_col, Compression::UNCOMPRESSED)
+    }
+
     async fn maybe_init_writer(
         &mut self,
         schema: &SchemaRef,
@@ -446,6 +458,11 @@ where
                 .set_statistics_truncate_length(None);
 
             let props_builder = Self::customize_column_config(props_builder, &self.metadata);
+            let props_builder = apply_float_field_encoding(
+                props_builder,
+                &self.metadata,
+                self.float_field_encoding,
+            );
             let writer_props = props_builder.build();
 
             let sst_file_path = self.path_provider.build_sst_file_path(RegionFileId::new(

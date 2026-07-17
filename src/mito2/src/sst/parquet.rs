@@ -17,7 +17,13 @@
 use std::sync::Arc;
 
 use common_base::readable_size::ReadableSize;
+use datatypes::prelude::ConcreteDataType;
+use parquet::basic::Encoding;
 use parquet::file::metadata::ParquetMetaData;
+use parquet::file::properties::WriterPropertiesBuilder;
+use parquet::schema::types::ColumnPath;
+use store_api::metadata::RegionMetadataRef;
+use store_api::region_request::PathType;
 use store_api::storage::FileId;
 
 use crate::sst::DEFAULT_WRITE_BUFFER_SIZE;
@@ -53,6 +59,51 @@ pub(crate) const DEFAULT_READ_BATCH_SIZE: usize = 8 * 1024;
 /// decoupled from [`DEFAULT_READ_BATCH_SIZE`] so we can tune runtime scan
 /// batching without changing the row group layout of newly written SSTs.
 pub const DEFAULT_ROW_GROUP_SIZE: usize = 100 * 1024;
+
+/// Internal policy for Parquet encoding of direct floating-point field columns.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum FloatFieldEncoding {
+    #[default]
+    Default,
+    ByteStreamSplit,
+}
+
+impl FloatFieldEncoding {
+    pub(crate) fn from_path_type(path_type: PathType) -> Self {
+        match path_type {
+            PathType::Data => Self::ByteStreamSplit,
+            PathType::Bare | PathType::Metadata => Self::Default,
+        }
+    }
+}
+
+/// Applies BYTE_STREAM_SPLIT to direct floating-point field columns when enabled.
+pub(crate) fn apply_float_field_encoding(
+    builder: WriterPropertiesBuilder,
+    region_metadata: &RegionMetadataRef,
+    float_field_encoding: FloatFieldEncoding,
+) -> WriterPropertiesBuilder {
+    if float_field_encoding != FloatFieldEncoding::ByteStreamSplit {
+        return builder;
+    }
+
+    let mut builder = builder;
+    for column in region_metadata.field_columns() {
+        if !matches!(
+            column.column_schema.data_type,
+            ConcreteDataType::Float32(_) | ConcreteDataType::Float64(_)
+        ) {
+            continue;
+        }
+
+        let column_path = ColumnPath::new(vec![column.column_schema.name.clone()]);
+        builder = builder
+            .set_column_encoding(column_path.clone(), Encoding::BYTE_STREAM_SPLIT)
+            .set_column_dictionary_enabled(column_path, false);
+    }
+
+    builder
+}
 
 /// Parquet write options.
 #[derive(Debug, Clone)]
@@ -117,13 +168,14 @@ mod tests {
     use datafusion_expr::{BinaryExpr, Expr, Literal, Operator, col, lit};
     use datatypes::arrow;
     use datatypes::arrow::array::{
-        ArrayRef, BinaryDictionaryBuilder, RecordBatch, StringArray, StringDictionaryBuilder,
-        TimestampMillisecondArray, UInt8Array, UInt64Array,
+        Array, ArrayRef, BinaryDictionaryBuilder, Float32Array, RecordBatch, StringArray,
+        StringDictionaryBuilder, TimestampMillisecondArray, UInt8Array, UInt64Array,
     };
     use datatypes::arrow::datatypes::{DataType, Field, Schema, UInt32Type};
     use datatypes::arrow::util::pretty::pretty_format_batches;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{FulltextAnalyzer, FulltextBackend, FulltextOptions};
+    use datatypes::types::{StructField, StructType};
     use object_store::ObjectStore;
     use parquet::arrow::AsyncArrowWriter;
     use parquet::basic::{Compression, Encoding, ZstdLevel};
@@ -167,6 +219,264 @@ mod tests {
 
     const FILE_DIR: &str = "/";
     const REGION_ID: RegionId = RegionId::new(0, 0);
+
+    fn float_property_test_metadata() -> Arc<RegionMetadata> {
+        let histogram =
+            ConcreteDataType::struct_datatype(StructType::new(Arc::new(vec![StructField::new(
+                "sum",
+                ConcreteDataType::float64_datatype(),
+                true,
+            )])));
+        let mut builder = RegionMetadataBuilder::new(REGION_ID);
+        builder
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new("tag", ConcreteDataType::string_datatype(), true),
+                semantic_type: SemanticType::Tag,
+                column_id: 0,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new("f32", ConcreteDataType::float32_datatype(), true),
+                semantic_type: SemanticType::Field,
+                column_id: 1,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new("f64", ConcreteDataType::float64_datatype(), true),
+                semantic_type: SemanticType::Field,
+                column_id: 2,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "integer",
+                    ConcreteDataType::int64_datatype(),
+                    true,
+                ),
+                semantic_type: SemanticType::Field,
+                column_id: 3,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new("histogram", histogram, true),
+                semantic_type: SemanticType::Field,
+                column_id: 4,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "ts",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Timestamp,
+                column_id: 5,
+            })
+            .primary_key(vec![0]);
+        Arc::new(builder.build().unwrap())
+    }
+
+    fn float32_region_metadata() -> Arc<RegionMetadata> {
+        let mut builder = RegionMetadataBuilder::new(REGION_ID);
+        for (column_id, name) in [(0, "tag_0"), (1, "tag_1")] {
+            builder.push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(name, ConcreteDataType::string_datatype(), true),
+                semantic_type: SemanticType::Tag,
+                column_id,
+            });
+        }
+        builder
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "value",
+                    ConcreteDataType::float32_datatype(),
+                    true,
+                ),
+                semantic_type: SemanticType::Field,
+                column_id: 2,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "ts",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Timestamp,
+                column_id: 3,
+            })
+            .primary_key(vec![0, 1]);
+        Arc::new(builder.build().unwrap())
+    }
+
+    fn float32_record_batch(metadata: &Arc<RegionMetadata>) -> RecordBatch {
+        let values = [
+            None,
+            Some(0.0),
+            Some(-0.0),
+            Some(f32::INFINITY),
+            Some(f32::NEG_INFINITY),
+            Some(f32::from_bits(1)),
+            Some(f32::from_bits(0x7fc0_0042)),
+        ];
+        let mut tag_0 = StringDictionaryBuilder::<UInt32Type>::new();
+        let mut tag_1 = StringDictionaryBuilder::<UInt32Type>::new();
+        let mut primary_key = BinaryDictionaryBuilder::<UInt32Type>::new();
+        let encoded_primary_key = new_primary_key(&["a", "b"]);
+        for _ in &values {
+            tag_0.append_value("a");
+            tag_1.append_value("b");
+            primary_key.append(&encoded_primary_key).unwrap();
+        }
+        RecordBatch::try_new(
+            to_flat_sst_arrow_schema(metadata, &FlatSchemaOptions::default()),
+            vec![
+                Arc::new(tag_0.finish()),
+                Arc::new(tag_1.finish()),
+                Arc::new(Float32Array::from(values.to_vec())),
+                Arc::new(TimestampMillisecondArray::from_iter_values(
+                    0..values.len() as i64,
+                )),
+                Arc::new(primary_key.finish()),
+                Arc::new(UInt64Array::from_value(0, values.len())),
+                Arc::new(UInt8Array::from_value(OpType::Put as u8, values.len())),
+            ],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn test_float_field_encoding_policy_and_properties() {
+        assert_eq!(
+            FloatFieldEncoding::ByteStreamSplit,
+            FloatFieldEncoding::from_path_type(PathType::Data)
+        );
+        assert_eq!(
+            FloatFieldEncoding::Default,
+            FloatFieldEncoding::from_path_type(PathType::Bare)
+        );
+        assert_eq!(
+            FloatFieldEncoding::Default,
+            FloatFieldEncoding::from_path_type(PathType::Metadata)
+        );
+
+        let metadata = float_property_test_metadata();
+        let props = apply_float_field_encoding(
+            WriterProperties::builder().set_encoding(Encoding::PLAIN),
+            &metadata,
+            FloatFieldEncoding::ByteStreamSplit,
+        )
+        .build();
+        for name in ["f32", "f64"] {
+            let path = parquet::schema::types::ColumnPath::new(vec![name.to_string()]);
+            assert_eq!(Some(Encoding::BYTE_STREAM_SPLIT), props.encoding(&path));
+            assert!(!props.dictionary_enabled(&path));
+        }
+        for name in ["integer", "tag"] {
+            let path = parquet::schema::types::ColumnPath::new(vec![name.to_string()]);
+            assert_eq!(Some(Encoding::PLAIN), props.encoding(&path));
+            assert!(props.dictionary_enabled(&path));
+        }
+        let histogram = parquet::schema::types::ColumnPath::new(vec![
+            "histogram".to_string(),
+            "sum".to_string(),
+        ]);
+        assert_eq!(Some(Encoding::PLAIN), props.encoding(&histogram));
+        assert!(props.dictionary_enabled(&histogram));
+
+        let default_props = apply_float_field_encoding(
+            WriterProperties::builder().set_encoding(Encoding::PLAIN),
+            &metadata,
+            FloatFieldEncoding::Default,
+        )
+        .build();
+        let f64_path = parquet::schema::types::ColumnPath::new(vec!["f64".to_string()]);
+        assert_eq!(Some(Encoding::PLAIN), default_props.encoding(&f64_path));
+        assert!(default_props.dictionary_enabled(&f64_path));
+    }
+
+    #[tokio::test]
+    async fn test_parquet_writer_uses_bss_for_data_float32_field() {
+        let mut env = TestEnv::new().await;
+        let object_store = env.init_object_store_manager();
+        let handle = sst_file_handle(0, 3);
+        let metadata = float32_region_metadata();
+        let source = new_flat_source_from_record_batches(vec![float32_record_batch(&metadata)]);
+        let mut metrics = Metrics::new(WriteType::Flush);
+        let mut writer = ParquetWriter::new_with_object_store(
+            object_store.clone(),
+            metadata,
+            IndexConfig::default(),
+            NoopIndexBuilder,
+            FixedPathProvider {
+                region_file_id: handle.file_id(),
+            },
+            &mut metrics,
+        )
+        .await
+        .with_float_field_encoding(FloatFieldEncoding::from_path_type(PathType::Data));
+        let info = writer
+            .write_all_flat_as_primary_key(source, None, &WriteOptions::default())
+            .await
+            .unwrap()
+            .remove(0);
+        let parquet_metadata = info.file_metadata.unwrap();
+        let row_group = &parquet_metadata.row_groups()[0];
+        for column in row_group.columns() {
+            match column.column_path().string().as_str() {
+                "value" => {
+                    assert!(
+                        column
+                            .encodings()
+                            .any(|encoding| encoding == Encoding::BYTE_STREAM_SPLIT)
+                    );
+                    assert!(
+                        !column
+                            .encodings()
+                            .any(|encoding| encoding == Encoding::RLE_DICTIONARY)
+                    );
+                }
+                "ts" | "__sequence" => {
+                    assert!(
+                        column
+                            .encodings()
+                            .any(|encoding| encoding == Encoding::DELTA_BINARY_PACKED)
+                    );
+                }
+                _ => assert!(
+                    !column
+                        .encodings()
+                        .any(|encoding| encoding == Encoding::BYTE_STREAM_SPLIT)
+                ),
+            }
+        }
+
+        let mut reader =
+            ParquetReaderBuilder::new(FILE_DIR.to_string(), PathType::Bare, handle, object_store)
+                .build()
+                .await
+                .unwrap()
+                .unwrap();
+        let mut actual = Vec::new();
+        while let Some(batch) = reader.next_record_batch().await.unwrap() {
+            let values = batch
+                .column_by_name("value")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Float32Array>()
+                .unwrap();
+            actual.extend(
+                (0..values.len())
+                    .map(|index| (!values.is_null(index)).then(|| values.value(index).to_bits())),
+            );
+        }
+        assert_eq!(
+            vec![
+                None,
+                Some(0.0f32.to_bits()),
+                Some((-0.0f32).to_bits()),
+                Some(f32::INFINITY.to_bits()),
+                Some(f32::NEG_INFINITY.to_bits()),
+                Some(1),
+                Some(0x7fc0_0042),
+            ],
+            actual
+        );
+    }
 
     #[derive(Clone)]
     struct FixedPathProvider {

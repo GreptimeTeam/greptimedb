@@ -45,7 +45,7 @@ use crate::sst::index::puffin_manager::{PuffinManagerFactory, SstPuffinManager};
 use crate::sst::location::{self, region_dir_from_table_dir};
 use crate::sst::parquet::reader::ParquetReaderBuilder;
 use crate::sst::parquet::writer::ParquetWriter;
-use crate::sst::parquet::{SstInfo, WriteOptions};
+use crate::sst::parquet::{FloatFieldEncoding, SstInfo, WriteOptions};
 use crate::sst::{DEFAULT_WRITE_BUFFER_SIZE, DEFAULT_WRITE_CONCURRENCY, FormatType};
 
 pub type AccessLayerRef = Arc<AccessLayer>;
@@ -355,6 +355,7 @@ impl AccessLayer {
                     },
                     write_opts,
                     metrics,
+                    FloatFieldEncoding::from_path_type(self.path_type),
                 )
                 .await?
         } else {
@@ -390,6 +391,7 @@ impl AccessLayer {
                 metrics,
             )
             .await
+            .with_float_field_encoding(FloatFieldEncoding::from_path_type(self.path_type))
             .with_file_cleaner(cleaner);
             match request.sst_write_format {
                 FormatType::PrimaryKey => {
@@ -717,5 +719,162 @@ impl FilePathProvider for RegionFilePathFactory {
 
     fn build_sst_file_path(&self, file_id: RegionFileId) -> String {
         location::sst_file_path(&self.table_dir, file_id, self.path_type)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use common_base::readable_size::ReadableSize;
+    use common_test_util::temp_dir::create_temp_dir;
+    use mito_codec::row_converter::build_primary_key_codec;
+    use parquet::basic::Encoding;
+
+    use super::*;
+    use crate::cache::CacheManager;
+    use crate::cache::test_util::new_fs_store;
+    use crate::memtable::bulk::part::BulkPartConverter;
+    use crate::sst::{FlatSchemaOptions, to_flat_sst_arrow_schema};
+    use crate::test_util::TestEnv;
+    use crate::test_util::memtable_util::build_key_values_with_ts_seq_values;
+    use crate::test_util::sst_util::new_flat_source_from_record_batches;
+
+    fn float_source(metadata: &RegionMetadataRef) -> FlatSource {
+        let values = [
+            None,
+            Some(0.0),
+            Some(-0.0),
+            Some(f64::INFINITY),
+            Some(f64::NEG_INFINITY),
+            Some(f64::from_bits(1)),
+            Some(f64::from_bits(0x7ff8_0000_0000_0042)),
+        ];
+        let key_values = build_key_values_with_ts_seq_values(
+            metadata,
+            "a".to_string(),
+            0,
+            1..=values.len() as i64,
+            values.into_iter(),
+            0,
+        );
+        let schema = to_flat_sst_arrow_schema(metadata, &FlatSchemaOptions::default());
+        let mut converter =
+            BulkPartConverter::new(metadata, schema, 2, build_primary_key_codec(metadata), true);
+        converter.append_key_values(&key_values).unwrap();
+        new_flat_source_from_record_batches(vec![converter.convert().unwrap().batch])
+    }
+
+    #[tokio::test]
+    async fn test_write_sst_uses_bss_only_for_data_path() {
+        let mut env = TestEnv::new().await;
+        let object_store = env.init_object_store_manager();
+        let metadata = crate::test_util::memtable_util::metadata_for_test();
+
+        for (path_type, expect_bss) in [
+            (PathType::Data, true),
+            (PathType::Bare, false),
+            (PathType::Metadata, false),
+        ] {
+            let access_layer = AccessLayer::new(
+                "test",
+                path_type,
+                object_store.clone(),
+                env.get_puffin_manager(),
+                env.get_intermediate_manager(),
+            );
+            let request = SstWriteRequest {
+                op_type: OperationType::Flush,
+                metadata: metadata.clone(),
+                source: float_source(&metadata),
+                cache_manager: Default::default(),
+                storage: None,
+                max_sequence: None,
+                sst_write_format: FormatType::Flat,
+                index_options: Default::default(),
+                index_config: Default::default(),
+                inverted_index_config: Default::default(),
+                fulltext_index_config: Default::default(),
+                bloom_filter_index_config: Default::default(),
+                #[cfg(feature = "vector_index")]
+                vector_index_config: Default::default(),
+            };
+            let mut metrics = Metrics::new(WriteType::Flush);
+            let sst = access_layer
+                .write_sst(request, &WriteOptions::default(), &mut metrics)
+                .await
+                .unwrap()
+                .remove(0);
+            let parquet_metadata = sst.file_metadata.unwrap();
+            let value_column = parquet_metadata
+                .row_group(0)
+                .columns()
+                .iter()
+                .find(|column| column.column_path().string() == "v1")
+                .unwrap();
+            assert_eq!(
+                expect_bss,
+                value_column
+                    .encodings()
+                    .any(|encoding| encoding == Encoding::BYTE_STREAM_SPLIT)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_write_sst_uses_bss_for_data_path_with_write_cache() {
+        let mut env = TestEnv::new().await;
+        let object_store = env.init_object_store_manager();
+        let local_dir = create_temp_dir("");
+        let write_cache = env
+            .create_write_cache(
+                new_fs_store(local_dir.path().to_str().unwrap()),
+                ReadableSize::mb(10),
+            )
+            .await;
+        let cache_manager = Arc::new(
+            CacheManager::builder()
+                .write_cache(Some(write_cache))
+                .build(),
+        );
+        let metadata = crate::test_util::memtable_util::metadata_for_test();
+        let access_layer = AccessLayer::new(
+            "test",
+            PathType::Data,
+            object_store,
+            env.get_puffin_manager(),
+            env.get_intermediate_manager(),
+        );
+        let request = SstWriteRequest {
+            op_type: OperationType::Flush,
+            metadata: metadata.clone(),
+            source: float_source(&metadata),
+            cache_manager,
+            storage: None,
+            max_sequence: None,
+            sst_write_format: FormatType::Flat,
+            index_options: Default::default(),
+            index_config: Default::default(),
+            inverted_index_config: Default::default(),
+            fulltext_index_config: Default::default(),
+            bloom_filter_index_config: Default::default(),
+            #[cfg(feature = "vector_index")]
+            vector_index_config: Default::default(),
+        };
+        let mut metrics = Metrics::new(WriteType::Flush);
+        let sst = access_layer
+            .write_sst(request, &WriteOptions::default(), &mut metrics)
+            .await
+            .unwrap()
+            .remove(0);
+        let parquet_metadata = sst.file_metadata.unwrap();
+        assert!(
+            parquet_metadata
+                .row_group(0)
+                .columns()
+                .iter()
+                .find(|column| column.column_path().string() == "v1")
+                .unwrap()
+                .encodings()
+                .any(|encoding| encoding == Encoding::BYTE_STREAM_SPLIT)
+        );
     }
 }

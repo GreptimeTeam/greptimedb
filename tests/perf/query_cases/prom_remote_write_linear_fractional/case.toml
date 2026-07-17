@@ -1,0 +1,48 @@
+[case]
+name = "prom_remote_write_linear_fractional"
+description = "End-to-end Prometheus remote-write regression with continuous fractional linear values"
+
+[scenario]
+kind = "prom_remote_write_then_query"
+
+[scenario.remote_write]
+database = "public"
+metric = "prom_remote_write_linear_fractional"
+physical_table = "greptime_physical_table"
+series_count = 2048
+samples_per_series = 14400
+sample_chunk_size = 1440
+flush_every_sample_chunks = 1
+start_unix_millis = 1704067200000
+step_millis = 60000
+chunk_series_count = 256
+timeout_seconds = 600
+visibility_timeout_seconds = 300
+
+[scenario.remote_write.value]
+pattern = "linear"
+base = 0
+step = 0.125
+
+[scenario.remote_write.prom_store]
+pending_rows_flush_interval = "1s"
+max_batch_rows = 100000
+
+[scenario.remote_write.storage]
+column = "greptime_value"
+min_files = 2
+min_files_with_column = 2
+
+[scenario.remote_write.read_bench]
+iterations = 7
+max_files = 4
+
+[[scenario.queries]]
+name = "selector_10d_linear_fractional"
+kind = "tql"
+query = "TQL ANALYZE VERBOSE (1704067200, 1704931200, '1h') prom_remote_write_linear_fractional{host=~'host.*'}"
+warmup = 2
+iterations = 15
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 75
