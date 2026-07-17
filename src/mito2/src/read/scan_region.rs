@@ -482,6 +482,11 @@ impl ScanRegion {
             read_cols,
             json_type_hint,
         )?;
+        let mapper = if self.request.preserve_pk_dictionary_encoding {
+            mapper.with_pk_dictionary_encoding()
+        } else {
+            mapper
+        };
 
         let ssts = &self.version.ssts;
         let mut files = Vec::new();

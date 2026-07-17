@@ -1147,7 +1147,16 @@ impl RangeSelectStream {
             self.schema_before_project.field(columns.len()).data_type(),
         )?;
         columns.push(ts_column);
-        columns.extend(self.row_converter.convert_rows(by_rows)?);
+        // RowConverter decodes dictionary sort fields to their value arrays. Re-encode them so
+        // the physical batch continues to match the logical output schema.
+        for by_column in self.row_converter.convert_rows(by_rows)? {
+            let output_type = self.schema_before_project.field(columns.len()).data_type();
+            if by_column.data_type() == output_type {
+                columns.push(by_column);
+            } else {
+                columns.push(compute::cast(by_column.as_ref(), output_type)?);
+            }
+        }
         let output = RecordBatch::try_new(self.schema_before_project.clone(), columns)?;
         let project_output = if let Some(project) = &self.schema_project {
             output.project(project)?

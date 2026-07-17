@@ -87,6 +87,39 @@ DEALLOCATE stmt;
 affected_rows: 0
 
 -- test with data
+-- A Mito scan exposes string primary keys as dictionaries, but that physical read type must not
+-- leak into INSERT Values planning.
+CREATE TABLE insert_values_dictionary (
+    ts TIMESTAMP TIME INDEX,
+    host STRING PRIMARY KEY
+) ENGINE=mito;
+
+Affected Rows: 0
+
+INSERT INTO insert_values_dictionary VALUES(now(), 'a');
+
+Affected Rows: 1
+
+SELECT host FROM insert_values_dictionary;
+
++------+
+| host |
++------+
+| a    |
++------+
+
+SELECT array_agg(host) FROM insert_values_dictionary;
+
++------------------------------------------+
+| array_agg(insert_values_dictionary.host) |
++------------------------------------------+
+| [a]                                      |
++------------------------------------------+
+
+DROP TABLE insert_values_dictionary;
+
+Affected Rows: 0
+
 CREATE TABLE IF NOT EXISTS "cake" (
     `domain` STRING,
     is_expire BOOLEAN NULL,

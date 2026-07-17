@@ -16,6 +16,7 @@ mod client;
 pub mod client_manager;
 pub mod database;
 pub mod error;
+mod flight;
 pub mod flow;
 pub mod inserter;
 pub mod load_balance;

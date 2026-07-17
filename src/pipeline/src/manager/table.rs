@@ -511,6 +511,9 @@ impl PipelineTable {
             .execute(plan, Self::query_ctx(&table_info))
             .await
             .context(ExecuteInternalStatementSnafu)?;
+        let output = output
+            .map_dictionary_to_values()
+            .context(CollectRecordsSnafu)?;
         let stream = match output.data {
             OutputData::Stream(stream) => stream,
             OutputData::RecordBatches(record_batches) => record_batches.as_stream(),

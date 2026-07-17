@@ -24,14 +24,14 @@ use arrow_pg::encoder::{Encoder, encode_value};
 use arrow_pg::list_encoder::encode_list;
 use arrow_schema::{DataType, TimeUnit};
 use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime};
-use common_recordbatch::RecordBatch;
 use common_recordbatch::error::Result as RecordBatchResult;
+use common_recordbatch::{RecordBatch, map_dictionary_to_values_data_type};
 use common_time::{IntervalDayTime, IntervalMonthDayNano, IntervalYearMonth};
 use datafusion_common::ScalarValue;
 use datafusion_expr::LogicalPlan;
 use datatypes::arrow::datatypes::DataType as ArrowDataType;
 use datatypes::json::JsonSettings;
-use datatypes::prelude::{ConcreteDataType, Value};
+use datatypes::prelude::{ConcreteDataType, DataType as _, Value};
 use datatypes::schema::{Schema, SchemaRef};
 use datatypes::types::{Decimal128Type, IntervalType, TimestampType, jsonb_to_string};
 use datatypes::value::StructValue;
@@ -234,6 +234,8 @@ where
 }
 
 pub(super) fn type_gt_to_pg(origin: &ConcreteDataType) -> Result<Type> {
+    let logical_type = map_dictionary_to_values_data_type(origin);
+    let origin = &logical_type;
     match origin {
         &ConcreteDataType::Null(_) => Ok(Type::UNKNOWN),
         &ConcreteDataType::Boolean(_) => Ok(Type::BOOL),
@@ -370,6 +372,29 @@ fn numeric_out_of_range_error(value: impl std::fmt::Display) -> PgWireError {
     )
 }
 
+fn string_parameter_to_scalar_value(
+    data: Option<String>,
+    data_type: &ConcreteDataType,
+) -> Option<ScalarValue> {
+    match data_type {
+        ConcreteDataType::String(string_type) => {
+            if string_type.is_large() {
+                Some(ScalarValue::LargeUtf8(data))
+            } else {
+                Some(ScalarValue::Utf8(data))
+            }
+        }
+        ConcreteDataType::Dictionary(dictionary) => Some(ScalarValue::Dictionary(
+            Box::new(dictionary.key_type().as_arrow_type()),
+            Box::new(string_parameter_to_scalar_value(
+                data,
+                dictionary.value_type(),
+            )?),
+        )),
+        _ => None,
+    }
+}
+
 pub(super) fn parameters_to_scalar_values(
     plan: &LogicalPlan,
     portal: &Portal<PgSqlPlan>,
@@ -408,21 +433,12 @@ pub(super) fn parameters_to_scalar_values(
             &Type::VARCHAR | &Type::TEXT | &Type::CHAR => {
                 let data = portal.parameter::<String>(idx, &client_type)?;
                 if let Some(server_type) = &server_type {
-                    match server_type {
-                        ConcreteDataType::String(t) => {
-                            if t.is_large() {
-                                ScalarValue::LargeUtf8(data)
-                            } else {
-                                ScalarValue::Utf8(data)
-                            }
-                        }
-                        _ => {
-                            return Err(invalid_parameter_error(
-                                "invalid_parameter_type",
-                                Some(format!("Expected: {}, found: {}", server_type, client_type)),
-                            ));
-                        }
-                    }
+                    string_parameter_to_scalar_value(data, server_type).ok_or_else(|| {
+                        invalid_parameter_error(
+                            "invalid_parameter_type",
+                            Some(format!("Expected: {}, found: {}", server_type, client_type)),
+                        )
+                    })?
                 } else {
                     ScalarValue::Utf8(data)
                 }
@@ -1751,6 +1767,35 @@ mod test {
             client_param_types,
         ));
         Portal::try_new(&bind, statement).unwrap()
+    }
+
+    #[test]
+    fn test_dictionary_string_parameter() {
+        let dictionary_type =
+            DataType::Dictionary(Box::new(DataType::UInt32), Box::new(DataType::Utf8));
+        let plan = build_plan_with_params(vec![("$1", dictionary_type)]);
+        let portal = make_portal(vec![None], vec![s("host-a")]);
+
+        let values = parameters_to_scalar_values(&plan, &portal).unwrap();
+        assert_eq!(
+            vec![ScalarValue::Dictionary(
+                Box::new(DataType::UInt32),
+                Box::new(ScalarValue::Utf8(s("host-a"))),
+            )],
+            values
+        );
+
+        let param_types = HashMap::from([(
+            "$1".to_string(),
+            Some(ConcreteDataType::dictionary_datatype(
+                ConcreteDataType::uint32_datatype(),
+                ConcreteDataType::string_datatype(),
+            )),
+        )]);
+        assert_eq!(
+            vec![Type::VARCHAR],
+            param_types_to_pg_types(&param_types).unwrap()
+        );
     }
 
     #[test]

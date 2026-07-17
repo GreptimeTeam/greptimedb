@@ -503,6 +503,11 @@ impl DataFusionExprConverter {
             // String casts might be safe in some cases
             DataType::Utf8 => true,
             DataType::LargeUtf8 => true,
+            // Dictionary encoding does not change the logical value. DataFusion inserts this cast
+            // when a predicate literal is compared with a dictionary-encoded scan column.
+            DataType::Dictionary(_, value_type) => {
+                Self::is_safe_cast_for_partition_pruning(value_type)
+            }
 
             // Date/time casts might be safe if they don't change precision significantly
             DataType::Date32 => true,
@@ -626,6 +631,26 @@ mod tests {
                 RestrictedOp::GtEq,
                 Operand::Value(Value::Int64(100)),
             )]
+        );
+    }
+
+    #[test]
+    fn test_dictionary_cast_preserves_partition_constraint() {
+        let dictionary_type =
+            DataType::Dictionary(Box::new(DataType::UInt32), Box::new(DataType::Utf8));
+        let filter = col("tag").eq(Expr::Cast(datafusion_expr::expr::Cast {
+            expr: Box::new(lit("b")),
+            data_type: dictionary_type,
+        }));
+
+        let partition_expr = DataFusionExprConverter::convert(&filter).unwrap();
+        assert_eq!(
+            partition_expr,
+            PartitionExpr::new(
+                Operand::Column("tag".to_string()),
+                RestrictedOp::Eq,
+                Operand::Value(Value::String("b".into())),
+            )
         );
     }
 

@@ -42,6 +42,7 @@ use store_api::storage::{
 };
 use table::TableRef;
 use table::metadata::{TableId, TableInfoRef};
+use table::table::adapter::{dictionary_encode_string_columns, supports_pk_dictionary_encoding};
 use table::table::scan::RegionScanExec;
 
 use crate::error::{GetRegionMetadataSnafu, Result};
@@ -166,7 +167,13 @@ impl TableProvider for DummyTableProvider {
     }
 
     fn schema(&self) -> SchemaRef {
-        self.metadata.schema.arrow_schema().clone()
+        let schema = self.metadata.schema.arrow_schema();
+        if !supports_pk_dictionary_encoding(self.engine.name()) {
+            return schema.clone();
+        }
+        dictionary_encode_string_columns(schema, |index| {
+            self.metadata.column_metadatas[index].semantic_type == SemanticType::Tag
+        })
     }
 
     fn table_type(&self) -> TableType {
@@ -247,11 +254,15 @@ impl TableProvider for DummyTableProvider {
 impl DummyTableProvider {
     /// Creates a new provider.
     pub fn new(region_id: RegionId, engine: RegionEngineRef, metadata: RegionMetadataRef) -> Self {
+        let preserve_pk_dictionary_encoding = supports_pk_dictionary_encoding(engine.name());
         Self {
             region_id,
             engine,
             metadata,
-            scan_request: Default::default(),
+            scan_request: Arc::new(Mutex::new(ScanRequest {
+                preserve_pk_dictionary_encoding,
+                ..Default::default()
+            })),
             query_ctx: None,
         }
     }
@@ -316,11 +327,13 @@ impl DummyTableProviderFactory {
                     region_id,
                 })?;
 
-        let scan_request = if let Some(ctx) = query_ctx.as_ref() {
+        let mut scan_request = if let Some(ctx) = query_ctx.as_ref() {
             scan_request_from_query_context(region_id, ctx)?
         } else {
             ScanRequest::default()
         };
+        scan_request.preserve_pk_dictionary_encoding =
+            supports_pk_dictionary_encoding(engine.name());
 
         Ok(DummyTableProvider {
             region_id,

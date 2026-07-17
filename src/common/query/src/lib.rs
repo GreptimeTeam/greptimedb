@@ -28,7 +28,10 @@ use std::sync::Arc;
 
 use api::greptime_proto::v1::AddColumnLocation as Location;
 use api::greptime_proto::v1::add_column_location::LocationType;
-use common_recordbatch::{RecordBatches, SendableRecordBatchStream};
+use common_recordbatch::{
+    RecordBatches, SendableRecordBatchMapper, SendableRecordBatchStream, map_dictionary_to_values,
+    map_dictionary_to_values_schema,
+};
 use datafusion::physical_plan::ExecutionPlan;
 use serde::{Deserialize, Serialize};
 use sqlparser_derive::{Visit, VisitMut};
@@ -96,6 +99,43 @@ impl Output {
 
     pub fn new(data: OutputData, meta: OutputMeta) -> Self {
         Self { data, meta }
+    }
+
+    /// Expands dictionary arrays before exposing a query result to a client.
+    pub fn map_dictionary_to_values(self) -> common_recordbatch::error::Result<Self> {
+        let Self { data, meta } = self;
+        let data = match data {
+            OutputData::AffectedRows(rows) => OutputData::AffectedRows(rows),
+            OutputData::RecordBatches(record_batches) => {
+                let original_schema = record_batches.schema();
+                let (mapped_schema, apply_mapper) =
+                    map_dictionary_to_values_schema(original_schema.clone());
+                if !apply_mapper {
+                    OutputData::RecordBatches(record_batches)
+                } else {
+                    let batches = record_batches
+                        .into_iter()
+                        .map(|batch| {
+                            map_dictionary_to_values(batch, &original_schema, &mapped_schema)
+                        })
+                        .collect::<common_recordbatch::error::Result<Vec<_>>>()?;
+                    OutputData::RecordBatches(RecordBatches::try_new(mapped_schema, batches)?)
+                }
+            }
+            OutputData::Stream(stream) => {
+                let (_, apply_mapper) = map_dictionary_to_values_schema(stream.schema());
+                if apply_mapper {
+                    OutputData::Stream(Box::pin(SendableRecordBatchMapper::new(
+                        stream,
+                        map_dictionary_to_values,
+                        map_dictionary_to_values_schema,
+                    )))
+                } else {
+                    OutputData::Stream(stream)
+                }
+            }
+        };
+        Ok(Self { data, meta })
     }
 
     pub fn extract_rows_and_cost(&self) -> (OutputRows, OutputCost) {

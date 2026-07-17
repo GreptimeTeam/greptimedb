@@ -136,6 +136,8 @@ pub struct ScanRequest {
     pub vector_search: Option<VectorSearchRequest>,
     /// Optional hint from query-driven JSON type concretization.
     pub json_type_hint: HashMap<String, JsonNativeType>,
+    /// Whether Mito should keep string primary-key columns dictionary encoded in its output.
+    pub preserve_pk_dictionary_encoding: bool,
 }
 
 impl ScanRequest {
@@ -228,6 +230,13 @@ impl Display for ScanRequest {
                 "{}snapshot_on_scan: {}",
                 delimiter.as_str(),
                 self.snapshot_on_scan
+            )?;
+        }
+        if self.preserve_pk_dictionary_encoding {
+            write!(
+                f,
+                "{}preserve_pk_dictionary_encoding: true",
+                delimiter.as_str()
             )?;
         }
         if let Some(distribution) = &self.distribution {

@@ -17,7 +17,7 @@ use std::fmt::Formatter;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
-use arrow::array::{AsArray, BooleanArray};
+use arrow::array::BooleanArray;
 use common_function::scalars::matches_term::MatchesTermFinder;
 use datafusion::config::ConfigOptions;
 use datafusion::error::Result as DfResult;
@@ -29,6 +29,7 @@ use datafusion_common::tree_node::{Transformed, TreeNode};
 use datafusion_expr::ColumnarValue;
 use datafusion_physical_expr::expressions::Literal;
 use datafusion_physical_expr::{PhysicalExpr, ScalarFunctionExpr};
+use datatypes::arrow_array::string_array_value_at_index;
 
 /// A physical expression that uses a pre-compiled term finder for the `matches_term` function.
 ///
@@ -98,11 +99,10 @@ impl PhysicalExpr for PreCompiledMatchesTermExpr {
 
         let text_value = self.text.evaluate(batch)?;
         let array = text_value.into_array(num_rows)?;
-        let str_array = array.as_string::<i32>();
 
         let mut result = BooleanArray::builder(num_rows);
-        for text in str_array {
-            match text {
+        for index in 0..array.len() {
+            match string_array_value_at_index(&array, index) {
                 Some(text) => {
                     result.append_value(self.finder.find(text));
                 }
@@ -233,8 +233,8 @@ impl PhysicalOptimizerRule for MatchesConstantTermOptimizer {
 mod tests {
     use std::sync::Arc;
 
-    use arrow::array::{ArrayRef, StringArray};
-    use arrow::datatypes::{DataType, Field, Schema};
+    use arrow::array::{ArrayRef, StringArray, StringDictionaryBuilder};
+    use arrow::datatypes::{DataType, Field, Schema, UInt32Type};
     use arrow::record_batch::RecordBatch;
     use catalog::RegisterTableRequest;
     use catalog::memory::MemoryCatalogManager;
@@ -366,6 +366,35 @@ mod tests {
         // The predicate should be a PreCompiledMatchesTermExpr
         assert!(
             std::any::TypeId::of::<PreCompiledMatchesTermExpr>() == predicate.as_any().type_id()
+        );
+    }
+
+    #[test]
+    fn test_precompiled_matches_term_with_dictionary() {
+        let mut text = StringDictionaryBuilder::<UInt32Type>::new();
+        text.append_value("hello world");
+        text.append_value("greeting");
+        text.append_value("hello there");
+        text.append_null();
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "text",
+            DataType::Dictionary(Box::new(DataType::UInt32), Box::new(DataType::Utf8)),
+            true,
+        )]));
+        let batch = RecordBatch::try_new(schema.clone(), vec![Arc::new(text.finish())]).unwrap();
+        let expr = PreCompiledMatchesTermExpr {
+            text: Arc::new(datafusion_physical_expr::expressions::Column::new(
+                "text", 0,
+            )),
+            term: "hello".to_string(),
+            finder: MatchesTermFinder::new("hello"),
+            probes: vec!["hello".to_string()],
+        };
+
+        let result = expr.evaluate(&batch).unwrap().into_array(4).unwrap();
+        assert_eq!(
+            result.as_any().downcast_ref::<BooleanArray>().unwrap(),
+            &BooleanArray::from(vec![Some(true), Some(false), Some(true), None])
         );
     }
 

@@ -27,7 +27,9 @@ use common_decimal::Decimal128;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_query::{Output, OutputData};
-use common_recordbatch::{RecordBatch, SendableRecordBatchStream};
+use common_recordbatch::{
+    RecordBatch, SendableRecordBatchStream, map_dictionary_to_values_data_type,
+};
 use common_telemetry::{debug, error};
 use common_time::{Date, IntervalDayTime, IntervalMonthDayNano, IntervalYearMonth};
 use datafusion_common::ScalarValue;
@@ -373,6 +375,7 @@ impl MysqlResultWriter {
 }
 
 pub fn create_mysql_column(data_type: &ConcreteDataType, column_name: &str) -> Result<Column> {
+    let data_type = &map_dictionary_to_values_data_type(data_type);
     let column_type = match data_type {
         ConcreteDataType::Null(_) => Ok(ColumnType::MYSQL_TYPE_NULL),
         ConcreteDataType::Boolean(_) | ConcreteDataType::Int8(_) | ConcreteDataType::UInt8(_) => {
