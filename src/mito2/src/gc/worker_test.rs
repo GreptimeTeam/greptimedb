@@ -768,9 +768,11 @@ impl RegionHook for GcCountingHook {
     }
 }
 
-/// `on_region_gc` fires after a GC pass for a live region.
+/// `on_region_gc` is **skipped** for a live region when the GC pass deleted no
+/// files — the common case for a periodic pass — to avoid unnecessary hook
+/// overhead/I/O. A freshly-flushed region has no deletable files.
 #[tokio::test]
-async fn test_on_region_gc_fires_on_gc_pass() {
+async fn test_on_region_gc_skipped_when_no_files_deleted() {
     init_default_ut_logging();
 
     let mut env = TestEnv::new().await;
@@ -833,13 +835,199 @@ async fn test_on_region_gc_fires_on_gc_pass() {
     let gc_worker = create_gc_worker(&engine, regions, &file_ref_manifest, true).await;
     gc_worker.run().await.unwrap();
 
+    assert_eq!(
+        hook.gc_calls.load(Ordering::Relaxed),
+        0,
+        "on_region_gc must be skipped when a live region's GC pass deleted no files"
+    );
+}
+
+/// `on_region_gc` **fires** (with `is_region_dropped = false`) for a live region
+/// when the GC pass actually deleted files. Truncating makes the flushed SST
+/// deletable, so the pass reclaims it.
+#[tokio::test]
+async fn test_on_region_gc_fires_when_live_region_has_deleted_files() {
+    init_default_ut_logging();
+
+    let mut env = TestEnv::new().await;
+
+    let hook = Arc::new(GcCountingHook::default());
+    let plugins = Plugins::new();
+    plugins.insert(hook.clone() as RegionHookRef);
+
+    let engine = env
+        .create_engine_with_plugins(
+            MitoConfig {
+                gc: GcConfig {
+                    enable: true,
+                    lingering_time: None,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            plugins,
+        )
+        .await;
+
+    let region_id = RegionId::new(1, 2);
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            region_id.table_id(),
+            "test_table",
+            "test_catalog",
+            "test_schema",
+            None,
+            env.get_kv_backend(),
+        )
+        .await;
+
+    let request = CreateRequestBuilder::new().build();
+    engine
+        .handle_request(region_id, RegionRequest::Create(request.clone()))
+        .await
+        .unwrap();
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: rows_schema(&request),
+            rows: build_rows(0, 3),
+        },
+    )
+    .await;
+    flush_region(&engine, region_id, None).await;
+
+    // Truncate so the flushed SST becomes a removed file the next GC pass reclaims
+    // (`lingering_time` is None -> immediately deletable).
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Truncate(store_api::region_request::RegionTruncateRequest::All),
+        )
+        .await
+        .unwrap();
+
+    let region = engine.get_region(region_id).unwrap();
+    let version = region.manifest_ctx.manifest().await.manifest_version;
+    let regions = BTreeMap::from([(region_id, Some(region.clone()))]);
+    let file_ref_manifest = FileRefsManifest {
+        file_refs: Default::default(),
+        manifest_version: [(region_id, version)].into(),
+        cross_region_refs: HashMap::new(),
+    };
+
+    let gc_worker = create_gc_worker(&engine, regions, &file_ref_manifest, true).await;
+    let report = gc_worker.run().await.unwrap();
+    assert!(
+        report
+            .deleted_files
+            .get(&region_id)
+            .map(|v| !v.is_empty())
+            .unwrap_or(false),
+        "precondition: the GC pass should have deleted the truncated SST"
+    );
+
     assert!(
         hook.gc_calls.load(Ordering::Relaxed) >= 1,
-        "on_region_gc should fire after a GC pass"
+        "on_region_gc should fire when a live region's GC pass deleted files"
     );
-    assert_eq!(
-        hook.last_is_region_dropped.load(Ordering::Relaxed),
-        false,
+    assert!(
+        !hook.last_is_region_dropped.load(Ordering::Relaxed),
         "a live region's GC pass must report is_region_dropped=false"
+    );
+}
+
+/// `on_region_gc` fires with `is_region_dropped = true` on the global-GC
+/// reclamation path for a dropped/absent region — e.g. a repartitioned-away
+/// source region whose mito2 files global GC reclaims. Mirrors
+/// [`test_on_region_gc_fires_on_gc_pass`] but drives GC with the region absent
+/// (`region: None`), the state `do_region_gc` reports as dropped. This is the
+/// path extensions rely on to clean up a deallocated region's sidecar files.
+#[tokio::test]
+async fn test_on_region_gc_fires_for_dropped_region() {
+    init_default_ut_logging();
+
+    let mut env = TestEnv::new().await;
+
+    let hook = Arc::new(GcCountingHook::default());
+    let plugins = Plugins::new();
+    plugins.insert(hook.clone() as RegionHookRef);
+
+    let engine = env
+        .create_engine_with_plugins(
+            MitoConfig {
+                gc: GcConfig {
+                    enable: true,
+                    lingering_time: None,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            plugins,
+        )
+        .await;
+
+    let region_id = RegionId::new(2, 1);
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            region_id.table_id(),
+            "test_table",
+            "test_catalog",
+            "test_schema",
+            None,
+            env.get_kv_backend(),
+        )
+        .await;
+
+    let request = CreateRequestBuilder::new().build();
+    engine
+        .handle_request(region_id, RegionRequest::Create(request.clone()))
+        .await
+        .unwrap();
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: rows_schema(&request),
+            rows: build_rows(0, 3),
+        },
+    )
+    .await;
+    flush_region(&engine, region_id, None).await;
+
+    // Grab the access layer + manifest version while the region is live, then
+    // treat the region as dropped (absent) for GC — the global reclamation path
+    // where `do_region_gc` sees `region: None` and sets `is_region_dropped`.
+    let region = engine.get_region(region_id).unwrap();
+    let access_layer = region.access_layer.clone();
+    let version = region.manifest_ctx.manifest().await.manifest_version;
+    let regions = BTreeMap::from([(region_id, None)]); // dropped/absent
+    let file_ref_manifest = FileRefsManifest {
+        file_refs: Default::default(),
+        manifest_version: [(region_id, version)].into(),
+        cross_region_refs: HashMap::new(),
+    };
+
+    let gc_worker = LocalGcWorker::try_new(
+        access_layer,
+        Some(engine.cache_manager()),
+        regions,
+        engine.mito_config().gc.clone(),
+        file_ref_manifest,
+        &engine.gc_limiter(),
+        true, // full_file_listing is required when the region is absent
+        engine.region_hook(),
+    )
+    .await
+    .unwrap();
+    gc_worker.run().await.unwrap();
+
+    assert!(
+        hook.gc_calls.load(Ordering::Relaxed) >= 1,
+        "on_region_gc should fire after a GC pass for a dropped region"
+    );
+    assert!(
+        hook.last_is_region_dropped.load(Ordering::Relaxed),
+        "a dropped region's GC pass must report is_region_dropped=true"
     );
 }

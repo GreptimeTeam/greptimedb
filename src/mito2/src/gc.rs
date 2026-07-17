@@ -547,9 +547,13 @@ impl LocalGcWorker {
 
         // Notify extensions (e.g. an Iceberg manifest tree under a separate
         // warehouse root) that GC reclaimed these files, so they can clean up
-        // their own residual sidecar files. Fires for both live regions and
-        // dropped/repartitioned regions (`is_region_dropped`).
-        if let Some(hook) = &self.hook {
+        // their own residual sidecar files. Skip the invocation when there is
+        // nothing to report — a live region's periodic pass that deleted no
+        // files — to avoid unnecessary hook overhead/I/O. A dropped region
+        // always notifies (the reclamation path extensions act on).
+        if let Some(hook) = &self.hook
+            && (!deletable_files.is_empty() || is_region_dropped)
+        {
             let region_metadata = region.as_ref().map(|r| r.metadata());
             hook.on_region_gc(
                 region_id,
