@@ -484,19 +484,19 @@ const RETENTION_EXPIRES_AT_KEY_PREFIX: &str = "__retention_expires_at";
 const DROP_GENERATION_KEY_PREFIX: &str = "__drop_generation";
 const PURGING_KEY_PREFIX: &str = "__purging";
 
-fn dropped_at_key(table_id: TableId) -> Vec<u8> {
+pub(crate) fn dropped_at_key(table_id: TableId) -> Vec<u8> {
     format!("{DROPPED_AT_KEY_PREFIX}/{table_id}").into_bytes()
 }
 
-fn retention_expires_at_key(table_id: TableId) -> Vec<u8> {
+pub(crate) fn retention_expires_at_key(table_id: TableId) -> Vec<u8> {
     format!("{RETENTION_EXPIRES_AT_KEY_PREFIX}/{table_id}").into_bytes()
 }
 
-fn drop_generation_key(table_id: TableId) -> Vec<u8> {
+pub(crate) fn drop_generation_key(table_id: TableId) -> Vec<u8> {
     format!("{DROP_GENERATION_KEY_PREFIX}/{table_id}").into_bytes()
 }
 
-fn purging_key(table_id: TableId) -> Vec<u8> {
+pub(crate) fn purging_key(table_id: TableId) -> Vec<u8> {
     format!("{PURGING_KEY_PREFIX}/{table_id}").into_bytes()
 }
 

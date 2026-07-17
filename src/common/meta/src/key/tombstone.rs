@@ -62,6 +62,10 @@ const TOMBSTONE_PREFIX: &str = "__tombstone/";
 const MOVE_VALUE_TXN_OPS_PER_KEY: usize = 4;
 const RESTORE_VALUE_TXN_OPS_PER_KEY: usize = 6;
 
+pub(crate) fn to_tombstone_key(key: &[u8]) -> Vec<u8> {
+    [TOMBSTONE_PREFIX.as_bytes(), key].concat()
+}
+
 impl TombstoneManager {
     /// Returns [TombstoneManager].
     pub fn new(kv_backend: KvBackendRef) -> Self {
