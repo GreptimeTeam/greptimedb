@@ -2101,8 +2101,10 @@ mod tests {
     use table::metadata::{TableInfoBuilder, TableMetaBuilder, TableType, TableVersion};
     use table::requests::TableOptions;
     use table::test_util::EmptyTable;
+    use table::test_util::table_info::test_table_info;
 
     use super::*;
+    use crate::prometheus_handler::PrometheusHandler;
 
     struct TestCase {
         name: &'static str,
@@ -2110,6 +2112,75 @@ mod tests {
         expected_metric: Option<&'static str>,
         expected_type: ValueType,
         should_error: bool,
+    }
+
+    struct DenyTablePrometheusHandler {
+        catalog_manager: CatalogManagerRef,
+    }
+
+    #[async_trait::async_trait]
+    impl PrometheusHandler for DenyTablePrometheusHandler {
+        async fn do_query(&self, _: &PromQuery, _: QueryContextRef) -> Result<Output> {
+            unreachable!()
+        }
+
+        async fn check_query_permission(&self, _: &[PromQuery], _: &QueryContextRef) -> Result<()> {
+            Ok(())
+        }
+
+        async fn check_query_target_permission(
+            &self,
+            targets: PermissionTableTargets,
+            _: &QueryContextRef,
+        ) -> Result<()> {
+            if matches!(
+                targets,
+                PermissionTableTargets::Resolved(targets)
+                    if targets.iter().any(|target| target.table == "denied")
+            ) {
+                return auth::error::PermissionDeniedSnafu
+                    .fail()
+                    .context(crate::error::AuthSnafu);
+            }
+            Ok(())
+        }
+
+        async fn filter_metadata_metric_names(
+            &self,
+            metric_names: Vec<String>,
+            _: &str,
+            _: &QueryContextRef,
+        ) -> Result<Vec<String>> {
+            Ok(metric_names
+                .into_iter()
+                .filter(|metric| metric != "denied")
+                .collect())
+        }
+
+        async fn query_metric_names(
+            &self,
+            _: Vec<Matcher>,
+            _: &str,
+            _: &QueryContextRef,
+        ) -> Result<Vec<String>> {
+            unreachable!()
+        }
+
+        async fn query_label_values(
+            &self,
+            _: String,
+            _: String,
+            _: Vec<Matcher>,
+            _: std::time::SystemTime,
+            _: std::time::SystemTime,
+            _: &QueryContextRef,
+        ) -> Result<Vec<String>> {
+            unreachable!()
+        }
+
+        fn catalog_manager(&self) -> CatalogManagerRef {
+            self.catalog_manager.clone()
+        }
     }
 
     fn permission_denied_response() -> PrometheusJsonResponse {
@@ -2123,6 +2194,59 @@ mod tests {
         use axum::response::IntoResponse;
 
         let response = permission_denied_response();
+        assert_eq!(Some(StatusCode::PermissionDenied), response.status_code);
+        assert_eq!(
+            axum::http::StatusCode::FORBIDDEN,
+            response.into_response().status()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_field_name_enumeration_fails_closed() {
+        use axum::response::IntoResponse;
+
+        let mut allowed = test_table_info(
+            1024,
+            "allowed",
+            DEFAULT_SCHEMA_NAME,
+            DEFAULT_CATALOG_NAME,
+            Arc::new(Schema::new(vec![])),
+        );
+        allowed.meta.options.extra_options.insert(
+            LOGICAL_TABLE_METADATA_KEY.to_string(),
+            "physical_metrics".to_string(),
+        );
+        let manager = MemoryCatalogManager::new_with_table(EmptyTable::from_table_info(&allowed));
+        let mut denied = allowed.clone();
+        denied.ident.table_id = 1025;
+        denied.name = "denied".to_string();
+        manager
+            .register_table_sync(RegisterTableRequest {
+                catalog: DEFAULT_CATALOG_NAME.to_string(),
+                schema: DEFAULT_SCHEMA_NAME.to_string(),
+                table_name: denied.name.clone(),
+                table_id: denied.table_id(),
+                table: EmptyTable::from_table_info(&denied),
+            })
+            .unwrap();
+        let query_ctx = QueryContext::with(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME);
+        assert_eq!(
+            vec!["allowed".to_string(), "denied".to_string()],
+            retrieve_table_names(&query_ctx, manager.clone(), Vec::new())
+                .await
+                .unwrap()
+        );
+
+        let response = label_values_query(
+            State(Arc::new(DenyTablePrometheusHandler {
+                catalog_manager: manager,
+            })),
+            Path(FIELD_NAME_LABEL.to_string()),
+            Extension(query_ctx),
+            Query(LabelValueQuery::default()),
+        )
+        .await;
+
         assert_eq!(Some(StatusCode::PermissionDenied), response.status_code);
         assert_eq!(
             axum::http::StatusCode::FORBIDDEN,
