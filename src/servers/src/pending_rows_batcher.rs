@@ -208,11 +208,56 @@ struct BatchKey {
     physical_table: String,
 }
 
+/// An aligned logical record batch and its timestamp column index.
+#[derive(Debug, Clone)]
+pub struct RecordBatchWithTsIdx {
+    /// The aligned logical record batch.
+    batch: RecordBatch,
+    /// The timestamp column index in `batch`.
+    timestamp_index: usize,
+}
+
+impl RecordBatchWithTsIdx {
+    /// Creates a record batch with a validated timestamp column index.
+    pub fn try_new(batch: RecordBatch, timestamp_index: usize) -> Result<Self> {
+        let schema = batch.schema();
+        let timestamp_field = schema.fields().get(timestamp_index).with_context(|| {
+            error::InvalidPromRemoteRequestSnafu {
+                msg: format!(
+                    "Timestamp column index {} is out of bounds for record batch with {} columns",
+                    timestamp_index,
+                    batch.num_columns()
+                ),
+            }
+        })?;
+        ensure!(
+            matches!(timestamp_field.data_type(), ArrowDataType::Timestamp(_, _)),
+            error::InvalidPromRemoteRequestSnafu {
+                msg: format!(
+                    "Column at index {} is not a timestamp column: {:?}",
+                    timestamp_index,
+                    timestamp_field.data_type()
+                ),
+            }
+        );
+
+        Ok(Self {
+            batch,
+            timestamp_index,
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn into_parts(self) -> (RecordBatch, usize) {
+        (self.batch, self.timestamp_index)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct TableBatch {
     pub table_name: String,
     pub table_id: TableId,
-    pub batches: Vec<RecordBatch>,
+    pub batches: Vec<RecordBatchWithTsIdx>,
     pub row_count: usize,
 }
 
@@ -256,7 +301,7 @@ struct PendingWorker {
 
 enum WorkerCommand {
     Submit {
-        table_batches: Vec<(String, u32, RecordBatch)>,
+        table_batches: Vec<(String, u32, RecordBatchWithTsIdx)>,
         total_rows: usize,
         ctx: QueryContextRef,
         response_tx: oneshot::Sender<std::result::Result<(), Arc<Error>>>,
@@ -437,7 +482,7 @@ impl PendingRowsBatcher {
         &self,
         requests: RowInsertRequests,
         ctx: &QueryContextRef,
-    ) -> Result<(Vec<(String, u32, RecordBatch)>, usize)> {
+    ) -> Result<(Vec<(String, u32, RecordBatchWithTsIdx)>, usize)> {
         let catalog = ctx.current_catalog().to_string();
         let schema = ctx.current_schema();
 
@@ -743,7 +788,7 @@ impl PendingRowsBatcher {
     fn build_aligned_batches(
         table_rows: &[(String, Rows)],
         region_schemas: &HashMap<String, (Arc<ArrowSchema>, u32)>,
-    ) -> Result<Vec<(String, u32, RecordBatch)>> {
+    ) -> Result<Vec<(String, u32, RecordBatchWithTsIdx)>> {
         let mut aligned_batches = Vec::with_capacity(table_rows.len());
         for (table_name, rows) in table_rows {
             let (region_schema, table_id) =
@@ -845,7 +890,7 @@ impl PendingBatch {
         &mut self,
         table_name: String,
         table_id: TableId,
-        record_batch: RecordBatch,
+        record_batch: RecordBatchWithTsIdx,
     ) {
         let entry = self.tables.entry(table_id).or_insert_with(|| TableBatch {
             table_name,
@@ -853,7 +898,7 @@ impl PendingBatch {
             batches: Vec::new(),
             row_count: 0,
         });
-        entry.row_count += record_batch.num_rows();
+        entry.row_count += record_batch.batch.num_rows();
         entry.batches.push(record_batch);
     }
 }
@@ -1332,10 +1377,7 @@ async fn flush_batch(
 fn extract_timestamps(table_batch: &TableBatch) -> Vec<i64> {
     let mut timestamps = Vec::with_capacity(table_batch.row_count);
     for batch in &table_batch.batches {
-        let Some(timestamp_column) = batch.column_by_name(greptime_timestamp()) else {
-            error!("Failed to extract timestamps from record batch: missing timestamp column");
-            continue;
-        };
+        let timestamp_column = batch.batch.column(batch.timestamp_index);
         let Some((timestamp_values, _)) =
             datatypes::timestamp::timestamp_array_to_primitive(timestamp_column)
         else {
@@ -1500,6 +1542,7 @@ fn transform_logical_batches_to_physical(
         let table_id = table_batch.table_id;
 
         for batch in &table_batch.batches {
+            let batch = &batch.batch;
             let batch_schema = batch.schema();
             let start = Instant::now();
             let (tag_columns, essential_col_indices) = columns_taxonomy(
@@ -1738,7 +1781,11 @@ mod tests {
     use api::v1::flow::{DirtyWindowRequests, FlowRequest, FlowResponse};
     use api::v1::meta::Peer;
     use api::v1::region::{InsertRequests, RegionRequest, region_request};
-    use api::v1::{ColumnSchema, Row, RowInsertRequest, RowInsertRequests, Rows};
+    use api::v1::value::ValueData;
+    use api::v1::{
+        ColumnDataType, ColumnSchema, Row, RowInsertRequest, RowInsertRequests, Rows, SemanticType,
+        Value,
+    };
     use arrow::array::{BinaryArray, BooleanArray, StringArray, TimestampMillisecondArray};
     use arrow::datatypes::{DataType as ArrowDataType, Field, Schema as ArrowSchema};
     use arrow::record_batch::RecordBatch;
@@ -1771,14 +1818,15 @@ mod tests {
         BatchKey, Error, FlushBatch, FlushRegionWrite, FlushWaiter, PendingBatch,
         PendingRowsBatcher, PendingWorker, PhysicalFlushCatalogProvider,
         PhysicalFlushNodeRequester, PhysicalFlushPartitionProvider, PhysicalTableMetadata,
-        PlannedRegionBatch, ResolvedRegionBatch, TableBatch, WorkerCommand, columns_taxonomy,
-        drain_batch, encode_region_write_requests, extract_timestamps, flush_batch,
-        flush_batch_physical, flush_region_writes_concurrently, greptime_timestamp,
+        PlannedRegionBatch, RecordBatchWithTsIdx, ResolvedRegionBatch, TableBatch, WorkerCommand,
+        columns_taxonomy, drain_batch, encode_region_write_requests, extract_timestamps,
+        flush_batch, flush_batch_physical, flush_region_writes_concurrently, greptime_timestamp,
         notify_flow_dirty_windows_after_flush, plan_region_batches, remove_worker_if_same_channel,
         should_close_worker_on_idle_timeout, should_dispatch_concurrently,
         strip_partition_columns_from_batch, transform_logical_batches_to_physical,
     };
     use crate::error;
+    use crate::prom_row_builder::rows_to_aligned_record_batch;
 
     fn mock_rows(row_count: usize, schema_name: &str) -> Rows {
         Rows {
@@ -1812,8 +1860,17 @@ mod tests {
         .unwrap()
     }
 
-    fn mock_timestamp_batch(timestamps: Vec<Option<i64>>) -> RecordBatch {
-        RecordBatch::try_new(
+    fn mock_aligned_tag_batch(
+        tag_name: &str,
+        tag_value: &str,
+        ts: i64,
+        val: f64,
+    ) -> RecordBatchWithTsIdx {
+        RecordBatchWithTsIdx::try_new(mock_tag_batch(tag_name, tag_value, ts, val), 0).unwrap()
+    }
+
+    fn mock_timestamp_batch(timestamps: Vec<Option<i64>>) -> RecordBatchWithTsIdx {
+        let batch = RecordBatch::try_new(
             Arc::new(ArrowSchema::new(vec![Field::new(
                 greptime_timestamp(),
                 ArrowDataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None),
@@ -1821,7 +1878,8 @@ mod tests {
             )])),
             vec![Arc::new(TimestampMillisecondArray::from(timestamps))],
         )
-        .unwrap()
+        .unwrap();
+        RecordBatchWithTsIdx::try_new(batch, 0).unwrap()
     }
 
     #[test]
@@ -1830,8 +1888,8 @@ mod tests {
             table_name: "cpu".to_string(),
             table_id: 42,
             batches: vec![
-                mock_tag_batch("tag1", "host-1", 1000, 1.0),
-                mock_tag_batch("tag1", "host-1", 2000, 2.0),
+                mock_aligned_tag_batch("tag1", "host-1", 1000, 1.0),
+                mock_aligned_tag_batch("tag1", "host-1", 2000, 2.0),
             ],
             row_count: 2,
         };
@@ -1852,6 +1910,141 @@ mod tests {
         };
 
         assert_eq!(vec![1000, 3000, 5000], extract_timestamps(&table_batch));
+    }
+
+    #[test]
+    fn test_record_batch_with_ts_idx_rejects_out_of_bounds_index() {
+        let batch = mock_tag_batch("tag1", "host-1", 1000, 1.0);
+
+        assert!(RecordBatchWithTsIdx::try_new(batch, 3).is_err());
+    }
+
+    #[test]
+    fn test_record_batch_with_ts_idx_rejects_non_timestamp_column() {
+        let batch = mock_tag_batch("tag1", "host-1", 1000, 1.0);
+
+        assert!(RecordBatchWithTsIdx::try_new(batch, 1).is_err());
+    }
+
+    #[test]
+    fn test_extract_timestamps_supports_per_batch_timestamp_indices() {
+        let timestamp_first = RecordBatch::try_new(
+            Arc::new(ArrowSchema::new(vec![
+                Field::new(
+                    "ts",
+                    ArrowDataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None),
+                    false,
+                ),
+                Field::new("host", ArrowDataType::Utf8, true),
+            ])),
+            vec![
+                Arc::new(TimestampMillisecondArray::from(vec![1000, 2000])),
+                Arc::new(StringArray::from(vec!["host-1", "host-2"])),
+            ],
+        )
+        .unwrap();
+        let timestamp_second = RecordBatch::try_new(
+            Arc::new(ArrowSchema::new(vec![
+                Field::new("host", ArrowDataType::Utf8, true),
+                Field::new(
+                    "timestamp",
+                    ArrowDataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None),
+                    false,
+                ),
+            ])),
+            vec![
+                Arc::new(StringArray::from(vec!["host-3", "host-4"])),
+                Arc::new(TimestampMillisecondArray::from(vec![3000, 4000])),
+            ],
+        )
+        .unwrap();
+        let table_batch = TableBatch {
+            table_name: "cpu".to_string(),
+            table_id: 42,
+            batches: vec![
+                RecordBatchWithTsIdx::try_new(timestamp_first, 0).unwrap(),
+                RecordBatchWithTsIdx::try_new(timestamp_second, 1).unwrap(),
+            ],
+            row_count: 4,
+        };
+
+        assert_eq!(
+            vec![1000, 2000, 3000, 4000],
+            extract_timestamps(&table_batch)
+        );
+    }
+
+    #[test]
+    fn test_extract_timestamps_uses_aligned_custom_timestamp_index() {
+        let rows = Rows {
+            schema: vec![
+                ColumnSchema {
+                    column_name: greptime_timestamp().to_string(),
+                    datatype: ColumnDataType::TimestampMillisecond as i32,
+                    semantic_type: SemanticType::Timestamp as i32,
+                    ..Default::default()
+                },
+                ColumnSchema {
+                    column_name: "host".to_string(),
+                    datatype: ColumnDataType::String as i32,
+                    semantic_type: SemanticType::Tag as i32,
+                    ..Default::default()
+                },
+                ColumnSchema {
+                    column_name: "greptime_value".to_string(),
+                    datatype: ColumnDataType::Float64 as i32,
+                    semantic_type: SemanticType::Field as i32,
+                    ..Default::default()
+                },
+            ],
+            rows: vec![
+                Row {
+                    values: vec![
+                        Value {
+                            value_data: Some(ValueData::TimestampMillisecondValue(1000)),
+                        },
+                        Value {
+                            value_data: Some(ValueData::StringValue("host-1".to_string())),
+                        },
+                        Value {
+                            value_data: Some(ValueData::F64Value(1.0)),
+                        },
+                    ],
+                },
+                Row {
+                    values: vec![
+                        Value {
+                            value_data: Some(ValueData::TimestampMillisecondValue(2000)),
+                        },
+                        Value {
+                            value_data: Some(ValueData::StringValue("host-2".to_string())),
+                        },
+                        Value {
+                            value_data: Some(ValueData::F64Value(2.0)),
+                        },
+                    ],
+                },
+            ],
+        };
+        let target_schema = ArrowSchema::new(vec![
+            Field::new("host", ArrowDataType::Utf8, true),
+            Field::new(
+                "timestamp",
+                ArrowDataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new("greptime_value", ArrowDataType::Float64, true),
+        ]);
+        let batch = rows_to_aligned_record_batch(&rows, &target_schema).unwrap();
+        assert_eq!(1, batch.timestamp_index);
+        let table_batch = TableBatch {
+            table_name: "cpu".to_string(),
+            table_id: 42,
+            row_count: batch.batch.num_rows(),
+            batches: vec![batch],
+        };
+
+        assert_eq!(vec![1000, 2000], extract_timestamps(&table_batch));
     }
 
     fn mock_physical_table_metadata(table_id: TableId) -> PhysicalTableMetadata {
@@ -2060,7 +2253,7 @@ mod tests {
                 TableBatch {
                     table_name: "cpu".to_string(),
                     table_id: 42,
-                    batches: vec![mock_tag_batch("tag1", "host-1", 1000, 1.0)],
+                    batches: vec![mock_aligned_tag_batch("tag1", "host-1", 1000, 1.0)],
                     row_count: 1,
                 },
             )]),
@@ -2091,12 +2284,12 @@ mod tests {
         pending_batch.add_table_batch(
             "cpu".to_string(),
             42,
-            mock_tag_batch("tag1", "host-1", 1000, 1.0),
+            mock_aligned_tag_batch("tag1", "host-1", 1000, 1.0),
         );
         pending_batch.add_table_batch(
             "cpu".to_string(),
             43,
-            mock_tag_batch("tag1", "host-1", 2000, 2.0),
+            mock_aligned_tag_batch("tag1", "host-1", 2000, 2.0),
         );
 
         assert_eq!(2, pending_batch.tables.len());
@@ -2260,7 +2453,7 @@ mod tests {
         let table_batches = vec![TableBatch {
             table_name: "cpu".to_string(),
             table_id,
-            batches: vec![mock_tag_batch("tag1", "host-1", 1000, 1.0)],
+            batches: vec![mock_aligned_tag_batch("tag1", "host-1", 1000, 1.0)],
             row_count: 1,
         }];
 
@@ -2301,8 +2494,8 @@ mod tests {
             table_name: "cpu".to_string(),
             table_id,
             batches: vec![
-                mock_tag_batch("tag1", "host-1", 1000, 1.0),
-                mock_tag_batch("tag1", "host-1", 2000, 2.0),
+                mock_aligned_tag_batch("tag1", "host-1", 1000, 1.0),
+                mock_aligned_tag_batch("tag1", "host-1", 2000, 2.0),
             ],
             row_count: 2,
         }];
@@ -2344,7 +2537,7 @@ mod tests {
         let table_batches = vec![TableBatch {
             table_name: "cpu".to_string(),
             table_id,
-            batches: vec![mock_tag_batch("tag1", "host-1", 1000, 1.0)],
+            batches: vec![mock_aligned_tag_batch("tag1", "host-1", 1000, 1.0)],
             row_count: 1,
         }];
         let writes = Arc::new(AtomicUsize::new(0));
@@ -2404,7 +2597,7 @@ mod tests {
         let table_batches = vec![TableBatch {
             table_name: "cpu".to_string(),
             table_id,
-            batches: vec![mock_tag_batch("tag1", "host-1", 1000, 1.0)],
+            batches: vec![mock_aligned_tag_batch("tag1", "host-1", 1000, 1.0)],
             row_count: 1,
         }];
         let writes = Arc::new(AtomicUsize::new(0));
@@ -2831,7 +3024,7 @@ mod tests {
 
     #[test]
     fn test_transform_logical_batches_to_physical_success() {
-        let batch = mock_tag_batch("tag1", "v1", 1000, 1.0);
+        let batch = mock_aligned_tag_batch("tag1", "v1", 1000, 1.0);
 
         let table_batches = vec![TableBatch {
             table_name: "t1".to_string(),
@@ -2855,7 +3048,7 @@ mod tests {
 
     #[test]
     fn test_transform_logical_batches_to_physical_taxonomy_failure() {
-        let batch = mock_tag_batch("tag1", "v1", 1000, 1.0);
+        let batch = mock_aligned_tag_batch("tag1", "v1", 1000, 1.0);
 
         let table_batches = vec![TableBatch {
             table_name: "t1".to_string(),
@@ -2879,8 +3072,8 @@ mod tests {
 
     #[test]
     fn test_transform_logical_batches_to_physical_multiple_batches() {
-        let batch1 = mock_tag_batch("tag1", "v1", 1000, 1.0);
-        let batch2 = mock_tag_batch("tag2", "v2", 2000, 2.0);
+        let batch1 = mock_aligned_tag_batch("tag1", "v1", 1000, 1.0);
+        let batch2 = mock_aligned_tag_batch("tag2", "v2", 2000, 2.0);
 
         let table_batches = vec![
             TableBatch {
@@ -2908,8 +3101,8 @@ mod tests {
 
     #[test]
     fn test_transform_logical_batches_to_physical_mixed_success_failure() {
-        let batch1 = mock_tag_batch("tag1", "v1", 1000, 1.0);
-        let batch2 = mock_tag_batch("tag2", "v2", 2000, 2.0);
+        let batch1 = mock_aligned_tag_batch("tag1", "v1", 1000, 1.0);
+        let batch2 = mock_aligned_tag_batch("tag2", "v2", 2000, 2.0);
 
         let table_batches = vec![
             TableBatch {
@@ -2941,7 +3134,7 @@ mod tests {
         let table_batches = vec![TableBatch {
             table_name: "t1".to_string(),
             table_id: 11,
-            batches: vec![mock_tag_batch("tag1", "host-1", 1000, 1.0)],
+            batches: vec![mock_aligned_tag_batch("tag1", "host-1", 1000, 1.0)],
             row_count: 1,
         }];
         let partition_calls = Arc::new(AtomicUsize::new(0));
@@ -2991,7 +3184,7 @@ mod tests {
         let table_batches = vec![TableBatch {
             table_name: "t1".to_string(),
             table_id: 11,
-            batches: vec![mock_tag_batch("tag1", "host-1", 1000, 1.0)],
+            batches: vec![mock_aligned_tag_batch("tag1", "host-1", 1000, 1.0)],
             row_count: 1,
         }];
         let ctx = session::context::QueryContext::arc();
@@ -3020,7 +3213,7 @@ mod tests {
         let table_batches = vec![TableBatch {
             table_name: "t1".to_string(),
             table_id: 11,
-            batches: vec![mock_tag_batch("tag1", "host-1", 1000, 1.0)],
+            batches: vec![mock_aligned_tag_batch("tag1", "host-1", 1000, 1.0)],
             row_count: 1,
         }];
         let partition_calls = Arc::new(AtomicUsize::new(0));
@@ -3057,13 +3250,13 @@ mod tests {
             TableBatch {
                 table_name: "broken".to_string(),
                 table_id: 11,
-                batches: vec![mock_tag_batch("unknown_tag", "host-1", 1000, 1.0)],
+                batches: vec![mock_aligned_tag_batch("unknown_tag", "host-1", 1000, 1.0)],
                 row_count: 1,
             },
             TableBatch {
                 table_name: "healthy".to_string(),
                 table_id: 12,
-                batches: vec![mock_tag_batch("tag1", "host-2", 2000, 2.0)],
+                batches: vec![mock_aligned_tag_batch("tag1", "host-2", 2000, 2.0)],
                 row_count: 1,
             },
         ];
