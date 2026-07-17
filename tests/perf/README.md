@@ -257,7 +257,7 @@ seed = 12345
 # SST and series layout
 
 [[scenario.queries]]
-# query, warmups, iterations, thresholds
+# name, kind, database, query, warmups, iterations, thresholds
 ```
 
 The runner currently supports `direct_readable_sst` and

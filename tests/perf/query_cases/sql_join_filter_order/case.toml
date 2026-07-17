@@ -87,6 +87,7 @@ series_layout = "round_robin"
 [[scenario.queries]]
 name = "join_host_aggregate_top"
 kind = "sql"
+database = "public"
 query = "SELECT f.host, d.zone, avg(f.value * d.weight) AS score FROM sql_join_fact f JOIN sql_join_dim d ON f.host = d.host WHERE f.ts >= '2024-01-01 00:00:00+0000'::TIMESTAMP AND f.ts < '2024-01-01 04:00:00+0000'::TIMESTAMP AND d.ts >= '2024-01-01 00:00:00+0000'::TIMESTAMP AND d.ts < '2024-01-01 04:00:00+0000'::TIMESTAMP AND d.zone IN ('zone1', 'zone2') GROUP BY f.host, d.zone ORDER BY score DESC LIMIT 10"
 warmup = 1
 iterations = 3

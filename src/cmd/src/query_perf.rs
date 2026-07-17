@@ -12,12 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::path::Path;
-
-pub(super) fn case_name_from_path(path: &Path) -> String {
-    path.parent()
-        .and_then(Path::file_name)
-        .and_then(|name| name.to_str())
-        .unwrap_or("query_perf_case")
-        .to_string()
-}
+pub mod case;
+pub mod error;
+pub mod fixture;
+pub mod manifest;

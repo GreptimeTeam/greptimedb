@@ -40,6 +40,7 @@ max_files = 4
 [[scenario.queries]]
 name = "selector_10d_seeded_random"
 kind = "tql"
+database = "public"
 query = "TQL ANALYZE VERBOSE (1704067200, 1704931200, '1h') prom_remote_write_seeded_random{host=~'host.*'}"
 warmup = 2
 iterations = 15

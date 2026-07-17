@@ -56,6 +56,7 @@ series_layout = "round_robin"
 [[scenario.queries]]
 name = "count_all"
 kind = "sql"
+database = "public"
 query = "SELECT count(*) FROM smoke_direct_sst"
 warmup = 0
 iterations = 1

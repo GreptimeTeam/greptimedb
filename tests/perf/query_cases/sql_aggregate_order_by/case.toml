@@ -55,6 +55,7 @@ series_layout = "round_robin"
 [[scenario.queries]]
 name = "aggregate_service_top"
 kind = "sql"
+database = "public"
 query = "SELECT service, avg(cpu) AS avg_cpu, sum(cpu) AS sum_cpu FROM sql_aggregate_order_by WHERE ts >= '2024-01-01 00:00:00+0000'::TIMESTAMP AND ts < '2024-01-01 08:00:00+0000'::TIMESTAMP GROUP BY service ORDER BY avg_cpu DESC LIMIT 5"
 warmup = 1
 iterations = 3

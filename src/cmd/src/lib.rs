@@ -30,6 +30,9 @@ pub mod flownode;
 pub mod frontend;
 pub mod metasrv;
 pub mod options;
+#[cfg(feature = "dev-tools")]
+#[doc(hidden)]
+pub mod query_perf;
 pub mod standalone;
 pub mod user;
 

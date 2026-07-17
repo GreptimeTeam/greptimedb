@@ -224,10 +224,10 @@ def create_table_sql(table: dict[str, Any]) -> str:
 
 
 def planned_queries(case: dict[str, Any]) -> list[dict[str, Any]]:
-    queries = scenario(case).get("queries", [])
-    if isinstance(queries, dict):
-        return [{"name": name, **value} for name, value in queries.items()]
-    return list(queries)
+    queries = scenario(case).get("queries")
+    if not isinstance(queries, list) or not queries:
+        raise ValueError("normalized scenario.queries must be a non-empty list")
+    return queries
 
 
 def http_post_sql(port: int, sql: str, db: str, timeout: float) -> dict[str, Any]:
@@ -701,11 +701,7 @@ def validate_show_create(result: dict[str, Any], table: dict[str, Any]) -> list[
 
 
 def run_queries(target: RunTarget, case: dict[str, Any], tables: list[dict[str, Any]], http_timeout: float) -> dict[str, Any]:
-    table = tables[0]
-    db = table["database"]
     queries = planned_queries(case)
-    if not queries:
-        queries = [{"name": "count_all", "kind": "sql", "query": f"SELECT count(*) FROM {sql_ident(table['name'])}", "warmup": 0, "iterations": 1}]
     validations = []
     validation_errors = []
     for table in tables:
@@ -717,20 +713,20 @@ def run_queries(target: RunTarget, case: dict[str, Any], tables: list[dict[str, 
                 for error in validate_show_create(result, table):
                     validation_errors.append({"sql": sql, "error": error, "response": result.get("response")})
             validations.append(result)
-    if queries:
-        result = http_post_sql(target.http_port, queries[0]["query"], db, http_timeout)
-        if not result["ok"]:
-            validation_errors.append({"sql": queries[0]["query"], "error": result.get("error"), "response": result.get("response")})
-        validations.append(result)
+    first_query = queries[0]
+    result = http_post_sql(target.http_port, first_query["query"], first_query["database"], http_timeout)
+    if not result["ok"]:
+        validation_errors.append({"sql": first_query["query"], "error": result.get("error"), "response": result.get("response")})
+    validations.append(result)
     measurements = []
     for q in queries:
         for _ in range(int(q.get("warmup", 0))):
-            warmup = http_post_sql(target.http_port, q["query"], db, http_timeout)
+            warmup = http_post_sql(target.http_port, q["query"], q["database"], http_timeout)
             if not warmup["ok"]:
                 validation_errors.append({"sql": q["query"], "phase": "warmup", "error": warmup.get("error"), "response": warmup.get("response")})
         samples = []
         for _ in range(int(q.get("iterations", 1))):
-            result = http_post_sql(target.http_port, q["query"], db, http_timeout)
+            result = http_post_sql(target.http_port, q["query"], q["database"], http_timeout)
             result["execution_time_ms"] = extract_execution_time(result.get("response"))
             samples.append(result)
         good_lats = [s["latency_ms"] for s in samples if s["ok"]]

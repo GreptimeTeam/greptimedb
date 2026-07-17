@@ -16,83 +16,49 @@ use std::collections::BTreeSet;
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 
-use clap::Args as ClapArgs;
 use parquet::file::reader::{FileReader, SerializedFileReader};
-use serde::Serialize;
 
-#[derive(Debug, ClapArgs)]
-pub(super) struct InspectFooterArgs {
-    #[arg(long)]
-    root: PathBuf,
-    #[arg(long, default_value = "greptime_value")]
-    column: String,
-    #[arg(long)]
-    include_metadata_files: bool,
-}
+use crate::query_perf::error::{Error, Result};
+use crate::query_perf::fixture::{
+    FooterColumnChunkObservation, FooterFileObservation, FooterObservation, FooterRequest,
+    FooterSummary, validate_footer_request,
+};
 
-#[derive(Debug, Serialize)]
-struct FooterReport {
-    root: String,
-    summary: FooterSummary,
-    files: Vec<FooterFileReport>,
-}
-#[derive(Debug, Default, Serialize)]
-struct FooterSummary {
-    column: String,
-    file_count: usize,
-    files_with_column: usize,
-    total_file_size: u64,
-    total_rows: i64,
-    column_compressed_size: i64,
-    column_uncompressed_size: i64,
-    unique_encodings: Vec<String>,
-}
-#[derive(Debug, Serialize)]
-struct FooterFileReport {
-    path: String,
-    relative_path: String,
-    file_size: u64,
-    num_rows: i64,
-    num_row_groups: usize,
-    columns: Vec<FooterColumnChunkReport>,
-}
-#[derive(Debug, Serialize)]
-struct FooterColumnChunkReport {
-    row_group_index: usize,
-    column_index: usize,
-    column_path: String,
-    encodings: Vec<String>,
-    compression: String,
-    compressed_size: i64,
-    uncompressed_size: i64,
-    num_values: i64,
-}
-
-pub(super) fn run_inspect_footer(
-    args: InspectFooterArgs,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let files = collect_parquet_files(&args.root, args.include_metadata_files)?;
+pub fn inspect_footer(request: FooterRequest) -> Result<FooterObservation> {
+    validate_footer_request(&request)?;
+    let files = collect_parquet_files(&request.root, request.include_metadata_files)?;
     let reports = files
         .iter()
-        .map(|p| inspect_file(&args.root, p, &args.column))
-        .collect::<Result<Vec<_>, _>>()?;
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&FooterReport {
-            root: args.root.display().to_string(),
-            summary: summarize_footer(&args.column, &reports),
-            files: reports
-        })?
-    );
-    Ok(())
+        .map(|p| inspect_file(&request.root, p, &request.column))
+        .collect::<Result<Vec<_>>>()?;
+    Ok(FooterObservation {
+        root: request.root.display().to_string(),
+        summary: summarize_footer(&request.column, &reports),
+        files: reports,
+    })
 }
-fn collect_parquet_files(
-    root: &Path,
-    include_metadata_files: bool,
-) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
+fn collect_parquet_files(root: &Path, include_metadata_files: bool) -> Result<Vec<PathBuf>> {
+    if !root.exists() {
+        return Err(Error::new(format!(
+            "footer root does not exist: {}",
+            root.display()
+        )));
+    }
+    if !root.is_dir() {
+        return Err(Error::new(format!(
+            "footer root is not a directory: {}",
+            root.display()
+        )));
+    }
     let mut files = Vec::new();
     collect_parquet_files_inner(root, root, include_metadata_files, &mut files)?;
     files.sort();
+    if files.is_empty() {
+        return Err(Error::new(format!(
+            "footer root contains no parquet files: {}",
+            root.display()
+        )));
+    }
     Ok(files)
 }
 fn collect_parquet_files_inner(
@@ -100,10 +66,14 @@ fn collect_parquet_files_inner(
     path: &Path,
     include_metadata_files: bool,
     files: &mut Vec<PathBuf>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<()> {
     if path.is_dir() {
-        for entry in fs::read_dir(path)? {
-            collect_parquet_files_inner(root, &entry?.path(), include_metadata_files, files)?;
+        for entry in fs::read_dir(path)
+            .map_err(|err| Error::new(format!("failed to read {}: {err}", path.display())))?
+        {
+            let entry = entry
+                .map_err(|err| Error::new(format!("failed to read directory entry: {err}")))?;
+            collect_parquet_files_inner(root, &entry.path(), include_metadata_files, files)?;
         }
     } else if path.extension().is_some_and(|ext| ext == "parquet")
         && (include_metadata_files
@@ -117,13 +87,20 @@ fn collect_parquet_files_inner(
     }
     Ok(())
 }
-fn inspect_file(
-    root: &Path,
-    path: &Path,
-    column: &str,
-) -> Result<FooterFileReport, Box<dyn std::error::Error>> {
-    let file_size = fs::metadata(path)?.len();
-    let reader = SerializedFileReader::new(File::open(path)?)?;
+fn inspect_file(root: &Path, path: &Path, column: &str) -> Result<FooterFileObservation> {
+    let file_size = fs::metadata(path)
+        .map_err(|err| Error::new(format!("failed to read {} metadata: {err}", path.display())))?
+        .len();
+    let reader = SerializedFileReader::new(
+        File::open(path)
+            .map_err(|err| Error::new(format!("failed to open {}: {err}", path.display())))?,
+    )
+    .map_err(|err| {
+        Error::new(format!(
+            "failed to read parquet footer {}: {err}",
+            path.display()
+        ))
+    })?;
     let metadata = reader.metadata().file_metadata();
     let row_groups = reader.metadata().row_groups();
     let mut columns = Vec::new();
@@ -131,7 +108,7 @@ fn inspect_file(
         for (column_index, chunk) in rg.columns().iter().enumerate() {
             let column_path = chunk.column_path().string();
             if column_path == column {
-                columns.push(FooterColumnChunkReport {
+                columns.push(FooterColumnChunkObservation {
                     row_group_index,
                     column_index,
                     column_path,
@@ -144,7 +121,7 @@ fn inspect_file(
             }
         }
     }
-    Ok(FooterFileReport {
+    Ok(FooterFileObservation {
         path: path.display().to_string(),
         relative_path: path
             .strip_prefix(root)
@@ -157,7 +134,7 @@ fn inspect_file(
         columns,
     })
 }
-fn summarize_footer(column: &str, files: &[FooterFileReport]) -> FooterSummary {
+fn summarize_footer(column: &str, files: &[FooterFileObservation]) -> FooterSummary {
     let mut encodings = BTreeSet::new();
     let mut s = FooterSummary {
         column: column.to_string(),
@@ -178,4 +155,19 @@ fn summarize_footer(column: &str, files: &[FooterFileReport]) -> FooterSummary {
     }
     s.unique_encodings = encodings.into_iter().collect();
     s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn footer_root_must_exist_be_a_directory_and_contain_parquet() {
+        let root = tempfile::tempdir().unwrap_or_else(|err| panic!("temporary directory: {err}"));
+        assert!(collect_parquet_files(&root.path().join("missing"), false).is_err());
+        let file = root.path().join("not-a-directory");
+        fs::write(&file, "x").unwrap_or_else(|err| panic!("temporary file: {err}"));
+        assert!(collect_parquet_files(&file, false).is_err());
+        assert!(collect_parquet_files(root.path(), false).is_err());
+    }
 }

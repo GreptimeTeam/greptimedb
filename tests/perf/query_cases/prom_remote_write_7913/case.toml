@@ -33,6 +33,7 @@ max_concurrent_flushes = 256
 [[scenario.queries]]
 name = "selector_1d_remote_write_high_cardinality"
 kind = "tql"
+database = "public"
 query = "TQL ANALYZE VERBOSE (1704067200, 1704153600, '5m') prom_remote_write_7913{host=~'host.*'}"
 warmup = 1
 iterations = 2
@@ -43,6 +44,7 @@ max_candidate_latency_regression_pct = 100
 [[scenario.queries]]
 name = "selector_7d_remote_write_high_cardinality"
 kind = "tql"
+database = "public"
 query = "TQL ANALYZE VERBOSE (1704067200, 1704672000, '1h') prom_remote_write_7913{host=~'host.*'}"
 warmup = 1
 iterations = 2
@@ -53,6 +55,7 @@ max_candidate_latency_regression_pct = 100
 [[scenario.queries]]
 name = "selector_14d_remote_write_high_cardinality"
 kind = "tql"
+database = "public"
 query = "TQL ANALYZE VERBOSE (1704067200, 1705276800, '1h') prom_remote_write_7913{host=~'host.*'}"
 warmup = 1
 iterations = 2
