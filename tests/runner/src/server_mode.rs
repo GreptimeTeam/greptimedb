@@ -150,6 +150,7 @@ struct ConfigContext {
     addrs: HashMap<String, String>,
     // enable flat format for storage engine
     enable_flat_format: bool,
+    enable_frontend_range_select_pushdown: bool,
 }
 
 impl ServerMode {
@@ -300,6 +301,7 @@ impl ServerMode {
     pub fn generate_config_file(
         &self,
         sqlness_home: &Path,
+        env: &Env,
         db_ctx: &GreptimeDBContext,
         id: usize,
     ) -> String {
@@ -357,6 +359,8 @@ impl ServerMode {
             instance_id: id,
             addrs,
             enable_flat_format: db_ctx.store_config().enable_flat_format,
+            enable_frontend_range_select_pushdown: env.enable_frontend_range_select_pushdown()
+                && matches!(self, ServerMode::Frontend { .. }),
         };
 
         let rendered = tt.render(self.name(), &ctx).unwrap();
@@ -405,7 +409,7 @@ impl ServerMode {
                         id
                     ),
                     "-c".to_string(),
-                    self.generate_config_file(sqlness_home, db_ctx, id),
+                    self.generate_config_file(sqlness_home, env, db_ctx, id),
                     format!("--http-addr={http_addr}"),
                     format!("{}={rpc_bind_addr}", arg_style.bind_addr_arg()),
                     format!("--mysql-addr={mysql_addr}"),
@@ -434,7 +438,7 @@ impl ServerMode {
                         id
                     ),
                     "-c".to_string(),
-                    self.generate_config_file(sqlness_home, db_ctx, id),
+                    self.generate_config_file(sqlness_home, env, db_ctx, id),
                 ]);
             }
             ServerMode::Metasrv {
@@ -456,7 +460,7 @@ impl ServerMode {
                         id
                     ),
                     "-c".to_string(),
-                    self.generate_config_file(sqlness_home, db_ctx, id),
+                    self.generate_config_file(sqlness_home, env, db_ctx, id),
                 ]);
 
                 if matches!(
@@ -535,7 +539,7 @@ impl ServerMode {
                     format!("--log-dir={}/logs", data_home.display()),
                     format!("--node-id={node_id}"),
                     "-c".to_string(),
-                    self.generate_config_file(sqlness_home, db_ctx, id),
+                    self.generate_config_file(sqlness_home, env, db_ctx, id),
                     format!("--metasrv-addrs={metasrv_addr}"),
                 ]);
             }
@@ -588,6 +592,7 @@ mod tests {
             Some(PathBuf::from(".")),
             store_config.clone(),
             vec![],
+            false,
         );
         let db_ctx = GreptimeDBContext::new(WalConfig::RaftEngine, store_config);
 
@@ -689,6 +694,86 @@ mod tests {
             style,
             true,
         );
+    }
+
+    fn config_from_args(args: &[String]) -> String {
+        let config_path = args
+            .windows(2)
+            .find_map(|args| (args[0] == "-c").then_some(&args[1]))
+            .expect("server arguments must include a config file");
+        std::fs::read_to_string(config_path).unwrap()
+    }
+
+    #[test]
+    fn test_default_generated_configs_do_not_enable_range_select_pushdown() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let (env, db_ctx) = test_env(temp_dir.path());
+
+        for mode in [
+            ServerMode::random_standalone(),
+            ServerMode::random_frontend(3002),
+            ServerMode::random_metasrv(),
+            ServerMode::random_datanode(3002, 0),
+        ] {
+            let config = config_from_args(&mode.get_args(
+                temp_dir.path(),
+                &env,
+                &db_ctx,
+                0,
+                GrpcArgStyle::Grpc,
+            ));
+            assert!(!config.contains("experimental_enable_range_select_pushdown"));
+        }
+    }
+
+    #[test]
+    fn test_range_select_pushdown_is_only_rendered_for_frontend() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let store_config = StoreConfig {
+            store_addrs: vec!["127.0.0.1:2379".to_string()],
+            setup_etcd: true,
+            setup_pg: None,
+            setup_mysql: None,
+            enable_flat_format: false,
+        };
+        let env = Env::new(
+            temp_dir.path().to_path_buf(),
+            ServerAddr::default(),
+            WalConfig::RaftEngine,
+            false,
+            Some(PathBuf::from(".")),
+            store_config.clone(),
+            vec![],
+            true,
+        );
+        let db_ctx = GreptimeDBContext::new(WalConfig::RaftEngine, store_config);
+
+        let frontend = ServerMode::random_frontend(3002);
+        let frontend_config = config_from_args(&frontend.get_args(
+            temp_dir.path(),
+            &env,
+            &db_ctx,
+            0,
+            GrpcArgStyle::Grpc,
+        ));
+        assert!(
+            frontend_config.contains("[query]\nexperimental_enable_range_select_pushdown = true")
+        );
+
+        for mode in [
+            ServerMode::random_standalone(),
+            ServerMode::random_metasrv(),
+            ServerMode::random_datanode(3002, 0),
+        ] {
+            let config = config_from_args(&mode.get_args(
+                temp_dir.path(),
+                &env,
+                &db_ctx,
+                0,
+                GrpcArgStyle::Grpc,
+            ));
+            assert!(!config.contains("experimental_enable_range_select_pushdown"));
+        }
     }
 
     #[test]

@@ -36,6 +36,7 @@ use store_api::metric_engine_consts::DATA_SCHEMA_TSID_COLUMN_NAME;
 use crate::dist_plan::MergeScanLogicalPlan;
 use crate::dist_plan::analyzer::AliasMapping;
 use crate::dist_plan::merge_sort::{MergeSortLogicalPlan, merge_sort_transformer};
+use crate::range_select::plan::{RangeSelect, RangeSelectMode};
 
 #[cfg(feature = "vector_index")]
 fn is_vector_sort(sort: &Sort) -> bool {
@@ -254,6 +255,18 @@ impl Categorizer {
         plan: &dyn UserDefinedLogicalNode,
         partition_cols: &AliasMapping,
     ) -> Commutativity {
+        if let Some(range_select) = plan.as_any().downcast_ref::<RangeSelect>() {
+            return match range_select.mode() {
+                // Partial is the only RangeSelect stage with a remote wire contract.
+                RangeSelectMode::Partial(_) => Commutativity::Commutative,
+                // Complete preserves the legacy frontend implementation; Final
+                // merges Partial state and must also remain on the frontend.
+                RangeSelectMode::Complete | RangeSelectMode::Final(_) => {
+                    Commutativity::NonCommutative
+                }
+            };
+        }
+
         match plan.name() {
             name if name == SeriesDivide::name() => {
                 let series_divide = plan.as_any().downcast_ref::<SeriesDivide>().unwrap();

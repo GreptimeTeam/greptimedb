@@ -285,6 +285,17 @@ allow_query_fallback = false
 ## When this limit is reached, queries will fail with ResourceExhausted error.
 ## NOTE: This does NOT limit memory used by table scans (only applies to datanodes).
 memory_pool_size = "50%"
+## Experimental RangeSelect Partial V1 pushdown. This is a frontend operator startup-only setting;
+## do not configure it on datanodes or flownodes. When enabled, the operator guarantees that every
+## datanode reachable through the current read preference, routing, retries, and failover supports
+## `RangeSelectPartialV1` and the compatible aggregate-state schema/ABI. Mixed-version rolling
+## upgrades and downgrades are unsupported while enabled. A local lowering encode failure keeps
+## the Complete plan before dispatch; a local DistPlanner optimization failure is controlled by
+## `allow_query_fallback` before dispatch. Neither retries a dispatched Partial plan. After
+## dispatch, datanode decode, planning, execution, or remote execution failures fail the query;
+## there is no runtime retry with Complete. Enable only after the full cluster upgrade has been
+## validated.
+experimental_enable_range_select_pushdown = false
 
 ## Datanode options.
 [datanode]

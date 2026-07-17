@@ -53,6 +53,24 @@ pub struct QueryOptions {
     /// Whether to expose per-region query load metrics.
     #[serde(skip)]
     pub enable_per_region_metrics: bool,
+    /// Enables the experimental RangeSelect Partial V1 pushdown path.
+    ///
+    /// This is a frontend operator startup option only. When enabled, the
+    /// operator guarantees that every datanode reachable through the current
+    /// read preference, routing, retries, and failover supports
+    /// `RangeSelectPartialV1` and the compatible aggregate-state schema and
+    /// ABI. Mixed-version rolling upgrades and downgrades are unsupported
+    /// while it is enabled.
+    ///
+    /// If the local lowering candidate cannot be encoded, it remains a
+    /// Complete plan before dispatch. Likewise, a local DistPlanner
+    /// optimization failure is controlled by `allow_query_fallback` before
+    /// dispatch. Neither is a retry of a dispatched Partial plan. Once a
+    /// Partial remote plan has been dispatched, datanode decode, planning,
+    /// execution, or remote execution failures fail the query; there is no
+    /// runtime retry with Complete. Enable it only after the full cluster
+    /// upgrade has been validated.
+    pub experimental_enable_range_select_pushdown: bool,
 }
 
 #[allow(clippy::derivable_impls)]
@@ -63,6 +81,7 @@ impl Default for QueryOptions {
             allow_query_fallback: false,
             memory_pool_size: MemoryLimit::default(),
             enable_per_region_metrics: false,
+            experimental_enable_range_select_pushdown: false,
         }
     }
 }
@@ -379,6 +398,13 @@ fn invalid_query_context_extension(reason: String) -> Error {
 #[cfg(test)]
 mod flow_extension_tests {
     use super::*;
+
+    #[test]
+    fn test_range_select_pushdown_defaults_to_false_when_deserialized() {
+        let options: QueryOptions = serde_json::from_str("{}").unwrap();
+
+        assert!(!options.experimental_enable_range_select_pushdown);
+    }
 
     #[test]
     fn test_parse_flow_extensions_returns_none_for_non_flow_query() {

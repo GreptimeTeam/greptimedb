@@ -750,6 +750,11 @@ jobs:
             kafka: false
             postgres: false
             mysql: false
+          - name: "RangeSelect Pushdown"
+            opts: "--enable-frontend-range-select-pushdown -t range_select_pushdown"
+            kafka: false
+            postgres: false
+            mysql: false
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4

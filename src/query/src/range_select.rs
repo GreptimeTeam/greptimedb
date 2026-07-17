@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub(crate) mod lowering;
 pub mod plan;
 pub mod plan_rewrite;
 pub mod planner;
+pub(crate) mod serializer;

@@ -355,6 +355,7 @@ impl CompatCommand {
             from_bins_dir,
             store_config,
             vec![],
+            false,
         );
 
         // ---- 7c. Etcd cleanup guard ----

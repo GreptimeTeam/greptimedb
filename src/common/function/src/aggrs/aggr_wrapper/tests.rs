@@ -28,12 +28,15 @@ use datafusion::datasource::DefaultTableSource;
 use datafusion::execution::{RecordBatchStream, SendableRecordBatchStream, TaskContext};
 use datafusion::functions_aggregate::average::avg_udaf;
 use datafusion::functions_aggregate::count::count_udaf;
+use datafusion::functions_aggregate::min_max::{max_udaf, min_udaf};
 use datafusion::functions_aggregate::sum::sum_udaf;
 use datafusion::optimizer::AnalyzerRule;
 use datafusion::optimizer::analyzer::type_coercion::TypeCoercion;
 use datafusion::physical_plan::aggregates::AggregateExec;
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
-use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties};
+use datafusion::physical_plan::{
+    DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties, collect,
+};
 use datafusion::physical_planner::{DefaultPhysicalPlanner, PhysicalPlanner};
 use datafusion::prelude::SessionContext;
 use datafusion_common::arrow::array::AsArray;
@@ -42,8 +45,8 @@ use datafusion_common::{Column, TableReference};
 use datafusion_expr::expr::{AggregateFunction, NullTreatment};
 use datafusion_expr::function::AccumulatorArgs;
 use datafusion_expr::{
-    Aggregate, AggregateUDFImpl, ColumnarValue, Expr, LogicalPlan, ScalarFunctionArgs, SortExpr,
-    TableScan, lit,
+    Aggregate, AggregateUDFImpl, ColumnarValue, Expr, LogicalPlan, Operator, ScalarFunctionArgs,
+    SortExpr, TableScan, binary_expr, lit,
 };
 use datafusion_physical_expr::aggregate::AggregateExprBuilder;
 use datafusion_physical_expr::expressions::col;
@@ -259,6 +262,100 @@ fn dummy_table_scan_with_ts() -> LogicalPlan {
     )
 }
 
+fn table_scan_with_batch(schema: Arc<arrow_schema::Schema>, batch: RecordBatch) -> LogicalPlan {
+    let table_source =
+        DefaultTableSource::new(Arc::new(DummyTableProvider::new(schema, Some(batch))));
+    LogicalPlan::TableScan(
+        TableScan::try_new(
+            TableReference::bare("input"),
+            Arc::new(table_source),
+            None,
+            vec![],
+            None,
+        )
+        .unwrap(),
+    )
+}
+
+async fn assert_state_only_merge(
+    function: AggregateUDF,
+    raw_expr: Expr,
+    values: Vec<Option<i64>>,
+    expected: ScalarValue,
+) {
+    let raw_schema = Arc::new(arrow_schema::Schema::new(vec![Field::new(
+        "number",
+        DataType::Int64,
+        true,
+    )]));
+    let raw_batch =
+        RecordBatch::try_new(raw_schema.clone(), vec![Arc::new(Int64Array::from(values))]).unwrap();
+    let original = Aggregate::try_new(
+        Arc::new(table_scan_with_batch(raw_schema, raw_batch)),
+        vec![],
+        vec![Expr::AggregateFunction(AggregateFunction::new_udf(
+            Arc::new(function),
+            vec![raw_expr],
+            false,
+            None,
+            vec![],
+            None,
+        ))],
+    )
+    .unwrap();
+    let coerced = StateMergeHelper::coerce_aggr_node(original).unwrap();
+    let contract = StateMergeHelper::split_coerced_aggregate_expr(
+        &coerced.aggr_expr[0],
+        coerced.input.as_ref(),
+    )
+    .unwrap();
+    let partial = LogicalPlan::Aggregate(
+        Aggregate::try_new(
+            coerced.input.clone(),
+            vec![],
+            vec![contract.partial_state_expr.clone()],
+        )
+        .unwrap(),
+    )
+    .recompute_schema()
+    .unwrap();
+    let ctx = SessionContext::new();
+    let partial_exec = DefaultPhysicalPlanner::default()
+        .create_physical_plan(&partial, &ctx.state())
+        .await
+        .unwrap();
+    let state_batches = collect(partial_exec, ctx.task_ctx()).await.unwrap();
+    let state_batch = state_batches.into_iter().next().unwrap();
+    assert_eq!(
+        state_batch.num_columns(),
+        1,
+        "partial output must contain only state"
+    );
+
+    let state_column = state_batch.schema().field(0).name().clone();
+    let state_schema = state_batch.schema();
+    let final_input = table_scan_with_batch(state_schema, state_batch);
+    let final_plan = LogicalPlan::Aggregate(
+        Aggregate::try_new(
+            Arc::new(final_input),
+            vec![],
+            vec![contract.merge_expr(Column::new_unqualified(state_column))],
+        )
+        .unwrap(),
+    )
+    .recompute_schema()
+    .unwrap();
+    let final_exec = DefaultPhysicalPlanner::default()
+        .create_physical_plan(&final_plan, &ctx.state())
+        .await
+        .unwrap();
+    let result = collect(final_exec, ctx.task_ctx()).await.unwrap();
+    assert_eq!(
+        ScalarValue::try_from_array(result[0].column(0), 0).unwrap(),
+        expected
+    );
+}
+
 fn create_avg_state_groups_accumulator() -> Box<dyn GroupsAccumulator> {
     let state_wrapper = StateWrapper::new((*avg_udaf()).clone()).unwrap();
     let schema = Arc::new(arrow_schema::Schema::new(vec![Field::new(
@@ -435,6 +532,157 @@ async fn test_sum_udaf() {
 
     let merge_eval_res = merge_accum.evaluate().unwrap();
     assert_eq!(merge_eval_res, ScalarValue::Int64(Some(48)));
+}
+
+#[test]
+fn test_expression_split_contract_state_and_merge_columns() {
+    let sum = (*datafusion::functions_aggregate::sum::sum_udaf()).clone();
+    let input = dummy_table_scan();
+    let aggregate = Aggregate::try_new(
+        Arc::new(input),
+        vec![],
+        vec![Expr::AggregateFunction(AggregateFunction::new_udf(
+            Arc::new(sum),
+            vec![Expr::Column(Column::new_unqualified("number"))],
+            false,
+            None,
+            vec![],
+            None,
+        ))],
+    )
+    .unwrap();
+    let coerced = StateMergeHelper::coerce_aggr_node(aggregate).unwrap();
+    let contract = StateMergeHelper::split_coerced_aggregate_expr(
+        &coerced.aggr_expr[0],
+        coerced.input.as_ref(),
+    )
+    .unwrap();
+
+    let (_, state_field) = contract
+        .partial_state_expr
+        .to_field(coerced.input.schema())
+        .unwrap();
+    assert!(matches!(state_field.data_type(), DataType::Struct(_)));
+    assert_eq!(contract.final_result_field.data_type(), &DataType::Int64);
+
+    let merge = contract.merge_expr(Column::new_unqualified("__range_state_0"));
+    let merge_func = get_aggr_func(&merge).unwrap();
+    assert_eq!(
+        merge_func.params.args,
+        vec![Expr::Column(Column::new_unqualified("__range_state_0"))]
+    );
+    assert!(merge_func.params.order_by.is_empty());
+    assert!(merge_func.params.filter.is_none());
+    assert!(!merge_func.params.distinct);
+}
+
+#[test]
+fn test_expression_split_contract_builtin_state_shapes() {
+    let functions = [
+        (*count_udaf()).clone(),
+        (*sum_udaf()).clone(),
+        (*min_udaf()).clone(),
+        (*max_udaf()).clone(),
+        (*avg_udaf()).clone(),
+    ];
+    for function in functions {
+        let aggregate = Aggregate::try_new(
+            Arc::new(dummy_table_scan()),
+            vec![],
+            vec![Expr::AggregateFunction(AggregateFunction::new_udf(
+                Arc::new(function),
+                vec![Expr::Column(Column::new_unqualified("number"))],
+                false,
+                None,
+                vec![],
+                None,
+            ))],
+        )
+        .unwrap();
+        let coerced = StateMergeHelper::coerce_aggr_node(aggregate).unwrap();
+        let contract = StateMergeHelper::split_coerced_aggregate_expr(
+            &coerced.aggr_expr[0],
+            coerced.input.as_ref(),
+        )
+        .unwrap();
+        let (_, state_field) = contract
+            .partial_state_expr
+            .to_field(coerced.input.schema())
+            .unwrap();
+        assert!(matches!(state_field.data_type(), DataType::Struct(_)));
+        assert!(get_aggr_func(&contract.merge_expr(Column::new_unqualified("state"))).is_some());
+    }
+}
+
+#[tokio::test]
+async fn test_state_only_merge_execution_builtins_and_compound_avg() {
+    let values = vec![Some(1), Some(2), None, Some(3)];
+    assert_state_only_merge(
+        (*count_udaf()).clone(),
+        Expr::Column(Column::new_unqualified("number")),
+        values.clone(),
+        ScalarValue::Int64(Some(3)),
+    )
+    .await;
+    assert_state_only_merge(
+        (*sum_udaf()).clone(),
+        Expr::Column(Column::new_unqualified("number")),
+        values.clone(),
+        ScalarValue::Int64(Some(6)),
+    )
+    .await;
+    assert_state_only_merge(
+        (*min_udaf()).clone(),
+        Expr::Column(Column::new_unqualified("number")),
+        values.clone(),
+        ScalarValue::Int64(Some(1)),
+    )
+    .await;
+    assert_state_only_merge(
+        (*max_udaf()).clone(),
+        Expr::Column(Column::new_unqualified("number")),
+        values.clone(),
+        ScalarValue::Int64(Some(3)),
+    )
+    .await;
+    assert_state_only_merge(
+        (*avg_udaf()).clone(),
+        Expr::Column(Column::new_unqualified("number")),
+        values.clone(),
+        ScalarValue::Float64(Some(2.0)),
+    )
+    .await;
+    assert_state_only_merge(
+        (*avg_udaf()).clone(),
+        binary_expr(
+            Expr::Column(Column::new_unqualified("number")),
+            Operator::Plus,
+            lit(1_i64),
+        ),
+        values,
+        ScalarValue::Float64(Some(3.0)),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn test_state_only_merge_empty_accumulators() {
+    let cases = [
+        ((*count_udaf()).clone(), ScalarValue::Int64(Some(0))),
+        ((*sum_udaf()).clone(), ScalarValue::Int64(None)),
+        ((*min_udaf()).clone(), ScalarValue::Int64(None)),
+        ((*max_udaf()).clone(), ScalarValue::Int64(None)),
+        ((*avg_udaf()).clone(), ScalarValue::Float64(None)),
+    ];
+    for (function, expected) in cases {
+        assert_state_only_merge(
+            function,
+            Expr::Column(Column::new_unqualified("number")),
+            vec![],
+            expected,
+        )
+        .await;
+    }
 }
 
 #[tokio::test]
@@ -669,7 +917,6 @@ async fn test_last_value_order_by_udaf() {
         .unwrap();
 
     assert_eq!(&res.lower_state, &fixed_aggr_state_plan);
-
     // schema is the state fields of the last_value udaf
     assert_eq!(
         res.lower_state.schema().as_arrow(),

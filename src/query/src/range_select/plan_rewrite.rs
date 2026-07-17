@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -30,6 +30,7 @@ use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRecursion, Tre
 use datafusion_common::{DFSchema, DataFusionError, Result as DFResult};
 use datafusion_expr::expr::WildcardOptions;
 use datafusion_expr::simplify::SimplifyContext;
+use datafusion_expr::utils::expr_to_columns;
 use datafusion_expr::{
     Aggregate, Analyze, Cast, Distinct, DistinctOn, Explain, Expr, ExprSchemable, Extension,
     Literal, LogicalPlan, LogicalPlanBuilder, Projection,
@@ -423,9 +424,16 @@ impl RangePlanRewriter {
                 if need_default_by {
                     range_rewriter.by = default_by;
                 }
+                let range_exprs = range_rewriter.range_fn.into_iter().collect::<Vec<_>>();
+                let input = Arc::new(build_range_input_projection(
+                    input.as_ref(),
+                    &range_exprs,
+                    &time_index,
+                    &range_rewriter.by,
+                )?);
                 let range_select = RangeSelect::try_new(
-                    input.clone(),
-                    range_rewriter.range_fn.into_iter().collect(),
+                    input,
+                    range_exprs,
                     range_rewriter.align,
                     range_rewriter.align_to,
                     time_index,
@@ -627,6 +635,61 @@ impl RangePlanRewriter {
     }
 }
 
+/// Builds the narrow child projection required by [`RangeSelect`].
+///
+/// The physical Range implementation consumes aggregate arguments and aggregate
+/// ordering expressions, but does not support aggregate `FILTER` expressions.
+fn build_range_input_projection(
+    input: &LogicalPlan,
+    range_exprs: &[RangeFn],
+    time_expr: &Expr,
+    by_exprs: &[Expr],
+) -> DFResult<LogicalPlan> {
+    let mut required_columns = HashSet::new();
+    for range_expr in range_exprs {
+        let range_expr = match &range_expr.expr {
+            Expr::Alias(alias) => alias.expr.as_ref(),
+            expr => expr,
+        };
+        let Expr::AggregateFunction(aggr) = range_expr else {
+            return Err(DataFusionError::Plan(format!(
+                "Unexpected Expr: {} in RangeSelect",
+                range_expr
+            )));
+        };
+        if aggr.params.filter.is_some() {
+            return Err(DataFusionError::NotImplemented(
+                "Range aggregate FILTER is unsupported".to_string(),
+            ));
+        }
+        for expr in &aggr.params.args {
+            expr_to_columns(expr, &mut required_columns)?;
+        }
+        for sort_expr in &aggr.params.order_by {
+            expr_to_columns(&sort_expr.expr, &mut required_columns)?;
+        }
+    }
+    expr_to_columns(time_expr, &mut required_columns)?;
+    for by_expr in by_exprs {
+        expr_to_columns(by_expr, &mut required_columns)?;
+    }
+
+    let required_indices = required_columns
+        .iter()
+        .map(|column| input.schema().index_of_column(column))
+        .collect::<DFResult<BTreeSet<_>>>()?;
+    let projection = required_indices
+        .into_iter()
+        .map(|index| {
+            let (qualifier, field) = input.schema().qualified_field(index);
+            Expr::Column(Column::new(qualifier.cloned(), field.name()))
+        })
+        .collect::<Vec<_>>();
+    LogicalPlanBuilder::from(input.clone())
+        .project(projection)?
+        .build()
+}
+
 fn have_range_in_exprs(exprs: &[Expr]) -> bool {
     exprs.iter().any(|expr| {
         let mut find_range = false;
@@ -683,7 +746,7 @@ fn interval_only_in_expr(expr: &Expr) -> bool {
 #[cfg(test)]
 mod test {
 
-    use arrow::datatypes::IntervalUnit;
+    use arrow::datatypes::{IntervalUnit, TimeUnit};
     use catalog::RegisterTableRequest;
     use catalog::memory::MemoryCatalogManager;
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
@@ -839,9 +902,145 @@ mod test {
         let query = r#"SELECT timestamp, tag_0, tag_1, avg(field_0 + field_1) RANGE '5m' FROM test ALIGN '1h' by (tag_0,tag_1);"#;
         let expected = String::from(
             "RangeSelect: range_exprs=[avg(test.field_0 + test.field_1) RANGE 5m], align=3600000ms, align_to=0ms, align_by=[test.tag_0, test.tag_1], time_index=timestamp [timestamp:Timestamp(ms), tag_0:Utf8, tag_1:Utf8, avg(test.field_0 + test.field_1) RANGE 5m:Float64;N]\
-            \n  TableScan: test [tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, tag_3:Utf8, tag_4:Utf8, timestamp:Timestamp(ms), field_0:Float64;N, field_1:Float64;N, field_2:Float64;N, field_3:Float64;N, field_4:Float64;N]",
+            \n  Projection: test.tag_0, test.tag_1, test.timestamp, test.field_0, test.field_1 [tag_0:Utf8, tag_1:Utf8, timestamp:Timestamp(ms), field_0:Float64;N, field_1:Float64;N]\
+            \n    TableScan: test [tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, tag_3:Utf8, tag_4:Utf8, timestamp:Timestamp(ms), field_0:Float64;N, field_1:Float64;N, field_2:Float64;N, field_3:Float64;N, field_4:Float64;N]",
         );
         query_plan_compare(query, expected).await;
+    }
+
+    #[tokio::test]
+    async fn range_select_rewrite_projects_required_input_columns() {
+        let query = r#"SELECT timestamp, tag_0, tag_1, avg(field_0 + field_1) RANGE '5m' FROM test ALIGN '1h' by (tag_0,tag_1);"#;
+        let plan = do_query(query).await.unwrap();
+        let LogicalPlan::Extension(extension) = plan else {
+            panic!("expected RangeSelect rewrite output, got: {plan}");
+        };
+        let range_select = extension
+            .node
+            .as_any()
+            .downcast_ref::<RangeSelect>()
+            .expect("expected RangeSelect extension");
+
+        let LogicalPlan::Projection(projection) = range_select.input.as_ref() else {
+            panic!(
+                "expected a narrow Projection below RangeSelect, got: {}",
+                range_select.input
+            );
+        };
+        assert_eq!(
+            projection
+                .schema
+                .fields()
+                .iter()
+                .map(|field| field.name().as_str())
+                .collect::<Vec<_>>(),
+            vec!["tag_0", "tag_1", "timestamp", "field_0", "field_1",]
+        );
+        assert_eq!(
+            range_select
+                .schema
+                .fields()
+                .iter()
+                .map(|field| (
+                    field.name().as_str(),
+                    field.data_type().clone(),
+                    field.is_nullable()
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    "timestamp",
+                    DataType::Timestamp(TimeUnit::Millisecond, None),
+                    false
+                ),
+                ("tag_0", DataType::Utf8, false),
+                ("tag_1", DataType::Utf8, false),
+                (
+                    "avg(test.field_0 + test.field_1) RANGE 5m",
+                    DataType::Float64,
+                    true,
+                ),
+            ]
+        );
+        assert_eq!(
+            range_select.schema.qualified_field(0).0,
+            projection.schema.qualified_field(2).0
+        );
+        assert_eq!(
+            range_select.schema.qualified_field(1).0,
+            projection.schema.qualified_field(0).0
+        );
+    }
+
+    async fn assert_range_select_input_columns(sql: &str, expected: &[&str]) {
+        let plan = do_query(sql).await.unwrap();
+        let LogicalPlan::Extension(extension) = plan else {
+            panic!("expected RangeSelect rewrite output, got: {plan}");
+        };
+        let range_select = extension
+            .node
+            .as_any()
+            .downcast_ref::<RangeSelect>()
+            .expect("expected RangeSelect extension");
+        let LogicalPlan::Projection(projection) = range_select.input.as_ref() else {
+            panic!("expected narrow Projection, got: {}", range_select.input);
+        };
+        assert_eq!(
+            projection
+                .schema
+                .fields()
+                .iter()
+                .map(|field| field.name().as_str())
+                .collect::<Vec<_>>(),
+            expected
+        );
+    }
+
+    #[tokio::test]
+    async fn range_select_input_projection_collects_range_dependencies() {
+        assert_range_select_input_columns(
+            r#"SELECT timestamp, tag_0, avg(field_0 + field_1) RANGE '5m', sum(field_2) RANGE '5m' FROM test ALIGN '1h' BY (tag_0);"#,
+            &["tag_0", "timestamp", "field_0", "field_1", "field_2"],
+        )
+        .await;
+        assert_range_select_input_columns(
+            r#"SELECT timestamp, tag_0, last_value(field_0 ORDER BY field_2) RANGE '5m' FROM test ALIGN '1h' BY (tag_0);"#,
+            &["tag_0", "timestamp", "field_0", "field_2"],
+        )
+        .await;
+        assert_range_select_input_columns(
+            r#"SELECT timestamp, count(*) RANGE '5m' FILL NULL FROM test ALIGN '1h';"#,
+            &["tag_0", "tag_1", "tag_2", "tag_3", "tag_4", "timestamp"],
+        )
+        .await;
+        assert_range_select_input_columns(
+            r#"SELECT timestamp, count(1) RANGE '5m' FILL PREV FROM test ALIGN '1h' BY (tag_0);"#,
+            &["tag_0", "timestamp"],
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn range_select_input_projection_resolves_derived_aliases() {
+        assert_range_select_input_columns(
+            r#"SELECT ts, group_tag, avg(value) RANGE '5m' FROM (SELECT timestamp AS ts, tag_0 AS group_tag, field_0 AS value, field_4 AS ignored FROM test) ALIGN '1h' BY (group_tag);"#,
+            &["ts", "group_tag", "value"],
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn range_select_rejects_aggregate_filter() {
+        let error = do_query(
+            r#"SELECT timestamp, tag_0, avg(field_0) FILTER (WHERE field_1 > 0) RANGE '5m' FROM test ALIGN '1h' BY (tag_0);"#,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert_eq!(
+            error,
+            "This feature is not implemented: Range aggregate FILTER is unsupported"
+        );
     }
 
     #[tokio::test]
@@ -850,7 +1049,8 @@ mod test {
         let expected = String::from(
             "Projection: avg(test.field_0 + test.field_1) RANGE 5m / Int64(4) [avg(test.field_0 + test.field_1) RANGE 5m / Int64(4):Float64;N]\
             \n  RangeSelect: range_exprs=[avg(test.field_0 + test.field_1) RANGE 5m], align=3600000ms, align_to=0ms, align_by=[test.tag_0, test.tag_1], time_index=timestamp [avg(test.field_0 + test.field_1) RANGE 5m:Float64;N, timestamp:Timestamp(ms), tag_0:Utf8, tag_1:Utf8]\
-            \n    TableScan: test [tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, tag_3:Utf8, tag_4:Utf8, timestamp:Timestamp(ms), field_0:Float64;N, field_1:Float64;N, field_2:Float64;N, field_3:Float64;N, field_4:Float64;N]",
+            \n    Projection: test.tag_0, test.tag_1, test.timestamp, test.field_0, test.field_1 [tag_0:Utf8, tag_1:Utf8, timestamp:Timestamp(ms), field_0:Float64;N, field_1:Float64;N]\
+            \n      TableScan: test [tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, tag_3:Utf8, tag_4:Utf8, timestamp:Timestamp(ms), field_0:Float64;N, field_1:Float64;N, field_2:Float64;N, field_3:Float64;N, field_4:Float64;N]",
         );
         query_plan_compare(query, expected).await;
     }
@@ -862,7 +1062,8 @@ mod test {
         let expected = String::from(
             "Projection: covar_samp(test.field_0 + test.field_1,test.field_1) RANGE 5m / Int64(4) [covar_samp(test.field_0 + test.field_1,test.field_1) RANGE 5m / Int64(4):Float64;N]\
             \n  RangeSelect: range_exprs=[covar_samp(test.field_0 + test.field_1,test.field_1) RANGE 5m], align=3600000ms, align_to=0ms, align_by=[test.tag_0, test.tag_1, test.tag_2, test.tag_3, test.tag_4], time_index=timestamp [covar_samp(test.field_0 + test.field_1,test.field_1) RANGE 5m:Float64;N, timestamp:Timestamp(ms), tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, tag_3:Utf8, tag_4:Utf8]\
-            \n    TableScan: test [tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, tag_3:Utf8, tag_4:Utf8, timestamp:Timestamp(ms), field_0:Float64;N, field_1:Float64;N, field_2:Float64;N, field_3:Float64;N, field_4:Float64;N]",
+            \n    Projection: test.tag_0, test.tag_1, test.tag_2, test.tag_3, test.tag_4, test.timestamp, test.field_0, test.field_1 [tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, tag_3:Utf8, tag_4:Utf8, timestamp:Timestamp(ms), field_0:Float64;N, field_1:Float64;N]\
+            \n      TableScan: test [tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, tag_3:Utf8, tag_4:Utf8, timestamp:Timestamp(ms), field_0:Float64;N, field_1:Float64;N, field_2:Float64;N, field_3:Float64;N, field_4:Float64;N]",
         );
         query_plan_compare(query, expected).await;
     }
@@ -873,7 +1074,8 @@ mod test {
         let expected = String::from(
             "Projection: (avg(test.field_0) RANGE 5m FILL NULL + sum(test.field_1) RANGE 5m FILL NULL) / Int64(4) [avg(test.field_0) RANGE 5m FILL NULL + sum(test.field_1) RANGE 5m FILL NULL / Int64(4):Float64;N]\
             \n  RangeSelect: range_exprs=[avg(test.field_0) RANGE 5m FILL NULL, sum(test.field_1) RANGE 5m FILL NULL], align=3600000ms, align_to=0ms, align_by=[test.tag_0, test.tag_1], time_index=timestamp [avg(test.field_0) RANGE 5m FILL NULL:Float64;N, sum(test.field_1) RANGE 5m FILL NULL:Float64;N, timestamp:Timestamp(ms), tag_0:Utf8, tag_1:Utf8]\
-            \n    TableScan: test [tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, tag_3:Utf8, tag_4:Utf8, timestamp:Timestamp(ms), field_0:Float64;N, field_1:Float64;N, field_2:Float64;N, field_3:Float64;N, field_4:Float64;N]",
+            \n    Projection: test.tag_0, test.tag_1, test.timestamp, test.field_0, test.field_1 [tag_0:Utf8, tag_1:Utf8, timestamp:Timestamp(ms), field_0:Float64;N, field_1:Float64;N]\
+            \n      TableScan: test [tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, tag_3:Utf8, tag_4:Utf8, timestamp:Timestamp(ms), field_0:Float64;N, field_1:Float64;N, field_2:Float64;N, field_3:Float64;N, field_4:Float64;N]",
         );
         query_plan_compare(query, expected).await;
     }
@@ -886,7 +1088,8 @@ mod test {
             \n  Filter: foo > Int64(1) [foo:Float64;N]\
             \n    Projection: (avg(test.field_0) RANGE 5m FILL NULL + sum(test.field_1) RANGE 5m FILL NULL) / Int64(4) AS foo [foo:Float64;N]\
             \n      RangeSelect: range_exprs=[avg(test.field_0) RANGE 5m FILL NULL, sum(test.field_1) RANGE 5m FILL NULL], align=3600000ms, align_to=0ms, align_by=[test.tag_0, test.tag_1], time_index=timestamp [avg(test.field_0) RANGE 5m FILL NULL:Float64;N, sum(test.field_1) RANGE 5m FILL NULL:Float64;N, timestamp:Timestamp(ms), tag_0:Utf8, tag_1:Utf8]\
-            \n        TableScan: test [tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, tag_3:Utf8, tag_4:Utf8, timestamp:Timestamp(ms), field_0:Float64;N, field_1:Float64;N, field_2:Float64;N, field_3:Float64;N, field_4:Float64;N]",
+            \n        Projection: test.tag_0, test.tag_1, test.timestamp, test.field_0, test.field_1 [tag_0:Utf8, tag_1:Utf8, timestamp:Timestamp(ms), field_0:Float64;N, field_1:Float64;N]\
+            \n          TableScan: test [tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, tag_3:Utf8, tag_4:Utf8, timestamp:Timestamp(ms), field_0:Float64;N, field_1:Float64;N, field_2:Float64;N, field_3:Float64;N, field_4:Float64;N]",
         );
         query_plan_compare(query, expected).await;
     }
@@ -897,9 +1100,10 @@ mod test {
         let expected = String::from(
             "Projection: (avg(a) RANGE 5m FILL NULL + sum(b) RANGE 5m FILL NULL) / Int64(4) [avg(a) RANGE 5m FILL NULL + sum(b) RANGE 5m FILL NULL / Int64(4):Float64;N]\
             \n  RangeSelect: range_exprs=[avg(a) RANGE 5m FILL NULL, sum(b) RANGE 5m FILL NULL], align=3600000ms, align_to=0ms, align_by=[c, d], time_index=timestamp [avg(a) RANGE 5m FILL NULL:Float64;N, sum(b) RANGE 5m FILL NULL:Float64;N, timestamp:Timestamp(ms), c:Utf8, d:Utf8]\
-            \n    Projection: test.field_0 AS a, test.field_1 AS b, test.tag_0 AS c, test.tag_1 AS d, test.timestamp [a:Float64;N, b:Float64;N, c:Utf8, d:Utf8, timestamp:Timestamp(ms)]\
-            \n      Filter: test.field_0 > Float64(1) [tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, tag_3:Utf8, tag_4:Utf8, timestamp:Timestamp(ms), field_0:Float64;N, field_1:Float64;N, field_2:Float64;N, field_3:Float64;N, field_4:Float64;N]\
-            \n        TableScan: test [tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, tag_3:Utf8, tag_4:Utf8, timestamp:Timestamp(ms), field_0:Float64;N, field_1:Float64;N, field_2:Float64;N, field_3:Float64;N, field_4:Float64;N]",
+            \n    Projection: a, b, c, d, test.timestamp [a:Float64;N, b:Float64;N, c:Utf8, d:Utf8, timestamp:Timestamp(ms)]\
+            \n      Projection: test.field_0 AS a, test.field_1 AS b, test.tag_0 AS c, test.tag_1 AS d, test.timestamp [a:Float64;N, b:Float64;N, c:Utf8, d:Utf8, timestamp:Timestamp(ms)]\
+            \n        Filter: test.field_0 > Float64(1) [tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, tag_3:Utf8, tag_4:Utf8, timestamp:Timestamp(ms), field_0:Float64;N, field_1:Float64;N, field_2:Float64;N, field_3:Float64;N, field_4:Float64;N]\
+            \n          TableScan: test [tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, tag_3:Utf8, tag_4:Utf8, timestamp:Timestamp(ms), field_0:Float64;N, field_1:Float64;N, field_2:Float64;N, field_3:Float64;N, field_4:Float64;N]",
         );
         query_plan_compare(query, expected).await;
     }
@@ -973,7 +1177,8 @@ mod test {
         let expected = String::from(
             "Projection: sin(avg(test.field_0 + test.field_1) RANGE 5m + Int64(1)) [sin(avg(test.field_0 + test.field_1) RANGE 5m + Int64(1)):Float64;N]\
             \n  RangeSelect: range_exprs=[avg(test.field_0 + test.field_1) RANGE 5m], align=3600000ms, align_to=0ms, align_by=[test.tag_0, test.tag_1], time_index=timestamp [avg(test.field_0 + test.field_1) RANGE 5m:Float64;N, timestamp:Timestamp(ms), tag_0:Utf8, tag_1:Utf8]\
-            \n    TableScan: test [tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, tag_3:Utf8, tag_4:Utf8, timestamp:Timestamp(ms), field_0:Float64;N, field_1:Float64;N, field_2:Float64;N, field_3:Float64;N, field_4:Float64;N]",
+            \n    Projection: test.tag_0, test.tag_1, test.timestamp, test.field_0, test.field_1 [tag_0:Utf8, tag_1:Utf8, timestamp:Timestamp(ms), field_0:Float64;N, field_1:Float64;N]\
+            \n      TableScan: test [tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, tag_3:Utf8, tag_4:Utf8, timestamp:Timestamp(ms), field_0:Float64;N, field_1:Float64;N, field_2:Float64;N, field_3:Float64;N, field_4:Float64;N]",
         );
         query_plan_compare(query, expected).await;
     }
@@ -984,7 +1189,8 @@ mod test {
         let expected = String::from(
             "Projection: avg(test.field_0) RANGE 5m FILL 6 + avg(test.field_0) RANGE 5m FILL 6 [avg(test.field_0) RANGE 5m FILL 6 + avg(test.field_0) RANGE 5m FILL 6:Float64]\
             \n  RangeSelect: range_exprs=[avg(test.field_0) RANGE 5m FILL 6], align=3600000ms, align_to=0ms, align_by=[test.tag_0, test.tag_1], time_index=timestamp [avg(test.field_0) RANGE 5m FILL 6:Float64, timestamp:Timestamp(ms), tag_0:Utf8, tag_1:Utf8]\
-            \n    TableScan: test [tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, tag_3:Utf8, tag_4:Utf8, timestamp:Timestamp(ms), field_0:Float64;N, field_1:Float64;N, field_2:Float64;N, field_3:Float64;N, field_4:Float64;N]",
+            \n    Projection: test.tag_0, test.tag_1, test.timestamp, test.field_0 [tag_0:Utf8, tag_1:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
+            \n      TableScan: test [tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, tag_3:Utf8, tag_4:Utf8, timestamp:Timestamp(ms), field_0:Float64;N, field_1:Float64;N, field_2:Float64;N, field_3:Float64;N, field_4:Float64;N]",
         );
         query_plan_compare(query, expected).await;
     }
@@ -995,7 +1201,8 @@ mod test {
         let expected = String::from(
             "Projection: round(sin(avg(test.field_0 + test.field_1) RANGE 5m + Int64(1))) [round(sin(avg(test.field_0 + test.field_1) RANGE 5m + Int64(1))):Float64;N]\
             \n  RangeSelect: range_exprs=[avg(test.field_0 + test.field_1) RANGE 5m], align=3600000ms, align_to=0ms, align_by=[test.tag_0, test.tag_1], time_index=timestamp [avg(test.field_0 + test.field_1) RANGE 5m:Float64;N, timestamp:Timestamp(ms), tag_0:Utf8, tag_1:Utf8]\
-            \n    TableScan: test [tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, tag_3:Utf8, tag_4:Utf8, timestamp:Timestamp(ms), field_0:Float64;N, field_1:Float64;N, field_2:Float64;N, field_3:Float64;N, field_4:Float64;N]",
+            \n    Projection: test.tag_0, test.tag_1, test.timestamp, test.field_0, test.field_1 [tag_0:Utf8, tag_1:Utf8, timestamp:Timestamp(ms), field_0:Float64;N, field_1:Float64;N]\
+            \n      TableScan: test [tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, tag_3:Utf8, tag_4:Utf8, timestamp:Timestamp(ms), field_0:Float64;N, field_1:Float64;N, field_2:Float64;N, field_3:Float64;N, field_4:Float64;N]",
         );
         query_plan_compare(query, expected).await;
     }
@@ -1006,7 +1213,8 @@ mod test {
         let expected = String::from(
             "Projection: gcd(arrow_cast(max(test.field_0 + Int64(1)) RANGE 5m FILL NULL, Utf8(\"Int64\")), arrow_cast(test.tag_0, Utf8(\"Int64\"))) + round(max(test.field_2 + Int64(1)) RANGE 6m FILL NULL + Int64(1)) + max(test.field_2 + Int64(3)) RANGE 10m FILL NULL * arrow_cast(test.tag_1, Utf8(\"Float64\")) + Int64(1) [gcd(arrow_cast(max(test.field_0 + Int64(1)) RANGE 5m FILL NULL,Utf8(\"Int64\")),arrow_cast(test.tag_0,Utf8(\"Int64\"))) + round(max(test.field_2 + Int64(1)) RANGE 6m FILL NULL + Int64(1)) + max(test.field_2 + Int64(3)) RANGE 10m FILL NULL * arrow_cast(test.tag_1,Utf8(\"Float64\")) + Int64(1):Float64;N]\
             \n  RangeSelect: range_exprs=[max(test.field_0 + Int64(1)) RANGE 5m FILL NULL, max(test.field_2 + Int64(1)) RANGE 6m FILL NULL, max(test.field_2 + Int64(3)) RANGE 10m FILL NULL], align=3600000ms, align_to=0ms, align_by=[test.tag_0, test.tag_1], time_index=timestamp [max(test.field_0 + Int64(1)) RANGE 5m FILL NULL:Float64;N, max(test.field_2 + Int64(1)) RANGE 6m FILL NULL:Float64;N, max(test.field_2 + Int64(3)) RANGE 10m FILL NULL:Float64;N, timestamp:Timestamp(ms), tag_0:Utf8, tag_1:Utf8]\
-            \n    TableScan: test [tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, tag_3:Utf8, tag_4:Utf8, timestamp:Timestamp(ms), field_0:Float64;N, field_1:Float64;N, field_2:Float64;N, field_3:Float64;N, field_4:Float64;N]",
+            \n    Projection: test.tag_0, test.tag_1, test.timestamp, test.field_0, test.field_2 [tag_0:Utf8, tag_1:Utf8, timestamp:Timestamp(ms), field_0:Float64;N, field_2:Float64;N]\
+            \n      TableScan: test [tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, tag_3:Utf8, tag_4:Utf8, timestamp:Timestamp(ms), field_0:Float64;N, field_1:Float64;N, field_2:Float64;N, field_3:Float64;N, field_4:Float64;N]",
         );
         query_plan_compare(query, expected).await;
     }
@@ -1016,7 +1224,8 @@ mod test {
         let query = r#"SELECT min(CAST(field_0 AS Int64) + CAST(field_1 AS Int64)) RANGE '5m' FILL LINEAR FROM test ALIGN '1h' by (tag_0,tag_1);"#;
         let expected = String::from(
             "RangeSelect: range_exprs=[min(arrow_cast(test.field_0,Utf8(\"Int64\")) + arrow_cast(test.field_1,Utf8(\"Int64\"))) RANGE 5m FILL LINEAR], align=3600000ms, align_to=0ms, align_by=[test.tag_0, test.tag_1], time_index=timestamp [min(arrow_cast(test.field_0,Utf8(\"Int64\")) + arrow_cast(test.field_1,Utf8(\"Int64\"))) RANGE 5m FILL LINEAR:Float64;N]\
-            \n  TableScan: test [tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, tag_3:Utf8, tag_4:Utf8, timestamp:Timestamp(ms), field_0:Float64;N, field_1:Float64;N, field_2:Float64;N, field_3:Float64;N, field_4:Float64;N]",
+            \n  Projection: test.tag_0, test.tag_1, test.timestamp, test.field_0, test.field_1 [tag_0:Utf8, tag_1:Utf8, timestamp:Timestamp(ms), field_0:Float64;N, field_1:Float64;N]\
+            \n    TableScan: test [tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, tag_3:Utf8, tag_4:Utf8, timestamp:Timestamp(ms), field_0:Float64;N, field_1:Float64;N, field_2:Float64;N, field_3:Float64;N, field_4:Float64;N]",
         );
         query_plan_compare(query, expected).await;
     }

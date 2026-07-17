@@ -1,3 +1,8 @@
 [grpc]
 bind_addr = "{addrs.grpc_addr}"
 server_addr = "{addrs.grpc_addr}"
+{{ if enable_frontend_range_select_pushdown }}
+
+[query]
+experimental_enable_range_select_pushdown = true
+{{ endif }}

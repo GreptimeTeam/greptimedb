@@ -106,6 +106,10 @@ pub struct BareCommand {
     /// Enable flat format for storage engine (sets default_flat_format = true).
     #[clap(long, default_value = "false")]
     enable_flat_format: bool,
+
+    /// Enable experimental RangeSelect pushdown on the locally managed frontend.
+    #[clap(long, default_value = "false", conflicts_with = "server_addr")]
+    enable_frontend_range_select_pushdown: bool,
 }
 
 impl BareCommand {
@@ -189,6 +193,7 @@ impl BareCommand {
                 self.bins_dir,
                 store,
                 self.extra_args,
+                self.enable_frontend_range_select_pushdown,
             ),
         );
         match runner.run().await {
@@ -209,5 +214,44 @@ impl BareCommand {
             println!("Removing state in {:?}", sqlness_home);
             tokio::fs::remove_dir_all(sqlness_home).await.unwrap();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+    use clap::error::ErrorKind;
+
+    use crate::cmd::{Command, SubCommand};
+
+    #[test]
+    fn test_range_select_pushdown_defaults_to_disabled() {
+        let command = Command::try_parse_from(["sqlness-runner", "bare"]).unwrap();
+
+        let SubCommand::Bare(command) = command.subcmd else {
+            panic!("expected bare command");
+        };
+        assert!(!command.enable_frontend_range_select_pushdown);
+    }
+
+    #[test]
+    fn test_range_select_pushdown_conflicts_with_external_server() {
+        let result = Command::try_parse_from([
+            "sqlness-runner",
+            "bare",
+            "--server-addr",
+            "127.0.0.1:4001",
+            "--pg-server-addr",
+            "127.0.0.1:4003",
+            "--mysql-server-addr",
+            "127.0.0.1:4002",
+            "--enable-frontend-range-select-pushdown",
+        ]);
+        let Err(error) = result else {
+            panic!("external server and RangeSelect pushdown must conflict");
+        };
+
+        assert_eq!(error.kind(), ErrorKind::ArgumentConflict);
+        assert!(error.to_string().contains("--server-addr"));
     }
 }

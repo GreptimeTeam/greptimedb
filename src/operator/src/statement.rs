@@ -430,7 +430,7 @@ impl StatementExecutor {
             Statement::ShowCreateView(show) => self.show_create_view(show, query_ctx).await,
             #[cfg(feature = "enterprise")]
             Statement::ShowCreateTrigger(show) => self.show_create_trigger(show, query_ctx).await,
-            Statement::SetVariables(set_var) => self.set_variables(set_var, query_ctx),
+            Statement::SetVariables(set_var) => Self::set_variables(set_var, query_ctx),
             Statement::ShowVariables(show_variable) => self.show_variable(show_variable, query_ctx),
             Statement::Comment(stmt) => self.comment(stmt, query_ctx).await,
             Statement::ShowColumns(show_columns) => {
@@ -462,7 +462,7 @@ impl StatementExecutor {
         Ok(Output::new_with_record_batches(RecordBatches::empty()))
     }
 
-    fn set_variables(&self, set_var: SetVariables, query_ctx: QueryContextRef) -> Result<Output> {
+    fn set_variables(set_var: SetVariables, query_ctx: QueryContextRef) -> Result<Output> {
         let var_name = set_var.variable.to_string().to_uppercase();
 
         debug!(
@@ -471,6 +471,16 @@ impl StatementExecutor {
             set_var.value.iter().map(|e| e.to_string()).join(", "),
             query_ctx.conn_info()
         );
+
+        if is_operator_only_range_select_setting(&var_name) {
+            return NotSupportedSnafu {
+                feat: format!(
+                    "{} is an operator startup-only configuration and cannot be changed with SET",
+                    var_name
+                ),
+            }
+            .fail();
+        }
 
         match var_name.as_str() {
             "READ_PREFERENCE" => set_read_preference(set_var.value, query_ctx)?,
@@ -711,6 +721,21 @@ impl StatementExecutor {
     }
 }
 
+fn is_operator_only_range_select_setting(var_name: &str) -> bool {
+    let var_name = var_name.strip_prefix("@@").unwrap_or(var_name);
+    let var_name = var_name
+        .strip_prefix("SESSION.")
+        .or_else(|| var_name.strip_prefix("GLOBAL."))
+        .or_else(|| var_name.strip_prefix("LOCAL."))
+        .unwrap_or(var_name);
+
+    matches!(
+        var_name,
+        "RANGE_SELECT.EXPERIMENTAL_ENABLE_RANGE_SELECT_PUSHDOWN"
+            | "EXPERIMENTAL_ENABLE_RANGE_SELECT_PUSHDOWN"
+    )
+}
+
 fn to_copy_query_request(stmt: CopyQueryToArgument) -> Result<CopyQueryToRequest> {
     let CopyQueryToArgument {
         with,
@@ -943,14 +968,19 @@ mod tests {
 
     use common_time::range::TimestampRange;
     use common_time::{Timestamp, Timezone};
-    use session::context::QueryContextBuilder;
+    use session::context::{Channel, QueryContextBuilder};
+    use sql::dialect::GreptimeDbDialect;
+    use sql::parser::{ParseOptions, ParserContext};
     use sql::statements::OptionMap;
+    use sql::statements::statement::Statement;
 
     use crate::error;
     use crate::statement::copy_database::{
         COPY_DATABASE_TIME_END_KEY, COPY_DATABASE_TIME_START_KEY,
     };
-    use crate::statement::{timestamp_range_from_option_map, verify_time_related_format};
+    use crate::statement::{
+        StatementExecutor, timestamp_range_from_option_map, verify_time_related_format,
+    };
 
     fn check_timestamp_range((start, end): (&str, &str)) -> error::Result<Option<TimestampRange>> {
         let query_ctx = QueryContextBuilder::default()
@@ -1043,5 +1073,42 @@ mod tests {
             verify_time_related_format(&map).unwrap_err(),
             error::Error::InvalidCopyParameter { .. }
         );
+    }
+
+    #[test]
+    fn test_range_select_pushdown_set_is_rejected_for_all_channels() {
+        for (channel, sql) in [
+            (
+                Channel::Unknown,
+                "SET range_select.experimental_enable_range_select_pushdown = true",
+            ),
+            (
+                Channel::Mysql,
+                "SET experimental_enable_range_select_pushdown = true",
+            ),
+            (
+                Channel::Postgres,
+                "SET range_select.experimental_enable_range_select_pushdown = true",
+            ),
+        ] {
+            let statements = ParserContext::create_with_dialect(
+                sql,
+                &GreptimeDbDialect {},
+                ParseOptions::default(),
+            )
+            .unwrap();
+            let [Statement::SetVariables(set_var)] = statements.as_slice() else {
+                unreachable!()
+            };
+            let query_ctx = QueryContextBuilder::default()
+                .channel(channel)
+                .build()
+                .into();
+
+            assert_matches!(
+                StatementExecutor::set_variables(set_var.clone(), query_ctx).unwrap_err(),
+                error::Error::NotSupported { .. }
+            );
+        }
     }
 }

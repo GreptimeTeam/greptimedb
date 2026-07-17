@@ -101,6 +101,8 @@ pub struct Env {
     store_config: StoreConfig,
     /// Extra command line arguments when starting GreptimeDB binaries.
     extra_args: Vec<String>,
+    /// Enables experimental RangeSelect pushdown only for a locally managed frontend.
+    enable_frontend_range_select_pushdown: bool,
     /// Cache for the inferred gRPC argument style per `bins_dir`.
     grpc_arg_style_cache: Arc<Mutex<HashMap<PathBuf, GrpcArgStyle>>>,
 }
@@ -139,6 +141,7 @@ impl Env {
         bins_dir: Option<PathBuf>,
         store_config: StoreConfig,
         extra_args: Vec<String>,
+        enable_frontend_range_select_pushdown: bool,
     ) -> Self {
         Self {
             sqlness_home: data_home,
@@ -152,6 +155,7 @@ impl Env {
             )]))),
             store_config,
             extra_args,
+            enable_frontend_range_select_pushdown,
             grpc_arg_style_cache: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -637,6 +641,10 @@ impl Env {
 
     pub(crate) fn extra_args(&self) -> &Vec<String> {
         &self.extra_args
+    }
+
+    pub(crate) fn enable_frontend_range_select_pushdown(&self) -> bool {
+        self.enable_frontend_range_select_pushdown
     }
 
     /// Start a distributed GreptimeDB cluster. Exposed for compat runner.

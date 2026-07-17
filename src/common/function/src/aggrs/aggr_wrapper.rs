@@ -115,6 +115,73 @@ pub struct StepAggrPlan {
     pub lower_state: LogicalPlan,
 }
 
+/// Expression-level contract for splitting one aggregate into a state phase
+/// and a merge phase. The contract is deliberately independent from a logical
+/// `Aggregate` node so callers that build custom physical plans can use the
+/// same StateWrapper/MergeWrapper construction as normal distributed planning.
+#[derive(Debug, Clone)]
+pub struct AggregateSplitContract {
+    /// Aggregate expression that consumes raw arguments and returns one Struct
+    /// state value.
+    pub partial_state_expr: Expr,
+    /// The field returned by the final merge expression.
+    pub final_result_field: FieldRef,
+    merge_factory: MergeAggregateExprFactory,
+}
+
+impl AggregateSplitContract {
+    /// Creates the final aggregate expression for a caller-provided state
+    /// column. This expression references only that column; it never retains
+    /// raw aggregate arguments or ordering expressions.
+    pub fn merge_expr(&self, state_column: Column) -> Expr {
+        self.merge_factory.merge_expr(state_column)
+    }
+}
+
+/// Opaque factory for a merge aggregate expression. It hides MergeWrapper's
+/// physical-expression dependency while allowing callers to bind a state
+/// column at their own plan boundary. The logical expression only references
+/// that state column; this private factory retains the original physical
+/// aggregate expression solely to create compatible accumulators.
+#[derive(Debug, Clone)]
+struct MergeAggregateExprFactory {
+    merge_udaf: AggregateUDF,
+    result_name: String,
+    null_treatment: Option<datafusion_expr::expr::NullTreatment>,
+    distinct: bool,
+}
+
+impl MergeAggregateExprFactory {
+    fn merge_expr(&self, state_column: Column) -> Expr {
+        Expr::AggregateFunction(AggregateFunction {
+            func: Arc::new(self.merge_udaf.clone()),
+            params: AggregateFunctionParams {
+                args: vec![Expr::Column(state_column)],
+                distinct: self.distinct,
+                filter: None,
+                order_by: vec![],
+                null_treatment: self.null_treatment,
+            },
+        })
+        .alias(self.result_name.clone())
+    }
+}
+
+fn ordering_fields(
+    order_by: &[datafusion_expr::SortExpr],
+    input: &LogicalPlan,
+) -> datafusion_common::Result<Vec<FieldRef>> {
+    order_by
+        .iter()
+        .map(|sort_expr| {
+            sort_expr
+                .expr
+                .to_field(input.schema())
+                .map(|(_, field)| field)
+        })
+        .collect()
+}
+
 impl StateMergeHelper {
     /// Register all the `state` function of supported aggregate functions.
     /// Note that can't register `merge` function here, as it needs to be created from the original aggregate function with given input types.
@@ -149,21 +216,7 @@ impl StateMergeHelper {
     /// Split an aggregate plan into two aggregate plans, one for the state function and one for the merge function.
     ///
     pub fn split_aggr_node(aggr_plan: Aggregate) -> datafusion_common::Result<StepAggrPlan> {
-        let aggr = {
-            // certain aggr func need type coercion to work correctly, so we need to analyze the plan first.
-            let aggr_plan = TypeCoercion::new().analyze(
-                LogicalPlan::Aggregate(aggr_plan).clone(),
-                &Default::default(),
-            )?;
-            if let LogicalPlan::Aggregate(aggr) = aggr_plan {
-                aggr
-            } else {
-                return Err(datafusion_common::DataFusionError::Internal(format!(
-                    "Failed to coerce expressions in aggregate plan, expected Aggregate, got: {:?}",
-                    aggr_plan
-                )));
-            }
-        };
+        let aggr = Self::coerce_aggr_node(aggr_plan)?;
         let mut lower_aggr_exprs = vec![];
         let mut upper_aggr_exprs = vec![];
 
@@ -176,65 +229,13 @@ impl StateMergeHelper {
             .map(|(r, c)| Expr::Column(Column::new(r, c)))
             .collect();
 
-        for aggr_expr in aggr.aggr_expr.iter() {
-            let Some(aggr_func) = get_aggr_func(aggr_expr) else {
-                return Err(datafusion_common::DataFusionError::NotImplemented(format!(
-                    "Unsupported aggregate expression for step aggr optimize: {:?}",
-                    aggr_expr
-                )));
-            };
-
-            let original_input_fields = aggr_func
-                .params
-                .args
-                .iter()
-                .map(|e| e.to_field(&aggr.input.schema()).map(|(_, field)| field))
-                .collect::<Result<Vec<_>, _>>()?;
-
-            // first create the state function from the original aggregate function.
-            let state_func = StateWrapper::new((*aggr_func.func).clone())?;
-
-            let expr = AggregateFunction {
-                func: Arc::new(state_func.into()),
-                params: aggr_func.params.clone(),
-            };
-            let expr = Expr::AggregateFunction(expr);
-            let lower_state_output_col_name = expr.schema_name().to_string();
-
-            lower_aggr_exprs.push(expr);
-
-            // then create the merge function using the physical expression of the original aggregate function
-            let (original_phy_expr, _filter, _ordering) = create_aggregate_expr_and_maybe_filter(
-                aggr_expr,
-                aggr.input.schema(),
-                aggr.input.schema().as_arrow(),
-                &Default::default(),
-            )?;
-
-            let merge_func = MergeWrapper::new(
-                (*aggr_func.func).clone(),
-                original_phy_expr,
-                original_input_fields,
-            )?;
-            let arg = Expr::Column(Column::new_unqualified(lower_state_output_col_name));
-            let expr = AggregateFunction {
-                func: Arc::new(merge_func.into()),
-                // notice filter/order_by is not supported in the merge function, as it's not meaningful to have them in the merge phase.
-                // do notice this order by is only removed in the outer logical plan, the physical plan still have order by and hence
-                // can create correct accumulator with order by.
-                params: AggregateFunctionParams {
-                    args: vec![arg],
-                    distinct: aggr_func.params.distinct,
-                    filter: None,
-                    order_by: vec![],
-                    null_treatment: aggr_func.params.null_treatment,
-                },
-            };
-
-            // alias to the original aggregate expr's schema name, so parent plan can refer to it
-            // correctly.
-            let expr = Expr::AggregateFunction(expr).alias(aggr_expr.schema_name().to_string());
-            upper_aggr_exprs.push(expr);
+        for aggr_expr in &aggr.aggr_expr {
+            let contract = Self::split_coerced_aggregate_expr(aggr_expr, aggr.input.as_ref())?;
+            let lower_state_output_col_name = contract.partial_state_expr.schema_name().to_string();
+            let merge_expr =
+                contract.merge_expr(Column::new_unqualified(lower_state_output_col_name));
+            lower_aggr_exprs.push(contract.partial_state_expr);
+            upper_aggr_exprs.push(merge_expr);
         }
 
         let mut lower = aggr.clone();
@@ -272,6 +273,76 @@ impl StateMergeHelper {
             upper_merge: upper_plan,
         })
     }
+
+    /// Runs the same coercion pass used by [`Self::split_aggr_node`]. Callers
+    /// that need expression-level contracts should split expressions from this
+    /// returned aggregate so AVG, compound arguments, and COUNT(*) use the
+    /// canonical DataFusion expressions.
+    pub fn coerce_aggr_node(aggr_plan: Aggregate) -> datafusion_common::Result<Aggregate> {
+        let plan = TypeCoercion::new().analyze(
+            LogicalPlan::Aggregate(aggr_plan).clone(),
+            &Default::default(),
+        )?;
+        if let LogicalPlan::Aggregate(aggr) = plan {
+            Ok(aggr)
+        } else {
+            Err(datafusion_common::DataFusionError::Internal(format!(
+                "Failed to coerce expressions in aggregate plan, expected Aggregate, got: {plan:?}"
+            )))
+        }
+    }
+
+    /// Produces the state/merge contract for one already-coerced aggregate
+    /// expression. The returned merge expression only accepts a Struct state
+    /// column supplied by the caller and therefore has no raw-input dependency.
+    pub fn split_coerced_aggregate_expr(
+        aggr_expr: &Expr,
+        input: &LogicalPlan,
+    ) -> datafusion_common::Result<AggregateSplitContract> {
+        let Some(aggr_func) = get_aggr_func(aggr_expr) else {
+            return Err(datafusion_common::DataFusionError::NotImplemented(format!(
+                "Unsupported aggregate expression for step aggr optimize: {aggr_expr:?}"
+            )));
+        };
+        let original_input_fields = aggr_func
+            .params
+            .args
+            .iter()
+            .map(|expr| expr.to_field(input.schema()).map(|(_, field)| field))
+            .collect::<Result<Vec<_>, _>>()?;
+        let state_func = StateWrapper::new_with_ordering(
+            (*aggr_func.func).clone(),
+            ordering_fields(&aggr_func.params.order_by, input)?,
+            aggr_func.params.distinct,
+        )?;
+        let partial_state_expr = Expr::AggregateFunction(AggregateFunction {
+            func: Arc::new(state_func.into()),
+            params: aggr_func.params.clone(),
+        });
+        let (_, final_result_field) = aggr_expr.to_field(input.schema())?;
+        let (original_phy_expr, _filter, _ordering) = create_aggregate_expr_and_maybe_filter(
+            aggr_expr,
+            input.schema(),
+            input.schema().as_arrow(),
+            &Default::default(),
+        )?;
+        let merge_udaf = AggregateUDF::new_from_impl(MergeWrapper::new(
+            (*aggr_func.func).clone(),
+            original_phy_expr,
+            original_input_fields,
+        )?);
+
+        Ok(AggregateSplitContract {
+            partial_state_expr,
+            final_result_field,
+            merge_factory: MergeAggregateExprFactory {
+                merge_udaf,
+                result_name: aggr_expr.schema_name().to_string(),
+                null_treatment: aggr_func.params.null_treatment,
+                distinct: aggr_func.params.distinct,
+            },
+        })
+    }
 }
 
 /// Wrapper to make an aggregate function out of a state function.
@@ -288,12 +359,23 @@ pub struct StateWrapper {
 impl StateWrapper {
     /// `state_index`: The index of the state in the output of the state function.
     pub fn new(inner: AggregateUDF) -> datafusion_common::Result<Self> {
+        Self::new_with_ordering(inner, vec![], false)
+    }
+
+    /// Constructs a state wrapper with the ordering and DISTINCT information
+    /// that affects its state layout. `FixStateUdafOrderingAnalyzer` may apply
+    /// the same values later and is intentionally idempotent.
+    fn new_with_ordering(
+        inner: AggregateUDF,
+        ordering: Vec<FieldRef>,
+        distinct: bool,
+    ) -> datafusion_common::Result<Self> {
         let name = aggr_state_func_name(inner.name());
         Ok(Self {
             inner,
             name,
-            ordering: vec![],
-            distinct: false,
+            ordering,
+            distinct,
         })
     }
 

@@ -12,22 +12,34 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
+use api::v1::region::{RemoteDynFilterUnregister, RemoteDynFilterUpdate};
+use arrow::array::{Float64Array, StringArray, TimestampMillisecondArray, UInt32Array};
 use arrow::datatypes::{DataType, IntervalDayTime, TimeUnit};
+use async_trait::async_trait;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
-use common_error::ext::BoxedError;
+use common_error::ext::{BoxedError, PlainError};
+use common_error::status_code::StatusCode;
 use common_function::aggrs::aggr_wrapper::{StateMergeHelper, StateWrapper};
-use common_recordbatch::adapter::RecordBatchMetrics;
+use common_recordbatch::adapter::{RecordBatchMetrics, RecordBatchStreamAdapter};
 use common_recordbatch::error::Result as RecordBatchResult;
-use common_recordbatch::{OrderOption, RecordBatch, RecordBatchStream, SendableRecordBatchStream};
+use common_recordbatch::{
+    DfRecordBatch, OrderOption, RecordBatch, RecordBatchStream, SendableRecordBatchStream,
+};
 use common_telemetry::init_default_ut_logging;
-use datafusion::datasource::DefaultTableSource;
-use datafusion::execution::SessionState;
+use datafusion::datasource::{DefaultTableSource, MemTable};
+use datafusion::execution::context::{QueryPlanner, SessionConfig};
+use datafusion::execution::{SessionState, SessionStateBuilder};
 use datafusion::functions_aggregate::expr_fn::avg;
 use datafusion::functions_aggregate::min_max::{max, min};
+use datafusion::physical_plan::ExecutionPlan;
+use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
+use datafusion::physical_plan::projection::ProjectionExec;
+use datafusion::physical_planner::{DefaultPhysicalPlanner, ExtensionPlanner, PhysicalPlanner};
 use datafusion::prelude::SessionContext;
 use datafusion_common::tree_node::TreeNodeRecursion;
 use datafusion_common::{ExprSchema, JoinType, ScalarValue};
@@ -45,16 +57,30 @@ use futures::Stream;
 use futures::task::{Context, Poll};
 use pretty_assertions::assert_eq;
 use regex::Regex;
+use session::ReadPreference;
+use session::context::QueryContext;
+use snafu::ResultExt;
 use store_api::data_source::DataSource;
-use store_api::storage::ScanRequest;
+use store_api::storage::{RegionId, ScanRequest};
 use table::metadata::{
     FilterPushDownType, TableId, TableInfoBuilder, TableInfoRef, TableMeta, TableType,
 };
 use table::table::adapter::DfTableProviderAdapter;
 use table::table::numbers::NumbersTable;
+use table::table_name::TableName;
 use table::{Table, TableRef};
+use tokio::time::timeout;
 
 use super::*;
+use crate::dist_plan::MergeScanExec;
+use crate::error::QueryExecutionSnafu;
+use crate::query_engine::DefaultSerializer;
+use crate::range_select::lowering::{RangeSelectLoweringAnalyzer, RangeSelectOptions};
+use crate::range_select::plan::{
+    RangeFn, RangeSelect, RangeSelectExec, RangeSelectExecMode, RangeSelectMode,
+};
+use crate::range_select::planner::RangeSelectPlanner;
+use crate::region_query::RegionQueryHandler;
 
 fn collect_merge_scan_remote_dyn_filter_producer_ids(
     plan: &LogicalPlan,
@@ -487,6 +513,928 @@ fn try_encode_decode_substrait(plan: &LogicalPlan, state: SessionState) {
     .unwrap();
 
     assert_eq!(*plan, decoded_plan);
+}
+
+fn range_select_plan(time_expr: Expr, by: Vec<Expr>) -> LogicalPlan {
+    range_select_plan_with_window(
+        time_expr,
+        by,
+        Duration::from_secs(5),
+        Duration::from_secs(5),
+    )
+}
+
+fn range_select_plan_with_window(
+    time_expr: Expr,
+    by: Vec<Expr>,
+    align: Duration,
+    range: Duration,
+) -> LogicalPlan {
+    let test_table = TestTable::table_with_name(0, "t".to_string());
+    let table_source = Arc::new(DefaultTableSource::new(Arc::new(
+        DfTableProviderAdapter::new(test_table),
+    )));
+    let scan = LogicalPlanBuilder::scan_with_filters("t", table_source, None, vec![])
+        .unwrap()
+        .build()
+        .unwrap();
+    let scan = LogicalPlanBuilder::from(scan)
+        .project(vec![col("pk1"), col("ts"), col("number")])
+        .unwrap()
+        .build()
+        .unwrap();
+    range_select_plan_from_input(scan, time_expr, by, align, range)
+}
+
+fn range_select_plan_from_input(
+    input: LogicalPlan,
+    time_expr: Expr,
+    by: Vec<Expr>,
+    align: Duration,
+    range: Duration,
+) -> LogicalPlan {
+    let range_expr = avg(col("number"));
+    let projection_expr = std::iter::once(range_expr.clone())
+        .chain([time_expr.clone()])
+        .chain(by.clone())
+        .collect::<Vec<_>>();
+    let range_select = RangeSelect::try_new(
+        Arc::new(input),
+        vec![RangeFn {
+            name: "avg(t.number)".to_string(),
+            data_type: DataType::Float64,
+            expr: range_expr.clone(),
+            range,
+            fill: None,
+            need_cast: false,
+        }],
+        align,
+        0,
+        time_expr,
+        by,
+        &projection_expr,
+    )
+    .unwrap();
+    LogicalPlan::Extension(datafusion_expr::logical_plan::Extension {
+        node: Arc::new(range_select),
+    })
+}
+
+fn lower_range_select_for_dist(plan: LogicalPlan, enabled: bool) -> LogicalPlan {
+    let mut config = ConfigOptions::default();
+    config.extensions.insert(RangeSelectOptions {
+        experimental_enable_range_select_pushdown: enabled,
+    });
+    RangeSelectLoweringAnalyzer.analyze(plan, &config).unwrap()
+}
+
+fn range_select_from_extension(plan: &LogicalPlan) -> &RangeSelect {
+    let LogicalPlan::Extension(extension) = plan else {
+        panic!("expected RangeSelect extension, got: {plan}");
+    };
+    extension
+        .node
+        .as_any()
+        .downcast_ref::<RangeSelect>()
+        .expect("expected RangeSelect extension")
+}
+
+fn merge_scan_from_extension(plan: &LogicalPlan) -> &MergeScanLogicalPlan {
+    let LogicalPlan::Extension(extension) = plan else {
+        panic!("expected MergeScan extension, got: {plan}");
+    };
+    extension
+        .node
+        .as_any()
+        .downcast_ref::<MergeScanLogicalPlan>()
+        .expect("expected MergeScan extension")
+}
+
+#[derive(Debug)]
+struct NoopRangeSelectRegionQueryHandler;
+
+#[async_trait]
+impl RegionQueryHandler for NoopRangeSelectRegionQueryHandler {
+    async fn do_get(
+        &self,
+        _read_preference: ReadPreference,
+        _request: common_query::request::QueryRequest,
+    ) -> crate::error::Result<SendableRecordBatchStream> {
+        unreachable!("physical shape tests must not execute MergeScan")
+    }
+
+    async fn handle_remote_dyn_filter_update(
+        &self,
+        _region_id: RegionId,
+        _query_id: String,
+        _update: RemoteDynFilterUpdate,
+    ) -> crate::error::Result<()> {
+        unreachable!("physical shape tests must not send remote dynamic filters")
+    }
+
+    async fn handle_remote_dyn_filter_unregister(
+        &self,
+        _region_id: RegionId,
+        _query_id: String,
+        _unregister: RemoteDynFilterUnregister,
+    ) -> crate::error::Result<()> {
+        unreachable!("physical shape tests must not unregister remote dynamic filters")
+    }
+}
+
+fn region_query_error(message: impl Into<String>) -> crate::error::Error {
+    Err::<(), _>(BoxedError::new(PlainError::new(
+        message.into(),
+        StatusCode::Unexpected,
+    )))
+    .context(QueryExecutionSnafu {})
+    .unwrap_err()
+}
+
+#[derive(Debug)]
+struct ExecutingRangeSelectRegionQueryHandler {
+    batches: HashMap<RegionId, DfRecordBatch>,
+    requests: Mutex<Vec<RegionId>>,
+}
+
+impl ExecutingRangeSelectRegionQueryHandler {
+    fn new(batches: HashMap<RegionId, DfRecordBatch>) -> Self {
+        Self {
+            batches,
+            requests: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn requests(&self) -> Vec<RegionId> {
+        self.requests.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl RegionQueryHandler for ExecutingRangeSelectRegionQueryHandler {
+    async fn do_get(
+        &self,
+        _read_preference: ReadPreference,
+        request: common_query::request::QueryRequest,
+    ) -> crate::error::Result<SendableRecordBatchStream> {
+        self.requests.lock().unwrap().push(request.region_id);
+        let LogicalPlan::Extension(extension) = &request.plan else {
+            return Err(region_query_error(
+                "remote request root is not an extension",
+            ));
+        };
+        let Some(partial) = extension.node.as_any().downcast_ref::<RangeSelect>() else {
+            return Err(region_query_error(
+                "remote request root is not RangeSelect Partial",
+            ));
+        };
+        if !matches!(partial.mode(), RangeSelectMode::Partial(_)) {
+            return Err(region_query_error(
+                "remote request RangeSelect is not Partial",
+            ));
+        }
+        if !matches!(partial.input.as_ref(), LogicalPlan::Projection(_)) {
+            return Err(region_query_error(
+                "remote request Partial lacks its materialization Projection",
+            ));
+        }
+        let expected_schema = request.plan.schema().as_arrow().clone();
+        if expected_schema.fields().len() != 3
+            || !matches!(expected_schema.field(0).data_type(), DataType::Struct(_))
+            || expected_schema.field(0).is_nullable()
+            || expected_schema.field(1).data_type()
+                != &DataType::Timestamp(TimeUnit::Millisecond, None)
+            || expected_schema
+                .fields()
+                .iter()
+                .any(|field| field.name() == "number")
+        {
+            return Err(region_query_error(
+                "remote request Partial schema must contain only non-null state, bucket, and BY",
+            ));
+        }
+
+        let raw_batch = self
+            .batches
+            .get(&request.region_id)
+            .cloned()
+            .ok_or_else(|| {
+                region_query_error(format!("missing raw batch for {}", request.region_id))
+            })?;
+        let remote_context = SessionContext::new_with_state(range_select_physical_session_state());
+        remote_context
+            .register_table(
+                "t",
+                Arc::new(
+                    MemTable::try_new(raw_batch.schema(), vec![vec![raw_batch]])
+                        .map_err(|error| region_query_error(error.to_string()))?,
+                ),
+            )
+            .map_err(|error| region_query_error(error.to_string()))?;
+        let remote_state = remote_context.state();
+        let bytes = substrait::DFLogicalSubstraitConvertor
+            .encode(&request.plan, DefaultSerializer)
+            .map_err(|error| region_query_error(error.to_string()))?;
+        let decoded = substrait::DFLogicalSubstraitConvertor
+            .decode(bytes, remote_state.clone())
+            .await
+            .map_err(|error| region_query_error(error.to_string()))?;
+        let decoded_partial = range_select_from_extension(&decoded);
+        if !matches!(decoded_partial.mode(), RangeSelectMode::Partial(_))
+            || !matches!(decoded_partial.input.as_ref(), LogicalPlan::Projection(_))
+        {
+            return Err(region_query_error(
+                "decoded remote request is not a materialized RangeSelect Partial",
+            ));
+        }
+        let physical = remote_state
+            .create_physical_plan(&decoded)
+            .await
+            .map_err(|error| region_query_error(error.to_string()))?;
+        let physical = optimize_range_select_physical_plan(&remote_state, physical)
+            .map_err(|error| region_query_error(error.to_string()))?;
+        let Some(partial_exec) = physical.as_any().downcast_ref::<RangeSelectExec>() else {
+            return Err(region_query_error(
+                "decoded remote physical root is not RangeSelectExec",
+            ));
+        };
+        if partial_exec.mode() != RangeSelectExecMode::Partial
+            || partial_exec.schema() != Arc::new(expected_schema)
+        {
+            return Err(region_query_error(
+                "remote Partial physical schema does not match MergeScan expected schema",
+            ));
+        }
+        let stream = physical
+            .execute(0, remote_context.task_ctx())
+            .map_err(|error| region_query_error(error.to_string()))?;
+        Ok(Box::pin(
+            RecordBatchStreamAdapter::try_new(stream)
+                .map_err(|error| region_query_error(error.to_string()))?,
+        ))
+    }
+
+    async fn handle_remote_dyn_filter_update(
+        &self,
+        _region_id: RegionId,
+        _query_id: String,
+        _update: RemoteDynFilterUpdate,
+    ) -> crate::error::Result<()> {
+        Ok(())
+    }
+
+    async fn handle_remote_dyn_filter_unregister(
+        &self,
+        _region_id: RegionId,
+        _query_id: String,
+        _unregister: RemoteDynFilterUnregister,
+    ) -> crate::error::Result<()> {
+        Ok(())
+    }
+}
+
+struct RangeSelectMergeScanTestPlanner {
+    region_query_handler: Arc<dyn RegionQueryHandler>,
+}
+
+impl std::fmt::Debug for RangeSelectMergeScanTestPlanner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RangeSelectMergeScanTestPlanner").finish()
+    }
+}
+
+#[async_trait]
+impl ExtensionPlanner for RangeSelectMergeScanTestPlanner {
+    async fn plan_extension(
+        &self,
+        _planner: &dyn PhysicalPlanner,
+        node: &dyn datafusion_expr::UserDefinedLogicalNode,
+        _logical_inputs: &[&LogicalPlan],
+        _physical_inputs: &[Arc<dyn ExecutionPlan>],
+        session_state: &SessionState,
+    ) -> DfResult<Option<Arc<dyn ExecutionPlan>>> {
+        let Some(merge_scan) = node.as_any().downcast_ref::<MergeScanLogicalPlan>() else {
+            return Ok(None);
+        };
+        Ok(Some(Arc::new(MergeScanExec::new(
+            session_state,
+            TableName::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "t"),
+            vec![RegionId::new(0, 0), RegionId::new(0, 1)],
+            merge_scan.input().clone(),
+            merge_scan.input().schema().as_arrow(),
+            self.region_query_handler.clone(),
+            QueryContext::arc(),
+            2,
+            merge_scan.partition_cols().clone(),
+            merge_scan.remote_dyn_filter_producer_id(),
+            false,
+        )?)))
+    }
+}
+
+struct RangeSelectPhysicalQueryPlanner {
+    planner: DefaultPhysicalPlanner,
+}
+
+impl std::fmt::Debug for RangeSelectPhysicalQueryPlanner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RangeSelectPhysicalQueryPlanner").finish()
+    }
+}
+
+#[async_trait]
+impl QueryPlanner for RangeSelectPhysicalQueryPlanner {
+    async fn create_physical_plan(
+        &self,
+        logical_plan: &LogicalPlan,
+        session_state: &SessionState,
+    ) -> DfResult<Arc<dyn ExecutionPlan>> {
+        self.planner
+            .create_physical_plan(logical_plan, session_state)
+            .await
+    }
+}
+
+fn range_select_physical_session_state_with_handler(
+    region_query_handler: Arc<dyn RegionQueryHandler>,
+) -> SessionState {
+    let planner = DefaultPhysicalPlanner::with_extension_planners(vec![
+        Arc::new(RangeSelectPlanner),
+        Arc::new(RangeSelectMergeScanTestPlanner {
+            region_query_handler,
+        }),
+    ]);
+    SessionStateBuilder::new()
+        .with_config(SessionConfig::new().with_target_partitions(2))
+        .with_default_features()
+        .with_serializer_registry(Arc::new(DefaultSerializer))
+        .with_query_planner(Arc::new(RangeSelectPhysicalQueryPlanner { planner }))
+        .build()
+}
+
+fn range_select_physical_session_state() -> SessionState {
+    range_select_physical_session_state_with_handler(Arc::new(NoopRangeSelectRegionQueryHandler))
+}
+
+fn assert_arrow_schema_matches_logical(
+    physical: &arrow::datatypes::Schema,
+    logical: &datafusion_common::DFSchema,
+) {
+    assert_eq!(physical.fields().len(), logical.fields().len());
+    for (index, physical_field) in physical.fields().iter().enumerate() {
+        let (_, logical_field) = logical.qualified_field(index);
+        assert_eq!(physical_field.name(), logical_field.name());
+        assert_eq!(physical_field.data_type(), logical_field.data_type());
+        assert_eq!(physical_field.is_nullable(), logical_field.is_nullable());
+        assert_eq!(physical_field.metadata(), logical_field.metadata());
+    }
+}
+
+fn optimize_range_select_physical_plan(
+    state: &SessionState,
+    plan: Arc<dyn ExecutionPlan>,
+) -> DfResult<Arc<dyn ExecutionPlan>> {
+    state
+        .physical_optimizers()
+        .iter()
+        .try_fold(plan, |plan, optimizer| {
+            optimizer.optimize(plan, state.config_options())
+        })
+}
+
+#[test]
+fn range_select_complete_keeps_legacy_narrow_remote_input_when_pushdown_disabled() {
+    let plan = range_select_plan(col("ts"), vec![col("pk1")]);
+    let plan = lower_range_select_for_dist(plan, false);
+    assert!(matches!(
+        range_select_from_extension(&plan).mode(),
+        RangeSelectMode::Complete
+    ));
+
+    let result = DistPlannerAnalyzer {}
+        .analyze(plan, &ConfigOptions::default())
+        .unwrap();
+    let range_select = range_select_from_extension(&result);
+    assert!(matches!(range_select.mode(), RangeSelectMode::Complete));
+    let LogicalPlan::Projection(projection) = range_select.input.as_ref() else {
+        panic!(
+            "expected schema-restoring Projection below legacy RangeSelect, got: {}",
+            range_select.input
+        );
+    };
+    let merge_scan = merge_scan_from_extension(projection.input.as_ref());
+
+    let LogicalPlan::Projection(remote_projection) = merge_scan.input() else {
+        panic!(
+            "expected narrow remote Projection, got: {}",
+            merge_scan.input()
+        );
+    };
+    assert_eq!(
+        remote_projection
+            .schema
+            .fields()
+            .iter()
+            .map(|field| field.name().as_str())
+            .collect::<Vec<_>>(),
+        vec!["pk1", "ts", "number"]
+    );
+}
+
+#[test]
+fn range_select_pushdown_places_partial_below_merge_scan_with_state_only_schema() {
+    let original = range_select_plan(col("ts"), vec![col("pk1")]);
+    let original_schema = original.schema().clone();
+    let lowered = lower_range_select_for_dist(original, true);
+    let lowered_final = range_select_from_extension(&lowered);
+    assert!(matches!(lowered_final.mode(), RangeSelectMode::Final(_)));
+
+    let result = DistPlannerAnalyzer {}
+        .analyze(lowered, &ConfigOptions::default())
+        .unwrap();
+    let final_range = range_select_from_extension(&result);
+    assert!(matches!(final_range.mode(), RangeSelectMode::Final(_)));
+    assert_eq!(final_range.schema, original_schema);
+
+    let LogicalPlan::Projection(restoring_projection) = final_range.input.as_ref() else {
+        panic!("expected schema-restoring Projection below Final RangeSelect");
+    };
+    let merge_scan = merge_scan_from_extension(restoring_projection.input.as_ref());
+    assert_eq!(
+        restoring_projection.schema,
+        merge_scan.input().schema().clone(),
+        "Final must receive precisely the remote Partial schema"
+    );
+
+    let remote_partial = range_select_from_extension(merge_scan.input());
+    assert!(matches!(remote_partial.mode(), RangeSelectMode::Partial(_)));
+    let LogicalPlan::Projection(materialization) = remote_partial.input.as_ref() else {
+        panic!("expected materialization Projection below remote Partial RangeSelect");
+    };
+    assert_eq!(
+        materialization
+            .schema
+            .fields()
+            .iter()
+            .map(|field| field.name().as_str())
+            .collect::<Vec<_>>(),
+        vec!["ts", "pk1", "__range_arg_0"]
+    );
+
+    let remote_schema = merge_scan.input().schema();
+    assert_eq!(
+        remote_schema
+            .fields()
+            .iter()
+            .map(|field| field.name().as_str())
+            .collect::<Vec<_>>(),
+        vec!["__range_state_0", "__range_bucket_ms", "pk1"]
+    );
+    assert!(matches!(
+        remote_schema.fields()[0].data_type(),
+        DataType::Struct(_)
+    ));
+    assert_eq!(
+        remote_schema.fields()[1].data_type(),
+        &DataType::Timestamp(TimeUnit::Millisecond, None)
+    );
+    assert_eq!(remote_schema.fields()[2].data_type(), &DataType::Utf8);
+    assert!(
+        substrait::DFLogicalSubstraitConvertor
+            .encode(merge_scan.input(), crate::query_engine::DefaultSerializer)
+            .is_ok(),
+        "the exact remote Partial subtree must be serializable"
+    );
+}
+
+#[test]
+fn range_select_pushdown_success_is_not_replaced_by_pre_dispatch_fallback() {
+    // `expand_sort_alias_conflict_limit` fixes the generic local DistPlanner
+    // fallback contract. It happens before dispatch and must not turn a
+    // successfully planned RangeSelect Partial into a Complete retry.
+    let lowered = lower_range_select_for_dist(range_select_plan(col("ts"), vec![col("pk1")]), true);
+    let mut config = ConfigOptions::default();
+    config.extensions.insert(DistPlannerOptions {
+        allow_query_fallback: true,
+    });
+
+    let result = DistPlannerAnalyzer {}.analyze(lowered, &config).unwrap();
+    let final_range = range_select_from_extension(&result);
+    assert!(matches!(final_range.mode(), RangeSelectMode::Final(_)));
+
+    let LogicalPlan::Projection(restoring_projection) = final_range.input.as_ref() else {
+        panic!("expected schema-restoring Projection below Final RangeSelect");
+    };
+    let merge_scan = merge_scan_from_extension(restoring_projection.input.as_ref());
+    let remote_partial = range_select_from_extension(merge_scan.input());
+    assert!(matches!(remote_partial.mode(), RangeSelectMode::Partial(_)));
+}
+
+#[test]
+fn range_select_unsupported_shape_keeps_complete_fallback_without_remote_partial() {
+    let plan = range_select_plan(col("ts").alias("ts"), vec![col("pk1")]);
+    let lowered = lower_range_select_for_dist(plan.clone(), true);
+    assert_eq!(
+        lowered, plan,
+        "unsupported RangeSelect shape must not split"
+    );
+
+    let result = DistPlannerAnalyzer {}
+        .analyze(lowered, &ConfigOptions::default())
+        .unwrap();
+    let complete = range_select_from_extension(&result);
+    assert!(matches!(complete.mode(), RangeSelectMode::Complete));
+    let LogicalPlan::Projection(restoring_projection) = complete.input.as_ref() else {
+        panic!("expected legacy schema-restoring Projection below Complete RangeSelect");
+    };
+    let merge_scan = merge_scan_from_extension(restoring_projection.input.as_ref());
+    assert!(
+        !matches!(merge_scan.input(), LogicalPlan::Extension(_)),
+        "unsupported RangeSelect must keep the legacy raw/narrow remote plan"
+    );
+}
+
+#[tokio::test]
+async fn range_select_pushdown_physical_plans_preserve_frontend_and_remote_boundaries() {
+    let logical = DistPlannerAnalyzer {}
+        .analyze(
+            lower_range_select_for_dist(range_select_plan(col("ts"), vec![col("pk1")]), true),
+            &ConfigOptions::default(),
+        )
+        .unwrap();
+    let final_range = range_select_from_extension(&logical);
+    let LogicalPlan::Projection(restoring_projection) = final_range.input.as_ref() else {
+        panic!("Final RangeSelect must have a schema-restoring Projection input");
+    };
+    let merge_scan = merge_scan_from_extension(restoring_projection.input.as_ref());
+    let remote_logical = merge_scan.input().clone();
+    let remote_partial = range_select_from_extension(&remote_logical);
+    assert!(matches!(final_range.mode(), RangeSelectMode::Final(_)));
+    assert!(matches!(remote_partial.mode(), RangeSelectMode::Partial(_)));
+
+    let frontend_state = range_select_physical_session_state();
+    let frontend = frontend_state.create_physical_plan(&logical).await.unwrap();
+    let frontend = optimize_range_select_physical_plan(&frontend_state, frontend).unwrap();
+    let final_exec = frontend
+        .as_any()
+        .downcast_ref::<RangeSelectExec>()
+        .expect("frontend root must be RangeSelectExec(Final)");
+    assert_eq!(final_exec.mode(), RangeSelectExecMode::Final);
+    assert!(
+        final_exec
+            .schema()
+            .fields()
+            .iter()
+            .all(|field| field.name() != "number"),
+        "frontend Final output must not reintroduce raw values"
+    );
+    assert_eq!(final_exec.required_input_distribution().len(), 1);
+    assert!(matches!(
+        final_exec.required_input_distribution()[0],
+        datafusion_physical_expr::Distribution::SinglePartition
+    ));
+    assert_eq!(
+        final_exec
+            .properties()
+            .output_partitioning()
+            .partition_count(),
+        1
+    );
+    assert_eq!(
+        final_exec.properties().emission_type,
+        datafusion::physical_plan::execution_plan::EmissionType::Final
+    );
+    assert_eq!(
+        final_exec.properties().boundedness,
+        datafusion::physical_plan::execution_plan::Boundedness::Bounded
+    );
+    assert_arrow_schema_matches_logical(final_exec.schema().as_ref(), final_range.schema.as_ref());
+
+    let final_children = final_exec.children();
+    let coalesce = final_children[0]
+        .as_any()
+        .downcast_ref::<CoalescePartitionsExec>()
+        .expect("physical optimizer must satisfy Final single-partition input");
+    let coalesce_children = coalesce.children();
+    // The logical schema-restoring Projection is an identity projection for this
+    // Partial state schema, so physical projection pushdown removes it while
+    // retaining its schema contract on MergeScanExec.
+    let frontend_merge_scan = coalesce_children[0]
+        .as_any()
+        .downcast_ref::<MergeScanExec>()
+        .expect("physical optimizer may only elide the identity restore ProjectionExec");
+    assert!(
+        frontend_merge_scan
+            .schema()
+            .fields()
+            .iter()
+            .all(|field| field.name() != "number"),
+        "Final input must expose only Partial state, bucket, and BY columns"
+    );
+    assert_eq!(
+        frontend_merge_scan
+            .properties()
+            .output_partitioning()
+            .partition_count(),
+        2
+    );
+    assert_arrow_schema_matches_logical(
+        frontend_merge_scan.schema().as_ref(),
+        remote_logical.schema().as_ref(),
+    );
+    assert_arrow_schema_matches_logical(
+        frontend_merge_scan.schema().as_ref(),
+        restoring_projection.schema.as_ref(),
+    );
+
+    let remote_bytes = substrait::DFLogicalSubstraitConvertor
+        .encode(&remote_logical, DefaultSerializer)
+        .expect("remote Partial must encode with DefaultSerializer");
+    let remote_context = SessionContext::new_with_state(range_select_physical_session_state());
+    remote_context
+        .register_table(
+            "t",
+            Arc::new(
+                MemTable::try_new(
+                    TestTable::schema().arrow_schema().clone(),
+                    vec![vec![], vec![]],
+                )
+                .unwrap(),
+            ),
+        )
+        .unwrap();
+    let remote_state = remote_context.state();
+    let remote_decoded = substrait::DFLogicalSubstraitConvertor
+        .decode(remote_bytes, remote_state.clone())
+        .await
+        .expect("remote Partial must decode as a datanode-style plan");
+    let decoded_partial = range_select_from_extension(&remote_decoded);
+    assert!(matches!(
+        decoded_partial.mode(),
+        RangeSelectMode::Partial(_)
+    ));
+    let remote = remote_state
+        .create_physical_plan(&remote_decoded)
+        .await
+        .unwrap();
+    let remote = optimize_range_select_physical_plan(&remote_state, remote).unwrap();
+    let partial_exec = remote
+        .as_any()
+        .downcast_ref::<RangeSelectExec>()
+        .expect("remote root must be RangeSelectExec(Partial)");
+    assert_eq!(partial_exec.mode(), RangeSelectExecMode::Partial);
+    assert!(matches!(
+        partial_exec.required_input_distribution()[0],
+        datafusion_physical_expr::Distribution::UnspecifiedDistribution
+    ));
+    assert_eq!(
+        partial_exec
+            .properties()
+            .output_partitioning()
+            .partition_count(),
+        2
+    );
+    assert_arrow_schema_matches_logical(
+        partial_exec.schema().as_ref(),
+        decoded_partial.schema.as_ref(),
+    );
+    assert!(matches!(
+        partial_exec.schema().field(0).data_type(),
+        DataType::Struct(_)
+    ));
+    assert!(!partial_exec.schema().field(0).is_nullable());
+    assert_eq!(
+        partial_exec.schema().field(1).data_type(),
+        &DataType::Timestamp(TimeUnit::Millisecond, None)
+    );
+    let (original_by_qualifier, original_by_field) = remote_partial.schema.qualified_field(2);
+    assert!(
+        original_by_qualifier.is_none(),
+        "the materialization Projection intentionally publishes the BY field unqualified"
+    );
+    assert_eq!(original_by_field.name(), "pk1");
+    assert_eq!(original_by_field.data_type(), &DataType::Utf8);
+    assert_eq!(
+        partial_exec.schema().field(2).name(),
+        original_by_field.name()
+    );
+    assert_eq!(
+        partial_exec.schema().field(2).data_type(),
+        original_by_field.data_type()
+    );
+    assert_eq!(
+        partial_exec.schema().field(2).is_nullable(),
+        original_by_field.is_nullable()
+    );
+    assert_eq!(
+        partial_exec.schema().field(2).metadata(),
+        original_by_field.metadata()
+    );
+
+    let partial_children = partial_exec.children();
+    let materialization = partial_children[0]
+        .as_any()
+        .downcast_ref::<ProjectionExec>()
+        .expect("remote Partial must consume its materialization ProjectionExec directly");
+    let materialization_children = materialization.children();
+    assert!(
+        materialization_children[0]
+            .as_any()
+            .downcast_ref::<CoalescePartitionsExec>()
+            .is_none(),
+        "Partial must not gain a CoalescePartitionsExec before its materialization input"
+    );
+    assert!(
+        materialization_children[0]
+            .as_any()
+            .downcast_ref::<datafusion::physical_plan::repartition::RepartitionExec>()
+            .is_none(),
+        "Partial must not gain a RepartitionExec before its materialization input"
+    );
+    assert_eq!(
+        materialization_children[0]
+            .properties()
+            .output_partitioning()
+            .partition_count(),
+        2
+    );
+    let batches = datafusion::physical_plan::collect(remote, remote_context.task_ctx())
+        .await
+        .unwrap();
+    assert!(batches.is_empty());
+}
+
+fn range_select_raw_batch(timestamps: Vec<i64>, values: Vec<u32>) -> DfRecordBatch {
+    let schema = TestTable::schema().arrow_schema().clone();
+    let hosts = vec!["host"; values.len()];
+    DfRecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(StringArray::from(hosts.clone())),
+            Arc::new(StringArray::from(vec!["pk2"; values.len()])),
+            Arc::new(StringArray::from(vec!["pk3"; values.len()])),
+            Arc::new(TimestampMillisecondArray::from(timestamps)),
+            Arc::new(UInt32Array::from(
+                values.into_iter().map(Some).collect::<Vec<_>>(),
+            )),
+        ],
+    )
+    .unwrap()
+}
+
+fn range_select_output_rows(batches: &[DfRecordBatch]) -> Vec<(i64, String, f64)> {
+    let mut rows = Vec::new();
+    for batch in batches {
+        let values = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+        let timestamps = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<TimestampMillisecondArray>()
+            .unwrap();
+        let by = batch
+            .column(2)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        for index in 0..batch.num_rows() {
+            rows.push((
+                timestamps.value(index),
+                by.value(index).to_string(),
+                values.value(index),
+            ));
+        }
+    }
+    rows.sort_by(|left, right| left.0.cmp(&right.0).then(left.1.cmp(&right.1)));
+    rows
+}
+
+#[tokio::test]
+async fn range_select_two_region_partial_states_execute_through_merge_scan() {
+    let region_a = RegionId::new(0, 0);
+    let region_b = RegionId::new(0, 1);
+    // `range=10s` and `align=5s` make the samples at 0ms and 5000ms
+    // contribute to overlapping buckets. Bucket 0 receives 1, 3, and 9.
+    let batch_a = range_select_raw_batch(vec![0, 5_000], vec![1, 3]);
+    let batch_b = range_select_raw_batch(vec![5_000], vec![9]);
+    let handler = Arc::new(ExecutingRangeSelectRegionQueryHandler::new(HashMap::from(
+        [(region_a, batch_a.clone()), (region_b, batch_b.clone())],
+    )));
+
+    let logical = DistPlannerAnalyzer {}
+        .analyze(
+            lower_range_select_for_dist(
+                range_select_plan_with_window(
+                    col("ts"),
+                    vec![col("pk1")],
+                    Duration::from_secs(5),
+                    Duration::from_secs(10),
+                ),
+                true,
+            ),
+            &ConfigOptions::default(),
+        )
+        .unwrap();
+    let frontend_state = range_select_physical_session_state_with_handler(handler.clone());
+    let frontend = frontend_state.create_physical_plan(&logical).await.unwrap();
+    let frontend = optimize_range_select_physical_plan(&frontend_state, frontend).unwrap();
+    let final_exec = frontend
+        .as_any()
+        .downcast_ref::<RangeSelectExec>()
+        .expect("frontend root must be RangeSelectExec(Final)");
+    assert_eq!(final_exec.mode(), RangeSelectExecMode::Final);
+    let final_children = final_exec.children();
+    let coalesce = final_children[0]
+        .as_any()
+        .downcast_ref::<CoalescePartitionsExec>()
+        .expect("Final must coalesce MergeScan partitions");
+    let coalesce_children = coalesce.children();
+    let merge_scan = coalesce_children[0]
+        .as_any()
+        .downcast_ref::<MergeScanExec>()
+        .expect("physical projection pushdown must leave MergeScan below Coalesce");
+    assert!(
+        merge_scan
+            .schema()
+            .fields()
+            .iter()
+            .all(|field| field.name() != "number"),
+        "frontend MergeScan must not receive raw values"
+    );
+    assert!(matches!(
+        merge_scan.schema().field(0).data_type(),
+        DataType::Struct(_)
+    ));
+    assert!(!merge_scan.schema().field(0).is_nullable());
+
+    let frontend_schema = frontend.schema();
+    let frontend_batches = timeout(
+        Duration::from_secs(5),
+        datafusion::physical_plan::collect(frontend, SessionContext::new().task_ctx()),
+    )
+    .await
+    .expect("two-region frontend execution timed out")
+    .unwrap();
+    let mut requests = handler.requests();
+    requests.sort();
+    assert_eq!(requests, vec![region_a, region_b]);
+
+    let union_source =
+        Arc::new(MemTable::try_new(batch_a.schema(), vec![vec![batch_a], vec![batch_b]]).unwrap());
+    let union_scan = LogicalPlanBuilder::scan_with_filters(
+        "t",
+        Arc::new(DefaultTableSource::new(union_source)),
+        None,
+        vec![],
+    )
+    .unwrap()
+    .project(vec![col("pk1"), col("ts"), col("number")])
+    .unwrap()
+    .build()
+    .unwrap();
+    let complete = range_select_plan_from_input(
+        union_scan,
+        col("ts"),
+        vec![col("pk1")],
+        Duration::from_secs(5),
+        Duration::from_secs(10),
+    );
+    let baseline_state = range_select_physical_session_state();
+    let baseline = baseline_state
+        .create_physical_plan(&complete)
+        .await
+        .unwrap();
+    let baseline = optimize_range_select_physical_plan(&baseline_state, baseline).unwrap();
+    let baseline_schema = baseline.schema();
+    let baseline_batches = timeout(
+        Duration::from_secs(5),
+        datafusion::physical_plan::collect(baseline, SessionContext::new().task_ctx()),
+    )
+    .await
+    .expect("Complete baseline execution timed out")
+    .unwrap();
+    assert_eq!(frontend_schema, baseline_schema);
+
+    let final_rows = range_select_output_rows(&frontend_batches);
+    let complete_rows = range_select_output_rows(&baseline_batches);
+    assert_eq!(final_rows.len(), complete_rows.len());
+    for (final_row, complete_row) in final_rows.iter().zip(&complete_rows) {
+        assert_eq!(final_row.0, complete_row.0);
+        assert_eq!(final_row.1, complete_row.1);
+        assert!(
+            (final_row.2 - complete_row.2).abs() < 1e-12,
+            "Final row {final_row:?} differs from Complete baseline {complete_row:?}"
+        );
+    }
+    assert!(
+        final_rows
+            .iter()
+            .any(|(_, _, value)| (*value - 13.0 / 3.0).abs() < 1e-12),
+        "merged states must produce the raw-sample AVG 13/3, not an average of regional averages"
+    );
 }
 
 #[test]

@@ -147,6 +147,7 @@ impl Default for FlownodeOptions {
                 allow_query_fallback: false,
                 memory_pool_size: MemoryLimit::default(),
                 enable_per_region_metrics: false,
+                experimental_enable_range_select_pushdown: false,
             },
             memory: MemoryOptions::default(),
         }
