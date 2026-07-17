@@ -48,7 +48,7 @@ function text(value) {
     .replace(/!/g, '\\!')
     .replace(/@/g, '@\u200b')
     .replace(/\|/g, '\\|')
-    .replace(/\r?\n/g, ' ');
+    .replace(/\r\n|\r|\n/g, ' ');
   return result;
 }
 
@@ -56,9 +56,20 @@ function statusEmoji(status) {
   return { ok: '✅', measured: '✅', failed: '❌', planned: '📝', 'fixture-ready': '🧪' }[status] || '⚠️';
 }
 
-function fmtMs(value) {
+function finiteNumber(value) {
+  if (typeof value !== 'number' && typeof value !== 'string') {
+    return null;
+  }
+  if (typeof value === 'string' && value.trim() === '') {
+    return null;
+  }
   const number = Number(value);
-  return Number.isFinite(number) ? number.toFixed(2) : 'N/A';
+  return Number.isFinite(number) ? number : null;
+}
+
+function fmtMs(value) {
+  const number = finiteNumber(value);
+  return number === null ? 'N/A' : number.toFixed(2);
 }
 
 function measurementsByName(target) {
@@ -71,51 +82,177 @@ function measurementsByName(target) {
 }
 
 function regression(base, candidate) {
-  const b = Number(base);
-  const c = Number(candidate);
-  if (!Number.isFinite(b) || !Number.isFinite(c) || b === 0) return 'N/A';
+  const b = finiteNumber(base);
+  const c = finiteNumber(candidate);
+  if (b === null || c === null || b === 0) return 'N/A';
   return `${(((c - b) / b) * 100).toFixed(1)}%`;
 }
 
-function renderReport(report, reportPath) {
+function thresholdStatus(thresholds, query) {
+  const hits = (Array.isArray(thresholds) ? thresholds : [])
+    .filter(item => query === undefined || (hasScopedQuery(item) && String(item.query) === query))
+    .map(formatThreshold);
+  return hits.length > 0 ? hits.join(', ') : 'N/A';
+}
+
+function hasScopedQuery(threshold) {
+  return threshold?.query !== null
+    && threshold?.query !== undefined
+    && String(threshold.query) !== '';
+}
+
+function hasValue(value) {
+  return value !== null && value !== undefined && String(value) !== '';
+}
+
+function formatThreshold(threshold) {
+  const scope = [];
+  if (hasValue(threshold?.target)) scope.push(`target=${threshold.target}`);
+  if (hasValue(threshold?.encoding)) scope.push(`encoding=${threshold.encoding}`);
+  const name = threshold?.threshold || 'threshold';
+  const status = threshold?.status || 'unknown';
+  const reason = hasValue(threshold?.reason) ? ` (reason: ${threshold.reason})` : '';
+  return `${name}${scope.length > 0 ? ` [${scope.join(', ')}]` : ''}: ${status}${reason}`;
+}
+
+function syntheticThresholdStatus(thresholds, measurementNames) {
+  const unscoped = [];
+  const unmatched = new Map();
+  for (const threshold of Array.isArray(thresholds) ? thresholds : []) {
+    if (!hasScopedQuery(threshold)) {
+      unscoped.push(threshold);
+      continue;
+    }
+    const query = String(threshold.query);
+    if (!measurementNames.has(query)) {
+      const entries = unmatched.get(query) || [];
+      entries.push(threshold);
+      unmatched.set(query, entries);
+    }
+  }
+
+  const parts = [];
+  if (unscoped.length > 0) {
+    parts.push(`case/storage threshold: ${thresholdStatus(unscoped)}`);
+  }
+  for (const query of Array.from(unmatched.keys()).sort()) {
+    parts.push(`unmatched query ${query}: ${thresholdStatus(unmatched.get(query))}`);
+  }
+  return parts.length > 0 ? parts.join('; ') : 'N/A';
+}
+
+function joinDetails(...details) {
+  const present = details.filter(detail => detail && detail !== 'N/A');
+  return present.length > 0 ? present.join('; ') : 'N/A';
+}
+
+function missingMeasurementDetails(base, candidate) {
+  const details = [];
+  if (finiteNumber(base?.latency_ms_median) === null) details.push('base measurement missing');
+  if (finiteNumber(candidate?.latency_ms_median) === null) details.push('candidate measurement missing');
+  return details;
+}
+
+function collectReportRows(report, reportPath) {
+  const fallbackName = typeof reportPath === 'string'
+    ? path.basename(path.dirname(reportPath)) || 'unknown'
+    : 'unknown';
+  if (report === null || Array.isArray(report) || typeof report !== 'object') {
+    return [{
+      caseName: fallbackName,
+      query: 'N/A',
+      status: 'missing',
+      baseMedian: 'N/A',
+      candidateMedian: 'N/A',
+      regression: 'N/A',
+      threshold: 'invalid report object',
+    }];
+  }
   const caseInfo = report.case || {};
-  const name = caseInfo.name || path.basename(path.dirname(reportPath));
+  const name = caseInfo.name || fallbackName;
   const status = report.status || 'missing';
-  const lines = [
-    `### ${statusEmoji(status)} ${text(name)}`,
-    '',
-    `- **Status:** \`${text(status)}\``,
-    `- **Case path:** \`${text(report.case_path)}\``,
-    `- **Query mode:** \`${text(report.query_mode)}\``,
-  ];
+  const thresholds = Array.isArray(report.thresholds) ? report.thresholds : [];
   if (report.error) {
-    lines.push(`- **Error:** \`${text(report.error)}\``);
+    return [{
+      caseName: name,
+      query: 'N/A',
+      status,
+      baseMedian: 'N/A',
+      candidateMedian: 'N/A',
+      regression: 'N/A',
+      threshold: joinDetails(`error: ${report.error}`, syntheticThresholdStatus(thresholds, new Set())),
+    }];
   }
 
   const targets = Array.isArray(report.targets) ? report.targets : [];
-  lines.push('', '| Target | Status | Validation errors | Region |', '| --- | --- | ---: | --- |');
-  for (const target of targets) {
-    const discovered = target?.discovered || {};
-    const region = Array.isArray(discovered)
-      ? discovered.map(item => item?.region_id).filter(Boolean).join(', ')
-      : discovered.region_id;
-    lines.push(
-      `| ${text(target?.name)} | ${statusEmoji(target?.status)} \`${text(target?.status)}\` | ${(target?.validation_errors || []).length} | ${text(region)} |`
-    );
+  if (targets.length < 2) {
+    return [{
+      caseName: name,
+      query: 'N/A',
+      status,
+      baseMedian: 'N/A',
+      candidateMedian: 'N/A',
+      regression: 'N/A',
+      threshold: joinDetails('base/candidate measurements missing', syntheticThresholdStatus(thresholds, new Set())),
+    }];
   }
 
-  if (targets.length >= 2) {
-    const base = measurementsByName(targets[0]);
-    const candidate = measurementsByName(targets[1]);
-    const names = Array.from(new Set([...base.keys(), ...candidate.keys()])).sort();
-    lines.push('', '| Query | Base median ms | Candidate median ms | Regression |', '| --- | ---: | ---: | ---: |');
-    for (const query of names) {
-      const b = base.get(query) || {};
-      const c = candidate.get(query) || {};
-      lines.push(
-        `| ${text(query)} | ${fmtMs(b.latency_ms_median)} | ${fmtMs(c.latency_ms_median)} | ${regression(b.latency_ms_median, c.latency_ms_median)} |`
-      );
-    }
+  const base = measurementsByName(targets[0]);
+  const candidate = measurementsByName(targets[1]);
+  const names = Array.from(new Set([...base.keys(), ...candidate.keys()])).sort();
+  if (names.length === 0) {
+    return [{
+      caseName: name,
+      query: 'N/A',
+      status,
+      baseMedian: 'N/A',
+      candidateMedian: 'N/A',
+      regression: 'N/A',
+      threshold: joinDetails('no query measurements found', syntheticThresholdStatus(thresholds, new Set())),
+    }];
+  }
+
+  const measurementNames = new Set(names);
+  const rows = names.map(query => {
+    const b = base.get(query) || {};
+    const c = candidate.get(query) || {};
+    return {
+      caseName: name,
+      query,
+      status,
+      baseMedian: fmtMs(b.latency_ms_median),
+      candidateMedian: fmtMs(c.latency_ms_median),
+      regression: regression(b.latency_ms_median, c.latency_ms_median),
+      threshold: joinDetails(
+        ...missingMeasurementDetails(b, c),
+        thresholdStatus(thresholds, query)
+      ),
+    };
+  });
+  const syntheticThresholds = syntheticThresholdStatus(thresholds, measurementNames);
+  if (syntheticThresholds !== 'N/A') {
+    rows.push({
+      caseName: name,
+      query: 'N/A',
+      status,
+      baseMedian: 'N/A',
+      candidateMedian: 'N/A',
+      regression: 'N/A',
+      threshold: syntheticThresholds,
+    });
+  }
+  return rows;
+}
+
+function renderSummaryTable(rows) {
+  const lines = [
+    '| Case | Query | Case status | Base median ms | Candidate median ms | Regression | Threshold |',
+    '| --- | --- | --- | ---: | ---: | ---: | --- |',
+  ];
+  for (const row of rows) {
+    lines.push(
+      `| ${text(row.caseName)} | ${text(row.query)} | ${statusEmoji(row.status)} \`${text(row.status)}\` | ${text(row.baseMedian)} | ${text(row.candidateMedian)} | ${text(row.regression)} | ${text(row.threshold)} |`
+    );
   }
   return lines.join('\n');
 }
@@ -251,7 +388,7 @@ module.exports = async function validateQueryRegressionComment({ github, context
   if (reportPaths.length === 0) {
     body += 'No query-regression JSON reports were found in the artifact.\n';
   } else {
-    const rendered = [];
+    const rows = [];
     for (const reportPath of reportPaths) {
       let report;
       try {
@@ -259,9 +396,9 @@ module.exports = async function validateQueryRegressionComment({ github, context
       } catch (error) {
         return skip(core, `Invalid report JSON in ${reportPath}: ${error.message}`);
       }
-      rendered.push(renderReport(report, reportPath));
+      rows.push(...collectReportRows(report, reportPath));
     }
-    body += rendered.join('\n\n---\n\n') + '\n';
+    body += renderSummaryTable(rows) + '\n';
   }
 
   fs.writeFileSync(summaryPath, body);
@@ -270,3 +407,5 @@ module.exports = async function validateQueryRegressionComment({ github, context
   core.setOutput('pr_number', String(prNumber));
   core.setOutput('summary_path', summaryPath);
 };
+
+module.exports._test = { collectReportRows, renderSummaryTable };
