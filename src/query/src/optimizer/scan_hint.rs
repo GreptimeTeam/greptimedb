@@ -105,6 +105,9 @@ impl ScanHintRule {
                         if visitor
                             .instant_last_row_scans
                             .contains(&(adapter as *const DummyTableProvider as usize))
+                            && !visitor
+                                .non_instant_scans
+                                .contains(&(adapter as *const DummyTableProvider as usize))
                         {
                             adapter.with_time_series_selector_hint(TimeSeriesRowSelector::LastRow);
                         }
@@ -247,6 +250,8 @@ struct ScanHintVisitor {
     instant_selector_depth: usize,
     /// Dummy providers scanned under a single-evaluation instant selector.
     instant_last_row_scans: HashSet<usize>,
+    /// Dummy providers also scanned outside a single-evaluation instant selector.
+    non_instant_scans: HashSet<usize>,
     #[cfg(feature = "vector_index")]
     vector_search: VectorSearchState,
 }
@@ -368,8 +373,7 @@ impl TreeNodeVisitor<'_> for ScanHintVisitor {
             }
         }
 
-        if self.instant_selector_depth > 0
-            && let LogicalPlan::TableScan(table_scan) = node
+        if let LogicalPlan::TableScan(table_scan) = node
             && let Some(source) = table_scan
                 .source
                 .as_any()
@@ -379,8 +383,12 @@ impl TreeNodeVisitor<'_> for ScanHintVisitor {
                 .as_any()
                 .downcast_ref::<DummyTableProvider>()
         {
-            self.instant_last_row_scans
-                .insert(adapter as *const DummyTableProvider as usize);
+            let provider = adapter as *const DummyTableProvider as usize;
+            if self.instant_selector_depth > 0 {
+                self.instant_last_row_scans.insert(provider);
+            } else {
+                self.non_instant_scans.insert(provider);
+            }
         }
 
         #[cfg(feature = "vector_index")]
@@ -624,6 +632,55 @@ mod test {
             single_request.distribution
         );
         assert_eq!(None, range_provider.scan_request().series_row_selector);
+    }
+
+    #[test]
+    fn shared_provider_is_not_hinted_for_mixed_instant_and_range_scans() {
+        let provider = Arc::new(mock_table_provider_with_tsid(RegionId::new(1, 1)));
+        let source = Arc::new(DefaultTableSource::new(provider.clone()));
+        let instant_input = LogicalPlanBuilder::scan("instant", source.clone(), None)
+            .unwrap()
+            .build()
+            .unwrap();
+        let instant = LogicalPlan::Extension(datafusion_expr::logical_plan::Extension {
+            node: Arc::new(InstantManipulate::new(
+                1000,
+                1000,
+                300_000,
+                5_000,
+                "ts".to_string(),
+                vec![DATA_SCHEMA_TSID_COLUMN_NAME.to_string()],
+                Some("v0".to_string()),
+                instant_input,
+            )),
+        });
+        let range_input = LogicalPlanBuilder::scan("range", source, None)
+            .unwrap()
+            .build()
+            .unwrap();
+        let range = LogicalPlan::Extension(datafusion_expr::logical_plan::Extension {
+            node: Arc::new(InstantManipulate::new(
+                1000,
+                2000,
+                300_000,
+                5_000,
+                "ts".to_string(),
+                vec![DATA_SCHEMA_TSID_COLUMN_NAME.to_string()],
+                Some("v0".to_string()),
+                range_input,
+            )),
+        });
+        let plan = LogicalPlanBuilder::from(instant)
+            .union(range)
+            .unwrap()
+            .build()
+            .unwrap();
+
+        ScanHintRule
+            .rewrite(plan, &OptimizerContext::default())
+            .unwrap();
+
+        assert_eq!(None, provider.scan_request().series_row_selector);
     }
 
     #[test]
