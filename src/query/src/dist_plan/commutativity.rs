@@ -322,14 +322,14 @@ impl Categorizer {
             | Expr::SimilarTo(_)
             | Expr::IsUnknown(_)
             | Expr::IsNotUnknown(_)
-            | Expr::Cast(_)
-            | Expr::TryCast(_)
             | Expr::WindowFunction(_)
             | Expr::InSubquery(_)
             | Expr::ScalarSubquery(_)
             | Expr::Wildcard { .. } => Commutativity::Unimplemented,
 
             Expr::Alias(alias) => Self::check_expr(&alias.expr),
+            Expr::Cast(cast) => Self::check_expr(&cast.expr),
+            Expr::TryCast(try_cast) => Self::check_expr(&try_cast.expr),
 
             Expr::Unnest(_)
             | Expr::GroupingSet(_)

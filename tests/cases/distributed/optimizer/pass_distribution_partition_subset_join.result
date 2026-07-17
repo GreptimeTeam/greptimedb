@@ -1,0 +1,118 @@
+CREATE TABLE pd_sub_l(
+  ts TIMESTAMP TIME INDEX,
+  device_id INTEGER,
+  area STRING,
+  lv INTEGER,
+  PRIMARY KEY(device_id, area)
+) PARTITION ON COLUMNS (device_id, area) (
+  device_id < 2 AND area < 'm',
+  device_id < 2 AND area >= 'm',
+  device_id >= 2
+) ENGINE=mito;
+
+Affected Rows: 0
+
+CREATE TABLE pd_sub_r(
+  ts TIMESTAMP TIME INDEX,
+  device_id INTEGER,
+  area STRING,
+  rv INTEGER,
+  PRIMARY KEY(device_id, area)
+) PARTITION ON COLUMNS (device_id, area) (
+  device_id < 2 AND area < 'm',
+  device_id < 2 AND area >= 'm',
+  device_id >= 2
+) ENGINE=mito;
+
+Affected Rows: 0
+
+INSERT INTO pd_sub_l VALUES
+  (1, 1, 'a', 10),
+  (2, 1, 'z', 20);
+
+Affected Rows: 2
+
+INSERT INTO pd_sub_r VALUES
+  (1, 1, 'a', 100),
+  (2, 1, 'z', 200);
+
+Affected Rows: 2
+
+ADMIN FLUSH_TABLE('pd_sub_l');
+
++-------------------------------+
+| ADMIN FLUSH_TABLE('pd_sub_l') |
++-------------------------------+
+| 0                             |
++-------------------------------+
+
+ADMIN FLUSH_TABLE('pd_sub_r');
+
++-------------------------------+
+| ADMIN FLUSH_TABLE('pd_sub_r') |
++-------------------------------+
+| 0                             |
++-------------------------------+
+
+-- Joining on only a subset of a multi-column partition key must still compare
+-- rows across all matching partitions for that subset key.
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE \d+\(\d+,\s+\d+\) REDACTED_REGION
+-- SQLNESS REPLACE Hash\(\[device_id@0\],\s+\d+\) Hash([device_id@0],REDACTED_PARTITIONS)
+-- SQLNESS REPLACE input_partitions=\d+ input_partitions=REDACTED
+-- SQLNESS REPLACE input_partitions=REDACTED\s+\| input_partitions=REDACTED|
+EXPLAIN SELECT l.area, r.area
+FROM pd_sub_l l JOIN pd_sub_r r ON l.device_id = r.device_id
+ORDER BY l.area, r.area;
+
++---------------+-------------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                              |
++---------------+-------------------------------------------------------------------------------------------------------------------+
+| logical_plan  | Sort: l.area ASC NULLS LAST, r.area ASC NULLS LAST                                                                |
+|               |   Projection: l.area, r.area                                                                                      |
+|               |     Inner Join: l.device_id = r.device_id                                                                         |
+|               |       Projection: l.device_id, l.area                                                                             |
+|               |         MergeScan [is_placeholder=false, remote_input=[                                                           |
+|               | SubqueryAlias: l                                                                                                  |
+|               |   Filter: pd_sub_l.device_id IS NOT NULL                                                                          |
+|               |     TableScan: pd_sub_l, partial_filters=[pd_sub_l.device_id IS NOT NULL]                                         |
+|               | ]]                                                                                                                |
+|               |       Projection: r.device_id, r.area                                                                             |
+|               |         MergeScan [is_placeholder=false, remote_input=[                                                           |
+|               | SubqueryAlias: r                                                                                                  |
+|               |   Filter: pd_sub_r.device_id IS NOT NULL                                                                          |
+|               |     TableScan: pd_sub_r, partial_filters=[pd_sub_r.device_id IS NOT NULL]                                         |
+|               | ]]                                                                                                                |
+| physical_plan | SortPreservingMergeExec: [area@0 ASC NULLS LAST, area@1 ASC NULLS LAST]                                           |
+|               |   SortExec: expr=[area@0 ASC NULLS LAST, area@1 ASC NULLS LAST], preserve_partitioning=[true]                     |
+|               |     HashJoinExec: mode=Partitioned, join_type=Inner, on=[(device_id@0, device_id@0)], projection=[area@1, area@3] |
+|               |       RepartitionExec: partitioning=Hash([device_id@0],REDACTED_PARTITIONS), input_partitions=REDACTED|
+|               |         ProjectionExec: expr=[device_id@1 as device_id, area@2 as area]                                           |
+|               |           MergeScanExec: peers=[REDACTED_REGION, REDACTED_REGION, REDACTED_REGION, ]         |
+|               |       RepartitionExec: partitioning=Hash([device_id@0],REDACTED_PARTITIONS), input_partitions=REDACTED|
+|               |         ProjectionExec: expr=[device_id@1 as device_id, area@2 as area]                                           |
+|               |           MergeScanExec: peers=[REDACTED_REGION, REDACTED_REGION, REDACTED_REGION, ]         |
+|               |                                                                                                                   |
++---------------+-------------------------------------------------------------------------------------------------------------------+
+
+SELECT l.area, r.area
+FROM pd_sub_l l JOIN pd_sub_r r ON l.device_id = r.device_id
+ORDER BY l.area, r.area;
+
++------+------+
+| area | area |
++------+------+
+| a    | a    |
+| a    | z    |
+| z    | a    |
+| z    | z    |
++------+------+
+
+DROP TABLE pd_sub_l;
+
+Affected Rows: 0
+
+DROP TABLE pd_sub_r;
+
+Affected Rows: 0
+

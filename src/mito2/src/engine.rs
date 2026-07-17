@@ -39,6 +39,8 @@ mod drop_test;
 #[cfg(test)]
 mod edit_region_test;
 #[cfg(test)]
+mod file_ref_test;
+#[cfg(test)]
 mod filter_deleted_test;
 #[cfg(test)]
 mod flush_test;
@@ -356,10 +358,13 @@ impl MitoEngine {
                 );
             let mut dst_region_to_src_regions = Vec::with_capacity(dst2src.len());
             for (dst_region, srcs) in dst2src {
-                let Some(dst_region) = self.find_region(dst_region) else {
-                    continue;
+                let Some(region) = self.find_region(dst_region) else {
+                    return RegionNotFoundSnafu {
+                        region_id: dst_region,
+                    }
+                    .fail();
                 };
-                dst_region_to_src_regions.push((dst_region, srcs));
+                dst_region_to_src_regions.push((region, srcs));
             }
             dst_region_to_src_regions
         };

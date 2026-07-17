@@ -36,6 +36,7 @@ use datafusion_optimizer::propagate_empty_relation::PropagateEmptyRelation;
 use datafusion_optimizer::push_down_filter::PushDownFilter;
 use datafusion_optimizer::rewrite_set_comparison::RewriteSetComparison;
 use datafusion_optimizer::scalar_subquery_to_join::ScalarSubqueryToJoin;
+use datafusion_optimizer::simplify_expressions::SimplifyExpressions;
 use promql::extension_plan::SeriesDivide;
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use table::metadata::TableType;
@@ -219,6 +220,7 @@ fn pre_merge_scan_optimizer() -> Optimizer {
         Arc::new(PropagateEmptyRelation::new()),
         Arc::new(FilterNullJoinKeys::default()),
         Arc::new(PushDownFilter::new()),
+        Arc::new(SimplifyExpressions::new()),
     ])
 }
 
