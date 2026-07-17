@@ -59,19 +59,17 @@ impl PluginOptionsDeserializer<Vec<PluginOptions>> for PluginOptionsDeserializer
 fn filter_known_plugin_options(values: Vec<Value>) -> Vec<PluginOptions> {
     values
         .into_iter()
-        .filter_map(
-            |value| match serde_json::from_value::<PluginOptions>(value.clone()) {
-                Ok(options) => Some(options),
-                Err(err) => {
-                    warn!(
-                        "Ignoring unrecognized plugin option in the config: {err}. \
+        .filter_map(|value| match PluginOptions::deserialize(&value) {
+            Ok(options) => Some(options),
+            Err(err) => {
+                warn!(
+                    "Ignoring unrecognized plugin option in the config: {err}. \
                      This usually means the option belongs to a plugin that is not \
                      compiled into this build. Raw value: {value}"
-                    );
-                    None
-                }
-            },
-        )
+                );
+                None
+            }
+        })
         .collect()
 }
 
