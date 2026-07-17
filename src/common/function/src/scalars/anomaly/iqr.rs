@@ -24,7 +24,6 @@
 //! When IQR = 0 (constant quartiles), returns 0.0 if value is on the fence,
 //! or +inf if value is outside.
 
-use std::any::Any;
 use std::fmt::Debug;
 use std::ops::Range;
 use std::sync::Arc;
@@ -56,10 +55,6 @@ impl AnomalyScoreIqr {
 }
 
 impl WindowUDFImpl for AnomalyScoreIqr {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn name(&self) -> &str {
         "anomaly_score_iqr"
     }

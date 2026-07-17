@@ -20,7 +20,6 @@
 //! When MAD = 0 (majority-constant window), returns 0.0 if value equals
 //! median, or +inf otherwise.
 
-use std::any::Any;
 use std::fmt::Debug;
 use std::ops::Range;
 use std::sync::Arc;
@@ -57,10 +56,6 @@ impl AnomalyScoreMad {
 }
 
 impl WindowUDFImpl for AnomalyScoreMad {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn name(&self) -> &str {
         "anomaly_score_mad"
     }

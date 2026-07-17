@@ -476,7 +476,8 @@ impl DfLogicalPlanner {
                     if let DfExpr::Cast(cast) = e
                         && let DfExpr::Placeholder(ph) = &*cast.expr
                     {
-                        placeholder_types.insert(ph.id.clone(), Some(cast.data_type.clone()));
+                        placeholder_types
+                            .insert(ph.id.clone(), Some(cast.field.data_type().clone()));
                         casted_placeholders.insert(ph.id.clone());
                     }
 

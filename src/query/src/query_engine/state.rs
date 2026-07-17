@@ -594,7 +594,17 @@ impl MetricsMemoryPool {
     }
 }
 
+impl fmt::Display for MetricsMemoryPool {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}(inner_pool: {})", self.name(), self.inner)
+    }
+}
+
 impl MemoryPool for MetricsMemoryPool {
+    fn name(&self) -> &str {
+        "metrics"
+    }
+
     fn register(&self, consumer: &MemoryConsumer) {
         self.inner.register(consumer);
     }

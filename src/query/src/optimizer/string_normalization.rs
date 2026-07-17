@@ -87,8 +87,8 @@ impl TreeNodeRewriter for StringNormalizationConverter {
     /// Otherwise - no modifications applied
     fn f_up(&mut self, expr: Expr) -> Result<Transformed<Expr>> {
         let new_expr = match expr {
-            Expr::Cast(Cast { expr, data_type }) => {
-                let expr = match data_type {
+            Expr::Cast(Cast { expr, field }) => {
+                let expr = match field.data_type() {
                     DataType::Timestamp(_, _) => match *expr {
                         Expr::Literal(value, _) => match value {
                             ScalarValue::Utf8(Some(s)) => trim_utf_expr(s),
@@ -98,10 +98,7 @@ impl TreeNodeRewriter for StringNormalizationConverter {
                     },
                     _ => *expr,
                 };
-                Expr::Cast(Cast {
-                    expr: Box::new(expr),
-                    data_type,
-                })
+                Expr::Cast(Cast::new_from_field(Box::new(expr), field))
             }
             expr => expr,
         };

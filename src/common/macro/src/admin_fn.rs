@@ -224,10 +224,6 @@ fn build_struct(
 
         // Implement DataFusion's ScalarUDFImpl trait
         impl datafusion::logical_expr::ScalarUDFImpl for #name {
-            fn as_any(&self) -> &dyn std::any::Any {
-                self
-            }
-
             fn name(&self) -> &str {
                 #display_name
             }

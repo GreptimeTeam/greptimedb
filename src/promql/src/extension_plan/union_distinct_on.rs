@@ -12,15 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::any::Any;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use ahash::{HashMap, RandomState};
+use ahash::HashMap;
 use datafusion::arrow::array::UInt64Array;
 use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::arrow::record_batch::RecordBatch;
+use datafusion::common::hash_utils::RandomState as FixedState;
 use datafusion::common::{DFSchema, DFSchemaRef};
 use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datafusion::execution::context::TaskContext;
@@ -122,7 +122,7 @@ impl UnionDistinctOn {
             output_schema,
             metric: ExecutionPlanMetricsSet::new(),
             properties,
-            random_state: RandomState::new(),
+            hash_state: FixedState::with_seed(0),
         })
     }
 
@@ -290,15 +290,11 @@ pub struct UnionDistinctOnExec {
     metric: ExecutionPlanMetricsSet,
     properties: Arc<PlanProperties>,
 
-    /// Shared the `RandomState` for the hashing algorithm
-    random_state: RandomState,
+    /// Shared deterministic hash state for building and probing the hash table.
+    hash_state: FixedState,
 }
 
 impl ExecutionPlan for UnionDistinctOnExec {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn schema(&self) -> SchemaRef {
         self.output_schema.clone()
     }
@@ -331,7 +327,7 @@ impl ExecutionPlan for UnionDistinctOnExec {
             output_schema: self.output_schema.clone(),
             metric: self.metric.clone(),
             properties: self.properties.clone(),
-            random_state: self.random_state.clone(),
+            hash_state: self.hash_state.clone(),
         }))
     }
 
@@ -365,7 +361,7 @@ impl ExecutionPlan for UnionDistinctOnExec {
         // Build right hash table future.
         let hashed_data_future = HashedDataFut::Pending(Box::pin(HashedData::new(
             right_stream,
-            self.random_state.clone(),
+            self.hash_state.clone(),
             key_indices.clone(),
         )));
 
@@ -486,13 +482,13 @@ struct HashedData {
     batch: RecordBatch,
     /// The indices of the columns to be hashed.
     hash_key_indices: Vec<usize>,
-    random_state: RandomState,
+    hash_state: FixedState,
 }
 
 impl HashedData {
     pub async fn new(
         input: SendableRecordBatchStream,
-        random_state: RandomState,
+        hash_state: FixedState,
         hash_key_indices: Vec<usize>,
     ) -> DataFusionResult<Self> {
         // Collect all batches from the input stream
@@ -521,8 +517,7 @@ impl HashedData {
                 .collect::<Vec<_>>();
 
             // compute hash
-            let hash_values =
-                hash_utils::create_hashes(&arrays, &random_state, &mut hashes_buffer)?;
+            let hash_values = hash_utils::create_hashes(&arrays, &hash_state, &mut hashes_buffer)?;
             for (row_number, hash_value) in hash_values.iter().enumerate() {
                 // Only keeps the first observed row for each hash value
                 if hash_map
@@ -541,7 +536,7 @@ impl HashedData {
             hash_map,
             batch,
             hash_key_indices,
-            random_state,
+            hash_state,
         })
     }
 
@@ -558,8 +553,7 @@ impl HashedData {
 
         // compute hash
         hashes_buffer.resize(input.num_rows(), 0);
-        let hash_values =
-            hash_utils::create_hashes(&arrays, &self.random_state, &mut hashes_buffer)?;
+        let hash_values = hash_utils::create_hashes(&arrays, &self.hash_state, &mut hashes_buffer)?;
 
         // remove those hashes
         for hash in hash_values {
@@ -641,6 +635,7 @@ mod test {
     use datafusion::arrow::datatypes::{DataType, Field, Schema};
     use datafusion::common::ToDFSchema;
     use datafusion::logical_expr::{EmptyRelation, LogicalPlan};
+    use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 
     use super::*;
 
@@ -754,6 +749,50 @@ mod test {
         )
         .unwrap();
 
+        assert_eq!(result, expected);
+    }
+
+    #[tokio::test]
+    async fn test_hashed_data_uses_same_state_for_build_and_update() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("key", DataType::Int32, false),
+            Field::new("value", DataType::Int32, false),
+        ]));
+        let right = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(Int32Array::from(vec![1, 1, 2])),
+                Arc::new(Int32Array::from(vec![10, 11, 20])),
+            ],
+        )
+        .unwrap();
+        let right_stream = Box::pin(RecordBatchStreamAdapter::new(
+            schema.clone(),
+            futures::stream::iter(vec![Ok(right)]),
+        ));
+
+        let mut hashed_data = HashedData::new(right_stream, FixedState::with_seed(0), vec![0])
+            .await
+            .unwrap();
+        let left = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(Int32Array::from(vec![1])),
+                Arc::new(Int32Array::from(vec![100])),
+            ],
+        )
+        .unwrap();
+        hashed_data.update_map(&left).unwrap();
+
+        let result = hashed_data.finish().unwrap();
+        let expected = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Int32Array::from(vec![2])),
+                Arc::new(Int32Array::from(vec![20])),
+            ],
+        )
+        .unwrap();
         assert_eq!(result, expected);
     }
 

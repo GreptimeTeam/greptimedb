@@ -625,13 +625,9 @@ impl PlanRewriter {
         }
 
         if let LogicalPlan::TableScan(table_scan) = plan
-            && let Some(source) = table_scan
-                .source
-                .as_any()
-                .downcast_ref::<DefaultTableSource>()
+            && let Some(source) = table_scan.source.downcast_ref::<DefaultTableSource>()
             && let Some(provider) = source
                 .table_provider
-                .as_any()
                 .downcast_ref::<DfTableProviderAdapter>()
         {
             let table = provider.table();

@@ -203,7 +203,7 @@ fn align_array(array: &ArrayRef, field: &FieldRef) -> Result<ArrayRef> {
         return Ok(array.clone());
     }
 
-    cast_column(array, field.as_ref(), &DEFAULT_CAST_OPTIONS).context(CastColumnSnafu)
+    cast_column(array, field.data_type(), &DEFAULT_CAST_OPTIONS).context(CastColumnSnafu)
 }
 
 #[cfg(test)]

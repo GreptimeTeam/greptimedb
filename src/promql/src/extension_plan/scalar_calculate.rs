@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::any::Any;
 use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -388,10 +387,6 @@ struct ScalarCalculateExec {
 }
 
 impl ExecutionPlan for ScalarCalculateExec {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn schema(&self) -> SchemaRef {
         self.schema.clone()
     }
@@ -468,7 +463,7 @@ impl ExecutionPlan for ScalarCalculateExec {
         Some(self.metric.clone_inner())
     }
 
-    fn partition_statistics(&self, partition: Option<usize>) -> DataFusionResult<Statistics> {
+    fn partition_statistics(&self, partition: Option<usize>) -> DataFusionResult<Arc<Statistics>> {
         let input_stats = self.input.partition_statistics(partition)?;
 
         let estimated_row_num = (self.end - self.start) as f64 / self.interval as f64;
@@ -481,12 +476,12 @@ impl ExecutionPlan for ScalarCalculateExec {
             })
             .unwrap_or_default();
 
-        Ok(Statistics {
+        Ok(Arc::new(Statistics {
             num_rows: Precision::Inexact(estimated_row_num as _),
             total_byte_size: estimated_total_bytes,
             // TODO(ruihang): support this column statistics
             column_statistics: Statistics::unknown_column(&self.schema()),
-        })
+        }))
     }
 
     fn name(&self) -> &str {

@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::any::Any;
 use std::fmt::{Debug, Formatter};
 use std::hash::{Hash, Hasher};
 
@@ -49,10 +48,6 @@ impl Hash for ScalarUdf {
 }
 
 impl ScalarUDFImpl for ScalarUdf {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn name(&self) -> &str {
         self.function.name()
     }

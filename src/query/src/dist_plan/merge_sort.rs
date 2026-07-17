@@ -16,7 +16,6 @@
 //! `SortPreservingMergeExec` operator in datafusion
 //!
 
-use std::any::Any;
 use std::fmt;
 use std::sync::Arc;
 
@@ -93,7 +92,7 @@ impl MergeSortExec {
 
     fn input_with_fetch(&self, fetch: Option<usize>) -> Arc<dyn ExecutionPlan> {
         let input = Arc::clone(self.inner.input());
-        if let Some(sort) = input.as_any().downcast_ref::<SortExec>()
+        if let Some(sort) = input.downcast_ref::<SortExec>()
             && sort.preserve_partitioning()
             && sort.expr() == self.inner.expr()
         {
@@ -148,7 +147,7 @@ impl ExecutionPlan for MergeSortExec {
     /// `MergeSortExec` delegates most behavior to DataFusion's
     /// `SortPreservingMergeExec`, but it must not expose itself as that type.
     /// DataFusion's `EnforceSorting` optimizer recognizes a bare
-    /// `SortPreservingMergeExec` via `as_any().downcast_ref::<...>()` and may
+    /// `SortPreservingMergeExec` via `downcast_ref::<...>()` and may
     /// replace it with an unordered `CoalescePartitionsExec(fetch)` when the
     /// parent does not require sorted output.
     ///
@@ -164,10 +163,6 @@ impl ExecutionPlan for MergeSortExec {
     /// below `MergeSortExec` when `MergeScanExec` cannot preserve per-partition
     /// ordering. This opacity is specifically about protecting the merge stage
     /// itself from the `EnforceSorting` rewrite above.
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn properties(&self) -> &Arc<PlanProperties> {
         self.inner.properties()
     }
@@ -204,7 +199,7 @@ impl ExecutionPlan for MergeSortExec {
     /// ordered. This is the contract that makes `EnforceSorting` insert a
     /// `SortExec` below `MergeSortExec` when the input cannot preserve ordering.
     ///
-    /// The opacity of `MergeSortExec::as_any`, not this requirement, is what
+    /// The opacity of `MergeSortExec`'s downcast identity, not this requirement, is what
     /// prevents DataFusion from rewriting the merge stage itself as a bare
     /// `SortPreservingMergeExec`.
     fn required_input_ordering(&self) -> Vec<Option<OrderingRequirements>> {
@@ -249,7 +244,7 @@ impl ExecutionPlan for MergeSortExec {
         self.inner.metrics()
     }
 
-    fn partition_statistics(&self, partition: Option<usize>) -> Result<Statistics> {
+    fn partition_statistics(&self, partition: Option<usize>) -> Result<Arc<Statistics>> {
         self.inner.partition_statistics(partition)
     }
 
@@ -416,10 +411,6 @@ mod tests {
             "PreserveOrderProbeExec"
         }
 
-        fn as_any(&self) -> &dyn Any {
-            self
-        }
-
         fn properties(&self) -> &Arc<PlanProperties> {
             self.inner.properties()
         }
@@ -484,7 +475,6 @@ mod tests {
         assert_eq!(merge_sort.name(), "MergeSortExec");
         assert!(
             merge_sort
-                .as_any()
                 .downcast_ref::<SortPreservingMergeExec>()
                 .is_none(),
             "MergeSortExec must stay opaque to EnforceSorting's bare SortPreservingMerge rewrite"
@@ -498,7 +488,7 @@ mod tests {
         assert!(!tree.contains("SortPreservingMergeExec"));
 
         let fetched = merge_sort.with_fetch(Some(2)).unwrap();
-        assert!(fetched.as_any().downcast_ref::<MergeSortExec>().is_some());
+        assert!(fetched.downcast_ref::<MergeSortExec>().is_some());
         assert_eq!(fetched.fetch(), Some(2));
     }
 
@@ -540,12 +530,9 @@ mod tests {
 
         let fetched = merge_sort.with_fetch(Some(2)).unwrap();
 
-        assert!(fetched.as_any().downcast_ref::<MergeSortExec>().is_some());
+        assert!(fetched.downcast_ref::<MergeSortExec>().is_some());
         assert_eq!(fetched.fetch(), Some(2));
-        let child_sort = fetched.children()[0]
-            .as_any()
-            .downcast_ref::<SortExec>()
-            .unwrap();
+        let child_sort = fetched.children()[0].downcast_ref::<SortExec>().unwrap();
         assert_eq!(child_sort.fetch(), Some(2));
         assert!(child_sort.preserve_partitioning());
     }
@@ -563,14 +550,12 @@ mod tests {
         let preserved_spm = bare_spm.with_preserve_order(true).unwrap();
         assert!(
             preserved_spm
-                .as_any()
                 .downcast_ref::<SortPreservingMergeExec>()
                 .is_some(),
             "bare SPM should rebuild as bare SPM"
         );
         assert!(
             preserved_spm.children()[0]
-                .as_any()
                 .downcast_ref::<PreserveOrderProbeExec>()
                 .unwrap()
                 .preserve_order
@@ -580,14 +565,12 @@ mod tests {
         let preserved_merge_sort = merge_sort.with_preserve_order(true).unwrap();
         assert!(
             preserved_merge_sort
-                .as_any()
                 .downcast_ref::<MergeSortExec>()
                 .is_some(),
             "MergeSortExec must rewrap the preserve-order child as MergeSortExec"
         );
         assert!(
             preserved_merge_sort
-                .as_any()
                 .downcast_ref::<SortPreservingMergeExec>()
                 .is_none(),
             "MergeSortExec must not expose a bare SPM after with_preserve_order"
@@ -600,7 +583,6 @@ mod tests {
         );
         assert!(
             preserved_merge_sort.children()[0]
-                .as_any()
                 .downcast_ref::<PreserveOrderProbeExec>()
                 .unwrap()
                 .preserve_order
@@ -632,7 +614,6 @@ mod tests {
             .expect("SPM should accept a narrowing projection that preserves the sort key");
         assert!(
             swapped_spm
-                .as_any()
                 .downcast_ref::<SortPreservingMergeExec>()
                 .is_some(),
             "bare SPM should rebuild as bare SPM"
@@ -652,15 +633,11 @@ mod tests {
             .expect("MergeSortExec should accept the same projection swap as SPM");
 
         assert!(
-            swapped_merge_sort
-                .as_any()
-                .downcast_ref::<MergeSortExec>()
-                .is_some(),
+            swapped_merge_sort.downcast_ref::<MergeSortExec>().is_some(),
             "MergeSortExec must rewrap projection swaps as MergeSortExec"
         );
         assert!(
             swapped_merge_sort
-                .as_any()
                 .downcast_ref::<SortPreservingMergeExec>()
                 .is_none(),
             "MergeSortExec must not expose a bare SPM after projection swap"
@@ -668,7 +645,6 @@ mod tests {
         assert_eq!(swapped_merge_sort.fetch(), Some(1));
         assert!(
             swapped_merge_sort.children()[0]
-                .as_any()
                 .downcast_ref::<ProjectionExec>()
                 .is_some(),
             "the projection should move below MergeSortExec"
@@ -749,7 +725,6 @@ mod tests {
         .plan;
         assert!(
             optimized_spm
-                .as_any()
                 .downcast_ref::<CoalescePartitionsExec>()
                 .is_some(),
             "this regression test must exercise EnforceSorting's bare SPM -> CoalescePartitionsExec rewrite"
@@ -771,14 +746,12 @@ mod tests {
             .plan;
         assert!(
             optimized_merge_sort
-                .as_any()
                 .downcast_ref::<MergeSortExec>()
                 .is_some(),
             "MergeSortExec must stay opaque to the bare SPM rewrite"
         );
         assert!(
             optimized_merge_sort
-                .as_any()
                 .downcast_ref::<CoalescePartitionsExec>()
                 .is_none(),
             "MergeSortExec(fetch) is the required distributed TopK merge stage, not an unordered coalesce"

@@ -51,10 +51,10 @@ impl RemoveDuplicate {
     fn do_optimize(plan: Arc<dyn ExecutionPlan>) -> DfResult<Arc<dyn ExecutionPlan>> {
         let result = plan
             .transform_down(|plan| {
-                if plan.as_any().is::<RepartitionExec>() {
+                if plan.is::<RepartitionExec>() {
                     // check child
                     let child = plan.children()[0].clone();
-                    if child.as_any().type_id() == plan.as_any().type_id() {
+                    if child.is::<RepartitionExec>() {
                         // remove child
                         let grand_child = child.children()[0].clone();
                         let new_plan = plan.with_new_children(vec![grand_child])?;

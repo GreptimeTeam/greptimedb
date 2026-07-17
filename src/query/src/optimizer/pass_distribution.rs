@@ -68,7 +68,7 @@ impl PassDistribution {
         current_req: Option<Distribution>,
     ) -> DfResult<Arc<dyn ExecutionPlan>> {
         // If this is a MergeScanExec, try to apply the current requirement.
-        if let Some(merge_scan) = plan.as_any().downcast_ref::<MergeScanExec>()
+        if let Some(merge_scan) = plan.downcast_ref::<MergeScanExec>()
             && let Some(Distribution::HashPartitioned(hash_exprs)) = current_req.as_ref()
         {
             if let Partitioning::Hash(current_hash_exprs, _) = &merge_scan.properties().partitioning
@@ -133,7 +133,7 @@ impl PassDistribution {
             return None;
         };
 
-        let projection = plan.as_any().downcast_ref::<ProjectionExec>()?;
+        let projection = plan.downcast_ref::<ProjectionExec>()?;
         let proj_exprs = projection
             .expr()
             .iter()
@@ -254,12 +254,8 @@ mod tests {
         let optimized = PassDistribution
             .optimize(join, &ConfigOptions::default())
             .unwrap();
-        let hash_join = optimized.as_any().downcast_ref::<HashJoinExec>().unwrap();
-        let left_projection = hash_join
-            .left()
-            .as_any()
-            .downcast_ref::<ProjectionExec>()
-            .unwrap();
+        let hash_join = optimized.downcast_ref::<HashJoinExec>().unwrap();
+        let left_projection = hash_join.left().downcast_ref::<ProjectionExec>().unwrap();
         let left_partitioning = left_projection.input().output_partitioning();
         let right_partitioning = hash_join.right().output_partitioning();
 
@@ -348,12 +344,7 @@ mod tests {
     fn column_names(exprs: &[Arc<dyn PhysicalExpr>]) -> Vec<&str> {
         exprs
             .iter()
-            .map(|expr| {
-                expr.as_any()
-                    .downcast_ref::<PhysicalColumn>()
-                    .unwrap()
-                    .name()
-            })
+            .map(|expr| expr.downcast_ref::<PhysicalColumn>().unwrap().name())
             .collect()
     }
 }

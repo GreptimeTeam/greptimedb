@@ -365,9 +365,6 @@ impl AggregateUDFImpl for StateWrapper {
         Ok(Box::new(StateGroupsAccum::new(inner, state_type)?))
     }
 
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
     fn name(&self) -> &str {
         self.name.as_str()
     }
@@ -437,7 +434,7 @@ impl AggregateUDFImpl for StateWrapper {
         &self,
         statistics_args: &datafusion_expr::StatisticsArgs,
     ) -> Option<ScalarValue> {
-        let inner = self.inner().inner().as_any();
+        let inner = self.inner().inner();
         // only count/min/max need special handling here, for getting result from statistics
         // the result of count/min/max is also the result of count_state so can return directly
         let can_use_stat = inner.is::<Count>() || inner.is::<Max>() || inner.is::<Min>();
@@ -751,9 +748,6 @@ impl AggregateUDFImpl for MergeWrapper {
         Ok(Box::new(MergeAccum::new(inner_accum, &fields)))
     }
 
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
     fn name(&self) -> &str {
         self.name.as_str()
     }

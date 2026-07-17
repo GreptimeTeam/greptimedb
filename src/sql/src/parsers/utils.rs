@@ -24,7 +24,7 @@ use datafusion::optimizer::simplify_expressions::ExprSimplifier;
 use datafusion_common::tree_node::{TreeNode, TreeNodeVisitor};
 use datafusion_common::{DFSchema, ScalarValue};
 use datafusion_expr::simplify::SimplifyContext;
-use datafusion_expr::{AggregateUDF, Expr, ScalarUDF, TableSource, WindowUDF};
+use datafusion_expr::{AggregateUDF, Expr, HigherOrderUDF, ScalarUDF, TableSource, WindowUDF};
 use datafusion_sql::TableReference;
 use datafusion_sql::planner::{ContextProvider, SqlToRel};
 use datatypes::arrow::datatypes::DataType;
@@ -316,6 +316,10 @@ impl ContextProvider for StubContextProvider {
         self.state.scalar_functions().get(name).cloned()
     }
 
+    fn get_higher_order_meta(&self, name: &str) -> Option<Arc<HigherOrderUDF>> {
+        self.state.higher_order_functions().get(name).cloned()
+    }
+
     fn get_aggregate_meta(&self, name: &str) -> Option<Arc<AggregateUDF>> {
         self.state.aggregate_functions().get(name).cloned()
     }
@@ -334,6 +338,14 @@ impl ContextProvider for StubContextProvider {
 
     fn udf_names(&self) -> Vec<String> {
         self.state.scalar_functions().keys().cloned().collect()
+    }
+
+    fn higher_order_function_names(&self) -> Vec<String> {
+        self.state
+            .higher_order_functions()
+            .keys()
+            .cloned()
+            .collect()
     }
 
     fn udaf_names(&self) -> Vec<String> {

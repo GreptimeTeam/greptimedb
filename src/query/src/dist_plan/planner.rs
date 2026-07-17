@@ -107,7 +107,7 @@ impl ExtensionPlanner for MergeSortExtensionPlanner {
                         "Expect MergeSort to have one physical input".to_string(),
                     )
                 })?;
-                if input.as_any().downcast_ref::<MergeScanExec>().is_none() {
+                if input.downcast_ref::<MergeScanExec>().is_none() {
                     return Err(DataFusionError::Internal(format!(
                         "Expect MergeSort's input is a MergeScanExec, found {:?}",
                         physical_inputs
@@ -372,10 +372,9 @@ impl TreeNodeVisitor<'_> for TableNameExtractor {
     fn f_down(&mut self, node: &Self::Node) -> Result<TreeNodeRecursion> {
         match node {
             LogicalPlan::TableScan(scan) => {
-                if let Some(source) = scan.source.as_any().downcast_ref::<DefaultTableSource>()
+                if let Some(source) = scan.source.downcast_ref::<DefaultTableSource>()
                     && let Some(provider) = source
                         .table_provider
-                        .as_any()
                         .downcast_ref::<DfTableProviderAdapter>()
                 {
                     if provider.table().table_type() == TableType::Base {

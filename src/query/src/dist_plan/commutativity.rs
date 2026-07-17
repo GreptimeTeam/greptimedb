@@ -325,6 +325,9 @@ impl Categorizer {
             | Expr::WindowFunction(_)
             | Expr::InSubquery(_)
             | Expr::ScalarSubquery(_)
+            | Expr::HigherOrderFunction(_)
+            | Expr::Lambda(_)
+            | Expr::LambdaVariable(_)
             | Expr::Wildcard { .. } => Commutativity::Unimplemented,
 
             Expr::Alias(alias) => Self::check_expr(&alias.expr),

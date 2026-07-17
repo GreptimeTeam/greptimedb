@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::any::Any;
 use std::sync::{Arc, Mutex};
 
 use common_query::stream::StreamScanAdapter;
@@ -77,10 +76,6 @@ impl std::fmt::Debug for DfTableProviderAdapter {
 
 #[async_trait::async_trait]
 impl TableProvider for DfTableProviderAdapter {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn schema(&self) -> DfSchemaRef {
         self.table.schema().arrow_schema().clone()
     }
