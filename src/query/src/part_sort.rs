@@ -18,7 +18,6 @@
 //! partition ([`PartitionRange`]) independently based on the provided physical
 //! sort expressions.
 
-use std::any::Any;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -206,10 +205,6 @@ impl DisplayAs for PartSortExec {
 impl ExecutionPlan for PartSortExec {
     fn name(&self) -> &str {
         "PartSortExec"
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
     }
 
     fn schema(&self) -> SchemaRef {

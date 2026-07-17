@@ -151,13 +151,9 @@ impl TreeNodeVisitor<'_> for TimeIndexFinder {
         }
 
         if let LogicalPlan::TableScan(table_scan) = &node
-            && let Some(source) = table_scan
-                .source
-                .as_any()
-                .downcast_ref::<DefaultTableSource>()
+            && let Some(source) = table_scan.source.downcast_ref::<DefaultTableSource>()
             && let Some(adapter) = source
                 .table_provider
-                .as_any()
                 .downcast_ref::<DfTableProviderAdapter>()
         {
             let table_info = adapter.table().table_info();

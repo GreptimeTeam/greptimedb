@@ -16,7 +16,6 @@
 //!
 //! The code skeleton is taken from `datafusion/physical-plan/src/analyze.rs`
 
-use std::any::Any;
 use std::fmt::Display;
 use std::sync::Arc;
 
@@ -103,7 +102,6 @@ pub fn analyze_plan_metrics_to_json_value(
     verbose: bool,
 ) -> serde_json::Result<Value> {
     let input = plan
-        .as_any()
         .downcast_ref::<DistAnalyzeExec>()
         .map(|exec| exec.input().clone())
         .unwrap_or_else(|| plan.clone());
@@ -118,7 +116,7 @@ pub fn analyze_plan_metrics_to_json_value(
     }));
 
     let _ = input.apply(|plan| {
-        if let Some(merge_scan) = plan.as_any().downcast_ref::<MergeScanExec>() {
+        if let Some(merge_scan) = plan.downcast_ref::<MergeScanExec>() {
             for (node, metric) in merge_scan.sub_stage_metrics().into_iter().enumerate() {
                 stages.push(json!({
                     "stage": 1,
@@ -148,11 +146,6 @@ impl DisplayAs for DistAnalyzeExec {
 impl ExecutionPlan for DistAnalyzeExec {
     fn name(&self) -> &'static str {
         "DistAnalyzeExec"
-    }
-
-    /// Return a reference to Any that can be used for downcasting
-    fn as_any(&self) -> &dyn Any {
-        self
     }
 
     fn properties(&self) -> &Arc<PlanProperties> {
@@ -286,7 +279,7 @@ fn create_output_batch(
 
     // Find merge scan and append its sub_stage_metrics
     input.apply(|plan| {
-        if let Some(merge_scan) = plan.as_any().downcast_ref::<MergeScanExec>() {
+        if let Some(merge_scan) = plan.downcast_ref::<MergeScanExec>() {
             let sub_stage_metrics = merge_scan.sub_stage_metrics();
             for (node, metric) in sub_stage_metrics.into_iter().enumerate() {
                 builder.append_metric(1, node as _, metrics_to_string(metric, format)?);
@@ -427,7 +420,6 @@ mod tests {
 
         if let Ok(plan) = result {
             let retained = plan
-                .as_any()
                 .downcast_ref::<DistAnalyzeExec>()
                 .unwrap()
                 .input()
@@ -449,7 +441,7 @@ mod tests {
         let replacement = empty_plan("replacement");
 
         let rebuilt = ExecutionPlan::with_new_children(analyze, vec![replacement]).unwrap();
-        let rebuilt = rebuilt.as_any().downcast_ref::<DistAnalyzeExec>().unwrap();
+        let rebuilt = rebuilt.downcast_ref::<DistAnalyzeExec>().unwrap();
 
         assert_eq!(rebuilt.input().schema().field(0).name(), "replacement");
     }

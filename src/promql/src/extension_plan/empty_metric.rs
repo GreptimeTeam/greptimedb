@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::any::Any;
 use std::collections::HashMap;
 use std::ops::Div;
 use std::pin::Pin;
@@ -224,10 +223,6 @@ pub struct EmptyMetricExec {
 }
 
 impl ExecutionPlan for EmptyMetricExec {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn schema(&self) -> SchemaRef {
         self.result_schema.clone()
     }
@@ -273,9 +268,9 @@ impl ExecutionPlan for EmptyMetricExec {
         Some(self.metric.clone_inner())
     }
 
-    fn partition_statistics(&self, partition: Option<usize>) -> DataFusionResult<Statistics> {
+    fn partition_statistics(&self, partition: Option<usize>) -> DataFusionResult<Arc<Statistics>> {
         if partition.is_some() {
-            return Ok(Statistics::new_unknown(self.schema().as_ref()));
+            return Ok(Arc::new(Statistics::new_unknown(self.schema().as_ref())));
         }
 
         let estimated_row_num = if self.end > self.start {
@@ -285,11 +280,11 @@ impl ExecutionPlan for EmptyMetricExec {
         };
         let total_byte_size = estimated_row_num * std::mem::size_of::<Millisecond>() as f64;
 
-        Ok(Statistics {
+        Ok(Arc::new(Statistics {
             num_rows: Precision::Inexact(estimated_row_num.floor() as _),
             total_byte_size: Precision::Inexact(total_byte_size.floor() as _),
             column_statistics: Statistics::unknown_column(&self.schema()),
-        })
+        }))
     }
 
     fn name(&self) -> &str {

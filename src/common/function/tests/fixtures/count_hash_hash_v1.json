@@ -1,0 +1,1870 @@
+{
+  "format": "greptime-count-hash-v1",
+  "metadata": {
+    "greptime_commit": "67683cef2e445f555edf0506c1c302ac61b5548f",
+    "datafusion_commit": "7a84c45104d35408f00bbf880268c47193b73b28",
+    "hash_utils_blob": "3be6118c55ff2045d9ebdc7ef1a1f6899c50732d",
+    "ahash_version": "0.8.12",
+    "arrow_version": "58.3.0",
+    "seeds_hex": [
+      "0x4047821dc6144e4b",
+      "0x2abddf23ad417112",
+      "0x6a52eeecd26eff21",
+      "0x91cf673b965a7875"
+    ],
+    "target_endianness": "little"
+  },
+  "int64": {
+    "logical_inputs": [
+      1,
+      2,
+      3,
+      4,
+      null
+    ],
+    "slot_hashes": [
+      "3520623206881679283",
+      "16267663279875310162",
+      "16422880750557392924",
+      "9297840658584225731",
+      "0"
+    ],
+    "null_handling": {
+      "create_hashes": "create_hashes returns one u64 slot for every input row, including null",
+      "scalar_accumulator": "CountHashAccumulator inserts every create_hashes slot, including null",
+      "grouped_accumulator": "CountHashGroupAccumulator skips null logical values after hashing"
+    },
+    "scalar_partial_states": [
+      {
+        "logical_inputs": [
+          1,
+          2,
+          3
+        ],
+        "sorted_hashes": [
+          "3520623206881679283",
+          "16267663279875310162",
+          "16422880750557392924"
+        ]
+      },
+      {
+        "logical_inputs": [
+          2,
+          3,
+          4
+        ],
+        "sorted_hashes": [
+          "9297840658584225731",
+          "16267663279875310162",
+          "16422880750557392924"
+        ]
+      }
+    ],
+    "grouped": {
+      "group_indices": [
+        0,
+        0,
+        1,
+        1,
+        1
+      ],
+      "filter": [
+        true,
+        false,
+        true,
+        true,
+        true
+      ],
+      "total_num_groups": 2,
+      "sorted_group_states": [
+        [
+          "3520623206881679283"
+        ],
+        [
+          "9297840658584225731",
+          "16422880750557392924"
+        ]
+      ]
+    }
+  },
+  "flat_cases": [
+    {
+      "id": "null",
+      "arrow_type": "Null",
+      "logical_inputs": [
+        null,
+        null,
+        null
+      ],
+      "slot_hashes": [
+        "3520623206881679283",
+        "3520623206881679283",
+        "3520623206881679283"
+      ]
+    },
+    {
+      "id": "boolean",
+      "arrow_type": "Boolean",
+      "logical_inputs": [
+        true,
+        false,
+        null,
+        true
+      ],
+      "slot_hashes": [
+        "1651652937063207849",
+        "7089686826578753578",
+        "0",
+        "1651652937063207849"
+      ]
+    },
+    {
+      "id": "int8",
+      "arrow_type": "Int8",
+      "logical_inputs": [
+        "-128",
+        "0",
+        "127",
+        null
+      ],
+      "slot_hashes": [
+        "6297162108252118961",
+        "10235160885650180287",
+        "2199771465032477938",
+        "0"
+      ]
+    },
+    {
+      "id": "int16",
+      "arrow_type": "Int16",
+      "logical_inputs": [
+        "-32768",
+        "0",
+        "32767",
+        null
+      ],
+      "slot_hashes": [
+        "5283916240992853682",
+        "10235160885650180287",
+        "13765026690981664999",
+        "0"
+      ]
+    },
+    {
+      "id": "int32",
+      "arrow_type": "Int32",
+      "logical_inputs": [
+        "-2147483648",
+        "0",
+        "2147483647",
+        null
+      ],
+      "slot_hashes": [
+        "1123207262851531737",
+        "10235160885650180287",
+        "1674074173207012814",
+        "0"
+      ]
+    },
+    {
+      "id": "int64",
+      "arrow_type": "Int64",
+      "logical_inputs": [
+        "-9223372036854775808",
+        "0",
+        "9223372036854775807",
+        null
+      ],
+      "slot_hashes": [
+        "5570633911902918511",
+        "10235160885650180287",
+        "2435009426944311994",
+        "0"
+      ]
+    },
+    {
+      "id": "uint8",
+      "arrow_type": "UInt8",
+      "logical_inputs": [
+        "0",
+        "1",
+        "255",
+        null
+      ],
+      "slot_hashes": [
+        "10235160885650180287",
+        "3520623206881679283",
+        "2750287164872547038",
+        "0"
+      ]
+    },
+    {
+      "id": "uint16",
+      "arrow_type": "UInt16",
+      "logical_inputs": [
+        "0",
+        "1",
+        "65535",
+        null
+      ],
+      "slot_hashes": [
+        "10235160885650180287",
+        "3520623206881679283",
+        "14536412591059226227",
+        "0"
+      ]
+    },
+    {
+      "id": "uint32",
+      "arrow_type": "UInt32",
+      "logical_inputs": [
+        "0",
+        "1",
+        "4294967295",
+        null
+      ],
+      "slot_hashes": [
+        "10235160885650180287",
+        "3520623206881679283",
+        "1264449691658001459",
+        "0"
+      ]
+    },
+    {
+      "id": "uint64",
+      "arrow_type": "UInt64",
+      "logical_inputs": [
+        "0",
+        "1",
+        "18446744073709551615",
+        null
+      ],
+      "slot_hashes": [
+        "10235160885650180287",
+        "3520623206881679283",
+        "2763750628276388110",
+        "0"
+      ]
+    },
+    {
+      "id": "float16-bits",
+      "arrow_type": "Float16",
+      "logical_inputs": [
+        "0x0000",
+        "0x8000",
+        "0x7c00",
+        "0xfc00",
+        "0x7e01",
+        "0x7e02",
+        "0x3e00",
+        null
+      ],
+      "slot_hashes": [
+        "10235160885650180287",
+        "5283916240992853682",
+        "4659815828991914176",
+        "1110749947326030476",
+        "6921826467039903660",
+        "2746447985617752178",
+        "2709653072252920681",
+        "0"
+      ]
+    },
+    {
+      "id": "float32-bits",
+      "arrow_type": "Float32",
+      "logical_inputs": [
+        "0x00000000",
+        "0x80000000",
+        "0x7f800000",
+        "0xff800000",
+        "0x7fc00001",
+        "0x7fc00002",
+        "0x3fc00000",
+        null
+      ],
+      "slot_hashes": [
+        "10235160885650180287",
+        "1123207262851531737",
+        "5126841742535505949",
+        "18131373748288514514",
+        "4821628008574088242",
+        "12319560085252846613",
+        "12236136349550470569",
+        "0"
+      ]
+    },
+    {
+      "id": "float64-bits",
+      "arrow_type": "Float64",
+      "logical_inputs": [
+        "0x0000000000000000",
+        "0x8000000000000000",
+        "0x7ff0000000000000",
+        "0xfff0000000000000",
+        "0x7ff8000000000001",
+        "0x7ff8000000000002",
+        "0x3ff8000000000000",
+        null
+      ],
+      "slot_hashes": [
+        "10235160885650180287",
+        "5570633911902918511",
+        "16536107459917742963",
+        "6846834899941436287",
+        "3250092651993900760",
+        "8149755420134907056",
+        "11206862425332410189",
+        "0"
+      ]
+    },
+    {
+      "id": "decimal32",
+      "arrow_type": "Decimal32(9, 2)",
+      "logical_inputs": {
+        "precision": 9,
+        "scale": 2,
+        "values": [
+          "-12345",
+          "0",
+          "67890",
+          null
+        ]
+      },
+      "slot_hashes": [
+        "11328161096048440149",
+        "10235160885650180287",
+        "6055455543861901557",
+        "0"
+      ]
+    },
+    {
+      "id": "decimal64",
+      "arrow_type": "Decimal64(18, 4)",
+      "logical_inputs": {
+        "precision": 18,
+        "scale": 4,
+        "values": [
+          "-12345678901234",
+          "0",
+          "67890123456789",
+          null
+        ]
+      },
+      "slot_hashes": [
+        "1585500258431587407",
+        "10235160885650180287",
+        "5599246500330582973",
+        "0"
+      ]
+    },
+    {
+      "id": "decimal128",
+      "arrow_type": "Decimal128(30, 6)",
+      "logical_inputs": {
+        "precision": 30,
+        "scale": 6,
+        "values": [
+          "-123456789012345678901234",
+          "0",
+          "678901234567890123456789",
+          null
+        ]
+      },
+      "slot_hashes": [
+        "1452417108566880109",
+        "2325127798686461754",
+        "3695381585542132101",
+        "0"
+      ]
+    },
+    {
+      "id": "decimal256",
+      "arrow_type": "Decimal256(50, 8)",
+      "logical_inputs": {
+        "precision": 50,
+        "scale": 8,
+        "values": [
+          "-1234567890123456789012345678901234567890",
+          "0",
+          "6789012345678901234567890123456789012345",
+          null
+        ]
+      },
+      "slot_hashes": [
+        "13422205506858653816",
+        "77301216587685583",
+        "10122390097949382804",
+        "0"
+      ]
+    },
+    {
+      "id": "date32",
+      "arrow_type": "Date32",
+      "logical_inputs": {
+        "raw_values": [
+          "-1",
+          "0",
+          "123456",
+          null
+        ],
+        "unit": "days"
+      },
+      "slot_hashes": [
+        "1264449691658001459",
+        "10235160885650180287",
+        "10103536999353117757",
+        "0"
+      ]
+    },
+    {
+      "id": "date64",
+      "arrow_type": "Date64",
+      "logical_inputs": {
+        "raw_values": [
+          "-1",
+          "0",
+          "123456",
+          null
+        ],
+        "unit": "milliseconds"
+      },
+      "slot_hashes": [
+        "2763750628276388110",
+        "10235160885650180287",
+        "10103536999353117757",
+        "0"
+      ]
+    },
+    {
+      "id": "time32-second",
+      "arrow_type": "Time32(Second)",
+      "logical_inputs": {
+        "raw_values": [
+          "-1",
+          "0",
+          "123456",
+          null
+        ],
+        "unit": "second"
+      },
+      "slot_hashes": [
+        "1264449691658001459",
+        "10235160885650180287",
+        "10103536999353117757",
+        "0"
+      ]
+    },
+    {
+      "id": "time32-millisecond",
+      "arrow_type": "Time32(Millisecond)",
+      "logical_inputs": {
+        "raw_values": [
+          "-1",
+          "0",
+          "123456",
+          null
+        ],
+        "unit": "millisecond"
+      },
+      "slot_hashes": [
+        "1264449691658001459",
+        "10235160885650180287",
+        "10103536999353117757",
+        "0"
+      ]
+    },
+    {
+      "id": "time64-microsecond",
+      "arrow_type": "Time64(Microsecond)",
+      "logical_inputs": {
+        "raw_values": [
+          "-1",
+          "0",
+          "123456",
+          null
+        ],
+        "unit": "microsecond"
+      },
+      "slot_hashes": [
+        "2763750628276388110",
+        "10235160885650180287",
+        "10103536999353117757",
+        "0"
+      ]
+    },
+    {
+      "id": "time64-nanosecond",
+      "arrow_type": "Time64(Nanosecond)",
+      "logical_inputs": {
+        "raw_values": [
+          "-1",
+          "0",
+          "123456",
+          null
+        ],
+        "unit": "nanosecond"
+      },
+      "slot_hashes": [
+        "2763750628276388110",
+        "10235160885650180287",
+        "10103536999353117757",
+        "0"
+      ]
+    },
+    {
+      "id": "timestamp-second",
+      "arrow_type": "Timestamp(Second)",
+      "logical_inputs": {
+        "raw_values": [
+          "-1",
+          "0",
+          "123456",
+          null
+        ],
+        "timezone": null,
+        "unit": "second"
+      },
+      "slot_hashes": [
+        "2763750628276388110",
+        "10235160885650180287",
+        "10103536999353117757",
+        "0"
+      ]
+    },
+    {
+      "id": "timestamp-second-utc",
+      "arrow_type": "Timestamp(Second) timezone=UTC",
+      "logical_inputs": {
+        "raw_values": [
+          "-1",
+          "0",
+          "123456",
+          null
+        ],
+        "timezone": "UTC",
+        "unit": "second"
+      },
+      "slot_hashes": [
+        "2763750628276388110",
+        "10235160885650180287",
+        "10103536999353117757",
+        "0"
+      ]
+    },
+    {
+      "id": "timestamp-millisecond",
+      "arrow_type": "Timestamp(Millisecond)",
+      "logical_inputs": {
+        "raw_values": [
+          "-1",
+          "0",
+          "123456",
+          null
+        ],
+        "timezone": null,
+        "unit": "millisecond"
+      },
+      "slot_hashes": [
+        "2763750628276388110",
+        "10235160885650180287",
+        "10103536999353117757",
+        "0"
+      ]
+    },
+    {
+      "id": "timestamp-millisecond-utc",
+      "arrow_type": "Timestamp(Millisecond) timezone=UTC",
+      "logical_inputs": {
+        "raw_values": [
+          "-1",
+          "0",
+          "123456",
+          null
+        ],
+        "timezone": "UTC",
+        "unit": "millisecond"
+      },
+      "slot_hashes": [
+        "2763750628276388110",
+        "10235160885650180287",
+        "10103536999353117757",
+        "0"
+      ]
+    },
+    {
+      "id": "timestamp-microsecond",
+      "arrow_type": "Timestamp(Microsecond)",
+      "logical_inputs": {
+        "raw_values": [
+          "-1",
+          "0",
+          "123456",
+          null
+        ],
+        "timezone": null,
+        "unit": "microsecond"
+      },
+      "slot_hashes": [
+        "2763750628276388110",
+        "10235160885650180287",
+        "10103536999353117757",
+        "0"
+      ]
+    },
+    {
+      "id": "timestamp-microsecond-utc",
+      "arrow_type": "Timestamp(Microsecond) timezone=UTC",
+      "logical_inputs": {
+        "raw_values": [
+          "-1",
+          "0",
+          "123456",
+          null
+        ],
+        "timezone": "UTC",
+        "unit": "microsecond"
+      },
+      "slot_hashes": [
+        "2763750628276388110",
+        "10235160885650180287",
+        "10103536999353117757",
+        "0"
+      ]
+    },
+    {
+      "id": "timestamp-nanosecond",
+      "arrow_type": "Timestamp(Nanosecond)",
+      "logical_inputs": {
+        "raw_values": [
+          "-1",
+          "0",
+          "123456",
+          null
+        ],
+        "timezone": null,
+        "unit": "nanosecond"
+      },
+      "slot_hashes": [
+        "2763750628276388110",
+        "10235160885650180287",
+        "10103536999353117757",
+        "0"
+      ]
+    },
+    {
+      "id": "timestamp-nanosecond-utc",
+      "arrow_type": "Timestamp(Nanosecond) timezone=UTC",
+      "logical_inputs": {
+        "raw_values": [
+          "-1",
+          "0",
+          "123456",
+          null
+        ],
+        "timezone": "UTC",
+        "unit": "nanosecond"
+      },
+      "slot_hashes": [
+        "2763750628276388110",
+        "10235160885650180287",
+        "10103536999353117757",
+        "0"
+      ]
+    },
+    {
+      "id": "duration-second",
+      "arrow_type": "Duration(Second)",
+      "logical_inputs": {
+        "raw_values": [
+          "-1",
+          "0",
+          "123456",
+          null
+        ],
+        "unit": "second"
+      },
+      "slot_hashes": [
+        "2763750628276388110",
+        "10235160885650180287",
+        "10103536999353117757",
+        "0"
+      ]
+    },
+    {
+      "id": "duration-millisecond",
+      "arrow_type": "Duration(Millisecond)",
+      "logical_inputs": {
+        "raw_values": [
+          "-1",
+          "0",
+          "123456",
+          null
+        ],
+        "unit": "millisecond"
+      },
+      "slot_hashes": [
+        "2763750628276388110",
+        "10235160885650180287",
+        "10103536999353117757",
+        "0"
+      ]
+    },
+    {
+      "id": "duration-microsecond",
+      "arrow_type": "Duration(Microsecond)",
+      "logical_inputs": {
+        "raw_values": [
+          "-1",
+          "0",
+          "123456",
+          null
+        ],
+        "unit": "microsecond"
+      },
+      "slot_hashes": [
+        "2763750628276388110",
+        "10235160885650180287",
+        "10103536999353117757",
+        "0"
+      ]
+    },
+    {
+      "id": "duration-nanosecond",
+      "arrow_type": "Duration(Nanosecond)",
+      "logical_inputs": {
+        "raw_values": [
+          "-1",
+          "0",
+          "123456",
+          null
+        ],
+        "unit": "nanosecond"
+      },
+      "slot_hashes": [
+        "2763750628276388110",
+        "10235160885650180287",
+        "10103536999353117757",
+        "0"
+      ]
+    },
+    {
+      "id": "interval-year-month",
+      "arrow_type": "Interval(YearMonth)",
+      "logical_inputs": {
+        "raw_values": [
+          "-1",
+          "0",
+          "25",
+          null
+        ],
+        "unit": "year_month"
+      },
+      "slot_hashes": [
+        "1264449691658001459",
+        "10235160885650180287",
+        "9340549182680168467",
+        "0"
+      ]
+    },
+    {
+      "id": "interval-day-time",
+      "arrow_type": "Interval(DayTime)",
+      "logical_inputs": {
+        "raw_values": [
+          {
+            "days": -1,
+            "milliseconds": 2
+          },
+          {
+            "days": 0,
+            "milliseconds": 0
+          },
+          {
+            "days": 3,
+            "milliseconds": 4
+          },
+          null
+        ],
+        "unit": "day_time"
+      },
+      "slot_hashes": [
+        "4921667063968560956",
+        "629272144446004489",
+        "12519618457697784284",
+        "0"
+      ]
+    },
+    {
+      "id": "interval-month-day-nano",
+      "arrow_type": "Interval(MonthDayNano)",
+      "logical_inputs": {
+        "raw_values": [
+          {
+            "days": 2,
+            "months": -1,
+            "nanoseconds": 3
+          },
+          {
+            "days": 0,
+            "months": 0,
+            "nanoseconds": 0
+          },
+          {
+            "days": 5,
+            "months": 4,
+            "nanoseconds": 6
+          },
+          null
+        ],
+        "unit": "month_day_nano"
+      },
+      "slot_hashes": [
+        "7555005478828952007",
+        "10429306064537313183",
+        "9895524188215285943",
+        "0"
+      ]
+    },
+    {
+      "id": "utf8",
+      "arrow_type": "Utf8",
+      "logical_inputs": [
+        "",
+        "short",
+        "0123456789abcdef0123456789abcdef",
+        "雪",
+        "short",
+        null
+      ],
+      "slot_hashes": [
+        "18009168453573014612",
+        "16063745670669428705",
+        "16471146966914539180",
+        "18308866632526957834",
+        "16063745670669428705",
+        "0"
+      ]
+    },
+    {
+      "id": "large-utf8",
+      "arrow_type": "LargeUtf8",
+      "logical_inputs": [
+        "",
+        "short",
+        "0123456789abcdef0123456789abcdef",
+        "雪",
+        "short",
+        null
+      ],
+      "slot_hashes": [
+        "18009168453573014612",
+        "16063745670669428705",
+        "16471146966914539180",
+        "18308866632526957834",
+        "16063745670669428705",
+        "0"
+      ]
+    },
+    {
+      "id": "utf8-view",
+      "arrow_type": "Utf8View",
+      "logical_inputs": [
+        "",
+        "short",
+        "0123456789abcdef0123456789abcdef",
+        "雪",
+        "short",
+        null
+      ],
+      "slot_hashes": [
+        "2325127798686461754",
+        "4368901731515066657",
+        "5227621693470855304",
+        "14312009175607353896",
+        "4368901731515066657",
+        "0"
+      ]
+    },
+    {
+      "id": "binary",
+      "arrow_type": "Binary",
+      "logical_inputs": [
+        "hex:",
+        "hex:0102",
+        "hex:abababababababababababababababababababababababababababababababab",
+        "hex:e29883",
+        "hex:0102",
+        null
+      ],
+      "slot_hashes": [
+        "16485166340809863179",
+        "9558633272077696927",
+        "4680548975548143013",
+        "11318256219281575767",
+        "9558633272077696927",
+        "0"
+      ]
+    },
+    {
+      "id": "large-binary",
+      "arrow_type": "LargeBinary",
+      "logical_inputs": [
+        "hex:",
+        "hex:0102",
+        "hex:abababababababababababababababababababababababababababababababab",
+        "hex:e29883",
+        "hex:0102",
+        null
+      ],
+      "slot_hashes": [
+        "16485166340809863179",
+        "9558633272077696927",
+        "4680548975548143013",
+        "11318256219281575767",
+        "9558633272077696927",
+        "0"
+      ]
+    },
+    {
+      "id": "binary-view",
+      "arrow_type": "BinaryView",
+      "logical_inputs": [
+        "hex:",
+        "hex:0102",
+        "hex:abababababababababababababababababababababababababababababababab",
+        "hex:e29883",
+        "hex:0102",
+        null
+      ],
+      "slot_hashes": [
+        "2325127798686461754",
+        "9765644657445404852",
+        "4680548975548143013",
+        "9840995393808221708",
+        "9765644657445404852",
+        "0"
+      ]
+    },
+    {
+      "id": "fixed-size-binary",
+      "arrow_type": "FixedSizeBinary(4)",
+      "logical_inputs": [
+        "hex:00000000",
+        "hex:01020304",
+        "hex:ffffffff",
+        "hex:01020304",
+        null
+      ],
+      "slot_hashes": [
+        "9479257996766035880",
+        "12778117559800614767",
+        "3841419864687326732",
+        "12778117559800614767",
+        "0"
+      ]
+    },
+    {
+      "id": "dictionary-int8",
+      "arrow_type": "Dictionary(Int8, Utf8)",
+      "logical_inputs": {
+        "dictionary_values": [
+          "alpha",
+          "alpha",
+          null
+        ],
+        "key_type": "Int8",
+        "keys": [
+          "0",
+          "1",
+          "2",
+          null,
+          "1"
+        ],
+        "logical_values": [
+          "alpha",
+          "alpha",
+          null,
+          null,
+          "alpha"
+        ]
+      },
+      "slot_hashes": [
+        "3170375707604638807",
+        "3170375707604638807",
+        "0",
+        "0",
+        "3170375707604638807"
+      ]
+    },
+    {
+      "id": "dictionary-int16",
+      "arrow_type": "Dictionary(Int16, Utf8)",
+      "logical_inputs": {
+        "dictionary_values": [
+          "alpha",
+          "alpha",
+          null
+        ],
+        "key_type": "Int16",
+        "keys": [
+          "0",
+          "1",
+          "2",
+          null,
+          "1"
+        ],
+        "logical_values": [
+          "alpha",
+          "alpha",
+          null,
+          null,
+          "alpha"
+        ]
+      },
+      "slot_hashes": [
+        "3170375707604638807",
+        "3170375707604638807",
+        "0",
+        "0",
+        "3170375707604638807"
+      ]
+    },
+    {
+      "id": "dictionary-int32",
+      "arrow_type": "Dictionary(Int32, Utf8)",
+      "logical_inputs": {
+        "dictionary_values": [
+          "alpha",
+          "alpha",
+          null
+        ],
+        "key_type": "Int32",
+        "keys": [
+          "0",
+          "1",
+          "2",
+          null,
+          "1"
+        ],
+        "logical_values": [
+          "alpha",
+          "alpha",
+          null,
+          null,
+          "alpha"
+        ]
+      },
+      "slot_hashes": [
+        "3170375707604638807",
+        "3170375707604638807",
+        "0",
+        "0",
+        "3170375707604638807"
+      ]
+    },
+    {
+      "id": "dictionary-int64",
+      "arrow_type": "Dictionary(Int64, Utf8)",
+      "logical_inputs": {
+        "dictionary_values": [
+          "alpha",
+          "alpha",
+          null
+        ],
+        "key_type": "Int64",
+        "keys": [
+          "0",
+          "1",
+          "2",
+          null,
+          "1"
+        ],
+        "logical_values": [
+          "alpha",
+          "alpha",
+          null,
+          null,
+          "alpha"
+        ]
+      },
+      "slot_hashes": [
+        "3170375707604638807",
+        "3170375707604638807",
+        "0",
+        "0",
+        "3170375707604638807"
+      ]
+    },
+    {
+      "id": "dictionary-uint8",
+      "arrow_type": "Dictionary(UInt8, Utf8)",
+      "logical_inputs": {
+        "dictionary_values": [
+          "alpha",
+          "alpha",
+          null
+        ],
+        "key_type": "UInt8",
+        "keys": [
+          "0",
+          "1",
+          "2",
+          null,
+          "1"
+        ],
+        "logical_values": [
+          "alpha",
+          "alpha",
+          null,
+          null,
+          "alpha"
+        ]
+      },
+      "slot_hashes": [
+        "3170375707604638807",
+        "3170375707604638807",
+        "0",
+        "0",
+        "3170375707604638807"
+      ]
+    },
+    {
+      "id": "dictionary-uint16",
+      "arrow_type": "Dictionary(UInt16, Utf8)",
+      "logical_inputs": {
+        "dictionary_values": [
+          "alpha",
+          "alpha",
+          null
+        ],
+        "key_type": "UInt16",
+        "keys": [
+          "0",
+          "1",
+          "2",
+          null,
+          "1"
+        ],
+        "logical_values": [
+          "alpha",
+          "alpha",
+          null,
+          null,
+          "alpha"
+        ]
+      },
+      "slot_hashes": [
+        "3170375707604638807",
+        "3170375707604638807",
+        "0",
+        "0",
+        "3170375707604638807"
+      ]
+    },
+    {
+      "id": "dictionary-uint32",
+      "arrow_type": "Dictionary(UInt32, Utf8)",
+      "logical_inputs": {
+        "dictionary_values": [
+          "alpha",
+          "alpha",
+          null
+        ],
+        "key_type": "UInt32",
+        "keys": [
+          "0",
+          "1",
+          "2",
+          null,
+          "1"
+        ],
+        "logical_values": [
+          "alpha",
+          "alpha",
+          null,
+          null,
+          "alpha"
+        ]
+      },
+      "slot_hashes": [
+        "3170375707604638807",
+        "3170375707604638807",
+        "0",
+        "0",
+        "3170375707604638807"
+      ]
+    },
+    {
+      "id": "dictionary-uint64",
+      "arrow_type": "Dictionary(UInt64, Utf8)",
+      "logical_inputs": {
+        "dictionary_values": [
+          "alpha",
+          "alpha",
+          null
+        ],
+        "key_type": "UInt64",
+        "keys": [
+          "0",
+          "1",
+          "2",
+          null,
+          "1"
+        ],
+        "logical_values": [
+          "alpha",
+          "alpha",
+          null,
+          null,
+          "alpha"
+        ]
+      },
+      "slot_hashes": [
+        "3170375707604638807",
+        "3170375707604638807",
+        "0",
+        "0",
+        "3170375707604638807"
+      ]
+    }
+  ],
+  "nested_cases": [
+    {
+      "id": "struct",
+      "arrow_type": "Struct<i:Int32,s:Utf8>",
+      "logical_inputs": {
+        "rows": [
+          {
+            "i": "1",
+            "s": "a"
+          },
+          {
+            "i": "2",
+            "s": "b"
+          },
+          {
+            "i": "1",
+            "s": "a"
+          },
+          null,
+          {
+            "i": "1",
+            "s": null
+          }
+        ]
+      },
+      "slot_hashes": [
+        "12006103499737156245",
+        "6897773328880926896",
+        "12006103499737156245",
+        "0",
+        "3520623206881702556"
+      ]
+    },
+    {
+      "id": "struct-sliced",
+      "arrow_type": "Struct<i:Int32,s:Utf8>; slice(1,3)",
+      "logical_inputs": {
+        "physical": "slice(1,3)",
+        "rows": [
+          {
+            "i": "2",
+            "s": "b"
+          },
+          {
+            "i": "1",
+            "s": "a"
+          },
+          null
+        ]
+      },
+      "slot_hashes": [
+        "6897773328880926896",
+        "12006103499737156245",
+        "0"
+      ]
+    },
+    {
+      "id": "list",
+      "arrow_type": "List<Int32>",
+      "logical_inputs": {
+        "offsets": [
+          0,
+          2,
+          2,
+          3,
+          5,
+          6
+        ],
+        "rows": [
+          [
+            "1",
+            null
+          ],
+          [],
+          null,
+          [
+            "1",
+            null
+          ],
+          [
+            "2"
+          ]
+        ]
+      },
+      "slot_hashes": [
+        "1135850138656156533",
+        "0",
+        "0",
+        "1135850138656156533",
+        "16267663279875333435"
+      ]
+    },
+    {
+      "id": "list-sliced",
+      "arrow_type": "List<Int32>; slice(1,3)",
+      "logical_inputs": {
+        "physical": "slice(1,3)",
+        "rows": [
+          [],
+          null,
+          [
+            "1",
+            null
+          ]
+        ]
+      },
+      "slot_hashes": [
+        "0",
+        "0",
+        "1135850138656156533"
+      ]
+    },
+    {
+      "id": "large-list",
+      "arrow_type": "LargeList<Int32>",
+      "logical_inputs": {
+        "offsets": [
+          "0",
+          "2",
+          "2",
+          "3",
+          "5",
+          "6"
+        ],
+        "rows": [
+          [
+            "1",
+            null
+          ],
+          [],
+          null,
+          [
+            "1",
+            null
+          ],
+          [
+            "2"
+          ]
+        ]
+      },
+      "slot_hashes": [
+        "1135850138656156533",
+        "0",
+        "0",
+        "1135850138656156533",
+        "16267663279875333435"
+      ]
+    },
+    {
+      "id": "nested-list",
+      "arrow_type": "List<List<Int32>>",
+      "logical_inputs": {
+        "rows": [
+          [
+            [
+              "1"
+            ],
+            [
+              "2",
+              "3"
+            ]
+          ],
+          [],
+          null
+        ]
+      },
+      "slot_hashes": [
+        "10719717812186567598",
+        "0",
+        "0"
+      ]
+    },
+    {
+      "id": "list-view",
+      "arrow_type": "ListView<Int32>",
+      "logical_inputs": {
+        "offsets": [
+          2,
+          0,
+          1,
+          4,
+          0
+        ],
+        "representation_sensitive": true,
+        "rows": [
+          [
+            "30",
+            "40"
+          ],
+          [
+            "10",
+            "20"
+          ],
+          [
+            "20",
+            "30"
+          ],
+          [],
+          null
+        ],
+        "sizes": [
+          2,
+          2,
+          2,
+          0,
+          1
+        ]
+      },
+      "slot_hashes": [
+        "1646535989875670792",
+        "5532665399746881900",
+        "6108722269366659608",
+        "0",
+        "0"
+      ]
+    },
+    {
+      "id": "large-list-view",
+      "arrow_type": "LargeListView<Int32>",
+      "logical_inputs": {
+        "offsets": [
+          "2",
+          "0",
+          "1",
+          "4",
+          "0"
+        ],
+        "representation_sensitive": true,
+        "rows": [
+          [
+            "30",
+            "40"
+          ],
+          [
+            "10",
+            "20"
+          ],
+          [
+            "20",
+            "30"
+          ],
+          [],
+          null
+        ],
+        "sizes": [
+          "2",
+          "2",
+          "2",
+          "0",
+          "1"
+        ]
+      },
+      "slot_hashes": [
+        "1646535989875670792",
+        "5532665399746881900",
+        "6108722269366659608",
+        "0",
+        "0"
+      ]
+    },
+    {
+      "id": "fixed-size-list",
+      "arrow_type": "FixedSizeList<Int32;2>",
+      "logical_inputs": {
+        "rows": [
+          [
+            "1",
+            "2"
+          ],
+          [
+            "1",
+            null
+          ],
+          [
+            "1",
+            "2"
+          ],
+          null
+        ]
+      },
+      "slot_hashes": [
+        "17403513418531466695",
+        "1135850138656156533",
+        "17403513418531466695",
+        "0"
+      ]
+    },
+    {
+      "id": "fixed-size-list-empty",
+      "arrow_type": "FixedSizeList<Int32;2>; empty",
+      "logical_inputs": {
+        "rows": []
+      },
+      "slot_hashes": []
+    },
+    {
+      "id": "fixed-size-list-sliced",
+      "arrow_type": "FixedSizeList<Int32;2>; slice(1,2)",
+      "logical_inputs": {
+        "physical": "slice(1,2)",
+        "rows": [
+          [
+            "1",
+            null
+          ],
+          [
+            "1",
+            "2"
+          ]
+        ]
+      },
+      "slot_hashes": [
+        "1135850138656156533",
+        "17403513418531466695"
+      ]
+    },
+    {
+      "id": "map",
+      "arrow_type": "Map<Utf8,Int32>",
+      "logical_inputs": {
+        "offsets": [
+          0,
+          2,
+          2,
+          3,
+          4
+        ],
+        "rows": [
+          [
+            [
+              "a",
+              "1"
+            ],
+            [
+              "b",
+              null
+            ]
+          ],
+          [],
+          null,
+          [
+            [
+              "a",
+              "1"
+            ]
+          ]
+        ]
+      },
+      "slot_hashes": [
+        "13863767657378145834",
+        "0",
+        "0",
+        "10339279155402004097"
+      ]
+    },
+    {
+      "id": "map-sliced",
+      "arrow_type": "Map<Utf8,Int32>; slice(1,3)",
+      "logical_inputs": {
+        "physical": "slice(1,3)",
+        "rows": [
+          [],
+          null,
+          [
+            [
+              "a",
+              "1"
+            ]
+          ]
+        ]
+      },
+      "slot_hashes": [
+        "0",
+        "0",
+        "10339279155402004097"
+      ]
+    },
+    {
+      "id": "union-dense",
+      "arrow_type": "Union(Dense; 0:Int32,1:Utf8)",
+      "logical_inputs": {
+        "offsets": [
+          0,
+          0,
+          1,
+          1,
+          2
+        ],
+        "rows": [
+          "7",
+          "x",
+          "7",
+          "x",
+          null
+        ],
+        "type_ids": [
+          0,
+          1,
+          0,
+          1,
+          0
+        ]
+      },
+      "slot_hashes": [
+        "12268081498153232132",
+        "5726068209471848797",
+        "12268081498153232132",
+        "5726068209471848797",
+        "23273"
+      ]
+    },
+    {
+      "id": "union-dense-sliced",
+      "arrow_type": "Union(Dense); slice(1,3)",
+      "logical_inputs": {
+        "physical": "slice(1,3)",
+        "rows": [
+          "x",
+          "7",
+          "x"
+        ]
+      },
+      "slot_hashes": [
+        "5726068209471848797",
+        "12268081498153232132",
+        "5726068209471848797"
+      ]
+    },
+    {
+      "id": "union-sparse",
+      "arrow_type": "Union(Sparse; 0:Int32,1:Utf8)",
+      "logical_inputs": {
+        "rows": [
+          "7",
+          "x",
+          "7",
+          "x",
+          null
+        ],
+        "type_ids": [
+          0,
+          1,
+          0,
+          1,
+          0
+        ]
+      },
+      "slot_hashes": [
+        "12268081498153232132",
+        "5726068209471848797",
+        "12268081498153232132",
+        "5726068209471848797",
+        "23273"
+      ]
+    },
+    {
+      "id": "union-sparse-sliced",
+      "arrow_type": "Union(Sparse); slice(1,3)",
+      "logical_inputs": {
+        "physical": "slice(1,3)",
+        "rows": [
+          "x",
+          "7",
+          "x"
+        ]
+      },
+      "slot_hashes": [
+        "5726068209471848797",
+        "12268081498153232132",
+        "5726068209471848797"
+      ]
+    },
+    {
+      "id": "ree-int16",
+      "arrow_type": "RunEndEncoded(Int16Type)",
+      "logical_inputs": {
+        "logical": [
+          "1",
+          "1",
+          "2",
+          "2",
+          "2",
+          null,
+          null
+        ],
+        "run_ends": [
+          "2",
+          "5",
+          "7"
+        ],
+        "values": [
+          "1",
+          "2",
+          null
+        ]
+      },
+      "slot_hashes": [
+        "3520623206881679283",
+        "3520623206881679283",
+        "16267663279875310162",
+        "16267663279875310162",
+        "16267663279875310162",
+        "0",
+        "0"
+      ]
+    },
+    {
+      "id": "ree-int16-sliced",
+      "arrow_type": "RunEndEncoded(Int16Type); slice(1,5)",
+      "logical_inputs": {
+        "logical": [
+          "1",
+          "2",
+          "2",
+          "2",
+          null
+        ],
+        "physical": "slice(1,5)"
+      },
+      "slot_hashes": [
+        "3520623206881679283",
+        "16267663279875310162",
+        "16267663279875310162",
+        "16267663279875310162",
+        "0"
+      ]
+    },
+    {
+      "id": "ree-int32",
+      "arrow_type": "RunEndEncoded(Int32Type)",
+      "logical_inputs": {
+        "logical": [
+          "1",
+          "1",
+          "2",
+          "2",
+          "2",
+          null,
+          null
+        ],
+        "run_ends": [
+          "2",
+          "5",
+          "7"
+        ],
+        "values": [
+          "1",
+          "2",
+          null
+        ]
+      },
+      "slot_hashes": [
+        "3520623206881679283",
+        "3520623206881679283",
+        "16267663279875310162",
+        "16267663279875310162",
+        "16267663279875310162",
+        "0",
+        "0"
+      ]
+    },
+    {
+      "id": "ree-int32-sliced",
+      "arrow_type": "RunEndEncoded(Int32Type); slice(1,5)",
+      "logical_inputs": {
+        "logical": [
+          "1",
+          "2",
+          "2",
+          "2",
+          null
+        ],
+        "physical": "slice(1,5)"
+      },
+      "slot_hashes": [
+        "3520623206881679283",
+        "16267663279875310162",
+        "16267663279875310162",
+        "16267663279875310162",
+        "0"
+      ]
+    },
+    {
+      "id": "ree-int64",
+      "arrow_type": "RunEndEncoded(Int64Type)",
+      "logical_inputs": {
+        "logical": [
+          "1",
+          "1",
+          "2",
+          "2",
+          "2",
+          null,
+          null
+        ],
+        "run_ends": [
+          "2",
+          "5",
+          "7"
+        ],
+        "values": [
+          "1",
+          "2",
+          null
+        ]
+      },
+      "slot_hashes": [
+        "3520623206881679283",
+        "3520623206881679283",
+        "16267663279875310162",
+        "16267663279875310162",
+        "16267663279875310162",
+        "0",
+        "0"
+      ]
+    },
+    {
+      "id": "ree-int64-sliced",
+      "arrow_type": "RunEndEncoded(Int64Type); slice(1,5)",
+      "logical_inputs": {
+        "logical": [
+          "1",
+          "2",
+          "2",
+          "2",
+          null
+        ],
+        "physical": "slice(1,5)"
+      },
+      "slot_hashes": [
+        "3520623206881679283",
+        "16267663279875310162",
+        "16267663279875310162",
+        "16267663279875310162",
+        "0"
+      ]
+    }
+  ]
+}

@@ -19,7 +19,6 @@
 //! When stddev = 0 (constant window), returns 0.0 if value equals mean,
 //! or +inf otherwise.
 
-use std::any::Any;
 use std::fmt::Debug;
 use std::ops::Range;
 use std::sync::Arc;
@@ -51,10 +50,6 @@ impl AnomalyScoreZscore {
 }
 
 impl WindowUDFImpl for AnomalyScoreZscore {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn name(&self) -> &str {
         "anomaly_score_zscore"
     }
