@@ -1270,4 +1270,35 @@ mod tests {
             "test_data_home"
         );
     }
+
+    #[test]
+    fn test_load_options_ignores_unknown_plugin_options() {
+        // Plugin options that are not recognized by the current build (for example,
+        // an enterprise plugin option seen by an open-source build) must not abort
+        // startup. They should be dropped with a warning instead.
+        let mut file = create_named_temp_file();
+        write!(
+            file,
+            r#"
+[[plugins]]
+SomeUnknownPlugin = {{ feature = "foo", count = 5 }}
+
+[[plugins]]
+AnotherUnknownPlugin = {{}}
+"#
+        )
+        .unwrap();
+
+        let opts = GreptimeOptions::<StandaloneOptions>::load_layered_options(
+            Some(file.path().to_str().unwrap()),
+            "GREPTIMEDB_STANDALONE_UT",
+        )
+        .expect(
+            "loading a config with unrecognized plugin options should succeed, \
+             ignoring the unknown ones",
+        );
+        // Unknown plugin options are dropped; the recognized list is empty in the
+        // open-source build.
+        assert!(opts.plugins.is_empty());
+    }
 }

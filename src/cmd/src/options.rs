@@ -42,6 +42,7 @@ pub struct GreptimeOptions<T> {
     /// The runtime options.
     pub runtime: RuntimeOptions,
     /// The plugin options.
+    #[serde(default, deserialize_with = "plugins::deserialize_plugin_options")]
     pub plugins: Vec<PluginOptions>,
 
     /// The options of each component (like Datanode or Standalone) of GreptimeDB.
