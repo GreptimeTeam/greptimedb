@@ -24,7 +24,7 @@ use std::time::Instant;
 use api::v1::SemanticType;
 use axum::Extension;
 use axum::extract::{Query, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::IntoResponse;
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
@@ -62,7 +62,8 @@ const HEC_HEALTHY_CODE: u32 = 17;
 
 /// Query parameters for `/services/collector/raw`.
 /// `channel` is accepted but ignored until indexer acknowledgment lands. `table`,
-/// `pipeline_name`, and `version` are Greptime extensions matching `/event`.
+/// `pipeline_name`, `version`, and `linebreaker` are Greptime extensions
+/// (`linebreaker` opts into event breaking; without it the body is one event).
 #[derive(Debug, Default, serde::Deserialize)]
 pub struct SplunkRawQueryParams {
     pub channel: Option<String>,
@@ -74,17 +75,30 @@ pub struct SplunkRawQueryParams {
     pub table: Option<String>,
     pub pipeline_name: Option<String>,
     pub version: Option<String>,
+    pub linebreaker: Option<String>,
 }
 
-/// Splits a raw HEC body into events: one event per line (`\n`, tolerating `\r\n`),
-/// skipping blank/whitespace-only lines.
-fn parse_raw_lines(body: &str) -> Vec<&str> {
-    body.lines()
-        .filter(|line| !line.trim().is_empty())
-        .collect()
+/// Splits a raw body into events. Without `?linebreaker=`, the whole body is ONE
+/// event. With `?linebreaker=<literal>` (percent-encoded, e.g. `%0A` for `\n`),
+/// the body is split on that literal delimiter; whitespace-only segments are
+/// dropped, segment content is kept verbatim.
+fn split_raw_body<'a>(body: &'a str, linebreaker: Option<&str>) -> Vec<&'a str> {
+    match linebreaker {
+        Some(lb) if !lb.is_empty() => body
+            .split(lb)
+            .filter(|segment| !segment.trim().is_empty())
+            .collect(),
+        _ => {
+            if body.trim().is_empty() {
+                vec![]
+            } else {
+                vec![body]
+            }
+        }
+    }
 }
 
-/// Column holding the verbatim raw line on `/raw` (Splunk's `_raw`). Named `message`
+/// Column holding the verbatim raw body on `/raw` (Splunk's `_raw`). Named `message`
 /// to avoid clashing with `/event`'s `event` column (whose shape
 /// varies by client: string vs identity-flattened object).
 const RAW_MESSAGE_COLUMN: &str = "message";
@@ -92,7 +106,6 @@ const RAW_MESSAGE_COLUMN: &str = "message";
 /// Collects request-level `/raw` metadata (`host`/`source`/`sourcetype`) present in
 /// the query params. The keys double as the tag-column names; values apply to every
 /// event in the request (HEC `/raw` metadata is request-level, unlike `/event`).
-/// Values are allocated as `Bytes` once here so each line clones them O(1).
 fn raw_metadata(params: &SplunkRawQueryParams) -> Vec<(&'static str, Bytes)> {
     [
         ("host", &params.host),
@@ -108,9 +121,13 @@ fn raw_metadata(params: &SplunkRawQueryParams) -> Vec<(&'static str, Bytes)> {
     .collect()
 }
 
-/// Maps one raw line to a per-event map: `{ greptime_timestamp: ts, message: <line>,
-/// <metadata columns> }`. The line is stored as it is.
-fn raw_line_to_map(line: &str, ts: DateTime<Utc>, metadata: &[(&'static str, Bytes)]) -> VrlValue {
+/// Maps one raw event to a per-event map: `{ greptime_timestamp: ts, message: <event>,
+/// <metadata columns> }`. The event text is stored as it is.
+fn raw_event_to_map(
+    event: &str,
+    ts: DateTime<Utc>,
+    metadata: &[(&'static str, Bytes)],
+) -> VrlValue {
     let mut map: BTreeMap<KeyString, VrlValue> = BTreeMap::new();
     map.insert(
         KeyString::from(greptime_timestamp()),
@@ -118,7 +135,7 @@ fn raw_line_to_map(line: &str, ts: DateTime<Utc>, metadata: &[(&'static str, Byt
     );
     map.insert(
         KeyString::from(RAW_MESSAGE_COLUMN),
-        VrlValue::Bytes(Bytes::copy_from_slice(line.as_bytes())),
+        VrlValue::Bytes(Bytes::copy_from_slice(event.as_bytes())),
     );
     for (key, value) in metadata {
         map.insert(KeyString::from(*key), VrlValue::Bytes(value.clone()));
@@ -428,10 +445,12 @@ pub async fn handle_event(
     .await
 }
 
-/// `POST /services/collector/raw` (+ `/raw/1.0` alias). Body is raw text, one event
-/// per line, stored as it is in the [`RAW_MESSAGE_COLUMN`]; metadata comes from query
-/// params and applies to every event. `channel` (param or `x-splunk-request-channel`
-/// header) is accepted but ignored until indexer acknowledgment lands;
+/// `POST /services/collector/raw` (+ `/raw/1.0` alias). By default, the whole body is
+/// raw text stored verbatim as ONE event in the [`RAW_MESSAGE_COLUMN`] — multiline
+/// payloads (e.g. stack traces) are preserved intact. Explicit framing is opt-in
+/// via `?linebreaker=` (see [`split_raw_body`]). Metadata comes from query params
+/// and applies to every event. `channel` (param or `x-splunk-request-channel` header)
+/// is accepted but ignored until indexer acknowledgment lands;
 #[axum_macros::debug_handler]
 pub async fn handle_raw(
     State(log_state): State<LogState>,
@@ -442,12 +461,22 @@ pub async fn handle_raw(
 ) -> impl IntoResponse {
     query_ctx.set_channel(Channel::Splunk);
 
-    let body = String::from_utf8_lossy(&payload);
-    if matches!(body, std::borrow::Cow::Owned(_)) {
-        debug!("splunk raw body contains invalid UTF-8; bytes replaced with U+FFFD");
+    // The decompression layer runs strips `Content-Encoding` when it decompresses,
+    // so a non-identity value means the body is still compressed
+    if let Some(encoding) = headers.get(header::CONTENT_ENCODING)
+        && encoding.as_bytes() != b"identity"
+    {
+        // HEC code 6 == "invalid data format".
+        return hec_response(StatusCode::BAD_REQUEST, 6, "invalid data format");
     }
-    let lines = parse_raw_lines(&body);
-    if lines.is_empty() {
+
+    let Ok(body) = std::str::from_utf8(&payload) else {
+        debug!("splunk raw body contains invalid UTF-8; rejecting");
+        // HEC code 6 == "invalid data format".
+        return hec_response(StatusCode::BAD_REQUEST, 6, "invalid data format");
+    };
+    let events = split_raw_body(body, params.linebreaker.as_deref());
+    if events.is_empty() {
         // HEC code 5 == "No data".
         return hec_response(StatusCode::BAD_REQUEST, 5, "No data");
     }
@@ -470,16 +499,16 @@ pub async fn handle_raw(
         .and_then(sanitize_index)
         .or_else(|| params.table.clone())
         .unwrap_or_else(|| DEFAULT_SPLUNK_TABLE.to_string());
-    // Bad table name (e.g. invalid `?table=`) -> HEC code 7 ("incorrect index").
+    // Bad table name (e.g. invalid `?table=`) -> HEC code 7.
     if !NAME_PATTERN_REG.is_match(&table) {
-        let msg = format!("incorrect index: {table}");
+        let msg = format!("Invalid index name: {table}");
         return hec_response(StatusCode::BAD_REQUEST, 7, &msg);
     }
 
     let metadata = raw_metadata(&params);
-    let values = lines
+    let values = events
         .iter()
-        .map(|line| raw_line_to_map(line, ts, &metadata))
+        .map(|event| raw_event_to_map(event, ts, &metadata))
         .collect();
     let tag_columns = HashMap::from([(
         table.clone(),
@@ -626,29 +655,53 @@ mod tests {
         assert!(parse_hec_events(br#"{"event":"a"}{bad}"#).is_err());
     }
 
-    // ---- parse_raw_lines ----
+    // ---- split_raw_body ----
 
     #[test]
-    fn parses_raw_lines() {
-        // single line, no trailing newline.
-        assert_eq!(parse_raw_lines("Hello World"), vec!["Hello World"]);
-        // \n and \r\n separated; trailing newline produces no extra event.
-        assert_eq!(parse_raw_lines("a\nb\r\nc\n"), vec!["a", "b", "c"]);
-        // blank / whitespace-only lines are skipped.
-        assert_eq!(parse_raw_lines("a\n\n   \n\t\nb"), vec!["a", "b"]);
-        // content is verbatim: leading indentation and inner whitespace preserved.
+    fn splits_raw_body_only_with_explicit_linebreaker() {
+        // default (no linebreaker): whole body is one event, verbatim.
+        assert_eq!(split_raw_body("a\nb\r\nc\n", None), vec!["a\nb\r\nc\n"]);
+        // empty / whitespace-only body -> no events (HEC code 5 upstream).
+        assert!(split_raw_body("", None).is_empty());
+        assert!(split_raw_body(" \n \r\n ", None).is_empty());
+        // empty linebreaker behaves like none.
+        assert_eq!(split_raw_body("a\nb", Some("")), vec!["a\nb"]);
+
+        // explicit "\n": split; whitespace-only segments dropped;
+        // (a "\r\n"-separated body keeps the "\r" — pass "\r\n" to strip it).
+        assert_eq!(split_raw_body("a\nb\n", Some("\n")), vec!["a", "b"]);
         assert_eq!(
-            parse_raw_lines("line one\n  indented stack frame"),
+            split_raw_body("a\n\n   \n\t\nb", Some("\n")),
+            vec!["a", "b"]
+        );
+        assert_eq!(
+            split_raw_body("line one\n  indented stack frame", Some("\n")),
             vec!["line one", "  indented stack frame"]
         );
-        // a JSON-looking line stays an opaque string (no parsing on /raw).
-        assert_eq!(parse_raw_lines("{\"a\":1}"), vec!["{\"a\":1}"]);
-        // empty / whitespace-only body yields no events (-> HEC code 5 upstream).
-        assert!(parse_raw_lines("").is_empty());
-        assert!(parse_raw_lines(" \n \r\n ").is_empty());
+        assert_eq!(split_raw_body("a\r\nb", Some("\r\n")), vec!["a", "b"]);
+        // multi-char literal delimiters work too.
+        assert_eq!(split_raw_body("a::b::c", Some("::")), vec!["a", "b", "c"]);
+        // whitespace-only after split -> no events.
+        assert!(split_raw_body("\n \n", Some("\n")).is_empty());
     }
 
-    // ---- raw_metadata / raw_line_to_map ----
+    // ---- raw_metadata / raw_event_to_map ----
+
+    #[test]
+    fn multiline_raw_body_is_one_event() {
+        // `/raw` must NOT split on newlines unless query parameter is provided.
+        let stack_trace = "java.lang.NullPointerException: boom\n\
+                           \tat com.example.Foo.bar(Foo.java:42)\n\
+                           \tat com.example.Main.main(Main.java:7)";
+        let ts = DateTime::from_timestamp(1447828325, 0).unwrap();
+        let VrlValue::Object(m) = raw_event_to_map(stack_trace, ts, &[]) else {
+            panic!("expected object");
+        };
+        assert_eq!(
+            m.get(RAW_MESSAGE_COLUMN),
+            Some(&VrlValue::from(json!(stack_trace)))
+        );
+    }
 
     #[test]
     fn maps_raw_line_with_request_metadata() {
@@ -668,7 +721,7 @@ mod tests {
         );
 
         let ts = DateTime::from_timestamp(1447828325, 0).unwrap();
-        let VrlValue::Object(m) = raw_line_to_map("GET /api 200", ts, &meta) else {
+        let VrlValue::Object(m) = raw_event_to_map("GET /api 200", ts, &meta) else {
             panic!("expected object");
         };
         assert_eq!(
@@ -691,7 +744,7 @@ mod tests {
         let default_params = SplunkRawQueryParams::default();
         let empty = raw_metadata(&default_params);
         assert!(empty.is_empty());
-        let VrlValue::Object(m) = raw_line_to_map("x", ts, &empty) else {
+        let VrlValue::Object(m) = raw_event_to_map("x", ts, &empty) else {
             panic!("expected object");
         };
         assert_eq!(m.len(), 2);
@@ -701,18 +754,15 @@ mod tests {
     fn parses_real_raw_client_payloads() {
         // Shapes captured from Vector's `splunk_hec_logs` sink with
         // `endpoint_target = "raw"`
-
-        // --- batch.max_events = 1: one event per request, no trailing newline. ---
         let single = "190.79.85.36 - b0rnc0nfused [13/Jul/2026:05:10:25 +0000] \"GET /money HTTP/2.0\" 300 29099";
-        assert_eq!(parse_raw_lines(single), vec![single]);
-
-        // --- Vector's default batching concatenates events with NO separator.
-        //     so the lines form just one event here.
-        let concatenated = concat!(
-            "214.106.15.209 - AnthraX [13/Jul/2026:05:08:12 +0000] \"GET /secret-info HTTP/1.0\" 401 47103",
-            "245.115.225.188 - KarimMove [13/Jul/2026:05:08:12 +0000] \"PUT /apps/deploy HTTP/2.0\" 302 18226",
+        let ts = DateTime::from_timestamp(1447828325, 0).unwrap();
+        let VrlValue::Object(m) = raw_event_to_map(single, ts, &[]) else {
+            panic!("expected object");
+        };
+        assert_eq!(
+            m.get(RAW_MESSAGE_COLUMN),
+            Some(&VrlValue::from(json!(single)))
         );
-        assert_eq!(parse_raw_lines(concatenated).len(), 1);
     }
 
     // ---- parse_hec_time ----

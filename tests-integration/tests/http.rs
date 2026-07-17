@@ -1754,7 +1754,8 @@ pub async fn test_splunk_raw(store_type: StorageType) {
     };
     let raw_path = "/v1/splunk/services/collector/raw";
 
-    // 1. Raw lines with request-level metadata; `channel` (param AND header) is
+    // 1. Explicit `?linebreaker=%0A` ("\n") splits the body into one event per
+    //    line, with request-level metadata; `channel` (param AND header) is
     //    accepted and ignored (ack protocol not implemented); `?time=` sets the
     //    timestamp for every event; `index` routes the table. Blank lines are
     //    skipped; indentation inside a line is preserved verbatim.
@@ -1763,13 +1764,14 @@ pub async fn test_splunk_raw(store_type: StorageType) {
         HeaderName::from_static("x-splunk-request-channel"),
         HeaderValue::from_static("FE0ECFAD-13D5-401B-847D-77833BD77131"),
     ));
-    let body = "line one\nline two\r\n\n  indented line";
+    let body = "line one\nline two\n\n  indented line";
     let res = send_req(
         &client,
         headers,
         &format!(
             "{raw_path}?channel=FE0ECFAD-13D5-401B-847D-77833BD77131\
-             &host=web-01&source=nginx&sourcetype=access&index=raw_main&time=1700000100"
+             &host=web-01&source=nginx&sourcetype=access&index=raw_main&time=1700000100\
+             &linebreaker=%0A"
         ),
         body.as_bytes().to_vec(),
         false,
@@ -1826,6 +1828,24 @@ pub async fn test_splunk_raw(store_type: StorageType) {
     assert_eq!(StatusCode::OK, res.status());
     let rows = get_rows_from_output(&query(&client, "select message from splunk_logs").await);
     assert_eq!(rows, r#"[["Hello World"]]"#);
+
+    // 4b. Without `?linebreaker=`, a multiline body (e.g. a stack trace) is stored
+    //     as it is.
+    let stack_trace = "java.lang.NullPointerException: boom\n\tat com.example.Foo.bar(Foo.java:42)\n\tat com.example.Main.main(Main.java:7)";
+    let res = send_req(
+        &client,
+        splunk_headers(),
+        &format!("{raw_path}?table=raw_multiline"),
+        stack_trace.as_bytes().to_vec(),
+        false,
+    )
+    .await;
+    assert_eq!(StatusCode::OK, res.status());
+    let rows = get_rows_from_output(&query(&client, "select message from raw_multiline").await);
+    assert_eq!(
+        rows,
+        r#"[["java.lang.NullPointerException: boom\n\tat com.example.Foo.bar(Foo.java:42)\n\tat com.example.Main.main(Main.java:7)"]]"#
+    );
 
     // 5. gzip-compressed raw body on the versioned alias (exercises the
     //    decompression layer and the `/raw/1.0` route).
@@ -1904,6 +1924,56 @@ pub async fn test_splunk_raw(store_type: StorageType) {
         rows,
         r#"[["localhost","vector-src","vector_demo","245.158.191.1 - AnthraX [13/Jul/2026:05:10:26 +0000] \"GET /wp-admin HTTP/1.0\" 300 17922"]]"#
     );
+
+    // 8. An unknown `Content-Encoding` passes through the decompression layer
+    //    still compressed (`pass_through_unaccepted(true)`); the handler must reject
+    //    it (code 6) instead of ingesting compressed bytes. `identity` is fine.
+    //    (Known-but-broken encodings, e.g. `zstd` over gzip bytes, already fail in
+    //    the layer itself.)
+    //    Invalid UTF-8 must also be rejected with code 6, not lossily replaced.
+    let mut headers = splunk_headers();
+    headers.push((
+        HeaderName::from_static("content-encoding"),
+        HeaderValue::from_static("snappy"),
+    ));
+    let res = send_req(
+        &client,
+        headers,
+        &format!("{raw_path}?table=raw_encoding"),
+        compress_vec_with_gzip(b"still compressed".to_vec()),
+        false,
+    )
+    .await;
+    assert_eq!(StatusCode::BAD_REQUEST, res.status());
+    assert!(res.text().await.contains("\"code\":6"));
+
+    let mut headers = splunk_headers();
+    headers.push((
+        HeaderName::from_static("content-encoding"),
+        HeaderValue::from_static("identity"),
+    ));
+    let res = send_req(
+        &client,
+        headers,
+        &format!("{raw_path}?table=raw_encoding"),
+        b"identity line".to_vec(),
+        false,
+    )
+    .await;
+    assert_eq!(StatusCode::OK, res.status());
+    let rows = get_rows_from_output(&query(&client, "select message from raw_encoding").await);
+    assert_eq!(rows, r#"[["identity line"]]"#);
+
+    let res = send_req(
+        &client,
+        splunk_headers(),
+        &format!("{raw_path}?table=raw_bad_utf8"),
+        vec![b'h', b'i', 0xff, 0xfe],
+        false,
+    )
+    .await;
+    assert_eq!(StatusCode::BAD_REQUEST, res.status());
+    assert!(res.text().await.contains("\"code\":6"));
 
     guard.remove_all().await;
 }
