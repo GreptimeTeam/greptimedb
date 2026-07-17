@@ -19,6 +19,7 @@ use common_procedure::error::{FromJsonSnafu, ToJsonSnafu};
 use common_procedure::{
     Context as ProcedureContext, LockKey, Procedure, Result as ProcedureResult, Status,
 };
+use common_time::util::current_time_millis;
 use common_wal::options::WalOptions;
 use serde::{Deserialize, Serialize};
 use snafu::{ResultExt, ensure};
@@ -34,6 +35,7 @@ use crate::ddl::utils::{
     map_to_procedure_error,
 };
 use crate::error::{self, Result};
+use crate::key::DroppedTableMetadata;
 use crate::key::table_route::TableRouteValue;
 use crate::lock_key::TableLock;
 use crate::rpc::ddl::PurgeDroppedTableTask;
@@ -46,6 +48,7 @@ pub struct PurgeDroppedTableProcedure {
 
 impl PurgeDroppedTableProcedure {
     pub const TYPE_NAME: &'static str = "metasrv-procedure::PurgeDroppedTable";
+    pub const EXPIRED_TYPE_NAME: &'static str = "metasrv-procedure::PurgeExpiredDroppedTable";
 
     pub fn new(task: PurgeDroppedTableTask, context: DdlContext) -> Self {
         Self {
@@ -54,12 +57,19 @@ impl PurgeDroppedTableProcedure {
         }
     }
 
+    pub fn new_if_expired(task: PurgeDroppedTableTask, context: DdlContext) -> Self {
+        Self {
+            context,
+            data: PurgeDroppedTableData::new_if_expired(task),
+        }
+    }
+
     pub fn from_json(json: &str, context: DdlContext) -> ProcedureResult<Self> {
         let data: PurgeDroppedTableData = serde_json::from_str(json).context(FromJsonSnafu)?;
         Ok(Self { context, data })
     }
 
-    async fn on_prepare(&mut self) -> Result<Status> {
+    async fn eligible_dropped_table(&self) -> Result<Option<DroppedTableMetadata>> {
         let dropped_table = self
             .context
             .table_metadata_manager
@@ -67,8 +77,25 @@ impl PurgeDroppedTableProcedure {
             .await?;
 
         let Some(dropped_table) = dropped_table else {
-            return Ok(Status::done());
+            return Ok(None);
         };
+        if self.data.check_expired {
+            if !self.context.soft_drop_enabled {
+                return Ok(None);
+            }
+            let retention_millis = self
+                .context
+                .soft_drop_retention
+                .and_then(|retention| i64::try_from(retention.as_millis()).ok());
+            let expires_at = dropped_table.retention_expires_at.or_else(|| {
+                dropped_table.dropped_at.and_then(|dropped_at| {
+                    retention_millis.and_then(|retention| dropped_at.checked_add(retention))
+                })
+            });
+            if expires_at.is_none_or(|expires_at| expires_at > current_time_millis()) {
+                return Ok(None);
+            }
+        }
         ensure!(
             !is_metric_engine_logical_table(
                 &dropped_table.table_info_value.table_info,
@@ -78,16 +105,58 @@ impl PurgeDroppedTableProcedure {
                 operation: "purging metric logical tables".to_string()
             }
         );
+        Ok(Some(dropped_table))
+    }
+
+    fn update_dropped_table(&mut self, dropped_table: DroppedTableMetadata) {
         self.data.table_id = Some(dropped_table.table_id);
         self.data.table_name = Some(dropped_table.table_name);
         self.data.table_info = Some(dropped_table.table_info_value.table_info);
         self.data.table_route_value = Some(dropped_table.table_route_value);
         self.data.region_wal_options = dropped_table.region_wal_options;
+        self.data.drop_generation = dropped_table.drop_generation;
+        self.data.drop_generation_loaded = true;
+    }
+
+    async fn on_prepare(&mut self) -> Result<Status> {
+        let Some(dropped_table) = self.eligible_dropped_table().await? else {
+            return Ok(Status::done());
+        };
+        self.update_dropped_table(dropped_table);
         self.data.state = PurgeDroppedTableState::DropRegions;
         Ok(Status::executing(true))
     }
 
     async fn on_drop_regions(&mut self) -> Result<Status> {
+        let expected_generation = self.data.drop_generation.as_deref().unwrap_or_default();
+        let purge_claim = self
+            .context
+            .table_metadata_manager
+            .dropped_table_purge_claim(self.data.task.table_id)
+            .await?;
+        if let Some(purge_claim) = purge_claim {
+            if purge_claim != expected_generation {
+                return Ok(Status::done());
+            }
+            self.data.purging_claimed = true;
+        } else {
+            // Revalidate after recovery before crossing the durable cleanup boundary.
+            let Some(dropped_table) = self.eligible_dropped_table().await? else {
+                return Ok(Status::done());
+            };
+            if dropped_table.drop_generation != self.data.drop_generation {
+                return Ok(Status::done());
+            }
+            self.update_dropped_table(dropped_table);
+            self.context
+                .table_metadata_manager
+                .mark_dropped_table_purging(
+                    self.data.task.table_id,
+                    self.data.drop_generation.as_deref(),
+                )
+                .await?;
+            self.data.purging_claimed = true;
+        }
         if let Some(region_routes) = self.data.physical_region_routes() {
             self.executor()
                 .on_cleanup_regions_offline(
@@ -109,6 +178,19 @@ impl PurgeDroppedTableProcedure {
     }
 
     async fn on_delete_tombstone(&mut self) -> Result<Status> {
+        if self.data.purging_claimed {
+            let expected_generation = self.data.drop_generation.as_deref().unwrap_or_default();
+            if self
+                .context
+                .table_metadata_manager
+                .dropped_table_purge_claim(self.data.task.table_id)
+                .await?
+                .as_deref()
+                != Some(expected_generation)
+            {
+                return Ok(Status::done());
+            }
+        }
         self.context
             .table_metadata_manager
             .delete_table_metadata_tombstone(
@@ -129,10 +211,19 @@ impl PurgeDroppedTableProcedure {
 #[async_trait]
 impl Procedure for PurgeDroppedTableProcedure {
     fn type_name(&self) -> &str {
-        Self::TYPE_NAME
+        if self.data.check_expired {
+            Self::EXPIRED_TYPE_NAME
+        } else {
+            Self::TYPE_NAME
+        }
     }
 
     fn recover(&mut self) -> ProcedureResult<()> {
+        if self.data.state == PurgeDroppedTableState::DropRegions
+            && !self.data.drop_generation_loaded
+        {
+            self.data.state = PurgeDroppedTableState::Prepare;
+        }
         Ok(())
     }
 
@@ -164,6 +255,14 @@ pub struct PurgeDroppedTableData {
     table_route_value: Option<TableRouteValue>,
     #[serde(default)]
     region_wal_options: HashMap<RegionNumber, WalOptions>,
+    #[serde(default)]
+    check_expired: bool,
+    #[serde(default)]
+    drop_generation: Option<String>,
+    #[serde(default)]
+    drop_generation_loaded: bool,
+    #[serde(default)]
+    purging_claimed: bool,
 }
 
 impl PurgeDroppedTableData {
@@ -176,6 +275,17 @@ impl PurgeDroppedTableData {
             table_info: None,
             table_route_value: None,
             region_wal_options: HashMap::new(),
+            check_expired: false,
+            drop_generation: None,
+            drop_generation_loaded: false,
+            purging_claimed: false,
+        }
+    }
+
+    fn new_if_expired(task: PurgeDroppedTableTask) -> Self {
+        Self {
+            check_expired: true,
+            ..Self::new(task)
         }
     }
 

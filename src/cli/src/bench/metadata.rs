@@ -119,6 +119,7 @@ impl TableMetadataBencher {
                         &table_info.table_name(),
                         &table_route,
                         &region_wal_options,
+                        None,
                     )
                     .await;
                 start.elapsed()

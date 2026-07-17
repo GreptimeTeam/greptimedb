@@ -50,7 +50,7 @@ impl DropTableProcedure {
         );
         // TODO(hl): support soft-dropping logical tables.
         ensure!(
-            !(self.context.soft_drop_enabled
+            !(self.data.soft_drop_enabled
                 && is_metric_engine_logical_table(
                     &table_info_value.table_info,
                     &table_route_value
@@ -63,7 +63,7 @@ impl DropTableProcedure {
         if physical_table_id == self.data.table_id() {
             let engine = table_info_value.table_info.meta.engine;
             ensure!(
-                !(self.context.soft_drop_enabled && engine == FILE_ENGINE),
+                !(self.data.soft_drop_enabled && engine == FILE_ENGINE),
                 error::UnsupportedSnafu {
                     operation: "soft-dropping file-engine tables".to_string()
                 }

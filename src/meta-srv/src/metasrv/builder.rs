@@ -58,7 +58,7 @@ use crate::cache_invalidator::MetasrvCacheInvalidator;
 use crate::cluster::MetaPeerClientRef;
 use crate::error::{self, BuildWalProviderSnafu, OtherSnafu, Result};
 use crate::events::EventHandlerImpl;
-use crate::gc::GcScheduler;
+use crate::gc::{DefaultGcSchedulerCtx, EXPERIMENTAL_SOFT_DROP_ENABLED, GcScheduler};
 use crate::greptimedb_telemetry::get_greptimedb_telemetry_task;
 use crate::handler::failure_handler::RegionFailureHandler;
 use crate::handler::flow_state_handler::FlowStateHandler;
@@ -430,6 +430,7 @@ impl MetasrvBuilder {
             flow_metadata_allocator: flow_metadata_allocator.clone(),
             region_failure_detector_controller,
             soft_drop_enabled: ddl_soft_drop_enabled(&options),
+            soft_drop_retention: ddl_soft_drop_retention(&options),
         };
         let procedure_manager_c = procedure_manager.clone();
         let repartition_procedure_factory: RepartitionProcedureFactoryRef = if options.gc.enable {
@@ -521,12 +522,16 @@ impl MetasrvBuilder {
         };
 
         let gc_ticker = if options.gc.enable {
-            let (gc_scheduler, gc_ticker) = GcScheduler::new_with_config(
+            let gc_scheduler_ctx = DefaultGcSchedulerCtx::try_new(
                 table_metadata_manager.clone(),
                 procedure_manager.clone(),
+                ddl_manager.clone(),
                 meta_peer_client.clone(),
                 mailbox.clone(),
                 options.grpc.server_addr.clone(),
+            )?;
+            let (gc_scheduler, gc_ticker) = GcScheduler::new_with_config(
+                gc_scheduler_ctx,
                 runtime_switch_manager.clone(),
                 options.gc.clone(),
             )?;
@@ -687,10 +692,13 @@ fn build_procedure_manager(
 }
 
 /// Resolves if soft-drop is enabled from metasrv options.
-fn ddl_soft_drop_enabled(_options: &MetasrvOptions) -> bool {
-    // TODO(hl): add a dedicated soft-drop cluster config
-    // when wiring the user-facing option.
-    false
+fn ddl_soft_drop_enabled(options: &MetasrvOptions) -> bool {
+    EXPERIMENTAL_SOFT_DROP_ENABLED && options.gc.experimental_soft_drop.enable
+}
+
+/// Returns soft-drop retention for recovering persisted procedures.
+fn ddl_soft_drop_retention(options: &MetasrvOptions) -> Option<Duration> {
+    Some(options.gc.experimental_soft_drop.retention)
 }
 
 impl Default for MetasrvBuilder {
@@ -703,4 +711,50 @@ impl Default for MetasrvBuilder {
 pub struct DdlManagerConfigureContext {
     pub kv_backend: KvBackendRef,
     pub meta_peer_client: MetaPeerClientRef,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_ddl_soft_drop_gate_preserves_retention_for_recovery() {
+        let mut options = MetasrvOptions::default();
+        options.gc.enable = true;
+        options.gc.experimental_soft_drop.enable = true;
+        options.gc.experimental_soft_drop.retention = Duration::from_secs(123);
+
+        assert!(!ddl_soft_drop_enabled(&options));
+        assert_eq!(
+            Some(Duration::from_secs(123)),
+            ddl_soft_drop_retention(&options)
+        );
+    }
+
+    #[test]
+    fn test_ddl_soft_drop_is_disabled_by_default() {
+        assert!(!ddl_soft_drop_enabled(&MetasrvOptions::default()));
+    }
+
+    #[test]
+    fn test_ignored_soft_drop_options_are_not_validated() {
+        let mut options = MetasrvOptions::default();
+        options.gc.experimental_soft_drop.enable = true;
+        options.gc.experimental_soft_drop.retention = Duration::ZERO;
+
+        assert!(options.gc.validate().is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_builder_skips_gc_validation_when_gc_is_disabled() {
+        let mut options = MetasrvOptions::default();
+        options.gc.enable = false;
+        options.gc.max_concurrent_tables = 0;
+
+        MetasrvBuilder::new()
+            .options(options)
+            .build()
+            .await
+            .unwrap();
+    }
 }

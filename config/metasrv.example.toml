@@ -326,6 +326,12 @@ enable = false
 ## Cooldown period between GC operations on the same region.
 gc_cooldown_period = "5m"
 
+[gc.experimental_soft_drop]
+## Reserved experimental option. Currently ignored.
+enable = false
+## Reserved retention duration. Currently ignored.
+retention = "7d"
+
 ## The logging options.
 [logging]
 ## The directory to store the log files. If set to empty, logs will not be written to files.

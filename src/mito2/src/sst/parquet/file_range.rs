@@ -332,7 +332,7 @@ impl FileRangeContext {
     /// Returns the estimated memory size of this context.
     /// Mainly accounts for the parquet metadata size.
     pub(crate) fn memory_size(&self) -> usize {
-        crate::cache::cache_size::parquet_meta_size(self.reader_builder.parquet_metadata())
+        self.reader_builder.parquet_metadata_size()
     }
 }
 
