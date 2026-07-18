@@ -212,6 +212,7 @@ impl DropTableProcedure {
             .await;
         if self.data.soft_drop_enabled {
             result.map_err(ensure_retry_later)?;
+            self.data.allow_rollback = false;
         } else {
             result?;
         }
@@ -222,7 +223,12 @@ impl DropTableProcedure {
 
     /// Broadcasts invalidate table cache instruction.
     async fn on_broadcast(&mut self) -> Result<Status> {
-        self.executor.invalidate_table_cache(&self.context).await?;
+        let result = self.executor.invalidate_table_cache(&self.context).await;
+        if self.data.soft_drop_enabled {
+            result.map_err(ensure_retry_later)?;
+        } else {
+            result?;
+        }
 
         self.data.state = DropTableState::DatanodeDropRegions;
 

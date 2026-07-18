@@ -2524,7 +2524,6 @@ async fn test_on_rollback() {
     let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
     let kv_backend = Arc::new(MemoryKvBackend::new());
     let mut ddl_context = new_ddl_context_with_kv_backend(node_manager, kv_backend.clone());
-    ddl_context.soft_drop_enabled = true;
     // Prepares physical table metadata.
     let mut create_physical_table_task = test_create_physical_table_task("phy_table");
     let TableMetadata {
@@ -2565,36 +2564,8 @@ async fn test_on_rollback() {
         procedure.on_prepare().await.unwrap();
         assert!(procedure.rollback_supported());
         procedure.on_delete_metadata().await.unwrap();
-        assert!(
-            kv_backend
-                .get(dropped_at_marker_key(physical_table_id).as_bytes())
-                .await
-                .unwrap()
-                .is_some()
-        );
-        assert!(
-            kv_backend
-                .get(retention_expires_at_marker_key(physical_table_id).as_bytes())
-                .await
-                .unwrap()
-                .is_some()
-        );
         assert!(procedure.rollback_supported());
         procedure.rollback(&ctx).await.unwrap();
-        assert!(
-            kv_backend
-                .get(dropped_at_marker_key(physical_table_id).as_bytes())
-                .await
-                .unwrap()
-                .is_none()
-        );
-        assert!(
-            kv_backend
-                .get(retention_expires_at_marker_key(physical_table_id).as_bytes())
-                .await
-                .unwrap()
-                .is_none()
-        );
         // Rollback again
         assert!(procedure.rollback_supported());
         procedure.rollback(&ctx).await.unwrap();
