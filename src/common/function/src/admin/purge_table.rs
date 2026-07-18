@@ -87,11 +87,12 @@ mod tests {
     use arrow::datatypes::{DataType as ArrowDataType, Field};
     use async_trait::async_trait;
     use catalog::CatalogManagerRef;
+    use common_macro::admin_fn;
     use common_meta::rpc::procedure::{
         GcRegionsRequest, GcResponse, GcTableRequest, ManageRegionFollowerRequest,
         MigrateRegionRequest, ProcedureStateResponse,
     };
-    use common_query::error::{InvalidFuncArgsSnafu, Result};
+    use common_query::error::{InvalidFuncArgsSnafu, MissingProcedureServiceHandlerSnafu, Result};
     use datafusion_expr::{ColumnarValue, Signature, TypeSignature, Volatility};
     use datatypes::prelude::{Value, ValueRef};
     use session::context::{QueryContext, QueryContextBuilder, QueryContextRef};
@@ -102,6 +103,26 @@ mod tests {
     use crate::function_registry::{FUNCTION_REGISTRY, get_admin_function};
     use crate::handlers::{ProcedureServiceHandler, ProcedureServiceHandlerRef};
     use crate::state::FunctionState;
+
+    #[admin_fn(
+        name = ZeroArgSingleRowFunction,
+        display_name = zero_arg_single_row,
+        sig_fn = zero_arg_single_row_signature,
+        ret = uint64,
+        single_row
+    )]
+    async fn zero_arg_single_row(
+        _procedure_service_handler: &ProcedureServiceHandlerRef,
+        _query_ctx: &QueryContextRef,
+        params: &[ValueRef<'_>],
+    ) -> Result<Value> {
+        assert!(params.is_empty());
+        Ok(Value::from(0_u64))
+    }
+
+    fn zero_arg_single_row_signature() -> Signature {
+        Signature::nullary(Volatility::Immutable)
+    }
 
     #[derive(Default)]
     struct RecordingHandler {
@@ -235,6 +256,35 @@ mod tests {
                 .is_err()
         );
         assert!(handler.calls.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_single_row_admin_fn_rejects_zero_arg_multi_row_invocation() {
+        let handler = Arc::new(RecordingHandler::default());
+        let state = FunctionState {
+            procedure_service_handler: Some(handler),
+            ..Default::default()
+        };
+        let factory: ScalarFunctionFactory = ZeroArgSingleRowFunction::factory().into();
+        let function = factory.provide(crate::function::FunctionContext {
+            query_ctx: QueryContext::arc(),
+            state: Arc::new(state),
+        });
+        let args = datafusion_expr::ScalarFunctionArgs {
+            args: vec![],
+            arg_fields: vec![],
+            return_field: Arc::new(Field::new("result", ArrowDataType::UInt64, false)),
+            number_rows: 2,
+            config_options: Arc::new(datafusion_common::config::ConfigOptions::default()),
+        };
+
+        let err = function
+            .as_async()
+            .unwrap()
+            .invoke_async_with_args(args)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("received 2"));
     }
 
     #[tokio::test]

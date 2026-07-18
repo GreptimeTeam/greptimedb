@@ -170,9 +170,9 @@ fn build_struct(
     let uppcase_display_name = display_name.to_uppercase();
     let validate_rows = single_row.then(|| {
         quote! {
-            if rows_num != 1 {
+            if args.number_rows != 1 {
                 return Err(datafusion_common::DataFusionError::Execution(
-                    format!("{} expects exactly one row, received {}", #display_name, rows_num)
+                    format!("{} expects exactly one row, received {}", #display_name, args.number_rows)
                 ));
             }
         }
