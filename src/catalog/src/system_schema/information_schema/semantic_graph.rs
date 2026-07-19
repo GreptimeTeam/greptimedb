@@ -54,42 +54,123 @@ fn string() -> ConcreteDataType {
     ConcreteDataType::string_datatype()
 }
 
-/// Schema of `semantic_entities` (matches the registry derivation projection).
+/// Schema of `semantic_entities` — the node set of the graph, one row per entity
+/// observed in a time window. Must match the registry derivation projection.
+///
+/// Columns:
+/// - `observed_at`   — TIME INDEX; the 60s time bucket the entity was observed in.
+/// - `window_start`  — start of that observation window.
+/// - `window_end`    — end of the window (`window_start` + 60s).
+/// - `fresh_until`   — time up to which the entity is considered present; equals
+///   `window_end` for derived rows (the graph is a sliding window, not a
+///   current-state table: an entity exists in a query window only if it has
+///   observed evidence there).
+/// - `entity_type`   — the entity's type, e.g. `service`, `host`, `k8s.pod`,
+///   `process`, `service.instance` (the OTel-style, possibly dotted, type).
+/// - `entity_id`     — canonical identifier: the value verbatim for a
+///   single-attribute identity, or a sorted `k=v,k=v` rendering for a composite.
+/// - `entity_id_attrs` — JSON object of the identifying attributes (the
+///   escaping-safe source of truth for composite ids); NULL for single-attribute ids.
+/// - `scope`         — namespace/environment the id is scoped to; empty when none.
+/// - `descriptive`   — JSON snapshot of the entity's descriptive (non-identifying)
+///   attributes; NULL when no descriptive columns were declared.
+/// - `source_tables` — JSON array of the telemetry tables that contributed this entity.
 fn entities_schema() -> SchemaRef {
     Arc::new(Schema::new(vec![
+        // 60s time bucket the entity was observed in (TIME INDEX).
         ColumnSchema::new("observed_at", ts(), false),
+        // Start of the observation window this row covers.
         ColumnSchema::new("window_start", ts(), true),
+        // End of the observation window (window_start + 60s).
         ColumnSchema::new("window_end", ts(), true),
+        // Time up to which the entity is considered present (= window_end for
+        // derived rows). The graph is a temporal window, not a current-state table.
         ColumnSchema::new("fresh_until", ts(), true),
+        // Entity type, e.g. `service` / `host` / `k8s.pod` / `process`.
         ColumnSchema::new("entity_type", string(), false),
+        // Canonical id: value verbatim (single attr) or sorted `k=v,k=v` (composite).
         ColumnSchema::new("entity_id", string(), false),
+        // JSON object of identifying attributes (source of truth for composite ids);
+        // NULL for single-attribute ids.
         ColumnSchema::new("entity_id_attrs", string(), true),
+        // Namespace/environment the id is scoped to; empty string when none.
         ColumnSchema::new("scope", string(), true),
+        // JSON snapshot of descriptive (non-identifying) attributes; NULL if none.
         ColumnSchema::new("descriptive", string(), true),
+        // JSON array of the telemetry tables that contributed this entity.
         ColumnSchema::new("source_tables", string(), true),
     ]))
 }
 
-/// Schema of `semantic_relationships` (the 18-column UNION contract).
+/// Schema of `semantic_relationships` — the edge set of the graph, one row per
+/// edge observed in a time window. This is the 18-column contract every derived
+/// branch and the declared-edge table must project for the top-level `UNION ALL`.
+///
+/// Columns:
+/// - `observed_at`   — TIME INDEX; the 60s time bucket the edge was observed in.
+/// - `window_start` / `window_end` — the observation window (`window_start` + 60s).
+/// - `fresh_until`   — time up to which the edge is considered live; equals
+///   `window_end` for derived edges (from `valid_until` for declared edges).
+/// - `src_type` / `src_id` — type and canonical id of the source endpoint.
+/// - `dst_type` / `dst_id` — type and canonical id of the destination endpoint.
+/// - `rel_type`      — relationship kind, e.g. `calls`, `runs_on`, `contains`,
+///   `part_of`, `depends_on` (direction is src → dst; the inverse is a query concern).
+/// - `provenance`    — how the edge was obtained: `trace` (derived from spans),
+///   `attribute` (shared-identity join), `declared` (hand-inserted), or `agent`
+///   (agent-inferred). Part of the edge identity, so edges of different provenance
+///   for the same pair coexist.
+/// - `confidence`    — confidence in `[0, 1]`: `1.0` for observed/declared edges,
+///   lower for sampled traces, virtual nodes, or agent-inferred edges.
+/// - `scope`         — namespace/environment; empty string when none.
+/// - `generation_id` — deterministic key of the producing (window, run) that makes
+///   re-derivation idempotent; empty for read-time derived rows (load-bearing only
+///   for a future maintained/materialised graph).
+/// - `request_count` — RED: number of requests over the window (`calls` edges).
+/// - `error_count`   — RED: number of errored requests over the window.
+/// - `duration_sum`  — RED: sum of request durations, in seconds, over the window.
+/// - `duration_count`— RED: number of durations summed (pair with `duration_sum`
+///   to get an average).
+/// - `attributes`    — JSON of edge attributes, e.g. `connection_type`,
+///   `db.system`, `peer.service`.
 fn relationships_schema() -> SchemaRef {
     Arc::new(Schema::new(vec![
+        // 60s time bucket the edge was observed in (TIME INDEX).
         ColumnSchema::new("observed_at", ts(), false),
+        // Start of the observation window this edge covers.
         ColumnSchema::new("window_start", ts(), true),
+        // End of the observation window (window_start + 60s).
         ColumnSchema::new("window_end", ts(), true),
+        // Time up to which the edge is considered live (= window_end for derived
+        // edges, from valid_until for declared edges).
         ColumnSchema::new("fresh_until", ts(), true),
+        // Type and canonical id of the source endpoint.
         ColumnSchema::new("src_type", string(), false),
         ColumnSchema::new("src_id", string(), false),
+        // Type and canonical id of the destination endpoint.
         ColumnSchema::new("dst_type", string(), false),
         ColumnSchema::new("dst_id", string(), false),
+        // Relationship kind (src -> dst), e.g. `calls` / `runs_on` / `depends_on`.
         ColumnSchema::new("rel_type", string(), false),
+        // Origin of the edge: `trace` | `attribute` | `declared` | `agent`
+        // (part of the edge identity).
         ColumnSchema::new("provenance", string(), false),
+        // Confidence in [0, 1]; 1.0 for observed/declared, lower for sampled /
+        // virtual-node / inferred edges.
         ColumnSchema::new("confidence", ConcreteDataType::float64_datatype(), true),
+        // Namespace/environment; empty string when none.
         ColumnSchema::new("scope", string(), true),
+        // Deterministic (window, run) key for idempotent re-derivation; empty for
+        // read-time derived rows.
         ColumnSchema::new("generation_id", string(), true),
+        // RED: request count over the window.
         ColumnSchema::new("request_count", ConcreteDataType::int64_datatype(), true),
+        // RED: errored-request count over the window.
         ColumnSchema::new("error_count", ConcreteDataType::int64_datatype(), true),
+        // RED: sum of request durations (seconds) over the window.
         ColumnSchema::new("duration_sum", ConcreteDataType::float64_datatype(), true),
+        // RED: number of durations summed (pair with duration_sum for an average).
         ColumnSchema::new("duration_count", ConcreteDataType::int64_datatype(), true),
+        // JSON of edge attributes: connection_type, db.system, peer.service, ...
         ColumnSchema::new("attributes", string(), true),
     ]))
 }
