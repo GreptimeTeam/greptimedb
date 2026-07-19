@@ -28,6 +28,8 @@ use snafu::{ResultExt, ensure};
 use crate::error::{
     CastColumnSnafu, DataTypeMismatchSnafu, NewRecordBatchSnafu, Result, UnexpectedSnafu,
 };
+use crate::sst::parquet::json_align::fallback::apply_json2_fallbacks_to_root;
+use crate::sst::parquet::read_columns::{Json2FallbackItem, Json2FallbackPlan};
 
 /// Aligns projected batches to the expected output schema for nested projections.
 ///
@@ -58,6 +60,8 @@ pub struct NestedSchemaAligner<S> {
     projected_root_presence: Vec<bool>,
     /// Number of columns expected from the physical batch returned by parquet.
     expected_input_col_num: usize,
+    /// JSON2 fallback items grouped by output root index.
+    fallbacks_by_output_root: Vec<Vec<Json2FallbackItem>>,
     /// Whether all projected roots are present and the stream can pass batches
     /// through.
     all_roots_present: bool,
@@ -73,6 +77,7 @@ where
         inner: S,
         projected_root_presence: Vec<bool>,
         output_schema: SchemaRef,
+        json2_fallback_plan: Json2FallbackPlan,
     ) -> Result<NestedSchemaAligner<S>> {
         ensure!(
             projected_root_presence.len() == output_schema.fields().len(),
@@ -90,12 +95,27 @@ where
             .filter(|matched| **matched)
             .count();
         let all_roots_present = projected_root_presence.iter().all(|&m| m);
+        let mut fallbacks_by_output_root = vec![Vec::new(); output_schema.fields().len()];
+        for item in json2_fallback_plan.items {
+            ensure!(
+                item.output_root_index < fallbacks_by_output_root.len(),
+                UnexpectedSnafu {
+                    reason: format!(
+                        "NestedSchemaAligner fallback output root index {} out of bounds {}",
+                        item.output_root_index,
+                        fallbacks_by_output_root.len()
+                    ),
+                }
+            );
+            fallbacks_by_output_root[item.output_root_index].push(item);
+        }
 
         Ok(NestedSchemaAligner {
             inner,
             output_schema,
             projected_root_presence,
             expected_input_col_num,
+            fallbacks_by_output_root,
             all_roots_present,
             is_schema_matched: None,
         })
@@ -113,25 +133,24 @@ where
 
         match Pin::new(&mut this.inner).poll_next(cx) {
             Poll::Ready(Some(Ok(rb))) => {
-                let rb = if this.all_roots_present {
-                    rb
-                } else {
-                    fill_missing_cols(
-                        rb,
-                        &this.output_schema,
-                        &this.projected_root_presence,
-                        this.expected_input_col_num,
-                    )?
-                };
-
-                let is_schema_matched = *this
-                    .is_schema_matched
-                    .get_or_insert_with(|| rb.schema() == this.output_schema);
+                let has_json2_fallbacks =
+                    this.fallbacks_by_output_root.iter().any(|x| !x.is_empty());
+                let is_schema_matched = !has_json2_fallbacks
+                    && this.all_roots_present
+                    && *this
+                        .is_schema_matched
+                        .get_or_insert_with(|| rb.schema() == this.output_schema);
 
                 if is_schema_matched {
                     Poll::Ready(Some(Ok(rb)))
                 } else {
-                    Poll::Ready(Some(align_batch_to_schema(rb, &this.output_schema)))
+                    Poll::Ready(Some(align_projected_batch(
+                        rb,
+                        &this.output_schema,
+                        &this.projected_root_presence,
+                        this.expected_input_col_num,
+                        &this.fallbacks_by_output_root,
+                    )))
                 }
             }
             Poll::Ready(Some(Err(err))) => Poll::Ready(Some(Err(err))),
@@ -141,11 +160,12 @@ where
     }
 }
 
-fn fill_missing_cols(
+fn align_projected_batch(
     rb: RecordBatch,
     output_schema: &SchemaRef,
-    projected_root_matches: &[bool],
+    projected_root_presence: &[bool],
     expected_input_col_num: usize,
+    fallbacks_by_output_root: &[Vec<Json2FallbackItem>],
 ) -> Result<RecordBatch> {
     ensure!(
         rb.columns().len() == expected_input_col_num,
@@ -158,41 +178,31 @@ fn fill_missing_cols(
         }
     );
 
-    let mut cols = Vec::with_capacity(projected_root_matches.len());
+    let mut cols = Vec::with_capacity(projected_root_presence.len());
     let mut idx = 0;
 
-    for (field, matched) in output_schema.fields().iter().zip(projected_root_matches) {
-        if *matched {
-            cols.push(rb.column(idx).clone());
-            idx += 1;
-        } else {
+    for (output_root_index, (field, present)) in output_schema
+        .fields()
+        .iter()
+        .zip(projected_root_presence)
+        .enumerate()
+    {
+        if !present {
             cols.push(new_null_array(field.data_type(), rb.num_rows()));
+            continue;
         }
+
+        let fallbacks = &fallbacks_by_output_root[output_root_index];
+        let column = if fallbacks.is_empty() {
+            rb.column(idx).clone()
+        } else {
+            apply_json2_fallbacks_to_root(rb.column(idx), field, fallbacks)?
+        };
+        cols.push(align_array(&column, field)?);
+        idx += 1;
     }
 
     RecordBatch::try_new(output_schema.clone(), cols).context(NewRecordBatchSnafu)
-}
-
-fn align_batch_to_schema(rb: RecordBatch, output_schema: &SchemaRef) -> Result<RecordBatch> {
-    ensure!(
-        rb.num_columns() == output_schema.fields().len(),
-        UnexpectedSnafu {
-            reason: format!(
-                "NestedSchemaAligner expected {} columns but got {}",
-                output_schema.fields().len(),
-                rb.num_columns()
-            ),
-        }
-    );
-
-    let columns = rb
-        .columns()
-        .iter()
-        .zip(output_schema.fields())
-        .map(|(array, field)| align_array(array, field))
-        .collect::<Result<Vec<_>>>()?;
-
-    RecordBatch::try_new(output_schema.clone(), columns).context(NewRecordBatchSnafu)
 }
 
 fn align_array(array: &ArrayRef, field: &FieldRef) -> Result<ArrayRef> {
@@ -217,8 +227,12 @@ fn align_array(array: &ArrayRef, field: &FieldRef) -> Result<ArrayRef> {
 mod tests {
     use std::sync::Arc;
 
-    use datatypes::arrow::array::{Array, ArrayRef, Int64Array, StringArray, StructArray};
+    use datatypes::arrow::array::{
+        Array, ArrayRef, BinaryArray, Int64Array, StringArray, StringViewArray, StructArray,
+    };
     use datatypes::arrow::datatypes::{DataType, Field, Fields, Schema};
+    use datatypes::extension::json::{JsonExtensionType, JsonMetadata};
+    use datatypes::types::parse_string_to_jsonb;
     use futures::{StreamExt, stream};
 
     use super::*;
@@ -236,8 +250,13 @@ mod tests {
         .unwrap();
         let stream = stream::iter([Ok(input.clone())]);
 
-        let mut aligner =
-            NestedSchemaAligner::new(stream, vec![true, true], output_schema.clone()).unwrap();
+        let mut aligner = NestedSchemaAligner::new(
+            stream,
+            vec![true, true],
+            output_schema.clone(),
+            Json2FallbackPlan::default(),
+        )
+        .unwrap();
         let output = aligner.next().await.unwrap().unwrap();
 
         assert_eq!(input, output);
@@ -255,9 +274,13 @@ mod tests {
         let input = RecordBatch::try_new(input_schema, vec![int_array([10, 20])]).unwrap();
         let stream = stream::iter([Ok(input)]);
 
-        let mut aligner =
-            NestedSchemaAligner::new(stream, vec![true, false, false], output_schema.clone())
-                .unwrap();
+        let mut aligner = NestedSchemaAligner::new(
+            stream,
+            vec![true, false, false],
+            output_schema.clone(),
+            Json2FallbackPlan::default(),
+        )
+        .unwrap();
         let output = aligner.next().await.unwrap().unwrap();
 
         assert_eq!(output_schema, output.schema());
@@ -293,8 +316,13 @@ mod tests {
         let input = RecordBatch::try_new(input_schema, vec![int_array([10, 20])]).unwrap();
         let stream = stream::iter([Ok(input)]);
 
-        let mut aligner =
-            NestedSchemaAligner::new(stream, vec![true, false], output_schema.clone()).unwrap();
+        let mut aligner = NestedSchemaAligner::new(
+            stream,
+            vec![true, false],
+            output_schema.clone(),
+            Json2FallbackPlan::default(),
+        )
+        .unwrap();
         let output = aligner.next().await.unwrap().unwrap();
 
         assert_eq!(output_schema, output.schema());
@@ -308,7 +336,12 @@ mod tests {
         let output_schema = schema([Field::new("a", DataType::Int64, true)]);
         let stream = stream::iter([]);
 
-        let err = match NestedSchemaAligner::new(stream, vec![true, false], output_schema) {
+        let err = match NestedSchemaAligner::new(
+            stream,
+            vec![true, false],
+            output_schema,
+            Json2FallbackPlan::default(),
+        ) {
             Ok(_) => panic!("NestedSchemaAligner should reject projection length mismatch"),
             Err(err) => err,
         };
@@ -330,8 +363,13 @@ mod tests {
         let input = RecordBatch::try_new(input_schema, vec![int_array([1, 2])]).unwrap();
         let stream = stream::iter([Ok(input)]);
 
-        let mut aligner =
-            NestedSchemaAligner::new(stream, vec![true, true, false], output_schema).unwrap();
+        let mut aligner = NestedSchemaAligner::new(
+            stream,
+            vec![true, true, false],
+            output_schema,
+            Json2FallbackPlan::default(),
+        )
+        .unwrap();
         let err = aligner.next().await.unwrap().unwrap_err();
 
         assert!(
@@ -363,9 +401,13 @@ mod tests {
         )
         .unwrap();
 
-        let mut aligner =
-            NestedSchemaAligner::new(stream::iter([Ok(input)]), vec![true], output_schema.clone())
-                .unwrap();
+        let mut aligner = NestedSchemaAligner::new(
+            stream::iter([Ok(input)]),
+            vec![true],
+            output_schema.clone(),
+            Json2FallbackPlan::default(),
+        )
+        .unwrap();
         let output = aligner.next().await.unwrap().unwrap();
 
         assert_eq!(output_schema, output.schema());
@@ -376,6 +418,196 @@ mod tests {
             .unwrap();
         assert_eq!(2, nested.columns().len());
         assert_eq!(2, nested.column(1).null_count());
+    }
+
+    #[tokio::test]
+    async fn test_nested_schema_aligner_applies_json2_fallback() {
+        let source_values = [
+            Some(parse_string_to_jsonb("1").unwrap()),
+            Some(parse_string_to_jsonb(r#"{"b":2}"#).unwrap()),
+            None,
+        ];
+        let source = Arc::new(BinaryArray::from_iter(
+            source_values.iter().map(|value| value.as_deref()),
+        )) as ArrayRef;
+        let input_fields = Fields::from(vec![Arc::new(Field::new("a", DataType::Binary, true))]);
+        let input = RecordBatch::try_new(
+            schema([Field::new(
+                "j",
+                DataType::Struct(input_fields.clone()),
+                true,
+            )]),
+            vec![Arc::new(StructArray::new(input_fields, vec![source], None))],
+        )
+        .unwrap();
+
+        let output_schema = schema([Field::new(
+            "j",
+            DataType::Struct(Fields::from(vec![Arc::new(Field::new(
+                "a",
+                DataType::Struct(Fields::from(vec![
+                    Arc::new(Field::new("b", DataType::Int64, true)),
+                    Arc::new(Field::new("c", DataType::Utf8View, true)),
+                ])),
+                true,
+            ))])),
+            true,
+        )
+        .with_extension_type(JsonExtensionType::new(Arc::new(JsonMetadata::default())))]);
+        let plan = Json2FallbackPlan {
+            items: vec![Json2FallbackItem {
+                output_root_index: 0,
+                source_path: vec!["j".to_string(), "a".to_string()],
+                requested_paths: vec![
+                    vec!["j".to_string(), "a".to_string(), "b".to_string()],
+                    vec!["j".to_string(), "a".to_string(), "c".to_string()],
+                ],
+            }],
+        };
+
+        let mut aligner = NestedSchemaAligner::new(
+            stream::iter([Ok(input)]),
+            vec![true],
+            output_schema.clone(),
+            plan,
+        )
+        .unwrap();
+        let output = aligner.next().await.unwrap().unwrap();
+
+        assert_eq!(output_schema, output.schema());
+        let j = output
+            .column(0)
+            .as_any()
+            .downcast_ref::<StructArray>()
+            .unwrap();
+        let a = j.column(0).as_any().downcast_ref::<StructArray>().unwrap();
+        assert_eq!(
+            &[None, Some(2), None],
+            a.column(0)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap()
+                .iter()
+                .collect::<Vec<_>>()
+                .as_slice()
+        );
+        assert_eq!(
+            &[None, None, None],
+            a.column(1)
+                .as_any()
+                .downcast_ref::<StringViewArray>()
+                .unwrap()
+                .iter()
+                .collect::<Vec<_>>()
+                .as_slice()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_nested_schema_aligner_preserves_json2_fallback_siblings() {
+        let source_values = [
+            Some(parse_string_to_jsonb(r#"{"x":1}"#).unwrap()),
+            Some(parse_string_to_jsonb(r#"{"x":2}"#).unwrap()),
+        ];
+        let source = Arc::new(BinaryArray::from_iter(
+            source_values.iter().map(|value| value.as_deref()),
+        )) as ArrayRef;
+        let c = Arc::new(Int64Array::from_iter_values([10, 20])) as ArrayRef;
+
+        let a_fields = Fields::from(vec![
+            Arc::new(Field::new("b", DataType::Binary, true)),
+            Arc::new(Field::new("c", DataType::Int64, true)),
+        ]);
+        let input_fields = Fields::from(vec![Arc::new(Field::new(
+            "a",
+            DataType::Struct(a_fields.clone()),
+            true,
+        ))]);
+        let input = RecordBatch::try_new(
+            schema([Field::new(
+                "j",
+                DataType::Struct(input_fields.clone()),
+                true,
+            )]),
+            vec![Arc::new(StructArray::new(
+                input_fields,
+                vec![Arc::new(StructArray::new(a_fields, vec![source, c], None))],
+                None,
+            ))],
+        )
+        .unwrap();
+
+        let output_schema = schema([Field::new(
+            "j",
+            DataType::Struct(Fields::from(vec![Arc::new(Field::new(
+                "a",
+                DataType::Struct(Fields::from(vec![
+                    Arc::new(Field::new(
+                        "b",
+                        DataType::Struct(Fields::from(vec![Arc::new(Field::new(
+                            "x",
+                            DataType::Int64,
+                            true,
+                        ))])),
+                        true,
+                    )),
+                    Arc::new(Field::new("c", DataType::Int64, true)),
+                ])),
+                true,
+            ))])),
+            true,
+        )
+        .with_extension_type(JsonExtensionType::new(Arc::new(JsonMetadata::default())))]);
+        let plan = Json2FallbackPlan {
+            items: vec![Json2FallbackItem {
+                output_root_index: 0,
+                source_path: vec!["j".to_string(), "a".to_string(), "b".to_string()],
+                requested_paths: vec![vec![
+                    "j".to_string(),
+                    "a".to_string(),
+                    "b".to_string(),
+                    "x".to_string(),
+                ]],
+            }],
+        };
+
+        let mut aligner = NestedSchemaAligner::new(
+            stream::iter([Ok(input)]),
+            vec![true],
+            output_schema.clone(),
+            plan,
+        )
+        .unwrap();
+        let output = aligner.next().await.unwrap().unwrap();
+
+        assert_eq!(output_schema, output.schema());
+        let j = output
+            .column(0)
+            .as_any()
+            .downcast_ref::<StructArray>()
+            .unwrap();
+        let a = j.column(0).as_any().downcast_ref::<StructArray>().unwrap();
+        let b = a.column(0).as_any().downcast_ref::<StructArray>().unwrap();
+        assert_eq!(
+            &[Some(1), Some(2)],
+            b.column(0)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap()
+                .iter()
+                .collect::<Vec<_>>()
+                .as_slice()
+        );
+        assert_eq!(
+            &[Some(10), Some(20)],
+            a.column(1)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap()
+                .iter()
+                .collect::<Vec<_>>()
+                .as_slice()
+        );
     }
 
     fn schema(fields: impl IntoIterator<Item = Field>) -> SchemaRef {

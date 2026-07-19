@@ -15,10 +15,13 @@
 use datatypes::arrow::record_batch::RecordBatch;
 use futures::stream::BoxStream;
 
-pub(crate) use super::json2_fallback_decoder::{
-    Json2FallbackDecoder, json2_fallback_output_schema,
-};
-pub(crate) use super::nested_schema_aligner::NestedSchemaAligner;
+mod fallback;
+mod schema;
+mod stream;
+
+pub(crate) use schema::align_schema_by_nested_paths;
+pub(crate) use stream::NestedSchemaAligner;
+
 use crate::error::Result;
 
 pub(crate) type ProjectedRecordBatchStream = BoxStream<'static, Result<RecordBatch>>;

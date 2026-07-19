@@ -28,6 +28,7 @@ pub mod file_range;
 pub mod flat_format;
 pub mod format;
 pub(crate) mod helper;
+pub(crate) mod json_align;
 pub mod metadata;
 pub mod prefilter;
 pub mod push_decoder;

@@ -14,10 +14,6 @@
 
 //! Parquet reader.
 
-mod json2_fallback_decoder;
-mod nested_schema_aligner;
-mod stream;
-
 #[cfg(feature = "vector_index")]
 use std::collections::BTreeSet;
 use std::collections::HashSet;
@@ -52,10 +48,6 @@ use store_api::region_request::PathType;
 use store_api::storage::{ColumnId, FileId};
 use table::predicate::Predicate;
 
-use self::stream::{
-    Json2FallbackDecoder, NestedSchemaAligner, ProjectedRecordBatchStream,
-    json2_fallback_output_schema,
-};
 use crate::cache::index::result_cache::PredicateKey;
 use crate::cache::{CacheStrategy, CachedSstMeta};
 #[cfg(feature = "vector_index")]
@@ -88,6 +80,7 @@ use crate::sst::parquet::file_range::{
 };
 use crate::sst::parquet::flat_format::{FlatReadFormat, primary_key_column_index};
 use crate::sst::parquet::format::{INTERNAL_COLUMN_NUM, need_override_sequence};
+use crate::sst::parquet::json_align::{NestedSchemaAligner, ProjectedRecordBatchStream};
 use crate::sst::parquet::metadata::MetadataLoader;
 use crate::sst::parquet::prefilter::{
     PrefilterContextBuilder, build_reader_filter_plan, execute_prefilter,
@@ -1856,24 +1849,11 @@ impl RowGroupReaderBuilder {
             return Ok(stream);
         }
 
-        let decoder_output_schema =
-            json2_fallback_output_schema(&self.output_schema, &self.projection.json2_fallback_plan);
-        let stream = if self.projection.json2_fallback_plan.is_empty() {
-            stream
-        } else {
-            Json2FallbackDecoder::new(
-                stream,
-                self.projection.projected_root_presence.clone(),
-                self.projection.json2_fallback_plan.clone(),
-                decoder_output_schema.clone(),
-            )?
-            .boxed()
-        };
-
         Ok(NestedSchemaAligner::new(
             stream,
             self.projection.projected_root_presence.clone(),
-            decoder_output_schema,
+            self.output_schema.clone(),
+            self.projection.json2_fallback_plan.clone(),
         )?
         .boxed())
     }
