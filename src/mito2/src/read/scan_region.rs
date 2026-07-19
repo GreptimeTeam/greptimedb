@@ -1500,7 +1500,7 @@ fn narrow_read_columns_by_json_type_hint(
         let mut paths = Vec::new();
         let mut current = vec![column_name.clone()];
         collect_json_nested_paths(json_type, &mut current, &mut paths);
-        merge_nested_paths(&mut read_column.nested_paths, paths);
+        merge_nested_paths(&mut read_column.nested_paths, paths)
     }
 }
 

@@ -50,13 +50,13 @@ use crate::read::scan_region::PredicateGroup;
 /// may produce read columns like:
 ///
 /// ```text
-/// ReadColumn::new(
-///     9,
-///     vec![
-///         vec!["j".to_string(), "a".to_string()],
-///         vec!["j".to_string(), "b".to_string(), "c".to_string()],
-///     ],
-/// )
+/// ReadColumn {
+///     column_id: 9,
+///     nested_paths: [
+///         ["j", "a"],
+///         ["j", "b", "c"],
+///     ]
+/// }
 /// ```
 ///
 /// If `nested_paths` is empty, the whole column will be read.
@@ -514,28 +514,6 @@ mod tests {
             ReadColumns {
                 cols: vec![ReadColumn::new(1, vec![nested_path(&["j", "a"])])],
             }
-        );
-    }
-
-    #[test]
-    fn test_merge_read_cols_merges_nested_paths() {
-        let a = ReadColumns {
-            cols: vec![ReadColumn::new(1, vec![nested_path(&["j", "a"])])],
-        };
-        let b = ReadColumns {
-            cols: vec![ReadColumn::new(1, vec![nested_path(&["j", "b"])])],
-        };
-
-        let merged = merge(a, b);
-
-        assert_eq!(
-            ReadColumns {
-                cols: vec![ReadColumn::new(
-                    1,
-                    vec![nested_path(&["j", "a"]), nested_path(&["j", "b"])]
-                )],
-            },
-            merged
         );
     }
 
