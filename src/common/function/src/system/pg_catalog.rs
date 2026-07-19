@@ -389,6 +389,10 @@ impl PGCatalogFunction {
         registry.register(pg_catalog::create_pg_get_partition_ancestors_udf());
         registry.register(pg_catalog::quote_ident_udf::create_quote_ident_udf());
         registry.register(pg_catalog::quote_ident_udf::create_parse_ident_udf());
+        // Postgres array bounds. DataFusion ships `array_length` but not
+        // `array_upper` / `array_lower`; psql/dbeaver/grafana clients use them.
+        registry.register(pg_catalog::array_bounds_udf::create_array_upper_udf());
+        registry.register(pg_catalog::array_bounds_udf::create_array_lower_udf());
         registry.register_scalar(ObjDescriptionFunction::new());
         registry.register_scalar(ColDescriptionFunction::new());
         registry.register_scalar(ShobjDescriptionFunction::new());
