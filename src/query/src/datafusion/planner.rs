@@ -19,6 +19,7 @@ use std::sync::Arc;
 use arrow_schema::DataType;
 use catalog::table_source::DfTableSourceProvider;
 use common_function::function::FunctionContext;
+use datafusion::catalog::TableFunctionArgs;
 use datafusion::common::TableReference;
 use datafusion::datasource::cte_worktable::CteWorkTable;
 use datafusion::datasource::file_format::{FileFormatFactory, format_as_file_type};
@@ -243,22 +244,40 @@ impl ContextProvider for DfContextProviderAdapter {
         name: &str,
         args: Vec<datafusion_expr::Expr>,
     ) -> DfResult<Arc<dyn TableSource>> {
-        if let Some(tbl_func) = self.engine_state.table_function(name) {
-            let provider = tbl_func.create_table_provider(&args)?;
-            Ok(provider_as_source(provider))
+        // Constant-fold the args before resolving the table function. DataFusion's
+        // SQL planner does not fold table-function arguments (constant folding
+        // happens later, in the analyzer), but table functions such as
+        // `generate_series`/`range` are resolved during planning and require
+        // literal bounds. Folding here lets immutable-UDF bounds like
+        // `array_upper(ARRAY[...], 1)` reach them as concrete literals.
+        // Non-constant args are returned unchanged by the simplifier.
+        let simplify_info = datafusion_expr::simplify::SimplifyContext::builder()
+            .with_config_options(self.session_state.config_options().clone())
+            .build();
+        let simplifier =
+            datafusion_optimizer::simplify_expressions::ExprSimplifier::new(simplify_info);
+        let args: Vec<datafusion_expr::Expr> = args
+            .into_iter()
+            .map(|a| match simplifier.simplify(a.clone()) {
+                Ok(simplified) => simplified,
+                Err(_) => a,
+            })
+            .collect();
+        let table_args = TableFunctionArgs::new(&args, &self.session_state);
+        let tbl_func = if let Some(tbl_func) = self.engine_state.table_function(name) {
+            tbl_func
         } else {
-            let tbl_func = self
-                .session_state
+            self.session_state
                 .table_functions()
                 .get(name)
                 .cloned()
                 .ok_or_else(|| {
                     DataFusionError::Plan(format!("table function '{name}' not found"))
-                })?;
-            let provider = tbl_func.create_table_provider(&args)?;
+                })?
+        };
+        let provider = tbl_func.create_table_provider_with_args(table_args)?;
 
-            Ok(provider_as_source(provider))
-        }
+        Ok(provider_as_source(provider))
     }
 
     fn create_cte_work_table(
@@ -275,6 +294,17 @@ impl ContextProvider for DfContextProviderAdapter {
     }
 
     fn get_type_planner(&self) -> Option<Arc<dyn TypePlanner>> {
-        None
+        // Teach the SQL planner to accept Postgres oid-alias type names
+        // (`regclass`, `regproc`, `regtype`, `regnamespace`, `oid`, ...) and
+        // `pg_catalog.`-qualified builtins. DataFusion rejects these as
+        // "Unsupported SQL type" otherwise. The planner maps each to its Arrow
+        // type so reverse / column-operand casts like `prorettype::regtype::text`
+        // parse. Forward name->oid casts (`'x'::regclass`) are resolved earlier,
+        // at SQL-parse time, by the `PostgresCompatibilityParser`'s built-in
+        // `RewriteRegCastToSubquery` rule.
+        // Stateless, so a fresh instance per query is cheap.
+        Some(Arc::new(
+            datafusion_pg_catalog::pg_catalog::oid_type_planner::PgOidTypePlanner,
+        ))
     }
 }

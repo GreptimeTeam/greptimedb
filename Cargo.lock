@@ -4548,9 +4548,9 @@ dependencies = [
 
 [[package]]
 name = "datafusion-pg-catalog"
-version = "0.17.3"
+version = "0.18.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f6b82fb8bd291b718d4226eaba85f78c73f0abdedb256a5dc91d9d9e6b0e0dab"
+checksum = "d2896323a1a10b6ca6c69f6ddfab3e6d9a400ded1a6134d8d1e74bd6178beaa3"
 dependencies = [
  "arrow-pg",
  "async-trait",
