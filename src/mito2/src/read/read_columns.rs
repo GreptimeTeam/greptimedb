@@ -109,32 +109,6 @@ pub struct ReadColumn {
     /// Nested field paths under this column.
     /// Empty means reading the whole column.
     pub nested_paths: Vec<NestedPath>,
-    pub nested_path_read_strategy: NestedReadStrategy,
-}
-
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum NestedReadStrategy {
-    /// Read parquet leaves whose paths start with the requested nested paths.
-    ///
-    /// For example, requesting `j.a` may read `j.a.b` and `j.a.c` from parquet.
-    /// If no leaf matches the requested prefix, the path stays missing.
-    #[default]
-    Prefix,
-    /// If a requested path is missing, read the nearest variant parent.
-    ///
-    /// Useful for JSON schema evolution, e.g. read `j.a` when `j.a.b` is
-    /// requested but only `j.a` exists as a variant value.
-    FallbackToNearestVariantParent,
-}
-
-impl NestedReadStrategy {
-    pub fn merge(self, other: Self) -> Self {
-        match (self, other) {
-            (Self::FallbackToNearestVariantParent, _)
-            | (_, Self::FallbackToNearestVariantParent) => Self::FallbackToNearestVariantParent,
-            (Self::Prefix, Self::Prefix) => Self::Prefix,
-        }
-    }
 }
 
 impl ReadColumn {
@@ -142,20 +116,11 @@ impl ReadColumn {
         Self {
             column_id,
             nested_paths,
-            nested_path_read_strategy: NestedReadStrategy::Prefix,
         }
     }
 
     pub fn nested_paths(&self) -> &[NestedPath] {
         &self.nested_paths
-    }
-
-    pub fn with_nested_path_read_strategy(
-        mut self,
-        nested_path_read_strategy: NestedReadStrategy,
-    ) -> Self {
-        self.nested_path_read_strategy = nested_path_read_strategy;
-        self
     }
 
     pub fn estimated_size(&self) -> usize {
@@ -173,12 +138,10 @@ impl ReadColumn {
 }
 
 pub fn merge(a: ReadColumns, b: ReadColumns) -> ReadColumns {
-    let mut merged = BTreeMap::<ColumnId, (Vec<NestedPath>, NestedReadStrategy)>::new();
+    let mut merged = BTreeMap::<ColumnId, Vec<NestedPath>>::new();
 
     for col in a.cols.into_iter().chain(b.cols) {
-        if let Some((nested_paths, nested_path_read_strategy)) = merged.get_mut(&col.column_id) {
-            *nested_path_read_strategy =
-                nested_path_read_strategy.merge(col.nested_path_read_strategy);
+        if let Some(nested_paths) = merged.get_mut(&col.column_id) {
             if nested_paths.is_empty() || col.nested_paths.is_empty() {
                 *nested_paths = vec![];
             } else {
@@ -187,25 +150,16 @@ pub fn merge(a: ReadColumns, b: ReadColumns) -> ReadColumns {
             continue;
         }
 
-        merged.insert(
-            col.column_id,
-            (
-                normalize_nested_paths(col.nested_paths),
-                col.nested_path_read_strategy,
-            ),
-        );
+        merged.insert(col.column_id, normalize_nested_paths(col.nested_paths));
     }
 
     ReadColumns {
         cols: merged
             .into_iter()
-            .map(
-                |(column_id, (nested_paths, nested_path_read_strategy))| ReadColumn {
-                    column_id,
-                    nested_paths,
-                    nested_path_read_strategy,
-                },
-            )
+            .map(|(column_id, nested_paths)| ReadColumn {
+                column_id,
+                nested_paths,
+            })
             .collect(),
     }
 }
@@ -286,7 +240,6 @@ pub fn read_columns_from_projection(
         read_cols.push(ReadColumn {
             column_id: col_id,
             nested_paths,
-            nested_path_read_strategy: NestedReadStrategy::Prefix,
         });
     }
 
@@ -565,28 +518,22 @@ mod tests {
     }
 
     #[test]
-    fn test_merge_read_cols_keeps_fallback_strategy() {
+    fn test_merge_read_cols_merges_nested_paths() {
         let a = ReadColumns {
             cols: vec![ReadColumn::new(1, vec![nested_path(&["j", "a"])])],
         };
         let b = ReadColumns {
-            cols: vec![
-                ReadColumn::new(1, vec![nested_path(&["j", "b"])]).with_nested_path_read_strategy(
-                    NestedReadStrategy::FallbackToNearestVariantParent,
-                ),
-            ],
+            cols: vec![ReadColumn::new(1, vec![nested_path(&["j", "b"])])],
         };
 
         let merged = merge(a, b);
 
         assert_eq!(
             ReadColumns {
-                cols: vec![
-                    ReadColumn::new(1, vec![nested_path(&["j", "a"]), nested_path(&["j", "b"])])
-                        .with_nested_path_read_strategy(
-                            NestedReadStrategy::FallbackToNearestVariantParent
-                        ),
-                ],
+                cols: vec![ReadColumn::new(
+                    1,
+                    vec![nested_path(&["j", "a"]), nested_path(&["j", "b"])]
+                )],
             },
             merged
         );

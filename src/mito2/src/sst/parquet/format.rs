@@ -52,7 +52,7 @@ use store_api::storage::{ColumnId, SequenceNumber};
 use crate::error::{
     ConvertVectorSnafu, DecodeSnafu, InvalidRecordBatchSnafu, NewRecordBatchSnafu, Result,
 };
-use crate::read::read_columns::{NestedReadStrategy, ReadColumns};
+use crate::read::read_columns::ReadColumns;
 use crate::read::{Batch, BatchBuilder, BatchColumn};
 use crate::sst::file::{FileMeta, FileTimeRange};
 use crate::sst::parquet::read_columns::{ParquetReadColumn, ParquetReadColumns};
@@ -603,32 +603,20 @@ impl FormatProjection {
                 id_to_index
                     .get(&col.column_id)
                     .copied()
-                    .map(|index_of_sst| {
-                        (
-                            col.column_id,
-                            index_of_sst,
-                            col.nested_paths,
-                            col.nested_path_read_strategy,
-                        )
-                    })
+                    .map(|index_of_sst| (col.column_id, index_of_sst, col.nested_paths))
             })
             .collect();
         // Sorts columns by their indices in the SST. SST uses a bitmap for projection.
         // This ensures the schema of `projected_columns` is the same as the batch returned from the SST.
-        projected_columns.sort_unstable_by_key(|(_, index, _, _)| *index);
+        projected_columns.sort_unstable_by_key(|(_, index, _)| *index);
 
         let mut parquet_read_cols: Vec<ParquetReadColumn> =
             Vec::with_capacity(projected_columns.len() + FIXED_POS_COLUMN_NUM);
         // Creates a map from column id to the index of that column in the projected record batch.
         let mut column_id_to_projected_index = HashMap::with_capacity(projected_columns.len());
 
-        for (col_id, index_of_sst, nested_paths, nested_path_read_strategy) in projected_columns {
-            Self::merge_or_push_parquet_column(
-                &mut parquet_read_cols,
-                index_of_sst,
-                nested_paths,
-                nested_path_read_strategy,
-            );
+        for (col_id, index_of_sst, nested_paths) in projected_columns {
+            Self::merge_or_push_parquet_column(&mut parquet_read_cols, index_of_sst, nested_paths);
 
             column_id_to_projected_index
                 .entry(col_id)
@@ -650,20 +638,17 @@ impl FormatProjection {
         parquet_read_cols: &mut Vec<ParquetReadColumn>,
         index_of_sst: usize,
         nested_paths: Vec<Vec<String>>,
-        nested_path_read_strategy: NestedReadStrategy,
     ) {
         // `projected_columns` is sorted by parquet root index, so repeated reads
         // for the same root column are always adjacent.
         if let Some(last_col) = parquet_read_cols.last_mut()
             && last_col.root_index() == index_of_sst
         {
-            last_col.merge_nested_paths(nested_paths, nested_path_read_strategy);
+            last_col.merge_nested_paths(nested_paths);
             return;
         }
 
-        let parquet_col = ParquetReadColumn::new(index_of_sst)
-            .with_nested_paths(nested_paths)
-            .with_nested_path_read_strategy(nested_path_read_strategy);
+        let parquet_col = ParquetReadColumn::new(index_of_sst).with_nested_paths(nested_paths);
         parquet_read_cols.push(parquet_col);
     }
 

@@ -38,7 +38,7 @@ use store_api::storage::{ProjectionInput, RegionId, ScanRequest, TimeSeriesDistr
 
 use crate::config::MitoConfig;
 use crate::error::Error;
-use crate::read::read_columns::{NestedReadStrategy, ReadColumn, ReadColumns};
+use crate::read::read_columns::{ReadColumn, ReadColumns};
 use crate::read::scan_region::Scanner;
 use crate::test_util;
 use crate::test_util::{CreateRequestBuilder, TestEnv};
@@ -133,8 +133,7 @@ async fn test_json_type_hint_pushdown_scanner_returns_batches() -> WhateverResul
                         "a".to_string(),
                         "x".to_string()
                     ]]
-                )
-                .with_nested_path_read_strategy(NestedReadStrategy::FallbackToNearestVariantParent),
+                ),
             ]
         }
     );
