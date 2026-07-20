@@ -296,6 +296,9 @@ fn build_parquet_leaves_indices(
     }
 
     // Then fallback prefix misses to their nearest variant parent.
+    // TODO(fys): Gate fallback planning on the root being JSON2. A raw Binary
+    // leaf is a JSONB variant only under a JSON2 root; plain struct Binary
+    // children should not enter this fallback path.
     for (output_root_index, col) in projection.cols.iter().enumerate() {
         for (path_idx, nested_path) in col.nested_paths.iter().enumerate() {
             if prefix_matched[&col.root_index][path_idx] {
