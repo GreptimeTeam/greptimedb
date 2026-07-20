@@ -19,7 +19,6 @@ use datafusion::arrow::array::{Array, ArrayRef, AsArray, PrimitiveArray};
 use datafusion::arrow::datatypes::DataType as ArrowDataType;
 use datafusion::logical_expr::{ColumnarValue, Volatility};
 use datafusion_common::{DataFusionError, ScalarValue, utils};
-use datafusion_expr::type_coercion::aggregates::NUMERICS;
 use datafusion_expr::{ScalarFunctionArgs, Signature};
 
 use crate::function::Function;
@@ -33,7 +32,7 @@ impl Default for ClampFunction {
     fn default() -> Self {
         Self {
             // input, min, max
-            signature: Signature::uniform(3, NUMERICS.to_vec(), Volatility::Immutable),
+            signature: Signature::numeric(3, Volatility::Immutable),
         }
     }
 }
@@ -232,7 +231,7 @@ impl Default for ClampMinFunction {
     fn default() -> Self {
         Self {
             // input, min
-            signature: Signature::uniform(2, NUMERICS.to_vec(), Volatility::Immutable),
+            signature: Signature::numeric(2, Volatility::Immutable),
         }
     }
 }
@@ -286,7 +285,7 @@ impl Default for ClampMaxFunction {
     fn default() -> Self {
         Self {
             // input, max
-            signature: Signature::uniform(2, NUMERICS.to_vec(), Volatility::Immutable),
+            signature: Signature::numeric(2, Volatility::Immutable),
         }
     }
 }

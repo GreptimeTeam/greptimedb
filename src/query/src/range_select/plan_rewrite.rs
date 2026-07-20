@@ -152,8 +152,10 @@ fn evaluate_expr_to_millisecond(
         return Err(dispose_parse_error(Some(expr)));
     }
     let info = match scheduled_time {
-        Some(dt) => SimplifyContext::default().with_query_execution_start_time(Some(dt)),
-        None => SimplifyContext::default().with_current_time(),
+        Some(dt) => SimplifyContext::builder()
+            .with_query_execution_start_time(Some(dt))
+            .build(),
+        None => SimplifyContext::builder().with_current_time().build(),
     };
     let simplify_expr = ExprSimplifier::new(info).simplify(expr.clone())?;
     match simplify_expr {

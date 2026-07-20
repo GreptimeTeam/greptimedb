@@ -19,7 +19,7 @@ use std::{assert_matches, vec};
 use common_test_util::find_workspace_path;
 use datafusion::assert_batches_eq;
 use datafusion::datasource::physical_plan::{
-    CsvSource, FileScanConfig, FileSource, FileStream, JsonSource, ParquetSource,
+    CsvSource, FileScanConfig, FileSource, FileStreamBuilder, JsonSource, ParquetSource,
 };
 use datafusion::datasource::source::DataSourceExec;
 use datafusion::execution::context::TaskContext;
@@ -50,16 +50,15 @@ impl Test<'_> {
             .create_file_opener(store, &self.config, 0)
             .unwrap();
 
-        let result = FileStream::new(
-            &self.config,
-            0,
-            file_opener,
-            &ExecutionPlanMetricsSet::new(),
-        )
-        .unwrap()
-        .map(|b| b.unwrap())
-        .collect::<Vec<_>>()
-        .await;
+        let result = FileStreamBuilder::new(&self.config)
+            .with_partition(0)
+            .with_file_opener(file_opener)
+            .with_metrics(&ExecutionPlanMetricsSet::new())
+            .build()
+            .unwrap()
+            .map(|b| b.unwrap())
+            .collect::<Vec<_>>()
+            .await;
 
         assert_batches_eq!(self.expected, &result);
     }
