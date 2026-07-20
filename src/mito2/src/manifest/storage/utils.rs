@@ -19,6 +19,8 @@ use store_api::ManifestVersion;
 use crate::cache::manifest_cache::ManifestCache;
 use crate::error::{OpenDalSnafu, Result};
 
+const CHUNK_SIZE: usize = 64 * 1024 * 1024; // 64MB
+
 /// Gets a manifest file from cache.
 /// Returns the file data if found in cache, None otherwise.
 pub(crate) async fn get_from_cache(cache: Option<&ManifestCache>, key: &str) -> Option<Vec<u8>> {
@@ -57,7 +59,11 @@ pub(crate) async fn write_and_put_cache(
     };
 
     // Write to object store
-    object_store.write(path, data).await.context(OpenDalSnafu)?;
+    object_store
+        .write_with(path, data)
+        .chunk(CHUNK_SIZE) // 64MB
+        .await
+        .context(OpenDalSnafu)?;
 
     // Put to cache if we cloned the data
     if let Some(data) = cache_data {
