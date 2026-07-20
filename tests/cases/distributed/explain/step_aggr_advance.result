@@ -409,7 +409,7 @@ tql analyze sum(aggr_optimize_not);
 |_|_|_ProjectionExec: expr=[greptime_timestamp@4 as greptime_timestamp, greptime_value@5 as greptime_value] REDACTED
 |_|_|_PromInstantManipulateExec: range=[0..0], lookback=[300000], interval=[300000], time index=[greptime_timestamp] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["a", "b", "c", "d"] REDACTED
-|_|_|_SeriesScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0}, "distribution":"PerSeries" REDACTED
+|_|_|_SeriesScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0}, "selector":"LastRow", "distribution":"PerSeries" REDACTED
 |_|_|_|
 | 1_| 1_|_AggregateExec: mode=FinalPartitioned, gby=[greptime_timestamp@0 as greptime_timestamp], aggr=[__sum_state(aggr_optimize_not.greptime_value)] REDACTED
 |_|_|_RepartitionExec: partitioning=REDACTED
@@ -417,7 +417,7 @@ tql analyze sum(aggr_optimize_not);
 |_|_|_ProjectionExec: expr=[greptime_timestamp@4 as greptime_timestamp, greptime_value@5 as greptime_value] REDACTED
 |_|_|_PromInstantManipulateExec: range=[0..0], lookback=[300000], interval=[300000], time index=[greptime_timestamp] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["a", "b", "c", "d"] REDACTED
-|_|_|_SeriesScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0}, "distribution":"PerSeries" REDACTED
+|_|_|_SeriesScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0}, "selector":"LastRow", "distribution":"PerSeries" REDACTED
 |_|_|_|
 |_|_| Total rows: 0_|
 +-+-+-+
