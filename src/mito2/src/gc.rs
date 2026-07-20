@@ -309,6 +309,7 @@ impl LocalGcWorker {
         let mut deleted_files = HashMap::new();
         let mut deleted_indexes = HashMap::new();
         let mut processed_regions = HashSet::new();
+        let mut need_retry_regions = HashSet::new();
         let tmp_ref_files = self.read_tmp_ref_files().await?;
         for (region_id, region) in &self.regions {
             let per_region_time = std::time::Instant::now();
@@ -327,23 +328,33 @@ impl LocalGcWorker {
                 .get(region_id)
                 .cloned()
                 .unwrap_or_else(HashSet::new);
-            let files = self
+            let outcome = self
                 .do_region_gc(*region_id, region.clone(), &tmp_ref_files)
                 .await?;
-            let index_files = files
+            let RegionGcOutcome {
+                removed_files,
+                extension_cleanup_failed,
+            } = outcome;
+            let index_files = removed_files
                 .iter()
                 .filter_map(|f| f.index_version().map(|v| (f.file_id(), v)))
                 .collect_vec();
-            let data_files = files
+            let data_files = removed_files
                 .into_iter()
                 .filter_map(|f| match f {
                     RemovedFile::File(file_id, _) => Some(file_id),
                     RemovedFile::Index(_, _) => None,
                 })
                 .collect();
-            deleted_files.insert(*region_id, data_files);
-            deleted_indexes.insert(*region_id, index_files);
-            processed_regions.insert(*region_id);
+            // Don't acknowledge the region as processed until extension cleanup
+            // succeeds; retry it next pass instead.
+            if extension_cleanup_failed {
+                need_retry_regions.insert(*region_id);
+            } else {
+                deleted_files.insert(*region_id, data_files);
+                deleted_indexes.insert(*region_id, index_files);
+                processed_regions.insert(*region_id);
+            }
             debug!(
                 "GC for region {} took {} secs.",
                 region_id,
@@ -357,11 +368,24 @@ impl LocalGcWorker {
         let report = GcReport {
             deleted_files,
             deleted_indexes,
-            need_retry_regions: HashSet::new(),
+            need_retry_regions,
             processed_regions,
         };
         Ok(report)
     }
+}
+
+/// Per-region outcome of [`LocalGcWorker::do_region_gc`].
+///
+/// `extension_cleanup_failed` records whether a registered extension's
+/// [`RegionHook::on_region_gc`] could not finish; the caller must then keep the
+/// region un-acknowledged (retry set) so the next GC pass replays the callback.
+pub(crate) struct RegionGcOutcome {
+    /// Files physically deleted this pass.
+    pub removed_files: Vec<RemovedFile>,
+    /// `true` if a registered extension's `on_region_gc` returned `Err`; the
+    /// caller retries the region next pass.
+    pub extension_cleanup_failed: bool,
 }
 
 impl LocalGcWorker {
@@ -390,7 +414,7 @@ impl LocalGcWorker {
         region_id: RegionId,
         region: Option<MitoRegionRef>,
         tmp_ref_files: &HashSet<FileRef>,
-    ) -> Result<Vec<RemovedFile>> {
+    ) -> Result<RegionGcOutcome> {
         let mode = if self.full_file_listing {
             "full_listing"
         } else {
@@ -434,7 +458,10 @@ impl LocalGcWorker {
                 GC_ERRORS_TOTAL
                     .with_label_values(&["manifest_mismatch"])
                     .inc();
-                return Ok(vec![]);
+                return Ok(RegionGcOutcome {
+                    removed_files: vec![],
+                    extension_cleanup_failed: false,
+                });
             }
             Some(manifest)
         } else {
@@ -537,7 +564,53 @@ impl LocalGcWorker {
             "Successfully deleted {} unused files for region {}",
             unused_file_cnt, region_id
         );
-        if let Some(region) = &region {
+
+        // Notify extensions so they can clean up sidecar files. Fire when there
+        // are removed files, or on a full-listing pass (lets extensions reconcile
+        // orphans even when mito deleted nothing). `terminal` authorizes whole-
+        // sidecar-dir removal only for a dropped region with no remaining refs.
+        let terminal = is_region_dropped
+            && !self
+                .file_ref_manifest
+                .cross_region_refs
+                .contains_key(&region_id)
+            && !self.file_ref_manifest.file_refs.contains_key(&region_id);
+
+        let extension_cleanup_failed = if let Some(hook) = &self.hook
+            && (!deletable_files.is_empty() || self.full_file_listing)
+        {
+            let region_metadata = region.as_ref().map(|r| r.metadata());
+            let result = hook
+                .on_region_gc(
+                    region_id,
+                    region_metadata.as_ref(),
+                    &self.access_layer,
+                    &RegionGcInfo {
+                        removed_files: &deletable_files,
+                        is_region_dropped,
+                        full_file_listing: self.full_file_listing,
+                        terminal,
+                    },
+                )
+                .await;
+            if let Err(err) = result {
+                warn!(
+                    err;
+                    "Region hook on_region_gc failed for region {}, will retry on the next GC pass",
+                    region_id
+                );
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
+        // Defer clearing the manifest tracking until the extension succeeds, so
+        // a failed live-region cleanup is replayed next pass. (Dropped regions
+        // have no manifest.)
+        if !extension_cleanup_failed && let Some(region) = &region {
             let _update_timer = GC_DURATION_SECONDS
                 .with_label_values(&["update_manifest"])
                 .start_timer();
@@ -545,30 +618,10 @@ impl LocalGcWorker {
                 .await?;
         }
 
-        // Notify extensions (e.g. an Iceberg manifest tree under a separate
-        // warehouse root) that GC reclaimed these files, so they can clean up
-        // their own residual sidecar files. Skip the invocation when there is
-        // nothing to report — a live region's periodic pass that deleted no
-        // files — to avoid unnecessary hook overhead/I/O. A dropped region
-        // always notifies (the reclamation path extensions act on).
-        if let Some(hook) = &self.hook
-            && (!deletable_files.is_empty() || is_region_dropped)
-        {
-            let region_metadata = region.as_ref().map(|r| r.metadata());
-            hook.on_region_gc(
-                region_id,
-                region_metadata.as_ref(),
-                &self.access_layer,
-                &RegionGcInfo {
-                    removed_files: &deletable_files,
-                    is_region_dropped,
-                    full_file_listing: self.full_file_listing,
-                },
-            )
-            .await;
-        }
-
-        Ok(deletable_files)
+        Ok(RegionGcOutcome {
+            removed_files: deletable_files,
+            extension_cleanup_failed,
+        })
     }
 
     #[common_telemetry::tracing::instrument(
