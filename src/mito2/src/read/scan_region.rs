@@ -818,6 +818,8 @@ pub struct ScanInput {
     pub(crate) memtables: Vec<MemRangeBuilder>,
     /// Handles to SST files to scan.
     pub(crate) files: Vec<FileHandle>,
+    /// Scan-wide hint for rows in an execution batch.
+    batch_size: usize,
     /// Cache.
     pub(crate) cache_strategy: CacheStrategy,
     /// Ignores file not found error.
@@ -871,6 +873,7 @@ impl ScanInput {
             region_partition_expr: None,
             memtables: Vec::new(),
             files: Vec::new(),
+            batch_size: crate::sst::parquet::DEFAULT_READ_BATCH_SIZE,
             cache_strategy: CacheStrategy::Disabled,
             ignore_file_not_found: false,
             max_concurrent_scan_files: DEFAULT_MAX_CONCURRENT_SCAN_FILES,
@@ -922,6 +925,18 @@ impl ScanInput {
     #[must_use]
     pub(crate) fn with_files(mut self, files: Vec<FileHandle>) -> Self {
         self.files = files;
+        self
+    }
+
+    /// Returns the scan-wide hint for rows in an execution batch.
+    pub(crate) fn batch_size(&self) -> usize {
+        self.batch_size
+    }
+
+    /// Sets the scan-wide hint for rows in an execution batch.
+    #[must_use]
+    pub(crate) fn with_batch_size(mut self, batch_size: usize) -> Self {
+        self.batch_size = batch_size;
         self
     }
 
@@ -1207,6 +1222,7 @@ impl ScanInput {
             .inverted_index_appliers(self.inverted_index_appliers.clone())
             .bloom_filter_index_appliers(self.bloom_filter_index_appliers.clone())
             .fulltext_index_appliers(self.fulltext_index_appliers.clone());
+        let reader = reader.batch_size(self.batch_size);
         let reader = if !self.compaction && may_build_selective_row_selection {
             reader.deferred_optional_page_index()
         } else {
@@ -2119,6 +2135,31 @@ mod tests {
             },
             Arc::new(crate::sst::file_purger::NoopFilePurger),
         )
+    }
+
+    #[tokio::test]
+    async fn test_scan_input_uses_explicit_batch_size() {
+        let metadata = Arc::new(metadata_with_primary_key(vec![0, 1], false));
+        let mapper = FlatProjectionMapper::new(&metadata, [0, 2, 3]).unwrap();
+        let env = SchedulerEnv::new().await;
+        let input = ScanInput::new(env.access_layer.clone(), mapper);
+        assert_eq!(
+            crate::sst::parquet::DEFAULT_READ_BATCH_SIZE,
+            input.batch_size()
+        );
+
+        let mapper = FlatProjectionMapper::new(&metadata, [0, 2, 3]).unwrap();
+        let input = ScanInput::new(env.access_layer.clone(), mapper)
+            .with_compaction(true)
+            .with_batch_size(256);
+        assert_eq!(256, input.batch_size());
+
+        let mapper = FlatProjectionMapper::new(&metadata, [0, 2, 3]).unwrap();
+        let input = ScanInput::new(env.access_layer.clone(), mapper)
+            .with_batch_size(256)
+            .with_compaction(true)
+            .with_compaction(false);
+        assert_eq!(256, input.batch_size());
     }
 
     #[test]

@@ -187,6 +187,8 @@ pub struct ParquetReaderBuilder {
     decode_primary_key_values: bool,
     page_index_policy: PageIndexPolicy,
     defer_optional_page_index: bool,
+    /// Scan-wide hint for rows in a decoded batch.
+    batch_size: usize,
 }
 
 impl ParquetReaderBuilder {
@@ -218,7 +220,15 @@ impl ParquetReaderBuilder {
             decode_primary_key_values: false,
             page_index_policy: Default::default(),
             defer_optional_page_index: false,
+            batch_size: DEFAULT_READ_BATCH_SIZE,
         }
+    }
+
+    /// Sets the scan-wide hint for rows in a decoded batch.
+    #[must_use]
+    pub(crate) fn batch_size(mut self, batch_size: usize) -> Self {
+        self.batch_size = batch_size.clamp(1, DEFAULT_READ_BATCH_SIZE);
+        self
     }
 
     /// Attaches the predicate to the builder.
@@ -561,6 +571,7 @@ impl ParquetReaderBuilder {
             has_nested_projection,
             cache_strategy: self.cache_strategy.clone(),
             prefilter_builder: filter_plan.prefilter_builder,
+            batch_size: self.batch_size,
         };
 
         let partition_filter = self.build_partition_filter(&read_format, &prune_schema)?;
@@ -1770,6 +1781,8 @@ pub(crate) struct RowGroupReaderBuilder {
     cache_strategy: CacheStrategy,
     /// Pre-built prefilter state. `None` if prefiltering is not applicable.
     prefilter_builder: Option<PrefilterContextBuilder>,
+    /// Hint for rows in a decoded batch.
+    batch_size: usize,
 }
 
 /// Context passed to [RowGroupReaderBuilder::build()] carrying all information
@@ -1908,7 +1921,7 @@ impl RowGroupReaderBuilder {
             projection,
             range_fetcher,
             self.file_path.clone(),
-            DEFAULT_READ_BATCH_SIZE,
+            self.batch_size,
         )
     }
 }

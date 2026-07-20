@@ -29,7 +29,6 @@ use std::time::Instant;
 
 use api::v1::region::compact_request;
 use api::v1::region::compact_request::Options;
-use arrow_schema::Schema;
 use common_base::Plugins;
 use common_base::cancellation::CancellationHandle;
 use common_memory_manager::OnExhaustedPolicy;
@@ -43,7 +42,7 @@ use datafusion_expr::Expr;
 use datatypes::extension::json::is_structured_json_field;
 use datatypes::types::json_type::JsonNativeType;
 use parquet::arrow::parquet_to_arrow_schema;
-use parquet::file::metadata::PageIndexPolicy;
+use parquet::file::metadata::{PageIndexPolicy, ParquetMetaData};
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::RegionMetadataRef;
@@ -1050,7 +1049,7 @@ impl CompactionSstReaderBuilder<'_> {
     /// Build a [FlatSource] that yields Arrow `RecordBatch`s from reading all the input SST files,
     /// for compaction. The schema of the [FlatSource] is unified.
     async fn build_flat_sst_reader(self) -> Result<FlatSource> {
-        let scan_input = self.build_scan_input().await?.with_compaction(true);
+        let scan_input = self.build_scan_input().await?;
 
         let schema = scan_input.mapper.output_schema();
         let schema = schema.arrow_schema();
@@ -1063,6 +1062,20 @@ impl CompactionSstReaderBuilder<'_> {
 
     async fn build_scan_input(self) -> Result<ScanInput> {
         let schema = self.metadata.schema.arrow_schema();
+        let parquet_metadata = self.collect_parquet_metadata().await?;
+        let batch_size = crate::batch_size::estimate_batch_size(
+            parquet_metadata
+                .iter()
+                .flat_map(|metadata| metadata.row_groups())
+                .map(|row_group| {
+                    let uncompressed_bytes = row_group
+                        .columns()
+                        .iter()
+                        .map(|column| column.uncompressed_size() as u64)
+                        .sum();
+                    (row_group.num_rows() as u64, uncompressed_bytes)
+                }),
+        );
         let json_type_hint = if schema.fields().iter().any(is_structured_json_field) {
             let mut json_type_hint = schema
                 .fields()
@@ -1071,8 +1084,15 @@ impl CompactionSstReaderBuilder<'_> {
                 .map(|field| (field.name().clone(), JsonNativeType::Null))
                 .collect::<HashMap<_, _>>();
 
-            let schemas = self.collect_arrow_schemas_from_parquet().await?;
-            for schema in schemas {
+            for metadata in &parquet_metadata {
+                let file_metadata = metadata.file_metadata();
+                let schema = parquet_to_arrow_schema(
+                    file_metadata.schema_descr(),
+                    file_metadata.key_value_metadata(),
+                )
+                .context(ParquetToArrowSchemaSnafu {
+                    file: "compaction input",
+                })?;
                 for field in schema.fields() {
                     let Some(merged) = json_type_hint.get_mut(field.name()) else {
                         continue;
@@ -1102,6 +1122,8 @@ impl CompactionSstReaderBuilder<'_> {
 
         let mut scan_input = ScanInput::new(self.sst_layer, mapper)
             .with_files(self.inputs.to_vec())
+            .with_compaction(true)
+            .with_batch_size(batch_size)
             .with_append_mode(self.append_mode)
             // We use special cache strategy for compaction.
             .with_cache(CacheStrategy::Compaction(self.cache))
@@ -1120,8 +1142,8 @@ impl CompactionSstReaderBuilder<'_> {
         Ok(scan_input)
     }
 
-    async fn collect_arrow_schemas_from_parquet(&self) -> Result<Vec<Schema>> {
-        let mut schemas = Vec::with_capacity(self.inputs.len());
+    async fn collect_parquet_metadata(&self) -> Result<Vec<Arc<ParquetMetaData>>> {
+        let mut metadata = Vec::with_capacity(self.inputs.len());
 
         for file_handle in self.inputs {
             let file_path =
@@ -1144,17 +1166,9 @@ impl CompactionSstReaderBuilder<'_> {
                 Err(e) if e.is_object_not_found() => continue,
                 Err(e) => return Err(e),
             };
-            let file_metadata = parquet_metadata.file_metadata();
-
-            let schema = parquet_to_arrow_schema(
-                file_metadata.schema_descr(),
-                file_metadata.key_value_metadata(),
-            )
-            .context(ParquetToArrowSchemaSnafu { file: file_path })?;
-
-            schemas.push(schema);
+            metadata.push(parquet_metadata);
         }
-        Ok(schemas)
+        Ok(metadata)
     }
 }
 
