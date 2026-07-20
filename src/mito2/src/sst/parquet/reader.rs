@@ -2425,7 +2425,6 @@ impl FlatRowGroupReader {
 
 #[cfg(test)]
 mod tests {
-    use std::any::Any;
     use std::fmt::{Debug, Formatter};
     use std::sync::{Arc, LazyLock};
 
@@ -2632,10 +2631,6 @@ mod tests {
         }
 
         impl ScalarUDFImpl for PanicDebugUdf {
-            fn as_any(&self) -> &dyn Any {
-                self
-            }
-
             fn name(&self) -> &str {
                 "panic_debug_udf"
             }
@@ -2734,10 +2729,6 @@ mod tests {
         }
 
         impl ScalarUDFImpl for TestVolatilityUdf {
-            fn as_any(&self) -> &dyn Any {
-                self
-            }
-
             fn name(&self) -> &str {
                 &self.name
             }
