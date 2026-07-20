@@ -29,7 +29,7 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("{}", msg))]
+    #[snafu(display("{}, code: {}, tonic code: {}", msg, code, tonic_code))]
     MetaServer {
         code: StatusCode,
         msg: String,
