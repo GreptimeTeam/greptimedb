@@ -327,9 +327,9 @@ enable = false
 gc_cooldown_period = "5m"
 
 [gc.experimental_soft_drop]
-## Reserved experimental option. Currently ignored.
+## Whether soft drop is enabled. Requires `gc.enable = true`.
 enable = false
-## Reserved retention duration. Currently ignored.
+## How long soft-dropped tables are retained before automatic purge.
 retention = "7d"
 
 ## The logging options.

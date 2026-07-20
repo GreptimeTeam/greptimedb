@@ -62,6 +62,10 @@ const TOMBSTONE_PREFIX: &str = "__tombstone/";
 const MOVE_VALUE_TXN_OPS_PER_KEY: usize = 4;
 const RESTORE_VALUE_TXN_OPS_PER_KEY: usize = 6;
 
+pub(crate) fn to_tombstone_key(key: &[u8]) -> Vec<u8> {
+    [TOMBSTONE_PREFIX.as_bytes(), key].concat()
+}
+
 impl TombstoneManager {
     /// Returns [TombstoneManager].
     pub fn new(kv_backend: KvBackendRef) -> Self {
@@ -101,7 +105,11 @@ impl TombstoneManager {
     /// Gets a single tombstoned value by its original key.
     pub async fn get(&self, key: &[u8]) -> Result<Option<KeyValue>> {
         let tombstone_key = self.to_tombstone(key);
-        self.kv_backend.get(&tombstone_key).await
+        let response = self
+            .kv_backend
+            .range(RangeRequest::new().with_key(tombstone_key))
+            .await?;
+        Ok(response.kvs.into_iter().next())
     }
 
     /// Gets tombstoned values by their original keys.
@@ -554,6 +562,7 @@ mod tests {
 
     use std::any::Any;
     use std::collections::HashMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
     use crate::error::{Error, Result};
@@ -563,6 +572,7 @@ mod tests {
     use crate::kv_backend::memory::MemoryKvBackend;
     use crate::kv_backend::txn::{Txn, TxnRequest, TxnResponse};
     use crate::kv_backend::{KvBackend, TxnService};
+    use crate::rpc::KeyValue;
     use crate::rpc::store::{
         BatchDeleteRequest, BatchDeleteResponse, BatchGetRequest, BatchGetResponse,
         BatchPutRequest, BatchPutResponse, DeleteRangeRequest, DeleteRangeResponse, PutRequest,
@@ -612,6 +622,64 @@ mod tests {
 
         async fn range(&self, req: RangeRequest) -> Result<RangeResponse> {
             self.inner.range(req).await
+        }
+
+        async fn put(&self, req: PutRequest) -> Result<PutResponse> {
+            self.inner.put(req).await
+        }
+
+        async fn batch_put(&self, req: BatchPutRequest) -> Result<BatchPutResponse> {
+            self.inner.batch_put(req).await
+        }
+
+        async fn batch_get(&self, req: BatchGetRequest) -> Result<BatchGetResponse> {
+            self.inner.batch_get(req).await
+        }
+
+        async fn delete_range(&self, req: DeleteRangeRequest) -> Result<DeleteRangeResponse> {
+            self.inner.delete_range(req).await
+        }
+
+        async fn batch_delete(&self, req: BatchDeleteRequest) -> Result<BatchDeleteResponse> {
+            self.inner.batch_delete(req).await
+        }
+    }
+
+    struct StalePointGetKvBackend {
+        inner: Arc<MemoryKvBackend<Error>>,
+        get_calls: AtomicUsize,
+        range_calls: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl TxnService for StalePointGetKvBackend {
+        type Error = Error;
+
+        async fn txn(&self, txn: Txn) -> Result<TxnResponse> {
+            self.inner.txn(txn).await
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl KvBackend for StalePointGetKvBackend {
+        fn name(&self) -> &str {
+            "stale_point_get"
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+
+        async fn range(&self, req: RangeRequest) -> Result<RangeResponse> {
+            assert_eq!(b"__tombstone/foo", req.key.as_slice());
+            assert!(req.range_end.is_empty());
+            self.range_calls.fetch_add(1, Ordering::SeqCst);
+            self.inner.range(req).await
+        }
+
+        async fn get(&self, key: &[u8]) -> Result<Option<KeyValue>> {
+            self.get_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(Some((key.to_vec(), b"stale".to_vec()).into()))
         }
 
         async fn put(&self, req: PutRequest) -> Result<PutResponse> {
@@ -697,6 +765,31 @@ mod tests {
             b"hi"
         );
         assert_eq!(kv_backend.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_get_tombstone_bypasses_stale_point_get() {
+        let inner = Arc::new(MemoryKvBackend::default());
+        let backend = Arc::new(StalePointGetKvBackend {
+            inner: inner.clone(),
+            get_calls: AtomicUsize::new(0),
+            range_calls: AtomicUsize::new(0),
+        });
+        let manager = TombstoneManager::new(backend.clone());
+        inner
+            .put(
+                PutRequest::new()
+                    .with_key(manager.to_tombstone(b"foo"))
+                    .with_value(b"authoritative"),
+            )
+            .await
+            .unwrap();
+
+        let value = manager.get(b"foo").await.unwrap().unwrap();
+
+        assert_eq!(b"authoritative", value.value.as_slice());
+        assert_eq!(0, backend.get_calls.load(Ordering::SeqCst));
+        assert_eq!(1, backend.range_calls.load(Ordering::SeqCst));
     }
 
     #[tokio::test]

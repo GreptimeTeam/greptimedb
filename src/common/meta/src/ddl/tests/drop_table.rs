@@ -15,8 +15,10 @@
 use std::assert_matches;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use api::region::RegionResponse;
 use api::v1::region::{RegionRequest, region_request};
 use async_trait::async_trait;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, FILE_ENGINE};
@@ -43,7 +45,7 @@ use crate::ddl::test_util::{
 };
 use crate::ddl::undrop_table::UndropTableProcedure;
 use crate::ddl::{DdlContext, DetectingRegion, RegionFailureDetectorController, TableMetadata};
-use crate::error::Error;
+use crate::error::{self, Error};
 use crate::key::MetadataKey;
 use crate::key::table_name::TableNameKey;
 use crate::key::table_route::TableRouteValue;
@@ -711,6 +713,110 @@ async fn test_soft_drop_closes_regions_and_keeps_tombstone() {
 }
 
 #[tokio::test]
+async fn test_soft_drop_keeps_metadata_live_until_regions_close() {
+    let (tx, mut rx) = mpsc::channel(2);
+    let fail_close = AtomicBool::new(true);
+    let datanode_handler = DatanodeWatcher::new(tx).with_handler(move |_, _| {
+        if fail_close.swap(false, Ordering::SeqCst) {
+            return error::UnexpectedSnafu {
+                err_msg: "mock close error".to_string(),
+            }
+            .fail();
+        }
+
+        Ok(RegionResponse::new(0))
+    });
+    let node_manager = Arc::new(MockDatanodeManager::new(datanode_handler));
+    let mut ddl_context = new_ddl_context(node_manager);
+    ddl_context.soft_drop_enabled = true;
+    let table_id = 1024;
+    let table_name = "foo";
+    let task = test_create_table_task(table_name, table_id);
+    ddl_context
+        .table_metadata_manager
+        .create_table_metadata(
+            task.table_info.clone(),
+            TableRouteValue::physical(vec![RegionRoute {
+                region: Region::new_test(RegionId::new(table_id, 1)),
+                leader_peer: Some(Peer::new(1, "old-leader")),
+                follower_peers: vec![],
+                leader_state: None,
+                leader_down_since: None,
+                write_route_policy: None,
+            }]),
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+
+    let task = new_drop_table_task(table_name, table_id, false);
+    let mut procedure = DropTableProcedure::new(task, ddl_context.clone());
+    let ctx = new_test_procedure_context();
+    procedure.execute(&ctx).await.unwrap();
+    put_datanode_address(&ddl_context, 1, "new-leader").await;
+    let error = procedure.execute(&ctx).await.unwrap_err();
+    assert!(error.is_retry_later());
+
+    let (peer, request) = rx.try_recv().unwrap();
+    assert_eq!(peer.addr, "new-leader");
+    let Some(region_request::Body::Close(request)) = request.body else {
+        unreachable!();
+    };
+    assert!(request.flush_on_close);
+    assert!(rx.try_recv().is_err());
+    assert!(
+        ddl_context
+            .table_metadata_manager
+            .table_name_manager()
+            .get(TableNameKey::new(
+                DEFAULT_CATALOG_NAME,
+                DEFAULT_SCHEMA_NAME,
+                table_name,
+            ))
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        ddl_context
+            .table_metadata_manager
+            .get_dropped_table_by_id(table_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    put_datanode_address(&ddl_context, 1, "newer-leader").await;
+    execute_procedure_until_done(&mut procedure).await;
+
+    let (peer, request) = rx.try_recv().unwrap();
+    assert_eq!(peer.addr, "newer-leader");
+    assert_matches!(request.body, Some(region_request::Body::Close(_)));
+    assert!(rx.try_recv().is_err());
+    assert!(
+        ddl_context
+            .table_metadata_manager
+            .table_name_manager()
+            .get(TableNameKey::new(
+                DEFAULT_CATALOG_NAME,
+                DEFAULT_SCHEMA_NAME,
+                table_name,
+            ))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        ddl_context
+            .table_metadata_manager
+            .get_dropped_table_by_id(table_id)
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[tokio::test]
 async fn test_soft_drop_timestamp_is_stable_across_retry_and_recovery() {
     let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
     let kv_backend = Arc::new(MemoryKvBackend::new());
@@ -912,6 +1018,10 @@ async fn test_hard_drop_recreated_table_fails_when_soft_tombstone_exists() {
     );
     let err = procedure.on_prepare().await.unwrap_err();
 
+    assert_eq!(
+        "Cannot drop table 'greptime.public.foo': an older tombstone already uses the same full name",
+        err.to_string()
+    );
     assert_matches!(err, Error::TableNameTombstoneConflict { .. });
 }
 
@@ -1191,7 +1301,7 @@ async fn test_undrop_logical_table_skips_datanode_open() {
 }
 
 #[tokio::test]
-async fn test_soft_drop_metric_logical_table_fails() {
+async fn test_soft_drop_metric_logical_table_falls_back_to_hard_drop() {
     let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
     let mut ddl_context = new_ddl_context(node_manager);
     ddl_context.soft_drop_enabled = true;
@@ -1203,18 +1313,70 @@ async fn test_soft_drop_metric_logical_table_fails() {
         new_drop_table_task("foo", logical_table_id, false),
         ddl_context.clone(),
     );
-    let err = procedure.on_prepare().await.unwrap_err();
-    assert_eq!(err.status_code(), StatusCode::Unsupported);
-    let persisted_soft_drop = procedure.dump().unwrap();
+    procedure.on_prepare().await.unwrap();
+    assert!(!procedure.data.soft_drop_enabled);
+    let persisted_hard_drop = procedure.dump().unwrap();
     ddl_context.soft_drop_enabled = false;
-    let mut recovered =
-        DropTableProcedure::from_json(&persisted_soft_drop, ddl_context.clone()).unwrap();
-    let err = recovered.on_prepare().await.unwrap_err();
-    assert_eq!(err.status_code(), StatusCode::Unsupported);
+    let recovered =
+        DropTableProcedure::from_json(&persisted_hard_drop, ddl_context.clone()).unwrap();
+    assert!(!recovered.data.soft_drop_enabled);
 }
 
 #[tokio::test]
-async fn test_soft_drop_file_engine_table_fails() {
+async fn test_soft_drop_metric_physical_table_remains_enabled() {
+    let (tx, mut rx) = mpsc::channel(8);
+    let datanode_handler = DatanodeWatcher::new(tx);
+    let node_manager = Arc::new(MockDatanodeManager::new(datanode_handler));
+    let mut ddl_context = new_ddl_context(node_manager);
+    ddl_context.soft_drop_enabled = true;
+    ddl_context.soft_drop_retention = Some(Duration::from_millis(100));
+    let table_id = 1024;
+    let table_name = "phy";
+    let mut task = test_create_physical_table_task(table_name);
+    task.set_table_id(table_id);
+    ddl_context
+        .table_metadata_manager
+        .create_table_metadata(
+            task.table_info,
+            TableRouteValue::physical(vec![RegionRoute {
+                region: Region::new_test(RegionId::new(table_id, 1)),
+                leader_peer: Some(Peer::empty(1)),
+                follower_peers: vec![],
+                leader_state: None,
+                leader_down_since: None,
+                write_route_policy: None,
+            }]),
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+
+    let mut procedure = DropTableProcedure::new(
+        new_drop_table_task(table_name, table_id, false),
+        ddl_context.clone(),
+    );
+    execute_procedure_until_done(&mut procedure).await;
+
+    assert!(procedure.data.soft_drop_enabled);
+    assert!(procedure.data.dropped_at.is_some());
+    let (_, request) = rx.try_recv().unwrap();
+    let Some(region_request::Body::Close(request)) = request.body else {
+        unreachable!();
+    };
+    assert!(request.flush_on_close);
+    assert!(rx.try_recv().is_err());
+    assert!(
+        ddl_context
+            .table_metadata_manager
+            .get_dropped_table_by_id(table_id)
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn test_soft_drop_file_engine_table_falls_back_to_hard_drop() {
     let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
     let mut ddl_context = new_ddl_context(node_manager);
     ddl_context.soft_drop_enabled = true;
@@ -1236,14 +1398,44 @@ async fn test_soft_drop_file_engine_table_fails() {
         new_drop_table_task(table_name, table_id, false),
         ddl_context.clone(),
     );
-    let err = procedure.on_prepare().await.unwrap_err();
-    assert_eq!(err.status_code(), StatusCode::Unsupported);
-    let persisted_soft_drop = procedure.dump().unwrap();
+    procedure.on_prepare().await.unwrap();
+    assert!(!procedure.data.soft_drop_enabled);
+    let persisted_hard_drop = procedure.dump().unwrap();
     ddl_context.soft_drop_enabled = false;
-    let mut recovered =
-        DropTableProcedure::from_json(&persisted_soft_drop, ddl_context.clone()).unwrap();
-    let err = recovered.on_prepare().await.unwrap_err();
-    assert_eq!(err.status_code(), StatusCode::Unsupported);
+    let recovered =
+        DropTableProcedure::from_json(&persisted_hard_drop, ddl_context.clone()).unwrap();
+    assert!(!recovered.data.soft_drop_enabled);
+}
+
+#[tokio::test]
+async fn test_file_engine_fallback_is_resolved_before_tombstone_conflict() {
+    let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
+    let mut ddl_context = new_ddl_context(node_manager);
+    ddl_context.soft_drop_enabled = true;
+    let original_table_id = 1024;
+    let recreated_table_id = 1025;
+    let table_name = "foo";
+    create_dropped_table(&ddl_context, original_table_id, None, None).await;
+
+    let mut task = test_create_table_task(table_name, recreated_table_id);
+    task.table_info.meta.engine = FILE_ENGINE.to_string();
+    ddl_context
+        .table_metadata_manager
+        .create_table_metadata(
+            task.table_info,
+            TableRouteValue::physical(vec![]),
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+
+    let mut procedure = DropTableProcedure::new(
+        new_drop_table_task(table_name, recreated_table_id, false),
+        ddl_context,
+    );
+    procedure.on_prepare().await.unwrap();
+
+    assert!(!procedure.data.soft_drop_enabled);
 }
 
 #[tokio::test]
@@ -2332,7 +2524,6 @@ async fn test_on_rollback() {
     let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
     let kv_backend = Arc::new(MemoryKvBackend::new());
     let mut ddl_context = new_ddl_context_with_kv_backend(node_manager, kv_backend.clone());
-    ddl_context.soft_drop_enabled = true;
     // Prepares physical table metadata.
     let mut create_physical_table_task = test_create_physical_table_task("phy_table");
     let TableMetadata {
@@ -2373,36 +2564,8 @@ async fn test_on_rollback() {
         procedure.on_prepare().await.unwrap();
         assert!(procedure.rollback_supported());
         procedure.on_delete_metadata().await.unwrap();
-        assert!(
-            kv_backend
-                .get(dropped_at_marker_key(physical_table_id).as_bytes())
-                .await
-                .unwrap()
-                .is_some()
-        );
-        assert!(
-            kv_backend
-                .get(retention_expires_at_marker_key(physical_table_id).as_bytes())
-                .await
-                .unwrap()
-                .is_some()
-        );
         assert!(procedure.rollback_supported());
         procedure.rollback(&ctx).await.unwrap();
-        assert!(
-            kv_backend
-                .get(dropped_at_marker_key(physical_table_id).as_bytes())
-                .await
-                .unwrap()
-                .is_none()
-        );
-        assert!(
-            kv_backend
-                .get(retention_expires_at_marker_key(physical_table_id).as_bytes())
-                .await
-                .unwrap()
-                .is_none()
-        );
         // Rollback again
         assert!(procedure.rollback_supported());
         procedure.rollback(&ctx).await.unwrap();

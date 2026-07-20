@@ -19,6 +19,7 @@ use common_procedure::error::{FromJsonSnafu, ToJsonSnafu};
 use common_procedure::{
     Context as ProcedureContext, LockKey, Procedure, Result as ProcedureResult, Status,
 };
+use common_telemetry::info;
 use common_time::util::current_time_millis;
 use common_wal::options::WalOptions;
 use serde::{Deserialize, Serialize};
@@ -123,11 +124,19 @@ impl PurgeDroppedTableProcedure {
             return Ok(Status::done());
         };
         self.update_dropped_table(dropped_table);
+        info!(
+            "Prepared purge dropped table procedure for {}",
+            self.data.purge_target_info()
+        );
         self.data.state = PurgeDroppedTableState::DropRegions;
         Ok(Status::executing(true))
     }
 
     async fn on_drop_regions(&mut self) -> Result<Status> {
+        info!(
+            "Purging dropped table regions for {}",
+            self.data.purge_target_info()
+        );
         let expected_generation = self.data.drop_generation.as_deref().unwrap_or_default();
         let purge_claim = self
             .context
@@ -178,6 +187,10 @@ impl PurgeDroppedTableProcedure {
     }
 
     async fn on_delete_tombstone(&mut self) -> Result<Status> {
+        info!(
+            "Deleting dropped table tombstone for {}",
+            self.data.purge_target_info()
+        );
         if self.data.purging_claimed {
             let expected_generation = self.data.drop_generation.as_deref().unwrap_or_default();
             if self
@@ -303,6 +316,16 @@ impl PurgeDroppedTableData {
 
     fn table_info(&self) -> &TableInfo {
         self.table_info.as_ref().unwrap()
+    }
+
+    fn purge_target_info(&self) -> String {
+        match (self.table_name.as_ref(), self.table_id) {
+            (Some(table_name), Some(table_id)) => format!(
+                "catalog={}, schema={}, table={}, table_id={}",
+                table_name.catalog_name, table_name.schema_name, table_name.table_name, table_id
+            ),
+            _ => format!("table_id={}", self.task.table_id),
+        }
     }
 
     fn physical_region_routes(&self) -> Option<&[RegionRoute]> {

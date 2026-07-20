@@ -1,0 +1,245 @@
+CREATE DATABASE soft_drop_lifecycle;
+
+Affected Rows: 1
+
+USE soft_drop_lifecycle;
+
+Affected Rows: 0
+
+CREATE TABLE lifecycle_table (
+  host STRING,
+  reading INT,
+  ts TIMESTAMP TIME INDEX
+);
+
+Affected Rows: 0
+
+INSERT INTO lifecycle_table VALUES ('original', 42, 1000);
+
+Affected Rows: 1
+
+DROP TABLE lifecycle_table;
+
+Affected Rows: 0
+
+SELECT object_id > 0 AS has_object_id,
+       object_type,
+       original_catalog_name,
+       original_schema_name,
+       original_object_name,
+       purge_status,
+       restorable,
+       dropped_at IS NOT NULL AS has_dropped_at,
+       dropped_by,
+       retention_expires_at IS NOT NULL AS has_retention_expires_at,
+       retention_expires_at > dropped_at AS deadline_after_drop,
+       restored_at,
+       restored_by
+FROM information_schema.recycle_bin
+WHERE original_schema_name = 'soft_drop_lifecycle'
+  AND original_object_name = 'lifecycle_table';
+
++---------------+-------------+-----------------------+----------------------+----------------------+--------------+------------+----------------+------------+--------------------------+---------------------+-------------+-------------+
+| has_object_id | object_type | original_catalog_name | original_schema_name | original_object_name | purge_status | restorable | has_dropped_at | dropped_by | has_retention_expires_at | deadline_after_drop | restored_at | restored_by |
++---------------+-------------+-----------------------+----------------------+----------------------+--------------+------------+----------------+------------+--------------------------+---------------------+-------------+-------------+
+| true          | TABLE       | greptime              | soft_drop_lifecycle  | lifecycle_table      | ACTIVE       | true       | true           |            | true                     | true                |             |             |
++---------------+-------------+-----------------------+----------------------+----------------------+--------------+------------+----------------+------------+--------------------------+---------------------+-------------+-------------+
+
+SELECT COUNT(*) AS live_table_count
+FROM information_schema.tables
+WHERE table_catalog = 'greptime'
+  AND table_schema = 'soft_drop_lifecycle'
+  AND table_name = 'lifecycle_table';
+
++------------------+
+| live_table_count |
++------------------+
+| 0                |
++------------------+
+
+SELECT COUNT(*) AS tombstone_count
+FROM information_schema.recycle_bin
+WHERE original_schema_name = 'soft_drop_lifecycle'
+  AND original_object_name = 'lifecycle_table';
+
++-----------------+
+| tombstone_count |
++-----------------+
+| 1               |
++-----------------+
+
+UNDROP TABLE greptime.soft_drop_lifecycle.lifecycle_table;
+
+Affected Rows: 0
+
+SELECT host, reading, ts FROM lifecycle_table;
+
++----------+---------+---------------------+
+| host     | reading | ts                  |
++----------+---------+---------------------+
+| original | 42      | 1970-01-01T00:00:01 |
++----------+---------+---------------------+
+
+DROP TABLE lifecycle_table;
+
+Affected Rows: 0
+
+ADMIN purge_table('lifecycle_table');
+
++--------------------------------------+
+| ADMIN purge_table('lifecycle_table') |
++--------------------------------------+
+| 0                                    |
++--------------------------------------+
+
+SELECT COUNT(*) AS tombstone_count
+FROM information_schema.recycle_bin
+WHERE original_schema_name = 'soft_drop_lifecycle'
+  AND original_object_name = 'lifecycle_table';
+
++-----------------+
+| tombstone_count |
++-----------------+
+| 0               |
++-----------------+
+
+UNDROP TABLE greptime.soft_drop_lifecycle.lifecycle_table;
+
+Error: 4001(TableNotFound), Table not found: greptime.soft_drop_lifecycle.lifecycle_table
+
+CREATE TABLE same_name (
+  generation STRING,
+  reading INT,
+  ts TIMESTAMP TIME INDEX
+);
+
+Affected Rows: 0
+
+INSERT INTO same_name VALUES ('old', 1, 2000);
+
+Affected Rows: 1
+
+DROP TABLE same_name;
+
+Affected Rows: 0
+
+CREATE TABLE same_name (
+  generation STRING,
+  reading INT,
+  ts TIMESTAMP TIME INDEX
+);
+
+Affected Rows: 0
+
+INSERT INTO same_name VALUES ('new', 2, 3000);
+
+Affected Rows: 1
+
+SELECT object_type,
+       original_catalog_name,
+       original_schema_name,
+       original_object_name,
+       purge_status,
+       restorable
+FROM information_schema.recycle_bin
+WHERE original_schema_name = 'soft_drop_lifecycle'
+  AND original_object_name = 'same_name';
+
++-------------+-----------------------+----------------------+----------------------+--------------+------------+
+| object_type | original_catalog_name | original_schema_name | original_object_name | purge_status | restorable |
++-------------+-----------------------+----------------------+----------------------+--------------+------------+
+| TABLE       | greptime              | soft_drop_lifecycle  | same_name            | ACTIVE       | true       |
++-------------+-----------------------+----------------------+----------------------+--------------+------------+
+
+UNDROP TABLE soft_drop_lifecycle.same_name;
+
+Error: 4000(TableAlreadyExists), Table already exists, table: greptime.soft_drop_lifecycle.same_name
+
+DROP TABLE same_name;
+
+Error: 4000(TableAlreadyExists), Cannot drop table 'greptime.soft_drop_lifecycle.same_name': an older tombstone already uses the same full name
+
+ADMIN purge_table('greptime.soft_drop_lifecycle.same_name');
+
++-------------------------------------------------------------+
+| ADMIN purge_table('greptime.soft_drop_lifecycle.same_name') |
++-------------------------------------------------------------+
+| 0                                                           |
++-------------------------------------------------------------+
+
+SELECT COUNT(*) AS tombstone_count
+FROM information_schema.recycle_bin
+WHERE original_schema_name = 'soft_drop_lifecycle'
+  AND original_object_name = 'same_name';
+
++-----------------+
+| tombstone_count |
++-----------------+
+| 0               |
++-----------------+
+
+SELECT generation, reading, ts FROM same_name;
+
++------------+---------+---------------------+
+| generation | reading | ts                  |
++------------+---------+---------------------+
+| new        | 2       | 1970-01-01T00:00:03 |
++------------+---------+---------------------+
+
+DROP TABLE same_name;
+
+Affected Rows: 0
+
+SELECT COUNT(*) AS tombstone_count
+FROM information_schema.recycle_bin
+WHERE original_schema_name = 'soft_drop_lifecycle'
+  AND original_object_name = 'same_name';
+
++-----------------+
+| tombstone_count |
++-----------------+
+| 1               |
++-----------------+
+
+UNDROP TABLE same_name;
+
+Affected Rows: 0
+
+SELECT generation, reading, ts FROM same_name;
+
++------------+---------+---------------------+
+| generation | reading | ts                  |
++------------+---------+---------------------+
+| new        | 2       | 1970-01-01T00:00:03 |
++------------+---------+---------------------+
+
+DROP TABLE same_name;
+
+Affected Rows: 0
+
+ADMIN purge_table('soft_drop_lifecycle.same_name');
+
++----------------------------------------------------+
+| ADMIN purge_table('soft_drop_lifecycle.same_name') |
++----------------------------------------------------+
+| 0                                                  |
++----------------------------------------------------+
+
+SELECT COUNT(*) AS tombstone_count
+FROM information_schema.recycle_bin
+WHERE original_schema_name = 'soft_drop_lifecycle';
+
++-----------------+
+| tombstone_count |
++-----------------+
+| 0               |
++-----------------+
+
+USE public;
+
+Affected Rows: 0
+
+DROP DATABASE soft_drop_lifecycle;
+
+Affected Rows: 0
+

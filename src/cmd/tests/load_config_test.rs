@@ -234,6 +234,25 @@ fn test_load_metasrv_example_config() {
 }
 
 #[test]
+fn test_load_metasrv_soft_drop_config() {
+    let config = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(
+        config.path(),
+        "[gc]\nenable = true\n[gc.experimental_soft_drop]\nenable = true\nretention = \"1d\"\n",
+    )
+    .unwrap();
+
+    let options =
+        GreptimeOptions::<MetasrvOptions>::load_layered_options(config.path().to_str(), "")
+            .unwrap();
+    assert!(options.component.gc.experimental_soft_drop.enable);
+    assert_eq!(
+        Duration::from_secs(24 * 60 * 60),
+        options.component.gc.experimental_soft_drop.retention
+    );
+}
+
+#[test]
 fn test_load_flownode_example_config() {
     let example_config = common_test_util::find_workspace_path("config/flownode.example.toml");
     let options =

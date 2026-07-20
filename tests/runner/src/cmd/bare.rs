@@ -106,6 +106,10 @@ pub struct BareCommand {
     /// Enable flat format for storage engine (sets default_flat_format = true).
     #[clap(long, default_value = "false")]
     enable_flat_format: bool,
+
+    /// Enable garbage collection in metasrv and datanodes.
+    #[clap(long, default_value = "false")]
+    enable_gc: bool,
 }
 
 impl BareCommand {
@@ -177,6 +181,7 @@ impl BareCommand {
             setup_pg: self.setup_pg,
             setup_mysql: self.setup_mysql,
             enable_flat_format: self.enable_flat_format,
+            enable_gc: self.enable_gc,
         };
 
         let runner = Runner::new(

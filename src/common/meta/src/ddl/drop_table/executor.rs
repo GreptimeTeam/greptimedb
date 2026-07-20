@@ -85,13 +85,7 @@ impl DropTableExecutor {
     /// Checks whether table exists.
     /// - Early returns if table not exists and `drop_if_exists` is `true`.
     /// - Throws an error if table not exists and `drop_if_exists` is `false`.
-    /// - Rejects dropping a recreated live table while an older tombstone still owns the same
-    ///   fully qualified name.
-    pub async fn on_prepare(
-        &self,
-        ctx: &DdlContext,
-        soft_drop_enabled: bool,
-    ) -> Result<Control<()>> {
+    pub async fn on_prepare(&self, ctx: &DdlContext) -> Result<Control<()>> {
         let table_ref = self.table.table_ref();
 
         let exist = ctx
@@ -115,6 +109,17 @@ impl DropTableExecutor {
             }
         );
 
+        Ok(Control::Continue(()))
+    }
+
+    /// Rejects dropping a recreated live table while an older tombstone still owns the same
+    /// fully qualified name.
+    pub async fn check_tombstone_conflict(
+        &self,
+        ctx: &DdlContext,
+        soft_drop_enabled: bool,
+    ) -> Result<()> {
+        let table_ref = self.table.table_ref();
         if let Some(dropped_table) = ctx
             .table_metadata_manager
             .get_dropped_table(&self.table)
@@ -130,7 +135,7 @@ impl DropTableExecutor {
             .fail();
         }
 
-        Ok(Control::Continue(()))
+        Ok(())
     }
 
     /// Deletes the table metadata **logically**.
@@ -573,7 +578,7 @@ mod tests {
             1024,
             true,
         );
-        let ctrl = executor.on_prepare(&ctx, false).await.unwrap();
+        let ctrl = executor.on_prepare(&ctx).await.unwrap();
         assert!(ctrl.stop());
 
         // Drops a non-exists table
@@ -582,7 +587,7 @@ mod tests {
             1024,
             false,
         );
-        let err = executor.on_prepare(&ctx, false).await.unwrap_err();
+        let err = executor.on_prepare(&ctx).await.unwrap_err();
         assert_matches!(err, error::Error::TableNotFound { .. });
 
         // Drops a exists table
@@ -600,7 +605,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let ctrl = executor.on_prepare(&ctx, false).await.unwrap();
+        let ctrl = executor.on_prepare(&ctx).await.unwrap();
         assert!(!ctrl.stop());
     }
 }
