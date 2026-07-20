@@ -315,3 +315,140 @@ impl ContextProvider for DfContextProviderAdapter {
         ))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    use common_base::Plugins;
+    use datafusion::catalog::{TableFunction, TableFunctionArgs, TableFunctionImpl, TableProvider};
+    use datafusion::datasource::MemTable;
+    use datafusion::execution::SessionStateBuilder;
+    use datafusion::execution::context::{SessionConfig, SessionContext, SessionState};
+    use datafusion_common::ScalarValue;
+    use datafusion_expr::expr::BinaryExpr;
+    use datafusion_expr::{Expr, Operator, lit};
+    use session::context::QueryContext;
+
+    use super::*;
+    use crate::options::QueryOptions;
+
+    #[derive(Debug, Default)]
+    struct RecordingTableFunction {
+        called: AtomicBool,
+        args: Mutex<Vec<Expr>>,
+        target_partitions: Mutex<Option<usize>>,
+    }
+
+    impl TableFunctionImpl for RecordingTableFunction {
+        fn call_with_args(&self, args: TableFunctionArgs) -> DfResult<Arc<dyn TableProvider>> {
+            let session_state = args
+                .session()
+                .as_any()
+                .downcast_ref::<SessionState>()
+                .expect("table function must receive the SessionState");
+            *self.args.lock().unwrap() = args.exprs().to_vec();
+            *self.target_partitions.lock().unwrap() =
+                Some(session_state.config().target_partitions());
+            self.called.store(true, Ordering::SeqCst);
+
+            Ok(Arc::new(MemTable::try_new(
+                Arc::new(arrow_schema::Schema::empty()),
+                vec![vec![]],
+            )?))
+        }
+    }
+
+    fn query_engine_state() -> Arc<QueryEngineState> {
+        Arc::new(QueryEngineState::new(
+            catalog::memory::new_memory_catalog_manager().unwrap(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+            Plugins::default(),
+            QueryOptions::default(),
+        ))
+    }
+
+    async fn context_provider(
+        engine_state: Arc<QueryEngineState>,
+        session_state: SessionState,
+    ) -> DfContextProviderAdapter {
+        DfContextProviderAdapter::try_new(engine_state, session_state, None, QueryContext::arc())
+            .await
+            .unwrap()
+    }
+
+    fn plus(left: Expr, right: Expr) -> Expr {
+        Expr::BinaryExpr(BinaryExpr {
+            left: Box::new(left),
+            op: Operator::Plus,
+            right: Box::new(right),
+        })
+    }
+
+    #[tokio::test]
+    async fn table_function_arguments_are_folded_before_engine_function_creation() {
+        let engine_state = query_engine_state();
+        let function = Arc::new(RecordingTableFunction::default());
+        engine_state.register_table_function(Arc::new(TableFunction::new(
+            "capture_engine_args".to_string(),
+            function.clone(),
+        )));
+        let provider = context_provider(engine_state.clone(), engine_state.session_state()).await;
+
+        provider
+            .get_table_function_source("capture_engine_args", vec![plus(lit(1_i64), lit(2_i64))])
+            .unwrap();
+
+        assert!(function.called.load(Ordering::SeqCst));
+        assert_eq!(
+            *function.args.lock().unwrap(),
+            vec![Expr::Literal(ScalarValue::Int64(Some(3)), None)]
+        );
+    }
+
+    #[tokio::test]
+    async fn table_function_argument_simplification_errors_are_propagated() {
+        let engine_state = query_engine_state();
+        let function = Arc::new(RecordingTableFunction::default());
+        engine_state.register_table_function(Arc::new(TableFunction::new(
+            "reject_invalid_args".to_string(),
+            function.clone(),
+        )));
+        let provider = context_provider(engine_state.clone(), engine_state.session_state()).await;
+
+        let error = match provider
+            .get_table_function_source("reject_invalid_args", vec![plus(lit(true), lit(1_i64))])
+        {
+            Ok(_) => panic!("invalid table-function argument must fail planning"),
+            Err(error) => error,
+        };
+
+        assert!(!error.to_string().is_empty());
+        assert!(!function.called.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn session_table_function_receives_table_function_args_session() {
+        let engine_state = query_engine_state();
+        let session_state = SessionStateBuilder::new_from_existing(engine_state.session_state())
+            .with_config(SessionConfig::new().with_target_partitions(7))
+            .build();
+        let session_context = SessionContext::new_with_state(session_state);
+        let function = Arc::new(RecordingTableFunction::default());
+        session_context.register_udtf("capture_session_args", function.clone());
+        let provider = context_provider(engine_state, session_context.state()).await;
+
+        provider
+            .get_table_function_source("capture_session_args", vec![lit(1_i64)])
+            .unwrap();
+
+        assert!(function.called.load(Ordering::SeqCst));
+        assert_eq!(*function.target_partitions.lock().unwrap(), Some(7));
+    }
+}
