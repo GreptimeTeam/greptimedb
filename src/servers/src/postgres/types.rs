@@ -29,6 +29,7 @@ use common_recordbatch::{RecordBatch, map_dictionary_to_values_data_type};
 use common_time::{IntervalDayTime, IntervalMonthDayNano, IntervalYearMonth};
 use datafusion_common::ScalarValue;
 use datafusion_expr::LogicalPlan;
+use datafusion_pg_catalog::pg_catalog::oid_field::{self, OID_ALIAS_KEY};
 use datatypes::arrow::datatypes::DataType as ArrowDataType;
 use datatypes::json::JsonSettings;
 use datatypes::prelude::{ConcreteDataType, DataType as _, Value};
@@ -63,11 +64,15 @@ pub(super) fn schema_to_pg(
         .iter()
         .enumerate()
         .map(|(idx, col)| {
+            let pg_type = match pg_oid_alias_type(col) {
+                Some(pg_type) => pg_type,
+                None => type_gt_to_pg(&col.data_type)?,
+            };
             let mut field_info = FieldInfo::new(
                 col.name.clone(),
                 None,
                 None,
-                type_gt_to_pg(&col.data_type)?,
+                pg_type,
                 field_formats.format_for(idx),
             );
             if let Some(format_options) = &format_options {
@@ -76,6 +81,39 @@ pub(super) fn schema_to_pg(
             Ok(field_info)
         })
         .collect::<Result<Vec<FieldInfo>>>()
+}
+
+/// Maps `datafusion-pg-catalog` OID-alias metadata to PostgreSQL wire types.
+///
+/// Version 0.18.1 exposes static catalog aliases as `Utf8` and dynamic aliases
+/// as `Int32`, so this must run before the ordinary `INT4`/`VARCHAR` fallbacks.
+/// The catalog crate only exposes named constants for the aliases it uses in
+/// dynamic catalog tables; keep the remaining aliases here for compatibility
+/// with its public `OID_ALIAS_TYPE_NAMES` contract. See
+/// https://github.com/datafusion-contrib/datafusion-postgres/issues/384.
+fn pg_oid_alias_type(column: &datatypes::schema::ColumnSchema) -> Option<Type> {
+    if !matches!(
+        &column.data_type,
+        ConcreteDataType::Int32(_) | ConcreteDataType::String(_)
+    ) {
+        return None;
+    }
+
+    match column.metadata().get(OID_ALIAS_KEY)?.as_str() {
+        oid_field::kind::OID => Some(Type::OID),
+        oid_field::kind::REGPROC => Some(Type::REGPROC),
+        oid_field::kind::REGCLASS => Some(Type::REGCLASS),
+        oid_field::kind::REGTYPE => Some(Type::REGTYPE),
+        oid_field::kind::REGNAMESPACE => Some(Type::REGNAMESPACE),
+        "regprocedure" => Some(Type::REGPROCEDURE),
+        "regoper" => Some(Type::REGOPER),
+        "regoperator" => Some(Type::REGOPERATOR),
+        "regcollation" => Some(Type::REGCOLLATION),
+        "regconfig" => Some(Type::REGCONFIG),
+        "regdictionary" => Some(Type::REGDICTIONARY),
+        "regrole" => Some(Type::REGROLE),
+        _ => None,
+    }
 }
 
 /// this function will encode greptime's `StructValue` into PostgreSQL jsonb type
@@ -1395,6 +1433,62 @@ mod test {
         let schema = Schema::new(column_schemas);
         let fs = schema_to_pg(&schema, &Format::UnifiedText, None).unwrap();
         assert_eq!(fs, pg_field_info);
+    }
+
+    #[test]
+    fn test_schema_convert_oid_alias_types() {
+        let aliases = [
+            (oid_field::kind::OID, Type::OID),
+            (oid_field::kind::REGPROC, Type::REGPROC),
+            ("regprocedure", Type::REGPROCEDURE),
+            ("regoper", Type::REGOPER),
+            ("regoperator", Type::REGOPERATOR),
+            (oid_field::kind::REGCLASS, Type::REGCLASS),
+            (oid_field::kind::REGTYPE, Type::REGTYPE),
+            (oid_field::kind::REGNAMESPACE, Type::REGNAMESPACE),
+            ("regrole", Type::REGROLE),
+            ("regconfig", Type::REGCONFIG),
+            ("regdictionary", Type::REGDICTIONARY),
+            ("regcollation", Type::REGCOLLATION),
+        ];
+        let mut columns = Vec::new();
+        let mut expected_oids = Vec::new();
+        for (type_name, data_type, fallback_type) in [
+            ("int32", ConcreteDataType::int32_datatype(), Type::INT4),
+            ("utf8", ConcreteDataType::string_datatype(), Type::VARCHAR),
+        ] {
+            for (alias, pg_type) in &aliases {
+                let mut column =
+                    ColumnSchema::new(format!("{type_name}_{alias}"), data_type.clone(), true);
+                column
+                    .mut_metadata()
+                    .insert(OID_ALIAS_KEY.to_string(), alias.to_string());
+                columns.push(column);
+                expected_oids.push(pg_type.oid());
+            }
+
+            columns.push(ColumnSchema::new(
+                format!("{type_name}_untagged"),
+                data_type.clone(),
+                true,
+            ));
+            expected_oids.push(fallback_type.oid());
+
+            let mut unknown = ColumnSchema::new(format!("{type_name}_unknown"), data_type, true);
+            unknown
+                .mut_metadata()
+                .insert(OID_ALIAS_KEY.to_string(), "unknown".to_string());
+            columns.push(unknown);
+            expected_oids.push(fallback_type.oid());
+        }
+
+        let fields = schema_to_pg(&Schema::new(columns), &Format::UnifiedText, None).unwrap();
+        let actual_oids = fields
+            .iter()
+            .map(|field| field.datatype().oid())
+            .collect::<Vec<_>>();
+
+        assert_eq!(actual_oids, expected_oids);
     }
 
     #[test]
