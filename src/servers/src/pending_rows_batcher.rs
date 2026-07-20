@@ -37,6 +37,7 @@ use common_telemetry::tracing_context::TracingContext;
 use common_telemetry::{debug, error, warn};
 use dashmap::DashMap;
 use dashmap::mapref::entry::Entry;
+use futures::StreamExt;
 use metric_engine::batch_modifier::{TagColumnInfo, modify_batch_sparse};
 use partition::manager::PartitionRuleManagerRef;
 use partition::partition::PartitionRuleRef;
@@ -64,6 +65,7 @@ const PHYSICAL_TABLE_KEY: &str = "physical_table";
 const PENDING_ROWS_BATCH_SYNC_ENV: &str = "PENDING_ROWS_BATCH_SYNC";
 const WORKER_IDLE_TIMEOUT_MULTIPLIER: u32 = 3;
 const PHYSICAL_REGION_ESSENTIAL_COLUMN_COUNT: usize = 3;
+const MAX_CONCURRENT_FLOW_NOTIFICATIONS: usize = 8;
 
 #[async_trait]
 pub trait PendingRowsSchemaAlterer: Send + Sync {
@@ -1394,49 +1396,76 @@ fn extract_timestamps(table_batch: &TableBatch) -> Vec<i64> {
     timestamps
 }
 
+async fn notify_flow_dirty_windows_for_table(
+    table_id: TableId,
+    timestamps: Vec<i64>,
+    peers: HashSet<Peer>,
+    node_manager: NodeManagerRef,
+) {
+    for peer in peers {
+        if let Err(e) = node_manager
+            .flownode(&peer)
+            .await
+            .handle_mark_window_dirty(DirtyWindowRequests {
+                requests: vec![DirtyWindowRequest {
+                    table_id,
+                    timestamps: timestamps.clone(),
+                }],
+            })
+            .await
+        {
+            error!(e; "Failed to mark timestamps as dirty, table: {}", table_id);
+        }
+    }
+}
+
 fn notify_flow_dirty_windows_after_flush(
     table_batches: Vec<TableBatch>,
     table_flownode_set_cache: TableFlownodeSetCacheRef,
     node_manager: NodeManagerRef,
 ) {
     common_runtime::spawn_global(async move {
-        for table_batch in table_batches {
-            let timestamps = extract_timestamps(&table_batch);
-            if timestamps.is_empty() {
-                continue;
-            }
+        let (notification_tx, notification_rx) = mpsc::channel(table_batches.len().max(1));
+        let resolve_flownodes = async move {
+            futures::stream::iter(table_batches)
+                .for_each_concurrent(MAX_CONCURRENT_FLOW_NOTIFICATIONS, |table_batch| {
+                    let table_flownode_set_cache = table_flownode_set_cache.clone();
+                    let notification_tx = notification_tx.clone();
+                    async move {
+                        let timestamps = extract_timestamps(&table_batch);
+                        if timestamps.is_empty() {
+                            return;
+                        }
 
-            let flownodes = match table_flownode_set_cache.get(table_batch.table_id).await {
-                Ok(Some(flownodes)) => flownodes,
-                Ok(None) => continue,
-                Err(e) => {
-                    error!(e; "Failed to get flownodes for table id: {}", table_batch.table_id);
-                    continue;
-                }
-            };
-            let peers: HashSet<_> = flownodes.values().cloned().collect();
-
-            for peer in peers {
-                let node_manager = node_manager.clone();
-                let timestamps = timestamps.clone();
-                let table_id = table_batch.table_id;
-                common_runtime::spawn_global(async move {
-                    if let Err(e) = node_manager
-                        .flownode(&peer)
-                        .await
-                        .handle_mark_window_dirty(DirtyWindowRequests {
-                            requests: vec![DirtyWindowRequest {
-                                table_id,
-                                timestamps,
-                            }],
-                        })
-                        .await
-                    {
-                        error!(e; "Failed to mark timestamps as dirty, table: {}", table_id);
+                        let table_id = table_batch.table_id;
+                        let flownodes = match table_flownode_set_cache.get(table_id).await {
+                            Ok(Some(flownodes)) => flownodes,
+                            Ok(None) => return,
+                            Err(e) => {
+                                error!(e; "Failed to get flownodes for table id: {}", table_id);
+                                return;
+                            }
+                        };
+                        let peers = flownodes.values().cloned().collect::<HashSet<_>>();
+                        let _ = notification_tx.send((table_id, timestamps, peers)).await;
                     }
-                });
-            }
-        }
+                })
+                .await;
+        };
+        let notify_flownodes = tokio_stream::wrappers::ReceiverStream::new(notification_rx)
+            .for_each_concurrent(
+                MAX_CONCURRENT_FLOW_NOTIFICATIONS,
+                |(table_id, timestamps, peers)| {
+                    notify_flow_dirty_windows_for_table(
+                        table_id,
+                        timestamps,
+                        peers,
+                        node_manager.clone(),
+                    )
+                },
+            );
+
+        futures::future::join(resolve_flownodes, notify_flownodes).await;
     });
 }
 
@@ -1772,9 +1801,10 @@ fn record_batch_to_ipc(record_batch: RecordBatch) -> Result<(Bytes, Bytes, Bytes
 
 #[cfg(test)]
 mod tests {
+    use std::any::Any;
     use std::collections::{HashMap, HashSet};
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
     use api::region::RegionResponse;
@@ -1795,9 +1825,15 @@ mod tests {
     use common_meta::error::Result as MetaResult;
     use common_meta::instruction::{CacheIdent, CreateFlow};
     use common_meta::kv_backend::memory::MemoryKvBackend;
+    use common_meta::kv_backend::{KvBackend, TxnService};
     use common_meta::node_manager::{
         Datanode, DatanodeManager, DatanodeRef, Flownode, FlownodeManager, FlownodeRef,
         NodeManagerRef,
+    };
+    use common_meta::rpc::store::{
+        BatchDeleteRequest, BatchDeleteResponse, BatchGetRequest, BatchGetResponse,
+        BatchPutRequest, BatchPutResponse, DeleteRangeRequest, DeleteRangeResponse, PutRequest,
+        PutResponse, RangeRequest, RangeResponse,
     };
     use common_query::request::QueryRequest;
     use common_recordbatch::SendableRecordBatchStream;
@@ -1811,7 +1847,7 @@ mod tests {
     use store_api::storage::RegionId;
     use table::metadata::TableId;
     use table::test_util::table_info::test_table_info;
-    use tokio::sync::{Semaphore, mpsc, oneshot};
+    use tokio::sync::{Notify, Semaphore, mpsc, oneshot};
     use tokio::time::sleep;
 
     use super::{
@@ -2435,6 +2471,118 @@ mod tests {
             .await
             .unwrap();
         cache
+    }
+
+    struct BlockingRangeKvBackend {
+        range_started: Mutex<Option<oneshot::Sender<()>>>,
+        range_release: Arc<Notify>,
+    }
+
+    impl TxnService for BlockingRangeKvBackend {
+        type Error = common_meta::error::Error;
+    }
+
+    #[async_trait]
+    impl KvBackend for BlockingRangeKvBackend {
+        fn name(&self) -> &str {
+            "blocking_range"
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+
+        async fn range(&self, _req: RangeRequest) -> MetaResult<RangeResponse> {
+            let range_started = self.range_started.lock().unwrap().take();
+            if let Some(range_started) = range_started {
+                let _ = range_started.send(());
+                self.range_release.notified().await;
+            }
+            Ok(RangeResponse {
+                kvs: Vec::new(),
+                more: false,
+            })
+        }
+
+        async fn put(&self, _req: PutRequest) -> MetaResult<PutResponse> {
+            unimplemented!()
+        }
+
+        async fn batch_put(&self, _req: BatchPutRequest) -> MetaResult<BatchPutResponse> {
+            unimplemented!()
+        }
+
+        async fn batch_get(&self, _req: BatchGetRequest) -> MetaResult<BatchGetResponse> {
+            unimplemented!()
+        }
+
+        async fn delete_range(&self, _req: DeleteRangeRequest) -> MetaResult<DeleteRangeResponse> {
+            unimplemented!()
+        }
+
+        async fn batch_delete(&self, _req: BatchDeleteRequest) -> MetaResult<BatchDeleteResponse> {
+            unimplemented!()
+        }
+    }
+
+    #[tokio::test]
+    async fn test_flow_notifications_do_not_block_on_previous_table_cache_lookup() {
+        let blocked_table_id = 41;
+        let cached_table_id = 42;
+        let peer = Peer {
+            id: 7,
+            addr: "flow-7".to_string(),
+        };
+        let (range_started_tx, range_started_rx) = oneshot::channel();
+        let range_release = Arc::new(Notify::new());
+        let cache = Arc::new(new_table_flownode_set_cache(
+            "test".to_string(),
+            CacheBuilder::new(2).build(),
+            Arc::new(BlockingRangeKvBackend {
+                range_started: Mutex::new(Some(range_started_tx)),
+                range_release: range_release.clone(),
+            }),
+        ));
+        cache
+            .invalidate(&[CacheIdent::CreateFlow(CreateFlow {
+                flow_id: 1,
+                source_table_ids: vec![cached_table_id],
+                partition_to_peer_mapping: vec![(0, peer)],
+            })])
+            .await
+            .unwrap();
+        let (requests_tx, mut requests_rx) = mpsc::unbounded_channel();
+        let _requests_tx = requests_tx.clone();
+        let node_manager: NodeManagerRef = Arc::new(FlowNotificationMockNodeManager {
+            flownode: Arc::new(RecordingFlownode { requests_tx }),
+        });
+        let table_batches = vec![
+            TableBatch {
+                table_name: "blocked".to_string(),
+                table_id: blocked_table_id,
+                batches: vec![mock_aligned_tag_batch("tag1", "host-1", 1000, 1.0)],
+                row_count: 1,
+            },
+            TableBatch {
+                table_name: "cached".to_string(),
+                table_id: cached_table_id,
+                batches: vec![mock_aligned_tag_batch("tag1", "host-2", 2000, 2.0)],
+                row_count: 1,
+            },
+        ];
+
+        notify_flow_dirty_windows_after_flush(table_batches, cache, node_manager);
+
+        tokio::time::timeout(Duration::from_secs(1), range_started_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        let requests = tokio::time::timeout(Duration::from_secs(1), requests_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(cached_table_id, requests.requests[0].table_id);
+        range_release.notify_one();
     }
 
     #[tokio::test]
