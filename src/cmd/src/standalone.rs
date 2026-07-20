@@ -1274,6 +1274,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "enterprise"))]
     fn test_load_options_ignores_unknown_plugin_options() {
         // Plugin options that are not recognized by the current build (for example,
         // an enterprise plugin option seen by an open-source build) must not abort
@@ -1331,6 +1332,7 @@ Dummy = {{ unexpected = "payload" }}
     }
 
     #[test]
+    #[cfg(not(feature = "enterprise"))]
     fn test_load_options_ignores_multi_key_unknown_plugin_entry() {
         // A single plugin table carrying several *unknown* keys must not abort
         // startup with serde's "expected map with a single key" error; it is
