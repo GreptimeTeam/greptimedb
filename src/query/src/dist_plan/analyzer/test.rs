@@ -74,7 +74,10 @@ impl TreeNodeRewriter for MergeScanRemoteDynFilterProducerIdCollector<'_> {
 
     fn f_up(&mut self, node: Self::Node) -> DfResult<Transformed<Self::Node>> {
         if let LogicalPlan::Extension(extension) = &node
-            && let Some(merge_scan) = extension.node.downcast_ref::<MergeScanLogicalPlan>()
+            && let Some(merge_scan) = extension
+                .node
+                .as_any()
+                .downcast_ref::<MergeScanLogicalPlan>()
         {
             self.producer_ids.push(
                 merge_scan
@@ -112,7 +115,10 @@ fn assert_remote_table_scan_filters_are_safe_inner(
     checked_filters: &mut usize,
 ) {
     if let LogicalPlan::Extension(extension) = plan
-        && let Some(merge_scan) = extension.node.downcast_ref::<MergeScanLogicalPlan>()
+        && let Some(merge_scan) = extension
+            .node
+            .as_any()
+            .downcast_ref::<MergeScanLogicalPlan>()
     {
         assert_remote_table_scan_filters_are_safe_inner(merge_scan.input(), true, checked_filters);
     }

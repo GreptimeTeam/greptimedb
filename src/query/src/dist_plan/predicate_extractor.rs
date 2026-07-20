@@ -638,10 +638,10 @@ mod tests {
     fn test_dictionary_cast_preserves_partition_constraint() {
         let dictionary_type =
             DataType::Dictionary(Box::new(DataType::UInt32), Box::new(DataType::Utf8));
-        let filter = col("tag").eq(Expr::Cast(datafusion_expr::expr::Cast {
-            expr: Box::new(lit("b")),
-            data_type: dictionary_type,
-        }));
+        let filter = col("tag").eq(Expr::Cast(datafusion_expr::Cast::new(
+            Box::new(lit("b")),
+            dictionary_type,
+        )));
 
         let partition_expr = DataFusionExprConverter::convert(&filter).unwrap();
         assert_eq!(
