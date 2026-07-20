@@ -45,6 +45,7 @@ const DEFAULT_RESULT_SET_WRITE_BUFFER_SIZE: usize = 100 * 1024;
 const CLIENT_DISCONNECT_ERROR_KINDS: &[std::io::ErrorKind] = &[
     std::io::ErrorKind::ConnectionAborted,
     std::io::ErrorKind::ConnectionReset,
+    std::io::ErrorKind::BrokenPipe,
 ];
 
 /// [`MysqlSpawnRef`] stores arc refs
@@ -238,17 +239,6 @@ impl MysqlServer {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::CLIENT_DISCONNECT_ERROR_KINDS;
-
-    #[test]
-    fn test_client_disconnect_error_kinds() {
-        assert!(CLIENT_DISCONNECT_ERROR_KINDS.contains(&std::io::ErrorKind::ConnectionAborted));
-        assert!(CLIENT_DISCONNECT_ERROR_KINDS.contains(&std::io::ErrorKind::ConnectionReset));
-    }
-}
-
 pub const MYSQL_SERVER: &str = "MYSQL_SERVER";
 
 #[async_trait]
@@ -285,5 +275,17 @@ impl Server for MysqlServer {
 
     fn as_any(&self) -> &dyn Any {
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CLIENT_DISCONNECT_ERROR_KINDS;
+
+    #[test]
+    fn test_client_disconnect_error_kinds() {
+        assert!(CLIENT_DISCONNECT_ERROR_KINDS.contains(&std::io::ErrorKind::ConnectionAborted));
+        assert!(CLIENT_DISCONNECT_ERROR_KINDS.contains(&std::io::ErrorKind::ConnectionReset));
+        assert!(CLIENT_DISCONNECT_ERROR_KINDS.contains(&std::io::ErrorKind::BrokenPipe));
     }
 }
