@@ -24,7 +24,6 @@ use common_recordbatch::util::ChainedRecordBatchStream;
 use common_recordbatch::{RecordBatchStreamWrapper, SendableRecordBatchStream};
 use common_telemetry::tracing::{self, Instrument};
 use common_telemetry::warn;
-use datafusion::execution::memory_pool::UnboundedMemoryPool;
 use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType};
 use datatypes::arrow::array::BinaryArray;
@@ -53,7 +52,6 @@ use crate::read::scan_util::{
     compute_parallel_channel_size,
 };
 use crate::read::seq_scan::SeqScan;
-use crate::read::series_candidate::SeriesCandidateScanner;
 use crate::read::stream::{ConvertBatchStream, ScanBatch, ScanBatchStream};
 use crate::sst::parquet::flat_format::primary_key_column_index;
 use crate::sst::parquet::format::PrimaryKeyArray;
@@ -318,46 +316,6 @@ impl SeriesScan {
         }
 
         Ok(())
-    }
-
-    /// Consumes the candidate-series discovery stream for Scanbench.
-    ///
-    /// This is a temporary benchmark hook. It deliberately stops before the
-    /// second-stage row scan and therefore returns candidate counts rather than rows.
-    pub(crate) async fn count_candidates_for_bench(
-        &self,
-        parallelism: usize,
-        explain_verbose: bool,
-    ) -> Result<(usize, usize)> {
-        let metrics_set = ExecutionPlanMetricsSet::new();
-        let metrics = new_partition_metrics(
-            &self.stream_ctx,
-            explain_verbose,
-            &metrics_set,
-            self.properties.num_partitions(),
-            &self.metrics_list,
-        );
-        metrics.on_first_poll();
-
-        let scanner = SeriesCandidateScanner::try_new(
-            self.stream_ctx.clone(),
-            self.properties.partitions.clone(),
-            self.pruner.clone(),
-            Arc::new(Semaphore::new(parallelism.max(1))),
-            Arc::new(UnboundedMemoryPool::default()),
-            metrics_set,
-            metrics.clone(),
-        )?;
-        let mut stream = scanner.build_stream().await?;
-        let mut num_groups = 0;
-        let mut num_candidates = 0;
-        while let Some(group) = stream.try_next().await? {
-            num_groups += 1;
-            num_candidates += group.len();
-        }
-        metrics.on_finish();
-
-        Ok((num_groups, num_candidates))
     }
 }
 

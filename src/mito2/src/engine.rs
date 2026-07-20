@@ -441,30 +441,6 @@ impl MitoEngine {
         scan_region.scanner().await?.scan_batch()
     }
 
-    /// Consumes only the candidate-series stage of a per-series scan.
-    ///
-    /// This is a temporary hook for Scanbench and is not part of the region-engine
-    /// interface. The returned values are `(candidate_groups, candidate_series)`.
-    #[doc(hidden)]
-    pub async fn scan_series_candidates_for_bench(
-        &self,
-        region_id: RegionId,
-        request: ScanRequest,
-        parallelism: usize,
-        explain_verbose: bool,
-    ) -> Result<(usize, usize), BoxedError> {
-        let scanner = self
-            .scan_region(region_id, request)
-            .map_err(BoxedError::new)?
-            .series_scan()
-            .await
-            .map_err(BoxedError::new)?;
-        scanner
-            .count_candidates_for_bench(parallelism, explain_verbose)
-            .await
-            .map_err(BoxedError::new)
-    }
-
     /// Returns a scanner to scan for `request`.
     pub(crate) async fn scanner(
         &self,

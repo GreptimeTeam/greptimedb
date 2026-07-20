@@ -76,7 +76,7 @@ pub struct ScanbenchCommand {
     #[clap(long)]
     table_dir: String,
 
-    /// Scanner type: seq, unordered, series, series-candidate
+    /// Scanner type: seq, unordered, series
     #[clap(long, default_value = "seq")]
     scanner: String,
 
@@ -555,11 +555,11 @@ impl ScanbenchCommand {
         let distribution = match self.scanner.as_str() {
             "seq" => None,
             "unordered" => Some(TimeSeriesDistribution::TimeWindowed),
-            "series" | "series-candidate" => Some(TimeSeriesDistribution::PerSeries),
+            "series" => Some(TimeSeriesDistribution::PerSeries),
             other => {
                 return Err(error::IllegalConfigSnafu {
                     msg: format!(
-                        "Unknown scanner type '{}', expected: seq, unordered, series, series-candidate",
+                        "Unknown scanner type '{}', expected: seq, unordered, series",
                         other
                     ),
                 }
@@ -617,7 +617,6 @@ impl ScanbenchCommand {
 
         let mut total_rows_all = 0u64;
         let mut total_elapsed_all = std::time::Duration::ZERO;
-        let candidate_only = self.scanner == "series-candidate";
 
         let projection_input = projection.map(ProjectionInput::new);
         for iteration in 0..self.iterations {
@@ -631,148 +630,118 @@ impl ScanbenchCommand {
 
             let start = Instant::now();
 
-            if candidate_only {
-                let (num_groups, num_candidates) = engine
-                    .scan_series_candidates_for_bench(
-                        region_id,
-                        request,
-                        self.parallelism,
-                        self.verbose,
-                    )
-                    .await
-                    .context(error::BuildCliSnafu)?;
-                let elapsed = start.elapsed();
-                let candidates_per_sec = if elapsed.is_zero() {
-                    0.0
-                } else {
-                    num_candidates as f64 / elapsed.as_secs_f64()
-                };
-                total_rows_all += num_candidates as u64;
-                total_elapsed_all += elapsed;
+            // Get scanner
+            let mut scanner = engine
+                .handle_query(region_id, request)
+                .await
+                .map_err(BoxedError::new)
+                .context(error::BuildCliSnafu)?;
 
+            // Get partition ranges and apply parallelism
+            let original_partitions = scanner.properties().partitions.clone();
+            let total_ranges: usize = original_partitions.iter().map(|p| p.len()).sum();
+
+            if self.verbose {
                 println!(
-                    "  [iter {}] {} candidate series in {:?} ({} groups, {:.2} candidates/s)",
-                    iteration + 1,
-                    num_candidates.to_string().cyan(),
-                    elapsed,
-                    num_groups,
-                    candidates_per_sec,
+                    "  {} Original partitions: {}, total ranges: {}",
+                    "ℹ".blue(),
+                    original_partitions.len(),
+                    total_ranges
                 );
-            } else {
-                // Get scanner
-                let mut scanner = engine
-                    .handle_query(region_id, request)
-                    .await
+            }
+
+            if self.parallelism > 1 {
+                // Flatten all ranges
+                let all_ranges: Vec<_> = original_partitions.into_iter().flatten().collect();
+
+                // Distribute ranges across partitions
+                let mut partitions =
+                    ParallelizeScan::assign_partition_range(all_ranges, self.parallelism);
+
+                // Sort ranges within each partition by start time ascending
+                for partition in &mut partitions {
+                    partition.sort_by_key(|a| a.start);
+                }
+
+                scanner
+                    .prepare(
+                        PrepareRequest::default()
+                            .with_ranges(partitions)
+                            .with_target_partitions(self.parallelism),
+                    )
+                    .map_err(BoxedError::new)
+                    .context(error::BuildCliSnafu)?;
+            }
+
+            // Scan all partitions
+            let num_partitions = scanner.properties().partitions.len();
+            let ctx = QueryScanContext {
+                explain_verbose: self.verbose,
+            };
+            let metrics_set = ExecutionPlanMetricsSet::new();
+
+            let mut scan_futures = FuturesUnordered::new();
+
+            for partition_idx in 0..num_partitions {
+                let mut stream = scanner
+                    .scan_partition(&ctx, &metrics_set, partition_idx)
                     .map_err(BoxedError::new)
                     .context(error::BuildCliSnafu)?;
 
-                // Get partition ranges and apply parallelism
-                let original_partitions = scanner.properties().partitions.clone();
-                let total_ranges: usize = original_partitions.iter().map(|p| p.len()).sum();
-
-                if self.verbose {
-                    println!(
-                        "  {} Original partitions: {}, total ranges: {}",
-                        "ℹ".blue(),
-                        original_partitions.len(),
-                        total_ranges
-                    );
-                }
-
-                if self.parallelism > 1 {
-                    // Flatten all ranges
-                    let all_ranges: Vec<_> = original_partitions.into_iter().flatten().collect();
-
-                    // Distribute ranges across partitions
-                    let mut partitions =
-                        ParallelizeScan::assign_partition_range(all_ranges, self.parallelism);
-
-                    // Sort ranges within each partition by start time ascending
-                    for partition in &mut partitions {
-                        partition.sort_by_key(|a| a.start);
-                    }
-
-                    scanner
-                        .prepare(
-                            PrepareRequest::default()
-                                .with_ranges(partitions)
-                                .with_target_partitions(self.parallelism),
-                        )
-                        .map_err(BoxedError::new)
-                        .context(error::BuildCliSnafu)?;
-                }
-
-                // Scan all partitions
-                let num_partitions = scanner.properties().partitions.len();
-                let ctx = QueryScanContext {
-                    explain_verbose: self.verbose,
-                };
-                let metrics_set = ExecutionPlanMetricsSet::new();
-
-                let mut scan_futures = FuturesUnordered::new();
-
-                for partition_idx in 0..num_partitions {
-                    let mut stream = scanner
-                        .scan_partition(&ctx, &metrics_set, partition_idx)
-                        .map_err(BoxedError::new)
-                        .context(error::BuildCliSnafu)?;
-
-                    scan_futures.push(tokio::spawn(async move {
-                        let mut rows = 0u64;
-                        let mut array_mem_size = 0u64;
-                        let mut estimated_size = 0u64;
-                        while let Some(batch_result) = stream.next().await {
-                            match batch_result {
-                                Ok(batch) => {
-                                    rows += batch.num_rows() as u64;
-                                    let df_batch = batch.df_record_batch();
-                                    array_mem_size += df_batch.get_array_memory_size() as u64;
-                                    estimated_size +=
-                                        mito2::memtable::record_batch_estimated_size(df_batch)
-                                            as u64;
-                                }
-                                Err(e) => {
-                                    return Err(BoxedError::new(e));
-                                }
+                scan_futures.push(tokio::spawn(async move {
+                    let mut rows = 0u64;
+                    let mut array_mem_size = 0u64;
+                    let mut estimated_size = 0u64;
+                    while let Some(batch_result) = stream.next().await {
+                        match batch_result {
+                            Ok(batch) => {
+                                rows += batch.num_rows() as u64;
+                                let df_batch = batch.df_record_batch();
+                                array_mem_size += df_batch.get_array_memory_size() as u64;
+                                estimated_size +=
+                                    mito2::memtable::record_batch_estimated_size(df_batch) as u64;
+                            }
+                            Err(e) => {
+                                return Err(BoxedError::new(e));
                             }
                         }
-                        Ok::<(u64, u64, u64), BoxedError>((rows, array_mem_size, estimated_size))
-                    }));
-                }
-
-                let mut total_rows = 0u64;
-                let mut total_array_mem_size = 0u64;
-                let mut total_estimated_size = 0u64;
-                while let Some(task) = scan_futures.next().await {
-                    let result = task
-                        .map_err(|e| {
-                            BoxedError::new(PlainError::new(
-                                format!("scan task failed: {e}"),
-                                StatusCode::Unexpected,
-                            ))
-                        })
-                        .context(error::BuildCliSnafu)?;
-                    let (rows, array_mem_size, estimated_size) =
-                        result.context(error::BuildCliSnafu)?;
-                    total_rows += rows;
-                    total_array_mem_size += array_mem_size;
-                    total_estimated_size += estimated_size;
-                }
-
-                let elapsed = start.elapsed();
-                total_rows_all += total_rows;
-                total_elapsed_all += elapsed;
-
-                println!(
-                    "  [iter {}] {} rows in {:?} ({} partitions), array_mem_size: {}, estimated_size: {}",
-                    iteration + 1,
-                    total_rows.to_string().cyan(),
-                    elapsed,
-                    num_partitions,
-                    format_bytes(total_array_mem_size),
-                    format_bytes(total_estimated_size),
-                );
+                    }
+                    Ok::<(u64, u64, u64), BoxedError>((rows, array_mem_size, estimated_size))
+                }));
             }
+
+            let mut total_rows = 0u64;
+            let mut total_array_mem_size = 0u64;
+            let mut total_estimated_size = 0u64;
+            while let Some(task) = scan_futures.next().await {
+                let result = task
+                    .map_err(|e| {
+                        BoxedError::new(PlainError::new(
+                            format!("scan task failed: {e}"),
+                            StatusCode::Unexpected,
+                        ))
+                    })
+                    .context(error::BuildCliSnafu)?;
+                let (rows, array_mem_size, estimated_size) =
+                    result.context(error::BuildCliSnafu)?;
+                total_rows += rows;
+                total_array_mem_size += array_mem_size;
+                total_estimated_size += estimated_size;
+            }
+
+            let elapsed = start.elapsed();
+            total_rows_all += total_rows;
+            total_elapsed_all += elapsed;
+
+            println!(
+                "  [iter {}] {} rows in {:?} ({} partitions), array_mem_size: {}, estimated_size: {}",
+                iteration + 1,
+                total_rows.to_string().cyan(),
+                elapsed,
+                num_partitions,
+                format_bytes(total_array_mem_size),
+                format_bytes(total_estimated_size),
+            );
 
             // Start profiling after the first iteration (warmup) if pprof_after_warmup is set
             #[cfg(unix)]
@@ -834,17 +803,11 @@ impl ScanbenchCommand {
         // Summary
         if self.iterations > 1 {
             let avg_elapsed = total_elapsed_all / self.iterations as u32;
-            let avg_items = total_rows_all / self.iterations as u64;
-            let item_name = if candidate_only {
-                "candidate series"
-            } else {
-                "rows"
-            };
+            let avg_rows = total_rows_all / self.iterations as u64;
             println!(
-                "\n{} Average: {} {} in {:?} over {} iterations",
+                "\n{} Average: {} rows in {:?} over {} iterations",
                 "Summary".green().bold(),
-                avg_items.to_string().cyan(),
-                item_name,
+                avg_rows.to_string().cyan(),
                 avg_elapsed,
                 self.iterations,
             );

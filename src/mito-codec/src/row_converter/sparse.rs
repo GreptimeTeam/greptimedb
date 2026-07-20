@@ -350,7 +350,7 @@ impl SparsePrimaryKeyCodec {
     }
 
     /// Decodes the reserved `(table_id, tsid)` prefix from a sparse primary key.
-    pub fn decode_internal(&self, bytes: &[u8]) -> Result<(u32, u64)> {
+    pub fn decode_ids(&self, bytes: &[u8]) -> Result<(u32, u64)> {
         // Two column IDs, two non-null markers, a u32 table ID, and a u64 TSID.
         const INTERNAL_PREFIX_LEN: usize = 4 + 1 + 4 + 4 + 1 + 8;
         ensure!(
@@ -860,18 +860,18 @@ mod tests {
     }
 
     #[test]
-    fn test_decode_internal() {
+    fn test_decode_ids() {
         let region_metadata = test_region_metadata();
         let codec = SparsePrimaryKeyCodec::new(&region_metadata);
         let mut buffer = Vec::new();
         codec.encode_internal(42, 100, &mut buffer).unwrap();
 
-        assert_eq!((42, 100), codec.decode_internal(&buffer).unwrap());
+        assert_eq!((42, 100), codec.decode_ids(&buffer).unwrap());
 
         let mut invalid = buffer.clone();
         invalid[0..4].copy_from_slice(&1_u32.to_be_bytes());
-        assert!(codec.decode_internal(&invalid).is_err());
-        assert!(codec.decode_internal(&buffer[..buffer.len() - 1]).is_err());
+        assert!(codec.decode_ids(&invalid).is_err());
+        assert!(codec.decode_ids(&buffer[..buffer.len() - 1]).is_err());
     }
 
     #[test]

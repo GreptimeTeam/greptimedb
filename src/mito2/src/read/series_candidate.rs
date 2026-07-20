@@ -70,6 +70,7 @@ pub(crate) struct MetricSeriesId {
 pub(crate) type MetricSeriesIdStream = BoxStream<'static, Result<Vec<MetricSeriesId>>>;
 
 /// Builds candidate metric series from the ranges assigned to a [`SeriesScan`](super::series_scan::SeriesScan).
+#[allow(dead_code)]
 pub(crate) struct SeriesCandidateScanner {
     stream_ctx: Arc<StreamContext>,
     partitions: Vec<Vec<PartitionRange>>,
@@ -80,6 +81,7 @@ pub(crate) struct SeriesCandidateScanner {
     part_metrics: PartitionMetrics,
 }
 
+#[allow(dead_code)]
 impl SeriesCandidateScanner {
     /// Creates a candidate-series scanner for native memtable and SST ranges.
     ///
@@ -480,7 +482,9 @@ fn decode_metric_series(
                 last_primary_key.clear();
                 last_primary_key.extend_from_slice(primary_key);
 
-                let (table_id, tsid) = codec.decode_internal(primary_key).context(crate::error::DecodeSnafu)?;
+                let (table_id, tsid) = codec
+                    .decode_ids(primary_key)
+                    .context(crate::error::DecodeSnafu)?;
                 let series = MetricSeriesId { table_id, tsid };
                 if last_series == Some(series) {
                     continue;
