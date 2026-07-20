@@ -1,0 +1,8 @@
+name = "legacy_json2_variant_payload"
+reason = "Verify current binaries can read JSON2 variant payloads written by old binaries after the JSON2 encoding change."
+introduced_by = "PR #8435"
+topologies = ["distributed"]
+from_range = ["=v1.1.0", "=v1.1.1", "=v1.1.2"]
+to_range = [">v1.1.1"]
+features = ["json", "json2", "table", "read"]
+owner = "query"

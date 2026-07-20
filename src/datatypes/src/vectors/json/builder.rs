@@ -19,17 +19,17 @@ use arrow_schema::DataType;
 
 use crate::data_type::ConcreteDataType;
 use crate::error::{Result, TryFromValueSnafu, UnexpectedSnafu, UnsupportedOperationSnafu};
-use crate::json::value::{JsonNumber, JsonValue, JsonVariant};
+use crate::json::value::{JsonNumber, JsonVariant, encode_json_variant};
 use crate::prelude::{ValueRef, Vector, VectorRef};
 use crate::types::StructType;
 use crate::types::json_type::{JsonNativeType, is_include};
-use crate::value::{ListValueRef, StructValueRef};
+use crate::value::{ListValue, StructValue, StructValueRef, Value};
 use crate::vectors::{MutableVector, StructVectorBuilder};
 
 #[derive(Clone)]
 pub(crate) struct JsonVectorBuilder {
     merged_type: JsonNativeType,
-    values: Vec<JsonValue>,
+    values: Vec<JsonVariant>,
 }
 
 impl JsonVectorBuilder {
@@ -56,23 +56,22 @@ impl JsonVectorBuilder {
 
         let mut builder =
             StructVectorBuilder::with_type_and_capacity(struct_type.clone(), self.values.len());
-        for value in self.values.iter_mut() {
-            if value.is_null() {
+        for value in std::mem::take(&mut self.values) {
+            if matches!(&value, JsonVariant::Null) {
                 builder.push_null();
                 continue;
             }
-            value.try_align(&self.merged_type)?;
-            let value_ref = json_variant_to_struct_value_ref(value.variant(), struct_type.clone())?;
-            builder.push_struct_value_ref(value_ref)?;
+            let value = json_variant_into_struct_value(value, struct_type.clone())?;
+            builder.push_struct_value_ref(StructValueRef::Ref(&value))?;
         }
         Ok(builder.to_vector())
     }
 }
 
-fn json_variant_to_struct_value_ref(
-    value: &JsonVariant,
+fn json_variant_into_struct_value(
+    value: JsonVariant,
     struct_type: StructType,
-) -> Result<StructValueRef<'_>> {
+) -> Result<StructValue> {
     let JsonVariant::Object(object) = value else {
         return TryFromValueSnafu {
             reason: format!("expected json object value, got {value:?}"),
@@ -80,63 +79,87 @@ fn json_variant_to_struct_value_ref(
         .fail();
     };
 
-    let values = struct_type
-        .fields()
-        .iter()
-        .map(|field| {
-            object
-                .get(field.name())
-                .map(|v| json_variant_to_value_ref(v, field.data_type()))
-                .unwrap_or(Ok(ValueRef::Null))
-        })
-        .collect::<Result<Vec<_>>>()?;
+    let mut entries = object.into_iter();
+    let mut entry = entries.next();
+    let mut values = Vec::with_capacity(struct_type.fields().len());
+    for field in struct_type.fields().iter() {
+        let value = match entry.take() {
+            Some((name, value)) if name == field.name() => {
+                entry = entries.next();
+                json_variant_into_value(value, field.data_type())?
+            }
+            Some((name, _)) if name.as_str() < field.name() => {
+                return TryFromValueSnafu {
+                    reason: format!("field {name} is missing from merged JSON type"),
+                }
+                .fail();
+            }
+            next => {
+                entry = next;
+                Value::Null
+            }
+        };
+        values.push(value);
+    }
+    if let Some((name, _)) = entry {
+        return TryFromValueSnafu {
+            reason: format!("field {name} is missing from merged JSON type"),
+        }
+        .fail();
+    }
 
-    Ok(StructValueRef::RefList {
-        val: values,
-        fields: struct_type,
-    })
+    Ok(StructValue::new(values, struct_type))
 }
 
-fn json_variant_to_value_ref<'a>(
-    value: &'a JsonVariant,
-    expected_type: &ConcreteDataType,
-) -> Result<ValueRef<'a>> {
-    let value = match value {
-        JsonVariant::Null => ValueRef::Null,
-        JsonVariant::Bool(x) => ValueRef::Boolean(*x),
-        JsonVariant::Number(x) => match x {
-            JsonNumber::PosInt(i) => ValueRef::UInt64(*i),
-            JsonNumber::NegInt(i) => ValueRef::Int64(*i),
-            JsonNumber::Float(f) => ValueRef::Float64(*f),
-        },
-        JsonVariant::String(x) => ValueRef::String(x),
-        JsonVariant::Array(array) => {
-            let item_type = match expected_type {
-                ConcreteDataType::List(list_type) => list_type.item_type().clone(),
-                _ => ConcreteDataType::null_datatype(),
-            };
-            let values = array
-                .iter()
-                .map(|v| json_variant_to_value_ref(v, &item_type))
-                .collect::<Result<Vec<_>>>()?;
-            ValueRef::List(ListValueRef::RefList {
-                val: values,
-                item_datatype: Arc::new(item_type),
-            })
+fn json_variant_into_value(value: JsonVariant, expected_type: &ConcreteDataType) -> Result<Value> {
+    let value = match (value, expected_type) {
+        (JsonVariant::Null, _) | (_, ConcreteDataType::Null(_)) => Value::Null,
+        (JsonVariant::Bool(x), ConcreteDataType::Boolean(_)) => Value::Boolean(x),
+        (JsonVariant::Number(JsonNumber::PosInt(x)), ConcreteDataType::UInt64(_)) => {
+            Value::UInt64(x)
         }
-        JsonVariant::Object(_) => {
-            let ConcreteDataType::Struct(struct_type) = expected_type else {
+        (JsonVariant::Number(x), ConcreteDataType::Int64(_)) => {
+            let x = match x {
+                JsonNumber::PosInt(x) => i64::try_from(x).ok(),
+                JsonNumber::NegInt(x) => Some(x),
+                JsonNumber::Float(_) => None,
+            };
+            let Some(x) = x else {
                 return TryFromValueSnafu {
-                    reason: format!("expected struct type, got {expected_type}"),
+                    reason: format!("unable to convert {x:?} to Int64"),
                 }
                 .fail();
             };
-            ValueRef::Struct(json_variant_to_struct_value_ref(
-                value,
-                struct_type.clone(),
-            )?)
+            Value::Int64(x)
         }
-        JsonVariant::Variant(x) => ValueRef::Binary(x),
+        (JsonVariant::Number(JsonNumber::PosInt(x)), ConcreteDataType::Float64(_)) => {
+            Value::Float64((x as f64).into())
+        }
+        (JsonVariant::Number(JsonNumber::NegInt(x)), ConcreteDataType::Float64(_)) => {
+            Value::Float64((x as f64).into())
+        }
+        (JsonVariant::Number(JsonNumber::Float(x)), ConcreteDataType::Float64(_)) => {
+            Value::Float64(x)
+        }
+        (JsonVariant::String(x), ConcreteDataType::String(_)) => Value::String(x.into()),
+        (JsonVariant::Array(array), ConcreteDataType::List(list_type)) => {
+            let item_type = list_type.item_type().clone();
+            let values = array
+                .into_iter()
+                .map(|v| json_variant_into_value(v, &item_type))
+                .collect::<Result<Vec<_>>>()?;
+            Value::List(ListValue::new(values, Arc::new(item_type)))
+        }
+        (value @ JsonVariant::Object(_), ConcreteDataType::Struct(struct_type)) => {
+            Value::Struct(json_variant_into_struct_value(value, struct_type.clone())?)
+        }
+        (value, ConcreteDataType::Binary(_)) => Value::from(encode_json_variant(value)?),
+        (value, expected_type) => {
+            return TryFromValueSnafu {
+                reason: format!("unable to convert json value {value:?} to {expected_type}"),
+            }
+            .fail();
+        }
     };
     Ok(value)
 }
@@ -185,13 +208,12 @@ impl MutableVector for JsonVectorBuilder {
             self.merged_type.merge(json_type);
         }
 
-        let value = JsonValue::new_with(JsonVariant::from(value.variant()), value.json_type());
-        self.values.push(value);
+        self.values.push(JsonVariant::from(value.variant()));
         Ok(())
     }
 
     fn push_null(&mut self) {
-        self.values.push(JsonValue::null())
+        self.values.push(JsonVariant::Null)
     }
 
     fn extend_slice_of(&mut self, _: &dyn Vector, _: usize, _: usize) -> Result<()> {
@@ -227,7 +249,7 @@ mod tests {
         }
 
         // Object inputs should merge into a superset schema, preserve null rows,
-        // and align conflicting nested values into Variant payloads.
+        // and project conflicting nested values into Variant payloads.
         let mut builder = JsonVectorBuilder::new(JsonNativeType::Object(Default::default()), 3);
         let first = parse_json_value(r#"{"id":1,"payload":{"name":"foo"}}"#);
         let second = parse_json_value(r#"{"id":2,"extra":true,"payload":"raw"}"#);
@@ -332,7 +354,7 @@ mod tests {
     }
 
     #[test]
-    fn test_json_variant_to_struct_value_ref() -> Result<()> {
+    fn test_json_variant_into_struct_value() -> Result<()> {
         let item_type =
             ConcreteDataType::struct_datatype(StructType::new(Arc::new(vec![StructField::new(
                 "id".to_string(),
@@ -370,8 +392,10 @@ mod tests {
                 JsonVariant::from([("name", JsonVariant::from("foo"))]),
             ),
         ]);
-        let value_ref = json_variant_to_struct_value_ref(&variant, struct_type.clone())?;
-        let value = value_ref.to_value();
+        let value = Value::Struct(json_variant_into_struct_value(
+            variant,
+            struct_type.clone(),
+        )?);
 
         assert_eq!(
             value,

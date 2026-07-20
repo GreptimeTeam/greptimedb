@@ -13,9 +13,11 @@
 // limitations under the License.
 
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use api::v1::Rows;
+use common_base::Plugins;
 use common_meta::key::SchemaMetadataManager;
 use common_meta::kv_backend::KvBackendRef;
 use object_store::util::join_path;
@@ -25,7 +27,9 @@ use store_api::storage::RegionId;
 
 use crate::config::MitoConfig;
 use crate::engine::MitoEngine;
+use crate::engine::flush_test::MockRegionHook;
 use crate::engine::listener::DropListener;
+use crate::engine::region_hook::RegionHookRef;
 use crate::test_util::{
     CreateRequestBuilder, TestEnv, build_rows_for_key, flush_region, put_rows, rows_schema,
 };
@@ -301,4 +305,76 @@ async fn test_engine_drop_region_for_custom_store_with_format(flat_format: bool)
             .await
             .unwrap()
     );
+}
+
+#[tokio::test]
+async fn test_region_hook_on_drop() {
+    common_telemetry::init_default_ut_logging();
+    let mut env = TestEnv::with_prefix("drop_hook").await;
+
+    let hook = Arc::new(MockRegionHook::new());
+    let plugins = Plugins::new();
+    plugins.insert(hook.clone() as RegionHookRef);
+
+    let engine = env
+        .create_engine_with_plugins(MitoConfig::default(), plugins)
+        .await;
+
+    let region_id = RegionId::new(1, 1);
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            region_id.table_id(),
+            "test_table",
+            "test_catalog",
+            "test_schema",
+            None,
+            env.get_kv_backend(),
+        )
+        .await;
+
+    let request = CreateRequestBuilder::new().build();
+    let column_schemas = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    // Put some rows so the region has active data (kept in memtable; we
+    // intentionally do not flush so the drop GC worker finds no parquet files
+    // and removes the directory immediately, avoiding the multi-minute GC wait).
+    let rows = Rows {
+        schema: column_schemas,
+        rows: build_rows_for_key("a", 0, 2, 0),
+    };
+    put_rows(&engine, region_id, rows).await;
+
+    // Sanity: nothing fired yet besides the open from create.
+    assert_eq!(hook.opened_count.load(Ordering::Relaxed), 1);
+    assert_eq!(hook.dropped_count.load(Ordering::Relaxed), 0);
+    assert_eq!(hook.closed_count.load(Ordering::Relaxed), 0);
+
+    // full drop (partial_drop = false) so the GC worker physically deletes the
+    // directory and fires on_region_files_removed.
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Drop(RegionDropRequest {
+                fast_path: false,
+                force: false,
+                partial_drop: false,
+            }),
+        )
+        .await
+        .unwrap();
+
+    // on_region_dropped fires inline while handling the drop request.
+    hook.wait_for_dropped().await;
+    assert_eq!(hook.dropped_count.load(Ordering::Relaxed), 1);
+    // Drop must not be confused with close.
+    assert_eq!(hook.closed_count.load(Ordering::Relaxed), 0);
+
+    // on_region_files_removed fires from the background GC worker once the
+    // directory is physically deleted.
+    hook.wait_for_files_removed().await;
+    assert_eq!(hook.files_removed_count.load(Ordering::Relaxed), 1);
 }

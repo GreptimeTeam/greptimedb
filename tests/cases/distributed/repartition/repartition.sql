@@ -10,6 +10,7 @@ CREATE TABLE alter_repartition_table(
   device_id >= 200
 );
 
+-- Repartition requires metasrv GC. Verify split requests are rejected when it is disabled.
 ALTER TABLE alter_repartition_table REPARTITION (
   device_id < 100
 ) INTO (
@@ -19,9 +20,10 @@ ALTER TABLE alter_repartition_table REPARTITION (
 
 SHOW CREATE TABLE alter_repartition_table;
 
+-- Repartition requires metasrv GC. Verify split requests are rejected when it is disabled.
 ALTER TABLE alter_repartition_table MERGE PARTITION (
-  device_id < 100 AND area < 'South',
-  device_id < 100 AND area >= 'South'
+  device_id < 100,
+  device_id >= 100 AND device_id < 200,
 );
 
 SHOW CREATE TABLE alter_repartition_table;
@@ -109,7 +111,7 @@ WITH (
     on_physical_table = "metric_physical_table"
 );
 
--- Split physical table partition
+-- Repartition requires metasrv GC. Verify split requests are rejected when it is disabled.
 ALTER TABLE metric_physical_table SPLIT PARTITION (
     host < 'h1'
 ) INTO (
@@ -126,10 +128,10 @@ SELECT * FROM logical_table_v1;
 
 SELECT * FROM logical_table_v2;
 
--- Merge physical table partition
+-- Repartition requires metasrv GC. Verify split requests are rejected when it is disabled.
 ALTER TABLE metric_physical_table MERGE PARTITION (
-    host < 'h0',
-    host >= 'h0' AND host < 'h1'
+    host < 'h1',
+    host >= 'h1' AND host < 'h2'
 );
 
 SHOW CREATE TABLE metric_physical_table;

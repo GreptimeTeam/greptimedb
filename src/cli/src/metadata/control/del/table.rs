@@ -118,7 +118,13 @@ impl TableMetadataDeleter {
         .map_err(BoxedError::new)?;
 
         self.table_metadata_manager
-            .delete_table_metadata(table_id, &table_name, &table_route, &region_wal_options)
+            .delete_table_metadata(
+                table_id,
+                &table_name,
+                &table_route,
+                &region_wal_options,
+                None,
+            )
             .await
             .map_err(BoxedError::new)?;
         Ok(())

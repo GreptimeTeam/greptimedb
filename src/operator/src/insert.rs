@@ -107,7 +107,7 @@ pub enum AutoCreateTableType {
     /// A table that merges rows by `last_non_null` strategy.
     LastNonNull,
     /// Create table that build index and default partition rules on trace_id
-    Trace,
+    Trace { alter_existing: bool },
 }
 
 impl AutoCreateTableType {
@@ -117,8 +117,17 @@ impl AutoCreateTableType {
             AutoCreateTableType::Physical => "physical",
             AutoCreateTableType::Log => "log",
             AutoCreateTableType::LastNonNull => "last_non_null",
-            AutoCreateTableType::Trace => "trace",
+            AutoCreateTableType::Trace { .. } => "trace",
         }
+    }
+
+    fn alter_existing(&self) -> bool {
+        !matches!(
+            self,
+            Self::Trace {
+                alter_existing: false
+            }
+        )
     }
 }
 
@@ -214,7 +223,9 @@ impl Inserter {
             requests,
             ctx,
             statement_executor,
-            AutoCreateTableType::Trace,
+            AutoCreateTableType::Trace {
+                alter_existing: true,
+            },
             false,
             false,
         )
@@ -503,6 +514,39 @@ impl Inserter {
         })
     }
 
+    /// Ensures a trace table has the request-global schema without requiring a
+    /// padded data row to drive on-demand creation or alteration. When
+    /// `alter_existing` is false, a table created after planning is left for the
+    /// caller to re-plan.
+    pub async fn ensure_trace_table_on_demand(
+        &self,
+        table_name: &str,
+        request_schema: Vec<ColumnSchema>,
+        alter_existing: bool,
+        ctx: &QueryContextRef,
+        statement_executor: &StatementExecutor,
+    ) -> Result<()> {
+        let mut requests = RowInsertRequests {
+            inserts: vec![RowInsertRequest {
+                table_name: table_name.to_string(),
+                rows: Some(api::v1::Rows {
+                    schema: request_schema,
+                    rows: Vec::new(),
+                }),
+            }],
+        };
+        self.create_or_alter_tables_on_demand(
+            &mut requests,
+            ctx,
+            AutoCreateTableType::Trace { alter_existing },
+            statement_executor,
+            false,
+            false,
+        )
+        .await?;
+        Ok(())
+    }
+
     /// Creates or alter tables on demand:
     /// - if table does not exist, create table by inferred CreateExpr
     /// - if table exist, check if schema matches. If any new column found, alter table by inferred `AlterExpr`
@@ -575,6 +619,7 @@ impl Inserter {
                         ctx,
                         accommodate_existing_schema,
                         is_single_value,
+                        auto_create_table_type.alter_existing(),
                     )? {
                         alter_tables.push(alter_expr);
                         need_refresh_table_infos.insert((
@@ -639,7 +684,7 @@ impl Inserter {
                 }
             }
 
-            AutoCreateTableType::Trace => {
+            AutoCreateTableType::Trace { .. } => {
                 let trace_table_name = ctx
                     .extension(TRACE_TABLE_NAME_SESSION_KEY)
                     .unwrap_or(TRACE_TABLE_NAME);
@@ -904,7 +949,12 @@ impl Inserter {
         ctx: &QueryContextRef,
         accommodate_existing_schema: bool,
         is_single_value: bool,
+        alter_existing: bool,
     ) -> Result<Option<AlterTableExpr>> {
+        if !alter_existing {
+            return Ok(None);
+        }
+
         let catalog_name = ctx.current_catalog();
         let schema_name = ctx.current_schema();
         let table_name = table.table_info().name.clone();
@@ -1187,7 +1237,7 @@ pub fn fill_table_options_for_create(
                 table_options.insert(MERGE_MODE_KEY.to_string(), "last_non_null".to_string());
             }
         }
-        AutoCreateTableType::Trace => {
+        AutoCreateTableType::Trace { .. } => {
             table_options.insert(APPEND_MODE_KEY.to_string(), "true".to_string());
         }
     }
@@ -1473,8 +1523,15 @@ mod tests {
             )),
             true,
         );
+        // Do not apply an absent-table plan to a table that appeared concurrently.
+        assert!(
+            inserter
+                .get_alter_table_expr_on_demand(&mut req, &table, &ctx, false, false, false)
+                .unwrap()
+                .is_none()
+        );
         let alter_expr = inserter
-            .get_alter_table_expr_on_demand(&mut req, &table, &ctx, true, true)
+            .get_alter_table_expr_on_demand(&mut req, &table, &ctx, true, true, true)
             .unwrap();
         assert!(alter_expr.is_none());
 

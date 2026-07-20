@@ -121,6 +121,7 @@ impl HeartbeatTask {
 
     pub async fn create_streams(
         meta_client: &MetaClient,
+        local_gc_enabled: bool,
         running: Arc<AtomicBool>,
         handler_executor: HeartbeatResponseHandlerExecutorRef,
         mailbox: MailboxRef,
@@ -129,6 +130,13 @@ impl HeartbeatTask {
     ) -> Result<(HeartbeatSender, HeartbeatConfig)> {
         let client_id = meta_client.id();
         let (tx, mut rx, config) = meta_client.heartbeat().await.context(MetaClientInitSnafu)?;
+        if config.gc_enabled != local_gc_enabled {
+            return error::GcConfigMismatchSnafu {
+                metasrv_gc_enabled: config.gc_enabled,
+                datanode_gc_enabled: local_gc_enabled,
+            }
+            .fail();
+        }
 
         let mut last_received_lease = Instant::now();
 
@@ -220,9 +228,17 @@ impl HeartbeatTask {
         let mailbox = Arc::new(HeartbeatMailbox::new(outgoing_tx));
 
         let quit_signal = Arc::new(Notify::new());
+        let local_gc_enabled = self
+            .region_server
+            .mito_engine()
+            .context(RegionEngineNotFoundSnafu { name: "mito" })?
+            .mito_config()
+            .gc
+            .enable;
 
         let (mut tx, config) = Self::create_streams(
             &meta_client,
+            local_gc_enabled,
             running.clone(),
             handler_executor.clone(),
             mailbox.clone(),
@@ -368,6 +384,7 @@ impl HeartbeatTask {
                         error!(e; "Failed to send heartbeat to metasrv");
                         match Self::create_streams(
                             &meta_client,
+                            local_gc_enabled,
                             running.clone(),
                             handler_executor.clone(),
                             mailbox.clone(),

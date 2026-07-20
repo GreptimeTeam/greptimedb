@@ -1236,6 +1236,7 @@ impl ManifestContext {
             action_list_for_hook,
             version,
             self.hook.clone(),
+            is_staging,
         ))
     }
 

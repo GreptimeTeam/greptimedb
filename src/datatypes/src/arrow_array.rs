@@ -20,6 +20,7 @@ use arrow::datatypes::{
     TimestampMicrosecondType, TimestampMillisecondType, TimestampNanosecondType,
     TimestampSecondType, UInt8Type, UInt16Type, UInt32Type, UInt64Type,
 };
+use arrow::downcast_dictionary_array;
 use arrow_array::Array;
 use common_time::time::Time;
 use common_time::{Duration, Timestamp};
@@ -134,7 +135,7 @@ pub fn duration_array_value(array: &ArrayRef, i: usize) -> Duration {
     Duration::new(v, time_unit.into())
 }
 
-/// Get the string value at index `i` for `Utf8`, `LargeUtf8`, or `Utf8View` arrays.
+/// Get the string value at index `i` for string or dictionary-encoded string arrays.
 ///
 /// Returns `None` when the array type is not a string type or the value is null.
 ///
@@ -154,6 +155,14 @@ pub fn string_array_value_at_index(array: &ArrayRef, i: usize) -> Option<&str> {
         DataType::Utf8View => {
             let array = array.as_string_view();
             array.is_valid(i).then(|| array.value(i))
+        }
+        DataType::Dictionary(key_type, value_type)
+            if key_type.is_integer() && value_type.is_string() =>
+        {
+            downcast_dictionary_array! {
+                array => string_array_value_at_index(array.values(), array.key(i)?),
+                _ => None,
+            }
         }
         _ => None,
     }
@@ -249,5 +258,41 @@ pub fn int_array_value_at_index(array: &ArrayRef, i: usize) -> Option<i64> {
                 .flatten()
         }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use arrow::array::StringDictionaryBuilder;
+    use arrow::datatypes::ArrowDictionaryKeyType;
+
+    use super::*;
+
+    fn assert_dictionary_key_type<K: ArrowDictionaryKeyType>() {
+        let mut builder = StringDictionaryBuilder::<K>::new();
+        builder.append("foo").unwrap();
+        builder.append("bar").unwrap();
+        builder.append("foo").unwrap();
+        builder.append_null();
+        let array: ArrayRef = Arc::new(builder.finish());
+
+        assert_eq!(Some("foo"), string_array_value_at_index(&array, 0));
+        assert_eq!(Some("bar"), string_array_value_at_index(&array, 1));
+        assert_eq!(Some("foo"), string_array_value_at_index(&array, 2));
+        assert_eq!(None, string_array_value_at_index(&array, 3));
+    }
+
+    #[test]
+    fn reads_dictionary_encoded_strings_with_all_key_types() {
+        assert_dictionary_key_type::<Int8Type>();
+        assert_dictionary_key_type::<Int16Type>();
+        assert_dictionary_key_type::<Int32Type>();
+        assert_dictionary_key_type::<Int64Type>();
+        assert_dictionary_key_type::<UInt8Type>();
+        assert_dictionary_key_type::<UInt16Type>();
+        assert_dictionary_key_type::<UInt32Type>();
+        assert_dictionary_key_type::<UInt64Type>();
     }
 }

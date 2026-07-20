@@ -17,7 +17,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use arrow::datatypes::{DataType, IntervalDayTime, TimeUnit};
-use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MITO_ENGINE};
 use common_error::ext::BoxedError;
 use common_function::aggrs::aggr_wrapper::{StateMergeHelper, StateWrapper};
 use common_recordbatch::adapter::RecordBatchMetrics;
@@ -285,6 +285,91 @@ impl Stream for EmptyStream {
     fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         Poll::Ready(None)
     }
+}
+
+fn find_merge_scan(plan: &LogicalPlan) -> Option<&MergeScanLogicalPlan> {
+    if let LogicalPlan::Extension(extension) = plan
+        && let Some(merge_scan) = extension
+            .node
+            .as_any()
+            .downcast_ref::<MergeScanLogicalPlan>()
+    {
+        return Some(merge_scan);
+    }
+
+    plan.inputs().into_iter().find_map(find_merge_scan)
+}
+
+#[test]
+fn dictionary_literals_are_unwrapped_before_pushdown() {
+    let table = Arc::new(Table::new(
+        TestTable::table_info(0, "t".to_string(), MITO_ENGINE.to_string()),
+        FilterPushDownType::Inexact,
+        Arc::new(TestDataSource::new(TestTable::schema())),
+    ));
+    let table_source = Arc::new(DefaultTableSource::new(Arc::new(
+        DfTableProviderAdapter::new(table),
+    )));
+    let literal = Expr::Literal(
+        ScalarValue::Dictionary(
+            Box::new(DataType::UInt32),
+            Box::new(ScalarValue::Utf8(Some("host-a".to_string()))),
+        ),
+        None,
+    );
+    let plan = LogicalPlanBuilder::scan_with_filters("t", table_source, None, vec![])
+        .unwrap()
+        .filter(col("pk1").eq(literal))
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let result = DistPlannerAnalyzer {}
+        .analyze(plan, &ConfigOptions::default())
+        .unwrap();
+    assert!(
+        result
+            .to_string()
+            .contains("Filter: t.pk1 = Utf8(\"host-a\")")
+    );
+
+    let remote_input = find_merge_scan(&result).unwrap().input();
+    assert!(
+        remote_input
+            .to_string()
+            .contains("partial_filters=[t.pk1 = Utf8(\"host-a\")]")
+    );
+    DFLogicalSubstraitConvertor
+        .encode(remote_input, DefaultSerializer)
+        .unwrap();
+}
+
+#[test]
+fn dictionary_literals_in_values_keep_their_schema() {
+    let literal = Expr::Literal(
+        ScalarValue::Dictionary(
+            Box::new(DataType::UInt32),
+            Box::new(ScalarValue::Utf8(Some("host-a".to_string()))),
+        ),
+        None,
+    );
+    let plan = LogicalPlanBuilder::values(vec![vec![literal]])
+        .unwrap()
+        .build()
+        .unwrap();
+    let schema = plan.schema().clone();
+
+    let transformed = plan
+        .transform_down_with_subqueries(&unwrap_dictionary_literals)
+        .unwrap()
+        .data;
+
+    assert_eq!(&schema, transformed.schema());
+    assert!(
+        transformed
+            .to_string()
+            .contains("Dictionary(UInt32, Utf8(\"host-a\"))")
+    );
 }
 
 #[cfg(feature = "vector_index")]

@@ -169,6 +169,9 @@ impl StatementExecutor {
         location: &str,
         connection: &HashMap<String, String>,
     ) -> Result<usize> {
+        let output = output
+            .map_dictionary_to_values()
+            .context(error::BuildRecordBatchSnafu)?;
         let stream = match output.data {
             OutputData::Stream(stream) => stream,
             OutputData::RecordBatches(record_batches) => record_batches.as_stream(),

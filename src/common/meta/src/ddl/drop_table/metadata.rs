@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use common_catalog::consts::FILE_ENGINE;
 use common_catalog::format_full_table_name;
 use snafu::{OptionExt, ensure};
 use store_api::metric_engine_consts::METRIC_ENGINE_NAME;
@@ -49,7 +50,7 @@ impl DropTableProcedure {
         );
         // TODO(hl): support soft-dropping logical tables.
         ensure!(
-            !(self.context.soft_drop_enabled
+            !(self.data.soft_drop_enabled
                 && is_metric_engine_logical_table(
                     &table_info_value.table_info,
                     &table_route_value
@@ -61,6 +62,12 @@ impl DropTableProcedure {
 
         if physical_table_id == self.data.table_id() {
             let engine = table_info_value.table_info.meta.engine;
+            ensure!(
+                !(self.data.soft_drop_enabled && engine == FILE_ENGINE),
+                error::UnsupportedSnafu {
+                    operation: "soft-dropping file-engine tables".to_string()
+                }
+            );
             // rollback only if dropping the metric physical table fails
             self.data.allow_rollback = engine.as_str() == METRIC_ENGINE_NAME;
 

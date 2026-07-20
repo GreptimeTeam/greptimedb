@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use api::v1::CreateTableExpr;
+use common_recordbatch::map_dictionary_to_values_data_type;
 use datafusion_common::tree_node::TreeNode;
 use datafusion_expr::LogicalPlan;
 use datatypes::prelude::ConcreteDataType;
@@ -63,7 +64,9 @@ pub(super) fn create_table_with_expr(
     let mut column_schemas = Vec::new();
     for field in plan.schema().fields() {
         let name = field.name();
-        let ty = ConcreteDataType::from_arrow_type(field.data_type());
+        let ty = map_dictionary_to_values_data_type(&ConcreteDataType::from_arrow_type(
+            field.data_type(),
+        ));
         let col_schema = if first_time_stamp == Some(name.clone()) {
             ColumnSchema::new(name, ty, false).with_time_index(true)
         } else {
@@ -164,7 +167,9 @@ fn build_by_tql_schema(plan: &LogicalPlan) -> Result<TableDef, Error> {
         .fields()
         .iter()
         .filter_map(|f| {
-            if ConcreteDataType::from_arrow_type(f.data_type()).is_string() {
+            if map_dictionary_to_values_data_type(&ConcreteDataType::from_arrow_type(f.data_type()))
+                .is_string()
+            {
                 Some(f.name().clone())
             } else {
                 None
@@ -246,7 +251,14 @@ fn build_pk_from_aggr(plan: &LogicalPlan) -> Result<Option<TableDef>, Error> {
 
 #[cfg(test)]
 mod test {
+    use std::sync::Arc;
+
     use api::v1::column_def::try_as_column_schema;
+    use datafusion::arrow::datatypes::{
+        DataType as ArrowDataType, Field, Schema as ArrowSchema, TimeUnit,
+    };
+    use datafusion_common::DFSchema;
+    use datafusion_expr::logical_plan::EmptyRelation;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::ColumnSchema;
     use pretty_assertions::assert_eq;
@@ -256,6 +268,45 @@ mod test {
     use crate::adapter::{AUTO_CREATED_PLACEHOLDER_TS_COL, AUTO_CREATED_UPDATE_AT_TS_COL};
     use crate::batching_mode::utils::sql_to_df_plan;
     use crate::test_utils::create_test_query_engine;
+
+    #[test]
+    fn test_tql_dictionary_string_is_label() {
+        let arrow_schema = Arc::new(ArrowSchema::new(vec![
+            Field::new_dictionary("host", ArrowDataType::UInt32, ArrowDataType::Utf8, true),
+            Field::new("value", ArrowDataType::Float64, true),
+            Field::new(
+                "ts",
+                ArrowDataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+        ]));
+        let plan = LogicalPlan::EmptyRelation(EmptyRelation {
+            produce_one_row: false,
+            schema: Arc::new(DFSchema::try_from(arrow_schema).unwrap()),
+        });
+
+        let expr = create_table_with_expr(
+            &plan,
+            &[
+                "greptime".to_string(),
+                "public".to_string(),
+                "sink".to_string(),
+            ],
+            &QueryType::Tql,
+        )
+        .unwrap();
+        let columns = expr
+            .column_defs
+            .iter()
+            .map(|column| try_as_column_schema(column).unwrap())
+            .collect::<Vec<_>>();
+
+        assert_eq!(vec!["host".to_string()], expr.primary_keys);
+        assert_eq!("ts", expr.time_index);
+        assert_eq!(ConcreteDataType::string_datatype(), columns[0].data_type);
+        assert_eq!(ConcreteDataType::float64_datatype(), columns[1].data_type);
+        assert!(columns[2].is_time_index());
+    }
 
     #[tokio::test]
     async fn test_gen_create_table_sql() {

@@ -42,10 +42,11 @@ use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use tokio_stream::StreamExt;
 
 use crate::error::{
-    self, ConvertFlightDataSnafu, FlightGetSnafu, IllegalDatabaseResponseSnafu,
-    IllegalFlightMessagesSnafu, MissingFieldSnafu, Result, ServerSnafu,
+    self, FlightGetSnafu, IllegalDatabaseResponseSnafu, IllegalFlightMessagesSnafu,
+    MissingFieldSnafu, Result, ServerSnafu,
 };
-use crate::{Client, Error, metrics};
+use crate::flight::decode_flight_data;
+use crate::{Client, metrics};
 
 #[derive(Debug)]
 pub struct RegionRequester {
@@ -128,14 +129,8 @@ impl RegionRequester {
         let flight_data_stream = response.into_inner();
         let mut decoder = FlightDecoder::default();
 
-        let mut flight_message_stream = flight_data_stream.map(move |flight_data| {
-            flight_data
-                .map_err(Error::from)
-                .and_then(|data| decoder.try_decode(&data).context(ConvertFlightDataSnafu))?
-                .context(IllegalFlightMessagesSnafu {
-                    reason: "none message",
-                })
-        });
+        let mut flight_message_stream = flight_data_stream
+            .filter_map(move |flight_data| decode_flight_data(&mut decoder, flight_data));
 
         let Some(first_flight_message) = flight_message_stream.next().await else {
             return IllegalFlightMessagesSnafu {

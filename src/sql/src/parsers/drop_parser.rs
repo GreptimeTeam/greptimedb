@@ -20,11 +20,34 @@ use crate::error::{self, InvalidFlowNameSnafu, InvalidTableNameSnafu, Result};
 use crate::parser::{FLOW, ParserContext};
 #[cfg(feature = "enterprise")]
 use crate::statements::drop::trigger::DropTrigger;
-use crate::statements::drop::{DropDatabase, DropFlow, DropTable, DropView};
+use crate::statements::drop::{DropDatabase, DropFlow, DropTable, DropView, UndropTable};
 use crate::statements::statement::Statement;
 
 /// DROP statement parser implementation
 impl ParserContext<'_> {
+    pub(crate) fn parse_undrop_table(&mut self) -> Result<Statement> {
+        let _ = self.parser.next_token();
+        if !self.parser.parse_keyword(Keyword::TABLE) {
+            return self.expected("TABLE", self.parser.peek_token());
+        }
+
+        let raw_table_name = self
+            .parse_object_name()
+            .with_context(|_| error::UnexpectedSnafu {
+                expected: "a table name",
+                actual: self.peek_token_as_string(),
+            })?;
+        let table_name = Self::canonicalize_object_name(raw_table_name)?;
+        ensure!(
+            !table_name.0.is_empty(),
+            InvalidTableNameSnafu {
+                name: table_name.to_string()
+            }
+        );
+
+        Ok(Statement::UndropTable(UndropTable::new(table_name)))
+    }
+
     pub(crate) fn parse_drop(&mut self) -> Result<Statement> {
         let _ = self.parser.next_token();
         match self.parser.peek_token().token {
@@ -171,6 +194,65 @@ mod tests {
     use super::*;
     use crate::dialect::GreptimeDbDialect;
     use crate::parser::ParseOptions;
+    use crate::statements::drop::UndropTable;
+
+    #[test]
+    fn test_undrop_table() {
+        let cases = [
+            ("UNDROP TABLE foo", "foo"),
+            ("undrop table my_schema.FOO", "my_schema.foo"),
+            (
+                "UnDrOp TaBlE my_catalog.my_schema.foo",
+                "my_catalog.my_schema.foo",
+            ),
+            (
+                "UNDROP TABLE `My Catalog`.`My Schema`.`My Table`",
+                "`My Catalog`.`My Schema`.`My Table`",
+            ),
+        ];
+
+        for (sql, expected_name) in cases {
+            let mut stmts = ParserContext::create_with_dialect(
+                sql,
+                &GreptimeDbDialect {},
+                ParseOptions::default(),
+            )
+            .unwrap();
+            let stmt = stmts.pop().unwrap();
+            assert_eq!(
+                stmt,
+                Statement::UndropTable(UndropTable::new(
+                    ParserContext::parse_table_name(expected_name, &GreptimeDbDialect {}).unwrap()
+                ))
+            );
+            assert_eq!(format!("UNDROP TABLE {expected_name}"), stmt.to_string());
+            assert!(!stmt.is_readonly());
+        }
+    }
+
+    #[test]
+    fn test_undrop_table_rejects_unsupported_syntax() {
+        for sql in [
+            "UNDROP",
+            "UNDROP foo",
+            "UNDROP TABLE",
+            "UNDROP TABLE IF EXISTS foo",
+            "UNDROP TABLE foo, bar",
+            "UNDROP TABLE foo bar",
+            "UNDROP TABLE foo RENAME TO bar",
+            "UNDROP TABLE foo AT '2026-01-01'",
+        ] {
+            assert!(
+                ParserContext::create_with_dialect(
+                    sql,
+                    &GreptimeDbDialect {},
+                    ParseOptions::default(),
+                )
+                .is_err(),
+                "unexpectedly parsed: {sql}"
+            );
+        }
+    }
 
     #[test]
     pub fn test_drop_table() {

@@ -269,6 +269,28 @@ impl RecordBatch {
             .sum()
     }
 
+    /// Returns the logical memory size of this batch's array slices.
+    ///
+    /// This sums Arrow's logical visible slice buffers rather than the capacity of their shared
+    /// backing buffers. View out-of-line payloads and nested custom payloads are not separately
+    /// traversed or accounted. It is not an exact measure of live physical memory. If Arrow cannot
+    /// calculate a slice's size, the full buffer size is used conservatively.
+    ///
+    /// Mito's current scan paths do not produce top-level View arrays. If they do in the future,
+    /// their out-of-line payload accounting must be reassessed here.
+    pub fn logical_slice_memory_size(&self) -> usize {
+        self.df_record_batch
+            .columns()
+            .iter()
+            .fold(0, |total, array| {
+                let array_size = array
+                    .to_data()
+                    .get_slice_memory_size()
+                    .unwrap_or_else(|_| array.get_buffer_memory_size());
+                total.saturating_add(array_size)
+            })
+    }
+
     /// Iterate the values as strings in the column at index `i`.
     ///
     /// Note that if the underlying array is not a valid GreptimeDB vector, an empty iterator is
@@ -382,13 +404,14 @@ fn maybe_align_json_array_with_schema(
 mod tests {
     use std::sync::Arc;
 
-    use datatypes::arrow::array::{AsArray, BinaryArray, UInt32Array};
+    use datatypes::arrow::array::{
+        AsArray, BinaryArray, StringArray, StringViewArray, UInt32Array,
+    };
     use datatypes::arrow::datatypes::{DataType, Field, Schema as ArrowSchema, UInt32Type};
-    use datatypes::arrow_array::StringArray;
     use datatypes::data_type::ConcreteDataType;
     use datatypes::extension::json::{JsonExtensionType, JsonMetadata};
     use datatypes::schema::{ColumnSchema, Schema};
-    use datatypes::vectors::{StringVector, UInt32Vector};
+    use datatypes::vectors::{BinaryVector, StringVector, UInt32Vector};
 
     use super::*;
 
@@ -473,6 +496,97 @@ mod tests {
         assert_eq!(expected, actual);
 
         assert!(recordbatch.slice(1, 5).is_err());
+    }
+
+    #[test]
+    fn test_logical_slice_memory_size_for_visible_primitive_string_binary_slices() {
+        let schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new("numbers", ConcreteDataType::uint32_datatype(), false),
+            ColumnSchema::new("strings", ConcreteDataType::string_datatype(), true),
+            ColumnSchema::new("binary", ConcreteDataType::binary_datatype(), true),
+        ]));
+        let numbers: Vec<_> = (0..1024).collect();
+        let strings = (0..1024)
+            .map(|value| (value % 3 != 0).then(|| format!("value-{value}")))
+            .collect::<Vec<_>>();
+        let binary = (0_u32..1024)
+            .map(|value| (value % 3 != 0).then(|| value.to_le_bytes().to_vec()))
+            .collect::<Vec<_>>();
+        let columns: Vec<VectorRef> = vec![
+            Arc::new(UInt32Vector::from_slice(numbers)),
+            Arc::new(StringVector::from(strings)),
+            Arc::new(BinaryVector::from(binary)),
+        ];
+        let batch = RecordBatch::new(schema, columns).unwrap();
+        let slice = batch.slice(511, 3).unwrap();
+
+        assert!(slice.columns().iter().any(|column| column.null_count() > 0));
+        assert!(slice.logical_slice_memory_size() < slice.buffer_memory_size());
+        assert_eq!(
+            slice.logical_slice_memory_size(),
+            slice
+                .columns()
+                .iter()
+                .map(|column| column.to_data().get_slice_memory_size().unwrap())
+                .sum::<usize>()
+        );
+    }
+
+    #[test]
+    fn test_logical_slice_memory_size_for_many_shared_buffer_slices() {
+        let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
+            "strings",
+            ConcreteDataType::string_datatype(),
+            false,
+        )]));
+        let strings = (0..1024)
+            .map(|value| format!("shared-value-{value}"))
+            .collect::<Vec<_>>();
+        let backing = RecordBatch::new(
+            schema,
+            vec![Arc::new(StringVector::from(strings)) as VectorRef],
+        )
+        .unwrap();
+        let slices = (0..128)
+            .map(|index| backing.slice(index * 4, 2).unwrap())
+            .collect::<Vec<_>>();
+        let logical_total = slices
+            .iter()
+            .map(RecordBatch::logical_slice_memory_size)
+            .sum::<usize>();
+        let buffer_total = slices
+            .iter()
+            .map(RecordBatch::buffer_memory_size)
+            .sum::<usize>();
+
+        assert!(logical_total < buffer_total);
+        assert!(slices.iter().all(|slice| {
+            slice.logical_slice_memory_size()
+                == slice.column(0).to_data().get_slice_memory_size().unwrap()
+        }));
+    }
+
+    #[test]
+    fn test_logical_slice_memory_size_uses_arrow_slice_scope_for_views() {
+        let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
+            "strings",
+            ConcreteDataType::utf8_view_datatype(),
+            false,
+        )]));
+        let columns: Vec<VectorRef> =
+            vec![Arc::new(StringVector::from(StringViewArray::from(vec![
+                "unrelated backing payload",
+                "visible string view payload",
+            ])))];
+        let batch = RecordBatch::new(schema, columns)
+            .unwrap()
+            .slice(1, 1)
+            .unwrap();
+
+        assert_eq!(
+            batch.column(0).to_data().get_slice_memory_size().unwrap(),
+            batch.logical_slice_memory_size()
+        );
     }
 
     #[test]

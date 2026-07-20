@@ -49,7 +49,7 @@ use common_telemetry::{error, warn};
 use futures::future;
 use futures_util::{Stream, StreamExt, TryStreamExt};
 use prost::Message;
-use snafu::{OptionExt, ResultExt};
+use snafu::ResultExt;
 use tonic::metadata::{AsciiMetadataKey, AsciiMetadataValue, MetadataMap, MetadataValue};
 use tonic::transport::Channel;
 
@@ -57,6 +57,7 @@ use crate::error::{
     ConvertFlightDataSnafu, Error, FlightGetSnafu, IllegalFlightMessagesSnafu,
     InvalidTonicMetadataValueSnafu,
 };
+use crate::flight::decode_flight_data;
 use crate::{Client, Result, error, from_grpc_response};
 
 type FlightDataStream = Pin<Box<dyn Stream<Item = FlightData> + Send>>;
@@ -803,13 +804,8 @@ impl Database {
         let flight_data_stream = response.into_inner();
         let mut decoder = FlightDecoder::default();
 
-        let flight_message_stream = flight_data_stream.map(move |flight_data| {
-            flight_data
-                .map_err(Error::from)
-                .and_then(|data| decoder.try_decode(&data).context(ConvertFlightDataSnafu))?
-                .context(IllegalFlightMessagesSnafu {
-                    reason: "none message",
-                })
+        let flight_message_stream = flight_data_stream.filter_map(move |flight_data| {
+            future::ready(decode_flight_data(&mut decoder, flight_data))
         });
 
         output_from_flight_message_stream(flight_message_stream).await

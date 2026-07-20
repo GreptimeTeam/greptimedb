@@ -52,7 +52,7 @@ use table::predicate::Predicate;
 
 use self::stream::{NestedSchemaAligner, ProjectedRecordBatchStream};
 use crate::cache::index::result_cache::PredicateKey;
-use crate::cache::{CacheStrategy, CachedSstMeta};
+use crate::cache::{CacheStrategy, CachedSstMeta, SstMetaPreparation, prepare_sst_meta};
 #[cfg(feature = "vector_index")]
 use crate::error::ApplyVectorIndexSnafu;
 use crate::error::{
@@ -402,6 +402,7 @@ impl ParquetReaderBuilder {
             )
             .await?;
         let mut parquet_meta = sst_meta.parquet_metadata();
+        let mut parquet_metadata_size = sst_meta.parquet_metadata_size();
         let region_meta = sst_meta.region_metadata();
         let region_partition_expr_str = self
             .expected_metadata
@@ -525,6 +526,7 @@ impl ParquetReaderBuilder {
                 )
                 .await?;
             parquet_meta = sst_meta.parquet_metadata();
+            parquet_metadata_size = sst_meta.parquet_metadata_size();
             cache_miss |= page_index_cache_miss;
         }
 
@@ -572,6 +574,7 @@ impl ParquetReaderBuilder {
             file_handle: self.file_handle.clone(),
             file_path,
             parquet_meta,
+            parquet_metadata_size,
             arrow_metadata,
             output_schema,
             object_store: self.object_store.clone(),
@@ -716,18 +719,34 @@ impl ParquetReaderBuilder {
         metadata_loader.with_page_index_policy(page_index_policy);
         let metadata = metadata_loader.load(cache_metrics).await?;
 
-        let metadata = Arc::new(CachedSstMeta::try_new_with_page_index_policy(
-            file_path,
-            metadata,
-            None,
-            page_index_policy,
-        )?);
-        // Cache the metadata.
-        self.cache_strategy
-            .put_sst_meta_data(file_id, metadata.clone());
+        let decoded = if self.cache_strategy.sst_meta_cache_enabled() {
+            let metadata = prepare_sst_meta(file_path, metadata, None, page_index_policy).await?;
+            let decoded = metadata.decoded();
+            match metadata {
+                SstMetaPreparation::Prepared(metadata) => {
+                    self.cache_strategy
+                        .put_prepared_sst_meta(file_id, metadata, true);
+                }
+                SstMetaPreparation::DecodedOnly { encoding_error, .. } => {
+                    warn!(
+                        encoding_error;
+                        "Failed to encode SST metadata for cache, using decoded metadata for {}",
+                        file_path
+                    );
+                }
+            }
+            decoded
+        } else {
+            Arc::new(CachedSstMeta::try_new_with_page_index_policy(
+                file_path,
+                metadata,
+                None,
+                page_index_policy,
+            )?)
+        };
 
         cache_metrics.metadata_load_cost += start.elapsed();
-        Ok((metadata, true))
+        Ok((decoded, true))
     }
 
     /// Computes row groups to read, along with their respective row selections.
@@ -1756,6 +1775,8 @@ pub(crate) struct RowGroupReaderBuilder {
     file_path: String,
     /// Metadata of the parquet file.
     parquet_meta: Arc<ParquetMetaData>,
+    /// Immutable metadata size, computed once when the footer is decoded.
+    parquet_metadata_size: usize,
     /// Arrow reader metadata for building async stream.
     arrow_metadata: ArrowReaderMetadata,
     /// Projected output schema aligned with `projection.projected_root_presence`.
@@ -1796,6 +1817,10 @@ impl RowGroupReaderBuilder {
 
     pub(crate) fn parquet_metadata(&self) -> &Arc<ParquetMetaData> {
         &self.parquet_meta
+    }
+
+    pub(crate) fn parquet_metadata_size(&self) -> usize {
+        self.parquet_metadata_size
     }
 
     pub(crate) fn cache_strategy(&self) -> &CacheStrategy {

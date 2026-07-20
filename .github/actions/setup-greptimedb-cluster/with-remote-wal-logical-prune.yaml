@@ -3,6 +3,7 @@ logging:
   format: "json"
   filters:
   - log_store=debug
+  - rskafka=debug
 meta:
   configData: |-
     [runtime]

@@ -543,20 +543,20 @@ impl Value {
                     None
                 }
             }
-            Value::Int8(x) => Some(Value::Int8(-*x)),
-            Value::Int16(x) => Some(Value::Int16(-*x)),
-            Value::Int32(x) => Some(Value::Int32(-*x)),
-            Value::Int64(x) => Some(Value::Int64(-*x)),
+            Value::Int8(x) => x.checked_neg().map(Value::Int8),
+            Value::Int16(x) => x.checked_neg().map(Value::Int16),
+            Value::Int32(x) => x.checked_neg().map(Value::Int32),
+            Value::Int64(x) => x.checked_neg().map(Value::Int64),
             Value::Float32(x) => Some(Value::Float32(-*x)),
             Value::Float64(x) => Some(Value::Float64(-*x)),
             Value::Decimal128(x) => Some(Value::Decimal128(x.negative())),
-            Value::Date(x) => Some(Value::Date(x.negative())),
-            Value::Timestamp(x) => Some(Value::Timestamp(x.negative())),
-            Value::Time(x) => Some(Value::Time(x.negative())),
-            Value::Duration(x) => Some(Value::Duration(x.negative())),
-            Value::IntervalYearMonth(x) => Some(Value::IntervalYearMonth(x.negative())),
-            Value::IntervalDayTime(x) => Some(Value::IntervalDayTime(x.negative())),
-            Value::IntervalMonthDayNano(x) => Some(Value::IntervalMonthDayNano(x.negative())),
+            Value::Date(x) => x.checked_negative().map(Value::Date),
+            Value::Timestamp(x) => x.checked_negative().map(Value::Timestamp),
+            Value::Time(x) => x.checked_negative().map(Value::Time),
+            Value::Duration(x) => x.checked_negative().map(Value::Duration),
+            Value::IntervalYearMonth(x) => x.checked_negative().map(Value::IntervalYearMonth),
+            Value::IntervalDayTime(x) => x.checked_negative().map(Value::IntervalDayTime),
+            Value::IntervalMonthDayNano(x) => x.checked_negative().map(Value::IntervalMonthDayNano),
 
             Value::Binary(_)
             | Value::String(_)
@@ -1218,12 +1218,12 @@ impl TryFrom<ScalarValue> for Value {
                     .collect::<Result<Vec<Value>>>()?;
                 Value::Struct(StructValue::try_new(items, struct_type)?)
             }
+            ScalarValue::Dictionary(_, value) => (*value).try_into()?,
             ScalarValue::Decimal32(_, _, _)
             | ScalarValue::Decimal64(_, _, _)
             | ScalarValue::Decimal256(_, _, _)
             | ScalarValue::FixedSizeList(_)
             | ScalarValue::LargeList(_)
-            | ScalarValue::Dictionary(_, _)
             | ScalarValue::Union(_, _, _)
             | ScalarValue::Float16(_)
             | ScalarValue::Utf8View(_)
@@ -1744,6 +1744,49 @@ pub(crate) mod tests {
     use crate::types::json_type::{JsonNativeType, JsonObjectType};
     use crate::vectors::ListVectorBuilder;
 
+    #[test]
+    fn test_try_negative_overflow() {
+        // Negating a MIN value overflows, so try_negative returns None instead
+        // of panicking (consistent with the unsigned arms).
+        assert_eq!(Value::Int8(i8::MIN).try_negative(), None);
+        assert_eq!(Value::Int16(i16::MIN).try_negative(), None);
+        assert_eq!(Value::Int32(i32::MIN).try_negative(), None);
+        assert_eq!(Value::Int64(i64::MIN).try_negative(), None);
+        assert_eq!(
+            Value::Timestamp(Timestamp::new_nanosecond(i64::MIN)).try_negative(),
+            None
+        );
+        assert_eq!(Value::Date(Date::new(i32::MIN)).try_negative(), None);
+        assert_eq!(
+            Value::Time(Time::new_nanosecond(i64::MIN)).try_negative(),
+            None
+        );
+        assert_eq!(
+            Value::Duration(Duration::new_nanosecond(i64::MIN)).try_negative(),
+            None
+        );
+        assert_eq!(
+            Value::IntervalYearMonth(IntervalYearMonth::new(i32::MIN)).try_negative(),
+            None
+        );
+        assert_eq!(
+            Value::IntervalDayTime(IntervalDayTime::new(i32::MIN, i32::MIN)).try_negative(),
+            None
+        );
+        assert_eq!(
+            Value::IntervalMonthDayNano(IntervalMonthDayNano::new(i32::MIN, i32::MIN, i64::MIN))
+                .try_negative(),
+            None
+        );
+
+        // Non-MIN values still negate.
+        assert_eq!(Value::Int64(5).try_negative(), Some(Value::Int64(-5)));
+        assert_eq!(
+            Value::Timestamp(Timestamp::new_nanosecond(5)).try_negative(),
+            Some(Value::Timestamp(Timestamp::new_nanosecond(-5)))
+        );
+    }
+
     pub(crate) fn build_struct_type() -> StructType {
         StructType::new(Arc::new(vec![
             StructField::new("id".to_string(), ConcreteDataType::int32_datatype(), false),
@@ -1884,6 +1927,16 @@ pub(crate) mod tests {
                 .unwrap()
         );
         assert_eq!(Value::Null, ScalarValue::Utf8(None).try_into().unwrap());
+
+        assert_eq!(
+            Value::from("dictionary"),
+            ScalarValue::Dictionary(
+                Box::new(ArrowDataType::UInt32),
+                Box::new(ScalarValue::Utf8(Some("dictionary".to_string()))),
+            )
+            .try_into()
+            .unwrap()
+        );
 
         assert_eq!(
             Value::from("large_hello"),

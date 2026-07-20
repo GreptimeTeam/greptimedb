@@ -93,6 +93,7 @@ tokio-stream.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
 uuid.workspace = true
+zstd.workspace = true
 
 [dev-dependencies]
 common-function.workspace = true

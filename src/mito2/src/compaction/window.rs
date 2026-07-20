@@ -254,6 +254,7 @@ mod tests {
                 merge_mode: None,
                 sst_format: None,
                 primary_key_encoding: None,
+                write_buffer_size: None,
             },
             compaction_time_window: None,
         }

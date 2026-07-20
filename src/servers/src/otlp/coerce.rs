@@ -108,38 +108,35 @@ pub fn trace_value_datatype(value: &ValueData) -> Option<ColumnDataType> {
 pub fn resolve_new_trace_column_type(
     observed_types: impl IntoIterator<Item = ColumnDataType>,
 ) -> Result<Option<ColumnDataType>, TraceCoerceError> {
-    let mut observed_types = observed_types.into_iter().collect::<Vec<_>>();
-    observed_types.dedup();
-
-    match observed_types.as_slice() {
-        [] => Ok(None),
-        [datatype] => Ok(Some(*datatype)),
-        [_, _]
-            if observed_types.contains(&ColumnDataType::String)
-                && observed_types.contains(&ColumnDataType::Boolean) =>
-        {
-            Ok(Some(ColumnDataType::Boolean))
+    let mut observed = Vec::new();
+    for datatype in observed_types {
+        if !observed.contains(&datatype) {
+            observed.push(datatype);
         }
-        [_, _]
-            if observed_types.contains(&ColumnDataType::String)
-                && observed_types.contains(&ColumnDataType::Int64) =>
-        {
-            Ok(Some(ColumnDataType::Int64))
-        }
-        [_, _]
-            if observed_types.contains(&ColumnDataType::String)
-                && observed_types.contains(&ColumnDataType::Float64) =>
-        {
-            Ok(Some(ColumnDataType::Float64))
-        }
-        [_, _]
-            if observed_types.contains(&ColumnDataType::Int64)
-                && observed_types.contains(&ColumnDataType::Float64) =>
-        {
-            Ok(Some(ColumnDataType::Float64))
-        }
-        _ => Err(TraceCoerceError::Unsupported),
     }
+
+    if observed.is_empty() {
+        return Ok(None);
+    }
+    if observed.len() == 1 {
+        return Ok(observed.first().copied());
+    }
+
+    [
+        ColumnDataType::Boolean,
+        ColumnDataType::Int64,
+        ColumnDataType::Float64,
+        ColumnDataType::String,
+    ]
+    .into_iter()
+    .find(|target| {
+        observed.contains(target)
+            && observed
+                .iter()
+                .all(|source| source == target || is_supported_trace_coercion(*source, *target))
+    })
+    .map(Some)
+    .ok_or(TraceCoerceError::Unsupported)
 }
 
 #[cfg(test)]
@@ -337,7 +334,15 @@ mod tests {
                 ColumnDataType::Int64,
                 ColumnDataType::Float64,
             ]),
-            Err(TraceCoerceError::Unsupported)
+            Ok(Some(ColumnDataType::Float64))
+        );
+        assert_eq!(
+            resolve_new_trace_column_type([
+                ColumnDataType::Float64,
+                ColumnDataType::String,
+                ColumnDataType::Int64,
+            ]),
+            Ok(Some(ColumnDataType::Float64))
         );
     }
 }

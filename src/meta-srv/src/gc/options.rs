@@ -23,6 +23,29 @@ use crate::error::{self, Result};
 #[allow(unused)]
 pub(crate) const TICKER_INTERVAL: Duration = Duration::from_secs(60 * 5);
 
+/// Soft drop remains disconnected from user configuration until it is ready.
+pub(crate) const EXPERIMENTAL_SOFT_DROP_ENABLED: bool = false;
+
+/// Reserved configuration for garbage collecting soft-dropped tables.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ExperimentalSoftDropGcOptions {
+    /// Reserved. This option is currently ignored.
+    pub enable: bool,
+    /// Reserved retention duration. This option is currently ignored.
+    #[serde(with = "humantime_serde")]
+    pub retention: Duration,
+}
+
+impl Default for ExperimentalSoftDropGcOptions {
+    fn default() -> Self {
+        Self {
+            enable: false,
+            retention: Duration::from_days(7),
+        }
+    }
+}
+
 /// Configuration for GC operations.
 ///
 /// TODO(discord9): not expose most config to users for now, until GC scheduler is fully stable.
@@ -33,6 +56,8 @@ pub struct GcSchedulerOptions {
     /// If set to false, no GC will be performed, and potentially some
     /// files from datanodes will never be deleted.
     pub enable: bool,
+    /// Reserved experimental soft-drop garbage collection options.
+    pub experimental_soft_drop: ExperimentalSoftDropGcOptions,
     /// Maximum number of tables to process concurrently.
     pub max_concurrent_tables: usize,
     /// Maximum number of retries per region when GC fails.
@@ -73,6 +98,7 @@ impl Default for GcSchedulerOptions {
     fn default() -> Self {
         Self {
             enable: false,
+            experimental_soft_drop: ExperimentalSoftDropGcOptions::default(),
             max_concurrent_tables: 10,
             max_retries_per_region: 3,
             retry_backoff_duration: Duration::from_secs(5),
@@ -172,5 +198,48 @@ impl GcSchedulerOptions {
         );
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_experimental_soft_drop_defaults() {
+        let options = GcSchedulerOptions::default();
+
+        assert!(!options.experimental_soft_drop.enable);
+        assert_eq!(
+            Duration::from_days(7),
+            options.experimental_soft_drop.retention
+        );
+    }
+
+    #[test]
+    fn test_experimental_soft_drop_valid_when_gc_is_enabled() {
+        let options = GcSchedulerOptions {
+            enable: true,
+            experimental_soft_drop: ExperimentalSoftDropGcOptions {
+                enable: true,
+                retention: Duration::from_days(1),
+            },
+            ..Default::default()
+        };
+
+        assert!(options.validate().is_ok());
+    }
+
+    #[test]
+    fn test_experimental_soft_drop_options_are_ignored_by_validation() {
+        let options = GcSchedulerOptions {
+            experimental_soft_drop: ExperimentalSoftDropGcOptions {
+                enable: true,
+                retention: Duration::ZERO,
+            },
+            ..Default::default()
+        };
+
+        assert!(options.validate().is_ok());
     }
 }

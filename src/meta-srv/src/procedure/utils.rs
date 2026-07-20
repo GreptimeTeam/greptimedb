@@ -547,6 +547,7 @@ pub mod test_data {
             leader_region_registry: Arc::new(LeaderRegionRegistry::default()),
             region_failure_detector_controller: Arc::new(NoopRegionFailureDetectorControl),
             soft_drop_enabled: false,
+            soft_drop_retention: None,
         }
     }
 }
