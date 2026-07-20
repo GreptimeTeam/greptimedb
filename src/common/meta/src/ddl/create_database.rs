@@ -32,21 +32,34 @@ use crate::key::schema_name::{SchemaNameKey, SchemaNameValue};
 use crate::lock_key::{CatalogLock, SchemaLock};
 use crate::rpc::ddl::CreatorGrantIntent;
 
+/// Describes the creator-access result of an atomic create.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AtomicCreateAccess {
+    /// Added an exact `ALL` ACL entry for the new database.
     AddedExactAll,
+    /// The creator already had effective `ALL` access, so their ACL was unchanged.
     AlreadyEffectiveAll,
 }
 
+/// Outcome of atomically creating database metadata and ensuring creator access.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AtomicCreateOutcome {
+    /// This attempt created the database with the given access result.
     Created(AtomicCreateAccess),
+    /// The same create procedure committed during an earlier attempt.
     AlreadyCommitted,
+    /// The creator row changed concurrently and the operation should be retried.
     UserChanged,
+    /// The creator is missing or no longer identifies the same account generation.
     UserMissing,
+    /// A different value already exists for the database metadata.
     SchemaConflict,
 }
 
+/// Commits database metadata and any required creator access atomically.
+///
+/// Implementations classify conditional-write failures with [`AtomicCreateOutcome`] so the
+/// procedure can retry without overwriting concurrent user changes.
 #[async_trait]
 pub trait CreateDatabaseMetadataCommitter: Send + Sync {
     async fn commit(
@@ -58,8 +71,10 @@ pub trait CreateDatabaseMetadataCommitter: Send + Sync {
     ) -> std::result::Result<AtomicCreateOutcome, BoxedError>;
 }
 
+/// Shared [`CreateDatabaseMetadataCommitter`].
 pub type CreateDatabaseMetadataCommitterRef = Arc<dyn CreateDatabaseMetadataCommitter>;
 
+/// Procedure that creates a database and optionally ensures its creator has access.
 pub struct CreateDatabaseProcedure {
     pub context: DdlContext,
     pub data: CreateDatabaseData,
@@ -123,6 +138,7 @@ impl CreateDatabaseProcedure {
         let mut value: SchemaNameValue = (&self.data.options).try_into()?;
 
         if let Some(creator) = self.data.creator.as_ref() {
+            // Distinguishes a replay of this procedure from a competing create.
             value.create_procedure_id = Some(procedure_id.to_string());
             let Some(committer) = self.context.create_database_metadata_committer.as_ref() else {
                 return error::UnexpectedSnafu {
@@ -182,6 +198,7 @@ impl CreateDatabaseProcedure {
                 }
             }
 
+            // The durable transaction is complete; retry cache invalidation separately.
             self.data.state = CreateDatabaseState::InvalidateCreatorCache;
             return Ok(Status::executing(true));
         }
@@ -258,13 +275,18 @@ impl Procedure for CreateDatabaseProcedure {
     }
 }
 
+/// Persistent states of [`CreateDatabaseProcedure`].
 #[derive(Debug, Clone, Serialize, Deserialize, AsRefStr)]
 pub enum CreateDatabaseState {
+    /// Checks whether the database already exists.
     Prepare,
+    /// Creates metadata and, when supplied, ensures the creator has access atomically.
     CreateMetadata,
+    /// Invalidates the creator's cached user data after the durable commit.
     InvalidateCreatorCache,
 }
 
+/// Persistent data of [`CreateDatabaseProcedure`].
 #[serde_as]
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CreateDatabaseData {
@@ -274,6 +296,7 @@ pub struct CreateDatabaseData {
     pub create_if_not_exists: bool,
     #[serde_as(deserialize_as = "DefaultOnNull")]
     pub options: HashMap<String, String>,
+    /// Authenticated creator whose access is ensured, absent for legacy schema-only requests.
     #[serde(default)]
     pub creator: Option<CreatorGrantIntent>,
 }

@@ -309,14 +309,19 @@ impl procedure_service_server::ProcedureService for Metasrv {
     }
 }
 
+/// Restores the authenticated creator omitted from the protobuf create-database task.
+///
+/// The frontend sends the serialized [`CreatorGrantIntent`] in both a reserved query-context
+/// extension and internal gRPC metadata. This function removes the extension, requires both
+/// copies to match on a frontend create-database request, and writes the decoded intent into the
+/// task. Missing both preserves legacy and admin behavior; missing or mismatched copies fail
+/// closed.
 fn restore_create_database_creator(
     metadata: &MetadataMap,
     role: i32,
     task: &mut DdlTask,
     query_context: &mut QueryContext,
 ) -> Result<(), Status> {
-    // The body copy makes metadata loss fail closed; old frontends provide no matching
-    // internal metadata and cannot turn public hints into trusted creator context.
     let forwarded = query_context
         .extensions
         .remove(CREATE_DATABASE_CREATOR_EXTENSION_KEY);
