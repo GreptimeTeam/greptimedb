@@ -41,6 +41,63 @@ struct WriteNotify {
     num_rows: usize,
 }
 
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use common_recordbatch::DfRecordBatch;
+    use datatypes::arrow::array::{ArrayRef, TimestampMillisecondArray};
+    use datatypes::arrow::datatypes::{DataType, Field, Schema};
+    use store_api::logstore::provider::Provider;
+    use tokio::sync::oneshot;
+
+    use super::*;
+    use crate::error::UnexpectedSnafu;
+    use crate::memtable::bulk::part::BulkPart;
+    use crate::test_util::version_util::VersionControlBuilder;
+
+    #[test]
+    fn test_set_error_marks_bulk_notifiers_failed() {
+        let builder = VersionControlBuilder::new();
+        let region_id = builder.region_id();
+        let version_control = Arc::new(builder.build());
+        let mut ctx =
+            RegionWriteCtx::new(region_id, &version_control, Provider::noop_provider(), None);
+        let (tx, rx) = oneshot::channel();
+
+        assert!(ctx.push_bulk(OptionOutputTx::from(tx), new_bulk_part(), None));
+        ctx.set_error(Arc::new(
+            UnexpectedSnafu {
+                reason: "wal failed".to_string(),
+            }
+            .build(),
+        ));
+        drop(ctx);
+
+        let result = rx.blocking_recv().unwrap();
+        assert!(result.is_err(), "bulk notifier should report WAL error");
+    }
+
+    fn new_bulk_part() -> BulkPart {
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "ts",
+            DataType::Timestamp(datatypes::arrow::datatypes::TimeUnit::Millisecond, None),
+            false,
+        )]));
+        let arrays = vec![Arc::new(TimestampMillisecondArray::from(vec![1, 2])) as ArrayRef];
+        let batch = DfRecordBatch::try_new(schema, arrays).unwrap();
+
+        BulkPart {
+            batch,
+            max_timestamp: 2,
+            min_timestamp: 1,
+            sequence: 0,
+            timestamp_index: 0,
+            raw_data: None,
+        }
+    }
+}
+
 impl WriteNotify {
     /// Creates a new notify from the `sender`.
     fn new(sender: OptionOutputTx, num_rows: usize) -> WriteNotify {
@@ -201,8 +258,11 @@ impl RegionWriteCtx {
 
     /// Sets error and marks all write operations are failed.
     pub(crate) fn set_error(&mut self, err: Arc<Error>) {
-        // Set error for all notifiers
+        // Set error for all notifiers.
         for notify in &mut self.notifiers {
+            notify.err = Some(err.clone());
+        }
+        for notify in &mut self.bulk_notifiers {
             notify.err = Some(err.clone());
         }
 
