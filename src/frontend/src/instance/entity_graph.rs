@@ -28,7 +28,9 @@ use std::sync::Weak;
 use async_trait::async_trait;
 use catalog::CatalogManager;
 use catalog::information_schema::EntityGraphProvider;
-use common_catalog::consts::DEFAULT_SCHEMA_NAME;
+use common_catalog::consts::{
+    DEFAULT_PRIVATE_SCHEMA_NAME, DEFAULT_SCHEMA_NAME, INFORMATION_SCHEMA_NAME, PG_CATALOG_NAME,
+};
 use common_error::ext::BoxedError;
 use common_query::OutputData;
 use common_recordbatch::{RecordBatch, util as record_util};
@@ -138,6 +140,14 @@ impl EntityGraphProviderImpl {
             .await
             .map_err(BoxedError::new)?;
         for schema in schemas {
+            // User telemetry never lives in the system schemas; skip them to avoid
+            // scanning information_schema (including the computed graph tables) etc.
+            if schema == INFORMATION_SCHEMA_NAME
+                || schema == PG_CATALOG_NAME
+                || schema == DEFAULT_PRIVATE_SCHEMA_NAME
+            {
+                continue;
+            }
             let mut tables = catalog_manager.tables(catalog, &schema, None);
             while let Some(table) = tables.try_next().await.map_err(BoxedError::new)? {
                 let table_info = table.table_info();
@@ -152,6 +162,17 @@ impl EntityGraphProviderImpl {
             }
         }
         Ok((declarations, traces))
+    }
+
+    /// The time window to derive over, taken from the scan's time predicate.
+    ///
+    /// TODO(entity-graph): read the `observed_at` bounds out of `request.filters`
+    /// and build the window from them. Until then this always returns the default
+    /// (last hour), so a query whose time filter falls entirely outside the last
+    /// hour derives nothing and returns empty — a known limitation tracked for the
+    /// scan-time-predicate-pushdown follow-up.
+    fn query_window(_request: &ScanRequest) -> GraphWindow {
+        GraphWindow::default_last_hour()
     }
 
     /// Plans and executes a derivation SQL statement, collecting its rows.
@@ -187,10 +208,10 @@ impl EntityGraphProvider for EntityGraphProviderImpl {
     async fn scan_entities(
         &self,
         catalog: &str,
-        _request: ScanRequest,
+        request: ScanRequest,
     ) -> Result<Vec<RecordBatch>, BoxedError> {
         let (declarations, _) = self.enumerate(catalog).await?;
-        let window = GraphWindow::default_last_hour();
+        let window = Self::query_window(&request);
         let Some(sql) = build_registry_sql(&declarations, &window) else {
             return Ok(vec![]);
         };
@@ -200,10 +221,10 @@ impl EntityGraphProvider for EntityGraphProviderImpl {
     async fn scan_relationships(
         &self,
         catalog: &str,
-        _request: ScanRequest,
+        request: ScanRequest,
     ) -> Result<Vec<RecordBatch>, BoxedError> {
         let (_, traces) = self.enumerate(catalog).await?;
-        let window = GraphWindow::default_last_hour();
+        let window = Self::query_window(&request);
         let mut batches = vec![];
         for trace in traces {
             let sql = build_calls_sql(&trace, &window);

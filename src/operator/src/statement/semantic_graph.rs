@@ -194,12 +194,17 @@ fn quote_literal(value: &str) -> String {
 /// computed table's declared type). Values containing `"` are not escaped, which
 /// is acceptable for the small, controlled identity/attribute sets in OSS v1.
 fn json_object_expr(columns: &[String]) -> String {
+    if columns.is_empty() {
+        return "'{}'".to_string();
+    }
     let pairs = columns
         .iter()
         .map(|c| {
             let key = c.replace(['\'', '"'], "");
+            // `coalesce(..., '')` stops a NULL column value from collapsing the
+            // whole `||` concatenation to NULL (descriptive columns are nullable).
             format!(
-                "'\"{key}\":\"' || CAST({} AS STRING) || '\"'",
+                "'\"{key}\":\"' || coalesce(CAST({} AS STRING), '') || '\"'",
                 quote_ident(c)
             )
         })
@@ -360,6 +365,8 @@ pub fn build_calls_sql(trace: &TraceSource, window: &GraphWindow) -> String {
          FROM {t} AS client JOIN {t} AS server \
          ON client.\"trace_id\" = server.\"trace_id\" \
          AND server.\"parent_span_id\" = client.\"span_id\" \
+         AND server.\"timestamp\" >= client.\"timestamp\" - INTERVAL '5 minutes' \
+         AND server.\"timestamp\" <= client.\"timestamp\" + INTERVAL '1 hour' \
          WHERE client.\"span_kind\" = 'SPAN_KIND_CLIENT' \
          AND server.\"span_kind\" = 'SPAN_KIND_SERVER' \
          AND client.\"service_name\" <> server.\"service_name\" \
@@ -425,7 +432,7 @@ mod tests {
         // struct→json function exists); no UNION for one decl.
         let composite =
             build_registry_sql(&[decl("process", &["start_time", "pid"])], &window).unwrap();
-        assert!(composite.contains(r#"'"pid":"' || CAST("pid" AS STRING)"#));
+        assert!(composite.contains(r#"'"pid":"' || coalesce(CAST("pid" AS STRING), '')"#));
         assert!(composite.contains("'pid' || '=' || CAST(\"pid\" AS STRING)"));
         assert!(!composite.contains("UNION ALL"));
 
