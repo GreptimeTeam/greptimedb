@@ -1383,7 +1383,10 @@ fn extract_timestamps(table_batch: &TableBatch) -> Vec<i64> {
         let Some((timestamp_values, _)) =
             datatypes::timestamp::timestamp_array_to_primitive(timestamp_column)
         else {
-            error!("Failed to extract timestamps from record batch");
+            error!(
+                "Failed to extract timestamps from record batch, table_id: {}, timestamp_index: {}",
+                table_batch.table_id, batch.timestamp_index
+            );
             continue;
         };
 
