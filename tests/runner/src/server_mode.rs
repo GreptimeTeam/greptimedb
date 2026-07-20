@@ -765,6 +765,7 @@ mod tests {
                 .unwrap();
 
         assert!(metasrv_config.contains("[gc]\nenable = true"));
+        assert!(metasrv_config.contains("[gc.experimental_soft_drop]\nenable = true"));
         assert!(datanode_config.contains("[region_engine.mito.gc]\nenable = true"));
     }
 }
