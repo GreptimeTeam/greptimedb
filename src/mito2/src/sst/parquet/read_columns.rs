@@ -360,7 +360,9 @@ fn find_nearest_variant_parent(
         return None;
     }
 
-    for parent_len in (1..nested_path.len()).rev() {
+    // JSON2 root columns are always structured fields. Fallback only applies to
+    // variant leaves below the root.
+    for parent_len in (2..nested_path.len()).rev() {
         let parent_path = &nested_path[..parent_len];
         for (leaf_idx, leaf_col) in parquet_schema_desc.columns().iter().enumerate() {
             if parquet_schema_desc.get_column_root_idx(leaf_idx) != root_idx {
@@ -714,6 +716,20 @@ mod tests {
         assert_eq!(vec![false], plan.projected_root_presence);
     }
 
+    #[test]
+    fn test_root_variant_does_not_fallback() {
+        let parquet_schema_desc = build_test_root_variant_schema();
+        let projection = ParquetReadColumns::from_deduped(vec![
+            ParquetReadColumn::new(0)
+                .with_nested_paths(vec![vec!["j".to_string(), "a".to_string()]]),
+        ]);
+
+        let plan = build_projection_plan(&projection, &parquet_schema_desc);
+
+        assert_eq!(vec![false], plan.projected_root_presence);
+        assert!(plan.json2_fallback_plan.is_empty());
+    }
+
     // Test schema:
     // schema
     // |- j
@@ -862,6 +878,26 @@ mod tests {
             Type::group_type_builder("j")
                 .with_repetition(Repetition::REQUIRED)
                 .with_fields(vec![leaf_a])
+                .build()
+                .unwrap(),
+        );
+        let schema = Arc::new(
+            Type::group_type_builder("schema")
+                .with_fields(vec![root_j])
+                .build()
+                .unwrap(),
+        );
+
+        SchemaDescriptor::new(schema)
+    }
+
+    // Test schema:
+    // schema
+    // `- j: BYTE_ARRAY
+    fn build_test_root_variant_schema() -> SchemaDescriptor {
+        let root_j = Arc::new(
+            Type::primitive_type_builder("j", parquet::basic::Type::BYTE_ARRAY)
+                .with_repetition(Repetition::REQUIRED)
                 .build()
                 .unwrap(),
         );
