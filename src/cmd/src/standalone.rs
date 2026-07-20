@@ -1328,4 +1328,31 @@ Dummy = {{ unexpected = "payload" }}
             "a malformed payload for a known plugin variant must fail config loading"
         );
     }
+
+    #[test]
+    fn test_load_options_ignores_multi_key_unknown_plugin_entry() {
+        // A single plugin table carrying several *unknown* keys must not abort
+        // startup with serde's "expected map with a single key" error; it is
+        // dropped like any other unrecognized plugin option.
+        let mut file = create_named_temp_file();
+        write!(
+            file,
+            r#"
+[[plugins]]
+FirstUnknownPlugin = {{ a = 1 }}
+SecondUnknownPlugin = {{ b = 2 }}
+"#
+        )
+        .unwrap();
+
+        let opts = GreptimeOptions::<StandaloneOptions>::load_layered_options(
+            Some(file.path().to_str().unwrap()),
+            "GREPTIMEDB_STANDALONE_UT",
+        )
+        .expect(
+            "loading a config with a multi-key unknown plugin entry should succeed, \
+             ignoring the unknown ones",
+        );
+        assert!(opts.plugins.is_empty());
+    }
 }

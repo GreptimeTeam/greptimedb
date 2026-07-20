@@ -16,7 +16,6 @@ common-base.workspace = true
 common-error.workspace = true
 common-meta.workspace = true
 common-options.workspace = true
-common-telemetry.workspace = true
 datanode.workspace = true
 flow.workspace = true
 frontend.workspace = true

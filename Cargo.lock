@@ -10683,7 +10683,6 @@ dependencies = [
  "common-error",
  "common-meta",
  "common-options",
- "common-telemetry",
  "datanode",
  "flow",
  "frontend",
