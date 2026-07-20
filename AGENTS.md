@@ -85,6 +85,10 @@ change-coupling points, and gotchas:
    `.agents/architecture-invariants.md`).
 7. Use a conventional-commit title, sign off commits (`git commit -s`), and sign
    the CLA.
+8. When creating or updating a pull request, follow
+   [`.github/pull_request_template.md`](.github/pull_request_template.md): include
+   the CLA statement, fill the change-intention section with enough detail, and
+   update checklist items accurately.
 
 ## More
 
