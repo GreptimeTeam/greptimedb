@@ -261,7 +261,7 @@ impl QueryEngineState {
         );
         physical_optimizer.rules.push(Arc::new(SanityCheckPlan {}));
 
-        let session_state_builder = SessionStateBuilder::new()
+        let session_state = SessionStateBuilder::new()
             .with_config(session_config)
             .with_runtime_env(runtime_env)
             .with_default_features()
@@ -274,9 +274,8 @@ impl QueryEngineState {
                 options.enable_per_region_metrics,
             )))
             .with_optimizer_rules(optimizer.rules)
-            .with_physical_optimizer_rules(physical_optimizer.rules);
-
-        let session_state = session_state_builder.build();
+            .with_physical_optimizer_rules(physical_optimizer.rules)
+            .build();
         let df_context = SessionContext::new_with_state(session_state);
         register_function_aliases(&df_context);
         register_pg_catalog_compat(&df_context);
@@ -552,8 +551,8 @@ fn register_function_aliases(ctx: &SessionContext) {
 /// require `int8` literals, and DF invokes them at planning time, before any
 /// analyzer rule can run).
 ///
-/// The oid-alias type planner is registered separately during session-state
-/// construction in [`QueryEngineState::new`] (via `get_type_planner`).
+/// The oid-alias type planner is supplied per SQL-planner context by
+/// [`DfContextProviderAdapter::get_type_planner`](crate::datafusion::planner::DfContextProviderAdapter::get_type_planner).
 /// Forward oid-alias name->oid resolution is handled at SQL-parse time by the
 /// `PostgresCompatibilityParser`'s built-in rewrite rule, not here.
 fn register_pg_catalog_compat(ctx: &SessionContext) {
