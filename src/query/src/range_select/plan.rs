@@ -24,30 +24,44 @@ use std::time::Duration;
 use ahash::RandomState;
 use arrow::compute::{self, CastOptions, cast_with_options, take_arrays};
 use arrow_schema::{DataType, Field, Schema, SchemaRef, SortOptions, TimeUnit};
+#[cfg(test)]
+use common_function::aggrs::aggr_wrapper::StateMergeHelper;
 use common_recordbatch::DfSendableRecordBatchStream;
 use datafusion::common::Result as DataFusionResult;
 use datafusion::error::Result as DfResult;
 use datafusion::execution::TaskContext;
 use datafusion::execution::context::SessionState;
+#[cfg(test)]
+use datafusion::functions_aggregate::{
+    average::Avg,
+    count::Count,
+    min_max::{Max, Min},
+    sum::Sum,
+};
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
 use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties, RecordBatchStream,
     SendableRecordBatchStream,
 };
+#[cfg(test)]
+use datafusion_common::Column;
 use datafusion_common::hash_utils::create_hashes;
 use datafusion_common::{DFSchema, DFSchemaRef, DataFusionError, ScalarValue};
-use datafusion_expr::utils::{COUNT_STAR_EXPANSION, exprlist_to_fields};
+use datafusion_expr::utils::COUNT_STAR_EXPANSION;
 use datafusion_expr::{
     Accumulator, Expr, ExprSchemable, LogicalPlan, UserDefinedLogicalNodeCore, lit,
 };
+#[cfg(test)]
+use datafusion_expr::{Aggregate, Extension, Projection};
 use datafusion_physical_expr::aggregate::{AggregateExprBuilder, AggregateFunctionExpr};
 use datafusion_physical_expr::{
     Distribution, EquivalenceProperties, Partitioning, PhysicalExpr, PhysicalSortExpr,
     create_physical_expr, create_physical_sort_expr,
 };
 use datatypes::arrow::array::{
-    Array, ArrayRef, TimestampMillisecondArray, TimestampMillisecondBuilder, UInt32Builder,
+    Array, ArrayRef, StructArray, TimestampMillisecondArray, TimestampMillisecondBuilder,
+    UInt32Builder,
 };
 use datatypes::arrow::datatypes::{ArrowPrimitiveType, TimestampMillisecondType};
 use datatypes::arrow::record_batch::RecordBatch;
@@ -239,6 +253,94 @@ pub struct RangeFn {
     pub need_cast: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+enum RangeSelectMode {
+    #[default]
+    Complete,
+    Partial(PartialRangeSelectSpec),
+    Final(FinalRangeSelectSpec),
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CanonicalRangeAggregate {
+    Min,
+    Max,
+    Sum,
+    Count,
+    Avg,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct PartialRangeSelectSpec {
+    state_columns: Vec<String>,
+    state_types: Vec<DataType>,
+    by_fields: Vec<FieldContract>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct FinalRangeSelectSpec {
+    state_columns: Vec<String>,
+    bucket_column: String,
+    bucket_field: FieldContract,
+    state_types: Vec<DataType>,
+    by_input_fields: Vec<FieldContract>,
+    raw_merge_result_fields: Vec<FieldContract>,
+    legacy_range_fields: Vec<FieldContract>,
+    legacy_time_field: FieldContract,
+    legacy_by_fields: Vec<FieldContract>,
+    legacy_metadata: BTreeMap<String, String>,
+    schema_project: Option<Vec<usize>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct FieldContract {
+    qualifier: Option<datafusion_common::TableReference>,
+    name: String,
+    data_type: DataType,
+    nullable: bool,
+    metadata: BTreeMap<String, String>,
+}
+
+impl FieldContract {
+    fn from_qualified_field(
+        qualifier: Option<&datafusion_common::TableReference>,
+        field: &Field,
+    ) -> Self {
+        Self {
+            qualifier: qualifier.cloned(),
+            name: field.name().clone(),
+            data_type: field.data_type().clone(),
+            nullable: field.is_nullable(),
+            metadata: field.metadata().clone().into_iter().collect(),
+        }
+    }
+
+    #[cfg(test)]
+    fn from_schema(schema: &DFSchema, index: usize) -> Self {
+        let (qualifier, field) = schema.qualified_field(index);
+        Self::from_qualified_field(qualifier, field)
+    }
+
+    fn to_qualified_field(&self) -> (Option<datafusion_common::TableReference>, Arc<Field>) {
+        (
+            self.qualifier.clone(),
+            Arc::new(
+                Field::new(self.name.clone(), self.data_type.clone(), self.nullable)
+                    .with_metadata(self.metadata.clone().into_iter().collect()),
+            ),
+        )
+    }
+
+    fn matches(
+        &self,
+        qualifier: Option<&datafusion_common::TableReference>,
+        field: &Field,
+    ) -> bool {
+        self == &Self::from_qualified_field(qualifier, field)
+    }
+}
+
 impl PartialEq for RangeFn {
     fn eq(&self, other: &Self) -> bool {
         self.name == other.name
@@ -269,7 +371,7 @@ impl Display for RangeFn {
     }
 }
 
-#[derive(Debug, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RangeSelect {
     /// The incoming logical plan
     pub input: Arc<LogicalPlan>,
@@ -290,6 +392,7 @@ pub struct RangeSelect {
     /// `schema_before_project  ----  schema_project ----> schema`
     /// if `schema_project==None` then `schema_before_project==schema`
     pub schema_before_project: DFSchemaRef,
+    mode: RangeSelectMode,
 }
 
 impl PartialOrd for RangeSelect {
@@ -323,7 +426,10 @@ impl PartialOrd for RangeSelect {
             Some(Ordering::Equal) => {}
             ord => return ord,
         }
-        self.schema_project.partial_cmp(&other.schema_project)
+        match self.schema_project.partial_cmp(&other.schema_project) {
+            Some(Ordering::Equal) => self.mode.partial_cmp(&other.mode),
+            other => other,
+        }
     }
 }
 
@@ -378,7 +484,7 @@ impl RangeSelect {
         let time_index_name = ts_field.1.name().clone();
         fields.push(ts_field);
         // add by
-        let by_fields = exprlist_to_fields(&by, &input)?;
+        let by_fields = range_by_fields(&by, &input)?;
         fields.extend(by_fields.clone());
         let schema_before_project = Arc::new(DFSchema::new_with_metadata(
             fields,
@@ -436,8 +542,311 @@ impl RangeSelect {
             by,
             schema_project,
             schema_before_project,
+            mode: RangeSelectMode::Complete,
         })
     }
+
+    /// Builds query-local Complete -> Partial -> Final stages for unit tests.
+    /// Production lowering and wire representation intentionally live in later
+    /// changes, so this must not become a planning API yet.
+    #[cfg(test)]
+    fn split_for_local_test(&self) -> Option<(Self, Self)> {
+        if !matches!(self.mode, RangeSelectMode::Complete)
+            || !matches!(self.time_expr, Expr::Column(_))
+            || self.by.iter().any(|expr| !matches!(expr, Expr::Column(_)))
+        {
+            return None;
+        }
+        let aggregate = StateMergeHelper::coerce_aggr_node(
+            Aggregate::try_new(
+                self.input.clone(),
+                vec![],
+                self.range_expr
+                    .iter()
+                    .map(|range| range.expr.clone())
+                    .collect(),
+            )
+            .ok()?,
+        )
+        .ok()?;
+        let mut projection_expr = vec![self.time_expr.clone()];
+        projection_expr.extend(self.by.clone());
+        let mut partial_ranges = Vec::with_capacity(self.range_expr.len());
+        let mut final_ranges = Vec::with_capacity(self.range_expr.len());
+        let mut state_columns = Vec::with_capacity(self.range_expr.len());
+        let mut state_types = Vec::with_capacity(self.range_expr.len());
+        let mut state_fields = Vec::with_capacity(self.range_expr.len() + self.by.len() + 1);
+        let mut raw_merge_result_fields = Vec::with_capacity(self.range_expr.len());
+
+        for (index, (range, expr)) in self.range_expr.iter().zip(&aggregate.aggr_expr).enumerate() {
+            let Expr::AggregateFunction(aggr) = strip_alias(expr) else {
+                return None;
+            };
+            let [argument] = aggr.params.args.as_slice() else {
+                return None;
+            };
+            if canonical_range_aggregate(aggr).is_none() {
+                return None;
+            }
+            let argument_name = format!("__range_arg_{index}");
+            if aggregate
+                .input
+                .schema()
+                .index_of_column_by_name(None, &argument_name)
+                .is_some()
+            {
+                return None;
+            }
+            let contract =
+                StateMergeHelper::split_coerced_aggregate_expr(expr, aggregate.input.as_ref())
+                    .ok()?;
+            projection_expr.push(argument.clone().alias(argument_name));
+            let state_column = format!("__range_state_{index}");
+            let final_result_field = contract.final_result_field.clone();
+            let final_expr = contract.merge_expr(Column::new_unqualified(state_column.clone()));
+            let state_expr = materialize_state_argument(contract.partial_state_expr, index)?
+                .alias(state_column.clone());
+            let materialized_schema = Arc::new(
+                DFSchema::new_with_metadata(
+                    projection_expr
+                        .iter()
+                        .map(|expr| expr.to_field(aggregate.input.schema()).ok())
+                        .collect::<Option<Vec<_>>>()?,
+                    aggregate.input.schema().metadata().clone(),
+                )
+                .ok()?,
+            );
+            let (_, state_field) = state_expr.to_field(materialized_schema.as_ref()).ok()?;
+            if !matches!(state_field.data_type(), DataType::Struct(_)) {
+                return None;
+            }
+            let state_type = state_field.data_type().clone();
+            let mut output_field = state_field.as_ref().clone();
+            output_field.set_nullable(false);
+            state_fields.push((None, Arc::new(output_field)));
+            state_columns.push(state_column.clone());
+            state_types.push(state_type.clone());
+            partial_ranges.push(RangeFn {
+                name: state_column.clone(),
+                data_type: state_type,
+                expr: state_expr,
+                range: range.range,
+                fill: None,
+                need_cast: false,
+            });
+            let Expr::Alias(alias) = final_expr else {
+                return None;
+            };
+            let final_expr = alias.expr.as_ref().clone().alias(range.name.clone());
+            raw_merge_result_fields.push(FieldContract::from_qualified_field(
+                None,
+                &Field::new(
+                    range.name.clone(),
+                    final_result_field.data_type().clone(),
+                    final_result_field.is_nullable(),
+                )
+                .with_metadata(final_result_field.metadata().clone()),
+            ));
+            final_ranges.push(RangeFn {
+                expr: final_expr,
+                ..range.clone()
+            });
+        }
+        let projection = Arc::new(LogicalPlan::Projection(
+            Projection::try_new(projection_expr, aggregate.input).ok()?,
+        ));
+        let time_expr = column_expr(projection.schema(), 0);
+        let by = (0..self.by.len())
+            .map(|index| column_expr(projection.schema(), index + 1))
+            .collect::<Vec<_>>();
+        let (_, time_field) = time_expr.to_field(projection.schema()).ok()?;
+        state_fields.push((
+            None,
+            Arc::new(Field::new(
+                "__range_bucket_ms",
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                time_field.is_nullable(),
+            )),
+        ));
+        let by_fields = (0..self.by_schema.fields().len())
+            .map(|index| {
+                let (qualifier, field) = self.by_schema.qualified_field(index);
+                (qualifier.cloned(), field.clone())
+            })
+            .collect::<Vec<_>>();
+        state_fields.extend(by_fields.clone());
+        let metadata = projection.schema().metadata().clone();
+        let partial_schema =
+            Arc::new(DFSchema::new_with_metadata(state_fields, metadata.clone()).ok()?);
+        let partial_by_schema = Arc::new(DFSchema::new_with_metadata(by_fields, metadata).ok()?);
+        let partial = Self {
+            input: projection,
+            range_expr: partial_ranges,
+            align: self.align,
+            align_to: self.align_to,
+            time_index: time_field.name().clone(),
+            time_expr,
+            by,
+            schema: partial_schema.clone(),
+            by_schema: partial_by_schema.clone(),
+            schema_project: None,
+            schema_before_project: partial_schema,
+            mode: RangeSelectMode::Partial(PartialRangeSelectSpec {
+                state_columns: state_columns.clone(),
+                state_types: state_types.clone(),
+                by_fields: (0..partial_by_schema.fields().len())
+                    .map(|index| FieldContract::from_schema(&partial_by_schema, index))
+                    .collect(),
+            }),
+        };
+        let partial = partial
+            .with_exprs_and_inputs(partial.expressions(), vec![partial.input.as_ref().clone()])
+            .ok()?;
+        let partial_plan = LogicalPlan::Extension(Extension {
+            node: Arc::new(partial.clone()),
+        });
+        let final_by = partial
+            .by_schema
+            .fields()
+            .iter()
+            .enumerate()
+            .map(|(index, _)| {
+                let (qualifier, field) = partial.by_schema.qualified_field(index);
+                Expr::Column(Column::new(qualifier.cloned(), field.name().clone()))
+            })
+            .collect();
+        let final_node = Self {
+            input: Arc::new(partial_plan),
+            range_expr: final_ranges,
+            align: self.align,
+            align_to: self.align_to,
+            time_index: "__range_bucket_ms".to_string(),
+            time_expr: Expr::Column(Column::new_unqualified("__range_bucket_ms")),
+            by: final_by,
+            schema: self.schema.clone(),
+            by_schema: self.by_schema.clone(),
+            schema_project: self.schema_project.clone(),
+            schema_before_project: self.schema_before_project.clone(),
+            mode: RangeSelectMode::Final(FinalRangeSelectSpec {
+                state_columns,
+                bucket_column: "__range_bucket_ms".to_string(),
+                bucket_field: FieldContract::from_schema(&partial.schema, self.range_expr.len()),
+                state_types,
+                by_input_fields: (0..partial.by_schema.fields().len())
+                    .map(|index| FieldContract::from_schema(&partial.by_schema, index))
+                    .collect(),
+                raw_merge_result_fields,
+                legacy_range_fields: (0..self.range_expr.len())
+                    .map(|index| FieldContract::from_schema(&self.schema_before_project, index))
+                    .collect(),
+                legacy_time_field: FieldContract::from_schema(
+                    &self.schema_before_project,
+                    self.range_expr.len(),
+                ),
+                legacy_by_fields: (0..self.by_schema.fields().len())
+                    .map(|index| FieldContract::from_schema(&self.by_schema, index))
+                    .collect(),
+                legacy_metadata: self
+                    .schema_before_project
+                    .metadata()
+                    .clone()
+                    .into_iter()
+                    .collect(),
+                schema_project: self.schema_project.clone(),
+            }),
+        };
+        let final_node = final_node
+            .with_exprs_and_inputs(
+                final_node.expressions(),
+                vec![final_node.input.as_ref().clone()],
+            )
+            .ok()?;
+        Some((partial, final_node))
+    }
+}
+
+#[cfg(test)]
+fn strip_alias(expr: &Expr) -> &Expr {
+    match expr {
+        Expr::Alias(alias) => strip_alias(&alias.expr),
+        expr => expr,
+    }
+}
+
+#[cfg(test)]
+fn canonical_range_aggregate(
+    aggregate: &datafusion_expr::expr::AggregateFunction,
+) -> Option<CanonicalRangeAggregate> {
+    if aggregate.params.distinct
+        || aggregate.params.filter.is_some()
+        || !aggregate.params.order_by.is_empty()
+        || aggregate.params.null_treatment.is_some()
+    {
+        return None;
+    }
+    let kind = if aggregate.func.inner().as_any().is::<Min>() {
+        CanonicalRangeAggregate::Min
+    } else if aggregate.func.inner().as_any().is::<Max>() {
+        CanonicalRangeAggregate::Max
+    } else if aggregate.func.inner().as_any().is::<Sum>() {
+        CanonicalRangeAggregate::Sum
+    } else if aggregate.func.inner().as_any().is::<Count>() {
+        CanonicalRangeAggregate::Count
+    } else if aggregate.func.inner().as_any().is::<Avg>() {
+        CanonicalRangeAggregate::Avg
+    } else {
+        return None;
+    };
+    if kind == CanonicalRangeAggregate::Count
+        && !matches!(aggregate.params.args.as_slice(), [Expr::Column(_)])
+    {
+        return None;
+    }
+    Some(kind)
+}
+
+#[cfg(test)]
+fn column_expr(schema: &DFSchemaRef, index: usize) -> Expr {
+    let (qualifier, field) = schema.qualified_field(index);
+    Expr::Column(Column::new(qualifier.cloned(), field.name().clone()))
+}
+
+#[cfg(test)]
+fn materialize_state_argument(expr: Expr, index: usize) -> Option<Expr> {
+    let Expr::AggregateFunction(mut aggregate) = expr else {
+        return None;
+    };
+    if aggregate.params.args.len() != 1 {
+        return None;
+    }
+    aggregate.params.args = vec![Expr::Column(Column::new_unqualified(format!(
+        "__range_arg_{index}"
+    )))];
+    Some(Expr::AggregateFunction(aggregate))
+}
+
+fn range_by_fields(
+    by: &[Expr],
+    input: &LogicalPlan,
+) -> DfResult<Vec<(Option<datafusion_common::TableReference>, Arc<Field>)>> {
+    by.iter()
+        .map(|expr| match expr {
+            Expr::Column(column) => {
+                let index = input
+                    .schema()
+                    .index_of_column_by_name(column.relation.as_ref(), &column.name)
+                    .ok_or_else(|| {
+                        DataFusionError::Plan(format!(
+                            "RangeSelect BY column {} not found",
+                            column.flat_name()
+                        ))
+                    })?;
+                let (qualifier, field) = input.schema().qualified_field(index);
+                Ok((qualifier.cloned(), field.clone()))
+            }
+            _ => expr.to_field(input.schema()),
+        })
+        .collect()
 }
 
 impl UserDefinedLogicalNodeCore for RangeSelect {
@@ -487,10 +896,11 @@ impl UserDefinedLogicalNodeCore for RangeSelect {
         exprs: Vec<Expr>,
         inputs: Vec<LogicalPlan>,
     ) -> DataFusionResult<Self> {
-        if inputs.is_empty() {
-            return Err(DataFusionError::Plan(
-                "RangeSelect: inputs is empty".to_string(),
-            ));
+        if inputs.len() != 1 {
+            return Err(DataFusionError::Plan(format!(
+                "RangeSelect expects exactly one input, got {}",
+                inputs.len()
+            )));
         }
         if exprs.len() != self.range_expr.len() + self.by.len() + 1 {
             return Err(DataFusionError::Plan(
@@ -512,20 +922,260 @@ impl UserDefinedLogicalNodeCore for RangeSelect {
             .collect();
         let time_expr = exprs[self.range_expr.len()].clone();
         let by = exprs[self.range_expr.len() + 1..].to_vec();
-        Ok(Self {
-            align: self.align,
-            align_to: self.align_to,
-            range_expr,
-            input: Arc::new(inputs[0].clone()),
-            time_index: self.time_index.clone(),
-            time_expr,
-            schema: self.schema.clone(),
-            by,
-            by_schema: self.by_schema.clone(),
-            schema_project: self.schema_project.clone(),
-            schema_before_project: self.schema_before_project.clone(),
-        })
+        let input = Arc::new(inputs.into_iter().next().unwrap());
+        match &self.mode {
+            RangeSelectMode::Complete => Ok(Self {
+                align: self.align,
+                align_to: self.align_to,
+                range_expr,
+                input,
+                time_index: self.time_index.clone(),
+                time_expr,
+                schema: self.schema.clone(),
+                by,
+                by_schema: self.by_schema.clone(),
+                schema_project: self.schema_project.clone(),
+                schema_before_project: self.schema_before_project.clone(),
+                mode: RangeSelectMode::Complete,
+            }),
+            RangeSelectMode::Partial(spec) => {
+                rebuild_partial(self, input, range_expr, time_expr, by, spec)
+            }
+            RangeSelectMode::Final(spec) => {
+                rebuild_final(self, input, range_expr, time_expr, by, spec)
+            }
+        }
     }
+}
+
+fn rebuild_partial(
+    node: &RangeSelect,
+    input: Arc<LogicalPlan>,
+    range_expr: Vec<RangeFn>,
+    time_expr: Expr,
+    by: Vec<Expr>,
+    spec: &PartialRangeSelectSpec,
+) -> DfResult<RangeSelect> {
+    if range_expr.len() != spec.state_columns.len()
+        || range_expr.len() != spec.state_types.len()
+        || by.len() != spec.by_fields.len()
+        || !matches!(input.as_ref(), LogicalPlan::Projection(_))
+    {
+        return Err(DataFusionError::Plan(
+            "RangeSelect Partial expressions do not match its contract".into(),
+        ));
+    }
+    let (_, time_field) = time_expr.to_field(input.schema())?;
+    let actual_by_fields = range_by_fields(&by, input.as_ref())?;
+    if actual_by_fields.len() != spec.by_fields.len() {
+        return Err(DataFusionError::Plan(
+            "RangeSelect Partial BY expressions do not match its contract".into(),
+        ));
+    }
+    let mut fields = Vec::with_capacity(range_expr.len() + by.len() + 1);
+    for (index, (range, (state_column, state_type))) in range_expr
+        .iter()
+        .zip(spec.state_columns.iter().zip(&spec.state_types))
+        .enumerate()
+    {
+        let Expr::Alias(alias) = &range.expr else {
+            return Err(DataFusionError::Plan(
+                "RangeSelect Partial state expressions must be aliases".into(),
+            ));
+        };
+        let Expr::AggregateFunction(aggregate) = alias.expr.as_ref() else {
+            return Err(DataFusionError::Plan(
+                "RangeSelect Partial state aliases must wrap aggregate functions".into(),
+            ));
+        };
+        if !aggregate
+            .func
+            .inner()
+            .as_any()
+            .is::<common_function::aggrs::aggr_wrapper::StateWrapper>()
+            || aggregate.params.args.len() != 1
+            || aggregate.params.filter.is_some()
+            || aggregate.params.distinct
+            || !aggregate.params.order_by.is_empty()
+            || aggregate.params.null_treatment.is_some()
+            || !matches!(aggregate.params.args.as_slice(), [Expr::Column(column)] if column.relation.is_none() && column.name == format!("__range_arg_{index}"))
+        {
+            return Err(DataFusionError::Plan(
+                "RangeSelect Partial state wrapper contract is invalid".into(),
+            ));
+        }
+        let (qualifier, field) = range.expr.to_field(input.schema())?;
+        if alias.name != *state_column
+            || qualifier.is_some()
+            || field.data_type() != state_type
+            || !matches!(field.data_type(), DataType::Struct(_))
+        {
+            return Err(DataFusionError::Plan(
+                "RangeSelect Partial state schema contract is invalid".into(),
+            ));
+        }
+        let mut field = field.as_ref().clone();
+        field.set_nullable(false);
+        fields.push((None, Arc::new(field)));
+    }
+    fields.push((
+        None,
+        Arc::new(Field::new(
+            "__range_bucket_ms",
+            DataType::Timestamp(TimeUnit::Millisecond, None),
+            time_field.is_nullable(),
+        )),
+    ));
+    let by_fields = spec
+        .by_fields
+        .iter()
+        .map(FieldContract::to_qualified_field)
+        .collect::<Vec<_>>();
+    fields.extend(by_fields.clone());
+    let metadata = input.schema().metadata().clone();
+    let schema = Arc::new(DFSchema::new_with_metadata(fields, metadata.clone())?);
+    let by_schema = Arc::new(DFSchema::new_with_metadata(by_fields, metadata)?);
+    Ok(RangeSelect {
+        input,
+        range_expr,
+        align: node.align,
+        align_to: node.align_to,
+        time_index: time_field.name().clone(),
+        time_expr,
+        by,
+        schema: schema.clone(),
+        by_schema,
+        schema_project: None,
+        schema_before_project: schema,
+        mode: RangeSelectMode::Partial(spec.clone()),
+    })
+}
+
+fn rebuild_final(
+    node: &RangeSelect,
+    input: Arc<LogicalPlan>,
+    range_expr: Vec<RangeFn>,
+    time_expr: Expr,
+    by: Vec<Expr>,
+    spec: &FinalRangeSelectSpec,
+) -> DfResult<RangeSelect> {
+    if range_expr.len() != spec.state_columns.len()
+        || range_expr.len() != spec.state_types.len()
+        || range_expr.len() != spec.raw_merge_result_fields.len()
+        || by.len() != spec.by_input_fields.len()
+    {
+        return Err(DataFusionError::Plan(
+            "RangeSelect Final expressions do not match its contract".into(),
+        ));
+    }
+    for (state_column, state_type) in spec.state_columns.iter().zip(&spec.state_types) {
+        let index = input
+            .schema()
+            .index_of_column_by_name(None, state_column)
+            .ok_or_else(|| {
+                DataFusionError::Plan(format!(
+                    "RangeSelect Final is missing state column {state_column}"
+                ))
+            })?;
+        let (qualifier, field) = input.schema().qualified_field(index);
+        if qualifier.is_some() || field.is_nullable() || field.data_type() != state_type {
+            return Err(DataFusionError::Plan(
+                "RangeSelect Final state schema contract is invalid".into(),
+            ));
+        }
+    }
+    let bucket_index = input
+        .schema()
+        .index_of_column_by_name(None, &spec.bucket_column)
+        .ok_or_else(|| {
+            DataFusionError::Plan("RangeSelect Final is missing bucket column".into())
+        })?;
+    let (bucket_qualifier, bucket_field) = input.schema().qualified_field(bucket_index);
+    if !spec.bucket_field.matches(bucket_qualifier, bucket_field)
+        || bucket_field.data_type() != &DataType::Timestamp(TimeUnit::Millisecond, None)
+    {
+        return Err(DataFusionError::Plan(
+            "RangeSelect Final bucket schema contract is invalid".into(),
+        ));
+    }
+    let Expr::Column(bucket) = &time_expr else {
+        return Err(DataFusionError::Plan(
+            "RangeSelect Final time expression must be the bucket column".into(),
+        ));
+    };
+    if bucket.relation.is_some() || bucket.name != spec.bucket_column {
+        return Err(DataFusionError::Plan(
+            "RangeSelect Final bucket contract is invalid".into(),
+        ));
+    }
+    for ((range, state_column), output) in range_expr
+        .iter()
+        .zip(&spec.state_columns)
+        .zip(&spec.raw_merge_result_fields)
+    {
+        let Some(aggregate) = common_function::aggrs::aggr_wrapper::get_aggr_func(&range.expr)
+        else {
+            return Err(DataFusionError::Plan(
+                "RangeSelect Final merge expression must be an aggregate".into(),
+            ));
+        };
+        if !aggregate
+            .func
+            .inner()
+            .as_any()
+            .is::<common_function::aggrs::aggr_wrapper::MergeWrapper>()
+            || aggregate.params.distinct
+            || aggregate.params.filter.is_some()
+            || !aggregate.params.order_by.is_empty()
+            || aggregate.params.null_treatment.is_some()
+            || !matches!(aggregate.params.args.as_slice(), [Expr::Column(column)] if column.relation.is_none() && column.name == *state_column)
+        {
+            return Err(DataFusionError::Plan(
+                "RangeSelect Final merge wrapper contract is invalid".into(),
+            ));
+        }
+        let (qualifier, field) = range.expr.to_field(input.schema())?;
+        if !output.matches(qualifier.as_ref(), &field) {
+            return Err(DataFusionError::Plan(
+                "RangeSelect Final merge output contract is invalid".into(),
+            ));
+        }
+    }
+    for (expr, expected) in by.iter().zip(&spec.by_input_fields) {
+        let (qualifier, field) = expr.to_field(input.schema())?;
+        if !expected.matches(qualifier.as_ref(), &field) {
+            return Err(DataFusionError::Plan(
+                "RangeSelect Final BY contract is invalid".into(),
+            ));
+        }
+    }
+    let fields = spec
+        .legacy_range_fields
+        .iter()
+        .map(FieldContract::to_qualified_field)
+        .chain(std::iter::once(spec.legacy_time_field.to_qualified_field()))
+        .chain(
+            spec.legacy_by_fields
+                .iter()
+                .map(FieldContract::to_qualified_field),
+        )
+        .collect();
+    let metadata = spec.legacy_metadata.clone().into_iter().collect();
+    let schema_before_project = Arc::new(DFSchema::new_with_metadata(fields, metadata)?);
+    Ok(RangeSelect {
+        input,
+        range_expr,
+        align: node.align,
+        align_to: node.align_to,
+        time_index: node.time_index.clone(),
+        time_expr,
+        by,
+        schema: node.schema.clone(),
+        by_schema: node.by_schema.clone(),
+        schema_project: spec.schema_project.clone(),
+        schema_before_project,
+        mode: RangeSelectMode::Final(spec.clone()),
+    })
 }
 
 impl RangeSelect {
@@ -561,6 +1211,16 @@ impl RangeSelect {
         exec_input: Arc<dyn ExecutionPlan>,
         session_state: &SessionState,
     ) -> DfResult<Arc<dyn ExecutionPlan>> {
+        let mode = match self.mode {
+            RangeSelectMode::Complete => RangeSelectExecMode::Complete,
+            RangeSelectMode::Partial(_) => RangeSelectExecMode::Partial,
+            RangeSelectMode::Final(_) => RangeSelectExecMode::Final,
+        };
+        if mode == RangeSelectExecMode::Partial && self.schema_project.is_some() {
+            return Err(DataFusionError::Plan(
+                "RangeSelect Partial must not apply a schema projection".into(),
+            ));
+        }
         let fields: Vec<_> = self
             .schema_before_project
             .fields()
@@ -688,10 +1348,21 @@ impl RangeSelect {
             schema_before_project.clone()
         };
         let by = self.create_physical_expr_list(false, &self.by, input_dfschema, session_state)?;
+        let output_partitioning = match mode {
+            RangeSelectExecMode::Partial => Partitioning::UnknownPartitioning(
+                exec_input
+                    .properties()
+                    .output_partitioning()
+                    .partition_count(),
+            ),
+            RangeSelectExecMode::Complete | RangeSelectExecMode::Final => {
+                Partitioning::UnknownPartitioning(1)
+            }
+        };
         let cache = Arc::new(PlanProperties::new(
             EquivalenceProperties::new(schema.clone()),
-            Partitioning::UnknownPartitioning(1),
-            EmissionType::Incremental,
+            output_partitioning,
+            EmissionType::Final,
             Boundedness::Bounded,
         ));
         Ok(Arc::new(RangeSelectExec {
@@ -707,6 +1378,7 @@ impl RangeSelect {
             schema_before_project,
             schema_project: self.schema_project.clone(),
             cache,
+            mode,
         }))
     }
 }
@@ -718,6 +1390,13 @@ struct RangeFnExec {
     range: Millisecond,
     fill: Option<Fill>,
     need_cast: Option<DataType>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RangeSelectExecMode {
+    Complete,
+    Partial,
+    Final,
 }
 
 impl RangeFnExec {
@@ -761,6 +1440,7 @@ pub struct RangeSelectExec {
     schema_project: Option<Vec<usize>>,
     schema_before_project: SchemaRef,
     cache: Arc<PlanProperties>,
+    mode: RangeSelectExecMode,
 }
 
 impl DisplayAs for RangeSelectExec {
@@ -798,7 +1478,12 @@ impl ExecutionPlan for RangeSelectExec {
     }
 
     fn required_input_distribution(&self) -> Vec<Distribution> {
-        vec![Distribution::SinglePartition]
+        match self.mode {
+            RangeSelectExecMode::Partial => vec![Distribution::UnspecifiedDistribution],
+            RangeSelectExecMode::Complete | RangeSelectExecMode::Final => {
+                vec![Distribution::SinglePartition]
+            }
+        }
     }
 
     fn properties(&self) -> &Arc<PlanProperties> {
@@ -813,9 +1498,29 @@ impl ExecutionPlan for RangeSelectExec {
         self: Arc<Self>,
         children: Vec<Arc<dyn ExecutionPlan>>,
     ) -> datafusion_common::Result<Arc<dyn ExecutionPlan>> {
-        assert!(!children.is_empty());
+        if children.len() != 1 {
+            return Err(DataFusionError::Plan(format!(
+                "RangeSelectExec expects exactly one child, got {}",
+                children.len()
+            )));
+        }
+        let input = children.into_iter().next().unwrap();
+        let partitioning = match self.mode {
+            RangeSelectExecMode::Partial => Partitioning::UnknownPartitioning(
+                input.properties().output_partitioning().partition_count(),
+            ),
+            RangeSelectExecMode::Complete | RangeSelectExecMode::Final => {
+                Partitioning::UnknownPartitioning(1)
+            }
+        };
+        let cache = Arc::new(PlanProperties::new(
+            EquivalenceProperties::new(self.schema.clone()),
+            partitioning,
+            EmissionType::Final,
+            Boundedness::Bounded,
+        ));
         Ok(Arc::new(Self {
-            input: children[0].clone(),
+            input,
             range_exec: self.range_exec.clone(),
             time_index: self.time_index.clone(),
             by: self.by.clone(),
@@ -826,7 +1531,8 @@ impl ExecutionPlan for RangeSelectExec {
             metric: self.metric.clone(),
             schema_before_project: self.schema_before_project.clone(),
             schema_project: self.schema_project.clone(),
-            cache: self.cache.clone(),
+            cache,
+            mode: self.mode,
         }))
     }
 
@@ -849,7 +1555,12 @@ impl ExecutionPlan for RangeSelectExec {
             self.by_schema
                 .fields()
                 .iter()
-                .map(|f| SortField::new(f.data_type().clone()))
+                .map(|f| match f.data_type() {
+                    DataType::Dictionary(_, value_type) => {
+                        SortField::new(value_type.as_ref().clone())
+                    }
+                    data_type => SortField::new(data_type.clone()),
+                })
                 .collect(),
         )?;
         Ok(Box::pin(RangeSelectStream {
@@ -872,6 +1583,7 @@ impl ExecutionPlan for RangeSelectExec {
             schema_before_project: self.schema_before_project.clone(),
             output_batch: None,
             output_batch_offset: 0,
+            mode: self.mode,
         }))
     }
 
@@ -914,6 +1626,7 @@ struct RangeSelectStream {
     schema_before_project: SchemaRef,
     output_batch: Option<RecordBatch>,
     output_batch_offset: usize,
+    mode: RangeSelectExecMode,
 }
 
 #[derive(Debug)]
@@ -978,10 +1691,27 @@ impl RangeSelectStream {
             .collect::<DfResult<Vec<_>>>()
     }
 
+    fn normalize_by_arrays(&self, arrays: Vec<ArrayRef>) -> DfResult<Vec<ArrayRef>> {
+        arrays
+            .into_iter()
+            .map(|array| match array.data_type() {
+                DataType::Dictionary(_, value_type) => {
+                    compute::cast(array.as_ref(), value_type.as_ref())
+                        .map_err(DataFusionError::from)
+                }
+                _ => Ok(array),
+            })
+            .collect()
+    }
+
     fn update_range_context(&mut self, batch: RecordBatch) -> DfResult<()> {
-        let _timer = self.metric.elapsed_compute().timer();
+        let metric = self.metric.clone();
+        let _timer = metric.elapsed_compute().timer();
+        if self.mode == RangeSelectExecMode::Final {
+            return self.merge_partial_context(batch);
+        }
         let num_rows = batch.num_rows();
-        let by_arrays = self.evaluate_many(&batch, &self.by)?;
+        let by_arrays = self.normalize_by_arrays(self.evaluate_many(&batch, &self.by)?)?;
         let mut hashes = vec![0; num_rows];
         create_hashes(&by_arrays, &self.random_state, &mut hashes)?;
         let by_rows = self.row_converter.convert_columns(&by_arrays)?;
@@ -1065,7 +1795,86 @@ impl RangeSelectStream {
         Ok(())
     }
 
+    fn merge_partial_context(&mut self, batch: RecordBatch) -> DfResult<()> {
+        let num_rows = batch.num_rows();
+        let by_arrays = self.normalize_by_arrays(self.evaluate_many(&batch, &self.by)?)?;
+        let state_args = self
+            .range_exec
+            .iter()
+            .map(|range| self.evaluate_many(&batch, &range.expressions()))
+            .collect::<DfResult<Vec<_>>>()?;
+        let mut hashes = vec![0; num_rows];
+        create_hashes(&by_arrays, &self.random_state, &mut hashes)?;
+        let by_rows = self.row_converter.convert_columns(&by_arrays)?;
+        let mut timestamp = batch.column(self.time_index).clone();
+        if !matches!(
+            timestamp.data_type(),
+            DataType::Timestamp(TimeUnit::Millisecond, _)
+        ) {
+            timestamp = compute::cast(
+                timestamp.as_ref(),
+                &DataType::Timestamp(TimeUnit::Millisecond, None),
+            )?;
+        }
+        let timestamp = timestamp
+            .as_any()
+            .downcast_ref::<TimestampMillisecondArray>()
+            .ok_or_else(|| {
+                DataFusionError::Execution(
+                    "Time index Column downcast to TimestampMillisecondArray failed".into(),
+                )
+            })?;
+        for row in 0..num_rows {
+            let bucket = timestamp.value(row);
+            let series = self
+                .series_map
+                .entry(hashes[row])
+                .or_insert_with(|| SeriesState {
+                    row: by_rows.row(row).owned(),
+                    align_ts_accumulator: BTreeMap::new(),
+                });
+            let accumulators = match series.align_ts_accumulator.entry(bucket) {
+                Entry::Occupied(entry) => entry.into_mut(),
+                Entry::Vacant(entry) => {
+                    self.num_not_null_rows += 1;
+                    entry.insert(
+                        self.range_exec
+                            .iter()
+                            .map(|range| range.expr.create_accumulator())
+                            .collect::<DfResult<Vec<_>>>()?,
+                    )
+                }
+            };
+            for (index, accumulator) in accumulators.iter_mut().enumerate() {
+                let states = &state_args[index];
+                if states.len() != 1 {
+                    return Err(DataFusionError::Execution(format!(
+                        "RangeSelect Final expected one state argument for aggregate {index}"
+                    )));
+                }
+                let state = states[0]
+                    .as_any()
+                    .downcast_ref::<StructArray>()
+                    .ok_or_else(|| {
+                        DataFusionError::Execution(format!(
+                            "RangeSelect Final expected Struct state for aggregate {index}"
+                        ))
+                    })?;
+                if state.is_null(row) {
+                    return Err(DataFusionError::Execution(format!(
+                        "RangeSelect Final received NULL outer state for aggregate {index}"
+                    )));
+                }
+                accumulator.update_batch(&[states[0].slice(row, 1)])?;
+            }
+        }
+        Ok(())
+    }
+
     fn generate_output(&mut self) -> DfResult<RecordBatch> {
+        if self.mode == RangeSelectExecMode::Partial {
+            return self.generate_partial_output();
+        }
         let _timer = self.metric.elapsed_compute().timer();
         if self.series_map.is_empty() {
             return Ok(RecordBatch::new_empty(self.schema.clone()));
@@ -1164,6 +1973,46 @@ impl RangeSelectStream {
             output
         };
         Ok(project_output)
+    }
+
+    fn generate_partial_output(&mut self) -> DfResult<RecordBatch> {
+        if self.series_map.is_empty() {
+            return Ok(RecordBatch::new_empty(self.schema.clone()));
+        }
+        let row_count = self
+            .series_map
+            .values()
+            .map(|series| series.align_ts_accumulator.len())
+            .sum();
+        let mut states = vec![Vec::with_capacity(row_count); self.range_exec.len()];
+        let mut timestamps = TimestampMillisecondBuilder::with_capacity(row_count);
+        let mut by_rows = Vec::with_capacity(row_count);
+        for series in self.series_map.values_mut() {
+            for (timestamp, accumulators) in &mut series.align_ts_accumulator {
+                for (state, accumulator) in states.iter_mut().zip(accumulators.iter_mut()) {
+                    state.push(accumulator.evaluate()?);
+                }
+                timestamps.append_value(*timestamp);
+                by_rows.push(series.row.row());
+            }
+        }
+        let mut columns = states
+            .into_iter()
+            .map(ScalarValue::iter_to_array)
+            .collect::<DfResult<Vec<_>>>()?;
+        columns.push(compute::cast(
+            &timestamps.finish(),
+            self.schema.field(columns.len()).data_type(),
+        )?);
+        for by_column in self.row_converter.convert_rows(by_rows)? {
+            let output_type = self.schema.field(columns.len()).data_type();
+            if by_column.data_type() == output_type {
+                columns.push(by_column);
+            } else {
+                columns.push(compute::cast(by_column.as_ref(), output_type)?);
+            }
+        }
+        Ok(RecordBatch::try_new(self.schema.clone(), columns)?)
     }
 
     fn next_output_batch(&mut self) -> DfResult<Option<RecordBatch>> {
@@ -1292,6 +2141,7 @@ mod test {
 
     use std::sync::Arc;
 
+    use arrow::array::StringDictionaryBuilder;
     use arrow_schema::SortOptions;
     use datafusion::arrow::datatypes::{
         ArrowPrimitiveType, DataType, Field, Schema, TimestampMillisecondType,
@@ -1303,7 +2153,10 @@ mod test {
     use datafusion::prelude::SessionContext;
     use datafusion_physical_expr::PhysicalSortExpr;
     use datafusion_physical_expr::expressions::Column;
-    use datatypes::arrow::array::{Float64Array, Int64Array, TimestampMillisecondArray};
+    use datatypes::arrow::array::{
+        Float64Array, Int64Array, TimestampMillisecondArray, TimestampSecondArray,
+    };
+    use datatypes::arrow::datatypes::Int8Type;
     use datatypes::arrow_array::StringArray;
 
     use super::*;
@@ -1429,7 +2282,7 @@ mod test {
         let cache = Arc::new(PlanProperties::new(
             EquivalenceProperties::new(schema.clone()),
             Partitioning::UnknownPartitioning(1),
-            EmissionType::Incremental,
+            EmissionType::Final,
             Boundedness::Bounded,
         ));
         let input_schema = memory_exec.schema().clone();
@@ -1477,6 +2330,7 @@ mod test {
             by_schema: Arc::new(Schema::new(vec![Field::new("host", DataType::Utf8, true)])),
             metric: ExecutionPlanMetricsSet::new(),
             cache,
+            mode: RangeSelectExecMode::Complete,
         });
         let sort_exec = SortExec::new(
             [
@@ -1824,7 +2678,7 @@ mod test {
         let cache = Arc::new(PlanProperties::new(
             EquivalenceProperties::new(schema.clone()),
             Partitioning::UnknownPartitioning(1),
-            EmissionType::Incremental,
+            EmissionType::Final,
             Boundedness::Bounded,
         ));
         let input_schema = memory_exec.schema().clone();
@@ -1872,6 +2726,7 @@ mod test {
             by_schema: Arc::new(Schema::new(vec![Field::new("host", DataType::Utf8, true)])),
             metric: ExecutionPlanMetricsSet::new(),
             cache,
+            mode: RangeSelectExecMode::Complete,
         });
         let session_context = SessionContext::new();
         let result =
@@ -1980,5 +2835,485 @@ mod test {
         let mut test1 = test.clone();
         Fill::Linear.apply_fill_strategy(&ts, &mut test1).unwrap();
         assert_eq!(test, test1);
+    }
+
+    fn local_stage_input(fields: Vec<Field>) -> LogicalPlan {
+        let schema = Arc::new(Schema::new(fields));
+        let source = Arc::new(datafusion::datasource::DefaultTableSource::new(Arc::new(
+            datafusion::datasource::empty::EmptyTable::new(schema),
+        )));
+        datafusion_expr::LogicalPlanBuilder::scan("range_select_local_stage", source, None)
+            .unwrap()
+            .build()
+            .unwrap()
+    }
+
+    fn local_stage_complete(expression: Expr, name: &str, result_type: DataType) -> RangeSelect {
+        let input = local_stage_input(vec![
+            Field::new(
+                "timestamp",
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                true,
+            ),
+            Field::new("value", DataType::Float64, true),
+            Field::new("other", DataType::Float64, true),
+            Field::new("host", DataType::Utf8, true),
+        ]);
+        RangeSelect::try_new(
+            Arc::new(input),
+            vec![RangeFn {
+                name: name.into(),
+                data_type: result_type,
+                expr: expression,
+                range: Duration::from_secs(10),
+                fill: (name == "sum").then_some(Fill::Prev),
+                need_cast: false,
+            }],
+            Duration::from_secs(5),
+            0,
+            Expr::Column(datafusion_common::Column::new_unqualified("timestamp")),
+            vec![Expr::Column(datafusion_common::Column::new_unqualified(
+                "host",
+            ))],
+            &[],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn local_stages_materialize_compound_arguments_and_reject_collisions() {
+        let complete = local_stage_complete(
+            datafusion::functions_aggregate::expr_fn::avg(
+                datafusion::prelude::col("value") + datafusion::prelude::col("other"),
+            ),
+            "avg",
+            DataType::Float64,
+        );
+        let (partial, final_node) = complete.split_for_local_test().unwrap();
+        let LogicalPlan::Projection(projection) = partial.input.as_ref() else {
+            unreachable!()
+        };
+        assert_eq!(projection.schema.field(2).name(), "__range_arg_0");
+        assert!(matches!(partial.mode, RangeSelectMode::Partial(_)));
+        assert!(matches!(final_node.mode, RangeSelectMode::Final(_)));
+        let Expr::Alias(alias) = &partial.range_expr[0].expr else {
+            unreachable!()
+        };
+        let Expr::AggregateFunction(state) = alias.expr.as_ref() else {
+            unreachable!()
+        };
+        assert!(
+            matches!(state.params.args.as_slice(), [Expr::Column(column)] if column.name == "__range_arg_0")
+        );
+
+        let collision = local_stage_input(vec![
+            Field::new(
+                "timestamp",
+                DataType::Timestamp(TimeUnit::Second, None),
+                true,
+            ),
+            Field::new("value", DataType::Float64, true),
+            Field::new("other", DataType::Float64, true),
+            Field::new(
+                "host",
+                DataType::Dictionary(Box::new(DataType::Int8), Box::new(DataType::Utf8)),
+                true,
+            ),
+            Field::new("__range_arg_0", DataType::Float64, true),
+        ]);
+        let collision = RangeSelect::try_new(
+            Arc::new(collision),
+            vec![RangeFn {
+                name: "sum".into(),
+                data_type: DataType::Float64,
+                expr: datafusion::functions_aggregate::expr_fn::sum(datafusion::prelude::col(
+                    "value",
+                )),
+                range: Duration::from_secs(5),
+                fill: None,
+                need_cast: false,
+            }],
+            Duration::from_secs(5),
+            0,
+            Expr::Column(datafusion_common::Column::new_unqualified("timestamp")),
+            vec![Expr::Column(datafusion_common::Column::new_unqualified(
+                "host",
+            ))],
+            &[],
+        )
+        .unwrap();
+        assert!(collision.split_for_local_test().is_none());
+    }
+
+    #[test]
+    fn local_stages_reject_noncanonical_aggregate_contracts() {
+        let value = || datafusion::prelude::col("value");
+        let mut distinct = datafusion::functions_aggregate::expr_fn::sum(value());
+        let Expr::AggregateFunction(function) = &mut distinct else {
+            unreachable!()
+        };
+        function.params.distinct = true;
+        let mut filtered = datafusion::functions_aggregate::expr_fn::sum(value());
+        let Expr::AggregateFunction(function) = &mut filtered else {
+            unreachable!()
+        };
+        function.params.filter = Some(Box::new(Expr::Literal(
+            ScalarValue::Boolean(Some(true)),
+            None,
+        )));
+        let mut ordered = datafusion::functions_aggregate::expr_fn::sum(value());
+        let Expr::AggregateFunction(function) = &mut ordered else {
+            unreachable!()
+        };
+        function.params.order_by = vec![datafusion_expr::expr::Sort::new(value(), false, false)];
+        let mut null_treated = datafusion::functions_aggregate::expr_fn::sum(value());
+        let Expr::AggregateFunction(function) = &mut null_treated else {
+            unreachable!()
+        };
+        function.params.null_treatment = Some(datafusion_expr::expr::NullTreatment::IgnoreNulls);
+        let cases = [
+            distinct,
+            filtered,
+            ordered,
+            null_treated,
+            datafusion::functions_aggregate::expr_fn::count(datafusion_expr::lit(1_i64)),
+            datafusion::functions_aggregate::expr_fn::first_value(value(), vec![]),
+        ];
+        for expression in cases {
+            assert!(
+                local_stage_complete(expression, "result", DataType::Float64)
+                    .split_for_local_test()
+                    .is_none()
+            );
+        }
+    }
+
+    fn local_raw_schema() -> SchemaRef {
+        Arc::new(Schema::new(vec![
+            Field::new(
+                "timestamp",
+                DataType::Timestamp(TimeUnit::Second, None),
+                true,
+            ),
+            Field::new("value", DataType::Float64, true),
+            Field::new("other", DataType::Float64, true),
+            Field::new(
+                "host",
+                DataType::Dictionary(Box::new(DataType::Int8), Box::new(DataType::Utf8)),
+                true,
+            ),
+        ]))
+    }
+
+    fn local_raw_batch(rows: &[(i64, Option<f64>, Option<f64>)]) -> RecordBatch {
+        let mut hosts = StringDictionaryBuilder::<Int8Type>::new();
+        for _ in rows {
+            hosts.append("g").unwrap();
+        }
+        RecordBatch::try_new(
+            local_raw_schema(),
+            vec![
+                Arc::new(TimestampSecondArray::from(
+                    rows.iter().map(|row| row.0).collect::<Vec<_>>(),
+                )),
+                Arc::new(Float64Array::from(
+                    rows.iter().map(|row| row.1).collect::<Vec<_>>(),
+                )),
+                Arc::new(Float64Array::from(
+                    rows.iter().map(|row| row.2).collect::<Vec<_>>(),
+                )),
+                Arc::new(hosts.finish()),
+            ],
+        )
+        .unwrap()
+    }
+
+    fn local_memory_exec(schema: SchemaRef, batches: Vec<RecordBatch>) -> Arc<dyn ExecutionPlan> {
+        Arc::new(DataSourceExec::new(Arc::new(
+            MemorySourceConfig::try_new(&[batches], schema, None).unwrap(),
+        )))
+    }
+
+    fn local_materialized_exec(
+        partial: &RangeSelect,
+        input: Arc<dyn ExecutionPlan>,
+        state: &SessionState,
+    ) -> Arc<dyn ExecutionPlan> {
+        let LogicalPlan::Projection(projection) = partial.input.as_ref() else {
+            unreachable!()
+        };
+        let expressions = projection
+            .expr
+            .iter()
+            .enumerate()
+            .map(|(index, expr)| {
+                Ok((
+                    create_physical_expr(
+                        expr,
+                        projection.input.schema().as_ref(),
+                        state.execution_props(),
+                    )?,
+                    projection.schema.field(index).name().clone(),
+                ))
+            })
+            .collect::<DfResult<Vec<_>>>()
+            .unwrap();
+        Arc::new(
+            datafusion::physical_plan::projection::ProjectionExec::try_new(expressions, input)
+                .unwrap(),
+        )
+    }
+
+    #[tokio::test]
+    async fn local_builtin_stages_execute_two_partial_inputs_then_final() {
+        let input = local_stage_input(vec![
+            Field::new(
+                "timestamp",
+                DataType::Timestamp(TimeUnit::Second, None),
+                true,
+            ),
+            Field::new("value", DataType::Float64, true),
+            Field::new("other", DataType::Float64, true),
+            Field::new(
+                "host",
+                DataType::Dictionary(Box::new(DataType::Int8), Box::new(DataType::Utf8)),
+                true,
+            ),
+        ]);
+        let value = || datafusion::prelude::col("value");
+        let ranges = vec![
+            (
+                "min",
+                datafusion::functions_aggregate::expr_fn::min(value()),
+                DataType::Float64,
+            ),
+            (
+                "max",
+                datafusion::functions_aggregate::expr_fn::max(value()),
+                DataType::Float64,
+            ),
+            (
+                "sum",
+                datafusion::functions_aggregate::expr_fn::sum(value()),
+                DataType::Float64,
+            ),
+            (
+                "count",
+                datafusion::functions_aggregate::expr_fn::count(value()),
+                DataType::Int64,
+            ),
+            (
+                "avg",
+                datafusion::functions_aggregate::expr_fn::avg(value()),
+                DataType::Float64,
+            ),
+            (
+                "compound_avg",
+                datafusion::functions_aggregate::expr_fn::avg(
+                    value() + datafusion::prelude::col("other"),
+                ),
+                DataType::Float64,
+            ),
+        ]
+        .into_iter()
+        .map(|(name, expr, data_type)| RangeFn {
+            name: name.into(),
+            data_type,
+            expr,
+            range: Duration::from_secs(10),
+            fill: (name == "sum").then_some(Fill::Prev),
+            need_cast: false,
+        })
+        .collect::<Vec<_>>();
+        let time_expr = Expr::Column(datafusion_common::Column::new_unqualified("timestamp"));
+        let by_expr = Expr::Column(datafusion_common::Column::new_unqualified("host"));
+        let schema_project = ranges
+            .iter()
+            .map(|range| range.expr.clone().alias(range.name.clone()))
+            .chain([time_expr.clone(), by_expr.clone()])
+            .collect::<Vec<_>>();
+        let complete = RangeSelect::try_new(
+            Arc::new(input),
+            ranges,
+            Duration::from_secs(5),
+            0,
+            time_expr,
+            vec![by_expr],
+            &schema_project,
+        )
+        .unwrap();
+        let (partial, final_node) = complete.split_for_local_test().unwrap();
+        let inputs = vec![
+            local_raw_batch(&[(0, Some(1.0), Some(3.0)), (5, Some(3.0), Some(5.0))]),
+            local_raw_batch(&[(5, Some(5.0), Some(7.0)), (20, None, None)]),
+            local_raw_batch(&[]),
+        ];
+        let session = SessionContext::new();
+        let state = session.state();
+        let two_partition_raw: Arc<dyn ExecutionPlan> = Arc::new(DataSourceExec::new(Arc::new(
+            MemorySourceConfig::try_new(
+                &[vec![inputs[0].clone()], vec![inputs[1].clone()]],
+                local_raw_schema(),
+                None,
+            )
+            .unwrap(),
+        )));
+        let two_partition_partial = partial
+            .to_execution_plan(
+                partial.input.as_ref(),
+                local_materialized_exec(&partial, two_partition_raw, &state),
+                &state,
+            )
+            .unwrap();
+        assert_eq!(
+            two_partition_partial
+                .properties()
+                .output_partitioning()
+                .partition_count(),
+            2
+        );
+        let complete_exec = complete
+            .to_execution_plan(
+                complete.input.as_ref(),
+                local_memory_exec(local_raw_schema(), inputs.clone()),
+                &state,
+            )
+            .unwrap();
+        assert!(matches!(
+            complete_exec.required_input_distribution().as_slice(),
+            [Distribution::SinglePartition]
+        ));
+        assert_eq!(
+            complete_exec
+                .properties()
+                .output_partitioning()
+                .partition_count(),
+            1
+        );
+        assert_eq!(
+            complete_exec.properties().emission_type,
+            EmissionType::Final
+        );
+        let expected = datafusion::physical_plan::collect(complete_exec, session.task_ctx())
+            .await
+            .unwrap();
+        assert!(
+            expected
+                .iter()
+                .any(|batch| batch.num_columns() == 8 && batch.num_rows() > 0)
+        );
+        assert_eq!(expected.iter().map(RecordBatch::num_rows).sum::<usize>(), 6);
+        let gap_sum = expected
+            .iter()
+            .flat_map(|batch| (0..batch.num_rows()).map(move |row| (batch, row)))
+            .find_map(|(batch, row)| {
+                (batch.num_columns() == 8
+                    && ScalarValue::try_from_array(batch.column(6), row).ok()
+                        == Some(ScalarValue::TimestampSecond(Some(10), None)))
+                .then(|| ScalarValue::try_from_array(batch.column(2), row).unwrap())
+            });
+        assert_eq!(gap_sum, Some(ScalarValue::Float64(Some(8.0))));
+        let mut states = Vec::new();
+        for input in inputs {
+            let raw = local_memory_exec(local_raw_schema(), vec![input]);
+            let exec = partial
+                .to_execution_plan(
+                    partial.input.as_ref(),
+                    local_materialized_exec(&partial, raw, &state),
+                    &state,
+                )
+                .unwrap();
+            assert!(matches!(
+                exec.required_input_distribution().as_slice(),
+                [Distribution::UnspecifiedDistribution]
+            ));
+            assert_eq!(exec.properties().emission_type, EmissionType::Final);
+            for field in exec.schema().fields().iter().take(6) {
+                assert!(matches!(field.data_type(), DataType::Struct(_)));
+                assert!(!field.is_nullable());
+            }
+            assert_eq!(
+                exec.schema().field(6).data_type(),
+                &DataType::Timestamp(TimeUnit::Millisecond, None)
+            );
+            assert_eq!(
+                exec.schema(),
+                Arc::new(Schema::new(
+                    partial
+                        .schema
+                        .fields()
+                        .iter()
+                        .map(|field| field.as_ref().clone())
+                        .collect::<Vec<_>>()
+                ))
+            );
+            states.extend(
+                datafusion::physical_plan::collect(exec, session.task_ctx())
+                    .await
+                    .unwrap(),
+            );
+        }
+        let final_exec = final_node
+            .to_execution_plan(
+                final_node.input.as_ref(),
+                local_memory_exec(states[0].schema(), states),
+                &state,
+            )
+            .unwrap();
+        let actual = datafusion::physical_plan::collect(final_exec.clone(), session.task_ctx())
+            .await
+            .unwrap();
+        assert!(matches!(
+            final_exec.required_input_distribution().as_slice(),
+            [Distribution::SinglePartition]
+        ));
+        assert_eq!(
+            final_exec
+                .properties()
+                .output_partitioning()
+                .partition_count(),
+            1
+        );
+        assert_eq!(final_exec.properties().emission_type, EmissionType::Final);
+        assert_eq!(final_exec.schema(), expected[0].schema());
+        assert_eq!(expected, actual);
+    }
+
+    #[test]
+    fn local_stage_rebuild_rejects_malformed_state_bucket_and_merge_contracts() {
+        let complete = local_stage_complete(
+            datafusion::functions_aggregate::expr_fn::sum(datafusion::prelude::col("value")),
+            "sum",
+            DataType::Float64,
+        );
+        let (partial, final_node) = complete.split_for_local_test().unwrap();
+        let assert_rejected = |node: RangeSelect| {
+            assert!(
+                node.with_exprs_and_inputs(node.expressions(), vec![node.input.as_ref().clone()])
+                    .is_err()
+            );
+        };
+        let mut malformed_state = partial.clone();
+        malformed_state.range_expr[0].expr = datafusion::functions_aggregate::expr_fn::sum(
+            datafusion::prelude::col("__range_arg_0"),
+        );
+        assert_rejected(malformed_state);
+
+        let mut malformed_bucket = final_node.clone();
+        let RangeSelectMode::Final(spec) = &mut malformed_bucket.mode else {
+            unreachable!()
+        };
+        spec.bucket_field.data_type = DataType::Timestamp(TimeUnit::Second, None);
+        assert_rejected(malformed_bucket);
+
+        let mut malformed_merge = final_node;
+        let Expr::Alias(alias) = &mut malformed_merge.range_expr[0].expr else {
+            unreachable!()
+        };
+        let Expr::AggregateFunction(merge) = alias.expr.as_mut() else {
+            unreachable!()
+        };
+        merge.params.distinct = true;
+        assert_rejected(malformed_merge);
     }
 }

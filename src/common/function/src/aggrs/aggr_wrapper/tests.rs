@@ -28,12 +28,15 @@ use datafusion::datasource::DefaultTableSource;
 use datafusion::execution::{RecordBatchStream, SendableRecordBatchStream, TaskContext};
 use datafusion::functions_aggregate::average::avg_udaf;
 use datafusion::functions_aggregate::count::count_udaf;
+use datafusion::functions_aggregate::min_max::{max_udaf, min_udaf};
 use datafusion::functions_aggregate::sum::sum_udaf;
 use datafusion::optimizer::AnalyzerRule;
 use datafusion::optimizer::analyzer::type_coercion::TypeCoercion;
 use datafusion::physical_plan::aggregates::AggregateExec;
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
-use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties};
+use datafusion::physical_plan::{
+    DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties, collect,
+};
 use datafusion::physical_planner::{DefaultPhysicalPlanner, PhysicalPlanner};
 use datafusion::prelude::SessionContext;
 use datafusion_common::arrow::array::AsArray;
@@ -1221,4 +1224,121 @@ async fn execute_phy_plan(
         batches.push(batch?);
     }
     Ok(batches)
+}
+
+fn table_scan_with_batch(schema: Arc<arrow_schema::Schema>, batch: RecordBatch) -> LogicalPlan {
+    let table_source =
+        DefaultTableSource::new(Arc::new(DummyTableProvider::new(schema, Some(batch))));
+    LogicalPlan::TableScan(
+        TableScan::try_new(
+            TableReference::bare("input"),
+            Arc::new(table_source),
+            None,
+            vec![],
+            None,
+        )
+        .unwrap(),
+    )
+}
+
+async fn assert_state_only_merge(
+    function: AggregateUDF,
+    values: Vec<Option<i64>>,
+    expected: ScalarValue,
+) {
+    let schema = Arc::new(arrow_schema::Schema::new(vec![Field::new(
+        "number",
+        DataType::Int64,
+        true,
+    )]));
+    let input = table_scan_with_batch(
+        schema.clone(),
+        RecordBatch::try_new(schema, vec![Arc::new(Int64Array::from(values))]).unwrap(),
+    );
+    let aggregate = StateMergeHelper::coerce_aggr_node(
+        Aggregate::try_new(
+            Arc::new(input),
+            vec![],
+            vec![Expr::AggregateFunction(AggregateFunction::new_udf(
+                Arc::new(function),
+                vec![Expr::Column(Column::new_unqualified("number"))],
+                false,
+                None,
+                vec![],
+                None,
+            ))],
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let contract = StateMergeHelper::split_coerced_aggregate_expr(
+        &aggregate.aggr_expr[0],
+        aggregate.input.as_ref(),
+    )
+    .unwrap();
+    let partial = LogicalPlan::Aggregate(
+        Aggregate::try_new(
+            aggregate.input.clone(),
+            vec![],
+            vec![contract.partial_state_expr.clone()],
+        )
+        .unwrap(),
+    )
+    .recompute_schema()
+    .unwrap();
+    let session = SessionContext::new();
+    let state = collect(
+        DefaultPhysicalPlanner::default()
+            .create_physical_plan(&partial, &session.state())
+            .await
+            .unwrap(),
+        session.task_ctx(),
+    )
+    .await
+    .unwrap()
+    .remove(0);
+    let state_name = state.schema().field(0).name().clone();
+    let final_input = table_scan_with_batch(state.schema(), state);
+    let final_plan = LogicalPlan::Aggregate(
+        Aggregate::try_new(
+            Arc::new(final_input),
+            vec![],
+            vec![contract.merge_expr(Column::new_unqualified(state_name))],
+        )
+        .unwrap(),
+    )
+    .recompute_schema()
+    .unwrap();
+    let output = collect(
+        DefaultPhysicalPlanner::default()
+            .create_physical_plan(&final_plan, &session.state())
+            .await
+            .unwrap(),
+        session.task_ctx(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        ScalarValue::try_from_array(output[0].column(0), 0).unwrap(),
+        expected
+    );
+}
+
+#[tokio::test]
+async fn test_expression_split_contract_state_only_merge_and_empty_accumulators() {
+    for (function, expected) in [
+        ((*count_udaf()).clone(), ScalarValue::Int64(Some(0))),
+        ((*sum_udaf()).clone(), ScalarValue::Int64(None)),
+        ((*min_udaf()).clone(), ScalarValue::Int64(None)),
+        ((*max_udaf()).clone(), ScalarValue::Int64(None)),
+        ((*avg_udaf()).clone(), ScalarValue::Float64(None)),
+    ] {
+        assert_state_only_merge(function, vec![], expected).await;
+    }
+    assert_state_only_merge(
+        (*avg_udaf()).clone(),
+        vec![Some(1), Some(2), None, Some(3)],
+        ScalarValue::Float64(Some(2.0)),
+    )
+    .await;
 }
