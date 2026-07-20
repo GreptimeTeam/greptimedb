@@ -68,7 +68,9 @@ use crate::sst::SeriesEstimator;
 use crate::sst::index::IndexOutput;
 use crate::sst::parquet::flat_format::primary_key_column_index;
 use crate::sst::parquet::format::{PrimaryKeyArray, PrimaryKeyArrayBuilder};
-use crate::sst::parquet::{PARQUET_METADATA_KEY, SstInfo};
+use crate::sst::parquet::{
+    FloatFieldEncoding, PARQUET_METADATA_KEY, SstInfo, apply_float_field_encoding,
+};
 
 const INIT_DICT_VALUE_CAPACITY: usize = 8;
 
@@ -1139,6 +1141,14 @@ pub struct BulkPartEncoder {
 
 impl BulkPartEncoder {
     pub fn new(metadata: RegionMetadataRef, row_group_size: usize) -> Result<BulkPartEncoder> {
+        Self::new_with_float_field_encoding(metadata, row_group_size, FloatFieldEncoding::Default)
+    }
+
+    pub(crate) fn new_with_float_field_encoding(
+        metadata: RegionMetadataRef,
+        row_group_size: usize,
+        float_field_encoding: FloatFieldEncoding,
+    ) -> Result<BulkPartEncoder> {
         // TODO(yingwen): Skip arrow schema if needed.
         let json = metadata.to_json().context(InvalidMetadataSnafu)?;
         let key_value_meta =
@@ -1146,14 +1156,18 @@ impl BulkPartEncoder {
 
         // TODO(yingwen): Do we need compression?
         let writer_props = Some(
-            WriterProperties::builder()
-                .set_key_value_metadata(Some(vec![key_value_meta]))
-                .set_write_batch_size(row_group_size)
-                .set_max_row_group_row_count(Some(row_group_size))
-                .set_compression(Compression::ZSTD(ZstdLevel::default()))
-                .set_column_index_truncate_length(None)
-                .set_statistics_truncate_length(None)
-                .build(),
+            apply_float_field_encoding(
+                WriterProperties::builder()
+                    .set_key_value_metadata(Some(vec![key_value_meta]))
+                    .set_write_batch_size(row_group_size)
+                    .set_max_row_group_row_count(Some(row_group_size))
+                    .set_compression(Compression::ZSTD(ZstdLevel::default()))
+                    .set_column_index_truncate_length(None)
+                    .set_statistics_truncate_length(None),
+                &metadata,
+                float_field_encoding,
+            )
+            .build(),
         );
 
         Ok(Self {
@@ -1652,12 +1666,13 @@ mod tests {
     use api::v1::{Row, SemanticType, WriteHint};
     use datafusion_common::ScalarValue;
     use datatypes::arrow::array::{
-        BinaryArray, DictionaryArray, Float64Array, TimestampMillisecondArray,
+        Array, BinaryArray, DictionaryArray, Float64Array, TimestampMillisecondArray,
     };
     use datatypes::arrow::datatypes::UInt32Type;
     use datatypes::prelude::{ConcreteDataType, Value};
     use datatypes::schema::ColumnSchema;
     use mito_codec::row_converter::build_primary_key_codec;
+    use parquet::basic::Encoding;
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
     use store_api::storage::RegionId;
     use store_api::storage::consts::ReservedColumnId;
@@ -1700,6 +1715,94 @@ mod tests {
         let part = converter.convert().unwrap();
         let encoder = BulkPartEncoder::new(metadata, 1024).unwrap();
         encoder.encode_part(&part).unwrap().unwrap()
+    }
+
+    #[test]
+    fn test_bulk_part_encoder_uses_bss_and_preserves_float_bits() {
+        let metadata = metadata_for_test();
+        let expected = vec![
+            None,
+            Some(0.0),
+            Some(-0.0),
+            Some(f64::INFINITY),
+            Some(f64::NEG_INFINITY),
+            Some(f64::from_bits(1)),
+            Some(f64::from_bits(0x7ff8_0000_0000_0042)),
+        ];
+        let kvs = build_key_values_with_ts_seq_values(
+            &metadata,
+            "a".to_string(),
+            0,
+            1..=expected.len() as i64,
+            expected.iter().copied(),
+            0,
+        );
+        let schema = to_flat_sst_arrow_schema(&metadata, &FlatSchemaOptions::default());
+        let mut converter = BulkPartConverter::new(
+            &metadata,
+            schema,
+            expected.len(),
+            build_primary_key_codec(&metadata),
+            true,
+        );
+        converter.append_key_values(&kvs).unwrap();
+        let part = converter.convert().unwrap();
+        let encoded = BulkPartEncoder::new_with_float_field_encoding(
+            metadata.clone(),
+            1024,
+            FloatFieldEncoding::ByteStreamSplit,
+        )
+        .unwrap()
+        .encode_part(&part)
+        .unwrap()
+        .unwrap();
+
+        let value_column = encoded
+            .metadata
+            .parquet_metadata
+            .row_group(0)
+            .columns()
+            .iter()
+            .find(|column| column.column_path().string() == "v1")
+            .unwrap();
+        assert!(
+            value_column
+                .encodings()
+                .any(|encoding| encoding == Encoding::BYTE_STREAM_SPLIT)
+        );
+        assert!(
+            !value_column
+                .encodings()
+                .any(|encoding| encoding == Encoding::RLE_DICTIONARY)
+        );
+
+        let projection = [4];
+        let reader = encoded
+            .read(
+                Arc::new(BulkIterContext::new(metadata, Some(&projection), None, false).unwrap()),
+                None,
+                None,
+            )
+            .unwrap()
+            .unwrap();
+        let actual = reader
+            .flat_map(|batch| {
+                let batch = batch.unwrap();
+                let values = batch
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<Float64Array>()
+                    .unwrap();
+                (0..values.len())
+                    .map(|index| (!values.is_null(index)).then(|| values.value(index).to_bits()))
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        let expected = expected
+            .into_iter()
+            .map(|value| value.map(f64::to_bits))
+            .collect::<Vec<_>>();
+        assert_eq!(expected, actual);
     }
 
     #[test]

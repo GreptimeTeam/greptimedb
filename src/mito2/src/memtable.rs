@@ -31,6 +31,7 @@ use mito_codec::row_converter::{PrimaryKeyCodec, build_primary_key_codec};
 use snafu::ensure;
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::RegionMetadataRef;
+use store_api::region_request::PathType;
 use store_api::storage::{ColumnId, SequenceNumber, SequenceRange};
 
 use crate::config::MitoConfig;
@@ -46,8 +47,8 @@ use crate::read::scan_region::PredicateGroup;
 use crate::region::options::{MemtableOptions, MergeMode, RegionOptions};
 use crate::sst::FormatType;
 use crate::sst::file::FileTimeRange;
-use crate::sst::parquet::SstInfo;
 use crate::sst::parquet::file_range::PreFilterMode;
+use crate::sst::parquet::{FloatFieldEncoding, SstInfo};
 
 mod builder;
 pub mod bulk;
@@ -405,7 +406,11 @@ impl MemtableBuilderProvider {
         }
     }
 
-    pub(crate) fn builder_for_options(&self, options: &RegionOptions) -> MemtableBuilderRef {
+    pub(crate) fn builder_for_options(
+        &self,
+        options: &RegionOptions,
+        path_type: PathType,
+    ) -> MemtableBuilderRef {
         let dedup = options.need_dedup();
         let merge_mode = options.merge_mode();
         let primary_key_encoding = options.primary_key_encoding();
@@ -422,7 +427,7 @@ impl MemtableBuilderProvider {
                 );
             }
 
-            return Arc::new(self.bulk_memtable_builder(dedup, merge_mode, options));
+            return Arc::new(self.bulk_memtable_builder(dedup, merge_mode, options, path_type));
         }
 
         if primary_key_encoding == PrimaryKeyEncoding::Sparse {
@@ -433,7 +438,7 @@ impl MemtableBuilderProvider {
                     "Overriding memtable config, use BulkMemtable for sparse primary key encoding"
                 );
             }
-            return Arc::new(self.bulk_memtable_builder(dedup, merge_mode, options));
+            return Arc::new(self.bulk_memtable_builder(dedup, merge_mode, options, path_type));
         }
 
         // The format is not flat.
@@ -441,7 +446,8 @@ impl MemtableBuilderProvider {
             Some(MemtableOptions::Bulk(config)) => Arc::new(
                 BulkMemtableBuilder::new(self.write_buffer_manager.clone(), !dedup, merge_mode)
                     .with_config(config.clone())
-                    .with_compact_dispatcher(self.compact_dispatcher.clone()),
+                    .with_compact_dispatcher(self.compact_dispatcher.clone())
+                    .with_float_field_encoding(FloatFieldEncoding::from_path_type(path_type)),
             ),
             Some(MemtableOptions::TimeSeries) => Arc::new(TimeSeriesMemtableBuilder::new(
                 self.write_buffer_manager.clone(),
@@ -457,13 +463,15 @@ impl MemtableBuilderProvider {
         dedup: bool,
         merge_mode: MergeMode,
         options: &RegionOptions,
+        path_type: PathType,
     ) -> BulkMemtableBuilder {
         let mut builder = BulkMemtableBuilder::new(
             self.write_buffer_manager.clone(),
             !dedup, // append_mode: true if not dedup, false if dedup
             merge_mode,
         )
-        .with_compact_dispatcher(self.compact_dispatcher.clone());
+        .with_compact_dispatcher(self.compact_dispatcher.clone())
+        .with_float_field_encoding(FloatFieldEncoding::from_path_type(path_type));
 
         if let Some(MemtableOptions::Bulk(config)) = &options.memtable {
             builder = builder.with_config(config.clone());
@@ -830,8 +838,12 @@ mod tests {
             ..Default::default()
         };
 
-        let builder =
-            provider.bulk_memtable_builder(options.need_dedup(), options.merge_mode(), &options);
+        let builder = provider.bulk_memtable_builder(
+            options.need_dedup(),
+            options.merge_mode(),
+            &options,
+            PathType::Bare,
+        );
 
         assert_eq!(&config, builder.config());
     }
