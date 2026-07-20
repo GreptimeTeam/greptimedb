@@ -177,7 +177,7 @@ impl PhysicalOptimizerRule for MatchesConstantTermOptimizer {
                             if let Some(lit) = args[1].downcast_ref::<Literal>()
                                 && let ScalarValue::Utf8(Some(term)) = lit.value()
                             {
-                                let finder = MatchesTermFinder::new(&term);
+                                let finder = MatchesTermFinder::new(term);
 
                                 // For debugging purpose. Not really precise but enough for most cases.
                                 let probes = term
