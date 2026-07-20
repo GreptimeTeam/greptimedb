@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use common_base::readable_size::ReadableSize;
 use common_base::secrets::{ExposeSecret, SecretString};
-use opendal::services::{Azblob, Gcs, Oss, S3};
+use opendal::services::{Azblob, Gcs, Mysql, Oss, S3};
 use serde::{Deserialize, Serialize};
 
 use crate::util;
@@ -32,6 +32,7 @@ pub enum ObjectStoreConfig {
     Oss(OssConfig),
     Azblob(AzblobConfig),
     Gcs(GcsConfig),
+    Mysql(MysqlConfig),
 }
 
 impl Default for ObjectStoreConfig {
@@ -49,6 +50,7 @@ impl ObjectStoreConfig {
             Self::Oss(_) => "Oss",
             Self::Azblob(_) => "Azblob",
             Self::Gcs(_) => "Gcs",
+            Self::Mysql(_) => "Mysql",
         }
     }
 
@@ -66,6 +68,7 @@ impl ObjectStoreConfig {
             Self::Oss(oss) => &oss.name,
             Self::Azblob(az) => &az.name,
             Self::Gcs(gcs) => &gcs.name,
+            Self::Mysql(mysql) => &mysql.name,
         };
 
         if name.trim().is_empty() {
@@ -83,6 +86,7 @@ impl ObjectStoreConfig {
             Self::Oss(oss) => Some(&oss.cache),
             Self::Azblob(az) => Some(&az.cache),
             Self::Gcs(gcs) => Some(&gcs.cache),
+            Self::Mysql(mysql) => Some(&mysql.cache),
         }
     }
 
@@ -94,6 +98,7 @@ impl ObjectStoreConfig {
             Self::Oss(oss) => Some(&mut oss.cache),
             Self::Azblob(az) => Some(&mut az.cache),
             Self::Gcs(gcs) => Some(&mut gcs.cache),
+            Self::Mysql(mysql) => Some(&mut mysql.cache),
         }
     }
 }
@@ -276,6 +281,37 @@ impl From<&GcsConnection> for Gcs {
             .endpoint(&connection.endpoint)
     }
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(default)]
+pub struct MysqlConfig {
+    pub name: String,
+    pub root: String,
+    pub addr: String,
+    pub table: Option<String>,
+    #[serde(flatten)]
+    pub cache: ObjectStorageCacheConfig,
+}
+
+impl From<&MysqlConfig> for Mysql {
+    fn from(config: &MysqlConfig) -> Self {
+        let root = util::normalize_dir(&config.root);
+        let mut builder = Mysql::default()
+            .connection_string(&config.addr)
+            .root(&root)
+            .key_field("key")
+            .value_field("value");
+
+        if let Some(table) = &config.table {
+            builder = builder.table(table);
+        } else {
+            builder = builder.table("greptime");
+        }
+
+        builder
+    }
+}
+
 /// The http client options to the storage.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
@@ -364,6 +400,17 @@ mod tests {
         });
         assert_eq!("test", s3_config.config_name());
         assert_eq!("S3", s3_config.provider_name());
+
+        let mysql_config = ObjectStoreConfig::Mysql(MysqlConfig::default());
+        assert_eq!("Mysql", mysql_config.config_name());
+        assert_eq!("Mysql", mysql_config.provider_name());
+
+        let mysql_config = ObjectStoreConfig::Mysql(MysqlConfig {
+            name: "test".to_string(),
+            ..Default::default()
+        });
+        assert_eq!("test", mysql_config.config_name());
+        assert_eq!("Mysql", mysql_config.provider_name());
     }
 
     #[test]
@@ -378,5 +425,7 @@ mod tests {
         assert!(gcs_config.is_object_storage());
         let azblob_config = ObjectStoreConfig::Azblob(AzblobConfig::default());
         assert!(azblob_config.is_object_storage());
+        let mysql_config = ObjectStoreConfig::Mysql(MysqlConfig::default());
+        assert!(mysql_config.is_object_storage());
     }
 }

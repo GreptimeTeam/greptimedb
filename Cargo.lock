@@ -9388,6 +9388,7 @@ dependencies = [
  "opendal-service-fs",
  "opendal-service-gcs",
  "opendal-service-http",
+ "opendal-service-mysql",
  "opendal-service-oss",
  "opendal-service-s3",
 ]
@@ -9573,6 +9574,18 @@ dependencies = [
  "log",
  "opendal-core",
  "serde",
+]
+
+[[package]]
+name = "opendal-service-mysql"
+version = "0.57.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5cb3364a16d32aeb9c9c3232a81648926a5a8efa680f3316e0743ca2d5a37744"
+dependencies = [
+ "mea",
+ "opendal-core",
+ "serde",
+ "sqlx",
 ]
 
 [[package]]

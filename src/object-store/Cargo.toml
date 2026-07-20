@@ -31,6 +31,7 @@ opendal = { version = "0.57", features = [
     "services-fs",
     "services-gcs",
     "services-http",
+    "services-mysql",
     "services-oss",
     "services-s3",
 ] }
