@@ -109,3 +109,110 @@ pub fn native_histogram_value_type() -> &'static ConcreteDataType {
 pub fn is_native_histogram_value_schema(name: &str, data_type: &ConcreteDataType) -> bool {
     name == NATIVE_HISTOGRAM_FIELD && data_type == native_histogram_value_type()
 }
+
+// ---------------------------------------------------------------------------
+// Stable Parquet field ids for native-histogram sub-fields.
+//
+// External readers resolve nested struct fields by `PARQUET:field_id`, so each
+// sub-field (and list element) needs a stable positive id. The struct schema
+// is fixed (always the same 18 fields). Each histogram column owns a block of
+// ids (offset from a reserved base by the column's id), so several histogram
+// columns in one table get disjoint sub-field ids. The reserved base is
+// disjoint from user column ids and mito2 internal ids (`1 << 30`).
+//
+// The id is computed with checked arithmetic: the reserved base plus
+// `column_id * stride` cannot always fit in a positive `i32` (a `ColumnId` is
+// `u32`), so derivation returns `None` once the representable range is
+// exceeded. Callers must handle `None` explicitly — the SST parquet writer
+// surfaces it as an error rather than wrapping, panicking, or silently
+// dropping the field id.
+// ---------------------------------------------------------------------------
+
+/// Reserved base for native-histogram struct sub-field ids.
+pub const NATIVE_HISTOGRAM_SUBFIELD_ID_BASE: i32 = 0x5000_0000;
+
+/// Number of ids reserved per histogram column (18 sub-fields + headroom for
+/// list element ids), so multiple histogram columns get disjoint ids.
+pub const NATIVE_HISTOGRAM_SUBFIELD_ID_STRIDE: i32 = 64;
+
+/// Offset of list element ids within a column's id block.
+pub const NATIVE_HISTOGRAM_LIST_ELEMENT_OFFSET: i32 = 32;
+
+/// Returns the stable field id for a native-histogram struct sub-field,
+/// namespaced by its parent `column_id`, or `None` if `name` is not a known
+/// sub-field or the derived id overflows a positive `i32`.
+pub fn native_histogram_subfield_id(column_id: i32, name: &str) -> Option<i32> {
+    let idx = subfield_index(name)?;
+    NATIVE_HISTOGRAM_SUBFIELD_ID_BASE
+        .checked_add(column_id.checked_mul(NATIVE_HISTOGRAM_SUBFIELD_ID_STRIDE)?)
+        .and_then(|v| v.checked_add(idx))
+}
+
+/// Returns the stable list `element-id` for a list-typed native-histogram
+/// sub-field, namespaced by its parent `column_id`, or `None` if `name` is not
+/// a known sub-field or the derived id overflows a positive `i32`.
+pub fn native_histogram_list_element_id(column_id: i32, name: &str) -> Option<i32> {
+    let idx = subfield_index(name)?;
+    NATIVE_HISTOGRAM_SUBFIELD_ID_BASE
+        .checked_add(column_id.checked_mul(NATIVE_HISTOGRAM_SUBFIELD_ID_STRIDE)?)
+        .and_then(|v| v.checked_add(NATIVE_HISTOGRAM_LIST_ELEMENT_OFFSET))
+        .and_then(|v| v.checked_add(idx))
+}
+
+fn subfield_index(name: &str) -> Option<i32> {
+    NATIVE_HISTOGRAM_FIELD_NAMES
+        .iter()
+        .position(|n| *n == name)
+        .map(|i| i as i32)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn subfield_ids_are_namespaced_and_disjoint() {
+        // SCHEMA=0, ZERO_THRESHOLD=1, SUM=2, ..., CUSTOM_VALUES=5.
+        let sum_idx = 2;
+        let custom_values_idx = 5;
+
+        // Ids are offset from the reserved base by the parent column id and
+        // the sub-field index.
+        assert_eq!(
+            native_histogram_subfield_id(1, SUM_FIELD),
+            Some(NATIVE_HISTOGRAM_SUBFIELD_ID_BASE + NATIVE_HISTOGRAM_SUBFIELD_ID_STRIDE + sum_idx,)
+        );
+        // List element ids additionally carry the list offset.
+        assert_eq!(
+            native_histogram_list_element_id(1, CUSTOM_VALUES_FIELD),
+            Some(
+                NATIVE_HISTOGRAM_SUBFIELD_ID_BASE
+                    + NATIVE_HISTOGRAM_SUBFIELD_ID_STRIDE
+                    + NATIVE_HISTOGRAM_LIST_ELEMENT_OFFSET
+                    + custom_values_idx,
+            )
+        );
+        // Different parent columns get disjoint ids for the same sub-field.
+        assert_ne!(
+            native_histogram_subfield_id(1, SUM_FIELD),
+            native_histogram_subfield_id(7, SUM_FIELD)
+        );
+        // Unknown sub-field name -> None.
+        assert_eq!(native_histogram_subfield_id(1, "not_a_field"), None);
+    }
+
+    #[test]
+    fn subfield_ids_overflow_returns_none() {
+        // `column_id` is u32-sized, but the derived id must fit in a positive
+        // i32. At column_id = 12_582_912, BASE + column_id*64 == i32::MAX + 1,
+        // which previously overflowed (debug panic / release wrap). Checked
+        // arithmetic must yield None instead of wrapping or panicking.
+        assert_eq!(native_histogram_subfield_id(12_582_912, SUM_FIELD), None);
+        assert_eq!(
+            native_histogram_list_element_id(12_582_912, CUSTOM_VALUES_FIELD),
+            None
+        );
+        // One below that boundary is still representable.
+        assert!(native_histogram_subfield_id(12_582_911, SUM_FIELD).is_some());
+    }
+}
