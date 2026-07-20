@@ -60,6 +60,9 @@ pub struct SchemaNameValue {
     pub ttl: Option<DatabaseTimeToLive>,
     #[serde(default)]
     pub extra_options: BTreeMap<String, String>,
+    /// Identifies the create-database procedure that wrote this value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub create_procedure_id: Option<String>,
 }
 
 impl Display for SchemaNameValue {
@@ -103,7 +106,11 @@ impl TryFrom<&HashMap<String, String>> for SchemaNameValue {
             })
             .collect();
 
-        Ok(Self { ttl, extra_options })
+        Ok(Self {
+            ttl,
+            extra_options,
+            ..Default::default()
+        })
     }
 }
 
@@ -452,6 +459,7 @@ mod tests {
             Some(SchemaNameValue {
                 ttl: Some(Duration::from_secs(10).into()),
                 extra_options: BTreeMap::new(),
+                create_procedure_id: None,
             })
         );
 
@@ -474,7 +482,28 @@ mod tests {
             Some(SchemaNameValue {
                 ttl: Some(Duration::from_secs(15).into()),
                 extra_options: expected_options,
+                create_procedure_id: None,
             })
+        );
+    }
+
+    #[test]
+    fn test_create_procedure_id_serialization() {
+        let value = SchemaNameValue {
+            create_procedure_id: Some("4ee0ba94-11f0-4d4d-9468-5ebf732e3ab2".to_string()),
+            ..Default::default()
+        };
+        let raw = value.try_as_raw_value().unwrap();
+        assert_eq!(
+            SchemaNameValue::try_from_raw_value(&raw).unwrap(),
+            Some(value)
+        );
+
+        let raw = SchemaNameValue::default().try_as_raw_value().unwrap();
+        assert!(
+            !String::from_utf8(raw)
+                .unwrap()
+                .contains("create_procedure_id")
         );
     }
 

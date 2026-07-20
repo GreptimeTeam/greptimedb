@@ -45,6 +45,8 @@ use common_meta::key::view_info::{ViewInfoManager, ViewInfoManagerRef};
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::procedure_executor::ProcedureExecutorRef;
+#[cfg(feature = "enterprise")]
+use common_meta::rpc::ddl::CreatorGrantIntent;
 use common_query::Output;
 use common_telemetry::{debug, tracing, warn};
 use common_time::Timestamp;
@@ -101,6 +103,23 @@ pub trait StatementExecutorConfigurator: Send + Sync {
 
 pub type StatementExecutorConfiguratorRef = Arc<dyn StatementExecutorConfigurator>;
 
+#[cfg(feature = "enterprise")]
+#[async_trait::async_trait]
+pub trait CreateDatabaseHandler: Send + Sync {
+    fn creator(
+        &self,
+        query_ctx: &QueryContextRef,
+    ) -> std::result::Result<Option<CreatorGrantIntent>, BoxedError>;
+
+    async fn refresh_current_user(
+        &self,
+        query_ctx: &QueryContextRef,
+    ) -> std::result::Result<(), BoxedError>;
+}
+
+#[cfg(feature = "enterprise")]
+pub type CreateDatabaseHandlerRef = Arc<dyn CreateDatabaseHandler>;
+
 pub struct ExecutorConfigureContext {
     pub kv_backend: KvBackendRef,
 }
@@ -118,6 +137,8 @@ pub struct StatementExecutor {
     inserter: InserterRef,
     process_manager: Option<ProcessManagerRef>,
     origin_frontend_addr: String,
+    #[cfg(feature = "enterprise")]
+    create_database_handler: Option<CreateDatabaseHandlerRef>,
     #[cfg(feature = "enterprise")]
     trigger_querier: Option<TriggerQuerierRef>,
 }
@@ -168,6 +189,8 @@ impl StatementExecutor {
             process_manager,
             origin_frontend_addr,
             #[cfg(feature = "enterprise")]
+            create_database_handler: None,
+            #[cfg(feature = "enterprise")]
             trigger_querier: None,
         }
     }
@@ -175,6 +198,12 @@ impl StatementExecutor {
     #[cfg(feature = "enterprise")]
     pub fn with_trigger_querier(mut self, querier: TriggerQuerierRef) -> Self {
         self.trigger_querier = Some(querier);
+        self
+    }
+
+    #[cfg(feature = "enterprise")]
+    pub fn with_create_database_handler(mut self, handler: CreateDatabaseHandlerRef) -> Self {
+        self.create_database_handler = Some(handler);
         self
     }
 

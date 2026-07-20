@@ -67,6 +67,18 @@ use crate::key::table_name::{TableNameKey, TableNameManager};
 /// Reserved query-context extension key for the frontend peer address that submitted a DDL request.
 pub const ORIGIN_FRONTEND_ADDR_EXTENSION_KEY: &str = "__greptime_origin_frontend.addr";
 
+/// Reserved query-context extension key for the authenticated database creator.
+pub const CREATE_DATABASE_CREATOR_EXTENSION_KEY: &str = "__greptime_create_database.creator";
+/// Internal gRPC metadata key for the authenticated database creator.
+pub const CREATE_DATABASE_CREATOR_METADATA_KEY: &str =
+    "x-greptime-internal-create-database-creator-bin";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreatorGrantIntent {
+    pub username: String,
+    pub created_at_ns: i64,
+}
+
 /// DDL tasks
 #[derive(Debug, Clone)]
 pub enum DdlTask {
@@ -171,12 +183,14 @@ impl DdlTask {
         schema: String,
         create_if_not_exists: bool,
         options: HashMap<String, String>,
+        creator: Option<CreatorGrantIntent>,
     ) -> Self {
         DdlTask::CreateDatabase(CreateDatabaseTask {
             catalog,
             schema,
             create_if_not_exists,
             options,
+            creator,
         })
     }
 
@@ -351,7 +365,28 @@ impl TryFrom<SubmitDdlTaskRequest> for PbDdlTaskRequest {
     type Error = error::Error;
 
     fn try_from(request: SubmitDdlTaskRequest) -> Result<Self> {
-        let task = match request.task {
+        let SubmitDdlTaskRequest {
+            mut query_context,
+            wait,
+            timeout,
+            task,
+        } = request;
+
+        query_context
+            .extensions
+            .remove(CREATE_DATABASE_CREATOR_EXTENSION_KEY);
+        if let DdlTask::CreateDatabase(CreateDatabaseTask {
+            creator: Some(creator),
+            ..
+        }) = &task
+        {
+            query_context.extensions.insert(
+                CREATE_DATABASE_CREATOR_EXTENSION_KEY.to_string(),
+                serde_json::to_string(creator).context(error::SerdeJsonSnafu)?,
+            );
+        }
+
+        let task = match task {
             DdlTask::CreateTable(task) => Task::CreateTableTask(task.try_into()?),
             DdlTask::DropTable(task) => Task::DropTableTask(task.into()),
             DdlTask::UndropTable(task) => Task::UndropTableTask(task.into()),
@@ -398,9 +433,9 @@ impl TryFrom<SubmitDdlTaskRequest> for PbDdlTaskRequest {
 
         Ok(Self {
             header: None,
-            query_context: Some(request.query_context.into()),
-            timeout_secs: request.timeout.as_secs() as u32,
-            wait: request.wait,
+            query_context: Some(query_context.into()),
+            timeout_secs: timeout.as_secs() as u32,
+            wait,
             task: Some(task),
         })
     }
@@ -1027,6 +1062,8 @@ pub struct CreateDatabaseTask {
     pub create_if_not_exists: bool,
     #[serde_as(deserialize_as = "DefaultOnNull")]
     pub options: HashMap<String, String>,
+    #[serde(default)]
+    pub creator: Option<CreatorGrantIntent>,
 }
 
 impl TryFrom<PbCreateDatabaseTask> for CreateDatabaseTask {
@@ -1047,6 +1084,7 @@ impl TryFrom<PbCreateDatabaseTask> for CreateDatabaseTask {
             schema: schema_name,
             create_if_not_exists,
             options,
+            creator: None,
         })
     }
 }
@@ -1060,6 +1098,7 @@ impl TryFrom<CreateDatabaseTask> for PbCreateDatabaseTask {
             schema,
             create_if_not_exists,
             options,
+            creator: _,
         }: CreateDatabaseTask,
     ) -> Result<Self> {
         Ok(PbCreateDatabaseTask {
@@ -1869,6 +1908,53 @@ mod tests {
         let de = DdlTask::try_from(pb_task).unwrap();
 
         assert!(matches!(de, DdlTask::PurgeDroppedTable(task) if task == expected));
+    }
+
+    #[test]
+    fn test_create_database_creator_transport_sanitizes_extension() {
+        let request = |creator| {
+            let mut query_context = QueryContext::default();
+            query_context.extensions.insert(
+                CREATE_DATABASE_CREATOR_EXTENSION_KEY.to_string(),
+                "spoofed".to_string(),
+            );
+            SubmitDdlTaskRequest::new(
+                query_context,
+                DdlTask::new_create_database(
+                    "greptime".to_string(),
+                    "test".to_string(),
+                    false,
+                    HashMap::new(),
+                    creator,
+                ),
+            )
+        };
+        let creator = CreatorGrantIntent {
+            username: "alice".to_string(),
+            created_at_ns: 42,
+        };
+
+        let mut pb = PbDdlTaskRequest::try_from(request(Some(creator.clone()))).unwrap();
+        let encoded = pb
+            .query_context
+            .as_ref()
+            .unwrap()
+            .extensions
+            .get(CREATE_DATABASE_CREATOR_EXTENSION_KEY)
+            .unwrap();
+        assert_eq!(creator, serde_json::from_str(encoded).unwrap());
+        assert!(matches!(
+            DdlTask::try_from(pb.task.take().unwrap()).unwrap(),
+            DdlTask::CreateDatabase(CreateDatabaseTask { creator: None, .. })
+        ));
+
+        let pb = PbDdlTaskRequest::try_from(request(None)).unwrap();
+        assert!(
+            !pb.query_context
+                .unwrap()
+                .extensions
+                .contains_key(CREATE_DATABASE_CREATOR_EXTENSION_KEY)
+        );
     }
 
     #[test]

@@ -34,7 +34,7 @@ use crate::ddl::alter_database::AlterDatabaseProcedure;
 use crate::ddl::alter_logical_tables::AlterLogicalTablesProcedure;
 use crate::ddl::alter_table::AlterTableProcedure;
 use crate::ddl::comment_on::CommentOnProcedure;
-use crate::ddl::create_database::CreateDatabaseProcedure;
+use crate::ddl::create_database::{CreateDatabaseMetadataCommitterRef, CreateDatabaseProcedure};
 use crate::ddl::create_flow::CreateFlowProcedure;
 use crate::ddl::create_logical_tables::CreateLogicalTablesProcedure;
 use crate::ddl::create_table::CreateTableProcedure;
@@ -135,7 +135,7 @@ macro_rules! procedure_loader_entry {
     ($procedure:ident) => {
         (
             $procedure::TYPE_NAME,
-            &|context: DdlContext| -> BoxedProcedureLoader {
+            &|context: DdlContext| -> common_procedure::BoxedProcedureLoader {
                 Box::new(move |json: &str| {
                     let context = context.clone();
                     $procedure::from_json(json, context).map(|p| Box::new(p) as _)
@@ -234,6 +234,14 @@ impl DdlManager {
         self
     }
 
+    pub fn with_create_database_metadata_committer(
+        mut self,
+        committer: CreateDatabaseMetadataCommitterRef,
+    ) -> Self {
+        self.ddl_context.create_database_metadata_committer = Some(committer);
+        self
+    }
+
     /// Returns the [TableMetadataManagerRef].
     pub fn table_metadata_manager(&self) -> &TableMetadataManagerRef {
         &self.ddl_context.table_metadata_manager
@@ -251,6 +259,7 @@ impl DdlManager {
             CreateLogicalTablesProcedure,
             CreateViewProcedure,
             CreateFlowProcedure,
+            CreateDatabaseProcedure,
             AlterTableProcedure,
             AlterLogicalTablesProcedure,
             AlterDatabaseProcedure,
@@ -259,7 +268,6 @@ impl DdlManager {
             PurgeDroppedTableProcedure,
             DropFlowProcedure,
             TruncateTableProcedure,
-            CreateDatabaseProcedure,
             DropDatabaseProcedure,
             DropViewProcedure,
             CommentOnProcedure
@@ -546,11 +554,18 @@ impl DdlManager {
             schema,
             create_if_not_exists,
             options,
+            creator,
         }: CreateDatabaseTask,
     ) -> Result<(ProcedureId, Option<Output>)> {
         let context = self.create_context();
-        let procedure =
-            CreateDatabaseProcedure::new(catalog, schema, create_if_not_exists, options, context);
+        let procedure = CreateDatabaseProcedure::new(
+            catalog,
+            schema,
+            create_if_not_exists,
+            options,
+            creator,
+            context,
+        );
         let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
 
         self.execute_procedure_and_wait(procedure_with_id).await
@@ -972,14 +987,16 @@ async fn handle_create_database_task(
     ddl_manager: &DdlManager,
     create_database_task: CreateDatabaseTask,
 ) -> Result<SubmitDdlTaskResponse> {
+    let catalog = create_database_task.catalog.clone();
+    let schema = create_database_task.schema.clone();
     let (id, _) = ddl_manager
-        .submit_create_database(create_database_task.clone())
+        .submit_create_database(create_database_task)
         .await?;
 
     let procedure_id = id.to_string();
     info!(
         "Database {}.{} is created via procedure_id {id:?}",
-        create_database_task.catalog, create_database_task.schema
+        catalog, schema
     );
 
     Ok(SubmitDdlTaskResponse {
@@ -1253,6 +1270,9 @@ mod tests {
     use super::DdlManager;
     use crate::cache_invalidator::DummyCacheInvalidator;
     use crate::ddl::alter_table::AlterTableProcedure;
+    use crate::ddl::create_database::{
+        AtomicCreateOutcome, CreateDatabaseMetadataCommitter, CreateDatabaseProcedure,
+    };
     use crate::ddl::create_table::CreateTableProcedure;
     use crate::ddl::drop_table::DropTableProcedure;
     use crate::ddl::flow_meta::FlowMetadataAllocator;
@@ -1267,9 +1287,10 @@ mod tests {
     use crate::peer::Peer;
     use crate::region_keeper::MemoryRegionKeeper;
     use crate::region_registry::LeaderRegionRegistry;
-    use crate::rpc::ddl::UndropTableTask;
+    use crate::rpc::ddl::{CreatorGrantIntent, UndropTableTask};
     use crate::sequence::SequenceBuilder;
     use crate::state_store::KvStateStore;
+    use crate::test_util::{MockDatanodeManager, new_ddl_context};
     use crate::wal_provider::WalProvider;
 
     /// A dummy implemented [NodeManager].
@@ -1314,6 +1335,47 @@ mod tests {
         }
     }
 
+    struct LoaderCommitter;
+
+    #[async_trait::async_trait]
+    impl CreateDatabaseMetadataCommitter for LoaderCommitter {
+        async fn commit(
+            &self,
+            _catalog: &str,
+            _schema: &str,
+            _value: &crate::key::schema_name::SchemaNameValue,
+            _creator: &CreatorGrantIntent,
+        ) -> std::result::Result<AtomicCreateOutcome, BoxedError> {
+            unreachable!()
+        }
+    }
+
+    #[test]
+    fn test_generic_loader_captures_configured_committer() {
+        let mut context = new_ddl_context(Arc::new(MockDatanodeManager::new(())));
+        let committer = Arc::new(LoaderCommitter);
+        context.create_database_metadata_committer = Some(committer.clone());
+        let loader = procedure_loader!(CreateDatabaseProcedure)[0].1(context);
+        assert_eq!(Arc::strong_count(&committer), 2);
+
+        let loaded = loader(
+            r#"{
+                "state":"CreateMetadata",
+                "catalog":"greptime",
+                "schema":"metrics",
+                "create_if_not_exists":false,
+                "options":{},
+                "creator":{"username":"alice","created_at_ns":42}
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(loaded.type_name(), "metasrv-procedure::CreateDatabase");
+        assert_eq!(Arc::strong_count(&committer), 3);
+        drop(loaded);
+        assert_eq!(Arc::strong_count(&committer), 2);
+    }
+
     #[test]
     fn test_try_new() {
         let kv_backend = Arc::new(MemoryKvBackend::new());
@@ -1350,6 +1412,7 @@ mod tests {
                 region_failure_detector_controller: Arc::new(NoopRegionFailureDetectorControl),
                 soft_drop_enabled: false,
                 soft_drop_retention: None,
+                create_database_metadata_committer: None,
             },
             procedure_manager.clone(),
             Arc::new(DummyRepartitionProcedureFactory),
@@ -1404,6 +1467,7 @@ mod tests {
                 region_failure_detector_controller: Arc::new(NoopRegionFailureDetectorControl),
                 soft_drop_enabled: true,
                 soft_drop_retention: Some(std::time::Duration::from_secs(1)),
+                create_database_metadata_committer: None,
             },
             procedure_manager,
             Arc::new(DummyRepartitionProcedureFactory),

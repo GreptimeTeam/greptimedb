@@ -47,7 +47,7 @@ use common_meta::rpc::ddl::trigger::CreateTriggerTask;
 #[cfg(feature = "enterprise")]
 use common_meta::rpc::ddl::trigger::DropTriggerTask;
 use common_meta::rpc::ddl::{
-    CreateFlowTask, DdlTask, DropFlowTask, DropViewTask, SubmitDdlTaskRequest,
+    CreateFlowTask, CreatorGrantIntent, DdlTask, DropFlowTask, DropViewTask, SubmitDdlTaskRequest,
     SubmitDdlTaskResponse,
 };
 use common_query::Output;
@@ -2138,7 +2138,15 @@ impl StatementExecutor {
             }
         );
 
-        if !self
+        #[cfg(feature = "enterprise")]
+        let creator = match &self.create_database_handler {
+            Some(handler) => handler.creator(&query_context).context(ExternalSnafu)?,
+            None => None,
+        };
+        #[cfg(not(feature = "enterprise"))]
+        let creator = None;
+
+        let output = if !self
             .catalog_manager
             .schema_exists(catalog, database, None)
             .await
@@ -2150,16 +2158,27 @@ impl StatementExecutor {
                 database.to_string(),
                 create_if_not_exists,
                 options,
-                query_context,
+                query_context.clone(),
+                creator,
             )
             .await?;
 
-            Ok(Output::new_with_affected_rows(1))
+            Output::new_with_affected_rows(1)
         } else if create_if_not_exists {
-            Ok(Output::new_with_affected_rows(1))
+            Output::new_with_affected_rows(1)
         } else {
-            error::SchemaExistsSnafu { name: database }.fail()
+            return error::SchemaExistsSnafu { name: database }.fail();
+        };
+
+        #[cfg(feature = "enterprise")]
+        if let Some(handler) = &self.create_database_handler {
+            handler
+                .refresh_current_user(&query_context)
+                .await
+                .context(ExternalSnafu)?;
         }
+
+        Ok(output)
     }
 
     async fn create_database_procedure(
@@ -2169,10 +2188,11 @@ impl StatementExecutor {
         create_if_not_exists: bool,
         options: HashMap<String, String>,
         query_context: QueryContextRef,
+        creator: Option<CreatorGrantIntent>,
     ) -> Result<SubmitDdlTaskResponse> {
         let request = SubmitDdlTaskRequest::new(
             to_meta_query_context(query_context),
-            DdlTask::new_create_database(catalog, database, create_if_not_exists, options),
+            DdlTask::new_create_database(catalog, database, create_if_not_exists, options, creator),
         );
 
         self.procedure_executor
