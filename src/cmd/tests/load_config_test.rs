@@ -189,6 +189,11 @@ fn test_load_metasrv_example_config() {
     let options =
         GreptimeOptions::<MetasrvOptions>::load_layered_options(example_config.to_str(), "")
             .unwrap();
+    assert!(!options.component.gc.experimental_soft_drop.enable);
+    assert_eq!(
+        Duration::from_secs(7 * 24 * 60 * 60),
+        options.component.gc.experimental_soft_drop.retention
+    );
     let expected = GreptimeOptions::<MetasrvOptions> {
         component: MetasrvOptions {
             selector: SelectorType::default(),
@@ -226,6 +231,25 @@ fn test_load_metasrv_example_config() {
         ..Default::default()
     };
     similar_asserts::assert_eq!(options, expected);
+}
+
+#[test]
+fn test_load_metasrv_soft_drop_config() {
+    let config = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(
+        config.path(),
+        "[gc]\nenable = true\n[gc.experimental_soft_drop]\nenable = true\nretention = \"1d\"\n",
+    )
+    .unwrap();
+
+    let options =
+        GreptimeOptions::<MetasrvOptions>::load_layered_options(config.path().to_str(), "")
+            .unwrap();
+    assert!(options.component.gc.experimental_soft_drop.enable);
+    assert_eq!(
+        Duration::from_secs(24 * 60 * 60),
+        options.component.gc.experimental_soft_drop.retention
+    );
 }
 
 #[test]

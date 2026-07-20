@@ -115,8 +115,8 @@ TQL ANALYZE (0, 5, '5s') tsid_binary_join_left / tsid_binary_join_right;
 +-+-+-+
 | stage | node | plan_|
 +-+-+-+
-| 0_| 0_|_ProjectionExec: expr=[host@2 as host, job@3 as job, ts@5 as ts, __tsid@4 as __tsid, greptime_value@0 / greptime_value@1 as tsid_binary_join_left.greptime_value / tsid_binary_join_right.greptime_value] REDACTED
-|_|_|_HashJoinExec: mode=CollectLeft, join_type=Inner, on=[(__tsid@1, __tsid@3), (ts@2, ts@4)], projection=[greptime_value@0, greptime_value@3, host@4, job@5, __tsid@6, ts@7], NullsEqual: true REDACTED
+| 0_| 0_|_ProjectionExec: expr=[host@0 as host, job@1 as job, ts@2 as ts, __tsid@3 as __tsid, greptime_value@4 / greptime_value@5 as tsid_binary_join_left.greptime_value / tsid_binary_join_right.greptime_value] REDACTED
+|_|_|_HashJoinExec: mode=CollectLeft, join_type=Inner, on=[(__tsid@1, __tsid@3), (ts@2, ts@4)], projection=[host@4, job@5, ts@7, __tsid@6, greptime_value@0, greptime_value@3], NullsEqual: true REDACTED
 |_|_|_CoalescePartitionsExec REDACTED
 |_|_|_ProjectionExec: expr=[greptime_value@0 as greptime_value, __tsid@3 as __tsid, ts@4 as ts] REDACTED
 |_|_|_MergeScanExec: REDACTED
@@ -155,8 +155,8 @@ TQL ANALYZE (0, 5, '5s') (tsid_binary_join_left + tsid_binary_join_right) / tsid
 +-+-+-+
 | stage | node | plan_|
 +-+-+-+
-| 0_| 0_|_ProjectionExec: expr=[host@1 as host, job@2 as job, ts@4 as ts, __tsid@3 as __tsid, (greptime_value@0 + greptime_value@5) / greptime_value@0 as tsid_binary_join_left.greptime_value + tsid_binary_join_right.greptime_value / tsid_binary_join_left.greptime_value] REDACTED
-|_|_|_HashJoinExec: mode=Partitioned, join_type=Inner, on=[(__tsid@3, __tsid@1), (ts@4, ts@2)], projection=[greptime_value@0, host@1, job@2, __tsid@3, ts@4, greptime_value@5], NullsEqual: true REDACTED
+| 0_| 0_|_ProjectionExec: expr=[host@0 as host, job@1 as job, ts@2 as ts, __tsid@3 as __tsid, (greptime_value@4 + greptime_value@5) / greptime_value@4 as tsid_binary_join_left.greptime_value + tsid_binary_join_right.greptime_value / tsid_binary_join_left.greptime_value] REDACTED
+|_|_|_HashJoinExec: mode=Partitioned, join_type=Inner, on=[(__tsid@3, __tsid@1), (ts@4, ts@2)], projection=[host@1, job@2, ts@4, __tsid@3, greptime_value@0, greptime_value@5], NullsEqual: true REDACTED
 |_|_|_RepartitionExec: partitioning=Hash([__tsid@3, ts@4],REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_RepartitionExec: partitioning=Hash([__tsid@1, ts@2],REDACTED
@@ -194,8 +194,8 @@ TQL ANALYZE (0, 5, '5s') ((tsid_binary_join_left + tsid_binary_join_right) * (ts
 +-+-+-+
 | stage | node | plan_|
 +-+-+-+
-| 0_| 0_|_ProjectionExec: expr=[host@1 as host, job@2 as job, ts@4 as ts, __tsid@3 as __tsid, (greptime_value@0 + greptime_value@5) * (greptime_value@0 - greptime_value@6) / (greptime_value@0 + 2) as tsid_binary_join_left.greptime_value + tsid_binary_join_right.greptime_value * tsid_binary_join_left.greptime_value - tsid_binary_join_third.greptime_value / tsid_binary_join_left.greptime_value + Float64(2)] REDACTED
-|_|_|_HashJoinExec: mode=Partitioned, join_type=Inner, on=[(__tsid@3, __tsid@1), (ts@4, ts@2)], projection=[greptime_value@0, host@1, job@2, __tsid@3, ts@4, greptime_value@5, greptime_value@6], NullsEqual: true REDACTED
+| 0_| 0_|_ProjectionExec: expr=[host@0 as host, job@1 as job, ts@2 as ts, __tsid@3 as __tsid, (greptime_value@4 + greptime_value@5) * (greptime_value@4 - greptime_value@6) / (greptime_value@4 + 2) as tsid_binary_join_left.greptime_value + tsid_binary_join_right.greptime_value * tsid_binary_join_left.greptime_value - tsid_binary_join_third.greptime_value / tsid_binary_join_left.greptime_value + Float64(2)] REDACTED
+|_|_|_HashJoinExec: mode=Partitioned, join_type=Inner, on=[(__tsid@3, __tsid@1), (ts@4, ts@2)], projection=[host@1, job@2, ts@4, __tsid@3, greptime_value@0, greptime_value@5, greptime_value@6], NullsEqual: true REDACTED
 |_|_|_HashJoinExec: mode=Partitioned, join_type=Inner, on=[(__tsid@3, __tsid@1), (ts@4, ts@2)], projection=[greptime_value@0, host@1, job@2, __tsid@3, ts@4, greptime_value@5], NullsEqual: true REDACTED
 |_|_|_RepartitionExec: partitioning=Hash([REDACTED
 |_|_|_MergeScanExec: REDACTED
@@ -243,8 +243,8 @@ TQL ANALYZE (0, 5, '5s') tsid_binary_join_left / ignoring(host) tsid_binary_join
 +-+-+-+
 | stage | node | plan_|
 +-+-+-+
-| 0_| 0_|_ProjectionExec: expr=[host@2 as host, job@3 as job, ts@5 as ts, __tsid@4 as __tsid, greptime_value@0 / greptime_value@1 as tsid_binary_join_left.greptime_value / tsid_binary_join_right.greptime_value] REDACTED
-|_|_|_HashJoinExec: mode=Partitioned, join_type=Inner, on=[(job@1, job@2), (ts@2, ts@4)], projection=[greptime_value@0, greptime_value@3, host@4, job@5, __tsid@6, ts@7], NullsEqual: true REDACTED
+| 0_| 0_|_ProjectionExec: expr=[host@0 as host, job@1 as job, ts@2 as ts, __tsid@3 as __tsid, greptime_value@4 / greptime_value@5 as tsid_binary_join_left.greptime_value / tsid_binary_join_right.greptime_value] REDACTED
+|_|_|_HashJoinExec: mode=Partitioned, join_type=Inner, on=[(job@1, job@2), (ts@2, ts@4)], projection=[host@4, job@5, ts@7, __tsid@6, greptime_value@0, greptime_value@3], NullsEqual: true REDACTED
 |_|_|_RepartitionExec: partitioning=Hash([job@1, ts@2],REDACTED
 |_|_|_ProjectionExec: expr=[greptime_value@0 as greptime_value, job@2 as job, ts@4 as ts] REDACTED
 |_|_|_MergeScanExec: REDACTED
@@ -282,8 +282,8 @@ TQL ANALYZE (0, 5, '5s') tsid_binary_join_left / on(job) tsid_binary_join_right_
 +-+-+-+
 | stage | node | plan_|
 +-+-+-+
-| 0_| 0_|_ProjectionExec: expr=[job@2 as job, ts@4 as ts, __tsid@3 as __tsid, greptime_value@0 / greptime_value@1 as tsid_binary_join_left.greptime_value / tsid_binary_join_right_by_job.greptime_value] REDACTED
-|_|_|_HashJoinExec: mode=Partitioned, join_type=Inner, on=[(job@1, job@1), (ts@2, ts@3)], projection=[greptime_value@0, greptime_value@3, job@4, __tsid@5, ts@6], NullsEqual: true REDACTED
+| 0_| 0_|_ProjectionExec: expr=[job@0 as job, ts@1 as ts, __tsid@2 as __tsid, greptime_value@3 / greptime_value@4 as tsid_binary_join_left.greptime_value / tsid_binary_join_right_by_job.greptime_value] REDACTED
+|_|_|_HashJoinExec: mode=Partitioned, join_type=Inner, on=[(job@1, job@1), (ts@2, ts@3)], projection=[job@4, ts@6, __tsid@5, greptime_value@0, greptime_value@3], NullsEqual: true REDACTED
 |_|_|_RepartitionExec: partitioning=Hash([job@1, ts@2],REDACTED
 |_|_|_ProjectionExec: expr=[greptime_value@0 as greptime_value, job@2 as job, ts@4 as ts] REDACTED
 |_|_|_MergeScanExec: REDACTED
@@ -322,8 +322,7 @@ TQL ANALYZE (0, 5, '5s') tsid_binary_join_left > tsid_binary_join_right;
 +-+-+-+
 | stage | node | plan_|
 +-+-+-+
-| 0_| 0_|_ProjectionExec: expr=[ts@4 as ts, greptime_value@0 as greptime_value, host@1 as host, job@2 as job, __tsid@3 as __tsid] REDACTED
-|_|_|_HashJoinExec: mode=Partitioned, join_type=Inner, on=[(__tsid@3, __tsid@1), (ts@4, ts@2)], filter=greptime_value@1 < greptime_value@0, projection=[greptime_value@0, host@1, job@2, __tsid@3, ts@4], NullsEqual: true REDACTED
+| 0_| 0_|_HashJoinExec: mode=Partitioned, join_type=Inner, on=[(__tsid@3, __tsid@1), (ts@4, ts@2)], filter=greptime_value@1 < greptime_value@0, projection=[ts@4, greptime_value@0, host@1, job@2, __tsid@3], NullsEqual: true REDACTED
 |_|_|_RepartitionExec: partitioning=Hash([__tsid@3, ts@4],REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_RepartitionExec: partitioning=Hash([__tsid@1, ts@2],REDACTED
@@ -361,8 +360,8 @@ TQL ANALYZE (0, 5, '5s') tsid_binary_join_left > bool tsid_binary_join_right;
 +-+-+-+
 | stage | node | plan_|
 +-+-+-+
-| 0_| 0_|_ProjectionExec: expr=[host@2 as host, job@3 as job, ts@5 as ts, __tsid@4 as __tsid, CAST(greptime_value@1 < greptime_value@0 AS Float64) as tsid_binary_join_left.greptime_value > tsid_binary_join_right.greptime_value] REDACTED
-|_|_|_HashJoinExec: mode=CollectLeft, join_type=Inner, on=[(__tsid@1, __tsid@3), (ts@2, ts@4)], projection=[greptime_value@0, greptime_value@3, host@4, job@5, __tsid@6, ts@7], NullsEqual: true REDACTED
+| 0_| 0_|_ProjectionExec: expr=[host@0 as host, job@1 as job, ts@2 as ts, __tsid@3 as __tsid, CAST(greptime_value@4 < greptime_value@5 AS Float64) as tsid_binary_join_left.greptime_value > tsid_binary_join_right.greptime_value] REDACTED
+|_|_|_HashJoinExec: mode=CollectLeft, join_type=Inner, on=[(__tsid@1, __tsid@3), (ts@2, ts@4)], projection=[host@4, job@5, ts@7, __tsid@6, greptime_value@3, greptime_value@0], NullsEqual: true REDACTED
 |_|_|_CoalescePartitionsExec REDACTED
 |_|_|_ProjectionExec: expr=[greptime_value@0 as greptime_value, __tsid@3 as __tsid, ts@4 as ts] REDACTED
 |_|_|_MergeScanExec: REDACTED
@@ -400,11 +399,10 @@ TQL ANALYZE (0, 5, '5s') ((tsid_binary_join_left > tsid_binary_join_right) / tsi
 +-+-+-+
 | stage | node | plan_|
 +-+-+-+
-| 0_| 0_|_ProjectionExec: expr=[host@2 as host, job@3 as job, ts@5 as ts, __tsid@4 as __tsid, greptime_value@0 / greptime_value@1 * 100 as .greptime_value / tsid_binary_join_left.greptime_value * Float64(100)] REDACTED
-|_|_|_HashJoinExec: mode=CollectLeft, join_type=Inner, on=[(__tsid@2, __tsid@3), (ts@0, ts@4)], projection=[greptime_value@1, greptime_value@3, host@4, job@5, __tsid@6, ts@7], NullsEqual: true REDACTED
+| 0_| 0_|_ProjectionExec: expr=[host@0 as host, job@1 as job, ts@2 as ts, __tsid@3 as __tsid, greptime_value@4 / greptime_value@5 * 100 as .greptime_value / tsid_binary_join_left.greptime_value * Float64(100)] REDACTED
+|_|_|_HashJoinExec: mode=CollectLeft, join_type=Inner, on=[(__tsid@2, __tsid@3), (ts@0, ts@4)], projection=[host@4, job@5, ts@7, __tsid@6, greptime_value@1, greptime_value@3], NullsEqual: true REDACTED
 |_|_|_CoalescePartitionsExec REDACTED
-|_|_|_ProjectionExec: expr=[ts@2 as ts, greptime_value@0 as greptime_value, __tsid@1 as __tsid] REDACTED
-|_|_|_HashJoinExec: mode=Partitioned, join_type=Inner, on=[(__tsid@1, __tsid@1), (ts@2, ts@2)], filter=greptime_value@1 < greptime_value@0, projection=[greptime_value@0, __tsid@1, ts@2], NullsEqual: true REDACTED
+|_|_|_HashJoinExec: mode=Partitioned, join_type=Inner, on=[(__tsid@1, __tsid@1), (ts@2, ts@2)], filter=greptime_value@1 < greptime_value@0, projection=[ts@2, greptime_value@0, __tsid@1], NullsEqual: true REDACTED
 |_|_|_RepartitionExec: partitioning=Hash([REDACTED
 |_|_|_ProjectionExec: expr=[greptime_value@0 as greptime_value, __tsid@3 as __tsid, ts@4 as ts] REDACTED
 |_|_|_MergeScanExec: REDACTED
@@ -450,13 +448,13 @@ TQL ANALYZE (0, 5, '5s') ((tsid_binary_join_left > bool tsid_binary_join_right) 
 +-+-+-+
 | stage | node | plan_|
 +-+-+-+
-| 0_| 0_|_ProjectionExec: expr=[host@2 as host, job@3 as job, ts@5 as ts, __tsid@4 as __tsid, tsid_binary_join_right.tsid_binary_join_left.greptime_value > tsid_binary_join_right.greptime_value + tsid_binary_join_left.greptime_value@0 / greptime_value@1 as lhs.tsid_binary_join_right.tsid_binary_join_left.greptime_value > tsid_binary_join_right.greptime_value + tsid_binary_join_left.greptime_value / rhs.greptime_value] REDACTED
-|_|_|_HashJoinExec: mode=CollectLeft, join_type=Inner, on=[(__tsid@1, __tsid@3), (ts@0, ts@4)], projection=[tsid_binary_join_right.tsid_binary_join_left.greptime_value > tsid_binary_join_right.greptime_value + tsid_binary_join_left.greptime_value@2, greptime_value@3, host@4, job@5, __tsid@6, ts@7], NullsEqual: true REDACTED
+| 0_| 0_|_ProjectionExec: expr=[host@0 as host, job@1 as job, ts@2 as ts, __tsid@3 as __tsid, tsid_binary_join_right.tsid_binary_join_left.greptime_value > tsid_binary_join_right.greptime_value + tsid_binary_join_left.greptime_value@4 / greptime_value@5 as lhs.tsid_binary_join_right.tsid_binary_join_left.greptime_value > tsid_binary_join_right.greptime_value + tsid_binary_join_left.greptime_value / rhs.greptime_value] REDACTED
+|_|_|_HashJoinExec: mode=CollectLeft, join_type=Inner, on=[(__tsid@1, __tsid@3), (ts@0, ts@4)], projection=[host@4, job@5, ts@7, __tsid@6, tsid_binary_join_right.tsid_binary_join_left.greptime_value > tsid_binary_join_right.greptime_value + tsid_binary_join_left.greptime_value@2, greptime_value@3], NullsEqual: true REDACTED
 |_|_|_CoalescePartitionsExec REDACTED
-|_|_|_ProjectionExec: expr=[ts@3 as ts, __tsid@2 as __tsid, tsid_binary_join_left.greptime_value > tsid_binary_join_right.greptime_value@0 + greptime_value@1 as tsid_binary_join_right.tsid_binary_join_left.greptime_value > tsid_binary_join_right.greptime_value + tsid_binary_join_left.greptime_value] REDACTED
-|_|_|_HashJoinExec: mode=Partitioned, join_type=Inner, on=[(__tsid@1, __tsid@1), (ts@0, ts@2)], projection=[tsid_binary_join_left.greptime_value > tsid_binary_join_right.greptime_value@2, greptime_value@3, __tsid@4, ts@5], NullsEqual: true REDACTED
-|_|_|_ProjectionExec: expr=[ts@3 as ts, __tsid@2 as __tsid, CAST(greptime_value@1 < greptime_value@0 AS Float64) as tsid_binary_join_left.greptime_value > tsid_binary_join_right.greptime_value] REDACTED
-|_|_|_HashJoinExec: mode=Partitioned, join_type=Inner, on=[(__tsid@1, __tsid@1), (ts@2, ts@2)], projection=[greptime_value@0, greptime_value@3, __tsid@4, ts@5], NullsEqual: true REDACTED
+|_|_|_ProjectionExec: expr=[ts@0 as ts, __tsid@1 as __tsid, tsid_binary_join_left.greptime_value > tsid_binary_join_right.greptime_value@2 + greptime_value@3 as tsid_binary_join_right.tsid_binary_join_left.greptime_value > tsid_binary_join_right.greptime_value + tsid_binary_join_left.greptime_value] REDACTED
+|_|_|_HashJoinExec: mode=Partitioned, join_type=Inner, on=[(__tsid@1, __tsid@1), (ts@0, ts@2)], projection=[ts@5, __tsid@4, tsid_binary_join_left.greptime_value > tsid_binary_join_right.greptime_value@2, greptime_value@3], NullsEqual: true REDACTED
+|_|_|_ProjectionExec: expr=[ts@0 as ts, __tsid@1 as __tsid, CAST(greptime_value@2 < greptime_value@3 AS Float64) as tsid_binary_join_left.greptime_value > tsid_binary_join_right.greptime_value] REDACTED
+|_|_|_HashJoinExec: mode=Partitioned, join_type=Inner, on=[(__tsid@1, __tsid@1), (ts@2, ts@2)], projection=[ts@5, __tsid@4, greptime_value@3, greptime_value@0], NullsEqual: true REDACTED
 |_|_|_RepartitionExec: partitioning=Hash([REDACTED
 |_|_|_ProjectionExec: expr=[greptime_value@0 as greptime_value, __tsid@3 as __tsid, ts@4 as ts] REDACTED
 |_|_|_MergeScanExec: REDACTED
@@ -512,10 +510,10 @@ TQL ANALYZE (0, 5, '5s') (tsid_binary_join_left or tsid_binary_join_right) / tsi
 +-+-+-+
 | stage | node | plan_|
 +-+-+-+
-| 0_| 0_|_ProjectionExec: expr=[host@2 as host, job@3 as job, ts@5 as ts, __tsid@4 as __tsid, greptime_value@0 / greptime_value@1 as tsid_binary_join_right.greptime_value / tsid_binary_join_left.greptime_value] REDACTED
-|_|_|_HashJoinExec: mode=CollectLeft, join_type=Inner, on=[(__tsid@1, __tsid@3), (ts@0, ts@4)], projection=[greptime_value@2, greptime_value@3, host@4, job@5, __tsid@6, ts@7], NullsEqual: true REDACTED
+| 0_| 0_|_ProjectionExec: expr=[host@0 as host, job@1 as job, ts@2 as ts, __tsid@3 as __tsid, greptime_value@4 / greptime_value@5 as lhs.greptime_value / rhs.greptime_value] REDACTED
+|_|_|_HashJoinExec: mode=CollectLeft, join_type=Inner, on=[(__tsid@1, __tsid@3), (ts@0, ts@4)], projection=[host@4, job@5, ts@7, __tsid@6, greptime_value@2, greptime_value@3], NullsEqual: true REDACTED
 |_|_|_ProjectionExec: expr=[ts@0 as ts, __tsid@1 as __tsid, greptime_value@2 as greptime_value] REDACTED
-|_|_|_UnionDistinctOnExec: on col=[["host", "job"]], ts_col=[ts] REDACTED
+|_|_|_UnionDistinctOnExec: on col=[5, 6], ts_col=0 REDACTED
 |_|_|_CoalescePartitionsExec REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_CoalescePartitionsExec REDACTED
@@ -523,14 +521,16 @@ TQL ANALYZE (0, 5, '5s') (tsid_binary_join_left or tsid_binary_join_right) / tsi
 |_|_|_CooperativeExec REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
-| 1_| 0_|_ProjectionExec: expr=[ts@4 as ts, __tsid@3 as __tsid, greptime_value@0 as greptime_value, host@1 as host, job@2 as job] REDACTED
+| 1_| 0_|_ProjectionExec: expr=[ts@2 as ts, __tsid@3 as __tsid, greptime_value@4 as greptime_value, host@5 as host, job@6 as job, CASE WHEN __common_expr_1@0 IS NOT NULL THEN __common_expr_1@0 ELSE_END as __promql_or_match_0, CASE WHEN __common_expr_2@1 IS NOT NULL THEN __common_expr_2@1 ELSE_END as __promql_or_match_1] REDACTED
+|_|_|_ProjectionExec: expr=[CAST(host@1 AS Utf8) as __common_expr_1, CAST(job@2 AS Utf8) as __common_expr_2, ts@4 as ts, __tsid@3 as __tsid, greptime_value@0 as greptime_value, host@1 as host, job@2 as job] REDACTED
 |_|_|_PromInstantManipulateExec: range=[0..5000], lookback=[300000], interval=[5000], time index=[ts] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["__tsid"] REDACTED
 |_|_|_ProjectionExec: expr=[greptime_value@1 as greptime_value, host@3 as host, job@4 as job, __tsid@2 as __tsid, ts@0 as ts] REDACTED
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries" REDACTED
 |_|_|_|
-| 1_| 0_|_ProjectionExec: expr=[ts@4 as ts, __tsid@3 as __tsid, greptime_value@0 as greptime_value, host@1 as host, job@2 as job] REDACTED
+| 1_| 0_|_ProjectionExec: expr=[ts@2 as ts, __tsid@3 as __tsid, greptime_value@4 as greptime_value, host@5 as host, job@6 as job, CASE WHEN __common_expr_1@0 IS NOT NULL THEN __common_expr_1@0 ELSE_END as __promql_or_match_0, CASE WHEN __common_expr_2@1 IS NOT NULL THEN __common_expr_2@1 ELSE_END as __promql_or_match_1] REDACTED
+|_|_|_ProjectionExec: expr=[CAST(host@1 AS Utf8) as __common_expr_1, CAST(job@2 AS Utf8) as __common_expr_2, ts@4 as ts, __tsid@3 as __tsid, greptime_value@0 as greptime_value, host@1 as host, job@2 as job] REDACTED
 |_|_|_PromInstantManipulateExec: range=[0..5000], lookback=[300000], interval=[5000], time index=[ts] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["__tsid"] REDACTED
 |_|_|_ProjectionExec: expr=[greptime_value@1 as greptime_value, host@3 as host, job@4 as job, __tsid@2 as __tsid, ts@0 as ts] REDACTED
@@ -562,11 +562,11 @@ TQL ANALYZE (0, 5, '5s') (tsid_binary_join_left / ignoring(host) group_left tsid
 +-+-+-+
 | stage | node | plan_|
 +-+-+-+
-| 0_| 0_|_ProjectionExec: expr=[host@2 as host, job@3 as job, ts@5 as ts, __tsid@4 as __tsid, tsid_binary_join_left.greptime_value / tsid_binary_join_right.greptime_value@0 / greptime_value@1 as tsid_binary_join_right.tsid_binary_join_left.greptime_value / tsid_binary_join_right.greptime_value / tsid_binary_join_left.greptime_value] REDACTED
-|_|_|_HashJoinExec: mode=CollectLeft, join_type=Inner, on=[(__tsid@1, __tsid@3), (ts@0, ts@4)], projection=[tsid_binary_join_left.greptime_value / tsid_binary_join_right.greptime_value@2, greptime_value@3, host@4, job@5, __tsid@6, ts@7], NullsEqual: true REDACTED
+| 0_| 0_|_ProjectionExec: expr=[host@0 as host, job@1 as job, ts@2 as ts, __tsid@3 as __tsid, tsid_binary_join_left.greptime_value / tsid_binary_join_right.greptime_value@4 / greptime_value@5 as tsid_binary_join_right.tsid_binary_join_left.greptime_value / tsid_binary_join_right.greptime_value / tsid_binary_join_left.greptime_value] REDACTED
+|_|_|_HashJoinExec: mode=CollectLeft, join_type=Inner, on=[(__tsid@1, __tsid@3), (ts@0, ts@4)], projection=[host@4, job@5, ts@7, __tsid@6, tsid_binary_join_left.greptime_value / tsid_binary_join_right.greptime_value@2, greptime_value@3], NullsEqual: true REDACTED
 |_|_|_CoalescePartitionsExec REDACTED
-|_|_|_ProjectionExec: expr=[ts@3 as ts, __tsid@2 as __tsid, greptime_value@0 / greptime_value@1 as tsid_binary_join_left.greptime_value / tsid_binary_join_right.greptime_value] REDACTED
-|_|_|_HashJoinExec: mode=Partitioned, join_type=Inner, on=[(job@1, job@1), (ts@2, ts@3)], projection=[greptime_value@0, greptime_value@3, __tsid@5, ts@6], NullsEqual: true REDACTED
+|_|_|_ProjectionExec: expr=[ts@0 as ts, __tsid@1 as __tsid, greptime_value@2 / greptime_value@3 as tsid_binary_join_left.greptime_value / tsid_binary_join_right.greptime_value] REDACTED
+|_|_|_HashJoinExec: mode=Partitioned, join_type=Inner, on=[(job@1, job@1), (ts@2, ts@3)], projection=[ts@6, __tsid@5, greptime_value@0, greptime_value@3], NullsEqual: true REDACTED
 |_|_|_RepartitionExec: partitioning=Hash([REDACTED
 |_|_|_ProjectionExec: expr=[greptime_value@0 as greptime_value, job@2 as job, ts@4 as ts] REDACTED
 |_|_|_MergeScanExec: REDACTED
@@ -672,24 +672,22 @@ TQL EVAL (0, 5, '5s') ((tsid_binary_join_left > bool tsid_binary_join_right) + t
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 5, '5s') (tsid_binary_join_left or tsid_binary_join_right) / tsid_binary_join_left;
 
-+-------+------+---------------------+------------------------------------------------------------------------------+
-| host  | job  | ts                  | tsid_binary_join_right.greptime_value / tsid_binary_join_left.greptime_value |
-+-------+------+---------------------+------------------------------------------------------------------------------+
-| host1 | job1 | 1970-01-01T00:00:00 | 1.0                                                                          |
-| host1 | job1 | 1970-01-01T00:00:05 | 1.0                                                                          |
-| host2 | job2 | 1970-01-01T00:00:00 | 1.0                                                                          |
-| host2 | job2 | 1970-01-01T00:00:05 | 1.0                                                                          |
-+-------+------+---------------------+------------------------------------------------------------------------------+
++-------+------+---------------------+-----------------------------------------+
+| host  | job  | ts                  | lhs.greptime_value / rhs.greptime_value |
++-------+------+---------------------+-----------------------------------------+
+| host1 | job1 | 1970-01-01T00:00:00 | 1.0                                     |
+| host1 | job1 | 1970-01-01T00:00:05 | 1.0                                     |
+| host2 | job2 | 1970-01-01T00:00:00 | 1.0                                     |
+| host2 | job2 | 1970-01-01T00:00:05 | 1.0                                     |
++-------+------+---------------------+-----------------------------------------+
 
 -- Range functions are outside the first island version; the range selector subtree must
 -- remain a barrier.
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 5, '5s') rate(tsid_binary_join_left[5s]) / tsid_binary_join_left;
 
-+------+-----+----+----------------------------------------------------------------------------+
-| host | job | ts | lhs.prom_rate(ts_range,greptime_value,ts,Int64(5000)) / rhs.greptime_value |
-+------+-----+----+----------------------------------------------------------------------------+
-+------+-----+----+----------------------------------------------------------------------------+
+++
+++
 
 -- Regression for aggregating a binary expression over `time()` and a TSID-backed metric.
 -- SQLNESS SORT_RESULT 3 1

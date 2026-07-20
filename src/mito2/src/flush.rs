@@ -553,8 +553,14 @@ impl RegionFlushTask {
             let compact_cost = compact_start.elapsed();
             flush_metrics.compact_memtable += compact_cost;
 
-            // Sets `for_flush` flag to true.
-            let mem_ranges = mem.ranges(None, RangesOptions::for_flush())?;
+            let mem_stats = mem.stats();
+            let batch_size = crate::batch_size::estimate_batch_size([(
+                mem_stats.num_rows() as u64,
+                mem_stats.bytes_allocated() as u64,
+            )]);
+            // Sets `for_flush` flag and propagates the reader batch size.
+            let mem_ranges =
+                mem.ranges(None, RangesOptions::for_flush().with_batch_size(batch_size))?;
             let num_mem_ranges = mem_ranges.ranges.len();
 
             // Aggregate stats from all ranges
@@ -918,6 +924,11 @@ fn memtable_flat_sources(
                     .map(|r| r.stats().max_sequence())
                     .max()
                     .unwrap_or(0);
+                let batch_size =
+                    crate::batch_size::estimate_batch_size(current_ranges.iter().map(|range| {
+                        let stats = range.stats();
+                        (stats.num_rows() as u64, stats.bytes_allocated() as u64)
+                    }));
 
                 let input_iters =
                     std::mem::replace(&mut input_iters, Vec::with_capacity(num_ranges));
@@ -927,12 +938,13 @@ fn memtable_flat_sources(
                     input_iters,
                 )?;
 
-                let maybe_dedup = merge_and_dedup(
+                let maybe_dedup = merge_and_dedup_with_batch_size(
                     &schema,
                     options.append_mode,
                     options.merge_mode(),
                     field_column_start,
                     input_iters,
+                    batch_size,
                 )?;
 
                 flat_sources
@@ -967,13 +979,19 @@ fn memtable_flat_sources(
                 .map(|r| r.stats().max_sequence())
                 .max()
                 .unwrap_or(0);
+            let batch_size =
+                crate::batch_size::estimate_batch_size(current_ranges.iter().map(|range| {
+                    let stats = range.stats();
+                    (stats.num_rows() as u64, stats.bytes_allocated() as u64)
+                }));
 
-            let maybe_dedup = merge_and_dedup(
+            let maybe_dedup = merge_and_dedup_with_batch_size(
                 &schema,
                 options.append_mode,
                 options.merge_mode(),
                 field_column_start,
                 input_iters,
+                batch_size,
             )?;
 
             flat_sources
@@ -1054,7 +1072,25 @@ pub fn merge_and_dedup(
     field_column_start: usize,
     input_iters: Vec<BoxedRecordBatchIterator>,
 ) -> Result<BoxedRecordBatchIterator> {
-    let merge_iter = FlatMergeIterator::new(schema.clone(), input_iters, DEFAULT_READ_BATCH_SIZE)?;
+    merge_and_dedup_with_batch_size(
+        schema,
+        append_mode,
+        merge_mode,
+        field_column_start,
+        input_iters,
+        DEFAULT_READ_BATCH_SIZE,
+    )
+}
+
+fn merge_and_dedup_with_batch_size(
+    schema: &SchemaRef,
+    append_mode: bool,
+    merge_mode: MergeMode,
+    field_column_start: usize,
+    input_iters: Vec<BoxedRecordBatchIterator>,
+    batch_size: usize,
+) -> Result<BoxedRecordBatchIterator> {
+    let merge_iter = FlatMergeIterator::new(schema.clone(), input_iters, batch_size)?;
     let maybe_dedup = if append_mode {
         // No dedup in append mode
         Box::new(merge_iter) as _

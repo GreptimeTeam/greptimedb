@@ -231,9 +231,11 @@ impl FrontendBuilder {
             requester,
         ));
 
+        let table_metadata_manager = Arc::new(TableMetadataManager::new(kv_backend.clone()));
         let procedure_service_handler = Arc::new(ProcedureServiceOperator::new(
             self.procedure_executor.clone(),
             self.catalog_manager.clone(),
+            table_metadata_manager.clone(),
         ));
 
         let flow_metadata_manager: Arc<FlowMetadataManager> =
@@ -308,7 +310,7 @@ impl FrontendBuilder {
             plugins,
             inserter,
             deleter,
-            table_metadata_manager: Arc::new(TableMetadataManager::new(kv_backend)),
+            table_metadata_manager,
             event_recorder: Some(event_recorder),
             process_manager,
             otlp_metrics_table_legacy_cache: DashMap::new(),

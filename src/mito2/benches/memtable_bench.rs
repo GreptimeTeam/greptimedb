@@ -37,6 +37,8 @@ use mito2::sst::{FlatSchemaOptions, to_flat_sst_arrow_schema};
 use mito2::test_util::bench_util::{CpuDataGenerator, cpu_metadata};
 use mito2::test_util::memtable_util;
 
+const DEFAULT_BATCH_SIZE: usize = 8 * 1024;
+
 /// Writes rows.
 fn write_rows(c: &mut Criterion) {
     let metadata = Arc::new(memtable_util::metadata_with_primary_key(vec![1, 0], true));
@@ -263,6 +265,7 @@ fn flat_merge_iterator_bench(c: &mut Criterion) {
                 None, // No projection
                 None, // No predicate
                 false,
+                DEFAULT_BATCH_SIZE,
             )
             .unwrap(),
         );
@@ -333,6 +336,7 @@ fn bulk_part_record_batch_iter_filter(c: &mut Criterion) {
                     None,                    // No projection
                     Some(predicate.clone()), // With hostname filter
                     false,
+                    DEFAULT_BATCH_SIZE,
                 )
                 .unwrap(),
             );
@@ -363,6 +367,7 @@ fn bulk_part_record_batch_iter_filter(c: &mut Criterion) {
                     None, // No projection
                     None, // No predicate
                     false,
+                    DEFAULT_BATCH_SIZE,
                 )
                 .unwrap(),
             );

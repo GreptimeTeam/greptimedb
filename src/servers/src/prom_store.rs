@@ -610,6 +610,11 @@ mod tests {
 
     use api::prom_store::remote::LabelMatcher;
     use api::v1::{ColumnDataType, Row, SemanticType};
+    use arrow::array::{
+        DictionaryArray, Float64Array, StringArray, TimestampMillisecondArray, UInt32Array,
+    };
+    use arrow::datatypes::{DataType as ArrowDataType, Field, Schema as ArrowSchema, UInt32Type};
+    use common_recordbatch::DfRecordBatch;
     use datafusion::prelude::SessionContext;
     use datatypes::data_type::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, Schema};
@@ -952,6 +957,56 @@ mod tests {
                 value: 7.0,
                 timestamp: 2000,
             }]
+        );
+    }
+
+    #[test]
+    fn test_recordbatches_to_timeseries_omits_dictionary_value_null_label() {
+        let arrow_schema = Arc::new(ArrowSchema::new(vec![
+            Field::new(
+                greptime_timestamp(),
+                ArrowDataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new(greptime_value(), ArrowDataType::Float64, false),
+            Field::new_dictionary("instance", ArrowDataType::UInt32, ArrowDataType::Utf8, true),
+        ]));
+        let schema = Arc::new(Schema::try_from(arrow_schema.clone()).unwrap());
+        let instance = DictionaryArray::<UInt32Type>::new(
+            UInt32Array::from(vec![0]),
+            Arc::new(StringArray::from(vec![None::<&str>])),
+        );
+        let batch = DfRecordBatch::try_new(
+            arrow_schema,
+            vec![
+                Arc::new(TimestampMillisecondArray::from(vec![1000])),
+                Arc::new(Float64Array::from(vec![3.0])),
+                Arc::new(instance),
+            ],
+        )
+        .unwrap();
+        let recordbatches = RecordBatches::try_new(
+            schema.clone(),
+            vec![RecordBatch::from_df_record_batch(schema, batch)],
+        )
+        .unwrap();
+
+        let timeseries = recordbatches_to_timeseries("metric1", recordbatches).unwrap();
+
+        assert_eq!(1, timeseries.len());
+        assert_eq!(
+            vec![Label {
+                name: METRIC_NAME_LABEL.to_string(),
+                value: "metric1".to_string(),
+            }],
+            timeseries[0].labels
+        );
+        assert_eq!(
+            vec![Sample {
+                value: 3.0,
+                timestamp: 1000,
+            }],
+            timeseries[0].samples
         );
     }
 }

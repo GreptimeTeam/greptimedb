@@ -213,6 +213,41 @@ impl FlatProjectionMapper {
         FlatProjectionMapper::new(metadata, 0..metadata.column_metadatas.len())
     }
 
+    /// Keeps projected string primary-key columns in their flat-format dictionary encoding.
+    pub(crate) fn with_pk_dictionary_encoding(mut self) -> Self {
+        let mut changed = false;
+        let columns = self
+            .output_schema
+            .column_schemas()
+            .iter()
+            .map(|column| {
+                let mut column = column.clone();
+                if column.data_type == ConcreteDataType::string_datatype()
+                    && self
+                        .metadata
+                        .column_by_name(&column.name)
+                        .is_some_and(|metadata| {
+                            self.metadata.primary_key.contains(&metadata.column_id)
+                        })
+                {
+                    changed = true;
+                    column.data_type = ConcreteDataType::dictionary_datatype(
+                        ConcreteDataType::uint32_datatype(),
+                        column.data_type.clone(),
+                    );
+                }
+                column
+            })
+            .collect();
+        if changed {
+            self.output_schema = Arc::new(Schema::new_with_version(
+                columns,
+                self.output_schema.version(),
+            ));
+        }
+        self
+    }
+
     /// Returns the metadata that created the mapper.
     pub(crate) fn metadata(&self) -> &RegionMetadataRef {
         &self.metadata
@@ -297,7 +332,12 @@ impl FlatProjectionMapper {
         for (output_idx, index) in self.batch_indices.iter().enumerate() {
             let mut array = batch.column(*index).clone();
             // Cast dictionary values to the target type.
-            if let ArrowDataType::Dictionary(_key_type, value_type) = array.data_type() {
+            if let ArrowDataType::Dictionary(_key_type, value_type) = array.data_type()
+                && !matches!(
+                    self.output_schema.arrow_schema().fields()[output_idx].data_type(),
+                    ArrowDataType::Dictionary(_, _)
+                )
+            {
                 // When a string dictionary column contains only a single value, reuse a cached
                 // repeated vector to avoid repeatedly expanding the dictionary.
                 if let Some(dict_array) = single_value_string_dictionary(
@@ -557,6 +597,7 @@ impl DfBatchAssembler {
 
 #[cfg(test)]
 mod tests {
+    use datatypes::schema::ColumnSchema;
     use datatypes::types::json_type::JsonObjectType;
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
     use store_api::storage::RegionId;
@@ -585,6 +626,43 @@ mod tests {
                 column_id: 1,
             });
         Arc::new(builder.build().unwrap())
+    }
+
+    #[test]
+    fn test_tag_projection_preserves_dictionary() {
+        let mut builder = RegionMetadataBuilder::new(RegionId::new(1024, 0));
+        builder
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new("tag", ConcreteDataType::string_datatype(), true),
+                semantic_type: SemanticType::Tag,
+                column_id: 0,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "ts",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Timestamp,
+                column_id: 1,
+            })
+            .primary_key(vec![0]);
+        let metadata = Arc::new(builder.build().unwrap());
+
+        let mapper = FlatProjectionMapper::new(&metadata, [0, 1]).unwrap();
+        assert_eq!(
+            &ArrowDataType::Utf8,
+            mapper.output_schema().arrow_schema().field(0).data_type()
+        );
+
+        let mapper = mapper.with_pk_dictionary_encoding();
+        assert_eq!(
+            &ArrowDataType::Dictionary(
+                Box::new(ArrowDataType::UInt32),
+                Box::new(ArrowDataType::Utf8),
+            ),
+            mapper.output_schema().arrow_schema().field(0).data_type()
+        );
     }
 
     #[test]

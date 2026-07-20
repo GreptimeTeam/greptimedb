@@ -221,6 +221,17 @@ pub static FUNCTION_REGISTRY: LazyLock<Arc<FunctionRegistry>> = LazyLock::new(||
     Arc::new(function_registry)
 });
 
+static ADMIN_FUNCTION_REGISTRY: LazyLock<FunctionRegistry> = LazyLock::new(|| {
+    let registry = FunctionRegistry::default();
+    AdminFunction::register_admin_only(&registry);
+    registry
+});
+
+/// Returns a function that is only available to the ADMIN statement executor.
+pub fn get_admin_function(name: &str) -> Option<ScalarFunctionFactory> {
+    ADMIN_FUNCTION_REGISTRY.get_function(name)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

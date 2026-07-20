@@ -19,9 +19,9 @@ use common_telemetry::debug;
 use datafusion::config::{ConfigExtension, ExtensionOptions};
 use datafusion::datasource::DefaultTableSource;
 use datafusion::error::Result as DfResult;
-use datafusion_common::Column;
 use datafusion_common::config::ConfigOptions;
 use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRewriter};
+use datafusion_common::{Column, ScalarValue};
 use datafusion_expr::expr::{Exists, InSubquery};
 use datafusion_expr::utils::expr_to_columns;
 use datafusion_expr::{Expr, LogicalPlan, LogicalPlanBuilder, Subquery, col as col_fn};
@@ -167,6 +167,9 @@ impl AnalyzerRule for DistPlannerAnalyzer {
                 }
             }
         };
+        let plan = plan
+            .transform_down_with_subqueries(&unwrap_dictionary_literals)?
+            .data;
 
         let result = match self.try_push_down(plan.clone()) {
             Ok(plan) => plan,
@@ -222,6 +225,23 @@ fn pre_merge_scan_optimizer() -> Optimizer {
         Arc::new(PushDownFilter::new()),
         Arc::new(SimplifyExpressions::new()),
     ])
+}
+
+fn unwrap_dictionary_literals(plan: LogicalPlan) -> DfResult<Transformed<LogicalPlan>> {
+    // A Values plan derives its schema from its expressions. Rewriting only the expressions would
+    // leave that schema inconsistent, which affects DML planning.
+    if matches!(&plan, LogicalPlan::Values(_)) {
+        return Ok(Transformed::no(plan));
+    }
+
+    plan.map_expressions(|expr| {
+        expr.transform_up(|expr| match expr {
+            Expr::Literal(ScalarValue::Dictionary(_, value), metadata) => {
+                Ok(Transformed::yes(Expr::Literal(*value, metadata)))
+            }
+            _ => Ok(Transformed::no(expr)),
+        })
+    })
 }
 
 impl DistPlannerAnalyzer {

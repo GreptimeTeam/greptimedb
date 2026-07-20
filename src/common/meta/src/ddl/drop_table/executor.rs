@@ -36,6 +36,7 @@ use crate::ddl::utils::{
 use crate::ddl::{CreateRequestBuilder, DdlContext, build_template_from_raw_table_info};
 use crate::error::{self, Result};
 use crate::instruction::CacheIdent;
+use crate::key::DroppedTableLifecycle;
 use crate::key::table_name::TableNameKey;
 use crate::key::table_route::TableRouteValue;
 use crate::node_manager::NodeManagerRef;
@@ -84,8 +85,6 @@ impl DropTableExecutor {
     /// Checks whether table exists.
     /// - Early returns if table not exists and `drop_if_exists` is `true`.
     /// - Throws an error if table not exists and `drop_if_exists` is `false`.
-    /// - Rejects dropping a recreated live table while an older tombstone still owns the same
-    ///   fully qualified name.
     pub async fn on_prepare(&self, ctx: &DdlContext) -> Result<Control<()>> {
         let table_ref = self.table.table_ref();
 
@@ -110,12 +109,23 @@ impl DropTableExecutor {
             }
         );
 
-        if ctx.soft_drop_enabled
-            && let Some(dropped_table) = ctx
-                .table_metadata_manager
-                .get_dropped_table(&self.table)
-                .await?
+        Ok(Control::Continue(()))
+    }
+
+    /// Rejects dropping a recreated live table while an older tombstone still owns the same
+    /// fully qualified name.
+    pub async fn check_tombstone_conflict(
+        &self,
+        ctx: &DdlContext,
+        soft_drop_enabled: bool,
+    ) -> Result<()> {
+        let table_ref = self.table.table_ref();
+        if let Some(dropped_table) = ctx
+            .table_metadata_manager
+            .get_dropped_table(&self.table)
+            .await?
             && dropped_table.table_id != self.table_id
+            && (soft_drop_enabled || dropped_table.dropped_at.is_some())
         {
             return error::TableNameTombstoneConflictSnafu {
                 table_name: table_ref.to_string(),
@@ -125,7 +135,7 @@ impl DropTableExecutor {
             .fail();
         }
 
-        Ok(Control::Continue(()))
+        Ok(())
     }
 
     /// Deletes the table metadata **logically**.
@@ -134,13 +144,21 @@ impl DropTableExecutor {
         ctx: &DdlContext,
         table_route_value: &TableRouteValue,
         region_wal_options: &HashMap<RegionNumber, WalOptions>,
+        dropped_at: Option<i64>,
+        retention_expires_at: Option<i64>,
+        drop_generation: Option<&str>,
     ) -> Result<()> {
         ctx.table_metadata_manager
-            .delete_table_metadata(
+            .delete_table_metadata_with_retention_and_generation(
                 self.table_id,
                 &self.table,
                 table_route_value,
                 region_wal_options,
+                DroppedTableLifecycle {
+                    dropped_at,
+                    retention_expires_at,
+                    drop_generation,
+                },
             )
             .await
     }

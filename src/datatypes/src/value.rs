@@ -1218,6 +1218,7 @@ impl TryFrom<ScalarValue> for Value {
                     .collect::<Result<Vec<Value>>>()?;
                 Value::Struct(StructValue::try_new(items, struct_type)?)
             }
+            ScalarValue::Dictionary(_, value) => (*value).try_into()?,
             ScalarValue::Decimal32(_, _, _)
             | ScalarValue::Decimal64(_, _, _)
             | ScalarValue::Decimal256(_, _, _)
@@ -1225,7 +1226,6 @@ impl TryFrom<ScalarValue> for Value {
             | ScalarValue::LargeList(_)
             | ScalarValue::ListView(_)
             | ScalarValue::LargeListView(_)
-            | ScalarValue::Dictionary(_, _)
             | ScalarValue::Union(_, _, _)
             | ScalarValue::Float16(_)
             | ScalarValue::Utf8View(_)
@@ -1929,6 +1929,16 @@ pub(crate) mod tests {
                 .unwrap()
         );
         assert_eq!(Value::Null, ScalarValue::Utf8(None).try_into().unwrap());
+
+        assert_eq!(
+            Value::from("dictionary"),
+            ScalarValue::Dictionary(
+                Box::new(ArrowDataType::UInt32),
+                Box::new(ScalarValue::Utf8(Some("dictionary".to_string()))),
+            )
+            .try_into()
+            .unwrap()
+        );
 
         assert_eq!(
             Value::from("large_hello"),

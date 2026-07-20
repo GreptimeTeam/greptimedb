@@ -16,8 +16,11 @@ use std::any::Any;
 use std::fmt;
 use std::sync::Arc;
 
-use arrow::array::{Array, ArrayRef, DictionaryArray, PrimitiveArray, PrimitiveBuilder};
-use arrow::datatypes::{ArrowDictionaryKeyType, ArrowNativeType};
+use arrow::array::{
+    Array, ArrayBuilder, ArrayRef, DictionaryArray, PrimitiveArray, PrimitiveBuilder,
+    StringDictionaryBuilder,
+};
+use arrow::datatypes::{ArrowDictionaryKeyType, ArrowNativeType, UInt32Type};
 use serde_json::Value as JsonValue;
 use snafu::ResultExt;
 
@@ -27,7 +30,76 @@ use crate::serialize::Serializable;
 use crate::types::DictionaryType;
 use crate::value::{Value, ValueRef};
 use crate::vectors::operations::VectorOp;
-use crate::vectors::{self, Helper, Validity, Vector, VectorRef};
+use crate::vectors::{self, Helper, MutableVector, Validity, Vector, VectorRef};
+
+/// Builder for `Dictionary<UInt32, Utf8>` vectors.
+pub(crate) struct StringDictionaryVectorBuilder {
+    builder: StringDictionaryBuilder<UInt32Type>,
+}
+
+impl StringDictionaryVectorBuilder {
+    pub(crate) fn with_capacity(capacity: usize) -> Self {
+        Self {
+            builder: StringDictionaryBuilder::with_capacity(capacity, 0, 0),
+        }
+    }
+
+    fn vector(array: DictionaryArray<UInt32Type>) -> VectorRef {
+        Arc::new(DictionaryVector::new(array, ConcreteDataType::string_datatype()).unwrap())
+    }
+}
+
+impl MutableVector for StringDictionaryVectorBuilder {
+    fn data_type(&self) -> ConcreteDataType {
+        ConcreteDataType::dictionary_datatype(
+            ConcreteDataType::uint32_datatype(),
+            ConcreteDataType::string_datatype(),
+        )
+    }
+
+    fn len(&self) -> usize {
+        self.builder.len()
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_mut_any(&mut self) -> &mut dyn Any {
+        self
+    }
+
+    fn to_vector(&mut self) -> VectorRef {
+        Self::vector(self.builder.finish())
+    }
+
+    fn to_vector_cloned(&self) -> VectorRef {
+        Self::vector(self.builder.finish_cloned())
+    }
+
+    fn try_push_value_ref(&mut self, value: &ValueRef) -> Result<()> {
+        match value.try_into_string()? {
+            Some(value) => {
+                self.builder
+                    .append(value)
+                    .context(error::ArrowComputeSnafu)?;
+            }
+            None => self.builder.append_null(),
+        }
+        Ok(())
+    }
+
+    fn push_null(&mut self) {
+        self.builder.append_null();
+    }
+
+    fn extend_slice_of(&mut self, vector: &dyn Vector, offset: usize, length: usize) -> Result<()> {
+        for index in offset..offset + length {
+            self.try_push_value_ref(&vector.get_ref(index))?;
+        }
+        Ok(())
+    }
+}
 
 /// Vector of dictionaries, basically backed by Arrow's `DictionaryArray`.
 pub struct DictionaryVector<K: ArrowDictionaryKeyType> {
@@ -121,7 +193,10 @@ impl<K: ArrowDictionaryKeyType> Vector for DictionaryVector<K> {
     }
 
     fn validity(&self) -> Validity {
-        vectors::impl_validity_for_vector!(self.array)
+        self.array
+            .logical_nulls()
+            .map(Validity::from_null_buffer)
+            .unwrap_or_else(|| Validity::all_valid(self.len()))
     }
 
     fn memory_size(&self) -> usize {
@@ -129,11 +204,13 @@ impl<K: ArrowDictionaryKeyType> Vector for DictionaryVector<K> {
     }
 
     fn null_count(&self) -> usize {
-        self.array.null_count()
+        self.array.logical_null_count()
     }
 
     fn is_null(&self, row: usize) -> bool {
-        self.array.is_null(row)
+        self.array
+            .key(row)
+            .is_none_or(|key| self.item_vector.is_null(key))
     }
 
     fn slice(&self, offset: usize, length: usize) -> VectorRef {
@@ -377,6 +454,27 @@ mod tests {
     }
 
     #[test]
+    fn test_dictionary_vector_logical_nulls() {
+        let values = StringArray::from(vec![Some("a"), None]);
+        let keys = Int64Array::from(vec![Some(0), Some(1), None, Some(1)]);
+        let dict_array = DictionaryArray::new(keys, Arc::new(values));
+        let dict_vec = DictionaryVector::<Int64Type>::try_from(dict_array).unwrap();
+
+        assert_eq!(3, dict_vec.null_count());
+        assert!(!dict_vec.is_null(0));
+        assert!(dict_vec.is_null(1));
+        assert!(dict_vec.is_null(2));
+        assert!(dict_vec.is_null(3));
+
+        let validity = dict_vec.validity();
+        assert_eq!(3, validity.null_count());
+        assert!(validity.is_set(0));
+        assert!(!validity.is_set(1));
+        assert!(!validity.is_set(2));
+        assert!(!validity.is_set(3));
+    }
+
+    #[test]
     fn test_slice() {
         let dict_vec = create_test_dictionary();
         let sliced = dict_vec.slice(1, 3);
@@ -475,5 +573,29 @@ mod tests {
             ),
             dict_vec.data_type()
         );
+    }
+
+    #[test]
+    fn test_string_dictionary_vector_builder() {
+        let mut builder = StringDictionaryVectorBuilder::with_capacity(4);
+        builder.push_value_ref(&ValueRef::String("a"));
+        builder.push_value_ref(&ValueRef::String("b"));
+        builder.push_value_ref(&ValueRef::String("a"));
+        builder.push_null();
+
+        let vector = builder.to_vector();
+        assert_eq!(vector.data_type(), builder.data_type());
+        assert_eq!(vector.get(0), Value::String("a".to_string().into()));
+        assert_eq!(vector.get(1), Value::String("b".to_string().into()));
+        assert_eq!(vector.get(2), Value::String("a".to_string().into()));
+        assert_eq!(vector.get(3), Value::Null);
+
+        let array = vector
+            .to_arrow_array()
+            .as_any()
+            .downcast_ref::<DictionaryArray<UInt32Type>>()
+            .unwrap()
+            .clone();
+        assert_eq!(array.values().len(), 2);
     }
 }

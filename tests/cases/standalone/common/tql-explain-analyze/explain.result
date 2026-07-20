@@ -211,7 +211,7 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test;
 | physical_plan_with_stats_| CooperativeExec, statistics=[Rows=Absent, Bytes=Absent, [(Col[0]:),(Col[1]:),(Col[2]:)]]_|
 |_|_MergeScanExec: REDACTED
 |_|_|
-| physical_plan_with_schema_| CooperativeExec, schema=[i:Float64;N, j:Timestamp(ms), k:Utf8;N]_|
+| physical_plan_with_schema_| CooperativeExec, schema=[i:Float64;N, j:Timestamp(ms), k:Dictionary(UInt32, Utf8);N]_|
 |_|_MergeScanExec: REDACTED
 |_|_|
 +-+-+
@@ -363,7 +363,7 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test AS series;
 | physical_plan_with_stats_| CooperativeExec, statistics=[Rows=Absent, Bytes=Absent, [(Col[0]:),(Col[1]:),(Col[2]:)]]_|
 |_|_MergeScanExec: REDACTED
 |_|_|
-| physical_plan_with_schema_| CooperativeExec, schema=[series:Float64;N, k:Utf8;N, j:Timestamp(ms)]_|
+| physical_plan_with_schema_| CooperativeExec, schema=[series:Float64;N, k:Dictionary(UInt32, Utf8);N, j:Timestamp(ms)]_|
 |_|_MergeScanExec: REDACTED
 |_|_|
 +-+-+
@@ -545,7 +545,7 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test_nano;
 | physical_plan_with_stats_| CooperativeExec, statistics=[Rows=Absent, Bytes=Absent, [(Col[0]:),(Col[1]:),(Col[2]:)]]_|
 |_|_MergeScanExec: REDACTED
 |_|_|
-| physical_plan_with_schema_| CooperativeExec, schema=[i:Float64;N, k:Utf8;N, j:Timestamp(ms)]_|
+| physical_plan_with_schema_| CooperativeExec, schema=[i:Float64;N, k:Dictionary(UInt32, Utf8);N, j:Timestamp(ms)]_|
 |_|_MergeScanExec: REDACTED
 |_|_|
 +-+-+

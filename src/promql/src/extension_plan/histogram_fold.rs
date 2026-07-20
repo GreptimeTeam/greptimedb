@@ -19,7 +19,7 @@ use std::task::Poll;
 use std::time::Instant;
 
 use common_telemetry::warn;
-use datafusion::arrow::array::{Array, AsArray, StringArray};
+use datafusion::arrow::array::{Array, ArrayRef, AsArray};
 use datafusion::arrow::compute::{SortOptions, concat_batches};
 use datafusion::arrow::datatypes::{DataType, Float64Type, SchemaRef};
 use datafusion::arrow::record_batch::RecordBatch;
@@ -40,6 +40,7 @@ use datafusion::physical_plan::{
 };
 use datafusion::prelude::{Column, Expr};
 use datafusion_expr::{EmptyRelation, col};
+use datatypes::arrow_array::string_array_value_at_index;
 use datatypes::prelude::{ConcreteDataType, DataType as GtDataType};
 use datatypes::value::{OrderedF64, Value, ValueRef};
 use datatypes::vectors::{Helper, MutableVector, VectorRef};
@@ -726,7 +727,7 @@ impl HistogramFoldStream {
 
         let vectors = Helper::try_into_vectors(batch.columns())
             .map_err(|e| DataFusionError::Execution(e.to_string()))?;
-        let le_array = batch.column(self.le_column_index).as_string::<i32>();
+        let le_array = batch.column(self.le_column_index);
 
         let mut tag_values_buf = Vec::with_capacity(self.normal_indices.len());
         self.collect_tag_values(&vectors, 0, &mut tag_values_buf);
@@ -757,7 +758,6 @@ impl HistogramFoldStream {
         let vectors = Helper::try_into_vectors(batch.columns())
             .map_err(|e| DataFusionError::Execution(e.to_string()))?;
         let le_array = batch.column(self.le_column_index);
-        let le_array = le_array.as_string::<i32>();
         let field_array = batch.column(self.field_column_index);
         let field_array = field_array.as_primitive::<Float64Type>();
         let mut tag_values_buf = Vec::with_capacity(self.normal_indices.len());
@@ -785,11 +785,9 @@ impl HistogramFoldStream {
             let mut counters = Vec::with_capacity(bucket_num);
             for bias in 0..bucket_num {
                 let position = cursor + bias;
-                let le = if le_array.is_valid(position) {
-                    le_array.value(position).parse::<f64>().unwrap_or(f64::NAN)
-                } else {
-                    f64::NAN
-                };
+                let le = string_array_value_at_index(le_array, position)
+                    .and_then(|value| value.parse::<f64>().ok())
+                    .unwrap_or(f64::NAN);
                 bucket.push(le);
 
                 let counter = if field_array.is_valid(position) {
@@ -857,7 +855,7 @@ impl HistogramFoldStream {
     fn validate_optimistic_group(
         &self,
         vectors: &[VectorRef],
-        le_array: &StringArray,
+        le_array: &ArrayRef,
         cursor: usize,
         bucket_num: usize,
         tag_values: &[ValueRef<'_>],
@@ -934,7 +932,7 @@ impl HistogramFoldStream {
         self.input_buffered_rows = 0;
         let vectors = Helper::try_into_vectors(batch.columns())
             .map_err(|e| DataFusionError::Execution(e.to_string()))?;
-        let le_array = batch.column(self.le_column_index).as_string::<i32>();
+        let le_array = batch.column(self.le_column_index);
         let field_array = batch
             .column(self.field_column_index)
             .as_primitive::<Float64Type>();
@@ -959,11 +957,9 @@ impl HistogramFoldStream {
                 continue;
             };
 
-            let bucket = if le_array.is_valid(row) {
-                le_array.value(row).parse::<f64>().unwrap_or(f64::NAN)
-            } else {
-                f64::NAN
-            };
+            let bucket = string_array_value_at_index(le_array, row)
+                .and_then(|value| value.parse::<f64>().ok())
+                .unwrap_or(f64::NAN);
             let counter = if field_array.is_valid(row) {
                 field_array.value(row)
             } else {
@@ -1031,12 +1027,11 @@ impl HistogramFoldStream {
         Ok(())
     }
 
-    fn is_positive_infinity(le_array: &StringArray, index: usize) -> bool {
-        le_array.is_valid(index)
-            && matches!(
-                le_array.value(index).parse::<f64>(),
-                Ok(value) if value.is_infinite() && value.is_sign_positive()
-            )
+    fn is_positive_infinity(le_array: &ArrayRef, index: usize) -> bool {
+        matches!(
+            string_array_value_at_index(le_array, index).and_then(|value| value.parse::<f64>().ok()),
+            Some(value) if value.is_infinite() && value.is_sign_positive()
+        )
     }
 
     /// Evaluate the field column and return the result
@@ -1119,8 +1114,10 @@ impl HistogramFoldStream {
 mod test {
     use std::sync::Arc;
 
-    use datafusion::arrow::array::{Float64Array, TimestampMillisecondArray};
-    use datafusion::arrow::datatypes::{Field, Schema, SchemaRef, TimeUnit};
+    use datafusion::arrow::array::{
+        DictionaryArray, Float64Array, StringDictionaryBuilder, TimestampMillisecondArray,
+    };
+    use datafusion::arrow::datatypes::{Field, Schema, SchemaRef, TimeUnit, UInt32Type};
     use datafusion::common::ToDFSchema;
     use datafusion::datasource::memory::MemorySourceConfig;
     use datafusion::datasource::source::DataSourceExec;
@@ -1329,6 +1326,56 @@ mod test {
 +--------+-------------------+",
         );
         assert_eq!(result_literal, expected);
+    }
+
+    #[tokio::test]
+    async fn fold_dictionary_encoded_labels() {
+        let dictionary_type =
+            DataType::Dictionary(Box::new(DataType::UInt32), Box::new(DataType::Utf8));
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("host", dictionary_type.clone(), true),
+            Field::new("le", dictionary_type, true),
+            Field::new("val", DataType::Float64, true),
+        ]));
+
+        let mut host = StringDictionaryBuilder::<UInt32Type>::new();
+        let mut le = StringDictionaryBuilder::<UInt32Type>::new();
+        for value in ["host_1", "host_1", "host_1"] {
+            host.append_value(value);
+        }
+        for value in ["0.1", "1", "+Inf"] {
+            le.append_value(value);
+        }
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(host.finish()),
+                Arc::new(le.finish()),
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+            ],
+        )
+        .unwrap();
+
+        let fold_exec = build_fold_exec_from_batches(vec![batch], schema, 0.5, 0);
+        let result =
+            datafusion::physical_plan::collect(fold_exec, SessionContext::default().task_ctx())
+                .await
+                .unwrap();
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].num_rows(), 1);
+        let host = result[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<DictionaryArray<UInt32Type>>()
+            .unwrap();
+        assert_eq!(host.values().len(), 1);
+        assert_eq!(
+            string_array_value_at_index(result[0].column(0), 0),
+            Some("host_1")
+        );
+        let value = result[0].column(1).as_primitive::<Float64Type>().value(0);
+        assert!((value - 0.55).abs() < 1e-12);
     }
 
     #[tokio::test]

@@ -51,6 +51,21 @@ jobs:
         with:
           config: licenserc-enterprise.toml
 
+  github-script-tests:
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
+    name: GitHub Script Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Run GitHub script tests
+        run: node --test .github/scripts/query-regression-comment.test.cjs
+
   check:
     if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
     name: Check
@@ -780,6 +795,12 @@ jobs:
         run: tar -xvf ./bins.tar.gz
       - name: Run sqlness
         run: RUST_BACKTRACE=1 ./bins/sqlness-runner bare ${{ matrix.mode.opts }} -c ./tests/cases --bins-dir ./bins --preserve-state
+      - if: matrix.mode.name == 'Basic'
+        name: Run soft-drop lifecycle sqlness
+        env:
+          GREPTIMEDB_METASRV__GC__SOFT_DROP__ENABLE: "true"
+          GREPTIMEDB_METASRV__GC__SOFT_DROP__RETENTION: "7d"
+        run: RUST_BACKTRACE=1 ./bins/sqlness-runner bare --enable-gc -c ./tests/cases-soft-drop --bins-dir ./bins --preserve-state -t soft_drop_table
       - name: Upload sqlness logs
         if: failure()
         uses: actions/upload-artifact@v4

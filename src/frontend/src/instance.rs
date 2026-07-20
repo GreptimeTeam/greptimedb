@@ -95,9 +95,9 @@ use table::requests::{OTLP_METRIC_COMPAT_KEY, OTLP_METRIC_COMPAT_PROM};
 use tracing::Span;
 
 use crate::error::{
-    self, Error, ExecLogicalPlanSnafu, ExecutePromqlSnafu, ExternalSnafu, InvalidSqlSnafu,
-    ParseSqlSnafu, PermissionSnafu, PlanStatementSnafu, Result, SqlExecInterceptedSnafu,
-    StatementTimeoutSnafu, TableOperationSnafu,
+    self, CollectRecordbatchSnafu, Error, ExecLogicalPlanSnafu, ExecutePromqlSnafu, ExternalSnafu,
+    InvalidSqlSnafu, ParseSqlSnafu, PermissionSnafu, PlanStatementSnafu, Result,
+    SqlExecInterceptedSnafu, StatementTimeoutSnafu, TableOperationSnafu,
 };
 use crate::service_config::InfluxdbMergeMode;
 use crate::stream_wrapper::CancellableStreamWrapper;
@@ -304,14 +304,15 @@ impl Instance {
                 )
                 .await
                 .map_err(|_| StatementTimeoutSnafu.build())??;
+                let output = map_query_output(output)?;
                 // compute remaining timeout
                 let remaining_timeout = timeout.checked_sub(start.elapsed()).unwrap_or_default();
                 attach_timeout(output, remaining_timeout)
             }
-            None => {
-                self.exec_statement(stmt, query_ctx, query_interceptor)
-                    .await
-            }
+            None => self
+                .exec_statement(stmt, query_ctx, query_interceptor)
+                .await
+                .and_then(map_query_output),
         }
     }
 
@@ -731,10 +732,14 @@ impl Instance {
                 let output = tokio::time::timeout(timeout, self.exec_plan(plan, query_ctx))
                     .await
                     .map_err(|_| StatementTimeoutSnafu.build())??;
+                let output = map_query_output(output)?;
                 let remaining_timeout = timeout.checked_sub(start.elapsed()).unwrap_or_default();
                 attach_timeout(output, remaining_timeout)
             }
-            None => self.exec_plan(plan, query_ctx).await,
+            None => self
+                .exec_plan(plan, query_ctx)
+                .await
+                .and_then(map_query_output),
         }
     }
 
@@ -952,6 +957,13 @@ impl SqlQueryHandler for Instance {
     }
 }
 
+/// Expands scan-time dictionaries only when a query result leaves the frontend.
+pub(crate) fn map_query_output(output: Output) -> Result<Output> {
+    output
+        .map_dictionary_to_values()
+        .context(CollectRecordbatchSnafu)
+}
+
 /// Attaches a timer to the output and observes it once the output is exhausted.
 pub fn attach_timer(output: Output, timer: HistogramTimer) -> Output {
     match output.data {
@@ -1044,19 +1056,19 @@ impl PrometheusHandler for Instance {
         let output = CancellableFuture::new(query_fut, ticket.cancellation_handle.clone())
             .await
             .map_err(|_| servers::error::CancelledSnafu.build())?
-            .map(|output| {
-                let Output { meta, data } = output;
-                let data = match data {
-                    OutputData::Stream(stream) => {
-                        OutputData::Stream(Box::pin(CancellableStreamWrapper::new(stream, ticket)))
-                    }
-                    other => other,
-                };
-                Output { data, meta }
-            })
             .map_err(BoxedError::new)
             .context(ExecuteQuerySnafu)?;
-
+        let output = map_query_output(output)
+            .map_err(BoxedError::new)
+            .context(ExecuteQuerySnafu)?;
+        let Output { meta, data } = output;
+        let data = match data {
+            OutputData::Stream(stream) => {
+                OutputData::Stream(Box::pin(CancellableStreamWrapper::new(stream, ticket)))
+            }
+            other => other,
+        };
+        let output = Output { data, meta };
         Ok(interceptor.post_execute(output, query_ctx)?)
     }
 
@@ -1197,6 +1209,9 @@ pub fn check_permission(
             for table_name in drop_stmt.table_names() {
                 validate_param(table_name, query_ctx)?;
             }
+        }
+        Statement::UndropTable(stmt) => {
+            validate_param(stmt.table_name(), query_ctx)?;
         }
         Statement::DropView(stmt) => {
             validate_param(&stmt.view_name, query_ctx)?;
@@ -2179,6 +2194,10 @@ mod tests {
 
         // test drop table
         let sql = "DROP TABLE {catalog}{schema}demo;";
+        replace_test(sql, plugins.clone(), &query_ctx);
+
+        // test undrop table
+        let sql = "UNDROP TABLE {catalog}{schema}demo;";
         replace_test(sql, plugins.clone(), &query_ctx);
 
         // test show tables

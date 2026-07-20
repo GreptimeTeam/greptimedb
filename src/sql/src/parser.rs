@@ -192,6 +192,12 @@ impl ParserContext<'_> {
                     self.parse_tql(false)
                 }
 
+                Keyword::NoKeyword
+                    if w.quote_style.is_none() && w.value.eq_ignore_ascii_case("UNDROP") =>
+                {
+                    self.parse_undrop_table()
+                }
+
                 Keyword::DECLARE => self.parse_declare_cursor(),
 
                 Keyword::FETCH => self.parse_fetch_cursor(),
