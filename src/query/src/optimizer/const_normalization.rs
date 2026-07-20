@@ -1506,10 +1506,6 @@ mod tests {
 
     #[async_trait]
     impl TableProvider for ExactPushdownProvider {
-        fn as_any(&self) -> &dyn std::any::Any {
-            self
-        }
-
         fn schema(&self) -> arrow_schema::SchemaRef {
             self.schema.clone()
         }
