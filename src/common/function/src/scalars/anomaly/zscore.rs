@@ -26,7 +26,6 @@ use std::sync::Arc;
 use arrow::array::{Array, ArrayRef, Float64Array};
 use arrow::datatypes::{DataType, Field, FieldRef};
 use datafusion_common::{DataFusionError, Result, ScalarValue};
-use datafusion_expr::type_coercion::aggregates::NUMERICS;
 use datafusion_expr::{PartitionEvaluator, Signature, Volatility, WindowUDFImpl};
 use datafusion_functions_window_common::field::WindowUDFFieldArgs;
 use datafusion_functions_window_common::partition::PartitionEvaluatorArgs;
@@ -44,7 +43,7 @@ pub struct AnomalyScoreZscore {
 impl AnomalyScoreZscore {
     pub fn new() -> Self {
         Self {
-            signature: Signature::uniform(1, NUMERICS.to_vec(), Volatility::Immutable),
+            signature: Signature::numeric(1, Volatility::Immutable),
         }
     }
 }

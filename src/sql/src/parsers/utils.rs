@@ -265,8 +265,10 @@ pub fn parser_expr_to_scalar_value_literal_at(
 
     // 2. simplify logical expr — use scheduled time if provided, else wall-clock
     let info = match scheduled_time {
-        Some(dt) => SimplifyContext::default().with_query_execution_start_time(Some(dt)),
-        None => SimplifyContext::default().with_current_time(),
+        Some(dt) => SimplifyContext::builder()
+            .with_query_execution_start_time(Some(dt))
+            .build(),
+        None => SimplifyContext::builder().with_current_time().build(),
     };
     let simplifier = ExprSimplifier::new(info);
 
@@ -565,7 +567,9 @@ SELECT * FROM tql_cte WHERE ts > 0
             ),
         ];
 
-        let info = SimplifyContext::default().with_query_execution_start_time(Some(now_time));
+        let info = SimplifyContext::builder()
+            .with_query_execution_start_time(Some(now_time))
+            .build();
         let simplifier = ExprSimplifier::new(info);
         for (expr, expected) in testcases {
             let expr_name = expr.schema_name().to_string();
