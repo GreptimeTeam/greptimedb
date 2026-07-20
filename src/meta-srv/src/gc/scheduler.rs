@@ -207,7 +207,7 @@ impl GcScheduler {
             info!("Skip gc trigger because maintenance mode is enabled");
             return Ok(GcJobReport::default());
         }
-        if self.config.soft_drop.enable {
+        if self.config.experimental_soft_drop.enable {
             self.purge_expired_soft_dropped_tables(common_time::util::current_time_millis())
                 .await;
         }
@@ -225,7 +225,8 @@ impl GcScheduler {
     async fn purge_expired_soft_dropped_tables(&self, now_millis: i64) {
         // The scheduler is only constructed after GcSchedulerOptions::validate().
         let retention_millis =
-            i64::try_from(self.config.soft_drop.retention.as_millis()).unwrap_or(i64::MAX);
+            i64::try_from(self.config.experimental_soft_drop.retention.as_millis())
+                .unwrap_or(i64::MAX);
         let dropped_tables = match self.ctx.list_dropped_tables().await {
             Ok(dropped_tables) => dropped_tables,
             Err(error) => {
@@ -602,7 +603,7 @@ mod tests {
             receiver: rx,
             config: GcSchedulerOptions {
                 enable: true,
-                soft_drop: crate::gc::options::SoftDropGcOptions {
+                experimental_soft_drop: crate::gc::options::SoftDropGcOptions {
                     enable: true,
                     retention: Duration::from_millis(100),
                 },
@@ -667,7 +668,8 @@ mod tests {
         *ctx.dropped_tables.lock().unwrap() = vec![dropped_table(1, Some(0))];
         ctx.never_complete_tables.lock().unwrap().insert(1);
         let mut scheduler = soft_drop_scheduler(ctx.clone());
-        scheduler.config.soft_drop.retention = Duration::from_millis(i64::MAX as u64 + 1);
+        scheduler.config.experimental_soft_drop.retention =
+            Duration::from_millis(i64::MAX as u64 + 1);
 
         scheduler.purge_expired_soft_dropped_tables(0).await;
 

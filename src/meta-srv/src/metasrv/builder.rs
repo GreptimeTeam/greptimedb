@@ -694,12 +694,12 @@ fn build_procedure_manager(
 
 /// Resolves if soft-drop is enabled from metasrv options.
 fn ddl_soft_drop_enabled(options: &MetasrvOptions) -> bool {
-    options.gc.soft_drop.enable
+    options.gc.experimental_soft_drop.enable
 }
 
 /// Returns soft-drop retention for recovering persisted procedures.
 fn ddl_soft_drop_retention(options: &MetasrvOptions) -> Option<Duration> {
-    Some(options.gc.soft_drop.retention)
+    Some(options.gc.experimental_soft_drop.retention)
 }
 
 impl Default for MetasrvBuilder {
@@ -722,8 +722,8 @@ mod tests {
     fn test_ddl_soft_drop_gate_preserves_retention_for_recovery() {
         let mut options = MetasrvOptions::default();
         options.gc.enable = true;
-        options.gc.soft_drop.enable = true;
-        options.gc.soft_drop.retention = Duration::from_secs(123);
+        options.gc.experimental_soft_drop.enable = true;
+        options.gc.experimental_soft_drop.retention = Duration::from_secs(123);
 
         assert!(ddl_soft_drop_enabled(&options));
         assert_eq!(
@@ -741,8 +741,8 @@ mod tests {
     fn test_soft_drop_options_are_validated() {
         let mut options = MetasrvOptions::default();
         options.gc.enable = true;
-        options.gc.soft_drop.enable = true;
-        options.gc.soft_drop.retention = Duration::ZERO;
+        options.gc.experimental_soft_drop.enable = true;
+        options.gc.experimental_soft_drop.retention = Duration::ZERO;
 
         assert!(options.gc.validate().is_err());
     }
@@ -750,7 +750,7 @@ mod tests {
     #[tokio::test]
     async fn test_builder_rejects_soft_drop_when_gc_is_disabled() {
         let mut options = MetasrvOptions::default();
-        options.gc.soft_drop.enable = true;
+        options.gc.experimental_soft_drop.enable = true;
 
         assert!(
             MetasrvBuilder::new()
