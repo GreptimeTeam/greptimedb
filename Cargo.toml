@@ -98,7 +98,7 @@ rust.unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tokio_unstable)'] }
 # for the inherited dependency but cannot do the reverse (override from true to false).
 #
 # See for more detaiils: https://github.com/rust-lang/cargo/issues/11329
-ahash = { version = "=0.8.12", features = ["compile-time-rng"] }
+ahash = { version = "0.8", features = ["compile-time-rng"] }
 aquamarine = "0.6"
 arrow = { version = "58.3", features = ["prettyprint"] }
 arrow-array = { version = "58.3", default-features = false, features = ["chrono-tz"] }
@@ -159,7 +159,6 @@ fst = "0.4.7"
 futures = "0.3"
 futures-util = "0.3"
 greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "c6f92ee9e12ee7bd5ee3c0956b1c9caa39be3f76" }
-half = "=2.7.1"
 hex = "0.4"
 http = "1"
 humantime = "2.1"

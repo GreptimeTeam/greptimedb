@@ -19,10 +19,6 @@
 //! It is designed to be more efficient than `CountDistinct` for large datasets,
 //! but it is not as accurate, as the hash value may be collision.
 
-mod hash_v1;
-#[cfg(test)]
-mod hash_v1_fixture;
-
 use std::collections::HashSet;
 use std::fmt::Debug;
 use std::sync::Arc;
@@ -30,6 +26,7 @@ use std::sync::Arc;
 use ahash::RandomState;
 use datafusion_common::cast::as_list_array;
 use datafusion_common::error::Result;
+use datafusion_common::hash_utils::{RandomState as FixedState, create_hashes};
 use datafusion_common::utils::SingleRowListArrayBuilder;
 use datafusion_common::{ScalarValue, internal_err, not_impl_err};
 use datafusion_expr::function::{AccumulatorArgs, StateFieldsArgs};
@@ -51,9 +48,6 @@ type HashValueType = u64;
 
 // read from /dev/urandom 4047821dc6144e4b2abddf23ad4171126a52eeecd26eff2191cf673b965a7875
 const RANDOM_SEED_0: u64 = 0x4047821dc6144e4b;
-const RANDOM_SEED_1: u64 = 0x2abddf23ad417112;
-const RANDOM_SEED_2: u64 = 0x6a52eeecd26eff21;
-const RANDOM_SEED_3: u64 = 0x91cf673b965a7875;
 
 impl CountHash {
     pub fn register(registry: &FunctionRegistry) {
@@ -109,12 +103,7 @@ impl AggregateUDFImpl for CountHash {
 
         Ok(Box::new(CountHashAccumulator {
             values: HashSet::default(),
-            random_state: RandomState::with_seeds(
-                RANDOM_SEED_0,
-                RANDOM_SEED_1,
-                RANDOM_SEED_2,
-                RANDOM_SEED_3,
-            ),
+            random_state: FixedState::with_seed(RANDOM_SEED_0),
             batch_hashes: vec![],
         }))
     }
@@ -160,7 +149,7 @@ impl AggregateUDFImpl for CountHash {
 pub struct CountHashGroupAccumulator {
     /// One HashSet per group to track distinct values
     distinct_sets: Vec<HashSet<HashValueType, RandomState>>,
-    random_state: RandomState,
+    random_state: FixedState,
     batch_hashes: Vec<HashValueType>,
 }
 
@@ -174,12 +163,7 @@ impl CountHashGroupAccumulator {
     pub fn new() -> Self {
         Self {
             distinct_sets: vec![],
-            random_state: RandomState::with_seeds(
-                RANDOM_SEED_0,
-                RANDOM_SEED_1,
-                RANDOM_SEED_2,
-                RANDOM_SEED_3,
-            ),
+            random_state: FixedState::with_seed(RANDOM_SEED_0),
             batch_hashes: vec![],
         }
     }
@@ -206,7 +190,7 @@ impl GroupsAccumulator for CountHashGroupAccumulator {
         let array = &values[0];
         self.batch_hashes.clear();
         self.batch_hashes.resize(array.len(), 0);
-        hash_v1::create_hashes(
+        create_hashes(
             &[ArrayRef::clone(array)],
             &self.random_state,
             &mut self.batch_hashes,
@@ -364,7 +348,7 @@ impl GroupsAccumulator for CountHashGroupAccumulator {
 #[derive(Debug)]
 struct CountHashAccumulator {
     values: HashSet<HashValueType, RandomState>,
-    random_state: RandomState,
+    random_state: FixedState,
     batch_hashes: Vec<HashValueType>,
 }
 
@@ -397,7 +381,7 @@ impl Accumulator for CountHashAccumulator {
 
         self.batch_hashes.clear();
         self.batch_hashes.resize(arr.len(), 0);
-        hash_v1::create_hashes(
+        create_hashes(
             &[ArrayRef::clone(arr)],
             &self.random_state,
             &mut self.batch_hashes,
@@ -462,12 +446,7 @@ mod tests {
     fn create_test_accumulator() -> CountHashAccumulator {
         CountHashAccumulator {
             values: HashSet::default(),
-            random_state: RandomState::with_seeds(
-                RANDOM_SEED_0,
-                RANDOM_SEED_1,
-                RANDOM_SEED_2,
-                RANDOM_SEED_3,
-            ),
+            random_state: FixedState::with_seed(RANDOM_SEED_0),
             batch_hashes: vec![],
         }
     }
