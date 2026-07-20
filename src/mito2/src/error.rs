@@ -204,6 +204,16 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display(
+        "Native histogram column '{}' has no usable PARQUET:field_id to namespace its sub-field ids (missing, malformed, or exceeds i32::MAX)",
+        field_name
+    ))]
+    InvalidNativeHistogramFieldId {
+        field_name: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Region {} not found", region_id))]
     RegionNotFound {
         region_id: RegionId,
@@ -1449,7 +1459,9 @@ impl ErrorExt for Error {
             | PuffinPurgeStager { source, .. } => source.status_code(),
             CleanDir { .. } => StatusCode::Unexpected,
             InvalidConfig { .. } => StatusCode::InvalidArguments,
-            StaleLogEntry { .. } | InvalidNativeHistogramSubfield { .. } => StatusCode::Unexpected,
+            StaleLogEntry { .. }
+            | InvalidNativeHistogramSubfield { .. }
+            | InvalidNativeHistogramFieldId { .. } => StatusCode::Unexpected,
 
             External { source, .. } => source.status_code(),
 

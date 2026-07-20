@@ -39,7 +39,7 @@ use store_api::storage::consts::{
     OP_TYPE_COLUMN_NAME, PRIMARY_KEY_COLUMN_NAME, SEQUENCE_COLUMN_NAME,
 };
 
-use crate::error::InvalidNativeHistogramSubfieldSnafu;
+use crate::error::{InvalidNativeHistogramFieldIdSnafu, InvalidNativeHistogramSubfieldSnafu};
 use crate::sst::parquet::flat_format::time_index_column_index;
 
 pub mod file;
@@ -92,10 +92,11 @@ pub fn with_field_id(mut field: Field, column_id: u32) -> Field {
 /// untouched. mito2 reads SST columns by schema position, never by field
 /// metadata, so this only affects external readers.
 ///
-/// Returns an error if a sub-field id cannot be resolved — because the
-/// sub-field name is not a known native-histogram field, or the derived id
-/// overflows a positive `i32` (an absurdly large parent `column_id`); see
-/// [`native_histogram_subfield_id`].
+/// Returns an error if the parent column's `PARQUET:field_id` is missing,
+/// malformed, or exceeds `i32::MAX`, or if a sub-field id cannot be derived
+/// — because the sub-field name is not a known native-histogram field, or
+/// the derived id overflows a positive `i32` (an absurdly large parent
+/// `column_id`); see [`native_histogram_subfield_id`].
 fn stamp_native_histogram_subfield_ids(field: &mut Field) -> crate::error::Result<()> {
     if !is_native_histogram_value_schema(
         field.name(),
@@ -105,13 +106,18 @@ fn stamp_native_histogram_subfield_ids(field: &mut Field) -> crate::error::Resul
     }
     // Namespace sub-field ids by the parent column's field id (its
     // `PARQUET:field_id`, stamped earlier by `with_field_id`) so several
-    // histogram columns in one table get disjoint ids. Falls back to 0 when
-    // the parent id is absent.
+    // histogram columns in one table get disjoint ids. Fail loudly if the id
+    // is absent, malformed, or too large to fit a positive `i32`.
     let column_id = field
         .metadata()
         .get(PARQUET_FIELD_ID_KEY)
         .and_then(|s| s.parse::<i32>().ok())
-        .unwrap_or(0);
+        .ok_or_else(|| {
+            InvalidNativeHistogramFieldIdSnafu {
+                field_name: field.name().clone(),
+            }
+            .build()
+        })?;
     // Tag the field with the greptime.histogram extension.
     field.metadata_mut().insert(
         EXTENSION_TYPE_NAME_KEY.to_string(),
@@ -983,6 +989,64 @@ mod tests {
                 crate::error::Error::InvalidNativeHistogramSubfield { .. }
             ),
             "expected InvalidNativeHistogramSubfield, got {:?}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_maybe_wrap_schema_missing_field_id_returns_error() {
+        // The parent column's PARQUET:field_id namespaces every sub-field id.
+        // If it is absent (e.g. a histogram struct handed to the writer
+        // without the write path's stamping), the writer must fail loudly
+        // rather than silently namespace under column 0, which would collide
+        // with that column's nested ids.
+        use common_query::native_histogram::{NATIVE_HISTOGRAM_FIELD, native_histogram_value_type};
+        use datatypes::data_type::DataType;
+
+        let field = Field::new(
+            NATIVE_HISTOGRAM_FIELD,
+            native_histogram_value_type().as_arrow_type(),
+            true,
+        );
+        assert!(
+            field.metadata().get(PARQUET_FIELD_ID_KEY).is_none(),
+            "fixture must not carry a field id"
+        );
+        let schema = Arc::new(Schema::new(vec![field]));
+        let err = maybe_wrap_schema(&schema).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                crate::error::Error::InvalidNativeHistogramFieldId { .. }
+            ),
+            "expected InvalidNativeHistogramFieldId, got {:?}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_maybe_wrap_schema_field_id_above_i32_max_returns_error() {
+        // `with_field_id` serializes the column id from a u32, so a valid id
+        // above i32::MAX (e.g. u32::MAX) must not be silently parsed as a
+        // failed i32 and collapsed onto column 0's nested ids. It must
+        // surface a checked-conversion error instead.
+        use common_query::native_histogram::NATIVE_HISTOGRAM_FIELD;
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(
+                "greptime_timestamp",
+                ArrowDataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+            histogram_field(NATIVE_HISTOGRAM_FIELD, u32::MAX),
+        ]));
+        let err = maybe_wrap_schema(&schema).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                crate::error::Error::InvalidNativeHistogramFieldId { .. }
+            ),
+            "expected InvalidNativeHistogramFieldId, got {:?}",
             err
         );
     }
