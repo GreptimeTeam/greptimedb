@@ -4127,8 +4127,9 @@ dependencies = [
 
 [[package]]
 name = "datafusion-orc"
-version = "0.8.0"
-source = "git+https://github.com/discord9/datafusion-orc.git?rev=6e280868a7a72aa5fcb8fe0fbe73c7d90f81ceff#6e280868a7a72aa5fcb8fe0fbe73c7d90f81ceff"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ef7b50458395b8fe7cbeb52c1444b67d4e36d9572a04c68242b2d16ad2a9cb08"
 dependencies = [
  "async-trait",
  "bytes",

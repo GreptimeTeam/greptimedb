@@ -136,7 +136,7 @@ datafusion-functions = "=54.0.0"
 datafusion-functions-aggregate-common = "=54.0.0"
 datafusion-functions-window-common = "=54.0.0"
 datafusion-optimizer = "=54.0.0"
-datafusion-orc = { git = "https://github.com/discord9/datafusion-orc.git", rev = "6e280868a7a72aa5fcb8fe0fbe73c7d90f81ceff" }
+datafusion-orc = "0.9"
 datafusion-pg-catalog = "0.18"
 datafusion-physical-expr = "=54.0.0"
 datafusion-physical-plan = "=54.0.0"
