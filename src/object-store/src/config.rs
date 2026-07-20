@@ -287,7 +287,8 @@ impl From<&GcsConnection> for Gcs {
 pub struct MysqlConfig {
     pub name: String,
     pub root: String,
-    pub addr: String,
+    #[serde(skip_serializing)]
+    pub connection_string: SecretString,
     pub table: Option<String>,
     #[serde(flatten)]
     pub cache: ObjectStorageCacheConfig,
@@ -297,7 +298,7 @@ impl From<&MysqlConfig> for Mysql {
     fn from(config: &MysqlConfig) -> Self {
         let root = util::normalize_dir(&config.root);
         let mut builder = Mysql::default()
-            .connection_string(&config.addr)
+            .connection_string(config.connection_string.expose_secret())
             .root(&root)
             .key_field("key")
             .value_field("value");
@@ -427,5 +428,35 @@ mod tests {
         assert!(azblob_config.is_object_storage());
         let mysql_config = ObjectStoreConfig::Mysql(MysqlConfig::default());
         assert!(mysql_config.is_object_storage());
+    }
+
+    #[test]
+    fn test_mysql_config_connection_string_serde() {
+        let config: ObjectStoreConfig = toml::from_str(
+            r#"
+type = "Mysql"
+name = "mysql-store"
+root = "/greptimedb"
+connection_string = "mysql://user:password@127.0.0.1:3306/greptime"
+table = "object_store"
+"#,
+        )
+        .unwrap();
+
+        let ObjectStoreConfig::Mysql(mysql_config) = config else {
+            unreachable!()
+        };
+
+        assert_eq!("mysql-store", mysql_config.name);
+        assert_eq!("/greptimedb", mysql_config.root);
+        assert_eq!(
+            "mysql://user:password@127.0.0.1:3306/greptime",
+            mysql_config.connection_string.expose_secret()
+        );
+        assert_eq!(Some("object_store"), mysql_config.table.as_deref());
+
+        let serialized = toml::to_string(&mysql_config).unwrap();
+        assert!(!serialized.contains("connection_string"));
+        assert!(!serialized.contains("password"));
     }
 }

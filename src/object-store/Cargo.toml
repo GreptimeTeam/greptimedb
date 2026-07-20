@@ -50,3 +50,4 @@ object_store_opendal.workspace = true
 rand.workspace = true
 tempfile.workspace = true
 tokio.workspace = true
+toml.workspace = true

@@ -9252,6 +9252,7 @@ dependencies = [
  "snafu 0.8.6",
  "tempfile",
  "tokio",
+ "toml 0.8.23",
  "uuid",
 ]
 
