@@ -73,6 +73,7 @@ impl InstanceBuilder {
             None,
         );
 
+        crate::options::flush_dropped_plugin_warnings();
         log_versions(verbose_version(), short_version(), APP_NAME);
         maybe_activate_heap_profile(&dn_opts.memory);
         create_resource_limit_metrics(APP_NAME);

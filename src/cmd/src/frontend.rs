@@ -343,6 +343,7 @@ impl StartCommand {
             Some(&opts.component.slow_query),
         );
 
+        crate::options::flush_dropped_plugin_warnings();
         log_versions(verbose_version(), short_version(), APP_NAME);
         maybe_activate_heap_profile(&opts.component.memory);
         create_resource_limit_metrics(APP_NAME);

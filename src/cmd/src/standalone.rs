@@ -350,6 +350,7 @@ impl StartCommand {
             Some(&opts.component.slow_query),
         );
 
+        crate::options::flush_dropped_plugin_warnings();
         log_versions(verbose_version(), short_version(), APP_NAME);
         maybe_activate_heap_profile(&opts.component.memory);
         create_resource_limit_metrics(APP_NAME);
@@ -1300,5 +1301,31 @@ AnotherUnknownPlugin = {{}}
         // Unknown plugin options are dropped; the recognized list is empty in the
         // open-source build.
         assert!(opts.plugins.is_empty());
+    }
+
+    #[test]
+    fn test_load_options_errors_on_malformed_known_plugin_option() {
+        // A *known* variant with a malformed payload must NOT be silently
+        // dropped; config loading must fail so a misconfigured plugin is not
+        // disabled without notice. Here `Dummy` (a unit variant) is given a map
+        // payload, which is invalid.
+        let mut file = create_named_temp_file();
+        write!(
+            file,
+            r#"
+[[plugins]]
+Dummy = {{ unexpected = "payload" }}
+"#
+        )
+        .unwrap();
+
+        let result = GreptimeOptions::<StandaloneOptions>::load_layered_options(
+            Some(file.path().to_str().unwrap()),
+            "GREPTIMEDB_STANDALONE_UT",
+        );
+        assert!(
+            result.is_err(),
+            "a malformed payload for a known plugin variant must fail config loading"
+        );
     }
 }

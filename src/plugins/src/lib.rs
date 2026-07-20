@@ -33,5 +33,5 @@ pub use frontend::{
 pub use meta_srv::{
     setup_metasrv_plugins_post_build, setup_metasrv_plugins_pre_build, start_metasrv_plugins,
 };
-pub use options::{PluginOptions, deserialize_plugin_options};
+pub use options::PluginOptions;
 pub use standalone::setup_standalone_plugins;
