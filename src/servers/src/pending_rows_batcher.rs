@@ -1417,7 +1417,13 @@ async fn notify_flow_dirty_windows_for_table(
             })
             .await
         {
-            error!(e; "Failed to mark timestamps as dirty, table: {}", table_id);
+            error!(
+                e;
+                "Failed to mark timestamps as dirty, table_id: {}, peer_id: {}, peer_addr: {}",
+                table_id,
+                peer.id,
+                peer.addr
+            );
         }
     }
 }
