@@ -350,6 +350,7 @@ impl StartCommand {
             Some(&opts.component.slow_query),
         );
 
+        crate::options::flush_dropped_plugin_warnings();
         log_versions(verbose_version(), short_version(), APP_NAME);
         maybe_activate_heap_profile(&opts.component.memory);
         create_resource_limit_metrics(APP_NAME);
@@ -1270,5 +1271,89 @@ mod tests {
             opts.storage.store.cache_config().unwrap().cache_path,
             "test_data_home"
         );
+    }
+
+    #[test]
+    fn test_load_options_ignores_unknown_plugin_options() {
+        // Plugin options that are not recognized by the current build (for example,
+        // an enterprise plugin option seen by an open-source build) must not abort
+        // startup. They should be dropped with a warning instead.
+        let mut file = create_named_temp_file();
+        write!(
+            file,
+            r#"
+[[plugins]]
+SomeUnknownPlugin = {{ feature = "foo", count = 5 }}
+
+[[plugins]]
+AnotherUnknownPlugin = {{}}
+"#
+        )
+        .unwrap();
+
+        let opts = GreptimeOptions::<StandaloneOptions>::load_layered_options(
+            Some(file.path().to_str().unwrap()),
+            "GREPTIMEDB_STANDALONE_UT",
+        )
+        .expect(
+            "loading a config with unrecognized plugin options should succeed, \
+             ignoring the unknown ones",
+        );
+        // Unknown plugin options are dropped; the recognized list is empty in the
+        // open-source build.
+        assert!(opts.plugins.is_empty());
+    }
+
+    #[test]
+    fn test_load_options_errors_on_malformed_known_plugin_option() {
+        // A *known* variant with a malformed payload must NOT be silently
+        // dropped; config loading must fail so a misconfigured plugin is not
+        // disabled without notice. Here `Dummy` (a unit variant) is given a map
+        // payload, which is invalid.
+        let mut file = create_named_temp_file();
+        write!(
+            file,
+            r#"
+[[plugins]]
+Dummy = {{ unexpected = "payload" }}
+"#
+        )
+        .unwrap();
+
+        let result = GreptimeOptions::<StandaloneOptions>::load_layered_options(
+            Some(file.path().to_str().unwrap()),
+            "GREPTIMEDB_STANDALONE_UT",
+        );
+        assert!(
+            result.is_err(),
+            "a malformed payload for a known plugin variant must fail config loading"
+        );
+    }
+
+    #[test]
+    fn test_load_options_ignores_multi_key_unknown_plugin_entry() {
+        // A single plugin table carrying several *unknown* keys must not abort
+        // startup with serde's "expected map with a single key" error; it is
+        // dropped like any other unrecognized plugin option.
+        let mut file = create_named_temp_file();
+        write!(
+            file,
+            r#"
+[[plugins]]
+FirstUnknownPlugin = {{ a = 1 }}
+SecondUnknownPlugin = {{ b = 2 }}
+"#
+        )
+        .unwrap();
+
+        let opts = GreptimeOptions::<StandaloneOptions>::load_layered_options(
+            Some(file.path().to_str().unwrap()),
+            "GREPTIMEDB_STANDALONE_UT",
+        )
+        .expect(
+            "loading a config with a multi-key unknown plugin entry should succeed, \
+             ignoring the unknown ones",
+        );
+        assert!(opts.plugins.is_empty());
     }
 }
