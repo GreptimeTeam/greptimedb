@@ -769,7 +769,7 @@ impl DirtyTimeWindows {
         Ok(ret)
     }
 
-    /// Align a time range `[start, end)`(end is optional and exclusive) to
+    /// Align a time range `[start, end)` (end is optional and exclusive) to
     /// time window boundaries defined by the time window expr.
     pub(crate) fn align_time_window(
         start: Timestamp,
