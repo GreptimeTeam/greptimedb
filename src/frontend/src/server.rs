@@ -138,6 +138,7 @@ where
                     opts.prom_store.max_concurrent_flushes,
                     opts.prom_store.worker_channel_capacity,
                     opts.prom_store.max_inflight_requests,
+                    opts.prom_store.flow_notification_queue_capacity,
                 )
             } else {
                 None

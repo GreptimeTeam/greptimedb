@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::collections::{HashMap, HashSet};
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -22,6 +23,7 @@ use api::v1::region::{
     BulkInsertRequest, RegionRequest, RegionRequestHeader, bulk_insert_request, region_request,
 };
 use api::v1::{ArrowIpc, ColumnSchema, RowInsertRequests, Rows};
+#[cfg(test)]
 use arrow::array::Array;
 use arrow::compute::{concat_batches, filter_record_batch};
 use arrow::datatypes::{DataType as ArrowDataType, Schema as ArrowSchema, TimeUnit};
@@ -51,9 +53,9 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore, broadcast, mpsc, oneshot};
 use crate::error;
 use crate::error::{Error, Result};
 use crate::metrics::{
-    FLUSH_DROPPED_ROWS, FLUSH_ELAPSED, FLUSH_FAILURES, FLUSH_ROWS, FLUSH_TOTAL, PENDING_BATCHES,
-    PENDING_ROWS, PENDING_ROWS_BATCH_FLUSH_STAGE_ELAPSED, PENDING_ROWS_BATCH_INGEST_STAGE_ELAPSED,
-    PENDING_WORKERS,
+    FLOW_NOTIFICATION_DROPPED, FLUSH_DROPPED_ROWS, FLUSH_ELAPSED, FLUSH_FAILURES, FLUSH_ROWS,
+    FLUSH_TOTAL, PENDING_BATCHES, PENDING_ROWS, PENDING_ROWS_BATCH_FLUSH_STAGE_ELAPSED,
+    PENDING_ROWS_BATCH_INGEST_STAGE_ELAPSED, PENDING_WORKERS,
 };
 use crate::prom_row_builder::{
     build_prom_create_table_schema_from_proto, identify_missing_columns_from_proto,
@@ -335,7 +337,7 @@ pub struct PendingRowsBatcher {
     partition_manager: PartitionRuleManagerRef,
     node_manager: NodeManagerRef,
     catalog_manager: CatalogManagerRef,
-    table_flownode_set_cache: TableFlownodeSetCacheRef,
+    flow_notification_tx: mpsc::Sender<FlowNotification>,
     flush_semaphore: Arc<Semaphore>,
     inflight_semaphore: Arc<Semaphore>,
     worker_channel_capacity: usize,
@@ -359,6 +361,7 @@ impl PendingRowsBatcher {
         max_concurrent_flushes: usize,
         worker_channel_capacity: usize,
         max_inflight_requests: usize,
+        flow_notification_queue_capacity: NonZeroUsize,
     ) -> Option<Arc<Self>> {
         // Disable the batcher if flush is disabled or configuration is invalid.
         // Zero values for these knobs either cause panics (e.g., zero-capacity channels)
@@ -380,6 +383,13 @@ impl PendingRowsBatcher {
             .unwrap_or(true);
         let workers = Arc::new(DashMap::new());
         PENDING_WORKERS.set(workers.len() as i64);
+        let (flow_notification_tx, flow_notification_rx) =
+            mpsc::channel(flow_notification_queue_capacity.get());
+        start_flow_notification_worker(
+            flow_notification_rx,
+            table_flownode_set_cache,
+            node_manager.clone(),
+        );
 
         Some(Arc::new(Self {
             workers,
@@ -388,7 +398,7 @@ impl PendingRowsBatcher {
             partition_manager,
             node_manager,
             catalog_manager,
-            table_flownode_set_cache,
+            flow_notification_tx,
             prom_store_with_metric_engine,
             schema_alterer,
             flush_semaphore: Arc::new(Semaphore::new(max_concurrent_flushes)),
@@ -860,7 +870,7 @@ impl PendingRowsBatcher {
             self.partition_manager.clone(),
             self.node_manager.clone(),
             self.catalog_manager.clone(),
-            self.table_flownode_set_cache.clone(),
+            self.flow_notification_tx.clone(),
             self.flush_interval,
             worker_idle_timeout,
             self.max_batch_rows,
@@ -917,7 +927,7 @@ fn start_worker(
     partition_manager: PartitionRuleManagerRef,
     node_manager: NodeManagerRef,
     catalog_manager: CatalogManagerRef,
-    table_flownode_set_cache: TableFlownodeSetCacheRef,
+    flow_notification_tx: mpsc::Sender<FlowNotification>,
     flush_interval: Duration,
     worker_idle_timeout: Duration,
     max_batch_rows: usize,
@@ -959,7 +969,7 @@ fn start_worker(
                                         partition_manager.clone(),
                                         node_manager.clone(),
                                         catalog_manager.clone(),
-                                        table_flownode_set_cache.clone(),
+                                        flow_notification_tx.clone(),
                                         flush_semaphore.clone(),
                                     ).await;
                             }
@@ -971,7 +981,7 @@ fn start_worker(
                                     partition_manager.clone(),
                                     node_manager.clone(),
                                     catalog_manager.clone(),
-                                    table_flownode_set_cache.clone(),
+                                    flow_notification_tx.clone(),
                                 ).await;
                             }
                             break;
@@ -1007,7 +1017,7 @@ fn start_worker(
                                 partition_manager.clone(),
                                 node_manager.clone(),
                                 catalog_manager.clone(),
-                                table_flownode_set_cache.clone(),
+                                flow_notification_tx.clone(),
                                 flush_semaphore.clone(),
                             ).await;
                     }
@@ -1019,7 +1029,7 @@ fn start_worker(
                             partition_manager.clone(),
                             node_manager.clone(),
                             catalog_manager.clone(),
-                            table_flownode_set_cache.clone(),
+                            flow_notification_tx.clone(),
                         ).await;
                     }
                     break;
@@ -1080,7 +1090,7 @@ async fn spawn_flush(
     partition_manager: PartitionRuleManagerRef,
     node_manager: NodeManagerRef,
     catalog_manager: CatalogManagerRef,
-    table_flownode_set_cache: TableFlownodeSetCacheRef,
+    flow_notification_tx: mpsc::Sender<FlowNotification>,
     semaphore: Arc<Semaphore>,
 ) {
     match semaphore.acquire_owned().await {
@@ -1092,7 +1102,7 @@ async fn spawn_flush(
                     partition_manager,
                     node_manager,
                     catalog_manager,
-                    table_flownode_set_cache,
+                    flow_notification_tx,
                 )
                 .await;
             });
@@ -1104,7 +1114,7 @@ async fn spawn_flush(
                 partition_manager,
                 node_manager,
                 catalog_manager,
-                table_flownode_set_cache,
+                flow_notification_tx,
             )
             .await;
         }
@@ -1296,7 +1306,7 @@ async fn flush_batch_with_managers(
     partition_manager: PartitionRuleManagerRef,
     node_manager: NodeManagerRef,
     catalog_manager: CatalogManagerRef,
-    table_flownode_set_cache: TableFlownodeSetCacheRef,
+    flow_notification_tx: mpsc::Sender<FlowNotification>,
 ) {
     let partition_provider = PartitionManagerPhysicalFlushAdapter { partition_manager };
     let node_requester = NodeManagerPhysicalFlushAdapter {
@@ -1308,8 +1318,7 @@ async fn flush_batch_with_managers(
         &partition_provider,
         &node_requester,
         &catalog_provider,
-        node_manager,
-        table_flownode_set_cache,
+        flow_notification_tx,
     )
     .await;
 }
@@ -1319,8 +1328,7 @@ async fn flush_batch(
     partition_manager: &(impl PhysicalFlushPartitionProvider + ?Sized),
     node_manager: &(impl PhysicalFlushNodeRequester + ?Sized),
     catalog_manager: &(impl PhysicalFlushCatalogProvider + ?Sized),
-    flow_node_manager: NodeManagerRef,
-    table_flownode_set_cache: TableFlownodeSetCacheRef,
+    flow_notification_tx: mpsc::Sender<FlowNotification>,
 ) {
     let FlushBatch {
         table_batches,
@@ -1363,12 +1371,8 @@ async fn flush_batch(
                 .with_label_values(&[db_string.as_str()])
                 .inc_by(affected_rows as u64);
 
-            notify_flow_dirty_windows_after_flush(
-                table_batches,
-                table_flownode_set_cache,
-                flow_node_manager,
-            );
             notify_waiters(waiters, Ok(()));
+            enqueue_flow_notifications(table_batches, &flow_notification_tx);
         }
         Err(err) => {
             FLUSH_FAILURES.inc();
@@ -1406,11 +1410,15 @@ struct FlowNotification {
     table_id: TableId,
     timestamps: Vec<i64>,
     time_ranges: Vec<TimeRange>,
+    min_timestamp: i64,
+    max_timestamp: i64,
 }
 
 fn compact_flow_notification(table_batch: TableBatch) -> Option<FlowNotification> {
     let mut timestamps = Vec::new();
     let mut time_ranges = Vec::new();
+    let mut min_timestamp: Option<i64> = None;
+    let mut max_timestamp: Option<i64> = None;
 
     for batch in table_batch.batches {
         let timestamp_column = batch.batch.column(batch.timestamp_index);
@@ -1436,6 +1444,8 @@ fn compact_flow_notification(table_batch: TableBatch) -> Option<FlowNotification
         let (Some(batch_min), Some(batch_max)) = (batch_min, batch_max) else {
             continue;
         };
+        min_timestamp = Some(min_timestamp.map_or(batch_min, |min| min.min(batch_min)));
+        max_timestamp = Some(max_timestamp.map_or(batch_max, |max| max.max(batch_max)));
         let timestamp_span = i128::from(batch_max) - i128::from(batch_min);
         let is_dense = timestamp_span * DENSE_TIMESTAMP_RANGE_FACTOR_DENOMINATOR
             < timestamp_count as i128 * DENSE_TIMESTAMP_RANGE_FACTOR_NUMERATOR;
@@ -1457,16 +1467,68 @@ fn compact_flow_notification(table_batch: TableBatch) -> Option<FlowNotification
         table_id: table_batch.table_id,
         timestamps,
         time_ranges,
+        min_timestamp: min_timestamp?,
+        max_timestamp: max_timestamp?,
     })
 }
 
-async fn notify_flow_dirty_windows_for_table(
-    table_id: TableId,
-    timestamps: Vec<i64>,
-    time_ranges: Vec<TimeRange>,
-    peers: HashSet<Peer>,
+fn try_enqueue_flow_notification(
+    tx: &mpsc::Sender<FlowNotification>,
+    notification: FlowNotification,
+) -> bool {
+    match tx.try_send(notification) {
+        Ok(()) => true,
+        Err(mpsc::error::TrySendError::Full(notification)) => {
+            FLOW_NOTIFICATION_DROPPED.with_label_values(&["full"]).inc();
+            warn!(
+                "Dropping flow notification because queue is full, table_id: {}, queue_capacity: {}, min_timestamp: {}, max_timestamp: {}",
+                notification.table_id,
+                tx.max_capacity(),
+                notification.min_timestamp,
+                notification.max_timestamp
+            );
+            false
+        }
+        Err(mpsc::error::TrySendError::Closed(notification)) => {
+            FLOW_NOTIFICATION_DROPPED
+                .with_label_values(&["closed"])
+                .inc();
+            error!(
+                "Dropping flow notification because queue is closed, table_id: {}, queue_capacity: {}, min_timestamp: {}, max_timestamp: {}",
+                notification.table_id,
+                tx.max_capacity(),
+                notification.min_timestamp,
+                notification.max_timestamp
+            );
+            false
+        }
+    }
+}
+
+fn enqueue_flow_notifications(table_batches: Vec<TableBatch>, tx: &mpsc::Sender<FlowNotification>) {
+    for table_batch in table_batches {
+        if let Some(notification) = compact_flow_notification(table_batch) {
+            try_enqueue_flow_notification(tx, notification);
+        }
+    }
+}
+
+async fn handle_flow_notification(
+    notification: FlowNotification,
+    table_flownode_set_cache: TableFlownodeSetCacheRef,
     node_manager: NodeManagerRef,
 ) {
+    let table_id = notification.table_id;
+    let flownodes = match table_flownode_set_cache.get(table_id).await {
+        Ok(Some(flownodes)) => flownodes,
+        Ok(None) => return,
+        Err(e) => {
+            error!(e; "Failed to get flownodes for table id: {}", table_id);
+            return;
+        }
+    };
+    let peers = flownodes.values().cloned().collect::<HashSet<_>>();
+
     for peer in peers {
         if let Err(e) = node_manager
             .flownode(&peer)
@@ -1474,8 +1536,8 @@ async fn notify_flow_dirty_windows_for_table(
             .handle_mark_window_dirty(DirtyWindowRequests {
                 requests: vec![DirtyWindowRequest {
                     table_id,
-                    timestamps: timestamps.clone(),
-                    time_ranges: time_ranges.clone(),
+                    timestamps: notification.timestamps.clone(),
+                    time_ranges: notification.time_ranges.clone(),
                 }],
             })
             .await
@@ -1491,61 +1553,31 @@ async fn notify_flow_dirty_windows_for_table(
     }
 }
 
+fn start_flow_notification_worker(
+    notification_rx: mpsc::Receiver<FlowNotification>,
+    table_flownode_set_cache: TableFlownodeSetCacheRef,
+    node_manager: NodeManagerRef,
+) {
+    common_runtime::spawn_global(async move {
+        tokio_stream::wrappers::ReceiverStream::new(notification_rx)
+            .for_each_concurrent(MAX_CONCURRENT_FLOW_NOTIFICATIONS, |notification| {
+                let table_flownode_set_cache = table_flownode_set_cache.clone();
+                let node_manager = node_manager.clone();
+                handle_flow_notification(notification, table_flownode_set_cache, node_manager)
+            })
+            .await;
+    });
+}
+
+#[cfg(test)]
 fn notify_flow_dirty_windows_after_flush(
     table_batches: Vec<TableBatch>,
     table_flownode_set_cache: TableFlownodeSetCacheRef,
     node_manager: NodeManagerRef,
 ) {
-    common_runtime::spawn_global(async move {
-        let (notification_tx, notification_rx) = mpsc::channel(table_batches.len().max(1));
-        let resolve_flownodes = async move {
-            futures::stream::iter(table_batches)
-                .for_each_concurrent(MAX_CONCURRENT_FLOW_NOTIFICATIONS, |table_batch| {
-                    let table_flownode_set_cache = table_flownode_set_cache.clone();
-                    let notification_tx = notification_tx.clone();
-                    async move {
-                        let Some(notification) = compact_flow_notification(table_batch) else {
-                            return;
-                        };
-
-                        let table_id = notification.table_id;
-                        let flownodes = match table_flownode_set_cache.get(table_id).await {
-                            Ok(Some(flownodes)) => flownodes,
-                            Ok(None) => return,
-                            Err(e) => {
-                                error!(e; "Failed to get flownodes for table id: {}", table_id);
-                                return;
-                            }
-                        };
-                        let peers = flownodes.values().cloned().collect::<HashSet<_>>();
-                        let _ = notification_tx
-                            .send((
-                                table_id,
-                                notification.timestamps,
-                                notification.time_ranges,
-                                peers,
-                            ))
-                            .await;
-                    }
-                })
-                .await;
-        };
-        let notify_flownodes = tokio_stream::wrappers::ReceiverStream::new(notification_rx)
-            .for_each_concurrent(
-                MAX_CONCURRENT_FLOW_NOTIFICATIONS,
-                |(table_id, timestamps, time_ranges, peers)| {
-                    notify_flow_dirty_windows_for_table(
-                        table_id,
-                        timestamps,
-                        time_ranges,
-                        peers,
-                        node_manager.clone(),
-                    )
-                },
-            );
-
-        futures::future::join(resolve_flownodes, notify_flownodes).await;
-    });
+    let (tx, rx) = mpsc::channel(table_batches.len().max(1));
+    start_flow_notification_worker(rx, table_flownode_set_cache, node_manager);
+    enqueue_flow_notifications(table_batches, &tx);
 }
 
 /// Flushes a batch of logical table rows by transforming them into the physical table format
@@ -1938,10 +1970,12 @@ mod tests {
         extract_timestamps, flush_batch, flush_batch_physical, flush_region_writes_concurrently,
         greptime_timestamp, notify_flow_dirty_windows_after_flush, plan_region_batches,
         remove_worker_if_same_channel, should_close_worker_on_idle_timeout,
-        should_dispatch_concurrently, strip_partition_columns_from_batch,
-        transform_logical_batches_to_physical,
+        should_dispatch_concurrently, start_flow_notification_worker,
+        strip_partition_columns_from_batch, transform_logical_batches_to_physical,
+        try_enqueue_flow_notification,
     };
     use crate::error;
+    use crate::metrics::FLOW_NOTIFICATION_DROPPED;
     use crate::prom_row_builder::rows_to_aligned_record_batch;
 
     fn mock_rows(row_count: usize, schema_name: &str) -> Rows {
@@ -2194,6 +2228,28 @@ mod tests {
             assert_eq!(expected_timestamps, notification.timestamps);
             assert_eq!(expected_ranges, notification.time_ranges);
         }
+    }
+
+    #[test]
+    fn test_flow_notification_queue_drops_when_full() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let notification = |table_id| {
+            compact_flow_notification(TableBatch {
+                table_name: format!("table-{table_id}"),
+                table_id,
+                row_count: 1,
+                batches: vec![mock_timestamp_batch(vec![Some(table_id as i64)])],
+            })
+            .unwrap()
+        };
+        let dropped = FLOW_NOTIFICATION_DROPPED.with_label_values(&["full"]);
+        let dropped_before = dropped.get();
+
+        assert!(try_enqueue_flow_notification(&tx, notification(1)));
+        assert!(!try_enqueue_flow_notification(&tx, notification(2)));
+
+        assert_eq!(1, rx.try_recv().unwrap().table_id);
+        assert_eq!(dropped_before + 1, dropped.get());
     }
 
     fn mock_physical_table_metadata(table_id: TableId) -> PhysicalTableMetadata {
@@ -2586,6 +2642,15 @@ mod tests {
         cache
     }
 
+    fn mock_flow_notification_sender(
+        cache: TableFlownodeSetCacheRef,
+        node_manager: NodeManagerRef,
+    ) -> mpsc::Sender<super::FlowNotification> {
+        let (tx, rx) = mpsc::channel(16);
+        start_flow_notification_worker(rx, cache, node_manager);
+        tx
+    }
+
     struct BlockingRangeKvBackend {
         range_started: Mutex<Option<oneshot::Sender<()>>>,
         range_release: Arc<Notify>,
@@ -2808,6 +2873,7 @@ mod tests {
         let flow_node_manager: NodeManagerRef = Arc::new(FlowNotificationMockNodeManager {
             flownode: Arc::new(RecordingFlownode { requests_tx }),
         });
+        let flow_notification_tx = mock_flow_notification_sender(cache, flow_node_manager.clone());
         let ctx = session::context::QueryContext::arc();
         let table_batches = vec![TableBatch {
             table_name: "cpu".to_string(),
@@ -2836,8 +2902,7 @@ mod tests {
             &MockFlushCatalogProvider {
                 table: Some(mock_physical_table_metadata(1024)),
             },
-            flow_node_manager,
-            cache,
+            flow_notification_tx,
         )
         .await;
 
@@ -2872,6 +2937,7 @@ mod tests {
         let flow_node_manager: NodeManagerRef = Arc::new(FlowNotificationMockNodeManager {
             flownode: Arc::new(RecordingFlownode { requests_tx }),
         });
+        let flow_notification_tx = mock_flow_notification_sender(cache, flow_node_manager.clone());
         let ctx = session::context::QueryContext::arc();
         let table_batches = vec![TableBatch {
             table_name: "cpu".to_string(),
@@ -2900,8 +2966,7 @@ mod tests {
             &MockFlushCatalogProvider {
                 table: Some(mock_physical_table_metadata(1024)),
             },
-            flow_node_manager,
-            cache,
+            flow_notification_tx,
         )
         .await;
 

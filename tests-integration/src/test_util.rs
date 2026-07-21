@@ -661,6 +661,7 @@ async fn setup_test_prom_app_with_frontend_inner(
             4,
             64,
             64,
+            std::num::NonZeroUsize::new(1024).unwrap(),
         )
     } else {
         None

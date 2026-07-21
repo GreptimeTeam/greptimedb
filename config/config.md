@@ -82,6 +82,7 @@
 | `prom_store.max_concurrent_flushes` | Integer | `256` | Max number of concurrent batch flushes. |
 | `prom_store.worker_channel_capacity` | Integer | `65526` | Capacity of the pending batch worker channel. |
 | `prom_store.max_inflight_requests` | Integer | `3000` | Max inflight write requests before backpressure. |
+| `prom_store.flow_notification_queue_capacity` | Integer | `1024` | Maximum number of logical-table flow notifications waiting in the shared queue. |
 | `wal` | -- | -- | The WAL options. |
 | `wal.provider` | String | `raft_engine` | The provider of the WAL.<br/>- `raft_engine`: the wal is stored in the local file system by raft-engine.<br/>- `kafka`: it's remote wal that data is stored in Kafka. |
 | `wal.dir` | String | Unset | The directory to store the WAL files.<br/>**It's only used when the provider is `raft_engine`**. |
@@ -314,6 +315,7 @@
 | `prom_store.max_concurrent_flushes` | Integer | `256` | Max number of concurrent batch flushes. |
 | `prom_store.worker_channel_capacity` | Integer | `65526` | Capacity of the pending batch worker channel. |
 | `prom_store.max_inflight_requests` | Integer | `3000` | Max inflight write requests before backpressure. |
+| `prom_store.flow_notification_queue_capacity` | Integer | `1024` | Maximum number of logical-table flow notifications waiting in the shared queue. |
 | `meta_client` | -- | -- | The metasrv client options. |
 | `meta_client.metasrv_addrs` | Array | -- | The addresses of the metasrv. |
 | `meta_client.timeout` | String | `3s` | Operation timeout. |
