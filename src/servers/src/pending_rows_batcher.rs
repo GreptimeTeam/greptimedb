@@ -17,13 +17,12 @@ use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use api::v1::flow::{DirtyWindowRequest, DirtyWindowRequests, TimeRange};
+use api::v1::flow::{DirtyWindowRequest, DirtyWindowRequests};
 use api::v1::meta::Peer;
 use api::v1::region::{
     BulkInsertRequest, RegionRequest, RegionRequestHeader, bulk_insert_request, region_request,
 };
 use api::v1::{ArrowIpc, ColumnSchema, RowInsertRequests, Rows};
-#[cfg(test)]
 use arrow::array::Array;
 use arrow::compute::{concat_batches, filter_record_batch};
 use arrow::datatypes::{DataType as ArrowDataType, Schema as ArrowSchema, TimeUnit};
@@ -68,9 +67,6 @@ const PENDING_ROWS_BATCH_SYNC_ENV: &str = "PENDING_ROWS_BATCH_SYNC";
 const WORKER_IDLE_TIMEOUT_MULTIPLIER: u32 = 3;
 const PHYSICAL_REGION_ESSENTIAL_COLUMN_COUNT: usize = 3;
 const MAX_CONCURRENT_FLOW_NOTIFICATIONS: usize = 8;
-const DENSE_TIMESTAMP_RANGE_FACTOR_NUMERATOR: i128 = 11;
-const DENSE_TIMESTAMP_RANGE_FACTOR_DENOMINATOR: i128 = 10;
-
 #[async_trait]
 pub trait PendingRowsSchemaAlterer: Send + Sync {
     /// Batch-create multiple logical tables that are missing.
@@ -1382,7 +1378,6 @@ async fn flush_batch(
     }
 }
 
-#[cfg(test)]
 fn extract_timestamps(table_batch: &TableBatch) -> Vec<i64> {
     let mut timestamps = Vec::with_capacity(table_batch.row_count);
     for batch in &table_batch.batches {
@@ -1409,67 +1404,6 @@ fn extract_timestamps(table_batch: &TableBatch) -> Vec<i64> {
 struct FlowNotification {
     table_id: TableId,
     timestamps: Vec<i64>,
-    time_ranges: Vec<TimeRange>,
-    min_timestamp: i64,
-    max_timestamp: i64,
-}
-
-fn compact_flow_notification(table_batch: TableBatch) -> Option<FlowNotification> {
-    let mut timestamps = Vec::new();
-    let mut time_ranges = Vec::new();
-    let mut min_timestamp: Option<i64> = None;
-    let mut max_timestamp: Option<i64> = None;
-
-    for batch in table_batch.batches {
-        let timestamp_column = batch.batch.column(batch.timestamp_index);
-        let Some((timestamp_values, _)) =
-            datatypes::timestamp::timestamp_array_to_primitive(timestamp_column)
-        else {
-            error!(
-                "Failed to extract timestamps from record batch, table_id: {}, timestamp_index: {}",
-                table_batch.table_id, batch.timestamp_index
-            );
-            continue;
-        };
-
-        let mut batch_min: Option<i64> = None;
-        let mut batch_max: Option<i64> = None;
-        let mut timestamp_count = 0usize;
-        for timestamp in timestamp_values.iter().flatten() {
-            batch_min = Some(batch_min.map_or(timestamp, |min| min.min(timestamp)));
-            batch_max = Some(batch_max.map_or(timestamp, |max| max.max(timestamp)));
-            timestamp_count += 1;
-        }
-
-        let (Some(batch_min), Some(batch_max)) = (batch_min, batch_max) else {
-            continue;
-        };
-        min_timestamp = Some(min_timestamp.map_or(batch_min, |min| min.min(batch_min)));
-        max_timestamp = Some(max_timestamp.map_or(batch_max, |max| max.max(batch_max)));
-        let timestamp_span = i128::from(batch_max) - i128::from(batch_min);
-        let is_dense = timestamp_span * DENSE_TIMESTAMP_RANGE_FACTOR_DENOMINATOR
-            < timestamp_count as i128 * DENSE_TIMESTAMP_RANGE_FACTOR_NUMERATOR;
-        if is_dense && let Some(end_exclusive) = batch_max.checked_add(1) {
-            time_ranges.push(TimeRange {
-                start_inclusive: batch_min,
-                end_exclusive,
-            });
-        } else {
-            timestamps.extend(timestamp_values.iter().flatten());
-        }
-    }
-
-    if timestamps.is_empty() && time_ranges.is_empty() {
-        return None;
-    }
-
-    Some(FlowNotification {
-        table_id: table_batch.table_id,
-        timestamps,
-        time_ranges,
-        min_timestamp: min_timestamp?,
-        max_timestamp: max_timestamp?,
-    })
 }
 
 fn try_enqueue_flow_notification(
@@ -1481,11 +1415,9 @@ fn try_enqueue_flow_notification(
         Err(mpsc::error::TrySendError::Full(notification)) => {
             FLOW_NOTIFICATION_DROPPED.with_label_values(&["full"]).inc();
             warn!(
-                "Dropping flow notification because queue is full, table_id: {}, queue_capacity: {}, min_timestamp: {}, max_timestamp: {}",
+                "Dropping flow notification because queue is full, table_id: {}, queue_capacity: {}",
                 notification.table_id,
-                tx.max_capacity(),
-                notification.min_timestamp,
-                notification.max_timestamp
+                tx.max_capacity()
             );
             false
         }
@@ -1494,11 +1426,9 @@ fn try_enqueue_flow_notification(
                 .with_label_values(&["closed"])
                 .inc();
             error!(
-                "Dropping flow notification because queue is closed, table_id: {}, queue_capacity: {}, min_timestamp: {}, max_timestamp: {}",
+                "Dropping flow notification because queue is closed, table_id: {}, queue_capacity: {}",
                 notification.table_id,
-                tx.max_capacity(),
-                notification.min_timestamp,
-                notification.max_timestamp
+                tx.max_capacity()
             );
             false
         }
@@ -1507,9 +1437,17 @@ fn try_enqueue_flow_notification(
 
 fn enqueue_flow_notifications(table_batches: Vec<TableBatch>, tx: &mpsc::Sender<FlowNotification>) {
     for table_batch in table_batches {
-        if let Some(notification) = compact_flow_notification(table_batch) {
-            try_enqueue_flow_notification(tx, notification);
+        let timestamps = extract_timestamps(&table_batch);
+        if timestamps.is_empty() {
+            continue;
         }
+        try_enqueue_flow_notification(
+            tx,
+            FlowNotification {
+                table_id: table_batch.table_id,
+                timestamps,
+            },
+        );
     }
 }
 
@@ -1537,7 +1475,7 @@ async fn handle_flow_notification(
                 requests: vec![DirtyWindowRequest {
                     table_id,
                     timestamps: notification.timestamps.clone(),
-                    time_ranges: notification.time_ranges.clone(),
+                    time_ranges: Vec::new(),
                 }],
             })
             .await
@@ -1919,7 +1857,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use api::region::RegionResponse;
-    use api::v1::flow::{DirtyWindowRequests, FlowRequest, FlowResponse, TimeRange};
+    use api::v1::flow::{DirtyWindowRequests, FlowRequest, FlowResponse};
     use api::v1::meta::Peer;
     use api::v1::region::{InsertRequests, RegionRequest, region_request};
     use api::v1::value::ValueData;
@@ -1966,13 +1904,12 @@ mod tests {
         PendingRowsBatcher, PendingWorker, PhysicalFlushCatalogProvider,
         PhysicalFlushNodeRequester, PhysicalFlushPartitionProvider, PhysicalTableMetadata,
         PlannedRegionBatch, RecordBatchWithTsIdx, ResolvedRegionBatch, TableBatch, WorkerCommand,
-        columns_taxonomy, compact_flow_notification, drain_batch, encode_region_write_requests,
-        extract_timestamps, flush_batch, flush_batch_physical, flush_region_writes_concurrently,
-        greptime_timestamp, notify_flow_dirty_windows_after_flush, plan_region_batches,
-        remove_worker_if_same_channel, should_close_worker_on_idle_timeout,
-        should_dispatch_concurrently, start_flow_notification_worker,
-        strip_partition_columns_from_batch, transform_logical_batches_to_physical,
-        try_enqueue_flow_notification,
+        columns_taxonomy, drain_batch, encode_region_write_requests, extract_timestamps,
+        flush_batch, flush_batch_physical, flush_region_writes_concurrently, greptime_timestamp,
+        notify_flow_dirty_windows_after_flush, plan_region_batches, remove_worker_if_same_channel,
+        should_close_worker_on_idle_timeout, should_dispatch_concurrently,
+        start_flow_notification_worker, strip_partition_columns_from_batch,
+        transform_logical_batches_to_physical, try_enqueue_flow_notification,
     };
     use crate::error;
     use crate::metrics::FLOW_NOTIFICATION_DROPPED;
@@ -2198,49 +2135,11 @@ mod tests {
     }
 
     #[test]
-    fn test_compact_flow_notification() {
-        let testcases = [
-            (
-                vec![Some(1), Some(2), Some(3)],
-                Vec::new(),
-                vec![TimeRange {
-                    start_inclusive: 1,
-                    end_exclusive: 4,
-                }],
-            ),
-            (vec![Some(1), Some(1000)], vec![1, 1000], Vec::new()),
-            (
-                vec![Some(i64::MAX - 1), Some(i64::MAX)],
-                vec![i64::MAX - 1, i64::MAX],
-                Vec::new(),
-            ),
-        ];
-
-        for (timestamps, expected_timestamps, expected_ranges) in testcases {
-            let table_batch = TableBatch {
-                table_name: "cpu".to_string(),
-                table_id: 42,
-                row_count: timestamps.len(),
-                batches: vec![mock_timestamp_batch(timestamps)],
-            };
-
-            let notification = compact_flow_notification(table_batch).unwrap();
-            assert_eq!(expected_timestamps, notification.timestamps);
-            assert_eq!(expected_ranges, notification.time_ranges);
-        }
-    }
-
-    #[test]
     fn test_flow_notification_queue_drops_when_full() {
         let (tx, mut rx) = mpsc::channel(1);
-        let notification = |table_id| {
-            compact_flow_notification(TableBatch {
-                table_name: format!("table-{table_id}"),
-                table_id,
-                row_count: 1,
-                batches: vec![mock_timestamp_batch(vec![Some(table_id as i64)])],
-            })
-            .unwrap()
+        let notification = |table_id| super::FlowNotification {
+            table_id,
+            timestamps: vec![table_id as i64],
         };
         let dropped = FLOW_NOTIFICATION_DROPPED.with_label_values(&["full"]);
         let dropped_before = dropped.get();
@@ -2792,11 +2691,8 @@ mod tests {
         assert_eq!(
             vec![api::v1::flow::DirtyWindowRequest {
                 table_id,
-                timestamps: Vec::new(),
-                time_ranges: vec![TimeRange {
-                    start_inclusive: 1000,
-                    end_exclusive: 1001,
-                }],
+                timestamps: vec![1000],
+                time_ranges: Vec::new(),
             }],
             requests.requests
         );
@@ -2839,17 +2735,8 @@ mod tests {
         assert_eq!(
             vec![api::v1::flow::DirtyWindowRequest {
                 table_id,
-                timestamps: Vec::new(),
-                time_ranges: vec![
-                    TimeRange {
-                        start_inclusive: 1000,
-                        end_exclusive: 1001,
-                    },
-                    TimeRange {
-                        start_inclusive: 2000,
-                        end_exclusive: 2001,
-                    },
-                ],
+                timestamps: vec![1000, 2000],
+                time_ranges: Vec::new(),
             }],
             requests.requests
         );
@@ -2914,11 +2801,8 @@ mod tests {
         assert_eq!(
             vec![api::v1::flow::DirtyWindowRequest {
                 table_id,
-                timestamps: Vec::new(),
-                time_ranges: vec![TimeRange {
-                    start_inclusive: 1000,
-                    end_exclusive: 1001,
-                }],
+                timestamps: vec![1000],
+                time_ranges: Vec::new(),
             }],
             requests.requests
         );
