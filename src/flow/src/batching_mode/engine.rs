@@ -236,13 +236,26 @@ impl BatchingEngine {
                             continue;
                         };
                         for timestamp in timestamps {
-                            let align_start = expr
-                                .eval(common_time::Timestamp::new(*timestamp, *unit))?
-                                .0
-                                .context(UnexpectedSnafu {
-                                    reason: "Failed to eval start value",
-                                })?;
-                            all_dirty_windows.insert(align_start);
+                            // On alignment failure, fall back to marking the
+                            // whole task dirty so the dirty signal is never
+                            // lost (the caller treats this RPC as accepted and
+                            // will not retry).
+                            match expr.eval(common_time::Timestamp::new(*timestamp, *unit)) {
+                                Ok((Some(align_start), _)) => {
+                                    all_dirty_windows.insert(align_start);
+                                }
+                                res => {
+                                    warn!(
+                                        "Failed to align dirty timestamp {} for flow id = {:?}: {:?}, marking the task fully dirty",
+                                        timestamp,
+                                        task.config.flow_id,
+                                        res.err().map(|e| e.to_string()).unwrap_or_else(|| {
+                                            "missing window lower bound".to_string()
+                                        })
+                                    );
+                                    is_dirty = true;
+                                }
+                            }
                         }
                         for time_range in time_ranges {
                             if time_range.end_exclusive <= time_range.start_inclusive {
@@ -252,12 +265,25 @@ impl BatchingEngine {
                                 );
                                 continue;
                             }
-                            let (align_start, align_end) = DirtyTimeWindows::align_time_window(
+                            match DirtyTimeWindows::align_time_window(
                                 common_time::Timestamp::new(time_range.start_inclusive, *unit),
                                 Some(common_time::Timestamp::new(time_range.end_exclusive, *unit)),
                                 expr,
-                            )?;
-                            all_dirty_ranges.push((align_start, align_end));
+                            ) {
+                                Ok((align_start, align_end)) => {
+                                    all_dirty_ranges.push((align_start, align_end));
+                                }
+                                Err(err) => {
+                                    warn!(
+                                        "Failed to align dirty time range [{}, {}) for flow id = {:?}: {}, marking the task fully dirty",
+                                        time_range.start_inclusive,
+                                        time_range.end_exclusive,
+                                        task.config.flow_id,
+                                        err
+                                    );
+                                    is_dirty = true;
+                                }
+                            }
                         }
                     }
                 }
