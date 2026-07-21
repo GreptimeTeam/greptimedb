@@ -70,18 +70,20 @@ use prometheus::HistogramTimer;
 use promql_parser::label::Matcher;
 use query::QueryEngineRef;
 use query::metrics::OnDone;
-use query::parser::{PromQuery, QueryLanguageParser, QueryStatement};
+use query::parser::{PromQuery, QueryStatement};
 use query::query_engine::DescribeResult;
 use query::query_engine::options::{QueryOptions, validate_catalog_and_schema};
 use servers::error::{
     self as server_error, AuthSnafu, CommonMetaSnafu, ExecuteQuerySnafu,
-    OtlpMetricModeIncompatibleSnafu, ParsePromQLSnafu, UnexpectedResultSnafu,
+    OtlpMetricModeIncompatibleSnafu, UnexpectedResultSnafu,
 };
 use servers::interceptor::{
     PromQueryInterceptor, PromQueryInterceptorRef, SqlQueryInterceptor, SqlQueryInterceptorRef,
 };
 use servers::otlp::metrics::legacy_normalize_otlp_name;
-use servers::prometheus_handler::{PrometheusHandler, resolve_schema_from_matchers};
+use servers::prometheus_handler::{
+    ParsedPromQuery, PrometheusHandler, resolve_schema_from_matchers,
+};
 use servers::query_handler::sql::SqlQueryHandler;
 use session::context::{Channel, QueryContextRef};
 use session::table_name::table_idents_to_full_name;
@@ -1082,19 +1084,14 @@ impl Instance {
 
     fn prom_queries_permission_targets(
         &self,
-        queries: &[PromQuery],
+        queries: &[ParsedPromQuery],
         query_ctx: &QueryContextRef,
     ) -> server_error::Result<PermissionTableTargets> {
         let mut targets = Vec::new();
         let mut resolved = true;
 
         for query in queries {
-            let stmt = QueryLanguageParser::parse_promql(query, query_ctx).with_context(|_| {
-                ParsePromQLSnafu {
-                    query: query.clone(),
-                }
-            })?;
-            let QueryStatement::Promql(eval_stmt, _) = stmt else {
+            let QueryStatement::Promql(eval_stmt, _) = query.statement() else {
                 unreachable!("query is parsed from promql");
             };
 
@@ -1123,27 +1120,32 @@ impl PrometheusHandler for Instance {
         query: &PromQuery,
         query_ctx: QueryContextRef,
     ) -> server_error::Result<Output> {
+        let query = ParsedPromQuery::parse(query.clone(), &query_ctx)?;
+        self.do_query_parsed(query, query_ctx).await
+    }
+
+    #[tracing::instrument(skip_all)]
+    async fn do_query_parsed(
+        &self,
+        query: ParsedPromQuery,
+        query_ctx: QueryContextRef,
+    ) -> server_error::Result<Output> {
         let interceptor = self
             .plugins
             .get::<PromQueryInterceptorRef<server_error::Error>>();
 
         self.check_prom_query_privilege(&query_ctx)?;
 
-        let stmt = QueryLanguageParser::parse_promql(query, &query_ctx).with_context(|_| {
-            ParsePromQLSnafu {
-                query: query.clone(),
-            }
-        })?;
+        let targets =
+            self.prom_queries_permission_targets(std::slice::from_ref(&query), &query_ctx)?;
+        self.check_query_target_permission(targets, &query_ctx)
+            .await?;
+
+        let (query, stmt) = query.into_parts();
 
         let QueryStatement::Promql(eval_stmt, _) = &stmt else {
             unreachable!("query is parsed from promql");
         };
-        let targets = match self.prom_expr_permission_targets(&eval_stmt.expr, &query_ctx)? {
-            Some(targets) => PermissionTableTargets::resolved(targets),
-            None => PermissionTableTargets::Unresolved,
-        };
-        self.check_query_target_permission(targets, &query_ctx)
-            .await?;
 
         let plan = self
             .statement_executor
@@ -1152,7 +1154,7 @@ impl PrometheusHandler for Instance {
             .map_err(BoxedError::new)
             .context(ExecuteQuerySnafu)?;
 
-        interceptor.pre_execute(query, &eval_stmt.expr, Some(&plan), query_ctx.clone())?;
+        interceptor.pre_execute(&query, &eval_stmt.expr, Some(&plan), query_ctx.clone())?;
 
         // Take the EvalStmt from the original QueryStatement and use it to create the CatalogQueryStatement.
         let query_statement = if let QueryStatement::Promql(eval_stmt, alias) = stmt {
@@ -1215,6 +1217,20 @@ impl PrometheusHandler for Instance {
     async fn check_query_permission(
         &self,
         queries: &[PromQuery],
+        query_ctx: &QueryContextRef,
+    ) -> server_error::Result<()> {
+        let queries = queries
+            .iter()
+            .cloned()
+            .map(|query| ParsedPromQuery::parse(query, query_ctx))
+            .collect::<server_error::Result<Vec<_>>>()?;
+        self.check_query_permission_parsed(&queries, query_ctx)
+            .await
+    }
+
+    async fn check_query_permission_parsed(
+        &self,
+        queries: &[ParsedPromQuery],
         query_ctx: &QueryContextRef,
     ) -> server_error::Result<()> {
         self.check_prom_query_privilege(query_ctx)?;

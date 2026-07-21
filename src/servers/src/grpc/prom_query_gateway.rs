@@ -36,7 +36,7 @@ use crate::grpc::TonicResult;
 use crate::grpc::context_auth::auth;
 use crate::grpc::greptime_handler::create_query_context;
 use crate::http::prometheus::{PrometheusJsonResponse, retrieve_metric_name_and_result_type};
-use crate::prometheus_handler::PrometheusHandlerRef;
+use crate::prometheus_handler::{ParsedPromQuery, PrometheusHandlerRef};
 
 pub struct PrometheusGatewayService {
     handler: PrometheusHandlerRef,
@@ -127,14 +127,14 @@ impl PrometheusGatewayService {
             .with_label_values(&[db.as_str()])
             .start_timer();
 
-        let result = self.handler.do_query(&query, ctx).await;
-        let (metric_name, mut result_type) =
-            match retrieve_metric_name_and_result_type(&query.query) {
-                Ok((metric_name, result_type)) => (metric_name, result_type),
-                Err(err) => {
-                    return PrometheusJsonResponse::error(err.status_code(), err.output_msg());
-                }
-            };
+        let query = match ParsedPromQuery::parse(query, &ctx) {
+            Ok(query) => query,
+            Err(err) => {
+                return PrometheusJsonResponse::error(err.status_code(), err.output_msg());
+            }
+        };
+        let (metric_name, mut result_type) = retrieve_metric_name_and_result_type(query.expr());
+        let result = self.handler.do_query_parsed(query, ctx).await;
         // range query only returns matrix
         if is_range_query {
             result_type = ValueType::Matrix;
