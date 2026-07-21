@@ -46,6 +46,7 @@ use tokio::sync::{RwLock, oneshot};
 use crate::batching_mode::BatchingModeOptions;
 use crate::batching_mode::eval_schedule::EvalSchedule;
 use crate::batching_mode::frontend_client::FrontendClient;
+use crate::batching_mode::state::DirtyTimeWindows;
 use crate::batching_mode::task::{BatchingTask, TaskArgs};
 use crate::batching_mode::time_window::{TimeWindowExpr, find_time_window_expr};
 use crate::batching_mode::utils::sql_to_df_plan;
@@ -157,11 +158,13 @@ impl BatchingEngine {
     ) -> Result<(), Error> {
         let table_info_mgr = self.table_meta.table_info_manager();
 
-        let mut group_by_table_id: HashMap<u32, Vec<_>> = HashMap::new();
+        let mut group_by_table_id: HashMap<u32, (Vec<i64>, Vec<api::v1::flow::TimeRange>)> =
+            HashMap::new();
         for r in reqs.requests {
             let tid = TableId::from(r.table_id);
             let entry = group_by_table_id.entry(tid).or_default();
-            entry.extend(r.timestamps);
+            entry.0.extend(r.timestamps);
+            entry.1.extend(r.time_ranges);
         }
         let tids = group_by_table_id.keys().cloned().collect::<Vec<TableId>>();
         let table_infos =
@@ -174,7 +177,7 @@ impl BatchingEngine {
 
         let group_by_table_name = group_by_table_id
             .into_iter()
-            .filter_map(|(id, timestamps)| {
+            .filter_map(|(id, (timestamps, time_ranges))| {
                 let table_name = table_infos.get(&id).map(|info| info.table_name());
                 let Some(table_name) = table_name else {
                     warn!("Failed to get table infos for table id: {:?}", id);
@@ -191,7 +194,7 @@ impl BatchingEngine {
                     .as_timestamp()
                     .unwrap()
                     .unit();
-                Some((table_name, (timestamps, time_index_unit)))
+                Some((table_name, (timestamps, time_ranges, time_index_unit)))
             })
             .collect::<HashMap<_, _>>();
 
@@ -219,13 +222,15 @@ impl BatchingEngine {
 
             let group_by_table_name = group_by_table_name.clone();
             let task = task.clone();
-
             let handle: JoinHandle<Result<(), Error>> = tokio::spawn(async move {
                 let src_table_names = &task.config.source_table_names;
                 let mut all_dirty_windows = HashSet::new();
+                let mut all_dirty_ranges = Vec::new();
                 let mut is_dirty = false;
                 for src_table_name in src_table_names {
-                    if let Some((timestamps, unit)) = group_by_table_name.get(src_table_name) {
+                    if let Some((timestamps, time_ranges, unit)) =
+                        group_by_table_name.get(src_table_name)
+                    {
                         let Some(expr) = &task.config.time_window_expr else {
                             is_dirty = true;
                             continue;
@@ -239,6 +244,21 @@ impl BatchingEngine {
                                 })?;
                             all_dirty_windows.insert(align_start);
                         }
+                        for time_range in time_ranges {
+                            if time_range.end_exclusive <= time_range.start_inclusive {
+                                warn!(
+                                    "Ignoring invalid dirty time range with start_inclusive={} >= end_exclusive={}",
+                                    time_range.start_inclusive, time_range.end_exclusive
+                                );
+                                continue;
+                            }
+                            let (align_start, align_end) = DirtyTimeWindows::align_time_window(
+                                common_time::Timestamp::new(time_range.start_inclusive, *unit),
+                                Some(common_time::Timestamp::new(time_range.end_exclusive, *unit)),
+                                expr,
+                            )?;
+                            all_dirty_ranges.push((align_start, align_end));
+                        }
                     }
                 }
                 let mut state = task.state.write().unwrap();
@@ -248,6 +268,9 @@ impl BatchingEngine {
                 let flow_id_label = task.config.flow_id.to_string();
                 for timestamp in all_dirty_windows {
                     state.dirty_time_windows.add_window(timestamp, None);
+                }
+                for (start, end) in all_dirty_ranges {
+                    state.dirty_time_windows.add_window(start, end);
                 }
 
                 METRIC_FLOW_BATCHING_ENGINE_BULK_MARK_TIME_WINDOW

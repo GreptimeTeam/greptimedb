@@ -738,7 +738,7 @@ impl DirtyTimeWindows {
                     }
                     .fail()?
                 };
-                self.align_time_window(start, end, time_window_expr)?
+                Self::align_time_window(start, end, time_window_expr)?
             } else {
                 (start, end)
             };
@@ -769,8 +769,9 @@ impl DirtyTimeWindows {
         Ok(ret)
     }
 
-    fn align_time_window(
-        &self,
+    /// Align a time range `[start, end)`(end is optional and exclusive) to
+    /// time window boundaries defined by the time window expr.
+    pub(crate) fn align_time_window(
         start: Timestamp,
         end: Option<Timestamp>,
         time_window_expr: &TimeWindowExpr,
@@ -1180,11 +1181,13 @@ mod test {
                 .unwrap()
                 .unwrap();
 
-            let dirty = DirtyTimeWindows::default();
             for (before_align, expected_after_align) in aligns {
-                let after_align = dirty
-                    .align_time_window(before_align.0, before_align.1, &time_window_expr)
-                    .unwrap();
+                let after_align = DirtyTimeWindows::align_time_window(
+                    before_align.0,
+                    before_align.1,
+                    &time_window_expr,
+                )
+                .unwrap();
                 assert_eq!(expected_after_align, after_align);
             }
         }
