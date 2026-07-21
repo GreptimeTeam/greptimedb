@@ -1082,7 +1082,11 @@ pub fn merge_and_dedup(
     )
 }
 
-fn merge_and_dedup_with_batch_size(
+/// Merges and optionally deduplicates record batch iterators with an explicit output batch size.
+///
+/// `batch_size` controls the target number of rows in batches assembled by the merge iterator.
+/// The other arguments have the same meaning as in [`merge_and_dedup`].
+pub fn merge_and_dedup_with_batch_size(
     schema: &SchemaRef,
     append_mode: bool,
     merge_mode: MergeMode,

@@ -25,7 +25,7 @@
 pub mod test_util;
 
 pub mod access_layer;
-mod batch_size;
+pub mod batch_size;
 pub mod cache;
 pub mod compaction;
 pub mod config;
