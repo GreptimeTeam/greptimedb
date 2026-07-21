@@ -40,6 +40,7 @@ use session::context::QueryContextRef;
 use snafu::{Location, ResultExt};
 
 use crate::datafusion::json_expr_planner::JsonExprPlanner;
+use crate::datafusion::pg_oid_alias_expr_planner::PgOidAliasExprPlanner;
 use crate::error::{CatalogSnafu, Result};
 use crate::query_engine::{DefaultPlanDecoder, QueryEngineState};
 
@@ -91,6 +92,7 @@ impl DfContextProviderAdapter {
 
         let mut expr_planners = SessionStateDefaults::default_expr_planners();
         expr_planners.insert(0, Arc::new(JsonExprPlanner));
+        expr_planners.insert(0, Arc::new(PgOidAliasExprPlanner));
 
         Ok(Self {
             engine_state,
