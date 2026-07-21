@@ -233,6 +233,10 @@ pub trait Procedure: Send {
     /// The hook is called with the current procedure instance, so an event can
     /// include state that was produced after the procedure was submitted. A
     /// return value of `None` means that this trigger should not be recorded.
+    /// Events that share an [`Event::event_type`] must return identical
+    /// [`Event::extra_schema`] values. The event recorder batches events by type
+    /// and rejects incompatible schemas; use a distinct event type for a
+    /// different schema.
     fn event(&self, _ctx: &EventContext<'_>) -> Option<Box<dyn Event>> {
         None
     }
