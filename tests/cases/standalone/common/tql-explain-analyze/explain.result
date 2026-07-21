@@ -104,6 +104,7 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test;
 | analyzed_logical_plan_| SAME TEXT AS ABOVE_|
 | logical_plan after rewrite_set_comparison_| SAME TEXT AS ABOVE_|
 | logical_plan after optimize_unions_| SAME TEXT AS ABOVE_|
+| logical_plan after unions_to_filter_| SAME TEXT AS ABOVE_|
 | logical_plan after simplify_expressions_| SAME TEXT AS ABOVE_|
 | logical_plan after replace_distinct_aggregate_| SAME TEXT AS ABOVE_|
 | logical_plan after eliminate_join_| SAME TEXT AS ABOVE_|
@@ -136,6 +137,7 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test;
 | logical_plan after JsonTypeConcretizeRule_| SAME TEXT AS ABOVE_|
 | logical_plan after rewrite_set_comparison_| SAME TEXT AS ABOVE_|
 | logical_plan after optimize_unions_| SAME TEXT AS ABOVE_|
+| logical_plan after unions_to_filter_| SAME TEXT AS ABOVE_|
 | logical_plan after simplify_expressions_| SAME TEXT AS ABOVE_|
 | logical_plan after replace_distinct_aggregate_| SAME TEXT AS ABOVE_|
 | logical_plan after eliminate_join_| SAME TEXT AS ABOVE_|
@@ -188,12 +190,15 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test;
 | physical_plan after CombinePartialFinalAggregate_| SAME TEXT AS ABOVE_|
 | physical_plan after EnforceSorting_| SAME TEXT AS ABOVE_|
 | physical_plan after OptimizeAggregateOrder_| SAME TEXT AS ABOVE_|
+| physical_plan after WindowTopN_| SAME TEXT AS ABOVE_|
 | physical_plan after ProjectionPushdown_| SAME TEXT AS ABOVE_|
 | physical_plan after OutputRequirements_| MergeScanExec: REDACTED
 |_|_|
 | physical_plan after LimitAggregation_| SAME TEXT AS ABOVE_|
 | physical_plan after LimitPushPastWindows_| SAME TEXT AS ABOVE_|
+| physical_plan after HashJoinBuffering_| SAME TEXT AS ABOVE_|
 | physical_plan after LimitPushdown_| SAME TEXT AS ABOVE_|
+| physical_plan after TopKRepartition_| SAME TEXT AS ABOVE_|
 | physical_plan after ProjectionPushdown_| SAME TEXT AS ABOVE_|
 | physical_plan after PushdownSort_| SAME TEXT AS ABOVE_|
 | physical_plan after EnsureCooperative_| CooperativeExec_|
@@ -254,6 +259,7 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test AS series;
 | analyzed_logical_plan_| SAME TEXT AS ABOVE_|
 | logical_plan after rewrite_set_comparison_| SAME TEXT AS ABOVE_|
 | logical_plan after optimize_unions_| SAME TEXT AS ABOVE_|
+| logical_plan after unions_to_filter_| SAME TEXT AS ABOVE_|
 | logical_plan after simplify_expressions_| SAME TEXT AS ABOVE_|
 | logical_plan after replace_distinct_aggregate_| SAME TEXT AS ABOVE_|
 | logical_plan after eliminate_join_| SAME TEXT AS ABOVE_|
@@ -287,6 +293,7 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test AS series;
 | logical_plan after JsonTypeConcretizeRule_| SAME TEXT AS ABOVE_|
 | logical_plan after rewrite_set_comparison_| SAME TEXT AS ABOVE_|
 | logical_plan after optimize_unions_| SAME TEXT AS ABOVE_|
+| logical_plan after unions_to_filter_| SAME TEXT AS ABOVE_|
 | logical_plan after simplify_expressions_| SAME TEXT AS ABOVE_|
 | logical_plan after replace_distinct_aggregate_| SAME TEXT AS ABOVE_|
 | logical_plan after eliminate_join_| SAME TEXT AS ABOVE_|
@@ -340,12 +347,15 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test AS series;
 | physical_plan after CombinePartialFinalAggregate_| SAME TEXT AS ABOVE_|
 | physical_plan after EnforceSorting_| SAME TEXT AS ABOVE_|
 | physical_plan after OptimizeAggregateOrder_| SAME TEXT AS ABOVE_|
+| physical_plan after WindowTopN_| SAME TEXT AS ABOVE_|
 | physical_plan after ProjectionPushdown_| SAME TEXT AS ABOVE_|
 | physical_plan after OutputRequirements_| MergeScanExec: REDACTED
 |_|_|
 | physical_plan after LimitAggregation_| SAME TEXT AS ABOVE_|
 | physical_plan after LimitPushPastWindows_| SAME TEXT AS ABOVE_|
+| physical_plan after HashJoinBuffering_| SAME TEXT AS ABOVE_|
 | physical_plan after LimitPushdown_| SAME TEXT AS ABOVE_|
+| physical_plan after TopKRepartition_| SAME TEXT AS ABOVE_|
 | physical_plan after ProjectionPushdown_| SAME TEXT AS ABOVE_|
 | physical_plan after PushdownSort_| SAME TEXT AS ABOVE_|
 | physical_plan after EnsureCooperative_| CooperativeExec_|
@@ -436,6 +446,7 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test_nano;
 | analyzed_logical_plan_| SAME TEXT AS ABOVE_|
 | logical_plan after rewrite_set_comparison_| SAME TEXT AS ABOVE_|
 | logical_plan after optimize_unions_| SAME TEXT AS ABOVE_|
+| logical_plan after unions_to_filter_| SAME TEXT AS ABOVE_|
 | logical_plan after simplify_expressions_| SAME TEXT AS ABOVE_|
 | logical_plan after replace_distinct_aggregate_| SAME TEXT AS ABOVE_|
 | logical_plan after eliminate_join_| SAME TEXT AS ABOVE_|
@@ -469,6 +480,7 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test_nano;
 | logical_plan after JsonTypeConcretizeRule_| SAME TEXT AS ABOVE_|
 | logical_plan after rewrite_set_comparison_| SAME TEXT AS ABOVE_|
 | logical_plan after optimize_unions_| SAME TEXT AS ABOVE_|
+| logical_plan after unions_to_filter_| SAME TEXT AS ABOVE_|
 | logical_plan after simplify_expressions_| SAME TEXT AS ABOVE_|
 | logical_plan after replace_distinct_aggregate_| SAME TEXT AS ABOVE_|
 | logical_plan after eliminate_join_| SAME TEXT AS ABOVE_|
@@ -522,12 +534,15 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test_nano;
 | physical_plan after CombinePartialFinalAggregate_| SAME TEXT AS ABOVE_|
 | physical_plan after EnforceSorting_| SAME TEXT AS ABOVE_|
 | physical_plan after OptimizeAggregateOrder_| SAME TEXT AS ABOVE_|
+| physical_plan after WindowTopN_| SAME TEXT AS ABOVE_|
 | physical_plan after ProjectionPushdown_| SAME TEXT AS ABOVE_|
 | physical_plan after OutputRequirements_| MergeScanExec: REDACTED
 |_|_|
 | physical_plan after LimitAggregation_| SAME TEXT AS ABOVE_|
 | physical_plan after LimitPushPastWindows_| SAME TEXT AS ABOVE_|
+| physical_plan after HashJoinBuffering_| SAME TEXT AS ABOVE_|
 | physical_plan after LimitPushdown_| SAME TEXT AS ABOVE_|
+| physical_plan after TopKRepartition_| SAME TEXT AS ABOVE_|
 | physical_plan after ProjectionPushdown_| SAME TEXT AS ABOVE_|
 | physical_plan after PushdownSort_| SAME TEXT AS ABOVE_|
 | physical_plan after EnsureCooperative_| CooperativeExec_|

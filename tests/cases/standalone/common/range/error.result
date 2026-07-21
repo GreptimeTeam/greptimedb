@@ -33,11 +33,11 @@ Error: 2000(InvalidSyntax), Invalid SQL syntax: sql parser error: not a valid du
 -- 2.1 no range param
 SELECT min(val) FROM host ALIGN '5s';
 
-Error: 2000(InvalidSyntax), Invalid SQL syntax: sql parser error: Illegal Range select, no RANGE keyword found in any SelectItem
+Error: 2000(InvalidSyntax), Invalid SQL syntax: sql parser error: Illegal range select: no RANGE keyword found in any SELECT item
 
 SELECT 1 FROM host ALIGN '5s';
 
-Error: 2000(InvalidSyntax), Invalid SQL syntax: sql parser error: Illegal Range select, no RANGE keyword found in any SelectItem
+Error: 2000(InvalidSyntax), Invalid SQL syntax: sql parser error: Illegal range select: no RANGE keyword found in any SELECT item
 
 SELECT min(val) RANGE '10s', max(val) FROM host ALIGN '5s';
 
@@ -45,11 +45,11 @@ Error: 3001(EngineExecuteQuery), No field named "max(host.val)". Valid fields ar
 
 SELECT min(val) * 2 RANGE '10s' FROM host ALIGN '5s';
 
-Error: 2000(InvalidSyntax), Invalid SQL syntax: sql parser error: Can't use the RANGE keyword in Expr 2 without function
+Error: 2000(InvalidSyntax), Invalid SQL syntax: sql parser error: Can't use RANGE in expression 2 without a function
 
 SELECT 1 RANGE '10s' FILL NULL FROM host ALIGN '1h' FILL NULL;
 
-Error: 2000(InvalidSyntax), Invalid SQL syntax: sql parser error: Can't use the RANGE keyword in Expr 1 without function
+Error: 2000(InvalidSyntax), Invalid SQL syntax: sql parser error: Can't use RANGE in expression 1 without a function
 
 -- 2.2 no align param
 SELECT min(val) RANGE '5s' FROM host;

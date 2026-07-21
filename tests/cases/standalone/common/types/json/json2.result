@@ -202,14 +202,14 @@ select j.a.b + 1 from json2_table order by ts;
 
 select abs(j.a.b) from json2_table order by ts;
 
-Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Function 'abs' expects NativeType::Numeric but received NativeType::String No function matches the given name and argument types 'abs(Utf8View)'. You might need to add explicit type casts.
+Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Function 'abs' expects Numeric but received String. No function matches the given name and argument types 'abs(Utf8View)'. You might need to add explicit type casts.
 	Candidate functions:
 	abs(Numeric(1))
 
 -- "j.c" is of type "String", "abs" is expected to be all "null"s.
 select abs(j.c) from json2_table order by ts;
 
-Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Function 'abs' expects NativeType::Numeric but received NativeType::String No function matches the given name and argument types 'abs(Utf8View)'. You might need to add explicit type casts.
+Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Function 'abs' expects Numeric but received String. No function matches the given name and argument types 'abs(Utf8View)'. You might need to add explicit type casts.
 	Candidate functions:
 	abs(Numeric(1))
 
