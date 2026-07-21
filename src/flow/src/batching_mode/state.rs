@@ -1161,10 +1161,7 @@ mod test {
                     (Timestamp::new_second(0), Some(Timestamp::new_second(15))),
                     (Timestamp::new_second(5), Some(Timestamp::new_second(10))),
                 ],
-                BTreeMap::from([(
-                    Timestamp::new_second(0),
-                    Some(Timestamp::new_second(15)),
-                )]),
+                BTreeMap::from([(Timestamp::new_second(0), Some(Timestamp::new_second(15)))]),
             ),
             // An unbounded dirty window nested in a bounded range must not
             // shrink the range either: [0s, 15s) merged with 3s (window end
@@ -1174,26 +1171,17 @@ mod test {
                     (Timestamp::new_second(0), Some(Timestamp::new_second(15))),
                     (Timestamp::new_second(3), None),
                 ],
-                BTreeMap::from([(
-                    Timestamp::new_second(0),
-                    Some(Timestamp::new_second(15)),
-                )]),
+                BTreeMap::from([(Timestamp::new_second(0), Some(Timestamp::new_second(15)))]),
             ),
             // Disjoint bounded ranges far apart are kept separate.
             (
                 vec![
                     (Timestamp::new_second(0), Some(Timestamp::new_second(5))),
-                    (
-                        Timestamp::new_second(100),
-                        Some(Timestamp::new_second(110)),
-                    ),
+                    (Timestamp::new_second(100), Some(Timestamp::new_second(110))),
                 ],
                 BTreeMap::from([
                     (Timestamp::new_second(0), Some(Timestamp::new_second(5))),
-                    (
-                        Timestamp::new_second(100),
-                        Some(Timestamp::new_second(110)),
-                    ),
+                    (Timestamp::new_second(100), Some(Timestamp::new_second(110))),
                 ]),
             ),
             // Overlapping bounded ranges are unioned: [0s, 10s) and [5s, 20s)
@@ -1203,10 +1191,7 @@ mod test {
                     (Timestamp::new_second(0), Some(Timestamp::new_second(10))),
                     (Timestamp::new_second(5), Some(Timestamp::new_second(20))),
                 ],
-                BTreeMap::from([(
-                    Timestamp::new_second(0),
-                    Some(Timestamp::new_second(20)),
-                )]),
+                BTreeMap::from([(Timestamp::new_second(0), Some(Timestamp::new_second(20)))]),
             ),
         ];
 
@@ -1235,25 +1220,16 @@ mod test {
             // suffix: [0s, 15s) with expire 10s becomes [10s, 15s).
             (
                 vec![(Timestamp::new_second(0), Some(Timestamp::new_second(15)))],
-                BTreeMap::from([(
-                    Timestamp::new_second(10),
-                    Some(Timestamp::new_second(15)),
-                )]),
+                BTreeMap::from([(Timestamp::new_second(10), Some(Timestamp::new_second(15)))]),
             ),
             // A bounded range starting at the expire bound is kept intact.
             (
                 vec![(Timestamp::new_second(10), Some(Timestamp::new_second(15)))],
-                BTreeMap::from([(
-                    Timestamp::new_second(10),
-                    Some(Timestamp::new_second(15)),
-                )]),
+                BTreeMap::from([(Timestamp::new_second(10), Some(Timestamp::new_second(15)))]),
             ),
             // An unbounded window starting before the expire bound is
             // dropped, preserving the existing start-based behavior.
-            (
-                vec![(Timestamp::new_second(5), None)],
-                BTreeMap::from([]),
-            ),
+            (vec![(Timestamp::new_second(5), None)], BTreeMap::from([])),
             // An unbounded window starting at the expire bound is kept.
             (
                 vec![(Timestamp::new_second(10), None)],
