@@ -92,6 +92,7 @@ tokio-postgres-rustls = { version = "0.12", optional = true }
 tonic.workspace = true
 tracing.workspace = true
 typetag.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 chrono.workspace = true
@@ -100,4 +101,3 @@ common-procedure-test.workspace = true
 common-test-util.workspace = true
 common-wal = { workspace = true, features = ["testing"] }
 datatypes.workspace = true
-uuid.workspace = true

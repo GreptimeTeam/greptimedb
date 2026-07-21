@@ -326,6 +326,26 @@ impl SchedulerCtx for MockSchedulerCtx {
         // Return the report with need_retry_regions populated - let the caller handle retry logic
         Ok(final_report)
     }
+
+    async fn list_dropped_tables(&self) -> Result<Vec<common_meta::key::DroppedTableName>> {
+        Ok(vec![])
+    }
+
+    async fn purge_dropped_table(&self, _table_id: TableId) -> Result<()> {
+        Ok(())
+    }
+
+    fn try_reserve_purge(
+        &self,
+        table_id: TableId,
+        max_in_flight: usize,
+    ) -> Option<crate::gc::ctx::PurgeReservation> {
+        crate::gc::ctx::PurgeReservation::try_new(
+            Arc::new(std::sync::Mutex::new(HashSet::new())),
+            table_id,
+            max_in_flight,
+        )
+    }
 }
 
 pub struct TestEnv {
@@ -344,6 +364,7 @@ impl TestEnv {
 
         let scheduler = GcScheduler {
             ctx: ctx.clone(),
+            runtime_switch_manager: crate::gc::scheduler::new_test_runtime_switch_manager(),
             receiver: rx,
             config,
             region_gc_tracker: Arc::new(tokio::sync::Mutex::new(HashMap::new())),

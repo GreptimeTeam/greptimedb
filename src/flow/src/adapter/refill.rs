@@ -85,7 +85,10 @@ impl StreamingEngine {
                 }
             }
 
-            let expire_after = info.expire_after();
+            let expire_after = info
+                .expire_after()
+                .map(super::expire_after_secs_to_millis)
+                .transpose()?;
             // TODO(discord9): better way to get last point
             let now = self.tick_manager.tick();
             let plan = self
@@ -416,6 +419,10 @@ impl RefillTask {
         let output_data = stmt_exec
             .exec_plan(plan, query_ctx)
             .await
+            .map_err(BoxedError::new)
+            .context(ExternalSnafu)?;
+        let output_data = output_data
+            .map_dictionary_to_values()
             .map_err(BoxedError::new)
             .context(ExternalSnafu)?;
 

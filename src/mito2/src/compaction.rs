@@ -29,7 +29,6 @@ use std::time::Instant;
 
 use api::v1::region::compact_request;
 use api::v1::region::compact_request::Options;
-use arrow_schema::Schema;
 use common_base::Plugins;
 use common_base::cancellation::CancellationHandle;
 use common_memory_manager::OnExhaustedPolicy;
@@ -43,7 +42,7 @@ use datafusion_expr::Expr;
 use datatypes::extension::json::is_structured_json_field;
 use datatypes::types::json_type::JsonNativeType;
 use parquet::arrow::parquet_to_arrow_schema;
-use parquet::file::metadata::PageIndexPolicy;
+use parquet::file::metadata::{PageIndexPolicy, ParquetMetaData};
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::RegionMetadataRef;
@@ -64,7 +63,9 @@ use crate::error::{
     RegionClosedSnafu, RegionDroppedSnafu, RegionTruncatedSnafu, RemoteCompactionSnafu, Result,
     TimeRangePredicateOverflowSnafu, TimeoutSnafu,
 };
-use crate::metrics::{COMPACTION_STAGE_ELAPSED, INFLIGHT_COMPACTION_COUNT};
+use crate::metrics::{
+    COMPACTION_MEMORY_REJECTED, COMPACTION_STAGE_ELAPSED, INFLIGHT_COMPACTION_COUNT,
+};
 use crate::read::FlatSource;
 use crate::read::flat_projection::FlatProjectionMapper;
 use crate::read::read_columns::ReadColumns;
@@ -613,8 +614,21 @@ impl CompactionScheduler {
             waiters
         };
 
-        // Create a local compaction task.
+        // Check whether this local compaction can ever fit before submitting it.
         let estimated_bytes = estimate_compaction_bytes(&picker_output);
+        if let Some(limit_bytes) = self.exceeds_compaction_memory_limit(estimated_bytes) {
+            COMPACTION_MEMORY_REJECTED
+                .with_label_values(&["oversized"])
+                .inc();
+            warn!(
+                "Skip compaction for region {} because estimated memory {} bytes exceeds compaction memory limit {} bytes",
+                region_id, estimated_bytes, limit_bytes,
+            );
+            for waiter in waiters {
+                waiter.send(Ok(0));
+            }
+            return Ok(None);
+        }
 
         let cancel_handle = Arc::new(CancellationHandle::default());
         let state = LocalCompactionState::new(cancel_handle.clone());
@@ -650,6 +664,15 @@ impl CompactionScheduler {
             .inspect_err(
                 |e| error!(e; "Failed to submit compaction request for region {}", region_id),
             )
+    }
+
+    fn exceeds_compaction_memory_limit(&self, estimated_bytes: u64) -> Option<u64> {
+        let limit_bytes = self.memory_manager.limit_bytes();
+        if limit_bytes > 0 && estimated_bytes > limit_bytes {
+            Some(limit_bytes)
+        } else {
+            None
+        }
     }
 
     fn remove_region_on_failure(&mut self, region_id: RegionId, err: Arc<Error>) {
@@ -1026,7 +1049,7 @@ impl CompactionSstReaderBuilder<'_> {
     /// Build a [FlatSource] that yields Arrow `RecordBatch`s from reading all the input SST files,
     /// for compaction. The schema of the [FlatSource] is unified.
     async fn build_flat_sst_reader(self) -> Result<FlatSource> {
-        let scan_input = self.build_scan_input().await?.with_compaction(true);
+        let scan_input = self.build_scan_input().await?;
 
         let schema = scan_input.mapper.output_schema();
         let schema = schema.arrow_schema();
@@ -1039,6 +1062,20 @@ impl CompactionSstReaderBuilder<'_> {
 
     async fn build_scan_input(self) -> Result<ScanInput> {
         let schema = self.metadata.schema.arrow_schema();
+        let parquet_metadata = self.collect_parquet_metadata().await?;
+        let batch_size = crate::batch_size::estimate_batch_size(
+            parquet_metadata
+                .iter()
+                .flat_map(|metadata| metadata.row_groups())
+                .map(|row_group| {
+                    let uncompressed_bytes = row_group
+                        .columns()
+                        .iter()
+                        .map(|column| column.uncompressed_size() as u64)
+                        .sum();
+                    (row_group.num_rows() as u64, uncompressed_bytes)
+                }),
+        );
         let json_type_hint = if schema.fields().iter().any(is_structured_json_field) {
             let mut json_type_hint = schema
                 .fields()
@@ -1047,8 +1084,15 @@ impl CompactionSstReaderBuilder<'_> {
                 .map(|field| (field.name().clone(), JsonNativeType::Null))
                 .collect::<HashMap<_, _>>();
 
-            let schemas = self.collect_arrow_schemas_from_parquet().await?;
-            for schema in schemas {
+            for metadata in &parquet_metadata {
+                let file_metadata = metadata.file_metadata();
+                let schema = parquet_to_arrow_schema(
+                    file_metadata.schema_descr(),
+                    file_metadata.key_value_metadata(),
+                )
+                .context(ParquetToArrowSchemaSnafu {
+                    file: "compaction input",
+                })?;
                 for field in schema.fields() {
                     let Some(merged) = json_type_hint.get_mut(field.name()) else {
                         continue;
@@ -1078,6 +1122,8 @@ impl CompactionSstReaderBuilder<'_> {
 
         let mut scan_input = ScanInput::new(self.sst_layer, mapper)
             .with_files(self.inputs.to_vec())
+            .with_compaction(true)
+            .with_batch_size(batch_size)
             .with_append_mode(self.append_mode)
             // We use special cache strategy for compaction.
             .with_cache(CacheStrategy::Compaction(self.cache))
@@ -1096,8 +1142,8 @@ impl CompactionSstReaderBuilder<'_> {
         Ok(scan_input)
     }
 
-    async fn collect_arrow_schemas_from_parquet(&self) -> Result<Vec<Schema>> {
-        let mut schemas = Vec::with_capacity(self.inputs.len());
+    async fn collect_parquet_metadata(&self) -> Result<Vec<Arc<ParquetMetaData>>> {
+        let mut metadata = Vec::with_capacity(self.inputs.len());
 
         for file_handle in self.inputs {
             let file_path =
@@ -1120,17 +1166,9 @@ impl CompactionSstReaderBuilder<'_> {
                 Err(e) if e.is_object_not_found() => continue,
                 Err(e) => return Err(e),
             };
-            let file_metadata = parquet_metadata.file_metadata();
-
-            let schema = parquet_to_arrow_schema(
-                file_metadata.schema_descr(),
-                file_metadata.key_value_metadata(),
-            )
-            .context(ParquetToArrowSchemaSnafu { file: file_path })?;
-
-            schemas.push(schema);
+            metadata.push(parquet_metadata);
         }
-        Ok(schemas)
+        Ok(metadata)
     }
 }
 
@@ -1549,6 +1587,65 @@ mod tests {
         assert!(scheduled);
         assert_eq!(1, job_scheduler.num_jobs());
         assert!(scheduler.region_status.contains_key(&region_id));
+    }
+
+    #[tokio::test]
+    async fn test_schedule_compaction_skips_task_exceeding_memory_limit() {
+        let job_scheduler = Arc::new(VecScheduler::default());
+        let env = SchedulerEnv::new().await.scheduler(job_scheduler.clone());
+        let (tx, _rx) = mpsc::channel(4);
+        let mut scheduler = env.mock_compaction_scheduler(tx);
+        scheduler.memory_manager = Arc::new(new_compaction_memory_manager(1024 * 1024));
+
+        let mut builder = VersionControlBuilder::new();
+        let region_id = builder.region_id();
+        let end = 1000 * 1000;
+        let version_control = Arc::new(
+            builder
+                .push_l0_file_with_max_row_group_size(0, end, 1024 * 1024)
+                .push_l0_file_with_max_row_group_size(10, end, 1024 * 1024)
+                .push_l0_file_with_max_row_group_size(50, end, 1024 * 1024)
+                .push_l0_file_with_max_row_group_size(80, end, 1024 * 1024)
+                .push_l0_file_with_max_row_group_size(90, end, 1024 * 1024)
+                .build(),
+        );
+        let manifest_ctx = env
+            .mock_manifest_context(version_control.current().version.metadata.clone())
+            .await;
+        let (schema_metadata_manager, kv_backend) = mock_schema_metadata_manager();
+        schema_metadata_manager
+            .register_region_table_info(
+                region_id.table_id(),
+                "test_table",
+                "test_catalog",
+                "test_schema",
+                None,
+                kv_backend,
+            )
+            .await;
+        let (output_tx, output_rx) = oneshot::channel();
+        let rejected = COMPACTION_MEMORY_REJECTED.with_label_values(&["oversized"]);
+        let rejected_before = rejected.get();
+
+        let scheduled = scheduler
+            .schedule_compaction(
+                region_id,
+                Options::Regular(Default::default()),
+                &version_control,
+                &env.access_layer,
+                OptionOutputTx::from(output_tx),
+                &manifest_ctx,
+                schema_metadata_manager,
+                1,
+            )
+            .await
+            .unwrap();
+
+        assert!(!scheduled);
+        assert_eq!(output_rx.await.unwrap().unwrap(), 0);
+        assert_eq!(rejected_before + 1, rejected.get());
+        assert_eq!(0, job_scheduler.num_jobs());
+        assert!(!scheduler.region_status.contains_key(&region_id));
     }
 
     #[tokio::test]

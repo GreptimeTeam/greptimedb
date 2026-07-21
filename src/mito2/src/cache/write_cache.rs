@@ -638,6 +638,7 @@ mod tests {
                 .write_cache(Some(write_cache.clone()))
                 .build(),
         );
+        assert!(!cache_manager.sst_meta_cache_enabled());
 
         // Create source
         let metadata = Arc::new(sst_region_metadata());
@@ -682,7 +683,7 @@ mod tests {
         let sst_info = sst_infos.remove(0);
         let write_parquet_metadata = sst_info.file_metadata.unwrap();
 
-        // Read metadata from write cache
+        // Read metadata from write cache without preparing an in-memory metadata cache entry.
         let handle = sst_file_handle_with_file_id(sst_info.file_id, 0, 1000);
         let builder = ParquetReaderBuilder::new(
             data_home,

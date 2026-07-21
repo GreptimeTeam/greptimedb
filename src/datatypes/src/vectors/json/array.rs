@@ -32,9 +32,10 @@ use crate::arrow_array::{
     MutableBinaryArray, StringViewArray, binary_array_value, string_array_value,
 };
 use crate::error::{
-    AlignJsonArraySnafu, ArrowComputeSnafu, CastTypeSnafu, DeserializeSnafu, InvalidJsonSnafu,
-    Result, SerializeSnafu,
+    AlignJsonArraySnafu, ArrowComputeSnafu, CastTypeSnafu, InvalidJsonSnafu, InvalidJsonbSnafu,
+    Result,
 };
+use crate::json::value::{decode_json_variant, encode_serde_json_as_jsonb};
 
 pub struct JsonArray<'a> {
     inner: &'a ArrayRef,
@@ -59,9 +60,7 @@ impl JsonArray<'_> {
             }
             DataType::Binary | DataType::LargeBinary | DataType::BinaryView => {
                 let bytes = binary_array_value(array, i);
-                serde_json::from_slice(bytes).with_context(|_| DeserializeSnafu {
-                    json: String::from_utf8_lossy(bytes),
-                })?
+                decode_json_variant(bytes).map_err(|error| InvalidJsonbSnafu { error }.build())?
             }
             DataType::Struct(_) => {
                 let structs = array.as_struct();
@@ -230,7 +229,7 @@ impl JsonArray<'_> {
             if value.is_null() {
                 encoded.push(None);
             } else {
-                let bytes = serde_json::to_vec(&value).context(SerializeSnafu)?;
+                let bytes = encode_serde_json_as_jsonb(value);
                 total_bytes += bytes.len();
                 encoded.push(Some(bytes));
             }
@@ -368,10 +367,12 @@ mod test {
         assert_eq!(JsonArray::from(&strings).try_get_value(0)?, json!("hello"));
         assert_eq!(JsonArray::from(&strings).try_get_value(1)?, Value::Null);
 
-        let binaries: ArrayRef = Arc::new(BinaryArray::from(vec![
-            br#"{"nested":[1,null,"x"]}"#.as_slice(),
-            b"null".as_slice(),
-        ]));
+        let nested = jsonb::parse_value(br#"{"nested":[1,null,"x"]}"#)
+            .unwrap()
+            .to_vec();
+        let null = jsonb::parse_value(b"null").unwrap().to_vec();
+        let binaries: ArrayRef =
+            Arc::new(BinaryArray::from(vec![nested.as_slice(), null.as_slice()]));
         assert_eq!(
             JsonArray::from(&binaries).try_get_value(0)?,
             json!({"nested": [1, null, "x"]})

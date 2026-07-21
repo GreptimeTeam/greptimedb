@@ -522,7 +522,10 @@ mod tests {
             .unwrap();
 
         region_server
-            .handle_request(region_id, RegionRequest::Close(RegionCloseRequest {}))
+            .handle_request(
+                region_id,
+                RegionRequest::Close(RegionCloseRequest::default()),
+            )
             .await
             .unwrap();
         let mut heartbeat_env = HeartbeatResponseTestEnv::new();

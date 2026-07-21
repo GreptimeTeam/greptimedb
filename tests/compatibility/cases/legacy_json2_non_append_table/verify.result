@@ -1,0 +1,63 @@
+SELECT ts, j.a AS a, j.nested.s AS nested_s
+FROM t_legacy_json2_non_append_table
+ORDER BY ts;
+
++---------------------+---+----------+
+| ts                  | a | nested_s |
++---------------------+---+----------+
+| 2026-07-08T00:00:00 | 1 | old-1    |
+| 2026-07-08T00:01:00 | 2 | old-2    |
++---------------------+---+----------+
+
+SHOW CREATE TABLE t_legacy_json2_non_append_table;
+
++---------------------------------+----------------------------------------------------------------+
+| Table                           | Create Table                                                   |
++---------------------------------+----------------------------------------------------------------+
+| t_legacy_json2_non_append_table | CREATE TABLE IF NOT EXISTS "t_legacy_json2_non_append_table" ( |
+|                                 |   "ts" TIMESTAMP(3) NOT NULL,                                  |
+|                                 |   "j" JSON2 NULL,                                              |
+|                                 |   TIME INDEX ("ts")                                            |
+|                                 | )                                                              |
+|                                 |                                                                |
+|                                 | ENGINE=mito                                                    |
+|                                 |                                                                |
++---------------------------------+----------------------------------------------------------------+
+
+ALTER TABLE t_legacy_json2_non_append_table SET 'append_mode' = 'true';
+
+Affected Rows: 0
+
+SHOW CREATE TABLE t_legacy_json2_non_append_table;
+
++---------------------------------+----------------------------------------------------------------+
+| Table                           | Create Table                                                   |
++---------------------------------+----------------------------------------------------------------+
+| t_legacy_json2_non_append_table | CREATE TABLE IF NOT EXISTS "t_legacy_json2_non_append_table" ( |
+|                                 |   "ts" TIMESTAMP(3) NOT NULL,                                  |
+|                                 |   "j" JSON2 NULL,                                              |
+|                                 |   TIME INDEX ("ts")                                            |
+|                                 | )                                                              |
+|                                 |                                                                |
+|                                 | ENGINE=mito                                                    |
+|                                 | WITH(                                                          |
+|                                 |   append_mode = 'true'                                         |
+|                                 | )                                                              |
++---------------------------------+----------------------------------------------------------------+
+
+INSERT INTO t_legacy_json2_non_append_table (ts, j) VALUES
+  ('2026-07-08 00:02:00+0000', '{"a": 3, "nested": {"s": "current-3"}}');
+
+Affected Rows: 1
+
+SELECT ts, j.a AS a, j.nested.s AS nested_s
+FROM t_legacy_json2_non_append_table
+ORDER BY ts;
+
++---------------------+---+-----------+
+| ts                  | a | nested_s  |
++---------------------+---+-----------+
+| 2026-07-08T00:00:00 | 1 | old-1     |
+| 2026-07-08T00:01:00 | 2 | old-2     |
+| 2026-07-08T00:02:00 | 3 | current-3 |
++---------------------+---+-----------+

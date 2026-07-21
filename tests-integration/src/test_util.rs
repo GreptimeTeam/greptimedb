@@ -567,7 +567,14 @@ pub async fn setup_test_prom_app_with_frontend(
     store_type: StorageType,
     name: &str,
 ) -> (Router, TestGuard) {
-    setup_test_prom_app_with_frontend_inner(store_type, name, false).await
+    setup_test_prom_app_with_frontend_inner(store_type, name, false, false).await
+}
+
+pub async fn setup_test_prom_app_with_frontend_native_histogram(
+    store_type: StorageType,
+    name: &str,
+) -> (Router, TestGuard) {
+    setup_test_prom_app_with_frontend_inner(store_type, name, false, true).await
 }
 
 /// Like [`setup_test_prom_app_with_frontend`] but enables the pending-rows batcher,
@@ -577,13 +584,14 @@ pub async fn setup_test_prom_app_with_frontend_batched(
     store_type: StorageType,
     name: &str,
 ) -> (Router, TestGuard) {
-    setup_test_prom_app_with_frontend_inner(store_type, name, true).await
+    setup_test_prom_app_with_frontend_inner(store_type, name, true, false).await
 }
 
 async fn setup_test_prom_app_with_frontend_inner(
     store_type: StorageType,
     name: &str,
     enable_batcher: bool,
+    experimental_enable_prometheus_native_histogram: bool,
 ) -> (Router, TestGuard) {
     unsafe {
         std::env::set_var("TZ", "UTC");
@@ -634,6 +642,7 @@ async fn setup_test_prom_app_with_frontend_inner(
 
     let http_opts = HttpOptions {
         addr: format!("127.0.0.1:{}", ports::get_port()),
+        experimental_enable_prometheus_native_histogram,
         ..Default::default()
     };
     let frontend_ref = instance.fe_instance().clone();

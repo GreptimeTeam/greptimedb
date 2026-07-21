@@ -150,6 +150,8 @@ struct ConfigContext {
     addrs: HashMap<String, String>,
     // enable flat format for storage engine
     enable_flat_format: bool,
+    // enable garbage collection in metasrv and datanodes
+    enable_gc: bool,
 }
 
 impl ServerMode {
@@ -357,6 +359,7 @@ impl ServerMode {
             instance_id: id,
             addrs,
             enable_flat_format: db_ctx.store_config().enable_flat_format,
+            enable_gc: db_ctx.store_config().enable_gc,
         };
 
         let rendered = tt.render(self.name(), &ctx).unwrap();
@@ -579,6 +582,7 @@ mod tests {
             setup_pg: None,
             setup_mysql: None,
             enable_flat_format: false,
+            enable_gc: false,
         };
         let env = Env::new(
             sqlness_home.to_path_buf(),
@@ -726,5 +730,42 @@ mod tests {
 
         assert_eq!(GrpcArgStyle::for_version(Some(&v1_1_0)), GrpcArgStyle::Grpc);
         assert_eq!(GrpcArgStyle::for_version(Some(&v1_2_0)), GrpcArgStyle::Grpc);
+    }
+
+    #[test]
+    fn test_generate_distributed_gc_config_when_enabled() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let store_config = StoreConfig {
+            store_addrs: vec![],
+            setup_etcd: false,
+            setup_pg: None,
+            setup_mysql: None,
+            enable_flat_format: false,
+            enable_gc: true,
+        };
+        let db_ctx = GreptimeDBContext::new(WalConfig::RaftEngine, store_config);
+        let metasrv = ServerMode::Metasrv {
+            rpc_bind_addr: "127.0.0.1:4201".to_string(),
+            rpc_server_addr: "127.0.0.1:4201".to_string(),
+            http_addr: "127.0.0.1:4200".to_string(),
+        };
+        let datanode = ServerMode::Datanode {
+            rpc_bind_addr: "127.0.0.1:4301".to_string(),
+            rpc_server_addr: "127.0.0.1:4301".to_string(),
+            http_addr: "127.0.0.1:4300".to_string(),
+            metasrv_addr: "127.0.0.1:4201".to_string(),
+            node_id: 0,
+        };
+
+        let metasrv_config =
+            std::fs::read_to_string(metasrv.generate_config_file(temp_dir.path(), &db_ctx, 0))
+                .unwrap();
+        let datanode_config =
+            std::fs::read_to_string(datanode.generate_config_file(temp_dir.path(), &db_ctx, 0))
+                .unwrap();
+
+        assert!(metasrv_config.contains("[gc]\nenable = true"));
+        assert!(metasrv_config.contains("[gc.experimental_soft_drop]\nenable = true"));
+        assert!(datanode_config.contains("[region_engine.mito.gc]\nenable = true"));
     }
 }

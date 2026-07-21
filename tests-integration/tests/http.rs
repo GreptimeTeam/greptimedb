@@ -17,7 +17,10 @@ use std::io::Write;
 use std::str::FromStr;
 use std::time::Duration;
 
-use api::greptime_proto::io::prometheus::write::v2::Sample as RemoteWriteV2Sample;
+use api::greptime_proto::io::prometheus::write::v2::histogram::{Count, ZeroCount};
+use api::greptime_proto::io::prometheus::write::v2::{
+    BucketSpan, Histogram, Sample as RemoteWriteV2Sample, TimeSeries as RemoteWriteV2TimeSeries,
+};
 use api::prom_store::remote::label_matcher::Type as MatcherType;
 use api::prom_store::remote::{
     Label, LabelMatcher, Query, ReadRequest, ReadResponse, Sample, TimeSeries, WriteRequest,
@@ -41,7 +44,7 @@ use common_memory_manager::OnExhaustedPolicy;
 use common_options::plugin_options::StandaloneFlag;
 use flate2::Compression;
 use flate2::write::GzEncoder;
-use log_query::{Context, Limit, LogQuery, TimeFilter};
+use log_query::{AggFunc, Context, Limit, LogExpr, LogQuery, TimeFilter};
 use loki_proto::logproto::{EntryAdapter, LabelPairAdapter, PushRequest, StreamAdapter};
 use loki_proto::prost_types::Timestamp;
 use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
@@ -74,7 +77,7 @@ use tests_integration::test_util::{
     StorageType, setup_test_http_app, setup_test_http_app_with_frontend,
     setup_test_http_app_with_frontend_and_slow_query_threshold,
     setup_test_http_app_with_frontend_and_user_provider, setup_test_prom_app_with_frontend,
-    setup_test_prom_app_with_frontend_batched,
+    setup_test_prom_app_with_frontend_batched, setup_test_prom_app_with_frontend_native_histogram,
 };
 use urlencoding::encode;
 use yaml_rust::YamlLoader;
@@ -122,6 +125,7 @@ macro_rules! http_tests {
                 test_dashboard_api,
                 test_prometheus_remote_write,
                 test_prometheus_remote_write_v2,
+                test_prometheus_remote_write_v2_native_histogram,
                 test_prometheus_remote_write_batched,
                 test_prometheus_remote_special_labels,
                 test_prometheus_remote_schema_labels,
@@ -164,6 +168,7 @@ macro_rules! http_tests {
                 test_splunk_health,
                 test_splunk_health_is_public,
                 test_splunk_logs,
+                test_splunk_raw,
                 test_log_query,
                 test_jaeger_query_api,
                 test_jaeger_query_api_for_trace_v1,
@@ -279,6 +284,14 @@ fn basic_auth(username: &str, password: &str) -> String {
 }
 
 fn assert_remote_write_v2_written_headers(headers: &HeaderMap, samples: &str) {
+    assert_remote_write_v2_written_headers_with_histograms(headers, samples, "0")
+}
+
+fn assert_remote_write_v2_written_headers_with_histograms(
+    headers: &HeaderMap,
+    samples: &str,
+    histograms: &str,
+) {
     assert_eq!(
         Some(samples),
         headers
@@ -286,7 +299,7 @@ fn assert_remote_write_v2_written_headers(headers: &HeaderMap, samples: &str) {
             .map(|x| x.to_str().unwrap())
     );
     assert_eq!(
-        Some("0"),
+        Some(histograms),
         headers
             .get("X-Prometheus-Remote-Write-Histograms-Written")
             .map(|x| x.to_str().unwrap())
@@ -1703,6 +1716,268 @@ transform:
     guard.remove_all().await;
 }
 
+pub async fn test_splunk_raw(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+
+    let user_provider =
+        user_provider_from_option("static_user_provider:cmd:greptime_user=greptime_pwd").unwrap();
+    let (app, mut guard) = setup_test_http_app_with_frontend_and_user_provider(
+        store_type,
+        "test_splunk_raw",
+        Some(user_provider),
+    )
+    .await;
+    let client = TestClient::new(app).await;
+
+    async fn query(client: &TestClient, sql: &str) -> String {
+        let res = client
+            .get(format!("/v1/sql?sql={sql}").as_str())
+            .header("Authorization", basic_auth("greptime_user", "greptime_pwd"))
+            .send()
+            .await;
+        assert_eq!(res.status(), StatusCode::OK, "query failed: {sql}");
+        res.text().await
+    }
+
+    // HEC `Authorization: Splunk <user:pass>` + plain-text content type (raw bodies).
+    let splunk_headers = || {
+        vec![
+            (
+                HeaderName::from_static("authorization"),
+                HeaderValue::from_static("Splunk greptime_user:greptime_pwd"),
+            ),
+            (
+                HeaderName::from_static("content-type"),
+                HeaderValue::from_static("text/plain"),
+            ),
+        ]
+    };
+    let raw_path = "/v1/splunk/services/collector/raw";
+
+    // 1. Explicit `?linebreaker=%0A` ("\n") splits the body into one event per
+    //    line, with request-level metadata; `channel` (param AND header) is
+    //    accepted and ignored (ack protocol not implemented); `?time=` sets the
+    //    timestamp for every event; `index` routes the table. Blank lines are
+    //    skipped; indentation inside a line is preserved verbatim.
+    let mut headers = splunk_headers();
+    headers.push((
+        HeaderName::from_static("x-splunk-request-channel"),
+        HeaderValue::from_static("FE0ECFAD-13D5-401B-847D-77833BD77131"),
+    ));
+    let body = "line one\nline two\n\n  indented line";
+    let res = send_req(
+        &client,
+        headers,
+        &format!(
+            "{raw_path}?channel=FE0ECFAD-13D5-401B-847D-77833BD77131\
+             &host=web-01&source=nginx&sourcetype=access&index=raw_main&time=1700000100\
+             &linebreaker=%0A"
+        ),
+        body.as_bytes().to_vec(),
+        false,
+    )
+    .await;
+    assert_eq!(StatusCode::OK, res.status());
+    assert!(res.text().await.contains("\"code\":0"));
+
+    // 2. Rows landed: `message` holds each line verbatim, metadata columns carry the
+    //    query-param values, `?time=` (epoch seconds) became the timestamp.
+    let rows = get_rows_from_output(
+        &query(
+            &client,
+            "select host, source, sourcetype, message, greptime_timestamp from raw_main order by message",
+        )
+        .await,
+    );
+    assert_eq!(
+        rows,
+        concat!(
+            r#"[["web-01","nginx","access","  indented line",1700000100000000000],"#,
+            r#"["web-01","nginx","access","line one",1700000100000000000],"#,
+            r#"["web-01","nginx","access","line two",1700000100000000000]]"#
+        )
+    );
+
+    // 3. host/source/sourcetype are tags (primary key); `message` is not.
+    let create = query(&client, "show create table raw_main").await;
+    let pk = create
+        .split("PRIMARY KEY")
+        .nth(1)
+        .expect("raw_main should have a PRIMARY KEY");
+    for col in ["host", "source", "sourcetype"] {
+        assert!(
+            pk.contains(col),
+            "expected `{col}` in primary key: {create}"
+        );
+    }
+    assert!(
+        !pk.contains("message"),
+        "`message` must not be a tag: {create}"
+    );
+
+    // 4. No query params at all: default table (`splunk_logs`), only timestamp +
+    //    `message` columns, ingest-time timestamp.
+    let res = send_req(
+        &client,
+        splunk_headers(),
+        raw_path,
+        b"Hello World".to_vec(),
+        false,
+    )
+    .await;
+    assert_eq!(StatusCode::OK, res.status());
+    let rows = get_rows_from_output(&query(&client, "select message from splunk_logs").await);
+    assert_eq!(rows, r#"[["Hello World"]]"#);
+
+    // 4b. Without `?linebreaker=`, a multiline body (e.g. a stack trace) is stored
+    //     as it is.
+    let stack_trace = "java.lang.NullPointerException: boom\n\tat com.example.Foo.bar(Foo.java:42)\n\tat com.example.Main.main(Main.java:7)";
+    let res = send_req(
+        &client,
+        splunk_headers(),
+        &format!("{raw_path}?table=raw_multiline"),
+        stack_trace.as_bytes().to_vec(),
+        false,
+    )
+    .await;
+    assert_eq!(StatusCode::OK, res.status());
+    let rows = get_rows_from_output(&query(&client, "select message from raw_multiline").await);
+    assert_eq!(
+        rows,
+        r#"[["java.lang.NullPointerException: boom\n\tat com.example.Foo.bar(Foo.java:42)\n\tat com.example.Main.main(Main.java:7)"]]"#
+    );
+
+    // 5. gzip-compressed raw body on the versioned alias (exercises the
+    //    decompression layer and the `/raw/1.0` route).
+    let res = send_req(
+        &client,
+        splunk_headers(),
+        "/v1/splunk/services/collector/raw/1.0?table=raw_gzip",
+        b"compressed line".to_vec(),
+        true,
+    )
+    .await;
+    assert_eq!(StatusCode::OK, res.status());
+    let rows = get_rows_from_output(&query(&client, "select message from raw_gzip").await);
+    assert_eq!(rows, r#"[["compressed line"]]"#);
+
+    // 6. Error paths: empty body -> 5 ("No data"); unparsable `?time=` -> 6;
+    //    invalid `?table=` -> 7 ("incorrect index").
+    let res = send_req(
+        &client,
+        splunk_headers(),
+        raw_path,
+        b"  \n ".to_vec(),
+        false,
+    )
+    .await;
+    assert_eq!(StatusCode::BAD_REQUEST, res.status());
+    assert!(res.text().await.contains("\"code\":5"));
+
+    let res = send_req(
+        &client,
+        splunk_headers(),
+        &format!("{raw_path}?time=not-a-time"),
+        b"x".to_vec(),
+        false,
+    )
+    .await;
+    assert_eq!(StatusCode::BAD_REQUEST, res.status());
+    assert!(res.text().await.contains("\"code\":6"));
+
+    let res = send_req(
+        &client,
+        splunk_headers(),
+        &format!("{raw_path}?table=bad%20name"),
+        b"x".to_vec(),
+        false,
+    )
+    .await;
+    assert_eq!(StatusCode::BAD_REQUEST, res.status());
+    assert!(res.text().await.contains("\"code\":7"));
+
+    // 7. Replay of a real Vector `splunk_hec_logs` (endpoint_target = "raw") request,
+    //    path and headers verbatim from a wire capture (body trimmed):
+    let mut headers = splunk_headers();
+    headers.push((
+        HeaderName::from_static("x-splunk-request-channel"),
+        HeaderValue::from_static("b408271e-51af-43c1-a99f-9c21f78df0cf"),
+    ));
+    let res = send_req(
+        &client,
+        headers,
+        "/v1/splunk/services/collector/raw?source=vector%2Dsrc&sourcetype=vector%5Fdemo&index=vector_raw&host=localhost",
+        b"245.158.191.1 - AnthraX [13/Jul/2026:05:10:26 +0000] \"GET /wp-admin HTTP/1.0\" 300 17922".to_vec(),
+        false,
+    )
+    .await;
+    assert_eq!(StatusCode::OK, res.status());
+    let rows = get_rows_from_output(
+        &query(
+            &client,
+            "select host, source, sourcetype, message from vector_raw",
+        )
+        .await,
+    );
+    // the percent-encoded params (`vector%2Dsrc` etc.) decode to the plain values.
+    assert_eq!(
+        rows,
+        r#"[["localhost","vector-src","vector_demo","245.158.191.1 - AnthraX [13/Jul/2026:05:10:26 +0000] \"GET /wp-admin HTTP/1.0\" 300 17922"]]"#
+    );
+
+    // 8. An unknown `Content-Encoding` passes through the decompression layer
+    //    still compressed (`pass_through_unaccepted(true)`); the handler must reject
+    //    it (code 6) instead of ingesting compressed bytes. `identity` is fine.
+    //    (Known-but-broken encodings, e.g. `zstd` over gzip bytes, already fail in
+    //    the layer itself.)
+    //    Invalid UTF-8 must also be rejected with code 6, not lossily replaced.
+    let mut headers = splunk_headers();
+    headers.push((
+        HeaderName::from_static("content-encoding"),
+        HeaderValue::from_static("snappy"),
+    ));
+    let res = send_req(
+        &client,
+        headers,
+        &format!("{raw_path}?table=raw_encoding"),
+        compress_vec_with_gzip(b"still compressed".to_vec()),
+        false,
+    )
+    .await;
+    assert_eq!(StatusCode::BAD_REQUEST, res.status());
+    assert!(res.text().await.contains("\"code\":6"));
+
+    let mut headers = splunk_headers();
+    headers.push((
+        HeaderName::from_static("content-encoding"),
+        HeaderValue::from_static("identity"),
+    ));
+    let res = send_req(
+        &client,
+        headers,
+        &format!("{raw_path}?table=raw_encoding"),
+        b"identity line".to_vec(),
+        false,
+    )
+    .await;
+    assert_eq!(StatusCode::OK, res.status());
+    let rows = get_rows_from_output(&query(&client, "select message from raw_encoding").await);
+    assert_eq!(rows, r#"[["identity line"]]"#);
+
+    let res = send_req(
+        &client,
+        splunk_headers(),
+        &format!("{raw_path}?table=raw_bad_utf8"),
+        vec![b'h', b'i', 0xff, 0xfe],
+        false,
+    )
+    .await;
+    assert_eq!(StatusCode::BAD_REQUEST, res.status());
+    assert!(res.text().await.contains("\"code\":6"));
+
+    guard.remove_all().await;
+}
+
 pub async fn test_health_api(store_type: StorageType) {
     common_telemetry::init_default_ut_logging();
     let (app, _guard) = setup_test_http_app_with_frontend(store_type, "health_api").await;
@@ -1805,9 +2080,10 @@ addr = "127.0.0.1:4000"
 timeout = "0s"
 body_limit = "64MiB"
 prom_validation_mode = "strict"
+experimental_enable_prometheus_native_histogram = false
 cors_allowed_origins = []
 enable_cors = true
-experimental_enable_explain_analyze_stream = false
+experimental_enable_explain_analyze_stream = true
 
 [grpc]
 bind_addr = "127.0.0.1:4001"
@@ -1926,6 +2202,7 @@ compress_manifest = false
 experimental_compaction_memory_limit = "unlimited"
 experimental_compaction_on_exhausted = "wait"
 auto_flush_interval = "30m"
+default_region_write_buffer_size = "0KiB"
 enable_write_cache = false
 write_cache_path = ""
 write_cache_size = "5GiB"
@@ -1969,7 +2246,7 @@ apply_on_query = "auto"
 mem_threshold_on_create = "auto"
 {vector_index_config}[region_engine.mito.gc]
 enable = false
-lingering_time = "1m"
+lingering_time = "1h"
 unknown_file_lingering_time = "1day"
 max_concurrent_lister_per_gc_job = 32
 max_concurrent_gc_job = 4
@@ -2344,7 +2621,7 @@ pub async fn test_prometheus_remote_write_v2(store_type: StorageType) {
         "select greptime_timestamp, greptime_value, job, instance from remote_write_v2_total order by greptime_timestamp;",
         "[[1000,42.0,\"api\",\"localhost:9090\"],[2000,43.0,\"api\",\"localhost:9090\"]]",
     )
-    .await;
+        .await;
 
     validate_data(
         "prometheus_remote_write_v2_semantic_identity",
@@ -2357,13 +2634,113 @@ pub async fn test_prometheus_remote_write_v2(store_type: StorageType) {
     )
     .await;
 
-    let write_request = remote_write_v2::request_with_labels_and_histograms(
-        vec![(
-            prom_store::METRIC_NAME_LABEL,
-            "remote_write_v2_histogram_only",
-        )],
-        vec![remote_write_v2::histogram(3000)],
+    guard.remove_all().await;
+}
+
+pub async fn test_prometheus_remote_write_v2_native_histogram(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) = setup_test_prom_app_with_frontend_native_histogram(
+        store_type,
+        "prometheus_remote_write_v2_native_histogram",
+    )
+    .await;
+    let client = TestClient::new(app).await;
+
+    let mut write_request = remote_write_v2::request_with_labels_and_samples(
+        vec![
+            (
+                prom_store::METRIC_NAME_LABEL,
+                "remote_write_v2_sample_seconds",
+            ),
+            ("job", "api"),
+            ("instance", "localhost:9090"),
+        ],
+        vec![RemoteWriteV2Sample {
+            value: 5.0,
+            timestamp: 2500,
+            start_timestamp: 0,
+        }],
     );
+    let name_ref = write_request
+        .symbols
+        .iter()
+        .position(|symbol| symbol == prom_store::METRIC_NAME_LABEL)
+        .unwrap() as u32;
+    let job_ref = write_request
+        .symbols
+        .iter()
+        .position(|symbol| symbol == "job")
+        .unwrap() as u32;
+    let api_ref = write_request
+        .symbols
+        .iter()
+        .position(|symbol| symbol == "api")
+        .unwrap() as u32;
+    let instance_ref = write_request
+        .symbols
+        .iter()
+        .position(|symbol| symbol == "instance")
+        .unwrap() as u32;
+    let localhost_ref = write_request
+        .symbols
+        .iter()
+        .position(|symbol| symbol == "localhost:9090")
+        .unwrap() as u32;
+    let histogram_metric_ref = write_request.symbols.len() as u32;
+    write_request
+        .symbols
+        .push("remote_write_v2_latency_seconds".to_string());
+    write_request.timeseries.push(RemoteWriteV2TimeSeries {
+        labels_refs: vec![
+            name_ref,
+            histogram_metric_ref,
+            job_ref,
+            api_ref,
+            instance_ref,
+            localhost_ref,
+        ],
+        histograms: vec![
+            Histogram {
+                count: Some(Count::CountInt(4)),
+                sum: 10.0,
+                schema: 1,
+                zero_threshold: 0.001,
+                zero_count: Some(ZeroCount::ZeroCountInt(1)),
+                negative_spans: vec![BucketSpan {
+                    offset: -2,
+                    length: 1,
+                }],
+                negative_deltas: vec![1],
+                positive_spans: vec![BucketSpan {
+                    offset: 0,
+                    length: 3,
+                }],
+                positive_deltas: vec![1, 2, -1],
+                reset_hint: 2,
+                timestamp: 3000,
+                start_timestamp: 1500,
+                custom_values: vec![0.5, 1.5],
+                ..Default::default()
+            },
+            Histogram {
+                count: Some(Count::CountFloat(3.5)),
+                sum: 20.0,
+                schema: 2,
+                zero_threshold: 0.002,
+                zero_count: Some(ZeroCount::ZeroCountFloat(0.5)),
+                positive_spans: vec![BucketSpan {
+                    offset: 3,
+                    length: 2,
+                }],
+                positive_counts: vec![2.0, 3.5],
+                reset_hint: 3,
+                timestamp: 4000,
+                start_timestamp: 2500,
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    });
     let serialized_request = write_request.encode_to_vec();
     let compressed_request =
         prom_store::snappy_compress(&serialized_request).expect("failed to encode snappy");
@@ -2380,13 +2757,37 @@ pub async fn test_prometheus_remote_write_v2(store_type: StorageType) {
         .await;
     assert_eq!(res.status(), StatusCode::NO_CONTENT);
     let headers = res.headers();
-    assert_remote_write_v2_written_headers(&headers, "0");
+    assert_remote_write_v2_written_headers_with_histograms(&headers, "1", "2");
     assert!(res.text().await.is_empty());
 
     validate_data(
-        "prometheus_remote_write_v2_histogram_only",
+        "prometheus_remote_write_v2_native_histogram_sample_rows",
         &client,
-        "select count(*) from information_schema.tables where table_name = 'remote_write_v2_histogram_only';",
+        "select greptime_timestamp, greptime_value, job, instance from remote_write_v2_sample_seconds order by greptime_timestamp;",
+        "[[2500,5.0,\"api\",\"localhost:9090\"]]",
+    )
+    .await;
+
+    validate_data(
+        "prometheus_remote_write_v2_native_histogram_rows",
+        &client,
+        "select greptime_timestamp, greptime_native_histogram, job, instance from remote_write_v2_latency_seconds order by greptime_timestamp;",
+        "[[3000,{\"count_f64\":null,\"count_u64\":4,\"custom_values\":[0.5,1.5],\"negative_buckets_f64\":[],\"negative_buckets_i64\":[1],\"negative_span_lengths\":[1],\"negative_span_offsets\":[-2],\"positive_buckets_f64\":[],\"positive_buckets_i64\":[1,3,2],\"positive_span_lengths\":[3],\"positive_span_offsets\":[0],\"reset_hint\":2,\"schema\":1,\"start_timestamp\":1500,\"sum\":10.0,\"zero_count_f64\":null,\"zero_count_u64\":1,\"zero_threshold\":0.001},\"api\",\"localhost:9090\"],[4000,{\"count_f64\":3.5,\"count_u64\":null,\"custom_values\":[],\"negative_buckets_f64\":[],\"negative_buckets_i64\":[],\"negative_span_lengths\":[],\"negative_span_offsets\":[],\"positive_buckets_f64\":[2.0,3.5],\"positive_buckets_i64\":[],\"positive_span_lengths\":[2],\"positive_span_offsets\":[3],\"reset_hint\":3,\"schema\":2,\"start_timestamp\":2500,\"sum\":20.0,\"zero_count_f64\":0.5,\"zero_count_u64\":null,\"zero_threshold\":0.002},\"api\",\"localhost:9090\"]]",
+    )
+    .await;
+
+    validate_data(
+        "prometheus_remote_write_v2_native_histogram_table_created",
+        &client,
+        "select count(*) from information_schema.tables where table_name = 'remote_write_v2_latency_seconds';",
+        "[[1]]",
+    )
+    .await;
+
+    validate_data(
+        "prometheus_remote_write_v2_native_histogram_suffix_table_not_created",
+        &client,
+        "select count(*) from information_schema.tables where table_name = 'remote_write_v2_latency_seconds_native_histogram';",
         "[[0]]",
     )
     .await;
@@ -6859,10 +7260,8 @@ pub async fn test_otlp_traces_v1(store_type: StorageType) {
         "unexpected error body: {body:?}"
     );
     assert!(
-        body.message.contains("Chunk fallback triggered by")
-            || body
-                .message
-                .contains("Discarded 2 spans after ambiguous chunk failure"),
+        body.message
+            .contains("Discarded 2 spans after pre-write request failure"),
         "unexpected error body: {body:?}"
     );
 
@@ -7673,14 +8072,16 @@ pub async fn test_log_query(store_type: StorageType) {
         .await;
     assert_eq!(res.status(), StatusCode::OK, "{:?}", res.text().await);
     let res = client
-        .post("/v1/sql?sql=insert into logs values ('2024-11-07 10:53:50', 'hello');")
+        .post(
+            "/v1/sql?sql=insert into logs values ('2024-11-06 23:59:59', 'before-date-end'), ('2024-11-07 10:53:50', 'before-explicit-end'), ('2024-11-07 10:53:51', 'at-explicit-end'), ('2024-11-07 10:53:52', 'after-explicit-end');",
+        )
         .header("Content-Type", "application/x-www-form-urlencoded")
         .send()
         .await;
     assert_eq!(res.status(), StatusCode::OK, "{:?}", res.text().await);
 
     // test log query
-    let log_query = LogQuery {
+    let mut log_query = LogQuery {
         table: TableName {
             catalog_name: "greptime".to_string(),
             schema_name: "public".to_string(),
@@ -7688,12 +8089,12 @@ pub async fn test_log_query(store_type: StorageType) {
         },
         time_filter: TimeFilter {
             start: Some("2024-11-07".to_string()),
-            end: None,
+            end: Some("2024-11-07T10:53:51Z".to_string()),
             span: None,
         },
         limit: Limit {
             skip: None,
-            fetch: Some(1),
+            fetch: Some(3),
         },
         columns: vec!["ts".to_string(), "message".to_string()],
         filters: Default::default(),
@@ -7710,7 +8111,114 @@ pub async fn test_log_query(store_type: StorageType) {
     assert_eq!(res.status(), StatusCode::OK, "{:?}", res.text().await);
     let resp = res.text().await;
     let v = get_rows_from_output(&resp);
-    assert_eq!(v, "[[1730976830000,\"hello\"]]");
+    assert_eq!(v, "[[1730976830000,\"before-explicit-end\"]]");
+
+    log_query.time_filter.start = Some("2024-11-06".to_string());
+    log_query.time_filter.end = Some("2024-11-07".to_string());
+    log_query.limit.fetch = Some(4);
+    let res = client
+        .post("/v1/logs")
+        .header("Content-Type", "application/json")
+        .body(serde_json::to_string(&log_query).unwrap())
+        .send()
+        .await;
+
+    assert_eq!(res.status(), StatusCode::OK, "{:?}", res.text().await);
+    let resp = res.text().await;
+    let output = serde_json::from_str::<Value>(&resp).unwrap();
+    let rows = output["output"][0]["records"]["rows"].as_array().unwrap();
+    let mut messages = rows
+        .iter()
+        .map(|row| row[1].as_str().unwrap())
+        .collect::<Vec<_>>();
+    messages.sort_unstable();
+    assert_eq!(
+        messages,
+        vec![
+            "after-explicit-end",
+            "at-explicit-end",
+            "before-date-end",
+            "before-explicit-end",
+        ]
+    );
+
+    let res = client
+        .get("/v1/sql?sql=create table logs_limit (`ts` timestamp time index, `message` string);")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK, "{:?}", res.text().await);
+    let res = client
+        .get("/v1/sql?sql=insert into logs_limit select number, 'hello' from numbers limit 1001;")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK, "{:?}", res.text().await);
+
+    let aggregate_query = LogQuery {
+        table: TableName::new("greptime", "public", "logs_limit"),
+        time_filter: TimeFilter {
+            start: Some("1970-01-01T00:00:00Z".to_string()),
+            end: Some("1970-01-01T00:00:02Z".to_string()),
+            span: None,
+        },
+        limit: Limit {
+            skip: None,
+            fetch: None,
+        },
+        columns: vec![],
+        filters: Default::default(),
+        context: Context::None,
+        exprs: vec![LogExpr::AggrFunc {
+            expr: vec![AggFunc::new(
+                "count".to_string(),
+                vec![LogExpr::NamedIdent("message".to_string())],
+                Some("count_result".to_string()),
+            )],
+            by: vec![],
+        }],
+    };
+    let res = client
+        .post("/v1/logs")
+        .header("Content-Type", "application/json")
+        .body(serde_json::to_string(&aggregate_query).unwrap())
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK, "{:?}", res.text().await);
+    assert_eq!(get_rows_from_output(&res.text().await), "[[1001]]");
+
+    let mut output_query = LogQuery {
+        table: TableName::new("greptime", "public", "logs_limit"),
+        time_filter: TimeFilter {
+            start: Some("1970-01-01T00:00:00Z".to_string()),
+            end: Some("1970-01-01T00:00:02Z".to_string()),
+            span: None,
+        },
+        limit: Limit {
+            skip: None,
+            fetch: None,
+        },
+        columns: vec!["ts".to_string(), "message".to_string()],
+        filters: Default::default(),
+        context: Context::None,
+        exprs: vec![],
+    };
+    let res = client
+        .post("/v1/logs")
+        .header("Content-Type", "application/json")
+        .body(serde_json::to_string(&output_query).unwrap())
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK, "{:?}", res.text().await);
+    assert_eq!(get_output_row_count(&res.text().await), 1000);
+
+    output_query.limit.fetch = Some(17);
+    let res = client
+        .post("/v1/logs")
+        .header("Content-Type", "application/json")
+        .body(serde_json::to_string(&output_query).unwrap())
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK, "{:?}", res.text().await);
+    assert_eq!(get_output_row_count(&res.text().await), 17);
 
     guard.remove_all().await;
 }
@@ -9492,6 +10000,18 @@ fn get_rows_from_output(output: &str) -> String {
         .and_then(|v| v.get("rows"))
         .unwrap()
         .to_string()
+}
+
+fn get_output_row_count(output: &str) -> usize {
+    let resp: Value = serde_json::from_str(output).unwrap();
+    resp.get("output")
+        .and_then(Value::as_array)
+        .and_then(|v| v.first())
+        .and_then(|v| v.get("records"))
+        .and_then(|v| v.get("rows"))
+        .and_then(Value::as_array)
+        .unwrap()
+        .len()
 }
 
 fn compress_vec_with_gzip(data: Vec<u8>) -> Vec<u8> {

@@ -53,7 +53,7 @@ pub struct Session {
 pub type SessionRef = Arc<Session>;
 
 /// A container for mutable items in query context
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct MutableInner {
     schema: String,
     user_info: UserInfoRef,

@@ -21,6 +21,7 @@ pub mod key_column_usage;
 mod partitions;
 mod procedure_info;
 pub mod process_list;
+mod recycle_bin;
 mod region_info;
 pub mod region_peers;
 mod region_statistics;
@@ -32,6 +33,9 @@ mod table_names;
 mod table_semantics;
 pub mod tables;
 mod views;
+
+#[cfg(test)]
+mod recycle_bin_test;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Weak};
@@ -47,6 +51,7 @@ use common_procedure::ProcedureInfo;
 use common_recordbatch::SendableRecordBatchStream;
 use datafusion::error::DataFusionError;
 use datafusion::logical_expr::LogicalPlan;
+use datafusion::physical_plan::ExecutionPlan;
 use datatypes::schema::SchemaRef;
 use lazy_static::lazy_static;
 use paste::paste;
@@ -73,6 +78,7 @@ use crate::system_schema::information_schema::flows::InformationSchemaFlows;
 use crate::system_schema::information_schema::information_memory_table::get_schema_columns;
 use crate::system_schema::information_schema::key_column_usage::InformationSchemaKeyColumnUsage;
 use crate::system_schema::information_schema::partitions::InformationSchemaPartitions;
+use crate::system_schema::information_schema::recycle_bin::InformationSchemaRecycleBin;
 use crate::system_schema::information_schema::region_peers::InformationSchemaRegionPeers;
 use crate::system_schema::information_schema::schemata::InformationSchemaSchemata;
 use crate::system_schema::information_schema::ssts::{
@@ -275,6 +281,10 @@ impl SystemSchemaProviderInner for InformationSchemaProvider {
                     self.catalog_manager.clone(),
                 )) as _,
             ),
+            RECYCLE_BIN => Some(Arc::new(InformationSchemaRecycleBin::new(
+                self.catalog_name.clone(),
+                self.catalog_manager.clone(),
+            )) as _),
             REGION_STATISTICS => Some(Arc::new(
                 region_statistics::InformationSchemaRegionStatistics::new(
                     self.catalog_manager.clone(),
@@ -435,6 +445,10 @@ pub trait InformationTable {
 
     fn to_stream(&self, request: ScanRequest) -> Result<SendableRecordBatchStream>;
 
+    fn scan_plan(&self, _request: ScanRequest) -> Result<Option<Arc<dyn ExecutionPlan>>> {
+        Ok(None)
+    }
+
     fn table_type(&self) -> TableType {
         TableType::Temporary
     }
@@ -464,6 +478,10 @@ where
     fn to_stream(&self, request: ScanRequest) -> Result<SendableRecordBatchStream> {
         InformationTable::to_stream(self, request)
     }
+
+    fn scan_plan(&self, request: ScanRequest) -> Result<Option<Arc<dyn ExecutionPlan>>> {
+        InformationTable::scan_plan(self, request)
+    }
 }
 
 pub type InformationExtensionRef = Arc<dyn InformationExtension<Error = Error> + Send + Sync>;
@@ -490,6 +508,16 @@ pub trait InformationExtension {
         &self,
         request: DatanodeInspectRequest,
     ) -> std::result::Result<SendableRecordBatchStream, Self::Error>;
+
+    /// Builds a physical plan for datanode inspect if the extension can expose
+    /// the distributed fan-in semantics to DataFusion.
+    fn inspect_datanode_plan(
+        &self,
+        _request: DatanodeInspectRequest,
+        _schema: SchemaRef,
+    ) -> std::result::Result<Option<Arc<dyn ExecutionPlan>>, Self::Error> {
+        Ok(None)
+    }
 }
 
 /// The request to inspect the datanode.

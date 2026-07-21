@@ -234,18 +234,21 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
     #[snafu(display("Invalid fulltext option: {}", msg))]
     InvalidFulltextOption {
         msg: String,
         #[snafu(implicit)]
         location: Location,
     },
+
     #[snafu(display("Invalid skipping index option: {}", msg))]
     InvalidSkippingIndexOption {
         msg: String,
         #[snafu(implicit)]
         location: Location,
     },
+
     #[snafu(display("Inconsistent struct field count {field_len} and item count {item_len}"))]
     InconsistentStructFieldsAndItems {
         field_len: usize,
@@ -253,16 +256,10 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
     #[snafu(display("Failed to process JSONB value"))]
     InvalidJsonb {
         error: jsonb::Error,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
-    #[snafu(display("Failed to merge JSON datatype: {reason}"))]
-    MergeJsonDatatype {
-        reason: String,
         #[snafu(implicit)]
         location: Location,
     },
@@ -294,6 +291,13 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("unexpected: {reason}"))]
+    Unexpected {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 impl ErrorExt for Error {
@@ -317,8 +321,7 @@ impl ErrorExt for Error {
             | InvalidJsonb { .. }
             | InvalidVector { .. }
             | InvalidFulltextOption { .. }
-            | InvalidSkippingIndexOption { .. }
-            | MergeJsonDatatype { .. } => StatusCode::InvalidArguments,
+            | InvalidSkippingIndexOption { .. } => StatusCode::InvalidArguments,
 
             ValueExceedsPrecision { .. }
             | CastType { .. }
@@ -340,6 +343,8 @@ impl ErrorExt for Error {
             | ArrowMetadata { .. }
             | AlignJsonValue { .. }
             | AlignJsonArray { .. } => StatusCode::Internal,
+
+            Unexpected { .. } => StatusCode::Unexpected,
         }
     }
 

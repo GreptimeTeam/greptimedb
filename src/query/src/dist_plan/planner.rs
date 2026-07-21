@@ -17,6 +17,7 @@
 use std::sync::Arc;
 
 use ahash::HashMap;
+use arrow_schema::SortOptions;
 use async_trait::async_trait;
 use catalog::CatalogManagerRef;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
@@ -29,6 +30,7 @@ use datafusion::physical_planner::{ExtensionPlanner, PhysicalPlanner};
 use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion, TreeNodeVisitor};
 use datafusion_common::{DataFusionError, TableReference};
 use datafusion_expr::{LogicalPlan, UserDefinedLogicalNode};
+use datafusion_physical_expr::{LexOrdering, PhysicalSortExpr};
 use partition::manager::{PartitionRuleManagerRef, create_partitions_from_region_routes};
 use session::context::QueryContext;
 use snafu::{OptionExt, ResultExt};
@@ -39,27 +41,54 @@ use table::table_name::TableName;
 
 use crate::dist_plan::PredicateExtractor;
 use crate::dist_plan::merge_scan::{MergeScanExec, MergeScanLogicalPlan};
-use crate::dist_plan::merge_sort::MergeSortLogicalPlan;
+use crate::dist_plan::merge_sort::{MergeSortExec, MergeSortLogicalPlan};
 use crate::dist_plan::region_pruner::ConstraintPruner;
 use crate::error::{CatalogSnafu, PartitionRuleManagerSnafu, TableNotFoundSnafu};
 use crate::region_query::RegionQueryHandlerRef;
 
-/// Planner for convert merge sort logical plan to physical plan
+/// Planner for converting merge sort logical plan to physical plan.
 ///
-/// it is currently a fallback to sort, and doesn't change the execution plan:
-/// `MergeSort(MergeScan) -> Sort(MergeScan) - to physical plan -> ...`
-/// It should be applied after `DistExtensionPlanner`
-///
-/// (Later when actually impl this merge sort)
-///
-/// We should ensure the number of partition is not smaller than the number of region at present. Otherwise this would result in incorrect output.
+/// `MergeSortExec` always represents the distributed merge stage. It declares
+/// the required input ordering to DataFusion, so `EnforceSorting` inserts a
+/// `SortExec` below it when the input `MergeScanExec` cannot preserve per-region
+/// ordering, for example when one output partition may merge multiple region
+/// streams.
 pub struct MergeSortExtensionPlanner {}
+
+impl MergeSortExtensionPlanner {
+    fn ordering(
+        session_state: &SessionState,
+        merge_sort: &MergeSortLogicalPlan,
+    ) -> Result<LexOrdering> {
+        let ordering = merge_sort
+            .expr
+            .iter()
+            .map(|sort_expr| {
+                let physical_expr = session_state
+                    .create_physical_expr(sort_expr.expr.clone(), merge_sort.input.schema())?;
+                Ok(PhysicalSortExpr::new(
+                    physical_expr,
+                    SortOptions {
+                        descending: !sort_expr.asc,
+                        nulls_first: sort_expr.nulls_first,
+                    },
+                ))
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        LexOrdering::new(ordering).ok_or_else(|| {
+            DataFusionError::Internal(
+                "Expect MergeSort to have non-empty sort expressions".to_string(),
+            )
+        })
+    }
+}
 
 #[async_trait]
 impl ExtensionPlanner for MergeSortExtensionPlanner {
     async fn plan_extension(
         &self,
-        planner: &dyn PhysicalPlanner,
+        _planner: &dyn PhysicalPlanner,
         node: &dyn UserDefinedLogicalNode,
         _logical_inputs: &[&LogicalPlan],
         physical_inputs: &[Arc<dyn ExecutionPlan>],
@@ -73,28 +102,24 @@ impl ExtensionPlanner for MergeSortExtensionPlanner {
                     .downcast_ref::<MergeScanLogicalPlan>()
                     .is_some()
             {
-                let merge_scan_exec = physical_inputs
-                    .first()
-                    .and_then(|p| p.as_any().downcast_ref::<MergeScanExec>())
-                    .ok_or(DataFusionError::Internal(format!(
+                let input = physical_inputs.first().cloned().ok_or_else(|| {
+                    DataFusionError::Internal(
+                        "Expect MergeSort to have one physical input".to_string(),
+                    )
+                })?;
+                if input.as_any().downcast_ref::<MergeScanExec>().is_none() {
+                    return Err(DataFusionError::Internal(format!(
                         "Expect MergeSort's input is a MergeScanExec, found {:?}",
                         physical_inputs
-                    )))?;
-
-                let partition_cnt = merge_scan_exec.partition_count();
-                let region_cnt = merge_scan_exec.region_count();
-                // if partition >= region, we know that every partition stream of merge scan is ordered
-                // and we only need to do a merge sort, otherwise fallback to quick sort
-                let can_merge_sort = partition_cnt >= region_cnt;
-                if can_merge_sort {
-                    // TODO(discord9): use `SortPreservingMergeExec here`
+                    )));
                 }
-                // for now merge sort only exist in logical plan, and have the same effect as `Sort`
-                // doesn't change the execution plan, this will change in the future
-                let ret = planner
-                    .create_physical_plan(&merge_sort.clone().into_sort(), session_state)
-                    .await?;
-                Ok(Some(ret))
+
+                let ordering = Self::ordering(session_state, merge_sort)?;
+                Ok(Some(Arc::new(MergeSortExec::new(
+                    ordering,
+                    input,
+                    merge_sort.fetch,
+                ))))
             } else {
                 Ok(None)
             }

@@ -77,12 +77,18 @@ change-coupling points, and gotchas:
 2. `make clippy`
 3. `make test` (or `cargo nextest run`)
 4. `make check-udeps` (run `make fix-udeps` if it reports unused dependencies).
-5. If you changed sample config under `config/`, run `make config-docs` (needs
-   Docker) and commit the regenerated `config/config.md`.
+5. If you added or changed a public configuration option, update the applicable
+   example TOMLs, configuration-loading and serialized-config snapshot tests,
+   and related user-facing documentation. Run `make config-docs` (needs Docker)
+   and commit the regenerated `config/config.md`.
 6. If you changed a persisted or wire format, add a compatibility test case (see
    `.agents/architecture-invariants.md`).
 7. Use a conventional-commit title, sign off commits (`git commit -s`), and sign
    the CLA.
+8. When creating or updating a pull request, follow
+   [`.github/pull_request_template.md`](.github/pull_request_template.md): include
+   the CLA statement, fill the change-intention section with enough detail, and
+   update checklist items accurately.
 
 ## More
 

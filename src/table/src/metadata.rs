@@ -29,7 +29,8 @@ use serde::{Deserialize, Deserializer, Serialize};
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::metric_engine_consts::PHYSICAL_TABLE_METADATA_KEY;
 use store_api::mito_engine_options::{
-    APPEND_MODE_KEY, COMPACTION_TYPE, COMPACTION_TYPE_TWCS, MERGE_MODE_KEY, SST_FORMAT_KEY,
+    APPEND_MODE_KEY, AUTO_FLUSH_INTERVAL_KEY, COMPACTION_TYPE, COMPACTION_TYPE_TWCS,
+    MERGE_MODE_KEY, SST_FORMAT_KEY,
 };
 use store_api::region_request::{SetRegionOption, UnsetRegionOption};
 use store_api::storage::{ColumnDescriptor, ColumnDescriptorBuilder, ColumnId};
@@ -349,6 +350,9 @@ impl TableMeta {
 
         for request in requests {
             match request {
+                SetRegionOption::WriteBufferSize(new_write_buffer_size) => {
+                    new_options.write_buffer_size = *new_write_buffer_size;
+                }
                 SetRegionOption::Ttl(new_ttl) => {
                     new_options.ttl = *new_ttl;
                 }
@@ -376,6 +380,16 @@ impl TableMeta {
                         .insert(APPEND_MODE_KEY.to_string(), value.to_string());
                     if *value {
                         new_options.extra_options.remove(MERGE_MODE_KEY);
+                    }
+                }
+                SetRegionOption::AutoFlushInterval(new_interval) => {
+                    if let Some(interval) = new_interval {
+                        new_options.extra_options.insert(
+                            AUTO_FLUSH_INTERVAL_KEY.to_string(),
+                            humantime::format_duration(*interval).to_string(),
+                        );
+                    } else {
+                        new_options.extra_options.remove(AUTO_FLUSH_INTERVAL_KEY);
                     }
                 }
             }
@@ -1869,6 +1883,73 @@ mod tests {
             !table_info
                 .to_region_options()
                 .contains_key(REPARTITION_COLUMN_HINT_KEY)
+        );
+    }
+
+    #[test]
+    fn test_set_auto_flush_interval() {
+        let schema = Arc::new(new_test_schema());
+        let table_options = TableOptions::default();
+        let meta = TableMetaBuilder::empty()
+            .schema(schema)
+            .primary_key_indices(vec![0])
+            .engine("engine")
+            .next_column_id(3)
+            .options(table_options)
+            .build()
+            .unwrap();
+
+        let alter_kind = AlterKind::SetTableOptions {
+            options: vec![SetRegionOption::AutoFlushInterval(Some(
+                std::time::Duration::from_secs(300),
+            ))],
+        };
+        let new_meta = meta
+            .builder_with_alter_kind("my_table", &alter_kind)
+            .unwrap()
+            .build()
+            .unwrap();
+
+        assert_eq!(
+            Some("5m"),
+            new_meta
+                .options
+                .extra_options
+                .get(AUTO_FLUSH_INTERVAL_KEY)
+                .map(String::as_str)
+        );
+    }
+
+    #[test]
+    fn test_set_auto_flush_interval_none_removes_existing() {
+        let schema = Arc::new(new_test_schema());
+        let mut table_options = TableOptions::default();
+        table_options
+            .extra_options
+            .insert(AUTO_FLUSH_INTERVAL_KEY.to_string(), "5m".to_string());
+        let meta = TableMetaBuilder::empty()
+            .schema(schema)
+            .primary_key_indices(vec![0])
+            .engine("engine")
+            .next_column_id(3)
+            .options(table_options)
+            .build()
+            .unwrap();
+
+        let alter_kind = AlterKind::SetTableOptions {
+            options: vec![SetRegionOption::AutoFlushInterval(None)],
+        };
+        let new_meta = meta
+            .builder_with_alter_kind("my_table", &alter_kind)
+            .unwrap()
+            .build()
+            .unwrap();
+
+        assert!(
+            !new_meta
+                .options
+                .extra_options
+                .contains_key(AUTO_FLUSH_INTERVAL_KEY)
         );
     }
 

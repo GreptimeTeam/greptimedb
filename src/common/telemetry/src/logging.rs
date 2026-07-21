@@ -237,7 +237,7 @@ enum TraceState {
 }
 
 /// The logging options that used to initialize the logger.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LoggingOptions {
     /// The directory to store log files. If not set, logs will be written to stdout.
@@ -340,20 +340,6 @@ pub enum LogFormat {
     #[default]
     Text,
 }
-
-impl PartialEq for LoggingOptions {
-    fn eq(&self, other: &Self) -> bool {
-        self.dir == other.dir
-            && self.level == other.level
-            && self.enable_otlp_tracing == other.enable_otlp_tracing
-            && self.otlp_endpoint == other.otlp_endpoint
-            && self.tracing_sample_ratio == other.tracing_sample_ratio
-            && self.append_stdout == other.append_stdout
-            && self.enable_per_region_metrics == other.enable_per_region_metrics
-    }
-}
-
-impl Eq for LoggingOptions {}
 
 #[derive(Clone, Debug)]
 struct TraceContext {
@@ -873,5 +859,28 @@ mod tests {
         let http_json = r#""http""#;
         let protocol: OtlpExportProtocol = serde_json::from_str(http_json).unwrap();
         assert_eq!(protocol, OtlpExportProtocol::Http);
+    }
+
+    #[test]
+    fn test_logging_options_partial_eq_all_fields() {
+        let base = LoggingOptions::default();
+
+        let mut log_format = base.clone();
+        log_format.log_format = LogFormat::Json;
+        assert_ne!(base, log_format);
+
+        let mut max_log_files = base.clone();
+        max_log_files.max_log_files += 1;
+        assert_ne!(base, max_log_files);
+
+        let mut otlp_export_protocol = base.clone();
+        otlp_export_protocol.otlp_export_protocol = Some(OtlpExportProtocol::Http);
+        assert_ne!(base, otlp_export_protocol);
+
+        let mut otlp_headers = base.clone();
+        otlp_headers
+            .otlp_headers
+            .insert("key".to_string(), "value".to_string());
+        assert_ne!(base, otlp_headers);
     }
 }

@@ -46,13 +46,14 @@ use tokio::sync::{RwLock, oneshot};
 use crate::batching_mode::BatchingModeOptions;
 use crate::batching_mode::eval_schedule::EvalSchedule;
 use crate::batching_mode::frontend_client::FrontendClient;
+use crate::batching_mode::state::DirtyTimeWindows;
 use crate::batching_mode::task::{BatchingTask, TaskArgs};
 use crate::batching_mode::time_window::{TimeWindowExpr, find_time_window_expr};
 use crate::batching_mode::utils::sql_to_df_plan;
 use crate::engine::{FlowEngine, FlowStatProvider};
 use crate::error::{
     CreateFlowSnafu, DatafusionSnafu, ExternalSnafu, FlowAlreadyExistSnafu, FlowNotFoundSnafu,
-    InvalidQuerySnafu, TableNotFoundMetaSnafu, UnexpectedSnafu, UnsupportedSnafu,
+    InvalidQuerySnafu, JoinTaskSnafu, TableNotFoundMetaSnafu, UnexpectedSnafu, UnsupportedSnafu,
 };
 use crate::metrics::METRIC_FLOW_BATCHING_ENGINE_BULK_MARK_TIME_WINDOW;
 use crate::{CreateFlowArgs, Error, FlowId, TableName};
@@ -151,17 +152,24 @@ impl BatchingEngine {
             .collect()
     }
 
+    /// Mark dirty time windows for batching flows.
+    ///
+    /// Both `timestamps` and `time_ranges` (`[start_inclusive, end_exclusive)`)
+    /// in each `DirtyWindowRequest` are bare `i64`s interpreted in the source
+    /// table's time index column native unit, resolved via table metadata.
     pub async fn handle_mark_dirty_time_window(
         &self,
         reqs: DirtyWindowRequests,
     ) -> Result<(), Error> {
         let table_info_mgr = self.table_meta.table_info_manager();
 
-        let mut group_by_table_id: HashMap<u32, Vec<_>> = HashMap::new();
+        let mut group_by_table_id: HashMap<u32, (Vec<i64>, Vec<api::v1::flow::TimeRange>)> =
+            HashMap::new();
         for r in reqs.requests {
             let tid = TableId::from(r.table_id);
             let entry = group_by_table_id.entry(tid).or_default();
-            entry.extend(r.timestamps);
+            entry.0.extend(r.timestamps);
+            entry.1.extend(r.time_ranges);
         }
         let tids = group_by_table_id.keys().cloned().collect::<Vec<TableId>>();
         let table_infos =
@@ -174,7 +182,7 @@ impl BatchingEngine {
 
         let group_by_table_name = group_by_table_id
             .into_iter()
-            .filter_map(|(id, timestamps)| {
+            .filter_map(|(id, (timestamps, time_ranges))| {
                 let table_name = table_infos.get(&id).map(|info| info.table_name());
                 let Some(table_name) = table_name else {
                     warn!("Failed to get table infos for table id: {:?}", id);
@@ -191,7 +199,7 @@ impl BatchingEngine {
                     .as_timestamp()
                     .unwrap()
                     .unit();
-                Some((table_name, (timestamps, time_index_unit)))
+                Some((table_name, (timestamps, time_ranges, time_index_unit)))
             })
             .collect::<HashMap<_, _>>();
 
@@ -219,13 +227,15 @@ impl BatchingEngine {
 
             let group_by_table_name = group_by_table_name.clone();
             let task = task.clone();
-
             let handle: JoinHandle<Result<(), Error>> = tokio::spawn(async move {
                 let src_table_names = &task.config.source_table_names;
                 let mut all_dirty_windows = HashSet::new();
+                let mut all_dirty_ranges = Vec::new();
                 let mut is_dirty = false;
                 for src_table_name in src_table_names {
-                    if let Some((timestamps, unit)) = group_by_table_name.get(src_table_name) {
+                    if let Some((timestamps, time_ranges, unit)) =
+                        group_by_table_name.get(src_table_name)
+                    {
                         let Some(expr) = &task.config.time_window_expr else {
                             is_dirty = true;
                             continue;
@@ -235,9 +245,26 @@ impl BatchingEngine {
                                 .eval(common_time::Timestamp::new(*timestamp, *unit))?
                                 .0
                                 .context(UnexpectedSnafu {
-                                    reason: "Failed to eval start value",
+                                    reason: format!(
+                                        "Failed to align dirty timestamp {timestamp}: missing window lower bound"
+                                    ),
                                 })?;
                             all_dirty_windows.insert(align_start);
+                        }
+                        for time_range in time_ranges {
+                            if time_range.end_exclusive <= time_range.start_inclusive {
+                                warn!(
+                                    "Ignoring invalid dirty time range with start_inclusive={} >= end_exclusive={}",
+                                    time_range.start_inclusive, time_range.end_exclusive
+                                );
+                                continue;
+                            }
+                            let (align_start, align_end) = DirtyTimeWindows::align_time_window(
+                                common_time::Timestamp::new(time_range.start_inclusive, *unit),
+                                Some(common_time::Timestamp::new(time_range.end_exclusive, *unit)),
+                                expr,
+                            )?;
+                            all_dirty_ranges.push((align_start, align_end));
                         }
                     }
                 }
@@ -249,6 +276,9 @@ impl BatchingEngine {
                 for timestamp in all_dirty_windows {
                     state.dirty_time_windows.add_window(timestamp, None);
                 }
+                for (start, end) in all_dirty_ranges {
+                    state.dirty_time_windows.add_window(start, end);
+                }
 
                 METRIC_FLOW_BATCHING_ENGINE_BULK_MARK_TIME_WINDOW
                     .with_label_values(&[&flow_id_label])
@@ -258,15 +288,7 @@ impl BatchingEngine {
             handles.push(handle);
         }
         for handle in handles {
-            match handle.await {
-                Err(e) => {
-                    warn!("Failed to handle inserts: {e}");
-                }
-                Ok(Ok(())) => (),
-                Ok(Err(e)) => {
-                    warn!("Failed to handle inserts: {e}");
-                }
-            }
+            handle.await.context(JoinTaskSnafu)??;
         }
 
         Ok(())
@@ -1017,10 +1039,14 @@ impl FlowEngine for BatchingEngine {
 
 #[cfg(test)]
 mod tests {
+    use api::v1::flow::{DirtyWindowRequest, TimeRange};
     use catalog::memory::new_memory_catalog_manager;
     use common_meta::key::TableMetadataManager;
     use common_meta::key::flow::FlowMetadataManager;
+    use common_meta::key::table_route::TableRouteValue;
+    use common_meta::key::test_utils::new_test_table_info_with_name;
     use common_meta::kv_backend::memory::MemoryKvBackend;
+    use common_time::timestamp::TimeUnit;
     use query::options::QueryOptions;
     use session::context::QueryContext;
 
@@ -1184,6 +1210,89 @@ GROUP BY l.number, time_window
     }
 
     async fn new_test_task(flow_id: FlowId) -> (BatchingTask, oneshot::Sender<()>) {
+        new_test_task_for_source(flow_id, "numbers_with_ts", None).await
+    }
+
+    async fn new_test_task_with_time_window_expr(
+        flow_id: FlowId,
+        time_window_expr: Option<TimeWindowExpr>,
+    ) -> (BatchingTask, oneshot::Sender<()>) {
+        new_test_task_for_source(flow_id, "numbers_with_ts", time_window_expr).await
+    }
+
+    fn test_table_info_with_ts_unit(
+        table_id: TableId,
+        table_name: &str,
+        unit: TimeUnit,
+    ) -> table::metadata::TableInfo {
+        use datatypes::schema::{ColumnSchema, SchemaBuilder};
+        use table::metadata::{TableInfoBuilder, TableMetaBuilder};
+
+        let ts_type = match unit {
+            TimeUnit::Second => ConcreteDataType::timestamp_second_datatype(),
+            TimeUnit::Millisecond => ConcreteDataType::timestamp_millisecond_datatype(),
+            TimeUnit::Microsecond => ConcreteDataType::timestamp_microsecond_datatype(),
+            TimeUnit::Nanosecond => ConcreteDataType::timestamp_nanosecond_datatype(),
+        };
+        let column_schemas = vec![
+            ColumnSchema::new("col1", ConcreteDataType::int32_datatype(), true),
+            ColumnSchema::new("ts", ts_type, false).with_time_index(true),
+        ];
+        let schema = SchemaBuilder::try_from(column_schemas)
+            .unwrap()
+            .build()
+            .unwrap();
+        let meta = TableMetaBuilder::empty()
+            .schema(Arc::new(schema))
+            .primary_key_indices(vec![0])
+            .engine("engine")
+            .next_column_id(3)
+            .build()
+            .unwrap();
+        TableInfoBuilder::default()
+            .table_id(table_id)
+            .table_version(0)
+            .name(table_name)
+            .catalog_name("greptime")
+            .schema_name("public")
+            .meta(meta)
+            .build()
+            .unwrap()
+    }
+
+    /// A 5-second `date_bin` time window expr over the test table's `ts` column.
+    async fn test_time_window_expr() -> TimeWindowExpr {
+        let query_engine = create_test_query_engine();
+        let ctx = QueryContext::arc();
+        let plan = sql_to_df_plan(
+            ctx.clone(),
+            query_engine.clone(),
+            "SELECT date_bin(INTERVAL '5 second', ts) AS time_window FROM numbers_with_ts GROUP BY time_window",
+            true,
+        )
+        .await
+        .unwrap();
+        let (column_name, time_window_expr, _, df_schema) = find_time_window_expr(
+            &plan,
+            query_engine.engine_state().catalog_manager().clone(),
+            ctx,
+        )
+        .await
+        .unwrap();
+        TimeWindowExpr::from_expr(
+            &time_window_expr.unwrap(),
+            &column_name,
+            &df_schema,
+            &query_engine.engine_state().session_state(),
+        )
+        .unwrap()
+    }
+
+    async fn new_test_task_for_source(
+        flow_id: FlowId,
+        source_table_name: &str,
+        time_window_expr: Option<TimeWindowExpr>,
+    ) -> (BatchingTask, oneshot::Sender<()>) {
         let query_engine = create_test_query_engine();
         let ctx = QueryContext::arc();
         let plan = sql_to_df_plan(
@@ -1200,7 +1309,7 @@ GROUP BY l.number, time_window
             flow_id,
             query: "SELECT number, ts FROM numbers_with_ts",
             plan,
-            time_window_expr: None,
+            time_window_expr,
             expire_after: None,
             sink_table_name: [
                 "greptime".to_string(),
@@ -1210,7 +1319,7 @@ GROUP BY l.number, time_window
             source_table_names: vec![[
                 "greptime".to_string(),
                 "public".to_string(),
-                "numbers_with_ts".to_string(),
+                source_table_name.to_string(),
             ]],
             query_ctx: ctx,
             catalog_manager: query_engine.engine_state().catalog_manager().clone(),
@@ -1222,6 +1331,182 @@ GROUP BY l.number, time_window
         .unwrap();
 
         (task, tx)
+    }
+
+    #[tokio::test]
+    async fn test_handle_mark_dirty_time_window_with_time_ranges() {
+        let engine = new_test_engine().await;
+
+        // Register the source table info so the engine can resolve the table
+        // name and the time index unit (millisecond).
+        let mut table_info = new_test_table_info_with_name(1, "numbers_with_ts");
+        table_info.catalog_name = "greptime".to_string();
+        table_info.schema_name = "public".to_string();
+        engine
+            .table_meta
+            .create_table_metadata(
+                table_info,
+                TableRouteValue::physical(vec![]),
+                HashMap::new(),
+            )
+            .await
+            .unwrap();
+
+        // Build a task with a 5-second time window expr.
+        let (task, shutdown_tx) =
+            new_test_task_with_time_window_expr(1, Some(test_time_window_expr().await)).await;
+        let task_identity = task.clone();
+        engine.runtime.write().await.insert(1, task, shutdown_tx);
+
+        engine
+            .handle_mark_dirty_time_window(DirtyWindowRequests {
+                requests: vec![DirtyWindowRequest {
+                    table_id: 1,
+                    timestamps: vec![],
+                    time_ranges: vec![
+                        // [3s, 11s) aligns to window start 0s and window end 15s.
+                        TimeRange {
+                            start_inclusive: 3_000,
+                            end_exclusive: 11_000,
+                        },
+                        // Empty and reversed ranges are invalid and skipped.
+                        TimeRange {
+                            start_inclusive: 5_000,
+                            end_exclusive: 5_000,
+                        },
+                        TimeRange {
+                            start_inclusive: 9_000,
+                            end_exclusive: 4_000,
+                        },
+                    ],
+                }],
+            })
+            .await
+            .unwrap();
+
+        let state = task_identity.state.read().unwrap();
+        assert_eq!(1, state.dirty_time_windows.len());
+        assert_eq!(
+            Duration::from_secs(15),
+            state.dirty_time_windows.window_size()
+        );
+    }
+
+    /// Dirty timestamps and time ranges are interpreted in the source table's
+    /// time index native unit. The same physical range [3s, 11s) expressed in
+    /// second/millisecond/microsecond/nanosecond units must align to the same
+    /// dirty window [0s, 15s).
+    #[tokio::test]
+    async fn test_handle_mark_dirty_time_window_time_index_units() {
+        let engine = new_test_engine().await;
+
+        let cases = [
+            (TimeUnit::Second, 1u32, "t_sec", 3i64, 11i64),
+            (TimeUnit::Millisecond, 2, "t_ms", 3_000, 11_000),
+            (TimeUnit::Microsecond, 3, "t_us", 3_000_000, 11_000_000),
+            (
+                TimeUnit::Nanosecond,
+                4,
+                "t_ns",
+                3_000_000_000,
+                11_000_000_000,
+            ),
+        ];
+
+        let mut task_identities = vec![];
+        let mut requests = vec![];
+        for (unit, table_id, table_name, start_inclusive, end_exclusive) in cases {
+            engine
+                .table_meta
+                .create_table_metadata(
+                    test_table_info_with_ts_unit(table_id, table_name, unit),
+                    TableRouteValue::physical(vec![]),
+                    HashMap::new(),
+                )
+                .await
+                .unwrap();
+
+            let (task, shutdown_tx) = new_test_task_for_source(
+                table_id as FlowId,
+                table_name,
+                Some(test_time_window_expr().await),
+            )
+            .await;
+            task_identities.push((table_id, task.clone()));
+            engine
+                .runtime
+                .write()
+                .await
+                .insert(table_id as FlowId, task, shutdown_tx);
+
+            requests.push(DirtyWindowRequest {
+                table_id,
+                timestamps: vec![],
+                time_ranges: vec![TimeRange {
+                    start_inclusive,
+                    end_exclusive,
+                }],
+            });
+        }
+
+        engine
+            .handle_mark_dirty_time_window(DirtyWindowRequests { requests })
+            .await
+            .unwrap();
+
+        for (table_id, task) in task_identities {
+            let state = task.state.read().unwrap();
+            assert_eq!(1, state.dirty_time_windows.len(), "table id = {table_id}");
+            assert_eq!(
+                Duration::from_secs(15),
+                state.dirty_time_windows.window_size(),
+                "table id = {table_id}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_handle_mark_dirty_time_window_returns_error_on_alignment_failure() {
+        let engine = new_test_engine().await;
+        let table_id = 10;
+        let table_name = "t_bad_timestamp";
+
+        engine
+            .table_meta
+            .create_table_metadata(
+                test_table_info_with_ts_unit(table_id, table_name, TimeUnit::Second),
+                TableRouteValue::physical(vec![]),
+                HashMap::new(),
+            )
+            .await
+            .unwrap();
+
+        let (task, shutdown_tx) = new_test_task_for_source(
+            table_id as FlowId,
+            table_name,
+            Some(test_time_window_expr().await),
+        )
+        .await;
+        engine
+            .runtime
+            .write()
+            .await
+            .insert(table_id as FlowId, task, shutdown_tx);
+
+        let result = engine
+            .handle_mark_dirty_time_window(DirtyWindowRequests {
+                requests: vec![DirtyWindowRequest {
+                    table_id,
+                    timestamps: vec![i64::MAX],
+                    time_ranges: vec![],
+                }],
+            })
+            .await;
+
+        assert!(
+            result.is_err(),
+            "invalid timestamp alignment should be returned to the caller"
+        );
     }
 
     async fn install_abort_observed_handle(task: &BatchingTask) -> oneshot::Receiver<()> {

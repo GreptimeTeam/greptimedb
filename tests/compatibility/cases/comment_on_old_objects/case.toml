@@ -1,0 +1,8 @@
+name = "comment_on_old_objects"
+reason = "Verify COMMENT ON metadata can be applied after upgrade to tables, columns, and flows created by old binaries."
+introduced_by = "PR #8390"
+topologies = ["distributed"]
+from_range = ["*"]
+to_range = [">v1.1.1"]
+features = ["ddl", "flow", "information_schema", "metadata", "table"]
+owner = "flow"

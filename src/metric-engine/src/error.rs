@@ -43,6 +43,14 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to clean up mito region, region type: {}", region_type))]
+    CleanUpMitoRegion {
+        region_type: String,
+        source: BoxedError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to batch open mito region"))]
     BatchOpenMitoRegion {
         source: BoxedError,
@@ -438,6 +446,7 @@ impl ErrorExt for Error {
 
             CreateMitoRegion { source, .. }
             | OpenMitoRegion { source, .. }
+            | CleanUpMitoRegion { source, .. }
             | CloseMitoRegion { source, .. }
             | MitoReadOperation { source, .. }
             | MitoWriteOperation { source, .. }
@@ -471,6 +480,7 @@ impl ErrorExt for Error {
         match self {
             CreateMitoRegion { source, .. }
             | OpenMitoRegion { source, .. }
+            | CleanUpMitoRegion { source, .. }
             | BatchOpenMitoRegion { source, .. }
             | BatchCatchupMitoRegion { source, .. }
             | CloseMitoRegion { source, .. }

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
@@ -392,6 +392,7 @@ impl StatementExecutor {
                 .collect_metadata(&object_store, format.clone(), path.to_string())
                 .await?;
 
+            validate_csv_headers_if_required(&file_metadata, &table_schema)?;
             let schema_mapping = copy_from_schema_mapping(&file_metadata, &table_schema);
             let projected_file_schema = Arc::new(
                 file_metadata
@@ -640,6 +641,62 @@ fn ensure_schema_compatible(from: &SchemaRef, to: &SchemaRef) -> Result<()> {
     } else {
         Ok(())
     }
+}
+
+fn validate_csv_headers_if_required(file_metadata: &FileMetadata, table: &SchemaRef) -> Result<()> {
+    let FileMetadata::Csv {
+        schema,
+        format,
+        path,
+    } = file_metadata
+    else {
+        return Ok(());
+    };
+
+    if !format.strict_headers {
+        return Ok(());
+    }
+
+    let mut seen_file_columns = HashSet::with_capacity(schema.fields().len());
+    let duplicate_columns = schema
+        .fields()
+        .iter()
+        .filter_map(|field| {
+            if seen_file_columns.insert(field.name().clone()) {
+                None
+            } else {
+                Some(field.name().clone())
+            }
+        })
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let file_columns = seen_file_columns.into_iter().collect::<BTreeSet<_>>();
+    let table_columns = table
+        .fields()
+        .iter()
+        .map(|field| field.name().clone())
+        .collect::<BTreeSet<_>>();
+    let unknown_columns = file_columns
+        .difference(&table_columns)
+        .cloned()
+        .collect::<Vec<_>>();
+    let missing_columns = table_columns
+        .difference(&file_columns)
+        .cloned()
+        .collect::<Vec<_>>();
+
+    ensure!(
+        unknown_columns.is_empty() && missing_columns.is_empty() && duplicate_columns.is_empty(),
+        error::CsvHeaderMismatchSnafu {
+            path,
+            unknown_columns,
+            missing_columns,
+            duplicate_columns,
+        }
+    );
+
+    Ok(())
 }
 
 /// Generates a maybe compatible schema of the file schema.
@@ -998,10 +1055,129 @@ mod tests {
         }
     }
 
+    fn make_strict_csv_metadata(schema: Arc<Schema>) -> FileMetadata {
+        FileMetadata::Csv {
+            schema,
+            format: CsvFormat {
+                strict_headers: true,
+                ..CsvFormat::default()
+            },
+            path: "test.csv".to_string(),
+        }
+    }
+
     fn assert_field(schema: &Schema, idx: usize, name: &str, data_type: &DataType) {
         let field = schema.field(idx);
         assert_eq!(field.name(), name);
         assert_eq!(field.data_type(), data_type);
+    }
+
+    #[test]
+    fn test_strict_csv_headers_allows_reordered_columns() {
+        let file_schema = make_test_schema(&[
+            Field::new("ts", DataType::Utf8, true),
+            Field::new("host_id", DataType::UInt8, true),
+            Field::new("reading_value", DataType::Float64, true),
+        ]);
+        let table_schema = make_test_schema(&[
+            Field::new("host_id", DataType::UInt32, true),
+            Field::new("reading_value", DataType::Float64, true),
+            Field::new("ts", DataType::Utf8, true),
+        ]);
+
+        validate_csv_headers_if_required(&make_strict_csv_metadata(file_schema), &table_schema)
+            .unwrap();
+    }
+
+    #[test]
+    fn test_strict_csv_headers_rejects_unknown_columns() {
+        let file_schema = make_test_schema(&[
+            Field::new("host_id", DataType::UInt8, true),
+            Field::new("reading_value", DataType::Float64, true),
+            Field::new("ts", DataType::Utf8, true),
+            Field::new("extra", DataType::Utf8, true),
+        ]);
+        let table_schema = make_test_schema(&[
+            Field::new("host_id", DataType::UInt32, true),
+            Field::new("reading_value", DataType::Float64, true),
+            Field::new("ts", DataType::Utf8, true),
+        ]);
+
+        let err =
+            validate_csv_headers_if_required(&make_strict_csv_metadata(file_schema), &table_schema)
+                .unwrap_err();
+
+        assert!(matches!(
+            err,
+            error::Error::CsvHeaderMismatch {
+                unknown_columns,
+                missing_columns,
+                duplicate_columns,
+                ..
+            } if unknown_columns == vec!["extra".to_string()]
+                && missing_columns.is_empty()
+                && duplicate_columns.is_empty()
+        ));
+    }
+
+    #[test]
+    fn test_strict_csv_headers_rejects_missing_columns() {
+        let file_schema = make_test_schema(&[
+            Field::new("host_id", DataType::UInt8, true),
+            Field::new("ts", DataType::Utf8, true),
+        ]);
+        let table_schema = make_test_schema(&[
+            Field::new("host_id", DataType::UInt32, true),
+            Field::new("reading_value", DataType::Float64, true),
+            Field::new("ts", DataType::Utf8, true),
+        ]);
+
+        let err =
+            validate_csv_headers_if_required(&make_strict_csv_metadata(file_schema), &table_schema)
+                .unwrap_err();
+
+        assert!(matches!(
+            err,
+            error::Error::CsvHeaderMismatch {
+                unknown_columns,
+                missing_columns,
+                duplicate_columns,
+                ..
+            } if unknown_columns.is_empty()
+                && missing_columns == vec!["reading_value".to_string()]
+                && duplicate_columns.is_empty()
+        ));
+    }
+
+    #[test]
+    fn test_strict_csv_headers_rejects_duplicate_columns() {
+        let file_schema = make_test_schema(&[
+            Field::new("host_id", DataType::UInt8, true),
+            Field::new("reading_value", DataType::Float64, true),
+            Field::new("ts", DataType::Utf8, true),
+            Field::new("host_id", DataType::UInt16, true),
+        ]);
+        let table_schema = make_test_schema(&[
+            Field::new("host_id", DataType::UInt32, true),
+            Field::new("reading_value", DataType::Float64, true),
+            Field::new("ts", DataType::Utf8, true),
+        ]);
+
+        let err =
+            validate_csv_headers_if_required(&make_strict_csv_metadata(file_schema), &table_schema)
+                .unwrap_err();
+
+        assert!(matches!(
+            err,
+            error::Error::CsvHeaderMismatch {
+                unknown_columns,
+                missing_columns,
+                duplicate_columns,
+                ..
+            } if unknown_columns.is_empty()
+                && missing_columns.is_empty()
+                && duplicate_columns == vec!["host_id".to_string()]
+        ));
     }
 
     #[test]

@@ -16,9 +16,13 @@ use std::{fs, path};
 
 use common_telemetry::info;
 use opendal::layers::HttpClientLayer;
+#[cfg(feature = "mysql-object-store")]
+use opendal::services::Mysql;
 use opendal::services::{Fs, Gcs, Oss, S3};
 use snafu::prelude::*;
 
+#[cfg(feature = "mysql-object-store")]
+use crate::config::MysqlConfig;
 use crate::config::{AzblobConfig, FileConfig, GcsConfig, ObjectStoreConfig, OssConfig, S3Config};
 use crate::error::{self, Result};
 use crate::services::Azblob;
@@ -36,7 +40,26 @@ pub async fn new_raw_object_store(
         ObjectStoreConfig::Oss(oss_config) => new_oss_object_store(oss_config).await,
         ObjectStoreConfig::Azblob(azblob_config) => new_azblob_object_store(azblob_config).await,
         ObjectStoreConfig::Gcs(gcs_config) => new_gcs_object_store(gcs_config).await,
+        #[cfg(feature = "mysql-object-store")]
+        ObjectStoreConfig::Mysql(mysql_config) => new_mysql_object_store(mysql_config).await,
     }
+}
+
+#[cfg(feature = "mysql-object-store")]
+pub async fn new_mysql_object_store(mysql_config: &MysqlConfig) -> Result<ObjectStore> {
+    let root = util::normalize_dir(&mysql_config.root);
+    info!(
+        "The mysql object storage table is: {}, root is: {}",
+        mysql_config.table.as_deref().unwrap_or("greptime"),
+        root
+    );
+
+    let builder = Mysql::from(mysql_config);
+    let operator = ObjectStore::new(builder)
+        .context(error::InitBackendSnafu)?
+        .finish();
+
+    Ok(operator)
 }
 
 /// A helper function to create a file system object store.

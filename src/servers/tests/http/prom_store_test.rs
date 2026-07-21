@@ -28,7 +28,8 @@ use async_trait::async_trait;
 use axum::Router;
 use axum::http::HeaderMap;
 use common_query::Output;
-use common_query::prelude::{greptime_timestamp, greptime_value};
+use common_query::native_histogram::NATIVE_HISTOGRAM_FIELD;
+use common_query::prelude::{GREPTIME_PHYSICAL_TABLE, greptime_timestamp, greptime_value};
 use common_test_util::ports;
 use datafusion_expr::LogicalPlan;
 use prost::Message;
@@ -62,16 +63,21 @@ struct DummyInstance {
 struct RemoteWriteCapture {
     schema: String,
     physical_table: Option<String>,
+    with_metric_engine: bool,
     request: RowInsertRequests,
 }
 
 #[async_trait]
 impl PromStoreProtocolHandler for DummyInstance {
-    async fn write(
+    async fn pre_write(&self, _request: &RowInsertRequests, _ctx: QueryContextRef) -> Result<()> {
+        Ok(())
+    }
+
+    async fn write_prepared(
         &self,
         request: RowInsertRequests,
         ctx: QueryContextRef,
-        _with_metric_engine: bool,
+        with_metric_engine: bool,
     ) -> Result<Output> {
         let write_call = self.write_calls.fetch_add(1, Ordering::SeqCst) + 1;
         if self.fail_write_call == Some(write_call) {
@@ -86,11 +92,38 @@ impl PromStoreProtocolHandler for DummyInstance {
             .send(RemoteWriteCapture {
                 schema: ctx.current_schema(),
                 physical_table: ctx.extension(PHYSICAL_TABLE_PARAM).map(ToString::to_string),
+                with_metric_engine,
                 request,
             })
             .await;
 
         Ok(Output::new_with_affected_rows(0))
+    }
+
+    async fn write(
+        &self,
+        request: RowInsertRequests,
+        ctx: QueryContextRef,
+        with_metric_engine: bool,
+    ) -> Result<Output> {
+        self.write_prepared(request, ctx, with_metric_engine).await
+    }
+
+    async fn write_all(
+        &self,
+        requests: Vec<(QueryContextRef, RowInsertRequests)>,
+        with_metric_engine: bool,
+    ) -> Result<Vec<Result<Output>>> {
+        let mut outputs = Vec::with_capacity(requests.len());
+        for (ctx, request) in requests {
+            let output = self.write_prepared(request, ctx, with_metric_engine).await;
+            let failed = output.is_err();
+            outputs.push(output);
+            if failed {
+                break;
+            }
+        }
+        Ok(outputs)
     }
 
     async fn read(&self, request: ReadRequest, ctx: QueryContextRef) -> Result<PromStoreResponse> {
@@ -166,13 +199,38 @@ fn make_test_app_with_write_capture(
     make_test_app_with_write_failure(read_tx, write_tx, None)
 }
 
+fn make_test_app_with_native_histogram_write_capture(
+    read_tx: mpsc::Sender<(String, Vec<u8>)>,
+    write_tx: mpsc::Sender<RemoteWriteCapture>,
+) -> Router {
+    make_test_app_with_write_failure_inner(read_tx, write_tx, None, true)
+}
+
 fn make_test_app_with_write_failure(
     read_tx: mpsc::Sender<(String, Vec<u8>)>,
     write_tx: mpsc::Sender<RemoteWriteCapture>,
     fail_write_call: Option<usize>,
 ) -> Router {
+    make_test_app_with_write_failure_inner(read_tx, write_tx, fail_write_call, false)
+}
+
+fn make_test_app_with_native_histogram_write_failure(
+    read_tx: mpsc::Sender<(String, Vec<u8>)>,
+    write_tx: mpsc::Sender<RemoteWriteCapture>,
+    fail_write_call: Option<usize>,
+) -> Router {
+    make_test_app_with_write_failure_inner(read_tx, write_tx, fail_write_call, true)
+}
+
+fn make_test_app_with_write_failure_inner(
+    read_tx: mpsc::Sender<(String, Vec<u8>)>,
+    write_tx: mpsc::Sender<RemoteWriteCapture>,
+    fail_write_call: Option<usize>,
+    experimental_enable_prometheus_native_histogram: bool,
+) -> Router {
     let http_opts = HttpOptions {
         addr: format!("127.0.0.1:{}", ports::get_port()),
+        experimental_enable_prometheus_native_histogram,
         ..Default::default()
     };
 
@@ -323,6 +381,59 @@ async fn test_prometheus_remote_write_v2_write_error_has_partial_written_headers
             .unwrap()
             .rows
             .len()
+    );
+    assert!(write_rx.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn test_prometheus_remote_write_v2_histogram_write_error_has_partial_written_headers() {
+    common_telemetry::init_default_ut_logging();
+    let (read_tx, _read_rx) = mpsc::channel(100);
+    let (write_tx, mut write_rx) = mpsc::channel(100);
+
+    let app = make_test_app_with_native_histogram_write_failure(read_tx, write_tx, Some(2));
+    let client = TestClient::new(app).await;
+
+    let mut write_request = remote_write_v2::request_with_labels_and_samples(
+        vec![(prom_store::METRIC_NAME_LABEL, "http_requests_total")],
+        vec![RemoteWriteV2Sample {
+            value: 42.0,
+            timestamp: 1000,
+            start_timestamp: 0,
+        }],
+    );
+    let metric_name_ref = write_request
+        .symbols
+        .iter()
+        .position(|symbol| symbol == prom_store::METRIC_NAME_LABEL)
+        .unwrap() as u32;
+    let histogram_metric_ref = write_request.symbols.len() as u32;
+    write_request
+        .symbols
+        .push("http_request_duration_seconds".to_string());
+    write_request.timeseries.push(RemoteWriteV2TimeSeries {
+        labels_refs: vec![metric_name_ref, histogram_metric_ref],
+        histograms: vec![remote_write_v2::histogram(1000)],
+        ..Default::default()
+    });
+
+    let result = post_remote_write_v2(&client, &write_request).await;
+
+    assert_eq!(result.status(), 400);
+    assert_remote_write_v2_written_headers_with_histograms(&result.headers(), "1", "0");
+    assert!(
+        result
+            .text()
+            .await
+            .contains("injected prometheus remote write failure")
+    );
+
+    let captured = write_rx.recv().await.unwrap();
+    assert!(captured.with_metric_engine);
+    assert_eq!(1, captured.request.inserts.len());
+    assert_eq!(
+        "http_requests_total",
+        captured.request.inserts[0].table_name
     );
     assert!(write_rx.try_recv().is_err());
 }
@@ -528,7 +639,50 @@ async fn test_prometheus_remote_write_v2_samples() {
 }
 
 #[tokio::test]
-async fn test_prometheus_remote_write_v2_ignores_histogram_only_series() {
+async fn test_prometheus_remote_write_v2_writes_histogram_only_series() {
+    common_telemetry::init_default_ut_logging();
+    let (read_tx, _read_rx) = mpsc::channel(100);
+    let (write_tx, mut write_rx) = mpsc::channel(100);
+
+    let app = make_test_app_with_native_histogram_write_capture(read_tx, write_tx);
+    let client = TestClient::new(app).await;
+
+    let write_request = remote_write_v2::request_with_labels_and_histograms(
+        vec![(
+            prom_store::METRIC_NAME_LABEL,
+            "http_request_duration_seconds",
+        )],
+        vec![remote_write_v2::histogram(1000)],
+    );
+
+    let result = post_remote_write_v2(&client, &write_request).await;
+
+    assert_eq!(result.status(), 204);
+    assert_remote_write_v2_written_headers_with_histograms(&result.headers(), "0", "1");
+    assert!(result.text().await.is_empty());
+
+    let captured = write_rx.recv().await.unwrap();
+    assert!(captured.with_metric_engine);
+    assert_eq!(
+        Some(GREPTIME_PHYSICAL_TABLE.to_string()),
+        captured.physical_table
+    );
+    assert_eq!(1, captured.request.inserts.len());
+    let insert = &captured.request.inserts[0];
+    assert_eq!("http_request_duration_seconds", insert.table_name);
+    let rows = insert.rows.as_ref().unwrap();
+    assert_eq!(1, rows.rows.len());
+    assert!(
+        rows.schema
+            .iter()
+            .any(|column| column.column_name == NATIVE_HISTOGRAM_FIELD
+                && column.datatype == ColumnDataType::Struct as i32)
+    );
+    assert!(write_rx.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn test_prometheus_remote_write_v2_rejects_native_histogram_when_disabled() {
     common_telemetry::init_default_ut_logging();
     let (read_tx, _read_rx) = mpsc::channel(100);
     let (write_tx, mut write_rx) = mpsc::channel(100);
@@ -546,9 +700,14 @@ async fn test_prometheus_remote_write_v2_ignores_histogram_only_series() {
 
     let result = post_remote_write_v2(&client, &write_request).await;
 
-    assert_eq!(result.status(), 204);
-    assert_remote_write_v2_written_headers(&result.headers(), "0");
-    assert!(result.text().await.is_empty());
+    assert_eq!(result.status(), 400);
+    assert_remote_write_v2_written_headers_with_histograms(&result.headers(), "0", "0");
+    assert!(
+        result
+            .text()
+            .await
+            .contains("native histogram ingestion is experimental")
+    );
     assert!(write_rx.try_recv().is_err());
 }
 
@@ -606,6 +765,14 @@ async fn test_prometheus_remote_write_v2_rejects_unsupported_content_encoding() 
 }
 
 fn assert_remote_write_v2_written_headers(headers: &HeaderMap, samples: &str) {
+    assert_remote_write_v2_written_headers_with_histograms(headers, samples, "0")
+}
+
+fn assert_remote_write_v2_written_headers_with_histograms(
+    headers: &HeaderMap,
+    samples: &str,
+    histograms: &str,
+) {
     assert_eq!(
         Some(samples),
         headers
@@ -613,7 +780,7 @@ fn assert_remote_write_v2_written_headers(headers: &HeaderMap, samples: &str) {
             .map(|x| x.to_str().unwrap())
     );
     assert_eq!(
-        Some("0"),
+        Some(histograms),
         headers
             .get("X-Prometheus-Remote-Write-Histograms-Written")
             .map(|x| x.to_str().unwrap())

@@ -30,6 +30,7 @@ use store_api::storage::RegionId;
 use table::requests::{
     BuildIndexTableRequest, CompactTableRequest, DeleteRequest, FlushTableRequest, InsertRequest,
 };
+use table::table_name::TableName;
 
 /// A trait for handling table mutations in `QueryEngine`.
 #[async_trait]
@@ -73,6 +74,9 @@ pub trait TableMutationHandler: Send + Sync {
 /// A trait for handling procedure service requests in `QueryEngine`.
 #[async_trait]
 pub trait ProcedureServiceHandler: Send + Sync {
+    /// Permanently purge a dropped table.
+    async fn purge_table(&self, table_name: TableName, query_ctx: QueryContextRef) -> Result<()>;
+
     /// Migrate a region from source peer to target peer, returns the procedure id if success.
     async fn migrate_region(&self, request: MigrateRegionRequest) -> Result<Option<String>>;
 

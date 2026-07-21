@@ -34,19 +34,20 @@ use common_base::regex_pattern::NAME_PATTERN_REG;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, is_readonly_schema};
 use common_catalog::{format_full_flow_name, format_full_table_name};
 use common_error::ext::BoxedError;
-use common_meta::cache_invalidator::Context;
+use common_meta::cache_invalidator::{CacheInvalidatorRef, Context};
 use common_meta::ddl::create_flow::{
     DEFER_ON_MISSING_SOURCE_KEY, FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY, FlowType,
 };
 use common_meta::instruction::CacheIdent;
+use common_meta::key::TableMetadataManagerRef;
 use common_meta::key::schema_name::{SchemaName, SchemaNameKey};
-use common_meta::procedure_executor::ExecutorContext;
+use common_meta::procedure_executor::{ExecutorContext, ProcedureExecutorRef};
 #[cfg(feature = "enterprise")]
 use common_meta::rpc::ddl::trigger::CreateTriggerTask;
 #[cfg(feature = "enterprise")]
 use common_meta::rpc::ddl::trigger::DropTriggerTask;
 use common_meta::rpc::ddl::{
-    CreateFlowTask, DdlTask, DropFlowTask, DropViewTask, SubmitDdlTaskRequest,
+    CreateFlowTask, CreatorGrantIntent, DdlTask, DropFlowTask, DropViewTask, SubmitDdlTaskRequest,
     SubmitDdlTaskResponse,
 };
 use common_query::Output;
@@ -84,6 +85,7 @@ use sql::statements::create::{
 use sql::statements::statement::Statement;
 use sqlparser::ast::{Expr, Ident, UnaryOperator, Value as ParserValue};
 use store_api::metric_engine_consts::{LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME};
+use store_api::mito_engine_options::APPEND_MODE_KEY;
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use table::TableRef;
 use table::dist_table::DistTable;
@@ -1402,6 +1404,22 @@ impl StatementExecutor {
     }
 
     #[tracing::instrument(skip_all)]
+    pub async fn undrop_table(
+        &self,
+        table_name: TableName,
+        query_context: QueryContextRef,
+    ) -> Result<Output> {
+        execute_undrop_table(
+            &self.table_metadata_manager,
+            &self.procedure_executor,
+            &self.cache_invalidator,
+            table_name,
+            query_context,
+        )
+        .await
+    }
+
+    #[tracing::instrument(skip_all)]
     pub async fn drop_database(
         &self,
         catalog: String,
@@ -2120,7 +2138,15 @@ impl StatementExecutor {
             }
         );
 
-        if !self
+        #[cfg(feature = "enterprise")]
+        let creator = match &self.create_database_handler {
+            Some(handler) => handler.creator(&query_context).context(ExternalSnafu)?,
+            None => None,
+        };
+        #[cfg(not(feature = "enterprise"))]
+        let creator = None;
+
+        let output = if !self
             .catalog_manager
             .schema_exists(catalog, database, None)
             .await
@@ -2132,16 +2158,27 @@ impl StatementExecutor {
                 database.to_string(),
                 create_if_not_exists,
                 options,
-                query_context,
+                query_context.clone(),
+                creator,
             )
             .await?;
 
-            Ok(Output::new_with_affected_rows(1))
+            Output::new_with_affected_rows(1)
         } else if create_if_not_exists {
-            Ok(Output::new_with_affected_rows(1))
+            Output::new_with_affected_rows(1)
         } else {
-            error::SchemaExistsSnafu { name: database }.fail()
+            return error::SchemaExistsSnafu { name: database }.fail();
+        };
+
+        #[cfg(feature = "enterprise")]
+        if let Some(handler) = &self.create_database_handler {
+            handler
+                .refresh_current_user(&query_context)
+                .await
+                .context(ExternalSnafu)?;
         }
+
+        Ok(output)
     }
 
     async fn create_database_procedure(
@@ -2151,10 +2188,11 @@ impl StatementExecutor {
         create_if_not_exists: bool,
         options: HashMap<String, String>,
         query_context: QueryContextRef,
+        creator: Option<CreatorGrantIntent>,
     ) -> Result<SubmitDdlTaskResponse> {
         let request = SubmitDdlTaskRequest::new(
             to_meta_query_context(query_context),
-            DdlTask::new_create_database(catalog, database, create_if_not_exists, options),
+            DdlTask::new_create_database(catalog, database, create_if_not_exists, options, creator),
         );
 
         self.procedure_executor
@@ -2273,12 +2311,14 @@ pub fn verify_alter(
         }
     }
 
-    let _ = table_info
+    let new_meta = table_info
         .meta
         .builder_with_alter_kind(table_name, &request.alter_kind)
         .context(error::TableSnafu)?
         .build()
         .context(error::BuildTableMetaSnafu { table_name })?;
+
+    validate_json2_columns_append_mode(&new_meta.schema, &new_meta.options)?;
 
     Ok(true)
 }
@@ -2328,6 +2368,8 @@ pub fn create_table_info(
     let mut table_options = TableOptions::try_from_iter(&create_table.table_options)
         .context(UnrecognizedTableOptionSnafu)?;
 
+    validate_json2_columns_append_mode(&schema, &table_options)?;
+
     validate_repartition_column_hint(
         &mut table_options,
         &column_name_to_index_map,
@@ -2368,6 +2410,33 @@ pub fn create_table_info(
         table_type: TableType::Base,
     };
     Ok(table_info)
+}
+
+fn validate_json2_columns_append_mode(schema: &Schema, table_options: &TableOptions) -> Result<()> {
+    let append_mode = table_options
+        .extra_options
+        .get(APPEND_MODE_KEY)
+        .is_some_and(|value| value == "true");
+
+    for column in schema.column_schemas() {
+        if column
+            .data_type
+            .as_json()
+            .is_some_and(|json_type| json_type.is_json2())
+        {
+            ensure!(
+                append_mode,
+                InvalidSqlSnafu {
+                    err_msg: format!(
+                        "JSON2 column `{}` requires {}='true'",
+                        column.name, APPEND_MODE_KEY
+                    ),
+                }
+            );
+        }
+    }
+
+    Ok(())
 }
 
 fn validate_repartition_column_hint(
@@ -2638,10 +2707,75 @@ fn convert_value(
     .context(error::SqlCommonSnafu)
 }
 
+async fn execute_undrop_table(
+    table_metadata_manager: &TableMetadataManagerRef,
+    procedure_executor: &ProcedureExecutorRef,
+    cache_invalidator: &CacheInvalidatorRef,
+    table_name: TableName,
+    query_context: QueryContextRef,
+) -> Result<Output> {
+    ensure!(
+        !is_readonly_schema(&table_name.schema_name),
+        SchemaReadOnlySnafu {
+            name: table_name.schema_name.clone()
+        }
+    );
+
+    let dropped = table_metadata_manager
+        .get_dropped_table(&table_name)
+        .await
+        .context(TableMetadataManagerSnafu)?
+        .with_context(|| TableNotFoundSnafu {
+            table_name: table_name.to_string(),
+        })?;
+
+    let request = SubmitDdlTaskRequest::new(
+        to_meta_query_context(query_context),
+        DdlTask::new_undrop_table(dropped.table_id),
+    );
+    procedure_executor
+        .submit_ddl_task(&ExecutorContext::default(), request)
+        .await
+        .context(error::ExecuteDdlSnafu)?;
+
+    if let Err(err) = cache_invalidator
+        .invalidate(
+            &Context::default(),
+            &[
+                CacheIdent::TableId(dropped.table_id),
+                CacheIdent::TableName(table_name),
+            ],
+        )
+        .await
+    {
+        warn!(
+            "Failed to invalidate cache after restoring table '{}' (id={}): {}",
+            dropped.table_name, dropped.table_id, err
+        );
+    }
+
+    Ok(Output::new_with_affected_rows(0))
+}
+
 #[cfg(test)]
 mod test {
+    use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
+    use api::v1::meta::{ProcedureDetailResponse, ReconcileRequest, ReconcileResponse};
+    use common_meta::cache_invalidator::{CacheInvalidator, CacheInvalidatorRef};
+    use common_meta::instruction::CacheIdent;
+    use common_meta::key::table_route::TableRouteValue;
+    use common_meta::key::test_utils::new_test_table_info_with_name;
+    use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
+    use common_meta::kv_backend::memory::MemoryKvBackend;
+    use common_meta::procedure_executor::{
+        ExecutorContext, ProcedureExecutor, ProcedureExecutorRef,
+    };
+    use common_meta::rpc::ddl::{DdlTask, SubmitDdlTaskRequest, SubmitDdlTaskResponse};
+    use common_meta::rpc::procedure::{
+        MigrateRegionRequest, MigrateRegionResponse, ProcedureStateResponse,
+    };
     use session::context::{QueryContext, QueryContextBuilder};
     use sql::dialect::GreptimeDbDialect;
     use sql::parser::{ParseOptions, ParserContext};
@@ -2650,6 +2784,203 @@ mod test {
 
     use super::*;
     use crate::expr_helper;
+
+    #[derive(Default)]
+    struct RecordingProcedureExecutor {
+        requests: Mutex<Vec<SubmitDdlTaskRequest>>,
+        fail: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl ProcedureExecutor for RecordingProcedureExecutor {
+        async fn submit_ddl_task(
+            &self,
+            _ctx: &ExecutorContext,
+            request: SubmitDdlTaskRequest,
+        ) -> common_meta::error::Result<SubmitDdlTaskResponse> {
+            self.requests.lock().unwrap().push(request);
+            if self.fail {
+                return common_meta::error::UnsupportedSnafu {
+                    operation: "test submit failure",
+                }
+                .fail();
+            }
+            Ok(SubmitDdlTaskResponse::default())
+        }
+
+        async fn migrate_region(
+            &self,
+            _: &ExecutorContext,
+            _: MigrateRegionRequest,
+        ) -> common_meta::error::Result<MigrateRegionResponse> {
+            unimplemented!()
+        }
+        async fn reconcile(
+            &self,
+            _: &ExecutorContext,
+            _: ReconcileRequest,
+        ) -> common_meta::error::Result<ReconcileResponse> {
+            unimplemented!()
+        }
+        async fn query_procedure_state(
+            &self,
+            _: &ExecutorContext,
+            _: &str,
+        ) -> common_meta::error::Result<ProcedureStateResponse> {
+            unimplemented!()
+        }
+        async fn list_procedures(
+            &self,
+            _: &ExecutorContext,
+        ) -> common_meta::error::Result<ProcedureDetailResponse> {
+            unimplemented!()
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingCacheInvalidator {
+        invalidations: Mutex<Vec<Vec<CacheIdent>>>,
+        fail: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl CacheInvalidator for RecordingCacheInvalidator {
+        async fn invalidate(
+            &self,
+            _: &Context,
+            caches: &[CacheIdent],
+        ) -> common_meta::error::Result<()> {
+            self.invalidations.lock().unwrap().push(caches.to_vec());
+            if self.fail {
+                return common_meta::error::UnsupportedSnafu {
+                    operation: "test cache failure",
+                }
+                .fail();
+            }
+            Ok(())
+        }
+
+        fn invalidate_all(&self) -> common_meta::error::Result<()> {
+            Ok(())
+        }
+    }
+
+    async fn dropped_table_manager(table_id: TableId, name: &TableName) -> TableMetadataManagerRef {
+        let backend = Arc::new(MemoryKvBackend::default());
+        let manager = Arc::new(TableMetadataManager::new(backend));
+        let mut info = new_test_table_info_with_name(table_id, &name.table_name);
+        info.catalog_name = name.catalog_name.clone();
+        info.schema_name = name.schema_name.clone();
+        let route = TableRouteValue::physical(vec![]);
+        manager
+            .create_table_metadata(info, route.clone(), HashMap::new())
+            .await
+            .unwrap();
+        manager
+            .delete_table_metadata(table_id, name, &route, &HashMap::new(), None)
+            .await
+            .unwrap();
+        manager
+    }
+
+    #[tokio::test]
+    async fn test_undrop_table_execution_path() {
+        let name = TableName::new("greptime", "public", "metrics");
+        let manager = dropped_table_manager(42, &name).await;
+        // A same-name live table must not redirect restoration to its ID.
+        let mut live = new_test_table_info_with_name(99, "metrics");
+        live.catalog_name = "greptime".to_string();
+        live.schema_name = "public".to_string();
+        manager
+            .create_table_metadata(live, TableRouteValue::physical(vec![]), HashMap::new())
+            .await
+            .unwrap();
+        let procedure = Arc::new(RecordingProcedureExecutor::default());
+        let cache = Arc::new(RecordingCacheInvalidator::default());
+
+        execute_undrop_table(
+            &manager,
+            &(procedure.clone() as ProcedureExecutorRef),
+            &(cache.clone() as CacheInvalidatorRef),
+            name.clone(),
+            QueryContext::arc(),
+        )
+        .await
+        .unwrap();
+
+        let requests = procedure.requests.lock().unwrap();
+        assert!(matches!(&requests[0].task, DdlTask::UndropTable(task) if task.table_id == 42));
+        assert_eq!(
+            cache.invalidations.lock().unwrap()[0],
+            vec![CacheIdent::TableId(42), CacheIdent::TableName(name)]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_undrop_table_missing_tombstone_submits_nothing() {
+        let manager = Arc::new(TableMetadataManager::new(Arc::new(
+            MemoryKvBackend::default(),
+        )));
+        let procedure = Arc::new(RecordingProcedureExecutor::default());
+        let cache = Arc::new(RecordingCacheInvalidator::default());
+        let err = execute_undrop_table(
+            &manager,
+            &(procedure.clone() as ProcedureExecutorRef),
+            &(cache as CacheInvalidatorRef),
+            TableName::new("greptime", "public", "missing"),
+            QueryContext::arc(),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, crate::error::Error::TableNotFound { .. }));
+        assert!(procedure.requests.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_undrop_table_submit_failure_does_not_invalidate() {
+        let name = TableName::new("greptime", "public", "metrics");
+        let manager = dropped_table_manager(42, &name).await;
+        let procedure = Arc::new(RecordingProcedureExecutor {
+            fail: true,
+            ..Default::default()
+        });
+        let cache = Arc::new(RecordingCacheInvalidator::default());
+        execute_undrop_table(
+            &manager,
+            &(procedure as ProcedureExecutorRef),
+            &(cache.clone() as CacheInvalidatorRef),
+            name,
+            QueryContext::arc(),
+        )
+        .await
+        .unwrap_err();
+        assert!(cache.invalidations.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_undrop_table_cache_failure_returns_success_after_submit() {
+        let name = TableName::new("greptime", "public", "metrics");
+        let manager = dropped_table_manager(42, &name).await;
+        let procedure = Arc::new(RecordingProcedureExecutor::default());
+        let cache = Arc::new(RecordingCacheInvalidator {
+            fail: true,
+            ..Default::default()
+        });
+        execute_undrop_table(
+            &manager,
+            &(procedure.clone() as ProcedureExecutorRef),
+            &(cache.clone() as CacheInvalidatorRef),
+            name.clone(),
+            QueryContext::arc(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(procedure.requests.lock().unwrap().len(), 1);
+        assert_eq!(
+            cache.invalidations.lock().unwrap()[0],
+            vec![CacheIdent::TableId(42), CacheIdent::TableName(name)]
+        );
+    }
 
     #[test]
     fn test_parse_ddl_options() {
@@ -2991,6 +3322,29 @@ WITH ('repartition.column.hint' = ' host ')",
                 .get(REPARTITION_COLUMN_HINT_KEY),
             Some(&"host".to_string())
         );
+    }
+
+    #[test]
+    fn test_json2_requires_append_mode() {
+        let cases = [
+            "CREATE TABLE monitor (payload JSON2, ts TIMESTAMP TIME INDEX);",
+            "CREATE TABLE monitor (payload JSON2, ts TIMESTAMP TIME INDEX) WITH (append_mode='false');",
+        ];
+
+        for sql in cases {
+            let expr = create_expr_from_sql(sql);
+            let err = create_table_info(&expr, vec![]).unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains("JSON2 column `payload` requires append_mode='true'"),
+                "{err}"
+            );
+        }
+
+        let expr = create_expr_from_sql(
+            "CREATE TABLE monitor (payload JSON2, ts TIMESTAMP TIME INDEX) WITH (append_mode='true');",
+        );
+        create_table_info(&expr, vec![]).unwrap();
     }
 
     #[test]

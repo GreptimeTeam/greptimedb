@@ -77,6 +77,7 @@ async fn test_concurrent_table_processing_limits() {
 
     let scheduler = GcScheduler {
         ctx: ctx.clone(),
+        runtime_switch_manager: crate::gc::scheduler::new_test_runtime_switch_manager(),
         receiver: GcScheduler::channel().1,
         config,
         region_gc_tracker: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
@@ -159,6 +160,7 @@ async fn test_datanode_processes_tables_with_partial_gc_failures() {
 
     let scheduler = GcScheduler {
         ctx: ctx.clone(),
+        runtime_switch_manager: crate::gc::scheduler::new_test_runtime_switch_manager(),
         receiver: GcScheduler::channel().1,
         config: GcSchedulerOptions::default(),
         region_gc_tracker: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
@@ -269,6 +271,7 @@ async fn test_region_gc_concurrency_limit() {
 
     let scheduler = GcScheduler {
         ctx: ctx.clone(),
+        runtime_switch_manager: crate::gc::scheduler::new_test_runtime_switch_manager(),
         receiver: GcScheduler::channel().1,
         config,
         region_gc_tracker: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
@@ -381,6 +384,7 @@ async fn test_region_gc_concurrency_with_partial_failures() {
 
     let scheduler = GcScheduler {
         ctx: ctx.clone(),
+        runtime_switch_manager: crate::gc::scheduler::new_test_runtime_switch_manager(),
         receiver: GcScheduler::channel().1,
         config,
         region_gc_tracker: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
@@ -520,6 +524,7 @@ async fn test_region_gc_concurrency_with_retryable_errors() {
 
     let scheduler = GcScheduler {
         ctx: ctx.clone(),
+        runtime_switch_manager: crate::gc::scheduler::new_test_runtime_switch_manager(),
         receiver: GcScheduler::channel().1,
         config,
         region_gc_tracker: Arc::new(tokio::sync::Mutex::new(HashMap::new())),

@@ -90,6 +90,12 @@ pub async fn put(
     ctx.set_channel(Channel::Opentsdb);
     let ctx = Arc::new(ctx);
 
+    if summary || details {
+        opentsdb_handler
+            .preflight(&data_points, ctx.clone())
+            .await?;
+    }
+
     let response = if !summary && !details {
         if let Err(e) = opentsdb_handler.exec(data_points, ctx.clone()).await {
             // Not debugging purpose, failed fast.

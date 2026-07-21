@@ -58,6 +58,13 @@ warmup = 0
 iterations = 1
 ```
 
+`series_layout = "round_robin"` advances the timestamp once per generated row and
+cycles series labels across rows. `series_layout = "timestamp_major"` writes all
+series for one timestamp before advancing to the next timestamp; use it for
+Prometheus-like high-cardinality scrape fixtures where short query windows should
+still contain many raw samples. `timestamp_major` requires `rows_per_sst` to be
+divisible by `series_count`.
+
 `[scenario]` is required. Other scenario variants are intentionally unsupported
 for now, but `scenario.kind` leaves room for future `write_then_query` and
 `cache_warm_query` configuration.

@@ -33,6 +33,8 @@ use operator::flow::FlowServiceOperator;
 use operator::insert::Inserter;
 use operator::procedure::ProcedureServiceOperator;
 use operator::request::Requester;
+#[cfg(feature = "enterprise")]
+use operator::statement::CreateDatabaseHandlerRef;
 use operator::statement::{
     ExecutorConfigureContext, StatementExecutor, StatementExecutorConfiguratorRef,
     StatementExecutorRef,
@@ -45,7 +47,7 @@ use query::QueryEngineFactory;
 use query::region_query::RegionQueryHandlerFactoryRef;
 use snafu::{OptionExt, ResultExt};
 
-use crate::error::{self, ExternalSnafu, Result};
+use crate::error::{self, DataFusionSnafu, ExternalSnafu, Result};
 use crate::events::EventHandlerImpl;
 use crate::frontend::FrontendOptions;
 use crate::heartbeat::frontend_peer_addr;
@@ -231,9 +233,11 @@ impl FrontendBuilder {
             requester,
         ));
 
+        let table_metadata_manager = Arc::new(TableMetadataManager::new(kv_backend.clone()));
         let procedure_service_handler = Arc::new(ProcedureServiceOperator::new(
             self.procedure_executor.clone(),
             self.catalog_manager.clone(),
+            table_metadata_manager.clone(),
         ));
 
         let flow_metadata_manager: Arc<FlowMetadataManager> =
@@ -242,7 +246,7 @@ impl FrontendBuilder {
 
         let mut query_options = self.options.query.clone();
         query_options.enable_per_region_metrics = self.options.logging.enable_per_region_metrics;
-        let query_engine = QueryEngineFactory::new_with_plugins(
+        let query_engine = QueryEngineFactory::try_new_with_plugins(
             self.catalog_manager.clone(),
             Some(partition_manager.clone()),
             Some(region_query_handler.clone()),
@@ -253,6 +257,7 @@ impl FrontendBuilder {
             plugins.clone(),
             query_options,
         )
+        .context(DataFusionSnafu)?
         .query_engine();
 
         let frontend_peer_addr = frontend_peer_addr(&self.options);
@@ -281,6 +286,13 @@ impl FrontendBuilder {
                 statement_executor
             };
 
+        #[cfg(feature = "enterprise")]
+        let statement_executor = if let Some(handler) = plugins.get::<CreateDatabaseHandlerRef>() {
+            statement_executor.with_create_database_handler(handler)
+        } else {
+            statement_executor
+        };
+
         let statement_executor = Arc::new(statement_executor);
 
         let pipeline_operator = Arc::new(PipelineOperator::new(
@@ -307,12 +319,13 @@ impl FrontendBuilder {
             plugins,
             inserter,
             deleter,
-            table_metadata_manager: Arc::new(TableMetadataManager::new(kv_backend)),
+            table_metadata_manager,
             event_recorder: Some(event_recorder),
             process_manager,
             otlp_metrics_table_legacy_cache: DashMap::new(),
             slow_query_options: self.options.slow_query.clone(),
             influxdb_default_merge_mode: self.options.influxdb.default_merge_mode,
+            trace_ingest_chunk_size: self.options.otlp.trace_ingest_chunk_size,
             suspend: Arc::new(AtomicBool::new(false)),
         })
     }

@@ -96,17 +96,30 @@ impl TableData {
         value: Option<ValueData>,
         one_row: &mut Vec<Value>,
     ) {
-        let name = name.to_string();
-        if let Some(index) = self.column_indexes.get(&name).copied() {
-            one_row[index].value_data = value;
-        } else {
-            let index = self.schema.len();
-            self.schema.push(ColumnSchema {
-                column_name: name.clone(),
+        self.write_column_unchecked(
+            ColumnSchema {
+                column_name: name.to_string(),
                 datatype: datatype as i32,
                 semantic_type: SemanticType::Field as i32,
                 ..Default::default()
-            });
+            },
+            value,
+            one_row,
+        );
+    }
+
+    pub fn write_column_unchecked(
+        &mut self,
+        column_schema: ColumnSchema,
+        value: Option<ValueData>,
+        one_row: &mut Vec<Value>,
+    ) {
+        if let Some(index) = self.column_indexes.get(&column_schema.column_name).copied() {
+            one_row[index].value_data = value;
+        } else {
+            let index = self.schema.len();
+            let name = column_schema.column_name.clone();
+            self.schema.push(column_schema);
             self.column_indexes.insert(name, index);
             one_row.push(Value { value_data: value });
         }
@@ -235,7 +248,7 @@ pub fn write_f64(
     )
 }
 
-fn build_json_column_schema(name: impl ToString) -> ColumnSchema {
+pub(crate) fn build_json_column_schema(name: impl ToString) -> ColumnSchema {
     ColumnSchema {
         column_name: name.to_string(),
         datatype: ColumnDataType::Binary as i32,
@@ -263,7 +276,7 @@ pub fn write_json(
     )
 }
 
-fn write_by_schema(
+pub(crate) fn write_by_schema(
     table_data: &mut TableData,
     kv_iter: impl Iterator<Item = (ColumnSchema, Option<ValueData>)>,
     one_row: &mut Vec<Value>,

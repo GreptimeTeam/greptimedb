@@ -30,7 +30,7 @@ use crate::statements::create::{
 use crate::statements::cursor::{CloseCursor, DeclareCursor, FetchCursor};
 use crate::statements::delete::Delete;
 use crate::statements::describe::DescribeTable;
-use crate::statements::drop::{DropDatabase, DropFlow, DropTable, DropView};
+use crate::statements::drop::{DropDatabase, DropFlow, DropTable, DropView, UndropTable};
 use crate::statements::explain::ExplainStatement;
 use crate::statements::insert::Insert;
 use crate::statements::kill::Kill;
@@ -69,6 +69,8 @@ pub enum Statement {
     CreateTrigger(crate::statements::create::trigger::CreateTrigger),
     // DROP TABLE
     DropTable(DropTable),
+    // UNDROP TABLE
+    UndropTable(UndropTable),
     // DROP DATABASE
     DropDatabase(DropDatabase),
     // DROP FLOW
@@ -181,7 +183,6 @@ impl Statement {
             | Statement::ShowSearchPath(_)
             | Statement::ShowViews(_)
             | Statement::DescribeTable(_)
-            | Statement::Explain(_)
             | Statement::ShowVariables(_)
             | Statement::ShowProcesslist(_)
             | Statement::FetchCursor(_)
@@ -192,6 +193,8 @@ impl Statement {
             #[cfg(feature = "enterprise")]
             Statement::ShowTriggers(_) => true,
 
+            Statement::Explain(explain) => !explain.analyze || explain.statement.is_readonly(),
+
             // Write operations
             Statement::Insert(_)
             | Statement::Delete(_)
@@ -201,6 +204,7 @@ impl Statement {
             | Statement::CreateFlow(_)
             | Statement::CreateView(_)
             | Statement::DropTable(_)
+            | Statement::UndropTable(_)
             | Statement::DropDatabase(_)
             | Statement::DropFlow(_)
             | Statement::DropView(_)
@@ -242,6 +246,7 @@ impl Display for Statement {
             #[cfg(feature = "enterprise")]
             Statement::DropTrigger(s) => s.fmt(f),
             Statement::DropTable(s) => s.fmt(f),
+            Statement::UndropTable(s) => s.fmt(f),
             Statement::DropDatabase(s) => s.fmt(f),
             Statement::DropView(s) => s.fmt(f),
             Statement::CreateDatabase(s) => s.fmt(f),

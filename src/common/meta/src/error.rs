@@ -380,9 +380,8 @@ pub enum Error {
     },
 
     #[snafu(display(
-        "Cannot drop table '{}': tombstoned table id {} already uses the same full name",
-        table_name,
-        existing_table_id
+        "Cannot drop table '{}': an older tombstone already uses the same full name",
+        table_name
     ))]
     /// Raised when a live table is recreated with a name still reserved by an older tombstone.
     TableNameTombstoneConflict {
@@ -1354,7 +1353,7 @@ impl ErrorExt for Error {
             | AcquireMySqlClient { error, .. }
             | MySqlTransaction { error, .. } => retry_hint_from_sqlx_error(error),
             #[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
-            SqlExecutionTimeout { .. } => RetryHint::Retryable,
+            RdsTransactionRetryFailed { .. } | SqlExecutionTimeout { .. } => RetryHint::Retryable,
             _ => RetryHint::NonRetryable,
         }
     }
@@ -1455,6 +1454,14 @@ mod retry_hint_tests {
             duration: std::time::Duration::from_secs(1),
         }
         .build();
+
+        assert_eq!(err.retry_hint(), RetryHint::Retryable);
+    }
+
+    #[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
+    #[test]
+    fn test_rds_transaction_retry_failed_hint_is_retryable() {
+        let err = RdsTransactionRetryFailedSnafu.build();
 
         assert_eq!(err.retry_hint(), RetryHint::Retryable);
     }

@@ -1048,6 +1048,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_purge_table_is_not_available_to_select() {
+        let engine = create_test_engine().await;
+        let stmt =
+            QueryLanguageParser::parse_sql("select purge_table('numbers')", &QueryContext::arc())
+                .unwrap();
+
+        assert!(
+            engine
+                .planner()
+                .plan(&stmt, QueryContext::arc())
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
     async fn test_execute() {
         let engine = create_test_engine().await;
         let sql = "select sum(number) from numbers limit 20";

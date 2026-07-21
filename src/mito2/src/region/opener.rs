@@ -43,8 +43,8 @@ use store_api::storage::{ColumnId, RegionId};
 use tokio::sync::Semaphore;
 
 use crate::access_layer::AccessLayer;
-use crate::cache::CacheManagerRef;
 use crate::cache::file_cache::{FileCache, FileType, IndexKey};
+use crate::cache::{CacheManagerRef, SstMetaPreparation, prepare_sst_meta};
 use crate::config::MitoConfig;
 use crate::engine::region_hook::RegionHookRef;
 use crate::error;
@@ -436,31 +436,7 @@ impl RegionOpener {
     }
 
     fn provider<S: LogStore>(&self, wal_options: &WalOptions) -> Result<Provider> {
-        match wal_options {
-            WalOptions::RaftEngine => {
-                ensure!(
-                    TypeId::of::<RaftEngineLogStore>() == TypeId::of::<S>()
-                        || TypeId::of::<NoopLogStore>() == TypeId::of::<S>(),
-                    error::IncompatibleWalProviderChangeSnafu {
-                        global: "`kafka`",
-                        region: "`raft_engine`",
-                    }
-                );
-                Ok(Provider::raft_engine_provider(self.region_id.as_u64()))
-            }
-            WalOptions::Kafka(options) => {
-                ensure!(
-                    TypeId::of::<KafkaLogStore>() == TypeId::of::<S>()
-                        || TypeId::of::<NoopLogStore>() == TypeId::of::<S>(),
-                    error::IncompatibleWalProviderChangeSnafu {
-                        global: "`raft_engine`",
-                        region: "`kafka`",
-                    }
-                );
-                Ok(Provider::kafka_provider(options.topic.clone()))
-            }
-            WalOptions::Noop => Ok(Provider::noop_provider()),
-        }
+        provider_from_wal_options::<S>(self.region_id, wal_options)
     }
 
     /// Tries to open the region and returns `None` if the region directory is empty.
@@ -653,6 +629,37 @@ impl RegionOpener {
         maybe_preload_parquet_meta_cache(&region, config, &self.cache_manager);
 
         Ok(Some(region))
+    }
+}
+
+pub(crate) fn provider_from_wal_options<S: LogStore>(
+    region_id: RegionId,
+    wal_options: &WalOptions,
+) -> Result<Provider> {
+    match wal_options {
+        WalOptions::RaftEngine => {
+            ensure!(
+                TypeId::of::<RaftEngineLogStore>() == TypeId::of::<S>()
+                    || TypeId::of::<NoopLogStore>() == TypeId::of::<S>(),
+                error::IncompatibleWalProviderChangeSnafu {
+                    global: "`kafka`",
+                    region: "`raft_engine`",
+                }
+            );
+            Ok(Provider::raft_engine_provider(region_id.as_u64()))
+        }
+        WalOptions::Kafka(options) => {
+            ensure!(
+                TypeId::of::<KafkaLogStore>() == TypeId::of::<S>()
+                    || TypeId::of::<NoopLogStore>() == TypeId::of::<S>(),
+                error::IncompatibleWalProviderChangeSnafu {
+                    global: "`raft_engine`",
+                    region: "`kafka`",
+                }
+            );
+            Ok(Provider::kafka_provider(options.topic.clone()))
+        }
+        WalOptions::Noop => Ok(Provider::noop_provider()),
     }
 }
 
@@ -1085,7 +1092,7 @@ async fn preload_parquet_meta_cache_for_files(
 ) -> usize {
     if !cache_manager.sst_meta_cache_enabled()
         || sst_meta_cache_capacity == 0
-        || cache_manager.sst_meta_cache_weighted_size() >= sst_meta_cache_capacity
+        || cache_manager.sst_meta_cache_is_full()
     {
         return 0;
     }
@@ -1097,28 +1104,58 @@ async fn preload_parquet_meta_cache_for_files(
 
     let mut loaded = 0usize;
     for file_handle in files {
-        // Stop when the shared SST meta cache is full.
-        if cache_manager.sst_meta_cache_weighted_size() >= sst_meta_cache_capacity {
+        // Stop when the protected authoritative tier is full.
+        if cache_manager.sst_meta_cache_is_full() {
             break;
         }
 
         let file_id = file_handle.file_id();
         let mut cache_metrics = MetadataCacheMetrics::default();
         if let Some(metadata) = cache_manager
-            .get_parquet_meta_data(file_id, &mut cache_metrics, PageIndexPolicy::Optional)
+            .get_compact_sst_meta_data(file_id, PageIndexPolicy::Optional)
             .await
         {
             if file_handle.primary_key_range().is_none()
-                && let Some(primary_key_range) =
-                    extract_primary_key_range(&metadata, &region_metadata)
+                && let Some(primary_key_range) = extract_primary_key_range(
+                    metadata.parquet_metadata().as_ref(),
+                    &region_metadata,
+                )
             {
                 file_handle.set_primary_key_range(primary_key_range);
             }
-            // Metadata is either already in memory or loaded from file cache.
-            if cache_metrics.mem_cache_hit == 0 {
-                loaded += 1;
-            }
             continue;
+        }
+
+        if let Some(write_cache) = cache_manager.write_cache() {
+            let key = IndexKey::new(file_id.region_id(), file_id.file_id(), FileType::Parquet);
+            if let Some(metadata) = write_cache
+                .file_cache()
+                .get_sst_meta_data(key, &mut cache_metrics, PageIndexPolicy::Optional)
+                .await
+            {
+                let decoded = metadata.decoded();
+                if file_handle.primary_key_range().is_none()
+                    && let Some(primary_key_range) = extract_primary_key_range(
+                        decoded.parquet_metadata().as_ref(),
+                        &region_metadata,
+                    )
+                {
+                    file_handle.set_primary_key_range(primary_key_range);
+                }
+                match metadata {
+                    SstMetaPreparation::Prepared(metadata) => {
+                        cache_manager.put_prepared_sst_meta(file_id, metadata, false);
+                        loaded += 1;
+                    }
+                    SstMetaPreparation::DecodedOnly { encoding_error, .. } => warn!(
+                        encoding_error;
+                        "Failed to encode file-cached SST metadata during preload, region: {}, file: {}",
+                        region_id,
+                        file_id.file_id()
+                    ),
+                }
+                continue;
+            }
         }
 
         if !allow_direct_load {
@@ -1136,8 +1173,35 @@ async fn preload_parquet_meta_cache_for_files(
                 {
                     file_handle.set_primary_key_range(primary_key_range);
                 }
-                cache_manager.put_parquet_meta_data(file_id, Arc::new(metadata), None);
-                loaded += 1;
+                match prepare_sst_meta(
+                    &file_path,
+                    metadata,
+                    // The SST can predate schema changes, so decode its embedded region metadata
+                    // instead of substituting the region's current schema.
+                    None,
+                    PageIndexPolicy::Optional,
+                )
+                .await
+                {
+                    Ok(SstMetaPreparation::Prepared(metadata)) => {
+                        // Preload the compact canonical entry only. Query traffic promotes decoded
+                        // entries into the separate acceleration tier according to actual demand.
+                        cache_manager.put_prepared_sst_meta(file_id, metadata, false);
+                        loaded += 1;
+                    }
+                    Ok(SstMetaPreparation::DecodedOnly { encoding_error, .. }) => warn!(
+                        encoding_error;
+                        "Failed to encode preloaded parquet metadata, region: {}, file: {}",
+                        region_id,
+                        file_path
+                    ),
+                    Err(err) => {
+                        warn!(
+                            err; "Failed to prepare preloaded parquet metadata, region: {}, file: {}",
+                            region_id, file_path
+                        );
+                    }
+                }
             }
             Err(err) => {
                 // Preloading is best-effort. Failure shouldn't affect region open.
@@ -1250,7 +1314,7 @@ mod tests {
     use object_store::ObjectStore;
     use object_store::services::{Fs, Memory, S3};
     use parquet::arrow::ArrowWriter;
-    use parquet::file::metadata::KeyValue;
+    use parquet::file::metadata::{KeyValue, PageIndexPolicy};
     use parquet::file::properties::WriterProperties;
     use store_api::region_request::PathType;
     use store_api::storage::{FileId, RegionId};
@@ -1483,17 +1547,11 @@ mod tests {
         assert_eq!(loaded, 1);
         assert!(
             cache_manager
-                .get_parquet_meta_data_from_mem_cache(region_file_id)
-                .is_some()
-        );
-        // The cached entry must carry the page index so that later `Optional` queries hit
-        // the in-memory cache instead of reloading metadata on demand.
-        assert!(
-            cache_manager
-                .get_sst_meta_data_from_mem_cache(
+                .get_compact_sst_meta_data(
                     region_file_id,
                     parquet::file::metadata::PageIndexPolicy::Optional,
                 )
+                .await
                 .is_some()
         );
         assert!(file_handle.primary_key_range().is_some());
@@ -1638,7 +1696,8 @@ mod tests {
         assert_eq!(loaded, 1);
         assert!(
             cache_manager
-                .get_parquet_meta_data_from_mem_cache(region_file_id)
+                .get_compact_sst_meta_data(region_file_id, PageIndexPolicy::Optional)
+                .await
                 .is_some()
         );
     }

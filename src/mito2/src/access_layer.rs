@@ -16,11 +16,13 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_stream::try_stream;
+use common_telemetry::warn;
 use common_time::Timestamp;
 use futures::{Stream, TryStreamExt};
 use object_store::services::Fs;
 use object_store::util::{join_dir, with_instrument_layers};
 use object_store::{ATOMIC_WRITE_DIR, ErrorKind, OLD_ATOMIC_WRITE_DIR, ObjectStore};
+use parquet::file::metadata::PageIndexPolicy;
 use smallvec::SmallVec;
 use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
@@ -28,9 +30,9 @@ use store_api::region_request::PathType;
 use store_api::sst_entry::StorageSstEntry;
 use store_api::storage::{FileId, RegionId, SequenceNumber};
 
-use crate::cache::CacheManagerRef;
 use crate::cache::file_cache::{FileCacheRef, FileType, IndexKey};
 use crate::cache::write_cache::SstUploadRequest;
+use crate::cache::{CacheManagerRef, SstMetaPreparation, prepare_sst_meta_sync};
 use crate::config::{BloomFilterConfig, FulltextIndexConfig, IndexConfig, InvertedIndexConfig};
 use crate::error::{
     CleanDirSnafu, DeleteIndexSnafu, DeleteIndexesSnafu, DeleteSstsSnafu, OpenDalSnafu, Result,
@@ -410,14 +412,46 @@ impl AccessLayer {
         };
 
         // Put parquet metadata to cache manager.
-        if !sst_info.is_empty() {
+        if !sst_info.is_empty() && cache_manager.sst_meta_cache_enabled() {
             for sst in &sst_info {
                 if let Some(parquet_metadata) = &sst.file_metadata {
-                    cache_manager.put_parquet_meta_data(
-                        RegionFileId::new(region_id, sst.file_id),
-                        parquet_metadata.clone(),
-                        Some(region_metadata.clone()),
-                    )
+                    let file_id = RegionFileId::new(region_id, sst.file_id);
+                    let file_path = format!(
+                        "region_id={}, file_id={}",
+                        file_id.region_id(),
+                        file_id.file_id()
+                    );
+                    let page_index_policy = if parquet_metadata.offset_index().is_some() {
+                        PageIndexPolicy::Optional
+                    } else {
+                        PageIndexPolicy::Skip
+                    };
+                    let parquet_metadata = parquet_metadata.clone();
+                    let region_metadata = region_metadata.clone();
+                    let cache_manager = cache_manager.clone();
+                    // Compact cache preparation is best-effort. Run the entire operation in one
+                    // detached blocking task so it neither blocks an async worker nor delays the
+                    // SST write.
+                    common_runtime::spawn_blocking_global(move || {
+                        match prepare_sst_meta_sync(
+                            &file_path,
+                            Arc::unwrap_or_clone(parquet_metadata),
+                            Some(region_metadata),
+                            page_index_policy,
+                        ) {
+                            Ok(SstMetaPreparation::Prepared(metadata)) => {
+                                cache_manager.put_prepared_sst_meta(file_id, metadata, true);
+                            }
+                            Ok(SstMetaPreparation::DecodedOnly { encoding_error, .. }) => warn!(
+                                encoding_error;
+                                "Failed to encode parquet metadata for cache, file: {}",
+                                file_path
+                            ),
+                            Err(err) => {
+                                warn!(err; "Failed to cache parquet metadata for {}", file_path);
+                            }
+                        }
+                    });
                 }
             }
         }

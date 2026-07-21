@@ -337,6 +337,8 @@ pub struct UnorderedPart {
     parts: Vec<BulkPart>,
     /// Total number of rows across all parts.
     total_rows: usize,
+    /// Total estimated uncompressed bytes across all parts.
+    total_bytes: usize,
     /// Minimum timestamp across all parts.
     min_timestamp: i64,
     /// Maximum timestamp across all parts.
@@ -361,6 +363,7 @@ impl UnorderedPart {
         Self {
             parts: Vec::new(),
             total_rows: 0,
+            total_bytes: 0,
             min_timestamp: i64::MAX,
             max_timestamp: i64::MIN,
             max_sequence: 0,
@@ -394,14 +397,20 @@ impl UnorderedPart {
         num_rows < self.threshold
     }
 
-    /// Returns true if this part should be compacted.
+    /// Returns true if this part should be compacted by row count.
     pub fn should_compact(&self) -> bool {
         self.total_rows >= self.compact_threshold
+    }
+
+    /// Returns the total estimated uncompressed bytes across all parts.
+    pub(super) fn estimated_bytes(&self) -> usize {
+        self.total_bytes
     }
 
     /// Adds a BulkPart to this unordered collection.
     pub fn push(&mut self, part: BulkPart) {
         self.total_rows += part.num_rows();
+        self.total_bytes = self.total_bytes.saturating_add(part.estimated_size());
         self.min_timestamp = self.min_timestamp.min(part.min_timestamp);
         self.max_timestamp = self.max_timestamp.max(part.max_timestamp);
         self.max_sequence = self.max_sequence.max(part.sequence);
@@ -476,6 +485,7 @@ impl UnorderedPart {
     pub fn clear(&mut self) {
         self.parts.clear();
         self.total_rows = 0;
+        self.total_bytes = 0;
         self.min_timestamp = i64::MAX;
         self.max_timestamp = i64::MIN;
         self.max_sequence = 0;
@@ -1676,6 +1686,34 @@ mod tests {
         sequence: u64,
     }
 
+    #[test]
+    fn test_unordered_part_tracks_estimated_bytes() {
+        let mut part = UnorderedPart::new();
+        let bulk_part = BulkPart {
+            batch: RecordBatch::new_empty(Arc::new(arrow::datatypes::Schema::empty())),
+            max_timestamp: 0,
+            min_timestamp: 0,
+            sequence: 0,
+            timestamp_index: 0,
+            raw_data: None,
+        };
+        let estimated_size = bulk_part.estimated_size();
+
+        part.push(bulk_part);
+        assert_eq!(estimated_size, part.estimated_bytes());
+        part.clear();
+        assert_eq!(0, part.estimated_bytes());
+        assert!(part.is_empty());
+    }
+
+    #[test]
+    fn test_unordered_part_should_accept() {
+        let mut part = UnorderedPart::new();
+        part.set_threshold(10);
+        assert!(part.should_accept(9));
+        assert!(!part.should_accept(10));
+    }
+
     fn encode(input: &[MutationInput]) -> EncodedBulkPart {
         let metadata = metadata_for_test();
         let kvs = input
@@ -1737,6 +1775,7 @@ mod tests {
                         Some(projection.as_slice()),
                         None,
                         false,
+                        crate::sst::parquet::DEFAULT_READ_BATCH_SIZE,
                     )
                     .unwrap(),
                 ),
@@ -1797,6 +1836,7 @@ mod tests {
                 None,
                 predicate,
                 false,
+                crate::sst::parquet::DEFAULT_READ_BATCH_SIZE,
             )
             .unwrap(),
         );
@@ -1831,6 +1871,7 @@ mod tests {
                     datafusion_expr::lit(ScalarValue::TimestampMillisecond(Some(300), None)),
                 )])),
                 false,
+                crate::sst::parquet::DEFAULT_READ_BATCH_SIZE,
             )
             .unwrap(),
         );
@@ -2811,6 +2852,7 @@ mod tests {
                     datafusion_expr::col("k0").eq(datafusion_expr::lit("m")),
                 ])),
                 false,
+                crate::sst::parquet::DEFAULT_READ_BATCH_SIZE,
             )
             .unwrap(),
         );
@@ -2830,13 +2872,23 @@ mod tests {
                     datafusion_expr::col("k0").eq(datafusion_expr::lit("nonexistent")),
                 ])),
                 false,
+                crate::sst::parquet::DEFAULT_READ_BATCH_SIZE,
             )
             .unwrap(),
         );
         assert!(multi.read(context, None, None).unwrap().is_none());
 
         // No predicate => all 6 rows.
-        let context = Arc::new(BulkIterContext::new(metadata.clone(), None, None, false).unwrap());
+        let context = Arc::new(
+            BulkIterContext::new(
+                metadata.clone(),
+                None,
+                None,
+                false,
+                crate::sst::parquet::DEFAULT_READ_BATCH_SIZE,
+            )
+            .unwrap(),
+        );
         let reader = multi
             .read(context, None, None)
             .unwrap()

@@ -14,6 +14,7 @@
 
 use std::collections::HashMap;
 use std::fmt::{self, Display};
+use std::time::Duration;
 
 use api::helper::{ColumnDataTypeWrapper, from_pb_time_ranges};
 use api::v1::add_column_location::LocationType;
@@ -22,16 +23,17 @@ use api::v1::column_def::{
 };
 use api::v1::region::bulk_insert_request::Body;
 use api::v1::region::{
-    AlterRequest, AlterRequests, BuildIndexRequest, BulkInsertRequest, CloseRequest,
-    CompactRequest, CreateRequest, CreateRequests, DeleteRequests, DropRequest, DropRequests,
-    FlushRequest, InsertRequests, OpenRequest, TruncateRequest, alter_request, compact_request,
-    region_request, truncate_request,
+    AlterRequest, AlterRequests, BuildIndexRequest, BulkInsertRequest,
+    CleanUpRequest as PbCleanUpRequest, CloseRequest, CompactRequest, CreateRequest,
+    CreateRequests, DeleteRequests, DropRequest, DropRequests, FlushRequest, InsertRequests,
+    OpenRequest, TruncateRequest, alter_request, compact_request, region_request, truncate_request,
 };
 use api::v1::{
     self, Analyzer, ArrowIpc, FulltextBackend as PbFulltextBackend, Option as PbOption, Rows,
     SemanticType, SkippingIndexType as PbSkippingIndexType, WriteHint,
 };
 pub use common_base::AffectedRows;
+use common_base::readable_size::ReadableSize;
 use common_grpc::flight::FlightDecoder;
 use common_recordbatch::DfRecordBatch;
 use common_time::{TimeToLive, Timestamp};
@@ -52,8 +54,8 @@ use crate::metadata::{
 use crate::metric_engine_consts::PHYSICAL_TABLE_METADATA_KEY;
 use crate::metrics;
 use crate::mito_engine_options::{
-    APPEND_MODE_KEY, SST_FORMAT_KEY, TTL_KEY, TWCS_MAX_OUTPUT_FILE_SIZE, TWCS_TIME_WINDOW,
-    TWCS_TRIGGER_FILE_NUM,
+    APPEND_MODE_KEY, AUTO_FLUSH_INTERVAL_KEY, SST_FORMAT_KEY, TTL_KEY, TWCS_MAX_OUTPUT_FILE_SIZE,
+    TWCS_TIME_WINDOW, TWCS_TRIGGER_FILE_NUM, WRITE_BUFFER_SIZE_KEY,
 };
 use crate::path_utils::table_dir;
 use crate::storage::{ColumnId, RegionId, ScanRequest};
@@ -144,6 +146,7 @@ pub enum RegionRequest {
     Create(RegionCreateRequest),
     Drop(RegionDropRequest),
     Open(RegionOpenRequest),
+    CleanUp(RegionCleanUpRequest),
     Close(RegionCloseRequest),
     Alter(RegionAlterRequest),
     Flush(RegionFlushRequest),
@@ -166,6 +169,7 @@ impl RegionRequest {
             region_request::Body::Create(create) => make_region_create(create),
             region_request::Body::Drop(drop) => make_region_drop(drop),
             region_request::Body::Open(open) => make_region_open(open),
+            region_request::Body::CleanUp(clean_up) => make_region_clean_up(clean_up),
             region_request::Body::Close(close) => make_region_close(close),
             region_request::Body::Alter(alter) => make_region_alter(alter),
             region_request::Body::Flush(flush) => make_region_flush(flush),
@@ -324,11 +328,27 @@ fn make_region_open(open: OpenRequest) -> Result<Vec<(RegionId, RegionRequest)>>
     )])
 }
 
+fn make_region_clean_up(clean_up: PbCleanUpRequest) -> Result<Vec<(RegionId, RegionRequest)>> {
+    let region_id = RegionId::from(clean_up.region_id);
+    let table_dir = table_dir(&clean_up.path, region_id.table_id());
+    Ok(vec![(
+        region_id,
+        RegionRequest::CleanUp(RegionCleanUpRequest {
+            engine: clean_up.engine,
+            table_dir,
+            path_type: PathType::Bare,
+            options: clean_up.options,
+        }),
+    )])
+}
+
 fn make_region_close(close: CloseRequest) -> Result<Vec<(RegionId, RegionRequest)>> {
     let region_id = close.region_id.into();
     Ok(vec![(
         region_id,
-        RegionRequest::Close(RegionCloseRequest {}),
+        RegionRequest::Close(RegionCloseRequest {
+            flush_on_close: close.flush_on_close,
+        }),
     )])
 }
 
@@ -645,9 +665,32 @@ impl RegionOpenRequest {
     }
 }
 
+/// Offline region cleanup request.
+#[derive(Debug, Clone)]
+pub struct RegionCleanUpRequest {
+    /// Region engine name
+    pub engine: String,
+    /// Directory for table's data home. Usually is composed by catalog and table id
+    pub table_dir: String,
+    /// Path type for generating paths
+    pub path_type: PathType,
+    /// Options of the cleaned region.
+    pub options: HashMap<String, String>,
+}
+
+impl RegionCleanUpRequest {
+    /// Returns true when the region belongs to the metric engine's physical table.
+    pub fn is_physical_table(&self) -> bool {
+        self.options.contains_key(PHYSICAL_TABLE_METADATA_KEY)
+    }
+}
+
 /// Close region request.
-#[derive(Debug)]
-pub struct RegionCloseRequest {}
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RegionCloseRequest {
+    /// Whether to flush the region before closing it.
+    pub flush_on_close: bool,
+}
 
 /// Alter metadata of a region.
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -1363,6 +1406,7 @@ impl From<v1::ModifyColumnType> for ModifyColumnType {
 
 #[derive(Debug, Eq, PartialEq, Clone, Serialize, Deserialize)]
 pub enum SetRegionOption {
+    WriteBufferSize(Option<ReadableSize>),
     Ttl(Option<TimeToLive>),
     // Modifying TwscOptions with values as (option name, new value).
     Twsc(String, String),
@@ -1370,6 +1414,8 @@ pub enum SetRegionOption {
     Format(String),
     // Modifying the append mode.
     AppendMode(bool),
+    // Modifying the per-region auto flush interval override.
+    AutoFlushInterval(Option<Duration>),
 }
 
 impl TryFrom<&PbOption> for SetRegionOption {
@@ -1378,6 +1424,12 @@ impl TryFrom<&PbOption> for SetRegionOption {
     fn try_from(value: &PbOption) -> std::result::Result<Self, Self::Error> {
         let PbOption { key, value } = value;
         match key.as_str() {
+            WRITE_BUFFER_SIZE_KEY => {
+                let size = value
+                    .parse::<ReadableSize>()
+                    .map_err(|_| InvalidSetRegionOptionRequestSnafu { key, value }.build())?;
+                Ok(Self::WriteBufferSize(Some(size)))
+            }
             TTL_KEY => {
                 let ttl = TimeToLive::from_humantime_or_str(value)
                     .map_err(|_| InvalidSetRegionOptionRequestSnafu { key, value }.build())?;
@@ -1393,6 +1445,20 @@ impl TryFrom<&PbOption> for SetRegionOption {
                     .parse::<bool>()
                     .map_err(|_| InvalidSetRegionOptionRequestSnafu { key, value }.build())?;
                 Ok(Self::AppendMode(append_mode))
+            }
+            AUTO_FLUSH_INTERVAL_KEY => {
+                if value.is_empty() {
+                    // SET 'auto_flush_interval' = NULL comes through as an empty
+                    // string; treat it as clearing the override (fall back to
+                    // the global default), same as Ttl.
+                    return Ok(Self::AutoFlushInterval(None));
+                }
+                let interval = humantime::parse_duration(value)
+                    .map_err(|_| InvalidSetRegionOptionRequestSnafu { key, value }.build())?;
+                if interval <= Duration::ZERO {
+                    return InvalidSetRegionOptionRequestSnafu { key, value }.fail();
+                }
+                Ok(Self::AutoFlushInterval(Some(interval)))
             }
             _ => InvalidSetRegionOptionRequestSnafu { key, value }.fail(),
         }
@@ -1412,6 +1478,7 @@ impl From<&UnsetRegionOption> for SetRegionOption {
                 SetRegionOption::Twsc(unset_option.to_string(), String::new())
             }
             UnsetRegionOption::Ttl => SetRegionOption::Ttl(Default::default()),
+            UnsetRegionOption::WriteBufferSize => SetRegionOption::WriteBufferSize(None),
         }
     }
 }
@@ -1422,6 +1489,7 @@ impl TryFrom<&str> for UnsetRegionOption {
     fn try_from(key: &str) -> Result<Self> {
         match key.to_ascii_lowercase().as_str() {
             TTL_KEY => Ok(Self::Ttl),
+            WRITE_BUFFER_SIZE_KEY => Ok(Self::WriteBufferSize),
             TWCS_TRIGGER_FILE_NUM => Ok(Self::TwcsTriggerFileNum),
             TWCS_MAX_OUTPUT_FILE_SIZE => Ok(Self::TwcsMaxOutputFileSize),
             TWCS_TIME_WINDOW => Ok(Self::TwcsTimeWindow),
@@ -1436,12 +1504,14 @@ pub enum UnsetRegionOption {
     TwcsMaxOutputFileSize,
     TwcsTimeWindow,
     Ttl,
+    WriteBufferSize,
 }
 
 impl UnsetRegionOption {
     pub fn as_str(&self) -> &str {
         match self {
             Self::Ttl => TTL_KEY,
+            Self::WriteBufferSize => WRITE_BUFFER_SIZE_KEY,
             Self::TwcsTriggerFileNum => TWCS_TRIGGER_FILE_NUM,
             Self::TwcsMaxOutputFileSize => TWCS_MAX_OUTPUT_FILE_SIZE,
             Self::TwcsTimeWindow => TWCS_TIME_WINDOW,
@@ -1616,6 +1686,7 @@ impl fmt::Display for RegionRequest {
             RegionRequest::Create(_) => write!(f, "Create"),
             RegionRequest::Drop(_) => write!(f, "Drop"),
             RegionRequest::Open(_) => write!(f, "Open"),
+            RegionRequest::CleanUp(_) => write!(f, "CleanUp"),
             RegionRequest::Close(_) => write!(f, "Close"),
             RegionRequest::Alter(_) => write!(f, "Alter"),
             RegionRequest::Flush(_) => write!(f, "Flush"),
@@ -1679,6 +1750,44 @@ mod tests {
     }
 
     #[test]
+    fn test_set_region_option_auto_flush_interval_try_from() {
+        use std::time::Duration;
+
+        // Valid duration
+        let pb = PbOption {
+            key: "auto_flush_interval".to_string(),
+            value: "5m".to_string(),
+        };
+        let opt = SetRegionOption::try_from(&pb).unwrap();
+        assert_eq!(
+            opt,
+            SetRegionOption::AutoFlushInterval(Some(Duration::from_secs(300)))
+        );
+
+        // Empty value clears the override (mirrors Ttl's behaviour for `SET key = NULL`).
+        let pb = PbOption {
+            key: "auto_flush_interval".to_string(),
+            value: String::new(),
+        };
+        let opt = SetRegionOption::try_from(&pb).unwrap();
+        assert_eq!(opt, SetRegionOption::AutoFlushInterval(None));
+
+        // Zero is rejected up front (engine invariant).
+        let pb = PbOption {
+            key: "auto_flush_interval".to_string(),
+            value: "0s".to_string(),
+        };
+        assert!(SetRegionOption::try_from(&pb).is_err());
+
+        // Garbage value is rejected.
+        let pb = PbOption {
+            key: "auto_flush_interval".to_string(),
+            value: "not_a_duration".to_string(),
+        };
+        assert!(SetRegionOption::try_from(&pb).is_err());
+    }
+
+    #[test]
     fn test_from_proto_alter_request() {
         RegionAlterRequest::try_from(AlterRequest {
             region_id: 0,
@@ -1731,6 +1840,41 @@ mod tests {
                     }]
                 },
             }
+        );
+    }
+
+    #[test]
+    fn test_write_buffer_size_region_options() {
+        let option = PbOption {
+            key: WRITE_BUFFER_SIZE_KEY.to_string(),
+            value: "128MiB".to_string(),
+        };
+        assert_eq!(
+            SetRegionOption::WriteBufferSize(Some(ReadableSize::mb(128))),
+            SetRegionOption::try_from(&option).unwrap()
+        );
+
+        let option = PbOption {
+            key: WRITE_BUFFER_SIZE_KEY.to_string(),
+            value: "invalid".to_string(),
+        };
+        SetRegionOption::try_from(&option).unwrap_err();
+
+        // Clearing the option uses UNSET. Empty SET values, including SQL NULL,
+        // remain invalid because the SQL layer does not distinguish NULL from ''.
+        let option = PbOption {
+            key: WRITE_BUFFER_SIZE_KEY.to_string(),
+            value: String::new(),
+        };
+        SetRegionOption::try_from(&option).unwrap_err();
+
+        assert_eq!(
+            UnsetRegionOption::WriteBufferSize,
+            UnsetRegionOption::try_from(WRITE_BUFFER_SIZE_KEY).unwrap()
+        );
+        assert_eq!(
+            SetRegionOption::WriteBufferSize(None),
+            SetRegionOption::from(&UnsetRegionOption::WriteBufferSize)
         );
     }
 
@@ -2137,6 +2281,28 @@ mod tests {
         };
 
         assert_eq!(request.requirements, RegionRequirements::object_storage());
+    }
+
+    #[test]
+    fn test_parse_region_cleanup_from_proto() {
+        let clean_up = api::v1::region::CleanUpRequest {
+            region_id: RegionId::new(42, 3).as_u64(),
+            engine: "mito".to_string(),
+            path: "test".to_string(),
+            options: HashMap::from([("k".to_string(), "v".to_string())]),
+        };
+
+        let requests =
+            RegionRequest::try_from_request_body(region_request::Body::CleanUp(clean_up)).unwrap();
+        let RegionRequest::CleanUp(request) = &requests[0].1 else {
+            unreachable!()
+        };
+
+        assert_eq!(requests[0].0, RegionId::new(42, 3));
+        assert_eq!(request.engine, "mito");
+        assert_eq!(request.table_dir, "data/test/42/");
+        assert_eq!(request.path_type, PathType::Bare);
+        assert_eq!(request.options.get("k"), Some(&"v".to_string()));
     }
 
     #[test]

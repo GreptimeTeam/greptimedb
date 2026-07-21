@@ -583,6 +583,7 @@ mod tests {
                 None, // No projection
                 None, // No predicate
                 false,
+                crate::sst::parquet::DEFAULT_READ_BATCH_SIZE,
             )
             .unwrap(),
         );
@@ -617,6 +618,7 @@ mod tests {
                 Some(&[0, 2]),
                 Some(Predicate::new(vec![col("key1").eq(lit("key2"))])),
                 false,
+                crate::sst::parquet::DEFAULT_READ_BATCH_SIZE,
             )
             .unwrap(),
         );
@@ -757,6 +759,7 @@ mod tests {
                 None, // No projection
                 None, // No predicate
                 false,
+                1,
             )
             .unwrap(),
         );
@@ -765,7 +768,7 @@ mod tests {
         let expect_batches = vec![batch1, batch2];
         let iter = BulkPartBatchIter::new(expect_batches.clone(), context.clone(), None, 0, None);
 
-        // Collect all results
+        // Existing valid Arrow batches retain their boundaries even when the merge hint is lower.
         let result: Vec<_> = iter.map(|rb| rb.unwrap()).collect();
         assert_eq!(expect_batches, result);
     }

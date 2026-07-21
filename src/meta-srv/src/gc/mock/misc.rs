@@ -51,6 +51,7 @@ async fn test_empty_file_refs_manifest() {
 
     let scheduler = GcScheduler {
         ctx: ctx.clone(),
+        runtime_switch_manager: crate::gc::scheduler::new_test_runtime_switch_manager(),
         receiver: GcScheduler::channel().1,
         config: GcSchedulerOptions::default(),
         region_gc_tracker: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
@@ -139,6 +140,7 @@ async fn test_multiple_regions_per_table() {
 
     let scheduler = GcScheduler {
         ctx: ctx.clone(),
+        runtime_switch_manager: crate::gc::scheduler::new_test_runtime_switch_manager(),
         receiver: GcScheduler::channel().1,
         config: GcSchedulerOptions::default(),
         region_gc_tracker: Arc::new(tokio::sync::Mutex::new(HashMap::new())),

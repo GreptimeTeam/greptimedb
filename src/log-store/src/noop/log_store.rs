@@ -86,6 +86,10 @@ impl LogStore for NoopLogStore {
         Ok(())
     }
 
+    async fn obsolete_all(&self, _provider: &Provider, _region_id: RegionId) -> Result<()> {
+        Ok(())
+    }
+
     fn latest_entry_id(&self, _provider: &Provider) -> Result<EntryId> {
         Ok(0)
     }

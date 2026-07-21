@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::collections::HashMap;
+use std::str::FromStr;
 use std::time::Duration;
 
 use auth::user_provider_from_option;
@@ -1353,11 +1354,79 @@ pub async fn test_postgres_uint64_parameter(store_type: StorageType) {
     let count: i64 = rows[0].get(0);
     assert_eq!(count, 1);
 
+    let scalar_statement = client
+        .prepare("SELECT arrow_cast($1, 'UInt64')")
+        .await
+        .unwrap();
+    let scalar_null_statement = client
+        .prepare("SELECT arrow_cast($1, 'UInt64') IS NULL")
+        .await
+        .unwrap();
+    let array_statement = client
+        .prepare("SELECT arrow_cast($1, 'List(UInt64)')")
+        .await
+        .unwrap();
+    let array_null_statement = client
+        .prepare("SELECT arrow_cast($1, 'List(UInt64)') IS NULL")
+        .await
+        .unwrap();
+
+    let ordinary = Decimal::from(42);
+    let max = Decimal::from_str("18446744073709551615").unwrap();
+    for value in [&ordinary, &max] {
+        let row = client.query_one(&scalar_statement, &[value]).await.unwrap();
+        assert_eq!(*value, row.get::<_, Decimal>(0));
+    }
+
+    let scalar_null: Option<Decimal> = None;
+    let row = client
+        .query_one(&scalar_null_statement, &[&scalar_null])
+        .await
+        .unwrap();
+    assert!(row.get::<_, bool>(0));
+
+    let array_values = vec![Some(ordinary), None, Some(max)];
+    let row = client
+        .query_one(&array_statement, &[&array_values])
+        .await
+        .unwrap();
+    assert_eq!(array_values, row.get::<_, Vec<Option<Decimal>>>(0));
+
+    let array_null: Option<Vec<Option<Decimal>>> = None;
+    let row = client
+        .query_one(&array_null_statement, &[&array_null])
+        .await
+        .unwrap();
+    assert!(row.get::<_, bool>(0));
+
+    for value in [
+        Decimal::from(-1),
+        Decimal::from_str("18446744073709551616").unwrap(),
+    ] {
+        let error = client
+            .query(&scalar_statement, &[&value])
+            .await
+            .unwrap_err();
+        assert_pg_numeric_range_error(error);
+
+        let error = client
+            .query(&array_statement, &[&vec![Some(value)]])
+            .await
+            .unwrap_err();
+        assert_pg_numeric_range_error(error);
+    }
+
     drop(client);
     rx.await.unwrap();
 
     let _ = fe_pg_server.shutdown().await;
     guard.remove_all().await;
+}
+
+fn assert_pg_numeric_range_error(error: tokio_postgres::Error) {
+    let error = error.as_db_error().expect("expected PostgreSQL user error");
+    assert_eq!("22023", error.code().code());
+    assert_eq!("numeric_value_out_of_range", error.message());
 }
 
 pub async fn test_postgres_explain_bind_parameter(store_type: StorageType) {

@@ -67,6 +67,8 @@ impl InfluxdbLineProtocolHandler for Instance {
         interceptor_ref.pre_execute(&request.lines, ctx.clone())?;
 
         let requests = request.try_into()?;
+        self.check_row_insert_permission(&requests, &ctx, PermissionReq::LineProtocol)
+            .context(AuthSnafu)?;
 
         let aligner = InfluxdbLineTimestampAligner {
             catalog_manager: self.catalog_manager(),
@@ -76,6 +78,10 @@ impl InfluxdbLineProtocolHandler for Instance {
         let requests = interceptor_ref
             .post_lines_conversion(requests, ctx.clone())
             .await?;
+
+        let ctx = Arc::new(ctx.fork());
+        self.check_row_insert_permission(&requests, &ctx, PermissionReq::LineProtocol)
+            .context(AuthSnafu)?;
 
         let ctx = ctx_with_default_merge_mode(ctx, self.influxdb_default_merge_mode);
         let ctx = {

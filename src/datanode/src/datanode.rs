@@ -61,8 +61,8 @@ use tokio::sync::Notify;
 use crate::config::{DatanodeOptions, RegionEngineConfig, StorageConfig};
 use crate::error::{
     self, BuildDatanodeSnafu, BuildMetricEngineSnafu, BuildMitoEngineSnafu, CreateDirSnafu,
-    GetMetadataSnafu, MissingCacheSnafu, MissingNodeIdSnafu, OpenLogStoreSnafu, Result,
-    ShutdownInstanceSnafu, ShutdownServerSnafu, StartServerSnafu,
+    DataFusionSnafu, GetMetadataSnafu, MissingCacheSnafu, MissingNodeIdSnafu, OpenLogStoreSnafu,
+    Result, ShutdownInstanceSnafu, ShutdownServerSnafu, StartServerSnafu,
 };
 use crate::event_listener::{
     NoopRegionServerEventListener, RegionServerEventListenerRef, RegionServerEventReceiver,
@@ -432,7 +432,7 @@ impl DatanodeBuilder {
     ) -> Result<RegionServer> {
         let opts: &DatanodeOptions = &self.opts;
 
-        let query_engine_factory = QueryEngineFactory::new_with_plugins(
+        let query_engine_factory = QueryEngineFactory::try_new_with_plugins(
             // query engine in datanode only executes plan with resolved table source.
             DummyCatalogManager::arc(),
             None,
@@ -443,7 +443,8 @@ impl DatanodeBuilder {
             false,
             self.plugins.clone(),
             opts.query.clone(),
-        );
+        )
+        .context(DataFusionSnafu)?;
         let query_engine = query_engine_factory.query_engine();
 
         let table_provider_factory = self

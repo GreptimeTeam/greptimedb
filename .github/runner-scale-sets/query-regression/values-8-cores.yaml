@@ -1,0 +1,146 @@
+githubConfigUrl: "https://github.com/GreptimeTeam/greptimedb"
+githubConfigSecret: greptimedb-arc-github-app
+
+runnerScaleSetName: "perf-regression-8-cores"
+minRunners: 0
+maxRunners: 1
+
+template:
+  spec:
+    automountServiceAccountToken: false
+    activeDeadlineSeconds: 12600
+    nodeSelector:
+      kubernetes.io/hostname: minipc-3
+    securityContext:
+      runAsNonRoot: true
+      runAsUser: 1001
+      runAsGroup: 1001
+      fsGroup: 1001
+      fsGroupChangePolicy: OnRootMismatch
+      seccompProfile:
+        type: RuntimeDefault
+    volumes:
+      - name: cargo-home
+        emptyDir: {}
+      - name: build-cache
+        persistentVolumeClaim:
+          claimName: query-regression-build-cache
+    initContainers:
+      - name: initialize-build-cache
+        image: greptime-registry.cn-hangzhou.cr.aliyuncs.com/greptime/greptimedb-query-regression-runner@sha256:2436278bf0756700c718927907cdbedac64d55c593f80b515acb44dec8b02cc1
+        imagePullPolicy: IfNotPresent
+        command:
+          - /bin/sh
+          - -ec
+          - |
+            umask 0002
+            for directory in cargo-registry-v1 cargo-git-v1 query-regression-target-v1 meta-v1 sccache-v1; do
+              cache_directory="/cache/${directory}"
+              mkdir -p "${cache_directory}"
+              test -w "${cache_directory}"
+              probe_file="${cache_directory}/.write-probe"
+              : > "${probe_file}"
+              test -f "${probe_file}"
+              rm "${probe_file}"
+            done
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1001
+          runAsGroup: 1001
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+              - ALL
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+            ephemeral-storage: 1Gi
+          limits:
+            cpu: 500m
+            memory: 512Mi
+            ephemeral-storage: 1Gi
+        volumeMounts:
+          - name: build-cache
+            mountPath: /cache
+    containers:
+      - name: runner
+        image: greptime-registry.cn-hangzhou.cr.aliyuncs.com/greptime/greptimedb-query-regression-runner@sha256:2436278bf0756700c718927907cdbedac64d55c593f80b515acb44dec8b02cc1
+        imagePullPolicy: IfNotPresent
+        command: ["/home/runner/run.sh"]
+        env:
+          - name: CARGO_HOME
+            value: /home/runner/.cargo
+          - name: HTTP_PROXY
+            valueFrom:
+              configMapKeyRef:
+                name: query-regression-runner-local-env
+                key: HTTP_PROXY
+                optional: true
+          - name: HTTPS_PROXY
+            valueFrom:
+              configMapKeyRef:
+                name: query-regression-runner-local-env
+                key: HTTPS_PROXY
+                optional: true
+          - name: NO_PROXY
+            valueFrom:
+              configMapKeyRef:
+                name: query-regression-runner-local-env
+                key: NO_PROXY
+                optional: true
+          - name: UV_CACHE_DIR
+            value: /home/runner/.cargo/uv-cache
+          - name: RUSTUP_HOME
+            value: /opt/rustup
+          - name: RUSTUP_TOOLCHAIN
+            value: nightly-2026-03-21
+          - name: RUSTUP_AUTO_INSTALL
+            value: "0"
+          - name: CARGO_TARGET_DIR
+            value: /home/runner/query-regression-target
+          - name: QUERY_REGRESSION_CACHE_META
+            value: /home/runner/query-regression-cache-meta
+          - name: RUSTC_WRAPPER
+            value: /usr/local/bin/sccache
+          - name: SCCACHE_DIR
+            value: /home/runner/.cache/sccache
+          - name: SCCACHE_CACHE_SIZE
+            value: 40G
+          - name: CARGO_INCREMENTAL
+            value: "0"
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1001
+          runAsGroup: 1001
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+              - ALL
+        resources:
+          requests:
+            cpu: "6"
+            memory: 24Gi
+            ephemeral-storage: 80Gi
+          limits:
+            cpu: "8"
+            memory: 24Gi
+            ephemeral-storage: 80Gi
+        volumeMounts:
+          - name: cargo-home
+            mountPath: /home/runner/.cargo
+          - name: build-cache
+            mountPath: /home/runner/.cargo/registry
+            subPath: cargo-registry-v1
+          - name: build-cache
+            mountPath: /home/runner/.cargo/git
+            subPath: cargo-git-v1
+          - name: build-cache
+            mountPath: /home/runner/query-regression-target
+            subPath: query-regression-target-v1
+          - name: build-cache
+            mountPath: /home/runner/query-regression-cache-meta
+            subPath: meta-v1
+          - name: build-cache
+            mountPath: /home/runner/.cache/sccache
+            subPath: sccache-v1

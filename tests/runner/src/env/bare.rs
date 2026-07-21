@@ -81,6 +81,7 @@ pub struct StoreConfig {
     pub(crate) setup_pg: Option<ServiceProvider>,
     pub(crate) setup_mysql: Option<ServiceProvider>,
     pub enable_flat_format: bool,
+    pub enable_gc: bool,
 }
 
 #[derive(Clone)]

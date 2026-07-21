@@ -107,6 +107,11 @@ pub struct RegionOptions {
     /// Internal primary key encoding override used by metric-engine.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub primary_key_encoding: Option<PrimaryKeyEncoding>,
+    /// Per-region write buffer size. A positive size flushes/stalls this region
+    /// independently of the global write buffer limit and rejects writes at twice
+    /// the configured size; zero disables both limits.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub write_buffer_size: Option<ReadableSize>,
 }
 
 impl RegionOptions {
@@ -256,6 +261,7 @@ impl RegionOptions {
             merge_mode: options.merge_mode,
             sst_format,
             primary_key_encoding,
+            write_buffer_size: options.write_buffer_size,
         };
         opts.validate()?;
 
@@ -354,6 +360,7 @@ impl Default for TwcsOptions {
 #[derive(Debug, Deserialize)]
 #[serde(default)]
 struct RegionOptionsWithoutEnum {
+    write_buffer_size: Option<ReadableSize>,
     /// Region SST files TTL.
     ttl: Option<TimeToLive>,
     #[serde(with = "humantime_serde")]
@@ -371,6 +378,7 @@ impl Default for RegionOptionsWithoutEnum {
     fn default() -> Self {
         let options = RegionOptions::default();
         RegionOptionsWithoutEnum {
+            write_buffer_size: options.write_buffer_size,
             ttl: options.ttl,
             auto_flush_interval: options.auto_flush_interval,
             storage: options.storage,
@@ -520,6 +528,7 @@ mod tests {
     use common_error::ext::ErrorExt;
     use common_error::status_code::StatusCode;
     use common_wal::options::KafkaWalOptions;
+    use store_api::mito_engine_options::WRITE_BUFFER_SIZE_KEY;
 
     use super::*;
 
@@ -567,6 +576,28 @@ mod tests {
             err.to_string().contains("auto_flush_interval"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn test_with_write_buffer_size() {
+        let map = make_map(&[(WRITE_BUFFER_SIZE_KEY, "128MiB")]);
+        let options = RegionOptions::try_from_options(RegionId::new(0, 0), &map).unwrap();
+        let expect = RegionOptions {
+            write_buffer_size: Some(ReadableSize::mb(128)),
+            ..Default::default()
+        };
+        assert_eq!(expect, options);
+    }
+
+    #[test]
+    fn test_with_zero_write_buffer_size() {
+        let map = make_map(&[(WRITE_BUFFER_SIZE_KEY, "0")]);
+        let options = RegionOptions::try_from_options(RegionId::new(0, 0), &map).unwrap();
+        let expect = RegionOptions {
+            write_buffer_size: Some(ReadableSize::mb(0)),
+            ..Default::default()
+        };
+        assert_eq!(expect, options);
     }
 
     #[test]
@@ -898,6 +929,7 @@ mod tests {
             merge_mode: Some(MergeMode::LastNonNull),
             sst_format: Some(FormatType::Flat),
             primary_key_encoding: None,
+            write_buffer_size: None,
         };
         assert_eq!(expect, options);
     }
@@ -928,10 +960,18 @@ mod tests {
             merge_mode: Some(MergeMode::LastNonNull),
             sst_format: None,
             primary_key_encoding: None,
+            write_buffer_size: Some(ReadableSize::mb(128)),
         };
         let region_options_json_str = serde_json::to_string(&options).unwrap();
         let got: RegionOptions = serde_json::from_str(&region_options_json_str).unwrap();
         assert_eq!(options, got);
+
+        let old_region_options_json_str = r#"{"ttl":null}"#;
+        let got: RegionOptions = serde_json::from_str(old_region_options_json_str).unwrap();
+        assert_eq!(None, got.write_buffer_size);
+
+        let default_json = serde_json::to_value(RegionOptions::default()).unwrap();
+        assert!(default_json.get(WRITE_BUFFER_SIZE_KEY).is_none());
     }
 
     #[test]
@@ -985,6 +1025,7 @@ mod tests {
             merge_mode: Some(MergeMode::LastNonNull),
             sst_format: None,
             primary_key_encoding: None,
+            write_buffer_size: None,
         };
         assert_eq!(options, got);
     }

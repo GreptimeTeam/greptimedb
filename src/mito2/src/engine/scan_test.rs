@@ -693,6 +693,7 @@ async fn test_series_scan_with_format(flat_format: bool) {
 
     let request = ScanRequest {
         distribution: Some(TimeSeriesDistribution::PerSeries),
+        preserve_pk_dictionary_encoding: true,
         ..Default::default()
     };
     let scanner = engine.scanner(region_id, request).await.unwrap();
@@ -790,7 +791,7 @@ fn collect_and_assert_partition_rows(
         let mut partition_series = Vec::new();
 
         for batch in batches.iter() {
-            let tags = batch.column_by_name("tag_0").unwrap().as_string::<i32>();
+            let tags = batch.column_by_name("tag_0").unwrap();
             let fields = batch
                 .column_by_name("field_0")
                 .unwrap()
@@ -801,7 +802,9 @@ fn collect_and_assert_partition_rows(
                 .as_primitive::<TimestampMillisecondType>();
 
             for row in 0..batch.num_rows() {
-                let tag = tags.value(row).to_string();
+                let tag = datatypes::arrow_array::string_array_value_at_index(tags, row)
+                    .unwrap()
+                    .to_string();
                 let field = fields.value(row);
                 let ts = ts.value(row);
                 partition_series.push(tag.clone());

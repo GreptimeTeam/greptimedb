@@ -163,6 +163,9 @@ pub struct HttpOptions {
     /// Validation mode while decoding Prometheus remote write requests.
     pub prom_validation_mode: PromValidationMode,
 
+    /// Enables experimental Prometheus remote write v2 native histogram ingestion.
+    pub experimental_enable_prometheus_native_histogram: bool,
+
     pub cors_allowed_origins: Vec<String>,
 
     pub enable_cors: bool,
@@ -180,7 +183,8 @@ impl Default for HttpOptions {
             cors_allowed_origins: Vec::new(),
             enable_cors: true,
             prom_validation_mode: PromValidationMode::Strict,
-            experimental_enable_explain_analyze_stream: false,
+            experimental_enable_prometheus_native_histogram: false,
+            experimental_enable_explain_analyze_stream: true,
         }
     }
 }
@@ -601,6 +605,9 @@ impl HttpServerBuilder {
             pipeline_handler,
             prom_store_with_metric_engine,
             prom_validation_mode,
+            experimental_enable_prometheus_native_histogram: self
+                .options
+                .experimental_enable_prometheus_native_histogram,
             pending_rows_batcher,
         };
 
@@ -970,6 +977,13 @@ impl HttpServer {
             .route(
                 "/services/collector/event/1.0",
                 routing::post(splunk::handle_event),
+            )
+            // The raw endpoint (plain-text body, one event per line) plus its
+            // versioned alias.
+            .route("/services/collector/raw", routing::post(splunk::handle_raw))
+            .route(
+                "/services/collector/raw/1.0",
+                routing::post(splunk::handle_raw),
             )
             .layer(
                 ServiceBuilder::new()
@@ -1441,7 +1455,11 @@ mod test {
     #[tokio::test]
     pub async fn test_analyze_stream_route_config_gate() {
         let (tx, _rx) = mpsc::channel(100);
-        let app = make_test_app_custom(tx, HttpOptions::default());
+        let options = HttpOptions {
+            experimental_enable_explain_analyze_stream: false,
+            ..Default::default()
+        };
+        let app = make_test_app_custom(tx, options);
         let client = TestClient::new(app).await;
         let res = client
             .post("/v1/sql/analyze/stream?sql=EXPLAIN%20ANALYZE%20VERBOSE%20SELECT%201")
@@ -1450,11 +1468,7 @@ mod test {
         assert_eq!(res.status(), StatusCode::NOT_FOUND);
 
         let (tx, _rx) = mpsc::channel(100);
-        let options = HttpOptions {
-            experimental_enable_explain_analyze_stream: true,
-            ..Default::default()
-        };
-        let app = make_test_app_custom(tx, options);
+        let app = make_test_app_custom(tx, HttpOptions::default());
         let client = TestClient::new(app).await;
         let res = client
             .post("/v1/sql/analyze/stream?sql=EXPLAIN%20ANALYZE%20VERBOSE%20SELECT%201")

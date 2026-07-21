@@ -752,7 +752,7 @@ impl DirtyTimeWindows {
                     }
                     .fail()?
                 };
-                self.align_time_window(start, end, time_window_expr)?
+                Self::align_time_window(start, end, time_window_expr)?
             } else {
                 (start, end)
             };
@@ -783,8 +783,9 @@ impl DirtyTimeWindows {
         Ok(ret)
     }
 
-    fn align_time_window(
-        &self,
+    /// Align a time range `[start, end)` (end is optional and exclusive) to
+    /// time window boundaries defined by the time window expr.
+    pub(crate) fn align_time_window(
         start: Timestamp,
         end: Option<Timestamp>,
         time_window_expr: &TimeWindowExpr,
@@ -830,12 +831,24 @@ impl DirtyTimeWindows {
 
         // previous time window
         let mut prev_tw = None;
-        for (lower_bound, upper_bound) in std::mem::take(&mut self.windows) {
+        for (mut lower_bound, upper_bound) in std::mem::take(&mut self.windows) {
             // filter out expired time window
-            if let Some(expire_lower_bound) = expire_lower_bound
-                && lower_bound < expire_lower_bound
-            {
-                continue;
+            if let Some(expire_lower_bound) = expire_lower_bound {
+                match upper_bound {
+                    // A bounded range ending at or before the expire bound is
+                    // fully expired, drop it.
+                    Some(upper_bound) if upper_bound <= expire_lower_bound => continue,
+                    // A bounded range crossing the expire bound keeps its
+                    // still-live suffix. The expire bound is aligned to the
+                    // time window boundary by the caller, so the clipped start
+                    // stays aligned.
+                    Some(_) if lower_bound < expire_lower_bound => {
+                        lower_bound = expire_lower_bound;
+                    }
+                    // Unbounded windows keep the start-based behavior.
+                    None if lower_bound < expire_lower_bound => continue,
+                    _ => {}
+                }
             }
 
             let Some(prev_tw) = &mut prev_tw else {
@@ -861,7 +874,9 @@ impl DirtyTimeWindows {
                 .map(|dist| dist <= window_size * self.time_window_merge_threshold as i32)
                 .unwrap_or(false)
             {
-                prev_tw.1 = Some(cur_upper);
+                // Union the two windows: the current window may be contained
+                // in the previous one, so keep the larger upper bound.
+                prev_tw.1 = Some(prev_upper.max(cur_upper));
             } else {
                 new_windows.insert(prev_tw.0, prev_tw.1);
                 *prev_tw = (lower_bound, Some(cur_upper));
@@ -1149,6 +1164,105 @@ mod test {
         }
     }
 
+    #[test]
+    fn test_merge_dirty_time_windows_with_bounded_ranges() {
+        let window_size = chrono::Duration::seconds(5);
+        let testcases = vec![
+            // A contained bounded range must not shrink the containing window:
+            // [0s, 15s) merged with nested [5s, 10s) stays [0s, 15s).
+            (
+                vec![
+                    (Timestamp::new_second(0), Some(Timestamp::new_second(15))),
+                    (Timestamp::new_second(5), Some(Timestamp::new_second(10))),
+                ],
+                BTreeMap::from([(Timestamp::new_second(0), Some(Timestamp::new_second(15)))]),
+            ),
+            // An unbounded dirty window nested in a bounded range must not
+            // shrink the range either: [0s, 15s) merged with 3s (window end
+            // 8s) stays [0s, 15s).
+            (
+                vec![
+                    (Timestamp::new_second(0), Some(Timestamp::new_second(15))),
+                    (Timestamp::new_second(3), None),
+                ],
+                BTreeMap::from([(Timestamp::new_second(0), Some(Timestamp::new_second(15)))]),
+            ),
+            // Disjoint bounded ranges far apart are kept separate.
+            (
+                vec![
+                    (Timestamp::new_second(0), Some(Timestamp::new_second(5))),
+                    (Timestamp::new_second(100), Some(Timestamp::new_second(110))),
+                ],
+                BTreeMap::from([
+                    (Timestamp::new_second(0), Some(Timestamp::new_second(5))),
+                    (Timestamp::new_second(100), Some(Timestamp::new_second(110))),
+                ]),
+            ),
+            // Overlapping bounded ranges are unioned: [0s, 10s) and [5s, 20s)
+            // become [0s, 20s).
+            (
+                vec![
+                    (Timestamp::new_second(0), Some(Timestamp::new_second(10))),
+                    (Timestamp::new_second(5), Some(Timestamp::new_second(20))),
+                ],
+                BTreeMap::from([(Timestamp::new_second(0), Some(Timestamp::new_second(20)))]),
+            ),
+        ];
+
+        for (windows, expected) in testcases {
+            let mut dirty = DirtyTimeWindows::default();
+            for (start, end) in windows {
+                dirty.add_window(start, end);
+            }
+            dirty.merge_dirty_time_windows(window_size, None).unwrap();
+            assert_eq!(expected, dirty.windows);
+        }
+
+        // Expire bound handling for bounded ranges vs unbounded windows.
+        let expire_testcases = vec![
+            // A bounded range ending at the expire bound is fully expired.
+            (
+                vec![(Timestamp::new_second(0), Some(Timestamp::new_second(10)))],
+                BTreeMap::from([]),
+            ),
+            // A bounded range ending before the expire bound is fully expired.
+            (
+                vec![(Timestamp::new_second(0), Some(Timestamp::new_second(5)))],
+                BTreeMap::from([]),
+            ),
+            // A bounded range crossing the expire bound keeps its live
+            // suffix: [0s, 15s) with expire 10s becomes [10s, 15s).
+            (
+                vec![(Timestamp::new_second(0), Some(Timestamp::new_second(15)))],
+                BTreeMap::from([(Timestamp::new_second(10), Some(Timestamp::new_second(15)))]),
+            ),
+            // A bounded range starting at the expire bound is kept intact.
+            (
+                vec![(Timestamp::new_second(10), Some(Timestamp::new_second(15)))],
+                BTreeMap::from([(Timestamp::new_second(10), Some(Timestamp::new_second(15)))]),
+            ),
+            // An unbounded window starting before the expire bound is
+            // dropped, preserving the existing start-based behavior.
+            (vec![(Timestamp::new_second(5), None)], BTreeMap::from([])),
+            // An unbounded window starting at the expire bound is kept.
+            (
+                vec![(Timestamp::new_second(10), None)],
+                BTreeMap::from([(Timestamp::new_second(10), None)]),
+            ),
+        ];
+
+        for (windows, expected) in expire_testcases {
+            let mut dirty = DirtyTimeWindows::default();
+            for (start, end) in windows {
+                dirty.add_window(start, end);
+            }
+            dirty
+                .merge_dirty_time_windows(window_size, Some(Timestamp::new_second(10)))
+                .unwrap();
+            assert_eq!(expected, dirty.windows);
+        }
+    }
+
     #[tokio::test]
     async fn test_align_time_window() {
         type TimeWindow = (Timestamp, Option<Timestamp>);
@@ -1194,11 +1308,13 @@ mod test {
                 .unwrap()
                 .unwrap();
 
-            let dirty = DirtyTimeWindows::default();
             for (before_align, expected_after_align) in aligns {
-                let after_align = dirty
-                    .align_time_window(before_align.0, before_align.1, &time_window_expr)
-                    .unwrap();
+                let after_align = DirtyTimeWindows::align_time_window(
+                    before_align.0,
+                    before_align.1,
+                    &time_window_expr,
+                )
+                .unwrap();
                 assert_eq!(expected_after_align, after_align);
             }
         }

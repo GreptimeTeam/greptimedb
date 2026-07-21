@@ -948,11 +948,14 @@ dependencies = [
  "common-test-util",
  "digest 0.10.7",
  "hex",
+ "hmac 0.12.1",
  "pbkdf2",
+ "rand 0.9.4",
  "sha1 0.10.6",
  "sha2 0.10.9",
  "snafu 0.8.6",
  "sql",
+ "stringprep",
  "subtle",
  "tokio",
 ]
@@ -1480,6 +1483,15 @@ checksum = "874bb8112abecc98cbd6d81ea4fa7e94fb9449648c93cc89aa40c81c24d7de03"
 dependencies = [
  "alloc-no-stdlib",
  "alloc-stdlib",
+]
+
+[[package]]
+name = "bs58"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bf88ba1141d185c399bee5288d850d63b8369520c1eafc32a0430b5b6c287bf4"
+dependencies = [
+ "tinyvec",
 ]
 
 [[package]]
@@ -2210,7 +2222,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "117725a109d387c937a1533ce01b450cbde6b88abceea8473c4d7a85853cda3c"
 dependencies = [
  "lazy_static",
- "windows-sys 0.59.0",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]
@@ -3541,6 +3553,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "darling"
+version = "0.23.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "25ae13da2f202d56bd7f91c25fba009e7717a1e4a1cc98a76d844b65ae912e9d"
+dependencies = [
+ "darling_core 0.23.0",
+ "darling_macro 0.23.0",
+]
+
+[[package]]
 name = "darling_core"
 version = "0.14.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3583,6 +3605,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "darling_core"
+version = "0.23.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9865a50f7c335f53564bb694ef660825eb8610e0a53d3e11bf1b0d3df31e03b0"
+dependencies = [
+ "ident_case",
+ "proc-macro2",
+ "quote",
+ "strsim 0.11.1",
+ "syn 2.0.117",
+]
+
+[[package]]
 name = "darling_macro"
 version = "0.14.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3616,6 +3651,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "darling_macro"
+version = "0.23.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ac3984ec7bd6cfa798e62b4a642426a5be0e68f9401cfc2a01e3fa9ea2fcdb8d"
+dependencies = [
+ "darling_core 0.23.0",
+ "quote",
+ "syn 2.0.117",
+]
+
+[[package]]
 name = "dary_heap"
 version = "0.3.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3644,7 +3690,7 @@ checksum = "a4ae5f15dda3c708c0ade84bfee31ccab44a3da4f88015ed22f63732abe300c8"
 [[package]]
 name = "datafusion"
 version = "53.1.0"
-source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=25e823d9ceefc2e538dee93f58c1a5c9e05e8182#25e823d9ceefc2e538dee93f58c1a5c9e05e8182"
+source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=7a84c45104d35408f00bbf880268c47193b73b28#7a84c45104d35408f00bbf880268c47193b73b28"
 dependencies = [
  "arrow 58.3.0",
  "arrow-schema 58.3.0",
@@ -3698,7 +3744,7 @@ dependencies = [
 [[package]]
 name = "datafusion-catalog"
 version = "53.1.0"
-source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=25e823d9ceefc2e538dee93f58c1a5c9e05e8182#25e823d9ceefc2e538dee93f58c1a5c9e05e8182"
+source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=7a84c45104d35408f00bbf880268c47193b73b28#7a84c45104d35408f00bbf880268c47193b73b28"
 dependencies = [
  "arrow 58.3.0",
  "async-trait",
@@ -3722,7 +3768,7 @@ dependencies = [
 [[package]]
 name = "datafusion-catalog-listing"
 version = "53.1.0"
-source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=25e823d9ceefc2e538dee93f58c1a5c9e05e8182#25e823d9ceefc2e538dee93f58c1a5c9e05e8182"
+source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=7a84c45104d35408f00bbf880268c47193b73b28#7a84c45104d35408f00bbf880268c47193b73b28"
 dependencies = [
  "arrow 58.3.0",
  "async-trait",
@@ -3744,7 +3790,7 @@ dependencies = [
 [[package]]
 name = "datafusion-common"
 version = "53.1.0"
-source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=25e823d9ceefc2e538dee93f58c1a5c9e05e8182#25e823d9ceefc2e538dee93f58c1a5c9e05e8182"
+source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=7a84c45104d35408f00bbf880268c47193b73b28#7a84c45104d35408f00bbf880268c47193b73b28"
 dependencies = [
  "ahash 0.8.12",
  "arrow 58.3.0",
@@ -3768,7 +3814,7 @@ dependencies = [
 [[package]]
 name = "datafusion-common-runtime"
 version = "53.1.0"
-source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=25e823d9ceefc2e538dee93f58c1a5c9e05e8182#25e823d9ceefc2e538dee93f58c1a5c9e05e8182"
+source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=7a84c45104d35408f00bbf880268c47193b73b28#7a84c45104d35408f00bbf880268c47193b73b28"
 dependencies = [
  "futures",
  "log",
@@ -3778,7 +3824,7 @@ dependencies = [
 [[package]]
 name = "datafusion-datasource"
 version = "53.1.0"
-source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=25e823d9ceefc2e538dee93f58c1a5c9e05e8182#25e823d9ceefc2e538dee93f58c1a5c9e05e8182"
+source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=7a84c45104d35408f00bbf880268c47193b73b28#7a84c45104d35408f00bbf880268c47193b73b28"
 dependencies = [
  "arrow 58.3.0",
  "async-compression",
@@ -3812,7 +3858,7 @@ dependencies = [
 [[package]]
 name = "datafusion-datasource-arrow"
 version = "53.1.0"
-source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=25e823d9ceefc2e538dee93f58c1a5c9e05e8182#25e823d9ceefc2e538dee93f58c1a5c9e05e8182"
+source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=7a84c45104d35408f00bbf880268c47193b73b28#7a84c45104d35408f00bbf880268c47193b73b28"
 dependencies = [
  "arrow 58.3.0",
  "arrow-ipc 58.3.0",
@@ -3835,7 +3881,7 @@ dependencies = [
 [[package]]
 name = "datafusion-datasource-csv"
 version = "53.1.0"
-source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=25e823d9ceefc2e538dee93f58c1a5c9e05e8182#25e823d9ceefc2e538dee93f58c1a5c9e05e8182"
+source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=7a84c45104d35408f00bbf880268c47193b73b28#7a84c45104d35408f00bbf880268c47193b73b28"
 dependencies = [
  "arrow 58.3.0",
  "async-trait",
@@ -3857,7 +3903,7 @@ dependencies = [
 [[package]]
 name = "datafusion-datasource-json"
 version = "53.1.0"
-source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=25e823d9ceefc2e538dee93f58c1a5c9e05e8182#25e823d9ceefc2e538dee93f58c1a5c9e05e8182"
+source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=7a84c45104d35408f00bbf880268c47193b73b28#7a84c45104d35408f00bbf880268c47193b73b28"
 dependencies = [
  "arrow 58.3.0",
  "async-trait",
@@ -3880,7 +3926,7 @@ dependencies = [
 [[package]]
 name = "datafusion-datasource-parquet"
 version = "53.1.0"
-source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=25e823d9ceefc2e538dee93f58c1a5c9e05e8182#25e823d9ceefc2e538dee93f58c1a5c9e05e8182"
+source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=7a84c45104d35408f00bbf880268c47193b73b28#7a84c45104d35408f00bbf880268c47193b73b28"
 dependencies = [
  "arrow 58.3.0",
  "async-trait",
@@ -3909,12 +3955,12 @@ dependencies = [
 [[package]]
 name = "datafusion-doc"
 version = "53.1.0"
-source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=25e823d9ceefc2e538dee93f58c1a5c9e05e8182#25e823d9ceefc2e538dee93f58c1a5c9e05e8182"
+source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=7a84c45104d35408f00bbf880268c47193b73b28#7a84c45104d35408f00bbf880268c47193b73b28"
 
 [[package]]
 name = "datafusion-execution"
 version = "53.1.0"
-source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=25e823d9ceefc2e538dee93f58c1a5c9e05e8182#25e823d9ceefc2e538dee93f58c1a5c9e05e8182"
+source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=7a84c45104d35408f00bbf880268c47193b73b28#7a84c45104d35408f00bbf880268c47193b73b28"
 dependencies = [
  "arrow 58.3.0",
  "arrow-buffer 58.3.0",
@@ -3936,7 +3982,7 @@ dependencies = [
 [[package]]
 name = "datafusion-expr"
 version = "53.1.0"
-source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=25e823d9ceefc2e538dee93f58c1a5c9e05e8182#25e823d9ceefc2e538dee93f58c1a5c9e05e8182"
+source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=7a84c45104d35408f00bbf880268c47193b73b28#7a84c45104d35408f00bbf880268c47193b73b28"
 dependencies = [
  "arrow 58.3.0",
  "async-trait",
@@ -3958,7 +4004,7 @@ dependencies = [
 [[package]]
 name = "datafusion-expr-common"
 version = "53.1.0"
-source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=25e823d9ceefc2e538dee93f58c1a5c9e05e8182#25e823d9ceefc2e538dee93f58c1a5c9e05e8182"
+source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=7a84c45104d35408f00bbf880268c47193b73b28#7a84c45104d35408f00bbf880268c47193b73b28"
 dependencies = [
  "arrow 58.3.0",
  "datafusion-common",
@@ -3970,7 +4016,7 @@ dependencies = [
 [[package]]
 name = "datafusion-functions"
 version = "53.1.0"
-source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=25e823d9ceefc2e538dee93f58c1a5c9e05e8182#25e823d9ceefc2e538dee93f58c1a5c9e05e8182"
+source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=7a84c45104d35408f00bbf880268c47193b73b28#7a84c45104d35408f00bbf880268c47193b73b28"
 dependencies = [
  "arrow 58.3.0",
  "arrow-buffer 58.3.0",
@@ -4001,7 +4047,7 @@ dependencies = [
 [[package]]
 name = "datafusion-functions-aggregate"
 version = "53.1.0"
-source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=25e823d9ceefc2e538dee93f58c1a5c9e05e8182#25e823d9ceefc2e538dee93f58c1a5c9e05e8182"
+source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=7a84c45104d35408f00bbf880268c47193b73b28#7a84c45104d35408f00bbf880268c47193b73b28"
 dependencies = [
  "ahash 0.8.12",
  "arrow 58.3.0",
@@ -4022,7 +4068,7 @@ dependencies = [
 [[package]]
 name = "datafusion-functions-aggregate-common"
 version = "53.1.0"
-source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=25e823d9ceefc2e538dee93f58c1a5c9e05e8182#25e823d9ceefc2e538dee93f58c1a5c9e05e8182"
+source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=7a84c45104d35408f00bbf880268c47193b73b28#7a84c45104d35408f00bbf880268c47193b73b28"
 dependencies = [
  "ahash 0.8.12",
  "arrow 58.3.0",
@@ -4034,7 +4080,7 @@ dependencies = [
 [[package]]
 name = "datafusion-functions-nested"
 version = "53.1.0"
-source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=25e823d9ceefc2e538dee93f58c1a5c9e05e8182#25e823d9ceefc2e538dee93f58c1a5c9e05e8182"
+source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=7a84c45104d35408f00bbf880268c47193b73b28#7a84c45104d35408f00bbf880268c47193b73b28"
 dependencies = [
  "arrow 58.3.0",
  "arrow-ord 58.3.0",
@@ -4058,7 +4104,7 @@ dependencies = [
 [[package]]
 name = "datafusion-functions-table"
 version = "53.1.0"
-source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=25e823d9ceefc2e538dee93f58c1a5c9e05e8182#25e823d9ceefc2e538dee93f58c1a5c9e05e8182"
+source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=7a84c45104d35408f00bbf880268c47193b73b28#7a84c45104d35408f00bbf880268c47193b73b28"
 dependencies = [
  "arrow 58.3.0",
  "async-trait",
@@ -4073,7 +4119,7 @@ dependencies = [
 [[package]]
 name = "datafusion-functions-window"
 version = "53.1.0"
-source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=25e823d9ceefc2e538dee93f58c1a5c9e05e8182#25e823d9ceefc2e538dee93f58c1a5c9e05e8182"
+source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=7a84c45104d35408f00bbf880268c47193b73b28#7a84c45104d35408f00bbf880268c47193b73b28"
 dependencies = [
  "arrow 58.3.0",
  "datafusion-common",
@@ -4090,7 +4136,7 @@ dependencies = [
 [[package]]
 name = "datafusion-functions-window-common"
 version = "53.1.0"
-source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=25e823d9ceefc2e538dee93f58c1a5c9e05e8182#25e823d9ceefc2e538dee93f58c1a5c9e05e8182"
+source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=7a84c45104d35408f00bbf880268c47193b73b28#7a84c45104d35408f00bbf880268c47193b73b28"
 dependencies = [
  "datafusion-common",
  "datafusion-physical-expr-common",
@@ -4099,7 +4145,7 @@ dependencies = [
 [[package]]
 name = "datafusion-macros"
 version = "53.1.0"
-source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=25e823d9ceefc2e538dee93f58c1a5c9e05e8182#25e823d9ceefc2e538dee93f58c1a5c9e05e8182"
+source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=7a84c45104d35408f00bbf880268c47193b73b28#7a84c45104d35408f00bbf880268c47193b73b28"
 dependencies = [
  "datafusion-doc",
  "quote",
@@ -4109,7 +4155,7 @@ dependencies = [
 [[package]]
 name = "datafusion-optimizer"
 version = "53.1.0"
-source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=25e823d9ceefc2e538dee93f58c1a5c9e05e8182#25e823d9ceefc2e538dee93f58c1a5c9e05e8182"
+source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=7a84c45104d35408f00bbf880268c47193b73b28#7a84c45104d35408f00bbf880268c47193b73b28"
 dependencies = [
  "arrow 58.3.0",
  "chrono",
@@ -4158,7 +4204,7 @@ dependencies = [
 [[package]]
 name = "datafusion-physical-expr"
 version = "53.1.0"
-source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=25e823d9ceefc2e538dee93f58c1a5c9e05e8182#25e823d9ceefc2e538dee93f58c1a5c9e05e8182"
+source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=7a84c45104d35408f00bbf880268c47193b73b28#7a84c45104d35408f00bbf880268c47193b73b28"
 dependencies = [
  "ahash 0.8.12",
  "arrow 58.3.0",
@@ -4181,7 +4227,7 @@ dependencies = [
 [[package]]
 name = "datafusion-physical-expr-adapter"
 version = "53.1.0"
-source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=25e823d9ceefc2e538dee93f58c1a5c9e05e8182#25e823d9ceefc2e538dee93f58c1a5c9e05e8182"
+source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=7a84c45104d35408f00bbf880268c47193b73b28#7a84c45104d35408f00bbf880268c47193b73b28"
 dependencies = [
  "arrow 58.3.0",
  "datafusion-common",
@@ -4195,7 +4241,7 @@ dependencies = [
 [[package]]
 name = "datafusion-physical-expr-common"
 version = "53.1.0"
-source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=25e823d9ceefc2e538dee93f58c1a5c9e05e8182#25e823d9ceefc2e538dee93f58c1a5c9e05e8182"
+source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=7a84c45104d35408f00bbf880268c47193b73b28#7a84c45104d35408f00bbf880268c47193b73b28"
 dependencies = [
  "ahash 0.8.12",
  "arrow 58.3.0",
@@ -4211,7 +4257,7 @@ dependencies = [
 [[package]]
 name = "datafusion-physical-optimizer"
 version = "53.1.0"
-source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=25e823d9ceefc2e538dee93f58c1a5c9e05e8182#25e823d9ceefc2e538dee93f58c1a5c9e05e8182"
+source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=7a84c45104d35408f00bbf880268c47193b73b28#7a84c45104d35408f00bbf880268c47193b73b28"
 dependencies = [
  "arrow 58.3.0",
  "datafusion-common",
@@ -4229,7 +4275,7 @@ dependencies = [
 [[package]]
 name = "datafusion-physical-plan"
 version = "53.1.0"
-source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=25e823d9ceefc2e538dee93f58c1a5c9e05e8182#25e823d9ceefc2e538dee93f58c1a5c9e05e8182"
+source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=7a84c45104d35408f00bbf880268c47193b73b28#7a84c45104d35408f00bbf880268c47193b73b28"
 dependencies = [
  "ahash 0.8.12",
  "arrow 58.3.0",
@@ -4260,7 +4306,7 @@ dependencies = [
 [[package]]
 name = "datafusion-proto"
 version = "53.1.0"
-source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=25e823d9ceefc2e538dee93f58c1a5c9e05e8182#25e823d9ceefc2e538dee93f58c1a5c9e05e8182"
+source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=7a84c45104d35408f00bbf880268c47193b73b28#7a84c45104d35408f00bbf880268c47193b73b28"
 dependencies = [
  "arrow 58.3.0",
  "chrono",
@@ -4287,7 +4333,7 @@ dependencies = [
 [[package]]
 name = "datafusion-proto-common"
 version = "53.1.0"
-source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=25e823d9ceefc2e538dee93f58c1a5c9e05e8182#25e823d9ceefc2e538dee93f58c1a5c9e05e8182"
+source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=7a84c45104d35408f00bbf880268c47193b73b28#7a84c45104d35408f00bbf880268c47193b73b28"
 dependencies = [
  "arrow 58.3.0",
  "datafusion-common",
@@ -4297,7 +4343,7 @@ dependencies = [
 [[package]]
 name = "datafusion-pruning"
 version = "53.1.0"
-source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=25e823d9ceefc2e538dee93f58c1a5c9e05e8182#25e823d9ceefc2e538dee93f58c1a5c9e05e8182"
+source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=7a84c45104d35408f00bbf880268c47193b73b28#7a84c45104d35408f00bbf880268c47193b73b28"
 dependencies = [
  "arrow 58.3.0",
  "datafusion-common",
@@ -4313,7 +4359,7 @@ dependencies = [
 [[package]]
 name = "datafusion-session"
 version = "53.1.0"
-source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=25e823d9ceefc2e538dee93f58c1a5c9e05e8182#25e823d9ceefc2e538dee93f58c1a5c9e05e8182"
+source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=7a84c45104d35408f00bbf880268c47193b73b28#7a84c45104d35408f00bbf880268c47193b73b28"
 dependencies = [
  "async-trait",
  "datafusion-common",
@@ -4326,7 +4372,7 @@ dependencies = [
 [[package]]
 name = "datafusion-sql"
 version = "53.1.0"
-source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=25e823d9ceefc2e538dee93f58c1a5c9e05e8182#25e823d9ceefc2e538dee93f58c1a5c9e05e8182"
+source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=7a84c45104d35408f00bbf880268c47193b73b28#7a84c45104d35408f00bbf880268c47193b73b28"
 dependencies = [
  "arrow 58.3.0",
  "bigdecimal 0.4.8",
@@ -4344,7 +4390,7 @@ dependencies = [
 [[package]]
 name = "datafusion-substrait"
 version = "53.1.0"
-source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=25e823d9ceefc2e538dee93f58c1a5c9e05e8182#25e823d9ceefc2e538dee93f58c1a5c9e05e8182"
+source = "git+https://github.com/GreptimeTeam/datafusion.git?rev=7a84c45104d35408f00bbf880268c47193b73b28#7a84c45104d35408f00bbf880268c47193b73b28"
 dependencies = [
  "async-recursion",
  "async-trait",
@@ -5500,7 +5546,6 @@ dependencies = [
  "humantime",
  "humantime-serde",
  "hyper-util",
- "itertools 0.14.0",
  "lazy_static",
  "log-query",
  "meta-client",
@@ -5939,7 +5984,7 @@ dependencies = [
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=4a69c9e75240a76afeb0796798085813669288f8#4a69c9e75240a76afeb0796798085813669288f8"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=a937a645546b377a8ba88b43dd82a294e63d99ac#a937a645546b377a8ba88b43dd82a294e63d99ac"
 dependencies = [
  "prost 0.14.1",
  "prost-types 0.14.1",
@@ -6556,7 +6601,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.61.2",
+ "windows-core 0.57.0",
 ]
 
 [[package]]
@@ -7425,7 +7470,7 @@ dependencies = [
  "http 1.3.1",
  "json-patch",
  "k8s-openapi",
- "schemars",
+ "schemars 0.8.22",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
@@ -7703,7 +7748,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "07033963ba89ebaf1584d767badaa2e8fcec21aedea6b8c0346d487d49c28667"
 dependencies = [
  "cfg-if",
- "windows-targets 0.53.5",
+ "windows-targets 0.48.5",
 ]
 
 [[package]]
@@ -8517,6 +8562,7 @@ dependencies = [
  "toml 0.8.23",
  "tracing",
  "uuid",
+ "zstd",
 ]
 
 [[package]]
@@ -9249,6 +9295,7 @@ dependencies = [
  "snafu 0.8.6",
  "tempfile",
  "tokio",
+ "toml 0.8.23",
  "uuid",
 ]
 
@@ -9385,6 +9432,7 @@ dependencies = [
  "opendal-service-fs",
  "opendal-service-gcs",
  "opendal-service-http",
+ "opendal-service-mysql",
  "opendal-service-oss",
  "opendal-service-s3",
 ]
@@ -9570,6 +9618,18 @@ dependencies = [
  "log",
  "opendal-core",
  "serde",
+]
+
+[[package]]
+name = "opendal-service-mysql"
+version = "0.57.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5cb3364a16d32aeb9c9c3232a81648926a5a8efa680f3316e0743ca2d5a37744"
+dependencies = [
+ "mea",
+ "opendal-core",
+ "serde",
+ "sqlx",
 ]
 
 [[package]]
@@ -11021,6 +11081,7 @@ dependencies = [
  "bytemuck",
  "common-error",
  "common-macro",
+ "common-query",
  "common-recordbatch",
  "common-telemetry",
  "criterion 0.7.0",
@@ -11039,9 +11100,9 @@ dependencies = [
 
 [[package]]
 name = "promql-parser"
-version = "0.7.3"
+version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f514ab521bb2b4ce26aca29bf133498b2a2651b785d03a262bbf5772329c279f"
+checksum = "9e8c90c956be4237a93be6f2298302b56974ef862ab11e0f98869d1f27c69f88"
 dependencies = [
  "cfgrammar",
  "chrono",
@@ -11136,7 +11197,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ac6c3320f9abac597dcbc668774ef006702672474aad53c6d596b62e487b40b1"
 dependencies = [
  "heck 0.5.0",
- "itertools 0.14.0",
+ "itertools 0.11.0",
  "log",
  "multimap",
  "once_cell",
@@ -12752,6 +12813,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "schemars"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4cd191f9397d57d581cddd31014772520aa448f65ef991055d7f61582c65165f"
+dependencies = [
+ "dyn-clone",
+ "ref-cast",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "schemars"
+version = "1.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a2b42f36aa1cd011945615b92222f6bf73c599a102a300334cd7f8dbeec726cc"
+dependencies = [
+ "dyn-clone",
+ "ref-cast",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "schemars_derive"
 version = "0.8.22"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -13016,15 +13101,19 @@ dependencies = [
 
 [[package]]
 name = "serde_with"
-version = "3.1.0"
+version = "3.21.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "21e47d95bc83ed33b2ecf84f4187ad1ab9685d18ff28db000c99deac8ce180e3"
+checksum = "76a5c54c7310e7b8b9577c286d7e399ddd876c3e12b3ed917a8aabc4b96e9e8c"
 dependencies = [
- "base64 0.21.7",
+ "base64 0.22.1",
+ "bs58",
  "chrono",
  "hex",
  "indexmap 1.9.3",
- "serde",
+ "indexmap 2.13.0",
+ "schemars 0.9.0",
+ "schemars 1.2.1",
+ "serde_core",
  "serde_json",
  "serde_with_macros",
  "time",
@@ -13032,11 +13121,11 @@ dependencies = [
 
 [[package]]
 name = "serde_with_macros"
-version = "3.1.0"
+version = "3.21.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ea3cee93715c2e266b9338b7544da68a9f24e227722ba482bd1c024367c77c65"
+checksum = "84d57bc0c8b9a17920c178daa6bb924850d54a9c97ab45194bb8c17ad66bb660"
 dependencies = [
- "darling 0.20.11",
+ "darling 0.23.0",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
@@ -14129,7 +14218,7 @@ dependencies = [
  "prost-build 0.14.1",
  "prost-types 0.14.1",
  "regress",
- "schemars",
+ "schemars 0.8.22",
  "semver",
  "serde",
  "serde_json",
@@ -14578,7 +14667,7 @@ dependencies = [
  "reqwest 0.13.4",
  "rskafka",
  "rustls",
- "schemars",
+ "schemars 0.8.22",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -15524,7 +15613,7 @@ dependencies = [
  "proc-macro2",
  "quote",
  "regress",
- "schemars",
+ "schemars 0.8.22",
  "semver",
  "serde",
  "serde_json",
@@ -15541,7 +15630,7 @@ checksum = "911c32f3c8514b048c1b228361bebb5e6d73aeec01696e8cc0e82e2ffef8ab7a"
 dependencies = [
  "proc-macro2",
  "quote",
- "schemars",
+ "schemars 0.8.22",
  "semver",
  "serde",
  "serde_json",
@@ -16256,7 +16345,7 @@ version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf221c93e13a30d793f7645a0e7762c55d169dbb0a49671918a2319d289b10bb"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]

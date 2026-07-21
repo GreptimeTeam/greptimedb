@@ -45,6 +45,8 @@ use common_meta::key::view_info::{ViewInfoManager, ViewInfoManagerRef};
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::procedure_executor::ProcedureExecutorRef;
+#[cfg(feature = "enterprise")]
+use common_meta::rpc::ddl::CreatorGrantIntent;
 use common_query::Output;
 use common_telemetry::{debug, tracing, warn};
 use common_time::Timestamp;
@@ -78,8 +80,7 @@ use table::table_name::TableName;
 use table::table_reference::TableReference;
 
 use self::set::{
-    set_bytea_output, set_datestyle, set_intervalstyle, set_search_path, set_timezone,
-    validate_client_encoding,
+    set_bytea_output, set_datestyle, set_intervalstyle, set_timezone, validate_client_encoding,
 };
 use crate::error::{
     self, CatalogSnafu, ExecLogicalPlanSnafu, ExternalSnafu, InvalidSqlSnafu, NotSupportedSnafu,
@@ -102,6 +103,23 @@ pub trait StatementExecutorConfigurator: Send + Sync {
 
 pub type StatementExecutorConfiguratorRef = Arc<dyn StatementExecutorConfigurator>;
 
+#[cfg(feature = "enterprise")]
+#[async_trait::async_trait]
+pub trait CreateDatabaseHandler: Send + Sync {
+    fn creator(
+        &self,
+        query_ctx: &QueryContextRef,
+    ) -> std::result::Result<Option<CreatorGrantIntent>, BoxedError>;
+
+    async fn refresh_current_user(
+        &self,
+        query_ctx: &QueryContextRef,
+    ) -> std::result::Result<(), BoxedError>;
+}
+
+#[cfg(feature = "enterprise")]
+pub type CreateDatabaseHandlerRef = Arc<dyn CreateDatabaseHandler>;
+
 pub struct ExecutorConfigureContext {
     pub kv_backend: KvBackendRef,
 }
@@ -119,6 +137,8 @@ pub struct StatementExecutor {
     inserter: InserterRef,
     process_manager: Option<ProcessManagerRef>,
     origin_frontend_addr: String,
+    #[cfg(feature = "enterprise")]
+    create_database_handler: Option<CreateDatabaseHandlerRef>,
     #[cfg(feature = "enterprise")]
     trigger_querier: Option<TriggerQuerierRef>,
 }
@@ -169,6 +189,8 @@ impl StatementExecutor {
             process_manager,
             origin_frontend_addr,
             #[cfg(feature = "enterprise")]
+            create_database_handler: None,
+            #[cfg(feature = "enterprise")]
             trigger_querier: None,
         }
     }
@@ -176,6 +198,12 @@ impl StatementExecutor {
     #[cfg(feature = "enterprise")]
     pub fn with_trigger_querier(mut self, querier: TriggerQuerierRef) -> Self {
         self.trigger_querier = Some(querier);
+        self
+    }
+
+    #[cfg(feature = "enterprise")]
+    pub fn with_create_database_handler(mut self, handler: CreateDatabaseHandlerRef) -> Self {
+        self.create_database_handler = Some(handler);
         self
     }
 
@@ -347,6 +375,14 @@ impl StatementExecutor {
                     table_names.push(TableName::new(catalog, schema, table));
                 }
                 self.drop_tables(&table_names[..], stmt.drop_if_exists(), query_ctx.clone())
+                    .await
+            }
+            Statement::UndropTable(stmt) => {
+                let (catalog, schema, table) =
+                    table_idents_to_full_name(stmt.table_name(), &query_ctx)
+                        .map_err(BoxedError::new)
+                        .context(ExternalSnafu)?;
+                self.undrop_table(TableName::new(catalog, schema, table), query_ctx)
                     .await
             }
             Statement::DropDatabase(stmt) => {
@@ -529,7 +565,10 @@ impl StatementExecutor {
             },
             "SEARCH_PATH" => {
                 if query_ctx.channel() == Channel::Postgres {
-                    set_search_path(set_var.value, query_ctx)?
+                    let search_path = set_var.search_path().context(NotSupportedSnafu {
+                        feat: "Unsupported search path in set variable statement",
+                    })?;
+                    query_ctx.set_current_schema(search_path);
                 } else {
                     return NotSupportedSnafu {
                         feat: format!("Unsupported set variable {}", var_name),

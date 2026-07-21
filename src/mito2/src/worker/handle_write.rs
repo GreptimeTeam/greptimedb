@@ -14,7 +14,7 @@
 
 //! Handling write requests.
 
-use std::collections::{HashMap, hash_map};
+use std::collections::{HashMap, HashSet, hash_map};
 use std::sync::Arc;
 
 use api::v1::OpType;
@@ -50,8 +50,11 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             return;
         }
 
-        // Flush this worker if the engine needs to flush.
+        let write_region_ids = write_region_ids(write_requests, bulk_requests);
+
+        // Check region pressure before writes to match the global write buffer behavior.
         self.maybe_flush_worker();
+        let pressure = self.maybe_flush_write_regions(write_region_ids);
 
         if self.should_reject_write() {
             // The memory pressure is still too high, reject write requests.
@@ -61,6 +64,20 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             return;
         }
 
+        if !pressure.rejected_region_ids.is_empty() {
+            reject_region_write_requests(
+                &pressure.rejected_region_ids,
+                write_requests,
+                bulk_requests,
+            );
+            for region_id in &pressure.rejected_region_ids {
+                self.reject_region_stalled_requests(region_id);
+            }
+            if write_requests.is_empty() && bulk_requests.is_empty() {
+                return;
+            }
+        }
+
         if self.write_buffer_manager.should_stall() && allow_stall {
             let stalled_count = (write_requests.len() + bulk_requests.len()) as i64;
             self.stalling_count.add(stalled_count);
@@ -68,6 +85,17 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             self.stalled_requests.append(write_requests, bulk_requests);
             self.listener.on_write_stall();
             return;
+        }
+
+        if allow_stall {
+            self.stall_region_write_requests(
+                &pressure.stalled_region_ids,
+                write_requests,
+                bulk_requests,
+            );
+            if write_requests.is_empty() && bulk_requests.is_empty() {
+                return;
+            }
         }
 
         // Prepare write context.
@@ -163,15 +191,31 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             .inc_by(delete_rows as u64);
     }
 
-    /// Handles all stalled write requests.
+    /// Handles stalled write requests whose regions no longer need to stall.
     pub(crate) async fn handle_stalled_requests(&mut self) {
-        // Handle stalled requests.
-        let stalled = std::mem::take(&mut self.stalled_requests);
-        self.stalling_count.sub(stalled.stalled_count() as i64);
-        // We already stalled these requests, don't stall them again.
-        for (_, (_, mut requests, mut bulk)) in stalled.requests {
-            self.handle_write_requests(&mut requests, &mut bulk, false)
-                .await;
+        let region_ids = self
+            .stalled_requests
+            .requests
+            .keys()
+            .copied()
+            .collect::<HashSet<_>>();
+        let pressure = self.maybe_flush_write_regions(region_ids);
+        for region_id in &pressure.rejected_region_ids {
+            self.reject_region_stalled_requests(region_id);
+        }
+        let ready_region_ids = self
+            .stalled_requests
+            .requests
+            .keys()
+            .filter(|region_id| !pressure.stalled_region_ids.contains(region_id))
+            .copied()
+            .collect::<Vec<_>>();
+
+        // These requests have already been stalled. Retry ready regions without stalling the
+        // same requests again. Regions that still exceed their limit remain in the queue until
+        // their own flush releases the pressure.
+        for region_id in ready_region_ids {
+            self.handle_region_stalled_requests(&region_id, false).await;
         }
     }
 
@@ -553,6 +597,34 @@ impl<S> RegionWorkerLoop<S> {
         self.write_buffer_manager.memory_usage() + self.stalled_requests.estimated_size
             >= self.config.global_write_buffer_reject_size.as_bytes() as usize
     }
+
+    fn stall_region_write_requests(
+        &mut self,
+        stalled_region_ids: &HashSet<RegionId>,
+        write_requests: &mut Vec<SenderWriteRequest>,
+        bulk_requests: &mut Vec<SenderBulkRequest>,
+    ) {
+        let mut stalled_count = 0;
+        let mut stalled_write_requests = write_requests
+            .extract_if(.., |req| {
+                stalled_region_ids.contains(&req.request.region_id)
+            })
+            .collect::<Vec<_>>();
+        let mut stalled_bulk_requests = bulk_requests
+            .extract_if(.., |req| stalled_region_ids.contains(&req.region_id))
+            .collect::<Vec<_>>();
+
+        stalled_count += stalled_write_requests.len() + stalled_bulk_requests.len();
+        self.stalled_requests
+            .append(&mut stalled_write_requests, &mut stalled_bulk_requests);
+
+        if stalled_count > 0 {
+            let stalled_count = stalled_count as i64;
+            self.stalling_count.add(stalled_count);
+            WRITE_STALL_TOTAL.inc_by(stalled_count as u64);
+            self.listener.on_write_stall();
+        }
+    }
 }
 
 /// Send rejected error to all `write_requests`.
@@ -574,6 +646,33 @@ fn reject_write_requests(
         let region_id = req.region_id;
         req.sender.send(RejectWriteSnafu { region_id }.fail());
     }
+}
+
+fn reject_region_write_requests(
+    rejected_region_ids: &HashSet<RegionId>,
+    write_requests: &mut Vec<SenderWriteRequest>,
+    bulk_requests: &mut Vec<SenderBulkRequest>,
+) {
+    let mut rejected_write_requests = write_requests
+        .extract_if(.., |req| {
+            rejected_region_ids.contains(&req.request.region_id)
+        })
+        .collect::<Vec<_>>();
+    let mut rejected_bulk_requests = bulk_requests
+        .extract_if(.., |req| rejected_region_ids.contains(&req.region_id))
+        .collect::<Vec<_>>();
+    reject_write_requests(&mut rejected_write_requests, &mut rejected_bulk_requests);
+}
+
+fn write_region_ids(
+    write_requests: &[SenderWriteRequest],
+    bulk_requests: &[SenderBulkRequest],
+) -> HashSet<RegionId> {
+    write_requests
+        .iter()
+        .map(|req| req.request.region_id)
+        .chain(bulk_requests.iter().map(|req| req.region_id))
+        .collect()
 }
 
 /// Rejects delete request under append mode.

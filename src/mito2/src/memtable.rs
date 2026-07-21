@@ -80,6 +80,8 @@ pub struct RangesOptions {
     pub predicate: PredicateGroup,
     /// Sequence range to filter the data.
     pub sequence: Option<SequenceRange>,
+    /// Maximum number of rows readers should produce in one batch.
+    pub batch_size: usize,
 }
 
 impl Default for RangesOptions {
@@ -89,6 +91,7 @@ impl Default for RangesOptions {
             pre_filter_mode: PreFilterMode::All,
             predicate: PredicateGroup::default(),
             sequence: None,
+            batch_size: crate::sst::parquet::DEFAULT_READ_BATCH_SIZE,
         }
     }
 }
@@ -101,6 +104,7 @@ impl RangesOptions {
             pre_filter_mode: PreFilterMode::All,
             predicate: PredicateGroup::default(),
             sequence: None,
+            batch_size: crate::sst::parquet::DEFAULT_READ_BATCH_SIZE,
         }
     }
 
@@ -122,6 +126,13 @@ impl RangesOptions {
     #[must_use]
     pub fn with_sequence(mut self, sequence: Option<SequenceRange>) -> Self {
         self.sequence = sequence;
+        self
+    }
+
+    /// Sets the maximum number of rows readers should produce in one batch.
+    #[must_use]
+    pub fn with_batch_size(mut self, batch_size: usize) -> Self {
+        self.batch_size = batch_size.clamp(1, crate::sst::parquet::DEFAULT_READ_BATCH_SIZE);
         self
     }
 }

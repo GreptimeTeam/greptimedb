@@ -20,12 +20,15 @@ use api::v1::meta::{
     GcRegionsResponse, GcStats, GcTableRequest, GcTableResponse, MigrateRegionRequest,
     MigrateRegionResponse, ProcedureDetailRequest, ProcedureDetailResponse, ProcedureStateResponse,
     QueryProcedureRequest, ReconcileCatalog, ReconcileDatabase, ReconcileRequest,
-    ReconcileResponse, ReconcileTable, ResolveStrategy, procedure_service_server,
+    ReconcileResponse, ReconcileTable, ResolveStrategy, Role, procedure_service_server,
 };
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::key::table_name::TableNameKey;
 use common_meta::procedure_executor::ExecutorContext;
-use common_meta::rpc::ddl::{DdlTask, SubmitDdlTaskRequest};
+use common_meta::rpc::ddl::{
+    CREATE_DATABASE_CREATOR_EXTENSION_KEY, CREATE_DATABASE_CREATOR_METADATA_KEY,
+    CreatorGrantIntent, DdlTask, QueryContext, SubmitDdlTaskRequest,
+};
 use common_meta::rpc::procedure::{
     self, GcRegionsRequest as MetaGcRegionsRequest, GcResponse,
     GcTableRequest as MetaGcTableRequest,
@@ -33,7 +36,8 @@ use common_meta::rpc::procedure::{
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::RegionId;
 use table::table_reference::TableReference;
-use tonic::Request;
+use tonic::metadata::MetadataMap;
+use tonic::{Request, Status};
 
 use crate::error::{TableMetadataManagerSnafu, TableNotFoundSnafu};
 use crate::metasrv::Metasrv;
@@ -78,24 +82,26 @@ impl procedure_service_server::ProcedureService for Metasrv {
     async fn ddl(&self, request: Request<PbDdlTaskRequest>) -> GrpcResult<PbDdlTaskResponse> {
         check_leader!(self, request, PbDdlTaskResponse, "`ddl`");
 
+        let (metadata, _, request) = request.into_parts();
         let PbDdlTaskRequest {
             header,
             query_context,
             task,
             wait,
             timeout_secs,
-        } = request.into_inner();
+        } = request;
 
         let header = header.context(error::MissingRequestHeaderSnafu)?;
-        let query_context = query_context
+        let mut query_context = query_context
             .context(error::MissingRequiredParameterSnafu {
                 param: "query_context",
             })?
             .into();
-        let task: DdlTask = task
+        let mut task: DdlTask = task
             .context(error::MissingRequiredParameterSnafu { param: "task" })?
             .try_into()
             .context(error::ConvertProtoDataSnafu)?;
+        restore_create_database_creator(&metadata, header.role, &mut task, &mut query_context)?;
 
         let resp = self
             .ddl_manager()
@@ -303,6 +309,59 @@ impl procedure_service_server::ProcedureService for Metasrv {
     }
 }
 
+/// Restores the authenticated creator omitted from the protobuf create-database task.
+///
+/// The frontend sends the serialized [`CreatorGrantIntent`] in both a reserved query-context
+/// extension and internal gRPC metadata. This function removes the extension, requires both
+/// copies to match on a frontend create-database request, and writes the decoded intent into the
+/// task. Missing both preserves legacy and admin behavior; missing or mismatched copies fail
+/// closed.
+fn restore_create_database_creator(
+    metadata: &MetadataMap,
+    role: i32,
+    task: &mut DdlTask,
+    query_context: &mut QueryContext,
+) -> Result<(), Status> {
+    let forwarded = query_context
+        .extensions
+        .remove(CREATE_DATABASE_CREATOR_EXTENSION_KEY);
+    let internal = metadata
+        .get_bin(CREATE_DATABASE_CREATOR_METADATA_KEY)
+        .map(|value| {
+            value
+                .to_bytes()
+                .map_err(|_| Status::invalid_argument("Invalid internal creator metadata"))
+        })
+        .transpose()?;
+
+    let (forwarded, internal) = match (forwarded, internal) {
+        (None, None) => return Ok(()),
+        (Some(forwarded), Some(internal)) => (forwarded, internal),
+        _ => {
+            return Err(Status::invalid_argument(
+                "Untrusted create-database creator context",
+            ));
+        }
+    };
+
+    let DdlTask::CreateDatabase(task) = task else {
+        return Err(Status::invalid_argument(
+            "Untrusted create-database creator context",
+        ));
+    };
+    if Role::try_from(role) != Ok(Role::Frontend) || forwarded.as_bytes() != internal.as_ref() {
+        return Err(Status::invalid_argument(
+            "Untrusted create-database creator context",
+        ));
+    }
+
+    task.creator = Some(
+        serde_json::from_str::<CreatorGrantIntent>(&forwarded)
+            .map_err(|_| Status::invalid_argument("Invalid internal creator metadata"))?,
+    );
+    Ok(())
+}
+
 impl Metasrv {
     fn normalize_gc_timeout(timeout: Duration) -> Option<Duration> {
         if timeout.is_zero() {
@@ -443,7 +502,46 @@ fn gc_response_to_table_pb(resp: GcResponse) -> GcTableResponse {
 mod tests {
     use std::time::Duration;
 
-    use super::Metasrv;
+    use api::v1::meta::Role;
+    use common_meta::rpc::ddl::{
+        CREATE_DATABASE_CREATOR_EXTENSION_KEY, CREATE_DATABASE_CREATOR_METADATA_KEY,
+        CreatorGrantIntent, DdlTask, QueryContext,
+    };
+    use tonic::metadata::{MetadataMap, MetadataValue};
+
+    use super::{Metasrv, restore_create_database_creator};
+
+    fn create_database_task() -> DdlTask {
+        DdlTask::new_create_database(
+            "greptime".to_string(),
+            "metrics".to_string(),
+            false,
+            Default::default(),
+            None,
+        )
+    }
+
+    fn creator_context(creator: Option<&str>) -> QueryContext {
+        let mut context = QueryContext::default();
+        if let Some(creator) = creator {
+            context.extensions.insert(
+                CREATE_DATABASE_CREATOR_EXTENSION_KEY.to_string(),
+                creator.to_string(),
+            );
+        }
+        context
+    }
+
+    fn creator_metadata(creator: Option<&str>) -> MetadataMap {
+        let mut metadata = MetadataMap::new();
+        if let Some(creator) = creator {
+            metadata.insert_bin(
+                CREATE_DATABASE_CREATOR_METADATA_KEY,
+                MetadataValue::from_bytes(creator.as_bytes()),
+            );
+        }
+        metadata
+    }
 
     #[test]
     fn test_normalize_gc_timeout() {
@@ -452,5 +550,100 @@ mod tests {
             Metasrv::normalize_gc_timeout(Duration::from_secs(10)),
             Some(Duration::from_secs(10))
         );
+    }
+
+    #[test]
+    fn test_restore_create_database_creator_requires_matching_internal_metadata() {
+        let mut task = create_database_task();
+        let mut legacy = QueryContext::default();
+        restore_create_database_creator(
+            &MetadataMap::new(),
+            Role::Frontend as i32,
+            &mut task,
+            &mut legacy,
+        )
+        .unwrap();
+
+        let creator = CreatorGrantIntent {
+            username: "alice".to_string(),
+            created_at_ns: 42,
+        };
+        let encoded = serde_json::to_string(&creator).unwrap();
+        let other = serde_json::to_string(&CreatorGrantIntent {
+            username: "mallory".to_string(),
+            created_at_ns: 99,
+        })
+        .unwrap();
+
+        for (name, body, metadata, role, create_database) in [
+            (
+                "body only",
+                Some(encoded.as_str()),
+                None,
+                Role::Frontend,
+                true,
+            ),
+            (
+                "metadata only",
+                None,
+                Some(encoded.as_str()),
+                Role::Frontend,
+                true,
+            ),
+            (
+                "mismatch",
+                Some(other.as_str()),
+                Some(encoded.as_str()),
+                Role::Frontend,
+                true,
+            ),
+            ("malformed", Some("{"), Some("{"), Role::Frontend, true),
+            (
+                "wrong role",
+                Some(encoded.as_str()),
+                Some(encoded.as_str()),
+                Role::Datanode,
+                true,
+            ),
+            (
+                "wrong task",
+                Some(encoded.as_str()),
+                Some(encoded.as_str()),
+                Role::Frontend,
+                false,
+            ),
+        ] {
+            let mut task = if create_database {
+                create_database_task()
+            } else {
+                DdlTask::new_drop_database("greptime".to_string(), "metrics".to_string(), false)
+            };
+            let mut context = creator_context(body);
+            assert!(
+                restore_create_database_creator(
+                    &creator_metadata(metadata),
+                    role as i32,
+                    &mut task,
+                    &mut context,
+                )
+                .is_err(),
+                "{name} must fail closed"
+            );
+        }
+
+        let mut task = create_database_task();
+        let mut trusted = creator_context(Some(&encoded));
+        restore_create_database_creator(
+            &creator_metadata(Some(&encoded)),
+            Role::Frontend as i32,
+            &mut task,
+            &mut trusted,
+        )
+        .unwrap();
+        let DdlTask::CreateDatabase(task) = task else {
+            unreachable!();
+        };
+        assert_eq!(task.creator, Some(creator));
+        assert!(trusted.extensions.is_empty());
     }
 }

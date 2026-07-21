@@ -83,6 +83,7 @@ async fn test_gc_regions_failure_handling() {
 
     let scheduler = GcScheduler {
         ctx: ctx.clone(),
+        runtime_switch_manager: crate::gc::scheduler::new_test_runtime_switch_manager(),
         receiver: GcScheduler::channel().1,
         config: GcSchedulerOptions::default(),
         region_gc_tracker: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
@@ -178,6 +179,7 @@ async fn test_get_file_references_failure() {
 
     let scheduler = GcScheduler {
         ctx: ctx.clone(),
+        runtime_switch_manager: crate::gc::scheduler::new_test_runtime_switch_manager(),
         receiver: GcScheduler::channel().1,
         config: GcSchedulerOptions {
             retry_backoff_duration: Duration::from_millis(10), // shorten for test
@@ -256,6 +258,7 @@ async fn test_get_table_route_failure() {
 
     let scheduler = GcScheduler {
         ctx: ctx.clone(),
+        runtime_switch_manager: crate::gc::scheduler::new_test_runtime_switch_manager(),
         receiver: GcScheduler::channel().1,
         config: GcSchedulerOptions::default(),
         region_gc_tracker: Arc::new(tokio::sync::Mutex::new(HashMap::new())),

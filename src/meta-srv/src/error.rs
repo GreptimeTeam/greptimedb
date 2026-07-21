@@ -426,6 +426,12 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Manual GC is rejected because maintenance mode is enabled"))]
+    ManualGcRejectedByMaintenanceMode {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[cfg(feature = "mysql_kvbackend")]
     #[snafu(display("Failed to parse mysql url: {}", mysql_url))]
     ParseMySqlUrl {
@@ -1194,6 +1200,7 @@ impl ErrorExt for Error {
             | Error::ParseAddr { .. }
             | Error::UnsupportedSelectorType { .. }
             | Error::InvalidArguments { .. }
+            | Error::ManualGcRejectedByMaintenanceMode { .. }
             | Error::ProcedureNotFound { .. }
             | Error::TooManyPartitions { .. }
             | Error::TomlFormat { .. }

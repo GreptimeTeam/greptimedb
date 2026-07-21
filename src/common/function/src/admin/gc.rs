@@ -266,6 +266,14 @@ mod tests {
 
     #[async_trait]
     impl ProcedureServiceHandler for MockProcedureServiceHandler {
+        async fn purge_table(
+            &self,
+            _table_name: table::table_name::TableName,
+            _query_ctx: QueryContextRef,
+        ) -> Result<()> {
+            unreachable!()
+        }
+
         async fn migrate_region(&self, _request: MigrateRegionRequest) -> Result<Option<String>> {
             unreachable!()
         }

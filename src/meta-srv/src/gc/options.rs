@@ -23,6 +23,26 @@ use crate::error::{self, Result};
 #[allow(unused)]
 pub(crate) const TICKER_INTERVAL: Duration = Duration::from_secs(60 * 5);
 
+/// Configuration for garbage collecting soft-dropped tables.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SoftDropGcOptions {
+    /// Whether soft drop is enabled.
+    pub enable: bool,
+    /// How long soft-dropped tables are retained before automatic purge.
+    #[serde(with = "humantime_serde")]
+    pub retention: Duration,
+}
+
+impl Default for SoftDropGcOptions {
+    fn default() -> Self {
+        Self {
+            enable: false,
+            retention: Duration::from_days(7),
+        }
+    }
+}
+
 /// Configuration for GC operations.
 ///
 /// TODO(discord9): not expose most config to users for now, until GC scheduler is fully stable.
@@ -33,6 +53,8 @@ pub struct GcSchedulerOptions {
     /// If set to false, no GC will be performed, and potentially some
     /// files from datanodes will never be deleted.
     pub enable: bool,
+    /// Experimental soft-drop garbage collection options.
+    pub experimental_soft_drop: SoftDropGcOptions,
     /// Maximum number of tables to process concurrently.
     pub max_concurrent_tables: usize,
     /// Maximum number of retries per region when GC fails.
@@ -73,6 +95,7 @@ impl Default for GcSchedulerOptions {
     fn default() -> Self {
         Self {
             enable: false,
+            experimental_soft_drop: SoftDropGcOptions::default(),
             max_concurrent_tables: 10,
             max_retries_per_region: 3,
             retry_backoff_duration: Duration::from_secs(5),
@@ -94,6 +117,32 @@ impl Default for GcSchedulerOptions {
 impl GcSchedulerOptions {
     /// Validates the configuration options.
     pub fn validate(&self) -> Result<()> {
+        ensure!(
+            !self.experimental_soft_drop.enable || self.enable,
+            error::InvalidArgumentsSnafu {
+                err_msg: "gc.enable must be true when soft drop is enabled",
+            }
+        );
+
+        if !self.enable {
+            return Ok(());
+        }
+
+        if self.experimental_soft_drop.enable {
+            ensure!(
+                self.experimental_soft_drop.retention.as_millis() > 0,
+                error::InvalidArgumentsSnafu {
+                    err_msg: "soft drop retention must be at least 1ms",
+                }
+            );
+            ensure!(
+                self.experimental_soft_drop.retention.as_millis() <= i64::MAX as u128,
+                error::InvalidArgumentsSnafu {
+                    err_msg: "soft drop retention must fit in an i64 millisecond value",
+                }
+            );
+        }
+
         ensure!(
             self.max_concurrent_tables > 0,
             error::InvalidArgumentsSnafu {
@@ -172,5 +221,90 @@ impl GcSchedulerOptions {
         );
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_soft_drop_defaults() {
+        let options = GcSchedulerOptions::default();
+
+        assert!(!options.experimental_soft_drop.enable);
+        assert_eq!(
+            Duration::from_days(7),
+            options.experimental_soft_drop.retention
+        );
+    }
+
+    #[test]
+    fn test_soft_drop_valid_when_gc_is_enabled() {
+        let options = GcSchedulerOptions {
+            enable: true,
+            experimental_soft_drop: SoftDropGcOptions {
+                enable: true,
+                retention: Duration::from_days(1),
+            },
+            ..Default::default()
+        };
+
+        assert!(options.validate().is_ok());
+    }
+
+    #[test]
+    fn test_soft_drop_requires_gc() {
+        let options = GcSchedulerOptions {
+            experimental_soft_drop: SoftDropGcOptions {
+                enable: true,
+                retention: Duration::from_days(1),
+            },
+            ..Default::default()
+        };
+
+        assert!(options.validate().is_err());
+    }
+
+    #[test]
+    fn test_soft_drop_retention_must_be_positive() {
+        let options = GcSchedulerOptions {
+            enable: true,
+            experimental_soft_drop: SoftDropGcOptions {
+                enable: true,
+                retention: Duration::ZERO,
+            },
+            ..Default::default()
+        };
+
+        assert!(options.validate().is_err());
+    }
+
+    #[test]
+    fn test_soft_drop_retention_must_be_at_least_one_millisecond() {
+        let options = GcSchedulerOptions {
+            enable: true,
+            experimental_soft_drop: SoftDropGcOptions {
+                enable: true,
+                retention: Duration::from_micros(999),
+            },
+            ..Default::default()
+        };
+
+        assert!(options.validate().is_err());
+    }
+
+    #[test]
+    fn test_soft_drop_retention_must_fit_i64_millis() {
+        let options = GcSchedulerOptions {
+            enable: true,
+            experimental_soft_drop: SoftDropGcOptions {
+                enable: true,
+                retention: Duration::from_millis(i64::MAX as u64 + 1),
+            },
+            ..Default::default()
+        };
+
+        assert!(options.validate().is_err());
     }
 }

@@ -1,0 +1,45 @@
+COMMENT ON TABLE compat_comment_table IS 'upgraded table comment';
+
+Affected Rows: 0
+
+COMMENT ON COLUMN compat_comment_table.val IS 'upgraded value column comment';
+
+Affected Rows: 0
+
+COMMENT ON FLOW compat_comment_flow IS 'upgraded flow comment';
+
+Affected Rows: 0
+
+SELECT table_schema, table_name, table_comment
+FROM information_schema.tables
+WHERE table_name = 'compat_comment_table'
+ORDER BY table_schema, table_name;
+
++------------------------+----------------------+------------------------+
+| table_schema           | table_name           | table_comment          |
++------------------------+----------------------+------------------------+
+| comment_on_old_objects | compat_comment_table | upgraded table comment |
++------------------------+----------------------+------------------------+
+
+SELECT table_schema, table_name, column_name, column_comment
+FROM information_schema.columns
+WHERE table_name = 'compat_comment_table'
+  AND column_name = 'val'
+ORDER BY table_schema, table_name, column_name;
+
++------------------------+----------------------+-------------+-------------------------------+
+| table_schema           | table_name           | column_name | column_comment                |
++------------------------+----------------------+-------------+-------------------------------+
+| comment_on_old_objects | compat_comment_table | val         | upgraded value column comment |
++------------------------+----------------------+-------------+-------------------------------+
+
+SELECT flow_name, comment
+FROM information_schema.flows
+WHERE flow_name = 'compat_comment_flow'
+ORDER BY flow_name;
+
++---------------------+-----------------------+
+| flow_name           | comment               |
++---------------------+-----------------------+
+| compat_comment_flow | upgraded flow comment |
++---------------------+-----------------------+

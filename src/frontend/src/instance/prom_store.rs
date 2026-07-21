@@ -23,7 +23,10 @@ use api::v1::{
     RowInsertRequests, SemanticType,
 };
 use async_trait::async_trait;
-use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
+use auth::{
+    PermissionChecker, PermissionCheckerRef, PermissionReq, PermissionTableTarget,
+    PermissionTableTargets,
+};
 use client::OutputData;
 use common_catalog::format_full_table_name;
 use common_error::ext::BoxedError;
@@ -176,22 +179,21 @@ impl Instance {
         &self,
         ctx: QueryContextRef,
         queries: &[Query],
+        table_names: &[String],
     ) -> ServerResult<Vec<(String, Output)>> {
         let mut results = Vec::with_capacity(queries.len());
 
         let catalog_name = ctx.current_catalog();
         let schema_name = ctx.current_schema();
 
-        for query in queries {
-            let table_name = prom_store::table_name(query)?;
-
+        for (query, table_name) in queries.iter().zip(table_names) {
             let output = self
-                .handle_remote_query(&ctx, catalog_name, &schema_name, &table_name, query)
+                .handle_remote_query(&ctx, catalog_name, &schema_name, table_name, query)
                 .await
                 .map_err(BoxedError::new)
                 .context(error::ExecuteQuerySnafu)?;
 
-            results.push((table_name, output));
+            results.push((table_name.clone(), output));
         }
         Ok(results)
     }
@@ -348,33 +350,22 @@ impl PendingRowsSchemaAlterer for Instance {
     }
 }
 
-#[async_trait]
-impl PromStoreProtocolHandler for Instance {
-    async fn pre_write(
+impl Instance {
+    async fn prepare_prom_store_write(
         &self,
-        request: &RowInsertRequests,
+        request: RowInsertRequests,
         ctx: QueryContextRef,
-    ) -> ServerResult<()> {
-        self.plugins
-            .get::<PermissionCheckerRef>()
-            .as_ref()
-            .check_permission(ctx.current_user(), PermissionReq::PromStoreWrite)
-            .context(AuthSnafu)?;
-        let interceptor_ref = self
-            .plugins
-            .get::<PromStoreProtocolInterceptorRef<servers::error::Error>>();
-        interceptor_ref.pre_write(request, ctx)?;
-        Ok(())
+    ) -> ServerResult<(RowInsertRequests, QueryContextRef)> {
+        PromStoreProtocolHandler::pre_write(self, &request, ctx.clone()).await?;
+        Ok((request, Arc::new(ctx.fork())))
     }
 
-    async fn write(
+    async fn execute_prom_store_write(
         &self,
         request: RowInsertRequests,
         ctx: QueryContextRef,
         with_metric_engine: bool,
     ) -> ServerResult<Output> {
-        self.pre_write(&request, ctx.clone()).await?;
-
         let output = if with_metric_engine {
             let physical_table = ctx
                 .extension(PHYSICAL_TABLE_PARAM)
@@ -393,6 +384,70 @@ impl PromStoreProtocolHandler for Instance {
 
         Ok(output)
     }
+}
+
+#[async_trait]
+impl PromStoreProtocolHandler for Instance {
+    async fn pre_write(
+        &self,
+        request: &RowInsertRequests,
+        ctx: QueryContextRef,
+    ) -> ServerResult<()> {
+        self.plugins
+            .get::<PermissionCheckerRef>()
+            .as_ref()
+            .check_permission(ctx.current_user(), PermissionReq::PromStoreWrite)
+            .context(AuthSnafu)?;
+        let interceptor_ref = self
+            .plugins
+            .get::<PromStoreProtocolInterceptorRef<servers::error::Error>>();
+        interceptor_ref.pre_write(request, ctx.clone())?;
+        self.check_row_insert_permission(request, &ctx, PermissionReq::PromStoreWrite)
+            .context(AuthSnafu)?;
+        Ok(())
+    }
+
+    async fn write_prepared(
+        &self,
+        request: RowInsertRequests,
+        ctx: QueryContextRef,
+        with_metric_engine: bool,
+    ) -> ServerResult<Output> {
+        self.execute_prom_store_write(request, ctx, with_metric_engine)
+            .await
+    }
+
+    async fn write(
+        &self,
+        request: RowInsertRequests,
+        ctx: QueryContextRef,
+        with_metric_engine: bool,
+    ) -> ServerResult<Output> {
+        let (request, ctx) = self.prepare_prom_store_write(request, ctx).await?;
+        self.write_prepared(request, ctx, with_metric_engine).await
+    }
+
+    async fn write_all(
+        &self,
+        requests: Vec<(QueryContextRef, RowInsertRequests)>,
+        with_metric_engine: bool,
+    ) -> ServerResult<Vec<ServerResult<Output>>> {
+        let mut prepared = Vec::with_capacity(requests.len());
+        for (ctx, request) in requests {
+            prepared.push(self.prepare_prom_store_write(request, ctx).await?);
+        }
+
+        let mut outputs = Vec::with_capacity(prepared.len());
+        for (request, ctx) in prepared {
+            let output = self.write_prepared(request, ctx, with_metric_engine).await;
+            let failed = output.is_err();
+            outputs.push(output);
+            if failed {
+                break;
+            }
+        }
+        Ok(outputs)
+    }
 
     #[instrument(skip_all, fields(table_name))]
     async fn read(
@@ -405,15 +460,40 @@ impl PromStoreProtocolHandler for Instance {
             .as_ref()
             .check_permission(ctx.current_user(), PermissionReq::PromStoreRead)
             .context(AuthSnafu)?;
+
         let interceptor_ref = self
             .plugins
             .get::<PromStoreProtocolInterceptorRef<servers::error::Error>>();
         interceptor_ref.pre_read(&request, ctx.clone())?;
+        let ctx = Arc::new(ctx.fork());
+
+        let table_names = request
+            .queries
+            .iter()
+            .map(prom_store::table_name)
+            .collect::<ServerResult<Vec<_>>>()?;
+        let catalog = ctx.current_catalog();
+        let schema = ctx.current_schema();
+        let targets = self
+            .resolve_query_permission_targets(
+                PermissionTableTargets::resolved(
+                    table_names
+                        .iter()
+                        .map(|table| PermissionTableTarget::new(catalog, &schema, table))
+                        .collect(),
+                ),
+                &ctx,
+            )
+            .await?;
+        self.check_table_permission(&ctx, PermissionReq::PromStoreRead, targets)
+            .context(AuthSnafu)?;
 
         let response_type = negotiate_response_type(&request.accepted_response_types)?;
 
         // TODO(dennis): use read_hints to speedup query if possible
-        let results = self.handle_remote_queries(ctx, &request.queries).await?;
+        let results = self
+            .handle_remote_queries(ctx, &request.queries, &table_names)
+            .await?;
 
         match response_type {
             ResponseType::Samples => {
@@ -534,7 +614,15 @@ impl ExportMetricHandler {
 
 #[async_trait]
 impl PromStoreProtocolHandler for ExportMetricHandler {
-    async fn write(
+    async fn pre_write(
+        &self,
+        _request: &RowInsertRequests,
+        _ctx: QueryContextRef,
+    ) -> ServerResult<()> {
+        Ok(())
+    }
+
+    async fn write_prepared(
         &self,
         request: RowInsertRequests,
         ctx: QueryContextRef,
@@ -550,6 +638,32 @@ impl PromStoreProtocolHandler for ExportMetricHandler {
             .await
             .map_err(BoxedError::new)
             .context(error::ExecuteGrpcQuerySnafu)
+    }
+
+    async fn write(
+        &self,
+        request: RowInsertRequests,
+        ctx: QueryContextRef,
+        with_metric_engine: bool,
+    ) -> ServerResult<Output> {
+        self.write_prepared(request, ctx, with_metric_engine).await
+    }
+
+    async fn write_all(
+        &self,
+        requests: Vec<(QueryContextRef, RowInsertRequests)>,
+        with_metric_engine: bool,
+    ) -> ServerResult<Vec<ServerResult<Output>>> {
+        let mut outputs = Vec::with_capacity(requests.len());
+        for (ctx, request) in requests {
+            let output = self.write_prepared(request, ctx, with_metric_engine).await;
+            let failed = output.is_err();
+            outputs.push(output);
+            if failed {
+                break;
+            }
+        }
+        Ok(outputs)
     }
 
     async fn read(

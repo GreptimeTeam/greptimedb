@@ -14,19 +14,20 @@
 
 use std::assert_matches;
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use api::region::RegionResponse;
 use api::v1::region::{RegionRequest, region_request};
 use async_trait::async_trait;
-use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
-use common_error::ext::{BoxedError, ErrorExt, StackError};
+use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, FILE_ENGINE};
+use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
-use common_procedure::Procedure;
+use common_procedure::{Procedure, StringKey};
 use common_procedure_test::{
     execute_procedure_until, execute_procedure_until_done, new_test_procedure_context,
 };
-use snafu::ResultExt;
 use store_api::region_engine::RegionRole;
 use store_api::storage::RegionId;
 use table::metadata::TableId;
@@ -43,20 +44,297 @@ use crate::ddl::test_util::{
     put_datanode_address, test_create_logical_table_task, test_create_physical_table_task,
 };
 use crate::ddl::undrop_table::UndropTableProcedure;
-use crate::ddl::{DetectingRegion, RegionFailureDetectorController, TableMetadata};
+use crate::ddl::{DdlContext, DetectingRegion, RegionFailureDetectorController, TableMetadata};
 use crate::error::{self, Error};
+use crate::key::MetadataKey;
 use crate::key::table_name::TableNameKey;
 use crate::key::table_route::TableRouteValue;
+use crate::kv_backend::KvBackend;
 use crate::kv_backend::memory::MemoryKvBackend;
 use crate::peer::Peer;
 use crate::rpc::ddl::{DropTableTask, PurgeDroppedTableTask, UndropTableTask};
 use crate::rpc::router::{Region, RegionRoute};
+use crate::rpc::store::{BatchDeleteRequest, PutRequest};
 use crate::test_util::{MockDatanodeManager, new_ddl_context, new_ddl_context_with_kv_backend};
+
+fn dropped_at_marker_key(table_id: TableId) -> String {
+    format!("__tombstone/__dropped_at/{table_id}")
+}
+
+fn retention_expires_at_marker_key(table_id: TableId) -> String {
+    format!("__tombstone/__retention_expires_at/{table_id}")
+}
+
+fn purging_marker_key(table_id: TableId) -> String {
+    format!("__tombstone/__purging/{table_id}")
+}
+
+fn drop_generation_marker_key(table_id: TableId) -> String {
+    format!("__tombstone/__drop_generation/{table_id}")
+}
+
+async fn create_dropped_table(
+    context: &DdlContext,
+    table_id: TableId,
+    dropped_at: Option<i64>,
+    retention_expires_at: Option<i64>,
+) {
+    let task = test_create_table_task("foo", table_id);
+    let table_name = task.table_name();
+    let table_route = TableRouteValue::physical(vec![]);
+    context
+        .table_metadata_manager
+        .create_table_metadata(task.table_info, table_route.clone(), HashMap::new())
+        .await
+        .unwrap();
+    context
+        .table_metadata_manager
+        .delete_table_metadata_with_retention(
+            table_id,
+            &table_name,
+            &table_route,
+            &HashMap::new(),
+            dropped_at,
+            retention_expires_at,
+        )
+        .await
+        .unwrap();
+}
+
+async fn undrop_at_restore_metadata(
+    context: &DdlContext,
+    table_id: TableId,
+) -> UndropTableProcedure {
+    create_dropped_table(context, table_id, Some(1), Some(i64::MAX)).await;
+    let mut undrop = UndropTableProcedure::new(new_undrop_table_task(table_id), context.clone());
+    let procedure_context = new_test_procedure_context();
+    undrop.execute(&procedure_context).await.unwrap();
+    undrop.execute(&procedure_context).await.unwrap();
+    undrop
+}
+
+fn legacy_undrop_snapshot(procedure: &UndropTableProcedure) -> String {
+    let mut data: serde_json::Value = serde_json::from_str(&procedure.dump().unwrap()).unwrap();
+    let data = data.as_object_mut().unwrap();
+    for field in [
+        "dropped_at",
+        "retention_expires_at",
+        "drop_generation",
+        "tombstone_identity_loaded",
+    ] {
+        data.remove(field);
+    }
+    serde_json::to_string(data).unwrap()
+}
+
+#[test]
+fn test_old_drop_table_json_defaults_to_hard_drop() {
+    let mut runtime_context = new_ddl_context(Arc::new(MockDatanodeManager::new(())));
+    runtime_context.soft_drop_enabled = true;
+    let procedure = DropTableProcedure::new(
+        new_drop_table_task("foo", 1024, false),
+        runtime_context.clone(),
+    );
+    let mut old_data: serde_json::Value = serde_json::from_str(&procedure.dump().unwrap()).unwrap();
+    old_data
+        .as_object_mut()
+        .unwrap()
+        .remove("soft_drop_enabled");
+    old_data.as_object_mut().unwrap().remove("dropped_at");
+
+    let recovered = DropTableProcedure::from_json(&old_data.to_string(), runtime_context).unwrap();
+    let recovered_data: serde_json::Value =
+        serde_json::from_str(&recovered.dump().unwrap()).unwrap();
+
+    assert_eq!(recovered_data["soft_drop_enabled"], false);
+    assert_eq!(recovered_data["dropped_at"], serde_json::Value::Null);
+}
+
+#[test]
+fn test_drop_table_lock_key_includes_table_name() {
+    let context = new_ddl_context(Arc::new(MockDatanodeManager::new(())));
+    let procedure = DropTableProcedure::new(new_drop_table_task("foo", 1024, false), context);
+
+    let keys = procedure
+        .lock_key()
+        .keys_to_lock()
+        .cloned()
+        .collect::<Vec<_>>();
+    assert!(
+        keys.iter().any(|key| matches!(
+            key,
+            StringKey::Exclusive(key) if key == "__table_name_lock/greptime.public.foo"
+        )),
+        "drop lock keys should include the table name: {keys:?}"
+    );
+    assert!(
+        keys.iter().any(|key| matches!(
+            key,
+            StringKey::Exclusive(key) if key == "__table_lock/1024"
+        )),
+        "drop lock keys should include the table id: {keys:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_recovered_soft_drop_preserves_persisted_mode() {
+    let (tx, mut rx) = mpsc::channel(8);
+    let node_manager = Arc::new(MockDatanodeManager::new(DatanodeWatcher::new(tx)));
+    let kv_backend = Arc::new(MemoryKvBackend::new());
+    let mut soft_context =
+        new_ddl_context_with_kv_backend(node_manager.clone(), kv_backend.clone());
+    soft_context.soft_drop_enabled = true;
+    let table_id = 1024;
+    let task = test_create_table_task("foo", table_id);
+    soft_context
+        .table_metadata_manager
+        .create_table_metadata(
+            task.table_info,
+            TableRouteValue::physical(vec![RegionRoute {
+                region: Region::new_test(RegionId::new(table_id, 1)),
+                leader_peer: Some(Peer::empty(1)),
+                follower_peers: vec![],
+                leader_state: None,
+                leader_down_since: None,
+                write_route_policy: None,
+            }]),
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+    let procedure = DropTableProcedure::new(
+        new_drop_table_task("foo", table_id, false),
+        soft_context.clone(),
+    );
+
+    let hard_context = new_ddl_context_with_kv_backend(node_manager, kv_backend);
+    let mut recovered =
+        DropTableProcedure::from_json(&procedure.dump().unwrap(), hard_context).unwrap();
+    execute_procedure_until_done(&mut recovered).await;
+
+    assert!(
+        soft_context
+            .table_metadata_manager
+            .get_dropped_table_by_id(table_id)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    let (_, request) = rx.try_recv().unwrap();
+    assert_matches!(request.body, Some(region_request::Body::Close(_)));
+}
+
+#[tokio::test]
+async fn test_legacy_soft_drop_prepare_preserves_persisted_mode() {
+    let node_manager = Arc::new(MockDatanodeManager::new(()));
+    let mut context = new_ddl_context(node_manager);
+    context.soft_drop_enabled = false;
+    context.soft_drop_retention = Some(Duration::from_millis(100));
+    let table_id = 1024;
+    let task = test_create_table_task("foo", table_id);
+    context
+        .table_metadata_manager
+        .create_table_metadata(
+            task.table_info,
+            TableRouteValue::physical(vec![]),
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+
+    let mut persisted: serde_json::Value = serde_json::from_str(
+        &DropTableProcedure::new(new_drop_table_task("foo", table_id, false), context.clone())
+            .dump()
+            .unwrap(),
+    )
+    .unwrap();
+    persisted["soft_drop_enabled"] = true.into();
+    persisted
+        .as_object_mut()
+        .unwrap()
+        .remove("soft_drop_retention_millis");
+    persisted
+        .as_object_mut()
+        .unwrap()
+        .remove("retention_expires_at");
+
+    let mut recovered =
+        DropTableProcedure::from_json(&persisted.to_string(), context.clone()).unwrap();
+    recovered.on_prepare().await.unwrap();
+
+    assert!(recovered.data.soft_drop_enabled);
+    assert_eq!(Some(100), recovered.data.soft_drop_retention_millis);
+    assert!(recovered.data.dropped_at.is_some());
+    assert!(recovered.data.retention_expires_at.is_some());
+}
+
+#[tokio::test]
+async fn test_disabled_soft_drop_creates_hard_drop_procedure() {
+    let node_manager = Arc::new(MockDatanodeManager::new(()));
+    let mut context = new_ddl_context(node_manager);
+    context.soft_drop_enabled = false;
+    context.soft_drop_retention = Some(Duration::from_millis(100));
+
+    let procedure = DropTableProcedure::new(new_drop_table_task("foo", 1024, false), context);
+
+    assert!(!procedure.data.soft_drop_enabled);
+    assert_eq!(None, procedure.data.dropped_at);
+    assert_eq!(None, procedure.data.retention_expires_at);
+}
+
+#[tokio::test]
+async fn test_recovered_hard_drop_ignores_soft_runtime_context() {
+    let (tx, mut rx) = mpsc::channel(8);
+    let node_manager = Arc::new(MockDatanodeManager::new(DatanodeWatcher::new(tx)));
+    let kv_backend = Arc::new(MemoryKvBackend::new());
+    let hard_context = new_ddl_context_with_kv_backend(node_manager.clone(), kv_backend.clone());
+    let table_id = 1024;
+    let task = test_create_table_task("foo", table_id);
+    hard_context
+        .table_metadata_manager
+        .create_table_metadata(
+            task.table_info,
+            TableRouteValue::physical(vec![RegionRoute {
+                region: Region::new_test(RegionId::new(table_id, 1)),
+                leader_peer: Some(Peer::empty(1)),
+                follower_peers: vec![],
+                leader_state: None,
+                leader_down_since: None,
+                write_route_policy: None,
+            }]),
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+    let procedure = DropTableProcedure::new(
+        new_drop_table_task("foo", table_id, false),
+        hard_context.clone(),
+    );
+
+    let mut soft_context = new_ddl_context_with_kv_backend(node_manager, kv_backend);
+    soft_context.soft_drop_enabled = true;
+    let mut recovered =
+        DropTableProcedure::from_json(&procedure.dump().unwrap(), soft_context).unwrap();
+    execute_procedure_until_done(&mut recovered).await;
+
+    assert!(
+        hard_context
+            .table_metadata_manager
+            .get_dropped_table_by_id(table_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let (_, request) = rx.try_recv().unwrap();
+    assert_matches!(request.body, Some(region_request::Body::Drop(_)));
+}
 
 #[tokio::test]
 async fn test_on_prepare_table_not_exists_err() {
     let node_manager = Arc::new(MockDatanodeManager::new(()));
-    let ddl_context = new_ddl_context(node_manager);
+    let mut ddl_context = new_ddl_context(node_manager);
+    ddl_context.soft_drop_enabled = true;
+    ddl_context.soft_drop_retention = Some(Duration::from_millis(100));
     let table_name = "foo";
     let table_id = 1024;
     let task = test_create_table_task(table_name, table_id);
@@ -73,8 +351,86 @@ async fn test_on_prepare_table_not_exists_err() {
 
     let task = new_drop_table_task("bar", table_id, false);
     let mut procedure = DropTableProcedure::new(task, ddl_context);
+    assert_eq!(procedure.data.dropped_at, None);
+    assert_eq!(procedure.data.retention_expires_at, None);
     let err = procedure.on_prepare().await.unwrap_err();
     assert_eq!(err.status_code(), StatusCode::TableNotFound);
+    assert_eq!(procedure.data.dropped_at, None);
+    assert_eq!(procedure.data.retention_expires_at, None);
+}
+
+#[tokio::test]
+async fn test_soft_drop_prepare_assigns_stable_deadline_and_recovers_it() {
+    let node_manager = Arc::new(MockDatanodeManager::new(()));
+    let mut ddl_context = new_ddl_context(node_manager);
+    ddl_context.soft_drop_enabled = true;
+    ddl_context.soft_drop_retention = Some(Duration::from_millis(100));
+    let table_id = 1024;
+    let task = test_create_table_task("foo", table_id);
+    ddl_context
+        .table_metadata_manager
+        .create_table_metadata(
+            task.table_info,
+            TableRouteValue::physical(vec![]),
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+    let mut procedure = DropTableProcedure::new(
+        new_drop_table_task("foo", table_id, false),
+        ddl_context.clone(),
+    );
+
+    procedure.on_prepare().await.unwrap();
+    let dropped_at = procedure.data.dropped_at.unwrap();
+    let deadline = procedure.data.retention_expires_at.unwrap();
+    assert_eq!(deadline, dropped_at + 100);
+
+    let mut changed_context = ddl_context;
+    changed_context.soft_drop_retention = Some(Duration::from_secs(10));
+    let recovered =
+        DropTableProcedure::from_json(&procedure.dump().unwrap(), changed_context).unwrap();
+    assert_eq!(recovered.data.dropped_at, Some(dropped_at));
+    assert_eq!(recovered.data.retention_expires_at, Some(deadline));
+}
+
+#[tokio::test]
+async fn test_soft_drop_prepare_rejects_deadline_overflow_before_metadata_delete() {
+    let node_manager = Arc::new(MockDatanodeManager::new(()));
+    let mut ddl_context = new_ddl_context(node_manager);
+    ddl_context.soft_drop_enabled = true;
+    ddl_context.soft_drop_retention = Some(Duration::from_millis(i64::MAX as u64));
+    let table_id = 1024;
+    let task = test_create_table_task("foo", table_id);
+    ddl_context
+        .table_metadata_manager
+        .create_table_metadata(
+            task.table_info,
+            TableRouteValue::physical(vec![]),
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+    let mut procedure = DropTableProcedure::new(
+        new_drop_table_task("foo", table_id, false),
+        ddl_context.clone(),
+    );
+
+    let error = procedure.on_prepare().await.unwrap_err();
+    assert!(error.to_string().contains("retention deadline"), "{error}");
+    assert!(
+        ddl_context
+            .table_metadata_manager
+            .table_name_manager()
+            .get(TableNameKey::new(
+                DEFAULT_CATALOG_NAME,
+                DEFAULT_SCHEMA_NAME,
+                "foo",
+            ))
+            .await
+            .unwrap()
+            .is_some()
+    );
 }
 
 #[tokio::test]
@@ -248,6 +604,7 @@ async fn test_soft_drop_closes_regions_and_keeps_tombstone() {
     let detector_controller = Arc::new(RecordingRegionFailureDetectorController::default());
     let mut ddl_context = new_ddl_context(node_manager);
     ddl_context.soft_drop_enabled = true;
+    ddl_context.soft_drop_retention = Some(Duration::from_millis(100));
     ddl_context.region_failure_detector_controller = detector_controller.clone();
     let table_id = 1024;
     let table_name = "foo";
@@ -293,16 +650,16 @@ async fn test_soft_drop_closes_regions_and_keeps_tombstone() {
         let Some(region_request::Body::Close(req)) = request.body else {
             unreachable!();
         };
-        requests.push((peer.id, req.region_id));
+        requests.push((peer.id, req.region_id, req.flush_on_close));
     }
     requests.sort_unstable();
     assert_eq!(
         requests,
         vec![
-            (1, RegionId::new(table_id, 1).as_u64()),
-            (1, RegionId::new(table_id, 2).as_u64()),
-            (2, RegionId::new(table_id, 1).as_u64()),
-            (2, RegionId::new(table_id, 2).as_u64()),
+            (1, RegionId::new(table_id, 1).as_u64(), true),
+            (1, RegionId::new(table_id, 2).as_u64(), false),
+            (2, RegionId::new(table_id, 1).as_u64(), false),
+            (2, RegionId::new(table_id, 2).as_u64(), true),
         ]
     );
     assert!(rx.try_recv().is_err());
@@ -316,12 +673,35 @@ async fn test_soft_drop_closes_regions_and_keeps_tombstone() {
         .unwrap();
     assert!(live_table.is_none());
 
+    let dropped_at = procedure.data.dropped_at.unwrap();
     let dropped_table = ddl_context
         .table_metadata_manager
         .get_dropped_table(&table_name)
         .await
+        .unwrap()
         .unwrap();
-    assert!(dropped_table.is_some());
+    assert_eq!(dropped_table.dropped_at, Some(dropped_at));
+    assert_eq!(dropped_table.retention_expires_at, Some(dropped_at + 100));
+    let dropped_tables = ddl_context
+        .table_metadata_manager
+        .list_dropped_tables()
+        .await
+        .unwrap();
+    assert_eq!(dropped_tables[0].dropped_at, Some(dropped_at));
+    assert_eq!(
+        dropped_tables[0].retention_expires_at,
+        Some(dropped_at + 100)
+    );
+
+    assert!(
+        ddl_context
+            .table_metadata_manager
+            .kv_backend()
+            .get(retention_expires_at_marker_key(table_id).as_bytes(),)
+            .await
+            .unwrap()
+            .is_some()
+    );
 
     assert_eq!(
         detector_controller.deregistered().await,
@@ -330,6 +710,173 @@ async fn test_soft_drop_closes_regions_and_keeps_tombstone() {
             (2, RegionId::new(table_id, 2))
         ]
     );
+}
+
+#[tokio::test]
+async fn test_soft_drop_keeps_metadata_live_until_regions_close() {
+    let (tx, mut rx) = mpsc::channel(2);
+    let fail_close = AtomicBool::new(true);
+    let datanode_handler = DatanodeWatcher::new(tx).with_handler(move |_, _| {
+        if fail_close.swap(false, Ordering::SeqCst) {
+            return error::UnexpectedSnafu {
+                err_msg: "mock close error".to_string(),
+            }
+            .fail();
+        }
+
+        Ok(RegionResponse::new(0))
+    });
+    let node_manager = Arc::new(MockDatanodeManager::new(datanode_handler));
+    let mut ddl_context = new_ddl_context(node_manager);
+    ddl_context.soft_drop_enabled = true;
+    let table_id = 1024;
+    let table_name = "foo";
+    let task = test_create_table_task(table_name, table_id);
+    ddl_context
+        .table_metadata_manager
+        .create_table_metadata(
+            task.table_info.clone(),
+            TableRouteValue::physical(vec![RegionRoute {
+                region: Region::new_test(RegionId::new(table_id, 1)),
+                leader_peer: Some(Peer::new(1, "old-leader")),
+                follower_peers: vec![],
+                leader_state: None,
+                leader_down_since: None,
+                write_route_policy: None,
+            }]),
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+
+    let task = new_drop_table_task(table_name, table_id, false);
+    let mut procedure = DropTableProcedure::new(task, ddl_context.clone());
+    let ctx = new_test_procedure_context();
+    procedure.execute(&ctx).await.unwrap();
+    put_datanode_address(&ddl_context, 1, "new-leader").await;
+    let error = procedure.execute(&ctx).await.unwrap_err();
+    assert!(error.is_retry_later());
+
+    let (peer, request) = rx.try_recv().unwrap();
+    assert_eq!(peer.addr, "new-leader");
+    let Some(region_request::Body::Close(request)) = request.body else {
+        unreachable!();
+    };
+    assert!(request.flush_on_close);
+    assert!(rx.try_recv().is_err());
+    assert!(
+        ddl_context
+            .table_metadata_manager
+            .table_name_manager()
+            .get(TableNameKey::new(
+                DEFAULT_CATALOG_NAME,
+                DEFAULT_SCHEMA_NAME,
+                table_name,
+            ))
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        ddl_context
+            .table_metadata_manager
+            .get_dropped_table_by_id(table_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    put_datanode_address(&ddl_context, 1, "newer-leader").await;
+    execute_procedure_until_done(&mut procedure).await;
+
+    let (peer, request) = rx.try_recv().unwrap();
+    assert_eq!(peer.addr, "newer-leader");
+    assert_matches!(request.body, Some(region_request::Body::Close(_)));
+    assert!(rx.try_recv().is_err());
+    assert!(
+        ddl_context
+            .table_metadata_manager
+            .table_name_manager()
+            .get(TableNameKey::new(
+                DEFAULT_CATALOG_NAME,
+                DEFAULT_SCHEMA_NAME,
+                table_name,
+            ))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        ddl_context
+            .table_metadata_manager
+            .get_dropped_table_by_id(table_id)
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn test_soft_drop_timestamp_is_stable_across_retry_and_recovery() {
+    let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
+    let kv_backend = Arc::new(MemoryKvBackend::new());
+    let mut ddl_context = new_ddl_context_with_kv_backend(node_manager, kv_backend.clone());
+    ddl_context.soft_drop_enabled = true;
+    let table_id = 1024;
+    let task = test_create_table_task("foo", table_id);
+    ddl_context
+        .table_metadata_manager
+        .create_table_metadata(
+            task.table_info,
+            TableRouteValue::physical(vec![]),
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+    let procedure = DropTableProcedure::new(
+        new_drop_table_task("foo", table_id, false),
+        ddl_context.clone(),
+    );
+    assert_eq!(procedure.data.dropped_at, None);
+    let mut procedure = procedure;
+    procedure.on_prepare().await.unwrap();
+    let dropped_at = procedure.data.dropped_at.unwrap();
+    let persisted = procedure.dump().unwrap();
+    let recovered = DropTableProcedure::from_json(&persisted, ddl_context.clone()).unwrap();
+    assert_eq!(recovered.data.dropped_at, Some(dropped_at));
+    let mut data: serde_json::Value = serde_json::from_str(&procedure.dump().unwrap()).unwrap();
+    data["dropped_at"] = 1_234_567_890_i64.into();
+    let mut recovered =
+        DropTableProcedure::from_json(&data.to_string(), ddl_context.clone()).unwrap();
+
+    recovered.on_delete_metadata().await.unwrap();
+    recovered.on_delete_metadata().await.unwrap();
+    let persisted = recovered.dump().unwrap();
+    let mut recovered_again =
+        DropTableProcedure::from_json(&persisted, ddl_context.clone()).unwrap();
+    recovered_again.on_delete_metadata().await.unwrap();
+
+    let marker = kv_backend
+        .get(dropped_at_marker_key(table_id).as_bytes())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(marker.value, b"1234567890");
+    let deadline_marker = kv_backend
+        .get(retention_expires_at_marker_key(table_id).as_bytes())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        deadline_marker.value,
+        recovered_again
+            .data
+            .retention_expires_at
+            .unwrap()
+            .to_string()
+            .as_bytes()
+    );
+    assert_eq!(recovered_again.data.dropped_at, Some(1_234_567_890));
 }
 
 #[tokio::test]
@@ -432,7 +979,7 @@ async fn test_create_table_succeeds_while_tombstone_exists() {
 }
 
 #[tokio::test]
-async fn test_drop_recreated_table_fails_when_previous_tombstone_exists() {
+async fn test_hard_drop_recreated_table_fails_when_soft_tombstone_exists() {
     let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
     let mut ddl_context = new_ddl_context(node_manager);
     ddl_context.soft_drop_enabled = true;
@@ -453,6 +1000,7 @@ async fn test_drop_recreated_table_fails_when_previous_tombstone_exists() {
     let drop_task = new_drop_table_task(table_name, original_table_id, false);
     let mut drop_procedure = DropTableProcedure::new(drop_task, ddl_context.clone());
     execute_procedure_until_done(&mut drop_procedure).await;
+    ddl_context.soft_drop_enabled = false;
 
     ddl_context
         .table_metadata_manager
@@ -470,6 +1018,10 @@ async fn test_drop_recreated_table_fails_when_previous_tombstone_exists() {
     );
     let err = procedure.on_prepare().await.unwrap_err();
 
+    assert_eq!(
+        "Cannot drop table 'greptime.public.foo': an older tombstone already uses the same full name",
+        err.to_string()
+    );
     assert_matches!(err, Error::TableNameTombstoneConflict { .. });
 }
 
@@ -522,7 +1074,8 @@ async fn test_undrop_table_restores_metadata_and_reopens_regions() {
     let datanode_handler = DatanodeWatcher::new(tx);
     let node_manager = Arc::new(MockDatanodeManager::new(datanode_handler));
     let detector_controller = Arc::new(RecordingRegionFailureDetectorController::default());
-    let mut ddl_context = new_ddl_context(node_manager);
+    let kv_backend = Arc::new(MemoryKvBackend::new());
+    let mut ddl_context = new_ddl_context_with_kv_backend(node_manager, kv_backend.clone());
     ddl_context.soft_drop_enabled = true;
     ddl_context.region_failure_detector_controller = detector_controller.clone();
     let table_id = 1024;
@@ -550,6 +1103,16 @@ async fn test_undrop_table_restores_metadata_and_reopens_regions() {
         ddl_context.clone(),
     );
     execute_procedure_until_done(&mut drop_procedure).await;
+    assert!(
+        ddl_context
+            .table_metadata_manager
+            .get_dropped_table_by_id(table_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .dropped_at
+            .is_some()
+    );
     detector_controller.clear().await;
 
     while rx.try_recv().is_ok() {}
@@ -574,6 +1137,20 @@ async fn test_undrop_table_restores_metadata_and_reopens_regions() {
         ddl_context
             .table_metadata_manager
             .get_dropped_table(&drop_procedure.data.task.table_name())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        kv_backend
+            .get(dropped_at_marker_key(table_id).as_bytes())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        kv_backend
+            .get(retention_expires_at_marker_key(table_id).as_bytes())
             .await
             .unwrap()
             .is_none()
@@ -724,7 +1301,7 @@ async fn test_undrop_logical_table_skips_datanode_open() {
 }
 
 #[tokio::test]
-async fn test_soft_drop_metric_logical_table_fails() {
+async fn test_soft_drop_metric_logical_table_falls_back_to_hard_drop() {
     let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
     let mut ddl_context = new_ddl_context(node_manager);
     ddl_context.soft_drop_enabled = true;
@@ -734,11 +1311,131 @@ async fn test_soft_drop_metric_logical_table_fails() {
 
     let mut procedure = DropTableProcedure::new(
         new_drop_table_task("foo", logical_table_id, false),
+        ddl_context.clone(),
+    );
+    procedure.on_prepare().await.unwrap();
+    assert!(!procedure.data.soft_drop_enabled);
+    let persisted_hard_drop = procedure.dump().unwrap();
+    ddl_context.soft_drop_enabled = false;
+    let recovered =
+        DropTableProcedure::from_json(&persisted_hard_drop, ddl_context.clone()).unwrap();
+    assert!(!recovered.data.soft_drop_enabled);
+}
+
+#[tokio::test]
+async fn test_soft_drop_metric_physical_table_remains_enabled() {
+    let (tx, mut rx) = mpsc::channel(8);
+    let datanode_handler = DatanodeWatcher::new(tx);
+    let node_manager = Arc::new(MockDatanodeManager::new(datanode_handler));
+    let mut ddl_context = new_ddl_context(node_manager);
+    ddl_context.soft_drop_enabled = true;
+    ddl_context.soft_drop_retention = Some(Duration::from_millis(100));
+    let table_id = 1024;
+    let table_name = "phy";
+    let mut task = test_create_physical_table_task(table_name);
+    task.set_table_id(table_id);
+    ddl_context
+        .table_metadata_manager
+        .create_table_metadata(
+            task.table_info,
+            TableRouteValue::physical(vec![RegionRoute {
+                region: Region::new_test(RegionId::new(table_id, 1)),
+                leader_peer: Some(Peer::empty(1)),
+                follower_peers: vec![],
+                leader_state: None,
+                leader_down_since: None,
+                write_route_policy: None,
+            }]),
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+
+    let mut procedure = DropTableProcedure::new(
+        new_drop_table_task(table_name, table_id, false),
+        ddl_context.clone(),
+    );
+    execute_procedure_until_done(&mut procedure).await;
+
+    assert!(procedure.data.soft_drop_enabled);
+    assert!(procedure.data.dropped_at.is_some());
+    let (_, request) = rx.try_recv().unwrap();
+    let Some(region_request::Body::Close(request)) = request.body else {
+        unreachable!();
+    };
+    assert!(request.flush_on_close);
+    assert!(rx.try_recv().is_err());
+    assert!(
+        ddl_context
+            .table_metadata_manager
+            .get_dropped_table_by_id(table_id)
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn test_soft_drop_file_engine_table_falls_back_to_hard_drop() {
+    let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
+    let mut ddl_context = new_ddl_context(node_manager);
+    ddl_context.soft_drop_enabled = true;
+    let table_id = 1024;
+    let table_name = "foo";
+    let mut task = test_create_table_task(table_name, table_id);
+    task.table_info.meta.engine = FILE_ENGINE.to_string();
+    ddl_context
+        .table_metadata_manager
+        .create_table_metadata(
+            task.table_info.clone(),
+            TableRouteValue::physical(vec![]),
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+
+    let mut procedure = DropTableProcedure::new(
+        new_drop_table_task(table_name, table_id, false),
+        ddl_context.clone(),
+    );
+    procedure.on_prepare().await.unwrap();
+    assert!(!procedure.data.soft_drop_enabled);
+    let persisted_hard_drop = procedure.dump().unwrap();
+    ddl_context.soft_drop_enabled = false;
+    let recovered =
+        DropTableProcedure::from_json(&persisted_hard_drop, ddl_context.clone()).unwrap();
+    assert!(!recovered.data.soft_drop_enabled);
+}
+
+#[tokio::test]
+async fn test_file_engine_fallback_is_resolved_before_tombstone_conflict() {
+    let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
+    let mut ddl_context = new_ddl_context(node_manager);
+    ddl_context.soft_drop_enabled = true;
+    let original_table_id = 1024;
+    let recreated_table_id = 1025;
+    let table_name = "foo";
+    create_dropped_table(&ddl_context, original_table_id, None, None).await;
+
+    let mut task = test_create_table_task(table_name, recreated_table_id);
+    task.table_info.meta.engine = FILE_ENGINE.to_string();
+    ddl_context
+        .table_metadata_manager
+        .create_table_metadata(
+            task.table_info,
+            TableRouteValue::physical(vec![]),
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+
+    let mut procedure = DropTableProcedure::new(
+        new_drop_table_task(table_name, recreated_table_id, false),
         ddl_context,
     );
-    let err = procedure.on_prepare().await.unwrap_err();
+    procedure.on_prepare().await.unwrap();
 
-    assert_eq!(err.status_code(), StatusCode::Unsupported);
+    assert!(!procedure.data.soft_drop_enabled);
 }
 
 #[tokio::test]
@@ -873,6 +1570,254 @@ async fn test_undrop_table_fails_when_live_name_is_created_after_prepare() {
 }
 
 #[tokio::test]
+async fn test_undrop_table_closes_opened_regions_when_restore_metadata_races_with_create() {
+    let (tx, mut rx) = mpsc::channel(8);
+    let datanode_handler = DatanodeWatcher::new(tx);
+    let node_manager = Arc::new(MockDatanodeManager::new(datanode_handler));
+    let detector_controller = Arc::new(RecordingRegionFailureDetectorController::default());
+    let mut ddl_context = new_ddl_context(node_manager);
+    ddl_context.soft_drop_enabled = true;
+    ddl_context.region_failure_detector_controller = detector_controller.clone();
+    let dropped_table_id = 1024;
+    let live_table_id = 1025;
+    let table_name = "foo";
+    let task = test_create_table_task(table_name, dropped_table_id);
+    ddl_context
+        .table_metadata_manager
+        .create_table_metadata(
+            task.table_info.clone(),
+            TableRouteValue::physical(vec![RegionRoute {
+                region: Region::new_test(RegionId::new(dropped_table_id, 1)),
+                leader_peer: Some(Peer::empty(1)),
+                follower_peers: vec![Peer::empty(2)],
+                leader_state: None,
+                leader_down_since: None,
+                write_route_policy: None,
+            }]),
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+    let mut drop_procedure = DropTableProcedure::new(
+        new_drop_table_task(table_name, dropped_table_id, false),
+        ddl_context.clone(),
+    );
+    execute_procedure_until_done(&mut drop_procedure).await;
+    while rx.try_recv().is_ok() {}
+    detector_controller.clear().await;
+
+    let mut procedure =
+        UndropTableProcedure::new(new_undrop_table_task(dropped_table_id), ddl_context.clone());
+    let ctx = new_test_procedure_context();
+    procedure.execute(&ctx).await.unwrap();
+    procedure.execute(&ctx).await.unwrap();
+
+    let mut opened_regions = HashSet::new();
+    for _ in 0..2 {
+        let (peer, request) = rx.try_recv().unwrap();
+        let Some(region_request::Body::Open(req)) = request.body else {
+            unreachable!();
+        };
+        opened_regions.insert((peer.id, req.region_id));
+    }
+    assert_eq!(
+        opened_regions,
+        HashSet::from([
+            (1, RegionId::new(dropped_table_id, 1).as_u64()),
+            (2, RegionId::new(dropped_table_id, 1).as_u64()),
+        ])
+    );
+    assert_eq!(
+        detector_controller.registered().await,
+        vec![(1, RegionId::new(dropped_table_id, 1))]
+    );
+
+    ddl_context
+        .table_metadata_manager
+        .create_table_metadata(
+            test_create_table_task(table_name, live_table_id).table_info,
+            TableRouteValue::physical(vec![]),
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+
+    let err = procedure.execute(&ctx).await.unwrap_err();
+    assert_eq!(err.status_code(), StatusCode::TableAlreadyExists);
+
+    let mut closed_regions = HashSet::new();
+    for _ in 0..2 {
+        let (peer, request) = rx.try_recv().unwrap();
+        let Some(region_request::Body::Close(req)) = request.body else {
+            unreachable!();
+        };
+        closed_regions.insert((peer.id, req.region_id));
+    }
+    assert_eq!(
+        closed_regions,
+        HashSet::from([
+            (1, RegionId::new(dropped_table_id, 1).as_u64()),
+            (2, RegionId::new(dropped_table_id, 1).as_u64()),
+        ])
+    );
+    assert!(rx.try_recv().is_err());
+    assert_eq!(
+        detector_controller.deregistered().await,
+        vec![(1, RegionId::new(dropped_table_id, 1))]
+    );
+
+    let live_table = ddl_context
+        .table_metadata_manager
+        .table_name_manager()
+        .get(TableNameKey::new(
+            DEFAULT_CATALOG_NAME,
+            DEFAULT_SCHEMA_NAME,
+            table_name,
+        ))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(live_table.table_id(), live_table_id);
+}
+
+#[tokio::test]
+async fn test_undrop_table_lock_key_includes_original_table_name_before_prepare() {
+    let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
+    let mut ddl_context = new_ddl_context(node_manager);
+    ddl_context.soft_drop_enabled = true;
+    let table_id = 1024;
+    let table_name = "foo";
+    let task = test_create_table_task(table_name, table_id);
+    ddl_context
+        .table_metadata_manager
+        .create_table_metadata(
+            task.table_info.clone(),
+            TableRouteValue::physical(vec![]),
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+    let mut drop_procedure = DropTableProcedure::new(
+        new_drop_table_task(table_name, table_id, false),
+        ddl_context.clone(),
+    );
+    execute_procedure_until_done(&mut drop_procedure).await;
+
+    let original_table_name = ddl_context
+        .table_metadata_manager
+        .get_dropped_table_by_id(table_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .table_name;
+    let procedure = UndropTableProcedure::new_with_original_table_name(
+        new_undrop_table_task(table_id),
+        ddl_context,
+        Some(original_table_name),
+    );
+
+    let keys = procedure
+        .lock_key()
+        .keys_to_lock()
+        .cloned()
+        .collect::<Vec<_>>();
+    assert!(
+        keys.iter().any(|key| matches!(
+            key,
+            StringKey::Exclusive(key) if key == "__table_name_lock/greptime.public.foo"
+        )),
+        "undrop lock keys should include the original table name: {keys:?}"
+    );
+    assert!(
+        keys.iter().any(|key| matches!(
+            key,
+            StringKey::Exclusive(key) if key == "__table_lock/1024"
+        )),
+        "undrop lock keys should include the dropped table id: {keys:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_undrop_rejects_stale_id_after_name_tombstone_is_consumed() {
+    let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
+    let ddl_context = new_ddl_context(node_manager);
+    let original_table_id = 1024;
+    let recreated_table_id = 1025;
+    let table_name = "foo";
+    let original_table_name = test_create_table_task(table_name, original_table_id).table_name();
+    let table_route_value = TableRouteValue::physical(vec![]);
+    ddl_context
+        .table_metadata_manager
+        .create_table_metadata(
+            test_create_table_task(table_name, original_table_id).table_info,
+            table_route_value.clone(),
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+    ddl_context
+        .table_metadata_manager
+        .delete_table_metadata(
+            original_table_id,
+            &original_table_name,
+            &table_route_value,
+            &HashMap::new(),
+            None,
+        )
+        .await
+        .unwrap();
+    ddl_context
+        .table_metadata_manager
+        .create_table_metadata(
+            test_create_table_task(table_name, recreated_table_id).table_info,
+            TableRouteValue::physical(vec![]),
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+
+    let mut stale_undrop = UndropTableProcedure::new_with_original_table_name(
+        new_undrop_table_task(original_table_id),
+        ddl_context.clone(),
+        Some(original_table_name.clone()),
+    );
+    let mut hard_drop = DropTableProcedure::new(
+        new_drop_table_task(table_name, recreated_table_id, false),
+        ddl_context.clone(),
+    );
+    execute_procedure_until_done(&mut hard_drop).await;
+    assert!(
+        ddl_context
+            .table_metadata_manager
+            .get_dropped_table(&original_table_name)
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    let err = stale_undrop.on_prepare().await.unwrap_err();
+
+    assert_eq!(err.status_code(), StatusCode::TableNotFound);
+    assert!(
+        ddl_context
+            .table_metadata_manager
+            .table_name_manager()
+            .get(TableNameKey::from(&original_table_name))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        ddl_context
+            .table_metadata_manager
+            .get_dropped_table_by_id(original_table_id)
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[tokio::test]
 async fn test_undrop_table_replayed_restore_metadata_is_idempotent() {
     let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
     let mut ddl_context = new_ddl_context(node_manager);
@@ -899,6 +1844,7 @@ async fn test_undrop_table_replayed_restore_metadata_is_idempotent() {
         UndropTableProcedure::new(new_undrop_table_task(table_id), ddl_context.clone());
     let ctx = new_test_procedure_context();
     procedure.execute(&ctx).await.unwrap();
+    procedure.execute(&ctx).await.unwrap();
     let restore_metadata_data = procedure.dump().unwrap();
     procedure.execute(&ctx).await.unwrap();
 
@@ -921,12 +1867,58 @@ async fn test_undrop_table_replayed_restore_metadata_is_idempotent() {
 }
 
 #[tokio::test]
-async fn test_purge_dropped_table_drops_regions_and_deletes_tombstone() {
+async fn test_legacy_undrop_replays_restore_metadata() {
+    for partial_restore in [false, true] {
+        let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
+        let kv_backend = Arc::new(MemoryKvBackend::new());
+        let mut context = new_ddl_context_with_kv_backend(node_manager, kv_backend.clone());
+        context.soft_drop_enabled = true;
+        let table_id = 1024;
+        let mut procedure = undrop_at_restore_metadata(&context, table_id).await;
+        let persisted = legacy_undrop_snapshot(&procedure);
+
+        if partial_restore {
+            let live_key =
+                TableNameKey::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "foo").to_bytes();
+            let tombstone_key = [b"__tombstone/".as_slice(), live_key.as_slice()].concat();
+            let value = kv_backend.get(&tombstone_key).await.unwrap().unwrap().value;
+            kv_backend
+                .put(PutRequest::new().with_key(live_key).with_value(value))
+                .await
+                .unwrap();
+            kv_backend
+                .batch_delete(BatchDeleteRequest::new().with_keys(vec![tombstone_key]))
+                .await
+                .unwrap();
+        } else {
+            procedure
+                .execute(&new_test_procedure_context())
+                .await
+                .unwrap();
+        }
+
+        let mut replayed = UndropTableProcedure::from_json(&persisted, context.clone()).unwrap();
+        replayed.recover().unwrap();
+        execute_procedure_until_done(&mut replayed).await;
+
+        let (table_info, table_route) = context
+            .table_metadata_manager
+            .get_full_table_info(table_id)
+            .await
+            .unwrap();
+        assert!(table_info.is_some(), "partial_restore={partial_restore}");
+        assert!(table_route.is_some(), "partial_restore={partial_restore}");
+    }
+}
+
+#[tokio::test]
+async fn test_purge_dropped_table_cleans_regions_offline_and_deletes_tombstone() {
     let (tx, mut rx) = mpsc::channel(8);
     let datanode_handler = DatanodeWatcher::new(tx);
     let node_manager = Arc::new(MockDatanodeManager::new(datanode_handler));
     let detector_controller = Arc::new(RecordingRegionFailureDetectorController::default());
-    let mut ddl_context = new_ddl_context(node_manager);
+    let kv_backend = Arc::new(MemoryKvBackend::new());
+    let mut ddl_context = new_ddl_context_with_kv_backend(node_manager, kv_backend.clone());
     ddl_context.soft_drop_enabled = true;
     ddl_context.region_failure_detector_controller = detector_controller.clone();
     let table_id = 1024;
@@ -963,15 +1955,16 @@ async fn test_purge_dropped_table_drops_regions_and_deletes_tombstone() {
     execute_procedure_until_done(&mut procedure).await;
 
     let mut requests = Vec::new();
-    for _ in 0..4 {
+    for _ in 0..1 {
         let (peer, request) = rx.try_recv().unwrap();
         requests.push((peer.id, request.body.unwrap()));
     }
     requests.sort_unstable_by_key(|(peer_id, _)| *peer_id);
-    assert_matches!(requests[0].1, region_request::Body::Open(_));
-    assert_matches!(requests[1].1, region_request::Body::Drop(_));
-    assert_matches!(requests[2].1, region_request::Body::Open(_));
-    assert_matches!(requests[3].1, region_request::Body::Close(_));
+    let region_request::Body::CleanUp(req) = &requests[0].1 else {
+        unreachable!();
+    };
+    assert_eq!(requests[0].0, 1);
+    assert_eq!(req.region_id, RegionId::new(table_id, 1).as_u64());
     assert!(rx.try_recv().is_err());
     assert!(
         ddl_context
@@ -981,10 +1974,479 @@ async fn test_purge_dropped_table_drops_regions_and_deletes_tombstone() {
             .unwrap()
             .is_none()
     );
+    assert!(
+        kv_backend
+            .get(dropped_at_marker_key(table_id).as_bytes())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        kv_backend
+            .get(retention_expires_at_marker_key(table_id).as_bytes())
+            .await
+            .unwrap()
+            .is_none()
+    );
 
     assert_eq!(
         detector_controller.deregistered().await,
         vec![(1, RegionId::new(table_id, 1))]
+    );
+}
+
+#[tokio::test]
+async fn test_automatic_purge_rechecks_unexpired_tombstone() {
+    let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
+    let mut ddl_context = new_ddl_context(node_manager);
+    ddl_context.soft_drop_enabled = true;
+    let table_id = 1024;
+    let table_name = test_create_table_task("foo", table_id).table_name();
+    let table_route_value = TableRouteValue::physical(vec![]);
+    ddl_context
+        .table_metadata_manager
+        .create_table_metadata(
+            test_create_table_task("foo", table_id).table_info,
+            table_route_value.clone(),
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+    ddl_context
+        .table_metadata_manager
+        .delete_table_metadata_with_retention(
+            table_id,
+            &table_name,
+            &table_route_value,
+            &HashMap::new(),
+            Some(1),
+            Some(i64::MAX),
+        )
+        .await
+        .unwrap();
+
+    let procedure = PurgeDroppedTableProcedure::new(
+        new_purge_dropped_table_task(table_id),
+        ddl_context.clone(),
+    );
+    let mut data: serde_json::Value = serde_json::from_str(&procedure.dump().unwrap()).unwrap();
+    data["check_expired"] = true.into();
+    let mut procedure =
+        PurgeDroppedTableProcedure::from_json(&data.to_string(), ddl_context.clone()).unwrap();
+    assert_eq!(
+        procedure.type_name(),
+        PurgeDroppedTableProcedure::EXPIRED_TYPE_NAME
+    );
+
+    execute_procedure_until_done(&mut procedure).await;
+
+    assert!(
+        ddl_context
+            .table_metadata_manager
+            .get_dropped_table_by_id(table_id)
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn test_recovered_automatic_purge_rechecks_unexpired_tombstone() {
+    let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
+    let mut ddl_context = new_ddl_context(node_manager);
+    ddl_context.soft_drop_enabled = true;
+    let table_id = 1024;
+    let table_name = test_create_table_task("foo", table_id).table_name();
+    let table_route_value = TableRouteValue::physical(vec![]);
+    ddl_context
+        .table_metadata_manager
+        .create_table_metadata(
+            test_create_table_task("foo", table_id).table_info,
+            table_route_value.clone(),
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+    ddl_context
+        .table_metadata_manager
+        .delete_table_metadata_with_retention(
+            table_id,
+            &table_name,
+            &table_route_value,
+            &HashMap::new(),
+            Some(0),
+            Some(0),
+        )
+        .await
+        .unwrap();
+
+    let procedure = PurgeDroppedTableProcedure::new(
+        new_purge_dropped_table_task(table_id),
+        ddl_context.clone(),
+    );
+    let mut data: serde_json::Value = serde_json::from_str(&procedure.dump().unwrap()).unwrap();
+    data["check_expired"] = true.into();
+    let mut procedure =
+        PurgeDroppedTableProcedure::from_json(&data.to_string(), ddl_context.clone()).unwrap();
+    procedure
+        .execute(&new_test_procedure_context())
+        .await
+        .unwrap();
+    let persisted = procedure.dump().unwrap();
+
+    ddl_context
+        .table_metadata_manager
+        .restore_table_metadata(table_id, &table_name, &table_route_value, &HashMap::new())
+        .await
+        .unwrap();
+    ddl_context
+        .table_metadata_manager
+        .delete_table_metadata_with_retention(
+            table_id,
+            &table_name,
+            &table_route_value,
+            &HashMap::new(),
+            Some(1),
+            Some(i64::MAX),
+        )
+        .await
+        .unwrap();
+
+    let mut recovered =
+        PurgeDroppedTableProcedure::from_json(&persisted, ddl_context.clone()).unwrap();
+    recovered.recover().unwrap();
+    execute_procedure_until_done(&mut recovered).await;
+
+    assert!(
+        ddl_context
+            .table_metadata_manager
+            .get_dropped_table_by_id(table_id)
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn test_recovered_automatic_purge_obeys_runtime_disable() {
+    let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
+    let ddl_context = new_ddl_context(node_manager);
+    let table_id = 1024;
+    let table_name = test_create_table_task("foo", table_id).table_name();
+    let table_route_value = TableRouteValue::physical(vec![]);
+    ddl_context
+        .table_metadata_manager
+        .create_table_metadata(
+            test_create_table_task("foo", table_id).table_info,
+            table_route_value.clone(),
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+    ddl_context
+        .table_metadata_manager
+        .delete_table_metadata_with_retention(
+            table_id,
+            &table_name,
+            &table_route_value,
+            &HashMap::new(),
+            Some(0),
+            Some(0),
+        )
+        .await
+        .unwrap();
+
+    let procedure = PurgeDroppedTableProcedure::new_if_expired(
+        new_purge_dropped_table_task(table_id),
+        ddl_context.clone(),
+    );
+    let mut recovered =
+        PurgeDroppedTableProcedure::from_json(&procedure.dump().unwrap(), ddl_context.clone())
+            .unwrap();
+    recovered.recover().unwrap();
+    execute_procedure_until_done(&mut recovered).await;
+
+    assert!(
+        ddl_context
+            .table_metadata_manager
+            .get_dropped_table_by_id(table_id)
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn test_recovered_automatic_purge_finishes_after_cleanup_is_claimed() {
+    let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
+    let kv_backend = Arc::new(MemoryKvBackend::new());
+    let mut enabled_context =
+        new_ddl_context_with_kv_backend(node_manager.clone(), kv_backend.clone());
+    enabled_context.soft_drop_enabled = true;
+    let table_id = 1024;
+    create_dropped_table(&enabled_context, table_id, Some(0), Some(0)).await;
+
+    let mut procedure = PurgeDroppedTableProcedure::new_if_expired(
+        new_purge_dropped_table_task(table_id),
+        enabled_context.clone(),
+    );
+    procedure
+        .execute(&new_test_procedure_context())
+        .await
+        .unwrap();
+    let persisted_before_cleanup = procedure.dump().unwrap();
+    procedure
+        .execute(&new_test_procedure_context())
+        .await
+        .unwrap();
+    assert!(
+        kv_backend
+            .get(purging_marker_key(table_id).as_bytes())
+            .await
+            .unwrap()
+            .is_some()
+    );
+
+    let disabled_context = new_ddl_context_with_kv_backend(node_manager, kv_backend.clone());
+    let mut recovered =
+        PurgeDroppedTableProcedure::from_json(&persisted_before_cleanup, disabled_context.clone())
+            .unwrap();
+    recovered.recover().unwrap();
+    execute_procedure_until_done(&mut recovered).await;
+
+    assert!(
+        disabled_context
+            .table_metadata_manager
+            .get_dropped_table_by_id(table_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        kv_backend
+            .get(purging_marker_key(table_id).as_bytes())
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn test_recovered_automatic_purge_ignores_foreign_generation_claim() {
+    let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
+    let kv_backend = Arc::new(MemoryKvBackend::new());
+    let mut ddl_context = new_ddl_context_with_kv_backend(node_manager.clone(), kv_backend.clone());
+    ddl_context.soft_drop_enabled = true;
+    let table_id = 1024;
+    create_dropped_table(&ddl_context, table_id, Some(0), Some(0)).await;
+    kv_backend
+        .put(
+            PutRequest::new()
+                .with_key(drop_generation_marker_key(table_id))
+                .with_value("generation-a"),
+        )
+        .await
+        .unwrap();
+
+    let mut procedure = PurgeDroppedTableProcedure::new_if_expired(
+        new_purge_dropped_table_task(table_id),
+        ddl_context.clone(),
+    );
+    procedure
+        .execute(&new_test_procedure_context())
+        .await
+        .unwrap();
+    let persisted = procedure.dump().unwrap();
+    kv_backend
+        .put(
+            PutRequest::new()
+                .with_key(purging_marker_key(table_id))
+                .with_value("generation-b"),
+        )
+        .await
+        .unwrap();
+
+    let mut recovered =
+        PurgeDroppedTableProcedure::from_json(&persisted, ddl_context.clone()).unwrap();
+    execute_procedure_until_done(&mut recovered).await;
+
+    assert!(
+        ddl_context
+            .table_metadata_manager
+            .get_dropped_table_by_id(table_id)
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn test_undrop_rejects_table_claimed_for_purge() {
+    let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
+    let kv_backend = Arc::new(MemoryKvBackend::new());
+    let ddl_context = new_ddl_context_with_kv_backend(node_manager, kv_backend.clone());
+    let table_id = 1024;
+    create_dropped_table(&ddl_context, table_id, Some(0), Some(0)).await;
+    kv_backend
+        .put(PutRequest::new().with_key(purging_marker_key(table_id)))
+        .await
+        .unwrap();
+
+    let mut procedure =
+        UndropTableProcedure::new(new_undrop_table_task(table_id), ddl_context.clone());
+    let error = procedure.on_prepare().await.unwrap_err();
+
+    assert_eq!(StatusCode::TableNotFound, error.status_code());
+    assert!(
+        ddl_context
+            .table_metadata_manager
+            .get_dropped_table_by_id(table_id)
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn test_recovered_undrop_rejects_tombstone_deleted_by_purge() {
+    let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
+    let ddl_context = new_ddl_context(node_manager);
+    let table_id = 1024;
+    create_dropped_table(&ddl_context, table_id, Some(1), Some(i64::MAX)).await;
+
+    let mut undrop =
+        UndropTableProcedure::new(new_undrop_table_task(table_id), ddl_context.clone());
+    undrop.on_prepare().await.unwrap();
+    let open_regions_state = undrop.dump().unwrap();
+    undrop.execute(&new_test_procedure_context()).await.unwrap();
+    let restore_metadata_state = undrop.dump().unwrap();
+
+    let mut purge = PurgeDroppedTableProcedure::new(
+        new_purge_dropped_table_task(table_id),
+        ddl_context.clone(),
+    );
+    execute_procedure_until_done(&mut purge).await;
+
+    for persisted in [open_regions_state, restore_metadata_state] {
+        let mut recovered =
+            UndropTableProcedure::from_json(&persisted, ddl_context.clone()).unwrap();
+        let error = recovered
+            .execute(&new_test_procedure_context())
+            .await
+            .unwrap_err();
+        assert_eq!(StatusCode::TableNotFound, error.status_code());
+    }
+}
+
+#[tokio::test]
+async fn test_recovered_undrop_rejects_replacement_generation() {
+    let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
+    let kv_backend = Arc::new(MemoryKvBackend::new());
+    let ddl_context = new_ddl_context_with_kv_backend(node_manager, kv_backend.clone());
+    let table_id = 1024;
+    create_dropped_table(&ddl_context, table_id, Some(1), Some(i64::MAX)).await;
+    kv_backend
+        .put(
+            PutRequest::new()
+                .with_key(drop_generation_marker_key(table_id))
+                .with_value("generation-a"),
+        )
+        .await
+        .unwrap();
+
+    let mut undrop =
+        UndropTableProcedure::new(new_undrop_table_task(table_id), ddl_context.clone());
+    undrop.on_prepare().await.unwrap();
+    let persisted = undrop.dump().unwrap();
+    kv_backend
+        .put(
+            PutRequest::new()
+                .with_key(drop_generation_marker_key(table_id))
+                .with_value("generation-b"),
+        )
+        .await
+        .unwrap();
+
+    let mut recovered = UndropTableProcedure::from_json(&persisted, ddl_context).unwrap();
+    let error = recovered
+        .execute(&new_test_procedure_context())
+        .await
+        .unwrap_err();
+    assert_eq!(StatusCode::TableNotFound, error.status_code());
+}
+
+#[tokio::test]
+async fn test_legacy_unmarked_tombstone_can_be_undropped_and_purged() {
+    let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
+    let ddl_context = new_ddl_context(node_manager);
+    let table_id = 1024;
+    let table_name = test_create_table_task("foo", table_id).table_name();
+    let table_route_value = TableRouteValue::physical(vec![]);
+    ddl_context
+        .table_metadata_manager
+        .create_table_metadata(
+            test_create_table_task("foo", table_id).table_info,
+            table_route_value.clone(),
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+    ddl_context
+        .table_metadata_manager
+        .delete_table_metadata(
+            table_id,
+            &table_name,
+            &table_route_value,
+            &HashMap::new(),
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        ddl_context
+            .table_metadata_manager
+            .get_dropped_table_by_id(table_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .dropped_at,
+        None
+    );
+    let dropped_tables = ddl_context
+        .table_metadata_manager
+        .list_dropped_tables()
+        .await
+        .unwrap();
+    assert_eq!(dropped_tables.len(), 1);
+    assert_eq!(dropped_tables[0].dropped_at, None);
+
+    let mut undrop =
+        UndropTableProcedure::new(new_undrop_table_task(table_id), ddl_context.clone());
+    execute_procedure_until_done(&mut undrop).await;
+
+    ddl_context
+        .table_metadata_manager
+        .delete_table_metadata(
+            table_id,
+            &table_name,
+            &table_route_value,
+            &HashMap::new(),
+            None,
+        )
+        .await
+        .unwrap();
+    let mut purge = PurgeDroppedTableProcedure::new(
+        new_purge_dropped_table_task(table_id),
+        ddl_context.clone(),
+    );
+    execute_procedure_until_done(&mut purge).await;
+    assert!(
+        ddl_context
+            .table_metadata_manager
+            .get_dropped_table_by_id(table_id)
+            .await
+            .unwrap()
+            .is_none()
     );
 }
 
@@ -1050,13 +2512,7 @@ async fn test_purge_dropped_table_by_id_selects_tombstone_when_live_table_exists
     assert_eq!(live_table.table_id(), live_table_id);
 
     let (_, request) = rx.try_recv().unwrap();
-    let Some(region_request::Body::Open(req)) = request.body else {
-        unreachable!();
-    };
-    assert_eq!(req.region_id, RegionId::new(dropped_table_id, 1).as_u64());
-
-    let (_, request) = rx.try_recv().unwrap();
-    let Some(region_request::Body::Drop(req)) = request.body else {
+    let Some(region_request::Body::CleanUp(req)) = request.body else {
         unreachable!();
     };
     assert_eq!(req.region_id, RegionId::new(dropped_table_id, 1).as_u64());
@@ -1064,110 +2520,10 @@ async fn test_purge_dropped_table_by_id_selects_tombstone_when_live_table_exists
 }
 
 #[tokio::test]
-async fn test_purge_dropped_table_replayed_open_regions_ignores_dropped_regions() {
-    let (tx, mut rx) = mpsc::channel(8);
-    let dropped_regions = Arc::new(StdMutex::new(HashSet::new()));
-    let datanode_handler = DatanodeWatcher::new(tx).with_handler({
-        let dropped_regions = dropped_regions.clone();
-        move |_peer, request| {
-            let Some(body) = request.body.as_ref() else {
-                return Ok(RegionResponse::new(0));
-            };
-            match body {
-                region_request::Body::Open(req)
-                    if dropped_regions.lock().unwrap().contains(&req.region_id) =>
-                {
-                    Err::<RegionResponse, _>(BoxedError::new(MockRegionNotFoundError))
-                        .context(error::ExternalSnafu)
-                }
-                region_request::Body::Drop(req) => {
-                    dropped_regions.lock().unwrap().insert(req.region_id);
-                    Ok(RegionResponse::new(0))
-                }
-                _ => Ok(RegionResponse::new(0)),
-            }
-        }
-    });
-    let node_manager = Arc::new(MockDatanodeManager::new(datanode_handler));
-    let mut ddl_context = new_ddl_context(node_manager);
-    ddl_context.soft_drop_enabled = true;
-    let table_id = 1024;
-    let table_name = "foo";
-    let task = test_create_table_task(table_name, table_id);
-    ddl_context
-        .table_metadata_manager
-        .create_table_metadata(
-            task.table_info.clone(),
-            TableRouteValue::physical(vec![RegionRoute {
-                region: Region::new_test(RegionId::new(table_id, 1)),
-                leader_peer: Some(Peer::empty(1)),
-                follower_peers: vec![],
-                leader_state: None,
-                leader_down_since: None,
-                write_route_policy: None,
-            }]),
-            HashMap::new(),
-        )
-        .await
-        .unwrap();
-    let mut drop_procedure = DropTableProcedure::new(
-        new_drop_table_task(table_name, table_id, false),
-        ddl_context.clone(),
-    );
-    execute_procedure_until_done(&mut drop_procedure).await;
-    while rx.try_recv().is_ok() {}
-
-    let mut procedure = PurgeDroppedTableProcedure::new(
-        new_purge_dropped_table_task(table_id),
-        ddl_context.clone(),
-    );
-    let ctx = new_test_procedure_context();
-    procedure.execute(&ctx).await.unwrap();
-    let open_regions_data = procedure.dump().unwrap();
-    procedure.execute(&ctx).await.unwrap();
-    procedure.execute(&ctx).await.unwrap();
-
-    let mut replayed =
-        PurgeDroppedTableProcedure::from_json(&open_regions_data, ddl_context.clone()).unwrap();
-    execute_procedure_until_done(&mut replayed).await;
-
-    assert!(
-        ddl_context
-            .table_metadata_manager
-            .get_dropped_table(&drop_procedure.data.task.table_name())
-            .await
-            .unwrap()
-            .is_none()
-    );
-}
-
-#[derive(Debug, snafu::Snafu)]
-#[snafu(display("mock region not found"))]
-struct MockRegionNotFoundError;
-
-impl StackError for MockRegionNotFoundError {
-    fn debug_fmt(&self, _: usize, _: &mut Vec<String>) {}
-
-    fn next(&self) -> Option<&dyn StackError> {
-        None
-    }
-}
-
-impl ErrorExt for MockRegionNotFoundError {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
-    fn status_code(&self) -> StatusCode {
-        StatusCode::RegionNotFound
-    }
-}
-
-#[tokio::test]
 async fn test_on_rollback() {
     let node_manager = Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler));
     let kv_backend = Arc::new(MemoryKvBackend::new());
-    let ddl_context = new_ddl_context_with_kv_backend(node_manager, kv_backend.clone());
+    let mut ddl_context = new_ddl_context_with_kv_backend(node_manager, kv_backend.clone());
     // Prepares physical table metadata.
     let mut create_physical_table_task = test_create_physical_table_task("phy_table");
     let TableMetadata {
@@ -1218,6 +2574,7 @@ async fn test_on_rollback() {
     }
 
     // Drops the logical table
+    ddl_context.soft_drop_enabled = false;
     let task = new_drop_table_task("foo", table_ids[0], false);
     let mut procedure = DropTableProcedure::new(task, ddl_context.clone());
     procedure.on_prepare().await.unwrap();
@@ -1258,6 +2615,7 @@ async fn create_metric_logical_table_tombstone(
             &task.table_name(),
             &TableRouteValue::logical(physical_table_id),
             &HashMap::new(),
+            None,
         )
         .await
         .unwrap();

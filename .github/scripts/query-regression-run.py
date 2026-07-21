@@ -26,7 +26,12 @@ from pathlib import Path
 
 DEFAULT_CASES = [
     "tests/perf/query_cases/smoke_direct_sst/case.toml",
+    "tests/perf/query_cases/prom_remote_write_seeded_random/case.toml",
+    "tests/perf/query_cases/prom_remote_write_run_heavy/case.toml",
+    "tests/perf/query_cases/prom_remote_write_mixed_every/case.toml",
+    "tests/perf/query_cases/prom_remote_write_integer_counter/case.toml",
     "tests/perf/query_cases/promql_pushdown_7913/case.toml",
+    "tests/perf/query_cases/analyze_verbose_many_files/case.toml",
     "tests/perf/query_cases/sql_topk_order_by/case.toml",
     "tests/perf/query_cases/sql_aggregate_order_by/case.toml",
     "tests/perf/query_cases/sql_join_filter_order/case.toml",
@@ -52,6 +57,12 @@ def profile_dir(cargo_profile: str) -> str:
     if cargo_profile == "dev":
         return "debug"
     return cargo_profile
+
+
+def configured_path(value: str | None) -> Path | None:
+    if not value or not value.strip():
+        return None
+    return Path(value.strip())
 
 
 def resolve_case_path(candidate_src: Path, case: str) -> Path:
@@ -83,6 +94,9 @@ def append_step_summary(summary: Path) -> None:
 
 def run_case(args: argparse.Namespace, case_path: Path, work_dir: Path) -> int:
     target_dir = profile_dir(args.cargo_profile)
+    base_bin = args.base_bin or args.base_src / "target" / target_dir / "greptime"
+    candidate_bin = args.candidate_bin or args.candidate_src / "target" / target_dir / "greptime"
+    fixture_generator = args.fixture_generator or args.candidate_src / "target" / target_dir / "query_perf_fixture"
     cmd = [
         "uv",
         "run",
@@ -92,11 +106,11 @@ def run_case(args: argparse.Namespace, case_path: Path, work_dir: Path) -> int:
         "--case",
         str(case_path),
         "--base-bin",
-        str(args.base_src / "target" / target_dir / "greptime"),
+        str(base_bin),
         "--candidate-bin",
-        str(args.candidate_src / "target" / target_dir / "greptime"),
+        str(candidate_bin),
         "--fixture-generator",
-        str(args.candidate_src / "target" / target_dir / "query_perf_fixture"),
+        str(fixture_generator),
         "--work-dir",
         str(work_dir),
         "--http-timeout",
@@ -138,6 +152,13 @@ def main() -> int:
     parser.add_argument("--cases", action="append", help="'all' or comma/space separated case paths")
     parser.add_argument("--base-src", type=Path, default=Path("base-src"))
     parser.add_argument("--candidate-src", type=Path, default=Path("candidate-src"))
+    parser.add_argument("--base-bin", type=Path, default=configured_path(os.environ.get("BASE_BIN")))
+    parser.add_argument("--candidate-bin", type=Path, default=configured_path(os.environ.get("CANDIDATE_BIN")))
+    parser.add_argument(
+        "--fixture-generator",
+        type=Path,
+        default=configured_path(os.environ.get("FIXTURE_GENERATOR")),
+    )
     parser.add_argument("--cargo-profile", default=os.environ.get("CARGO_PROFILE", "nightly"))
     parser.add_argument("--work-dir", default=Path("query-regression-work"), type=Path)
     parser.add_argument("--http-timeout", default=os.environ.get("HTTP_TIMEOUT", "300"))
@@ -154,7 +175,6 @@ def main() -> int:
     parser.add_argument("--candidate-ref", default=os.environ.get("CANDIDATE_REF", ""))
     parser.add_argument("--github-output", default=os.environ.get("GITHUB_OUTPUT"))
     args = parser.parse_args()
-
     try:
         cases = split_cases(args.cases or [os.environ.get("CASE_PATHS", "all")])
     except ValueError as err:

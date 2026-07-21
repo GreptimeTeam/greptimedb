@@ -25,6 +25,7 @@ use std::sync::Arc;
 use common_error::ext::BoxedError;
 use common_recordbatch::{RecordBatchStreamWrapper, SendableRecordBatchStream};
 use common_telemetry::tracing::Span;
+use datafusion::physical_plan::ExecutionPlan;
 use datatypes::schema::SchemaRef;
 use futures_util::StreamExt;
 use snafu::ResultExt;
@@ -107,6 +108,10 @@ pub trait SystemTable {
 
     fn to_stream(&self, request: ScanRequest) -> Result<SendableRecordBatchStream>;
 
+    fn scan_plan(&self, _request: ScanRequest) -> Result<Option<Arc<dyn ExecutionPlan>>> {
+        Ok(None)
+    }
+
     fn table_type(&self) -> TableType {
         TableType::Temporary
     }
@@ -172,5 +177,16 @@ impl DataSource for SystemTableDataSource {
         };
 
         Ok(Box::pin(stream))
+    }
+
+    fn get_physical_plan(
+        &self,
+        request: ScanRequest,
+    ) -> std::result::Result<Option<Arc<dyn ExecutionPlan>>, BoxedError> {
+        self.table
+            .scan_plan(request)
+            .map_err(BoxedError::new)
+            .context(TablesRecordBatchSnafu)
+            .map_err(BoxedError::new)
     }
 }

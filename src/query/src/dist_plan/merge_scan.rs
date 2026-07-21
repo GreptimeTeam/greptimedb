@@ -45,10 +45,14 @@ use futures_util::StreamExt;
 use greptime_proto::v1::region::RegionRequestHeader;
 use meter_core::data::ReadItem;
 use meter_macros::read_meter;
-use session::context::QueryContextRef;
+use session::context::{
+    FLIGHT_METRICS_HEARTBEAT_INTERVAL, QueryContextRef,
+    SUPPORT_FLIGHT_METRICS_BEFORE_BATCH_EXTENSION_KEY,
+};
 use store_api::metrics::{REGION_QUERY_CPU_TIME, REGION_QUERY_SCANNED_BYTES};
 use store_api::storage::RegionId;
 use table::table_name::TableName;
+use tokio::time;
 use tokio::time::Instant;
 use tracing::{Instrument, Span};
 
@@ -388,12 +392,21 @@ impl MergeScanExec {
                     region_id = %region_id,
                     partition = partition
                 ));
-                let region_query_ctx = query_context_for_remote_dyn_filter_region(
+                let mut region_query_ctx = query_context_for_remote_dyn_filter_region(
                     &query_ctx,
                     region_id,
                     remote_dyn_filter_registry_lease.as_ref(),
                     &captured_remote_dyn_filters,
                 );
+                if explain_verbose {
+                    let remote_query_id = region_query_ctx.remote_query_id().map(str::to_string);
+                    if let Some(remote_query_id) = remote_query_id {
+                        region_query_ctx.set_extension(
+                            SUPPORT_FLIGHT_METRICS_BEFORE_BATCH_EXTENSION_KEY,
+                            remote_query_id,
+                        );
+                    }
+                }
                 let request = QueryRequest {
                     header: Some(RegionRequestHeader {
                         tracing_context: tracing_context.to_w3c(),
@@ -438,7 +451,30 @@ impl MergeScanExec {
 
                 let mut poll_duration = Duration::ZERO;
                 let mut poll_timer = Instant::now();
-                while let Some(batch) = stream.next().instrument(region_span.clone()).await {
+                loop {
+                    let batch = if explain_verbose {
+                        match time::timeout(
+                            FLIGHT_METRICS_HEARTBEAT_INTERVAL,
+                            stream.next().instrument(region_span.clone()),
+                        )
+                        .await
+                        {
+                            Ok(batch) => batch,
+                            Err(_) => {
+                                if let Some(metrics) = stream.metrics() {
+                                    let mut sub_stage_metrics =
+                                        sub_stage_metrics_moved.lock().unwrap();
+                                    sub_stage_metrics.insert(region_id, metrics);
+                                }
+                                continue;
+                            }
+                        }
+                    } else {
+                        stream.next().instrument(region_span.clone()).await
+                    };
+                    let Some(batch) = batch else {
+                        break;
+                    };
                     let poll_elapsed = poll_timer.elapsed();
                     poll_duration += poll_elapsed;
 
@@ -551,6 +587,24 @@ impl MergeScanExec {
             && curr_dist == &hash_exprs
         {
             // No need to change the distribution
+            return None;
+        }
+
+        let hash_expr_col_names: HashSet<_> = hash_exprs
+            .iter()
+            .filter_map(|expr| {
+                expr.as_any()
+                    .downcast_ref::<Column>()
+                    .map(|col_expr| col_expr.name())
+            })
+            .collect();
+
+        let covers_all_partition_cols = self.partition_cols.values().all(|aliases| {
+            aliases
+                .iter()
+                .any(|col| hash_expr_col_names.contains(col.name()))
+        });
+        if !covers_all_partition_cols {
             return None;
         }
 
@@ -1013,7 +1067,7 @@ mod tests {
     use datafusion::execution::SessionStateBuilder;
     use datafusion::physical_plan::filter_pushdown::ChildFilterPushdownResult;
     use datafusion_common::TableReference;
-    use datafusion_expr::{LogicalPlanBuilder, lit};
+    use datafusion_expr::{LogicalPlanBuilder, col, lit};
     use datafusion_physical_expr::Distribution;
     use datafusion_physical_expr::expressions::{
         Column, DynamicFilterPhysicalExpr, lit as physical_lit,
@@ -1031,6 +1085,65 @@ mod tests {
 
     fn test_query_id(value: u128) -> QueryId {
         QueryId::from(Uuid::from_u128(value))
+    }
+
+    fn merge_scan_exec_with_sorted_input(
+        region_count: u64,
+        target_partition: usize,
+    ) -> MergeScanExec {
+        let session_state = SessionStateBuilder::new().build();
+        let plan = LogicalPlanBuilder::empty(true)
+            .project(vec![lit(1i64).alias("ts")])
+            .unwrap()
+            .sort(vec![col("ts").sort(false, true)])
+            .unwrap()
+            .build()
+            .unwrap();
+        let schema = plan.schema().as_arrow().clone();
+        let regions = (0..region_count)
+            .map(|region_number| RegionId::new(1024, region_number as u32))
+            .collect();
+
+        MergeScanExec::new(
+            &session_state,
+            // The table name is not relevant to these ordering metadata tests;
+            // `MergeScanExec::new` requires one to model the production plan.
+            TableName::new("catalog", "schema", "table"),
+            regions,
+            plan,
+            &schema,
+            Arc::new(TestRegionQueryHandler),
+            QueryContext::arc(),
+            target_partition,
+            AliasMapping::new(),
+            None,
+            false,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn merge_scan_does_not_advertise_ordering_when_partition_may_merge_regions() {
+        let exec = merge_scan_exec_with_sorted_input(3, 2);
+
+        assert!(
+            exec.properties().output_ordering().is_none(),
+            "target_partition < region_count means one output partition may concatenate multiple sorted region streams"
+        );
+    }
+
+    #[test]
+    fn merge_scan_advertises_ordering_when_each_partition_reads_at_most_one_region() {
+        let exec = merge_scan_exec_with_sorted_input(3, 3);
+
+        assert!(exec.properties().output_ordering().is_some());
+    }
+
+    #[test]
+    fn merge_scan_advertises_ordering_when_partitions_exceed_regions() {
+        let exec = merge_scan_exec_with_sorted_input(3, 4);
+
+        assert!(exec.properties().output_ordering().is_some());
     }
 
     #[test]

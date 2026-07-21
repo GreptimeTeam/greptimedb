@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: query-regression-build-cache
+  namespace: arc-runners
+  labels:
+    app.kubernetes.io/part-of: perf-regression-8-cores
+spec:
+  volumeMode: Filesystem
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 600Gi

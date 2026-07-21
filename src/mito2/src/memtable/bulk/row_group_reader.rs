@@ -28,12 +28,12 @@ use crate::error;
 use crate::error::ReadDataPartSnafu;
 use crate::memtable::bulk::chunk_reader::MemtableChunkReader;
 use crate::memtable::bulk::context::BulkIterContextRef;
-use crate::sst::parquet::DEFAULT_READ_BATCH_SIZE;
 
 pub(crate) struct MemtableRowGroupReaderBuilder {
     projection: ProjectionMask,
     arrow_metadata: ArrowReaderMetadata,
     data: Bytes,
+    batch_size: usize,
 }
 
 impl MemtableRowGroupReaderBuilder {
@@ -70,6 +70,7 @@ impl MemtableRowGroupReaderBuilder {
             projection,
             arrow_metadata,
             data,
+            batch_size: context.batch_size(),
         })
     }
 
@@ -87,7 +88,7 @@ impl MemtableRowGroupReaderBuilder {
         )
         .with_row_groups(vec![row_group_idx])
         .with_projection(self.projection.clone())
-        .with_batch_size(DEFAULT_READ_BATCH_SIZE);
+        .with_batch_size(self.batch_size);
 
         if let Some(selection) = row_selection {
             builder = builder.with_row_selection(selection);

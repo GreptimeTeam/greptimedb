@@ -16,6 +16,7 @@ use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
+use api::v1::meta::ddl_task_request::Task;
 use api::v1::meta::procedure_service_client::ProcedureServiceClient;
 use api::v1::meta::{
     DdlTaskRequest, DdlTaskResponse, GcRegionsRequest, GcRegionsResponse, GcTableRequest,
@@ -24,6 +25,9 @@ use api::v1::meta::{
     ReconcileRequest, ReconcileResponse, RequestHeader, ResponseHeader, Role,
 };
 use common_grpc::channel_manager::ChannelManager;
+use common_meta::rpc::ddl::{
+    CREATE_DATABASE_CREATOR_EXTENSION_KEY, CREATE_DATABASE_CREATOR_METADATA_KEY,
+};
 use common_meta::rpc::procedure::{
     GcRegionsRequest as MetaGcRegionsRequest, GcResponse as MetaGcResponse,
     GcTableRequest as MetaGcTableRequest,
@@ -377,6 +381,7 @@ impl Inner {
     }
 
     async fn submit_ddl_task(&self, mut req: DdlTaskRequest) -> Result<DdlTaskResponse> {
+        let creator = create_database_creator_metadata_value(&req);
         req.set_header(
             self.id,
             self.role,
@@ -388,6 +393,12 @@ impl Inner {
             "submit ddl task",
             move |mut client| {
                 let mut req = Request::new(req.clone());
+                if let Some(value) = creator.as_deref() {
+                    req.metadata_mut().insert_bin(
+                        CREATE_DATABASE_CREATOR_METADATA_KEY,
+                        tonic::metadata::MetadataValue::from_bytes(value.as_bytes()),
+                    );
+                }
                 req.set_timeout(timeout);
                 async move { client.ddl(req).await.map(|res| res.into_inner()) }
             },
@@ -417,6 +428,19 @@ impl Inner {
     }
 }
 
+fn create_database_creator_metadata_value(req: &DdlTaskRequest) -> Option<String> {
+    // StatementExecutor removes client values before attaching the authenticated creator.
+    if !matches!(req.task, Some(Task::CreateDatabaseTask(_))) {
+        return None;
+    }
+
+    req.query_context
+        .as_ref()?
+        .extensions
+        .get(CREATE_DATABASE_CREATOR_EXTENSION_KEY)
+        .cloned()
+}
+
 fn gc_timeout_secs(timeout: Option<Duration>) -> u32 {
     timeout
         .map(|timeout| timeout.as_secs().max(1).try_into().unwrap_or(u32::MAX))
@@ -439,11 +463,14 @@ mod tests {
     use async_trait::async_trait;
     use common_error::status_code::StatusCode;
     use common_meta::rpc::ddl::{
-        CommentObjectType, CommentOnTask, DdlTask, QueryContext, SubmitDdlTaskRequest,
+        CREATE_DATABASE_CREATOR_EXTENSION_KEY, CREATE_DATABASE_CREATOR_METADATA_KEY,
+        CommentObjectType, CommentOnTask, CreatorGrantIntent, DdlTask, QueryContext,
+        SubmitDdlTaskRequest,
     };
     use common_telemetry::common_error::ext::ErrorExt;
     use common_telemetry::info;
     use tokio::net::TcpListener;
+    use tokio::sync::mpsc;
     use tokio_stream::wrappers::{ReceiverStream, TcpListenerStream};
     use tonic::codec::CompressionEncoding;
     use tonic::{Request, Response, Status};
@@ -498,6 +525,7 @@ mod tests {
     #[derive(Clone)]
     struct MockProcedure {
         delay: Duration,
+        request_tx: Option<mpsc::UnboundedSender<Request<DdlTaskRequest>>>,
     }
 
     #[async_trait]
@@ -511,8 +539,11 @@ mod tests {
 
         async fn ddl(
             &self,
-            _request: Request<DdlTaskRequest>,
+            request: Request<DdlTaskRequest>,
         ) -> Result<Response<DdlTaskResponse>, Status> {
+            if let Some(request_tx) = &self.request_tx {
+                request_tx.send(request).unwrap();
+            }
             tokio::time::sleep(self.delay).await;
             Ok(Response::new(DdlTaskResponse {
                 header: Some(ResponseHeader {
@@ -560,6 +591,70 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn test_meta_client_forwards_create_database_creator_metadata() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr_str = listener.local_addr().unwrap().to_string();
+        let (request_tx, mut request_rx) = mpsc::unbounded_channel();
+        let heartbeat = MockHeartbeat {
+            leader_addr: addr_str.clone(),
+        };
+        let procedure = MockProcedure {
+            delay: Duration::ZERO,
+            request_tx: Some(request_tx),
+        };
+        let server = tonic::transport::Server::builder()
+            .add_service(
+                HeartbeatServer::new(heartbeat).accept_compressed(CompressionEncoding::Zstd),
+            )
+            .add_service(
+                ProcedureServiceServer::new(procedure).accept_compressed(CompressionEncoding::Zstd),
+            )
+            .serve_with_incoming(TcpListenerStream::new(listener));
+        let server_handle = tokio::spawn(server);
+
+        let mut client = MetaClientBuilder::new(0, Role::Frontend)
+            .enable_heartbeat()
+            .enable_procedure()
+            .build();
+        client.start(&[addr_str.as_str()]).await.unwrap();
+
+        let creator = CreatorGrantIntent {
+            username: "alice".to_string(),
+            created_at_ns: 42,
+        };
+        client
+            .submit_ddl_task(SubmitDdlTaskRequest::new(
+                QueryContext::default(),
+                DdlTask::new_create_database(
+                    "greptime".to_string(),
+                    "metrics".to_string(),
+                    false,
+                    Default::default(),
+                    Some(creator.clone()),
+                ),
+            ))
+            .await
+            .unwrap();
+
+        let request = request_rx.recv().await.unwrap();
+        let encoded = serde_json::to_string(&creator).unwrap();
+        assert_eq!(
+            request
+                .metadata()
+                .get_bin(CREATE_DATABASE_CREATOR_METADATA_KEY)
+                .unwrap()
+                .to_bytes()
+                .unwrap()
+                .as_ref(),
+            encoded.as_bytes()
+        );
+        let extensions = &request.into_inner().query_context.unwrap().extensions;
+        assert_eq!(extensions[CREATE_DATABASE_CREATOR_EXTENSION_KEY], encoded);
+
+        server_handle.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_meta_client_ddl_request_timeout() {
         common_telemetry::init_default_ut_logging();
 
@@ -572,6 +667,7 @@ mod tests {
         };
         let procedure = MockProcedure {
             delay: Duration::from_secs(4),
+            request_tx: None,
         };
 
         let server = tonic::transport::Server::builder()
