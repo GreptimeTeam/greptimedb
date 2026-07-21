@@ -16,7 +16,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use api::v1::flow::{DirtyWindowRequest, DirtyWindowRequests};
+use api::v1::flow::{DirtyWindowRequest, DirtyWindowRequests, TimeRange};
 use api::v1::meta::Peer;
 use api::v1::region::{
     BulkInsertRequest, RegionRequest, RegionRequestHeader, bulk_insert_request, region_request,
@@ -66,6 +66,8 @@ const PENDING_ROWS_BATCH_SYNC_ENV: &str = "PENDING_ROWS_BATCH_SYNC";
 const WORKER_IDLE_TIMEOUT_MULTIPLIER: u32 = 3;
 const PHYSICAL_REGION_ESSENTIAL_COLUMN_COUNT: usize = 3;
 const MAX_CONCURRENT_FLOW_NOTIFICATIONS: usize = 8;
+const DENSE_TIMESTAMP_RANGE_FACTOR_NUMERATOR: i128 = 11;
+const DENSE_TIMESTAMP_RANGE_FACTOR_DENOMINATOR: i128 = 10;
 
 #[async_trait]
 pub trait PendingRowsSchemaAlterer: Send + Sync {
@@ -1376,6 +1378,7 @@ async fn flush_batch(
     }
 }
 
+#[cfg(test)]
 fn extract_timestamps(table_batch: &TableBatch) -> Vec<i64> {
     let mut timestamps = Vec::with_capacity(table_batch.row_count);
     for batch in &table_batch.batches {
@@ -1399,9 +1402,68 @@ fn extract_timestamps(table_batch: &TableBatch) -> Vec<i64> {
     timestamps
 }
 
+struct FlowNotification {
+    table_id: TableId,
+    timestamps: Vec<i64>,
+    time_ranges: Vec<TimeRange>,
+}
+
+fn compact_flow_notification(table_batch: TableBatch) -> Option<FlowNotification> {
+    let mut timestamps = Vec::new();
+    let mut time_ranges = Vec::new();
+
+    for batch in table_batch.batches {
+        let timestamp_column = batch.batch.column(batch.timestamp_index);
+        let Some((timestamp_values, _)) =
+            datatypes::timestamp::timestamp_array_to_primitive(timestamp_column)
+        else {
+            error!(
+                "Failed to extract timestamps from record batch, table_id: {}, timestamp_index: {}",
+                table_batch.table_id, batch.timestamp_index
+            );
+            continue;
+        };
+
+        let mut batch_min: Option<i64> = None;
+        let mut batch_max: Option<i64> = None;
+        let mut timestamp_count = 0usize;
+        for timestamp in timestamp_values.iter().flatten() {
+            batch_min = Some(batch_min.map_or(timestamp, |min| min.min(timestamp)));
+            batch_max = Some(batch_max.map_or(timestamp, |max| max.max(timestamp)));
+            timestamp_count += 1;
+        }
+
+        let (Some(batch_min), Some(batch_max)) = (batch_min, batch_max) else {
+            continue;
+        };
+        let timestamp_span = i128::from(batch_max) - i128::from(batch_min);
+        let is_dense = timestamp_span * DENSE_TIMESTAMP_RANGE_FACTOR_DENOMINATOR
+            < timestamp_count as i128 * DENSE_TIMESTAMP_RANGE_FACTOR_NUMERATOR;
+        if is_dense && let Some(end_exclusive) = batch_max.checked_add(1) {
+            time_ranges.push(TimeRange {
+                start_inclusive: batch_min,
+                end_exclusive,
+            });
+        } else {
+            timestamps.extend(timestamp_values.iter().flatten());
+        }
+    }
+
+    if timestamps.is_empty() && time_ranges.is_empty() {
+        return None;
+    }
+
+    Some(FlowNotification {
+        table_id: table_batch.table_id,
+        timestamps,
+        time_ranges,
+    })
+}
+
 async fn notify_flow_dirty_windows_for_table(
     table_id: TableId,
     timestamps: Vec<i64>,
+    time_ranges: Vec<TimeRange>,
     peers: HashSet<Peer>,
     node_manager: NodeManagerRef,
 ) {
@@ -1413,6 +1475,7 @@ async fn notify_flow_dirty_windows_for_table(
                 requests: vec![DirtyWindowRequest {
                     table_id,
                     timestamps: timestamps.clone(),
+                    time_ranges: time_ranges.clone(),
                 }],
             })
             .await
@@ -1441,12 +1504,11 @@ fn notify_flow_dirty_windows_after_flush(
                     let table_flownode_set_cache = table_flownode_set_cache.clone();
                     let notification_tx = notification_tx.clone();
                     async move {
-                        let timestamps = extract_timestamps(&table_batch);
-                        if timestamps.is_empty() {
+                        let Some(notification) = compact_flow_notification(table_batch) else {
                             return;
-                        }
+                        };
 
-                        let table_id = table_batch.table_id;
+                        let table_id = notification.table_id;
                         let flownodes = match table_flownode_set_cache.get(table_id).await {
                             Ok(Some(flownodes)) => flownodes,
                             Ok(None) => return,
@@ -1456,7 +1518,14 @@ fn notify_flow_dirty_windows_after_flush(
                             }
                         };
                         let peers = flownodes.values().cloned().collect::<HashSet<_>>();
-                        let _ = notification_tx.send((table_id, timestamps, peers)).await;
+                        let _ = notification_tx
+                            .send((
+                                table_id,
+                                notification.timestamps,
+                                notification.time_ranges,
+                                peers,
+                            ))
+                            .await;
                     }
                 })
                 .await;
@@ -1464,10 +1533,11 @@ fn notify_flow_dirty_windows_after_flush(
         let notify_flownodes = tokio_stream::wrappers::ReceiverStream::new(notification_rx)
             .for_each_concurrent(
                 MAX_CONCURRENT_FLOW_NOTIFICATIONS,
-                |(table_id, timestamps, peers)| {
+                |(table_id, timestamps, time_ranges, peers)| {
                     notify_flow_dirty_windows_for_table(
                         table_id,
                         timestamps,
+                        time_ranges,
                         peers,
                         node_manager.clone(),
                     )
@@ -1817,7 +1887,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use api::region::RegionResponse;
-    use api::v1::flow::{DirtyWindowRequests, FlowRequest, FlowResponse};
+    use api::v1::flow::{DirtyWindowRequests, FlowRequest, FlowResponse, TimeRange};
     use api::v1::meta::Peer;
     use api::v1::region::{InsertRequests, RegionRequest, region_request};
     use api::v1::value::ValueData;
@@ -1864,11 +1934,12 @@ mod tests {
         PendingRowsBatcher, PendingWorker, PhysicalFlushCatalogProvider,
         PhysicalFlushNodeRequester, PhysicalFlushPartitionProvider, PhysicalTableMetadata,
         PlannedRegionBatch, RecordBatchWithTsIdx, ResolvedRegionBatch, TableBatch, WorkerCommand,
-        columns_taxonomy, drain_batch, encode_region_write_requests, extract_timestamps,
-        flush_batch, flush_batch_physical, flush_region_writes_concurrently, greptime_timestamp,
-        notify_flow_dirty_windows_after_flush, plan_region_batches, remove_worker_if_same_channel,
-        should_close_worker_on_idle_timeout, should_dispatch_concurrently,
-        strip_partition_columns_from_batch, transform_logical_batches_to_physical,
+        columns_taxonomy, compact_flow_notification, drain_batch, encode_region_write_requests,
+        extract_timestamps, flush_batch, flush_batch_physical, flush_region_writes_concurrently,
+        greptime_timestamp, notify_flow_dirty_windows_after_flush, plan_region_batches,
+        remove_worker_if_same_channel, should_close_worker_on_idle_timeout,
+        should_dispatch_concurrently, strip_partition_columns_from_batch,
+        transform_logical_batches_to_physical,
     };
     use crate::error;
     use crate::prom_row_builder::rows_to_aligned_record_batch;
@@ -2090,6 +2161,39 @@ mod tests {
         };
 
         assert_eq!(vec![1000, 2000], extract_timestamps(&table_batch));
+    }
+
+    #[test]
+    fn test_compact_flow_notification() {
+        let testcases = [
+            (
+                vec![Some(1), Some(2), Some(3)],
+                Vec::new(),
+                vec![TimeRange {
+                    start_inclusive: 1,
+                    end_exclusive: 4,
+                }],
+            ),
+            (vec![Some(1), Some(1000)], vec![1, 1000], Vec::new()),
+            (
+                vec![Some(i64::MAX - 1), Some(i64::MAX)],
+                vec![i64::MAX - 1, i64::MAX],
+                Vec::new(),
+            ),
+        ];
+
+        for (timestamps, expected_timestamps, expected_ranges) in testcases {
+            let table_batch = TableBatch {
+                table_name: "cpu".to_string(),
+                table_id: 42,
+                row_count: timestamps.len(),
+                batches: vec![mock_timestamp_batch(timestamps)],
+            };
+
+            let notification = compact_flow_notification(table_batch).unwrap();
+            assert_eq!(expected_timestamps, notification.timestamps);
+            assert_eq!(expected_ranges, notification.time_ranges);
+        }
     }
 
     fn mock_physical_table_metadata(table_id: TableId) -> PhysicalTableMetadata {
@@ -2623,7 +2727,11 @@ mod tests {
         assert_eq!(
             vec![api::v1::flow::DirtyWindowRequest {
                 table_id,
-                timestamps: vec![1000],
+                timestamps: Vec::new(),
+                time_ranges: vec![TimeRange {
+                    start_inclusive: 1000,
+                    end_exclusive: 1001,
+                }],
             }],
             requests.requests
         );
@@ -2666,7 +2774,17 @@ mod tests {
         assert_eq!(
             vec![api::v1::flow::DirtyWindowRequest {
                 table_id,
-                timestamps: vec![1000, 2000],
+                timestamps: Vec::new(),
+                time_ranges: vec![
+                    TimeRange {
+                        start_inclusive: 1000,
+                        end_exclusive: 1001,
+                    },
+                    TimeRange {
+                        start_inclusive: 2000,
+                        end_exclusive: 2001,
+                    },
+                ],
             }],
             requests.requests
         );
@@ -2731,7 +2849,11 @@ mod tests {
         assert_eq!(
             vec![api::v1::flow::DirtyWindowRequest {
                 table_id,
-                timestamps: vec![1000],
+                timestamps: Vec::new(),
+                time_ranges: vec![TimeRange {
+                    start_inclusive: 1000,
+                    end_exclusive: 1001,
+                }],
             }],
             requests.requests
         );
