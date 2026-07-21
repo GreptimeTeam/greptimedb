@@ -659,6 +659,21 @@ dependencies = [
  "arrow-schema 58.3.0",
  "bytes",
  "chrono",
+ "futures",
+ "pg_interval",
+ "pgwire",
+ "postgres-types",
+ "rust_decimal",
+]
+
+[[package]]
+name = "arrow-pg"
+version = "0.15.0"
+source = "git+https://github.com/GreptimeTeam/datafusion-postgres.git?rev=a3bf682e8b5c0587d50a29366761b6fd76ad19d2#a3bf682e8b5c0587d50a29366761b6fd76ad19d2"
+dependencies = [
+ "arrow-schema 58.3.0",
+ "bytes",
+ "chrono",
  "datafusion",
  "futures",
  "pg_interval",
@@ -4228,10 +4243,9 @@ dependencies = [
 [[package]]
 name = "datafusion-pg-catalog"
 version = "0.18.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7d1537f7dac90979658655fb793401a0683f643fae579d7d8713eb03bbb4f880"
+source = "git+https://github.com/GreptimeTeam/datafusion-postgres.git?rev=a3bf682e8b5c0587d50a29366761b6fd76ad19d2#a3bf682e8b5c0587d50a29366761b6fd76ad19d2"
 dependencies = [
- "arrow-pg",
+ "arrow-pg 0.15.0 (git+https://github.com/GreptimeTeam/datafusion-postgres.git?rev=a3bf682e8b5c0587d50a29366761b6fd76ad19d2)",
  "async-trait",
  "datafusion",
  "futures",
@@ -9285,7 +9299,7 @@ version = "0.7.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "77e878c846a8abae00dd069496dbe8751b16ac1c3d6bd2a7283a938e8228f90d"
 dependencies = [
- "proc-macro-crate 3.3.0",
+ "proc-macro-crate 1.3.1",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
@@ -13272,7 +13286,7 @@ dependencies = [
  "arrow 58.3.0",
  "arrow-flight",
  "arrow-ipc 58.3.0",
- "arrow-pg",
+ "arrow-pg 0.15.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "arrow-schema 58.3.0",
  "async-trait",
  "auth",
