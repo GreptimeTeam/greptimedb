@@ -848,7 +848,9 @@ impl DirtyTimeWindows {
                 .map(|dist| dist <= window_size * self.time_window_merge_threshold as i32)
                 .unwrap_or(false)
             {
-                prev_tw.1 = Some(cur_upper);
+                // Union the two windows: the current window may be contained
+                // in the previous one, so keep the larger upper bound.
+                prev_tw.1 = Some(prev_upper.max(cur_upper));
             } else {
                 new_windows.insert(prev_tw.0, prev_tw.1);
                 *prev_tw = (lower_bound, Some(cur_upper));
@@ -1133,6 +1135,76 @@ mod test {
                 .as_ref()
                 .map(|e| unparser.expr_to_sql(e).unwrap().to_string());
             assert_eq!(expected_filter_expr, to_sql.as_deref());
+        }
+    }
+
+    #[test]
+    fn test_merge_dirty_time_windows_with_bounded_ranges() {
+        let window_size = chrono::Duration::seconds(5);
+        let testcases = vec![
+            // A contained bounded range must not shrink the containing window:
+            // [0s, 15s) merged with nested [5s, 10s) stays [0s, 15s).
+            (
+                vec![
+                    (Timestamp::new_second(0), Some(Timestamp::new_second(15))),
+                    (Timestamp::new_second(5), Some(Timestamp::new_second(10))),
+                ],
+                BTreeMap::from([(
+                    Timestamp::new_second(0),
+                    Some(Timestamp::new_second(15)),
+                )]),
+            ),
+            // An unbounded dirty window nested in a bounded range must not
+            // shrink the range either: [0s, 15s) merged with 3s (window end
+            // 8s) stays [0s, 15s).
+            (
+                vec![
+                    (Timestamp::new_second(0), Some(Timestamp::new_second(15))),
+                    (Timestamp::new_second(3), None),
+                ],
+                BTreeMap::from([(
+                    Timestamp::new_second(0),
+                    Some(Timestamp::new_second(15)),
+                )]),
+            ),
+            // Disjoint bounded ranges far apart are kept separate.
+            (
+                vec![
+                    (Timestamp::new_second(0), Some(Timestamp::new_second(5))),
+                    (
+                        Timestamp::new_second(100),
+                        Some(Timestamp::new_second(110)),
+                    ),
+                ],
+                BTreeMap::from([
+                    (Timestamp::new_second(0), Some(Timestamp::new_second(5))),
+                    (
+                        Timestamp::new_second(100),
+                        Some(Timestamp::new_second(110)),
+                    ),
+                ]),
+            ),
+            // Overlapping bounded ranges are unioned: [0s, 10s) and [5s, 20s)
+            // become [0s, 20s).
+            (
+                vec![
+                    (Timestamp::new_second(0), Some(Timestamp::new_second(10))),
+                    (Timestamp::new_second(5), Some(Timestamp::new_second(20))),
+                ],
+                BTreeMap::from([(
+                    Timestamp::new_second(0),
+                    Some(Timestamp::new_second(20)),
+                )]),
+            ),
+        ];
+
+        for (windows, expected) in testcases {
+            let mut dirty = DirtyTimeWindows::default();
+            for (start, end) in windows {
+                dirty.add_window(start, end);
+            }
+            dirty.merge_dirty_time_windows(window_size, None).unwrap();
+            assert_eq!(expected, dirty.windows);
         }
     }
 
