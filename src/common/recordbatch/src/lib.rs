@@ -390,7 +390,11 @@ impl RecordBatches {
             .iter()
             .map(|x| x.df_record_batch().clone())
             .collect::<Vec<_>>();
-        let result = pretty::pretty_format_batches(df_batches).context(error::FormatSnafu)?;
+        let result = pretty::pretty_format_batches_with_schema(
+            self.schema.arrow_schema().clone(),
+            df_batches,
+        )
+        .context(error::FormatSnafu)?;
 
         Ok(result.to_string())
     }
@@ -1014,6 +1018,35 @@ mod tests {
         let expected = vec![RecordBatch::new(schema.clone(), vec![v.clone()]).unwrap()];
         let r = RecordBatches::try_from_columns(schema, vec![v]).unwrap();
         assert_eq!(r.take(), expected);
+    }
+
+    #[tokio::test]
+    async fn test_recordbatches_pretty_print_empty_batches_preserves_schema() {
+        let schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new("unit", ConcreteDataType::string_datatype(), false),
+            ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            ),
+            ColumnSchema::new(
+                "lhs.degrees(val) + rhs.radians(val)",
+                ConcreteDataType::float64_datatype(),
+                false,
+            ),
+        ]));
+        let batches =
+            RecordBatches::try_collect(Box::pin(EmptyRecordBatchStream::new(schema.clone())))
+                .await
+                .unwrap();
+
+        assert_eq!(schema, batches.schema());
+        let expected = "\
++------+----+-------------------------------------+
+| unit | ts | lhs.degrees(val) + rhs.radians(val) |
++------+----+-------------------------------------+
++------+----+-------------------------------------+";
+        assert_eq!(expected, batches.pretty_print().unwrap());
     }
 
     #[test]
