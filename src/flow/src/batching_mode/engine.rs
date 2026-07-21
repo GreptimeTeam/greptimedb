@@ -1030,9 +1030,12 @@ impl FlowEngine for BatchingEngine {
 
 #[cfg(test)]
 mod tests {
+    use api::v1::flow::{DirtyWindowRequest, TimeRange};
     use catalog::memory::new_memory_catalog_manager;
     use common_meta::key::TableMetadataManager;
     use common_meta::key::flow::FlowMetadataManager;
+    use common_meta::key::table_route::TableRouteValue;
+    use common_meta::key::test_utils::new_test_table_info_with_name;
     use common_meta::kv_backend::memory::MemoryKvBackend;
     use query::options::QueryOptions;
     use session::context::QueryContext;
@@ -1197,6 +1200,13 @@ GROUP BY l.number, time_window
     }
 
     async fn new_test_task(flow_id: FlowId) -> (BatchingTask, oneshot::Sender<()>) {
+        new_test_task_with_time_window_expr(flow_id, None).await
+    }
+
+    async fn new_test_task_with_time_window_expr(
+        flow_id: FlowId,
+        time_window_expr: Option<TimeWindowExpr>,
+    ) -> (BatchingTask, oneshot::Sender<()>) {
         let query_engine = create_test_query_engine();
         let ctx = QueryContext::arc();
         let plan = sql_to_df_plan(
@@ -1213,7 +1223,7 @@ GROUP BY l.number, time_window
             flow_id,
             query: "SELECT number, ts FROM numbers_with_ts",
             plan,
-            time_window_expr: None,
+            time_window_expr,
             expire_after: None,
             sink_table_name: [
                 "greptime".to_string(),
@@ -1235,6 +1245,90 @@ GROUP BY l.number, time_window
         .unwrap();
 
         (task, tx)
+    }
+
+    #[tokio::test]
+    async fn test_handle_mark_dirty_time_window_with_time_ranges() {
+        let engine = new_test_engine().await;
+
+        // Register the source table info so the engine can resolve the table
+        // name and the time index unit (millisecond).
+        let mut table_info = new_test_table_info_with_name(1, "numbers_with_ts");
+        table_info.catalog_name = "greptime".to_string();
+        table_info.schema_name = "public".to_string();
+        engine
+            .table_meta
+            .create_table_metadata(
+                table_info,
+                TableRouteValue::physical(vec![]),
+                HashMap::new(),
+            )
+            .await
+            .unwrap();
+
+        // Build a task with a 5-second time window expr.
+        let query_engine = create_test_query_engine();
+        let ctx = QueryContext::arc();
+        let plan = sql_to_df_plan(
+            ctx.clone(),
+            query_engine.clone(),
+            "SELECT date_bin(INTERVAL '5 second', ts) AS time_window FROM numbers_with_ts GROUP BY time_window",
+            true,
+        )
+        .await
+        .unwrap();
+        let (column_name, time_window_expr, _, df_schema) = find_time_window_expr(
+            &plan,
+            query_engine.engine_state().catalog_manager().clone(),
+            ctx,
+        )
+        .await
+        .unwrap();
+        let time_window_expr = TimeWindowExpr::from_expr(
+            &time_window_expr.unwrap(),
+            &column_name,
+            &df_schema,
+            &query_engine.engine_state().session_state(),
+        )
+        .unwrap();
+
+        let (task, shutdown_tx) =
+            new_test_task_with_time_window_expr(1, Some(time_window_expr)).await;
+        let task_identity = task.clone();
+        engine.runtime.write().await.insert(1, task, shutdown_tx);
+
+        engine
+            .handle_mark_dirty_time_window(DirtyWindowRequests {
+                requests: vec![DirtyWindowRequest {
+                    table_id: 1,
+                    timestamps: vec![],
+                    time_ranges: vec![
+                        // [3s, 11s) aligns to window start 0s and window end 15s.
+                        TimeRange {
+                            start_inclusive: 3_000,
+                            end_exclusive: 11_000,
+                        },
+                        // Empty and reversed ranges are invalid and skipped.
+                        TimeRange {
+                            start_inclusive: 5_000,
+                            end_exclusive: 5_000,
+                        },
+                        TimeRange {
+                            start_inclusive: 9_000,
+                            end_exclusive: 4_000,
+                        },
+                    ],
+                }],
+            })
+            .await
+            .unwrap();
+
+        let state = task_identity.state.read().unwrap();
+        assert_eq!(1, state.dirty_time_windows.len());
+        assert_eq!(
+            Duration::from_secs(15),
+            state.dirty_time_windows.window_size()
+        );
     }
 
     async fn install_abort_observed_handle(task: &BatchingTask) -> oneshot::Receiver<()> {
