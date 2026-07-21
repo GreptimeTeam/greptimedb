@@ -40,7 +40,8 @@ use store_api::storage::consts::{PRIMARY_KEY_COLUMN_NAME, ReservedColumnId};
 use tokio::sync::Semaphore;
 
 use crate::error::{
-    InvalidRequestSnafu, MergeCandidateSeriesSnafu, NewRecordBatchSnafu, Result, UnexpectedSnafu,
+    InvalidRequestSnafu, JoinSnafu, MergeCandidateSeriesSnafu, NewRecordBatchSnafu, Result,
+    UnexpectedSnafu,
 };
 use crate::read::BoxedRecordBatchStream;
 use crate::read::pruner::{PartitionPruner, Pruner};
@@ -75,7 +76,7 @@ pub(crate) struct SeriesCandidateScanner {
     stream_ctx: Arc<StreamContext>,
     partitions: Vec<Vec<PartitionRange>>,
     pruner: Arc<Pruner>,
-    source_semaphore: Arc<Semaphore>,
+    range_semaphore: Arc<Semaphore>,
     memory_pool: Arc<dyn MemoryPool>,
     metrics_set: ExecutionPlanMetricsSet,
     part_metrics: PartitionMetrics,
@@ -91,7 +92,7 @@ impl SeriesCandidateScanner {
         stream_ctx: Arc<StreamContext>,
         partitions: Vec<Vec<PartitionRange>>,
         pruner: Arc<Pruner>,
-        source_semaphore: Arc<Semaphore>,
+        range_semaphore: Arc<Semaphore>,
         memory_pool: Arc<dyn MemoryPool>,
         metrics_set: ExecutionPlanMetricsSet,
         part_metrics: PartitionMetrics,
@@ -109,7 +110,7 @@ impl SeriesCandidateScanner {
             stream_ctx,
             partitions,
             pruner,
-            source_semaphore,
+            range_semaphore,
             memory_pool,
             metrics_set,
             part_metrics,
@@ -127,12 +128,38 @@ impl SeriesCandidateScanner {
         self.pruner.add_partition_ranges(&all_ranges);
         let partition_pruner = Arc::new(PartitionPruner::new(self.pruner.clone(), &all_ranges));
 
-        let mut range_streams = Vec::with_capacity(all_ranges.len());
-        for (range_idx, part_range) in all_ranges.iter().enumerate() {
-            let stream = self
-                .build_range_stream(*part_range, partition_pruner.clone(), range_idx)
-                .await?;
-            range_streams.push(stream);
+        let range_builder = SeriesCandidateRangeBuilder {
+            stream_ctx: self.stream_ctx.clone(),
+            range_semaphore: self.range_semaphore.clone(),
+            memory_pool: self.memory_pool.clone(),
+            metrics_set: self.metrics_set.clone(),
+            part_metrics: self.part_metrics.clone(),
+        };
+        let mut tasks = Vec::with_capacity(all_ranges.len());
+        for (range_idx, part_range) in all_ranges.into_iter().enumerate() {
+            let range_builder = range_builder.clone();
+            let partition_pruner = partition_pruner.clone();
+            tasks.push(common_runtime::spawn_query(async move {
+                let _permit = range_builder
+                    .range_semaphore
+                    .clone()
+                    .acquire_owned()
+                    .await
+                    .map_err(|error| {
+                        UnexpectedSnafu {
+                            reason: format!("failed to acquire candidate range permit: {error}"),
+                        }
+                        .build()
+                    })?;
+                range_builder
+                    .build_range_stream(part_range, partition_pruner, range_idx)
+                    .await
+            }));
+        }
+
+        let mut range_streams = Vec::with_capacity(tasks.len());
+        for task in tasks {
+            range_streams.push(task.await.context(JoinSnafu)??);
         }
 
         let merged = merge_primary_key_streams(
@@ -144,7 +171,18 @@ impl SeriesCandidateScanner {
         )?;
         decode_metric_series(merged, self.stream_ctx.input.region_metadata().clone())
     }
+}
 
+#[derive(Clone)]
+struct SeriesCandidateRangeBuilder {
+    stream_ctx: Arc<StreamContext>,
+    range_semaphore: Arc<Semaphore>,
+    memory_pool: Arc<dyn MemoryPool>,
+    metrics_set: ExecutionPlanMetricsSet,
+    part_metrics: PartitionMetrics,
+}
+
+impl SeriesCandidateRangeBuilder {
     async fn build_range_stream(
         &self,
         part_range: PartitionRange,
@@ -173,7 +211,7 @@ impl SeriesCandidateScanner {
 
         let sources = self.stream_ctx.input.create_parallel_flat_sources(
             sources,
-            self.source_semaphore.clone(),
+            self.range_semaphore.clone(),
             2,
         )?;
         let stream = merge_primary_key_streams(
@@ -464,7 +502,6 @@ fn decode_metric_series(
 ) -> Result<MetricSeriesIdStream> {
     let codec = SparsePrimaryKeyCodec::new(&metadata);
     Ok(Box::pin(try_stream! {
-        let mut last_primary_key = Vec::new();
         let mut last_series = None;
         let mut output = Vec::with_capacity(CANDIDATE_SERIES_BATCH_SIZE);
         while let Some(batch) = input.try_next().await? {
@@ -476,12 +513,6 @@ fn decode_metric_series(
                     reason: "merged candidate primary key is not binary",
                 })?;
             for primary_key in array.iter().flatten() {
-                if last_primary_key == primary_key {
-                    continue;
-                }
-                last_primary_key.clear();
-                last_primary_key.extend_from_slice(primary_key);
-
                 let (table_id, tsid) = codec
                     .decode_ids(primary_key)
                     .context(crate::error::DecodeSnafu)?;
@@ -655,7 +686,9 @@ mod tests {
             primary_key
         };
         let keys_1 = [encode(1), encode(3)];
-        let keys_2 = [encode(1), encode(2)];
+        let mut alternate_key_for_series_1 = encode(1);
+        alternate_key_for_series_1.push(0);
+        let keys_2 = [alternate_key_for_series_1, encode(2)];
         let sources = vec![
             Box::pin(futures::stream::iter(vec![Ok(binary_batch(
                 &keys_1.iter().map(Vec::as_slice).collect::<Vec<_>>(),
