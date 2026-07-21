@@ -285,3 +285,17 @@ SELECT array_upper(ARRAY[1,2], 0), array_lower(ARRAY[1,2], 0);
 
 -- generate_series with int4 bounds from array_upper must execute (widened to int8)
 SELECT n FROM generate_series(1, array_upper(ARRAY[10,20,30], 1)) AS t(n);
+
+-- ADBC type-info predicate: retain bool, excluding zero receivers and arrays.
+-- SQLNESS PROTOCOL POSTGRES
+WITH type_info AS (
+    SELECT oid, typname, typreceive, typbasetype, typrelid, typarray
+    FROM pg_catalog.pg_type
+    WHERE (typreceive != 0 OR typsend != 0)
+      AND typtype != 'r'
+      AND typreceive::TEXT != 'array_recv'
+)
+SELECT oid, typname, typreceive
+FROM type_info
+WHERE oid IN (16, 269, 1000)
+ORDER BY oid;
