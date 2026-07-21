@@ -24,36 +24,29 @@ use std::time::Duration;
 use ahash::RandomState;
 use arrow::compute::{self, CastOptions, cast_with_options, take_arrays};
 use arrow_schema::{DataType, Field, Schema, SchemaRef, SortOptions, TimeUnit};
-#[cfg(test)]
 use common_function::aggrs::aggr_wrapper::StateMergeHelper;
 use common_recordbatch::DfSendableRecordBatchStream;
 use datafusion::common::Result as DataFusionResult;
 use datafusion::error::Result as DfResult;
 use datafusion::execution::TaskContext;
 use datafusion::execution::context::SessionState;
-#[cfg(test)]
-use datafusion::functions_aggregate::{
-    average::Avg,
-    count::Count,
-    min_max::{Max, Min},
-    sum::Sum,
-};
+use datafusion::functions_aggregate::average::Avg;
+use datafusion::functions_aggregate::count::Count;
+use datafusion::functions_aggregate::min_max::{Max, Min};
+use datafusion::functions_aggregate::sum::Sum;
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
 use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties, RecordBatchStream,
     SendableRecordBatchStream,
 };
-#[cfg(test)]
-use datafusion_common::Column;
 use datafusion_common::hash_utils::create_hashes;
-use datafusion_common::{DFSchema, DFSchemaRef, DataFusionError, ScalarValue};
+use datafusion_common::{Column, DFSchema, DFSchemaRef, DataFusionError, ScalarValue};
 use datafusion_expr::utils::COUNT_STAR_EXPANSION;
 use datafusion_expr::{
-    Accumulator, Expr, ExprSchemable, LogicalPlan, UserDefinedLogicalNodeCore, lit,
+    Accumulator, Aggregate, Expr, ExprSchemable, Extension, LogicalPlan, Projection,
+    UserDefinedLogicalNodeCore, lit,
 };
-#[cfg(test)]
-use datafusion_expr::{Aggregate, Extension, Projection};
 use datafusion_physical_expr::aggregate::{AggregateExprBuilder, AggregateFunctionExpr};
 use datafusion_physical_expr::{
     Distribution, EquivalenceProperties, Partitioning, PhysicalExpr, PhysicalSortExpr,
@@ -261,7 +254,6 @@ enum RangeSelectMode {
     Final(FinalRangeSelectSpec),
 }
 
-#[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CanonicalRangeAggregate {
     Min,
@@ -276,6 +268,117 @@ struct PartialRangeSelectSpec {
     state_columns: Vec<String>,
     state_types: Vec<DataType>,
     by_fields: Vec<FieldContract>,
+    wire: PartialRangeWireMetadata,
+}
+
+/// The only accumulator-state layout accepted by the Partial wire contract.
+pub(crate) const SUPPORTED_PARTIAL_STATE_ABI: u32 = 1;
+
+/// Canonical built-in aggregate identity carried by the Partial wire contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) enum RangeAggregateKind {
+    Min,
+    Max,
+    Sum,
+    Count,
+    Avg,
+}
+
+/// Schema-indexed metadata for a materialized RangeSelect Partial.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct PartialRangeWireMetadata {
+    align: Duration,
+    align_to: i64,
+    time_index: usize,
+    by_indices: Vec<usize>,
+    functions: Vec<PartialRangeWireFunction>,
+    state_abi_version: u32,
+}
+
+/// Wire-stable metadata for one materialized RangeSelect aggregate.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct PartialRangeWireFunction {
+    kind: RangeAggregateKind,
+    argument_index: usize,
+    range: Duration,
+}
+
+impl PartialRangeWireMetadata {
+    pub(crate) fn try_new(
+        align: Duration,
+        align_to: i64,
+        time_index: usize,
+        by_indices: Vec<usize>,
+        functions: Vec<PartialRangeWireFunction>,
+        state_abi_version: u32,
+    ) -> DfResult<Self> {
+        validate_wire_duration(align, "align")?;
+        if functions.is_empty() || state_abi_version != SUPPORTED_PARTIAL_STATE_ABI {
+            return Err(DataFusionError::Plan(
+                "RangeSelect Partial wire metadata is invalid".to_string(),
+            ));
+        }
+        Ok(Self {
+            align,
+            align_to,
+            time_index,
+            by_indices,
+            functions,
+            state_abi_version,
+        })
+    }
+
+    pub(crate) fn align(&self) -> Duration {
+        self.align
+    }
+    pub(crate) fn align_to(&self) -> i64 {
+        self.align_to
+    }
+    pub(crate) fn time_index(&self) -> usize {
+        self.time_index
+    }
+    pub(crate) fn by_indices(&self) -> &[usize] {
+        &self.by_indices
+    }
+    pub(crate) fn functions(&self) -> &[PartialRangeWireFunction] {
+        &self.functions
+    }
+    pub(crate) fn state_abi_version(&self) -> u32 {
+        self.state_abi_version
+    }
+}
+
+impl PartialRangeWireFunction {
+    pub(crate) fn try_new(
+        kind: RangeAggregateKind,
+        argument_index: usize,
+        range: Duration,
+    ) -> DfResult<Self> {
+        validate_wire_duration(range, "range")?;
+        Ok(Self {
+            kind,
+            argument_index,
+            range,
+        })
+    }
+    pub(crate) fn kind(&self) -> RangeAggregateKind {
+        self.kind
+    }
+    pub(crate) fn argument_index(&self) -> usize {
+        self.argument_index
+    }
+    pub(crate) fn range(&self) -> Duration {
+        self.range
+    }
+}
+
+fn validate_wire_duration(duration: Duration, name: &str) -> DfResult<()> {
+    if duration.as_millis() == 0 || duration.as_millis() > i64::MAX as u128 {
+        return Err(DataFusionError::Plan(format!(
+            "RangeSelect Partial wire {name} must be in 1..=i64::MAX milliseconds"
+        )));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -316,7 +419,6 @@ impl FieldContract {
         }
     }
 
-    #[cfg(test)]
     fn from_schema(schema: &DFSchema, index: usize) -> Self {
         let (qualifier, field) = schema.qualified_field(index);
         Self::from_qualified_field(qualifier, field)
@@ -546,14 +648,13 @@ impl RangeSelect {
         })
     }
 
-    /// Builds query-local Complete -> Partial -> Final stages for unit tests.
-    /// Production lowering and wire representation intentionally live in later
-    /// changes, so this must not become a planning API yet.
-    #[cfg(test)]
+    /// Builds the canonical Complete -> Partial -> Final stages.
+    #[allow(dead_code)]
     fn split_for_local_test(&self) -> Option<(Self, Self)> {
         if !matches!(self.mode, RangeSelectMode::Complete)
             || !matches!(self.time_expr, Expr::Column(_))
             || self.by.iter().any(|expr| !matches!(expr, Expr::Column(_)))
+            || !is_pushdown_safe_input(self.input.as_ref())
         {
             return None;
         }
@@ -577,6 +678,7 @@ impl RangeSelect {
         let mut state_types = Vec::with_capacity(self.range_expr.len());
         let mut state_fields = Vec::with_capacity(self.range_expr.len() + self.by.len() + 1);
         let mut raw_merge_result_fields = Vec::with_capacity(self.range_expr.len());
+        let mut wire_functions = Vec::with_capacity(self.range_expr.len());
 
         for (index, (range, expr)) in self.range_expr.iter().zip(&aggregate.aggr_expr).enumerate() {
             let Expr::AggregateFunction(aggr) = strip_alias(expr) else {
@@ -585,9 +687,8 @@ impl RangeSelect {
             let [argument] = aggr.params.args.as_slice() else {
                 return None;
             };
-            if canonical_range_aggregate(aggr).is_none() {
-                return None;
-            }
+            canonical_range_aggregate(aggr)?;
+            let kind = canonical_aggregate_kind(expr)?;
             let argument_name = format!("__range_arg_{index}");
             if aggregate
                 .input
@@ -626,6 +727,11 @@ impl RangeSelect {
             state_fields.push((None, Arc::new(output_field)));
             state_columns.push(state_column.clone());
             state_types.push(state_type.clone());
+            wire_functions.push(PartialRangeWireFunction {
+                kind,
+                argument_index: 1 + self.by.len() + index,
+                range: range.range,
+            });
             partial_ranges.push(RangeFn {
                 name: state_column.clone(),
                 data_type: state_type,
@@ -679,6 +785,9 @@ impl RangeSelect {
         let partial_schema =
             Arc::new(DFSchema::new_with_metadata(state_fields, metadata.clone()).ok()?);
         let partial_by_schema = Arc::new(DFSchema::new_with_metadata(by_fields, metadata).ok()?);
+        let wire_by_fields = (1..=self.by.len())
+            .map(|index| FieldContract::from_schema(projection.schema(), index))
+            .collect::<Vec<_>>();
         let partial = Self {
             input: projection,
             range_expr: partial_ranges,
@@ -694,9 +803,16 @@ impl RangeSelect {
             mode: RangeSelectMode::Partial(PartialRangeSelectSpec {
                 state_columns: state_columns.clone(),
                 state_types: state_types.clone(),
-                by_fields: (0..partial_by_schema.fields().len())
-                    .map(|index| FieldContract::from_schema(&partial_by_schema, index))
-                    .collect(),
+                by_fields: wire_by_fields,
+                wire: PartialRangeWireMetadata::try_new(
+                    self.align,
+                    self.align_to,
+                    0,
+                    (1..=self.by.len()).collect(),
+                    wire_functions,
+                    SUPPORTED_PARTIAL_STATE_ABI,
+                )
+                .ok()?,
             }),
         };
         let partial = partial
@@ -763,9 +879,167 @@ impl RangeSelect {
             .ok()?;
         Some((partial, final_node))
     }
+
+    /// Splits a Complete RangeSelect only when its direct input is safe to
+    /// materialize and distribute as a wire-compatible Partial stage.
+    #[allow(dead_code)]
+    pub(crate) fn try_split_for_pushdown(&self) -> Option<LogicalPlan> {
+        let (_, final_node) = self.split_for_local_test()?;
+        Some(LogicalPlan::Extension(Extension {
+            node: Arc::new(final_node),
+        }))
+    }
+
+    pub(crate) fn partial_wire_metadata(&self) -> Option<&PartialRangeWireMetadata> {
+        let RangeSelectMode::Partial(spec) = &self.mode else {
+            return None;
+        };
+        Some(&spec.wire)
+    }
+
+    /// Reconstructs a Partial node from decoded metadata and its canonical
+    /// materialization Projection. Complete and Final nodes are never rebuilt
+    /// from wire data.
+    pub(crate) fn try_new_partial_from_wire(
+        input: Arc<LogicalPlan>,
+        wire: PartialRangeWireMetadata,
+    ) -> DfResult<Self> {
+        validate_partial_wire_slots(input.as_ref(), &wire)?;
+        let LogicalPlan::Projection(projection) = input.as_ref() else {
+            return Err(DataFusionError::Plan(
+                "RangeSelect Partial wire input must be a Projection".to_string(),
+            ));
+        };
+        let schema = input.schema();
+        let time_expr = column_expr(schema, wire.time_index);
+        let (_, time_field) = time_expr.to_field(schema.as_ref())?;
+        let by = wire
+            .by_indices
+            .iter()
+            .map(|index| column_expr(schema, *index))
+            .collect::<Vec<_>>();
+        let raw_aggregates = wire
+            .functions
+            .iter()
+            .enumerate()
+            .map(|(index, function)| {
+                aggregate_expr_for_wire_kind(
+                    function.kind,
+                    Expr::Column(Column::new_unqualified(format!("__range_arg_{index}"))),
+                )
+            })
+            .collect::<Vec<_>>();
+        let normalized = projection
+            .expr
+            .iter()
+            .enumerate()
+            .map(
+                |(slot, expr)| match slot.checked_sub(1 + wire.by_indices.len()) {
+                    Some(index)
+                        if index < wire.functions.len() && !matches!(expr, Expr::Alias(_)) =>
+                    {
+                        expr.clone().alias(format!("__range_arg_{index}"))
+                    }
+                    _ => expr.clone(),
+                },
+            )
+            .collect();
+        let aggregate_input = Arc::new(LogicalPlan::Projection(Projection::try_new(
+            normalized,
+            projection.input.clone(),
+        )?));
+        let aggregate = StateMergeHelper::coerce_aggr_node(Aggregate::try_new(
+            aggregate_input.clone(),
+            vec![],
+            raw_aggregates,
+        )?)?;
+        if aggregate.aggr_expr.len() != wire.functions.len() {
+            return Err(DataFusionError::Plan(
+                "RangeSelect Partial wire aggregate count is invalid".to_string(),
+            ));
+        }
+        let mut state_columns = Vec::with_capacity(wire.functions.len());
+        let mut state_types = Vec::with_capacity(wire.functions.len());
+        let mut state_fields = Vec::with_capacity(wire.functions.len() + by.len() + 1);
+        let mut range_expr = Vec::with_capacity(wire.functions.len());
+        for (index, (function, expression)) in
+            wire.functions.iter().zip(&aggregate.aggr_expr).enumerate()
+        {
+            if canonical_aggregate_kind(expression) != Some(function.kind) {
+                return Err(DataFusionError::Plan(
+                    "RangeSelect Partial wire aggregate identity is invalid".to_string(),
+                ));
+            }
+            let contract = StateMergeHelper::split_coerced_aggregate_expr(
+                expression,
+                aggregate.input.as_ref(),
+            )?;
+            let state_column = format!("__range_state_{index}");
+            let state_expr = materialize_state_argument(contract.partial_state_expr, index)
+                .ok_or_else(|| {
+                    DataFusionError::Plan("RangeSelect Partial state is invalid".to_string())
+                })?
+                .alias(state_column.clone());
+            let (_, field) = state_expr.to_field(schema.as_ref())?;
+            if !matches!(field.data_type(), DataType::Struct(_)) {
+                return Err(DataFusionError::Plan(
+                    "RangeSelect Partial state must be a Struct".to_string(),
+                ));
+            }
+            let data_type = field.data_type().clone();
+            let mut field = field.as_ref().clone();
+            field.set_nullable(false);
+            state_fields.push((None, Arc::new(field)));
+            state_columns.push(state_column.clone());
+            state_types.push(data_type.clone());
+            range_expr.push(RangeFn {
+                name: state_column,
+                data_type,
+                expr: state_expr,
+                range: function.range,
+                fill: None,
+                need_cast: false,
+            });
+        }
+        state_fields.push((
+            None,
+            Arc::new(Field::new(
+                "__range_bucket_ms",
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                time_field.is_nullable(),
+            )),
+        ));
+        let by_fields = range_by_fields(&by, input.as_ref())?;
+        state_fields.extend(by_fields.clone());
+        let metadata = schema.metadata().clone();
+        let output_schema = Arc::new(DFSchema::new_with_metadata(state_fields, metadata.clone())?);
+        let by_schema = Arc::new(DFSchema::new_with_metadata(by_fields, metadata)?);
+        let partial = Self {
+            input: aggregate_input,
+            range_expr,
+            align: wire.align,
+            align_to: wire.align_to,
+            time_index: time_field.name().clone(),
+            time_expr,
+            by,
+            schema: output_schema.clone(),
+            by_schema: by_schema.clone(),
+            schema_project: None,
+            schema_before_project: output_schema,
+            mode: RangeSelectMode::Partial(PartialRangeSelectSpec {
+                state_columns,
+                state_types,
+                by_fields: (0..by_schema.fields().len())
+                    .map(|index| FieldContract::from_schema(&by_schema, index))
+                    .collect(),
+                wire,
+            }),
+        };
+        partial.with_exprs_and_inputs(partial.expressions(), vec![partial.input.as_ref().clone()])
+    }
 }
 
-#[cfg(test)]
+#[allow(dead_code)]
 fn strip_alias(expr: &Expr) -> &Expr {
     match expr {
         Expr::Alias(alias) => strip_alias(&alias.expr),
@@ -773,7 +1047,6 @@ fn strip_alias(expr: &Expr) -> &Expr {
     }
 }
 
-#[cfg(test)]
 fn canonical_range_aggregate(
     aggregate: &datafusion_expr::expr::AggregateFunction,
 ) -> Option<CanonicalRangeAggregate> {
@@ -805,13 +1078,11 @@ fn canonical_range_aggregate(
     Some(kind)
 }
 
-#[cfg(test)]
 fn column_expr(schema: &DFSchemaRef, index: usize) -> Expr {
     let (qualifier, field) = schema.qualified_field(index);
     Expr::Column(Column::new(qualifier.cloned(), field.name().clone()))
 }
 
-#[cfg(test)]
 fn materialize_state_argument(expr: Expr, index: usize) -> Option<Expr> {
     let Expr::AggregateFunction(mut aggregate) = expr else {
         return None;
@@ -823,6 +1094,226 @@ fn materialize_state_argument(expr: Expr, index: usize) -> Option<Expr> {
         "__range_arg_{index}"
     )))];
     Some(Expr::AggregateFunction(aggregate))
+}
+
+#[allow(dead_code)]
+fn is_pushdown_safe_input(plan: &LogicalPlan) -> bool {
+    match plan {
+        LogicalPlan::Projection(projection) => is_pushdown_safe_input(projection.input.as_ref()),
+        LogicalPlan::Filter(filter) => is_pushdown_safe_input(filter.input.as_ref()),
+        LogicalPlan::TableScan(_) => true,
+        _ => false,
+    }
+}
+
+fn canonical_aggregate_kind(expr: &Expr) -> Option<RangeAggregateKind> {
+    let Expr::AggregateFunction(function) = expr else {
+        return None;
+    };
+    if function.params.distinct
+        || function.params.filter.is_some()
+        || !function.params.order_by.is_empty()
+        || function.params.null_treatment.is_some()
+    {
+        return None;
+    }
+    let kind = canonical_aggregate_udf_kind(&function.func)?;
+    if kind == RangeAggregateKind::Count
+        && !matches!(function.params.args.as_slice(), [Expr::Column(_)])
+    {
+        return None;
+    }
+    Some(kind)
+}
+
+fn canonical_aggregate_udf_kind(
+    function: &datafusion_expr::AggregateUDF,
+) -> Option<RangeAggregateKind> {
+    let inner = function.inner().as_any();
+    Some(
+        if inner.is::<datafusion::functions_aggregate::min_max::Min>() {
+            RangeAggregateKind::Min
+        } else if inner.is::<datafusion::functions_aggregate::min_max::Max>() {
+            RangeAggregateKind::Max
+        } else if inner.is::<datafusion::functions_aggregate::sum::Sum>() {
+            RangeAggregateKind::Sum
+        } else if inner.is::<datafusion::functions_aggregate::count::Count>() {
+            RangeAggregateKind::Count
+        } else if inner.is::<datafusion::functions_aggregate::average::Avg>() {
+            RangeAggregateKind::Avg
+        } else {
+            return None;
+        },
+    )
+}
+
+fn aggregate_expr_for_wire_kind(kind: RangeAggregateKind, argument: Expr) -> Expr {
+    use datafusion::functions_aggregate::expr_fn::{avg, count, max, min, sum};
+    match kind {
+        RangeAggregateKind::Min => min(argument),
+        RangeAggregateKind::Max => max(argument),
+        RangeAggregateKind::Sum => sum(argument),
+        RangeAggregateKind::Count => count(argument),
+        RangeAggregateKind::Avg => avg(argument),
+    }
+}
+
+fn validate_partial_wire_slots(
+    plan: &LogicalPlan,
+    wire: &PartialRangeWireMetadata,
+) -> DfResult<()> {
+    validate_wire_duration(wire.align, "align")?;
+    if wire.state_abi_version != SUPPORTED_PARTIAL_STATE_ABI || wire.functions.is_empty() {
+        return Err(DataFusionError::Plan(
+            "RangeSelect Partial wire state ABI is invalid".to_string(),
+        ));
+    }
+    let LogicalPlan::Projection(projection) = plan else {
+        return Err(DataFusionError::Plan(
+            "RangeSelect Partial wire input must be a Projection".to_string(),
+        ));
+    };
+    let output = plan.schema();
+    let expected = 1 + wire.by_indices.len() + wire.functions.len();
+    if output.fields().len() != expected
+        || projection.expr.len() != expected
+        || wire.time_index != 0
+    {
+        return Err(DataFusionError::Plan(
+            "RangeSelect Partial wire Projection slots are invalid".to_string(),
+        ));
+    }
+    validate_direct_projection_slot(
+        &projection.expr[0],
+        projection.input.schema(),
+        output,
+        0,
+        "time",
+    )?;
+    let (_, time_field) = output.qualified_field(0);
+    if !matches!(time_field.data_type(), DataType::Timestamp(_, _)) {
+        return Err(DataFusionError::Plan(
+            "RangeSelect Partial wire time column must be a timestamp".to_string(),
+        ));
+    }
+    for (position, index) in wire.by_indices.iter().enumerate() {
+        if *index != position + 1 {
+            return Err(DataFusionError::Plan(
+                "RangeSelect Partial wire BY index is invalid".to_string(),
+            ));
+        }
+        validate_direct_projection_slot(
+            &projection.expr[*index],
+            projection.input.schema(),
+            output,
+            *index,
+            "BY",
+        )?;
+    }
+    for (position, function) in wire.functions.iter().enumerate() {
+        validate_wire_duration(function.range, "range")?;
+        let slot = 1 + wire.by_indices.len() + position;
+        if function.argument_index != slot {
+            return Err(DataFusionError::Plan(
+                "RangeSelect Partial wire argument index is invalid".to_string(),
+            ));
+        }
+        validate_materialized_projection_slot(
+            &projection.expr[slot],
+            projection.input.schema(),
+            output,
+            slot,
+            &format!("__range_arg_{position}"),
+            function.kind,
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_direct_projection_slot(
+    expr: &Expr,
+    child: &DFSchema,
+    output: &DFSchema,
+    slot: usize,
+    kind: &str,
+) -> DfResult<()> {
+    let (output_qualifier, output_field) = output.qualified_field(slot);
+    if let Expr::Alias(alias) = expr {
+        let Expr::Column(column) = alias.expr.as_ref() else {
+            return Err(DataFusionError::Plan(format!(
+                "RangeSelect Partial wire {kind} alias must wrap a direct column"
+            )));
+        };
+        let (_, field) = Expr::Column(column.clone()).to_field(child)?;
+        if alias.relation.is_some()
+            || alias.name != *field.name()
+            || output_qualifier.is_some()
+            || *output_field.name() != alias.name
+            || output_field.data_type() != field.data_type()
+            || output_field.is_nullable() != field.is_nullable()
+            || output_field.metadata() != field.metadata()
+        {
+            return Err(DataFusionError::Plan(format!(
+                "RangeSelect Partial wire {kind} alias contract is invalid"
+            )));
+        }
+        return Ok(());
+    }
+    let inner = expr;
+    let Expr::Column(column) = inner else {
+        return Err(DataFusionError::Plan(format!(
+            "RangeSelect Partial wire {kind} slot must be a direct column"
+        )));
+    };
+    let (qualifier, field) = Expr::Column(column.clone()).to_field(child)?;
+    if !FieldContract::from_qualified_field(qualifier.as_ref(), &field)
+        .matches(output_qualifier, output_field)
+    {
+        return Err(DataFusionError::Plan(format!(
+            "RangeSelect Partial wire {kind} slot contract is invalid"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_materialized_projection_slot(
+    expr: &Expr,
+    child: &DFSchema,
+    output: &DFSchema,
+    slot: usize,
+    name: &str,
+    kind: RangeAggregateKind,
+) -> DfResult<()> {
+    let inner = match expr {
+        Expr::Alias(alias) if alias.name == name => alias.expr.as_ref(),
+        Expr::Alias(_) => {
+            return Err(DataFusionError::Plan(
+                "RangeSelect Partial wire argument alias is invalid".to_string(),
+            ));
+        }
+        expr => expr,
+    };
+    if kind == RangeAggregateKind::Count && !matches!(inner, Expr::Column(_)) {
+        return Err(DataFusionError::Plan(
+            "RangeSelect Partial wire COUNT argument must be a direct column".to_string(),
+        ));
+    }
+    let (_, output_field) = output.qualified_field(slot);
+    if output_field.name() != name || output.qualified_field(slot).0.is_some() {
+        return Err(DataFusionError::Plan(
+            "RangeSelect Partial wire argument output name is invalid".to_string(),
+        ));
+    }
+    let (_, field) = expr.to_field(child)?;
+    if field.data_type() != output_field.data_type()
+        || field.is_nullable() != output_field.is_nullable()
+        || field.metadata() != output_field.metadata()
+    {
+        return Err(DataFusionError::Plan(
+            "RangeSelect Partial wire argument contract is invalid".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 fn range_by_fields(
@@ -851,7 +1342,11 @@ fn range_by_fields(
 
 impl UserDefinedLogicalNodeCore for RangeSelect {
     fn name(&self) -> &str {
-        "RangeSelect"
+        if self.partial_wire_metadata().is_some() {
+            crate::range_select::serializer::RANGE_SELECT_PARTIAL_NODE_NAME
+        } else {
+            "RangeSelect"
+        }
     }
 
     fn inputs(&self) -> Vec<&LogicalPlan> {
@@ -956,26 +1451,47 @@ fn rebuild_partial(
     by: Vec<Expr>,
     spec: &PartialRangeSelectSpec,
 ) -> DfResult<RangeSelect> {
+    validate_partial_wire_slots(input.as_ref(), &spec.wire)?;
     if range_expr.len() != spec.state_columns.len()
         || range_expr.len() != spec.state_types.len()
+        || range_expr.len() != spec.wire.functions.len()
         || by.len() != spec.by_fields.len()
+        || by.len() != spec.wire.by_indices.len()
         || !matches!(input.as_ref(), LogicalPlan::Projection(_))
+        || node.align != spec.wire.align
+        || node.align_to != spec.wire.align_to
     {
         return Err(DataFusionError::Plan(
             "RangeSelect Partial expressions do not match its contract".into(),
         ));
     }
+    let expected_time = column_expr(input.schema(), spec.wire.time_index);
+    if time_expr != expected_time {
+        return Err(DataFusionError::Plan(
+            "RangeSelect Partial time expression does not match wire metadata".into(),
+        ));
+    }
     let (_, time_field) = time_expr.to_field(input.schema())?;
     let actual_by_fields = range_by_fields(&by, input.as_ref())?;
-    if actual_by_fields.len() != spec.by_fields.len() {
+    if actual_by_fields.len() != spec.by_fields.len()
+        || actual_by_fields
+            .iter()
+            .zip(&spec.by_fields)
+            .any(|((qualifier, field), expected)| !expected.matches(qualifier.as_ref(), field))
+        || by
+            .iter()
+            .zip(&spec.wire.by_indices)
+            .any(|(expr, index)| *expr != column_expr(input.schema(), *index))
+    {
         return Err(DataFusionError::Plan(
             "RangeSelect Partial BY expressions do not match its contract".into(),
         ));
     }
     let mut fields = Vec::with_capacity(range_expr.len() + by.len() + 1);
-    for (index, (range, (state_column, state_type))) in range_expr
+    for (index, ((range, (state_column, state_type)), wire_function)) in range_expr
         .iter()
         .zip(spec.state_columns.iter().zip(&spec.state_types))
+        .zip(&spec.wire.functions)
         .enumerate()
     {
         let Expr::Alias(alias) = &range.expr else {
@@ -1002,6 +1518,23 @@ fn rebuild_partial(
         {
             return Err(DataFusionError::Plan(
                 "RangeSelect Partial state wrapper contract is invalid".into(),
+            ));
+        }
+        let Some(state_wrapper) = aggregate
+            .func
+            .inner()
+            .as_any()
+            .downcast_ref::<common_function::aggrs::aggr_wrapper::StateWrapper>(
+        ) else {
+            return Err(DataFusionError::Plan(
+                "RangeSelect Partial state wrapper is invalid".into(),
+            ));
+        };
+        if canonical_aggregate_udf_kind(state_wrapper.inner()) != Some(wire_function.kind)
+            || range.range != wire_function.range
+        {
+            return Err(DataFusionError::Plan(
+                "RangeSelect Partial state aggregate does not match wire metadata".into(),
             ));
         }
         let (qualifier, field) = range.expr.to_field(input.schema())?;

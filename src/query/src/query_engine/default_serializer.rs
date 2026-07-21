@@ -41,6 +41,8 @@ use substrait::extension_serializer::ExtensionSerializer;
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 
 use crate::dist_plan::MergeScanLogicalPlan;
+use crate::range_select::plan::RangeSelect;
+use crate::range_select::serializer::{self, RANGE_SELECT_PARTIAL_NODE_NAME};
 
 /// Extended [`substrait::extension_serializer::ExtensionSerializer`] but supports [`MergeScanLogicalPlan`] serialization.
 #[derive(Debug)]
@@ -66,6 +68,8 @@ impl SerializerRegistry for DefaultSerializer {
                 input,
             }
             .encode_to_vec())
+        } else if let Some(range_select) = node.as_any().downcast_ref::<RangeSelect>() {
+            serializer::serialize(range_select)
         } else {
             ExtensionSerializer.serialize_logical_plan(node)
         }
@@ -82,6 +86,8 @@ impl SerializerRegistry for DefaultSerializer {
             Err(DataFusionError::Substrait(format!(
                 "Unsupported plan node: {name}"
             )))
+        } else if name == RANGE_SELECT_PARTIAL_NODE_NAME {
+            serializer::deserialize(bytes)
         } else {
             ExtensionSerializer.deserialize_logical_plan(name, bytes)
         }
@@ -186,16 +192,33 @@ impl SubstraitPlanDecoder for DefaultPlanDecoder {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+    use std::time::Duration;
+
     use datafusion::catalog::TableProvider;
-    use datafusion_expr::{LogicalPlanBuilder, LogicalTableSource, col, lit};
-    use datatypes::arrow::datatypes::SchemaRef;
+    use datafusion::common::{Column, TableReference};
+    use datafusion::datasource::memory::MemorySourceConfig;
+    use datafusion::datasource::source::DataSourceExec;
+    use datafusion::datasource::{MemTable, provider_as_source};
+    use datafusion::logical_expr::{LogicalPlanBuilder, LogicalTableSource, col, lit};
+    use datafusion::physical_plan::{ExecutionPlan, collect};
+    use datafusion::prelude::SessionContext;
+    use datafusion_expr::{Expr, Extension, LogicalPlan};
+    use datafusion_physical_expr::create_physical_expr;
+    use datatypes::arrow::array::{Int64Array, StringDictionaryBuilder, TimestampSecondArray};
+    use datatypes::arrow::datatypes::{DataType, Field, Int8Type, Schema, SchemaRef};
+    use datatypes::arrow::record_batch::RecordBatch;
+    use prost::Message;
     use session::context::QueryContext;
+    use substrait::substrait_proto_df::proto::plan_rel;
+    use substrait::substrait_proto_df::proto::rel::RelType;
 
     use super::*;
     use crate::QueryEngineFactory;
     use crate::dummy_catalog::DummyCatalogList;
     use crate::optimizer::test_util::mock_table_provider;
     use crate::options::QueryOptions;
+    use crate::range_select::plan::RangeFn;
 
     fn mock_plan(schema: SchemaRef) -> LogicalPlan {
         let table_source = LogicalTableSource::new(schema);
@@ -208,6 +231,269 @@ mod tests {
             .unwrap()
             .build()
             .unwrap()
+    }
+
+    fn range_select_partial_fixture() -> (RangeSelect, Arc<dyn TableProvider>, RecordBatch) {
+        let schema = Arc::new(Schema::new_with_metadata(
+            vec![
+                Field::new(
+                    "timestamp",
+                    DataType::Timestamp(datatypes::arrow::datatypes::TimeUnit::Second, None),
+                    false,
+                ),
+                Field::new("value", DataType::Int64, true),
+                Field::new(
+                    "host",
+                    DataType::Dictionary(Box::new(DataType::Int8), Box::new(DataType::Utf8)),
+                    true,
+                ),
+            ],
+            HashMap::from([("range_select_test".to_string(), "metadata".to_string())]),
+        ));
+        let mut hosts = StringDictionaryBuilder::<Int8Type>::new();
+        for host in ["a", "a", "a", "a"] {
+            hosts.append(host).unwrap();
+        }
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(TimestampSecondArray::from(vec![0, 5, 0, 5])),
+                Arc::new(Int64Array::from(vec![Some(1), Some(3), Some(2), Some(4)])),
+                Arc::new(hosts.finish()),
+            ],
+        )
+        .unwrap();
+        let provider: Arc<dyn TableProvider> =
+            Arc::new(MemTable::try_new(schema, vec![vec![batch.clone()]]).unwrap());
+        let input = LogicalPlanBuilder::scan(
+            "public.measurements",
+            provider_as_source(provider.clone()),
+            None,
+        )
+        .unwrap()
+        .build()
+        .unwrap();
+        let column = |name| {
+            Expr::Column(Column::new(
+                Some(TableReference::partial("public", "measurements")),
+                name,
+            ))
+        };
+        let value = || column("value");
+        let time = column("timestamp");
+        let by = column("host");
+        let complete = RangeSelect::try_new(
+            Arc::new(input),
+            vec![
+                RangeFn {
+                    name: "sum_value".into(),
+                    data_type: DataType::Int64,
+                    expr: datafusion::functions_aggregate::expr_fn::sum(value()),
+                    range: Duration::from_secs(10),
+                    fill: None,
+                    need_cast: false,
+                },
+                RangeFn {
+                    name: "min_value".into(),
+                    data_type: DataType::Int64,
+                    expr: datafusion::functions_aggregate::expr_fn::min(value()),
+                    range: Duration::from_secs(10),
+                    fill: None,
+                    need_cast: false,
+                },
+                RangeFn {
+                    name: "avg_value".into(),
+                    data_type: DataType::Float64,
+                    expr: datafusion::functions_aggregate::expr_fn::avg(value()),
+                    range: Duration::from_secs(10),
+                    fill: None,
+                    need_cast: false,
+                },
+            ],
+            Duration::from_secs(5),
+            0,
+            time,
+            vec![by],
+            &[],
+        )
+        .unwrap();
+        (complete, provider, batch)
+    }
+
+    fn split_range_select_partial(complete: &RangeSelect) -> (RangeSelect, RangeSelect) {
+        let LogicalPlan::Extension(Extension { node: final_node }) =
+            complete.try_split_for_pushdown().unwrap()
+        else {
+            unreachable!()
+        };
+        let final_node = final_node
+            .as_any()
+            .downcast_ref::<RangeSelect>()
+            .unwrap()
+            .clone();
+        let LogicalPlan::Extension(Extension { node: partial_node }) = final_node.input.as_ref()
+        else {
+            unreachable!()
+        };
+        (
+            partial_node
+                .as_any()
+                .downcast_ref::<RangeSelect>()
+                .unwrap()
+                .clone(),
+            final_node,
+        )
+    }
+
+    async fn execute_range_select_partial(
+        partial: &RangeSelect,
+        input_batch: RecordBatch,
+    ) -> Vec<RecordBatch> {
+        let LogicalPlan::Projection(projection) = partial.input.as_ref() else {
+            unreachable!()
+        };
+        let session = SessionContext::new();
+        let state = session.state();
+        let input: Arc<dyn ExecutionPlan> = Arc::new(DataSourceExec::new(Arc::new(
+            MemorySourceConfig::try_new(
+                &[vec![input_batch]],
+                projection.input.schema().as_arrow().clone().into(),
+                None,
+            )
+            .unwrap(),
+        )));
+        let expressions = projection
+            .expr
+            .iter()
+            .enumerate()
+            .map(|(index, expr)| {
+                Ok((
+                    create_physical_expr(
+                        expr,
+                        projection.input.schema().as_ref(),
+                        state.execution_props(),
+                    )?,
+                    projection.schema.field(index).name().clone(),
+                ))
+            })
+            .collect::<datafusion::error::Result<Vec<_>>>()
+            .unwrap();
+        let input = Arc::new(
+            datafusion::physical_plan::projection::ProjectionExec::try_new(expressions, input)
+                .unwrap(),
+        );
+        let plan = partial
+            .to_execution_plan(partial.input.as_ref(), input, &state)
+            .unwrap();
+        collect(plan, session.task_ctx()).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn range_select_partial_crosses_default_serializer_boundary() {
+        let (complete, provider, batch) = range_select_partial_fixture();
+        let (partial, _) = split_range_select_partial(&complete);
+        let LogicalPlan::Projection(projection) = partial.input.as_ref() else {
+            unreachable!()
+        };
+        assert!(matches!(
+            &projection.expr[4],
+            Expr::Alias(alias) if matches!(alias.expr.as_ref(), Expr::Cast(_))
+        ));
+        let metadata = partial.partial_wire_metadata().unwrap();
+        assert_eq!(metadata.by_indices(), &[1]);
+        assert_eq!(
+            metadata
+                .functions()
+                .iter()
+                .map(|function| function.argument_index())
+                .collect::<Vec<_>>(),
+            vec![2, 3, 4],
+        );
+
+        let partial_plan = LogicalPlan::Extension(Extension {
+            node: Arc::new(partial.clone()),
+        });
+        let bytes = DFLogicalSubstraitConvertor
+            .encode(&partial_plan, DefaultSerializer)
+            .unwrap();
+        let substrait = substrait::substrait_proto_df::proto::Plan::decode(bytes.clone()).unwrap();
+        let Some(plan_rel::RelType::Root(root)) = substrait.relations[0].rel_type.as_ref() else {
+            unreachable!()
+        };
+        let Some(RelType::ExtensionSingle(extension)) = root
+            .input
+            .as_ref()
+            .and_then(|input| input.rel_type.as_ref())
+        else {
+            unreachable!()
+        };
+        assert_eq!(
+            extension.detail.as_ref().unwrap().type_url,
+            RANGE_SELECT_PARTIAL_NODE_NAME
+        );
+        assert_eq!(partial.name(), RANGE_SELECT_PARTIAL_NODE_NAME);
+
+        let factory = QueryEngineFactory::new(
+            catalog::memory::new_memory_catalog_manager().unwrap(),
+            None,
+            None,
+            None,
+            None,
+            false,
+            QueryOptions::default(),
+        );
+        let decoded = factory
+            .query_engine()
+            .engine_context(QueryContext::arc())
+            .new_plan_decoder()
+            .unwrap()
+            .decode(
+                bytes,
+                Arc::new(DummyCatalogList::with_table_provider(provider)),
+                false,
+            )
+            .await
+            .unwrap();
+        let LogicalPlan::Extension(Extension { node }) = decoded else {
+            unreachable!()
+        };
+        let decoded = node.as_any().downcast_ref::<RangeSelect>().unwrap();
+        assert_eq!(decoded.name(), RANGE_SELECT_PARTIAL_NODE_NAME);
+        assert_eq!(decoded.schema.as_arrow(), partial.schema.as_arrow());
+        assert_eq!(decoded.schema.metadata(), partial.schema.metadata());
+        assert_eq!(decoded.by_schema.as_arrow(), partial.by_schema.as_arrow());
+        assert_eq!(
+            decoded.partial_wire_metadata(),
+            partial.partial_wire_metadata()
+        );
+        let LogicalPlan::Projection(decoded_projection) = decoded.input.as_ref() else {
+            unreachable!()
+        };
+        assert!(matches!(
+            &decoded_projection.expr[4],
+            Expr::Alias(alias) if matches!(alias.expr.as_ref(), Expr::Cast(_))
+        ));
+
+        let original_batches = execute_range_select_partial(&partial, batch.clone()).await;
+        let decoded_batches = execute_range_select_partial(decoded, batch).await;
+        assert_eq!(
+            original_batches.first().unwrap().schema(),
+            decoded_batches.first().unwrap().schema()
+        );
+        assert_eq!(original_batches, decoded_batches);
+    }
+
+    #[test]
+    fn range_select_partial_serializer_rejects_complete_and_final() {
+        let (complete, _, _) = range_select_partial_fixture();
+        let (_, final_node) = split_range_select_partial(&complete);
+
+        assert!(DefaultSerializer.serialize_logical_plan(&complete).is_err());
+        assert!(
+            DefaultSerializer
+                .serialize_logical_plan(&final_node)
+                .is_err()
+        );
     }
 
     #[tokio::test]

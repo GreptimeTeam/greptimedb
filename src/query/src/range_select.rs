@@ -15,3 +15,4 @@
 pub mod plan;
 pub mod plan_rewrite;
 pub mod planner;
+pub(crate) mod serializer;
