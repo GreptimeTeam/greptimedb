@@ -118,8 +118,10 @@ pub const INFORMATION_SCHEMA_REGION_INFO_TABLE_ID: u32 = 41;
 pub const INFORMATION_SCHEMA_TABLE_SEMANTICS_TABLE_ID: u32 = 42;
 /// id for information_schema.statistics
 pub const INFORMATION_SCHEMA_STATISTICS_TABLE_ID: u32 = 43;
+/// id for information_schema.recycle_bin
+pub const INFORMATION_SCHEMA_RECYCLE_BIN_TABLE_ID: u32 = 44;
 /// id for information_schema.flow_statistics
-pub const INFORMATION_SCHEMA_FLOW_STATISTICS_TABLE_ID: u32 = 44;
+pub const INFORMATION_SCHEMA_FLOW_STATISTICS_TABLE_ID: u32 = 45;
 
 // ----- End of information_schema tables -----
 

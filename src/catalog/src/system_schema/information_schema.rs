@@ -405,6 +405,10 @@ impl InformationSchemaProvider {
             self.build_table(FLOW_STATISTICS).unwrap(),
         );
         tables.insert(
+            RECYCLE_BIN.to_string(),
+            self.build_table(RECYCLE_BIN).unwrap(),
+        );
+        tables.insert(
             TABLE_SEMANTICS.to_string(),
             self.build_table(TABLE_SEMANTICS).unwrap(),
         );
