@@ -1,0 +1,8 @@
+name = "analyze_verbose_remote_metrics_extension"
+reason = "Verify EXPLAIN ANALYZE VERBOSE remote scans continue to work after adding the internal Flight metrics capability extension."
+introduced_by = "PR #8405"
+topologies = ["distributed"]
+from_range = ["*"]
+to_range = ["*"]
+features = ["query", "compatibility", "explain-analyze"]
+owner = "query"

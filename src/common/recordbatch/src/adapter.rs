@@ -286,14 +286,16 @@ impl RecordBatchStreamAdapter {
         };
 
         match &self.metrics_2 {
-            Metrics::Unresolved(df_plan) | Metrics::PartialResolved(df_plan, _) => {
+            Metrics::Unresolved(df_plan) => {
                 let metrics = collect_lightweight_query_load_metrics(
                     df_plan.as_ref(),
                     self.query_load_region_id,
                 );
                 record_query_stats(counters, &metrics);
             }
-            Metrics::Resolved(metrics) => record_query_stats(counters, metrics),
+            Metrics::PartialResolved(_, metrics) | Metrics::Resolved(metrics) => {
+                record_query_stats(counters, metrics);
+            }
             Metrics::Unavailable => {}
         }
     }
@@ -309,6 +311,61 @@ impl RecordBatchStreamAdapter {
     /// Set the verbose mode for displaying plan and metrics.
     pub fn set_explain_verbose(&mut self, verbose: bool) {
         self.explain_verbose = verbose;
+    }
+
+    fn collect_plan_metrics(&self, df_plan: &Arc<dyn ExecutionPlan>) -> RecordBatchMetrics {
+        collect_full_metrics(
+            df_plan.as_ref(),
+            self.explain_verbose,
+            self.query_load_region_id,
+        )
+    }
+
+    fn collect_partial_metrics(
+        df_plan: &dyn ExecutionPlan,
+        explain_verbose: bool,
+        query_load_region_id: Option<u64>,
+    ) -> RecordBatchMetrics {
+        if explain_verbose {
+            collect_full_metrics(df_plan, explain_verbose, query_load_region_id)
+        } else {
+            collect_lightweight_query_load_metrics(df_plan, query_load_region_id)
+        }
+    }
+
+    fn update_plan_metrics(&mut self, final_metrics: bool) {
+        if final_metrics {
+            let df_plan = match &self.metrics_2 {
+                Metrics::Unresolved(df_plan) | Metrics::PartialResolved(df_plan, _) => {
+                    df_plan.clone()
+                }
+                Metrics::Unavailable | Metrics::Resolved(_) => return,
+            };
+            let metrics = self.collect_plan_metrics(&df_plan);
+            self.metrics_2 = Metrics::Resolved(metrics);
+        } else {
+            let explain_verbose = self.explain_verbose;
+            let query_load_region_id = self.query_load_region_id;
+            match &mut self.metrics_2 {
+                Metrics::Unresolved(df_plan) => {
+                    let df_plan = df_plan.clone();
+                    let metrics = Self::collect_partial_metrics(
+                        df_plan.as_ref(),
+                        explain_verbose,
+                        query_load_region_id,
+                    );
+                    self.metrics_2 = Metrics::PartialResolved(df_plan, metrics);
+                }
+                Metrics::PartialResolved(df_plan, metrics) => {
+                    *metrics = Self::collect_partial_metrics(
+                        df_plan.as_ref(),
+                        explain_verbose,
+                        query_load_region_id,
+                    );
+                }
+                Metrics::Unavailable | Metrics::Resolved(_) => {}
+            }
+        }
     }
 }
 
@@ -420,10 +477,20 @@ impl RecordBatchStream for RecordBatchStreamAdapter {
 
     fn metrics(&self) -> Option<RecordBatchMetrics> {
         match &self.metrics_2 {
-            Metrics::Resolved(metrics) | Metrics::PartialResolved(_, metrics) => {
-                Some(metrics.clone())
+            Metrics::Unresolved(df_plan) => {
+                if self.explain_verbose {
+                    Some(self.collect_plan_metrics(df_plan))
+                } else {
+                    None
+                }
             }
-            Metrics::Unavailable | Metrics::Unresolved(_) => None,
+            Metrics::PartialResolved(df_plan, metrics) => Some(if self.explain_verbose {
+                self.collect_plan_metrics(df_plan)
+            } else {
+                metrics.clone()
+            }),
+            Metrics::Resolved(metrics) => Some(metrics.clone()),
+            Metrics::Unavailable => None,
         }
     }
 
@@ -448,47 +515,14 @@ impl Stream for RecordBatchStreamAdapter {
             Poll::Pending => Poll::Pending,
             Poll::Ready(Some(df_record_batch)) => {
                 let df_record_batch = df_record_batch?;
-                // Verbose analyze streams need complete partial metrics. Normal
-                // queries only need query-load metrics before EOF so early
-                // stop/cancellation can still report per-region load.
-                if self.explain_verbose {
-                    if let Metrics::Unresolved(df_plan) | Metrics::PartialResolved(df_plan, _) =
-                        &self.metrics_2
-                    {
-                        let record_batch_metrics = collect_full_metrics(
-                            df_plan.as_ref(),
-                            self.explain_verbose,
-                            self.query_load_region_id,
-                        );
-                        self.metrics_2 =
-                            Metrics::PartialResolved(df_plan.clone(), record_batch_metrics);
-                    }
-                } else if let Metrics::Unresolved(df_plan) | Metrics::PartialResolved(df_plan, _) =
-                    &self.metrics_2
-                {
-                    let record_batch_metrics = collect_lightweight_query_load_metrics(
-                        df_plan.as_ref(),
-                        self.query_load_region_id,
-                    );
-                    self.metrics_2 =
-                        Metrics::PartialResolved(df_plan.clone(), record_batch_metrics);
-                }
+                self.update_plan_metrics(false);
                 Poll::Ready(Some(Ok(RecordBatch::from_df_record_batch(
                     self.schema(),
                     df_record_batch,
                 ))))
             }
             Poll::Ready(None) => {
-                if let Metrics::Unresolved(df_plan) | Metrics::PartialResolved(df_plan, _) =
-                    &self.metrics_2
-                {
-                    let record_batch_metrics = collect_full_metrics(
-                        df_plan.as_ref(),
-                        self.explain_verbose,
-                        self.query_load_region_id,
-                    );
-                    self.metrics_2 = Metrics::Resolved(record_batch_metrics);
-                }
+                self.update_plan_metrics(true);
                 Poll::Ready(None)
             }
         }
@@ -1060,7 +1094,7 @@ mod test {
     }
 
     #[test]
-    fn test_record_batch_stream_adapter_refreshes_partial_query_stats_on_drop() {
+    fn test_record_batch_stream_adapter_reuses_partial_query_stats_on_drop() {
         let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
             "a",
             ConcreteDataType::int32_datatype(),
@@ -1102,8 +1136,8 @@ mod test {
 
         drop(adapter);
 
-        assert_eq!(counters.query_cpu_time.load(Ordering::Relaxed), 52);
-        assert_eq!(counters.query_scanned_bytes.load(Ordering::Relaxed), 44);
+        assert_eq!(counters.query_cpu_time.load(Ordering::Relaxed), 11);
+        assert_eq!(counters.query_scanned_bytes.load(Ordering::Relaxed), 22);
     }
 
     #[tokio::test]

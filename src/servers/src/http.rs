@@ -184,7 +184,7 @@ impl Default for HttpOptions {
             enable_cors: true,
             prom_validation_mode: PromValidationMode::Strict,
             experimental_enable_prometheus_native_histogram: false,
-            experimental_enable_explain_analyze_stream: false,
+            experimental_enable_explain_analyze_stream: true,
         }
     }
 }
@@ -1455,7 +1455,11 @@ mod test {
     #[tokio::test]
     pub async fn test_analyze_stream_route_config_gate() {
         let (tx, _rx) = mpsc::channel(100);
-        let app = make_test_app_custom(tx, HttpOptions::default());
+        let options = HttpOptions {
+            experimental_enable_explain_analyze_stream: false,
+            ..Default::default()
+        };
+        let app = make_test_app_custom(tx, options);
         let client = TestClient::new(app).await;
         let res = client
             .post("/v1/sql/analyze/stream?sql=EXPLAIN%20ANALYZE%20VERBOSE%20SELECT%201")
@@ -1464,11 +1468,7 @@ mod test {
         assert_eq!(res.status(), StatusCode::NOT_FOUND);
 
         let (tx, _rx) = mpsc::channel(100);
-        let options = HttpOptions {
-            experimental_enable_explain_analyze_stream: true,
-            ..Default::default()
-        };
-        let app = make_test_app_custom(tx, options);
+        let app = make_test_app_custom(tx, HttpOptions::default());
         let client = TestClient::new(app).await;
         let res = client
             .post("/v1/sql/analyze/stream?sql=EXPLAIN%20ANALYZE%20VERBOSE%20SELECT%201")

@@ -36,6 +36,8 @@ pub(super) enum Scenario {
 pub(super) struct DirectReadableSstScenario {
     #[serde(default)]
     pub(super) seed: Option<u64>,
+    #[serde(default)]
+    pub(super) queries: Vec<serde_json::Value>,
     pub(super) tables: Vec<TableConfig>,
     pub(super) layout: LayoutConfig,
 }

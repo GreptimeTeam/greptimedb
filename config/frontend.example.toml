@@ -68,7 +68,7 @@ prom_validation_mode = "strict"
 ## Experimental: enable Prometheus remote write v2 native histogram ingestion.
 experimental_enable_prometheus_native_histogram = false
 ## Experimental: enable POST /v1/sql/analyze/stream for streaming EXPLAIN ANALYZE VERBOSE metrics.
-experimental_enable_explain_analyze_stream = false
+experimental_enable_explain_analyze_stream = true
 
 ## The gRPC server options.
 [grpc]

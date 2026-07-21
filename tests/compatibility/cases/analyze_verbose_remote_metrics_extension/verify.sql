@@ -1,0 +1,11 @@
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (elapsed_compute.*) REDACTED
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
+-- SQLNESS REPLACE ("files":\s\[.*\],) "files": REDACTED,
+-- SQLNESS REPLACE "flat_format":\s\w+, "flat_format": REDACTED,
+EXPLAIN ANALYZE VERBOSE SELECT count(*) FROM t_analyze_verbose_remote_metrics_extension;

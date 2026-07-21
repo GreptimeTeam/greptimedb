@@ -1,0 +1,33 @@
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (elapsed_compute.*) REDACTED
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
+-- SQLNESS REPLACE ("files":\s\[.*\],) "files": REDACTED,
+-- SQLNESS REPLACE "flat_format":\s\w+, "flat_format": REDACTED,
+EXPLAIN ANALYZE VERBOSE SELECT count(*) FROM t_analyze_verbose_remote_metrics_extension;
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_ProjectionExec: expr=[count(Int64(1))@0 as count(*)] REDACTED
+|_|_|_AggregateExec: mode=Final, gby=[], aggr=[count(Int64(1))] REDACTED
+|_|_|_CoalescePartitionsExec REDACTED
+|_|_|_AggregateExec: mode=Partial, gby=[], aggr=[count(Int64(1))] REDACTED
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_AggregateExec: mode=Final, gby=[], aggr=[__count_state(t_analyze_verbose_remote_REDACTED
+|_|_|_CoalescePartitionsExec REDACTED
+|_|_|_AggregateExec: mode=Partial, gby=[], aggr=[__count_state(t_analyze_verbose_remote_REDACTED
+|_|_|_SeqScan: region=REDACTED, {"partition_count":REDACTED, "projection": ["ts"], "filters": ["host >= Utf8(\"m\") AND host IS NOT NULL"], "flat_format": REDACTED, "REDACTED
+|_|_|_|
+| 1_| 1_|_AggregateExec: mode=Final, gby=[], aggr=[__count_state(t_analyze_verbose_remote_REDACTED
+|_|_|_CoalescePartitionsExec REDACTED
+|_|_|_AggregateExec: mode=Partial, gby=[], aggr=[__count_state(t_analyze_verbose_remote_REDACTED
+|_|_|_SeqScan: region=REDACTED, {"partition_count":REDACTED, "projection": ["ts"], "filters": ["host < Utf8(\"m\") OR host IS NULL"], "files": REDACTED, "flat_format": REDACTED, "REDACTED
+|_|_|_|
+|_|_| Total rows: 1_|
++-+-+-+

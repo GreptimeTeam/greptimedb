@@ -45,10 +45,14 @@ use futures_util::StreamExt;
 use greptime_proto::v1::region::RegionRequestHeader;
 use meter_core::data::ReadItem;
 use meter_macros::read_meter;
-use session::context::QueryContextRef;
+use session::context::{
+    FLIGHT_METRICS_HEARTBEAT_INTERVAL, QueryContextRef,
+    SUPPORT_FLIGHT_METRICS_BEFORE_BATCH_EXTENSION_KEY,
+};
 use store_api::metrics::{REGION_QUERY_CPU_TIME, REGION_QUERY_SCANNED_BYTES};
 use store_api::storage::RegionId;
 use table::table_name::TableName;
+use tokio::time;
 use tokio::time::Instant;
 use tracing::{Instrument, Span};
 
@@ -388,12 +392,21 @@ impl MergeScanExec {
                     region_id = %region_id,
                     partition = partition
                 ));
-                let region_query_ctx = query_context_for_remote_dyn_filter_region(
+                let mut region_query_ctx = query_context_for_remote_dyn_filter_region(
                     &query_ctx,
                     region_id,
                     remote_dyn_filter_registry_lease.as_ref(),
                     &captured_remote_dyn_filters,
                 );
+                if explain_verbose {
+                    let remote_query_id = region_query_ctx.remote_query_id().map(str::to_string);
+                    if let Some(remote_query_id) = remote_query_id {
+                        region_query_ctx.set_extension(
+                            SUPPORT_FLIGHT_METRICS_BEFORE_BATCH_EXTENSION_KEY,
+                            remote_query_id,
+                        );
+                    }
+                }
                 let request = QueryRequest {
                     header: Some(RegionRequestHeader {
                         tracing_context: tracing_context.to_w3c(),
@@ -438,7 +451,30 @@ impl MergeScanExec {
 
                 let mut poll_duration = Duration::ZERO;
                 let mut poll_timer = Instant::now();
-                while let Some(batch) = stream.next().instrument(region_span.clone()).await {
+                loop {
+                    let batch = if explain_verbose {
+                        match time::timeout(
+                            FLIGHT_METRICS_HEARTBEAT_INTERVAL,
+                            stream.next().instrument(region_span.clone()),
+                        )
+                        .await
+                        {
+                            Ok(batch) => batch,
+                            Err(_) => {
+                                if let Some(metrics) = stream.metrics() {
+                                    let mut sub_stage_metrics =
+                                        sub_stage_metrics_moved.lock().unwrap();
+                                    sub_stage_metrics.insert(region_id, metrics);
+                                }
+                                continue;
+                            }
+                        }
+                    } else {
+                        stream.next().instrument(region_span.clone()).await
+                    };
+                    let Some(batch) = batch else {
+                        break;
+                    };
                     let poll_elapsed = poll_timer.elapsed();
                     poll_duration += poll_elapsed;
 
