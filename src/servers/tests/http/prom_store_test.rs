@@ -69,7 +69,11 @@ struct RemoteWriteCapture {
 
 #[async_trait]
 impl PromStoreProtocolHandler for DummyInstance {
-    async fn write(
+    async fn pre_write(&self, _request: &RowInsertRequests, _ctx: QueryContextRef) -> Result<()> {
+        Ok(())
+    }
+
+    async fn write_prepared(
         &self,
         request: RowInsertRequests,
         ctx: QueryContextRef,
@@ -94,6 +98,32 @@ impl PromStoreProtocolHandler for DummyInstance {
             .await;
 
         Ok(Output::new_with_affected_rows(0))
+    }
+
+    async fn write(
+        &self,
+        request: RowInsertRequests,
+        ctx: QueryContextRef,
+        with_metric_engine: bool,
+    ) -> Result<Output> {
+        self.write_prepared(request, ctx, with_metric_engine).await
+    }
+
+    async fn write_all(
+        &self,
+        requests: Vec<(QueryContextRef, RowInsertRequests)>,
+        with_metric_engine: bool,
+    ) -> Result<Vec<Result<Output>>> {
+        let mut outputs = Vec::with_capacity(requests.len());
+        for (ctx, request) in requests {
+            let output = self.write_prepared(request, ctx, with_metric_engine).await;
+            let failed = output.is_err();
+            outputs.push(output);
+            if failed {
+                break;
+            }
+        }
+        Ok(outputs)
     }
 
     async fn read(&self, request: ReadRequest, ctx: QueryContextRef) -> Result<PromStoreResponse> {

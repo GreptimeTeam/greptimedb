@@ -237,6 +237,18 @@ impl From<&QueryContext> for api::v1::QueryContext {
 }
 
 impl QueryContext {
+    /// Forks this context with an independent snapshot of mutable session data.
+    ///
+    /// Unlike [`Clone`], changes to the schema, user, timezone, and other fields
+    /// held in mutable session data do not affect this context.
+    pub fn fork(&self) -> Self {
+        let mut fork = self.clone();
+        fork.mutable_session_data = Arc::new(RwLock::new(
+            self.mutable_session_data.read().unwrap().clone(),
+        ));
+        fork
+    }
+
     pub fn arc() -> QueryContextRef {
         Arc::new(
             QueryContextBuilder::default()
@@ -773,6 +785,17 @@ mod test {
 
         let context = QueryContext::with(DEFAULT_CATALOG_NAME, "test");
         assert_eq!("test", context.get_db_string());
+    }
+
+    #[test]
+    fn test_fork_has_independent_mutable_session_data() {
+        let context = QueryContext::with(DEFAULT_CATALOG_NAME, "public");
+        let fork = context.fork();
+
+        fork.set_current_schema("private");
+
+        assert_eq!(context.current_schema(), "public");
+        assert_eq!(fork.current_schema(), "private");
     }
 
     #[test]

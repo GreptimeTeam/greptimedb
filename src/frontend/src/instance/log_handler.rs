@@ -33,9 +33,12 @@ use table::Table;
 
 use crate::instance::Instance;
 
-#[async_trait]
-impl PipelineHandler for Instance {
-    async fn insert(&self, log: RowInsertRequests, ctx: QueryContextRef) -> ServerResult<Output> {
+impl Instance {
+    async fn prepare_log_insert(
+        &self,
+        log: RowInsertRequests,
+        ctx: QueryContextRef,
+    ) -> ServerResult<RowInsertRequests> {
         self.plugins
             .get::<PermissionCheckerRef>()
             .as_ref()
@@ -48,7 +51,37 @@ impl PipelineHandler for Instance {
             .as_ref()
             .pre_ingest(log, ctx.clone())?;
 
-        self.handle_log_inserts(log, ctx).await
+        self.check_row_insert_permission(&log, &ctx, PermissionReq::LogWrite)
+            .context(AuthSnafu)?;
+
+        Ok(log)
+    }
+}
+
+#[async_trait]
+impl PipelineHandler for Instance {
+    async fn insert(&self, log: RowInsertRequests, ctx: QueryContextRef) -> ServerResult<Output> {
+        let log = self.prepare_log_insert(log, ctx.clone()).await?;
+        self.handle_log_inserts(log, Arc::new(ctx.fork())).await
+    }
+
+    async fn insert_all(
+        &self,
+        inputs: Vec<(QueryContextRef, RowInsertRequests)>,
+    ) -> ServerResult<Vec<ServerResult<Output>>> {
+        let mut prepared = Vec::with_capacity(inputs.len());
+        for (ctx, log) in inputs {
+            let log = self.prepare_log_insert(log, ctx.clone()).await?;
+            // Detach from context clones retained by pre-ingest hooks so the
+            // checked schema cannot change before this batch is written.
+            prepared.push((Arc::new(ctx.fork()), log));
+        }
+
+        let mut outputs = Vec::with_capacity(prepared.len());
+        for (ctx, log) in prepared {
+            outputs.push(self.handle_log_inserts(log, ctx).await);
+        }
+        Ok(outputs)
     }
 
     async fn get_pipeline(

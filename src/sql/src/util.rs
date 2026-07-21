@@ -34,8 +34,12 @@ use crate::ast::ObjectNamePartExt;
 use crate::error::{InvalidExprAsOptionValueSnafu, InvalidSqlSnafu, Result};
 use crate::parser::ParserContext;
 use crate::parsers::with_tql_parser::CteContent;
+use crate::statements::alter::AlterTableOperation;
+use crate::statements::comment::CommentObject;
+use crate::statements::copy::{Copy, CopyTable};
 use crate::statements::create::SqlOrTql;
 use crate::statements::query::Query;
+use crate::statements::statement::Statement;
 use crate::statements::tql::Tql;
 
 const SCHEMA_MATCHER: &str = "__schema__";
@@ -195,6 +199,181 @@ pub fn extract_tables_from_query_checked(
     complete.then_some(names.into_iter())
 }
 
+/// Walks through a [`Statement`] and extracts all referenced tables, returning
+/// `None` if any table reference cannot be resolved statically.
+pub fn extract_tables_from_statement_checked(
+    stmt: &Statement,
+) -> Option<impl Iterator<Item = ObjectName>> {
+    let mut names = HashSet::new();
+    extract_tables_from_statement(stmt, &mut names).then_some(names.into_iter())
+}
+
+fn extract_tables_from_statement(stmt: &Statement, names: &mut HashSet<ObjectName>) -> bool {
+    match stmt {
+        Statement::Tql(tql) => extract_tables_from_tql(tql, names),
+        Statement::Insert(insert) => {
+            collect_relations(&insert.inner, names);
+            true
+        }
+        Statement::Delete(delete) => {
+            collect_relations(&delete.inner, names);
+            true
+        }
+        Statement::Query(query) => extract_tables_from_query_ast(query, names),
+        Statement::CreateTable(create) => {
+            names.insert(create.name.clone());
+            true
+        }
+        Statement::CreateExternalTable(create) => {
+            names.insert(create.name.clone());
+            true
+        }
+        Statement::AlterTable(alter) => {
+            let current = alter.table_name().clone();
+            names.insert(current.clone());
+            if let AlterTableOperation::RenameTable { new_table_name } = alter.alter_operation() {
+                let mut renamed = current;
+                if let Some(last) = renamed.0.last_mut() {
+                    *last = ObjectNamePart::Identifier(Ident::new(new_table_name));
+                }
+                names.insert(renamed);
+            }
+            true
+        }
+        Statement::DropTable(drop) => {
+            names.extend(drop.table_names().iter().cloned());
+            true
+        }
+        Statement::UndropTable(undrop) => {
+            names.insert(undrop.table_name().clone());
+            true
+        }
+        Statement::TruncateTable(truncate) => {
+            names.insert(truncate.table_name().clone());
+            true
+        }
+        Statement::CreateTableLike(create) => {
+            names.extend([create.table_name.clone(), create.source_name.clone()]);
+            true
+        }
+        Statement::CreateView(create) => {
+            names.insert(create.name.clone());
+            extract_tables_from_statement(&create.query, names)
+        }
+        Statement::CreateFlow(create) => {
+            names.insert(create.sink_table_name.clone());
+            extract_tables_from_sql_or_tql(&create.query, names)
+        }
+        #[cfg(feature = "enterprise")]
+        Statement::CreateTrigger(create) => {
+            extract_tables_from_sql_or_tql(&create.trigger_on.query, names)
+        }
+        #[cfg(feature = "enterprise")]
+        Statement::AlterTrigger(alter) => match &alter.operation.trigger_on {
+            Some(trigger_on) => extract_tables_from_sql_or_tql(&trigger_on.query, names),
+            None => true,
+        },
+        Statement::DropView(drop) => {
+            names.insert(drop.view_name.clone());
+            true
+        }
+        Statement::Explain(explain) => extract_tables_from_statement(&explain.statement, names),
+        Statement::DeclareCursor(cursor) => extract_tables_from_query_ast(&cursor.query, names),
+        Statement::DescribeTable(describe) => {
+            names.insert(describe.name().clone());
+            true
+        }
+        Statement::ShowCreateTable(show) => {
+            names.insert(show.table_name.clone());
+            true
+        }
+        Statement::ShowCreateView(show) => {
+            names.insert(show.view_name.clone());
+            true
+        }
+        Statement::ShowColumns(show) => {
+            names.insert(metadata_table_name(&show.table, show.database.as_deref()));
+            true
+        }
+        Statement::ShowIndex(show) => {
+            names.insert(metadata_table_name(&show.table, show.database.as_deref()));
+            true
+        }
+        Statement::ShowRegion(show) => {
+            names.insert(metadata_table_name(&show.table, show.database.as_deref()));
+            true
+        }
+        Statement::Comment(comment) => {
+            if let CommentObject::Table(table) | CommentObject::Column { table, .. } =
+                &comment.object
+            {
+                names.insert(table.clone());
+            }
+            true
+        }
+        Statement::Copy(Copy::CopyTable(copy)) => {
+            let table = match copy {
+                CopyTable::To(args) | CopyTable::From(args) => &args.table_name,
+            };
+            names.insert(table.clone());
+            true
+        }
+        Statement::Copy(Copy::CopyQueryTo(copy)) => {
+            extract_tables_from_statement(&copy.query, names)
+        }
+        Statement::Copy(Copy::CopyDatabase(_)) => true,
+        Statement::DropDatabase(_)
+        | Statement::DropFlow(_)
+        | Statement::CreateDatabase(_)
+        | Statement::AlterDatabase(_)
+        | Statement::ShowDatabases(_)
+        | Statement::ShowTables(_)
+        | Statement::ShowTableStatus(_)
+        | Statement::ShowCharset(_)
+        | Statement::ShowCollation(_)
+        | Statement::ShowCreateDatabase(_)
+        | Statement::ShowCreateFlow(_)
+        | Statement::ShowFlows(_)
+        | Statement::ShowStatus(_)
+        | Statement::ShowSearchPath(_)
+        | Statement::ShowViews(_)
+        | Statement::SetVariables(_)
+        | Statement::ShowVariables(_)
+        | Statement::Use(_)
+        | Statement::Admin(_)
+        | Statement::FetchCursor(_)
+        | Statement::CloseCursor(_)
+        | Statement::Kill(_)
+        | Statement::ShowProcesslist(_) => true,
+        #[cfg(feature = "enterprise")]
+        Statement::DropTrigger(_)
+        | Statement::ShowCreateTrigger(_)
+        | Statement::ShowTriggers(_) => true,
+    }
+}
+
+fn extract_tables_from_query_ast(query: &Query, names: &mut HashSet<ObjectName>) -> bool {
+    extract_tables_from_sql_query(&query.inner, names);
+    extract_tables_from_hybrid_cte_query(query, names)
+}
+
+fn extract_tables_from_sql_or_tql(query: &SqlOrTql, names: &mut HashSet<ObjectName>) -> bool {
+    let (query_names, complete) = extract_tables_from_query_inner(query);
+    names.extend(query_names);
+    complete
+}
+
+fn collect_relations(ast: &impl AstVisit, names: &mut HashSet<ObjectName>) {
+    let _ = ast.visit(&mut RelationCollector::new(names));
+}
+
+fn metadata_table_name(table: &str, database: Option<&str>) -> ObjectName {
+    let mut parts = Vec::with_capacity(usize::from(database.is_some()) + 1);
+    parts.extend(database.map(Ident::new));
+    parts.push(Ident::new(table));
+    ObjectName::from(parts)
+}
+
 fn extract_tables_from_query_inner(query: &SqlOrTql) -> (HashSet<ObjectName>, bool) {
     let mut names = HashSet::new();
 
@@ -270,6 +449,15 @@ fn extract_tables_from_tql(tql: &Tql, names: &mut HashSet<ObjectName>) -> bool {
     extract_tables_from_prom_expr(&expr, names)
 }
 
+/// Extracts all tables referenced by a [`PromExpr`], returning `None`
+/// if any table reference cannot be resolved statically.
+pub fn extract_tables_from_prom_expr_checked(
+    expr: &PromExpr,
+) -> Option<impl Iterator<Item = ObjectName>> {
+    let mut names = HashSet::new();
+    extract_tables_from_prom_expr(expr, &mut names).then_some(names.into_iter())
+}
+
 fn extract_tables_from_prom_expr(expr: &PromExpr, names: &mut HashSet<ObjectName>) -> bool {
     struct TableCollector<'a> {
         names: &'a mut HashSet<ObjectName>,
@@ -306,6 +494,10 @@ fn extract_metric_name_from_vector_selector(
     selector: &PromVectorSelector,
     names: &mut HashSet<ObjectName>,
 ) -> bool {
+    if selector.name.is_none() && !selector.matchers.or_matchers.is_empty() {
+        return false;
+    }
+
     let metric_name = selector.name.clone().or_else(|| {
         let mut metric_name_matchers = selector.matchers.find_matchers(METRIC_NAME);
         if metric_name_matchers.len() == 1 && metric_name_matchers[0].op == MatchOp::Equal {
@@ -561,13 +753,22 @@ TQL EVAL (now() - '15s'::interval, now(), '5s') count_values("status_code", {__n
     fn test_extract_tables_from_tql_query_completeness() {
         let testcases = [
             ("cpu", true, vec!["cpu"]),
+            ("cpu + mem", true, vec!["cpu", "mem"]),
+            (r#"cpu{__database__="private"}"#, true, vec!["private.cpu"]),
+            ("1 + 2", true, vec![]),
             (r#"{__name__="cpu"}"#, true, vec!["cpu"]),
+            (r#"cpu{job="api" or instance="host"}"#, true, vec!["cpu"]),
             (r#"cpu + {job="api"}"#, false, vec!["cpu"]),
             (r#"{__name__=~"cpu.*"}"#, false, vec![]),
+            (r#"{__name__=~"cpu.*" or job="api"}"#, false, vec![]),
             (r#"cpu{__schema__=~"private.*"}"#, false, vec![]),
         ];
 
         for (promql, expected_complete, expected_tables) in testcases {
+            let expected_tables = expected_tables
+                .into_iter()
+                .map(str::to_string)
+                .collect_vec();
             let sql = format!("TQL EVAL (0, 10, '5s') {promql}");
             let mut stmts = ParserContext::create_with_dialect(
                 &sql,
@@ -593,6 +794,59 @@ TQL EVAL (now() - '15s'::interval, now(), '5s') count_values("status_code", {__n
                 extract_tables_from_query_checked(&query).is_some(),
                 "{promql}"
             );
+
+            let expr = promql_parser::parser::parse(promql).unwrap();
+            let direct_tables = extract_tables_from_prom_expr_checked(&expr).map(|tables| {
+                let mut tables = tables
+                    .map(|table| format_raw_object_name(&table))
+                    .collect_vec();
+                tables.sort();
+                tables
+            });
+            assert_eq!(
+                expected_complete.then(|| expected_tables.clone()),
+                direct_tables
+            );
+        }
+    }
+
+    #[test]
+    fn test_extract_tables_from_statement() {
+        for (sql, expected) in [
+            ("SELECT * FROM physical_metric", vec!["physical_metric"]),
+            (
+                "INSERT INTO target SELECT * FROM physical_metric",
+                vec!["physical_metric", "target"],
+            ),
+            (
+                "INSERT INTO target WITH cte AS (SELECT * FROM physical_metric) SELECT * FROM cte",
+                vec!["physical_metric", "target"],
+            ),
+            (
+                "TQL EVAL (0, 10, '5s') physical_metric",
+                vec!["physical_metric"],
+            ),
+            (
+                "CREATE VIEW target AS SELECT * FROM physical_metric",
+                vec!["physical_metric", "target"],
+            ),
+            ("ALTER TABLE old RENAME new", vec!["new", "old"]),
+            ("UNDROP TABLE restored", vec!["restored"]),
+            ("SHOW TABLES", vec![]),
+        ] {
+            let stmt = ParserContext::create_with_dialect(
+                sql,
+                &GreptimeDbDialect {},
+                ParseOptions::default(),
+            )
+            .unwrap()
+            .remove(0);
+            let mut tables = extract_tables_from_statement_checked(&stmt)
+                .unwrap()
+                .map(|table| format_raw_object_name(&table))
+                .collect_vec();
+            tables.sort();
+            assert_eq!(expected, tables, "{sql}");
         }
     }
 

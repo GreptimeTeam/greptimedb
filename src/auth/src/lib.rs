@@ -29,7 +29,10 @@ pub use common::{
     format_pg_scram_sha256_password_verifier, mysql_native_password_hash,
     static_user_provider_from_option, user_provider_from_option, userinfo_by_name,
 };
-pub use permission::{DefaultPermissionChecker, PermissionChecker, PermissionReq, PermissionResp};
+pub use permission::{
+    DefaultPermissionChecker, PermissionChecker, PermissionReq, PermissionResp,
+    PermissionTableTarget, PermissionTableTargets,
+};
 pub use user_info::UserInfo;
 pub use user_provider::static_user_provider::StaticUserProvider;
 pub use user_provider::{PgAuthInfo, UserProvider};

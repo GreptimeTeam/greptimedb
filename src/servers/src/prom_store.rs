@@ -98,20 +98,27 @@ pub struct Metrics {
 
 /// Get table name from remote query
 pub fn table_name(q: &Query) -> Result<String> {
-    let label_matches = &q.matchers;
-
-    label_matches
+    let mut matchers = q
+        .matchers
         .iter()
-        .find_map(|m| {
-            if m.name == METRIC_NAME_LABEL {
-                Some(m.value.clone())
-            } else {
-                None
-            }
-        })
+        .filter(|matcher| matcher.name == METRIC_NAME_LABEL);
+    let matcher = matchers
+        .next()
         .context(error::InvalidPromRemoteRequestSnafu {
             msg: "missing '__name__' label in timeseries",
-        })
+        })?;
+
+    if matcher.r#type != MatcherType::Eq as i32
+        || matcher.value.is_empty()
+        || matchers.next().is_some()
+    {
+        return Err(error::InvalidPromRemoteRequestSnafu {
+            msg: "expected exactly one non-empty equality matcher for '__name__'".to_string(),
+        }
+        .build());
+    }
+
+    Ok(matcher.value.clone())
 }
 
 /// Extract schema from remote read request. Returns the first schema found from any query's matchers.
@@ -650,6 +657,40 @@ mod tests {
             ..Default::default()
         };
         assert_eq!("test", table_name(&q).unwrap());
+
+        for matchers in [
+            vec![LabelMatcher {
+                name: METRIC_NAME_LABEL.to_string(),
+                value: "test.*".to_string(),
+                r#type: RE_TYPE,
+            }],
+            vec![LabelMatcher {
+                name: METRIC_NAME_LABEL.to_string(),
+                value: String::new(),
+                r#type: EQ_TYPE,
+            }],
+            vec![
+                LabelMatcher {
+                    name: METRIC_NAME_LABEL.to_string(),
+                    value: "test".to_string(),
+                    r#type: EQ_TYPE,
+                },
+                LabelMatcher {
+                    name: METRIC_NAME_LABEL.to_string(),
+                    value: "other".to_string(),
+                    r#type: EQ_TYPE,
+                },
+            ],
+        ] {
+            let q = Query {
+                matchers,
+                ..Default::default()
+            };
+            assert!(matches!(
+                table_name(&q),
+                Err(error::Error::InvalidPromRemoteRequest { .. })
+            ));
+        }
     }
 
     #[test]

@@ -26,6 +26,7 @@ mod promql;
 mod region_query;
 pub mod standalone;
 
+use std::collections::HashSet;
 use std::pin::Pin;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, atomic};
@@ -33,7 +34,10 @@ use std::time::{Duration, SystemTime};
 
 use async_stream::stream;
 use async_trait::async_trait;
-use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
+use auth::{
+    PermissionChecker, PermissionCheckerRef, PermissionReq, PermissionTableTarget,
+    PermissionTableTargets,
+};
 use catalog::CatalogManagerRef;
 use catalog::process_manager::{
     ProcessManagerRef, QueryStatement as CatalogQueryStatement, SlowQueryTimer,
@@ -55,7 +59,7 @@ use common_telemetry::logging::SlowQueryOptions;
 use common_telemetry::{debug, error, tracing};
 use dashmap::DashMap;
 use datafusion_expr::LogicalPlan;
-use futures::{Stream, StreamExt};
+use futures::{Stream, StreamExt, future};
 use lazy_static::lazy_static;
 use operator::delete::DeleterRef;
 use operator::insert::InserterRef;
@@ -66,18 +70,20 @@ use prometheus::HistogramTimer;
 use promql_parser::label::Matcher;
 use query::QueryEngineRef;
 use query::metrics::OnDone;
-use query::parser::{PromQuery, QueryLanguageParser, QueryStatement};
+use query::parser::{PromQuery, QueryStatement};
 use query::query_engine::DescribeResult;
 use query::query_engine::options::{QueryOptions, validate_catalog_and_schema};
 use servers::error::{
     self as server_error, AuthSnafu, CommonMetaSnafu, ExecuteQuerySnafu,
-    OtlpMetricModeIncompatibleSnafu, ParsePromQLSnafu, UnexpectedResultSnafu,
+    OtlpMetricModeIncompatibleSnafu, UnexpectedResultSnafu,
 };
 use servers::interceptor::{
     PromQueryInterceptor, PromQueryInterceptorRef, SqlQueryInterceptor, SqlQueryInterceptorRef,
 };
 use servers::otlp::metrics::legacy_normalize_otlp_name;
-use servers::prometheus_handler::PrometheusHandler;
+use servers::prometheus_handler::{
+    ParsedPromQuery, PrometheusHandler, resolve_schema_from_matchers,
+};
 use servers::query_handler::sql::SqlQueryHandler;
 use session::context::{Channel, QueryContextRef};
 use session::table_name::table_idents_to_full_name;
@@ -89,6 +95,7 @@ use sql::statements::comment::CommentObject;
 use sql::statements::copy::{CopyDatabase, CopyTable};
 use sql::statements::statement::Statement;
 use sql::statements::tql::Tql;
+use sql::util::{extract_tables_from_prom_expr_checked, extract_tables_from_statement_checked};
 use sqlparser::ast::{AnalyzeFormat, ObjectName};
 pub use standalone::StandaloneDatanodeManager;
 use table::requests::{OTLP_METRIC_COMPAT_KEY, OTLP_METRIC_COMPAT_PROM};
@@ -393,8 +400,8 @@ impl Instance {
 
     async fn check_otlp_legacy(
         &self,
-        names: &[&String],
-        ctx: QueryContextRef,
+        names: &[String],
+        ctx: &QueryContextRef,
     ) -> server_error::Result<bool> {
         let db_string = ctx.get_db_string();
         // fast cache check
@@ -433,13 +440,6 @@ impl Instance {
 
         // means no existing table is found, use new mode
         if table_ids.is_empty() {
-            let cache = self
-                .otlp_metrics_table_legacy_cache
-                .entry(db_string)
-                .or_default();
-            names.iter().for_each(|name| {
-                cache.insert((*name).clone(), false);
-            });
             return Ok(false);
         }
 
@@ -461,10 +461,6 @@ impl Instance {
                     .unwrap_or(&OTLP_LEGACY_DEFAULT_VALUE)
             })
             .collect::<Vec<_>>();
-        let cache = self
-            .otlp_metrics_table_legacy_cache
-            .entry(db_string)
-            .or_default();
         if !options.is_empty() {
             // check value consistency
             let has_prom = options.iter().any(|opt| *opt == OTLP_METRIC_COMPAT_PROM);
@@ -472,28 +468,34 @@ impl Instance {
                 .iter()
                 .any(|opt| *opt == OTLP_LEGACY_DEFAULT_VALUE.as_str());
             ensure!(!(has_prom && has_legacy), OtlpMetricModeIncompatibleSnafu);
-            let flag = has_legacy;
-            names.iter().for_each(|name| {
-                cache.insert((*name).clone(), flag);
-            });
-            Ok(flag)
+            Ok(has_legacy)
         } else {
             // no table info, use new mode
-            names.iter().for_each(|name| {
-                cache.insert((*name).clone(), false);
-            });
             Ok(false)
         }
+    }
+
+    fn cache_otlp_legacy(
+        &self,
+        names: &[String],
+        ctx: &QueryContextRef,
+        is_legacy: bool,
+    ) -> server_error::Result<()> {
+        let cache = self
+            .otlp_metrics_table_legacy_cache
+            .entry(ctx.get_db_string())
+            .or_default();
+        cache_legacy_mode(&cache, names, is_legacy)
     }
 }
 
 fn fast_legacy_check(
     cache: &DashMap<String, bool>,
-    names: &[&String],
+    names: &[String],
 ) -> server_error::Result<Option<bool>> {
     let hit_cache = names
         .iter()
-        .filter_map(|name| cache.get(*name))
+        .filter_map(|name| cache.get(name))
         .collect::<Vec<_>>();
     if !hit_cache.is_empty() {
         let hit_legacy = hit_cache.iter().any(|en| *en.value());
@@ -504,20 +506,22 @@ fn fast_legacy_check(
         // add doc links in err msg later
         ensure!(!(hit_legacy && hit_prom), OtlpMetricModeIncompatibleSnafu);
 
-        let flag = hit_legacy;
-        // drop hit_cache to release references before inserting to avoid deadlock
-        drop(hit_cache);
-
-        // set cache for all names
-        names.iter().for_each(|name| {
-            if !cache.contains_key(*name) {
-                cache.insert((*name).clone(), flag);
-            }
-        });
-        Ok(Some(flag))
+        Ok(Some(hit_legacy))
     } else {
         Ok(None)
     }
+}
+
+fn cache_legacy_mode(
+    cache: &DashMap<String, bool>,
+    names: &[String],
+    is_legacy: bool,
+) -> server_error::Result<()> {
+    for name in names {
+        let cached = cache.entry(name.clone()).or_insert(is_legacy);
+        ensure!(*cached == is_legacy, OtlpMetricModeIncompatibleSnafu);
+    }
+    Ok(())
 }
 
 /// If the relevant variables are set, the timeout is enforced for all PostgreSQL statements.
@@ -585,6 +589,47 @@ fn attach_timeout(output: Output, mut timeout: Duration) -> Result<Output> {
 }
 
 impl Instance {
+    async fn check_sql_permission(
+        &self,
+        stmt: &Statement,
+        query_ctx: &QueryContextRef,
+    ) -> Result<()> {
+        self.plugins
+            .get::<PermissionCheckerRef>()
+            .as_ref()
+            .check_permission_with_context(
+                query_ctx.current_user(),
+                PermissionReq::SqlStatement(stmt),
+                Some(&query_ctx.current_schema()),
+            )
+            .context(PermissionSnafu)?;
+
+        let targets = match extract_tables_from_statement_checked(stmt) {
+            Some(tables) => PermissionTableTargets::resolved(
+                tables
+                    .map(|name| {
+                        table_idents_to_full_name(&name, query_ctx).map(
+                            |(catalog, schema, table)| {
+                                PermissionTableTarget::new(catalog, schema, table)
+                            },
+                        )
+                    })
+                    .collect::<std::result::Result<Vec<_>, _>>()
+                    .map_err(BoxedError::new)
+                    .context(ExternalSnafu)?,
+            ),
+            None => PermissionTableTargets::Unresolved,
+        };
+        let targets = self
+            .resolve_query_permission_targets(targets, query_ctx)
+            .await
+            .map_err(BoxedError::new)
+            .context(ExternalSnafu)?;
+        self.check_table_permission(query_ctx, PermissionReq::SqlStatement(stmt), targets)
+            .context(PermissionSnafu)?;
+        Ok(())
+    }
+
     #[tracing::instrument(skip_all, name = "SqlQueryHandler::do_analyze_stream_query")]
     async fn do_analyze_stream_query_inner(
         &self,
@@ -609,15 +654,7 @@ impl Instance {
         validate_analyze_stream_statement(&mut stmt)?;
         query_ctx.set_explain_format(AnalyzeFormat::JSON.to_string());
 
-        let checker_ref = self.plugins.get::<PermissionCheckerRef>();
-        checker_ref
-            .as_ref()
-            .check_permission_with_context(
-                query_ctx.current_user(),
-                PermissionReq::SqlStatement(&stmt),
-                Some(&query_ctx.current_schema()),
-            )
-            .context(PermissionSnafu)?;
+        self.check_sql_permission(&stmt, &query_ctx).await?;
         check_permission(self.plugins.clone(), &stmt, &query_ctx)?;
         let catalog_name = query_ctx.current_catalog().to_string();
         let schema_name = query_ctx.current_schema();
@@ -658,9 +695,6 @@ impl Instance {
             Err(e) => return vec![Err(e)],
         };
 
-        let checker_ref = self.plugins.get::<PermissionCheckerRef>();
-        let checker = checker_ref.as_ref();
-
         match parse_stmt(query.as_ref(), query_ctx.sql_dialect())
             .and_then(|stmts| query_interceptor.post_parsing(stmts, query_ctx.clone()))
         {
@@ -676,14 +710,7 @@ impl Instance {
 
                 let mut results = Vec::with_capacity(stmts.len());
                 for stmt in stmts {
-                    if let Err(e) = checker
-                        .check_permission_with_context(
-                            query_ctx.current_user(),
-                            PermissionReq::SqlStatement(&stmt),
-                            Some(&query_ctx.current_schema()),
-                        )
-                        .context(PermissionSnafu)
-                    {
+                    if let Err(e) = self.check_sql_permission(&stmt, &query_ctx).await {
                         results.push(Err(e));
                         break;
                     }
@@ -855,15 +882,7 @@ impl Instance {
             || matches!(&stmt, Statement::Explain(explain) if is_inner_plannable(explain.statement.as_ref()));
 
         if plannable {
-            self.plugins
-                .get::<PermissionCheckerRef>()
-                .as_ref()
-                .check_permission_with_context(
-                    query_ctx.current_user(),
-                    PermissionReq::SqlStatement(&stmt),
-                    Some(&query_ctx.current_schema()),
-                )
-                .context(PermissionSnafu)?;
+            self.check_sql_permission(&stmt, &query_ctx).await?;
 
             let plan = self
                 .query_engine
@@ -977,6 +996,134 @@ pub fn attach_timer(output: Output, timer: HistogramTimer) -> Output {
     }
 }
 
+impl Instance {
+    fn check_prom_query_privilege(&self, query_ctx: &QueryContextRef) -> server_error::Result<()> {
+        self.plugins
+            .get::<PermissionCheckerRef>()
+            .as_ref()
+            .check_permission(query_ctx.current_user(), PermissionReq::PromQuery)
+            .context(AuthSnafu)?;
+        Ok(())
+    }
+
+    fn prom_expr_permission_targets(
+        &self,
+        expr: &promql_parser::parser::Expr,
+        query_ctx: &QueryContextRef,
+    ) -> server_error::Result<Option<Vec<PermissionTableTarget>>> {
+        extract_tables_from_prom_expr_checked(expr)
+            .map(|tables| {
+                tables
+                    .map(|name| {
+                        table_idents_to_full_name(&name, query_ctx).map(
+                            |(catalog, schema, table)| {
+                                PermissionTableTarget::new(catalog, schema, table)
+                            },
+                        )
+                    })
+                    .collect::<std::result::Result<Vec<_>, _>>()
+                    .map_err(BoxedError::new)
+                    .context(ExecuteQuerySnafu)
+            })
+            .transpose()
+    }
+
+    async fn is_physical_query_permission_target(
+        &self,
+        target: &PermissionTableTarget,
+        query_ctx: &QueryContextRef,
+    ) -> server_error::Result<bool> {
+        self.catalog_manager
+            .table(
+                &target.catalog,
+                &target.schema,
+                &target.table,
+                Some(query_ctx),
+            )
+            .await
+            .map(|table| table.is_some_and(|table| table.table_info().is_physical_table()))
+            .map_err(BoxedError::new)
+            .context(ExecuteQuerySnafu)
+    }
+
+    async fn resolve_query_permission_targets(
+        &self,
+        targets: PermissionTableTargets,
+        query_ctx: &QueryContextRef,
+    ) -> server_error::Result<PermissionTableTargets> {
+        const CONCURRENCY: usize = 8;
+
+        let checker = self.plugins.get::<PermissionCheckerRef>();
+        if !checker.as_ref().uses_table_targets() {
+            return Ok(targets);
+        }
+
+        let PermissionTableTargets::Resolved(mut targets) = targets else {
+            return Ok(PermissionTableTargets::Unresolved);
+        };
+        if targets.len() > 1 {
+            let mut seen = HashSet::with_capacity(targets.len());
+            targets.retain(|target| seen.insert(target.clone()));
+        }
+        if let [target] = targets.as_slice() {
+            return if self
+                .is_physical_query_permission_target(target, query_ctx)
+                .await?
+            {
+                Ok(PermissionTableTargets::Unresolved)
+            } else {
+                Ok(PermissionTableTargets::resolved(targets))
+            };
+        }
+
+        // Bound catalog load and inspect results in target order to preserve serial semantics.
+        for chunk in targets.chunks(CONCURRENCY) {
+            let results = future::join_all(
+                chunk
+                    .iter()
+                    .map(|target| self.is_physical_query_permission_target(target, query_ctx)),
+            )
+            .await;
+            for result in results {
+                if result? {
+                    return Ok(PermissionTableTargets::Unresolved);
+                }
+            }
+        }
+
+        Ok(PermissionTableTargets::resolved(targets))
+    }
+
+    fn prom_queries_permission_targets(
+        &self,
+        queries: &[ParsedPromQuery],
+        query_ctx: &QueryContextRef,
+    ) -> server_error::Result<PermissionTableTargets> {
+        let mut targets = Vec::new();
+        let mut resolved = true;
+
+        for query in queries {
+            let QueryStatement::Promql(eval_stmt, _) = query.statement() else {
+                unreachable!("query is parsed from promql");
+            };
+
+            if let Some(query_targets) =
+                self.prom_expr_permission_targets(&eval_stmt.expr, query_ctx)?
+            {
+                targets.extend(query_targets);
+            } else {
+                resolved = false;
+            }
+        }
+
+        Ok(if resolved {
+            PermissionTableTargets::resolved(targets)
+        } else {
+            PermissionTableTargets::Unresolved
+        })
+    }
+}
+
 #[async_trait]
 impl PrometheusHandler for Instance {
     #[tracing::instrument(skip_all)]
@@ -985,21 +1132,32 @@ impl PrometheusHandler for Instance {
         query: &PromQuery,
         query_ctx: QueryContextRef,
     ) -> server_error::Result<Output> {
+        let query = ParsedPromQuery::parse(query.clone(), &query_ctx)?;
+        self.do_query_parsed(query, query_ctx).await
+    }
+
+    #[tracing::instrument(skip_all)]
+    async fn do_query_parsed(
+        &self,
+        query: ParsedPromQuery,
+        query_ctx: QueryContextRef,
+    ) -> server_error::Result<Output> {
         let interceptor = self
             .plugins
             .get::<PromQueryInterceptorRef<server_error::Error>>();
 
-        self.plugins
-            .get::<PermissionCheckerRef>()
-            .as_ref()
-            .check_permission(query_ctx.current_user(), PermissionReq::PromQuery)
-            .context(AuthSnafu)?;
+        self.check_prom_query_privilege(&query_ctx)?;
 
-        let stmt = QueryLanguageParser::parse_promql(query, &query_ctx).with_context(|_| {
-            ParsePromQLSnafu {
-                query: query.clone(),
-            }
-        })?;
+        let targets =
+            self.prom_queries_permission_targets(std::slice::from_ref(&query), &query_ctx)?;
+        self.check_query_target_permission(targets, &query_ctx)
+            .await?;
+
+        let (query, stmt) = query.into_parts();
+
+        let QueryStatement::Promql(eval_stmt, _) = &stmt else {
+            unreachable!("query is parsed from promql");
+        };
 
         let plan = self
             .statement_executor
@@ -1008,11 +1166,7 @@ impl PrometheusHandler for Instance {
             .map_err(BoxedError::new)
             .context(ExecuteQuerySnafu)?;
 
-        let QueryStatement::Promql(eval_stmt, _) = &stmt else {
-            unreachable!("query is parsed from promql");
-        };
-
-        interceptor.pre_execute(query, &eval_stmt.expr, Some(&plan), query_ctx.clone())?;
+        interceptor.pre_execute(&query, &eval_stmt.expr, Some(&plan), query_ctx.clone())?;
 
         // Take the EvalStmt from the original QueryStatement and use it to create the CatalogQueryStatement.
         let query_statement = if let QueryStatement::Promql(eval_stmt, alias) = stmt {
@@ -1072,12 +1226,106 @@ impl PrometheusHandler for Instance {
         Ok(interceptor.post_execute(output, query_ctx)?)
     }
 
+    async fn check_query_permission(
+        &self,
+        queries: &[PromQuery],
+        query_ctx: &QueryContextRef,
+    ) -> server_error::Result<()> {
+        let queries = queries
+            .iter()
+            .cloned()
+            .map(|query| ParsedPromQuery::parse(query, query_ctx))
+            .collect::<server_error::Result<Vec<_>>>()?;
+        self.check_query_permission_parsed(&queries, query_ctx)
+            .await
+    }
+
+    async fn check_query_permission_parsed(
+        &self,
+        queries: &[ParsedPromQuery],
+        query_ctx: &QueryContextRef,
+    ) -> server_error::Result<()> {
+        self.check_prom_query_privilege(query_ctx)?;
+        let targets = self.prom_queries_permission_targets(queries, query_ctx)?;
+        self.check_query_target_permission(targets, query_ctx).await
+    }
+
+    async fn check_query_target_permission(
+        &self,
+        targets: PermissionTableTargets,
+        query_ctx: &QueryContextRef,
+    ) -> server_error::Result<()> {
+        let targets = self
+            .resolve_query_permission_targets(targets, query_ctx)
+            .await?;
+        self.check_table_permission(query_ctx, PermissionReq::PromQuery, targets)
+            .context(AuthSnafu)?;
+        Ok(())
+    }
+
+    async fn filter_metadata_metric_names(
+        &self,
+        metric_names: Vec<String>,
+        schema: &str,
+        query_ctx: &QueryContextRef,
+    ) -> server_error::Result<Vec<String>> {
+        let checker = self.plugins.get::<PermissionCheckerRef>();
+        if !checker.as_ref().uses_table_targets() {
+            let Some(metric) = metric_names.first() else {
+                return Ok(metric_names);
+            };
+            let target =
+                PermissionTableTarget::new(query_ctx.current_catalog(), schema, metric.as_str());
+            let result = checker
+                .as_ref()
+                .check_permission_with_table_targets(
+                    query_ctx.current_user(),
+                    PermissionReq::PromQuery,
+                    PermissionTableTargets::resolved(vec![target]),
+                )
+                .context(AuthSnafu);
+            return match result {
+                Ok(_) => Ok(metric_names),
+                Err(error)
+                    if error.status_code()
+                        == common_error::status_code::StatusCode::PermissionDenied =>
+                {
+                    Ok(Vec::new())
+                }
+                Err(error) => Err(error),
+            };
+        }
+
+        let mut allowed = Vec::with_capacity(metric_names.len());
+        for metric in metric_names {
+            let target =
+                PermissionTableTarget::new(query_ctx.current_catalog(), schema, metric.as_str());
+            match checker
+                .as_ref()
+                .check_permission_with_table_targets(
+                    query_ctx.current_user(),
+                    PermissionReq::PromQuery,
+                    PermissionTableTargets::resolved(vec![target]),
+                )
+                .context(AuthSnafu)
+            {
+                Ok(_) => allowed.push(metric),
+                Err(error)
+                    if error.status_code()
+                        == common_error::status_code::StatusCode::PermissionDenied => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(allowed)
+    }
+
     async fn query_metric_names(
         &self,
         matchers: Vec<Matcher>,
+        schema: &str,
         ctx: &QueryContextRef,
     ) -> server_error::Result<Vec<String>> {
-        self.handle_query_metric_names(matchers, ctx)
+        self.handle_query_metric_names(matchers, schema, ctx)
             .await
             .map_err(BoxedError::new)
             .context(ExecuteQuerySnafu)
@@ -1092,7 +1340,16 @@ impl PrometheusHandler for Instance {
         end: SystemTime,
         ctx: &QueryContextRef,
     ) -> server_error::Result<Vec<String>> {
-        self.handle_query_label_values(metric, label_name, matchers, start, end, ctx)
+        let schema =
+            resolve_schema_from_matchers(&matchers)?.unwrap_or_else(|| ctx.current_schema());
+        let target = PermissionTableTarget::new(ctx.current_catalog(), schema.as_str(), &metric);
+        self.check_query_target_permission(
+            PermissionTableTargets::resolved(vec![target.clone()]),
+            ctx,
+        )
+        .await?;
+
+        self.handle_query_label_values(target, label_name, matchers, start, end, ctx)
             .await
             .map_err(BoxedError::new)
             .context(ExecuteQuerySnafu)
@@ -1342,13 +1599,14 @@ mod tests {
     use std::collections::HashMap;
     use std::future::Future;
     use std::pin::Pin;
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::{Arc, Barrier};
+    use std::sync::Arc;
     use std::task::{Context, Poll};
-    use std::thread;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
+    use api::prom_store::remote::label_matcher::Type as PromMatcherType;
+    use api::prom_store::remote::{LabelMatcher, Query as RemoteQuery, ReadRequest};
     use api::v1::meta::{ProcedureDetailResponse, ReconcileRequest, ReconcileResponse};
+    use auth::{PermissionResp, UserInfoRef};
     use catalog::process_manager::ProcessManager;
     use common_base::Plugins;
     use common_error::ext::{BoxedError, PlainError};
@@ -1369,15 +1627,22 @@ mod tests {
     use datafusion_expr::{LogicalPlanBuilder, LogicalTableSource};
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, Schema as GtSchema, SchemaRef as GtSchemaRef};
+    use datatypes::vectors::{StringVector, VectorRef};
+    use log_query::LogQuery;
     use query::query_engine::options::QueryOptions;
+    use servers::query_handler::{LogQueryHandler, PromStoreProtocolHandler};
     use session::context::{Channel, ConnInfo, QueryContext, QueryContextBuilder};
     use snafu::{Location, Snafu};
     use sql::dialect::GreptimeDbDialect;
     use store_api::data_source::DataSource;
+    use store_api::metric_engine_consts::{
+        LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME, PHYSICAL_TABLE_METADATA_KEY,
+    };
     use store_api::storage::ScanRequest;
     use strfmt::Format;
     use table::metadata::{FilterPushDownType, TableInfo, TableInfoBuilder, TableMetaBuilder};
-    use table::test_util::EmptyTable;
+    use table::table_name::TableName;
+    use table::test_util::{EmptyTable, MemTable};
     use table::{Table, TableRef};
     use tokio::sync::{mpsc, oneshot};
 
@@ -1549,6 +1814,66 @@ mod tests {
                 .process_id(process_id)
                 .build(),
         )
+    }
+
+    struct RejectUnresolvedPermissionChecker;
+
+    impl PermissionChecker for RejectUnresolvedPermissionChecker {
+        fn check_permission(
+            &self,
+            _user_info: UserInfoRef,
+            _req: PermissionReq,
+        ) -> auth::error::Result<PermissionResp> {
+            Ok(PermissionResp::Allow)
+        }
+
+        fn check_permission_with_table_targets(
+            &self,
+            _user_info: UserInfoRef,
+            _req: PermissionReq,
+            targets: PermissionTableTargets,
+        ) -> auth::error::Result<PermissionResp> {
+            let reject = match targets {
+                PermissionTableTargets::Unresolved => true,
+                PermissionTableTargets::Resolved(targets) => {
+                    targets.iter().any(|target| target.table == "denied")
+                }
+            };
+            Ok(if reject {
+                PermissionResp::Reject
+            } else {
+                PermissionResp::Allow
+            })
+        }
+    }
+
+    #[derive(Default)]
+    struct TargetIndependentPermissionChecker {
+        checks: atomic::AtomicUsize,
+    }
+
+    impl PermissionChecker for TargetIndependentPermissionChecker {
+        fn check_permission(
+            &self,
+            _user_info: UserInfoRef,
+            _req: PermissionReq,
+        ) -> auth::error::Result<PermissionResp> {
+            self.checks.fetch_add(1, atomic::Ordering::Relaxed);
+            Ok(PermissionResp::Allow)
+        }
+
+        fn uses_table_targets(&self) -> bool {
+            false
+        }
+
+        fn check_permission_with_table_targets(
+            &self,
+            user_info: UserInfoRef,
+            req: PermissionReq,
+            _targets: PermissionTableTargets,
+        ) -> auth::error::Result<PermissionResp> {
+            self.check_permission(user_info, req)
+        }
     }
 
     struct BlockingInsertSelectInterceptor {
@@ -1761,6 +2086,54 @@ mod tests {
         Ok(EmptyTable::from_table_info(&table_info))
     }
 
+    fn test_physical_table(table_id: u32, table_name: &str) -> TestResult<table::TableRef> {
+        let mut table_info = test_table_info(table_id, table_name)?;
+        table_info
+            .meta
+            .options
+            .extra_options
+            .insert(PHYSICAL_TABLE_METADATA_KEY.to_string(), String::new());
+        Ok(EmptyTable::from_table_info(&table_info))
+    }
+
+    fn test_logical_table(table_id: u32, table_name: &str) -> TestResult<table::TableRef> {
+        let mut table_info = test_table_info(table_id, table_name)?;
+        table_info.meta.engine = METRIC_ENGINE_NAME.to_string();
+        table_info.meta.options.extra_options.insert(
+            LOGICAL_TABLE_METADATA_KEY.to_string(),
+            "physical_metric".to_string(),
+        );
+        Ok(EmptyTable::from_table_info(&table_info))
+    }
+
+    fn test_metric_names_table() -> TableRef {
+        let schema = Arc::new(GtSchema::new(vec![
+            ColumnSchema::new("table_catalog", ConcreteDataType::string_datatype(), false),
+            ColumnSchema::new("table_schema", ConcreteDataType::string_datatype(), false),
+            ColumnSchema::new("table_name", ConcreteDataType::string_datatype(), false),
+            ColumnSchema::new("engine", ConcreteDataType::string_datatype(), false),
+            ColumnSchema::new("create_options", ConcreteDataType::string_datatype(), false),
+        ]));
+        let columns: Vec<VectorRef> = vec![
+            Arc::new(StringVector::from(vec!["greptime", "greptime"])),
+            Arc::new(StringVector::from(vec!["public", "public"])),
+            Arc::new(StringVector::from(vec!["denied", "target"])),
+            Arc::new(StringVector::from(vec!["metric", "metric"])),
+            Arc::new(StringVector::from(vec![
+                "on_physical_table=physical_metric",
+                "on_physical_table=physical_metric",
+            ])),
+        ];
+        let record_batch = RecordBatch::new(schema, columns).unwrap();
+        MemTable::new_with_catalog(
+            "tables",
+            record_batch,
+            2048,
+            "greptime".to_string(),
+            "information_schema".to_string(),
+        )
+    }
+
     fn pending_table(
         table_id: u32,
         table_name: &str,
@@ -1805,6 +2178,15 @@ mod tests {
         target_table: TableRef,
         plugins: Plugins,
     ) -> TestResult<Instance> {
+        test_instance_with_plugins_and_metric_names(source_table, target_table, plugins, None).await
+    }
+
+    async fn test_instance_with_plugins_and_metric_names(
+        source_table: TableRef,
+        target_table: TableRef,
+        plugins: Plugins,
+        metric_names_table: Option<TableRef>,
+    ) -> TestResult<Instance> {
         let kv_backend = Arc::new(MemoryKvBackend::new());
         let process_manager = Arc::new(ProcessManager::new("test-frontend".to_string(), None));
         let catalog_manager = catalog::memory::MemoryCatalogManager::new_with_table(source_table);
@@ -1820,6 +2202,24 @@ mod tests {
             .with_context(|_| RegisterTableSnafu {
                 table_name: target_table_name.to_string(),
             })?;
+        if let Some(table) = metric_names_table {
+            catalog_manager
+                .deregister_table_sync(catalog::DeregisterTableRequest {
+                    catalog: "greptime".to_string(),
+                    schema: "information_schema".to_string(),
+                    table_name: "tables".to_string(),
+                })
+                .unwrap();
+            catalog_manager
+                .register_table_sync(catalog::RegisterTableRequest {
+                    catalog: "greptime".to_string(),
+                    schema: "information_schema".to_string(),
+                    table_name: "tables".to_string(),
+                    table_id: 2048,
+                    table,
+                })
+                .unwrap();
+        }
         catalog_manager.register_process_list_table(process_manager.clone());
 
         let cache_registry = test_cache_registry(kv_backend.clone())?;
@@ -1857,120 +2257,272 @@ mod tests {
         })
     }
 
-    #[test]
-    fn test_fast_legacy_check_deadlock_prevention() {
-        // Create a DashMap to simulate the cache
-        let cache = DashMap::new();
+    #[tokio::test]
+    async fn test_target_independent_checker_skips_target_resolution() -> TestResult<()> {
+        let physical_table = "physical_metric";
+        let checker = Arc::new(TargetIndependentPermissionChecker::default());
+        let plugins = Plugins::new();
+        plugins.insert::<PermissionCheckerRef>(checker.clone());
+        let instance = test_instance_with_plugins(
+            test_physical_table(1024, physical_table)?,
+            test_table(1025, "target")?,
+            plugins,
+        )
+        .await?;
 
-        // Pre-populate cache with some entries
-        cache.insert("metric1".to_string(), true); // legacy mode
-        cache.insert("metric2".to_string(), false); // prom mode
-        cache.insert("metric3".to_string(), true); // legacy mode
+        let ctx = test_query_ctx(1);
+        let physical_target = PermissionTableTarget::new("greptime", "public", physical_table);
+        assert_eq!(
+            PermissionTableTargets::Resolved(vec![physical_target.clone()]),
+            instance
+                .resolve_query_permission_targets(
+                    PermissionTableTargets::resolved(vec![physical_target]),
+                    &ctx,
+                )
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            vec![physical_table.to_string(), "target".to_string()],
+            PrometheusHandler::filter_metadata_metric_names(
+                &instance,
+                vec![physical_table.to_string(), "target".to_string()],
+                "public",
+                &ctx,
+            )
+            .await
+            .unwrap()
+        );
+        assert_eq!(1, checker.checks.load(atomic::Ordering::Relaxed));
 
-        // Test case 1: Normal operation with cache hits
-        let metric1 = "metric1".to_string();
-        let metric4 = "metric4".to_string();
-        let names1 = vec![&metric1, &metric4];
-        let result = fast_legacy_check(&cache, &names1);
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), Some(true)); // should return legacy mode
+        Ok(())
+    }
 
-        // Verify that metric4 was added to cache
-        assert!(cache.contains_key("metric4"));
-        assert!(*cache.get("metric4").unwrap().value());
+    #[tokio::test]
+    async fn test_query_permission_targets_are_deduplicated() -> TestResult<()> {
+        let plugins = Plugins::new();
+        plugins.insert::<PermissionCheckerRef>(Arc::new(RejectUnresolvedPermissionChecker));
+        let instance = test_instance_with_plugins(
+            test_table(1024, "source")?,
+            test_table(1025, "target")?,
+            plugins,
+        )
+        .await?;
+        let ctx = test_query_ctx(1);
+        let target = PermissionTableTarget::new("greptime", "public", "target");
 
-        // Test case 2: No cache hits
-        let metric5 = "metric5".to_string();
-        let metric6 = "metric6".to_string();
-        let names2 = vec![&metric5, &metric6];
-        let result = fast_legacy_check(&cache, &names2);
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), None); // should return None as no cache hits
+        assert_eq!(
+            PermissionTableTargets::Resolved(vec![target.clone()]),
+            instance
+                .resolve_query_permission_targets(
+                    PermissionTableTargets::resolved(vec![target.clone(), target]),
+                    &ctx,
+                )
+                .await
+                .unwrap()
+        );
 
-        // Test case 3: Incompatible modes should return error
-        let cache_incompatible = DashMap::new();
-        cache_incompatible.insert("metric1".to_string(), true); // legacy
-        cache_incompatible.insert("metric2".to_string(), false); // prom
-        let metric1_test = "metric1".to_string();
-        let metric2_test = "metric2".to_string();
-        let names3 = vec![&metric1_test, &metric2_test];
-        let result = fast_legacy_check(&cache_incompatible, &names3);
-        assert!(result.is_err()); // should error due to incompatible modes
+        Ok(())
+    }
 
-        // Test case 4: Intensive concurrent access to test deadlock prevention
-        // This test specifically targets the scenario where multiple threads
-        // access the same cache entries simultaneously
-        let cache_concurrent = Arc::new(DashMap::new());
-        cache_concurrent.insert("shared_metric".to_string(), true);
+    #[tokio::test]
+    async fn test_physical_query_targets_fail_closed() -> TestResult<()> {
+        let physical_table = "physical_metric";
+        let plugins = Plugins::new();
+        plugins.insert::<PermissionCheckerRef>(Arc::new(RejectUnresolvedPermissionChecker));
+        let instance = test_instance_with_plugins(
+            test_physical_table(1024, physical_table)?,
+            test_table(1025, "target")?,
+            plugins,
+        )
+        .await?;
 
-        let num_threads = 8;
-        let operations_per_thread = 100;
-        let barrier = Arc::new(Barrier::new(num_threads));
-        let success_flag = Arc::new(AtomicBool::new(true));
+        let ctx = test_query_ctx(1);
+        let logical_target = PermissionTableTarget::new("greptime", "public", "target");
+        assert_eq!(
+            PermissionTableTargets::Resolved(vec![logical_target.clone()]),
+            instance
+                .resolve_query_permission_targets(
+                    PermissionTableTargets::resolved(vec![logical_target.clone()]),
+                    &ctx,
+                )
+                .await
+                .unwrap()
+        );
+        let physical_target = PermissionTableTarget::new("greptime", "public", physical_table);
+        assert_eq!(
+            PermissionTableTargets::Unresolved,
+            instance
+                .resolve_query_permission_targets(
+                    PermissionTableTargets::resolved(
+                        vec![logical_target, physical_target.clone(),]
+                    ),
+                    &ctx,
+                )
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            vec!["target".to_string()],
+            PrometheusHandler::filter_metadata_metric_names(
+                &instance,
+                vec!["target".to_string(), "denied".to_string()],
+                "public",
+                &ctx,
+            )
+            .await
+            .unwrap()
+        );
 
-        let handles: Vec<_> = (0..num_threads)
-            .map(|thread_id| {
-                let cache_clone = Arc::clone(&cache_concurrent);
-                let barrier_clone = Arc::clone(&barrier);
-                let success_flag_clone = Arc::clone(&success_flag);
+        let query = PromQuery {
+            query: physical_table.to_string(),
+            ..Default::default()
+        };
+        let err = PrometheusHandler::check_query_target_permission(
+            &instance,
+            PermissionTableTargets::resolved(vec![physical_target]),
+            &ctx,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(StatusCode::PermissionDenied, err.status_code());
+        let err = PrometheusHandler::check_query_permission(
+            &instance,
+            std::slice::from_ref(&query),
+            &ctx,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(StatusCode::PermissionDenied, err.status_code());
+        let err = PrometheusHandler::do_query(&instance, &query, ctx.clone())
+            .await
+            .unwrap_err();
+        assert_eq!(StatusCode::PermissionDenied, err.status_code());
 
-                thread::spawn(move || {
-                    // Wait for all threads to be ready
-                    barrier_clone.wait();
-
-                    let start_time = Instant::now();
-                    for i in 0..operations_per_thread {
-                        // Each operation references existing cache entry and adds new ones
-                        let shared_metric = "shared_metric".to_string();
-                        let new_metric = format!("thread_{}_metric_{}", thread_id, i);
-                        let names = vec![&shared_metric, &new_metric];
-
-                        match fast_legacy_check(&cache_clone, &names) {
-                            Ok(_) => {}
-                            Err(_) => {
-                                success_flag_clone.store(false, Ordering::Relaxed);
-                                return;
-                            }
-                        }
-
-                        // If the test takes too long, it likely means deadlock
-                        if start_time.elapsed() > Duration::from_secs(10) {
-                            success_flag_clone.store(false, Ordering::Relaxed);
-                            return;
-                        }
-                    }
-                })
-            })
-            .collect();
-
-        // Join all threads with timeout
-        let start_time = Instant::now();
-        for (i, handle) in handles.into_iter().enumerate() {
-            let join_result = handle.join();
-
-            // Check if we're taking too long (potential deadlock)
-            if start_time.elapsed() > Duration::from_secs(30) {
-                panic!("Test timed out - possible deadlock detected!");
-            }
-
-            if join_result.is_err() {
-                panic!("Thread {} panicked during execution", i);
-            }
+        for sql in [
+            "SELECT * FROM physical_metric",
+            "TQL EVAL (0, 10, '5s') physical_metric",
+            "INSERT INTO target SELECT * FROM physical_metric",
+        ] {
+            let mut results = instance.do_query_inner(sql, ctx.clone()).await;
+            assert_eq!(1, results.len(), "{sql}");
+            let err = results.remove(0).unwrap_err();
+            assert_eq!(StatusCode::PermissionDenied, err.status_code(), "{sql}");
         }
+        let err = LogQueryHandler::query(
+            &instance,
+            LogQuery {
+                table: TableName::new("greptime", "public", physical_table),
+                ..Default::default()
+            },
+            ctx.clone(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(StatusCode::PermissionDenied, err.status_code());
+        let err = instance
+            .do_describe_inner(parse_one_sql("SELECT * FROM physical_metric"), ctx.clone())
+            .await
+            .unwrap_err();
+        assert_eq!(StatusCode::PermissionDenied, err.status_code());
 
-        // Verify all operations completed successfully
-        assert!(
-            success_flag.load(Ordering::Relaxed),
-            "Some operations failed"
+        let request = ReadRequest {
+            queries: vec![RemoteQuery {
+                matchers: vec![LabelMatcher {
+                    r#type: PromMatcherType::Eq as i32,
+                    name: servers::prom_store::METRIC_NAME_LABEL.to_string(),
+                    value: physical_table.to_string(),
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let Err(err) = PromStoreProtocolHandler::read(&instance, request, ctx.clone()).await else {
+            panic!("physical remote-read target must be rejected");
+        };
+        assert_eq!(StatusCode::PermissionDenied, err.status_code());
+
+        let err = PrometheusHandler::query_label_values(
+            &instance,
+            physical_table.to_string(),
+            "host".to_string(),
+            vec![],
+            SystemTime::UNIX_EPOCH,
+            SystemTime::UNIX_EPOCH,
+            &ctx,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(StatusCode::PermissionDenied, err.status_code());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_non_exact_query_discovery_keeps_denied_targets_for_batch_check() -> TestResult<()>
+    {
+        let plugins = Plugins::new();
+        plugins.insert::<PermissionCheckerRef>(Arc::new(RejectUnresolvedPermissionChecker));
+        let instance = test_instance_with_plugins_and_metric_names(
+            test_logical_table(1024, "denied")?,
+            test_logical_table(1025, "target")?,
+            plugins,
+            Some(test_metric_names_table()),
+        )
+        .await?;
+        let ctx = test_query_ctx(1);
+
+        let mut metric_names = PrometheusHandler::query_metric_names(
+            &instance,
+            vec![Matcher::new(
+                promql_parser::label::MatchOp::NotEqual,
+                "__name__",
+                "",
+            )],
+            "public",
+            &ctx,
+        )
+        .await
+        .unwrap();
+        metric_names.sort_unstable();
+        assert_eq!(
+            vec!["denied".to_string(), "target".to_string()],
+            metric_names
         );
 
-        // Verify that many new entries were added (proving operations completed)
-        let final_count = cache_concurrent.len();
-        assert!(
-            final_count > 1 + num_threads * operations_per_thread / 2,
-            "Expected more cache entries, got {}",
-            final_count
-        );
+        let queries = metric_names
+            .into_iter()
+            .map(|query| PromQuery {
+                query,
+                ..Default::default()
+            })
+            .collect::<Vec<_>>();
+        let err = PrometheusHandler::check_query_permission(&instance, &queries, &ctx)
+            .await
+            .unwrap_err();
+        assert_eq!(StatusCode::PermissionDenied, err.status_code());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_fast_legacy_check_is_read_only() {
+        let cache = DashMap::new();
+        cache.insert("metric1".to_string(), true);
+
+        let names = vec!["metric1".to_string(), "metric2".to_string()];
+        assert_eq!(Some(true), fast_legacy_check(&cache, &names).unwrap());
+        assert!(!cache.contains_key("metric2"));
+
+        cache_legacy_mode(&cache, &names, true).unwrap();
+        assert!(*cache.get("metric2").unwrap().value());
+        assert!(cache_legacy_mode(&cache, &names, false).is_err());
+        assert!(*cache.get("metric2").unwrap().value());
+
+        let cache_incompatible = DashMap::new();
+        cache_incompatible.insert("metric1".to_string(), true);
+        cache_incompatible.insert("metric2".to_string(), false);
+        assert!(fast_legacy_check(&cache_incompatible, &names).is_err());
     }
 
     #[test]
