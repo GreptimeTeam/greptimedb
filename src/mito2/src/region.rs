@@ -1261,6 +1261,27 @@ impl ManifestContext {
                 continue;
             };
 
+            // A flush that adds files must move the replay frontier forward. This also
+            // rejects a flush that started before an unflushed-data discard advanced the
+            // frontier, preventing that stale job from publishing the discarded rows as SSTs.
+            if !edit.files_to_add.is_empty()
+                && let Some(flushed_entry_id) = edit.flushed_entry_id
+            {
+                let is_newer_entry = manifest.flushed_entry_id < flushed_entry_id;
+                let is_same_entry_with_newer_sequence = manifest.flushed_entry_id
+                    == flushed_entry_id
+                    && edit.flushed_sequence.is_some_and(|flushed_sequence| {
+                        manifest.flushed_sequence < flushed_sequence
+                    });
+
+                ensure!(
+                    is_newer_entry || is_same_entry_with_newer_sequence,
+                    RegionTruncatedSnafu {
+                        region_id: manifest.metadata.region_id,
+                    }
+                );
+            }
+
             // Checks whether the region is truncated.
             let Some(truncated_entry_id) = manifest.truncated_entry_id else {
                 continue;

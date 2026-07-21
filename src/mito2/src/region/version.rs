@@ -282,6 +282,28 @@ impl VersionControl {
         };
     }
 
+    /// Discards all memtables while preserving persisted SST files.
+    pub(crate) fn discard_unflushed(
+        &self,
+        discarded_entry_id: EntryId,
+        discarded_sequence: SequenceNumber,
+    ) {
+        let version = self.current().version;
+        let memtable_builder = version.memtables.mutable.memtable_builder().clone();
+        let new_mutable =
+            Self::new_mutable_from_version(&version, version.metadata.clone(), memtable_builder);
+        let new_version = Arc::new(
+            VersionBuilder::from_version(version)
+                .memtables(MemtableVersion::new(new_mutable))
+                .flushed_entry_id(discarded_entry_id)
+                .flushed_sequence(discarded_sequence)
+                .build(),
+        );
+
+        let mut version_data = self.data.write().unwrap();
+        version_data.version = new_version;
+    }
+
     /// Overwrites the current version with a new version.
     pub(crate) fn overwrite_current(&self, version: VersionRef) {
         let mut version_data = self.data.write().unwrap();

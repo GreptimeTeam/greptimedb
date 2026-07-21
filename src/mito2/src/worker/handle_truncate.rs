@@ -14,15 +14,15 @@
 
 //! Handling truncate related requests.
 
-use common_telemetry::{debug, info};
+use common_telemetry::{debug, info, warn};
 use store_api::logstore::LogStore;
 use store_api::region_request::RegionTruncateRequest;
 use store_api::storage::RegionId;
 
 use crate::error::RegionNotFoundSnafu;
-use crate::manifest::action::{RegionTruncate, TruncateKind};
+use crate::manifest::action::{RegionEdit, RegionTruncate, TruncateKind};
 use crate::region::RegionLeaderState;
-use crate::request::{OptionOutputTx, TruncateResult};
+use crate::request::{DiscardUnflushedResult, OptionOutputTx, TruncateResult};
 use crate::worker::RegionWorkerLoop;
 
 impl<S: LogStore> RegionWorkerLoop<S> {
@@ -60,6 +60,54 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 };
 
                 self.handle_manifest_truncate_action(region, truncate, sender);
+            }
+            RegionTruncateRequest::Unflushed => {
+                let memtables = &version_data.version.memtables;
+                if memtables.is_empty()
+                    && version_data.version.flushed_entry_id == version_data.last_entry_id
+                    && version_data.version.flushed_sequence == version_data.committed_sequence
+                {
+                    self.update_topic_latest_entry_id(&region);
+                    let result = self
+                        .wal
+                        .obsolete(
+                            region_id,
+                            version_data.version.flushed_entry_id,
+                            &region.provider,
+                        )
+                        .await
+                        .map(|_| 0);
+                    sender.send(result);
+                    return;
+                }
+
+                let discarded_rows = memtables.num_rows();
+                let discarded_bytes = memtables.mutable_usage() + memtables.immutables_usage();
+                warn!(
+                    "Discarding unflushed data from region {}, entry_id: {}, sequence: {}, estimated rows: {}, estimated bytes: {}",
+                    region_id,
+                    version_data.last_entry_id,
+                    version_data.committed_sequence,
+                    discarded_rows,
+                    discarded_bytes,
+                );
+
+                let edit = RegionEdit {
+                    files_to_add: Vec::new(),
+                    files_to_remove: Vec::new(),
+                    timestamp_ms: None,
+                    compaction_time_window: None,
+                    flushed_entry_id: Some(version_data.last_entry_id),
+                    flushed_sequence: Some(version_data.committed_sequence),
+                    committed_sequence: None,
+                };
+                self.handle_manifest_discard_unflushed_action(
+                    region,
+                    edit,
+                    discarded_rows,
+                    discarded_bytes,
+                    sender,
+                );
             }
             RegionTruncateRequest::ByTimeRanges { time_ranges } => {
                 info!(
@@ -169,5 +217,51 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         );
 
         truncate_result.sender.send(Ok(0));
+    }
+
+    /// Handles the result of advancing the replay frontier for unflushed data.
+    pub(crate) async fn handle_discard_unflushed_result(&mut self, result: DiscardUnflushedResult) {
+        let region_id = result.region_id;
+        let Some(region) = self.regions.get_region(region_id) else {
+            result.sender.send(RegionNotFoundSnafu { region_id }.fail());
+            return;
+        };
+
+        region.switch_state_to_writable(RegionLeaderState::Truncating);
+
+        if let Err(e) = result.result {
+            result.sender.send(Err(e));
+            return;
+        }
+
+        region
+            .version_control
+            .discard_unflushed(result.discarded_entry_id, result.discarded_sequence);
+
+        self.flush_scheduler.on_region_truncated(region_id);
+        self.compaction_scheduler.on_region_truncated(region_id);
+        self.index_build_scheduler
+            .on_region_truncated(region_id)
+            .await;
+        self.update_topic_latest_entry_id(&region);
+
+        if let Err(e) = self
+            .wal
+            .obsolete(region_id, result.discarded_entry_id, &region.provider)
+            .await
+        {
+            result.sender.send(Err(e));
+            return;
+        }
+
+        warn!(
+            "Discarded unflushed data from region {}, entry_id: {}, sequence: {}, estimated rows: {}, estimated bytes: {}",
+            region_id,
+            result.discarded_entry_id,
+            result.discarded_sequence,
+            result.discarded_rows,
+            result.discarded_bytes,
+        );
+        result.sender.send(Ok(0));
     }
 }
