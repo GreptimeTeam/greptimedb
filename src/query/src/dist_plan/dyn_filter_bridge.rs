@@ -264,10 +264,6 @@ mod tests {
     impl Eq for UnserializableExpr {}
 
     impl datafusion_physical_expr::PhysicalExpr for UnserializableExpr {
-        fn as_any(&self) -> &dyn Any {
-            self
-        }
-
         fn data_type(
             &self,
             _input_schema: &arrow_schema::Schema,
@@ -638,7 +634,7 @@ mod tests {
             captured_dyn_filters[0].filter_id.to_string()
         );
         assert_eq!(decoded_children.len(), 1);
-        assert!(decoded_children[0].as_any().is::<Column>());
+        assert!(decoded_children[0].is::<Column>());
     }
 
     #[test]

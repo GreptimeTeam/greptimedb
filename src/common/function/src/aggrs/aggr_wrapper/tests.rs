@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::any::Any;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
@@ -91,10 +90,6 @@ impl DisplayAs for MockInputExec {
 impl ExecutionPlan for MockInputExec {
     fn name(&self) -> &str {
         "MockInputExec"
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
     }
 
     fn properties(&self) -> &Arc<PlanProperties> {
@@ -199,10 +194,6 @@ impl Default for DummyTableProvider {
 
 #[async_trait::async_trait]
 impl TableProvider for DummyTableProvider {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     fn schema(&self) -> Arc<arrow_schema::Schema> {
         self.schema.clone()
     }
@@ -377,10 +368,7 @@ async fn test_sum_udaf() {
         .create_physical_plan(&res.lower_state, &ctx.state())
         .await
         .unwrap();
-    let aggr_exec = phy_aggr_state_plan
-        .as_any()
-        .downcast_ref::<AggregateExec>()
-        .unwrap();
+    let aggr_exec = phy_aggr_state_plan.downcast_ref::<AggregateExec>().unwrap();
     let aggr_func_expr = &aggr_exec.aggr_expr()[0];
     let mut state_accum = aggr_func_expr.create_accumulator().unwrap();
 
@@ -410,10 +398,7 @@ async fn test_sum_udaf() {
         .create_physical_plan(&res.upper_merge, &ctx.state())
         .await
         .unwrap();
-    let aggr_exec = phy_aggr_merge_plan
-        .as_any()
-        .downcast_ref::<AggregateExec>()
-        .unwrap();
+    let aggr_exec = phy_aggr_merge_plan.downcast_ref::<AggregateExec>().unwrap();
     let aggr_func_expr = &aggr_exec.aggr_expr()[0];
     let mut merge_accum = aggr_func_expr.create_accumulator().unwrap();
 
@@ -539,10 +524,7 @@ async fn test_avg_udaf() {
         .create_physical_plan(&coerced_aggr_state_plan, &ctx.state())
         .await
         .unwrap();
-    let aggr_exec = phy_aggr_state_plan
-        .as_any()
-        .downcast_ref::<AggregateExec>()
-        .unwrap();
+    let aggr_exec = phy_aggr_state_plan.downcast_ref::<AggregateExec>().unwrap();
     let aggr_func_expr = &aggr_exec.aggr_expr()[0];
     let mut state_accum = aggr_func_expr.create_accumulator().unwrap();
 
@@ -578,10 +560,7 @@ async fn test_avg_udaf() {
         .create_physical_plan(&res.upper_merge, &ctx.state())
         .await
         .unwrap();
-    let aggr_exec = phy_aggr_merge_plan
-        .as_any()
-        .downcast_ref::<AggregateExec>()
-        .unwrap();
+    let aggr_exec = phy_aggr_merge_plan.downcast_ref::<AggregateExec>().unwrap();
     let aggr_func_expr = &aggr_exec.aggr_expr()[0];
 
     let mut merge_accum = aggr_func_expr.create_accumulator().unwrap();
@@ -699,10 +678,7 @@ async fn test_last_value_order_by_udaf() {
         .create_physical_plan(&fixed_aggr_state_plan, &ctx.state())
         .await
         .unwrap();
-    let aggr_exec = phy_aggr_state_plan
-        .as_any()
-        .downcast_ref::<AggregateExec>()
-        .unwrap();
+    let aggr_exec = phy_aggr_state_plan.downcast_ref::<AggregateExec>().unwrap();
     let aggr_func_expr = &aggr_exec.aggr_expr()[0];
 
     let merge_input_fields = vec![Arc::new(Field::new(
@@ -792,10 +768,7 @@ async fn test_last_value_order_by_udaf() {
         .create_physical_plan(&res.upper_merge, &ctx.state())
         .await
         .unwrap();
-    let aggr_exec = phy_aggr_merge_plan
-        .as_any()
-        .downcast_ref::<AggregateExec>()
-        .unwrap();
+    let aggr_exec = phy_aggr_merge_plan.downcast_ref::<AggregateExec>().unwrap();
     let aggr_func_expr = &aggr_exec.aggr_expr()[0];
 
     let mut merge_accum = aggr_func_expr.create_accumulator().unwrap();

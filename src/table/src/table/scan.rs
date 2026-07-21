@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::any::Any;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
@@ -381,10 +380,6 @@ impl RegionScanExec {
 }
 
 impl ExecutionPlan for RegionScanExec {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn schema(&self) -> ArrowSchemaRef {
         self.arrow_schema.clone()
     }
@@ -446,9 +441,9 @@ impl ExecutionPlan for RegionScanExec {
         Some(self.metric.clone_inner())
     }
 
-    fn partition_statistics(&self, partition: Option<usize>) -> DfResult<Statistics> {
+    fn partition_statistics(&self, partition: Option<usize>) -> DfResult<Arc<Statistics>> {
         if partition.is_some() {
-            return Ok(Statistics::new_unknown(self.schema().as_ref()));
+            return Ok(Arc::new(Statistics::new_unknown(self.schema().as_ref())));
         }
 
         let statistics =
@@ -471,7 +466,7 @@ impl ExecutionPlan for RegionScanExec {
             } else {
                 Statistics::new_unknown(&self.arrow_schema)
             };
-        Ok(statistics)
+        Ok(Arc::new(statistics))
     }
 
     fn name(&self) -> &str {

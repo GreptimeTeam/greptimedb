@@ -122,16 +122,16 @@ EXPLAIN INSERT INTO other SELECT i, 2 FROM integers WHERE i=(SELECT MAX(i) FROM 
 +---------------------+-----------------------------------------------------------------------------+
 | logical_plan        | Dml: op=[Insert Into] table=[other]                                         |
 |                     |   Projection: integers.i AS i, TimestampMillisecond(2, None) AS j           |
-|                     |     Inner Join: integers.i = __scalar_sq_1.max(integers.i)                  |
+|                     |     Filter: integers.i = (<subquery>)                                       |
+|                     |       Subquery:                                                             |
+|                     |         MergeScan [is_placeholder=false, remote_input=[                     |
+|                     | Projection: max(integers.i)                                                 |
+|                     |   Aggregate: groupBy=[[]], aggr=[[max(integers.i)]]                         |
+|                     |     TableScan: integers                                                     |
+|                     | ]]                                                                          |
 |                     |       Projection: integers.i                                                |
 |                     |         MergeScan [is_placeholder=false, remote_input=[                     |
 |                     | TableScan: integers                                                         |
-|                     | ]]                                                                          |
-|                     |       MergeScan [is_placeholder=false, remote_input=[                       |
-|                     | SubqueryAlias: __scalar_sq_1                                                |
-|                     |   Projection: max(integers.i)                                               |
-|                     |     Aggregate: groupBy=[[]], aggr=[[max(integers.i)]]                       |
-|                     |       TableScan: integers, partial_filters=[Boolean(true)]                  |
 |                     | ]]                                                                          |
 | physical_plan_error | This feature is not implemented: Insert into not implemented for this table |
 +---------------------+-----------------------------------------------------------------------------+

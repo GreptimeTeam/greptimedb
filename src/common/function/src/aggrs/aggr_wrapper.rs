@@ -33,7 +33,6 @@ use datafusion::functions_aggregate::count::Count;
 use datafusion::functions_aggregate::min_max::{Max, Min};
 use datafusion::optimizer::AnalyzerRule;
 use datafusion::optimizer::analyzer::type_coercion::TypeCoercion;
-use datafusion::physical_planner::create_aggregate_expr_and_maybe_filter;
 use datafusion_common::{Column, ScalarValue};
 use datafusion_expr::expr::{AggregateFunction, AggregateFunctionParams};
 use datafusion_expr::function::StateFieldsArgs;
@@ -41,7 +40,7 @@ use datafusion_expr::{
     Accumulator, Aggregate, AggregateUDF, AggregateUDFImpl, EmitTo, Expr, ExprSchemable,
     GroupsAccumulator, LogicalPlan, Signature,
 };
-use datafusion_physical_expr::aggregate::AggregateFunctionExpr;
+use datafusion_physical_expr::aggregate::{AggregateFunctionExpr, LoweredAggregateBuilder};
 use datatypes::arrow::datatypes::{DataType, Field};
 
 use crate::aggrs::aggr_wrapper::fix_order::FixStateUdafOrderingAnalyzer;
@@ -204,12 +203,24 @@ impl StateMergeHelper {
             lower_aggr_exprs.push(expr);
 
             // then create the merge function using the physical expression of the original aggregate function
-            let (original_phy_expr, _filter, _ordering) = create_aggregate_expr_and_maybe_filter(
+            let (name, human_display) = match aggr_expr {
+                Expr::Alias(alias) => (alias.name.clone(), aggr_expr.human_display().to_string()),
+                Expr::AggregateFunction(_) => (
+                    aggr_expr.schema_name().to_string(),
+                    aggr_expr.human_display().to_string(),
+                ),
+                _ => unreachable!("aggregate expression was validated above"),
+            };
+            let original_phy_expr = LoweredAggregateBuilder::new(
                 aggr_expr,
                 aggr.input.schema(),
                 aggr.input.schema().as_arrow(),
                 &Default::default(),
-            )?;
+            )
+            .with_name(name)
+            .with_human_display(human_display)
+            .build()?
+            .aggregate;
 
             let merge_func = MergeWrapper::new(
                 (*aggr_func.func).clone(),
@@ -365,9 +376,6 @@ impl AggregateUDFImpl for StateWrapper {
         Ok(Box::new(StateGroupsAccum::new(inner, state_type)?))
     }
 
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
     fn name(&self) -> &str {
         self.name.as_str()
     }
@@ -437,7 +445,7 @@ impl AggregateUDFImpl for StateWrapper {
         &self,
         statistics_args: &datafusion_expr::StatisticsArgs,
     ) -> Option<ScalarValue> {
-        let inner = self.inner().inner().as_any();
+        let inner = self.inner().inner();
         // only count/min/max need special handling here, for getting result from statistics
         // the result of count/min/max is also the result of count_state so can return directly
         let can_use_stat = inner.is::<Count>() || inner.is::<Max>() || inner.is::<Min>();
@@ -751,9 +759,6 @@ impl AggregateUDFImpl for MergeWrapper {
         Ok(Box::new(MergeAccum::new(inner_accum, &fields)))
     }
 
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
     fn name(&self) -> &str {
         self.name.as_str()
     }

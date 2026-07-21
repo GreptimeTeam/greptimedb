@@ -107,7 +107,7 @@ mod tests {
             connect_by: vec![],
             select_token: AttachedToken::empty(),
             flavor: SelectFlavor::Standard,
-            optimizer_hint: None,
+            optimizer_hints: vec![],
         };
 
         let sp_query = Box::new(

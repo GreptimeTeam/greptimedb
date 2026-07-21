@@ -23,7 +23,8 @@ use datafusion::config::CsvOptions;
 use datafusion::datasource::listing::PartitionedFile;
 use datafusion::datasource::object_store::ObjectStoreUrl;
 use datafusion::datasource::physical_plan::{
-    CsvSource, FileGroup, FileScanConfigBuilder, FileSource, FileStream, JsonSource, ParquetSource,
+    CsvSource, FileGroup, FileScanConfigBuilder, FileSource, FileStreamBuilder, JsonSource,
+    ParquetSource,
 };
 use datafusion::datasource::source::DataSourceExec;
 use datafusion::physical_expr::create_physical_expr;
@@ -66,13 +67,12 @@ fn build_record_batch_stream(
     ));
 
     let file_opener = config.file_source().create_file_opener(store, &config, 0)?;
-    let stream = FileStream::new(
-        &config,
-        0, // partition: hard-code
-        file_opener,
-        &ExecutionPlanMetricsSet::new(),
-    )
-    .context(error::BuildStreamSnafu)?;
+    let stream = FileStreamBuilder::new(&config)
+        .with_partition(0) // partition: hard-code
+        .with_file_opener(file_opener)
+        .with_metrics(&ExecutionPlanMetricsSet::new())
+        .build()
+        .context(error::BuildStreamSnafu)?;
     Ok(Box::pin(stream))
 }
 

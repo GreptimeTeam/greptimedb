@@ -24,8 +24,7 @@ use crate::statements::statement::Statement;
 /// SET variables statement parser implementation
 impl ParserContext<'_> {
     pub(crate) fn parse_set_variables(&mut self) -> Result<Statement> {
-        let _ = self.parser.next_token();
-        let spstatement = self.parser.parse_set().context(error::SyntaxSnafu)?;
+        let spstatement = self.parser.parse_statement().context(error::SyntaxSnafu)?;
         match spstatement {
             SpStatement::Set(set) => match set {
                 Set::SingleAssignment {
@@ -143,5 +142,15 @@ mod tests {
         );
         let sql = "SET STATEMENT_TIMEOUT TO 5000";
         assert_pg_parse_result(sql, "STATEMENT_TIMEOUT", expected_query_timeout_expr);
+    }
+
+    #[test]
+    fn test_unsupported_set_variant_remains_rejected() {
+        let result = ParserContext::create_with_dialect(
+            "SET ROLE admin",
+            &GreptimeDbDialect {},
+            ParseOptions::default(),
+        );
+        assert!(result.is_err());
     }
 }

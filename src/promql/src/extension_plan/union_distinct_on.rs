@@ -12,15 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::any::Any;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use ahash::{HashSet, RandomState};
+use ahash::HashSet;
 use datafusion::arrow::array::UInt64Array;
 use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::arrow::record_batch::RecordBatch;
+use datafusion::common::hash_utils::RandomState as FixedState;
 use datafusion::common::{DFSchema, DFSchemaRef};
 use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datafusion::execution::context::TaskContext;
@@ -179,7 +179,7 @@ impl UnionDistinctOn {
             output_schema,
             metric: ExecutionPlanMetricsSet::new(),
             properties,
-            random_state: RandomState::new(),
+            random_state: FixedState::with_seed(0),
         })
     }
 
@@ -347,15 +347,11 @@ pub struct UnionDistinctOnExec {
     metric: ExecutionPlanMetricsSet,
     properties: Arc<PlanProperties>,
 
-    /// Shared the `RandomState` for the hashing algorithm
-    random_state: RandomState,
+    /// Shared deterministic hash state for the hashing algorithm.
+    random_state: FixedState,
 }
 
 impl ExecutionPlan for UnionDistinctOnExec {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn schema(&self) -> SchemaRef {
         self.output_schema.clone()
     }
@@ -452,7 +448,7 @@ pub struct UnionDistinctOnStream {
     /// Include time index
     compare_keys: Vec<usize>,
     output_schema: SchemaRef,
-    random_state: RandomState,
+    random_state: FixedState,
     lhs_signatures: HashSet<u64>,
     hashes: Vec<u64>,
     phase: StreamPhase,
@@ -915,10 +911,6 @@ mod test {
             "TestExec"
         }
 
-        fn as_any(&self) -> &dyn Any {
-            self
-        }
-
         fn properties(&self) -> &Arc<PlanProperties> {
             &self.properties
         }
@@ -965,7 +957,7 @@ mod test {
             right: None,
             compare_keys: vec![1, 0],
             output_schema,
-            random_state: RandomState::new(),
+            random_state: FixedState::with_seed(0),
             lhs_signatures: HashSet::default(),
             hashes: Vec::new(),
             phase: StreamPhase::Left,

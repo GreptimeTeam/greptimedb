@@ -70,10 +70,6 @@ impl DummyCatalogList {
 }
 
 impl CatalogProviderList for DummyCatalogList {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn register_catalog(
         &self,
         _name: String,
@@ -98,10 +94,6 @@ struct DummyCatalogProvider {
 }
 
 impl CatalogProvider for DummyCatalogProvider {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn schema_names(&self) -> Vec<String> {
         vec![]
     }
@@ -119,10 +111,6 @@ struct DummySchemaProvider {
 
 #[async_trait]
 impl SchemaProvider for DummySchemaProvider {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn table_names(&self) -> Vec<String> {
         vec![]
     }
@@ -162,10 +150,6 @@ impl fmt::Debug for DummyTableProvider {
 
 #[async_trait]
 impl TableProvider for DummyTableProvider {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn schema(&self) -> SchemaRef {
         let schema = self.metadata.schema.arrow_schema();
         if !supports_pk_dictionary_encoding(self.engine.name()) {

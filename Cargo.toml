@@ -127,22 +127,22 @@ const_format = "0.2"
 criterion = "0.7"
 crossbeam-utils = "0.8"
 dashmap = "6.1"
-datafusion = "=53.1.0"
-datafusion-common = "=53.1.0"
-datafusion-datasource = "=53.1.0"
-datafusion-expr = "=53.1.0"
-datafusion-expr-common = "=53.1.0"
-datafusion-functions = "=53.1.0"
-datafusion-functions-aggregate-common = "=53.1.0"
-datafusion-functions-window-common = "=53.1.0"
-datafusion-optimizer = "=53.1.0"
-datafusion-orc = { git = "https://github.com/datafusion-contrib/datafusion-orc.git", rev = "6c07fa282dc8d62db2aa4ded06ab55485efc811a" }
-datafusion-pg-catalog = "0.17.3"
-datafusion-physical-expr = "=53.1.0"
-datafusion-physical-plan = "=53.1.0"
-datafusion-proto = "=53.1.0"
-datafusion-sql = "=53.1.0"
-datafusion-substrait = "=53.1.0"
+datafusion = "=54.0.0"
+datafusion-common = "=54.0.0"
+datafusion-datasource = "=54.0.0"
+datafusion-expr = "=54.0.0"
+datafusion-expr-common = "=54.0.0"
+datafusion-functions = "=54.0.0"
+datafusion-functions-aggregate-common = "=54.0.0"
+datafusion-functions-window-common = "=54.0.0"
+datafusion-optimizer = "=54.0.0"
+datafusion-orc = "0.9"
+datafusion-pg-catalog = "0.18.1"
+datafusion-physical-expr = "=54.0.0"
+datafusion-physical-plan = "=54.0.0"
+datafusion-proto = "=54.0.0"
+datafusion-sql = "=54.0.0"
+datafusion-substrait = "=54.0.0"
 datafusion_object_store = { package = "object_store", version = "0.13.2" }
 deadpool = "0.12"
 deadpool-postgres = "0.14"
@@ -233,7 +233,7 @@ simd-json = "0.15"
 similar-asserts = "1.6.0"
 smallvec = { version = "1", features = ["serde"] }
 snafu = "0.8"
-sqlparser = { version = "0.61.0", default-features = false, features = ["std", "visitor", "serde"] }
+sqlparser = { version = "0.62.0", default-features = false, features = ["std", "visitor", "serde"] }
 sqlx = { version = "0.8", default-features = false, features = [
     "any",
     "macros",
@@ -342,22 +342,22 @@ git = "https://github.com/GreptimeTeam/greptime-meter.git"
 rev = "5618e779cf2bb4755b499c630fba4c35e91898cb"
 
 [patch.crates-io]
-datafusion = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "7a84c45104d35408f00bbf880268c47193b73b28" }
-datafusion-common = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "7a84c45104d35408f00bbf880268c47193b73b28" }
-datafusion-datasource = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "7a84c45104d35408f00bbf880268c47193b73b28" }
-datafusion-expr = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "7a84c45104d35408f00bbf880268c47193b73b28" }
-datafusion-expr-common = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "7a84c45104d35408f00bbf880268c47193b73b28" }
-datafusion-functions = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "7a84c45104d35408f00bbf880268c47193b73b28" }
-datafusion-functions-aggregate-common = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "7a84c45104d35408f00bbf880268c47193b73b28" }
-datafusion-functions-window-common = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "7a84c45104d35408f00bbf880268c47193b73b28" }
-datafusion-optimizer = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "7a84c45104d35408f00bbf880268c47193b73b28" }
-datafusion-physical-expr = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "7a84c45104d35408f00bbf880268c47193b73b28" }
-datafusion-physical-expr-common = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "7a84c45104d35408f00bbf880268c47193b73b28" }
-datafusion-physical-plan = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "7a84c45104d35408f00bbf880268c47193b73b28" }
-datafusion-proto = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "7a84c45104d35408f00bbf880268c47193b73b28" }
-datafusion-sql = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "7a84c45104d35408f00bbf880268c47193b73b28" }
-datafusion-substrait = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "7a84c45104d35408f00bbf880268c47193b73b28" }
-sqlparser = { git = "https://github.com/GreptimeTeam/sqlparser-rs.git", rev = "2aefa08a8d69c96eec2d6d6703598a009bba6e4c" }                           # on branch v0.61.x
+sqlparser = { git = "https://github.com/GreptimeTeam/sqlparser-rs.git", rev = "9e9019bb1c7040ed956f654e39378dd42ab17884" }
+datafusion = { git = "https://github.com/discord9/arrow-datafusion.git", rev = "cee35d94c03300f1b9a21090828826e61cb67b11" }
+datafusion-common = { git = "https://github.com/discord9/arrow-datafusion.git", rev = "cee35d94c03300f1b9a21090828826e61cb67b11" }
+datafusion-datasource = { git = "https://github.com/discord9/arrow-datafusion.git", rev = "cee35d94c03300f1b9a21090828826e61cb67b11" }
+datafusion-expr = { git = "https://github.com/discord9/arrow-datafusion.git", rev = "cee35d94c03300f1b9a21090828826e61cb67b11" }
+datafusion-expr-common = { git = "https://github.com/discord9/arrow-datafusion.git", rev = "cee35d94c03300f1b9a21090828826e61cb67b11" }
+datafusion-functions = { git = "https://github.com/discord9/arrow-datafusion.git", rev = "cee35d94c03300f1b9a21090828826e61cb67b11" }
+datafusion-functions-aggregate-common = { git = "https://github.com/discord9/arrow-datafusion.git", rev = "cee35d94c03300f1b9a21090828826e61cb67b11" }
+datafusion-functions-window-common = { git = "https://github.com/discord9/arrow-datafusion.git", rev = "cee35d94c03300f1b9a21090828826e61cb67b11" }
+datafusion-optimizer = { git = "https://github.com/discord9/arrow-datafusion.git", rev = "cee35d94c03300f1b9a21090828826e61cb67b11" }
+datafusion-physical-expr = { git = "https://github.com/discord9/arrow-datafusion.git", rev = "cee35d94c03300f1b9a21090828826e61cb67b11" }
+datafusion-physical-expr-common = { git = "https://github.com/discord9/arrow-datafusion.git", rev = "cee35d94c03300f1b9a21090828826e61cb67b11" }
+datafusion-physical-plan = { git = "https://github.com/discord9/arrow-datafusion.git", rev = "cee35d94c03300f1b9a21090828826e61cb67b11" }
+datafusion-proto = { git = "https://github.com/discord9/arrow-datafusion.git", rev = "cee35d94c03300f1b9a21090828826e61cb67b11" }
+datafusion-sql = { git = "https://github.com/discord9/arrow-datafusion.git", rev = "cee35d94c03300f1b9a21090828826e61cb67b11" }
+datafusion-substrait = { git = "https://github.com/discord9/arrow-datafusion.git", rev = "cee35d94c03300f1b9a21090828826e61cb67b11" }
 
 [profile.release]
 debug = 1

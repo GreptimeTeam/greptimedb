@@ -16,6 +16,7 @@
 
 mod error;
 mod json_expr_planner;
+mod pg_oid_alias_expr_planner;
 mod planner;
 
 use std::any::Any;
@@ -86,7 +87,7 @@ fn query_load_region_id(plan: &Arc<dyn ExecutionPlan>) -> Option<u64> {
 
     while let Some(plan) = stack.pop() {
         if plan.name() == REGION_SCAN_EXEC_NAME
-            && let Some(scan) = plan.as_any().downcast_ref::<RegionScanExec>()
+            && let Some(scan) = plan.downcast_ref::<RegionScanExec>()
             && let Some(scan_region_id) = scan.query_load_region_id()
         {
             match region_id {
@@ -115,7 +116,7 @@ fn query_stat_counters(plan: &Arc<dyn ExecutionPlan>) -> Option<RegionQueryStatC
 
     while let Some(plan) = stack.pop() {
         if plan.name() == REGION_SCAN_EXEC_NAME
-            && let Some(scan) = plan.as_any().downcast_ref::<RegionScanExec>()
+            && let Some(scan) = plan.downcast_ref::<RegionScanExec>()
             && let Some(scan_counters) = scan.query_stat_counters()
         {
             match &counters {
@@ -442,8 +443,7 @@ impl DatafusionQueryEngine {
         // let config = state.config_options();
 
         // skip optimize AnalyzeExec plan
-        let optimized_plan = if let Some(analyze_plan) = plan.as_any().downcast_ref::<AnalyzeExec>()
-        {
+        let optimized_plan = if let Some(analyze_plan) = plan.downcast_ref::<AnalyzeExec>() {
             let format = if let Some(format) = ctx.query_ctx().explain_format()
                 && format.to_lowercase() == "json"
             {

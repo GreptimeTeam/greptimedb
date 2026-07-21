@@ -517,11 +517,11 @@ enum CastInputKind {
 /// Returns the input expression and target type for `CAST` and `TRY_CAST` expressions.
 fn extract_cast_input(expr: &Expr) -> Option<(CastInputKind, &Expr, &DataType)> {
     match expr {
-        Expr::Cast(Cast { expr, data_type }) => {
-            Some((CastInputKind::Cast, expr.as_ref(), data_type))
+        Expr::Cast(Cast { expr, field }) => {
+            Some((CastInputKind::Cast, expr.as_ref(), field.data_type()))
         }
-        Expr::TryCast(TryCast { expr, data_type }) => {
-            Some((CastInputKind::TryCast, expr.as_ref(), data_type))
+        Expr::TryCast(TryCast { expr, field }) => {
+            Some((CastInputKind::TryCast, expr.as_ref(), field.data_type()))
         }
         _ => None,
     }
@@ -1235,10 +1235,6 @@ mod tests {
 
     #[async_trait]
     impl TableProvider for ExactPushdownProvider {
-        fn as_any(&self) -> &dyn std::any::Any {
-            self
-        }
-
         fn schema(&self) -> arrow_schema::SchemaRef {
             self.schema.clone()
         }

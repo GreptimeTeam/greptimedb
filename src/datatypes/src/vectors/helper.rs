@@ -251,6 +251,8 @@ impl Helper {
             | ScalarValue::Decimal256(_, _, _)
             | ScalarValue::FixedSizeList(_)
             | ScalarValue::LargeList(_)
+            | ScalarValue::ListView(_)
+            | ScalarValue::LargeListView(_)
             | ScalarValue::Dictionary(_, _)
             | ScalarValue::Union(_, _, _)
             | ScalarValue::Utf8View(_)

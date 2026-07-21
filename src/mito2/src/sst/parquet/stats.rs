@@ -142,7 +142,7 @@ impl<T: Borrow<RowGroupMetaData>> PruningStatistics for RowGroupPruningStats<'_,
         }
     }
 
-    fn row_counts(&self, _column: &Column) -> Option<ArrayRef> {
+    fn row_counts(&self) -> Option<ArrayRef> {
         // TODO(LFC): Impl it.
         None
     }

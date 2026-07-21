@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::any::Any;
 use std::sync::{Arc, Mutex};
 
 use common_catalog::consts::{METRIC_ENGINE, MITO_ENGINE, MITO2_ENGINE};
@@ -118,10 +117,6 @@ impl std::fmt::Debug for DfTableProviderAdapter {
 
 #[async_trait::async_trait]
 impl TableProvider for DfTableProviderAdapter {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn schema(&self) -> DfSchemaRef {
         let table_info = self.table.table_info();
         let schema = self.table.schema().arrow_schema().clone();

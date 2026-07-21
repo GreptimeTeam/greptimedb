@@ -15,7 +15,6 @@
 //! A physical plan for window sort(Which is sorting multiple sorted ranges according to input `PartitionRange`).
 //!
 
-use std::any::Any;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::pin::Pin;
 use std::slice::from_ref;
@@ -195,10 +194,6 @@ impl DisplayAs for WindowedSortExec {
 }
 
 impl ExecutionPlan for WindowedSortExec {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn schema(&self) -> SchemaRef {
         self.input.schema()
     }

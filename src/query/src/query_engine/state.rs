@@ -207,6 +207,14 @@ impl QueryEngineState {
         }
         analyzer.rules.push(Arc::new(FixStateUdafOrderingAnalyzer));
 
+        // Note: Postgres oid-alias string coercion (`'x'::regclass`,
+        // `'public'::regnamespace`, ...) is handled by the
+        // `PostgresCompatibilityParser`'s built-in `RewriteRegCastToSubquery`
+        // rule at SQL-parse time, so no analyzer rule is registered here. The
+        // implicit `oid_col = 'name'` form is not resolved (it needs schema
+        // awareness the parser lacks); the few client queries that use it are
+        // handled by the parser's blacklist.
+
         let mut optimizer = Optimizer::new();
         optimizer.rules.push(Arc::new(ScanHintRule));
         optimizer.rules.push(Arc::new(JsonTypeConcretizeRule));
@@ -268,9 +276,9 @@ impl QueryEngineState {
             .with_optimizer_rules(optimizer.rules)
             .with_physical_optimizer_rules(physical_optimizer.rules)
             .build();
-
         let df_context = SessionContext::new_with_state(session_state);
         register_function_aliases(&df_context);
+        register_pg_catalog_compat(&df_context);
 
         Ok(Self {
             df_context,
@@ -537,6 +545,22 @@ fn register_function_aliases(ctx: &SessionContext) {
     }
 }
 
+/// Register the session-level (not function-registry) Postgres-compatibility
+/// extension sourced from `datafusion-pg-catalog`: widen Postgres `int4`
+/// bounds to `int8` for `generate_series`/`range` (their stock implementations
+/// require `int8` literals, and DF invokes them at planning time, before any
+/// analyzer rule can run).
+///
+/// The oid-alias type planner is supplied per SQL-planner context by
+/// [`DfContextProviderAdapter::get_type_planner`](crate::datafusion::planner::DfContextProviderAdapter::get_type_planner).
+/// Forward oid-alias name->oid resolution is handled at SQL-parse time by the
+/// `PostgresCompatibilityParser`'s built-in rewrite rule, not here.
+fn register_pg_catalog_compat(ctx: &SessionContext) {
+    datafusion_pg_catalog::pg_catalog::generate_series_arg_coercion::CoerceIntArgsToBigInt::widen(
+        ctx,
+    );
+}
+
 impl DfQueryPlanner {
     fn new(
         catalog_manager: CatalogManagerRef,
@@ -594,7 +618,17 @@ impl MetricsMemoryPool {
     }
 }
 
+impl fmt::Display for MetricsMemoryPool {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}(inner_pool: {})", self.name(), self.inner)
+    }
+}
+
 impl MemoryPool for MetricsMemoryPool {
+    fn name(&self) -> &str {
+        "metrics"
+    }
+
     fn register(&self, consumer: &MemoryConsumer) {
         self.inner.register(consumer);
     }

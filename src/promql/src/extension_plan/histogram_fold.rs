@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::any::Any;
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -423,10 +422,6 @@ pub struct HistogramFoldExec {
 }
 
 impl ExecutionPlan for HistogramFoldExec {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn properties(&self) -> &Arc<PlanProperties> {
         &self.properties
     }
@@ -553,12 +548,12 @@ impl ExecutionPlan for HistogramFoldExec {
         Some(self.metric.clone_inner())
     }
 
-    fn partition_statistics(&self, _: Option<usize>) -> DataFusionResult<Statistics> {
-        Ok(Statistics {
+    fn partition_statistics(&self, _: Option<usize>) -> DataFusionResult<Arc<Statistics>> {
+        Ok(Arc::new(Statistics {
             num_rows: Precision::Absent,
             total_byte_size: Precision::Absent,
             column_statistics: Statistics::unknown_column(&self.schema()),
-        })
+        }))
     }
 
     fn name(&self) -> &str {

@@ -157,10 +157,6 @@ impl ExecutionPlan for DistributedInspectExec {
         "DistributedInspectExec"
     }
 
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     fn schema(&self) -> ArrowSchemaRef {
         self.arrow_schema.clone()
     }

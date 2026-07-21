@@ -14,7 +14,6 @@ CREATE TABLE ts_precision_display (
 );
 
 affected_rows: 0
-
 -- SQLNESS PROTOCOL MYSQL
 INSERT INTO ts_precision_display VALUES (
     '2026-06-02 03:50:00',
@@ -66,4 +65,3 @@ SELECT * FROM ts_precision_display ORDER BY v;
 DROP TABLE ts_precision_display;
 
 affected_rows: 0
-
