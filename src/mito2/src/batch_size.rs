@@ -20,7 +20,11 @@ use crate::sst::parquet::DEFAULT_READ_BATCH_SIZE;
 pub(crate) const TARGET_BATCH_BYTES: usize = 64 * 1024 * 1024;
 
 /// Estimates a batch size from `(num_rows, estimated_bytes)` pairs.
-pub(crate) fn estimate_batch_size(sources: impl IntoIterator<Item = (u64, u64)>) -> usize {
+///
+/// Uses the widest source with valid statistics and targets approximately 64 MiB of decoded data.
+/// The result is clamped to `1..=DEFAULT_READ_BATCH_SIZE`. Returns the default read batch size if
+/// no source contains usable statistics.
+pub fn estimate_batch_size(sources: impl IntoIterator<Item = (u64, u64)>) -> usize {
     let max_row_width = sources
         .into_iter()
         .filter_map(|(rows, bytes)| estimate_row_width(rows, bytes))

@@ -1082,7 +1082,12 @@ pub fn merge_and_dedup(
     )
 }
 
-fn merge_and_dedup_with_batch_size(
+/// Merges and optionally deduplicates record batch iterators with an explicit output batch size.
+///
+/// `batch_size` controls the target number of rows in batches assembled by the merge iterator and
+/// is clamped to at least one. The other arguments have the same meaning as in
+/// [`merge_and_dedup`].
+pub fn merge_and_dedup_with_batch_size(
     schema: &SchemaRef,
     append_mode: bool,
     merge_mode: MergeMode,
@@ -1090,6 +1095,7 @@ fn merge_and_dedup_with_batch_size(
     input_iters: Vec<BoxedRecordBatchIterator>,
     batch_size: usize,
 ) -> Result<BoxedRecordBatchIterator> {
+    let batch_size = batch_size.max(1);
     let merge_iter = FlatMergeIterator::new(schema.clone(), input_iters, batch_size)?;
     let maybe_dedup = if append_mode {
         // No dedup in append mode
