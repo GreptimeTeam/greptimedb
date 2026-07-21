@@ -446,13 +446,11 @@ impl MetasrvBuilder {
                 options.grpc.server_addr.clone(),
             ))
         };
-        let ddl_manager = DdlManager::try_new(
+        let ddl_manager = DdlManager::new(
             ddl_context,
             procedure_manager_c,
             repartition_procedure_factory,
-            false,
-        )
-        .context(error::InitDdlManagerSnafu)?;
+        );
 
         let ddl_manager = if let Some(configurator) = plugins
             .as_ref()

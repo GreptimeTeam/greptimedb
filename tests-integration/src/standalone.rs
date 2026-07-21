@@ -238,28 +238,27 @@ impl GreptimeDbStandaloneBuilder {
         ));
 
         let repartition_procedure_factory = Arc::new(StandaloneRepartitionProcedureFactory);
-        let ddl_manager = Arc::new(
-            DdlManager::try_new(
-                DdlContext {
-                    node_manager: node_manager.clone(),
-                    cache_invalidator: cache_registry.clone(),
-                    memory_region_keeper: Arc::new(MemoryRegionKeeper::default()),
-                    leader_region_registry: Arc::new(LeaderRegionRegistry::default()),
-                    table_metadata_manager,
-                    table_metadata_allocator,
-                    flow_metadata_manager,
-                    flow_metadata_allocator,
-                    region_failure_detector_controller: Arc::new(NoopRegionFailureDetectorControl),
-                    soft_drop_enabled: false,
-                    soft_drop_retention: None,
-                    create_database_metadata_committer: None,
-                },
-                procedure_manager.clone(),
-                repartition_procedure_factory,
-                register_procedure_loaders,
-            )
-            .unwrap(),
-        );
+        let ddl_manager = Arc::new(DdlManager::new(
+            DdlContext {
+                node_manager: node_manager.clone(),
+                cache_invalidator: cache_registry.clone(),
+                memory_region_keeper: Arc::new(MemoryRegionKeeper::default()),
+                leader_region_registry: Arc::new(LeaderRegionRegistry::default()),
+                table_metadata_manager,
+                table_metadata_allocator,
+                flow_metadata_manager,
+                flow_metadata_allocator,
+                region_failure_detector_controller: Arc::new(NoopRegionFailureDetectorControl),
+                soft_drop_enabled: false,
+                soft_drop_retention: None,
+                create_database_metadata_committer: None,
+            },
+            procedure_manager.clone(),
+            repartition_procedure_factory,
+        ));
+        if register_procedure_loaders {
+            ddl_manager.register_loaders().unwrap();
+        }
         let procedure_executor = Arc::new(LocalProcedureExecutor::new(
             ddl_manager,
             procedure_manager.clone(),

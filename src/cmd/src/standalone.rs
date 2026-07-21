@@ -556,13 +556,11 @@ impl StartCommand {
             create_database_metadata_committer: None,
         };
 
-        let ddl_manager = DdlManager::try_new(
+        let ddl_manager = DdlManager::new(
             ddl_context,
             procedure_manager.clone(),
             Arc::new(StandaloneRepartitionProcedureFactory),
-            false,
-        )
-        .context(error::InitDdlManagerSnafu)?;
+        );
 
         let ddl_manager = if let Some(configurator) =
             plugins.get::<DdlManagerConfiguratorRef<DdlManagerConfigureContext>>()

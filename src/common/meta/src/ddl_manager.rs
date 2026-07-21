@@ -208,24 +208,19 @@ pub struct DdlOptions {
 }
 
 impl DdlManager {
-    /// Returns a new [DdlManager] with all Ddl [BoxedProcedureLoader](common_procedure::procedure::BoxedProcedureLoader)s registered.
-    pub fn try_new(
+    /// Returns a new [DdlManager].
+    pub fn new(
         ddl_context: DdlContext,
         procedure_manager: ProcedureManagerRef,
         repartition_procedure_factory: RepartitionProcedureFactoryRef,
-        register_loaders: bool,
-    ) -> Result<Self> {
-        let manager = Self {
+    ) -> Self {
+        Self {
             ddl_context,
             procedure_manager,
             repartition_procedure_factory,
             #[cfg(feature = "enterprise")]
             trigger_ddl_manager: None,
-        };
-        if register_loaders {
-            manager.register_loaders()?;
         }
-        Ok(manager)
     }
 
     #[cfg(feature = "enterprise")]
@@ -1377,7 +1372,7 @@ mod tests {
     }
 
     #[test]
-    fn test_try_new() {
+    fn test_register_loaders() {
         let kv_backend = Arc::new(MemoryKvBackend::new());
         let table_metadata_manager = Arc::new(TableMetadataManager::new(kv_backend.clone()));
         let table_metadata_allocator = Arc::new(TableMetadataAllocator::new(
@@ -1399,7 +1394,7 @@ mod tests {
             None,
         ));
 
-        let _ = DdlManager::try_new(
+        let ddl_manager = DdlManager::new(
             DdlContext {
                 node_manager: Arc::new(DummyDatanodeManager),
                 cache_invalidator: Arc::new(DummyCacheInvalidator),
@@ -1416,8 +1411,8 @@ mod tests {
             },
             procedure_manager.clone(),
             Arc::new(DummyRepartitionProcedureFactory),
-            true,
         );
+        ddl_manager.register_loaders().unwrap();
 
         let expected_loaders = vec![
             CreateTableProcedure::TYPE_NAME,
@@ -1454,7 +1449,7 @@ mod tests {
             None,
         ));
 
-        let ddl_manager = DdlManager::try_new(
+        let ddl_manager = DdlManager::new(
             DdlContext {
                 node_manager: Arc::new(DummyDatanodeManager),
                 cache_invalidator: Arc::new(DummyCacheInvalidator),
@@ -1471,9 +1466,7 @@ mod tests {
             },
             procedure_manager,
             Arc::new(DummyRepartitionProcedureFactory),
-            true,
-        )
-        .unwrap();
+        );
 
         let err = ddl_manager
             .submit_undrop_table_task(UndropTableTask { table_id: 1024 })
