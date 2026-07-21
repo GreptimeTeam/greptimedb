@@ -303,6 +303,7 @@ impl Inserter {
                             requests: vec![DirtyWindowRequest {
                                 table_id,
                                 timestamps,
+                                time_ranges: vec![],
                             }],
                         })
                         .await
