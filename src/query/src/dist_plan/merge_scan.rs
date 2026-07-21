@@ -656,11 +656,12 @@ impl MergeScanExec {
     }
 
     pub fn sub_stage_metrics(&self) -> Vec<RecordBatchMetrics> {
-        self.sub_stage_metrics
-            .lock()
-            .unwrap()
-            .values()
-            .cloned()
+        let sub_stage_metrics = self.sub_stage_metrics.lock().unwrap();
+        let mut metrics: Vec<_> = sub_stage_metrics.iter().collect();
+        metrics.sort_by_key(|(region_id, _)| **region_id);
+        metrics
+            .into_iter()
+            .map(|(_, metrics)| metrics.clone())
             .collect()
     }
 
@@ -1144,6 +1145,44 @@ mod tests {
         let exec = merge_scan_exec_with_sorted_input(3, 4);
 
         assert!(exec.properties().output_ordering().is_some());
+    }
+
+    #[test]
+    fn sub_stage_metrics_are_sorted_by_region_id() {
+        let exec = merge_scan_exec_with_sorted_input(0, 1);
+        let higher_region = RegionId::new(1024, 2);
+        let lower_region = RegionId::new(1024, 1);
+        let higher_metrics = RecordBatchMetrics {
+            plan_metrics: vec![PlanMetrics {
+                plan: "higher region".to_string(),
+                plan_name: "higher region".to_string(),
+                level: 0,
+                metrics: Vec::new(),
+            }],
+            ..Default::default()
+        };
+        let lower_metrics = RecordBatchMetrics {
+            plan_metrics: vec![PlanMetrics {
+                plan: "lower region".to_string(),
+                plan_name: "lower region".to_string(),
+                level: 0,
+                metrics: Vec::new(),
+            }],
+            ..Default::default()
+        };
+
+        let mut sub_stage_metrics = exec.sub_stage_metrics.lock().unwrap();
+        sub_stage_metrics.insert(higher_region, higher_metrics);
+        sub_stage_metrics.insert(lower_region, lower_metrics);
+        drop(sub_stage_metrics);
+
+        let metrics = exec.sub_stage_metrics();
+        let plans: Vec<_> = metrics
+            .iter()
+            .map(|metrics| metrics.plan_metrics[0].plan.as_str())
+            .collect();
+
+        assert_eq!(plans, ["lower region", "higher region"]);
     }
 
     #[test]
