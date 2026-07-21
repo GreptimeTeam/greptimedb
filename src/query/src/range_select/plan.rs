@@ -585,9 +585,7 @@ impl RangeSelect {
             let [argument] = aggr.params.args.as_slice() else {
                 return None;
             };
-            if canonical_range_aggregate(aggr).is_none() {
-                return None;
-            }
+            canonical_range_aggregate(aggr)?;
             let argument_name = format!("__range_arg_{index}");
             if aggregate
                 .input
