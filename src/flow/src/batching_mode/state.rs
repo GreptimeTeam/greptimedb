@@ -817,12 +817,24 @@ impl DirtyTimeWindows {
 
         // previous time window
         let mut prev_tw = None;
-        for (lower_bound, upper_bound) in std::mem::take(&mut self.windows) {
+        for (mut lower_bound, upper_bound) in std::mem::take(&mut self.windows) {
             // filter out expired time window
-            if let Some(expire_lower_bound) = expire_lower_bound
-                && lower_bound < expire_lower_bound
-            {
-                continue;
+            if let Some(expire_lower_bound) = expire_lower_bound {
+                match upper_bound {
+                    // A bounded range ending at or before the expire bound is
+                    // fully expired, drop it.
+                    Some(upper_bound) if upper_bound <= expire_lower_bound => continue,
+                    // A bounded range crossing the expire bound keeps its
+                    // still-live suffix. The expire bound is aligned to the
+                    // time window boundary by the caller, so the clipped start
+                    // stays aligned.
+                    Some(_) if lower_bound < expire_lower_bound => {
+                        lower_bound = expire_lower_bound;
+                    }
+                    // Unbounded windows keep the start-based behavior.
+                    None if lower_bound < expire_lower_bound => continue,
+                    _ => {}
+                }
             }
 
             let Some(prev_tw) = &mut prev_tw else {
@@ -1204,6 +1216,59 @@ mod test {
                 dirty.add_window(start, end);
             }
             dirty.merge_dirty_time_windows(window_size, None).unwrap();
+            assert_eq!(expected, dirty.windows);
+        }
+
+        // Expire bound handling for bounded ranges vs unbounded windows.
+        let expire_testcases = vec![
+            // A bounded range ending at the expire bound is fully expired.
+            (
+                vec![(Timestamp::new_second(0), Some(Timestamp::new_second(10)))],
+                BTreeMap::from([]),
+            ),
+            // A bounded range ending before the expire bound is fully expired.
+            (
+                vec![(Timestamp::new_second(0), Some(Timestamp::new_second(5)))],
+                BTreeMap::from([]),
+            ),
+            // A bounded range crossing the expire bound keeps its live
+            // suffix: [0s, 15s) with expire 10s becomes [10s, 15s).
+            (
+                vec![(Timestamp::new_second(0), Some(Timestamp::new_second(15)))],
+                BTreeMap::from([(
+                    Timestamp::new_second(10),
+                    Some(Timestamp::new_second(15)),
+                )]),
+            ),
+            // A bounded range starting at the expire bound is kept intact.
+            (
+                vec![(Timestamp::new_second(10), Some(Timestamp::new_second(15)))],
+                BTreeMap::from([(
+                    Timestamp::new_second(10),
+                    Some(Timestamp::new_second(15)),
+                )]),
+            ),
+            // An unbounded window starting before the expire bound is
+            // dropped, preserving the existing start-based behavior.
+            (
+                vec![(Timestamp::new_second(5), None)],
+                BTreeMap::from([]),
+            ),
+            // An unbounded window starting at the expire bound is kept.
+            (
+                vec![(Timestamp::new_second(10), None)],
+                BTreeMap::from([(Timestamp::new_second(10), None)]),
+            ),
+        ];
+
+        for (windows, expected) in expire_testcases {
+            let mut dirty = DirtyTimeWindows::default();
+            for (start, end) in windows {
+                dirty.add_window(start, end);
+            }
+            dirty
+                .merge_dirty_time_windows(window_size, Some(Timestamp::new_second(10)))
+                .unwrap();
             assert_eq!(expected, dirty.windows);
         }
     }
