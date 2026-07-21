@@ -27,6 +27,8 @@ Affected Rows: 5
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE (partitioning.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE Total\s+rows:\s+\d+ Total rows: REDACTED
+-- SQLNESS REPLACE Dictionary\(UInt32,\s*Utf8\(([^)]*)\)\) Utf8($1)
 EXPLAIN ANALYZE VERBOSE SELECT
     ts,
     station,
@@ -52,7 +54,7 @@ ORDER BY station, "channel", ts;
 | 1_| 0_|_CooperativeExec REDACTED
 |_|_|_SeqScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "projection": ["ts", "station", "channel", "value_a", "value_b"], "filters": ["station = Utf8(\"station-a\")", "unused_tag = Utf8(\"unused-a\")", "ts >= TimestampMillisecond(0, None)", "ts < TimestampMillisecond(15000, None)"], "flat_format": true, "REDACTED
 |_|_|_|
-|_|_| Total rows: 4_|
+|_|_| Total rows: REDACTED_|
 +-+-+-+
 
 SELECT

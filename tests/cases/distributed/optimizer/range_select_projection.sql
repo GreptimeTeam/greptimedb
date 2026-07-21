@@ -23,6 +23,8 @@ INSERT INTO range_select_projection VALUES
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE (partitioning.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE Total\s+rows:\s+\d+ Total rows: REDACTED
+-- SQLNESS REPLACE Dictionary\(UInt32,\s*Utf8\(([^)]*)\)\) Utf8($1)
 EXPLAIN ANALYZE VERBOSE SELECT
     ts,
     station,
