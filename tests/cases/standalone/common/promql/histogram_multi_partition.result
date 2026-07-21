@@ -44,9 +44,9 @@ tql analyze (0, 10, '10s') histogram_quantile(0.5, sum by (le) (histogram_gap_bu
 | 0_| 0_|_HistogramFoldExec: le=@0, field=@2, quantile=0.5 REDACTED
 |_|_|_SortExec: expr=[ts@1 ASC NULLS LAST, CAST(le@0 AS Float64) ASC NULLS LAST], preserve_partitioning=[true] REDACTED
 |_|_|_RepartitionExec: partitioning=Hash([ts@1],REDACTED
-|_|_|_AggregateExec: mode=FinalPartitioned, gby=[le@0 as le, ts@1 as ts], aggr=[sum(histogram_gap_bucket.val)] REDACTED
+|_|_|_AggregateExec: mode=FinalPartitioned, gby=[le@0 as le, ts@1 as ts], aggr=[__sum_merge(__sum_state(histogram_gap_bucket.val)) as sum(histogram_gap_bucket.val)] REDACTED
 |_|_|_RepartitionExec: partitioning=Hash([le@0, ts@1],REDACTED
-|_|_|_AggregateExec: mode=Partial, gby=[le@0 as le, ts@1 as ts], aggr=[sum(histogram_gap_bucket.val)] REDACTED
+|_|_|_AggregateExec: mode=Partial, gby=[le@0 as le, ts@1 as ts], aggr=[__sum_merge(__sum_state(histogram_gap_bucket.val)) as sum(histogram_gap_bucket.val)] REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
 | 1_| 0_|_AggregateExec: mode=FinalPartitioned, gby=[le@0 as le, ts@1 as ts], aggr=[__sum_state(histogram_gap_bucket.val)] REDACTED

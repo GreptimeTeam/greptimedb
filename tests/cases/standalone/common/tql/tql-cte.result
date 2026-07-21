@@ -201,7 +201,7 @@ SELECT sum(val) FROM filtered;
 |               |         Projection: tql_data.ts, tql_data.val                                                                                                                  |
 |               |           SubqueryAlias: tql_data                                                                                                                              |
 |               |             Projection: metric.ts AS ts, prom_rate(ts_range,val,ts,Int64(20000)) AS val                                                                        |
-|               |               Filter: prom_rate(ts_range,val,ts,Int64(20000)) > Float64(0) AND prom_rate(ts_range,val,ts,Int64(20000)) IS NOT NULL                             |
+|               |               Filter: prom_rate(ts_range,val,ts,Int64(20000)) IS NOT NULL AND prom_rate(ts_range,val,ts,Int64(20000)) > Float64(0)                             |
 |               |                 Projection: metric.ts, prom_rate(ts_range, val, metric.ts, Int64(20000)) AS prom_rate(ts_range,val,ts,Int64(20000))                            |
 |               |                   PromRangeManipulate: req range=[0..40000], interval=[10000], eval range=[20000], time index=[ts], values=["val"]                             |
 |               |                     PromSeriesNormalize: offset=[0], time index=[ts], filter NaN: [true]                                                                       |
@@ -389,8 +389,8 @@ LIMIT 3;
 | physical_plan | ProjectionExec: expr=[metric_val@0 as metric_val, label_val@1 as label_val]                                                                                                    |
 |               |   SortPreservingMergeExec: [ts@2 ASC NULLS LAST], fetch=3                                                                                                                      |
 |               |     SortExec: TopK(fetch=3), expr=[ts@2 ASC NULLS LAST], preserve_REDACTED
-|               |       ProjectionExec: expr=[val@1 as metric_val, cpu@2 as label_val, ts@0 as ts]                                                                                               |
-|               |         HashJoinExec: mode=Partitioned, join_type=Inner, on=[(ts@0, ts@0)], projection=[ts@0, val@1, cpu@3]                                                                    |
+|               |       ProjectionExec: expr=[val@0 as metric_val, cpu@1 as label_val, ts@2 as ts]                                                                                               |
+|               |         HashJoinExec: mode=Partitioned, join_type=Inner, on=[(ts@0, ts@0)], projection=[val@1, cpu@3, ts@0]                                                                    |
 |               |           RepartitionExec: REDACTED
 |               |             MergeScanExec: REDACTED
 |               |           RepartitionExec: REDACTED
@@ -651,7 +651,7 @@ SELECT count(*) as high_values FROM final;
 |               |               Projection: base_tql.ts, base_tql.val * Float64(100) AS percent                                                                                     |
 |               |                 SubqueryAlias: base_tql                                                                                                                           |
 |               |                   Projection: metric.ts AS ts, metric.val AS val                                                                                                  |
-|               |                     Filter: metric.val * Float64(100) > Float64(200) AND metric.val > Float64(0)                                                                  |
+|               |                     Filter: metric.val > Float64(0) AND metric.val * Float64(100) > Float64(200)                                                                  |
 |               |                       PromInstantManipulate: range=[0..40000], lookback=[300000], interval=[10000], time index=[ts]                                               |
 |               |                         PromSeriesDivide: tags=[]                                                                                                                 |
 |               |                           Filter: metric.ts >= TimestampMillisecond(-299999, None) AND metric.ts <= TimestampMillisecond(40000, None)                             |
@@ -840,8 +840,8 @@ LIMIT 5;
 |               | ]]                                                                                                                                                                   |
 | physical_plan | SortPreservingMergeExec: [ts@0 ASC NULLS LAST, host@2 ASC NULLS LAST, avg_value@1 ASC NULLS LAST], fetch=5                                                           |
 |               |   SortExec: TopK(fetch=5), expr=[ts@0 ASC NULLS LAST, host@2 ASC NULLS LAST, avg_value@1 ASC NULLS LAST], preserve_REDACTED
-|               |     ProjectionExec: expr=[ts@1 as ts, cpu@0 as avg_value, host@2 as host]                                                                                            |
-|               |       HashJoinExec: mode=Partitioned, join_type=Inner, on=[(date_trunc(Utf8("second"),t.ts)@2, date_trunc(Utf8("second"),l.ts)@2)], projection=[cpu@0, ts@1, host@4] |
+|               |     ProjectionExec: expr=[ts@0 as ts, cpu@1 as avg_value, host@2 as host]                                                                                            |
+|               |       HashJoinExec: mode=Partitioned, join_type=Inner, on=[(date_trunc(Utf8("second"),t.ts)@2, date_trunc(Utf8("second"),l.ts)@2)], projection=[ts@1, cpu@0, host@4] |
 |               |         RepartitionExec: REDACTED
 |               |           ProjectionExec: expr=[cpu@0 as cpu, ts@2 as ts, date_trunc(second, ts@2) as date_trunc(Utf8("second"),t.ts)]                                               |
 |               |             MergeScanExec: REDACTED
