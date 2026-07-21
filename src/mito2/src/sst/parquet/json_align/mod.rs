@@ -15,7 +15,6 @@
 use datatypes::arrow::record_batch::RecordBatch;
 use futures::stream::BoxStream;
 
-mod fallback;
 mod schema;
 mod stream;
 

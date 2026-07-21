@@ -574,7 +574,7 @@ pub(crate) fn decode_json_variant(
     jsonb::from_slice(bytes).map(Into::into)
 }
 
-pub fn encode_serde_json_as_jsonb(value: serde_json::Value) -> Vec<u8> {
+pub(crate) fn encode_serde_json_as_jsonb(value: serde_json::Value) -> Vec<u8> {
     jsonb::Value::from(value).to_vec()
 }
 

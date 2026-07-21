@@ -1853,7 +1853,6 @@ impl RowGroupReaderBuilder {
             stream,
             self.projection.projected_root_presence.clone(),
             self.output_schema.clone(),
-            self.projection.json2_fallback_plan.clone(),
         )?
         .boxed())
     }
