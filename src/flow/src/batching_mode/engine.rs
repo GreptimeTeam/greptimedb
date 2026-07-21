@@ -53,7 +53,7 @@ use crate::batching_mode::utils::sql_to_df_plan;
 use crate::engine::{FlowEngine, FlowStatProvider};
 use crate::error::{
     CreateFlowSnafu, DatafusionSnafu, ExternalSnafu, FlowAlreadyExistSnafu, FlowNotFoundSnafu,
-    InvalidQuerySnafu, TableNotFoundMetaSnafu, UnexpectedSnafu, UnsupportedSnafu,
+    InvalidQuerySnafu, JoinTaskSnafu, TableNotFoundMetaSnafu, UnexpectedSnafu, UnsupportedSnafu,
 };
 use crate::metrics::METRIC_FLOW_BATCHING_ENGINE_BULK_MARK_TIME_WINDOW;
 use crate::{CreateFlowArgs, Error, FlowId, TableName};
@@ -241,26 +241,15 @@ impl BatchingEngine {
                             continue;
                         };
                         for timestamp in timestamps {
-                            // On alignment failure, fall back to marking the
-                            // whole task dirty so the dirty signal is never
-                            // lost (the caller treats this RPC as accepted and
-                            // will not retry).
-                            match expr.eval(common_time::Timestamp::new(*timestamp, *unit)) {
-                                Ok((Some(align_start), _)) => {
-                                    all_dirty_windows.insert(align_start);
-                                }
-                                res => {
-                                    warn!(
-                                        "Failed to align dirty timestamp {} for flow id = {:?}: {:?}, marking the task fully dirty",
-                                        timestamp,
-                                        task.config.flow_id,
-                                        res.err().map(|e| e.to_string()).unwrap_or_else(|| {
-                                            "missing window lower bound".to_string()
-                                        })
-                                    );
-                                    is_dirty = true;
-                                }
-                            }
+                            let align_start = expr
+                                .eval(common_time::Timestamp::new(*timestamp, *unit))?
+                                .0
+                                .context(UnexpectedSnafu {
+                                    reason: format!(
+                                        "Failed to align dirty timestamp {timestamp}: missing window lower bound"
+                                    ),
+                                })?;
+                            all_dirty_windows.insert(align_start);
                         }
                         for time_range in time_ranges {
                             if time_range.end_exclusive <= time_range.start_inclusive {
@@ -270,25 +259,12 @@ impl BatchingEngine {
                                 );
                                 continue;
                             }
-                            match DirtyTimeWindows::align_time_window(
+                            let (align_start, align_end) = DirtyTimeWindows::align_time_window(
                                 common_time::Timestamp::new(time_range.start_inclusive, *unit),
                                 Some(common_time::Timestamp::new(time_range.end_exclusive, *unit)),
                                 expr,
-                            ) {
-                                Ok((align_start, align_end)) => {
-                                    all_dirty_ranges.push((align_start, align_end));
-                                }
-                                Err(err) => {
-                                    warn!(
-                                        "Failed to align dirty time range [{}, {}) for flow id = {:?}: {}, marking the task fully dirty",
-                                        time_range.start_inclusive,
-                                        time_range.end_exclusive,
-                                        task.config.flow_id,
-                                        err
-                                    );
-                                    is_dirty = true;
-                                }
-                            }
+                            )?;
+                            all_dirty_ranges.push((align_start, align_end));
                         }
                     }
                 }
@@ -312,15 +288,7 @@ impl BatchingEngine {
             handles.push(handle);
         }
         for handle in handles {
-            match handle.await {
-                Err(e) => {
-                    warn!("Failed to handle inserts: {e}");
-                }
-                Ok(Ok(())) => (),
-                Ok(Err(e)) => {
-                    warn!("Failed to handle inserts: {e}");
-                }
-            }
+            handle.await.context(JoinTaskSnafu)??;
         }
 
         Ok(())
@@ -1485,6 +1453,50 @@ GROUP BY l.number, time_window
                 "table id = {table_id}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn test_handle_mark_dirty_time_window_returns_error_on_alignment_failure() {
+        let engine = new_test_engine().await;
+        let table_id = 10;
+        let table_name = "t_bad_timestamp";
+
+        engine
+            .table_meta
+            .create_table_metadata(
+                test_table_info_with_ts_unit(table_id, table_name, TimeUnit::Second),
+                TableRouteValue::physical(vec![]),
+                HashMap::new(),
+            )
+            .await
+            .unwrap();
+
+        let (task, shutdown_tx) = new_test_task_for_source(
+            table_id as FlowId,
+            table_name,
+            Some(test_time_window_expr().await),
+        )
+        .await;
+        engine
+            .runtime
+            .write()
+            .await
+            .insert(table_id as FlowId, task, shutdown_tx);
+
+        let result = engine
+            .handle_mark_dirty_time_window(DirtyWindowRequests {
+                requests: vec![DirtyWindowRequest {
+                    table_id,
+                    timestamps: vec![i64::MAX],
+                    time_ranges: vec![],
+                }],
+            })
+            .await;
+
+        assert!(
+            result.is_err(),
+            "invalid timestamp alignment should be returned to the caller"
+        );
     }
 
     async fn install_abort_observed_handle(task: &BatchingTask) -> oneshot::Receiver<()> {
