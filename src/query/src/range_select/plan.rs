@@ -1824,15 +1824,12 @@ impl RangeSelectStream {
                     "Time index Column downcast to TimestampMillisecondArray failed".into(),
                 )
             })?;
-        for row in 0..num_rows {
+        for (row, hash) in hashes.iter().enumerate().take(num_rows) {
             let bucket = timestamp.value(row);
-            let series = self
-                .series_map
-                .entry(hashes[row])
-                .or_insert_with(|| SeriesState {
-                    row: by_rows.row(row).owned(),
-                    align_ts_accumulator: BTreeMap::new(),
-                });
+            let series = self.series_map.entry(*hash).or_insert_with(|| SeriesState {
+                row: by_rows.row(row).owned(),
+                align_ts_accumulator: BTreeMap::new(),
+            });
             let accumulators = match series.align_ts_accumulator.entry(bucket) {
                 Entry::Occupied(entry) => entry.into_mut(),
                 Entry::Vacant(entry) => {
