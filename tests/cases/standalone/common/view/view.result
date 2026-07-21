@@ -78,6 +78,95 @@ DROP VIEW IF EXISTS v2;
 
 Affected Rows: 0
 
+CREATE VIEW pg_keywords_view AS SELECT * FROM pg_get_keywords();
+
+Affected Rows: 0
+
+SELECT count(*) FROM pg_keywords_view;
+
++----------+
+| count(*) |
++----------+
+| 494      |
++----------+
+
+SELECT count(*) FROM pg_keywords_view;
+
++----------+
+| count(*) |
++----------+
+| 494      |
++----------+
+
+DROP VIEW pg_keywords_view;
+
+Affected Rows: 0
+
+CREATE VIEW pg_keywords_upper_view AS SELECT * FROM PG_GET_KEYWORDS();
+
+Affected Rows: 0
+
+SELECT count(*) FROM pg_keywords_upper_view;
+
++----------+
+| count(*) |
++----------+
+| 494      |
++----------+
+
+SELECT count(*) FROM pg_keywords_upper_view;
+
++----------+
+| count(*) |
++----------+
+| 494      |
++----------+
+
+DROP VIEW pg_keywords_upper_view;
+
+Affected Rows: 0
+
+CREATE VIEW pg_keywords_quoted_view AS SELECT * FROM "pg_get_keywords"();
+
+Affected Rows: 0
+
+SELECT count(*) FROM pg_keywords_quoted_view;
+
++----------+
+| count(*) |
++----------+
+| 494      |
++----------+
+
+SELECT count(*) FROM pg_keywords_quoted_view;
+
++----------+
+| count(*) |
++----------+
+| 494      |
++----------+
+
+DROP VIEW pg_keywords_quoted_view;
+
+Affected Rows: 0
+
+CREATE VIEW rejected_quoted_pg_keywords_view AS SELECT * FROM "PG_GET_KEYWORDS"();
+
+Error: 1004(InvalidArguments), Invalid view "rejected_quoted_pg_keywords_view": only pg_get_keywords() is supported as a table function source
+
+CREATE VIEW rejected_pg_keywords_view AS SELECT * FROM pg_get_keywords(1);
+
+Error: 1004(InvalidArguments), Invalid view "rejected_pg_keywords_view": only pg_get_keywords() is supported as a table function source
+
+CREATE VIEW rejected_udtf_view AS SELECT * FROM generate_series(1, 2);
+
+Error: 1004(InvalidArguments), Invalid view "rejected_udtf_view": only pg_get_keywords() is supported as a table function source
+
+SHOW VIEWS;
+
+++
+++
+
 DROP TABLE t1;
 
 Affected Rows: 0

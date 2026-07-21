@@ -17,6 +17,7 @@ use std::sync::Arc;
 
 use common_catalog::format_full_table_name;
 use common_query::logical_plan::{SubstraitPlanDecoderRef, rename_logical_plan_columns};
+use datafusion::catalog::TableFunction;
 use datafusion::common::{ResolvedTableReference, TableReference};
 use datafusion::datasource::view::ViewTable;
 use datafusion::datasource::{TableProvider, provider_as_source};
@@ -47,6 +48,7 @@ pub struct DfTableSourceProvider {
     query_ctx: QueryContextRef,
     plan_decoder: SubstraitPlanDecoderRef,
     enable_ident_normalization: bool,
+    persisted_view_table_function: Option<Arc<TableFunction>>,
 }
 
 impl DfTableSourceProvider {
@@ -66,7 +68,17 @@ impl DfTableSourceProvider {
             query_ctx,
             plan_decoder,
             enable_ident_normalization,
+            persisted_view_table_function: None,
         }
+    }
+
+    /// Adds the exact table function used to reconstruct legacy persisted-view markers.
+    pub fn with_persisted_view_table_function(
+        mut self,
+        table_function: Option<Arc<TableFunction>>,
+    ) -> Self {
+        self.persisted_view_table_function = table_function;
+        self
     }
 
     /// Returns the query context.
@@ -147,7 +159,10 @@ impl DfTableSourceProvider {
             })?;
 
         // Build the catalog list provider for deserialization.
-        let catalog_list = Arc::new(DummyCatalogList::new(self.catalog_manager.clone()));
+        let catalog_list = Arc::new(
+            DummyCatalogList::new(self.catalog_manager.clone())
+                .with_persisted_view_table_function(self.persisted_view_table_function.clone()),
+        );
         let logical_plan = self
             .plan_decoder
             .decode(view_info.view_info.clone().into(), catalog_list, false)

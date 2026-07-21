@@ -186,16 +186,26 @@ impl SubstraitPlanDecoder for DefaultPlanDecoder {
 
 #[cfg(test)]
 mod tests {
+    use catalog::{CatalogManagerRef, RegisterTableRequest};
+    use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, NUMBERS_TABLE_ID};
     use datafusion::catalog::TableProvider;
+    use datafusion_common::TableReference;
     use datafusion_expr::{LogicalPlanBuilder, LogicalTableSource, col, lit};
     use datatypes::arrow::datatypes::SchemaRef;
     use session::context::QueryContext;
+    use substrait::substrait_proto_df::proto::Plan;
+    use substrait::substrait_proto_df::proto::plan_rel::RelType as PlanRelType;
+    use substrait::substrait_proto_df::proto::read_rel::ReadType;
+    use substrait::substrait_proto_df::proto::rel::RelType;
+    use table::table::numbers::{NUMBERS_TABLE_NAME, NumbersTable};
 
     use super::*;
     use crate::QueryEngineFactory;
     use crate::dummy_catalog::DummyCatalogList;
     use crate::optimizer::test_util::mock_table_provider;
     use crate::options::QueryOptions;
+    use crate::parser::QueryLanguageParser;
+    use crate::plan::extract_and_rewrite_full_table_names;
 
     fn mock_plan(schema: SchemaRef) -> LogicalPlan {
         let table_source = LogicalTableSource::new(schema);
@@ -208,6 +218,71 @@ mod tests {
             .unwrap()
             .build()
             .unwrap()
+    }
+
+    fn test_engine_with_numbers_table() -> (crate::query_engine::QueryEngineRef, CatalogManagerRef)
+    {
+        let catalog_manager = catalog::memory::new_memory_catalog_manager().unwrap();
+        catalog_manager
+            .register_table_sync(RegisterTableRequest {
+                catalog: DEFAULT_CATALOG_NAME.to_string(),
+                schema: DEFAULT_SCHEMA_NAME.to_string(),
+                table_name: NUMBERS_TABLE_NAME.to_string(),
+                table_id: NUMBERS_TABLE_ID,
+                table: NumbersTable::table(NUMBERS_TABLE_ID),
+            })
+            .unwrap();
+
+        let engine = QueryEngineFactory::new(
+            catalog_manager.clone(),
+            None,
+            None,
+            None,
+            None,
+            false,
+            QueryOptions::default(),
+        )
+        .query_engine();
+        (engine, catalog_manager)
+    }
+
+    async fn plan_sql(
+        engine: &crate::query_engine::QueryEngineRef,
+        query_ctx: &QueryContextRef,
+        sql: &str,
+    ) -> LogicalPlan {
+        let statement = QueryLanguageParser::parse_sql(sql, query_ctx).unwrap();
+        engine
+            .planner()
+            .plan(&statement, query_ctx.clone())
+            .await
+            .unwrap()
+    }
+
+    fn named_table_names(plan: &Plan) -> &[String] {
+        let Some(PlanRelType::Root(root)) =
+            plan.relations.first().and_then(|rel| rel.rel_type.as_ref())
+        else {
+            panic!("expected a root relation");
+        };
+        let Some(RelType::Project(project)) = root
+            .input
+            .as_ref()
+            .and_then(|input| input.rel_type.as_ref())
+        else {
+            panic!("expected the root input to be a project relation");
+        };
+        let Some(RelType::Read(read)) = project
+            .input
+            .as_ref()
+            .and_then(|input| input.rel_type.as_ref())
+        else {
+            panic!("expected the project input to be a read relation");
+        };
+        let Some(ReadType::NamedTable(table)) = read.read_type.as_ref() else {
+            panic!("expected the read relation to be a named table");
+        };
+        &table.names
     }
 
     #[tokio::test]
@@ -247,6 +322,60 @@ mod tests {
             "Filter: devices.k0 = Utf8(\"hello\")
   TableScan: devices",
             decode_plan.to_string(),
+        );
+    }
+
+    #[tokio::test]
+    async fn test_pg_get_keywords_legacy_named_table_shape() {
+        let (engine, _) = test_engine_with_numbers_table();
+        let query_ctx = QueryContext::arc();
+        let plan = plan_sql(&engine, &query_ctx, "SELECT * FROM pg_get_keywords()").await;
+
+        let LogicalPlan::Projection(projection) = &plan else {
+            panic!("expected pg_get_keywords() to have a projection root, got {plan}");
+        };
+        let LogicalPlan::TableScan(scan) = projection.input.as_ref() else {
+            panic!("expected the projection to wrap a TableScan, got {plan}");
+        };
+        let TableReference::Bare { table } = &scan.table_name else {
+            panic!("expected the table function scan to have a bare table reference");
+        };
+        assert_eq!(table.as_ref(), "pg_get_keywords()");
+
+        let (_, rewritten_plan) = extract_and_rewrite_full_table_names(plan, query_ctx).unwrap();
+        let encoded = DFLogicalSubstraitConvertor
+            .encode(&rewritten_plan, DefaultSerializer)
+            .unwrap();
+        let substrait_plan = Plan::decode(encoded).unwrap();
+        assert_eq!(
+            named_table_names(&substrait_plan),
+            &["greptime", "public", "pg_get_keywords()"]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_generic_plan_decoder_does_not_resolve_persisted_view_table_function() {
+        let (engine, catalog_manager) = test_engine_with_numbers_table();
+        let query_ctx = QueryContext::arc();
+        let plan = plan_sql(&engine, &query_ctx, "SELECT * FROM pg_get_keywords()").await;
+        let (_, rewritten_plan) =
+            extract_and_rewrite_full_table_names(plan, query_ctx.clone()).unwrap();
+        let encoded = DFLogicalSubstraitConvertor
+            .encode(&rewritten_plan, DefaultSerializer)
+            .unwrap();
+
+        let decoder = engine.engine_context(query_ctx).new_plan_decoder().unwrap();
+        assert!(
+            decoder
+                .decode(
+                    encoded,
+                    Arc::new(catalog::table_source::dummy_catalog::DummyCatalogList::new(
+                        catalog_manager,
+                    )),
+                    false,
+                )
+                .await
+                .is_err()
         );
     }
 }

@@ -217,7 +217,8 @@ impl DfLogicalPlanner {
                 .config_options()
                 .sql_parser
                 .enable_ident_normalization,
-        );
+        )
+        .with_persisted_view_table_function(self.engine_state.table_function("pg_get_keywords"));
 
         let context_provider = DfContextProviderAdapter::try_new(
             self.engine_state.clone(),
