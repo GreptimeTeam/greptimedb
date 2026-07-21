@@ -253,6 +253,8 @@ pub struct EventContext<'a> {
 pub enum EventTrigger {
     /// The root procedure was submitted to the manager.
     Submitted,
+    /// The root procedure was recovered from persisted state.
+    Recovered,
     /// A child submission was attempted.
     ChildSubmitted {
         /// The submitted child procedure.
@@ -299,6 +301,7 @@ impl Display for EventTrigger {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Submitted => write!(f, "Submitted"),
+            Self::Recovered => write!(f, "Recovered"),
             Self::ChildSubmitted {
                 procedure_id,
                 outcome,

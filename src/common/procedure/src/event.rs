@@ -106,21 +106,25 @@ impl Event for ProcedureEvent {
     fn extra_rows(&self) -> Result<Vec<Row>> {
         let mut internal_event_extra_rows = self.internal_event.extra_rows()?;
         let mut rows = Vec::with_capacity(internal_event_extra_rows.len());
+        let procedure_id = self.procedure_id.to_string();
+        let state = self.state.as_str_name().to_string();
+        let error = match &self.state {
+            ProcedureState::Failed { error }
+            | ProcedureState::PrepareRollback { error }
+            | ProcedureState::RollingBack { error }
+            | ProcedureState::Retrying { error }
+            | ProcedureState::Poisoned { error, .. } => format!("{error:?}"),
+            _ => String::new(),
+        };
+        let trigger = self.trigger.to_string();
+
         for internal_event_extra_row in internal_event_extra_rows.iter_mut() {
-            let error_str = match &self.state {
-                ProcedureState::Failed { error } => format!("{:?}", error),
-                ProcedureState::PrepareRollback { error } => format!("{:?}", error),
-                ProcedureState::RollingBack { error } => format!("{:?}", error),
-                ProcedureState::Retrying { error } => format!("{:?}", error),
-                ProcedureState::Poisoned { error, .. } => format!("{:?}", error),
-                _ => "".to_string(),
-            };
             let mut values = Vec::with_capacity(4 + internal_event_extra_row.values.len());
             values.extend([
-                ValueData::StringValue(self.procedure_id.to_string()).into(),
-                ValueData::StringValue(self.state.as_str_name().to_string()).into(),
-                ValueData::StringValue(error_str).into(),
-                ValueData::StringValue(self.trigger.to_string()).into(),
+                ValueData::StringValue(procedure_id.clone()).into(),
+                ValueData::StringValue(state.clone()).into(),
+                ValueData::StringValue(error.clone()).into(),
+                ValueData::StringValue(trigger.clone()).into(),
             ]);
             values.append(&mut internal_event_extra_row.values);
             rows.push(Row { values });
@@ -207,6 +211,7 @@ mod tests {
         let procedure_id = ProcedureId::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
 
         assert_eq!(EventTrigger::Submitted.to_string(), "Submitted");
+        assert_eq!(EventTrigger::Recovered.to_string(), "Recovered");
         assert_eq!(
             EventTrigger::ChildSubmitted {
                 procedure_id,

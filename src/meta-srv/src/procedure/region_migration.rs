@@ -1034,6 +1034,7 @@ mod tests {
             RegionMigrationProcedure::new(new_persistent_context(), env.context_factory(), vec![]);
         let state = common_procedure::ProcedureState::Running;
         let triggers = [
+            common_procedure::EventTrigger::Recovered,
             common_procedure::EventTrigger::Retrying {
                 phase: common_procedure::RetryPhase::Execute,
                 attempt: 1,

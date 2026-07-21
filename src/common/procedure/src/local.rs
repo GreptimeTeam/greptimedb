@@ -50,6 +50,21 @@ use crate::{
 /// The expired time of a procedure's metadata.
 const META_TTL: Duration = Duration::from_secs(60 * 10);
 
+#[derive(Clone, Copy)]
+enum RootSubmissionOrigin {
+    Fresh,
+    Recovery,
+}
+
+impl RootSubmissionOrigin {
+    fn event_trigger(self) -> EventTrigger {
+        match self {
+            Self::Fresh => EventTrigger::Submitted,
+            Self::Recovery => EventTrigger::Recovered,
+        }
+    }
+}
+
 /// Shared metadata of a procedure.
 ///
 /// # Note
@@ -676,6 +691,7 @@ impl LocalManager {
         procedure_state: ProcedureState,
         step: u32,
         procedure: BoxedProcedure,
+        origin: RootSubmissionOrigin,
     ) -> Result<Watcher> {
         ensure!(self.manager_ctx.running(), ManagerNotStartSnafu);
 
@@ -717,7 +733,7 @@ impl LocalManager {
             DuplicateProcedureSnafu { procedure_id },
         );
 
-        runner.record_event(EventTrigger::Submitted);
+        runner.record_event(origin.event_trigger());
 
         let tracing_context = TracingContext::from_current_span();
 
@@ -789,6 +805,7 @@ impl LocalManager {
                     procedure_state,
                     loaded_procedure.step,
                     loaded_procedure.procedure,
+                    RootSubmissionOrigin::Recovery,
                 ) {
                     error!(e; "Failed to recover procedure {}", procedure_id);
                 }
@@ -915,6 +932,7 @@ impl ProcedureManager for LocalManager {
             ProcedureState::Running,
             0,
             procedure.procedure,
+            RootSubmissionOrigin::Fresh,
         )
     }
 
@@ -978,10 +996,12 @@ pub(crate) mod test_util {
 #[cfg(test)]
 mod tests {
     use std::assert_matches;
+    use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 
     use common_error::mock::MockError;
     use common_error::status_code::StatusCode;
+    use common_event_recorder::{Event, EventRecorder};
     use common_test_util::temp_dir::create_temp_dir;
     use tokio::sync::oneshot;
     use tokio::time::timeout;
@@ -990,11 +1010,55 @@ mod tests {
     use crate::error::{self, Error};
     use crate::store::state_store::ObjectStateStore;
     use crate::test_util::InMemoryPoisonStore;
-    use crate::{Context, Procedure, Status};
+    use crate::{Context, EventContext, EventTrigger, Procedure, ProcedureEvent, Status};
 
     fn new_test_manager_context() -> ManagerContext {
         let poison_manager = Arc::new(InMemoryPoisonStore::default());
         ManagerContext::new(poison_manager)
+    }
+
+    #[derive(Debug, Default)]
+    struct CapturingEventRecorder {
+        events: Mutex<Vec<Box<dyn Event>>>,
+    }
+
+    impl CapturingEventRecorder {
+        fn triggers(&self) -> Vec<EventTrigger> {
+            self.events
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|event| {
+                    event
+                        .as_any()
+                        .downcast_ref::<ProcedureEvent>()
+                        .unwrap()
+                        .trigger
+                        .clone()
+                })
+                .collect()
+        }
+    }
+
+    impl EventRecorder for CapturingEventRecorder {
+        fn record(&self, event: Box<dyn Event>) {
+            self.events.lock().unwrap().push(event);
+        }
+
+        fn close(&self) {}
+    }
+
+    #[derive(Debug)]
+    struct TestProcedureEvent;
+
+    impl Event for TestProcedureEvent {
+        fn event_type(&self) -> &str {
+            "test_procedure"
+        }
+
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
     }
 
     #[test]
@@ -1146,6 +1210,10 @@ mod tests {
         fn poison_keys(&self) -> PoisonKeys {
             self.poison_keys.clone()
         }
+
+        fn event(&self, _ctx: &EventContext<'_>) -> Option<Box<dyn Event>> {
+            Some(Box::new(TestProcedureEvent))
+        }
     }
 
     impl ProcedureToLoad {
@@ -1164,6 +1232,80 @@ mod tests {
             };
             Box::new(f)
         }
+    }
+
+    #[tokio::test]
+    async fn test_fresh_submission_emits_submitted_event() {
+        let dir = create_temp_dir("fresh_submission_event");
+        let state_store = Arc::new(ObjectStateStore::new(test_util::new_object_store(&dir)));
+        let poison_manager = Arc::new(InMemoryPoisonStore::new());
+        let event_recorder = Arc::new(CapturingEventRecorder::default());
+        let manager = LocalManager::new(
+            ManagerConfig::default(),
+            state_store,
+            poison_manager,
+            None,
+            Some(event_recorder.clone()),
+        );
+        manager.manager_ctx.start();
+
+        manager
+            .submit(ProcedureWithId {
+                id: ProcedureId::random(),
+                procedure: Box::new(ProcedureToLoad::new("fresh submission")),
+            })
+            .await
+            .unwrap();
+
+        assert!(event_recorder.triggers().contains(&EventTrigger::Submitted));
+    }
+
+    #[tokio::test]
+    async fn test_recovery_emits_recovered_event() {
+        let dir = create_temp_dir("recovery_submission_event");
+        let object_store = test_util::new_object_store(&dir);
+        let state_store = Arc::new(ObjectStateStore::new(object_store.clone()));
+        let poison_manager = Arc::new(InMemoryPoisonStore::new());
+        let event_recorder = Arc::new(CapturingEventRecorder::default());
+        let manager = LocalManager::new(
+            ManagerConfig {
+                parent_path: "data/".to_string(),
+                ..Default::default()
+            },
+            state_store,
+            poison_manager,
+            None,
+            Some(event_recorder.clone()),
+        );
+        manager.manager_ctx.start();
+        manager
+            .register_loader("ProcedureToLoad", ProcedureToLoad::loader())
+            .unwrap();
+
+        let procedure = ProcedureToLoad::new("recovered submission");
+        let procedure_id = ProcedureId::random();
+        ProcedureStore::from_object_store(object_store)
+            .store_procedure(
+                procedure_id,
+                0,
+                procedure.type_name().to_string(),
+                procedure.dump().unwrap(),
+                None,
+            )
+            .await
+            .unwrap();
+
+        manager.recover().await.unwrap();
+
+        assert!(
+            manager
+                .procedure_state(procedure_id)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(event_recorder.triggers().contains(&EventTrigger::Recovered));
+        assert!(!event_recorder.triggers().contains(&EventTrigger::Submitted));
     }
 
     #[derive(Debug)]
