@@ -16,6 +16,7 @@
 
 mod error;
 mod json_expr_planner;
+mod pg_oid_alias_expr_planner;
 mod planner;
 
 use std::any::Any;
