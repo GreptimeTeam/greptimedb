@@ -94,15 +94,18 @@ impl TaskState {
         }
     }
 
-    /// called after last query is done
-    /// `is_succ` indicate whether the last query is successful
+    /// Record the first-execution start time. Call this once, just before
+    /// the first frontend query is dispatched, not after it completes.
+    pub fn record_start_time_if_first(&mut self) {
+        if self.start_time_millis.is_none() {
+            self.start_time_millis = Some(common_time::util::current_time_millis());
+        }
+    }
+
     pub fn after_query_exec(&mut self, elapsed: Duration, is_succ: bool) {
         self.exec_state = ExecState::Idle;
         self.last_query_duration = elapsed;
         self.last_update_time = Instant::now();
-        if self.start_time_millis.is_none() {
-            self.start_time_millis = Some(common_time::util::current_time_millis());
-        }
         if is_succ {
             self.last_exec_time_millis = Some(common_time::util::current_time_millis());
         }

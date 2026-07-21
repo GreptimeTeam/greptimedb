@@ -642,7 +642,7 @@ fn describe_fields(
                 "state_size".to_string(),
                 None,
                 None,
-                Type::INT8,
+                Type::NUMERIC,
                 format.format_for(5),
             ),
         ]),
