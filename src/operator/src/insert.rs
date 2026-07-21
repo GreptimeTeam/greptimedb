@@ -412,41 +412,67 @@ impl Inserter {
             instant_requests,
         } = requests;
 
-        // Mirror requests for source table to flownode asynchronously
-        let flow_mirror_task = FlowMirrorTask::new(
+        // Instant TTL requests are not committed to source storage; mirror
+        // them to flownodes. Build the task here so cache errors fail before
+        // any work, but defer detach until after all normal mirror precomputes
+        // succeed. If a normal precompute fails later, we must not have sent
+        // side effects for instant requests either.
+        let instant_mirror = FlowMirrorTask::new(
             &self.table_flownode_set_cache,
-            normal_requests
-                .requests
-                .iter()
-                .chain(instant_requests.requests.iter()),
+            instant_requests.requests.iter(),
         )
         .await?;
-        flow_mirror_task.detach(self.node_manager.clone())?;
 
-        // Write requests to datanode and wait for response
-        let write_tasks = self
-            .group_requests_by_peer(normal_requests)
-            .await?
-            .into_iter()
-            .map(|(peer, inserts)| {
-                let node_manager = self.node_manager.clone();
-                let request = request_factory.build_insert(inserts);
-                common_runtime::spawn_global(async move {
-                    node_manager
-                        .datanode(&peer)
-                        .await
-                        .handle(request)
-                        .await
-                        .context(RequestInsertsSnafu)
-                })
-            });
-        let results = future::try_join_all(write_tasks)
-            .await
-            .context(JoinTaskSnafu)?;
-        let affected_rows = results
-            .into_iter()
-            .map(|resp| resp.map(|r| r.affected_rows))
-            .sum::<Result<AffectedRows>>()?;
+        // Normal requests: group by datanode peer first, then prebuild all
+        // mirror tasks BEFORE spawning any datanode write. This avoids the
+        // race where a later group's cache lookup fails but an earlier group's
+        // write has already committed.
+        let grouped = self.group_requests_by_peer(normal_requests).await?;
+        let mut per_peer: Vec<(Peer, RegionInsertRequests, FlowMirrorTask)> =
+            Vec::with_capacity(grouped.len());
+        for (peer, inserts) in grouped {
+            let mirror =
+                FlowMirrorTask::new(&self.table_flownode_set_cache, inserts.requests.iter())
+                    .await?;
+            per_peer.push((peer, inserts, mirror));
+        }
+
+        // All precompute succeeded. Now detach instant mirror (no source write
+        // barrier — instant TTL rows are never written to datanode storage).
+        instant_mirror.detach(self.node_manager.clone())?;
+
+        // All mirrors precomputed; now spawn writes. Each spawned task
+        // detaches its group's mirror only after its datanode returns Ok.
+        let mut write_tasks = Vec::with_capacity(per_peer.len());
+        for (peer, inserts, mirror) in per_peer {
+            let node_manager = self.node_manager.clone();
+            let request = request_factory.build_insert(inserts);
+            write_tasks.push(common_runtime::spawn_global(async move {
+                let result = node_manager
+                    .datanode(&peer)
+                    .await
+                    .handle(request)
+                    .await
+                    .context(RequestInsertsSnafu);
+                if result.is_ok() {
+                    let _ = mirror.detach(node_manager);
+                }
+                result.map(|r| r.affected_rows)
+            }));
+        }
+
+        let results = future::join_all(write_tasks).await;
+        let mut affected_rows: AffectedRows = 0;
+        let mut first_error = None;
+        for result in results {
+            match result.context(JoinTaskSnafu)? {
+                Ok(rows) => affected_rows += rows,
+                Err(e) => first_error = first_error.or(Some(e)),
+            }
+        }
+        if let Some(e) = first_error {
+            return Err(e);
+        }
         crate::metrics::DIST_INGEST_ROW_COUNT
             .with_label_values(&[ctx.get_db_string().as_str()])
             .inc_by(affected_rows as u64);
@@ -1427,22 +1453,118 @@ impl FlowMirrorTask {
 mod tests {
     use std::sync::Arc;
 
+    use api::v1::flow::FlowResponse;
     use api::v1::helper::{field_column_schema, time_index_column_schema};
+    use api::v1::region::{InsertRequest as RegionInsertRequest, RegionRequest};
     use api::v1::{RowInsertRequest, Rows, Value};
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use common_meta::cache::new_table_flownode_set_cache;
     use common_meta::ddl::test_util::datanode_handler::NaiveDatanodeHandler;
+    use common_meta::instruction::{CacheIdent, CreateFlow};
+    use common_meta::node_manager::{DatanodeManager, DatanodeRef, FlownodeManager, FlownodeRef};
+    use common_meta::peer::Peer;
     use common_meta::test_util::MockDatanodeManager;
     use datatypes::data_type::ConcreteDataType;
     use datatypes::schema::ColumnSchema;
     use moka::future::Cache;
     use session::context::QueryContext;
+    use store_api::storage::RegionId;
     use table::TableRef;
     use table::dist_table::DummyDataSource;
-    use table::metadata::{TableInfoBuilder, TableMetaBuilder, TableType};
+    use table::metadata::{TableInfoBuilder, TableInfoRef, TableMetaBuilder, TableType};
+    use tokio::sync::mpsc;
 
     use super::*;
     use crate::tests::{create_partition_rule_manager, prepare_mocked_backend};
+
+    /// A combined `DatanodeManager` + `FlownodeManager` that implements
+    /// `NodeManager` by delegating to separate inner managers.
+    struct CombinedNodeManager<D: DatanodeManager, F: FlownodeManager> {
+        datanode_mgr: D,
+        flownode_mgr: F,
+    }
+
+    #[async_trait::async_trait]
+    impl<D: DatanodeManager + Send + Sync, F: FlownodeManager + Send + Sync> DatanodeManager
+        for CombinedNodeManager<D, F>
+    {
+        async fn datanode(&self, peer: &Peer) -> DatanodeRef {
+            self.datanode_mgr.datanode(peer).await
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl<D: DatanodeManager + Send + Sync, F: FlownodeManager + Send + Sync> FlownodeManager
+        for CombinedNodeManager<D, F>
+    {
+        async fn flownode(&self, peer: &Peer) -> FlownodeRef {
+            self.flownode_mgr.flownode(peer).await
+        }
+    }
+
+    /// A `MockFlownodeHandler` that records flownode calls through a channel.
+    #[derive(Clone)]
+    struct RecordingFlownodeHandler {
+        tx: mpsc::UnboundedSender<()>,
+    }
+
+    #[async_trait::async_trait]
+    impl common_meta::test_util::MockFlownodeHandler for RecordingFlownodeHandler {
+        async fn handle_inserts(
+            &self,
+            _peer: &Peer,
+            _requests: api::v1::region::InsertRequests,
+        ) -> common_meta::error::Result<FlowResponse> {
+            let _ = self.tx.send(());
+            Ok(FlowResponse::default())
+        }
+
+        async fn handle_mark_window_dirty(
+            &self,
+            _peer: &Peer,
+            _req: api::v1::flow::DirtyWindowRequests,
+        ) -> common_meta::error::Result<FlowResponse> {
+            let _ = self.tx.send(());
+            Ok(FlowResponse::default())
+        }
+    }
+
+    /// Populates the flownode set cache so that `table_id` resolves to `peers`.
+    async fn populate_flownode_cache(
+        cache: &TableFlownodeSetCacheRef,
+        table_id: u32,
+        peers: Vec<Peer>,
+    ) {
+        let ident = vec![CacheIdent::CreateFlow(CreateFlow {
+            flow_id: 1,
+            source_table_ids: vec![table_id],
+            partition_to_peer_mapping: peers
+                .into_iter()
+                .enumerate()
+                .map(|(i, p)| (i as u32, p))
+                .collect(),
+        })];
+        cache.invalidate(&ident).await.unwrap();
+    }
+
+    /// Builds a minimal `RegionInsertRequest` with a single row (no real data).
+    fn make_region_insert_req(region_id: RegionId) -> RegionInsertRequest {
+        RegionInsertRequest {
+            region_id: region_id.as_u64(),
+            rows: Some(api::v1::Rows {
+                schema: vec![time_index_column_schema(
+                    "ts",
+                    api::v1::ColumnDataType::TimestampMillisecond,
+                )],
+                rows: vec![api::v1::Row {
+                    values: vec![Value {
+                        value_data: Some(api::v1::value::ValueData::TimeMillisecondValue(1000)),
+                    }],
+                }],
+            }),
+            partition_expr_version: None,
+        }
+    }
 
     fn make_table_ref_with_schema(ts_name: &str, field_name: &str) -> TableRef {
         let schema = datatypes::schema::SchemaBuilder::try_from_columns(vec![
@@ -1693,5 +1815,576 @@ mod tests {
             Some("last_row"),
             table_options.get(MERGE_MODE_KEY).map(String::as_str)
         );
+    }
+
+    use api::region::RegionResponse;
+    use common_meta::error as meta_error;
+    use common_meta::node_manager::Datanode;
+    use common_query::request::QueryRequest;
+    use common_recordbatch::SendableRecordBatchStream;
+    use tokio::sync::oneshot;
+
+    /// Builds a `TableInfoRef` for `table_id` with a `ts` timestamp column.
+    fn make_table_info(table_id: u32) -> TableInfoRef {
+        let column_schemas = vec![
+            ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
+        ];
+        let schema = Arc::new(
+            datatypes::schema::SchemaBuilder::try_from(column_schemas)
+                .unwrap()
+                .build()
+                .unwrap(),
+        );
+        let meta = TableMetaBuilder::empty()
+            .schema(schema)
+            .primary_key_indices(vec![])
+            .value_indices(vec![])
+            .engine("mito")
+            .next_column_id(1)
+            .options(Default::default())
+            .created_on(Default::default())
+            .build()
+            .unwrap();
+        Arc::new(
+            TableInfoBuilder::default()
+                .table_id(table_id)
+                .table_version(0)
+                .name("test_table")
+                .schema_name(DEFAULT_SCHEMA_NAME)
+                .catalog_name(DEFAULT_CATALOG_NAME)
+                .desc(None)
+                .table_type(TableType::Base)
+                .meta(meta)
+                .build()
+                .unwrap(),
+        )
+    }
+
+    // ── Blocking datanode manager for ordering tests ──
+
+    /// A `Datanode` that sends on `entered_tx` when `handle()` is called,
+    /// then blocks until its `release_rx` fires, and returns a pre-set result.
+    struct BlockingDatanode {
+        entered_tx: mpsc::UnboundedSender<()>,
+        release_rx: std::sync::Mutex<Option<oneshot::Receiver<()>>>,
+        result: std::sync::Mutex<Option<meta_error::Result<RegionResponse>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl Datanode for BlockingDatanode {
+        async fn handle(&self, _request: RegionRequest) -> meta_error::Result<RegionResponse> {
+            let _ = self.entered_tx.send(());
+            let rx = self.release_rx.lock().unwrap().take().unwrap();
+            rx.await.unwrap();
+            self.result.lock().unwrap().take().unwrap()
+        }
+
+        async fn handle_query(
+            &self,
+            _request: QueryRequest,
+        ) -> meta_error::Result<SendableRecordBatchStream> {
+            unimplemented!("not needed for insert tests")
+        }
+    }
+
+    /// A `DatanodeManager` that creates `BlockingDatanode` instances from
+    /// pre-set slots. Each slot is a `(oneshot::Receiver, Result<RegionResponse>)`.
+    #[allow(clippy::type_complexity)]
+    struct BlockingDatanodeManager {
+        entered_tx: mpsc::UnboundedSender<()>,
+        slots:
+            Arc<std::sync::Mutex<Vec<(oneshot::Receiver<()>, meta_error::Result<RegionResponse>)>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl DatanodeManager for BlockingDatanodeManager {
+        async fn datanode(&self, _peer: &Peer) -> DatanodeRef {
+            let (rx, result) = self
+                .slots
+                .lock()
+                .unwrap()
+                .pop()
+                .expect("too many datanode calls");
+            Arc::new(BlockingDatanode {
+                entered_tx: self.entered_tx.clone(),
+                release_rx: std::sync::Mutex::new(Some(rx)),
+                result: std::sync::Mutex::new(Some(result)),
+            })
+        }
+    }
+
+    // ── Flow mirror ordering tests ──
+
+    /// Normal insert success ordering: datanode blocks; assert no mirror before
+    /// release; release datanode; assert mirror arrives after success.
+    #[tokio::test]
+    async fn test_normal_insert_success_ordering() {
+        let (flownode_tx, mut flownode_rx) = mpsc::unbounded_channel::<()>();
+        let (entered_tx, mut entered_rx) = mpsc::unbounded_channel::<()>();
+        let (rel_tx, rel_rx) = oneshot::channel();
+
+        let kv_backend = prepare_mocked_backend().await;
+        let cache = Arc::new(new_table_flownode_set_cache(
+            String::new(),
+            Cache::new(100),
+            kv_backend.clone(),
+        ));
+        populate_flownode_cache(&cache, 1, vec![Peer::new(1, "")]).await;
+
+        let flownode_mgr =
+            common_meta::test_util::MockFlownodeManager::new(RecordingFlownodeHandler {
+                tx: flownode_tx,
+            });
+        let datanode_mgr = BlockingDatanodeManager {
+            entered_tx,
+            slots: Arc::new(std::sync::Mutex::new(vec![(
+                rel_rx,
+                Ok(RegionResponse::new(1)),
+            )])),
+        };
+        let node_manager: NodeManagerRef = Arc::new(CombinedNodeManager {
+            datanode_mgr,
+            flownode_mgr,
+        });
+
+        let partition_manager = create_partition_rule_manager(kv_backend).await;
+        let inserter = Inserter::new(
+            catalog::memory::MemoryCatalogManager::new(),
+            partition_manager,
+            node_manager,
+            cache,
+            true,
+        );
+
+        let table_info = make_table_info(1);
+        let mut table_infos = ahash::HashMap::new();
+        table_infos.insert(table_info.table_id(), table_info);
+
+        let normal_requests = RegionInsertRequests {
+            requests: vec![make_region_insert_req(RegionId::new(1, 1))],
+        };
+        let instant_requests = RegionInsertRequests { requests: vec![] };
+        let ctx = Arc::new(QueryContext::with(
+            DEFAULT_CATALOG_NAME,
+            DEFAULT_SCHEMA_NAME,
+        ));
+
+        let do_req = inserter.do_request(
+            InstantAndNormalInsertRequests {
+                normal_requests,
+                instant_requests,
+            },
+            &table_infos,
+            &ctx,
+        );
+        tokio::pin!(do_req);
+
+        // Interleave: wait for datanode to be entered
+        tokio::select! {
+            r = &mut do_req => panic!("do_req completed too early: {:?}", r),
+            e = entered_rx.recv() => assert!(e.is_some(), "datanode should be entered"),
+        }
+
+        // Assert no flownode mirror has been dispatched yet
+        let premature =
+            tokio::time::timeout(std::time::Duration::from_millis(200), flownode_rx.recv()).await;
+        assert!(
+            premature.is_err() || premature.unwrap().is_none(),
+            "flownode mirror must NOT be dispatched before datanode returns"
+        );
+
+        // Release the datanode
+        rel_tx.send(()).unwrap();
+
+        // Now await completion
+        let result = do_req.await;
+        assert!(result.is_ok(), "insert should succeed: {:?}", result.err());
+
+        // Flownode mirror should now arrive
+        tokio::time::timeout(std::time::Duration::from_secs(5), flownode_rx.recv())
+            .await
+            .expect("flownode mirror should be dispatched after datanode success");
+    }
+
+    /// Normal insert datanode failure: datanode returns error, assert no mirror.
+    #[tokio::test]
+    async fn test_normal_insert_datanode_failure_no_mirror() {
+        let (flownode_tx, mut flownode_rx) = mpsc::unbounded_channel::<()>();
+        let (entered_tx, mut entered_rx) = mpsc::unbounded_channel::<()>();
+        let (rel_tx, rel_rx) = oneshot::channel();
+
+        let kv_backend = prepare_mocked_backend().await;
+        let cache = Arc::new(new_table_flownode_set_cache(
+            String::new(),
+            Cache::new(100),
+            kv_backend.clone(),
+        ));
+        populate_flownode_cache(&cache, 1, vec![Peer::new(1, "")]).await;
+
+        let err = meta_error::UnexpectedSnafu {
+            err_msg: "mock datanode error",
+        }
+        .build();
+
+        let flownode_mgr =
+            common_meta::test_util::MockFlownodeManager::new(RecordingFlownodeHandler {
+                tx: flownode_tx,
+            });
+        let datanode_mgr = BlockingDatanodeManager {
+            entered_tx,
+            slots: Arc::new(std::sync::Mutex::new(vec![(rel_rx, Err(err))])),
+        };
+        let node_manager: NodeManagerRef = Arc::new(CombinedNodeManager {
+            datanode_mgr,
+            flownode_mgr,
+        });
+
+        let partition_manager = create_partition_rule_manager(kv_backend).await;
+        let inserter = Inserter::new(
+            catalog::memory::MemoryCatalogManager::new(),
+            partition_manager,
+            node_manager,
+            cache,
+            true,
+        );
+
+        let table_info = make_table_info(1);
+        let mut table_infos = ahash::HashMap::new();
+        table_infos.insert(table_info.table_id(), table_info);
+
+        let normal_requests = RegionInsertRequests {
+            requests: vec![make_region_insert_req(RegionId::new(1, 1))],
+        };
+        let instant_requests = RegionInsertRequests { requests: vec![] };
+        let ctx = Arc::new(QueryContext::with(
+            DEFAULT_CATALOG_NAME,
+            DEFAULT_SCHEMA_NAME,
+        ));
+
+        let do_req = inserter.do_request(
+            InstantAndNormalInsertRequests {
+                normal_requests,
+                instant_requests,
+            },
+            &table_infos,
+            &ctx,
+        );
+        tokio::pin!(do_req);
+
+        // Wait for datanode to be entered
+        tokio::select! {
+            r = &mut do_req => panic!("do_req completed too early: {:?}", r),
+            e = entered_rx.recv() => assert!(e.is_some(), "datanode should be entered"),
+        }
+
+        // Release — the datanode returns error
+        rel_tx.send(()).unwrap();
+
+        let result = do_req.await;
+        assert!(result.is_err(), "insert should fail on datanode error");
+
+        // No flownode mirror should have been dispatched
+        let premature =
+            tokio::time::timeout(std::time::Duration::from_millis(200), flownode_rx.recv()).await;
+        assert!(
+            premature.is_err() || premature.unwrap().is_none(),
+            "flownode mirror must NOT be dispatched on datanode failure"
+        );
+    }
+
+    /// Normal insert with two datanode peers: one succeeds, one fails.
+    /// Only the successful peer's rows are mirrored; final result is error.
+    #[tokio::test]
+    async fn test_normal_insert_partial_peer_success() {
+        let (flownode_tx, mut flownode_rx) = mpsc::unbounded_channel::<()>();
+        let (entered_tx, mut entered_rx) = mpsc::unbounded_channel::<()>();
+
+        let (rel1_tx, rel1_rx) = oneshot::channel();
+        let (rel2_tx, rel2_rx) = oneshot::channel();
+        let err = meta_error::UnexpectedSnafu {
+            err_msg: "mock datanode error",
+        }
+        .build();
+
+        let kv_backend = prepare_mocked_backend().await;
+        let cache = Arc::new(new_table_flownode_set_cache(
+            String::new(),
+            Cache::new(100),
+            kv_backend.clone(),
+        ));
+        populate_flownode_cache(&cache, 1, vec![Peer::new(1, ""), Peer::new(3, "")]).await;
+
+        let flownode_mgr =
+            common_meta::test_util::MockFlownodeManager::new(RecordingFlownodeHandler {
+                tx: flownode_tx,
+            });
+        let datanode_mgr = BlockingDatanodeManager {
+            entered_tx,
+            slots: Arc::new(std::sync::Mutex::new(vec![
+                (rel1_rx, Ok(RegionResponse::new(1))),
+                (rel2_rx, Err(err)),
+            ])),
+        };
+        let node_manager: NodeManagerRef = Arc::new(CombinedNodeManager {
+            datanode_mgr,
+            flownode_mgr,
+        });
+
+        let partition_manager = create_partition_rule_manager(kv_backend).await;
+        let inserter = Inserter::new(
+            catalog::memory::MemoryCatalogManager::new(),
+            partition_manager,
+            node_manager,
+            cache,
+            true,
+        );
+
+        let table_info = make_table_info(1);
+        let mut table_infos = ahash::HashMap::new();
+        table_infos.insert(table_info.table_id(), table_info);
+
+        let normal_requests = RegionInsertRequests {
+            requests: vec![
+                make_region_insert_req(RegionId::new(1, 1)),
+                make_region_insert_req(RegionId::new(1, 3)),
+            ],
+        };
+        let instant_requests = RegionInsertRequests { requests: vec![] };
+        let ctx = Arc::new(QueryContext::with(
+            DEFAULT_CATALOG_NAME,
+            DEFAULT_SCHEMA_NAME,
+        ));
+
+        let do_req = inserter.do_request(
+            InstantAndNormalInsertRequests {
+                normal_requests,
+                instant_requests,
+            },
+            &table_infos,
+            &ctx,
+        );
+        tokio::pin!(do_req);
+
+        // Wait for BOTH datanodes to be entered
+        tokio::select! {
+            r = &mut do_req => panic!("do_req completed too early: {:?}", r),
+            e = entered_rx.recv() => assert!(e.is_some(), "datanode 1 should be entered"),
+        }
+        tokio::select! {
+            r = &mut do_req => panic!("do_req completed too early: {:?}", r),
+            e = entered_rx.recv() => assert!(e.is_some(), "datanode 2 should be entered"),
+        }
+
+        // Release both
+        rel1_tx.send(()).unwrap();
+        rel2_tx.send(()).unwrap();
+
+        let result = do_req.await;
+        assert!(result.is_err(), "insert should fail when one peer fails");
+
+        // The successful peer's mirror should arrive (one per flownode peer
+        // in the cache — we have 2 flownode peers)
+        let mut mirror_count = 0;
+        for _ in 0..2 {
+            tokio::time::timeout(std::time::Duration::from_secs(5), flownode_rx.recv())
+                .await
+                .expect("successful peer's mirror should be dispatched");
+            mirror_count += 1;
+        }
+
+        // No additional mirror for the failed peer
+        let premature =
+            tokio::time::timeout(std::time::Duration::from_millis(200), flownode_rx.recv()).await;
+        assert!(
+            premature.is_err() || premature.unwrap().is_none(),
+            "failed peer's mirror must NOT be dispatched (got {} mirrors from success)",
+            mirror_count
+        );
+    }
+
+    /// Instant-only insert: datanode is never called; mirror is dispatched
+    /// without any source write barrier.
+    #[tokio::test]
+    async fn test_instant_only_insert_no_datanode_write() {
+        let (flownode_tx, mut flownode_rx) = mpsc::unbounded_channel::<()>();
+        let (entered_tx, _entered_rx) = mpsc::unbounded_channel::<()>();
+
+        let kv_backend = prepare_mocked_backend().await;
+        let cache = Arc::new(new_table_flownode_set_cache(
+            String::new(),
+            Cache::new(100),
+            kv_backend.clone(),
+        ));
+        populate_flownode_cache(&cache, 1, vec![Peer::new(1, "")]).await;
+
+        let flownode_mgr =
+            common_meta::test_util::MockFlownodeManager::new(RecordingFlownodeHandler {
+                tx: flownode_tx,
+            });
+        let datanode_mgr = BlockingDatanodeManager {
+            entered_tx,
+            slots: Arc::new(std::sync::Mutex::new(vec![])),
+        };
+        let node_manager: NodeManagerRef = Arc::new(CombinedNodeManager {
+            datanode_mgr,
+            flownode_mgr,
+        });
+
+        let partition_manager = create_partition_rule_manager(kv_backend).await;
+        let inserter = Inserter::new(
+            catalog::memory::MemoryCatalogManager::new(),
+            partition_manager,
+            node_manager,
+            cache,
+            true,
+        );
+
+        let table_info = make_table_info(1);
+        let mut table_infos = ahash::HashMap::new();
+        table_infos.insert(table_info.table_id(), table_info);
+
+        let normal_requests = RegionInsertRequests { requests: vec![] };
+        let instant_requests = RegionInsertRequests {
+            requests: vec![make_region_insert_req(RegionId::new(1, 1))],
+        };
+        let ctx = Arc::new(QueryContext::with(
+            DEFAULT_CATALOG_NAME,
+            DEFAULT_SCHEMA_NAME,
+        ));
+
+        let result = inserter
+            .do_request(
+                InstantAndNormalInsertRequests {
+                    normal_requests,
+                    instant_requests,
+                },
+                &table_infos,
+                &ctx,
+            )
+            .await;
+
+        assert!(
+            result.is_ok(),
+            "instant-only insert should succeed: {:?}",
+            result.err()
+        );
+
+        // Mirror should be dispatched (no datanode barrier)
+        tokio::time::timeout(std::time::Duration::from_secs(5), flownode_rx.recv())
+            .await
+            .expect("instant mirror should be dispatched without datanode write");
+    }
+
+    /// Mixed instant+normal insert: instant mirror dispatched immediately
+    /// (no source barrier), normal mirror waits for datanode success.
+    #[tokio::test]
+    async fn test_mixed_instant_normal_insert() {
+        let (flownode_tx, mut flownode_rx) = mpsc::unbounded_channel::<()>();
+        let (entered_tx, mut entered_rx) = mpsc::unbounded_channel::<()>();
+        let (rel_tx, rel_rx) = oneshot::channel();
+
+        let kv_backend = prepare_mocked_backend().await;
+        let cache = Arc::new(new_table_flownode_set_cache(
+            String::new(),
+            Cache::new(100),
+            kv_backend.clone(),
+        ));
+        populate_flownode_cache(&cache, 1, vec![Peer::new(1, "")]).await;
+
+        let flownode_mgr =
+            common_meta::test_util::MockFlownodeManager::new(RecordingFlownodeHandler {
+                tx: flownode_tx,
+            });
+        let datanode_mgr = BlockingDatanodeManager {
+            entered_tx,
+            slots: Arc::new(std::sync::Mutex::new(vec![(
+                rel_rx,
+                Ok(RegionResponse::new(1)),
+            )])),
+        };
+        let node_manager: NodeManagerRef = Arc::new(CombinedNodeManager {
+            datanode_mgr,
+            flownode_mgr,
+        });
+
+        let partition_manager = create_partition_rule_manager(kv_backend).await;
+        let inserter = Inserter::new(
+            catalog::memory::MemoryCatalogManager::new(),
+            partition_manager,
+            node_manager,
+            cache,
+            true,
+        );
+
+        let table_info = make_table_info(1);
+        let mut table_infos = ahash::HashMap::new();
+        table_infos.insert(table_info.table_id(), table_info);
+
+        let normal_requests = RegionInsertRequests {
+            requests: vec![make_region_insert_req(RegionId::new(1, 1))],
+        };
+        let instant_requests = RegionInsertRequests {
+            requests: vec![make_region_insert_req(RegionId::new(1, 2))],
+        };
+        let ctx = Arc::new(QueryContext::with(
+            DEFAULT_CATALOG_NAME,
+            DEFAULT_SCHEMA_NAME,
+        ));
+
+        let do_req = inserter.do_request(
+            InstantAndNormalInsertRequests {
+                normal_requests,
+                instant_requests,
+            },
+            &table_infos,
+            &ctx,
+        );
+        tokio::pin!(do_req);
+
+        // Drive do_req forward. The instant mirror detach happens first
+        // (after all precompute but before spawning normal writes).
+        // The flownode channel will receive the instant mirror signal.
+        // Then the normal datanode will be entered and block.
+        //
+        // Use select to interleave: we need both the inst mirror AND
+        // the datanode-entered signal.
+        tokio::select! {
+            r = &mut do_req => panic!("do_req completed too early: {:?}", r),
+            msg = flownode_rx.recv() => assert!(msg.is_some(), "instant mirror should be dispatched"),
+        };
+
+        // Now wait for normal datanode to be entered
+        tokio::select! {
+            r = &mut do_req => panic!("do_req completed too early: {:?}", r),
+            e = entered_rx.recv() => assert!(e.is_some(), "datanode should be entered"),
+        }
+
+        // Normal mirror must NOT have arrived yet
+        let premature =
+            tokio::time::timeout(std::time::Duration::from_millis(200), flownode_rx.recv()).await;
+        assert!(
+            premature.is_err() || premature.unwrap().is_none(),
+            "normal mirror must NOT arrive before datanode completes"
+        );
+
+        // Release
+        rel_tx.send(()).unwrap();
+
+        let result = do_req.await;
+        assert!(
+            result.is_ok(),
+            "mixed insert should succeed: {:?}",
+            result.err()
+        );
+
+        // Normal mirror should now arrive
+        tokio::time::timeout(std::time::Duration::from_secs(5), flownode_rx.recv())
+            .await
+            .expect("normal mirror should arrive after datanode success");
     }
 }
