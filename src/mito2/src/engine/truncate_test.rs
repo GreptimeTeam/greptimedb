@@ -21,19 +21,52 @@ use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_recordbatch::RecordBatches;
 use common_telemetry::{info, init_default_ut_logging};
-use store_api::region_engine::RegionEngine;
+use store_api::region_engine::{RegionEngine, RegionRole};
 use store_api::region_request::{
     PathType, RegionFlushRequest, RegionOpenRequest, RegionRequest, RegionTruncateRequest,
 };
 use store_api::storage::RegionId;
+use tokio::sync::Notify;
 
 use super::ScanRequest;
 use crate::config::MitoConfig;
-use crate::engine::listener::FlushCancellationListener;
+use crate::engine::listener::{EventListener, FlushCancellationListener};
 use crate::test_util::{
     CreateRequestBuilder, MockWriteBufferManager, TestEnv, build_rows, put_rows, rows_schema,
 };
 
+#[derive(Default)]
+struct FlushCommitListener {
+    commit_started: Notify,
+    cancel_requested: Notify,
+    resume_flush: Notify,
+}
+
+impl FlushCommitListener {
+    async fn wait_commit_started(&self) {
+        self.commit_started.notified().await;
+    }
+
+    async fn wait_cancel_requested(&self) {
+        self.cancel_requested.notified().await;
+    }
+
+    fn resume_flush(&self) {
+        self.resume_flush.notify_one();
+    }
+}
+
+#[async_trait::async_trait]
+impl EventListener for FlushCommitListener {
+    async fn on_flush_commit_begin(&self, _region_id: RegionId) {
+        self.commit_started.notify_one();
+        self.resume_flush.notified().await;
+    }
+
+    fn on_flush_cancel_requested(&self, _region_id: RegionId) {
+        self.cancel_requested.notify_one();
+    }
+}
 #[tokio::test]
 async fn test_engine_truncate_region_basic() {
     test_engine_truncate_region_basic_with_format(false).await;
@@ -344,12 +377,285 @@ async fn test_engine_truncate_reopen_with_format(flat_format: bool) {
 }
 
 #[tokio::test]
-async fn test_engine_truncate_during_flush() {
-    test_engine_truncate_during_flush_with_format(false).await;
-    test_engine_truncate_during_flush_with_format(true).await;
+async fn test_engine_discard_unflushed() {
+    test_engine_discard_unflushed_with_format(false).await;
+    test_engine_discard_unflushed_with_format(true).await;
 }
 
-async fn test_engine_truncate_during_flush_with_format(flat_format: bool) {
+async fn test_engine_discard_unflushed_with_format(flat_format: bool) {
+    let mut env = TestEnv::with_prefix("discard-unflushed").await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+    let table_dir = request.table_dir.clone();
+    let column_schemas = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    // Persist the first batch and leave the second batch in memtables and WAL.
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: column_schemas.clone(),
+            rows: build_rows(0, 3),
+        },
+    )
+    .await;
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Flush(RegionFlushRequest::default()),
+        )
+        .await
+        .unwrap();
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: column_schemas.clone(),
+            rows: build_rows(3, 6),
+        },
+    )
+    .await;
+
+    let region = engine.get_region(region_id).unwrap();
+    let version_data = region.version_control.current();
+    let discarded_entry_id = version_data.last_entry_id;
+    let discarded_sequence = version_data.committed_sequence;
+    assert!(!version_data.version.memtables.is_empty());
+    assert_eq!(
+        1,
+        engine
+            .scanner(region_id, ScanRequest::default())
+            .await
+            .unwrap()
+            .num_files()
+    );
+
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Truncate(RegionTruncateRequest::Unflushed),
+        )
+        .await
+        .unwrap();
+
+    let version = region.version();
+    assert!(version.memtables.is_empty());
+    assert_eq!(discarded_entry_id, version.flushed_entry_id);
+    assert_eq!(discarded_sequence, version.flushed_sequence);
+    assert_eq!(
+        1,
+        engine
+            .scanner(region_id, ScanRequest::default())
+            .await
+            .unwrap()
+            .num_files()
+    );
+
+    // Repeating the request is a no-op and also retries WAL obsoletion if needed.
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Truncate(RegionTruncateRequest::Unflushed),
+        )
+        .await
+        .unwrap();
+
+    let stream = engine
+        .scan_to_stream(region_id, ScanRequest::default())
+        .await
+        .unwrap();
+    let batches = RecordBatches::try_collect(stream).await.unwrap();
+    let expected = "\
++-------+---------+---------------------+
+| tag_0 | field_0 | ts                  |
++-------+---------+---------------------+
+| 0     | 0.0     | 1970-01-01T00:00:00 |
+| 1     | 1.0     | 1970-01-01T00:00:01 |
+| 2     | 2.0     | 1970-01-01T00:00:02 |
++-------+---------+---------------------+";
+    assert_eq!(expected, batches.pretty_print().unwrap());
+
+    // The replay boundary is durable: reopening must not restore discarded rows.
+    let engine = env
+        .reopen_engine(
+            engine,
+            MitoConfig {
+                default_flat_format: flat_format,
+                ..Default::default()
+            },
+        )
+        .await;
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Open(RegionOpenRequest {
+                engine: String::new(),
+                table_dir,
+                path_type: PathType::Bare,
+                options: HashMap::default(),
+                skip_wal_replay: false,
+                checkpoint: None,
+                requirements: Default::default(),
+            }),
+        )
+        .await
+        .unwrap();
+    engine
+        .set_region_role(region_id, RegionRole::Leader)
+        .unwrap();
+
+    let region = engine.get_region(region_id).unwrap();
+    assert!(region.version().memtables.is_empty());
+    let stream = engine
+        .scan_to_stream(region_id, ScanRequest::default())
+        .await
+        .unwrap();
+    let batches = RecordBatches::try_collect(stream).await.unwrap();
+    assert_eq!(expected, batches.pretty_print().unwrap());
+
+    // The region remains writable after discarding its unflushed data.
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: column_schemas,
+            rows: build_rows(6, 8),
+        },
+    )
+    .await;
+    let stream = engine
+        .scan_to_stream(region_id, ScanRequest::default())
+        .await
+        .unwrap();
+    let batches = RecordBatches::try_collect(stream).await.unwrap();
+    assert_eq!(
+        5,
+        batches.iter().map(|batch| batch.num_rows()).sum::<usize>()
+    );
+}
+
+#[tokio::test]
+async fn test_engine_truncate_during_flush() {
+    test_engine_truncate_during_flush_with_format(false, false).await;
+    test_engine_truncate_during_flush_with_format(true, false).await;
+}
+
+#[tokio::test]
+async fn test_engine_discard_unflushed_during_flush() {
+    test_engine_truncate_during_flush_with_format(false, true).await;
+    test_engine_truncate_during_flush_with_format(true, true).await;
+}
+
+#[tokio::test]
+async fn test_engine_discard_unflushed_after_flush_commit_started() {
+    test_engine_discard_unflushed_after_flush_commit_started_with_format(false).await;
+    test_engine_discard_unflushed_after_flush_commit_started_with_format(true).await;
+}
+
+async fn test_engine_discard_unflushed_after_flush_commit_started_with_format(flat_format: bool) {
+    let mut env = TestEnv::with_prefix("discard-unflushed-after-flush-commit").await;
+    let listener = Arc::new(FlushCommitListener::default());
+    let engine = env
+        .create_engine_with(
+            MitoConfig {
+                default_flat_format: flat_format,
+                ..Default::default()
+            },
+            None,
+            Some(listener.clone()),
+            None,
+        )
+        .await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+    let column_schemas = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: column_schemas,
+            rows: build_rows(0, 3),
+        },
+    )
+    .await;
+
+    let flush_engine = engine.clone();
+    let flush_task = tokio::spawn(async move {
+        flush_engine
+            .handle_request(
+                region_id,
+                RegionRequest::Flush(RegionFlushRequest::default()),
+            )
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(5), listener.wait_commit_started())
+        .await
+        .expect("flush did not reach the commit gate");
+
+    let discard_engine = engine.clone();
+    let discard_task = tokio::spawn(async move {
+        discard_engine
+            .handle_request(
+                region_id,
+                RegionRequest::Truncate(RegionTruncateRequest::Unflushed),
+            )
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(5), listener.wait_cancel_requested())
+        .await
+        .expect("discard did not queue behind the committing flush");
+    assert!(!discard_task.is_finished());
+
+    listener.resume_flush();
+    tokio::time::timeout(Duration::from_secs(5), flush_task)
+        .await
+        .expect("flush did not finish")
+        .expect("flush task panicked")
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), discard_task)
+        .await
+        .expect("discard did not finish")
+        .expect("discard task panicked")
+        .unwrap();
+
+    let region = engine.get_region(region_id).unwrap();
+    assert!(region.version().memtables.is_empty());
+    assert_eq!(
+        1,
+        engine
+            .scanner(region_id, ScanRequest::default())
+            .await
+            .unwrap()
+            .num_files()
+    );
+    let stream = engine
+        .scan_to_stream(region_id, ScanRequest::default())
+        .await
+        .unwrap();
+    let batches = RecordBatches::try_collect(stream).await.unwrap();
+    assert_eq!(
+        3,
+        batches.iter().map(|batch| batch.num_rows()).sum::<usize>()
+    );
+}
+
+async fn test_engine_truncate_during_flush_with_format(flat_format: bool, unflushed_only: bool) {
     init_default_ut_logging();
     let mut env = TestEnv::with_prefix("truncate-during-flush").await;
     let write_buffer_manager = Arc::new(MockWriteBufferManager::default());
@@ -412,7 +718,11 @@ async fn test_engine_truncate_during_flush_with_format(flat_format: bool) {
         Duration::from_secs(5),
         engine.handle_request(
             region_id,
-            RegionRequest::Truncate(RegionTruncateRequest::All),
+            RegionRequest::Truncate(if unflushed_only {
+                RegionTruncateRequest::Unflushed
+            } else {
+                RegionTruncateRequest::All
+            }),
         ),
     )
     .await
@@ -434,7 +744,7 @@ async fn test_engine_truncate_during_flush_with_format(flat_format: bool) {
     let request = ScanRequest::default();
     let scanner = engine.scanner(region_id, request.clone()).await.unwrap();
     assert_eq!(0, scanner.num_files());
-    assert_eq!(Some(entry_id), truncated_entry_id);
+    assert_eq!((!unflushed_only).then_some(entry_id), truncated_entry_id);
     assert_eq!(sequence, truncated_sequence);
 
     // Reopen the engine.
@@ -465,5 +775,8 @@ async fn test_engine_truncate_during_flush_with_format(flat_format: bool) {
 
     let region = engine.get_region(region_id).unwrap();
     let current_version = region.version_control.current().version;
-    assert_eq!(current_version.truncated_entry_id, Some(entry_id));
+    assert_eq!(
+        current_version.truncated_entry_id,
+        (!unflushed_only).then_some(entry_id)
+    );
 }

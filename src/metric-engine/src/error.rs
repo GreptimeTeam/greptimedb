@@ -178,6 +178,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Mito truncate operation fails"))]
+    MitoTruncateOperation {
+        source: BoxedError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Mito sync operation fails"))]
     MitoSyncOperation {
         source: BoxedError,
@@ -451,6 +458,7 @@ impl ErrorExt for Error {
             | MitoReadOperation { source, .. }
             | MitoWriteOperation { source, .. }
             | MitoFlushOperation { source, .. }
+            | MitoTruncateOperation { source, .. }
             | MitoSyncOperation { source, .. }
             | MitoEnterStagingOperation { source, .. }
             | BatchOpenMitoRegion { source, .. }
@@ -487,6 +495,7 @@ impl ErrorExt for Error {
             | MitoReadOperation { source, .. }
             | MitoWriteOperation { source, .. }
             | MitoFlushOperation { source, .. }
+            | MitoTruncateOperation { source, .. }
             | MitoSyncOperation { source, .. }
             | MitoEnterStagingOperation { source, .. }
             | MitoCopyRegionFromOperation { source, .. }
