@@ -130,8 +130,7 @@ EXPLAIN ANALYZE VERBOSE SELECT host, `region` FROM filter_prune_test WHERE cpu_u
 |_|_|_SortPreservingMergeExec: [ts@2 ASC NULLS LAST] REDACTED
 |_|_|_WindowedSortExec: expr=ts@2 ASC NULLS LAST num_ranges=REDACTED REDACTED
 |_|_|_PartSortExec: expr=ts@2 ASC NULLS LAST num_ranges=REDACTED REDACTED
-|_|_|_ProjectionExec: expr=[host@1 as host, region@2 as region, ts@0 as ts] REDACTED
-|_|_|_FilterExec: cpu_usage@3 > 20, projection=[ts@0, host@1, region@2] REDACTED
+|_|_|_FilterExec: cpu_usage@3 > 20, projection=[host@1, region@2, ts@0] REDACTED
 |_|_|_SeqScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "projection": ["ts", "host", "region", "cpu_usage"], "filters": ["cpu_usage > Float64(20)"], "flat_format": REDACTED, "REDACTED
 |_|_|_|
 |_|_| Total rows: 4_|
@@ -205,8 +204,7 @@ EXPLAIN ANALYZE VERBOSE SELECT mem_usage FROM filter_prune_test WHERE host = 'ho
 |_|_|_SortPreservingMergeExec: [ts@1 ASC NULLS LAST] REDACTED
 |_|_|_WindowedSortExec: expr=ts@1 ASC NULLS LAST num_ranges=REDACTED REDACTED
 |_|_|_PartSortExec: expr=ts@1 ASC NULLS LAST num_ranges=REDACTED REDACTED
-|_|_|_ProjectionExec: expr=[mem_usage@1 as mem_usage, ts@0 as ts] REDACTED
-|_|_|_FilterExec: cpu_usage@1 > 10, projection=[ts@0, mem_usage@2] REDACTED
+|_|_|_FilterExec: cpu_usage@1 > 10, projection=[mem_usage@2, ts@0] REDACTED
 |_|_|_SeqScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "projection": ["ts", "cpu_usage", "mem_usage"], "filters": ["host = Dictionary(UInt32, Utf8(\"host1\"))", "cpu_usage > Float64(10)", "region = Dictionary(UInt32, Utf8(\"us-east\"))"], "flat_format": REDACTED, "REDACTED
 |_|_|_|
 |_|_| Total rows: 2_|
@@ -355,8 +353,7 @@ EXPLAIN ANALYZE VERBOSE SELECT host FROM filter_prune_test WHERE cpu_usage BETWE
 |_|_|_SortPreservingMergeExec: [ts@1 ASC NULLS LAST] REDACTED
 |_|_|_WindowedSortExec: expr=ts@1 ASC NULLS LAST num_ranges=REDACTED REDACTED
 |_|_|_PartSortExec: expr=ts@1 ASC NULLS LAST num_ranges=REDACTED REDACTED
-|_|_|_ProjectionExec: expr=[host@1 as host, ts@0 as ts] REDACTED
-|_|_|_FilterExec: cpu_usage@2 >= 15 AND cpu_usage@2 <= 30, projection=[ts@0, host@1] REDACTED
+|_|_|_FilterExec: cpu_usage@2 >= 15 AND cpu_usage@2 <= 30, projection=[host@1, ts@0] REDACTED
 |_|_|_SeqScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "projection": ["ts", "host", "cpu_usage"], "filters": ["cpu_usage >= Float64(15)", "cpu_usage <= Float64(30)"], "flat_format": REDACTED, "REDACTED
 |_|_|_|
 |_|_| Total rows: 3_|
@@ -395,8 +392,7 @@ EXPLAIN ANALYZE VERBOSE SELECT cpu_usage FROM filter_prune_test WHERE host LIKE 
 |_|_|_SortPreservingMergeExec: [ts@1 ASC NULLS LAST] REDACTED
 |_|_|_WindowedSortExec: expr=ts@1 ASC NULLS LAST num_ranges=REDACTED REDACTED
 |_|_|_PartSortExec: expr=ts@1 ASC NULLS LAST num_ranges=REDACTED REDACTED
-|_|_|_ProjectionExec: expr=[cpu_usage@1 as cpu_usage, ts@0 as ts] REDACTED
-|_|_|_FilterExec: host@1 LIKE host% AND region@2 LIKE us-%, projection=[ts@0, cpu_usage@3] REDACTED
+|_|_|_FilterExec: host@1 LIKE host% AND region@2 LIKE us-%, projection=[cpu_usage@3, ts@0] REDACTED
 |_|_|_SeqScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "projection": ["ts", "host", "region", "cpu_usage"], "filters": ["host LIKE Dictionary(UInt32, Utf8(\"host%\"))", "region LIKE Dictionary(UInt32, Utf8(\"us-%\"))"], "flat_format": REDACTED, "REDACTED
 |_|_|_|
 |_|_| Total rows: 5_|
@@ -434,8 +430,7 @@ EXPLAIN ANALYZE VERBOSE SELECT cpu_usage FROM filter_prune_test WHERE host = 'ho
 |_|_|_SortPreservingMergeExec: [ts@1 ASC NULLS LAST] REDACTED
 |_|_|_WindowedSortExec: expr=ts@1 ASC NULLS LAST num_ranges=REDACTED REDACTED
 |_|_|_PartSortExec: expr=ts@1 ASC NULLS LAST num_ranges=REDACTED REDACTED
-|_|_|_ProjectionExec: expr=[cpu_usage@1 as cpu_usage, ts@0 as ts] REDACTED
-|_|_|_FilterExec: host@1 = host1 OR region@2 = eu-west, projection=[ts@0, cpu_usage@3] REDACTED
+|_|_|_FilterExec: host@1 = host1 OR region@2 = eu-west, projection=[cpu_usage@3, ts@0] REDACTED
 |_|_|_SeqScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "projection": ["ts", "host", "region", "cpu_usage"], "filters": ["host = Dictionary(UInt32, Utf8(\"host1\")) OR region = Dictionary(UInt32, Utf8(\"eu-west\"))"], "flat_format": REDACTED, "REDACTED
 |_|_|_|
 |_|_| Total rows: 4_|
@@ -472,7 +467,7 @@ EXPLAIN ANALYZE VERBOSE SELECT cpu_usage FROM (SELECT * FROM filter_prune_test W
 |_|_|_WindowedSortExec: expr=ts@1 ASC NULLS LAST num_ranges=REDACTED REDACTED
 |_|_|_PartSortExec: expr=ts@1 ASC NULLS LAST num_ranges=REDACTED REDACTED
 |_|_|_ProjectionExec: expr=[cpu_usage@1 as cpu_usage, ts@0 as ts] REDACTED
-|_|_|_SeqScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "projection": ["ts", "cpu_usage"], "filters": ["region = Dictionary(UInt32, Utf8(\"us-east\"))", "host = Dictionary(UInt32, Utf8(\"host1\"))"], "flat_format": REDACTED, "REDACTED
+|_|_|_SeqScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "projection": ["ts", "cpu_usage"], "filters": ["host = Dictionary(UInt32, Utf8(\"host1\"))", "region = Dictionary(UInt32, Utf8(\"us-east\"))"], "flat_format": REDACTED, "REDACTED
 |_|_|_|
 |_|_| Total rows: 2_|
 +-+-+-+
@@ -594,8 +589,7 @@ EXPLAIN ANALYZE VERBOSE SELECT host, `region` FROM filter_prune_test WHERE cpu_u
 |_|_|_SortPreservingMergeExec: [ts@2 ASC NULLS LAST] REDACTED
 |_|_|_WindowedSortExec: expr=ts@2 ASC NULLS LAST num_ranges=REDACTED REDACTED
 |_|_|_PartSortExec: expr=ts@2 ASC NULLS LAST num_ranges=REDACTED REDACTED
-|_|_|_ProjectionExec: expr=[host@1 as host, region@2 as region, ts@0 as ts] REDACTED
-|_|_|_FilterExec: cpu_usage@3 > 20, projection=[ts@0, host@1, region@2] REDACTED
+|_|_|_FilterExec: cpu_usage@3 > 20, projection=[host@1, region@2, ts@0] REDACTED
 |_|_|_SeqScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":0, "files":1, "file_ranges":1}, "projection": ["ts", "host", "region", "cpu_usage"], "filters": ["cpu_usage > Float64(20)"], \"file\":REDACTED
 |_|_|_|
 |_|_| Total rows: 4_|
@@ -671,8 +665,7 @@ EXPLAIN ANALYZE VERBOSE SELECT mem_usage FROM filter_prune_test WHERE host = 'ho
 |_|_|_SortPreservingMergeExec: [ts@1 ASC NULLS LAST] REDACTED
 |_|_|_WindowedSortExec: expr=ts@1 ASC NULLS LAST num_ranges=REDACTED REDACTED
 |_|_|_PartSortExec: expr=ts@1 ASC NULLS LAST num_ranges=REDACTED REDACTED
-|_|_|_ProjectionExec: expr=[mem_usage@1 as mem_usage, ts@0 as ts] REDACTED
-|_|_|_FilterExec: cpu_usage@1 > 10, projection=[ts@0, mem_usage@2] REDACTED
+|_|_|_FilterExec: cpu_usage@1 > 10, projection=[mem_usage@2, ts@0] REDACTED
 |_|_|_SeqScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":0, "files":1, "file_ranges":1}, "projection": ["ts", "cpu_usage", "mem_usage"], "filters": ["host = Dictionary(UInt32, Utf8(\"host1\"))", "cpu_usage > Float64(10)", "region = Dictionary(UInt32, Utf8(\"us-east\"))"], \"file\":REDACTED
 |_|_|_|
 |_|_| Total rows: 2_|
@@ -825,8 +818,7 @@ EXPLAIN ANALYZE VERBOSE SELECT host FROM filter_prune_test WHERE cpu_usage BETWE
 |_|_|_SortPreservingMergeExec: [ts@1 ASC NULLS LAST] REDACTED
 |_|_|_WindowedSortExec: expr=ts@1 ASC NULLS LAST num_ranges=REDACTED REDACTED
 |_|_|_PartSortExec: expr=ts@1 ASC NULLS LAST num_ranges=REDACTED REDACTED
-|_|_|_ProjectionExec: expr=[host@1 as host, ts@0 as ts] REDACTED
-|_|_|_FilterExec: cpu_usage@2 >= 15 AND cpu_usage@2 <= 30, projection=[ts@0, host@1] REDACTED
+|_|_|_FilterExec: cpu_usage@2 >= 15 AND cpu_usage@2 <= 30, projection=[host@1, ts@0] REDACTED
 |_|_|_SeqScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":0, "files":1, "file_ranges":1}, "projection": ["ts", "host", "cpu_usage"], "filters": ["cpu_usage >= Float64(15)", "cpu_usage <= Float64(30)"], \"file\":REDACTED
 |_|_|_|
 |_|_| Total rows: 3_|
@@ -866,8 +858,7 @@ EXPLAIN ANALYZE VERBOSE SELECT cpu_usage FROM filter_prune_test WHERE host LIKE 
 |_|_|_SortPreservingMergeExec: [ts@1 ASC NULLS LAST] REDACTED
 |_|_|_WindowedSortExec: expr=ts@1 ASC NULLS LAST num_ranges=REDACTED REDACTED
 |_|_|_PartSortExec: expr=ts@1 ASC NULLS LAST num_ranges=REDACTED REDACTED
-|_|_|_ProjectionExec: expr=[cpu_usage@1 as cpu_usage, ts@0 as ts] REDACTED
-|_|_|_FilterExec: host@1 LIKE host% AND region@2 LIKE us-%, projection=[ts@0, cpu_usage@3] REDACTED
+|_|_|_FilterExec: host@1 LIKE host% AND region@2 LIKE us-%, projection=[cpu_usage@3, ts@0] REDACTED
 |_|_|_SeqScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":0, "files":1, "file_ranges":1}, "projection": ["ts", "host", "region", "cpu_usage"], "filters": ["host LIKE Dictionary(UInt32, Utf8(\"host%\"))", "region LIKE Dictionary(UInt32, Utf8(\"us-%\"))"], \"file\":REDACTED
 |_|_|_|
 |_|_| Total rows: 5_|
@@ -906,8 +897,7 @@ EXPLAIN ANALYZE VERBOSE SELECT cpu_usage FROM filter_prune_test WHERE host = 'ho
 |_|_|_SortPreservingMergeExec: [ts@1 ASC NULLS LAST] REDACTED
 |_|_|_WindowedSortExec: expr=ts@1 ASC NULLS LAST num_ranges=REDACTED REDACTED
 |_|_|_PartSortExec: expr=ts@1 ASC NULLS LAST num_ranges=REDACTED REDACTED
-|_|_|_ProjectionExec: expr=[cpu_usage@1 as cpu_usage, ts@0 as ts] REDACTED
-|_|_|_FilterExec: host@1 = host1 OR region@2 = eu-west, projection=[ts@0, cpu_usage@3] REDACTED
+|_|_|_FilterExec: host@1 = host1 OR region@2 = eu-west, projection=[cpu_usage@3, ts@0] REDACTED
 |_|_|_SeqScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":0, "files":1, "file_ranges":1}, "projection": ["ts", "host", "region", "cpu_usage"], "filters": ["host = Dictionary(UInt32, Utf8(\"host1\")) OR region = Dictionary(UInt32, Utf8(\"eu-west\"))"], \"file\":REDACTED
 |_|_|_|
 |_|_| Total rows: 4_|
@@ -945,7 +935,7 @@ EXPLAIN ANALYZE VERBOSE SELECT cpu_usage FROM (SELECT * FROM filter_prune_test W
 |_|_|_WindowedSortExec: expr=ts@1 ASC NULLS LAST num_ranges=REDACTED REDACTED
 |_|_|_PartSortExec: expr=ts@1 ASC NULLS LAST num_ranges=REDACTED REDACTED
 |_|_|_ProjectionExec: expr=[cpu_usage@1 as cpu_usage, ts@0 as ts] REDACTED
-|_|_|_SeqScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":0, "files":1, "file_ranges":1}, "projection": ["ts", "cpu_usage"], "filters": ["region = Dictionary(UInt32, Utf8(\"us-east\"))", "host = Dictionary(UInt32, Utf8(\"host1\"))"], \"file\":REDACTED
+|_|_|_SeqScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":0, "files":1, "file_ranges":1}, "projection": ["ts", "cpu_usage"], "filters": ["host = Dictionary(UInt32, Utf8(\"host1\"))", "region = Dictionary(UInt32, Utf8(\"us-east\"))"], \"file\":REDACTED
 |_|_|_|
 |_|_| Total rows: 2_|
 +-+-+-+
@@ -1073,8 +1063,7 @@ EXPLAIN ANALYZE VERBOSE SELECT field1 FROM filter_prune_files WHERE field2 > 5.0
 |_|_|_SortPreservingMergeExec: [ts@1 ASC NULLS LAST] REDACTED
 |_|_|_WindowedSortExec: expr=ts@1 ASC NULLS LAST num_ranges=REDACTED REDACTED
 |_|_|_PartSortExec: expr=ts@1 ASC NULLS LAST num_ranges=REDACTED REDACTED
-|_|_|_ProjectionExec: expr=[field1@1 as field1, ts@0 as ts] REDACTED
-|_|_|_FilterExec: field2@2 > 5, projection=[ts@0, field1@1] REDACTED
+|_|_|_FilterExec: field2@2 > 5, projection=[field1@1, ts@0] REDACTED
 |_|_|_SeqScan: region=REDACTED, {"partition_count":{"count":3, "mem_ranges":1, "files":2, "file_ranges":2}, "projection": ["ts", "field1", "field2"], "filters": ["field2 > Float64(5)"], \"file\":REDACTED
 |_|_|_|
 |_|_| Total rows: 5_|
@@ -1111,8 +1100,7 @@ EXPLAIN ANALYZE VERBOSE SELECT field3 FROM filter_prune_files WHERE tag_key = 'b
 |_|_|_SortPreservingMergeExec: [ts@1 ASC NULLS LAST] REDACTED
 |_|_|_WindowedSortExec: expr=ts@1 ASC NULLS LAST num_ranges=REDACTED REDACTED
 |_|_|_PartSortExec: expr=ts@1 ASC NULLS LAST num_ranges=REDACTED REDACTED
-|_|_|_ProjectionExec: expr=[field3@1 as field3, ts@0 as ts] REDACTED
-|_|_|_FilterExec: field2@1 > 7, projection=[ts@0, field3@2] REDACTED
+|_|_|_FilterExec: field2@1 > 7, projection=[field3@2, ts@0] REDACTED
 |_|_|_SeqScan: region=REDACTED, {"partition_count":{"count":3, "mem_ranges":1, "files":2, "file_ranges":2}, "projection": ["ts", "field2", "field3"], "filters": ["tag_key = Dictionary(UInt32, Utf8(\"b\"))", "field2 > Float64(7)"], \"file\":REDACTED
 |_|_|_|
 |_|_| Total rows: 2_|

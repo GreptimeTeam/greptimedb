@@ -358,19 +358,19 @@ EXPLAIN SELECT host, v FROM cast_preimage_ts_ms
 WHERE CAST(ts AS TIMESTAMP(9)) = '1970-01-01 00:00:05'::TIMESTAMP(9)
 ORDER BY host;
 
-+---------------+-------------------------------------------------------------------------------------------------------------------+
-| plan_type     | plan                                                                                                              |
-+---------------+-------------------------------------------------------------------------------------------------------------------+
-| logical_plan  | MergeScan [is_placeholder=false, remote_input=[                                                                   |
-|               | Sort: cast_preimage_ts_ms.host ASC NULLS LAST                                                                     |
-|               |   Projection: cast_preimage_ts_ms.host, cast_preimage_ts_ms.v                                                     |
-|               |     Filter: cast_preimage_ts_ms.ts = TimestampMillisecond(5000, None)                                             |
-|               |       TableScan: cast_preimage_ts_ms, partial_filters=[cast_preimage_ts_ms.ts = TimestampMillisecond(5000, None)] |
-|               | ]]                                                                                                                |
-| physical_plan | CooperativeExec                                                                                                   |
++---------------+-----------------------------------------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                                                          |
++---------------+-----------------------------------------------------------------------------------------------------------------------------------------------+
+| logical_plan  | MergeScan [is_placeholder=false, remote_input=[                                                                                               |
+|               | Sort: cast_preimage_ts_ms.host ASC NULLS LAST                                                                                                 |
+|               |   Projection: cast_preimage_ts_ms.host, cast_preimage_ts_ms.v                                                                                 |
+|               |     Filter: CAST(cast_preimage_ts_ms.ts AS Timestamp(ns)) = TimestampNanosecond(5000000000, None)                                             |
+|               |       TableScan: cast_preimage_ts_ms, partial_filters=[CAST(cast_preimage_ts_ms.ts AS Timestamp(ns)) = TimestampNanosecond(5000000000, None)] |
+|               | ]]                                                                                                                                            |
+| physical_plan | CooperativeExec                                                                                                                               |
 |               |   MergeScanExec: REDACTED
-|               |                                                                                                                   |
-+---------------+-------------------------------------------------------------------------------------------------------------------+
+|               |                                                                                                                                               |
++---------------+-----------------------------------------------------------------------------------------------------------------------------------------------+
 
 -- Non-exact nanosecond literal should remain semantically correct.
 SELECT host, v FROM cast_preimage_ts_ms
