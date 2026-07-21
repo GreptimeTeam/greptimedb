@@ -554,15 +554,14 @@ impl StartCommand {
             region_failure_detector_controller: Arc::new(NoopRegionFailureDetectorControl),
             soft_drop_enabled: false,
             soft_drop_retention: None,
+            create_database_metadata_committer: None,
         };
 
-        let ddl_manager = DdlManager::try_new(
+        let ddl_manager = DdlManager::new(
             ddl_context,
             procedure_manager.clone(),
             Arc::new(StandaloneRepartitionProcedureFactory),
-            true,
-        )
-        .context(error::InitDdlManagerSnafu)?;
+        );
 
         let ddl_manager = if let Some(configurator) =
             plugins.get::<DdlManagerConfiguratorRef<DdlManagerConfigureContext>>()
@@ -579,6 +578,9 @@ impl StartCommand {
         } else {
             ddl_manager
         };
+        ddl_manager
+            .register_loaders()
+            .context(error::InitDdlManagerSnafu)?;
 
         let procedure_executor = creator
             .procedure_executor_creator

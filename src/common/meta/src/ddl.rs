@@ -124,6 +124,9 @@ pub struct DdlContext {
     pub soft_drop_enabled: bool,
     /// Fixed retention used to calculate new soft-drop deadlines.
     pub soft_drop_retention: Option<Duration>,
+    /// Commits create-database metadata and the creator grant atomically.
+    pub create_database_metadata_committer:
+        Option<create_database::CreateDatabaseMetadataCommitterRef>,
 }
 
 impl DdlContext {

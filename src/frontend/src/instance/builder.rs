@@ -33,6 +33,8 @@ use operator::flow::FlowServiceOperator;
 use operator::insert::Inserter;
 use operator::procedure::ProcedureServiceOperator;
 use operator::request::Requester;
+#[cfg(feature = "enterprise")]
+use operator::statement::CreateDatabaseHandlerRef;
 use operator::statement::{
     ExecutorConfigureContext, StatementExecutor, StatementExecutorConfiguratorRef,
     StatementExecutorRef,
@@ -283,6 +285,13 @@ impl FrontendBuilder {
             } else {
                 statement_executor
             };
+
+        #[cfg(feature = "enterprise")]
+        let statement_executor = if let Some(handler) = plugins.get::<CreateDatabaseHandlerRef>() {
+            statement_executor.with_create_database_handler(handler)
+        } else {
+            statement_executor
+        };
 
         let statement_executor = Arc::new(statement_executor);
 

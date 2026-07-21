@@ -432,6 +432,7 @@ impl MetasrvBuilder {
             region_failure_detector_controller,
             soft_drop_enabled: ddl_soft_drop_enabled(&options),
             soft_drop_retention: ddl_soft_drop_retention(&options),
+            create_database_metadata_committer: None,
         };
         let procedure_manager_c = procedure_manager.clone();
         let repartition_procedure_factory: RepartitionProcedureFactoryRef = if options.gc.enable {
@@ -445,13 +446,11 @@ impl MetasrvBuilder {
                 options.grpc.server_addr.clone(),
             ))
         };
-        let ddl_manager = DdlManager::try_new(
+        let ddl_manager = DdlManager::new(
             ddl_context,
             procedure_manager_c,
             repartition_procedure_factory,
-            true,
-        )
-        .context(error::InitDdlManagerSnafu)?;
+        );
 
         let ddl_manager = if let Some(configurator) = plugins
             .as_ref()
@@ -468,6 +467,9 @@ impl MetasrvBuilder {
         } else {
             ddl_manager
         };
+        ddl_manager
+            .register_loaders()
+            .context(error::InitDdlManagerSnafu)?;
 
         let ddl_manager = Arc::new(ddl_manager);
 

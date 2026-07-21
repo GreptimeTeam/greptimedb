@@ -1353,7 +1353,7 @@ impl ErrorExt for Error {
             | AcquireMySqlClient { error, .. }
             | MySqlTransaction { error, .. } => retry_hint_from_sqlx_error(error),
             #[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
-            SqlExecutionTimeout { .. } => RetryHint::Retryable,
+            RdsTransactionRetryFailed { .. } | SqlExecutionTimeout { .. } => RetryHint::Retryable,
             _ => RetryHint::NonRetryable,
         }
     }
@@ -1454,6 +1454,14 @@ mod retry_hint_tests {
             duration: std::time::Duration::from_secs(1),
         }
         .build();
+
+        assert_eq!(err.retry_hint(), RetryHint::Retryable);
+    }
+
+    #[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
+    #[test]
+    fn test_rds_transaction_retry_failed_hint_is_retryable() {
+        let err = RdsTransactionRetryFailedSnafu.build();
 
         assert_eq!(err.retry_hint(), RetryHint::Retryable);
     }
