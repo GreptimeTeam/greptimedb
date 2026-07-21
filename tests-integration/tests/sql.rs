@@ -83,6 +83,7 @@ macro_rules! sql_tests {
                 test_postgres_datestyle,
                 test_postgres_intervalstyle,
                 test_postgres_parameter_inference,
+                test_postgres_regclass_bind_parameter,
                 test_postgres_uint64_parameter,
                 test_postgres_explain_bind_parameter,
                 test_postgres_array_types,
@@ -1303,6 +1304,115 @@ pub async fn test_postgres_parameter_inference(store_type: StorageType) {
     assert_eq!(1, rows.len());
 
     // Shutdown the client.
+    drop(client);
+    rx.await.unwrap();
+
+    let _ = fe_pg_server.shutdown().await;
+    guard.remove_all().await;
+}
+
+pub async fn test_postgres_regclass_bind_parameter(store_type: StorageType) {
+    let (mut guard, fe_pg_server) =
+        setup_pg_server(store_type, "test_postgres_regclass_bind_parameter").await;
+    let addr = fe_pg_server.bind_addr().unwrap().to_string();
+
+    let (client, connection) = tokio_postgres::connect(&format!("postgres://{addr}/public"), NoTls)
+        .await
+        .unwrap();
+
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        connection.await.unwrap();
+        tx.send(()).unwrap();
+    });
+
+    client
+        .simple_query(
+            "CREATE TABLE test_adbc_app_logs (\"service\" STRING, message STRING, ts TIMESTAMP TIME INDEX)",
+        )
+        .await
+        .unwrap();
+
+    let pgadbc_query = "SELECT attr.attname FROM pg_catalog.pg_class AS cls \
+        INNER JOIN pg_catalog.pg_attribute AS attr ON cls.oid = attr.attrelid \
+        INNER JOIN pg_catalog.pg_type AS typ ON attr.atttypid = typ.oid \
+        WHERE attr.attnum >= 0 AND cls.oid = $1::regclass::oid ORDER BY attr.attnum";
+    let pgadbc_statement = client.prepare(pgadbc_query).await.unwrap();
+
+    for table_name in [
+        "test_adbc_app_logs",
+        "\"test_adbc_app_logs\"",
+        "public.test_adbc_app_logs",
+        "\"public\".\"test_adbc_app_logs\"",
+    ] {
+        let rows = client
+            .query(&pgadbc_statement, &[&table_name])
+            .await
+            .unwrap();
+        assert!(!rows.is_empty(), "{table_name} should resolve to a table");
+        assert_eq!(
+            rows.iter()
+                .map(|row| row.get::<_, String>(0))
+                .collect::<Vec<_>>(),
+            ["service", "message", "ts"]
+        );
+    }
+
+    let relname_statement = client
+        .prepare("SELECT cls.oid FROM pg_catalog.pg_class AS cls WHERE cls.relname = $1")
+        .await
+        .unwrap();
+    let rows = client
+        .query(&relname_statement, &[&"\"test_adbc_app_logs\""])
+        .await
+        .unwrap();
+    assert!(rows.is_empty(), "quoted text is not a relation name");
+
+    client
+        .simple_query("CREATE DATABASE adbc_override")
+        .await
+        .unwrap();
+    client
+        .simple_query(
+            "CREATE TABLE adbc_override.test_adbc_app_logs (override_column STRING, ts TIMESTAMP TIME INDEX)",
+        )
+        .await
+        .unwrap();
+    client
+        .simple_query("SET search_path TO adbc_override, public")
+        .await
+        .unwrap();
+
+    let rows = client
+        .query(&pgadbc_statement, &[&"test_adbc_app_logs"])
+        .await
+        .unwrap();
+    assert_eq!(rows[0].get::<_, String>(0), "override_column");
+
+    let rows = client
+        .query(&pgadbc_statement, &[&"public.test_adbc_app_logs"])
+        .await
+        .unwrap();
+    assert_eq!(
+        rows.iter()
+            .map(|row| row.get::<_, String>(0))
+            .collect::<Vec<_>>(),
+        ["service", "message", "ts"]
+    );
+
+    client
+        .simple_query("SET search_path TO public")
+        .await
+        .unwrap();
+    client
+        .simple_query("DROP TABLE adbc_override.test_adbc_app_logs")
+        .await
+        .unwrap();
+    client
+        .simple_query("DROP DATABASE adbc_override")
+        .await
+        .unwrap();
+
     drop(client);
     rx.await.unwrap();
 

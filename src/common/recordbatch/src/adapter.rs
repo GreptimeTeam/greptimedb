@@ -891,7 +891,6 @@ fn convert_map_to_json_binary(
 
 #[cfg(test)]
 mod test {
-    use std::any::Any;
     use std::time::Duration;
 
     use common_error::ext::BoxedError;
@@ -957,10 +956,6 @@ mod test {
     impl ExecutionPlan for TestMetricsExec {
         fn name(&self) -> &str {
             REGION_SCAN_EXEC_NAME
-        }
-
-        fn as_any(&self) -> &dyn Any {
-            self
         }
 
         fn properties(&self) -> &Arc<PlanProperties> {
