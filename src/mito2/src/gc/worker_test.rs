@@ -755,7 +755,6 @@ async fn test_file_in_tmp_ref_old_mtime_kept() {
 struct GcCountingHook {
     gc_calls: AtomicUsize,
     last_is_region_dropped: AtomicBool,
-    last_terminal: AtomicBool,
     fail_remaining: AtomicUsize,
 }
 
@@ -771,7 +770,6 @@ impl RegionHook for GcCountingHook {
         self.gc_calls.fetch_add(1, Ordering::Relaxed);
         self.last_is_region_dropped
             .store(info.is_region_dropped, Ordering::Relaxed);
-        self.last_terminal.store(info.terminal, Ordering::Relaxed);
         // Atomically decrement-and-return the previous value; fail while > 0.
         let prev = self.fail_remaining.fetch_sub(1, Ordering::Relaxed);
         if prev > 0 {
@@ -1048,10 +1046,6 @@ async fn test_on_region_gc_fires_for_dropped_region() {
         hook.last_is_region_dropped.load(Ordering::Relaxed),
         "a dropped region's GC pass must report is_region_dropped=true"
     );
-    assert!(
-        hook.last_terminal.load(Ordering::Relaxed),
-        "a dropped region with no cross-region/tmp refs is terminally cleaned (terminal=true)"
-    );
 }
 
 /// `on_region_gc` **fires** on a full-listing pass even when mito itself deleted
@@ -1130,10 +1124,6 @@ async fn test_on_region_gc_fires_on_full_listing_without_deleted_files() {
     assert!(
         !hook.last_is_region_dropped.load(Ordering::Relaxed),
         "a live region's GC pass must report is_region_dropped=false"
-    );
-    assert!(
-        !hook.last_terminal.load(Ordering::Relaxed),
-        "a live region is never terminal"
     );
 }
 

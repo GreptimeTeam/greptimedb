@@ -567,15 +567,8 @@ impl LocalGcWorker {
 
         // Notify extensions so they can clean up sidecar files. Fire when there
         // are removed files, or on a full-listing pass (lets extensions reconcile
-        // orphans even when mito deleted nothing). `terminal` authorizes whole-
-        // sidecar-dir removal only for a dropped region with no remaining refs.
-        let terminal = is_region_dropped
-            && !self
-                .file_ref_manifest
-                .cross_region_refs
-                .contains_key(&region_id)
-            && !self.file_ref_manifest.file_refs.contains_key(&region_id);
-
+        // orphans even when mito deleted nothing). Cleanup is always scoped to
+        // `removed_files`; see `RegionGcInfo`.
         let extension_cleanup_failed = if let Some(hook) = &self.hook
             && (!deletable_files.is_empty() || self.full_file_listing)
         {
@@ -589,7 +582,6 @@ impl LocalGcWorker {
                         removed_files: &deletable_files,
                         is_region_dropped,
                         full_file_listing: self.full_file_listing,
-                        terminal,
                     },
                 )
                 .await;

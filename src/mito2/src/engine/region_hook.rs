@@ -391,21 +391,28 @@ pub trait RegionHook: Send + Sync + Debug {
     /// Called after the datanode's global GC worker (`LocalGcWorker`) finishes a
     /// GC pass for a region — live regions (periodic GC) or dropped/repartitioned
     /// regions (the global reclamation path). Lets extensions with sidecar files
-    /// outside mito2's region dir clean up their own residual files.
+    /// outside mito2's region dir clean up residual files.
     ///
-    /// Authorization is scoped to stay safe against cross-region / tmp refs mito
-    /// honors but an extension can't see:
-    /// - [`RegionGcInfo::terminal`] `false`: clean only sidecar artifacts for the
-    ///   files in [`RegionGcInfo::removed_files`] (plus orphans on a full-listing
-    ///   pass). [`RegionGcInfo::is_region_dropped`] is context, not authorization.
-    /// - [`RegionGcInfo::terminal`] `true`: all refs released; may remove the
-    ///   whole sidecar dir.
+    /// Always scoped to [`RegionGcInfo::removed_files`]: clean only sidecar
+    /// artifacts for the files mito deleted this pass. On a
+    /// [`RegionGcInfo::full_file_listing`] pass you may also reconcile
+    /// sidecar-only orphans (e.g. detect a fully-reaped region by cross-checking
+    /// the region dir against your own manifest). This callback never authorizes
+    /// blind whole-directory removal — derive "fully reaped" from your own state
+    /// so a stale mito snapshot can't cause accidental deletion.
+    /// [`RegionGcInfo::is_region_dropped`] is context, not authorization.
     ///
-    /// Returns `Err` to keep the region un-acknowledged (`need_retry_regions`)
-    /// so the next pass replays this callback.
+    /// # Retry
+    ///
+    /// Returning `Err` keeps the region un-acknowledged (`need_retry_regions`)
+    /// for a future replay. **Dropped/repartitioned**: guaranteed — metasrv keeps
+    /// the `table_repart` tombstone until `Ok`, so full-listing passes continue
+    /// until cleanup finishes. **Live**: best-effort — not expedited through
+    /// candidate selection, and a later full-listing pass may not reconstruct the
+    /// same `removed_files`; treat live cleanup as opportunistic.
     ///
     /// `region_metadata` is `None` for dropped regions; use `region_id` +
-    /// `access_layer`. Runs on the background GC task; must be idempotent.
+    /// `access_layer`. Idempotent; runs on the background GC task.
     async fn on_region_gc(
         &self,
         region_id: RegionId,
@@ -421,19 +428,15 @@ pub trait RegionHook: Send + Sync + Debug {
 /// What mito2's GC pass deleted for a region, handed to
 /// [`RegionHook::on_region_gc`].
 pub struct RegionGcInfo<'a> {
-    /// Files mito2 physically deleted this pass. When [`Self::terminal`] is
-    /// `false`, cleanup must be scoped to these.
+    /// Files mito2 physically deleted this pass. Cleanup must be scoped to these
+    /// (plus sidecar-only orphans you can identify on a [`Self::full_file_listing`]
+    /// pass).
     pub removed_files: &'a [RemovedFile],
     /// `true` when the region is dropped/absent (e.g. a repartitioned source).
-    /// Context only — not authorization to remove the whole sidecar dir; see
-    /// [`Self::terminal`]. `region_metadata` is `None` when this is `true`.
+    /// Context only — not authorization. `region_metadata` is `None` when `true`.
     pub is_region_dropped: bool,
     /// Whether this pass did a full object-store listing.
     pub full_file_listing: bool,
-    /// All refs to the region's files are released (dropped, no cross-region/tmp
-    /// refs). Only when `true` may an extension remove its whole sidecar dir;
-    /// otherwise stay scoped to [`Self::removed_files`].
-    pub terminal: bool,
 }
 
 pub type RegionHookRef = Arc<dyn RegionHook>;
