@@ -446,7 +446,7 @@ mod tests {
             DataType::Struct(Fields::from(vec![Arc::new(Field::new(
                 "a",
                 DataType::Struct(Fields::from(vec![
-                    Arc::new(Field::new("b", DataType::Int64, true)),
+                    Arc::new(Field::new("b", DataType::UInt64, true)),
                     Arc::new(Field::new("c", DataType::Utf8View, true)),
                 ])),
                 true,
@@ -485,7 +485,7 @@ mod tests {
             &[None, Some(2), None],
             a.column(0)
                 .as_any()
-                .downcast_ref::<Int64Array>()
+                .downcast_ref::<datatypes::arrow::array::UInt64Array>()
                 .unwrap()
                 .iter()
                 .collect::<Vec<_>>()

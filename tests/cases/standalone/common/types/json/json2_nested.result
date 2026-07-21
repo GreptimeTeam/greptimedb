@@ -26,17 +26,10 @@ ADMIN FLUSH_TABLE('json2_nested_fallback');
 
 INSERT INTO json2_nested_fallback
 VALUES
-    (3, '{"a": {"b": 3}}');
+    (3, '{"a": {"b": 3}}'),
+    (4, '{"a": 2}');
 
-Affected Rows: 1
-
-ADMIN FLUSH_TABLE('json2_nested_fallback');
-
-+--------------------------------------------+
-| ADMIN FLUSH_TABLE('json2_nested_fallback') |
-+--------------------------------------------+
-| 0                                          |
-+--------------------------------------------+
+Affected Rows: 2
 
 SELECT j.a.b FROM json2_nested_fallback ORDER BY ts;
 
@@ -46,7 +39,19 @@ SELECT j.a.b FROM json2_nested_fallback ORDER BY ts;
 |                                               |
 | 2                                             |
 | 3                                             |
+|                                               |
 +-----------------------------------------------+
+
+SELECT j.a, j.a.b FROM json2_nested_fallback ORDER BY ts;
+
++---------------------------------------------+-----------------------------------------------+
+| json_get(json2_nested_fallback.j,Utf8("a")) | json_get(json2_nested_fallback.j,Utf8("a.b")) |
++---------------------------------------------+-----------------------------------------------+
+| 1                                           |                                               |
+| {"b":2}                                     | 2                                             |
+| {"b":3}                                     | 3                                             |
+| 2                                           |                                               |
++---------------------------------------------+-----------------------------------------------+
 
 DROP TABLE json2_nested_fallback;
 

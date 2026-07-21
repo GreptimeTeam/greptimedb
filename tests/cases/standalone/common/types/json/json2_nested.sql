@@ -16,11 +16,12 @@ ADMIN FLUSH_TABLE('json2_nested_fallback');
 
 INSERT INTO json2_nested_fallback
 VALUES
-    (3, '{"a": {"b": 3}}');
-
-ADMIN FLUSH_TABLE('json2_nested_fallback');
+    (3, '{"a": {"b": 3}}'),
+    (4, '{"a": 2}');
 
 SELECT j.a.b FROM json2_nested_fallback ORDER BY ts;
+
+SELECT j.a, j.a.b FROM json2_nested_fallback ORDER BY ts;
 
 DROP TABLE json2_nested_fallback;
 
