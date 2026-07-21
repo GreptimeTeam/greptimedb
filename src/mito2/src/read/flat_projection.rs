@@ -226,9 +226,7 @@ impl FlatProjectionMapper {
                     && self
                         .metadata
                         .column_by_name(&column.name)
-                        .is_some_and(|metadata| {
-                            self.metadata.primary_key.contains(&metadata.column_id)
-                        })
+                        .is_some_and(|metadata| metadata.semantic_type == SemanticType::Tag)
                 {
                     changed = true;
                     column.data_type = ConcreteDataType::dictionary_datatype(
