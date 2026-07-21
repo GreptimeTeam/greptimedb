@@ -247,11 +247,6 @@ impl KvBackend for LeaderCachedKvBackend {
         }
 
         let cached_res = self.cache.batch_get(req.clone()).await?;
-        // The cache hit all keys
-        if cached_res.kvs.len() == req.keys.len() {
-            return Ok(cached_res);
-        }
-
         let hit_keys = cached_res
             .kvs
             .iter()
@@ -261,6 +256,11 @@ impl KvBackend for LeaderCachedKvBackend {
         metrics::METRIC_META_KV_CACHE_HIT
             .with_label_values(&["batch_get"])
             .inc_by(hit_keys.len() as u64);
+
+        // The cache hit all keys
+        if cached_res.kvs.len() == req.keys.len() {
+            return Ok(cached_res);
+        }
 
         let missed_keys = req
             .keys
