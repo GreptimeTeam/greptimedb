@@ -235,6 +235,20 @@ struct ExecuteOnceOutcome {
     result: Result<Option<(usize, Duration)>, Error>,
 }
 
+fn merge_flush_execution_results(
+    first: Option<(usize, Duration)>,
+    second: Option<(usize, Duration)>,
+) -> Option<(usize, Duration)> {
+    match (first, second) {
+        (Some((first_rows, first_elapsed)), Some((second_rows, second_elapsed))) => Some((
+            first_rows.saturating_add(second_rows),
+            first_elapsed.saturating_add(second_elapsed),
+        )),
+        (Some(result), None) | (None, Some(result)) => Some(result),
+        (None, None) => None,
+    }
+}
+
 impl BatchingTask {
     #[allow(clippy::too_many_arguments)]
     pub fn try_new(
@@ -410,6 +424,37 @@ impl BatchingTask {
         outcome.result
     }
 
+    pub(crate) async fn execute_once_serialized_for_flush(
+        &self,
+        engine: &QueryEngineRef,
+        frontend_client: &Arc<FrontendClient>,
+    ) -> Result<Option<(usize, Duration)>, Error> {
+        let _execution_guard = self.execution_lock.lock().await;
+        let run_live_dirty_second = self.flush_has_pending_and_live_dirty_coverage();
+        let first = self
+            .execute_once_unlocked(
+                engine,
+                frontend_client,
+                self.current_flush_dirty_window_count(),
+            )
+            .await
+            .result?;
+
+        if !run_live_dirty_second {
+            return Ok(first);
+        }
+
+        let second = self
+            .execute_once_unlocked(
+                engine,
+                frontend_client,
+                self.current_flush_dirty_window_count(),
+            )
+            .await
+            .result?;
+        Ok(merge_flush_execution_results(first, second))
+    }
+
     /// Executes one flow evaluation under `execution_lock` and keeps the
     /// generated query context for the background loop's error logging/backoff.
     async fn execute_once_serialized_with_outcome(
@@ -464,6 +509,45 @@ impl BatchingTask {
                 result: Ok(None),
             }
         }
+    }
+
+    fn current_flush_dirty_window_count(&self) -> Option<usize> {
+        let time_window_size = self
+            .config
+            .time_window_expr
+            .as_ref()
+            .and_then(|expr| *expr.time_window_size())?;
+        let state = self.state.read().unwrap();
+        let dirty_count = state
+            .dirty_time_windows
+            .conservative_flush_window_count(&time_window_size);
+        let pending_count = state
+            .pending_fenced_repair()
+            .map(|repair| {
+                repair
+                    .pending_windows()
+                    .conservative_flush_window_count(&time_window_size)
+            })
+            .unwrap_or_default();
+        let total_count = dirty_count.saturating_add(pending_count);
+        let has_coverage = !state.dirty_time_windows.is_empty()
+            || state
+                .pending_fenced_repair()
+                .is_some_and(|repair| !repair.pending_windows().is_empty());
+
+        Some(if has_coverage && total_count == 0 {
+            1
+        } else {
+            total_count
+        })
+    }
+
+    fn flush_has_pending_and_live_dirty_coverage(&self) -> bool {
+        let state = self.state.read().unwrap();
+        state
+            .pending_fenced_repair()
+            .is_some_and(|repair| !repair.pending_windows().is_empty())
+            && !state.dirty_time_windows.is_empty()
     }
 
     /// Generates the insert plan. Caller must reach this through the serialized path.
@@ -1400,6 +1484,31 @@ impl BatchingTask {
                     self.config.flow_id
                 ),
             })?;
+
+        if self.state.read().unwrap().force_full_recompute() {
+            let retention_filter = self.config.expire_after.map(|_| {
+                (
+                    col_name.as_str(),
+                    expire_lower_bound,
+                    "force-full-recompute",
+                )
+            });
+            let (_, dirty_windows_to_restore) = self.drain_dirty_windows_signal();
+            let plan_info = self
+                .gen_unfiltered_plan_info(
+                    engine,
+                    query_ctx,
+                    sink_table_schema.clone(),
+                    primary_key_indices,
+                    allow_partial,
+                    dirty_windows_to_restore,
+                    retention_filter,
+                    QueryCoverage::UnfilteredFull,
+                )
+                .await?;
+
+            return Ok(Some(plan_info));
+        }
 
         if self.should_use_unfiltered_incremental_delta() {
             // In incremental mode, source correctness is defined by the

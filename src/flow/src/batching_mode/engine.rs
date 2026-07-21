@@ -20,7 +20,8 @@ use std::time::Duration;
 
 use api::v1::flow::DirtyWindowRequests;
 use catalog::CatalogManagerRef;
-use common_error::ext::BoxedError;
+use common_error::ext::{BoxedError, ErrorExt};
+use common_error::status_code::StatusCode;
 use common_meta::ddl::create_flow::{FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY, FlowType};
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::key::flow::FlowMetadataManagerRef;
@@ -44,6 +45,7 @@ use table::table_reference::TableReference;
 use tokio::sync::{RwLock, oneshot};
 
 use crate::batching_mode::BatchingModeOptions;
+use crate::batching_mode::error_chain::error_chain_contains_any;
 use crate::batching_mode::eval_schedule::EvalSchedule;
 use crate::batching_mode::frontend_client::FrontendClient;
 use crate::batching_mode::task::{BatchingTask, TaskArgs};
@@ -56,6 +58,8 @@ use crate::error::{
 };
 use crate::metrics::METRIC_FLOW_BATCHING_ENGINE_BULK_MARK_TIME_WINDOW;
 use crate::{CreateFlowArgs, Error, FlowId, TableName};
+
+const FLUSH_FLOW_REQUEST_OUTDATED_MAX_RETRIES: usize = 3;
 
 /// Batching mode Engine, responsible for driving all the batching mode tasks
 ///
@@ -894,27 +898,32 @@ impl BatchingEngine {
         let task = self.runtime.read().await.tasks.get(&flow_id).cloned();
         let task = task.with_context(|| FlowNotFoundSnafu { id: flow_id })?;
 
-        let time_window_size = task
-            .config
-            .time_window_expr
-            .as_ref()
-            .and_then(|expr| *expr.time_window_size());
-
-        let cur_dirty_window_cnt = time_window_size.map(|time_window_size| {
-            task.state
-                .read()
-                .unwrap()
-                .dirty_time_windows
-                .effective_count(&time_window_size)
-        });
-
-        let res = task
-            .execute_once_serialized(
-                &self.query_engine,
-                &self.frontend_client,
-                cur_dirty_window_cnt,
-            )
-            .await?;
+        let mut attempt = 0;
+        let res = loop {
+            match task
+                .execute_once_serialized_for_flush(&self.query_engine, &self.frontend_client)
+                .await
+            {
+                Ok(res) => break res,
+                Err(err)
+                    if should_retry_flush_error(&err)
+                        && attempt < FLUSH_FLOW_REQUEST_OUTDATED_MAX_RETRIES =>
+                {
+                    attempt += 1;
+                    warn!(
+                        "Flush flow {flow_id} hit retryable stale source state, retrying ({attempt}/{FLUSH_FLOW_REQUEST_OUTDATED_MAX_RETRIES}): {err}"
+                    );
+                }
+                Err(err) => {
+                    if should_retry_flush_error(&err) {
+                        warn!(
+                            "Flush flow {flow_id} exhausted retryable stale retries ({FLUSH_FLOW_REQUEST_OUTDATED_MAX_RETRIES}), returning last error: {err}"
+                        );
+                    }
+                    return Err(err);
+                }
+            }
+        };
 
         let affected_rows = res.map(|(r, _)| r).unwrap_or_default();
         debug!(
@@ -938,6 +947,21 @@ impl BatchingEngine {
         notify_flow_shutdown(flow_id, removed_shutdown_tx, "rolled back");
         abort_flow_task(flow_id, removed_task, "rolled back");
     }
+}
+
+fn should_retry_flush_error(err: &Error) -> bool {
+    err.status_code() == StatusCode::RequestOutdated
+        || error_chain_contains_any(
+            err,
+            &[
+                "stale_cursor",
+                "fallback_full_recompute",
+                "incremental query stale",
+                "stale_snapshot_fence",
+                "rebind_snapshot_fence",
+                "snapshot upper bound stale",
+            ],
+        )
 }
 
 fn notify_flow_shutdown(flow_id: FlowId, tx: Option<oneshot::Sender<()>>, action: &str) -> bool {
@@ -1007,12 +1031,17 @@ impl FlowEngine for BatchingEngine {
 
 #[cfg(test)]
 mod tests {
+    use std::fmt;
+
     use catalog::memory::new_memory_catalog_manager;
+    use common_error::ext::StackError;
+    use common_error::mock::MockError;
     use common_meta::key::TableMetadataManager;
     use common_meta::key::flow::FlowMetadataManager;
     use common_meta::kv_backend::memory::MemoryKvBackend;
     use query::options::QueryOptions;
     use session::context::QueryContext;
+    use snafu::ResultExt;
 
     use super::*;
     use crate::test_utils::create_test_query_engine;
@@ -1074,6 +1103,87 @@ mod tests {
         assert!(BatchingEngine::table_options_enable_append_mode(
             &HashMap::from([(APPEND_MODE_KEY.to_string(), "TRUE".to_string())])
         ));
+    }
+
+    fn flow_error_with_status(status_code: StatusCode) -> Error {
+        Err::<(), _>(BoxedError::new(MockError::new(status_code)))
+            .context(ExternalSnafu)
+            .unwrap_err()
+    }
+
+    #[derive(Debug)]
+    struct MarkerSourceError(&'static str);
+
+    impl fmt::Display for MarkerSourceError {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(f, "{}", self.0)
+        }
+    }
+
+    impl std::error::Error for MarkerSourceError {}
+
+    #[derive(Debug)]
+    struct WrappedMarkerError {
+        source: MarkerSourceError,
+    }
+
+    impl fmt::Display for WrappedMarkerError {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(f, "External error")
+        }
+    }
+
+    impl std::error::Error for WrappedMarkerError {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            Some(&self.source)
+        }
+    }
+
+    impl ErrorExt for WrappedMarkerError {
+        fn status_code(&self) -> StatusCode {
+            StatusCode::Unexpected
+        }
+
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+
+    impl StackError for WrappedMarkerError {
+        fn debug_fmt(&self, _: usize, _: &mut Vec<String>) {}
+
+        fn next(&self) -> Option<&dyn StackError> {
+            None
+        }
+    }
+
+    fn external_error_with_source_marker(marker: &'static str) -> Error {
+        Err::<(), _>(BoxedError::new(WrappedMarkerError {
+            source: MarkerSourceError(marker),
+        }))
+        .context(ExternalSnafu)
+        .unwrap_err()
+    }
+
+    #[test]
+    fn test_should_retry_flush_error_retries_request_outdated_and_wrapped_stale_markers() {
+        let stale_cursor = flow_error_with_status(StatusCode::RequestOutdated);
+        assert!(should_retry_flush_error(&stale_cursor));
+
+        let unexpected = flow_error_with_status(StatusCode::Unexpected);
+        assert!(!should_retry_flush_error(&unexpected));
+
+        let wrapped_stale_cursor = external_error_with_source_marker(
+            "storage returned STALE_CURSOR: given_seq=8527000 min_readable_seq=8550000",
+        );
+        assert!(should_retry_flush_error(&wrapped_stale_cursor));
+
+        let wrapped_stale_fence =
+            external_error_with_source_marker("storage hint REBIND_SNAPSHOT_FENCE for repair");
+        assert!(should_retry_flush_error(&wrapped_stale_fence));
+
+        let generic_wrapped = external_error_with_source_marker("generic network error");
+        assert!(!should_retry_flush_error(&generic_wrapped));
     }
 
     #[test]
