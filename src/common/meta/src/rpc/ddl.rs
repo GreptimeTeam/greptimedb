@@ -361,6 +361,14 @@ impl SubmitDdlTaskRequest {
     }
 }
 
+fn ddl_timeout_secs(timeout: Duration) -> u32 {
+    timeout
+        .as_nanos()
+        .div_ceil(Duration::from_secs(1).as_nanos())
+        .try_into()
+        .unwrap_or(u32::MAX)
+}
+
 impl TryFrom<SubmitDdlTaskRequest> for PbDdlTaskRequest {
     type Error = error::Error;
 
@@ -434,7 +442,7 @@ impl TryFrom<SubmitDdlTaskRequest> for PbDdlTaskRequest {
         Ok(Self {
             header: None,
             query_context: Some(query_context.into()),
-            timeout_secs: timeout.as_secs() as u32,
+            timeout_secs: ddl_timeout_secs(timeout),
             wait,
             task: Some(task),
         })
@@ -1855,6 +1863,18 @@ mod tests {
     use table::test_util::table_info::test_table_info;
 
     use super::{AlterTableTask, CreateTableTask, *};
+
+    #[test]
+    fn test_ddl_timeout_secs() {
+        assert_eq!(ddl_timeout_secs(Duration::ZERO), 0);
+        assert_eq!(ddl_timeout_secs(Duration::from_nanos(1)), 1);
+        assert_eq!(ddl_timeout_secs(Duration::from_secs(1)), 1);
+        assert_eq!(ddl_timeout_secs(Duration::from_millis(1500)), 2);
+        assert_eq!(
+            ddl_timeout_secs(Duration::from_secs(u32::MAX as u64 + 1)),
+            u32::MAX
+        );
+    }
 
     #[test]
     fn test_basic_ser_de_create_table_task() {
