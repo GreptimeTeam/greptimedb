@@ -8,6 +8,7 @@ license.workspace = true
 workspace = true
 
 [features]
+mysql-object-store = ["opendal/services-mysql"]
 services-memory = ["opendal/services-memory"]
 testing = ["derive_builder"]
 
@@ -31,7 +32,6 @@ opendal = { version = "0.57", features = [
     "services-fs",
     "services-gcs",
     "services-http",
-    "services-mysql",
     "services-oss",
     "services-s3",
 ] }
