@@ -152,6 +152,11 @@ impl BatchingEngine {
             .collect()
     }
 
+    /// Mark dirty time windows for batching flows.
+    ///
+    /// Both `timestamps` and `time_ranges` (`[start_inclusive, end_exclusive)`)
+    /// in each `DirtyWindowRequest` are bare `i64`s interpreted in the source
+    /// table's time index column native unit, resolved via table metadata.
     pub async fn handle_mark_dirty_time_window(
         &self,
         reqs: DirtyWindowRequests,
@@ -1063,6 +1068,7 @@ mod tests {
     use common_meta::key::table_route::TableRouteValue;
     use common_meta::key::test_utils::new_test_table_info_with_name;
     use common_meta::kv_backend::memory::MemoryKvBackend;
+    use common_time::timestamp::TimeUnit;
     use query::options::QueryOptions;
     use session::context::QueryContext;
 
@@ -1226,11 +1232,87 @@ GROUP BY l.number, time_window
     }
 
     async fn new_test_task(flow_id: FlowId) -> (BatchingTask, oneshot::Sender<()>) {
-        new_test_task_with_time_window_expr(flow_id, None).await
+        new_test_task_for_source(flow_id, "numbers_with_ts", None).await
     }
 
     async fn new_test_task_with_time_window_expr(
         flow_id: FlowId,
+        time_window_expr: Option<TimeWindowExpr>,
+    ) -> (BatchingTask, oneshot::Sender<()>) {
+        new_test_task_for_source(flow_id, "numbers_with_ts", time_window_expr).await
+    }
+
+    fn test_table_info_with_ts_unit(
+        table_id: TableId,
+        table_name: &str,
+        unit: TimeUnit,
+    ) -> table::metadata::TableInfo {
+        use datatypes::schema::{ColumnSchema, SchemaBuilder};
+        use table::metadata::{TableInfoBuilder, TableMetaBuilder};
+
+        let ts_type = match unit {
+            TimeUnit::Second => ConcreteDataType::timestamp_second_datatype(),
+            TimeUnit::Millisecond => ConcreteDataType::timestamp_millisecond_datatype(),
+            TimeUnit::Microsecond => ConcreteDataType::timestamp_microsecond_datatype(),
+            TimeUnit::Nanosecond => ConcreteDataType::timestamp_nanosecond_datatype(),
+        };
+        let column_schemas = vec![
+            ColumnSchema::new("col1", ConcreteDataType::int32_datatype(), true),
+            ColumnSchema::new("ts", ts_type, false).with_time_index(true),
+        ];
+        let schema = SchemaBuilder::try_from(column_schemas)
+            .unwrap()
+            .build()
+            .unwrap();
+        let meta = TableMetaBuilder::empty()
+            .schema(Arc::new(schema))
+            .primary_key_indices(vec![0])
+            .engine("engine")
+            .next_column_id(3)
+            .build()
+            .unwrap();
+        TableInfoBuilder::default()
+            .table_id(table_id)
+            .table_version(0)
+            .name(table_name)
+            .catalog_name("greptime")
+            .schema_name("public")
+            .meta(meta)
+            .build()
+            .unwrap()
+    }
+
+    /// A 5-second `date_bin` time window expr over the test table's `ts` column.
+    async fn test_time_window_expr() -> TimeWindowExpr {
+        let query_engine = create_test_query_engine();
+        let ctx = QueryContext::arc();
+        let plan = sql_to_df_plan(
+            ctx.clone(),
+            query_engine.clone(),
+            "SELECT date_bin(INTERVAL '5 second', ts) AS time_window FROM numbers_with_ts GROUP BY time_window",
+            true,
+        )
+        .await
+        .unwrap();
+        let (column_name, time_window_expr, _, df_schema) = find_time_window_expr(
+            &plan,
+            query_engine.engine_state().catalog_manager().clone(),
+            ctx,
+        )
+        .await
+        .unwrap();
+        TimeWindowExpr::from_expr(
+            &time_window_expr.unwrap(),
+            &column_name,
+            &df_schema,
+            &query_engine.engine_state().session_state(),
+        )
+        .unwrap()
+    }
+
+    async fn new_test_task_for_source(
+        flow_id: FlowId,
+        source_table_name: &str,
         time_window_expr: Option<TimeWindowExpr>,
     ) -> (BatchingTask, oneshot::Sender<()>) {
         let query_engine = create_test_query_engine();
@@ -1259,7 +1341,7 @@ GROUP BY l.number, time_window
             source_table_names: vec![[
                 "greptime".to_string(),
                 "public".to_string(),
-                "numbers_with_ts".to_string(),
+                source_table_name.to_string(),
             ]],
             query_ctx: ctx,
             catalog_manager: query_engine.engine_state().catalog_manager().clone(),
@@ -1293,33 +1375,8 @@ GROUP BY l.number, time_window
             .unwrap();
 
         // Build a task with a 5-second time window expr.
-        let query_engine = create_test_query_engine();
-        let ctx = QueryContext::arc();
-        let plan = sql_to_df_plan(
-            ctx.clone(),
-            query_engine.clone(),
-            "SELECT date_bin(INTERVAL '5 second', ts) AS time_window FROM numbers_with_ts GROUP BY time_window",
-            true,
-        )
-        .await
-        .unwrap();
-        let (column_name, time_window_expr, _, df_schema) = find_time_window_expr(
-            &plan,
-            query_engine.engine_state().catalog_manager().clone(),
-            ctx,
-        )
-        .await
-        .unwrap();
-        let time_window_expr = TimeWindowExpr::from_expr(
-            &time_window_expr.unwrap(),
-            &column_name,
-            &df_schema,
-            &query_engine.engine_state().session_state(),
-        )
-        .unwrap();
-
         let (task, shutdown_tx) =
-            new_test_task_with_time_window_expr(1, Some(time_window_expr)).await;
+            new_test_task_with_time_window_expr(1, Some(test_time_window_expr().await)).await;
         let task_identity = task.clone();
         engine.runtime.write().await.insert(1, task, shutdown_tx);
 
@@ -1355,6 +1412,79 @@ GROUP BY l.number, time_window
             Duration::from_secs(15),
             state.dirty_time_windows.window_size()
         );
+    }
+
+    /// Dirty timestamps and time ranges are interpreted in the source table's
+    /// time index native unit. The same physical range [3s, 11s) expressed in
+    /// second/millisecond/microsecond/nanosecond units must align to the same
+    /// dirty window [0s, 15s).
+    #[tokio::test]
+    async fn test_handle_mark_dirty_time_window_time_index_units() {
+        let engine = new_test_engine().await;
+
+        let cases = [
+            (TimeUnit::Second, 1u32, "t_sec", 3i64, 11i64),
+            (TimeUnit::Millisecond, 2, "t_ms", 3_000, 11_000),
+            (TimeUnit::Microsecond, 3, "t_us", 3_000_000, 11_000_000),
+            (
+                TimeUnit::Nanosecond,
+                4,
+                "t_ns",
+                3_000_000_000,
+                11_000_000_000,
+            ),
+        ];
+
+        let mut task_identities = vec![];
+        let mut requests = vec![];
+        for (unit, table_id, table_name, start_inclusive, end_exclusive) in cases {
+            engine
+                .table_meta
+                .create_table_metadata(
+                    test_table_info_with_ts_unit(table_id, table_name, unit),
+                    TableRouteValue::physical(vec![]),
+                    HashMap::new(),
+                )
+                .await
+                .unwrap();
+
+            let (task, shutdown_tx) = new_test_task_for_source(
+                table_id as FlowId,
+                table_name,
+                Some(test_time_window_expr().await),
+            )
+            .await;
+            task_identities.push((table_id, task.clone()));
+            engine
+                .runtime
+                .write()
+                .await
+                .insert(table_id as FlowId, task, shutdown_tx);
+
+            requests.push(DirtyWindowRequest {
+                table_id,
+                timestamps: vec![],
+                time_ranges: vec![TimeRange {
+                    start_inclusive,
+                    end_exclusive,
+                }],
+            });
+        }
+
+        engine
+            .handle_mark_dirty_time_window(DirtyWindowRequests { requests })
+            .await
+            .unwrap();
+
+        for (table_id, task) in task_identities {
+            let state = task.state.read().unwrap();
+            assert_eq!(1, state.dirty_time_windows.len(), "table id = {table_id}");
+            assert_eq!(
+                Duration::from_secs(15),
+                state.dirty_time_windows.window_size(),
+                "table id = {table_id}"
+            );
+        }
     }
 
     async fn install_abort_observed_handle(task: &BatchingTask) -> oneshot::Receiver<()> {
