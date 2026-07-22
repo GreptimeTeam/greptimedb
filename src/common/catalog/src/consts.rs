@@ -171,6 +171,16 @@ pub const SPAN_ID_COLUMN: &str = "span_id";
 pub const SPAN_NAME_COLUMN: &str = "span_name";
 pub const SERVICE_NAME_COLUMN: &str = "service_name";
 pub const PARENT_SPAN_ID_COLUMN: &str = "parent_span_id";
+// More fixed columns/values of the `greptime_trace_v1` data model, shared by
+// the ingest side (`servers::otlp::trace` re-exports them) and the read-time
+// graph derivation so the two cannot silently drift.
+pub const TRACE_TIMESTAMP_COLUMN: &str = "timestamp";
+pub const SPAN_KIND_COLUMN: &str = "span_kind";
+pub const SPAN_STATUS_CODE_COLUMN: &str = "span_status_code";
+pub const DURATION_NANO_COLUMN: &str = "duration_nano";
+pub const SPAN_KIND_CLIENT: &str = "SPAN_KIND_CLIENT";
+pub const SPAN_KIND_SERVER: &str = "SPAN_KIND_SERVER";
+pub const SPAN_STATUS_ERROR: &str = "STATUS_CODE_ERROR";
 pub const TRACE_TABLE_NAME: &str = "opentelemetry_traces";
 pub const TRACE_TABLE_NAME_SESSION_KEY: &str = "trace_table_name";
 // ---- End of special table and fields ----
@@ -197,6 +207,7 @@ pub const SEMANTIC_ENTITIES_TABLE_NAME: &str = "semantic_entities";
 /// read time (`calls`/`runs_on`/... ) and unioned with the declared-edge table.
 pub const SEMANTIC_RELATIONSHIPS_TABLE_NAME: &str = "semantic_relationships";
 /// Physical table holding hand-declared edges (`provenance = 'declared'`), the
-/// only stored part of the OSS graph, bootstrapped in `greptime_private`.
+/// only stored part of the OSS graph, living in `greptime_private`. Schema-only
+/// for now: its bootstrap and the derived+declared union are follow-ups.
 pub const SEMANTIC_RELATIONSHIPS_DECLARED_TABLE_NAME: &str = "semantic_relationships_declared";
 // ---- End of entity relationship graph tables ----

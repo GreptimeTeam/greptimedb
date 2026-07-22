@@ -34,7 +34,10 @@ use std::sync::{Arc, LazyLock};
 
 use api::v1::{ColumnDataType, ColumnDef, CreateTableExpr, SemanticType};
 use common_catalog::consts::{
-    DEFAULT_PRIVATE_SCHEMA_NAME, SEMANTIC_RELATIONSHIPS_DECLARED_TABLE_NAME,
+    DEFAULT_PRIVATE_SCHEMA_NAME, DURATION_NANO_COLUMN, PARENT_SPAN_ID_COLUMN,
+    SEMANTIC_RELATIONSHIPS_DECLARED_TABLE_NAME, SERVICE_NAME_COLUMN, SPAN_ID_COLUMN,
+    SPAN_KIND_CLIENT, SPAN_KIND_COLUMN, SPAN_KIND_SERVER, SPAN_STATUS_CODE_COLUMN,
+    SPAN_STATUS_ERROR, TRACE_ID_COLUMN, TRACE_TIMESTAMP_COLUMN,
 };
 use common_function::function::FunctionContext;
 use common_function::function_registry::FUNCTION_REGISTRY;
@@ -158,7 +161,7 @@ const BIN_NANOS: i64 = 60 * 1_000_000_000;
 
 /// A single table's entity-identity declaration, projected from
 /// `information_schema.table_semantics` (`greptime.semantic.entity.<type>.*`).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct EntityDeclaration {
     /// The declaring table's name, recorded in `source_tables`.
     pub table: String,
@@ -212,6 +215,24 @@ fn bin_interval() -> Expr {
     interval(BIN_NANOS)
 }
 
+/// `date_bin(60s, ts)` cast to millisecond precision, so the output schema is
+/// deterministic regardless of the source column's precision (trace tables are
+/// nanosecond, metric tables millisecond).
+fn bin_ms(ts: Expr) -> Expr {
+    cast(
+        datetime_fns::date_bin().call(vec![bin_interval(), ts]),
+        DataType::Timestamp(TimeUnit::Millisecond, None),
+    )
+}
+
+/// Folds union branches without requiring a non-empty input.
+fn union_all(acc: Option<DataFrame>, branch: DataFrame) -> DfResult<Option<DataFrame>> {
+    Ok(Some(match acc {
+        Some(acc) => acc.union(branch)?,
+        None => branch,
+    }))
+}
+
 /// A column reference qualified by a join-side alias, built without string
 /// parsing (so column names containing `.` or `"` stay verbatim).
 fn qcol(relation: &str, name: &str) -> Expr {
@@ -252,9 +273,10 @@ fn null_json() -> Expr {
     lit(ScalarValue::Binary(None))
 }
 
-/// Escapes a string for embedding inside a JSON string value (`\` and `"`).
-fn json_escape(value: &str) -> String {
-    value.replace('\\', "\\\\").replace('"', "\\\"")
+/// Renders a compile-time-known string as JSON text (quoted, fully escaped —
+/// including control characters, unlike the runtime value escaping).
+fn json_quote(value: &str) -> String {
+    serde_json::Value::from(value).to_string()
 }
 
 /// Wraps a column reference in `replace` calls so its runtime value is
@@ -282,7 +304,7 @@ fn json_object_expr(columns: &[String]) -> Expr {
         if i > 0 {
             parts.push(lit(","));
         }
-        parts.push(lit(format!("\"{}\":\"", json_escape(column))));
+        parts.push(lit(format!("{}:\"", json_quote(column))));
         parts.push(json_escaped_value_expr(column));
         parts.push(lit("\""));
     }
@@ -317,13 +339,7 @@ fn registry_branch(
     window: &GraphWindow,
 ) -> DfResult<DataFrame> {
     let ts = ident(&decl.time_index);
-    // Bin into 60s windows, cast to millisecond precision so the output schema
-    // is deterministic regardless of the source column's precision (trace tables
-    // are nanosecond, metric tables millisecond).
-    let bin = cast(
-        datetime_fns::date_bin().call(vec![bin_interval(), ts.clone()]),
-        DataType::Timestamp(TimeUnit::Millisecond, None),
-    );
+    let bin = bin_ms(ts.clone());
 
     let (entity_id, entity_id_attrs) = if let [id] = decl.id_columns.as_slice() {
         // CAST even the single-column id: id columns must be tags but not
@@ -354,7 +370,7 @@ fn registry_branch(
         json_object_expr(&decl.descriptive_columns)
     };
 
-    let source_tables = parse_json_expr(lit(format!("[\"{}\"]", json_escape(&decl.table))));
+    let source_tables = parse_json_expr(lit(format!("[{}]", json_quote(&decl.table))));
 
     df.filter(
         ts.clone()
@@ -386,11 +402,7 @@ pub fn build_registry_plan(
 ) -> DfResult<Option<LogicalPlan>> {
     let mut union_df: Option<DataFrame> = None;
     for (decl, df) in branches {
-        let branch = registry_branch(&decl, df, window)?;
-        union_df = Some(match union_df {
-            Some(acc) => acc.union(branch)?,
-            None => branch,
-        });
+        union_df = union_all(union_df, registry_branch(&decl, df, window)?)?;
     }
     Ok(union_df.map(DataFrame::into_unoptimized_plan))
 }
@@ -399,7 +411,9 @@ pub fn build_registry_plan(
 /// branch and the declared-edge scan must project exactly these so the top-level
 /// `UNION ALL` type-aligns. (The physical declared table additionally stores
 /// `valid_from`/`valid_until`, which are applied as a filter, not projected.)
-pub const RELATIONSHIP_COLUMNS: [&str; 18] = [
+/// Test-only until the declared-edge union branch lands and enforces it in code.
+#[cfg(test)]
+const RELATIONSHIP_COLUMNS: [&str; 18] = [
     "observed_at",
     "window_start",
     "window_end",
@@ -420,75 +434,90 @@ pub const RELATIONSHIP_COLUMNS: [&str; 18] = [
     "attributes",
 ];
 
-/// Column names of the fixed `greptime_trace_v1` schema the calls derivation
-/// relies on (the reason `table_data_model = greptime_trace_v1` is required).
-const TRACE_TS: &str = "timestamp";
-const TRACE_ID: &str = "trace_id";
-const TRACE_SPAN_ID: &str = "span_id";
-const TRACE_PARENT_SPAN_ID: &str = "parent_span_id";
-const TRACE_SPAN_KIND: &str = "span_kind";
-const TRACE_SPAN_STATUS_CODE: &str = "span_status_code";
-const TRACE_SERVICE_NAME: &str = "service_name";
-const TRACE_DURATION_NANO: &str = "duration_nano";
+/// A child server span starts no earlier than 5 minutes before its client span
+/// (clock-skew allowance) and no later than 1 hour after it; the bounds keep the
+/// join windowed instead of pairing arbitrarily distant spans of a long-lived
+/// trace.
+const CHILD_SPAN_EARLY_NANOS: i64 = 5 * 60 * 1_000_000_000;
+const CHILD_SPAN_LATE_NANOS: i64 = 60 * 60 * 1_000_000_000;
 
-/// Builds the `calls` derivation (RFC §3a): pair each client span with its child
-/// server span on `trace_id` + `parent_span_id`, project to `service`, aggregate
-/// to RED metrics per 60s window. This is the plan form of the Tempo servicegraph
-/// connector. Virtual-node edges (uninstrumented peers) are a separate branch,
-/// added on top of this. `span_status_code` is a string column
-/// (`STATUS_CODE_ERROR`), verified against the trace ingest path.
-pub fn build_calls_plan(trace: DataFrame, window: &GraphWindow) -> DfResult<LogicalPlan> {
+/// Builds the `calls` derivation (RFC §3a) over `traces` (one scan per trace
+/// table, unioned): pair each client span with its child server span on
+/// `trace_id` + `parent_span_id`, project to `service`, aggregate to RED metrics
+/// per 60s window. This is the plan form of the Tempo servicegraph connector.
+/// Virtual-node edges (uninstrumented peers) are a separate branch, added on top
+/// of this. Column names are the fixed `greptime_trace_v1` schema (the reason
+/// `table_data_model = greptime_trace_v1` is required); `span_status_code` is a
+/// string column (`STATUS_CODE_ERROR`), verified against the trace ingest path.
+/// Returns `None` when there is no trace table.
+pub fn build_calls_plan(
+    traces: Vec<DataFrame>,
+    window: &GraphWindow,
+) -> DfResult<Option<LogicalPlan>> {
+    let mut union_df: Option<DataFrame> = None;
+    for trace in traces {
+        union_df = union_all(union_df, calls_branch(trace, window)?)?;
+    }
+    Ok(union_df.map(DataFrame::into_unoptimized_plan))
+}
+
+fn calls_branch(trace: DataFrame, window: &GraphWindow) -> DfResult<DataFrame> {
     // `scope` stays empty here: the fixed `greptime_trace_v1` schema declares no
     // scope columns (the auto-stamp is `entity.service.id = service_name` only).
     // Revisit when trace tables can carry scope declarations.
     let client = trace
         .clone()
         .filter(
-            ident(TRACE_SPAN_KIND)
-                .eq(lit("SPAN_KIND_CLIENT"))
-                .and(ident(TRACE_TS).gt_eq(window.start.clone()))
-                .and(ident(TRACE_TS).lt(window.end.clone())),
+            ident(SPAN_KIND_COLUMN)
+                .eq(lit(SPAN_KIND_CLIENT))
+                .and(ident(TRACE_TIMESTAMP_COLUMN).gt_eq(window.start.clone()))
+                .and(ident(TRACE_TIMESTAMP_COLUMN).lt(window.end.clone())),
         )?
         .alias("client")?;
     let server = trace
-        .filter(ident(TRACE_SPAN_KIND).eq(lit("SPAN_KIND_SERVER")))?
+        .filter(
+            ident(SPAN_KIND_COLUMN)
+                .eq(lit(SPAN_KIND_SERVER))
+                // Static bounds implied by the window and the join's
+                // time-proximity conditions below; the join bounds reference
+                // client.timestamp and cannot prune the server-side scan.
+                .and(
+                    ident(TRACE_TIMESTAMP_COLUMN)
+                        .gt_eq(window.start.clone() - interval(CHILD_SPAN_EARLY_NANOS)),
+                )
+                .and(
+                    ident(TRACE_TIMESTAMP_COLUMN)
+                        .lt(window.end.clone() + interval(CHILD_SPAN_LATE_NANOS)),
+                ),
+        )?
         .alias("server")?;
 
-    // A child server span starts no earlier than its client span and, in
-    // practice, within the hour; the bounds keep the join windowed instead of
-    // pairing arbitrarily distant spans of a long-lived trace.
     let join_conditions = vec![
-        qcol("client", TRACE_ID).eq(qcol("server", TRACE_ID)),
-        qcol("server", TRACE_PARENT_SPAN_ID).eq(qcol("client", TRACE_SPAN_ID)),
-        qcol("server", TRACE_TS).gt_eq(qcol("client", TRACE_TS) - interval(5 * 60 * 1_000_000_000)),
-        qcol("server", TRACE_TS)
-            .lt_eq(qcol("client", TRACE_TS) + interval(60 * 60 * 1_000_000_000)),
+        qcol("client", TRACE_ID_COLUMN).eq(qcol("server", TRACE_ID_COLUMN)),
+        qcol("server", PARENT_SPAN_ID_COLUMN).eq(qcol("client", SPAN_ID_COLUMN)),
+        qcol("server", TRACE_TIMESTAMP_COLUMN)
+            .gt_eq(qcol("client", TRACE_TIMESTAMP_COLUMN) - interval(CHILD_SPAN_EARLY_NANOS)),
+        qcol("server", TRACE_TIMESTAMP_COLUMN)
+            .lt_eq(qcol("client", TRACE_TIMESTAMP_COLUMN) + interval(CHILD_SPAN_LATE_NANOS)),
         // Exclude self-calls: an edge needs two distinct services.
-        qcol("client", TRACE_SERVICE_NAME).not_eq(qcol("server", TRACE_SERVICE_NAME)),
+        qcol("client", SERVICE_NAME_COLUMN).not_eq(qcol("server", SERVICE_NAME_COLUMN)),
     ];
 
-    // Cast to millisecond precision: trace timestamps are nanosecond, but the
-    // computed table's schema declares millisecond.
-    let bin = cast(
-        datetime_fns::date_bin().call(vec![bin_interval(), qcol("client", TRACE_TS)]),
-        DataType::Timestamp(TimeUnit::Millisecond, None),
-    );
-
-    let plan = client
+    client
         .join_on(server, JoinType::Inner, join_conditions)?
         .select(vec![
-            bin.alias("observed_at"),
-            qcol("client", TRACE_SERVICE_NAME).alias("src_id"),
-            qcol("server", TRACE_SERVICE_NAME).alias("dst_id"),
-            qcol("server", TRACE_SPAN_STATUS_CODE).alias("status_code"),
-            qcol("server", TRACE_DURATION_NANO).alias("duration_nano"),
+            bin_ms(qcol("client", TRACE_TIMESTAMP_COLUMN)).alias("observed_at"),
+            qcol("client", SERVICE_NAME_COLUMN).alias("src_id"),
+            qcol("server", SERVICE_NAME_COLUMN).alias("dst_id"),
+            qcol("server", SPAN_STATUS_CODE_COLUMN).alias("status_code"),
+            qcol("server", DURATION_NANO_COLUMN).alias("duration_nano"),
         ])?
         .aggregate(
             vec![ident("observed_at"), ident("src_id"), ident("dst_id")],
             vec![
                 count(lit(1)).alias("request_count"),
                 count(lit(1))
-                    .filter(ident("status_code").eq(lit("STATUS_CODE_ERROR")))
+                    .filter(ident("status_code").eq(lit(SPAN_STATUS_ERROR)))
                     .build()?
                     .alias("error_count"),
                 sum(ident("duration_nano")).alias("duration_nano_sum"),
@@ -515,9 +544,7 @@ pub fn build_calls_plan(trace: DataFrame, window: &GraphWindow) -> DfResult<Logi
                 .alias("duration_sum"),
             ident("request_count").alias("duration_count"),
             null_json().alias("attributes"),
-        ])?
-        .into_unoptimized_plan();
-    Ok(plan)
+        ])
 }
 
 #[cfg(test)]
@@ -794,17 +821,17 @@ mod tests {
     fn trace_table_ctx() -> SessionContext {
         let schema = Arc::new(Schema::new(vec![
             Field::new(
-                TRACE_TS,
+                TRACE_TIMESTAMP_COLUMN,
                 DataType::Timestamp(TimeUnit::Nanosecond, None),
                 false,
             ),
-            Field::new(TRACE_ID, DataType::Utf8, false),
-            Field::new(TRACE_SPAN_ID, DataType::Utf8, false),
-            Field::new(TRACE_PARENT_SPAN_ID, DataType::Utf8, true),
-            Field::new(TRACE_SPAN_KIND, DataType::Utf8, false),
-            Field::new(TRACE_SPAN_STATUS_CODE, DataType::Utf8, false),
-            Field::new(TRACE_SERVICE_NAME, DataType::Utf8, false),
-            Field::new(TRACE_DURATION_NANO, DataType::UInt64, false),
+            Field::new(TRACE_ID_COLUMN, DataType::Utf8, false),
+            Field::new(SPAN_ID_COLUMN, DataType::Utf8, false),
+            Field::new(PARENT_SPAN_ID_COLUMN, DataType::Utf8, true),
+            Field::new(SPAN_KIND_COLUMN, DataType::Utf8, false),
+            Field::new(SPAN_STATUS_CODE_COLUMN, DataType::Utf8, false),
+            Field::new(SERVICE_NAME_COLUMN, DataType::Utf8, false),
+            Field::new(DURATION_NANO_COLUMN, DataType::UInt64, false),
         ]));
         const MS: i64 = 1_000_000;
         // Two client->server pairs frontend->cart (one errored), one pair
@@ -882,7 +909,9 @@ mod tests {
     async fn calls_plan_aggregates_red_metrics() {
         let ctx = trace_table_ctx();
         let trace = ctx.table("opentelemetry_traces").await.unwrap();
-        let plan = build_calls_plan(trace, &test_window()).unwrap();
+        let plan = build_calls_plan(vec![trace], &test_window())
+            .unwrap()
+            .unwrap();
 
         let names = plan
             .schema()
@@ -940,7 +969,7 @@ mod tests {
             start: lit(ScalarValue::TimestampMillisecond(Some(0), None)),
             end: lit(ScalarValue::TimestampMillisecond(Some(500), None)),
         };
-        let plan = build_calls_plan(trace, &window).unwrap();
+        let plan = build_calls_plan(vec![trace], &window).unwrap().unwrap();
         let batches = collect(&ctx, plan).await;
         let total: usize = batches.iter().map(|b| b.num_rows()).sum();
         assert_eq!(total, 0);

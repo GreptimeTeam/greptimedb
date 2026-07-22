@@ -43,10 +43,15 @@ use operator::statement::semantic_graph::{
 };
 use query::QueryEngineRef;
 use session::context::{QueryContextBuilder, QueryContextRef};
+use snafu::ResultExt;
 use store_api::storage::ScanRequest;
 use table::TableRef;
 use table::metadata::TableInfo;
-use table::requests::{SEMANTIC_ENTITY_PREFIX, TABLE_DATA_MODEL, TABLE_DATA_MODEL_TRACE_V1};
+use table::requests::{
+    EntityRole, is_trace_v1_table, parse_entity_columns, parse_entity_option_key,
+};
+
+use crate::error;
 
 /// The live [`EntityGraphProvider`], backed by the query engine.
 pub struct EntityGraphProviderImpl {
@@ -78,23 +83,15 @@ impl EntityGraphProviderImpl {
         type RoleColumns = (Vec<String>, Vec<String>, Vec<String>);
         let mut by_type: HashMap<String, RoleColumns> = HashMap::new();
         for (key, value) in &table_info.meta.options.extra_options {
-            let Some(rest) = key.strip_prefix(SEMANTIC_ENTITY_PREFIX) else {
+            let Some((entity_type, role)) = parse_entity_option_key(key) else {
                 continue;
             };
-            let Some((entity_type, role)) = rest.rsplit_once('.') else {
-                continue;
-            };
-            let cols: Vec<String> = value
-                .split(',')
-                .map(|c| c.trim().to_string())
-                .filter(|c| !c.is_empty())
-                .collect();
+            let cols = parse_entity_columns(value);
             let entry = by_type.entry(entity_type.to_string()).or_default();
             match role {
-                "id" => entry.0 = cols,
-                "descriptive" => entry.1 = cols,
-                "scope" => entry.2 = cols,
-                _ => {}
+                EntityRole::Id => entry.0 = cols,
+                EntityRole::Descriptive => entry.1 = cols,
+                EntityRole::Scope => entry.2 = cols,
             }
         }
 
@@ -116,21 +113,10 @@ impl EntityGraphProviderImpl {
             .collect()
     }
 
-    /// Keyed off the engine-native `table_data_model` option (same check as the
-    /// Jaeger query path) so pre-existing trace tables without the newer
-    /// `greptime.semantic.*` stamps are recognized too. The v1 model is required
-    /// because the derivation plan relies on its fixed column names.
-    fn is_trace_table(table_info: &TableInfo) -> bool {
-        table_info
-            .meta
-            .options
-            .extra_options
-            .get(TABLE_DATA_MODEL)
-            .map(|v| v == TABLE_DATA_MODEL_TRACE_V1)
-            .unwrap_or(false)
-    }
-
-    /// Enumerates entity declarations and trace tables across a catalog.
+    /// Enumerates entity declarations and trace tables across a catalog. Trace
+    /// tables are keyed off the engine-native `table_data_model` option (same
+    /// check as the Jaeger query path) so pre-existing trace tables without the
+    /// newer `greptime.semantic.*` stamps are recognized too.
     async fn enumerate(
         &self,
         catalog: &str,
@@ -162,7 +148,7 @@ impl EntityGraphProviderImpl {
                         .into_iter()
                         .map(|decl| (decl, table.clone())),
                 );
-                if Self::is_trace_table(&table_info) {
+                if is_trace_v1_table(&table_info) {
                     traces.push(table.clone());
                 }
             }
@@ -228,7 +214,10 @@ impl EntityGraphProvider for EntityGraphProviderImpl {
             branches.push((decl, self.read_table(table)?));
         }
         let window = Self::query_window(&request);
-        let Some(plan) = build_registry_plan(branches, &window).map_err(box_df_error)? else {
+        let Some(plan) = build_registry_plan(branches, &window)
+            .context(error::DataFusionSnafu)
+            .map_err(BoxedError::new)?
+        else {
             return Ok(vec![]);
         };
         self.execute_plan(catalog, plan).await
@@ -240,19 +229,17 @@ impl EntityGraphProvider for EntityGraphProviderImpl {
         request: ScanRequest,
     ) -> Result<Vec<RecordBatch>, BoxedError> {
         let (_, traces) = self.enumerate(catalog).await?;
-        let window = Self::query_window(&request);
-        let mut batches = vec![];
+        let mut scans = Vec::with_capacity(traces.len());
         for trace in traces {
-            let plan = build_calls_plan(self.read_table(trace)?, &window).map_err(box_df_error)?;
-            batches.extend(self.execute_plan(catalog, plan).await?);
+            scans.push(self.read_table(trace)?);
         }
-        Ok(batches)
+        let window = Self::query_window(&request);
+        let Some(plan) = build_calls_plan(scans, &window)
+            .context(error::DataFusionSnafu)
+            .map_err(BoxedError::new)?
+        else {
+            return Ok(vec![]);
+        };
+        self.execute_plan(catalog, plan).await
     }
-}
-
-fn box_df_error(err: datafusion::error::DataFusionError) -> BoxedError {
-    BoxedError::new(common_error::ext::PlainError::new(
-        err.to_string(),
-        common_error::status_code::StatusCode::EngineExecuteQuery,
-    ))
 }

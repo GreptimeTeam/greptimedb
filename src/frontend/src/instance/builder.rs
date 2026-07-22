@@ -264,8 +264,9 @@ impl FrontendBuilder {
         .query_engine();
 
         // Inject the entity-graph provider now that the query engine exists, so the
-        // computed `information_schema.semantic_*` tables can derive rows. Late
-        // binding here breaks the `catalog -> query` dependency cycle.
+        // computed `greptime_private.semantic_entities` / `semantic_relationships`
+        // tables can derive rows. Late binding here breaks the `catalog -> query`
+        // dependency cycle.
         if let Some(kv_catalog) = self
             .catalog_manager
             .as_any()

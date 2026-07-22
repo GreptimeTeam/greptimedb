@@ -75,7 +75,9 @@ pub struct KvBackendCatalogManager {
     pub(super) information_extension: InformationExtensionRef,
     /// Backs the computed entity-graph tables (`semantic_entities` /
     /// `semantic_relationships`). Set once, after the query engine is built, to
-    /// break the `catalog -> query` cycle; `None` until then.
+    /// break the `catalog -> query` cycle; `None` until then. `Arc` so the cell
+    /// stays shared across `Clone`s of the manager (a plain `OnceLock` would
+    /// fork on clone).
     pub(super) entity_graph_provider: Arc<OnceLock<EntityGraphProviderRef>>,
     /// Manages partition rules.
     pub(super) partition_manager: PartitionRuleManagerRef,
@@ -664,8 +666,10 @@ impl SystemCatalog {
             }
         } else if schema == DEFAULT_SCHEMA_NAME {
             self.numbers_table_provider.table(table_name)
-        } else if schema == DEFAULT_PRIVATE_SCHEMA_NAME {
-            // Constructed on demand: the provider is two Arc'd schemas, and the
+        } else if schema == DEFAULT_PRIVATE_SCHEMA_NAME
+            && SemanticGraphTableProvider::table_exists(table_name)
+        {
+            // Constructed on demand (the provider is a name + a weak ref); the
             // system catalog is consulted before physical resolution, so the
             // computed tables shadow same-named physical tables by design.
             SemanticGraphTableProvider::new(catalog.to_string(), self.catalog_manager.clone())

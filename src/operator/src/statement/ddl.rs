@@ -93,8 +93,8 @@ use table::TableRef;
 use table::dist_table::DistTable;
 use table::metadata::{self, TableId, TableInfo, TableMeta, TableType};
 use table::requests::{
-    AlterKind, AlterTableRequest, COMMENT_KEY, DDL_TIMEOUT, DDL_WAIT, REPARTITION_COLUMN_HINT_KEY,
-    TableOptions, is_entity_option_key,
+    AlterKind, AlterTableRequest, COMMENT_KEY, DDL_TIMEOUT, DDL_WAIT, EntityRole,
+    REPARTITION_COLUMN_HINT_KEY, TableOptions, parse_entity_columns, parse_entity_option_key,
 };
 use table::table_name::TableName;
 use table::table_reference::TableReference;
@@ -374,12 +374,7 @@ impl StatementExecutor {
         partitions: Option<Partitions>,
         query_ctx: QueryContextRef,
     ) -> Result<TableRef> {
-        ensure!(
-            !is_readonly_table(&create_table.schema_name, &create_table.table_name),
-            TableReadOnlySnafu {
-                name: create_table.table_name.clone()
-            }
-        );
+        ensure_table_writable(&create_table.schema_name, &create_table.table_name)?;
 
         if create_table.engine == METRIC_ENGINE_NAME
             && create_table
@@ -1356,12 +1351,7 @@ impl StatementExecutor {
     ) -> Result<Output> {
         let mut tables = Vec::with_capacity(table_names.len());
         for table_name in table_names {
-            ensure!(
-                !is_readonly_table(&table_name.schema_name, &table_name.table_name),
-                TableReadOnlySnafu {
-                    name: table_name.table_name.clone()
-                }
-            );
+            ensure_table_writable(&table_name.schema_name, &table_name.table_name)?;
 
             if let Some(table) = self
                 .catalog_manager
@@ -1466,12 +1456,7 @@ impl StatementExecutor {
         time_ranges: Vec<(Timestamp, Timestamp)>,
         query_context: QueryContextRef,
     ) -> Result<Output> {
-        ensure!(
-            !is_readonly_table(&table_name.schema_name, &table_name.table_name),
-            TableReadOnlySnafu {
-                name: table_name.table_name.clone()
-            }
-        );
+        ensure_table_writable(&table_name.schema_name, &table_name.table_name)?;
 
         let table = self
             .catalog_manager
@@ -1518,12 +1503,7 @@ impl StatementExecutor {
         query_context: &QueryContextRef,
     ) -> Result<Output> {
         // Check if the schema is read-only.
-        ensure!(
-            !is_readonly_table(&request.schema_name, &request.table_name),
-            TableReadOnlySnafu {
-                name: request.table_name.clone()
-            }
-        );
+        ensure_table_writable(&request.schema_name, &request.table_name)?;
 
         let table_ref = TableReference::full(
             &request.catalog_name,
@@ -1803,12 +1783,7 @@ impl StatementExecutor {
         expr: AlterTableExpr,
         query_context: QueryContextRef,
     ) -> Result<Output> {
-        ensure!(
-            !is_readonly_table(&expr.schema_name, &expr.table_name),
-            TableReadOnlySnafu {
-                name: expr.table_name.clone()
-            }
-        );
+        ensure_table_writable(&expr.schema_name, &expr.table_name)?;
 
         let catalog_name = if expr.catalog_name.is_empty() {
             DEFAULT_CATALOG_NAME.to_string()
@@ -2502,6 +2477,17 @@ fn validate_repartition_column_hint(
     Ok(())
 }
 
+/// Rejects DDL against read-only tables (the computed entity-graph tables).
+fn ensure_table_writable(schema: &str, table: &str) -> Result<()> {
+    ensure!(
+        !is_readonly_table(schema, table),
+        TableReadOnlySnafu {
+            name: table.to_string()
+        }
+    );
+    Ok(())
+}
+
 /// Validates `greptime.semantic.entity.<type>.{id|descriptive|scope}` options
 /// against the table schema: every named column must exist, and `id` columns must
 /// additionally be tag (primary-key) columns so entity identity stays indexable
@@ -2512,11 +2498,11 @@ fn validate_entity_semantic_options(
     primary_key_indices: &[usize],
 ) -> Result<()> {
     for (key, value) in &table_options.extra_options {
-        if !is_entity_option_key(key) {
+        let Some((_, role)) = parse_entity_option_key(key) else {
             continue;
-        }
-        let is_id_role = key.ends_with(".id");
-        for col in value.split(',').map(str::trim).filter(|c| !c.is_empty()) {
+        };
+        let is_id_role = role == EntityRole::Id;
+        for col in &parse_entity_columns(value) {
             let idx = column_name_to_index_map
                 .get(col)
                 .context(ColumnNotFoundSnafu { msg: col })?;
@@ -2753,12 +2739,7 @@ async fn execute_undrop_table(
     table_name: TableName,
     query_context: QueryContextRef,
 ) -> Result<Output> {
-    ensure!(
-        !is_readonly_table(&table_name.schema_name, &table_name.table_name),
-        TableReadOnlySnafu {
-            name: table_name.table_name.clone()
-        }
-    );
+    ensure_table_writable(&table_name.schema_name, &table_name.table_name)?;
 
     let dropped = table_metadata_manager
         .get_dropped_table(&table_name)

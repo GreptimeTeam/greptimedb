@@ -50,7 +50,6 @@ use servers::query_handler::JaegerQueryHandler;
 use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
 use table::TableRef;
-use table::requests::{TABLE_DATA_MODEL, TABLE_DATA_MODEL_TRACE_V1};
 use table::table::adapter::DfTableProviderAdapter;
 
 use crate::instance::Instance;
@@ -342,15 +341,7 @@ async fn query_trace_table(
             schema: ctx.current_schema(),
         })?;
 
-    let is_data_model_v1 = table
-        .clone()
-        .table_info()
-        .meta
-        .options
-        .extra_options
-        .get(TABLE_DATA_MODEL)
-        .map(|s| s.as_str())
-        == Some(TABLE_DATA_MODEL_TRACE_V1);
+    let is_data_model_v1 = table::requests::is_trace_v1_table(&table.table_info());
 
     // collect to set
     let col_names = table

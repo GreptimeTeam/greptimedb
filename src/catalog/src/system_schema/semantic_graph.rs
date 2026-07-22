@@ -33,13 +33,11 @@
 //! declared Arrow schema (which carries the `json` extension metadata) in
 //! [`SystemTable::to_stream`].
 
-use std::sync::{Arc, Weak};
+use std::sync::{Arc, LazyLock, Weak};
 
 use common_catalog::consts::{
-    DEFAULT_PRIVATE_SCHEMA_NAME, SEMANTIC_ENTITIES_TABLE_ID, SEMANTIC_RELATIONSHIPS_TABLE_ID,
-};
-pub use common_catalog::consts::{
-    SEMANTIC_ENTITIES_TABLE_NAME as SEMANTIC_ENTITIES,
+    DEFAULT_PRIVATE_SCHEMA_NAME, SEMANTIC_ENTITIES_TABLE_ID,
+    SEMANTIC_ENTITIES_TABLE_NAME as SEMANTIC_ENTITIES, SEMANTIC_RELATIONSHIPS_TABLE_ID,
     SEMANTIC_RELATIONSHIPS_TABLE_NAME as SEMANTIC_RELATIONSHIPS,
 };
 use common_error::ext::BoxedError;
@@ -94,31 +92,31 @@ pub trait EntityGraphProvider: Send + Sync {
 /// Serves the computed graph tables under `greptime_private`, overlaid on the
 /// schema's physical tables the same way the `numbers` table overlays `public`
 /// (the system catalog is consulted before physical table resolution).
-pub struct SemanticGraphTableProvider {
+pub(crate) struct SemanticGraphTableProvider {
     catalog_name: String,
     catalog_manager: Weak<dyn CatalogManager>,
 }
 
 impl SemanticGraphTableProvider {
-    pub fn new(catalog_name: String, catalog_manager: Weak<dyn CatalogManager>) -> Self {
+    pub(crate) fn new(catalog_name: String, catalog_manager: Weak<dyn CatalogManager>) -> Self {
         Self {
             catalog_name,
             catalog_manager,
         }
     }
 
-    pub fn table_names() -> Vec<String> {
+    pub(crate) fn table_names() -> Vec<String> {
         vec![
             SEMANTIC_ENTITIES.to_string(),
             SEMANTIC_RELATIONSHIPS.to_string(),
         ]
     }
 
-    pub fn table_exists(name: &str) -> bool {
+    pub(crate) fn table_exists(name: &str) -> bool {
         name == SEMANTIC_ENTITIES || name == SEMANTIC_RELATIONSHIPS
     }
 
-    pub fn table(&self, name: &str) -> Option<TableRef> {
+    pub(crate) fn table(&self, name: &str) -> Option<TableRef> {
         self.build_table(name)
     }
 }
@@ -133,17 +131,16 @@ impl SystemSchemaProviderInner for SemanticGraphTableProvider {
     }
 
     fn system_table(&self, name: &str) -> Option<SystemTableRef> {
-        match name {
-            SEMANTIC_ENTITIES => Some(Arc::new(SemanticGraphTable::entities(
-                self.catalog_name.clone(),
-                self.catalog_manager.clone(),
-            )) as _),
-            SEMANTIC_RELATIONSHIPS => Some(Arc::new(SemanticGraphTable::relationships(
-                self.catalog_name.clone(),
-                self.catalog_manager.clone(),
-            )) as _),
-            _ => None,
-        }
+        let kind = match name {
+            SEMANTIC_ENTITIES => GraphTableKind::Entities,
+            SEMANTIC_RELATIONSHIPS => GraphTableKind::Relationships,
+            _ => return None,
+        };
+        Some(Arc::new(SemanticGraphTable::new(
+            kind,
+            self.catalog_name.clone(),
+            self.catalog_manager.clone(),
+        )) as _)
     }
 }
 
@@ -180,32 +177,20 @@ fn json() -> ConcreteDataType {
 /// - `descriptive`   — JSON snapshot of the entity's descriptive (non-identifying)
 ///   attributes; NULL when no descriptive columns were declared.
 /// - `source_tables` — JSON array of the telemetry tables that contributed this entity.
-fn entities_schema() -> SchemaRef {
+static ENTITIES_SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
     Arc::new(Schema::new(vec![
-        // 60s time bucket the entity was observed in (TIME INDEX).
         ColumnSchema::new("observed_at", ts(), false),
-        // Start of the observation window this row covers.
         ColumnSchema::new("window_start", ts(), true),
-        // End of the observation window (window_start + 60s).
         ColumnSchema::new("window_end", ts(), true),
-        // Time up to which the entity is considered present (= window_end for
-        // derived rows). The graph is a temporal window, not a current-state table.
         ColumnSchema::new("fresh_until", ts(), true),
-        // Entity type, e.g. `service` / `host` / `k8s.pod` / `process`.
         ColumnSchema::new("entity_type", string(), false),
-        // Canonical id: value verbatim (single attr) or sorted `k=v,k=v` (composite).
         ColumnSchema::new("entity_id", string(), false),
-        // JSON object of identifying attributes (source of truth for composite ids);
-        // NULL for single-attribute ids.
         ColumnSchema::new("entity_id_attrs", json(), true),
-        // Namespace/environment the id is scoped to; empty string when none.
         ColumnSchema::new("scope", string(), true),
-        // JSON snapshot of descriptive (non-identifying) attributes; NULL if none.
         ColumnSchema::new("descriptive", json(), true),
-        // JSON array of the telemetry tables that contributed this entity.
         ColumnSchema::new("source_tables", json(), true),
     ]))
-}
+});
 
 /// Schema of `semantic_relationships` — the edge set of the graph, one row per
 /// edge observed in a time window. This is the 18-column contract every derived
@@ -237,48 +222,28 @@ fn entities_schema() -> SchemaRef {
 ///   to get an average).
 /// - `attributes`    — JSON of edge attributes, e.g. `connection_type`,
 ///   `db.system`, `peer.service`.
-fn relationships_schema() -> SchemaRef {
+static RELATIONSHIPS_SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
     Arc::new(Schema::new(vec![
-        // 60s time bucket the edge was observed in (TIME INDEX).
         ColumnSchema::new("observed_at", ts(), false),
-        // Start of the observation window this edge covers.
         ColumnSchema::new("window_start", ts(), true),
-        // End of the observation window (window_start + 60s).
         ColumnSchema::new("window_end", ts(), true),
-        // Time up to which the edge is considered live (= window_end for derived
-        // edges, from valid_until for declared edges).
         ColumnSchema::new("fresh_until", ts(), true),
-        // Type and canonical id of the source endpoint.
         ColumnSchema::new("src_type", string(), false),
         ColumnSchema::new("src_id", string(), false),
-        // Type and canonical id of the destination endpoint.
         ColumnSchema::new("dst_type", string(), false),
         ColumnSchema::new("dst_id", string(), false),
-        // Relationship kind (src -> dst), e.g. `calls` / `runs_on` / `depends_on`.
         ColumnSchema::new("rel_type", string(), false),
-        // Origin of the edge: `trace` | `attribute` | `declared` | `agent`
-        // (part of the edge identity).
         ColumnSchema::new("provenance", string(), false),
-        // Confidence in [0, 1]; 1.0 for observed/declared, lower for sampled /
-        // virtual-node / inferred edges.
         ColumnSchema::new("confidence", ConcreteDataType::float64_datatype(), true),
-        // Namespace/environment; empty string when none.
         ColumnSchema::new("scope", string(), true),
-        // Deterministic (window, run) key for idempotent re-derivation; empty for
-        // read-time derived rows.
         ColumnSchema::new("generation_id", string(), true),
-        // RED: request count over the window.
         ColumnSchema::new("request_count", ConcreteDataType::int64_datatype(), true),
-        // RED: errored-request count over the window.
         ColumnSchema::new("error_count", ConcreteDataType::int64_datatype(), true),
-        // RED: sum of request durations (seconds) over the window.
         ColumnSchema::new("duration_sum", ConcreteDataType::float64_datatype(), true),
-        // RED: number of durations summed (pair with duration_sum for an average).
         ColumnSchema::new("duration_count", ConcreteDataType::int64_datatype(), true),
-        // JSON of edge attributes: connection_type, db.system, peer.service, ...
         ColumnSchema::new("attributes", json(), true),
     ]))
-}
+});
 
 /// Which computed table this shell represents, so the two share one forwarder.
 #[derive(Clone, Copy)]
@@ -296,19 +261,18 @@ struct SemanticGraphTable {
 }
 
 impl SemanticGraphTable {
-    fn entities(catalog_name: String, catalog_manager: Weak<dyn CatalogManager>) -> Self {
+    fn new(
+        kind: GraphTableKind,
+        catalog_name: String,
+        catalog_manager: Weak<dyn CatalogManager>,
+    ) -> Self {
+        let schema = match kind {
+            GraphTableKind::Entities => ENTITIES_SCHEMA.clone(),
+            GraphTableKind::Relationships => RELATIONSHIPS_SCHEMA.clone(),
+        };
         Self {
-            kind: GraphTableKind::Entities,
-            schema: entities_schema(),
-            catalog_name,
-            catalog_manager,
-        }
-    }
-
-    fn relationships(catalog_name: String, catalog_manager: Weak<dyn CatalogManager>) -> Self {
-        Self {
-            kind: GraphTableKind::Relationships,
-            schema: relationships_schema(),
+            kind,
+            schema,
             catalog_name,
             catalog_manager,
         }
