@@ -82,6 +82,7 @@ use crate::query_engine::options::QueryOptions;
 use crate::query_engine::runtime::{
     DefaultQueryRuntimeProvider, QueryRuntimeContext, QueryRuntimeProviderRef,
 };
+use crate::range_select::lowering::{RangeSelectLoweringAnalyzer, RangeSelectOptions};
 use crate::range_select::planner::RangeSelectPlanner;
 use crate::region_query::RegionQueryHandlerRef;
 
@@ -163,6 +164,13 @@ impl QueryEngineState {
                     allow_query_fallback: true,
                 });
         }
+        session_config
+            .options_mut()
+            .extensions
+            .insert(RangeSelectOptions {
+                experimental_enable_range_select_pushdown: options
+                    .experimental_enable_range_select_pushdown,
+            });
 
         // todo(hl): This serves as a workaround for https://github.com/GreptimeTeam/greptimedb/issues/5659
         // and we can add that check back once we upgrade datafusion.
@@ -203,6 +211,9 @@ impl QueryEngineState {
         );
 
         if with_dist_planner {
+            // Lower after expression normalization but before distributed planning
+            // seals remote children inside MergeScan.
+            analyzer.rules.push(Arc::new(RangeSelectLoweringAnalyzer));
             analyzer.rules.push(Arc::new(DistPlannerAnalyzer));
         }
         analyzer.rules.push(Arc::new(FixStateUdafOrderingAnalyzer));
@@ -656,6 +667,14 @@ mod tests {
     }
 
     fn new_query_engine_state_with(plugins: Plugins, options: QueryOptions) -> QueryEngineState {
+        new_query_engine_state_with_dist_planner(plugins, options, false)
+    }
+
+    fn new_query_engine_state_with_dist_planner(
+        plugins: Plugins,
+        options: QueryOptions,
+        with_dist_planner: bool,
+    ) -> QueryEngineState {
         QueryEngineState::new(
             catalog::memory::new_memory_catalog_manager().unwrap(),
             None,
@@ -663,10 +682,74 @@ mod tests {
             None,
             None,
             None,
-            false,
+            with_dist_planner,
             plugins,
             options,
         )
+    }
+
+    #[test]
+    fn range_select_pushdown_option_is_written_to_session_extensions() {
+        let state = new_query_engine_state_with(
+            Plugins::default(),
+            QueryOptions {
+                experimental_enable_range_select_pushdown: true,
+                ..Default::default()
+            },
+        );
+
+        assert!(
+            state
+                .session_state()
+                .config()
+                .options()
+                .extensions
+                .get::<RangeSelectOptions>()
+                .unwrap()
+                .experimental_enable_range_select_pushdown
+        );
+    }
+
+    #[test]
+    fn range_select_lowering_is_registered_only_before_distributed_planner() {
+        let non_distributed = new_query_engine_state();
+        assert!(
+            non_distributed
+                .session_state()
+                .analyzer()
+                .rules
+                .iter()
+                .all(|rule| rule.name() != "RangeSelectLoweringAnalyzer")
+        );
+
+        let distributed = new_query_engine_state_with_dist_planner(
+            Plugins::default(),
+            QueryOptions::default(),
+            true,
+        );
+        let session_state = distributed.session_state();
+        let names = session_state
+            .analyzer()
+            .rules
+            .iter()
+            .map(|rule| rule.name())
+            .collect::<Vec<_>>();
+        let lowering = names
+            .iter()
+            .position(|name| *name == "RangeSelectLoweringAnalyzer")
+            .unwrap();
+        let dist = names
+            .iter()
+            .position(|name| *name == "DistPlannerAnalyzer")
+            .unwrap();
+        let const_normalization = names
+            .iter()
+            .position(|name| *name == "ConstNormalizationRule")
+            .unwrap();
+        assert!(
+            const_normalization < lowering && lowering < dist,
+            "{names:?}"
+        );
     }
 
     struct TestRuntimeProvider {

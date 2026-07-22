@@ -15,6 +15,7 @@
 use std::collections::{BTreeSet, HashSet};
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Duration;
 
 use arrow::datatypes::{DataType, IntervalDayTime, TimeUnit};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MITO_ENGINE};
@@ -55,6 +56,8 @@ use table::table::numbers::NumbersTable;
 use table::{Table, TableRef};
 
 use super::*;
+use crate::range_select::lowering::{RangeSelectLoweringAnalyzer, RangeSelectOptions};
+use crate::range_select::plan::{RangeFn, RangeSelect, RangeSelectMode};
 
 fn collect_merge_scan_remote_dyn_filter_producer_ids(
     plan: &LogicalPlan,
@@ -572,6 +575,132 @@ fn try_encode_decode_substrait(plan: &LogicalPlan, state: SessionState) {
     .unwrap();
 
     assert_eq!(*plan, decoded_plan);
+}
+
+fn range_select_plan(time_expr: Expr, by: Vec<Expr>) -> LogicalPlan {
+    let table = TestTable::table_with_name(0, "t".to_string());
+    let source = Arc::new(DefaultTableSource::new(Arc::new(
+        DfTableProviderAdapter::new(table),
+    )));
+    let input = LogicalPlanBuilder::scan_with_filters("t", source, None, vec![])
+        .unwrap()
+        .project(vec![col("pk1"), col("ts"), col("number")])
+        .unwrap()
+        .build()
+        .unwrap();
+    let aggregate = avg(col("number"));
+    let range = RangeSelect::try_new(
+        Arc::new(input),
+        vec![RangeFn {
+            name: "avg(t.number)".to_string(),
+            data_type: DataType::Float64,
+            expr: aggregate.clone(),
+            range: Duration::from_secs(5),
+            fill: None,
+            need_cast: false,
+        }],
+        Duration::from_secs(5),
+        0,
+        time_expr.clone(),
+        by.clone(),
+        &std::iter::once(aggregate)
+            .chain([time_expr])
+            .chain(by)
+            .collect::<Vec<_>>(),
+    )
+    .unwrap();
+    LogicalPlan::Extension(datafusion_expr::logical_plan::Extension {
+        node: Arc::new(range),
+    })
+}
+
+fn lower_range_select_for_dist(plan: LogicalPlan, enabled: bool) -> LogicalPlan {
+    let mut config = ConfigOptions::default();
+    config.extensions.insert(RangeSelectOptions {
+        experimental_enable_range_select_pushdown: enabled,
+    });
+    RangeSelectLoweringAnalyzer.analyze(plan, &config).unwrap()
+}
+
+fn range_select_from_extension(plan: &LogicalPlan) -> &RangeSelect {
+    let LogicalPlan::Extension(extension) = plan else {
+        panic!("expected RangeSelect extension, got: {plan}");
+    };
+    extension
+        .node
+        .as_any()
+        .downcast_ref::<RangeSelect>()
+        .expect("expected RangeSelect extension")
+}
+
+#[test]
+fn range_select_complete_keeps_legacy_remote_input_when_pushdown_disabled() {
+    let plan = lower_range_select_for_dist(range_select_plan(col("ts"), vec![col("pk1")]), false);
+    assert!(matches!(
+        range_select_from_extension(&plan).mode(),
+        RangeSelectMode::Complete
+    ));
+
+    let result = DistPlannerAnalyzer {}
+        .analyze(plan, &ConfigOptions::default())
+        .unwrap();
+    let complete = range_select_from_extension(&result);
+    assert!(matches!(complete.mode(), RangeSelectMode::Complete));
+    assert!(find_merge_scan(complete.input.as_ref()).is_some());
+}
+
+#[test]
+fn range_select_pushdown_places_partial_below_merge_scan_with_state_only_schema() {
+    let lowered = lower_range_select_for_dist(range_select_plan(col("ts"), vec![col("pk1")]), true);
+    let result = DistPlannerAnalyzer {}
+        .analyze(lowered, &ConfigOptions::default())
+        .unwrap();
+    let final_range = range_select_from_extension(&result);
+    assert!(matches!(final_range.mode(), RangeSelectMode::Final(_)));
+    let merge_scan = find_merge_scan(final_range.input.as_ref()).unwrap();
+    let partial = range_select_from_extension(merge_scan.input());
+    assert!(matches!(partial.mode(), RangeSelectMode::Partial(_)));
+    let schema = merge_scan.input().schema();
+    assert_eq!(schema.fields()[0].name(), "__range_state_0");
+    assert!(matches!(
+        schema.fields()[0].data_type(),
+        DataType::Struct(_)
+    ));
+    assert_eq!(schema.fields()[1].name(), "__range_bucket_ms");
+    assert_eq!(schema.fields().len(), 3);
+}
+
+#[test]
+fn range_select_pushdown_success_is_not_replaced_by_fallback() {
+    let lowered = lower_range_select_for_dist(range_select_plan(col("ts"), vec![col("pk1")]), true);
+    let mut config = ConfigOptions::default();
+    config.extensions.insert(DistPlannerOptions {
+        allow_query_fallback: true,
+    });
+
+    let result = DistPlannerAnalyzer {}.analyze(lowered, &config).unwrap();
+    let final_range = range_select_from_extension(&result);
+    assert!(matches!(final_range.mode(), RangeSelectMode::Final(_)));
+    assert!(matches!(
+        range_select_from_extension(find_merge_scan(final_range.input.as_ref()).unwrap().input())
+            .mode(),
+        RangeSelectMode::Partial(_)
+    ));
+}
+
+#[test]
+fn range_select_unsupported_shape_stays_complete_without_remote_partial() {
+    let plan = range_select_plan(col("ts").alias("ts"), vec![col("pk1")]);
+    let lowered = lower_range_select_for_dist(plan.clone(), true);
+    assert_eq!(lowered, plan);
+
+    let result = DistPlannerAnalyzer {}
+        .analyze(lowered, &ConfigOptions::default())
+        .unwrap();
+    let complete = range_select_from_extension(&result);
+    assert!(matches!(complete.mode(), RangeSelectMode::Complete));
+    let merge_scan = find_merge_scan(complete.input.as_ref()).unwrap();
+    assert!(!matches!(merge_scan.input(), LogicalPlan::Extension(_)));
 }
 
 #[test]

@@ -198,6 +198,14 @@ mod tests {
         let _parsed: FrontendOptions = toml::from_str(&toml_string).unwrap();
     }
 
+    #[test]
+    fn test_range_select_pushdown_option_deserializes_from_query_section() {
+        let options: FrontendOptions =
+            toml::from_str("[query]\nexperimental_enable_range_select_pushdown = true\n").unwrap();
+
+        assert!(options.query.experimental_enable_range_select_pushdown);
+    }
+
     struct SuspendableHeartbeatServer {
         suspend: Arc<AtomicBool>,
     }

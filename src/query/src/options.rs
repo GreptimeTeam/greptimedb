@@ -53,6 +53,14 @@ pub struct QueryOptions {
     /// Whether to expose per-region query load metrics.
     #[serde(skip)]
     pub enable_per_region_metrics: bool,
+    /// Enables experimental RangeSelect Partial pushdown from frontend to datanodes.
+    ///
+    /// Every datanode reachable through routing, read preference, retries, or
+    /// failover must support RangeSelectPartialV1 and a compatible aggregate-state schema/ABI.
+    /// Fallback occurs only before dispatch; after dispatch, Partial decode,
+    /// planning, or execution errors fail the query without a Complete retry.
+    /// Mixed-version operation is unsupported.
+    pub experimental_enable_range_select_pushdown: bool,
 }
 
 #[allow(clippy::derivable_impls)]
@@ -63,6 +71,7 @@ impl Default for QueryOptions {
             allow_query_fallback: false,
             memory_pool_size: MemoryLimit::default(),
             enable_per_region_metrics: false,
+            experimental_enable_range_select_pushdown: false,
         }
     }
 }
@@ -379,6 +388,13 @@ fn invalid_query_context_extension(reason: String) -> Error {
 #[cfg(test)]
 mod flow_extension_tests {
     use super::*;
+
+    #[test]
+    fn test_range_select_pushdown_defaults_to_false_when_deserialized() {
+        let options: QueryOptions = serde_json::from_str("{}").unwrap();
+
+        assert!(!options.experimental_enable_range_select_pushdown);
+    }
 
     #[test]
     fn test_parse_flow_extensions_returns_none_for_non_flow_query() {

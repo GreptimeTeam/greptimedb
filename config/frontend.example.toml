@@ -287,6 +287,12 @@ parallelism = 0
 ## Default to false, meaning when push down optimize failed, return error msg
 allow_query_fallback = false
 
+## Experimental RangeSelect Partial pushdown. Every datanode reachable through routing, read preference,
+## retries, or failover must support RangeSelectPartialV1 and a compatible aggregate-state schema/ABI.
+## Fallback occurs only before dispatch; after dispatch, Partial decode, planning, or execution errors fail the
+## query without a Complete retry. Mixed-version operation is unsupported.
+experimental_enable_range_select_pushdown = false
+
 ## Memory pool size for query execution operators (aggregation, sorting, join).
 ## Supports absolute size (e.g., "4GB", "8GB") or percentage of system memory (e.g., "30%").
 ## Setting it to 0 disables the limit (unbounded, default behavior).

@@ -795,6 +795,11 @@ jobs:
         run: tar -xvf ./bins.tar.gz
       - name: Run sqlness
         run: RUST_BACKTRACE=1 ./bins/sqlness-runner bare ${{ matrix.mode.opts }} -c ./tests/cases --bins-dir ./bins --preserve-state
+      - if: matrix.mode.name == 'Basic'
+        name: Run experimental RangeSelect pushdown sqlness
+        env:
+          GREPTIMEDB_FRONTEND__QUERY__EXPERIMENTAL_ENABLE_RANGE_SELECT_PUSHDOWN: "true"
+        run: RUST_BACKTRACE=1 ./bins/sqlness-runner bare -c ./tests/experimental-cases -t range_select_pushdown --bins-dir ./bins --preserve-state
       - name: Upload sqlness logs
         if: failure()
         uses: actions/upload-artifact@v4

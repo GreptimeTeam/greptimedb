@@ -1,0 +1,131 @@
+CREATE TABLE range_select_pushdown (
+    ts TIMESTAMP TIME INDEX,
+    shard STRING,
+    series STRING,
+    filter_only STRING,
+    value_a DOUBLE,
+    value_b DOUBLE,
+    PRIMARY KEY (shard, series, filter_only),
+) PARTITION ON COLUMNS (shard) (
+    shard < 'm',
+    shard >= 'm'
+);
+
+Affected Rows: 0
+
+INSERT INTO range_select_pushdown VALUES
+    (0, 'alpha', 'api', 'include', 1.0, 10.0),
+    (2000, 'zulu', 'api', 'include', 3.0, 30.0),
+    (7000, 'zulu', 'api', 'include', 5.0, 50.0),
+    (8000, 'zulu', 'api', 'include', NULL, 80.0),
+    (20000, 'alpha', 'api', 'include', 2.0, 20.0),
+    (22000, 'zulu', 'api', 'include', 4.0, 40.0),
+    (0, 'alpha', 'api', 'exclude', 100.0, 1000.0);
+
+Affected Rows: 7
+
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (elapsed_compute.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (partitioning.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE Total\s+rows:\s+\d+ Total rows: REDACTED
+-- SQLNESS REPLACE \"filters\":\s*\[.*\],\s*\"flat_format\" \"filters\":REDACTED,\"flat_format\"
+EXPLAIN ANALYZE VERBOSE SELECT
+    ts,
+    series,
+    min_value,
+    max_value,
+    sum_value,
+    count_value,
+    avg_value,
+    avg_compound + 1.0 AS avg_compound_plus_one
+FROM (
+    SELECT
+        ts,
+        series,
+        min(value_a) RANGE '10s' AS min_value,
+        max(value_a) RANGE '10s' AS max_value,
+        sum(value_a) RANGE '10s' AS sum_value,
+        count(value_a) RANGE '10s' AS count_value,
+        avg(value_a) RANGE '10s' AS avg_value,
+        avg(value_a + value_b) RANGE '10s' AS avg_compound
+    FROM range_select_pushdown
+    WHERE filter_only = 'include'
+        AND ts >= '1970-01-01 00:00:00'
+        AND ts < '1970-01-01 00:00:30'
+    ALIGN '5s' BY (series) FILL 0
+)
+WHERE series = 'api'
+ORDER BY series, ts;
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_SortPreservingMergeExec: [ts@0 ASC NULLS LAST] REDACTED
+|_|_|_SortExec: expr=[ts@0 ASC NULLS LAST], preserve_REDACTED
+|_|_|_ProjectionExec: expr=[ts@6 as ts, series@7 as series, min(range_select_pushdown.value_a) RANGE 10s FILL 0@4 as min_value, max(range_select_pushdown.value_a) RANGE 10s FILL 0@3 as max_value, sum(range_select_pushdown.value_a) RANGE 10s FILL 0@5 as sum_value, count(range_select_pushdown.value_a) RANGE 10s FILL 0@2 as count_value, avg(range_select_pushdown.value_a) RANGE 10s FILL 0@1 as avg_value, avg(range_select_pushdown.value_a + range_select_pushdown.value_b) RANGE 10s FILL 0@0 + 1 as avg_compound_plus_one] REDACTED
+|_|_|_FilterExec: series@7 = api REDACTED
+|_|_|_RepartitionExec: REDACTED
+|_|_|_RangeSelectExec: range_expr=[avg(range_select_pushdown.value_a + range_select_pushdown.value_b) RANGE 10s FILL 0 RANGE 10s FILL 0, avg(range_select_pushdown.value_a) RANGE 10s FILL 0 RANGE 10s FILL 0, count(range_select_pushdown.value_a) RANGE 10s FILL 0 RANGE 10s FILL 0, max(range_select_pushdown.value_a) RANGE 10s FILL 0 RANGE 10s FILL 0, min(range_select_pushdown.value_a) RANGE 10s FILL 0 RANGE 10s FILL 0, sum(range_select_pushdown.value_a) RANGE 10s FILL 0 RANGE 10s FILL 0], align=5000ms, align_to=0ms, align_by=[series@7], time_index=__range_bucket_ms REDACTED
+|_|_|_CoalescePartitionsExec REDACTED
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_RangeSelectExec: range_expr=[__range_state_0 RANGE 10s, __range_state_1 RANGE 10s, __range_state_2 RANGE 10s, __range_state_3 RANGE 10s, __range_state_4 RANGE 10s, __range_state_5 RANGE 10s], align=5000ms, align_to=0ms, align_by=[series@1], time_index=ts REDACTED
+|_|_|_ProjectionExec: expr=[ts@0 as ts, series@2 as series, value_a@4 + value_b@5 as __range_arg_0, value_a@4 as __range_arg_1, value_a@4 as __range_arg_2, value_a@4 as __range_arg_3, value_a@4 as __range_arg_4, value_a@4 as __range_arg_5] REDACTED
+|_|_|_CooperativeExec REDACTED
+|_|_|_SeqScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "projection": ["ts", "shard", "series", "filter_only", "value_a", "value_b"], \"filters\":REDACTED,\"flat_format\": true, "REDACTED
+|_|_|_|
+| 1_| 1_|_RangeSelectExec: range_expr=[__range_state_0 RANGE 10s, __range_state_1 RANGE 10s, __range_state_2 RANGE 10s, __range_state_3 RANGE 10s, __range_state_4 RANGE 10s, __range_state_5 RANGE 10s], align=5000ms, align_to=0ms, align_by=[series@1], time_index=ts REDACTED
+|_|_|_ProjectionExec: expr=[ts@0 as ts, series@2 as series, value_a@4 + value_b@5 as __range_arg_0, value_a@4 as __range_arg_1, value_a@4 as __range_arg_2, value_a@4 as __range_arg_3, value_a@4 as __range_arg_4, value_a@4 as __range_arg_5] REDACTED
+|_|_|_CooperativeExec REDACTED
+|_|_|_SeqScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "projection": ["ts", "shard", "series", "filter_only", "value_a", "value_b"], \"filters\":REDACTED,\"flat_format\": true, "REDACTED
+|_|_|_|
+|_|_| Total rows: REDACTED_|
++-+-+-+
+
+SELECT
+    ts,
+    series,
+    min_value,
+    max_value,
+    sum_value,
+    count_value,
+    avg_value,
+    avg_compound + 1.0 AS avg_compound_plus_one
+FROM (
+    SELECT
+        ts,
+        series,
+        min(value_a) RANGE '10s' AS min_value,
+        max(value_a) RANGE '10s' AS max_value,
+        sum(value_a) RANGE '10s' AS sum_value,
+        count(value_a) RANGE '10s' AS count_value,
+        avg(value_a) RANGE '10s' AS avg_value,
+        avg(value_a + value_b) RANGE '10s' AS avg_compound
+    FROM range_select_pushdown
+    WHERE filter_only = 'include'
+        AND ts >= '1970-01-01 00:00:00'
+        AND ts < '1970-01-01 00:00:30'
+    ALIGN '5s' BY (series) FILL 0
+)
+WHERE series = 'api'
+ORDER BY series, ts;
+
++---------------------+--------+-----------+-----------+-----------+-------------+-----------+-----------------------+
+| ts                  | series | min_value | max_value | sum_value | count_value | avg_value | avg_compound_plus_one |
++---------------------+--------+-----------+-----------+-----------+-------------+-----------+-----------------------+
+| 1969-12-31T23:59:55 | api    | 1.0       | 3.0       | 4.0       | 2           | 2.0       | 23.0                  |
+| 1970-01-01T00:00:00 | api    | 1.0       | 5.0       | 9.0       | 3           | 3.0       | 34.0                  |
+| 1970-01-01T00:00:05 | api    | 5.0       | 5.0       | 5.0       | 1           | 5.0       | 56.0                  |
+| 1970-01-01T00:00:10 | api    | 0.0       | 0.0       | 0.0       | 0           | 0.0       | 1.0                   |
+| 1970-01-01T00:00:15 | api    | 2.0       | 4.0       | 6.0       | 2           | 3.0       | 34.0                  |
+| 1970-01-01T00:00:20 | api    | 2.0       | 4.0       | 6.0       | 2           | 3.0       | 34.0                  |
++---------------------+--------+-----------+-----------+-----------+-------------+-----------+-----------------------+
+
+DROP TABLE range_select_pushdown;
+
+Affected Rows: 0
+

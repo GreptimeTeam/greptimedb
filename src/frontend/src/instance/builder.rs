@@ -172,6 +172,15 @@ impl FrontendBuilder {
         let node_manager = self.node_manager;
         let plugins = self.plugins.unwrap_or_default();
         let process_manager = self.process_manager;
+        if self.options.query.experimental_enable_range_select_pushdown
+            && plugins
+                .get::<common_options::plugin_options::StandaloneFlag>()
+                .is_none()
+        {
+            common_telemetry::warn!(
+                "experimental RangeSelect pushdown is enabled: every datanode reachable through routing, read preference, retries, or failover must support RangeSelectPartialV1 and a compatible aggregate-state schema/ABI; fallback occurs only before dispatch, and after dispatch Partial decode, planning, or execution errors fail the query without a Complete retry; mixed-version operation is unsupported"
+            );
+        }
         let table_route_cache: TableRouteCacheRef =
             self.layered_cache_registry
                 .get()

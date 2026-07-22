@@ -247,7 +247,7 @@ pub struct RangeFn {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
-enum RangeSelectMode {
+pub(crate) enum RangeSelectMode {
     #[default]
     Complete,
     Partial(PartialRangeSelectSpec),
@@ -264,7 +264,7 @@ enum CanonicalRangeAggregate {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-struct PartialRangeSelectSpec {
+pub(crate) struct PartialRangeSelectSpec {
     state_columns: Vec<String>,
     state_types: Vec<DataType>,
     by_fields: Vec<FieldContract>,
@@ -382,7 +382,7 @@ fn validate_wire_duration(duration: Duration, name: &str) -> DfResult<()> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-struct FinalRangeSelectSpec {
+pub(crate) struct FinalRangeSelectSpec {
     state_columns: Vec<String>,
     bucket_column: String,
     bucket_field: FieldContract,
@@ -536,6 +536,10 @@ impl PartialOrd for RangeSelect {
 }
 
 impl RangeSelect {
+    pub(crate) fn mode(&self) -> &RangeSelectMode {
+        &self.mode
+    }
+
     pub fn try_new(
         input: Arc<LogicalPlan>,
         range_expr: Vec<RangeFn>,

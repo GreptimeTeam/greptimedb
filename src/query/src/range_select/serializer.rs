@@ -27,7 +27,7 @@ use greptime_proto::substrait_extension::{
 };
 use prost::Message;
 
-use super::plan::{
+use crate::range_select::plan::{
     PartialRangeWireFunction, PartialRangeWireMetadata, RangeAggregateKind, RangeSelect,
     SUPPORTED_PARTIAL_STATE_ABI,
 };
