@@ -74,8 +74,8 @@ can lead in.
    (declared vs. derived-from-trace vs. derived-from-attribute vs.
    agent-inferred).
 3. **Derive** the high-value edges automatically at read time: the service call
-   graph from trace tables, and host/containment edges from shared identifying
-   attributes.
+   graph from trace tables, and host/containment edges from identities
+   co-declared on the same rows.
 4. **Query** the graph with bounded-hop traversal and a standard SQL surface,
    so an agent can ask "what is related to this entity" in one statement and
    join straight back to the telemetry tables.
@@ -138,7 +138,7 @@ Graph). The facts that shaped it:
 | Decision | Borrowed from |
 | --- | --- |
 | Entity = `(type, identifying attrs)`, identity ≠ description | OTel Entity model |
-| Relationship via shared identifying attribute | OTel de-facto; relational FK |
+| Join keys from shared identifying attributes; edge semantics from co-declaration | OTel de-facto; relational FK |
 | Small typed, inverse-paired edge vocabulary | Backstage / New Relic / ServiceNow |
 | Single `calls` edge qualified by attributes (`connection_type`, RED) | Tempo / servicegraph |
 | **Provenance** on every edge; declared edges survive derivation | Datadog |
@@ -234,11 +234,11 @@ entity's identity by naming the identifying columns consistently. An explicit
 `semantic_key=column` mapping form is reserved as a backwards-compatible
 extension for tables whose column names diverge from the attribute keys.
 
-**`scope` is not part of identity.** OTel has no separate scope concept —
-namespace-like attributes (`service.namespace`, `k8s.namespace.name`) are
-identifying attributes of the entity. If a namespace disambiguates identity,
-declare its column in `id`; the `scope` role only surfaces a namespace/
-environment value as a convenient filter/display column.
+**`scope` is not part of identity.** An OTel entity id is an attribute map;
+there is no generic scope dimension. If a namespace-like attribute
+disambiguates identity for your tables, declare its column in `id` — identity
+uniqueness then holds by construction. The `scope` role only surfaces a
+namespace/environment value as a convenient filter/display column.
 
 Example — a latency metric table that describes both a `service` and the
 `host` it runs on:
@@ -264,11 +264,54 @@ several entity types mirrors a resource referencing several entities. The same
 mechanism declares agent-telemetry entities (`entity.agent.id`,
 `entity.session.id`, ...), so agent events join the graph with no new surface.
 
-For OTLP **trace** tables (`greptime_trace_v1`) the ingestion path already
-knows the identity column and stamps
-`greptime.semantic.entity.service.id = service_name` automatically, the same
-way it stamps `signal_type = trace` today. Declarations surface in
-`information_schema.table_semantics`.
+Declarations surface in `information_schema.table_semantics`.
+
+### Zero-configuration declarations (well-known conventions)
+
+Explicit declarations are the mechanism; built-in conventions make the graph
+light up without them. An explicit declaration always overrides an implicit
+one, so non-standard setups (custom relabeling, renamed columns) are covered
+by declaring explicitly.
+
+**OTLP traces.** For `greptime_trace_v1` tables the identity column is fixed:
+the ingestion path stamps `greptime.semantic.entity.service.id = service_name`
+at table creation, and the derivation synthesizes the same declaration for
+trace-v1 tables that predate stamping.
+
+**Prometheus metrics on Kubernetes.** A metric table
+(`signal_type = metric`, `source = prometheus`) whose tag columns match the
+well-known label sets receives implicit declarations:
+
+| Tag columns | Entity | Basis |
+| --- | --- | --- |
+| `job` | `service` | The OTel↔Prometheus compatibility spec: `service.namespace`/`service.name` MUST be combined into the `job` label |
+| `job`, `instance` | `service.instance` | Same spec: `service.instance.id` MUST be converted to the `instance` label |
+| `namespace`, `pod` | `k8s.pod` | Kubernetes service-discovery / kube-prometheus-stack relabeling convention |
+| `node` | `k8s.node` | same |
+| `namespace` | `k8s.namespace` | same |
+
+This is what connects the graph to metrics. A `service` node derived from a
+metric table's `job` label and the one derived from a trace table's
+`service_name` unify on the entity id, so a single node's `source_tables`
+spans both signals and "the neighbours' telemetry" reaches metric tables
+without any user declaration.
+
+`*_info` metrics are entity descriptors, and their rows witness edges under
+the same-row co-declaration rule (3b): `kube_pod_info` carries `pod`,
+`namespace`, and `node` in one row — deriving `k8s.pod runs_on k8s.node` plus
+descriptive attributes (`host_ip`, `pod_ip`, `created_by_*`); `kube_pod_owner`
+carries the pod and its `owner_kind`/`owner_name` — `part_of` edges to
+workloads. `target_info`, the OTLP-over-Prometheus resource metric (labelled
+by `job` and `instance` plus the remaining resource attributes, per the same
+compatibility spec), enriches the `service` entity's descriptive attributes.
+
+**Prometheus Remote Write 2.0 metadata.** RW 2.0 carries metric type, help,
+and unit inline with each series (the metadata sub-fields SHOULD be provided),
+where 1.x had no reliable in-protocol metadata (RW 2.0 support is tracked in
+[#4765](https://github.com/GreptimeTeam/greptimedb/issues/4765)). Ingestion consumes them into
+the semantic vocabulary — `metric.type`, `metric.unit`,
+`metadata_quality = declared` — so the graph's metric-side descriptive
+metadata is trustworthy instead of suffix-guessed.
 
 **Vocabulary mechanism.** The semantic vocabulary is a closed whitelist, but
 entity types are open-ended (`service`, `host`, `k8s.pod`, custom), so the
@@ -286,9 +329,11 @@ derivation over telemetry tables, which would break the cheap-metadata
 expectation of `information_schema`). All DDL/DML against them is rejected on
 every write path.
 
-`semantic_entities` — the node set. One row per **(window, entity, contributing
-table)**: an entity declared by three tables yields three rows per window, each
-with its own `source_tables` lineage and descriptive snapshot. This keeps the
+`semantic_entities` — the node set. One row per **distinct projected entity
+observation from a contributing table**: an entity declared by three tables
+yields at least three rows per window, more when its scope or descriptive
+snapshot varies within the window. `source_tables` is that row's lineage,
+rendered as the schema-qualified `"schema.table"` string. This keeps the
 derivation free of cross-source merge policies (descriptive conflicts, JSON
 merging); consumers deduplicate with `SELECT DISTINCT entity_type, entity_id`,
 and a unique node set is the job of the snapshot relation (Layer 4).
@@ -316,8 +361,7 @@ metrics.
 | `src_type`, `src_id`, `dst_type`, `dst_id` | STRING | endpoints |
 | `rel_type` | STRING | vocabulary below |
 | `provenance` | STRING | `trace` \| `attribute` \| `declared` \| `agent` |
-| `confidence` | DOUBLE | 1.0 = observed/declared; lower for sampled / virtual-node / inferred |
-| `scope` | STRING | namespace/environment |
+| `confidence` | DOUBLE | derivation certainty: 1.0 = paired/declared; < 1.0 for virtual-node / agent-inferred |
 | `generation_id` | STRING | idempotency key of the producing (window, run); empty for read-time rows |
 | `request_count`, `error_count`, `duration_sum`, `duration_count` | BIGINT/DOUBLE | RED metrics for `calls` edges |
 | `attributes` | JSON | `connection_type`, `db.system`, `peer.service`, ... |
@@ -327,20 +371,26 @@ Design notes:
 - **Edges are time-ranged facts.** A row asserts an edge *existed in a
   window*, with RED metrics for that window — the TSDB-native answer to "edges
   expire". "The topology now" is `WHERE fresh_until >= now() - INTERVAL '5m'`.
-- **Endpoint encoding.** For a single-attribute identity, `entity_id` is the
-  value verbatim; for a composite identity it is the attributes sorted by key,
-  rendered `k1=v1,k2=v2`, with `entity_id_attrs` (JSON) as the escaping-safe
-  source of truth. Endpoints are opaque keys for traversal.
+- **Endpoint encoding (v1 storage-level identity key).** For a
+  single-attribute identity, `entity_id` is the value verbatim; for a composite
+  identity it is the attributes sorted by key, rendered `k1=v1,k2=v2` — a
+  human-readable traversal key, not a collision-free canonical encoding.
+  `entity_id_attrs` (JSON) is the structured form of a composite identity on
+  nodes, but edges carry only the string key. Known v1 limitation: composite
+  components containing unescaped `,` or `=` are not guaranteed to be
+  distinguished.
 - **`provenance` is part of edge identity**, so a declared edge and a derived
   edge between the same pair coexist, and a user-declared edge survives when
   derivation is off.
 - **`confidence` expresses derivation certainty, not statistical
   completeness**: `1.0` for a successfully paired or declared edge, `< 1.0` for
   virtual-node or agent-inferred edges. It does not correct for trace sampling.
-- **RED metrics count observed span pairs** — the servicegraph-connector
-  semantics (`traces_service_graph_request_total`). Under sampling,
-  `request_count` undercounts true traffic; ratios (error rate, mean duration)
-  remain meaningful.
+- **RED metrics describe the observed span-pair population** — the
+  servicegraph-connector semantics (`traces_service_graph_request_total`).
+  Under sampling, counts understate true traffic, and ratios (error rate, mean
+  duration) are representative only when sampling is unbiased with respect to
+  status and latency — tail sampling that keeps errors and slow traces skews
+  both.
 - **Hand-declared edges** (`provenance = 'declared'`) are stored in a physical
   table of the same shape (plus a business validity window) in
   `greptime_private` and unioned into the computed `semantic_relationships`.
@@ -386,11 +436,16 @@ Normative for the read-time graph:
   and a join-derived edge requires read access to all of its input tables.
   Querying the computed tables must never widen access to the underlying
   telemetry.
-- **Time window.** An explicit `observed_at` bound on the scan determines the
-  source-scan window (half-open `[start, end)`); only a query with no explicit
-  bound uses the product default of the **last hour**. The window is never
-  silently clamped. The trace pairing extends the server-side scan by the
-  pairing tolerance, but emitted buckets stay within the requested range.
+- **Time window.** The derived source-scan window is **never narrower than
+  the query's `observed_at` range** — the outer filter can only discard extra
+  buckets, never recover unscanned ones. Rules: no `observed_at` predicate →
+  the product default `[now - 1h, now)`; a lower bound only → `[lower, now)`;
+  both bounds → the full requested range (half-open `[start, end)`); an upper
+  bound only, or `observed_at` inside a predicate the planner cannot safely
+  extract (e.g. under `OR`) → an error asking for an explicit range, never a
+  silent fallback. Disjuncts not involving `observed_at` do not affect the
+  extracted range. Bucket mapping expands outward (`floor` the lower bound,
+  `ceil` the upper to bucket boundaries); `now()` is evaluated once per plan.
 - **Bounded work and cancellation.** The window bound is the resource bound: a
   bare `SELECT * FROM semantic_entities` scans at most the last hour of the
   declaring tables. Derivation inherits the caller's cancellation and deadline.
@@ -440,6 +495,15 @@ WHERE  client.span_kind = 'SPAN_KIND_CLIENT'
 GROUP BY 1, src_id, dst_id;
 ```
 
+Edge endpoints are built from each trace table's **`service` entity
+declaration** — the same id expression the registry uses — so edges land on
+exactly the entity ids the registry emits, including composite service
+identities; span pairs with a NULL identity component are filtered, and
+self-calls are excluded by comparing the full endpoint ids (two services with
+equal names but different composite identities are not a self-call). A trace
+table whose explicit service declaration is unusable contributes no calls
+edges rather than silently falling back to another identity.
+
 The implementation additionally bounds the join with a time-proximity window
 (a child server span starts within `[-5min, +1h]` of its client span) and
 applies the equivalent static bounds to both scans so file/partition pruning
@@ -455,10 +519,10 @@ unioned in.
 
 ### 3b. Attribute → `runs_on` / `contains`
 
-These edges are not in the traces; they come from OTel's de-facto mechanism:
-join by shared identifying attribute. A shared value alone does not determine
-direction, edge type, or cardinality, so the derivation is rule-based, not
-join-everything:
+**Shared attributes provide join keys; co-declaration or a relationship
+template provides the relationship semantics.** A shared value alone does not
+determine direction, edge type, or cardinality, so the derivation is
+rule-based, not join-everything:
 
 - **Same-row co-declaration**: a table declaring both a `service.instance` and
   a `host` identity on the same rows derives `runs_on` between them — the row
@@ -500,7 +564,9 @@ defined over a **snapshot relation**, not the raw fact tables:
 `semantic_graph_snapshot(start, end)` aggregates the queried range into one
 row per entity (vertex key `(entity_type, entity_id)`, `source_tables`
 merged) and one row per edge (RED metrics merged), and guarantees every edge
-endpoint exists in the vertex set.
+endpoint exists in the vertex set — an endpoint with no telemetry-derived
+entity row (a virtual node, a declared or agent edge) is synthesized as an
+endpoint-only vertex with NULL descriptive and empty `source_tables`.
 
 ```sql
 CREATE PROPERTY GRAPH observability
@@ -624,9 +690,9 @@ directly.
 - **A static (non-time-indexed) relationship model.** Cannot express "the
   topology at 14:23 during the incident", cannot carry edge RED metrics, and
   needs an external expiry mechanism.
-- **Edges as schema-level options on telemetry tables.** Works for
-  table-pairing hints but cannot represent entity-*instance* edges
-  (`api-server-1 → users-db`), which are data, not schema.
+- **Storing entity-instance edges in table options.** Options can carry
+  derivation *rules* (declarations, relationship templates) but not the edges
+  themselves (`api-server-1 → users-db`) — those are data, not schema.
 
 # Open Questions
 
