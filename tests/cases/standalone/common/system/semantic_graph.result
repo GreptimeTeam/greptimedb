@@ -14,6 +14,12 @@ insert into greptime_private.semantic_entities (observed_at, entity_type, entity
 
 Error: 1001(Unsupported), Cannot change read-only table: semantic_entities
 
+-- Plain-literal VALUES takes the direct region-insert path, not the query
+-- engine; the table-level guard must hold there too.
+insert into greptime_private.semantic_entities (observed_at, entity_type, entity_id) values (0, 'service', 'svc-b');
+
+Error: 1001(Unsupported), Table `semantic_entities` is read-only
+
 create table greptime_private.semantic_entities (ts timestamp time index);
 
 Error: 1001(Unsupported), Table `semantic_entities` is read-only

@@ -6,6 +6,10 @@ select observed_at, src_id, dst_id, rel_type from greptime_private.semantic_rela
 
 insert into greptime_private.semantic_entities (observed_at, entity_type, entity_id) values (now(), 'service', 'svc-a');
 
+-- Plain-literal VALUES takes the direct region-insert path, not the query
+-- engine; the table-level guard must hold there too.
+insert into greptime_private.semantic_entities (observed_at, entity_type, entity_id) values (0, 'service', 'svc-b');
+
 create table greptime_private.semantic_entities (ts timestamp time index);
 
 create table greptime_private.semantic_relationships (ts timestamp time index);
