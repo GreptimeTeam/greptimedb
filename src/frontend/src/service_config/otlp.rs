@@ -14,7 +14,7 @@
 
 use serde::{Deserialize, Serialize};
 
-const DEFAULT_TRACE_INGEST_CHUNK_SIZE: usize = 128;
+const DEFAULT_TRACE_INGEST_CHUNK_SIZE: usize = 512;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
@@ -41,10 +41,7 @@ mod tests {
     fn test_otlp_options() {
         let default = OtlpOptions::default();
         assert!(default.enable);
-        assert_eq!(
-            default.trace_ingest_chunk_size,
-            DEFAULT_TRACE_INGEST_CHUNK_SIZE
-        );
+        assert_eq!(default.trace_ingest_chunk_size, 512);
 
         let options: OtlpOptions = toml::from_str("enable = false").unwrap();
         assert!(!options.enable);

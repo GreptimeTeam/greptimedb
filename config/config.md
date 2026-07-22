@@ -73,7 +73,7 @@
 | `jaeger.enable` | Bool | `true` | Whether to enable Jaeger protocol in HTTP API. |
 | `otlp` | -- | -- | OpenTelemetry protocol options. |
 | `otlp.enable` | Bool | `true` | Whether to enable OpenTelemetry protocol in HTTP API. |
-| `otlp.trace_ingest_chunk_size` | Integer | `128` | Maximum spans per trace ingest chunk. Set to 0 to disable splitting. |
+| `otlp.trace_ingest_chunk_size` | Integer | `512` | Maximum spans per trace ingest chunk. Set to 0 to disable splitting. |
 | `prom_store` | -- | -- | Prometheus remote storage options |
 | `prom_store.enable` | Bool | `true` | Whether to enable Prometheus remote write and read in HTTP API. |
 | `prom_store.with_metric_engine` | Bool | `true` | Whether to store the data from Prometheus remote write in metric engine. |
@@ -305,7 +305,7 @@
 | `jaeger.enable` | Bool | `true` | Whether to enable Jaeger protocol in HTTP API. |
 | `otlp` | -- | -- | OpenTelemetry protocol options. |
 | `otlp.enable` | Bool | `true` | Whether to enable OpenTelemetry protocol in HTTP API. |
-| `otlp.trace_ingest_chunk_size` | Integer | `128` | Maximum spans per trace ingest chunk. Set to 0 to disable splitting. |
+| `otlp.trace_ingest_chunk_size` | Integer | `512` | Maximum spans per trace ingest chunk. Set to 0 to disable splitting. |
 | `prom_store` | -- | -- | Prometheus remote storage options |
 | `prom_store.enable` | Bool | `true` | Whether to enable Prometheus remote write and read in HTTP API. |
 | `prom_store.with_metric_engine` | Bool | `true` | Whether to store the data from Prometheus remote write in metric engine. |
