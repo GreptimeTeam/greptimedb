@@ -329,30 +329,72 @@ const RELATIONSHIP_COLUMNS: [&str; 18] = [
 const CHILD_SPAN_EARLY_NANOS: i64 = 5 * 60 * 1_000_000_000;
 const CHILD_SPAN_LATE_NANOS: i64 = 60 * 60 * 1_000_000_000;
 
-/// Builds the `calls` derivation (RFC §3a) over `traces` (one scan per trace
-/// table, unioned): pair each client span with its child server span on
-/// `trace_id` + `parent_span_id`, project to `service`, aggregate to RED metrics
-/// per 60s window. This is the plan form of the Tempo servicegraph connector.
-/// Virtual-node edges (uninstrumented peers) are a separate branch, added on top
-/// of this. Column names are the fixed `greptime_trace_v1` schema (the reason
-/// `table_data_model = greptime_trace_v1` is required); `span_status_code` is a
-/// string column (`STATUS_CODE_ERROR`), verified against the trace ingest path.
-/// Returns `None` when there is no trace table.
+/// Builds the `calls` derivation (RFC §3a) over `traces`: pair each client span
+/// with its child server span on `trace_id` + `parent_span_id`, project to
+/// `service`, union the pairs of all trace tables, and aggregate to RED metrics
+/// per 60s window in one pass — so an edge observed across several trace tables
+/// yields one row, not per-table fragments. This is the plan form of the Tempo
+/// servicegraph connector. Virtual-node edges (uninstrumented peers) are a
+/// separate branch, added on top of this. Column names are the fixed
+/// `greptime_trace_v1` schema (the reason `table_data_model = greptime_trace_v1`
+/// is required); `span_status_code` is a string column (`STATUS_CODE_ERROR`),
+/// verified against the trace ingest path. Returns `None` when there is no
+/// trace table.
 pub fn build_calls_plan(
     traces: Vec<DataFrame>,
     window: &GraphWindow,
 ) -> DfResult<Option<LogicalPlan>> {
     let mut union_df: Option<DataFrame> = None;
     for trace in traces {
-        union_df = union_all(union_df, calls_branch(trace, window)?)?;
+        union_df = union_all(union_df, calls_pairs(trace, window)?)?;
     }
-    Ok(union_df.map(DataFrame::into_unoptimized_plan))
+    let Some(pairs) = union_df else {
+        return Ok(None);
+    };
+
+    let plan = pairs
+        .aggregate(
+            vec![ident("observed_at"), ident("src_id"), ident("dst_id")],
+            vec![
+                count(lit(1)).alias("request_count"),
+                count(lit(1))
+                    .filter(ident("status_code").eq(lit(SPAN_STATUS_ERROR)))
+                    .build()?
+                    .alias("error_count"),
+                sum(ident("duration_nano")).alias("duration_nano_sum"),
+            ],
+        )?
+        .select(vec![
+            ident("observed_at"),
+            ident("observed_at").alias("window_start"),
+            (ident("observed_at") + bin_interval()).alias("window_end"),
+            (ident("observed_at") + bin_interval()).alias("fresh_until"),
+            lit("service").alias("src_type"),
+            ident("src_id"),
+            lit("service").alias("dst_type"),
+            ident("dst_id"),
+            lit("calls").alias("rel_type"),
+            lit("trace").alias("provenance"),
+            lit(1.0_f64).alias("confidence"),
+            lit("").alias("scope"),
+            lit("").alias("generation_id"),
+            ident("request_count"),
+            ident("error_count"),
+            // duration_nano sums in nanoseconds; the contract column is seconds.
+            (cast(ident("duration_nano_sum"), DataType::Float64) / lit(1e9_f64))
+                .alias("duration_sum"),
+            ident("request_count").alias("duration_count"),
+            null_json().alias("attributes"),
+        ])?
+        .into_unoptimized_plan();
+    Ok(Some(plan))
 }
 
-fn calls_branch(trace: DataFrame, window: &GraphWindow) -> DfResult<DataFrame> {
+/// One trace table's client/server span pairs, projected to the aggregation
+/// inputs `(observed_at, src_id, dst_id, status_code, duration_nano)`.
+fn calls_pairs(trace: DataFrame, window: &GraphWindow) -> DfResult<DataFrame> {
     // `scope` stays empty here: the fixed `greptime_trace_v1` schema declares no
     // scope columns (the auto-stamp is `entity.service.id = service_name` only).
-    // Revisit when trace tables can carry scope declarations.
     let client = trace
         .clone()
         .filter(
@@ -401,39 +443,6 @@ fn calls_branch(trace: DataFrame, window: &GraphWindow) -> DfResult<DataFrame> {
             cast(qcol("server", SERVICE_NAME_COLUMN), DataType::Utf8).alias("dst_id"),
             qcol("server", SPAN_STATUS_CODE_COLUMN).alias("status_code"),
             qcol("server", DURATION_NANO_COLUMN).alias("duration_nano"),
-        ])?
-        .aggregate(
-            vec![ident("observed_at"), ident("src_id"), ident("dst_id")],
-            vec![
-                count(lit(1)).alias("request_count"),
-                count(lit(1))
-                    .filter(ident("status_code").eq(lit(SPAN_STATUS_ERROR)))
-                    .build()?
-                    .alias("error_count"),
-                sum(ident("duration_nano")).alias("duration_nano_sum"),
-            ],
-        )?
-        .select(vec![
-            ident("observed_at"),
-            ident("observed_at").alias("window_start"),
-            (ident("observed_at") + bin_interval()).alias("window_end"),
-            (ident("observed_at") + bin_interval()).alias("fresh_until"),
-            lit("service").alias("src_type"),
-            ident("src_id"),
-            lit("service").alias("dst_type"),
-            ident("dst_id"),
-            lit("calls").alias("rel_type"),
-            lit("trace").alias("provenance"),
-            lit(1.0_f64).alias("confidence"),
-            lit("").alias("scope"),
-            lit("").alias("generation_id"),
-            ident("request_count"),
-            ident("error_count"),
-            // duration_nano sums in nanoseconds; the contract column is seconds.
-            (cast(ident("duration_nano_sum"), DataType::Float64) / lit(1e9_f64))
-                .alias("duration_sum"),
-            ident("request_count").alias("duration_count"),
-            null_json().alias("attributes"),
         ])
 }
 
@@ -802,6 +811,11 @@ mod tests {
         let ctx = SessionContext::new();
         ctx.register_table(
             "opentelemetry_traces",
+            Arc::new(MemTable::try_new(schema.clone(), vec![vec![batch.clone()]]).unwrap()),
+        )
+        .unwrap();
+        ctx.register_table(
+            "opentelemetry_traces_2",
             Arc::new(MemTable::try_new(schema, vec![vec![batch]]).unwrap()),
         )
         .unwrap();
@@ -861,5 +875,40 @@ mod tests {
         assert_eq!(duration_count.value(0), 2);
         // Derived calls edges carry no attributes: a typed-JSON NULL.
         assert!(json_texts(batch, 17)[0].is_none());
+    }
+
+    #[tokio::test]
+    async fn calls_plan_merges_edges_across_trace_tables() {
+        let ctx = trace_table_ctx();
+        let t1 = ctx.table("opentelemetry_traces").await.unwrap();
+        let t2 = ctx.table("opentelemetry_traces_2").await.unwrap();
+        let plan = build_calls_plan(vec![t1, t2], &test_window())
+            .unwrap()
+            .unwrap();
+
+        let batches = collect(&ctx, plan).await;
+        let total: usize = batches.iter().map(|b| b.num_rows()).sum();
+        // The same frontend->cart edge from both tables folds into one row with
+        // summed RED metrics.
+        assert_eq!(total, 1);
+        let batch = &batches[0];
+        let request_count = batch
+            .column(13)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        assert_eq!(request_count.value(0), 4);
+        let error_count = batch
+            .column(14)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        assert_eq!(error_count.value(0), 2);
+        let duration_sum = batch
+            .column(15)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+        assert!((duration_sum.value(0) - 4.0).abs() < 1e-9);
     }
 }
