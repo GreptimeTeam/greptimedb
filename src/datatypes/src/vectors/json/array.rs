@@ -33,7 +33,9 @@ use crate::error::{
 };
 use crate::json::value::{JsonVariant, decode_json_variant, encode_serde_json_as_jsonb};
 use crate::prelude::DataType as _;
-use crate::vectors::json::builder::json_variant_into_projected_value;
+use crate::vectors::json::builder::{
+    json_variant_into_projected_value, null_on_json_type_mismatch,
+};
 
 pub struct JsonArray<'a> {
     inner: &'a ArrayRef,
@@ -256,9 +258,10 @@ fn decode_json_values(values: &[Value], to_type: &DataType) -> Result<ArrayRef> 
     let concrete_type = ConcreteDataType::from_arrow_type(to_type);
     let mut builder = concrete_type.create_mutable_vector(values.len());
     for value in values {
-        let value =
-            json_variant_into_projected_value(JsonVariant::from(value.clone()), &concrete_type)
-                .unwrap_or(crate::value::Value::Null);
+        let value = null_on_json_type_mismatch(json_variant_into_projected_value(
+            JsonVariant::from(value.clone()),
+            &concrete_type,
+        ))?;
         builder.try_push_value_ref(&value.as_value_ref())?;
     }
     Ok(builder.to_vector().to_arrow_array())
