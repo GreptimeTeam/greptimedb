@@ -22,8 +22,10 @@ use std::hash::{Hash, Hasher};
 use api::prom_store::remote::label_matcher::Type as MatcherType;
 use api::prom_store::remote::{Label, Query, ReadRequest, Sample, TimeSeries, WriteRequest};
 use api::v1::RowInsertRequests;
-use arrow::array::{Array, AsArray, LargeStringArray, StringArray, StringViewArray};
-use arrow::datatypes::{Float64Type, TimestampMillisecondType};
+use arrow::array::{
+    Array, AsArray, DictionaryArray, LargeStringArray, StringArray, StringViewArray,
+};
+use arrow::datatypes::{Float64Type, TimestampMillisecondType, UInt32Type};
 use common_grpc::precision::Precision;
 use common_query::prelude::{greptime_timestamp, greptime_value};
 use common_recordbatch::{RecordBatch, RecordBatches};
@@ -228,6 +230,10 @@ enum LabelValues<'a> {
     Utf8(&'a StringArray),
     LargeUtf8(&'a LargeStringArray),
     Utf8View(&'a StringViewArray),
+    DictionaryUtf8 {
+        dictionary: &'a DictionaryArray<UInt32Type>,
+        values: &'a StringArray,
+    },
     Other(Vec<Option<String>>),
 }
 
@@ -237,6 +243,9 @@ impl LabelValues<'_> {
             Self::Utf8(values) => values.is_valid(row).then(|| values.value(row)),
             Self::LargeUtf8(values) => values.is_valid(row).then(|| values.value(row)),
             Self::Utf8View(values) => values.is_valid(row).then(|| values.value(row)),
+            Self::DictionaryUtf8 { dictionary, values } => dictionary
+                .key(row)
+                .and_then(|key| values.is_valid(key).then(|| values.value(key))),
             Self::Other(values) => values.get(row).and_then(Option::as_deref),
         }
     }
@@ -274,6 +283,16 @@ fn label_columns(recordbatch: &RecordBatch) -> Result<Vec<LabelColumn<'_>>> {
                 }
                 arrow::datatypes::DataType::Utf8View => {
                     LabelValues::Utf8View(array.as_string_view())
+                }
+                arrow::datatypes::DataType::Dictionary(key, value)
+                    if key.as_ref() == &arrow::datatypes::DataType::UInt32
+                        && value.as_ref() == &arrow::datatypes::DataType::Utf8 =>
+                {
+                    let dictionary = array.as_dictionary::<UInt32Type>();
+                    LabelValues::DictionaryUtf8 {
+                        dictionary,
+                        values: dictionary.values().as_string::<i32>(),
+                    }
                 }
                 _ => {
                     let values = recordbatch.iter_column_as_string(index).collect::<Vec<_>>();
@@ -1055,7 +1074,7 @@ mod tests {
     }
 
     #[test]
-    fn test_recordbatches_to_timeseries_omits_dictionary_value_null_label() {
+    fn test_recordbatches_to_timeseries_borrows_and_groups_dictionary_labels() {
         let arrow_schema = Arc::new(ArrowSchema::new(vec![
             Field::new(
                 greptime_timestamp(),
@@ -1067,27 +1086,32 @@ mod tests {
         ]));
         let schema = Arc::new(Schema::try_from(arrow_schema.clone()).unwrap());
         let instance = DictionaryArray::<UInt32Type>::new(
-            UInt32Array::from(vec![0]),
-            Arc::new(StringArray::from(vec![None::<&str>])),
+            UInt32Array::from(vec![Some(0), None, Some(1), Some(0), Some(2)]),
+            Arc::new(StringArray::from(vec![Some("host2"), Some("host1"), None])),
         );
         let batch = DfRecordBatch::try_new(
             arrow_schema,
             vec![
-                Arc::new(TimestampMillisecondArray::from(vec![1000])),
-                Arc::new(Float64Array::from(vec![3.0])),
+                Arc::new(TimestampMillisecondArray::from(vec![
+                    1000, 2000, 3000, 4000, 5000,
+                ])),
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0, 5.0])),
                 Arc::new(instance),
             ],
         )
         .unwrap();
-        let recordbatches = RecordBatches::try_new(
-            schema.clone(),
-            vec![RecordBatch::from_df_record_batch(schema, batch)],
-        )
-        .unwrap();
+        let recordbatch = RecordBatch::from_df_record_batch(schema.clone(), batch);
+        let columns = label_columns(&recordbatch).unwrap();
+        assert!(matches!(
+            columns[0].values,
+            LabelValues::DictionaryUtf8 { .. }
+        ));
+        drop(columns);
+        let recordbatches = RecordBatches::try_new(schema, vec![recordbatch]).unwrap();
 
         let timeseries = recordbatches_to_timeseries("metric1", recordbatches).unwrap();
 
-        assert_eq!(1, timeseries.len());
+        assert_eq!(3, timeseries.len());
         assert_eq!(
             vec![Label {
                 name: METRIC_NAME_LABEL.to_string(),
@@ -1096,11 +1120,39 @@ mod tests {
             timeseries[0].labels
         );
         assert_eq!(
+            vec![
+                Sample {
+                    value: 2.0,
+                    timestamp: 2000,
+                },
+                Sample {
+                    value: 5.0,
+                    timestamp: 5000,
+                },
+            ],
+            timeseries[0].samples
+        );
+        assert_eq!("host1", timeseries[1].labels[1].value);
+        assert_eq!(
             vec![Sample {
                 value: 3.0,
-                timestamp: 1000,
+                timestamp: 3000,
             }],
-            timeseries[0].samples
+            timeseries[1].samples
+        );
+        assert_eq!("host2", timeseries[2].labels[1].value);
+        assert_eq!(
+            vec![
+                Sample {
+                    value: 1.0,
+                    timestamp: 1000,
+                },
+                Sample {
+                    value: 4.0,
+                    timestamp: 4000,
+                },
+            ],
+            timeseries[2].samples
         );
     }
 
