@@ -382,6 +382,15 @@ impl BatchGcProcedure {
 
         let repart_mgr = self.table_metadata_manager.table_repart_manager();
 
+        // Regions whose extension sidecar cleanup failed and need retry. Keep
+        // their tombstone so the next GC cycle can replay the cleanup.
+        let need_retry: HashSet<RegionId> = self
+            .data
+            .gc_report
+            .as_ref()
+            .map(|r| r.need_retry_regions.clone())
+            .unwrap_or_default();
+
         let mut table_ids: HashSet<TableId> = cross_refs_grouped
             .keys()
             .copied()
@@ -432,9 +441,9 @@ impl BatchGcProcedure {
                     let mut set = BTreeSet::new();
                     set.extend(dst_regions.iter().copied());
                     new_value.src_to_dst.insert(src_region, set);
-                } else if has_tmp_ref {
-                    // Keep a tombstone entry with an empty set so dropped regions that still
-                    // have tmp refs are preserved; removing it would lose the repartition trace.
+                } else if has_tmp_ref || need_retry.contains(&src_region) {
+                    // Keep the tombstone: tmp refs or pending extension cleanup
+                    // still need a future GC pass.
                     new_value.src_to_dst.insert(src_region, BTreeSet::new());
                 } else {
                     new_value.src_to_dst.remove(&src_region);

@@ -89,6 +89,7 @@
 //! | Close | [`on_region_closed`] | A close request (or a close-after-flush) removes the region from the active set. Data files, manifest and WAL state are **preserved**; the region may be reopened. |
 //! | Logical drop | [`on_region_dropped`] | A drop request has been handled: the region leaves the active set and its WAL entries are marked obsolete. Data files are **not yet deleted**. |
 //! | Physical file removal | [`on_region_files_removed`] | The drop GC worker has deleted the region directory. Terminal file-lifecycle event. |
+//! | Global GC pass | [`on_region_gc`] | The datanode's global GC worker finished a GC pass for a region — both periodic GC for live regions and the global reclamation of dropped/repartitioned regions (`is_region_dropped`). |
 //!
 //! Notes:
 //! - `on_region_closed` / `on_region_dropped` run **inline in the region worker loop**,
@@ -128,8 +129,9 @@
 //!
 //! `on_region_files_removed` currently covers only the **drop** GC worker's physical
 //! directory removal. A broader per-file `on_files_removed` hook covering compaction
-//! removal, truncate, and the global GC reclamation path is not yet implemented
-//! (though logical file removal is already observable via `on_manifest_updated`).
+//! removal and truncate is not yet implemented
+//! (though logical file removal is already observable via `on_manifest_updated`,
+//! and the global GC reclamation path is covered by `on_region_gc`).
 //! Role/leadership transitions (`on_region_role_changed`) are also not hooked.
 //!
 //! [`on_sst_files_written`]: RegionHook::on_sst_files_written
@@ -138,6 +140,7 @@
 //! [`on_region_closed`]: RegionHook::on_region_closed
 //! [`on_region_dropped`]: RegionHook::on_region_dropped
 //! [`on_region_files_removed`]: RegionHook::on_region_files_removed
+//! [`on_region_gc`]: RegionHook::on_region_gc
 //! [`RegionManifestManager::update`]: crate::manifest::manager::RegionManifestManager::update
 //! [`ManifestContext::update_locked`]: crate::region::ManifestContext::update_locked
 //! [`ManifestContext::update_manifest`]: crate::region::ManifestContext::update_manifest
@@ -150,7 +153,9 @@ use store_api::ManifestVersion;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::RegionId;
 
-use crate::manifest::action::RegionMetaActionList;
+use crate::access_layer::AccessLayerRef;
+use crate::error::Result;
+use crate::manifest::action::{RegionMetaActionList, RemovedFile};
 use crate::sst::file::FileMeta;
 use crate::sst::parquet::SstInfo;
 
@@ -382,6 +387,56 @@ pub trait RegionHook: Send + Sync + Debug {
     ) {
         let _ = (region_id, region_metadata);
     }
+
+    /// Called after the datanode's global GC worker (`LocalGcWorker`) finishes a
+    /// GC pass for a region — live regions (periodic GC) or dropped/repartitioned
+    /// regions (the global reclamation path). Lets extensions with sidecar files
+    /// outside mito2's region dir clean up residual files.
+    ///
+    /// Always scoped to [`RegionGcInfo::removed_files`]: clean only sidecar
+    /// artifacts for the files mito deleted this pass. On a
+    /// [`RegionGcInfo::full_file_listing`] pass you may also reconcile
+    /// sidecar-only orphans (e.g. detect a fully-reaped region by cross-checking
+    /// the region dir against your own manifest). This callback never authorizes
+    /// blind whole-directory removal — derive "fully reaped" from your own state
+    /// so a stale mito snapshot can't cause accidental deletion.
+    /// [`RegionGcInfo::is_region_dropped`] is context, not authorization.
+    ///
+    /// # Retry
+    ///
+    /// Returning `Err` keeps the region un-acknowledged (`need_retry_regions`)
+    /// for a future replay. **Dropped/repartitioned**: guaranteed — metasrv keeps
+    /// the `table_repart` tombstone until `Ok`, so full-listing passes continue
+    /// until cleanup finishes. **Live**: best-effort — not expedited through
+    /// candidate selection, and a later full-listing pass may not reconstruct the
+    /// same `removed_files`; treat live cleanup as opportunistic.
+    ///
+    /// `region_metadata` is `None` for dropped regions; use `region_id` +
+    /// `access_layer`. Idempotent; runs on the background GC task.
+    async fn on_region_gc(
+        &self,
+        region_id: RegionId,
+        region_metadata: Option<&RegionMetadataRef>,
+        access_layer: &AccessLayerRef,
+        info: &RegionGcInfo<'_>,
+    ) -> Result<()> {
+        let _ = (region_id, region_metadata, access_layer, info);
+        Ok(())
+    }
+}
+
+/// What mito2's GC pass deleted for a region, handed to
+/// [`RegionHook::on_region_gc`].
+pub struct RegionGcInfo<'a> {
+    /// Files mito2 physically deleted this pass. Cleanup must be scoped to these
+    /// (plus sidecar-only orphans you can identify on a [`Self::full_file_listing`]
+    /// pass).
+    pub removed_files: &'a [RemovedFile],
+    /// `true` when the region is dropped/absent (e.g. a repartitioned source).
+    /// Context only — not authorization. `region_metadata` is `None` when `true`.
+    pub is_region_dropped: bool,
+    /// Whether this pass did a full object-store listing.
+    pub full_file_listing: bool,
 }
 
 pub type RegionHookRef = Arc<dyn RegionHook>;
