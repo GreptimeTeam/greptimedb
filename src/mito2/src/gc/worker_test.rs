@@ -25,7 +25,7 @@ use object_store::{Entry, ObjectStore, services};
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::RegionEngine as _;
 use store_api::region_request::{RegionCompactRequest, RegionRequest};
-use store_api::storage::{FileRef, FileRefsManifest, RegionId};
+use store_api::storage::{FileId, FileRef, FileRefsManifest, RegionId};
 
 use crate::access_layer::AccessLayerRef;
 use crate::config::MitoConfig;
@@ -69,6 +69,65 @@ async fn create_gc_worker(
     )
     .await
     .unwrap()
+}
+
+#[tokio::test]
+async fn test_fast_gc_respects_parquet_tmp_ref_regardless_of_index_version() {
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let region_id = RegionId::new(1, 1);
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            region_id.table_id(),
+            "test_table",
+            "test_catalog",
+            "test_schema",
+            None,
+            env.get_kv_backend(),
+        )
+        .await;
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Create(CreateRequestBuilder::new().build()),
+        )
+        .await
+        .unwrap();
+
+    let region = engine.get_region(region_id).unwrap();
+    let gc_worker = create_gc_worker(
+        &engine,
+        BTreeMap::from([(region_id, Some(region))]),
+        &FileRefsManifest::default(),
+        false,
+    )
+    .await;
+    let file_id = FileId::random();
+    let tmp_refs = HashSet::from([FileRef::new(region_id, file_id, Some(1))]);
+    let in_tmp_ref = tmp_refs
+        .iter()
+        .map(|file_ref| (file_ref.file_id, file_ref.index_version))
+        .collect();
+    let deletable = gc_worker
+        .list_to_be_deleted_files(
+            region_id,
+            false,
+            &HashMap::new(),
+            &in_tmp_ref,
+            BTreeMap::from([(
+                common_time::Timestamp::new_millisecond(0),
+                HashSet::from([
+                    RemovedFile::File(file_id, Some(2)),
+                    RemovedFile::Index(file_id, 1),
+                    RemovedFile::Index(file_id, 3),
+                ]),
+            )]),
+            vec![],
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(deletable, vec![RemovedFile::Index(file_id, 3)]);
 }
 
 /// Test insert/flush then truncate can allow gc worker to delete files
