@@ -1,6 +1,41 @@
 name: Query Regression
 
 on:
+  workflow_call:
+    inputs:
+      case:
+        description: Query perf case path(s) in candidate checkout, or all
+        required: false
+        type: string
+        default: all
+      allow_large_fixture:
+        description: Pass --allow-large-fixture to runner
+        required: false
+        type: boolean
+        default: true
+      http_timeout:
+        description: Runner HTTP timeout seconds
+        required: false
+        type: string
+        default: "300"
+      base_ref:
+        description: Base ref/sha to build
+        required: true
+        type: string
+      candidate_ref:
+        description: Candidate ref/sha to build; reusable release calls must provide an immutable full SHA
+        required: true
+        type: string
+      cargo_profile:
+        description: Cargo profile to build base and candidate binaries with
+        required: false
+        type: string
+        default: nightly
+      runner:
+        description: Self-hosted runner label or ARC runner scale set for this query regression run
+        required: false
+        type: string
+        default: perf-regression-8-cores
   workflow_dispatch:
     inputs:
       case:
@@ -48,12 +83,12 @@ permissions:
 jobs:
   query-regression:
     if: >-
-      ${{ github.event_name == 'workflow_dispatch' ||
+      ${{ github.event_name != 'pull_request' ||
            (github.event_name == 'pull_request' &&
             !github.event.pull_request.draft &&
             contains(github.event.pull_request.labels.*.name, 'query-regression') &&
             (github.event.action != 'labeled' || github.event.label.name == 'query-regression')) }}
-    runs-on: ${{ github.event_name == 'workflow_dispatch' && inputs.runner || 'perf-regression-8-cores' }}
+    runs-on: ${{ github.event_name != 'pull_request' && inputs.runner || 'perf-regression-8-cores' }}
     timeout-minutes: 180
     concurrency:
       group: query-regression-persistent-cache-v1
@@ -75,7 +110,7 @@ jobs:
       RUSTFLAGS: -D warnings -C link-arg=-fuse-ld=mold
       QUERY_REGRESSION_CACHE_EPOCH: "1"
       BASE_REF: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || inputs.base_ref }}
-      CANDIDATE_REF: ${{ github.event_name == 'workflow_dispatch' && (inputs.candidate_ref || github.ref) || '' }}
+      CANDIDATE_REF: ${{ github.event_name != 'pull_request' && (inputs.candidate_ref || github.ref) || '' }}
       EVENT_MERGE_SHA: ${{ github.event_name == 'pull_request' && github.sha || '' }}
       EVENT_HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || '' }}
       EVENT_BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || '' }}
@@ -88,17 +123,12 @@ jobs:
           path: src
           persist-credentials: false
 
-      - name: Preserve trusted query regression scripts
-        run: |
-          mkdir -p query-regression-trusted-scripts
-          cp src/.github/scripts/query-regression-pr-metadata.py \
-            query-regression-trusted-scripts/query-regression-pr-metadata.py
-          cp src/.github/scripts/query-regression-summary.py \
-            query-regression-trusted-scripts/query-regression-summary.py
-
       - name: Resolve immutable candidate and build base
         working-directory: src
         shell: bash
+        env:
+          CALLER_WORKFLOW_REF: ${{ github.workflow_ref }}
+          DEFINING_WORKFLOW_REF: ${{ job.workflow_ref }}
         run: |
           set -euo pipefail
 
@@ -111,6 +141,11 @@ jobs:
           is_full_sha() {
             [[ "$1" =~ ^[[:xdigit:]]{40}$ ]]
           }
+
+          is_reusable_call=false
+          if [[ "${CALLER_WORKFLOW_REF}" != "${DEFINING_WORKFLOW_REF}" ]]; then
+            is_reusable_call=true
+          fi
 
           fetch_with_retry() {
             local ref="$1"
@@ -172,11 +207,23 @@ jobs:
               || fail_closed "Event merge SHA has no non-head parent for the base build."
             VERIFIED_CANDIDATE_SHA="${fetched_sha,,}"
           else
+            if [[ "${is_reusable_call}" == true ]] && ! is_full_sha "${CANDIDATE_REF}"; then
+              printf 'Reusable calls require CANDIDATE_REF to be an immutable full SHA, got: %s\n' \
+                "${CANDIDATE_REF}" >&2
+              exit 1
+            fi
             if ! fetch_with_retry "${CANDIDATE_REF}" 1; then
               printf 'Could not fetch candidate ref %s.\n' "${CANDIDATE_REF}" >&2
               exit 1
             fi
-            VERIFIED_CANDIDATE_SHA="$(git rev-parse --verify FETCH_HEAD)"
+            fetched_sha="$(git rev-parse --verify FETCH_HEAD)"
+            if { [[ "${is_reusable_call}" == true ]] || is_full_sha "${CANDIDATE_REF}"; } && \
+              [[ "${fetched_sha,,}" != "${CANDIDATE_REF,,}" ]]; then
+              printf 'FETCH_HEAD %s does not match immutable candidate SHA %s.\n' \
+                "${fetched_sha}" "${CANDIDATE_REF}" >&2
+              exit 1
+            fi
+            VERIFIED_CANDIDATE_SHA="${fetched_sha}"
             VERIFIED_BASE_SHA="${initially_checked_out_base_sha}"
           fi
 
@@ -196,6 +243,21 @@ jobs:
             "${VERIFIED_CANDIDATE_SHA,,}" "${VERIFIED_BASE_SHA,,}" >> "${GITHUB_STEP_SUMMARY}"
           git reset --hard "${VERIFIED_BASE_SHA}"
           git clean -ffdx
+
+      - name: Preserve trusted query regression scripts
+        working-directory: src
+        shell: bash
+        run: |
+          set -euo pipefail
+          helper_ref="${VERIFIED_CANDIDATE_SHA}"
+          if [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
+            helper_ref="${VERIFIED_BASE_SHA}"
+          fi
+          mkdir -p "${GITHUB_WORKSPACE}/query-regression-trusted-scripts"
+          git show "${helper_ref}:.github/scripts/query-regression-pr-metadata.py" \
+            > "${GITHUB_WORKSPACE}/query-regression-trusted-scripts/query-regression-pr-metadata.py"
+          git show "${helper_ref}:.github/scripts/query-regression-summary.py" \
+            > "${GITHUB_WORKSPACE}/query-regression-trusted-scripts/query-regression-summary.py"
 
       - name: Verify runner image tools
         shell: bash
