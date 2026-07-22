@@ -427,10 +427,18 @@ impl QueryContext {
     }
 
     pub fn set_explain_format(&self, format: String) {
-        self.mutable_query_context_data
-            .write()
-            .unwrap()
-            .explain_format = Some(format);
+        let _ = self.replace_explain_format(Some(format));
+    }
+
+    pub fn replace_explain_format(&self, format: Option<String>) -> Option<String> {
+        std::mem::replace(
+            &mut self
+                .mutable_query_context_data
+                .write()
+                .unwrap()
+                .explain_format,
+            format,
+        )
     }
 
     pub fn explain_verbose(&self) -> bool {

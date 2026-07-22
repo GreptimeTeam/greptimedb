@@ -231,6 +231,27 @@ fn validate_analyze_stream_statement(stmt: &mut Statement) -> Result<()> {
     }
 }
 
+struct ExplainFormatGuard {
+    query_ctx: QueryContextRef,
+    previous: Option<String>,
+}
+
+impl ExplainFormatGuard {
+    fn new(query_ctx: QueryContextRef) -> Self {
+        let previous = query_ctx.explain_format();
+        Self {
+            query_ctx,
+            previous,
+        }
+    }
+}
+
+impl Drop for ExplainFormatGuard {
+    fn drop(&mut self) {
+        let _ = self.query_ctx.replace_explain_format(self.previous.take());
+    }
+}
+
 impl Instance {
     fn statement_slow_query_timer(
         &self,
@@ -329,6 +350,7 @@ impl Instance {
         query_ctx: QueryContextRef,
         query_interceptor: Option<&SqlQueryInterceptorRef<Error>>,
     ) -> Result<Output> {
+        let _explain_format_guard = ExplainFormatGuard::new(query_ctx.clone());
         match stmt {
             Statement::Query(_) | Statement::Explain(_) | Statement::Delete(_) => {
                 // TODO: remove this when format is supported in datafusion
@@ -1622,6 +1644,7 @@ mod tests {
     use common_recordbatch::{
         OrderOption, RecordBatch, RecordBatchStream, SendableRecordBatchStream,
     };
+    use datafusion::arrow::array::{Array, StringArray};
     use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
     use datafusion_expr::dml::InsertOp;
     use datafusion_expr::{LogicalPlanBuilder, LogicalTableSource};
@@ -2255,6 +2278,118 @@ mod tests {
         results.remove(0).with_context(|_| ExecuteSqlSnafu {
             sql: sql.to_string(),
         })
+    }
+
+    async fn collect_explain_analyze_formats(
+        instance: &Instance,
+        sql: &str,
+        query_ctx: QueryContextRef,
+    ) -> Vec<AnalyzeFormat> {
+        let results = instance.do_query_inner(sql, query_ctx).await;
+        let mut formats = Vec::with_capacity(results.len());
+        for result in results {
+            let output = result.unwrap();
+            let OutputData::Stream(stream) = output.data else {
+                panic!("EXPLAIN ANALYZE must return a stream");
+            };
+            let batches = common_recordbatch::util::collect(stream).await.unwrap();
+            let plan = batches
+                .first()
+                .expect("EXPLAIN ANALYZE must return a batch")
+                .column_by_name("plan")
+                .expect("EXPLAIN ANALYZE output must include the plan column")
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .expect("EXPLAIN ANALYZE plan column must be a string")
+                .value(0);
+            formats.push(if serde_json::from_str::<serde_json::Value>(plan).is_ok() {
+                AnalyzeFormat::JSON
+            } else {
+                AnalyzeFormat::TEXT
+            });
+        }
+        formats
+    }
+
+    #[tokio::test]
+    async fn test_explain_analyze_format_is_statement_local() -> TestResult<()> {
+        let instance =
+            test_instance_with_tables(test_table(1024, "source")?, test_table(1025, "target")?)
+                .await?;
+
+        for (sql, expected_formats) in [
+            (
+                "EXPLAIN ANALYZE SELECT * FROM source;",
+                vec![AnalyzeFormat::TEXT],
+            ),
+            (
+                "EXPLAIN ANALYZE SELECT * FROM source; \
+                 EXPLAIN ANALYZE FORMAT JSON SELECT * FROM source;",
+                vec![AnalyzeFormat::TEXT, AnalyzeFormat::JSON],
+            ),
+            (
+                "EXPLAIN ANALYZE FORMAT JSON SELECT * FROM source; \
+                 EXPLAIN ANALYZE FORMAT JSON SELECT * FROM source;",
+                vec![AnalyzeFormat::JSON, AnalyzeFormat::JSON],
+            ),
+            (
+                "EXPLAIN ANALYZE FORMAT JSON SELECT * FROM source; \
+                 EXPLAIN ANALYZE SELECT * FROM source;",
+                vec![AnalyzeFormat::JSON, AnalyzeFormat::TEXT],
+            ),
+        ] {
+            let query_ctx = test_query_ctx(1);
+            assert_eq!(
+                expected_formats,
+                collect_explain_analyze_formats(&instance, sql, query_ctx.clone()).await,
+                "{sql}"
+            );
+            assert_eq!(None, query_ctx.explain_format(), "{sql}");
+        }
+
+        let query_ctx = test_query_ctx(2);
+        query_ctx.set_explain_format(AnalyzeFormat::JSON.to_string());
+        let sql = "EXPLAIN ANALYZE SELECT * FROM source;";
+        assert_eq!(
+            vec![AnalyzeFormat::JSON],
+            collect_explain_analyze_formats(&instance, sql, query_ctx.clone()).await,
+            "{sql}"
+        );
+        assert_eq!(
+            Some(AnalyzeFormat::JSON.to_string()),
+            query_ctx.explain_format(),
+            "{sql}"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_explain_format_guard_restores_on_future_drop() {
+        let query_ctx = test_query_ctx(1);
+        query_ctx.set_explain_format(AnalyzeFormat::TEXT.to_string());
+        let (mutated_tx, mutated_rx) = oneshot::channel();
+        let task = tokio::spawn({
+            let query_ctx = query_ctx.clone();
+            async move {
+                let _guard = ExplainFormatGuard::new(query_ctx.clone());
+                query_ctx.set_explain_format(AnalyzeFormat::JSON.to_string());
+                mutated_tx.send(()).unwrap();
+                std::future::pending::<()>().await;
+            }
+        });
+
+        mutated_rx.await.unwrap();
+        assert_eq!(
+            Some(AnalyzeFormat::JSON.to_string()),
+            query_ctx.explain_format()
+        );
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert_eq!(
+            Some(AnalyzeFormat::TEXT.to_string()),
+            query_ctx.explain_format()
+        );
     }
 
     #[tokio::test]
