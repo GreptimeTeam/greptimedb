@@ -250,16 +250,16 @@ impl JsonArray<'_> {
         let values = (0..self.inner.len())
             .map(|i| self.try_get_value(i))
             .collect::<Result<Vec<_>>>()?;
-        decode_json_values(&values, to_type)
+        decode_json_values(values, to_type)
     }
 }
 
-fn decode_json_values(values: &[Value], to_type: &DataType) -> Result<ArrayRef> {
+fn decode_json_values(values: Vec<Value>, to_type: &DataType) -> Result<ArrayRef> {
     let concrete_type = ConcreteDataType::from_arrow_type(to_type);
     let mut builder = concrete_type.create_mutable_vector(values.len());
     for value in values {
         let value = null_on_json_type_mismatch(json_variant_into_projected_value(
-            JsonVariant::from(value.clone()),
+            JsonVariant::from(value),
             &concrete_type,
         ))?;
         builder.try_push_value_ref(&value.as_value_ref())?;
