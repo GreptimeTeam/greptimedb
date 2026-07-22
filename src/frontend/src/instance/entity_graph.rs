@@ -118,6 +118,7 @@ impl EntityGraphProviderImpl {
                         return None;
                     }
                     Some(EntityDeclaration {
+                        schema: table_info.schema_name.clone(),
                         table: table_info.name.clone(),
                         time_index: time_index.clone(),
                         entity_type,
@@ -133,10 +134,17 @@ impl EntityGraphProviderImpl {
     /// All entity declarations of one table. Trace-v1 tables created before the
     /// ingest-side auto-stamp carry no `entity.service.id` option; synthesize it
     /// (their schema is fixed), so their `calls` edges have endpoint entities.
+    /// A table with an explicit service declaration never gets the synthesized
+    /// one — not even when the explicit declaration is invalid and skipped:
+    /// silently falling back would change entity identity behind the user's back.
     fn declarations_for(table_info: &TableInfo) -> Vec<EntityDeclaration> {
         let mut declarations = Self::parse_declarations(table_info);
+        let has_explicit_service = table_info.meta.options.extra_options.keys().any(|key| {
+            parse_entity_option_key(key)
+                .is_some_and(|(ty, role)| ty == "service" && role == EntityRole::Id)
+        });
         if is_trace_v1_table(table_info)
-            && !declarations.iter().any(|d| d.entity_type == "service")
+            && !has_explicit_service
             && table_info
                 .meta
                 .schema
@@ -149,6 +157,7 @@ impl EntityGraphProviderImpl {
                 .map(|c| c.name.clone())
         {
             declarations.push(EntityDeclaration {
+                schema: table_info.schema_name.clone(),
                 table: table_info.name.clone(),
                 time_index,
                 entity_type: "service".to_string(),
@@ -167,7 +176,13 @@ impl EntityGraphProviderImpl {
     async fn enumerate(
         &self,
         catalog: &str,
-    ) -> Result<(Vec<(EntityDeclaration, TableRef)>, Vec<TableRef>), BoxedError> {
+    ) -> Result<
+        (
+            Vec<(EntityDeclaration, TableRef)>,
+            Vec<(EntityDeclaration, TableRef)>,
+        ),
+        BoxedError,
+    > {
         let Some(catalog_manager) = self.catalog_manager.upgrade() else {
             return Ok((vec![], vec![]));
         };
@@ -190,14 +205,26 @@ impl EntityGraphProviderImpl {
             let mut tables = catalog_manager.tables(catalog, &schema, None);
             while let Some(table) = tables.try_next().await.map_err(BoxedError::new)? {
                 let table_info = table.table_info();
+                let table_declarations = Self::declarations_for(&table_info);
+                if is_trace_v1_table(&table_info) {
+                    match table_declarations
+                        .iter()
+                        .find(|d| d.entity_type == "service")
+                    {
+                        Some(service) => traces.push((service.clone(), table.clone())),
+                        // No usable service identity: the table cannot
+                        // contribute calls edges (see declarations_for).
+                        None => warn!(
+                            "Trace table `{}` has no usable service declaration; skipping calls derivation",
+                            table_info.name
+                        ),
+                    }
+                }
                 declarations.extend(
-                    Self::declarations_for(&table_info)
+                    table_declarations
                         .into_iter()
                         .map(|decl| (decl, table.clone())),
                 );
-                if is_trace_v1_table(&table_info) {
-                    traces.push(table.clone());
-                }
             }
         }
         Ok((declarations, traces))
@@ -277,8 +304,8 @@ impl EntityGraphProvider for EntityGraphProviderImpl {
     ) -> Result<Vec<RecordBatch>, BoxedError> {
         let (_, traces) = self.enumerate(catalog).await?;
         let mut scans = Vec::with_capacity(traces.len());
-        for trace in traces {
-            scans.push(self.read_table(trace)?);
+        for (service, trace) in traces {
+            scans.push((service, self.read_table(trace)?));
         }
         let window = Self::query_window(&request);
         let Some(plan) = build_calls_plan(scans, &window)
@@ -403,6 +430,17 @@ mod tests {
 
         // A trace-model table without the fixed column synthesizes nothing.
         let info = table_info(&[], &[(TABLE_DATA_MODEL, TABLE_DATA_MODEL_TRACE_V1)]);
+        assert!(EntityGraphProviderImpl::declarations_for(&info).is_empty());
+
+        // An explicit but invalid declaration must not silently fall back to
+        // the synthesized one: identity must not change behind the user's back.
+        let info = table_info(
+            &["service_name"],
+            &[
+                (TABLE_DATA_MODEL, TABLE_DATA_MODEL_TRACE_V1),
+                ("greptime.semantic.entity.service.id", "gone"),
+            ],
+        );
         assert!(EntityGraphProviderImpl::declarations_for(&info).is_empty());
     }
 }

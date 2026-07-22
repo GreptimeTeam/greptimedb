@@ -81,7 +81,7 @@ insert into graph_traces values
   (0, 't0', 's0', 'c0', 'SPAN_KIND_SERVER', 'STATUS_CODE_UNSET', 'stale-dst', 100);
 
 -- SQLNESS PROTOCOL MYSQL
-select src_type, src_id, dst_type, dst_id, rel_type, provenance, confidence, scope,
+select src_type, src_id, dst_type, dst_id, rel_type, provenance, confidence,
   request_count, error_count, duration_sum, duration_count, attributes
 from greptime_private.semantic_relationships
 order by src_id;

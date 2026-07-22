@@ -24,9 +24,9 @@
 use std::sync::{Arc, LazyLock};
 
 use common_catalog::consts::{
-    DURATION_NANO_COLUMN, PARENT_SPAN_ID_COLUMN, SERVICE_NAME_COLUMN, SPAN_ID_COLUMN,
-    SPAN_KIND_CLIENT, SPAN_KIND_COLUMN, SPAN_KIND_SERVER, SPAN_STATUS_CODE_COLUMN,
-    SPAN_STATUS_ERROR, TRACE_ID_COLUMN, TRACE_TIMESTAMP_COLUMN,
+    DURATION_NANO_COLUMN, PARENT_SPAN_ID_COLUMN, SPAN_ID_COLUMN, SPAN_KIND_CLIENT,
+    SPAN_KIND_COLUMN, SPAN_KIND_SERVER, SPAN_STATUS_CODE_COLUMN, SPAN_STATUS_ERROR,
+    TRACE_ID_COLUMN, TRACE_TIMESTAMP_COLUMN,
 };
 use common_function::function::FunctionContext;
 use common_function::function_registry::FUNCTION_REGISTRY;
@@ -45,6 +45,8 @@ const BIN_NANOS: i64 = 60 * 1_000_000_000;
 /// `information_schema.table_semantics` (`greptime.semantic.entity.<type>.*`).
 #[derive(Debug, Clone)]
 pub struct EntityDeclaration {
+    /// The declaring table's schema, for the qualified `source_tables` lineage.
+    pub schema: String,
     /// The declaring table's name, recorded in `source_tables`.
     pub table: String,
     /// The table's time index column, used for the temporal window filter.
@@ -131,6 +133,20 @@ fn cast_string_or_empty(column: &str) -> Expr {
     core_fns::coalesce().call(vec![cast(ident(column), DataType::Utf8), lit("")])
 }
 
+/// The canonical entity-id expression for `id_columns`: the value verbatim for
+/// a single column, the sorted `k=v,k=v` rendering for a composite. `col`
+/// constructs the column reference (unqualified for registry branches,
+/// join-side-qualified for the calls derivation).
+fn entity_id_expr(id_columns: &[String], col: &dyn Fn(&str) -> Expr) -> Expr {
+    if let [id] = id_columns {
+        cast(col(id), DataType::Utf8)
+    } else {
+        let mut cols = id_columns.to_vec();
+        cols.sort();
+        sorted_kv_expr_with(&cols, false, col)
+    }
+}
+
 /// The `parse_json` UDF, shared by all derivation plans. Resolved from the
 /// global registry once: the UDF is stateless (its `FunctionContext` is unused).
 static PARSE_JSON_UDF: LazyLock<Arc<ScalarUDF>> = LazyLock::new(|| {
@@ -197,7 +213,7 @@ fn json_object_expr(columns: &[String]) -> Expr {
 /// Renders pre-sorted columns as a `k=v,k=v` concatenation. `nullable`
 /// coalesces each value to `''` (id columns are tags and non-null; scope
 /// columns carry no such guarantee).
-fn sorted_kv_expr(sorted_cols: &[String], nullable: bool) -> Expr {
+fn sorted_kv_expr_with(sorted_cols: &[String], nullable: bool, col: &dyn Fn(&str) -> Expr) -> Expr {
     let mut parts = Vec::with_capacity(sorted_cols.len() * 3);
     for (i, column) in sorted_cols.iter().enumerate() {
         if i > 0 {
@@ -205,9 +221,9 @@ fn sorted_kv_expr(sorted_cols: &[String], nullable: bool) -> Expr {
         }
         parts.push(lit(format!("{column}=")));
         parts.push(if nullable {
-            cast_string_or_empty(column)
+            core_fns::coalesce().call(vec![cast(col(column), DataType::Utf8), lit("")])
         } else {
-            cast(ident(column), DataType::Utf8)
+            cast(col(column), DataType::Utf8)
         });
     }
     concat_expr(parts)
@@ -223,16 +239,16 @@ fn registry_branch(
     let ts = ident(&decl.time_index);
     let bin = bin_ms(ts.clone());
 
-    let (entity_id, entity_id_attrs) = if let [id] = decl.id_columns.as_slice() {
-        // CAST even the single-column id: id columns must be tags but not
-        // necessarily strings, and the computed table declares entity_id STRING.
-        (cast(ident(id), DataType::Utf8), null_json())
+    // CAST even a single-column id: id columns must be tags but not necessarily
+    // strings, and the computed table declares entity_id STRING. Composite ids
+    // additionally carry a JSON object of the id columns in entity_id_attrs.
+    let entity_id = entity_id_expr(&decl.id_columns, &|c| ident(c));
+    let entity_id_attrs = if decl.id_columns.len() == 1 {
+        null_json()
     } else {
-        // Composite identity: sorted `k=v,k=v` string + a JSON object of the same
-        // columns (the escaping-safe source of truth, RFC Open Question 1).
         let mut cols = decl.id_columns.clone();
         cols.sort();
-        (sorted_kv_expr(&cols, false), json_object_expr(&cols))
+        json_object_expr(&cols)
     };
 
     let scope = match decl.scope_columns.as_slice() {
@@ -242,7 +258,7 @@ fn registry_branch(
         _ => {
             let mut cols = decl.scope_columns.clone();
             cols.sort();
-            sorted_kv_expr(&cols, true)
+            sorted_kv_expr_with(&cols, true, &|c| ident(c))
         }
     };
 
@@ -252,7 +268,10 @@ fn registry_branch(
         json_object_expr(&decl.descriptive_columns)
     };
 
-    let source_tables = parse_json_expr(lit(format!("[{}]", json_quote(&decl.table))));
+    let source_tables = parse_json_expr(lit(format!(
+        "[{}]",
+        json_quote(&format!("{}.{}", decl.schema, decl.table))
+    )));
 
     let mut predicate = ts
         .clone()
@@ -301,7 +320,7 @@ pub fn build_registry_plan(
 /// `valid_from`/`valid_until`, which are applied as a filter, not projected.)
 /// Test-only until the declared-edge union branch lands and enforces it in code.
 #[cfg(test)]
-const RELATIONSHIP_COLUMNS: [&str; 18] = [
+const RELATIONSHIP_COLUMNS: [&str; 17] = [
     "observed_at",
     "window_start",
     "window_end",
@@ -313,7 +332,6 @@ const RELATIONSHIP_COLUMNS: [&str; 18] = [
     "rel_type",
     "provenance",
     "confidence",
-    "scope",
     "generation_id",
     "request_count",
     "error_count",
@@ -341,12 +359,12 @@ const CHILD_SPAN_LATE_NANOS: i64 = 60 * 60 * 1_000_000_000;
 /// verified against the trace ingest path. Returns `None` when there is no
 /// trace table.
 pub fn build_calls_plan(
-    traces: Vec<DataFrame>,
+    traces: Vec<(EntityDeclaration, DataFrame)>,
     window: &GraphWindow,
 ) -> DfResult<Option<LogicalPlan>> {
     let mut union_df: Option<DataFrame> = None;
-    for trace in traces {
-        union_df = union_all(union_df, calls_pairs(trace, window)?)?;
+    for (service, trace) in traces {
+        union_df = union_all(union_df, calls_pairs(&service, trace, window)?)?;
     }
     let Some(pairs) = union_df else {
         return Ok(None);
@@ -376,7 +394,6 @@ pub fn build_calls_plan(
             lit("calls").alias("rel_type"),
             lit("trace").alias("provenance"),
             lit(1.0_f64).alias("confidence"),
-            lit("").alias("scope"),
             lit("").alias("generation_id"),
             ident("request_count"),
             ident("error_count"),
@@ -392,35 +409,38 @@ pub fn build_calls_plan(
 
 /// One trace table's client/server span pairs, projected to the aggregation
 /// inputs `(observed_at, src_id, dst_id, status_code, duration_nano)`.
-fn calls_pairs(trace: DataFrame, window: &GraphWindow) -> DfResult<DataFrame> {
-    // `scope` stays empty here: the fixed `greptime_trace_v1` schema declares no
-    // scope columns (the auto-stamp is `entity.service.id = service_name` only).
-    let client = trace
-        .clone()
-        .filter(
-            ident(SPAN_KIND_COLUMN)
-                .eq(lit(SPAN_KIND_CLIENT))
-                .and(ident(TRACE_TIMESTAMP_COLUMN).gt_eq(window.start.clone()))
-                .and(ident(TRACE_TIMESTAMP_COLUMN).lt(window.end.clone())),
-        )?
-        .alias("client")?;
-    let server = trace
-        .filter(
-            ident(SPAN_KIND_COLUMN)
-                .eq(lit(SPAN_KIND_SERVER))
-                // Static bounds implied by the window and the join's
-                // time-proximity conditions below; the join bounds reference
-                // client.timestamp and cannot prune the server-side scan.
-                .and(
-                    ident(TRACE_TIMESTAMP_COLUMN)
-                        .gt_eq(window.start.clone() - interval(CHILD_SPAN_EARLY_NANOS)),
-                )
-                .and(
-                    ident(TRACE_TIMESTAMP_COLUMN)
-                        .lt(window.end.clone() + interval(CHILD_SPAN_LATE_NANOS)),
-                ),
-        )?
-        .alias("server")?;
+/// Endpoint ids are built from the table's `service` entity declaration, so
+/// edges land on exactly the entity ids the registry emits (a composite
+/// service identity renders the same sorted `k=v` form on both sides).
+fn calls_pairs(
+    service: &EntityDeclaration,
+    trace: DataFrame,
+    window: &GraphWindow,
+) -> DfResult<DataFrame> {
+    let mut client_pred = ident(SPAN_KIND_COLUMN)
+        .eq(lit(SPAN_KIND_CLIENT))
+        .and(ident(TRACE_TIMESTAMP_COLUMN).gt_eq(window.start.clone()))
+        .and(ident(TRACE_TIMESTAMP_COLUMN).lt(window.end.clone()));
+    let mut server_pred = ident(SPAN_KIND_COLUMN)
+        .eq(lit(SPAN_KIND_SERVER))
+        // Static bounds implied by the window and the join's time-proximity
+        // conditions below; the join bounds reference client.timestamp and
+        // cannot prune the server-side scan.
+        .and(
+            ident(TRACE_TIMESTAMP_COLUMN)
+                .gt_eq(window.start.clone() - interval(CHILD_SPAN_EARLY_NANOS)),
+        )
+        .and(
+            ident(TRACE_TIMESTAMP_COLUMN).lt(window.end.clone() + interval(CHILD_SPAN_LATE_NANOS)),
+        );
+    // A NULL identity component identifies nothing, on either endpoint.
+    for id in &service.id_columns {
+        client_pred = client_pred.and(ident(id).is_not_null());
+        server_pred = server_pred.and(ident(id).is_not_null());
+    }
+
+    let client = trace.clone().filter(client_pred)?.alias("client")?;
+    let server = trace.filter(server_pred)?.alias("server")?;
 
     let join_conditions = vec![
         qcol("client", TRACE_ID_COLUMN).eq(qcol("server", TRACE_ID_COLUMN)),
@@ -429,27 +449,29 @@ fn calls_pairs(trace: DataFrame, window: &GraphWindow) -> DfResult<DataFrame> {
             .gt_eq(qcol("client", TRACE_TIMESTAMP_COLUMN) - interval(CHILD_SPAN_EARLY_NANOS)),
         qcol("server", TRACE_TIMESTAMP_COLUMN)
             .lt_eq(qcol("client", TRACE_TIMESTAMP_COLUMN) + interval(CHILD_SPAN_LATE_NANOS)),
-        // Exclude self-calls: an edge needs two distinct services.
-        qcol("client", SERVICE_NAME_COLUMN).not_eq(qcol("server", SERVICE_NAME_COLUMN)),
     ];
 
     client
         .join_on(server, JoinType::Inner, join_conditions)?
         .select(vec![
             bin_ms(qcol("client", TRACE_TIMESTAMP_COLUMN)).alias("observed_at"),
-            // Cast: tag columns come out of the storage engine dictionary-encoded,
-            // but the computed table declares plain STRING.
-            cast(qcol("client", SERVICE_NAME_COLUMN), DataType::Utf8).alias("src_id"),
-            cast(qcol("server", SERVICE_NAME_COLUMN), DataType::Utf8).alias("dst_id"),
+            // The cast inside entity_id_expr also normalizes tag columns, which
+            // come out of the storage engine dictionary-encoded.
+            entity_id_expr(&service.id_columns, &|c| qcol("client", c)).alias("src_id"),
+            entity_id_expr(&service.id_columns, &|c| qcol("server", c)).alias("dst_id"),
             qcol("server", SPAN_STATUS_CODE_COLUMN).alias("status_code"),
             qcol("server", DURATION_NANO_COLUMN).alias("duration_nano"),
-        ])
+        ])?
+        // Exclude self-calls on the composed identity: an edge needs two
+        // distinct service entities.
+        .filter(ident("src_id").not_eq(ident("dst_id")))
 }
 
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
 
+    use common_catalog::consts::SERVICE_NAME_COLUMN;
     use datafusion::arrow::array::{
         Array, ArrayRef, BinaryArray, Float64Array, Int64Array, StringArray,
         TimestampMillisecondArray, TimestampNanosecondArray, UInt64Array,
@@ -544,6 +566,7 @@ mod tests {
 
     fn decl(entity_type: &str, id_columns: &[&str]) -> EntityDeclaration {
         EntityDeclaration {
+            schema: "public".to_string(),
             table: "app_latency".to_string(),
             time_index: "ts".to_string(),
             entity_type: entity_type.to_string(),
@@ -598,7 +621,7 @@ mod tests {
         assert!(json_texts(batch, 8).iter().all(Option::is_none));
         assert_eq!(
             json_texts(batch, 9),
-            vec![Some(r#"["app_latency"]"#.to_string()); batch.num_rows()]
+            vec![Some(r#"["public.app_latency"]"#.to_string()); batch.num_rows()]
         );
     }
 
@@ -743,6 +766,7 @@ mod tests {
             Field::new(SPAN_KIND_COLUMN, DataType::Utf8, false),
             Field::new(SPAN_STATUS_CODE_COLUMN, DataType::Utf8, false),
             Field::new(SERVICE_NAME_COLUMN, DataType::Utf8, false),
+            Field::new("service_namespace", DataType::Utf8, false),
             Field::new(DURATION_NANO_COLUMN, DataType::UInt64, false),
         ]));
         const MS: i64 = 1_000_000;
@@ -796,6 +820,7 @@ mod tests {
                 Arc::new(StringArray::from(vec![
                     "frontend", "cart", "frontend", "cart", "cart", "cart", "frontend",
                 ])),
+                Arc::new(StringArray::from(vec!["ns1"; 7])),
                 Arc::new(UInt64Array::from(vec![
                     0,
                     500_000_000, // 0.5s
@@ -822,13 +847,28 @@ mod tests {
         ctx
     }
 
+    fn trace_service_decl(id_columns: &[&str]) -> EntityDeclaration {
+        EntityDeclaration {
+            schema: "public".to_string(),
+            table: "opentelemetry_traces".to_string(),
+            time_index: TRACE_TIMESTAMP_COLUMN.to_string(),
+            entity_type: "service".to_string(),
+            id_columns: id_columns.iter().map(|s| s.to_string()).collect(),
+            descriptive_columns: vec![],
+            scope_columns: vec![],
+        }
+    }
+
     #[tokio::test]
     async fn calls_plan_aggregates_red_metrics() {
         let ctx = trace_table_ctx();
         let trace = ctx.table("opentelemetry_traces").await.unwrap();
-        let plan = build_calls_plan(vec![trace], &test_window())
-            .unwrap()
-            .unwrap();
+        let plan = build_calls_plan(
+            vec![(trace_service_decl(&[SERVICE_NAME_COLUMN]), trace)],
+            &test_window(),
+        )
+        .unwrap()
+        .unwrap();
 
         let names = plan
             .schema()
@@ -850,31 +890,31 @@ mod tests {
         assert_eq!(strings(batch, 9), vec!["trace"]);
 
         let request_count = batch
-            .column(13)
+            .column(12)
             .as_any()
             .downcast_ref::<Int64Array>()
             .unwrap();
         assert_eq!(request_count.value(0), 2);
         let error_count = batch
-            .column(14)
+            .column(13)
             .as_any()
             .downcast_ref::<Int64Array>()
             .unwrap();
         assert_eq!(error_count.value(0), 1);
         let duration_sum = batch
-            .column(15)
+            .column(14)
             .as_any()
             .downcast_ref::<Float64Array>()
             .unwrap();
         assert!((duration_sum.value(0) - 2.0).abs() < 1e-9);
         let duration_count = batch
-            .column(16)
+            .column(15)
             .as_any()
             .downcast_ref::<Int64Array>()
             .unwrap();
         assert_eq!(duration_count.value(0), 2);
         // Derived calls edges carry no attributes: a typed-JSON NULL.
-        assert!(json_texts(batch, 17)[0].is_none());
+        assert!(json_texts(batch, 16)[0].is_none());
     }
 
     #[tokio::test]
@@ -882,9 +922,15 @@ mod tests {
         let ctx = trace_table_ctx();
         let t1 = ctx.table("opentelemetry_traces").await.unwrap();
         let t2 = ctx.table("opentelemetry_traces_2").await.unwrap();
-        let plan = build_calls_plan(vec![t1, t2], &test_window())
-            .unwrap()
-            .unwrap();
+        let plan = build_calls_plan(
+            vec![
+                (trace_service_decl(&[SERVICE_NAME_COLUMN]), t1),
+                (trace_service_decl(&[SERVICE_NAME_COLUMN]), t2),
+            ],
+            &test_window(),
+        )
+        .unwrap()
+        .unwrap();
 
         let batches = collect(&ctx, plan).await;
         let total: usize = batches.iter().map(|b| b.num_rows()).sum();
@@ -893,22 +939,52 @@ mod tests {
         assert_eq!(total, 1);
         let batch = &batches[0];
         let request_count = batch
-            .column(13)
+            .column(12)
             .as_any()
             .downcast_ref::<Int64Array>()
             .unwrap();
         assert_eq!(request_count.value(0), 4);
         let error_count = batch
-            .column(14)
+            .column(13)
             .as_any()
             .downcast_ref::<Int64Array>()
             .unwrap();
         assert_eq!(error_count.value(0), 2);
         let duration_sum = batch
-            .column(15)
+            .column(14)
             .as_any()
             .downcast_ref::<Float64Array>()
             .unwrap();
         assert!((duration_sum.value(0) - 4.0).abs() < 1e-9);
+    }
+
+    #[tokio::test]
+    async fn calls_endpoints_follow_service_declaration() {
+        let ctx = trace_table_ctx();
+        let trace = ctx.table("opentelemetry_traces").await.unwrap();
+        let plan = build_calls_plan(
+            vec![(
+                trace_service_decl(&[SERVICE_NAME_COLUMN, "service_namespace"]),
+                trace,
+            )],
+            &test_window(),
+        )
+        .unwrap()
+        .unwrap();
+
+        let batches = collect(&ctx, plan).await;
+        let total: usize = batches.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(total, 1);
+        let batch = &batches[0];
+        // Composite service identity renders the same sorted `k=v` form the
+        // registry emits, so edges land on registry entity ids.
+        assert_eq!(
+            strings(batch, 5),
+            vec!["service_name=frontend,service_namespace=ns1"]
+        );
+        assert_eq!(
+            strings(batch, 7),
+            vec!["service_name=cart,service_namespace=ns1"]
+        );
     }
 }

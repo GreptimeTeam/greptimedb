@@ -193,7 +193,7 @@ static ENTITIES_SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
 });
 
 /// Schema of `semantic_relationships` — the edge set of the graph, one row per
-/// edge observed in a time window. This is the 18-column contract every derived
+/// edge observed in a time window. This is the 17-column contract every derived
 /// branch and the declared-edge table must project for the top-level `UNION ALL`.
 ///
 /// Columns:
@@ -209,9 +209,9 @@ static ENTITIES_SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
 ///   `attribute` (shared-identity join), `declared` (hand-inserted), or `agent`
 ///   (agent-inferred). Part of the edge identity, so edges of different provenance
 ///   for the same pair coexist.
-/// - `confidence`    — confidence in `[0, 1]`: `1.0` for observed/declared edges,
-///   lower for sampled traces, virtual nodes, or agent-inferred edges.
-/// - `scope`         — namespace/environment; empty string when none.
+/// - `confidence`    — derivation certainty in `[0, 1]`: `1.0` for paired or
+///   declared edges, lower for virtual-node or agent-inferred edges. It does
+///   not correct for trace sampling.
 /// - `generation_id` — deterministic key of the producing (window, run) that makes
 ///   re-derivation idempotent; empty for read-time derived rows (load-bearing only
 ///   for a future maintained/materialised graph).
@@ -235,7 +235,6 @@ static RELATIONSHIPS_SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
         ColumnSchema::new("rel_type", string(), false),
         ColumnSchema::new("provenance", string(), false),
         ColumnSchema::new("confidence", ConcreteDataType::float64_datatype(), true),
-        ColumnSchema::new("scope", string(), true),
         ColumnSchema::new("generation_id", string(), true),
         ColumnSchema::new("request_count", ConcreteDataType::int64_datatype(), true),
         ColumnSchema::new("error_count", ConcreteDataType::int64_datatype(), true),
