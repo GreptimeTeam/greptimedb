@@ -1,0 +1,14 @@
+name = "legacy_dense_metric_primary_key"
+reason = "Verify dense-encoded metric regions written by released old binaries recover, accept new writes, and remain readable after restart."
+introduced_by = "PR #8470"
+topologies = ["distributed"]
+from_range = ["=v1.0.0", "=v1.1.0"]
+to_range = [">=v1.2.0"]
+features = ["metric", "dense_primary_key", "read", "write", "restart"]
+owner = "storage"
+
+[old_config.datanode]
+"region_engine.metric.sparse_primary_key_encoding" = false
+
+[old_assert]
+metric_primary_key_encoding = "dense"
