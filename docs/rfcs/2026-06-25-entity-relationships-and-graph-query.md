@@ -399,7 +399,7 @@ Design notes:
 | `calls` | `service` calls `service` | trace | `called_by` |
 | `runs_on` | `service.instance`/`process`/`k8s.pod` runs on `host`/`node` | attribute | `hosts` |
 | `contains` | `pod`→`container` | attribute/declared | `part_of` |
-| `part_of` | `service.instance` is part of `service` | attribute/declared | `has_instance` |
+| `part_of` | `service.instance`→`service`, `k8s.pod`→`k8s.workload` | attribute/declared | `contains` |
 | `depends_on` | logical/declared dependency | declared | `dependency_of` |
 | `owns` | team/service owns dst | declared | `owned_by` |
 
