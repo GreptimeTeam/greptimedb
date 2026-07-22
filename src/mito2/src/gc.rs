@@ -1086,6 +1086,13 @@ impl LocalGcWorker {
         // When full_file_listing is false, skip expensive list operations and only delete
         // files that are tracked in recently_removed_files
         if !self.full_file_listing {
+            // Parquet files are identified only by file ID. A full file reference also
+            // carries the index version, but that version must not affect Parquet GC.
+            let parquet_tmp_ref_file_ids = in_tmp_ref
+                .iter()
+                .map(|(file_id, _)| *file_id)
+                .collect::<HashSet<_>>();
+
             // Only delete files that:
             // 1. Are in recently_removed_files (tracked in manifest)
             // 2. Are not in use(in manifest or tmp ref)
@@ -1094,9 +1101,9 @@ impl LocalGcWorker {
                 .iter()
                 .filter(|file_id| {
                     let in_use = match file_id {
-                        RemovedFile::File(file_id, index_version) => {
-                            in_manifest.get(file_id) == Some(index_version)
-                                || in_tmp_ref.contains(&(*file_id, *index_version))
+                        RemovedFile::File(file_id, _) => {
+                            in_manifest.contains_key(file_id)
+                                || parquet_tmp_ref_file_ids.contains(file_id)
                         }
                         RemovedFile::Index(file_id, index_version) => {
                             in_manifest.get(file_id) == Some(&Some(*index_version))
