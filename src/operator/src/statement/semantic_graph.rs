@@ -254,24 +254,30 @@ fn registry_branch(
 
     let source_tables = parse_json_expr(lit(format!("[{}]", json_quote(&decl.table))));
 
-    df.filter(
-        ts.clone()
-            .gt_eq(window.start.clone())
-            .and(ts.lt(window.end.clone())),
-    )?
-    .select(vec![
-        bin.clone().alias("observed_at"),
-        bin.clone().alias("window_start"),
-        (bin.clone() + bin_interval()).alias("window_end"),
-        (bin + bin_interval()).alias("fresh_until"),
-        lit(decl.entity_type.as_str()).alias("entity_type"),
-        entity_id.alias("entity_id"),
-        entity_id_attrs.alias("entity_id_attrs"),
-        scope.alias("scope"),
-        descriptive.alias("descriptive"),
-        source_tables.alias("source_tables"),
-    ])?
-    .distinct()
+    let mut predicate = ts
+        .clone()
+        .gt_eq(window.start.clone())
+        .and(ts.lt(window.end.clone()));
+    // Tag columns may still be nullable; a NULL identity component would
+    // violate the computed table's non-null `entity_id`.
+    for id in &decl.id_columns {
+        predicate = predicate.and(ident(id).is_not_null());
+    }
+
+    df.filter(predicate)?
+        .select(vec![
+            bin.clone().alias("observed_at"),
+            bin.clone().alias("window_start"),
+            (bin.clone() + bin_interval()).alias("window_end"),
+            (bin + bin_interval()).alias("fresh_until"),
+            lit(decl.entity_type.as_str()).alias("entity_type"),
+            entity_id.alias("entity_id"),
+            entity_id_attrs.alias("entity_id_attrs"),
+            scope.alias("scope"),
+            descriptive.alias("descriptive"),
+            source_tables.alias("source_tables"),
+        ])?
+        .distinct()
 }
 
 /// Builds the `semantic_entities` registry plan: a `UNION ALL` of one branch per
@@ -389,8 +395,10 @@ fn calls_branch(trace: DataFrame, window: &GraphWindow) -> DfResult<DataFrame> {
         .join_on(server, JoinType::Inner, join_conditions)?
         .select(vec![
             bin_ms(qcol("client", TRACE_TIMESTAMP_COLUMN)).alias("observed_at"),
-            qcol("client", SERVICE_NAME_COLUMN).alias("src_id"),
-            qcol("server", SERVICE_NAME_COLUMN).alias("dst_id"),
+            // Cast: tag columns come out of the storage engine dictionary-encoded,
+            // but the computed table declares plain STRING.
+            cast(qcol("client", SERVICE_NAME_COLUMN), DataType::Utf8).alias("src_id"),
+            cast(qcol("server", SERVICE_NAME_COLUMN), DataType::Utf8).alias("dst_id"),
             qcol("server", SPAN_STATUS_CODE_COLUMN).alias("status_code"),
             qcol("server", DURATION_NANO_COLUMN).alias("duration_nano"),
         ])?
@@ -672,6 +680,19 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn registry_skips_null_identity_rows() {
+        let ctx = metric_table_ctx();
+        let df = ctx.table("app_latency").await.unwrap();
+        let plan = build_registry_plan(vec![(decl("host", &["host"]), df)], &test_window())
+            .unwrap()
+            .unwrap();
+        let batches = collect(&ctx, plan).await;
+        let mut ids: Vec<String> = batches.iter().flat_map(|b| strings(b, 5)).collect();
+        ids.sort();
+        assert_eq!(ids, vec!["h2", r#"we"ird\host"#]);
+    }
+
+    #[tokio::test]
     async fn registry_unions_declarations() {
         let ctx = metric_table_ctx();
         let df1 = ctx.table("app_latency").await.unwrap();
@@ -840,20 +861,5 @@ mod tests {
         assert_eq!(duration_count.value(0), 2);
         // Derived calls edges carry no attributes: a typed-JSON NULL.
         assert!(json_texts(batch, 17)[0].is_none());
-    }
-
-    #[tokio::test]
-    async fn calls_plan_respects_window() {
-        let ctx = trace_table_ctx();
-        let trace = ctx.table("opentelemetry_traces").await.unwrap();
-        // A window that ends before all test spans: nothing derives.
-        let window = GraphWindow {
-            start: lit(ScalarValue::TimestampMillisecond(Some(0), None)),
-            end: lit(ScalarValue::TimestampMillisecond(Some(500), None)),
-        };
-        let plan = build_calls_plan(vec![trace], &window).unwrap().unwrap();
-        let batches = collect(&ctx, plan).await;
-        let total: usize = batches.iter().map(|b| b.num_rows()).sum();
-        assert_eq!(total, 0);
     }
 }

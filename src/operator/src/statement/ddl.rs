@@ -2271,6 +2271,9 @@ pub fn verify_alter(
                 violated: format!("Invalid table name: {}", new_table_name)
             }
         );
+        // Renaming INTO a computed graph table's name would let the overlay
+        // shadow the renamed physical table, orphaning its data.
+        ensure_table_writable(&table_info.schema_name, new_table_name)?;
     } else if let AlterKind::AddColumns { columns } = alter_kind {
         // If all the columns are marked as add_if_not_exists and they already exist in the table,
         // there is no need to perform the alter.

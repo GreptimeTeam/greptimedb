@@ -31,10 +31,12 @@ use catalog::CatalogManager;
 use catalog::system_schema::semantic_graph::EntityGraphProvider;
 use common_catalog::consts::{
     DEFAULT_PRIVATE_SCHEMA_NAME, DEFAULT_SCHEMA_NAME, INFORMATION_SCHEMA_NAME, PG_CATALOG_NAME,
+    SERVICE_NAME_COLUMN,
 };
 use common_error::ext::BoxedError;
 use common_query::OutputData;
 use common_recordbatch::{RecordBatch, util as record_util};
+use common_telemetry::warn;
 use datafusion::dataframe::DataFrame;
 use datafusion_expr::LogicalPlan;
 use futures::TryStreamExt;
@@ -98,19 +100,64 @@ impl EntityGraphProviderImpl {
         by_type
             .into_iter()
             .filter(|(_, (id, _, _))| !id.is_empty())
-            .map(
+            .filter_map(
                 |(entity_type, (id_columns, descriptive_columns, scope_columns))| {
-                    EntityDeclaration {
+                    // A stale declaration (e.g. its column was dropped later)
+                    // must not poison every graph scan; skip it.
+                    let schema = &table_info.meta.schema;
+                    if let Some(missing) = id_columns
+                        .iter()
+                        .chain(&descriptive_columns)
+                        .chain(&scope_columns)
+                        .find(|c| schema.column_schema_by_name(c).is_none())
+                    {
+                        warn!(
+                            "Skipping entity declaration `{}` of table `{}`: column `{}` not found",
+                            entity_type, table_info.name, missing
+                        );
+                        return None;
+                    }
+                    Some(EntityDeclaration {
                         table: table_info.name.clone(),
                         time_index: time_index.clone(),
                         entity_type,
                         id_columns,
                         descriptive_columns,
                         scope_columns,
-                    }
+                    })
                 },
             )
             .collect()
+    }
+
+    /// All entity declarations of one table. Trace-v1 tables created before the
+    /// ingest-side auto-stamp carry no `entity.service.id` option; synthesize it
+    /// (their schema is fixed), so their `calls` edges have endpoint entities.
+    fn declarations_for(table_info: &TableInfo) -> Vec<EntityDeclaration> {
+        let mut declarations = Self::parse_declarations(table_info);
+        if is_trace_v1_table(table_info)
+            && !declarations.iter().any(|d| d.entity_type == "service")
+            && table_info
+                .meta
+                .schema
+                .column_schema_by_name(SERVICE_NAME_COLUMN)
+                .is_some()
+            && let Some(time_index) = table_info
+                .meta
+                .schema
+                .timestamp_column()
+                .map(|c| c.name.clone())
+        {
+            declarations.push(EntityDeclaration {
+                table: table_info.name.clone(),
+                time_index,
+                entity_type: "service".to_string(),
+                id_columns: vec![SERVICE_NAME_COLUMN.to_string()],
+                descriptive_columns: vec![],
+                scope_columns: vec![],
+            });
+        }
+        declarations
     }
 
     /// Enumerates entity declarations and trace tables across a catalog. Trace
@@ -144,7 +191,7 @@ impl EntityGraphProviderImpl {
             while let Some(table) = tables.try_next().await.map_err(BoxedError::new)? {
                 let table_info = table.table_info();
                 declarations.extend(
-                    Self::parse_declarations(&table_info)
+                    Self::declarations_for(&table_info)
                         .into_iter()
                         .map(|decl| (decl, table.clone())),
                 );
@@ -241,5 +288,121 @@ impl EntityGraphProvider for EntityGraphProviderImpl {
             return Ok(vec![]);
         };
         self.execute_plan(catalog, plan).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use common_catalog::consts::{DEFAULT_CATALOG_NAME, MITO_ENGINE};
+    use datatypes::prelude::ConcreteDataType;
+    use datatypes::schema::{ColumnSchema, SchemaBuilder};
+    use table::metadata::{TableInfoBuilder, TableMeta, TableType};
+    use table::requests::{TABLE_DATA_MODEL, TABLE_DATA_MODEL_TRACE_V1, TableOptions};
+
+    use super::*;
+
+    fn table_info(columns: &[&str], extra: &[(&str, &str)]) -> TableInfo {
+        let mut column_schemas = vec![
+            ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
+        ];
+        column_schemas.extend(
+            columns
+                .iter()
+                .map(|c| ColumnSchema::new(*c, ConcreteDataType::string_datatype(), true)),
+        );
+        let schema = Arc::new(
+            SchemaBuilder::try_from_columns(column_schemas)
+                .unwrap()
+                .build()
+                .unwrap(),
+        );
+        let options = TableOptions {
+            extra_options: extra
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect::<HashMap<_, _>>(),
+            ..Default::default()
+        };
+        let meta = TableMeta {
+            schema,
+            primary_key_indices: vec![],
+            value_indices: vec![],
+            engine: MITO_ENGINE.to_string(),
+            next_column_id: 1,
+            options,
+            created_on: Default::default(),
+            updated_on: Default::default(),
+            partition_key_indices: vec![],
+            column_ids: vec![],
+        };
+        TableInfoBuilder::default()
+            .table_id(1)
+            .name("t1")
+            .catalog_name(DEFAULT_CATALOG_NAME)
+            .schema_name(DEFAULT_SCHEMA_NAME)
+            .table_version(0)
+            .table_type(TableType::Base)
+            .meta(meta)
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn declaration_referencing_missing_column_is_skipped() {
+        let info = table_info(
+            &["service_name"],
+            &[
+                ("greptime.semantic.entity.service.id", "service_name"),
+                ("greptime.semantic.entity.host.id", "gone"),
+            ],
+        );
+        let declarations = EntityGraphProviderImpl::declarations_for(&info);
+        assert_eq!(declarations.len(), 1);
+        assert_eq!(declarations[0].entity_type, "service");
+
+        let info = table_info(
+            &["service_name"],
+            &[
+                ("greptime.semantic.entity.service.id", "service_name"),
+                ("greptime.semantic.entity.service.descriptive", "gone"),
+            ],
+        );
+        assert!(EntityGraphProviderImpl::declarations_for(&info).is_empty());
+    }
+
+    #[test]
+    fn trace_v1_table_gets_implicit_service_declaration() {
+        let info = table_info(
+            &["service_name"],
+            &[(TABLE_DATA_MODEL, TABLE_DATA_MODEL_TRACE_V1)],
+        );
+        let declarations = EntityGraphProviderImpl::declarations_for(&info);
+        assert_eq!(declarations.len(), 1);
+        let decl = &declarations[0];
+        assert_eq!(decl.entity_type, "service");
+        assert_eq!(decl.id_columns, vec![SERVICE_NAME_COLUMN.to_string()]);
+        assert_eq!(decl.time_index, "ts");
+
+        // An explicit service declaration wins; no duplicate is synthesized.
+        let info = table_info(
+            &["service_name"],
+            &[
+                (TABLE_DATA_MODEL, TABLE_DATA_MODEL_TRACE_V1),
+                ("greptime.semantic.entity.service.id", "service_name"),
+            ],
+        );
+        assert_eq!(EntityGraphProviderImpl::declarations_for(&info).len(), 1);
+
+        // A trace-model table without the fixed column synthesizes nothing.
+        let info = table_info(&[], &[(TABLE_DATA_MODEL, TABLE_DATA_MODEL_TRACE_V1)]);
+        assert!(EntityGraphProviderImpl::declarations_for(&info).is_empty());
     }
 }
