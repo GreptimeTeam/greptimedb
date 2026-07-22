@@ -265,8 +265,10 @@ fn registry_branch(decl: &EntityDeclaration, window: &GraphWindow) -> String {
     let bin = format!("CAST(date_bin({BIN_INTERVAL}, {ts}) AS TIMESTAMP(3))");
 
     let (entity_id, entity_id_attrs) = if decl.id_columns.len() == 1 {
+        // CAST even the single-column id: id columns must be tags but not
+        // necessarily strings, and the computed table declares entity_id STRING.
         (
-            quote_ident(&decl.id_columns[0]),
+            format!("CAST({} AS STRING)", quote_ident(&decl.id_columns[0])),
             "CAST(NULL AS STRING)".to_string(),
         )
     } else {
@@ -463,7 +465,7 @@ mod tests {
 
         let single = build_registry_sql(&[decl("service", &["service_name"])], &window).unwrap();
         assert!(single.contains("SELECT DISTINCT"));
-        assert!(single.contains(r#""service_name" AS entity_id"#));
+        assert!(single.contains(r#"CAST("service_name" AS STRING) AS entity_id"#));
         assert!(single.contains("CAST(NULL AS STRING) AS entity_id_attrs"));
         assert!(single.contains(r#"FROM "greptime"."public"."app_latency""#));
         assert!(single.contains(r#"WHERE "ts" >= now() - INTERVAL '1 hour' AND "ts" < now()"#));

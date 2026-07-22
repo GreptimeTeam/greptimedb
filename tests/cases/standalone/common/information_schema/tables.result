@@ -24,13 +24,15 @@ Affected Rows: 0
 
 select table_catalog, table_schema, table_name from information_schema.tables where table_schema != 'information_schema';
 
-+---------------+--------------+------------+
-| table_catalog | table_schema | table_name |
-+---------------+--------------+------------+
-| greptime      | abc          | t          |
-| greptime      | abcde        | t          |
-| greptime      | public       | numbers    |
-+---------------+--------------+------------+
++---------------+------------------+------------------------+
+| table_catalog | table_schema     | table_name             |
++---------------+------------------+------------------------+
+| greptime      | abc              | t                      |
+| greptime      | abcde            | t                      |
+| greptime      | greptime_private | semantic_entities      |
+| greptime      | greptime_private | semantic_relationships |
+| greptime      | public           | numbers                |
++---------------+------------------+------------------------+
 
 use public;
 
@@ -54,19 +56,19 @@ Affected Rows: 0
 
 create table t (ts timestamp time index);
 
-Error: 1001(Unsupported), Schema `information_schema` is read-only
+Error: 1001(Unsupported), Table `t` is read-only
 
 drop table build_info;
 
-Error: 1001(Unsupported), Schema `information_schema` is read-only
+Error: 1001(Unsupported), Table `build_info` is read-only
 
 alter table build_info add q string;
 
-Error: 1001(Unsupported), Schema `information_schema` is read-only
+Error: 1001(Unsupported), Table `build_info` is read-only
 
 truncate table build_info;
 
-Error: 1001(Unsupported), Schema `information_schema` is read-only
+Error: 1001(Unsupported), Table `build_info` is read-only
 
 insert into build_info values ("", "", "", "", "");
 

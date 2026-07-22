@@ -349,6 +349,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Table `{name}` is read-only"))]
+    TableReadOnly {
+        name: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Table occurs error"))]
     Table {
         #[snafu(implicit)]
@@ -992,7 +999,8 @@ impl ErrorExt for Error {
             }
             Error::NotSupported { .. }
             | Error::ShowCreateTableBaseOnly { .. }
-            | Error::SchemaReadOnly { .. } => StatusCode::Unsupported,
+            | Error::SchemaReadOnly { .. }
+            | Error::TableReadOnly { .. } => StatusCode::Unsupported,
             Error::TableMetadataManager { source, .. } => source.status_code(),
             Error::ParseSql { source, .. } => source.status_code(),
             Error::InvalidateTableCache { source, .. } => source.status_code(),

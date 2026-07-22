@@ -153,6 +153,18 @@ pub fn is_readonly_schema(schema: &str) -> bool {
     matches!(schema, INFORMATION_SCHEMA_NAME)
 }
 
+/// Returns true for tables that must reject DDL/DML: everything in a read-only
+/// schema, plus computed system tables overlaid on a writable schema (the
+/// entity-graph tables under `greptime_private`).
+pub fn is_readonly_table(schema: &str, table: &str) -> bool {
+    is_readonly_schema(schema)
+        || (schema == DEFAULT_PRIVATE_SCHEMA_NAME
+            && matches!(
+                table,
+                SEMANTIC_ENTITIES_TABLE_NAME | SEMANTIC_RELATIONSHIPS_TABLE_NAME
+            ))
+}
+
 // ---- special table and fields ----
 pub const TRACE_ID_COLUMN: &str = "trace_id";
 pub const SPAN_ID_COLUMN: &str = "span_id";

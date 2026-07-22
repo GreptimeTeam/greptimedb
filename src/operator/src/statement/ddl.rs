@@ -31,7 +31,9 @@ use api::v1::{
 use catalog::CatalogManagerRef;
 use chrono::Utc;
 use common_base::regex_pattern::NAME_PATTERN_REG;
-use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, is_readonly_schema};
+use common_catalog::consts::{
+    DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, is_readonly_schema, is_readonly_table,
+};
 use common_catalog::{format_full_flow_name, format_full_table_name};
 use common_error::ext::BoxedError;
 use common_meta::cache_invalidator::{CacheInvalidatorRef, Context};
@@ -105,7 +107,7 @@ use crate::error::{
     InvalidPartitionSnafu, InvalidSqlSnafu, InvalidTableNameSnafu, InvalidViewNameSnafu,
     InvalidViewStmtSnafu, NotSupportedSnafu, PartitionExprToPbSnafu, Result, SchemaInUseSnafu,
     SchemaNotFoundSnafu, SchemaReadOnlySnafu, SerializePartitionExprSnafu, SubstraitCodecSnafu,
-    TableAlreadyExistsSnafu, TableMetadataManagerSnafu, TableNotFoundSnafu,
+    TableAlreadyExistsSnafu, TableMetadataManagerSnafu, TableNotFoundSnafu, TableReadOnlySnafu,
     UnrecognizedTableOptionSnafu, ViewAlreadyExistsSnafu,
 };
 use crate::expr_helper::{self, RepartitionRequest, RepartitionSource};
@@ -373,9 +375,9 @@ impl StatementExecutor {
         query_ctx: QueryContextRef,
     ) -> Result<TableRef> {
         ensure!(
-            !is_readonly_schema(&create_table.schema_name),
-            SchemaReadOnlySnafu {
-                name: create_table.schema_name.clone()
+            !is_readonly_table(&create_table.schema_name, &create_table.table_name),
+            TableReadOnlySnafu {
+                name: create_table.table_name.clone()
             }
         );
 
@@ -1355,9 +1357,9 @@ impl StatementExecutor {
         let mut tables = Vec::with_capacity(table_names.len());
         for table_name in table_names {
             ensure!(
-                !is_readonly_schema(&table_name.schema_name),
-                SchemaReadOnlySnafu {
-                    name: table_name.schema_name.clone()
+                !is_readonly_table(&table_name.schema_name, &table_name.table_name),
+                TableReadOnlySnafu {
+                    name: table_name.table_name.clone()
                 }
             );
 
@@ -1465,9 +1467,9 @@ impl StatementExecutor {
         query_context: QueryContextRef,
     ) -> Result<Output> {
         ensure!(
-            !is_readonly_schema(&table_name.schema_name),
-            SchemaReadOnlySnafu {
-                name: table_name.schema_name.clone()
+            !is_readonly_table(&table_name.schema_name, &table_name.table_name),
+            TableReadOnlySnafu {
+                name: table_name.table_name.clone()
             }
         );
 
@@ -1517,9 +1519,9 @@ impl StatementExecutor {
     ) -> Result<Output> {
         // Check if the schema is read-only.
         ensure!(
-            !is_readonly_schema(&request.schema_name),
-            SchemaReadOnlySnafu {
-                name: request.schema_name.clone()
+            !is_readonly_table(&request.schema_name, &request.table_name),
+            TableReadOnlySnafu {
+                name: request.table_name.clone()
             }
         );
 
@@ -1802,9 +1804,9 @@ impl StatementExecutor {
         query_context: QueryContextRef,
     ) -> Result<Output> {
         ensure!(
-            !is_readonly_schema(&expr.schema_name),
-            SchemaReadOnlySnafu {
-                name: expr.schema_name.clone()
+            !is_readonly_table(&expr.schema_name, &expr.table_name),
+            TableReadOnlySnafu {
+                name: expr.table_name.clone()
             }
         );
 
@@ -2752,9 +2754,9 @@ async fn execute_undrop_table(
     query_context: QueryContextRef,
 ) -> Result<Output> {
     ensure!(
-        !is_readonly_schema(&table_name.schema_name),
-        SchemaReadOnlySnafu {
-            name: table_name.schema_name.clone()
+        !is_readonly_table(&table_name.schema_name, &table_name.table_name),
+        TableReadOnlySnafu {
+            name: table_name.table_name.clone()
         }
     );
 

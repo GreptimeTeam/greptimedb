@@ -36,6 +36,10 @@ use std::sync::{Arc, Weak};
 use common_catalog::consts::{
     DEFAULT_PRIVATE_SCHEMA_NAME, SEMANTIC_ENTITIES_TABLE_ID, SEMANTIC_RELATIONSHIPS_TABLE_ID,
 };
+pub use common_catalog::consts::{
+    SEMANTIC_ENTITIES_TABLE_NAME as SEMANTIC_ENTITIES,
+    SEMANTIC_RELATIONSHIPS_TABLE_NAME as SEMANTIC_RELATIONSHIPS,
+};
 use common_error::ext::BoxedError;
 use common_recordbatch::adapter::RecordBatchStreamAdapter;
 use common_recordbatch::{RecordBatch, SendableRecordBatchStream};
@@ -51,11 +55,6 @@ use table::TableRef;
 use crate::CatalogManager;
 use crate::error::{InternalSnafu, Result};
 use crate::system_schema::{SystemSchemaProviderInner, SystemTable, SystemTableRef, utils};
-
-/// Name of the computed entity registry table.
-pub const SEMANTIC_ENTITIES: &str = "semantic_entities";
-/// Name of the computed relationship (edge set) table.
-pub const SEMANTIC_RELATIONSHIPS: &str = "semantic_relationships";
 
 pub type EntityGraphProviderRef = Arc<dyn EntityGraphProvider>;
 
