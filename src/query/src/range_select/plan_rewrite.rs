@@ -125,7 +125,7 @@ fn seconds_to_millisecond(seconds: i64, expr: &Expr) -> DFResult<i64> {
         .ok_or_else(|| time_millisecond_overflow(expr))
 }
 
-/// Parse a duraion expr:
+/// Parse a duration expr:
 /// 1. duration string (e.g. `'1h'`)
 /// 2. Interval expr (e.g. `INTERVAL '1 year 3 hours 20 minutes'`)
 /// 3. An interval expr can be evaluated at the logical plan stage (e.g. `INTERVAL '2' day - INTERVAL '1' day`)
