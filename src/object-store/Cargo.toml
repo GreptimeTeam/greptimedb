@@ -8,6 +8,7 @@ license.workspace = true
 workspace = true
 
 [features]
+mysql-object-store = ["opendal/services-mysql"]
 services-memory = ["opendal/services-memory"]
 testing = ["derive_builder"]
 
@@ -49,3 +50,4 @@ object_store_opendal.workspace = true
 rand.workspace = true
 tempfile.workspace = true
 tokio.workspace = true
+toml.workspace = true
