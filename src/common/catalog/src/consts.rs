@@ -206,8 +206,4 @@ pub const SEMANTIC_ENTITIES_TABLE_NAME: &str = "semantic_entities";
 /// Computed relationship set: the edge set of the observability graph, derived at
 /// read time (`calls`/`runs_on`/... ) and unioned with the declared-edge table.
 pub const SEMANTIC_RELATIONSHIPS_TABLE_NAME: &str = "semantic_relationships";
-/// Physical table holding hand-declared edges (`provenance = 'declared'`), the
-/// only stored part of the OSS graph, living in `greptime_private`. Schema-only
-/// for now: its bootstrap and the derived+declared union are follow-ups.
-pub const SEMANTIC_RELATIONSHIPS_DECLARED_TABLE_NAME: &str = "semantic_relationships_declared";
 // ---- End of entity relationship graph tables ----

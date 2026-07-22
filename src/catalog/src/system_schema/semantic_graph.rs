@@ -19,8 +19,8 @@
 //! triggers read-time derivation over telemetry tables (trace self-joins, ...),
 //! which breaks the "cheap, metadata-only" expectation users have of
 //! `information_schema`. `greptime_private` already signals "system-managed,
-//! computed data objects" and also hosts the physical declared-edge table
-//! (`semantic_relationships_declared`), so derived and declared edges share one
+//! computed data objects", and it is also where the physical declared-edge
+//! table will live (a follow-up), so derived and declared edges will share one
 //! schema.
 //!
 //! These are thin forwarders: their rows are derived at read time by the injected
