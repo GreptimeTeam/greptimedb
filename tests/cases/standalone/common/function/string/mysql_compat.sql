@@ -43,6 +43,19 @@ SELECT FIELD('A', 'a', 'b', 'c');
 
 SELECT FIELD(NULL, 'a', 'b', 'c');
 
+-- FIELD coercion matrix: strings compare as strings; mixed values compare as DOUBLE.
+SELECT FIELD(2, '02', 3);
+SELECT FIELD('2', '02', '3');
+SELECT FIELD(2, 2, 3);
+SELECT FIELD(NULL, 1, 2);
+SELECT FIELD(2, NULL, 2);
+SELECT FIELD(12, '12x', 3);
+SELECT FIELD(0, 'x', 1);
+-- Pure integers retain exact comparison above the f64 precision boundary.
+SELECT FIELD(9007199254740993, 9007199254740992, 9007199254740993);
+-- A floating-point argument intentionally promotes the comparison to DOUBLE.
+SELECT FIELD(9007199254740993, 9007199254740992e0);
+
 -- INSERT function tests
 SELECT INSERT('Quadratic', 3, 4, 'What');
 
