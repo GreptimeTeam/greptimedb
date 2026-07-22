@@ -68,6 +68,7 @@ either.workspace = true
 futures.workspace = true
 futures-util.workspace = true
 headers = "0.4"
+hex.workspace = true
 hostname = "0.3"
 http.workspace = true
 humantime.workspace = true
