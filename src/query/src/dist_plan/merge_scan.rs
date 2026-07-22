@@ -658,7 +658,7 @@ impl MergeScanExec {
     pub fn sub_stage_metrics(&self) -> Vec<RecordBatchMetrics> {
         let sub_stage_metrics = self.sub_stage_metrics.lock().unwrap();
         let mut metrics: Vec<_> = sub_stage_metrics.iter().collect();
-        metrics.sort_by_key(|(region_id, _)| **region_id);
+        metrics.sort_unstable_by_key(|(region_id, _)| **region_id);
         metrics
             .into_iter()
             .map(|(_, metrics)| metrics.clone())
