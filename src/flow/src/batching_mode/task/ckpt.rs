@@ -280,6 +280,15 @@ impl BatchingTask {
                 );
             }
             FlowCheckpointDecision::FallbackToFullSnapshot {
+                previous_mode: CheckpointMode::FullSnapshot,
+                reason: FlowQueryFallbackReason::IncrementalDisabled,
+            } => {
+                debug!(
+                    "Flow {flow_id} remains in full snapshot mode, reason={}",
+                    FlowQueryFallbackReason::IncrementalDisabled.as_label()
+                );
+            }
+            FlowCheckpointDecision::FallbackToFullSnapshot {
                 previous_mode,
                 reason,
             } => {
