@@ -269,6 +269,10 @@ fn json_escaped_value_expr(column: &str) -> Expr {
 /// Builds a JSONB object from `columns` by concatenating a JSON text and parsing
 /// it — GreptimeDB has no struct→json function. Keys are JSON-escaped in Rust;
 /// values are JSON-escaped at runtime via [`json_escaped_value_expr`].
+///
+/// TODO(entity-graph): replace the text round-trip with a UDF that assembles
+/// JSONB directly from the value columns (`jsonb::ObjectBuilder`, keys baked
+/// in), dropping the escaping helpers and the per-row parse cost.
 fn json_object_expr(columns: &[String]) -> Expr {
     if columns.is_empty() {
         return parse_json_expr(lit("{}"));
