@@ -18,7 +18,7 @@ use std::sync::Arc;
 use arrow_schema::DataType;
 
 use crate::data_type::ConcreteDataType;
-use crate::error::{Result, TryFromValueSnafu, UnexpectedSnafu, UnsupportedOperationSnafu};
+use crate::error::{Error, Result, TryFromValueSnafu, UnexpectedSnafu, UnsupportedOperationSnafu};
 use crate::json::value::{JsonNumber, JsonVariant, encode_json_variant};
 use crate::prelude::{ValueRef, Vector, VectorRef};
 use crate::types::StructType;
@@ -115,7 +115,13 @@ fn json_variant_into_value(value: JsonVariant, expected_type: &ConcreteDataType)
     let value = match (value, expected_type) {
         (JsonVariant::Null, _) | (_, ConcreteDataType::Null(_)) => Value::Null,
         (JsonVariant::Bool(x), ConcreteDataType::Boolean(_)) => Value::Boolean(x),
-        (JsonVariant::Number(JsonNumber::PosInt(x)), ConcreteDataType::UInt64(_)) => {
+        (JsonVariant::Number(x), ConcreteDataType::UInt64(_)) => {
+            let Some(x) = x.as_u64() else {
+                return TryFromValueSnafu {
+                    reason: format!("unable to convert {x:?} to UInt64"),
+                }
+                .fail();
+            };
             Value::UInt64(x)
         }
         (JsonVariant::Number(x), ConcreteDataType::Int64(_)) => {
@@ -162,6 +168,65 @@ fn json_variant_into_value(value: JsonVariant, expected_type: &ConcreteDataType)
         }
     };
     Ok(value)
+}
+
+/// Projects a JSON value to `expected_type`, discarding object fields that are not expected.
+///
+/// This is used when aligning a dynamically typed JSON value to a projected Arrow schema.
+pub(crate) fn json_variant_into_projected_value(
+    value: JsonVariant,
+    expected_type: &ConcreteDataType,
+) -> Result<Value> {
+    match (value, expected_type) {
+        (JsonVariant::Null, _) => Ok(Value::Null),
+        (JsonVariant::String(value), ConcreteDataType::String(_)) => {
+            Ok(Value::String(value.into()))
+        }
+        (value, ConcreteDataType::String(_)) => Ok(Value::String(value.to_string().into())),
+        (JsonVariant::Object(mut object), ConcreteDataType::Struct(struct_type)) => {
+            let values = struct_type
+                .fields()
+                .iter()
+                .map(|field| {
+                    object
+                        .remove(field.name())
+                        .map(|value| {
+                            // A dynamically typed JSON field may not match the corresponding field
+                            // type in the projected Arrow schema. Treat only the mismatched field as
+                            // SQL NULL so the enclosing value remains readable. Errors other than
+                            // type mismatches are preserved.
+                            null_on_json_type_mismatch(json_variant_into_projected_value(
+                                value,
+                                field.data_type(),
+                            ))
+                        })
+                        .transpose()
+                        .map(|value| value.unwrap_or(Value::Null))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            Ok(Value::Struct(StructValue::new(values, struct_type.clone())))
+        }
+        (JsonVariant::Array(array), ConcreteDataType::List(list_type)) => {
+            let item_type = list_type.item_type().clone();
+            let values = array
+                .into_iter()
+                .map(|value| {
+                    // Apply the same mismatch-to-NULL rule to each list item.
+                    null_on_json_type_mismatch(json_variant_into_projected_value(value, &item_type))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            Ok(Value::List(ListValue::new(values, Arc::new(item_type))))
+        }
+        (value, expected_type) => json_variant_into_value(value, expected_type),
+    }
+}
+
+pub(crate) fn null_on_json_type_mismatch(result: Result<Value>) -> Result<Value> {
+    match result {
+        Ok(value) => Ok(value),
+        Err(Error::TryFromValue { .. }) => Ok(Value::Null),
+        Err(error) => Err(error),
+    }
 }
 
 impl MutableVector for JsonVectorBuilder {
@@ -435,5 +500,52 @@ mod tests {
             ))
         );
         Ok(())
+    }
+
+    #[test]
+    fn test_projected_value_nulls_nested_type_mismatches() {
+        let struct_type = ConcreteDataType::struct_datatype(StructType::new(Arc::new(vec![
+            StructField::new(
+                "value".to_string(),
+                ConcreteDataType::uint64_datatype(),
+                true,
+            ),
+            StructField::new(
+                "items".to_string(),
+                ConcreteDataType::list_datatype(Arc::new(ConcreteDataType::uint64_datatype())),
+                true,
+            ),
+            StructField::new(
+                "payload".to_string(),
+                ConcreteDataType::binary_datatype(),
+                true,
+            ),
+        ])));
+
+        let invalid_field = JsonVariant::from([("value", JsonVariant::from("invalid"))]);
+        let Value::Struct(value) = json_variant_into_projected_value(invalid_field, &struct_type)
+            .expect("type mismatch should become null")
+        else {
+            unreachable!()
+        };
+        assert_eq!(value.items()[0], Value::Null);
+
+        let invalid_item = JsonVariant::from([(
+            "items",
+            JsonVariant::Array(vec![JsonVariant::from("invalid")]),
+        )]);
+        let Value::Struct(value) = json_variant_into_projected_value(invalid_item, &struct_type)
+            .expect("type mismatch should become null")
+        else {
+            unreachable!()
+        };
+        let Value::List(items) = &value.items()[1] else {
+            unreachable!()
+        };
+        assert_eq!(items.items()[0], Value::Null);
+
+        let invalid_json = JsonVariant::from([("payload", JsonVariant::from(f64::NAN))]);
+        let error = json_variant_into_projected_value(invalid_json, &struct_type).unwrap_err();
+        assert!(matches!(error, Error::InvalidJson { .. }));
     }
 }
