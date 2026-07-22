@@ -50,19 +50,14 @@ engine. What it lacks is the link layer: the metadata is scattered per signal,
 and there is no way to query it as a graph. Today an agent must guess the
 topology from column names and join by hand.
 
-All-in-one is the structural lever. In split stacks (metrics in Prometheus,
-logs in Loki, traces in Tempo), an entity catalog sits *above* the stores and
-stitches results in application code. Here, correlation is a join inside one
-query engine, and the entity graph is a view over the same tables — not
-another database beside them.
-
-The audience is broader than one product: alert routing, dashboards, "what
-depends on this" impact analysis, MCP servers, and ETL lineage all need a
-queryable answer to *"given this entity, what is related to it, and how do I
-get its telemetry?"* OpenTelemetry standardises the write side and has a
-settled *entity-identity* model, but explicitly defers **entity relationships**
-and leaves the read-side catalog to backends — unclaimed territory GreptimeDB
-can lead in.
+All-in-one is the structural lever. In split stacks an entity catalog sits
+*above* the stores and stitches results in application code; here, correlation
+is a join inside one query engine, and the entity graph is a view over the
+same tables. The audience is broader than one product — alert routing,
+dashboards, impact analysis, MCP servers all need *"given this entity, what is
+related to it, and how do I get its telemetry?"* — and OpenTelemetry settles
+entity identity but explicitly defers entity relationships and the read-side
+catalog to backends: unclaimed territory.
 
 # Goals
 
@@ -110,30 +105,22 @@ eBPF tools (Hubble/Pixie), plus SQL/PGQ implementations (DuckPGQ, Spanner
 Graph). The facts that shaped it:
 
 - **OTel settles entity identity, not relationships.** An entity is
-  `(type, identifying attributes, descriptive attributes)`; identity follows
-  the *Minimally Sufficient Id* rule (a service is `service.name`, a process is
-  `(pid, start_time)`). Entity-to-entity relationships are explicitly deferred
-  ("not yet supported"); the de-facto mechanism that works today is **join by
-  shared identifying attribute**, which maps cleanly onto a relational model.
-- **Vendors converge on a small, typed, inverse-paired edge vocabulary**
-  (containment + dependency + call + hosting + ownership), with trace-derived
-  tools using a single `calls` edge qualified by attributes. The best products
-  derive aggressively, let users supplement, and **mark provenance**.
-- **Edges expire; topology is a sliding time window.** New Relic edges TTL out
-  in ~75 minutes; Tempo pairs spans in a bounded window; no vendor treats
-  derived topology as permanent. For a TSDB the natural form is **edges as
-  time-ranged facts**.
-- **The service graph is span pairing.** Pair `span.kind=client` with its child
-  `span.kind=server` on `trace_id`+`parent_span_id`, project to `service.name`,
-  aggregate RED metrics — exactly the OTel Collector `servicegraph` connector.
-  Pairing needs trace-locality; a database holding the whole trace table gets
-  it for free as a self-join.
-- **SQL/PGQ adds graph query without a graph store.** Property graphs are
-  view-like objects over existing tables; fixed-length `MATCH` compiles to
-  joins. DuckPGQ proves the model inside an analytical columnar engine — the
-  direct analog of DataFusion extension points. Apache AGE (own per-label
-  storage) is the model this RFC rejects. `WITH RECURSIVE` is the baseline
-  already in SQL.
+  `(type, identifying attributes, descriptive attributes)` under the
+  *Minimally Sufficient Id* rule (a service is `service.name`, disambiguated
+  by `service.namespace` when set; a process is `(pid, start_time)`).
+  Relationships are explicitly deferred; the de-facto mechanism today is join
+  by shared identifying attribute — which maps cleanly onto a relational model.
+- **No vendor treats derived topology as permanent** — edges TTL out (New
+  Relic ~75 min) and span pairing runs in bounded windows; for a TSDB the
+  natural form is edges as time-ranged facts.
+- **The service graph is span pairing** (`client`/`server` on
+  `trace_id`+`parent_span_id`, RED aggregation — the OTel Collector
+  `servicegraph` connector). Pairing needs trace-locality; a database holding
+  the whole trace table gets it for free as a self-join.
+- **SQL/PGQ adds graph query without a graph store**: property graphs are
+  view-like objects over existing tables, `MATCH` compiles to joins; DuckPGQ
+  proves the model inside an analytical columnar engine. Apache AGE (own
+  per-label storage) is the model this RFC rejects.
 
 | Decision | Borrowed from |
 | --- | --- |
@@ -176,12 +163,10 @@ The same observations form one graph at two resolutions:
   window.
 
 Agent events need no new signal type: they ride the existing `trace`/`event`
-signals with GenAI semantic conventions, and join the graph through ordinary
-entity declarations (`agent`, `session`, `model`, `tool`). An agent may also
-*assert* edges it inferred; those carry `provenance = 'agent'` and a
-`confidence < 1.0`, and must stay visibly distinct from observed structure —
-an LLM-inferred edge masquerading as a trace-derived dependency is dangerous
-on an RCA path.
+signals with GenAI semantic conventions and join the graph through ordinary
+entity declarations (`agent`, `session`, `model`, `tool`). Agent-*asserted*
+edges carry `provenance = 'agent'` and `confidence < 1.0` — an LLM-inferred
+edge must stay visibly distinct from observed structure on an RCA path.
 
 ## Overview: four layers
 
@@ -290,11 +275,16 @@ well-known label sets receives implicit declarations:
 | `node` | `k8s.node` | same |
 | `namespace` | `k8s.namespace` | same |
 
-This is what connects the graph to metrics. A `service` node derived from a
-metric table's `job` label and the one derived from a trace table's
-`service_name` unify on the entity id, so a single node's `source_tables`
-spans both signals and "the neighbours' telemetry" reaches metric tables
-without any user declaration.
+This is what connects the graph to metrics — with one caveat the
+compatibility spec itself creates: `job` is `<service.namespace>/<service.name>`
+when a namespace is set, while a trace table's default identity is the bare
+`service_name`. The metric- and trace-derived `service` nodes therefore unify
+automatically only when `service.namespace` is empty (so `job` equals
+`service.name`) and `job` was not relabeled; otherwise alignment needs
+pipeline normalization or explicit declarations naming identity columns that
+carry the same values. When the ids do align, the same entity appears from
+both signals (each row keeping its own `source_tables` lineage), and "the
+neighbours' telemetry" reaches metric tables without any user declaration.
 
 `*_info` metrics are entity descriptors, and their rows witness edges under
 the same-row co-declaration rule (3b): `kube_pod_info` carries `pod`,
@@ -308,10 +298,11 @@ compatibility spec), enriches the `service` entity's descriptive attributes.
 **Prometheus Remote Write 2.0 metadata.** RW 2.0 carries metric type, help,
 and unit inline with each series (the metadata sub-fields SHOULD be provided),
 where 1.x had no reliable in-protocol metadata (RW 2.0 support is tracked in
-[#4765](https://github.com/GreptimeTeam/greptimedb/issues/4765)). Ingestion consumes them into
-the semantic vocabulary — `metric.type`, `metric.unit`,
-`metadata_quality = declared` — so the graph's metric-side descriptive
-metadata is trustworthy instead of suffix-guessed.
+[#4765](https://github.com/GreptimeTeam/greptimedb/issues/4765)). Feeding them
+into the semantic vocabulary — `metric.type`, `metric.unit`,
+`metadata_quality = declared` — makes the graph's metric-side descriptive
+metadata trustworthy instead of suffix-guessed; this intake is an M1 work
+item, alongside the implicit declarations above.
 
 **Vocabulary mechanism.** The semantic vocabulary is a closed whitelist, but
 entity types are open-ended (`service`, `host`, `k8s.pod`, custom), so the
@@ -468,8 +459,11 @@ Normative for the read-time graph:
 
 A self-join of each `greptime_trace_v1` table (recognised by its
 `table_data_model` option): pair each client span with its child server span,
-project to `service_name`, aggregate RED metrics per 60s window — the SQL form
-of the Tempo servicegraph connector. The defining query:
+project to the service identity, aggregate RED metrics per 60s window — the
+SQL form of the Tempo servicegraph connector. The defining query, shown in its
+simplified form for the default single-column `service_name` declaration (in
+general every `service_name` reference below stands for the
+declaration-derived id expression):
 
 ```sql
 SELECT
@@ -536,8 +530,7 @@ rule-based, not join-everything:
 
 Per declaring table, a filter(window) → project(bin, casts, JSON assembly) →
 `DISTINCT` plan; the per-table results are unioned without a cross-source
-merge, giving the one-row-per-(window, entity, contributing table) contract
-above. Rows whose identity columns are NULL identify nothing and are filtered
+merge, giving the per-observation row contract above. Rows whose identity columns are NULL identify nothing and are filtered
 out. Single-column ids are used verbatim; composite ids render the sorted
 `k=v` form plus the `entity_id_attrs` JSON.
 
@@ -558,8 +551,8 @@ in the PoC). Bounded-hop traversal over a relationship set that is small
 relative to raw telemetry is the performance contract.
 
 The ISO SQL/PGQ surface is ergonomics over the same data. SQL/PGQ requires the
-vertex key to uniquely identify a vertex, and the fact tables have one row per
-window (and per contributing table for entities) — so the property graph is
+vertex key to uniquely identify a vertex, and the fact tables have one row
+per window and, for entities, per source observation — so the property graph is
 defined over a **snapshot relation**, not the raw fact tables:
 `semantic_graph_snapshot(start, end)` aggregates the queried range into one
 row per entity (vertex key `(entity_type, entity_id)`, `source_tables`
@@ -607,12 +600,10 @@ window.
 
 # Worked Example: diagnosing a slow-query alert
 
-A GreptimeDB self-monitoring scenario, end to end:
+A GreptimeDB self-monitoring scenario: a slow-query alert fires, the agent
+reads the alert entity (a `frontend` instance from the alert labels), then:
 
-1. **Alert** fires on `max_over_time(sql_query_duration_seconds[1m]) > 5`.
-2. The agent reads the alert entity (a `frontend` instance from the alert
-   labels) and recent entries from the `slow_queries` system table.
-3. **Frontend → its dependencies** (datanode, metasrv) via the graph — the
+1. **Frontend → its dependencies** (datanode, metasrv) via the graph — the
    step that was impossible before:
 
    ```sql
@@ -625,16 +616,14 @@ A GreptimeDB self-monitoring scenario, end to end:
 
    These `calls` edges are derived from GreptimeDB's own internal traces; the
    topology is not hand-maintained.
-4. **Dependencies → their telemetry**: join the neighbour set back to the
+2. **Dependencies → their telemetry**: join the neighbour set back to the
    datanode/metasrv metric tables.
-5. **Descend to evidence**: from the suspect edge, fetch the slowest witnessing
+3. **Descend to evidence**: from the suspect edge, fetch the slowest witnessing
    server spans in the window, then the logs emitted inside those spans by
-   `(trace_id, span_id)` — exact, request-level correlation, one query in the
-   all-in-one store.
+   `(trace_id, span_id)` — exact, request-level correlation in one query.
 
-The agent hands the LLM not just "frontend depends on datanode" but the
-specific slow requests and the log lines inside them — the difference between
-a topology hint and a root cause.
+The agent hands the LLM not a topology hint but the specific slow requests and
+the log lines inside them — the difference from a root cause.
 
 # PoC Validation
 
@@ -642,14 +631,12 @@ Validated against live GreptimeDB instances holding agent events (~90k rows),
 Prometheus self-monitoring metrics (451 tables), and real OTel traces (1.8M
 spans of coding-agent telemetry):
 
-- Entity discovery is a read-time `DISTINCT`/`GROUP BY`; the edge aggregate
-  over ~54k rows ran in ~31 ms.
-- Parent→child span pairing produced a real call graph; multi-hop traversal
-  via `WITH RECURSIVE` walked a real trace tree to depth 10 (~300 nodes).
+- Entity discovery is a read-time `DISTINCT`/`GROUP BY` (edge aggregate over
+  ~54k rows: ~31 ms); span pairing produced a real call graph, and
+  `WITH RECURSIVE` walked a real trace tree to depth 10 (~300 nodes).
 - Cross-signal correlation is a join on shared keys (`trace_id`,
-  `gen_ai.request.model`).
-- Agent events land as ordinary trace-signal tables with flattened `gen_ai.*`
-  columns — no new signal type needed.
+  `gen_ai.request.model`); agent events land as ordinary trace-signal tables —
+  no new signal type needed.
 - GreptimeDB already auto-derives `opentelemetry_traces_services` /
   `_operations` — a deduplicated distinct-entity table, the precedent
   `semantic_entities` generalises.
@@ -666,10 +653,12 @@ validation and the id-columns-must-be-tags DDL check; auto-stamp of
 
 **M1 — The read-time graph.** The computed tables in `greptime_private`,
 read-only, derived via typed DataFusion plans with JSON-typed output columns:
-the entity registry and the trace-derived `calls` edge first, then virtual
-nodes, attribute-derived edges, agent edges, the declared-edge table and its
-union, and the derivation contract (caller authorization, explicit time
-windows). Queryable with plain SQL and `WITH RECURSIVE` throughout.
+the entity registry and the trace-derived `calls` edge first, then the
+Prometheus/Kubernetes implicit declarations and Remote Write 2.0 metadata
+intake, virtual nodes, attribute-derived edges, agent edges, the declared-edge
+table and its union, and the derivation contract (caller authorization,
+explicit time windows). Queryable with plain SQL and `WITH RECURSIVE`
+throughout.
 
 **M2 — Query ergonomics.** The snapshot relation, `CREATE PROPERTY GRAPH` +
 `GRAPH_TABLE`/`MATCH` (single-hop, then bounded variable-length) compiled to
@@ -702,8 +691,9 @@ directly.
    (New-Relic-style) for large graphs; typed value encoding; the criteria for
    introducing the `semantic_key=column` mapping form of the declaration;
    `schema_url`-gated entity merge.
-2. **Identity reconciliation across signals.** Trace edges key on
-   `service.name`; host edges key on `host.id`/`k8s.pod.uid`. Linking them
+2. **Identity reconciliation across signals.** Trace edges key on the trace
+   table's service declaration; host edges key on `host.id`/`k8s.pod.uid`.
+   Linking them
    relies on tables carrying both columns; how aggressively to enrich (a
    `k8sattributes`-equivalent) gates how connected the graph is.
 3. **`GRAPH_TABLE` surface scope.** How much of SQL/PGQ to implement vs. a
@@ -744,10 +734,10 @@ GreptimeDB:
 - [Dataflow framework RFC](2024-01-17-dataflow-framework.md)
 - [Inverted index RFC](2023-11-03-inverted-index.md)
 
-OpenTelemetry:
+OpenTelemetry / Prometheus:
 - [Entity data model](https://opentelemetry.io/docs/specs/otel/entities/data-model/)
-- [OTEP 0256 — Entities data model](https://github.com/open-telemetry/oteps/blob/main/text/entities/0256-entities-data-model.md)
-- [OTEP 0264 — Resource and entities](https://github.com/open-telemetry/oteps/blob/main/text/entities/0264-resource-and-entities.md)
+- [Prometheus and OpenMetrics compatibility](https://opentelemetry.io/docs/specs/otel/compatibility/prometheus_and_openmetrics/)
+- [Prometheus Remote Write 2.0](https://prometheus.io/docs/specs/prw/remote_write_spec_2_0/)
 - [Tempo service graphs](https://grafana.com/docs/tempo/latest/metrics-from-traces/service_graphs/)
 - [servicegraph connector](https://github.com/open-telemetry/opentelemetry-collector-contrib/blob/main/connector/servicegraphconnector/README.md)
 
@@ -761,7 +751,4 @@ Vendor entity/relationship models:
 
 Graph query in SQL:
 - [DuckPGQ — SQL/PGQ in an analytical RDBMS (VLDB'23)](https://www.vldb.org/pvldb/vol16/p4034-wolde.pdf)
-- [DuckPGQ (CIDR'23)](https://www.cidrdb.org/cidr2023/papers/p66-wolde.pdf)
 - [Spanner Graph schema statements](https://docs.cloud.google.com/spanner/docs/reference/standard-sql/graph-schema-statements)
-- [GQL: the ISO standard for graphs (AWS)](https://aws.amazon.com/blogs/database/gql-the-iso-standard-for-graphs-has-arrived/)
-- [DuckDB USING KEY recursive CTEs](https://duckdb.org/2025/05/23/using-key)
