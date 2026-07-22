@@ -150,7 +150,7 @@ select j.a, j.a.x from json2_table order by ts;
 | {"b":-2}                          |                                     |
 | {"b":3}                           |                                     |
 | {"b":-4}                          |                                     |
-| {"b":null}                        |                                     |
+|                                   |                                     |
 |                                   |                                     |
 | {"b":"s7"}                        |                                     |
 | {"b":8}                           |                                     |

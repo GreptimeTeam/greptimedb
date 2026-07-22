@@ -114,6 +114,7 @@ fn json_variant_into_struct_value(
 fn json_variant_into_value(value: JsonVariant, expected_type: &ConcreteDataType) -> Result<Value> {
     let value = match (value, expected_type) {
         (JsonVariant::Null, _) | (_, ConcreteDataType::Null(_)) => Value::Null,
+        (JsonVariant::Object(object), _) if object.is_empty() => Value::Null,
         (JsonVariant::Bool(x), ConcreteDataType::Boolean(_)) => Value::Boolean(x),
         (JsonVariant::Number(x), ConcreteDataType::UInt64(_)) => {
             let Some(x) = x.as_u64() else {
@@ -247,7 +248,7 @@ impl MutableVector for JsonVectorBuilder {
     }
 
     fn to_vector(&mut self) -> VectorRef {
-        self.try_build().unwrap_or_else(|e| panic!("{}", e))
+        self.try_build().unwrap_or_else(|e| panic!("{:?}", e))
     }
 
     fn to_vector_cloned(&self) -> VectorRef {
@@ -420,6 +421,14 @@ mod tests {
 
     #[test]
     fn test_json_variant_into_struct_value() -> Result<()> {
+        assert_eq!(
+            json_variant_into_value(
+                JsonVariant::Object(Default::default()),
+                &ConcreteDataType::string_datatype(),
+            )?,
+            Value::Null
+        );
+
         let item_type =
             ConcreteDataType::struct_datatype(StructType::new(Arc::new(vec![StructField::new(
                 "id".to_string(),
