@@ -1,3 +1,17 @@
+FROM golang:1.23@sha256:e87b2a5f6df2dff71ea330d55d54f4979eb380ae58a7e3aabc9d53121243e689 AS otelgen
+
+ARG OTELGEN_COMMIT=863a3f395d062c7322cc1de08a38774b7fdaa6c8
+
+RUN git init /tmp/otelgen \
+    && git -C /tmp/otelgen remote add origin https://github.com/WenyXu/otelgen.git \
+    && git -C /tmp/otelgen fetch --depth=1 origin "${OTELGEN_COMMIT}" \
+    && test "$(git -C /tmp/otelgen rev-parse FETCH_HEAD)" = "${OTELGEN_COMMIT}" \
+    && git -C /tmp/otelgen checkout --detach FETCH_HEAD \
+    && cd /tmp/otelgen \
+    && CGO_ENABLED=0 go build -trimpath \
+        -ldflags "-s -w -X main.version=${OTELGEN_COMMIT} -X main.commit=${OTELGEN_COMMIT}" \
+        -o /usr/local/bin/otelgen ./cmd/otelgen
+
 FROM ghcr.io/astral-sh/uv@sha256:3d868e555f8f1dbc324afa005066cd11e1053fc4743b9808ca8025283e65efa5 AS uv
 FROM ghcr.io/actions/actions-runner@sha256:08c30b0a7105f64bddfc485d2487a22aa03932a791402393352fdf674bda2c29
 
@@ -43,6 +57,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=uv /uv /uvx /usr/local/bin/
+COPY --from=otelgen /usr/local/bin/otelgen /usr/local/bin/otelgen
 
 RUN curl --fail --location --silent --show-error \
         --output /tmp/sccache.tar.gz \

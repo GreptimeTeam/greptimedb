@@ -286,6 +286,8 @@ jobs:
           mold_version="$(mold --version)"
           [[ "${mold_version}" =~ ^mold[[:space:]]2\.30\.0([[:space:]]|$) ]]
           [[ "$(python3 --version)" == "Python 3.12.3" ]]
+          [[ "$(command -v otelgen)" == "/usr/local/bin/otelgen" ]]
+          [[ "$(otelgen --version)" == *"863a3f395d062c7322cc1de08a38774b7fdaa6c8"* ]]
           sccache_version="$(sccache --version)"
           [[ "${sccache_version}" =~ ^sccache[[:space:]]0\.16\.0([[:space:]]|$) ]]
           [[ "$(command -v rustup)" == "/opt/cargo/bin/rustup" ]]
@@ -558,9 +560,12 @@ jobs:
           git reset --hard "${VERIFIED_CANDIDATE_SHA}"
           git clean -ffdx
 
-      - name: Test query regression runner lifecycle
+      - name: Test query regression tooling
         working-directory: src
-        run: uv run --no-project python tests/perf/test_query_regression_runner_compaction_toctou.py
+        run: |
+          uv run --no-project python tests/perf/test_query_regression_runner_compaction_toctou.py
+          uv run --no-project python tests/perf/test_query_regression_runner_otlp_trace_load.py
+          uv run --no-project python tests/perf/test_query_regression_summary_otlp.py
 
       - name: Build candidate greptime and fixture generators
         working-directory: src
@@ -594,11 +599,13 @@ jobs:
           BASE_BIN: ${{ github.workspace }}/query-regression-bins/base/greptime
           CANDIDATE_BIN: ${{ github.workspace }}/query-regression-bins/candidate/greptime
           FIXTURE_GENERATOR: ${{ github.workspace }}/query-regression-bins/candidate/query_perf_fixture
+          OTELGEN_BIN: /usr/local/bin/otelgen
+          SUMMARY_SCRIPT: ${{ github.event_name == 'pull_request' && 'query-regression-trusted-scripts/query-regression-summary.py' || 'src/.github/scripts/query-regression-summary.py' }}
         run: >-
           uv run --no-project python src/.github/scripts/query-regression-run.py
           --base-src src
           --candidate-src src
-          --summary-script query-regression-trusted-scripts/query-regression-summary.py
+          --summary-script "${SUMMARY_SCRIPT}"
 
       - name: Write PR metadata for trusted comment workflow
         if: ${{ always() && github.event_name == 'pull_request' }}
@@ -622,6 +629,7 @@ jobs:
             query-regression-work/**/base/report.json
             query-regression-work/**/candidate/report.json
             query-regression-work/**/logs/**
+            query-regression-work/**/otelgen/**
             query-regression-summary.md
           if-no-files-found: warn
           retention-days: 7

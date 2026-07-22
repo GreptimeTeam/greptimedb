@@ -208,6 +208,75 @@ in 1440-sample daily time chunks, flushing after each chunk before running 1d/7d
 TQL selectors. It is not included in the default case set because ingestion cost
 dominates routine CI validation.
 
+## OTLP trace load scenario
+
+`scenario.kind = "otlp_trace_load"` runs a bounded native `otelgen` process
+against each local distributed cluster. The runner excludes the configured
+warmup window, derives throughput and mean request latency from GreptimeDB's
+OTLP-specific metrics, flushes the trace table, and verifies its row count
+against the accepted-span counter. The case is intentionally outside the
+default set until its variance is known.
+
+Build base/candidate `greptime` binaries with the same profile, build the
+candidate `query_perf_fixture`, then run the case explicitly:
+
+```bash
+WORK_DIR="$(mktemp -d /tmp/query-perf-otlp.XXXXXX)"
+python3 tests/perf/query_regression_runner.py \
+  --case tests/perf/query_cases/otlp_trace_load/case.toml \
+  --base-bin /path/to/base/target/nightly/greptime \
+  --candidate-bin /path/to/candidate/target/nightly/greptime \
+  --fixture-generator /path/to/candidate/target/nightly/query_perf_fixture \
+  --otelgen-bin /path/to/otelgen \
+  --work-dir "$WORK_DIR"
+```
+
+After the run, print the relevant result fields with `jq`:
+
+```bash
+REPORT="$WORK_DIR/query-regression-report.json"
+jq '{
+  status,
+  targets: [.targets[] | {
+    target: .name,
+    accepted_spans: .metrics.accepted_spans,
+    table_rows: .visibility.observed_rows,
+    spans_per_second: .metrics.accepted_spans_per_second,
+    mean_latency_ms: .metrics.mean_http_latency_ms,
+    failures: .metrics.failure_count
+  }],
+  thresholds
+}' "$REPORT"
+```
+
+For each target, `accepted_spans` should equal `table_rows`, and `failures`
+should stay within `max_failure_count`. Throughput is better when
+`spans_per_second` is higher; its `actual_pct` is
+`(base - candidate) / base * 100`. Latency is better when `mean_latency_ms` is
+lower; its `actual_pct` is `(candidate - base) / base * 100`. A positive
+`actual_pct` is a candidate regression, while a negative value is an
+improvement. The case passes when every `actual_pct` is at or below its
+`limit_pct` and every failure-count threshold passes. For local results, run
+the case at least three times on an otherwise idle machine and compare the
+median regressions rather than relying on one run.
+
+The CI runner image includes the pinned `otelgen` binary. Until this case is
+added to the default set, run it explicitly with `workflow_dispatch`:
+
+```bash
+gh workflow run query-regression.yml \
+  --ref <workflow-branch> \
+  -f case=tests/perf/query_cases/otlp_trace_load/case.toml \
+  -f base_ref=<full-base-sha> \
+  -f candidate_ref=<full-candidate-sha> \
+  -f cargo_profile=nightly \
+  -f http_timeout=300 \
+  -f runner=perf-regression-8-cores
+```
+
+The selected ARC scale set must already be deployed with the runner-image
+digest built from the current query-regression Dockerfile.
+
 ## Generator contract
 
 The direct-SST generator should accept a case definition with:

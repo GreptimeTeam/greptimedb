@@ -125,6 +125,28 @@ fn run_plan(args: PlanArgs) -> Result<(), Box<dyn std::error::Error>> {
             return Err("scenario.remote_write.read_bench requires scenario.remote_write.storage.inspect = true".into());
         }
     }
+    if let Scenario::OtlpTraceLoad(s) = &case.scenario {
+        if s.load.warmup_seconds >= s.load.duration_seconds.get() {
+            return Err("scenario.load.warmup_seconds must be less than duration_seconds".into());
+        }
+        for (name, value) in [
+            (
+                "max_candidate_throughput_regression_pct",
+                s.load.thresholds.max_candidate_throughput_regression_pct,
+            ),
+            (
+                "max_candidate_mean_latency_regression_pct",
+                s.load.thresholds.max_candidate_mean_latency_regression_pct,
+            ),
+        ] {
+            if !value.is_finite() || value < 0.0 {
+                return Err(format!(
+                    "scenario.load.thresholds.{name} must be a finite non-negative number"
+                )
+                .into());
+            }
+        }
+    }
     println!(
         "{}",
         serde_json::to_string_pretty(&json!({"schema_version": 1, "scenario": case.scenario}))?
