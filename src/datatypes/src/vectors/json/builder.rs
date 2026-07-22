@@ -191,6 +191,10 @@ pub(crate) fn json_variant_into_projected_value(
                     object
                         .remove(field.name())
                         .map(|value| {
+                            // A dynamically typed JSON field may not match the corresponding field
+                            // type in the projected Arrow schema. Treat only the mismatched field as
+                            // SQL NULL so the enclosing value remains readable. Errors other than
+                            // type mismatches are preserved.
                             null_on_json_type_mismatch(json_variant_into_projected_value(
                                 value,
                                 field.data_type(),
@@ -207,6 +211,7 @@ pub(crate) fn json_variant_into_projected_value(
             let values = array
                 .into_iter()
                 .map(|value| {
+                    // Apply the same mismatch-to-NULL rule to each list item.
                     null_on_json_type_mismatch(json_variant_into_projected_value(value, &item_type))
                 })
                 .collect::<Result<Vec<_>>>()?;
