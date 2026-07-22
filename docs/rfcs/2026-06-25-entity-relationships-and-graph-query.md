@@ -289,11 +289,16 @@ neighbours' telemetry" reaches metric tables without any user declaration.
 `*_info` metrics are entity descriptors, and their rows witness edges under
 the same-row co-declaration rule (3b): `kube_pod_info` carries `pod`,
 `namespace`, and `node` in one row — deriving `k8s.pod runs_on k8s.node` plus
-descriptive attributes (`host_ip`, `pod_ip`, `created_by_*`); `kube_pod_owner`
-carries the pod and its `owner_kind`/`owner_name` — `part_of` edges to
-workloads. `target_info`, the OTLP-over-Prometheus resource metric (labelled
-by `job` and `instance` plus the remaining resource attributes, per the same
-compatibility spec), enriches the `service` entity's descriptive attributes.
+descriptive attributes (`host_ip`, `pod_ip`, `created_by_*`). Two more fixed
+rules complete the pack, again without new syntax:
+
+- `kube_pod_owner` implicitly declares a `k8s.workload` entity with id
+  `(namespace, owner_kind, owner_name)` — the kind is part of the identity, so
+  no dynamic entity typing is needed — and its rows derive
+  `k8s.pod part_of k8s.workload`.
+- For `target_info` (the OTLP-over-Prometheus resource metric, per the same
+  compatibility spec) the labels other than `job` and `instance` are implicit
+  *descriptive* columns of the `service` entity.
 
 **Prometheus Remote Write 2.0 metadata.** RW 2.0 carries metric type, help,
 and unit inline with each series (the metadata sub-fields SHOULD be provided),
@@ -335,7 +340,7 @@ and a unique node set is the job of the snapshot relation (Layer 4).
 | `window_start` / `window_end` | TIMESTAMP(3) | observation window |
 | `fresh_until` | TIMESTAMP(3) | presence horizon (= `window_end` for derived rows) |
 | `entity_type` | STRING | `service`, `host`, `k8s.pod`, ... |
-| `entity_id` | STRING | canonical id (see encoding below) |
+| `entity_id` | STRING | v1 storage-level id (see encoding below) |
 | `entity_id_attrs` | JSON | identifying attributes; source of truth for composite ids; NULL for single-attribute ids |
 | `scope` | STRING | namespace/environment; `''` if none |
 | `descriptive` | JSON | snapshot of descriptive attributes |
@@ -392,8 +397,8 @@ Design notes:
 | `rel_type` | Meaning (src → dst) | Primary provenance | Inverse (query) |
 | --- | --- | --- | --- |
 | `calls` | `service` calls `service` | trace | `called_by` |
-| `runs_on` | `service.instance`/`process` runs on `host`/`node` | attribute | `hosts` |
-| `contains` | `node`→`pod`, `pod`→`container` | attribute/declared | `part_of` |
+| `runs_on` | `service.instance`/`process`/`k8s.pod` runs on `host`/`node` | attribute | `hosts` |
+| `contains` | `pod`→`container` | attribute/declared | `part_of` |
 | `part_of` | `service.instance` is part of `service` | attribute/declared | `has_instance` |
 | `depends_on` | logical/declared dependency | declared | `dependency_of` |
 | `owns` | team/service owns dst | declared | `owned_by` |
@@ -685,7 +690,7 @@ directly.
 
 # Open Questions
 
-1. **Endpoint encoding hardening.** The canonical `k=v` rendering (with
+1. **Endpoint encoding hardening.** The v1 `k=v` rendering (with
    `entity_id_attrs` JSON as the source of truth) is readable but collides
    when values contain `,`/`=`. Open: a fixed-width `entity_id_hash` join key
    (New-Relic-style) for large graphs; typed value encoding; the criteria for
