@@ -695,7 +695,7 @@ impl BatchingTask {
                             }
                         }
                         Err(err) => {
-                            warn!(
+                            debug!(
                                 "Failed to unparse full-snapshot SQL flow {} plan; \
                                  falling back to InsertIntoPlan: {:?}",
                                 flow_id, err
