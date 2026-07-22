@@ -14,6 +14,8 @@ order by table_schema, table_name;
 +++++++++++++++++++++++++
 |table_catalog|table_schema|table_name|table_type|table_id|data_length|max_data_length|index_length|max_index_length|avg_row_length|engine|version|row_format|table_rows|data_free|auto_increment|create_time|update_time|check_time|table_collation|checksum|create_options|table_comment|temporary|
 +++++++++++++++++++++++++
+|greptime|greptime_private|semantic_entities|LOCALTEMPORARY|45|0|0|0|0|0||11|Fixed|0|0|0|DATETIME|DATETIME||utf8_bin|0|||Y|
+|greptime|greptime_private|semantic_relationships|LOCALTEMPORARY|46|0|0|0|0|0||11|Fixed|0|0|0|DATETIME|DATETIME||utf8_bin|0|||Y|
 |greptime|information_schema|build_info|LOCALTEMPORARY|8|0|0|0|0|0||11|Fixed|0|0|0|DATETIME|DATETIME||utf8_bin|0|||Y|
 |greptime|information_schema|character_sets|LOCALTEMPORARY|9|0|0|0|0|0||11|Fixed|0|0|0|DATETIME|DATETIME||utf8_bin|0|||Y|
 |greptime|information_schema|check_constraints|LOCALTEMPORARY|12|0|0|0|0|0||11|Fixed|0|0|0|DATETIME|DATETIME||utf8_bin|0|||Y|
@@ -61,6 +63,34 @@ select * from information_schema.columns order by table_schema, table_name, colu
 +---------------+--------------------+---------------------------------------+-----------------------------------+------------------+--------------------------+------------------------+-------------------+---------------+--------------------+--------------------+----------------+------------+-------+---------------+-----------------------+----------------------+---------------------+---------------+----------------+-------------+---------------------+----------------+--------+
 | table_catalog | table_schema       | table_name                            | column_name                       | ordinal_position | character_maximum_length | character_octet_length | numeric_precision | numeric_scale | datetime_precision | character_set_name | collation_name | column_key | extra | privileges    | generation_expression | greptime_data_type   | data_type           | semantic_type | column_default | is_nullable | column_type         | column_comment | srs_id |
 +---------------+--------------------+---------------------------------------+-----------------------------------+------------------+--------------------------+------------------------+-------------------+---------------+--------------------+--------------------+----------------+------------+-------+---------------+-----------------------+----------------------+---------------------+---------------+----------------+-------------+---------------------+----------------+--------+
+| greptime      | greptime_private   | semantic_entities                     | descriptive                       | 9                | 2147483647               | 2147483647             |                   |               |                    | utf8               | utf8_bin       |            |       | select,insert |                       | String               | string              | FIELD         |                | YES         | string              |                |        |
+| greptime      | greptime_private   | semantic_entities                     | entity_id                         | 6                | 2147483647               | 2147483647             |                   |               |                    | utf8               | utf8_bin       |            |       | select,insert |                       | String               | string              | FIELD         |                | NO          | string              |                |        |
+| greptime      | greptime_private   | semantic_entities                     | entity_id_attrs                   | 7                | 2147483647               | 2147483647             |                   |               |                    | utf8               | utf8_bin       |            |       | select,insert |                       | String               | string              | FIELD         |                | YES         | string              |                |        |
+| greptime      | greptime_private   | semantic_entities                     | entity_type                       | 5                | 2147483647               | 2147483647             |                   |               |                    | utf8               | utf8_bin       |            |       | select,insert |                       | String               | string              | FIELD         |                | NO          | string              |                |        |
+| greptime      | greptime_private   | semantic_entities                     | fresh_until                       | 4                |                          |                        |                   |               | 3                  |                    |                |            |       | select,insert |                       | TimestampMillisecond | timestamp(3)        | FIELD         |                | YES         | timestamp(3)        |                |        |
+| greptime      | greptime_private   | semantic_entities                     | observed_at                       | 1                |                          |                        |                   |               | 3                  |                    |                |            |       | select,insert |                       | TimestampMillisecond | timestamp(3)        | FIELD         |                | NO          | timestamp(3)        |                |        |
+| greptime      | greptime_private   | semantic_entities                     | scope                             | 8                | 2147483647               | 2147483647             |                   |               |                    | utf8               | utf8_bin       |            |       | select,insert |                       | String               | string              | FIELD         |                | YES         | string              |                |        |
+| greptime      | greptime_private   | semantic_entities                     | source_tables                     | 10               | 2147483647               | 2147483647             |                   |               |                    | utf8               | utf8_bin       |            |       | select,insert |                       | String               | string              | FIELD         |                | YES         | string              |                |        |
+| greptime      | greptime_private   | semantic_entities                     | window_end                        | 3                |                          |                        |                   |               | 3                  |                    |                |            |       | select,insert |                       | TimestampMillisecond | timestamp(3)        | FIELD         |                | YES         | timestamp(3)        |                |        |
+| greptime      | greptime_private   | semantic_entities                     | window_start                      | 2                |                          |                        |                   |               | 3                  |                    |                |            |       | select,insert |                       | TimestampMillisecond | timestamp(3)        | FIELD         |                | YES         | timestamp(3)        |                |        |
+| greptime      | greptime_private   | semantic_relationships                | attributes                        | 18               | 2147483647               | 2147483647             |                   |               |                    | utf8               | utf8_bin       |            |       | select,insert |                       | String               | string              | FIELD         |                | YES         | string              |                |        |
+| greptime      | greptime_private   | semantic_relationships                | confidence                        | 11               |                          |                        | 22                |               |                    |                    |                |            |       | select,insert |                       | Float64              | double              | FIELD         |                | YES         | double              |                |        |
+| greptime      | greptime_private   | semantic_relationships                | dst_id                            | 8                | 2147483647               | 2147483647             |                   |               |                    | utf8               | utf8_bin       |            |       | select,insert |                       | String               | string              | FIELD         |                | NO          | string              |                |        |
+| greptime      | greptime_private   | semantic_relationships                | dst_type                          | 7                | 2147483647               | 2147483647             |                   |               |                    | utf8               | utf8_bin       |            |       | select,insert |                       | String               | string              | FIELD         |                | NO          | string              |                |        |
+| greptime      | greptime_private   | semantic_relationships                | duration_count                    | 17               |                          |                        | 19                | 0             |                    |                    |                |            |       | select,insert |                       | Int64                | bigint              | FIELD         |                | YES         | bigint              |                |        |
+| greptime      | greptime_private   | semantic_relationships                | duration_sum                      | 16               |                          |                        | 22                |               |                    |                    |                |            |       | select,insert |                       | Float64              | double              | FIELD         |                | YES         | double              |                |        |
+| greptime      | greptime_private   | semantic_relationships                | error_count                       | 15               |                          |                        | 19                | 0             |                    |                    |                |            |       | select,insert |                       | Int64                | bigint              | FIELD         |                | YES         | bigint              |                |        |
+| greptime      | greptime_private   | semantic_relationships                | fresh_until                       | 4                |                          |                        |                   |               | 3                  |                    |                |            |       | select,insert |                       | TimestampMillisecond | timestamp(3)        | FIELD         |                | YES         | timestamp(3)        |                |        |
+| greptime      | greptime_private   | semantic_relationships                | generation_id                     | 13               | 2147483647               | 2147483647             |                   |               |                    | utf8               | utf8_bin       |            |       | select,insert |                       | String               | string              | FIELD         |                | YES         | string              |                |        |
+| greptime      | greptime_private   | semantic_relationships                | observed_at                       | 1                |                          |                        |                   |               | 3                  |                    |                |            |       | select,insert |                       | TimestampMillisecond | timestamp(3)        | FIELD         |                | NO          | timestamp(3)        |                |        |
+| greptime      | greptime_private   | semantic_relationships                | provenance                        | 10               | 2147483647               | 2147483647             |                   |               |                    | utf8               | utf8_bin       |            |       | select,insert |                       | String               | string              | FIELD         |                | NO          | string              |                |        |
+| greptime      | greptime_private   | semantic_relationships                | rel_type                          | 9                | 2147483647               | 2147483647             |                   |               |                    | utf8               | utf8_bin       |            |       | select,insert |                       | String               | string              | FIELD         |                | NO          | string              |                |        |
+| greptime      | greptime_private   | semantic_relationships                | request_count                     | 14               |                          |                        | 19                | 0             |                    |                    |                |            |       | select,insert |                       | Int64                | bigint              | FIELD         |                | YES         | bigint              |                |        |
+| greptime      | greptime_private   | semantic_relationships                | scope                             | 12               | 2147483647               | 2147483647             |                   |               |                    | utf8               | utf8_bin       |            |       | select,insert |                       | String               | string              | FIELD         |                | YES         | string              |                |        |
+| greptime      | greptime_private   | semantic_relationships                | src_id                            | 6                | 2147483647               | 2147483647             |                   |               |                    | utf8               | utf8_bin       |            |       | select,insert |                       | String               | string              | FIELD         |                | NO          | string              |                |        |
+| greptime      | greptime_private   | semantic_relationships                | src_type                          | 5                | 2147483647               | 2147483647             |                   |               |                    | utf8               | utf8_bin       |            |       | select,insert |                       | String               | string              | FIELD         |                | NO          | string              |                |        |
+| greptime      | greptime_private   | semantic_relationships                | window_end                        | 3                |                          |                        |                   |               | 3                  |                    |                |            |       | select,insert |                       | TimestampMillisecond | timestamp(3)        | FIELD         |                | YES         | timestamp(3)        |                |        |
+| greptime      | greptime_private   | semantic_relationships                | window_start                      | 2                |                          |                        |                   |               | 3                  |                    |                |            |       | select,insert |                       | TimestampMillisecond | timestamp(3)        | FIELD         |                | YES         | timestamp(3)        |                |        |
 | greptime      | information_schema | build_info                            | git_branch                        | 1                | 2147483647               | 2147483647             |                   |               |                    | utf8               | utf8_bin       |            |       | select,insert |                       | String               | string              | FIELD         |                | NO          | string              |                |        |
 | greptime      | information_schema | build_info                            | git_clean                         | 4                | 2147483647               | 2147483647             |                   |               |                    | utf8               | utf8_bin       |            |       | select,insert |                       | String               | string              | FIELD         |                | NO          | string              |                |        |
 | greptime      | information_schema | build_info                            | git_commit                        | 2                | 2147483647               | 2147483647             |                   |               |                    | utf8               | utf8_bin       |            |       | select,insert |                       | String               | string              | FIELD         |                | NO          | string              |                |        |
@@ -632,11 +662,13 @@ from information_schema.tables
 where table_schema not in ('my_db', 'information_schema', 'pg_catalog')
 order by table_name;
 
-+------------+
-| table_name |
-+------------+
-| numbers    |
-+------------+
++------------------------+
+| table_name             |
++------------------------+
+| numbers                |
+| semantic_entities      |
+| semantic_relationships |
++------------------------+
 
 select table_catalog, table_schema, table_name, table_type, engine
 from information_schema.tables
@@ -646,11 +678,13 @@ where table_catalog = 'greptime'
   and table_schema != 'pg_catalog'
 order by table_schema, table_name;
 
-+---------------+--------------+------------+------------+--------+
-| table_catalog | table_schema | table_name | table_type | engine |
-+---------------+--------------+------------+------------+--------+
-| greptime      | my_db        | foo        | BASE TABLE | mito   |
-+---------------+--------------+------------+------------+--------+
++---------------+------------------+------------------------+-----------------+--------+
+| table_catalog | table_schema     | table_name             | table_type      | engine |
++---------------+------------------+------------------------+-----------------+--------+
+| greptime      | greptime_private | semantic_entities      | LOCAL TEMPORARY |        |
+| greptime      | greptime_private | semantic_relationships | LOCAL TEMPORARY |        |
+| greptime      | my_db            | foo                    | BASE TABLE      | mito   |
++---------------+------------------+------------------------+-----------------+--------+
 
 select table_catalog, table_schema, table_name, column_name, data_type, semantic_type
 from information_schema.columns
@@ -660,11 +694,39 @@ where table_catalog = 'greptime'
   and table_schema != 'pg_catalog'
 order by table_schema, table_name, column_name;
 
-+---------------+--------------+------------+-------------+--------------+---------------+
-| table_catalog | table_schema | table_name | column_name | data_type    | semantic_type |
-+---------------+--------------+------------+-------------+--------------+---------------+
-| greptime      | my_db        | foo        | ts          | timestamp(3) | TIMESTAMP     |
-+---------------+--------------+------------+-------------+--------------+---------------+
++---------------+------------------+------------------------+-----------------+--------------+---------------+
+| table_catalog | table_schema     | table_name             | column_name     | data_type    | semantic_type |
++---------------+------------------+------------------------+-----------------+--------------+---------------+
+| greptime      | greptime_private | semantic_entities      | descriptive     | string       | FIELD         |
+| greptime      | greptime_private | semantic_entities      | entity_id       | string       | FIELD         |
+| greptime      | greptime_private | semantic_entities      | entity_id_attrs | string       | FIELD         |
+| greptime      | greptime_private | semantic_entities      | entity_type     | string       | FIELD         |
+| greptime      | greptime_private | semantic_entities      | fresh_until     | timestamp(3) | FIELD         |
+| greptime      | greptime_private | semantic_entities      | observed_at     | timestamp(3) | FIELD         |
+| greptime      | greptime_private | semantic_entities      | scope           | string       | FIELD         |
+| greptime      | greptime_private | semantic_entities      | source_tables   | string       | FIELD         |
+| greptime      | greptime_private | semantic_entities      | window_end      | timestamp(3) | FIELD         |
+| greptime      | greptime_private | semantic_entities      | window_start    | timestamp(3) | FIELD         |
+| greptime      | greptime_private | semantic_relationships | attributes      | string       | FIELD         |
+| greptime      | greptime_private | semantic_relationships | confidence      | double       | FIELD         |
+| greptime      | greptime_private | semantic_relationships | dst_id          | string       | FIELD         |
+| greptime      | greptime_private | semantic_relationships | dst_type        | string       | FIELD         |
+| greptime      | greptime_private | semantic_relationships | duration_count  | bigint       | FIELD         |
+| greptime      | greptime_private | semantic_relationships | duration_sum    | double       | FIELD         |
+| greptime      | greptime_private | semantic_relationships | error_count     | bigint       | FIELD         |
+| greptime      | greptime_private | semantic_relationships | fresh_until     | timestamp(3) | FIELD         |
+| greptime      | greptime_private | semantic_relationships | generation_id   | string       | FIELD         |
+| greptime      | greptime_private | semantic_relationships | observed_at     | timestamp(3) | FIELD         |
+| greptime      | greptime_private | semantic_relationships | provenance      | string       | FIELD         |
+| greptime      | greptime_private | semantic_relationships | rel_type        | string       | FIELD         |
+| greptime      | greptime_private | semantic_relationships | request_count   | bigint       | FIELD         |
+| greptime      | greptime_private | semantic_relationships | scope           | string       | FIELD         |
+| greptime      | greptime_private | semantic_relationships | src_id          | string       | FIELD         |
+| greptime      | greptime_private | semantic_relationships | src_type        | string       | FIELD         |
+| greptime      | greptime_private | semantic_relationships | window_end      | timestamp(3) | FIELD         |
+| greptime      | greptime_private | semantic_relationships | window_start    | timestamp(3) | FIELD         |
+| greptime      | my_db            | foo                    | ts              | timestamp(3) | TIMESTAMP     |
++---------------+------------------+------------------------+-----------------+--------------+---------------+
 
 -- test query filter for columns --
 select table_catalog, table_schema, table_name, column_name, data_type, semantic_type

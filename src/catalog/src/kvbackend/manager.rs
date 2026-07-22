@@ -18,7 +18,8 @@ use std::sync::{Arc, OnceLock, Weak};
 
 use async_stream::try_stream;
 use common_catalog::consts::{
-    DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, INFORMATION_SCHEMA_NAME, PG_CATALOG_NAME,
+    DEFAULT_CATALOG_NAME, DEFAULT_PRIVATE_SCHEMA_NAME, DEFAULT_SCHEMA_NAME,
+    INFORMATION_SCHEMA_NAME, PG_CATALOG_NAME,
 };
 use common_error::ext::BoxedError;
 use common_meta::cache::{
@@ -54,14 +55,14 @@ use crate::error::{
     Result, TableMetadataManagerSnafu,
 };
 use crate::information_schema::{
-    EntityGraphProviderRef, InformationExtensionRef, InformationSchemaProvider,
-    InformationSchemaTableFactoryRef,
+    InformationExtensionRef, InformationSchemaProvider, InformationSchemaTableFactoryRef,
 };
 use crate::kvbackend::TableCacheRef;
 use crate::process_manager::ProcessManagerRef;
 use crate::system_schema::SystemSchemaProvider;
 use crate::system_schema::numbers_table_provider::NumbersTableProvider;
 use crate::system_schema::pg_catalog::PGCatalogProvider;
+use crate::system_schema::semantic_graph::{EntityGraphProviderRef, SemanticGraphTableProvider};
 
 /// Access all existing catalog, schema and tables.
 ///
@@ -595,6 +596,9 @@ impl SystemCatalog {
                 self.pg_catalog_provider.table_names()
             }
             DEFAULT_SCHEMA_NAME => self.numbers_table_provider.table_names(),
+            // Computed entity-graph tables overlay the physical tables of
+            // `greptime_private` (the caller appends these to the physical list).
+            DEFAULT_PRIVATE_SCHEMA_NAME => SemanticGraphTableProvider::table_names(),
             _ => vec![],
         }
     }
@@ -615,6 +619,8 @@ impl SystemCatalog {
             self.numbers_table_provider.table_exists(table)
         } else if schema == PG_CATALOG_NAME && channel == Channel::Postgres {
             self.pg_catalog_provider.table(table).is_some()
+        } else if schema == DEFAULT_PRIVATE_SCHEMA_NAME {
+            SemanticGraphTableProvider::table_exists(table)
         } else {
             false
         }
@@ -658,6 +664,12 @@ impl SystemCatalog {
             }
         } else if schema == DEFAULT_SCHEMA_NAME {
             self.numbers_table_provider.table(table_name)
+        } else if schema == DEFAULT_PRIVATE_SCHEMA_NAME {
+            // Constructed on demand: the provider is two Arc'd schemas, and the
+            // system catalog is consulted before physical resolution, so the
+            // computed tables shadow same-named physical tables by design.
+            SemanticGraphTableProvider::new(catalog.to_string(), self.catalog_manager.clone())
+                .table(table_name)
         } else {
             None
         }

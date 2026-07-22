@@ -17,9 +17,9 @@ use std::sync::atomic::AtomicBool;
 
 use cache::{PARTITION_INFO_CACHE_NAME, TABLE_FLOWNODE_SET_CACHE_NAME, TABLE_ROUTE_CACHE_NAME};
 use catalog::CatalogManagerRef;
-use catalog::information_schema::EntityGraphProviderRef;
 use catalog::kvbackend::KvBackendCatalogManager;
 use catalog::process_manager::ProcessManagerRef;
+use catalog::system_schema::semantic_graph::EntityGraphProviderRef;
 use common_base::Plugins;
 use common_event_recorder::EventRecorderImpl;
 use common_meta::cache::{LayeredCacheRegistryRef, TableRouteCacheRef};

@@ -730,11 +730,13 @@ WHERE c.relkind IN ('r','p','v','m','S','f','')
   AND pg_catalog.pg_table_is_visible(c.oid)
 ORDER BY 1,2;
 
-+--------+---------+-------+----------+
-| Schema | Name    | Type  | Owner    |
-+--------+---------+-------+----------+
-| public | numbers | table | postgres |
-+--------+---------+-------+----------+
++------------------+------------------------+-------+----------+
+| Schema           | Name                   | Type  | Owner    |
++------------------+------------------------+-------+----------+
+| greptime_private | semantic_entities      | table | postgres |
+| greptime_private | semantic_relationships | table | postgres |
+| public           | numbers                | table | postgres |
++------------------+------------------------+-------+----------+
 
 -- \dt
 -- SQLNESS PROTOCOL POSTGRES
@@ -751,11 +753,13 @@ WHERE c.relkind IN ('r','p','')
   AND pg_catalog.pg_table_is_visible(c.oid)
 ORDER BY 1,2;
 
-+--------+---------+-------+----------+
-| Schema | Name    | Type  | Owner    |
-+--------+---------+-------+----------+
-| public | numbers | table | postgres |
-+--------+---------+-------+----------+
++------------------+------------------------+-------+----------+
+| Schema           | Name                   | Type  | Owner    |
++------------------+------------------------+-------+----------+
+| greptime_private | semantic_entities      | table | postgres |
+| greptime_private | semantic_relationships | table | postgres |
+| public           | numbers                | table | postgres |
++------------------+------------------------+-------+----------+
 
 -- make sure oid of namespace keep stable
 -- SQLNESS PROTOCOL POSTGRES
@@ -819,12 +823,14 @@ WHERE c.relkind IN ('r','p','')
   AND pg_catalog.pg_table_is_visible(c.oid)
 ORDER BY 1,2;
 
-+--------+---------+-------+----------+
-| Schema | Name    | Type  | Owner    |
-+--------+---------+-------+----------+
-| my_db  | foo     | table | postgres |
-| public | numbers | table | postgres |
-+--------+---------+-------+----------+
++------------------+------------------------+-------+----------+
+| Schema           | Name                   | Type  | Owner    |
++------------------+------------------------+-------+----------+
+| greptime_private | semantic_entities      | table | postgres |
+| greptime_private | semantic_relationships | table | postgres |
+| my_db            | foo                    | table | postgres |
+| public           | numbers                | table | postgres |
++------------------+------------------------+-------+----------+
 
 -- show tables in `my_db`, `public`
 -- SQLNESS PROTOCOL POSTGRES
@@ -896,12 +902,14 @@ SELECT
             string_to_array(current_setting('search_path'),',') s
             ) THEN 0 ELSE 1 END, 1;
 
-+----------------+
-| table          |
-+----------------+
-| my_db.foo      |
-| public.numbers |
-+----------------+
++-----------------------------------------+
+| table                                   |
++-----------------------------------------+
+| greptime_private.semantic_entities      |
+| greptime_private.semantic_relationships |
+| my_db.foo                               |
+| public.numbers                          |
++-----------------------------------------+
 
 -- SQLNESS PROTOCOL POSTGRES
 SELECT quote_ident(column_name) AS "column", data_type AS "type"
@@ -943,11 +951,13 @@ where relnamespace in (
 )
 order by relnamespace, relname;
 
-+--------------+---------+---------+
-| relnamespace | relname | relkind |
-+--------------+---------+---------+
-| OID| foo     | r       |
-+--------------+---------+---------+
++--------------+------------------------+---------+
+| relnamespace | relname                | relkind |
++--------------+------------------------+---------+
+| OID| semantic_entities      | r       |
+| OID| semantic_relationships | r       |
+| OID| foo                    | r       |
++--------------+------------------------+---------+
 
 -- SQLNESS PROTOCOL POSTGRES
 use public;

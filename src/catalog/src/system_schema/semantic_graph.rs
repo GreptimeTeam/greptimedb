@@ -12,8 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! The computed entity-graph tables `information_schema.semantic_entities` and
-//! `information_schema.semantic_relationships`.
+//! The computed entity-graph tables `greptime_private.semantic_entities` and
+//! `greptime_private.semantic_relationships`.
+//!
+//! They live in `greptime_private`, not `information_schema`: scanning them
+//! triggers read-time derivation over telemetry tables (trace self-joins, ...),
+//! which breaks the "cheap, metadata-only" expectation users have of
+//! `information_schema`. `greptime_private` already signals "system-managed,
+//! computed data objects" and also hosts the physical declared-edge table
+//! (`semantic_relationships_declared`), so derived and declared edges share one
+//! schema.
 //!
 //! These are thin forwarders: their rows are derived at read time by the injected
 //! [`EntityGraphProvider`], which enumerates the `table_semantics` declarations,
@@ -26,8 +34,7 @@
 use std::sync::{Arc, Weak};
 
 use common_catalog::consts::{
-    INFORMATION_SCHEMA_SEMANTIC_ENTITIES_TABLE_ID,
-    INFORMATION_SCHEMA_SEMANTIC_RELATIONSHIPS_TABLE_ID,
+    DEFAULT_PRIVATE_SCHEMA_NAME, SEMANTIC_ENTITIES_TABLE_ID, SEMANTIC_RELATIONSHIPS_TABLE_ID,
 };
 use common_error::ext::BoxedError;
 use common_recordbatch::adapter::RecordBatchStreamAdapter;
@@ -39,12 +46,105 @@ use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use futures::TryStreamExt;
 use snafu::ResultExt;
 use store_api::storage::{ScanRequest, TableId};
+use table::TableRef;
 
-use super::{SEMANTIC_ENTITIES, SEMANTIC_RELATIONSHIPS};
 use crate::CatalogManager;
 use crate::error::{InternalSnafu, Result};
-use crate::system_schema::information_schema::InformationTable;
-use crate::system_schema::utils;
+use crate::system_schema::{SystemSchemaProviderInner, SystemTable, SystemTableRef, utils};
+
+/// Name of the computed entity registry table.
+pub const SEMANTIC_ENTITIES: &str = "semantic_entities";
+/// Name of the computed relationship (edge set) table.
+pub const SEMANTIC_RELATIONSHIPS: &str = "semantic_relationships";
+
+pub type EntityGraphProviderRef = Arc<dyn EntityGraphProvider>;
+
+/// Produces the rows of the computed entity-graph tables
+/// (`semantic_entities` / `semantic_relationships`) at read time.
+///
+/// The computed tables are thin forwarders to this provider, which is
+/// implemented above the query engine (in the frontend): it enumerates the entity
+/// declarations from `table_semantics`, builds the derivation SQL, and executes it.
+/// It is injected into the catalog manager *after* construction — the provider
+/// needs the engine, which needs the catalog manager — so this late binding breaks
+/// the `catalog -> query` dependency cycle. Keeping derivation out of `catalog`
+/// also respects the crate layering (the SQL builders live in `operator`). See
+/// `docs/rfcs/2026-06-25-entity-relationships-and-graph-query.md`.
+#[async_trait::async_trait]
+pub trait EntityGraphProvider: Send + Sync {
+    /// Produces the entity registry (`semantic_entities`) rows for `catalog`. The
+    /// graph is small relative to raw telemetry, so the provider collects the
+    /// derivation into batches (rather than a live stream), keeping the forwarding
+    /// table trivial.
+    async fn scan_entities(
+        &self,
+        catalog: &str,
+        request: ScanRequest,
+    ) -> std::result::Result<Vec<RecordBatch>, BoxedError>;
+
+    /// Produces the relationship set (`semantic_relationships`) rows for `catalog`.
+    async fn scan_relationships(
+        &self,
+        catalog: &str,
+        request: ScanRequest,
+    ) -> std::result::Result<Vec<RecordBatch>, BoxedError>;
+}
+
+/// Serves the computed graph tables under `greptime_private`, overlaid on the
+/// schema's physical tables the same way the `numbers` table overlays `public`
+/// (the system catalog is consulted before physical table resolution).
+pub struct SemanticGraphTableProvider {
+    catalog_name: String,
+    catalog_manager: Weak<dyn CatalogManager>,
+}
+
+impl SemanticGraphTableProvider {
+    pub fn new(catalog_name: String, catalog_manager: Weak<dyn CatalogManager>) -> Self {
+        Self {
+            catalog_name,
+            catalog_manager,
+        }
+    }
+
+    pub fn table_names() -> Vec<String> {
+        vec![
+            SEMANTIC_ENTITIES.to_string(),
+            SEMANTIC_RELATIONSHIPS.to_string(),
+        ]
+    }
+
+    pub fn table_exists(name: &str) -> bool {
+        name == SEMANTIC_ENTITIES || name == SEMANTIC_RELATIONSHIPS
+    }
+
+    pub fn table(&self, name: &str) -> Option<TableRef> {
+        self.build_table(name)
+    }
+}
+
+impl SystemSchemaProviderInner for SemanticGraphTableProvider {
+    fn catalog_name(&self) -> &str {
+        &self.catalog_name
+    }
+
+    fn schema_name() -> &'static str {
+        DEFAULT_PRIVATE_SCHEMA_NAME
+    }
+
+    fn system_table(&self, name: &str) -> Option<SystemTableRef> {
+        match name {
+            SEMANTIC_ENTITIES => Some(Arc::new(SemanticGraphTable::entities(
+                self.catalog_name.clone(),
+                self.catalog_manager.clone(),
+            )) as _),
+            SEMANTIC_RELATIONSHIPS => Some(Arc::new(SemanticGraphTable::relationships(
+                self.catalog_name.clone(),
+                self.catalog_manager.clone(),
+            )) as _),
+            _ => None,
+        }
+    }
+}
 
 fn ts() -> ConcreteDataType {
     ConcreteDataType::timestamp_millisecond_datatype()
@@ -183,18 +283,15 @@ enum GraphTableKind {
 }
 
 /// Forwarder for a computed entity-graph table.
-pub(super) struct InformationSchemaSemanticGraph {
+struct SemanticGraphTable {
     kind: GraphTableKind,
     schema: SchemaRef,
     catalog_name: String,
     catalog_manager: Weak<dyn CatalogManager>,
 }
 
-impl InformationSchemaSemanticGraph {
-    pub(super) fn entities(
-        catalog_name: String,
-        catalog_manager: Weak<dyn CatalogManager>,
-    ) -> Self {
+impl SemanticGraphTable {
+    fn entities(catalog_name: String, catalog_manager: Weak<dyn CatalogManager>) -> Self {
         Self {
             kind: GraphTableKind::Entities,
             schema: entities_schema(),
@@ -203,10 +300,7 @@ impl InformationSchemaSemanticGraph {
         }
     }
 
-    pub(super) fn relationships(
-        catalog_name: String,
-        catalog_manager: Weak<dyn CatalogManager>,
-    ) -> Self {
+    fn relationships(catalog_name: String, catalog_manager: Weak<dyn CatalogManager>) -> Self {
         Self {
             kind: GraphTableKind::Relationships,
             schema: relationships_schema(),
@@ -234,11 +328,11 @@ impl InformationSchemaSemanticGraph {
     }
 }
 
-impl InformationTable for InformationSchemaSemanticGraph {
+impl SystemTable for SemanticGraphTable {
     fn table_id(&self) -> TableId {
         match self.kind {
-            GraphTableKind::Entities => INFORMATION_SCHEMA_SEMANTIC_ENTITIES_TABLE_ID,
-            GraphTableKind::Relationships => INFORMATION_SCHEMA_SEMANTIC_RELATIONSHIPS_TABLE_ID,
+            GraphTableKind::Entities => SEMANTIC_ENTITIES_TABLE_ID,
+            GraphTableKind::Relationships => SEMANTIC_RELATIONSHIPS_TABLE_ID,
         }
     }
 

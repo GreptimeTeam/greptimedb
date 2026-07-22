@@ -120,12 +120,15 @@ pub const INFORMATION_SCHEMA_TABLE_SEMANTICS_TABLE_ID: u32 = 42;
 pub const INFORMATION_SCHEMA_STATISTICS_TABLE_ID: u32 = 43;
 /// id for information_schema.recycle_bin
 pub const INFORMATION_SCHEMA_RECYCLE_BIN_TABLE_ID: u32 = 44;
-/// id for information_schema.semantic_entities (computed entity registry)
-pub const INFORMATION_SCHEMA_SEMANTIC_ENTITIES_TABLE_ID: u32 = 45;
-/// id for information_schema.semantic_relationships (computed edge set)
-pub const INFORMATION_SCHEMA_SEMANTIC_RELATIONSHIPS_TABLE_ID: u32 = 46;
 
 // ----- End of information_schema tables -----
+
+// Computed system tables under `greptime_private` (same virtual-table id space
+// as the information_schema tables above).
+/// id for greptime_private.semantic_entities (computed entity registry)
+pub const SEMANTIC_ENTITIES_TABLE_ID: u32 = 45;
+/// id for greptime_private.semantic_relationships (computed edge set)
+pub const SEMANTIC_RELATIONSHIPS_TABLE_ID: u32 = 46;
 
 /// ----- Begin of pg_catalog tables -----
 pub const PG_CATALOG_TABLE_ID_START: u32 = 256;

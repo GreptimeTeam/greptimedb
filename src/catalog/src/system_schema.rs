@@ -17,6 +17,7 @@ mod memory_table;
 pub mod numbers_table_provider;
 pub mod pg_catalog;
 pub mod predicate;
+pub mod semantic_graph;
 mod utils;
 
 use std::collections::HashMap;

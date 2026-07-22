@@ -19,8 +19,9 @@ use snafu::OptionExt;
 
 use crate::CatalogManager;
 use crate::error::{GetInformationExtensionSnafu, Result, UpgradeWeakCatalogManagerRefSnafu};
-use crate::information_schema::{EntityGraphProviderRef, InformationExtensionRef};
+use crate::information_schema::InformationExtensionRef;
 use crate::kvbackend::KvBackendCatalogManager;
+use crate::system_schema::semantic_graph::EntityGraphProviderRef;
 
 pub mod tables;
 

@@ -154,6 +154,9 @@ pub struct EntityDeclaration {
     pub id_columns: Vec<String>,
     /// Descriptive columns snapshotted into the `descriptive` JSON (may be empty).
     pub descriptive_columns: Vec<String>,
+    /// Scope columns (namespace/environment). One column → scope verbatim;
+    /// several → sorted `k=v,k=v`, mirroring the composite id rendering.
+    pub scope_columns: Vec<String>,
 }
 
 /// The read-time query window as SQL scalar expressions (e.g.
@@ -189,10 +192,26 @@ fn quote_literal(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
 }
 
+/// Escapes a string for embedding inside a JSON string value (`\` and `"`).
+fn json_escape(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+/// Wraps a column reference in SQL `replace` calls so its runtime value is
+/// JSON-escaped (`\` then `"`), with `coalesce(..., '')` stopping a NULL column
+/// value from collapsing the whole `||` concatenation to NULL (descriptive
+/// columns are nullable).
+fn json_escaped_value_expr(column: &str) -> String {
+    format!(
+        r#"replace(replace(coalesce(CAST({} AS STRING), ''), '\', '\\'), '"', '\"')"#,
+        quote_ident(column)
+    )
+}
+
 /// Builds a JSON object string from `columns` via string concat — GreptimeDB has
 /// no struct→json function, and this keeps the output column a plain STRING (the
-/// computed table's declared type). Values containing `"` are not escaped, which
-/// is acceptable for the small, controlled identity/attribute sets in OSS v1.
+/// computed table's declared type). Keys are JSON-escaped in Rust; values are
+/// JSON-escaped at runtime via [`json_escaped_value_expr`].
 fn json_object_expr(columns: &[String]) -> String {
     if columns.is_empty() {
         return "'{}'".to_string();
@@ -200,17 +219,30 @@ fn json_object_expr(columns: &[String]) -> String {
     let pairs = columns
         .iter()
         .map(|c| {
-            let key = c.replace(['\'', '"'], "");
-            // `coalesce(..., '')` stops a NULL column value from collapsing the
-            // whole `||` concatenation to NULL (descriptive columns are nullable).
-            format!(
-                "'\"{key}\":\"' || coalesce(CAST({} AS STRING), '') || '\"'",
-                quote_ident(c)
-            )
+            let key = quote_literal(&format!("\"{}\":\"", json_escape(c)));
+            format!("{key} || {} || '\"'", json_escaped_value_expr(c))
         })
         .collect::<Vec<_>>()
         .join(" || ',' || ");
     format!("'{{' || {pairs} || '}}'")
+}
+
+/// Renders pre-sorted columns as a `k=v,k=v` concat expression. `nullable`
+/// coalesces each value to `''` (id columns are tags and non-null; scope
+/// columns carry no such guarantee).
+fn sorted_kv_expr(sorted_cols: &[String], nullable: bool) -> String {
+    sorted_cols
+        .iter()
+        .map(|c| {
+            let value = if nullable {
+                format!("coalesce(CAST({} AS STRING), '')", quote_ident(c))
+            } else {
+                format!("CAST({} AS STRING)", quote_ident(c))
+            };
+            format!("{} || '=' || {value}", quote_literal(c))
+        })
+        .collect::<Vec<_>>()
+        .join(" || ',' || ")
 }
 
 fn qualified_table(decl: &EntityDeclaration) -> String {
@@ -242,18 +274,21 @@ fn registry_branch(decl: &EntityDeclaration, window: &GraphWindow) -> String {
         // columns (the escaping-safe source of truth, RFC Open Question 1).
         let mut cols = decl.id_columns.clone();
         cols.sort();
-        let id = cols
-            .iter()
-            .map(|c| {
-                format!(
-                    "{} || '=' || CAST({} AS STRING)",
-                    quote_literal(c),
-                    quote_ident(c)
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(" || ',' || ");
-        (id, json_object_expr(&cols))
+        (sorted_kv_expr(&cols, false), json_object_expr(&cols))
+    };
+
+    let scope = if decl.scope_columns.is_empty() {
+        "''".to_string()
+    } else if decl.scope_columns.len() == 1 {
+        // Scope columns are not required to be tags, so guard against NULL.
+        format!(
+            "coalesce(CAST({} AS STRING), '')",
+            quote_ident(&decl.scope_columns[0])
+        )
+    } else {
+        let mut cols = decl.scope_columns.clone();
+        cols.sort();
+        sorted_kv_expr(&cols, true)
     };
 
     let descriptive = if decl.descriptive_columns.is_empty() {
@@ -268,7 +303,7 @@ fn registry_branch(decl: &EntityDeclaration, window: &GraphWindow) -> String {
         "SELECT DISTINCT {bin} AS observed_at, {bin} AS window_start, \
          {bin} + {BIN_INTERVAL} AS window_end, {bin} + {BIN_INTERVAL} AS fresh_until, \
          {etype} AS entity_type, {entity_id} AS entity_id, {entity_id_attrs} AS entity_id_attrs, \
-         '' AS scope, {descriptive} AS descriptive, {source_tables} AS source_tables \
+         {scope} AS scope, {descriptive} AS descriptive, {source_tables} AS source_tables \
          FROM {table} \
          WHERE {ts} >= {start} AND {ts} < {end}",
         etype = quote_literal(&decl.entity_type),
@@ -347,6 +382,10 @@ impl TraceSource {
 /// (`STATUS_CODE_ERROR`), verified against the trace ingest path.
 pub fn build_calls_sql(trace: &TraceSource, window: &GraphWindow) -> String {
     let t = trace.qualified();
+    // `scope` stays empty here: the fixed `greptime_trace_v1` schema declares no
+    // scope columns (the auto-stamp is `entity.service.id = service_name` only).
+    // Revisit when trace tables can carry scope declarations.
+    //
     // Cast to millisecond precision: trace timestamps are nanosecond, but the
     // computed table's schema declares millisecond.
     let bin = format!("CAST(date_bin({BIN_INTERVAL}, client.\"timestamp\") AS TIMESTAMP(3))");
@@ -414,6 +453,7 @@ mod tests {
             entity_type: entity_type.to_string(),
             id_columns: id_columns.iter().map(|s| s.to_string()).collect(),
             descriptive_columns: vec![],
+            scope_columns: vec![],
         }
     }
 
@@ -432,7 +472,7 @@ mod tests {
         // struct→json function exists); no UNION for one decl.
         let composite =
             build_registry_sql(&[decl("process", &["start_time", "pid"])], &window).unwrap();
-        assert!(composite.contains(r#"'"pid":"' || coalesce(CAST("pid" AS STRING), '')"#));
+        assert!(composite.contains(r#"'"pid":"' || replace(replace(coalesce(CAST("pid" AS STRING), ''), '\', '\\'), '"', '\"')"#));
         assert!(composite.contains("'pid' || '=' || CAST(\"pid\" AS STRING)"));
         assert!(!composite.contains("UNION ALL"));
 
@@ -449,6 +489,46 @@ mod tests {
 
         // No declarations → no query.
         assert!(build_registry_sql(&[], &window).is_none());
+    }
+
+    #[test]
+    fn build_registry_sql_scope() {
+        let window = GraphWindow::default_last_hour();
+
+        // No scope declared → empty literal.
+        let none = build_registry_sql(&[decl("service", &["service_name"])], &window).unwrap();
+        assert!(none.contains("'' AS scope"));
+
+        // Single scope column → its (NULL-safe) value verbatim.
+        let mut single_decl = decl("service", &["service_name"]);
+        single_decl.scope_columns = vec!["k8s_namespace".to_string()];
+        let single = build_registry_sql(&[single_decl], &window).unwrap();
+        assert!(single.contains(r#"coalesce(CAST("k8s_namespace" AS STRING), '') AS scope"#));
+
+        // Multiple scope columns → sorted `k=v,k=v`, like composite ids.
+        let mut multi_decl = decl("service", &["service_name"]);
+        multi_decl.scope_columns = vec!["namespace".to_string(), "cluster".to_string()];
+        let multi = build_registry_sql(&[multi_decl], &window).unwrap();
+        let cluster = multi.find(r#"'cluster' || '=' || coalesce(CAST("cluster" AS STRING), '')"#);
+        let namespace =
+            multi.find(r#"'namespace' || '=' || coalesce(CAST("namespace" AS STRING), '')"#);
+        assert!(
+            cluster.unwrap() < namespace.unwrap(),
+            "scope must be sorted"
+        );
+    }
+
+    #[test]
+    fn json_object_expr_escapes_keys_and_values() {
+        // Key is JSON-escaped in Rust and SQL-quoted; value escaping happens at
+        // runtime via nested replace (backslash first, then double quote).
+        let expr = json_object_expr(&[r#"we"ird"#.to_string()]);
+        assert!(expr.contains(r#"'"we\"ird":"'"#));
+        assert!(expr.contains(
+            r#"replace(replace(coalesce(CAST("we""ird" AS STRING), ''), '\', '\\'), '"', '\"')"#
+        ));
+
+        assert_eq!(json_object_expr(&[]), "'{}'");
     }
 
     #[test]

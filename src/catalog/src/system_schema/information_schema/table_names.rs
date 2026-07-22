@@ -52,7 +52,5 @@ pub const SSTS_MANIFEST: &str = "ssts_manifest";
 pub const SSTS_STORAGE: &str = "ssts_storage";
 pub const SSTS_INDEX_META: &str = "ssts_index_meta";
 pub const TABLE_SEMANTICS: &str = "table_semantics";
-pub const SEMANTIC_ENTITIES: &str = "semantic_entities";
-pub const SEMANTIC_RELATIONSHIPS: &str = "semantic_relationships";
 pub const STATISTICS: &str = "statistics";
 pub const RECYCLE_BIN: &str = "recycle_bin";

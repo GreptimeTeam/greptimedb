@@ -13,7 +13,7 @@
 // limitations under the License.
 
 //! Frontend implementation of the [`EntityGraphProvider`]: the live connector that
-//! makes the computed `information_schema.semantic_entities` /
+//! makes the computed `greptime_private.semantic_entities` /
 //! `semantic_relationships` tables produce rows.
 //!
 //! It enumerates the entity-identity declarations by iterating the catalog's
@@ -27,7 +27,7 @@ use std::sync::Weak;
 
 use async_trait::async_trait;
 use catalog::CatalogManager;
-use catalog::information_schema::EntityGraphProvider;
+use catalog::system_schema::semantic_graph::EntityGraphProvider;
 use common_catalog::consts::{
     DEFAULT_PRIVATE_SCHEMA_NAME, DEFAULT_SCHEMA_NAME, INFORMATION_SCHEMA_NAME, PG_CATALOG_NAME,
 };
@@ -59,8 +59,8 @@ impl EntityGraphProviderImpl {
         }
     }
 
-    /// Parses `greptime.semantic.entity.<type>.{id|descriptive}` options of one
-    /// table into per-type declarations. A type with no `id` columns is skipped.
+    /// Parses `greptime.semantic.entity.<type>.{id|descriptive|scope}` options of
+    /// one table into per-type declarations. A type with no `id` columns is skipped.
     fn parse_declarations(
         table_info: &TableInfo,
         catalog: &str,
@@ -75,8 +75,9 @@ impl EntityGraphProviderImpl {
             return vec![];
         };
 
-        // entity_type -> (id_columns, descriptive_columns)
-        let mut by_type: HashMap<String, (Vec<String>, Vec<String>)> = HashMap::new();
+        // entity_type -> (id_columns, descriptive_columns, scope_columns)
+        type RoleColumns = (Vec<String>, Vec<String>, Vec<String>);
+        let mut by_type: HashMap<String, RoleColumns> = HashMap::new();
         for (key, value) in &table_info.meta.options.extra_options {
             let Some(rest) = key.strip_prefix(SEMANTIC_ENTITY_PREFIX) else {
                 continue;
@@ -93,22 +94,26 @@ impl EntityGraphProviderImpl {
             match role {
                 "id" => entry.0 = cols,
                 "descriptive" => entry.1 = cols,
+                "scope" => entry.2 = cols,
                 _ => {}
             }
         }
 
         by_type
             .into_iter()
-            .filter(|(_, (id, _))| !id.is_empty())
+            .filter(|(_, (id, _, _))| !id.is_empty())
             .map(
-                |(entity_type, (id_columns, descriptive_columns))| EntityDeclaration {
-                    catalog: catalog.to_string(),
-                    schema: schema.to_string(),
-                    table: table_info.name.clone(),
-                    time_index: time_index.clone(),
-                    entity_type,
-                    id_columns,
-                    descriptive_columns,
+                |(entity_type, (id_columns, descriptive_columns, scope_columns))| {
+                    EntityDeclaration {
+                        catalog: catalog.to_string(),
+                        schema: schema.to_string(),
+                        table: table_info.name.clone(),
+                        time_index: time_index.clone(),
+                        entity_type,
+                        id_columns,
+                        descriptive_columns,
+                        scope_columns,
+                    }
                 },
             )
             .collect()
