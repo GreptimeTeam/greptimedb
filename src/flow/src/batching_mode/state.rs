@@ -19,7 +19,6 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::time::Duration;
 
 use common_telemetry::debug;
-use common_telemetry::tracing::warn;
 use common_time::Timestamp;
 use datatypes::value::Value;
 use session::context::QueryContextRef;
@@ -609,7 +608,7 @@ impl DirtyTimeWindows {
             let last_time_window = self.windows.last_key_value();
 
             if let Some(task_ctx) = task_ctx {
-                warn!(
+                debug!(
                     "Flow id = {:?}, too many time windows: {}, only the first {} are taken for this query, the group by expression might be wrong. Time window expr={:?}, expire_after={:?}, first_time_window={:?}, last_time_window={:?}, the original query: {:?}",
                     task_ctx.config.flow_id,
                     self.windows.len(),
@@ -621,7 +620,7 @@ impl DirtyTimeWindows {
                     task_ctx.config.query
                 );
             } else {
-                warn!(
+                debug!(
                     "Flow id = {:?}, too many time windows: {}, only the first {} are taken for this query, the group by expression might be wrong. first_time_window={:?}, last_time_window={:?}",
                     flow_id,
                     self.windows.len(),

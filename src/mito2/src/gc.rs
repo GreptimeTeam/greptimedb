@@ -54,6 +54,7 @@ use crate::metrics::{
 use crate::region::{MitoRegionRef, RegionRoleState};
 use crate::sst::file::{RegionFileId, RegionIndexId, delete_files, delete_indexes};
 use crate::sst::location::{self};
+use crate::worker::DROPPING_MARKER_FILE;
 
 #[cfg(test)]
 mod worker_test;
@@ -948,6 +949,10 @@ impl LocalGcWorker {
             });
 
         for entry in entries {
+            if entry.name() == DROPPING_MARKER_FILE {
+                continue;
+            }
+
             let (file_id, file_type) = match location::parse_file_id_type_from_path(entry.name()) {
                 Ok((file_id, file_type)) => (file_id, file_type),
                 Err(err) => {
