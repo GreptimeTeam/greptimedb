@@ -308,7 +308,7 @@ impl JsonMetrics {
         let mut elapsed_compute = 0;
         let mut output_rows = 0;
         let mut other_metrics = HashMap::default();
-        let (name, param) = raw_name.split_once(": ").unwrap_or_default();
+        let (name, param) = raw_name.split_once(": ").unwrap_or((raw_name, ""));
 
         for (name, value) in plan_metrics.metrics.into_iter() {
             if name == "elapsed_compute" {
@@ -405,5 +405,31 @@ mod tests {
         let rebuilt = rebuilt.as_any().downcast_ref::<DistAnalyzeExec>().unwrap();
 
         assert_eq!(rebuilt.input.schema().field(0).name(), "replacement");
+    }
+
+    #[test]
+    fn qbs_analyze_json_preserves_plan_name_without_parameters() {
+        let (_, metrics) = JsonMetrics::from_plan_metrics(PlanMetrics {
+            plan: "EmptyExec".to_string(),
+            plan_name: "EmptyExec".to_string(),
+            level: 0,
+            metrics: vec![],
+        });
+
+        assert_eq!(metrics.name, "EmptyExec");
+        assert!(metrics.param.is_empty());
+    }
+
+    #[test]
+    fn qbs_analyze_json_splits_plan_name_and_parameters() {
+        let (_, metrics) = JsonMetrics::from_plan_metrics(PlanMetrics {
+            plan: "FilterExec: predicate".to_string(),
+            plan_name: "FilterExec".to_string(),
+            level: 0,
+            metrics: vec![],
+        });
+
+        assert_eq!(metrics.name, "FilterExec");
+        assert_eq!(metrics.param, "predicate");
     }
 }
