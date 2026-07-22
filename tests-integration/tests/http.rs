@@ -2977,37 +2977,16 @@ pub async fn test_prometheus_remote_write_with_pipeline(store_type: StorageType)
     guard.remove_all().await;
 }
 
-pub async fn test_prometheus_remote_schema_labels(store_type: StorageType) {
-    common_telemetry::init_default_ut_logging();
-    let (app, mut guard) =
-        setup_test_prom_app_with_frontend(store_type, "test_prometheus_remote_schema_labels").await;
-    let client = TestClient::new(app).await;
-
-    // Create test schemas
-    let res = client
-        .post("/v1/sql?sql=create database test_schema_1")
-        .header("Content-Type", "application/x-www-form-urlencoded")
-        .send()
-        .await;
-    assert_eq!(res.status(), StatusCode::OK);
-
-    let res = client
-        .post("/v1/sql?sql=create database test_schema_2")
-        .header("Content-Type", "application/x-www-form-urlencoded")
-        .send()
-        .await;
-    assert_eq!(res.status(), StatusCode::OK);
-
-    // Write data with __schema__ label
-    let schema_series = TimeSeries {
+fn qx_077_schema_series(schema: &str, value: f64) -> TimeSeries {
+    TimeSeries {
         labels: vec![
             Label {
                 name: "__name__".to_string(),
-                value: "metric_with_schema".to_string(),
+                value: "qx_077_schema_metric".to_string(),
             },
             Label {
                 name: "__schema__".to_string(),
-                value: "test_schema_1".to_string(),
+                value: schema.to_string(),
             },
             Label {
                 name: "instance".to_string(),
@@ -3015,19 +2994,121 @@ pub async fn test_prometheus_remote_schema_labels(store_type: StorageType) {
             },
         ],
         samples: vec![Sample {
-            value: 100.0,
+            value,
             timestamp: 1000,
         }],
         ..Default::default()
-    };
+    }
+}
 
-    let write_request = WriteRequest {
-        timeseries: vec![schema_series],
+fn qx_077_schema_query(schema: Option<&str>) -> Query {
+    let mut matchers = vec![LabelMatcher {
+        name: "__name__".to_string(),
+        value: "qx_077_schema_metric".to_string(),
+        r#type: MatcherType::Eq as i32,
+    }];
+    if let Some(schema) = schema {
+        matchers.push(LabelMatcher {
+            name: "__schema__".to_string(),
+            value: schema.to_string(),
+            r#type: MatcherType::Eq as i32,
+        });
+    }
+
+    Query {
+        start_timestamp_ms: 500,
+        end_timestamp_ms: 1500,
+        matchers,
+        ..Default::default()
+    }
+}
+
+async fn post_qx_077_remote_read(client: &TestClient, queries: Vec<Query>) -> ReadResponse {
+    let read_request = ReadRequest {
+        queries,
         ..Default::default()
     };
-    let serialized_request = write_request.encode_to_vec();
-    let compressed_request =
-        prom_store::snappy_compress(&serialized_request).expect("failed to encode snappy");
+    let compressed_request = prom_store::snappy_compress(&read_request.encode_to_vec())
+        .expect("failed to encode snappy");
+
+    let response = client
+        .post("/v1/prometheus/read")
+        .body(compressed_request)
+        .send()
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response_body = response.bytes().await;
+    let decompressed_response = prom_store::snappy_decompress(&response_body).unwrap();
+    ReadResponse::decode(decompressed_response.as_slice()).unwrap()
+}
+
+async fn post_qx_077_remote_read_from_schema_a(
+    client: &TestClient,
+    queries: Vec<Query>,
+) -> ReadResponse {
+    let read_request = ReadRequest {
+        queries,
+        ..Default::default()
+    };
+    let compressed_request = prom_store::snappy_compress(&read_request.encode_to_vec())
+        .expect("failed to encode snappy");
+
+    let response = client
+        .post("/v1/prometheus/read")
+        .header(GREPTIME_DB_HEADER_NAME.clone(), "qx_077_schema_a")
+        .body(compressed_request)
+        .send()
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response_body = response.bytes().await;
+    let decompressed_response = prom_store::snappy_decompress(&response_body).unwrap();
+    ReadResponse::decode(decompressed_response.as_slice()).unwrap()
+}
+
+fn qx_077_read_sample_values(read_response: ReadResponse) -> Vec<f64> {
+    read_response
+        .results
+        .into_iter()
+        .map(|result| {
+            assert_eq!(result.timeseries.len(), 1);
+            let timeseries = &result.timeseries[0];
+            assert_eq!(timeseries.samples.len(), 1);
+            assert_eq!(timeseries.samples[0].timestamp, 1000);
+            timeseries.samples[0].value
+        })
+        .collect()
+}
+
+pub async fn test_prometheus_remote_schema_labels(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) =
+        setup_test_prom_app_with_frontend(store_type, "test_prometheus_remote_schema_labels").await;
+    let client = TestClient::new(app).await;
+
+    const SCHEMA_A: &str = "qx_077_schema_a";
+    const SCHEMA_B: &str = "qx_077_schema_b";
+
+    for schema in [SCHEMA_A, SCHEMA_B] {
+        let res = client
+            .post(&format!("/v1/sql?sql=create database {schema}"))
+            .header("Content-Type", "application/x-www-form-urlencoded")
+            .send()
+            .await;
+        assert_eq!(res.status(), StatusCode::OK);
+    }
+
+    // Both series have the same metric, non-schema labels, and timestamp.
+    let write_request = WriteRequest {
+        timeseries: vec![
+            qx_077_schema_series(SCHEMA_A, 101.0),
+            qx_077_schema_series(SCHEMA_B, 202.0),
+        ],
+        ..Default::default()
+    };
+    let compressed_request = prom_store::snappy_compress(&write_request.encode_to_vec())
+        .expect("failed to encode snappy");
 
     let res = client
         .post("/v1/prometheus/write")
@@ -3037,50 +3118,71 @@ pub async fn test_prometheus_remote_schema_labels(store_type: StorageType) {
         .await;
     assert_eq!(res.status(), StatusCode::NO_CONTENT);
 
-    // Read data from test_schema_1 using __schema__ matcher
-    let read_request = ReadRequest {
-        queries: vec![Query {
-            start_timestamp_ms: 500,
-            end_timestamp_ms: 1500,
-            matchers: vec![
-                LabelMatcher {
-                    name: "__name__".to_string(),
-                    value: "metric_with_schema".to_string(),
-                    r#type: MatcherType::Eq as i32,
-                },
-                LabelMatcher {
-                    name: "__schema__".to_string(),
-                    value: "test_schema_1".to_string(),
-                    r#type: MatcherType::Eq as i32,
-                },
+    // Independent controls establish that each selector resolves its own schema.
+    assert_eq!(
+        qx_077_read_sample_values(
+            post_qx_077_remote_read(&client, vec![qx_077_schema_query(Some(SCHEMA_A))]).await,
+        ),
+        vec![101.0]
+    );
+    assert_eq!(
+        qx_077_read_sample_values(
+            post_qx_077_remote_read(&client, vec![qx_077_schema_query(Some(SCHEMA_B))]).await,
+        ),
+        vec![202.0]
+    );
+
+    // Results must stay aligned with the request query order.
+    let forward_values = qx_077_read_sample_values(
+        post_qx_077_remote_read(
+            &client,
+            vec![
+                qx_077_schema_query(Some(SCHEMA_A)),
+                qx_077_schema_query(Some(SCHEMA_B)),
             ],
-            ..Default::default()
-        }],
-        ..Default::default()
-    };
+        )
+        .await,
+    );
+    let reverse_values = qx_077_read_sample_values(
+        post_qx_077_remote_read(
+            &client,
+            vec![
+                qx_077_schema_query(Some(SCHEMA_B)),
+                qx_077_schema_query(Some(SCHEMA_A)),
+            ],
+        )
+        .await,
+    );
+    assert_eq!(
+        (forward_values, reverse_values),
+        (vec![101.0, 202.0], vec![202.0, 101.0])
+    );
 
-    let serialized_read_request = read_request.encode_to_vec();
-    let compressed_read_request =
-        prom_store::snappy_compress(&serialized_read_request).expect("failed to encode snappy");
-
-    let mut result = client
-        .post("/v1/prometheus/read")
-        .body(compressed_read_request)
-        .send()
-        .await;
-    assert_eq!(result.status(), StatusCode::OK);
-
-    let response_body = result.chunk().await.unwrap();
-    let decompressed_response = prom_store::snappy_decompress(&response_body).unwrap();
-    let read_response = ReadResponse::decode(&decompressed_response[..]).unwrap();
-
-    assert_eq!(read_response.results.len(), 1);
-    assert_eq!(read_response.results[0].timeseries.len(), 1);
-
-    let timeseries = &read_response.results[0].timeseries[0];
-    assert_eq!(timeseries.samples.len(), 1);
-    assert_eq!(timeseries.samples[0].value, 100.0);
-    assert_eq!(timeseries.samples[0].timestamp, 1000);
+    // With request database A, unqualified queries must resolve to A independently.
+    let explicit_then_default_values = qx_077_read_sample_values(
+        post_qx_077_remote_read_from_schema_a(
+            &client,
+            vec![
+                qx_077_schema_query(Some(SCHEMA_B)),
+                qx_077_schema_query(None),
+            ],
+        )
+        .await,
+    );
+    let default_then_explicit_values = qx_077_read_sample_values(
+        post_qx_077_remote_read_from_schema_a(
+            &client,
+            vec![
+                qx_077_schema_query(None),
+                qx_077_schema_query(Some(SCHEMA_B)),
+            ],
+        )
+        .await,
+    );
+    assert_eq!(
+        (explicit_then_default_values, default_then_explicit_values),
+        (vec![202.0, 101.0], vec![101.0, 202.0])
+    );
 
     // write data to unknown schema
     let unknown_schema_series = TimeSeries {

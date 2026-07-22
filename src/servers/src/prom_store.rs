@@ -19,7 +19,7 @@ use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};
 
 use api::prom_store::remote::label_matcher::Type as MatcherType;
-use api::prom_store::remote::{Label, Query, ReadRequest, Sample, TimeSeries, WriteRequest};
+use api::prom_store::remote::{Label, Query, Sample, TimeSeries, WriteRequest};
 use api::v1::RowInsertRequests;
 use arrow::array::{Array, AsArray};
 use arrow::datatypes::{Float64Type, TimestampMillisecondType};
@@ -121,19 +121,15 @@ pub fn table_name(q: &Query) -> Result<String> {
     Ok(matcher.value.clone())
 }
 
-/// Extract schema from remote read request. Returns the first schema found from any query's matchers.
-pub fn extract_schema_from_read_request(request: &ReadRequest) -> Option<String> {
-    for query in &request.queries {
-        for matcher in &query.matchers {
-            if is_database_selection_label(&matcher.name)
-                && matcher.r#type == MatcherType::Eq as i32
-            {
-                return Some(matcher.value.clone());
-            }
-        }
-    }
-
-    None
+/// Extract database selector from a remote read query.
+pub fn extract_schema_from_query(query: &Query) -> Option<String> {
+    query
+        .matchers
+        .iter()
+        .find(|matcher| {
+            is_database_selection_label(&matcher.name) && matcher.r#type == MatcherType::Eq as i32
+        })
+        .map(|matcher| matcher.value.clone())
 }
 
 /// Create a DataFrame from a remote Query
@@ -691,6 +687,38 @@ mod tests {
                 Err(error::Error::InvalidPromRemoteRequest { .. })
             ));
         }
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn test_extract_schema_from_query() {
+        let query = Query::default();
+        assert_eq!(None, extract_schema_from_query(&query));
+
+        for label in [DATABASE_LABEL, DATABASE_LABEL_ALT, SCHEMA_LABEL] {
+            let query = Query {
+                matchers: vec![LabelMatcher {
+                    name: label.to_string(),
+                    value: "selected_schema".to_string(),
+                    r#type: EQ_TYPE,
+                }],
+                ..Default::default()
+            };
+            assert_eq!(
+                Some("selected_schema".to_string()),
+                extract_schema_from_query(&query)
+            );
+        }
+
+        let query = Query {
+            matchers: vec![LabelMatcher {
+                name: DATABASE_LABEL.to_string(),
+                value: "selected_schema".to_string(),
+                r#type: NEQ_TYPE,
+            }],
+            ..Default::default()
+        };
+        assert_eq!(None, extract_schema_from_query(&query));
     }
 
     #[test]
