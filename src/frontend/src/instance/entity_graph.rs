@@ -18,7 +18,8 @@
 //!
 //! It enumerates the entity-identity declarations by iterating the catalog's
 //! `TableInfo` options (`greptime.semantic.entity.*`), builds the read-time
-//! derivation SQL (`operator::statement::semantic_graph`), and executes it through
+//! derivation plans as typed DataFusion `Expr`s over the declaring tables'
+//! DataFrames (`operator::statement::semantic_graph`), and executes them through
 //! the query engine. Injected into the catalog manager after the engine is built,
 //! breaking the `catalog -> query` cycle.
 
@@ -34,14 +35,16 @@ use common_catalog::consts::{
 use common_error::ext::BoxedError;
 use common_query::OutputData;
 use common_recordbatch::{RecordBatch, util as record_util};
+use datafusion::dataframe::DataFrame;
+use datafusion_expr::LogicalPlan;
 use futures::TryStreamExt;
 use operator::statement::semantic_graph::{
-    EntityDeclaration, GraphWindow, TraceSource, build_calls_sql, build_registry_sql,
+    EntityDeclaration, GraphWindow, build_calls_plan, build_registry_plan,
 };
 use query::QueryEngineRef;
-use query::parser::QueryLanguageParser;
 use session::context::{QueryContextBuilder, QueryContextRef};
 use store_api::storage::ScanRequest;
+use table::TableRef;
 use table::metadata::TableInfo;
 use table::requests::{SEMANTIC_ENTITY_PREFIX, TABLE_DATA_MODEL, TABLE_DATA_MODEL_TRACE_V1};
 
@@ -61,11 +64,7 @@ impl EntityGraphProviderImpl {
 
     /// Parses `greptime.semantic.entity.<type>.{id|descriptive|scope}` options of
     /// one table into per-type declarations. A type with no `id` columns is skipped.
-    fn parse_declarations(
-        table_info: &TableInfo,
-        catalog: &str,
-        schema: &str,
-    ) -> Vec<EntityDeclaration> {
+    fn parse_declarations(table_info: &TableInfo) -> Vec<EntityDeclaration> {
         let Some(time_index) = table_info
             .meta
             .schema
@@ -105,8 +104,6 @@ impl EntityGraphProviderImpl {
             .map(
                 |(entity_type, (id_columns, descriptive_columns, scope_columns))| {
                     EntityDeclaration {
-                        catalog: catalog.to_string(),
-                        schema: schema.to_string(),
                         table: table_info.name.clone(),
                         time_index: time_index.clone(),
                         entity_type,
@@ -122,7 +119,7 @@ impl EntityGraphProviderImpl {
     /// Keyed off the engine-native `table_data_model` option (same check as the
     /// Jaeger query path) so pre-existing trace tables without the newer
     /// `greptime.semantic.*` stamps are recognized too. The v1 model is required
-    /// because the derivation SQL relies on its fixed column names.
+    /// because the derivation plan relies on its fixed column names.
     fn is_trace_table(table_info: &TableInfo) -> bool {
         table_info
             .meta
@@ -137,7 +134,7 @@ impl EntityGraphProviderImpl {
     async fn enumerate(
         &self,
         catalog: &str,
-    ) -> Result<(Vec<EntityDeclaration>, Vec<TraceSource>), BoxedError> {
+    ) -> Result<(Vec<(EntityDeclaration, TableRef)>, Vec<TableRef>), BoxedError> {
         let Some(catalog_manager) = self.catalog_manager.upgrade() else {
             return Ok((vec![], vec![]));
         };
@@ -160,13 +157,13 @@ impl EntityGraphProviderImpl {
             let mut tables = catalog_manager.tables(catalog, &schema, None);
             while let Some(table) = tables.try_next().await.map_err(BoxedError::new)? {
                 let table_info = table.table_info();
-                declarations.extend(Self::parse_declarations(&table_info, catalog, &schema));
+                declarations.extend(
+                    Self::parse_declarations(&table_info)
+                        .into_iter()
+                        .map(|decl| (decl, table.clone())),
+                );
                 if Self::is_trace_table(&table_info) {
-                    traces.push(TraceSource {
-                        catalog: catalog.to_string(),
-                        schema: schema.clone(),
-                        table: table_info.name.clone(),
-                    });
+                    traces.push(table.clone());
                 }
             }
         }
@@ -184,25 +181,26 @@ impl EntityGraphProviderImpl {
         GraphWindow::default_last_hour()
     }
 
-    /// Plans and executes a derivation SQL statement, collecting its rows.
+    fn read_table(&self, table: TableRef) -> Result<DataFrame, BoxedError> {
+        self.query_engine.read_table(table).map_err(BoxedError::new)
+    }
+
+    /// Executes a derivation plan, collecting its rows.
     ///
     /// TODO(entity-graph): the QueryContext must come from the outer query
     /// instead of being built here, so the derivation inherits the caller's
     /// permissions, cancellation and deadline. Requires threading the context
     /// through the computed-table scan path (planned next PR).
-    async fn run_sql(&self, catalog: &str, sql: &str) -> Result<Vec<RecordBatch>, BoxedError> {
+    async fn execute_plan(
+        &self,
+        catalog: &str,
+        plan: LogicalPlan,
+    ) -> Result<Vec<RecordBatch>, BoxedError> {
         let query_ctx: QueryContextRef = QueryContextBuilder::default()
             .current_catalog(catalog.to_string())
             .current_schema(DEFAULT_SCHEMA_NAME.to_string())
             .build()
             .into();
-        let stmt = QueryLanguageParser::parse_sql(sql, &query_ctx).map_err(BoxedError::new)?;
-        let plan = self
-            .query_engine
-            .planner()
-            .plan(&stmt, query_ctx.clone())
-            .await
-            .map_err(BoxedError::new)?;
         let output = self
             .query_engine
             .execute(plan, query_ctx)
@@ -225,11 +223,15 @@ impl EntityGraphProvider for EntityGraphProviderImpl {
         request: ScanRequest,
     ) -> Result<Vec<RecordBatch>, BoxedError> {
         let (declarations, _) = self.enumerate(catalog).await?;
+        let mut branches = Vec::with_capacity(declarations.len());
+        for (decl, table) in declarations {
+            branches.push((decl, self.read_table(table)?));
+        }
         let window = Self::query_window(&request);
-        let Some(sql) = build_registry_sql(&declarations, &window) else {
+        let Some(plan) = build_registry_plan(branches, &window).map_err(box_df_error)? else {
             return Ok(vec![]);
         };
-        self.run_sql(catalog, &sql).await
+        self.execute_plan(catalog, plan).await
     }
 
     async fn scan_relationships(
@@ -241,9 +243,16 @@ impl EntityGraphProvider for EntityGraphProviderImpl {
         let window = Self::query_window(&request);
         let mut batches = vec![];
         for trace in traces {
-            let sql = build_calls_sql(&trace, &window);
-            batches.extend(self.run_sql(catalog, &sql).await?);
+            let plan = build_calls_plan(self.read_table(trace)?, &window).map_err(box_df_error)?;
+            batches.extend(self.execute_plan(catalog, plan).await?);
         }
         Ok(batches)
     }
+}
+
+fn box_df_error(err: datafusion::error::DataFusionError) -> BoxedError {
+    BoxedError::new(common_error::ext::PlainError::new(
+        err.to_string(),
+        common_error::status_code::StatusCode::EngineExecuteQuery,
+    ))
 }

@@ -25,11 +25,13 @@
 //!
 //! These are thin forwarders: their rows are derived at read time by the injected
 //! [`EntityGraphProvider`], which enumerates the `table_semantics` declarations,
-//! builds the derivation SQL, and executes it via the query engine. When no
-//! provider is injected (e.g. before the engine is up, or on a non-frontend node)
-//! they stream empty. The fixed schemas here must match the columns the provider's
-//! SQL projects (the provider casts JSON/attribute columns to STRING so the output
-//! schema is deterministic).
+//! builds typed DataFusion derivation plans, and executes them via the query
+//! engine. When no provider is injected (e.g. before the engine is up, or on a
+//! non-frontend node) they stream empty. The fixed schemas here must match the
+//! columns the provider's plans project; JSON columns are `json` (JSONB), whose
+//! Arrow storage type is `Binary` — the derived batches are rebuilt against the
+//! declared Arrow schema (which carries the `json` extension metadata) in
+//! [`SystemTable::to_stream`].
 
 use std::sync::{Arc, Weak};
 
@@ -42,7 +44,7 @@ pub use common_catalog::consts::{
 };
 use common_error::ext::BoxedError;
 use common_recordbatch::adapter::RecordBatchStreamAdapter;
-use common_recordbatch::{RecordBatch, SendableRecordBatchStream};
+use common_recordbatch::{DfRecordBatch, RecordBatch, SendableRecordBatchStream};
 use datafusion::error::DataFusionError;
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter as DfRecordBatchStreamAdapter;
 use datatypes::prelude::ConcreteDataType;
@@ -63,12 +65,12 @@ pub type EntityGraphProviderRef = Arc<dyn EntityGraphProvider>;
 ///
 /// The computed tables are thin forwarders to this provider, which is
 /// implemented above the query engine (in the frontend): it enumerates the entity
-/// declarations from `table_semantics`, builds the derivation SQL, and executes it.
-/// It is injected into the catalog manager *after* construction — the provider
-/// needs the engine, which needs the catalog manager — so this late binding breaks
-/// the `catalog -> query` dependency cycle. Keeping derivation out of `catalog`
-/// also respects the crate layering (the SQL builders live in `operator`). See
-/// `docs/rfcs/2026-06-25-entity-relationships-and-graph-query.md`.
+/// declarations from `table_semantics`, builds the typed derivation plans, and
+/// executes them. It is injected into the catalog manager *after* construction —
+/// the provider needs the engine, which needs the catalog manager — so this late
+/// binding breaks the `catalog -> query` dependency cycle. Keeping derivation out
+/// of `catalog` also respects the crate layering (the plan builders live in
+/// `operator`). See `docs/rfcs/2026-06-25-entity-relationships-and-graph-query.md`.
 #[async_trait::async_trait]
 pub trait EntityGraphProvider: Send + Sync {
     /// Produces the entity registry (`semantic_entities`) rows for `catalog`. The
@@ -153,6 +155,10 @@ fn string() -> ConcreteDataType {
     ConcreteDataType::string_datatype()
 }
 
+fn json() -> ConcreteDataType {
+    ConcreteDataType::json_datatype()
+}
+
 /// Schema of `semantic_entities` — the node set of the graph, one row per entity
 /// observed in a time window. Must match the registry derivation projection.
 ///
@@ -191,13 +197,13 @@ fn entities_schema() -> SchemaRef {
         ColumnSchema::new("entity_id", string(), false),
         // JSON object of identifying attributes (source of truth for composite ids);
         // NULL for single-attribute ids.
-        ColumnSchema::new("entity_id_attrs", string(), true),
+        ColumnSchema::new("entity_id_attrs", json(), true),
         // Namespace/environment the id is scoped to; empty string when none.
         ColumnSchema::new("scope", string(), true),
         // JSON snapshot of descriptive (non-identifying) attributes; NULL if none.
-        ColumnSchema::new("descriptive", string(), true),
+        ColumnSchema::new("descriptive", json(), true),
         // JSON array of the telemetry tables that contributed this entity.
-        ColumnSchema::new("source_tables", string(), true),
+        ColumnSchema::new("source_tables", json(), true),
     ]))
 }
 
@@ -270,7 +276,7 @@ fn relationships_schema() -> SchemaRef {
         // RED: number of durations summed (pair with duration_sum for an average).
         ColumnSchema::new("duration_count", ConcreteDataType::int64_datatype(), true),
         // JSON of edge attributes: connection_type, db.system, peer.service, ...
-        ColumnSchema::new("attributes", string(), true),
+        ColumnSchema::new("attributes", json(), true),
     ]))
 }
 
@@ -352,13 +358,22 @@ impl SystemTable for SemanticGraphTable {
         let catalog = self.catalog_name.clone();
         let catalog_manager = self.catalog_manager.clone();
 
+        let batch_schema = arrow_schema.clone();
         let batches = futures::stream::once(async move {
             Self::derive(kind, catalog, catalog_manager, request)
                 .await
-                .map(|batches| {
-                    futures::stream::iter(
-                        batches.into_iter().map(|rb| Ok(rb.into_df_record_batch())),
-                    )
+                .map(move |batches| {
+                    futures::stream::iter(batches.into_iter().map(move |rb| {
+                        // Rebuild against the declared Arrow schema: the derived
+                        // batches are structurally identical, but their fields
+                        // lack the `json` extension metadata (JSON columns are
+                        // plain `Binary` in the derivation output).
+                        DfRecordBatch::try_new(
+                            batch_schema.clone(),
+                            rb.into_df_record_batch().columns().to_vec(),
+                        )
+                        .map_err(DataFusionError::from)
+                    }))
                 })
                 .map_err(|err| DataFusionError::External(Box::new(err)))
         })
