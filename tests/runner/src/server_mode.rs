@@ -18,13 +18,43 @@ use std::sync::{Mutex, OnceLock};
 
 use serde::Serialize;
 use tinytemplate::TinyTemplate;
+use toml::Value;
 
 use crate::cmd::bare::ServerAddr;
-use crate::cmd::compat_case::Version;
+use crate::cmd::compat_case::{OldConfig, Version, validate_old_datanode_path};
 use crate::env::bare::{Env, GreptimeDBContext, ServiceProvider};
 use crate::util;
 
 const DEFAULT_LOG_LEVEL: &str = "--log-level=debug,hyper=warn,tower=warn,datafusion=warn,reqwest=warn,sqlparser=warn,h2=info,opendal=info";
+
+/// The explicitly active compatibility configuration stage.
+#[derive(Debug, Clone, Default)]
+pub(crate) enum CompatConfigStage {
+    /// Ordinary rendering without compatibility-specific configuration.
+    #[default]
+    Baseline,
+    /// Old binary configuration with its typed datanode overlay.
+    Old(OldConfig),
+    /// Newly rendered current-binary configuration with no old overlay.
+    Current,
+}
+
+impl CompatConfigStage {
+    fn file_suffix(&self) -> &'static str {
+        match self {
+            Self::Baseline => "",
+            Self::Old(_) => "-old",
+            Self::Current => "-current",
+        }
+    }
+
+    fn old_config(&self) -> Option<&OldConfig> {
+        match self {
+            Self::Old(config) => Some(config),
+            Self::Baseline | Self::Current => None,
+        }
+    }
+}
 
 /// Which set of gRPC CLI argument names to use when spawning a GreptimeDB binary.
 ///
@@ -152,6 +182,127 @@ struct ConfigContext {
     enable_flat_format: bool,
     // enable garbage collection in metasrv and datanodes
     enable_gc: bool,
+}
+
+/// Applies the intentionally narrow compatibility overlay to rendered datanode TOML.
+///
+/// This is not a generic TOML merge: every logical path selects one named entry in
+/// `[[region_engine]]`, then descends only through table values to set a boolean leaf.
+pub(crate) fn apply_old_datanode_overlay(
+    rendered: &str,
+    old_config: &OldConfig,
+) -> Result<String, String> {
+    let mut document: Value = toml::from_str(rendered)
+        .map_err(|e| format!("Failed to parse rendered datanode TOML: {e}"))?;
+
+    for (path, value) in &old_config.datanode {
+        validate_old_datanode_path(path)?;
+        apply_region_engine_bool(&mut document, path, *value)?;
+    }
+
+    toml::to_string(&document).map_err(|e| format!("Failed to render datanode TOML: {e}"))
+}
+
+/// Validates an old-stage overlay against the rendered datanode template used by
+/// the runner without creating state or starting services.
+pub(crate) fn validate_old_config_against_datanode_template(
+    old_config: &OldConfig,
+) -> Result<(), String> {
+    let mut path = util::sqlness_conf_path();
+    path.push("datanode-test.toml.template");
+    let template = std::fs::read_to_string(&path)
+        .map_err(|e| format!("Failed to read datanode template '{}': {e}", path.display()))?;
+    let mut tt = TinyTemplate::new();
+    tt.add_template("datanode", &template)
+        .map_err(|e| format!("Failed to parse datanode template: {e}"))?;
+    let rendered = tt
+        .render(
+            "datanode",
+            &ConfigContext {
+                wal_dir: "/tmp/wal".to_string(),
+                data_home: "/tmp/data".to_string(),
+                procedure_dir: "/tmp/procedure".to_string(),
+                is_raft_engine: true,
+                kafka_wal_broker_endpoints: String::new(),
+                use_etcd: true,
+                store_addrs: "\"127.0.0.1:2379\"".to_string(),
+                instance_id: 0,
+                addrs: [("metasrv_addr".to_string(), "127.0.0.1:3002".to_string())].into(),
+                enable_flat_format: false,
+                enable_gc: false,
+            },
+        )
+        .map_err(|e| format!("Failed to render datanode template: {e}"))?;
+
+    apply_old_datanode_overlay(&rendered, old_config).map(|_| ())
+}
+
+fn apply_region_engine_bool(document: &mut Value, path: &str, value: bool) -> Result<(), String> {
+    let segments: Vec<_> = path.split('.').collect();
+    let engine = segments[1];
+    let leaf_path = &segments[2..];
+    let root = document
+        .as_table_mut()
+        .ok_or_else(|| "Rendered datanode TOML root must be a table".to_string())?;
+    let entries = root
+        .get_mut("region_engine")
+        .ok_or_else(|| "Rendered datanode TOML has no region_engine array".to_string())?
+        .as_array_mut()
+        .ok_or_else(|| "Rendered datanode TOML region_engine must be an array".to_string())?;
+
+    let matching_entries: Vec<_> = entries
+        .iter()
+        .enumerate()
+        .filter_map(|(index, entry)| {
+            entry
+                .as_table()
+                .and_then(|table| table.contains_key(engine).then_some(index))
+        })
+        .collect();
+    if matching_entries.len() > 1 {
+        return Err(format!(
+            "Rendered datanode TOML has duplicate region_engine entry '{engine}'"
+        ));
+    }
+
+    let entry_index = if let Some(index) = matching_entries.first() {
+        *index
+    } else {
+        let mut engine_table = toml::map::Map::new();
+        engine_table.insert(engine.to_string(), Value::Table(toml::map::Map::new()));
+        entries.push(Value::Table(engine_table));
+        entries.len() - 1
+    };
+
+    let entry = entries[entry_index]
+        .as_table_mut()
+        .ok_or_else(|| format!("region_engine entry '{engine}' must be a table"))?;
+    let engine_value = entry
+        .get_mut(engine)
+        .ok_or_else(|| format!("region_engine entry '{engine}' is missing"))?;
+    let mut current = engine_value
+        .as_table_mut()
+        .ok_or_else(|| format!("region_engine entry '{engine}' must be a table"))?;
+
+    for segment in &leaf_path[..leaf_path.len() - 1] {
+        let node = current
+            .entry((*segment).to_string())
+            .or_insert_with(|| Value::Table(toml::map::Map::new()));
+        current = node.as_table_mut().ok_or_else(|| {
+            format!("old_config.datanode key '{path}' has non-table intermediate '{segment}'")
+        })?;
+    }
+
+    let leaf = leaf_path.last().expect("validated path has a leaf");
+    if let Some(existing) = current.get(*leaf)
+        && !existing.is_bool()
+    {
+        return Err(format!(
+            "old_config.datanode key '{path}' conflicts with an existing non-bool value"
+        ));
+    }
+    current.insert((*leaf).to_string(), Value::Boolean(value));
+    Ok(())
 }
 
 impl ServerMode {
@@ -304,6 +455,7 @@ impl ServerMode {
         sqlness_home: &Path,
         db_ctx: &GreptimeDBContext,
         id: usize,
+        compat_stage: &CompatConfigStage,
     ) -> String {
         let mut tt = TinyTemplate::new();
 
@@ -363,9 +515,25 @@ impl ServerMode {
         };
 
         let rendered = tt.render(self.name(), &ctx).unwrap();
+        let rendered = if matches!(self, Self::Datanode { .. }) {
+            compat_stage
+                .old_config()
+                .map(|config| apply_old_datanode_overlay(&rendered, config))
+                .transpose()
+                .unwrap_or_else(|e| panic!("Failed to apply old datanode config: {e}"))
+                .unwrap_or(rendered)
+        } else {
+            rendered
+        };
 
         let conf_file = data_home
-            .join(format!("{}-{}-{}.toml", self.name(), id, db_ctx.time()))
+            .join(format!(
+                "{}-{}-{}{}.toml",
+                self.name(),
+                id,
+                db_ctx.time(),
+                compat_stage.file_suffix()
+            ))
             .display()
             .to_string();
         println!(
@@ -385,6 +553,7 @@ impl ServerMode {
         db_ctx: &GreptimeDBContext,
         id: usize,
         arg_style: GrpcArgStyle,
+        compat_stage: &CompatConfigStage,
     ) -> Vec<String> {
         let mut args = env
             .extra_args()
@@ -408,7 +577,7 @@ impl ServerMode {
                         id
                     ),
                     "-c".to_string(),
-                    self.generate_config_file(sqlness_home, db_ctx, id),
+                    self.generate_config_file(sqlness_home, db_ctx, id, compat_stage),
                     format!("--http-addr={http_addr}"),
                     format!("{}={rpc_bind_addr}", arg_style.bind_addr_arg()),
                     format!("--mysql-addr={mysql_addr}"),
@@ -437,7 +606,7 @@ impl ServerMode {
                         id
                     ),
                     "-c".to_string(),
-                    self.generate_config_file(sqlness_home, db_ctx, id),
+                    self.generate_config_file(sqlness_home, db_ctx, id, compat_stage),
                 ]);
             }
             ServerMode::Metasrv {
@@ -459,7 +628,7 @@ impl ServerMode {
                         id
                     ),
                     "-c".to_string(),
-                    self.generate_config_file(sqlness_home, db_ctx, id),
+                    self.generate_config_file(sqlness_home, db_ctx, id, compat_stage),
                 ]);
 
                 if matches!(
@@ -538,7 +707,7 @@ impl ServerMode {
                     format!("--log-dir={}/logs", data_home.display()),
                     format!("--node-id={node_id}"),
                     "-c".to_string(),
-                    self.generate_config_file(sqlness_home, db_ctx, id),
+                    self.generate_config_file(sqlness_home, db_ctx, id, compat_stage),
                     format!("--metasrv-addrs={metasrv_addr}"),
                 ]);
             }
@@ -570,6 +739,7 @@ impl ServerMode {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::path::PathBuf;
 
     use super::*;
@@ -639,7 +809,14 @@ mod tests {
             postgres_addr: "127.0.0.1:4003".to_string(),
         };
         assert_uses_style(
-            &standalone.get_args(temp_dir, env, db_ctx, 0, style),
+            &standalone.get_args(
+                temp_dir,
+                env,
+                db_ctx,
+                0,
+                style,
+                &CompatConfigStage::Baseline,
+            ),
             style,
             false,
         );
@@ -652,7 +829,14 @@ mod tests {
             metasrv_addr: "127.0.0.1:4001".to_string(),
         };
         assert_uses_style(
-            &frontend.get_args(temp_dir, env, db_ctx, 0, style),
+            &frontend.get_args(
+                temp_dir,
+                env,
+                db_ctx,
+                0,
+                style,
+                &CompatConfigStage::Baseline,
+            ),
             style,
             true,
         );
@@ -663,7 +847,14 @@ mod tests {
             http_addr: "127.0.0.1:4200".to_string(),
         };
         assert_uses_style(
-            &metasrv.get_args(temp_dir, env, db_ctx, 0, style),
+            &metasrv.get_args(
+                temp_dir,
+                env,
+                db_ctx,
+                0,
+                style,
+                &CompatConfigStage::Baseline,
+            ),
             style,
             true,
         );
@@ -676,7 +867,14 @@ mod tests {
             node_id: 0,
         };
         assert_uses_style(
-            &datanode.get_args(temp_dir, env, db_ctx, 0, style),
+            &datanode.get_args(
+                temp_dir,
+                env,
+                db_ctx,
+                0,
+                style,
+                &CompatConfigStage::Baseline,
+            ),
             style,
             true,
         );
@@ -689,7 +887,14 @@ mod tests {
             node_id: 0,
         };
         assert_uses_style(
-            &flownode.get_args(temp_dir, env, db_ctx, 0, style),
+            &flownode.get_args(
+                temp_dir,
+                env,
+                db_ctx,
+                0,
+                style,
+                &CompatConfigStage::Baseline,
+            ),
             style,
             true,
         );
@@ -757,15 +962,131 @@ mod tests {
             node_id: 0,
         };
 
-        let metasrv_config =
-            std::fs::read_to_string(metasrv.generate_config_file(temp_dir.path(), &db_ctx, 0))
-                .unwrap();
-        let datanode_config =
-            std::fs::read_to_string(datanode.generate_config_file(temp_dir.path(), &db_ctx, 0))
-                .unwrap();
+        let metasrv_config = std::fs::read_to_string(metasrv.generate_config_file(
+            temp_dir.path(),
+            &db_ctx,
+            0,
+            &CompatConfigStage::Baseline,
+        ))
+        .unwrap();
+        let datanode_config = std::fs::read_to_string(datanode.generate_config_file(
+            temp_dir.path(),
+            &db_ctx,
+            0,
+            &CompatConfigStage::Baseline,
+        ))
+        .unwrap();
 
         assert!(metasrv_config.contains("[gc]\nenable = true"));
         assert!(metasrv_config.contains("[gc.experimental_soft_drop]\nenable = true"));
         assert!(datanode_config.contains("[region_engine.mito.gc]\nenable = true"));
+    }
+
+    fn metric_overlay() -> OldConfig {
+        OldConfig {
+            datanode: BTreeMap::from([(
+                "region_engine.metric.sparse_primary_key_encoding".to_string(),
+                false,
+            )]),
+        }
+    }
+
+    #[test]
+    fn test_old_overlay_targets_named_region_engine_entry() {
+        let rendered = r#"
+[[region_engine]]
+[region_engine.mito]
+enable_write_cache = true
+"#;
+
+        let overlaid = apply_old_datanode_overlay(rendered, &metric_overlay()).unwrap();
+        let value: Value = toml::from_str(&overlaid).unwrap();
+        let entries = value["region_engine"].as_array().unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(
+            entries[1]["metric"]["sparse_primary_key_encoding"].as_bool(),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn test_old_overlay_rejects_duplicate_engine_non_table_and_type_conflicts() {
+        let overlay = metric_overlay();
+        for rendered in [
+            "[[region_engine]]\n[region_engine.metric]\n\n[[region_engine]]\n[region_engine.metric]\n",
+            "[[region_engine]]\nmetric = false\n",
+            "[[region_engine]]\n[region_engine.metric]\nsparse_primary_key_encoding = \"false\"\n",
+            "[[region_engine]]\n[region_engine.metric]\ncache = false\n",
+        ] {
+            let actual_overlay = if rendered.contains("cache = false") {
+                OldConfig {
+                    datanode: BTreeMap::from([(
+                        "region_engine.metric.cache.enabled".to_string(),
+                        false,
+                    )]),
+                }
+            } else {
+                overlay.clone()
+            };
+            assert!(apply_old_datanode_overlay(rendered, &actual_overlay).is_err());
+        }
+    }
+
+    #[test]
+    fn test_actual_datanode_template_validates_old_profile_without_state() {
+        assert!(validate_old_config_against_datanode_template(&metric_overlay()).is_ok());
+    }
+
+    #[test]
+    fn test_old_and_current_datanode_configs_are_independently_rendered() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let (_, db_ctx) = test_env(temp_dir.path());
+        let datanode = ServerMode::Datanode {
+            rpc_bind_addr: "127.0.0.1:4301".to_string(),
+            rpc_server_addr: "127.0.0.1:4301".to_string(),
+            http_addr: "127.0.0.1:4300".to_string(),
+            metasrv_addr: "127.0.0.1:4001".to_string(),
+            node_id: 0,
+        };
+        let old_path = datanode.generate_config_file(
+            temp_dir.path(),
+            &db_ctx,
+            0,
+            &CompatConfigStage::Old(metric_overlay()),
+        );
+        let baseline_path = datanode.generate_config_file(
+            temp_dir.path(),
+            &db_ctx,
+            0,
+            &CompatConfigStage::Baseline,
+        );
+        let current_path =
+            datanode.generate_config_file(temp_dir.path(), &db_ctx, 0, &CompatConfigStage::Current);
+
+        assert_ne!(old_path, current_path);
+        assert!(!baseline_path.ends_with("-.toml"));
+        assert!(old_path.ends_with("-old.toml"));
+        assert!(current_path.ends_with("-current.toml"));
+        assert!(!old_path.ends_with("--old.toml"));
+        assert!(!current_path.ends_with("--current.toml"));
+        assert!(
+            std::fs::read_to_string(old_path)
+                .unwrap()
+                .contains("sparse_primary_key_encoding")
+        );
+        assert!(
+            !std::fs::read_to_string(current_path)
+                .unwrap()
+                .contains("sparse_primary_key_encoding")
+        );
+    }
+
+    #[test]
+    fn test_all_old_datanode_renders_receive_the_overlay() {
+        let rendered = "[[region_engine]]\n[region_engine.mito]\n";
+        for _ in 0..3 {
+            let overlaid = apply_old_datanode_overlay(rendered, &metric_overlay()).unwrap();
+            assert!(overlaid.contains("sparse_primary_key_encoding = false"));
+        }
     }
 }

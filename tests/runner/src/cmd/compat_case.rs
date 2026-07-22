@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -43,6 +43,61 @@ pub struct CaseMetadata {
     /// Must match `[a-z0-9_]+`.
     #[serde(default)]
     pub namespace: Option<String>,
+    /// Optional old-stage-only configuration overlay.
+    #[serde(default)]
+    pub old_config: Option<OldConfig>,
+}
+
+/// Typed, role-scoped configuration applied only while the old binary runs.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OldConfig {
+    /// Datanode logical configuration paths and their boolean values.
+    pub datanode: BTreeMap<String, bool>,
+}
+
+impl OldConfig {
+    /// Returns the normalized logical paths in this profile without exposing values.
+    pub(crate) fn keys(&self) -> impl Iterator<Item = &str> {
+        self.datanode.keys().map(String::as_str)
+    }
+
+    /// Validates the deliberately narrow first-version configuration surface.
+    pub(crate) fn validate(&self) -> Result<(), String> {
+        if self.datanode.is_empty() {
+            return Err("old_config.datanode must not be empty".to_string());
+        }
+
+        for path in self.datanode.keys() {
+            validate_old_datanode_path(path)?;
+        }
+
+        Ok(())
+    }
+}
+
+/// Validates a logical path under the positive region-engine allowlist.
+pub(crate) fn validate_old_datanode_path(path: &str) -> Result<(), String> {
+    let segments: Vec<_> = path.split('.').collect();
+    if segments.len() < 3 || segments.first() != Some(&"region_engine") {
+        return Err(format!(
+            "old_config.datanode key '{path}' must match region_engine.<engine>.<leaf/path>"
+        ));
+    }
+
+    for segment in segments {
+        let mut chars = segment.chars();
+        if segment.contains("__")
+            || !matches!(chars.next(), Some(c) if c.is_ascii_lowercase())
+            || !chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+        {
+            return Err(format!(
+                "old_config.datanode key '{path}' contains an invalid path segment"
+            ));
+        }
+    }
+
+    Ok(())
 }
 
 impl CaseMetadata {
@@ -52,6 +107,15 @@ impl CaseMetadata {
         self.namespace
             .clone()
             .unwrap_or_else(|| sanitize_namespace(case_dir_name))
+    }
+
+    fn validate_old_config(&self) -> Result<(), String> {
+        if let Some(old_config) = &self.old_config {
+            old_config
+                .validate()
+                .map_err(|e| format!("Case '{}' has invalid old_config: {e}", self.name))?;
+        }
+        Ok(())
     }
 }
 
@@ -140,6 +204,7 @@ pub fn discover_cases(case_root: &Path) -> Result<Vec<CompatCase>, String> {
 
         let metadata: CaseMetadata = toml::from_str(&content)
             .map_err(|e| format!("Failed to parse {}: {e}", case_toml_path.display()))?;
+        metadata.validate_old_config()?;
 
         let case_dir_name = path
             .file_name()
@@ -223,6 +288,7 @@ pub fn validate_cases_metadata(cases: &[CompatCase]) -> Result<(), String> {
         if case.metadata.features.is_empty() {
             return Err(format!("Case '{}' has empty features", case.metadata.name));
         }
+        case.metadata.validate_old_config()?;
     }
 
     Ok(())
@@ -482,6 +548,7 @@ mod tests {
                 features: vec!["table".to_string()],
                 owner: "team".to_string(),
                 namespace: None,
+                old_config: None,
             },
             dir: PathBuf::from("case"),
             namespace: "case".to_string(),
@@ -503,6 +570,7 @@ mod tests {
                 features: vec!["table".to_string()],
                 owner: "test".to_string(),
                 namespace: None,
+                old_config: None,
             },
             dir: PathBuf::from("bad_constraint"),
             namespace: "bad_constraint".to_string(),
@@ -524,6 +592,7 @@ mod tests {
                 features: vec!["table".to_string()],
                 owner: "test".to_string(),
                 namespace: None,
+                old_config: None,
             },
             dir: PathBuf::from("case_a"),
             namespace: "shared_name".to_string(),
@@ -539,6 +608,7 @@ mod tests {
                 features: vec!["table".to_string()],
                 owner: "test".to_string(),
                 namespace: None,
+                old_config: None,
             },
             dir: PathBuf::from("case_b"),
             namespace: "shared_name".to_string(),
@@ -563,6 +633,7 @@ mod tests {
                 features: vec!["table".to_string()],
                 owner: "test".to_string(),
                 namespace: Some("shared_name".to_string()),
+                old_config: None,
             },
             dir: PathBuf::from("case_a"),
             namespace: "shared_name".to_string(),
@@ -578,6 +649,7 @@ mod tests {
                 features: vec!["table".to_string()],
                 owner: "test".to_string(),
                 namespace: Some("shared_name".to_string()),
+                old_config: None,
             },
             dir: PathBuf::from("case_b"),
             namespace: "shared_name".to_string(),
@@ -599,6 +671,7 @@ mod tests {
                 features: vec!["table".to_string()],
                 owner: "team".to_string(),
                 namespace: None,
+                old_config: None,
             },
             dir: PathBuf::from("case"),
             namespace: "case".to_string(),
@@ -644,6 +717,93 @@ owner = "test"
             discover_cases(tmp.path()).expect("discover should succeed without verify.result");
         assert_eq!(cases.len(), 1);
         assert_eq!(cases[0].metadata.name, "test_case");
+        assert!(cases[0].metadata.old_config.is_none());
+    }
+
+    #[test]
+    fn test_metadata_parses_typed_old_datanode_config() {
+        let metadata: CaseMetadata = toml::from_str(
+            r#"
+name = "test_case"
+reason = "test"
+introduced_by = "test"
+topologies = ["distributed"]
+from_range = ["*"]
+to_range = ["*"]
+features = ["table"]
+owner = "test"
+
+[old_config.datanode]
+"region_engine.metric.sparse_primary_key_encoding" = false
+"#,
+        )
+        .unwrap();
+
+        let old_config = metadata.old_config.unwrap();
+        assert_eq!(
+            old_config
+                .datanode
+                .get("region_engine.metric.sparse_primary_key_encoding"),
+            Some(&false)
+        );
+        assert!(old_config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_metadata_rejects_non_bool_old_config_values() {
+        let base = r#"
+name = "test_case"
+reason = "test"
+introduced_by = "test"
+topologies = ["distributed"]
+from_range = ["*"]
+to_range = ["*"]
+features = ["table"]
+owner = "test"
+
+[old_config.datanode]
+"region_engine.metric.sparse_primary_key_encoding" = VALUE
+"#;
+
+        for value in ["1", "\"false\""] {
+            assert!(toml::from_str::<CaseMetadata>(&base.replace("VALUE", value)).is_err());
+        }
+    }
+
+    #[test]
+    fn test_metadata_rejects_non_allowlisted_old_config_role() {
+        let metadata = r#"
+name = "test_case"
+reason = "test"
+introduced_by = "test"
+topologies = ["distributed"]
+from_range = ["*"]
+to_range = ["*"]
+features = ["table"]
+owner = "test"
+
+[old_config.frontend]
+"region_engine.metric.sparse_primary_key_encoding" = false
+"#;
+
+        assert!(toml::from_str::<CaseMetadata>(metadata).is_err());
+    }
+
+    #[test]
+    fn test_old_config_rejects_unsafe_or_non_allowlisted_paths() {
+        for path in [
+            "region_engine.metric",
+            "region_engine..enabled",
+            "region_engine.metric.__enabled",
+            "region_engine.METRIC.enabled",
+            "REGION_ENGINE.metric.enabled",
+            "datanode.metric.enabled",
+        ] {
+            let old_config = OldConfig {
+                datanode: BTreeMap::from([(path.to_string(), false)]),
+            };
+            assert!(old_config.validate().is_err(), "path should fail: {path}");
+        }
     }
 
     #[test]

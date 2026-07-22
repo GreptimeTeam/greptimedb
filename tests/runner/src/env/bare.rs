@@ -30,10 +30,10 @@ use tokio::sync::Mutex as TokioMutex;
 
 use crate::client::MultiProtocolClient;
 use crate::cmd::bare::ServerAddr;
-use crate::cmd::compat_case::try_infer_version;
+use crate::cmd::compat_case::{OldConfig, try_infer_version};
 use crate::formatter::{ErrorFormatter, MysqlFormatter, OutputFormatter, PostgresqlFormatter};
 use crate::protocol_interceptor::{MYSQL, PROTOCOL_KEY};
-use crate::server_mode::{GrpcArgStyle, ServerMode};
+use crate::server_mode::{CompatConfigStage, GrpcArgStyle, ServerMode};
 use crate::util;
 use crate::util::{PROGRAM, get_workspace_root, maybe_pull_binary};
 
@@ -104,6 +104,8 @@ pub struct Env {
     extra_args: Vec<String>,
     /// Cache for the inferred gRPC argument style per `bins_dir`.
     grpc_arg_style_cache: Arc<Mutex<HashMap<PathBuf, GrpcArgStyle>>>,
+    /// Active compatibility configuration stage, shared by initial starts and restarts.
+    compat_config_stage: Arc<Mutex<CompatConfigStage>>,
 }
 
 #[async_trait]
@@ -154,6 +156,7 @@ impl Env {
             store_config,
             extra_args,
             grpc_arg_style_cache: Arc::new(Mutex::new(HashMap::new())),
+            compat_config_stage: Arc::new(Mutex::new(CompatConfigStage::Baseline)),
         }
     }
 
@@ -348,7 +351,15 @@ impl Env {
             .unwrap();
 
         let arg_style = self.infer_grpc_arg_style(&bins_dir);
-        let args = mode.get_args(&self.sqlness_home, self, db_ctx, id, arg_style);
+        let compat_stage = self.compat_stage_for_start();
+        let args = mode.get_args(
+            &self.sqlness_home,
+            self,
+            db_ctx,
+            id,
+            arg_style,
+            &compat_stage,
+        );
         let check_ip_addrs = mode.check_addrs();
 
         for check_ip_addr in &check_ip_addrs {
@@ -643,6 +654,21 @@ impl Env {
     /// Start a distributed GreptimeDB cluster. Exposed for compat runner.
     pub(crate) async fn compat_start_distributed(&self, id: usize) -> GreptimeDB {
         self.start_distributed(id).await
+    }
+
+    /// Activates a typed old-stage configuration profile for subsequent starts and restarts.
+    pub(crate) fn compat_activate_old_profile(&self, old_config: OldConfig) {
+        *self.compat_config_stage.lock().unwrap() = CompatConfigStage::Old(old_config);
+    }
+
+    /// Atomically clears the old-stage overlay before starting the current binary.
+    pub(crate) fn compat_activate_current_profile(&self) {
+        *self.compat_config_stage.lock().unwrap() = CompatConfigStage::Current;
+    }
+
+    /// Returns the stage that a subsequent server spawn or restart will render.
+    pub(crate) fn compat_stage_for_start(&self) -> CompatConfigStage {
+        self.compat_config_stage.lock().unwrap().clone()
     }
 
     /// Full restart of all distributed processes with a new binary directory,
@@ -960,5 +986,66 @@ impl GreptimeDBContext {
 
     fn get_server_mode(&self, idx: usize) -> Option<&ServerMode> {
         self.server_modes.get(idx)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use super::*;
+
+    fn test_env() -> Env {
+        Env::new(
+            PathBuf::from("."),
+            ServerAddr::default(),
+            WalConfig::RaftEngine,
+            false,
+            Some(PathBuf::from(".")),
+            StoreConfig {
+                store_addrs: vec![],
+                setup_etcd: false,
+                setup_pg: None,
+                setup_mysql: None,
+                enable_flat_format: false,
+                enable_gc: false,
+            },
+            vec![],
+        )
+    }
+
+    fn old_config() -> OldConfig {
+        OldConfig {
+            datanode: BTreeMap::from([(
+                "region_engine.metric.sparse_primary_key_encoding".to_string(),
+                false,
+            )]),
+        }
+    }
+
+    #[test]
+    fn test_compat_stage_keeps_old_for_setup_restarts_then_stays_current() {
+        let env = test_env();
+        env.compat_activate_old_profile(old_config());
+        assert!(matches!(
+            env.compat_stage_for_start(),
+            CompatConfigStage::Old(_)
+        ));
+        // A setup restart consumes the same stage and therefore retains the overlay.
+        assert!(matches!(
+            env.compat_stage_for_start(),
+            CompatConfigStage::Old(_)
+        ));
+
+        env.compat_activate_current_profile();
+        // The transition happens before a current spawn, and verify restarts stay clean.
+        assert!(matches!(
+            env.compat_stage_for_start(),
+            CompatConfigStage::Current
+        ));
+        assert!(matches!(
+            env.compat_stage_for_start(),
+            CompatConfigStage::Current
+        ));
     }
 }

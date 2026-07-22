@@ -35,6 +35,27 @@ This file is intended for AI agents editing compat cases or the compat runner. F
 - `verify.sql` runs on the **new (to)** binary. Output is compared against
   `verify.result`.
 
+## Old-Stage Datanode Configuration
+
+- A case may opt into a typed old-stage-only overlay:
+  ```toml
+  [old_config.datanode]
+  "region_engine.metric.sparse_primary_key_encoding" = false
+  ```
+- The first version accepts only boolean values under the logical positive
+  allowlist `region_engine.<engine>.<leaf/path>`. Paths must be lowercase,
+  non-empty, and must not contain `__`; arbitrary TOML, roles, and environment
+  variables are not supported.
+- The runner renders the old datanode TOML and updates the named
+  `[[region_engine]]` entry. It does not perform a generic TOML merge. The
+  current stage always uses a separately rendered clean config, including after
+  restart directives in `verify.sql`.
+- Selected cases are grouped by the full normalized old configuration profile.
+  Baseline cases share one lifecycle, equal non-empty profiles share another,
+  and distinct profiles run sequentially with independent SQLNESS_HOME/data/WAL
+  state and a fresh etcd start/stop/remove lifecycle. `--preserve-state` lists
+  every retained profile directory.
+
 ## PostgreSQL Protocol Cases
 
 - When using `-- SQLNESS PROTOCOL POSTGRES`, avoid unqualified table names
@@ -50,7 +71,8 @@ cargo run -p sqlness-runner -- compat --dry-run [--from-version vX.Y.Z] [--test-
 The dry-run performs full discovery and filtering (name, topology, metadata
 validation, namespace dedup, version-range matching) but starts no services,
 creates no temp dirs, and mutates no files. Use it to check which cases
-would be selected before a real run.
+would be selected before a real run. It also prints profile-to-case mappings
+and logical configuration keys, never configuration values.
 
 ## CI Version Window
 

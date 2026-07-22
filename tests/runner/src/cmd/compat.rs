@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -21,15 +22,83 @@ use sqlness::interceptor::template::DELIMITER as TEMPLATE_DELIMITER;
 use sqlness::interceptor::{InterceptorRef, Registry};
 
 use crate::cmd::bare::ServerAddr;
-use crate::cmd::compat_case::{self, CompatCase, try_infer_version, version_matches_range};
+use crate::cmd::compat_case::{
+    self, CompatCase, OldConfig, try_infer_version, version_matches_range,
+};
 use crate::env::bare::{Env, StoreConfig, WalConfig};
 use crate::protocol_interceptor::{self, POSTGRES, PROTOCOL_KEY};
+use crate::server_mode::validate_old_config_against_datanode_template;
 use crate::util;
 
 const COMPAT_TOPOLOGY: &str = "distributed";
 const COMMENT_PREFIX: &str = "--";
 const INTERCEPTOR_PREFIX: &str = "-- SQLNESS";
 const QUERY_DELIMITER: char = ';';
+
+/// A deterministic collection of cases that can share one compatibility lifecycle.
+#[derive(Debug)]
+struct CompatProfile {
+    old_config: Option<OldConfig>,
+    cases: Vec<CompatCase>,
+}
+
+impl CompatProfile {
+    fn name(&self, index: usize) -> String {
+        if self.old_config.is_some() {
+            format!("old-config-{index}")
+        } else {
+            "baseline".to_string()
+        }
+    }
+
+    fn config_keys(&self) -> Vec<&str> {
+        self.old_config
+            .as_ref()
+            .map(|config| config.keys().collect())
+            .unwrap_or_default()
+    }
+}
+
+/// Groups cases by their complete normalized old-stage configuration profile.
+fn group_cases_by_profile(cases: Vec<CompatCase>) -> Vec<CompatProfile> {
+    let mut grouped: BTreeMap<Option<OldConfig>, Vec<CompatCase>> = BTreeMap::new();
+    for case in cases {
+        grouped
+            .entry(case.metadata.old_config.clone())
+            .or_default()
+            .push(case);
+    }
+
+    grouped
+        .into_iter()
+        .map(|(old_config, cases)| CompatProfile { old_config, cases })
+        .collect()
+}
+
+/// Records which setup cases may advance to verification.
+#[derive(Default, Debug, PartialEq, Eq)]
+struct SetupProgress {
+    successful: Vec<usize>,
+    failed: Vec<usize>,
+}
+
+impl SetupProgress {
+    /// Records one attempted setup result and returns whether setup should continue.
+    fn record(&mut self, index: usize, succeeded: bool, fail_fast: bool) -> bool {
+        if succeeded {
+            self.successful.push(index);
+            true
+        } else {
+            self.failed.push(index);
+            !fail_fast
+        }
+    }
+
+    /// Returns whether successful setup cases may advance to the current stage.
+    fn should_transition(&self, fail_fast: bool) -> bool {
+        !self.successful.is_empty() && (!fail_fast || self.failed.is_empty())
+    }
+}
 
 /// Run compatibility tests in bare distributed mode.
 ///
@@ -102,7 +171,10 @@ impl CompatCommand {
         }
 
         // ---- 2. Resolve case directory ----
-        let case_dir = self.case_dir.unwrap_or_else(default_compat_case_dir);
+        let case_dir = self
+            .case_dir
+            .clone()
+            .unwrap_or_else(default_compat_case_dir);
 
         if !case_dir.is_dir() {
             panic!("Case directory not found: {}", case_dir.display());
@@ -273,8 +345,17 @@ impl CompatCommand {
             return;
         }
 
+        let selected_case_count = cases.len();
+        let profiles = group_cases_by_profile(cases);
+        for profile in &profiles {
+            if let Some(old_config) = &profile.old_config {
+                validate_old_config_against_datanode_template(old_config)
+                    .unwrap_or_else(|e| panic!("Invalid old datanode configuration profile: {e}"));
+            }
+        }
+
         if dry_run {
-            println!("DRY-RUN: would run {} compat case(s)", cases.len());
+            println!("DRY-RUN: would run {} compat case(s)", selected_case_count);
             println!("  topology:     {}", COMPAT_TOPOLOGY);
             println!(
                 "  from version: {}",
@@ -288,21 +369,29 @@ impl CompatCommand {
                     .as_deref()
                     .unwrap_or("unknown (use --to-bins-dir or build debug binary)")
             );
-            if pre_filter_count != cases.len() {
+            if pre_filter_count != selected_case_count {
                 println!();
                 println!(
                     "Version-range filtering reduced {} → {} cases (see 'Skipping case' messages above)",
-                    pre_filter_count,
-                    cases.len()
+                    pre_filter_count, selected_case_count
                 );
             }
             println!();
-            for c in &cases {
-                println!("  case:        {}", c.metadata.name);
-                println!("    namespace:   {}", c.namespace);
-                println!("    from_range:  {:?}", c.metadata.from_range);
-                println!("    to_range:    {:?}", c.metadata.to_range);
-                println!("    features:    {:?}", c.metadata.features);
+            for (index, profile) in profiles.iter().enumerate() {
+                println!("  profile: {}", profile.name(index));
+                let keys = profile.config_keys();
+                if keys.is_empty() {
+                    println!("    config keys: baseline");
+                } else {
+                    println!("    config keys: {}", keys.join(", "));
+                }
+                for c in &profile.cases {
+                    println!("    case:      {}", c.metadata.name);
+                    println!("      namespace: {}", c.namespace);
+                    println!("      from_range: {:?}", c.metadata.from_range);
+                    println!("      to_range:   {:?}", c.metadata.to_range);
+                    println!("      features:   {:?}", c.metadata.features);
+                }
             }
             println!();
             println!("Dry run complete. Remove --dry-run to execute.");
@@ -310,20 +399,71 @@ impl CompatCommand {
         }
 
         println!(
-            "Running {} compat case(s) with topology {}:",
-            cases.len(),
+            "Running compatibility profiles with topology {}:",
             COMPAT_TOPOLOGY
         );
-        for c in &cases {
+        for (index, profile) in profiles.iter().enumerate() {
             println!(
-                "  - {} (namespace: {}, topologies: {:?})",
-                c.metadata.name, c.namespace, c.metadata.topologies
+                "  - {}: {} case(s)",
+                profile.name(index),
+                profile.cases.len()
             );
         }
 
-        // ---- 6. Create temp directory (after filtering so early exits don't leave empty dirs) ----
+        // ---- 6. Build interceptor registry ----
+        let interceptor_registry = create_interceptor_registry();
+        let from_bins_dir =
+            from_bins_dir.expect("from_bins_dir must be resolved in non-dry-run mode");
+        let to_bins_dir = to_bins_dir.expect("to_bins_dir must be resolved in non-dry-run mode");
+        let mut failed = Vec::new();
+        let mut preserved_homes = Vec::new();
+
+        for (index, profile) in profiles.into_iter().enumerate() {
+            let outcome = self
+                .run_profile(
+                    index,
+                    profile,
+                    &interceptor_registry,
+                    &from_bins_dir,
+                    &to_bins_dir,
+                )
+                .await;
+            if let Some(home) = outcome.preserved_home {
+                preserved_homes.push(home);
+            }
+            let profile_failed = !outcome.failed_cases.is_empty();
+            failed.extend(outcome.failed_cases);
+            if profile_failed && self.fail_fast {
+                break;
+            }
+        }
+
+        if self.preserve_state {
+            println!("Preserved compatibility state directories:");
+            for home in preserved_homes {
+                println!("  - {}", home.display());
+            }
+        }
+
+        if failed.is_empty() {
+            println!("\n\x1b[32mAll compat tests passed!\x1b[0m");
+        } else {
+            println!("\n\x1b[31mFailed cases: {}\x1b[0m", failed.join(", "));
+            panic!("Compatibility profiles failed");
+        }
+    }
+
+    async fn run_profile(
+        &self,
+        index: usize,
+        profile: CompatProfile,
+        interceptor_registry: &Registry,
+        from_bins_dir: &PathBuf,
+        to_bins_dir: &PathBuf,
+    ) -> ProfileOutcome {
+        let profile_name = profile.name(index);
         let temp_dir = tempfile::Builder::new()
-            .prefix("sqlness-compat")
+            .prefix(&format!("sqlness-compat-{profile_name}-"))
             .tempdir()
             .unwrap();
         let sqlness_home = temp_dir.keep();
@@ -331,10 +471,6 @@ impl CompatCommand {
             std::env::set_var("SQLNESS_HOME", sqlness_home.display().to_string());
         }
 
-        // ---- 7. Build interceptor registry ----
-        let interceptor_registry = create_interceptor_registry();
-
-        // ---- 7b. Create Env for bare distributed mode ----
         let store_config = StoreConfig {
             store_addrs: if self.setup_etcd {
                 vec!["127.0.0.1:2379".to_string()]
@@ -347,93 +483,105 @@ impl CompatCommand {
             enable_flat_format: false,
             enable_gc: false,
         };
-
         let env = Env::new(
             sqlness_home.clone(),
             ServerAddr::default(),
             WalConfig::RaftEngine,
             self.pull_version_on_need,
-            from_bins_dir,
+            Some(from_bins_dir.clone()),
             store_config,
             vec![],
         );
-
-        // ---- 7c. Etcd cleanup guard ----
-        // Arm this only immediately before starting the cluster. Earlier validation
-        // failures should not stop an unrelated local container named `etcd`.
-        let mut etcd_guard = if self.setup_etcd {
-            Some(EtcdGuard::new())
-        } else {
-            None
-        };
-
-        // ---- 8. Run setup phase on old cluster ----
-        println!("Starting old-version distributed cluster with flownode...");
-        let mut db = env.compat_start_distributed(0).await;
-
-        println!("Running setup phase...");
-        for case in &cases {
-            run_compat_phase(&db, case, &interceptor_registry, CompatPhase::Setup)
-                .await
-                .unwrap_or_else(|e| panic!("Setup failed for case '{}': {e}", case.metadata.name));
-            println!("  Setup: {} - OK", case.metadata.name);
+        let configured_old_profile = profile.old_config.is_some();
+        if let Some(old_config) = profile.old_config.clone() {
+            env.compat_activate_old_profile(old_config);
         }
 
-        // ---- 9. Switch to "to" binary and restart cluster ----
-        // to_bins_dir was already resolved during version-range filtering
-        println!("Restarting cluster with new-version binary on preserved state...");
-        env.compat_restart_all(
-            &db,
-            to_bins_dir.expect("to_bins_dir must be resolved in non-dry-run mode"),
-        )
-        .await;
+        // Arm only immediately before this profile starts etcd. Scope guarantees
+        // cleanup finishes before the next profile can acquire the same container.
+        let mut etcd_guard = self.setup_etcd.then(EtcdGuard::new);
+        println!("Starting profile '{profile_name}' with old-version distributed cluster...");
+        let mut db = env.compat_start_distributed(0).await;
+        let mut failed_cases = Vec::new();
+        let mut setup_progress = SetupProgress::default();
 
-        // ---- 10. Run verify phase on new cluster ----
-        println!("Running verify phase...");
-        let mut failed = Vec::new();
-        for case in &cases {
-            match run_compat_phase(&db, case, &interceptor_registry, CompatPhase::Verify).await {
-                Ok(()) => println!("  Verify: {} - PASSED", case.metadata.name),
+        println!("Running setup phase for profile '{profile_name}'...");
+        for (case_index, case) in profile.cases.iter().enumerate() {
+            match run_compat_phase(&db, case, interceptor_registry, CompatPhase::Setup).await {
+                Ok(()) => {
+                    setup_progress.record(case_index, true, self.fail_fast);
+                    println!("  Setup: {} - OK", case.metadata.name);
+                }
                 Err(e) => {
-                    println!("  Verify: {} - FAILED: {e}", case.metadata.name);
-                    failed.push(case.metadata.name.clone());
-                    if self.fail_fast {
+                    println!("  Setup: {} - FAILED: {e}", case.metadata.name);
+                    if !setup_progress.record(case_index, false, self.fail_fast) {
                         break;
                     }
                 }
             }
         }
+        failed_cases.extend(
+            setup_progress
+                .failed
+                .iter()
+                .map(|index| profile.cases[*index].metadata.name.clone()),
+        );
 
-        // ---- 11. Stop cluster ----
+        if setup_progress.should_transition(self.fail_fast) {
+            // This transition is deliberately before every current process spawn.
+            // Subsequent verify-stage restart directives observe the clean stage too.
+            if configured_old_profile {
+                env.compat_activate_current_profile();
+            }
+            println!("Restarting profile '{profile_name}' with new-version binary...");
+            env.compat_restart_all(&db, to_bins_dir.clone()).await;
+
+            println!("Running verify phase for profile '{profile_name}'...");
+            for case_index in setup_progress.successful {
+                let case = &profile.cases[case_index];
+                match run_compat_phase(&db, case, interceptor_registry, CompatPhase::Verify).await {
+                    Ok(()) => println!("  Verify: {} - PASSED", case.metadata.name),
+                    Err(e) => {
+                        println!("  Verify: {} - FAILED: {e}", case.metadata.name);
+                        failed_cases.push(case.metadata.name.clone());
+                        if self.fail_fast {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
         db.compat_stop();
-
-        // ---- 12. Cleanup ----
-        // Etcd is always cleaned up; --preserve-state only preserves sqlness_home.
         if self.setup_etcd {
-            println!("Stopping etcd");
+            println!("Stopping etcd for profile '{profile_name}'");
             util::stop_rm_etcd();
         }
-
-        if !self.preserve_state {
-            println!("Removing state in {:?}", sqlness_home);
-            tokio::fs::remove_dir_all(sqlness_home)
-                .await
-                .unwrap_or_else(|e| println!("Warning: failed to clean up temp dir: {e}"));
-        }
-
-        // Disarm the etcd guard now that we've done normal cleanup.
         if let Some(mut guard) = etcd_guard.take() {
             guard.disarm();
         }
 
-        if failed.is_empty() {
-            println!("\n\x1b[32mAll compat tests passed!\x1b[0m");
+        let preserved_home = if self.preserve_state {
+            Some(sqlness_home)
         } else {
-            println!("\n\x1b[31mFailed cases: {}\x1b[0m", failed.join(", "));
-            // Explicitly drop the guard before exit so it doesn't double-cleanup.
-            std::process::exit(1);
+            println!("Removing state in {:?}", sqlness_home);
+            tokio::fs::remove_dir_all(sqlness_home)
+                .await
+                .unwrap_or_else(|e| println!("Warning: failed to clean up temp dir: {e}"));
+            None
+        };
+
+        ProfileOutcome {
+            failed_cases,
+            preserved_home,
         }
     }
+}
+
+/// Result of one isolated profile lifecycle.
+struct ProfileOutcome {
+    failed_cases: Vec<String>,
+    preserved_home: Option<PathBuf>,
 }
 
 /// Guard that stops/removes Docker etcd on drop (panic or early exit).
@@ -867,7 +1015,11 @@ fn simple_diff(expected: &str, actual: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::trim_trailing_blank_lines;
+    use std::collections::BTreeMap;
+    use std::path::PathBuf;
+
+    use super::*;
+    use crate::cmd::compat_case::CaseMetadata;
 
     #[test]
     fn test_trim_trailing_blank_lines_preserves_single_final_newline() {
@@ -875,5 +1027,90 @@ mod tests {
         trim_trailing_blank_lines(&mut output);
 
         assert_eq!(output, "SELECT 1;\n\n+---+\n");
+    }
+
+    fn test_case(name: &str, old_config: Option<OldConfig>) -> CompatCase {
+        CompatCase {
+            metadata: CaseMetadata {
+                name: name.to_string(),
+                reason: "test".to_string(),
+                introduced_by: "test".to_string(),
+                topologies: vec![COMPAT_TOPOLOGY.to_string()],
+                from_range: vec!["*".to_string()],
+                to_range: vec!["*".to_string()],
+                features: vec!["table".to_string()],
+                owner: "test".to_string(),
+                namespace: None,
+                old_config,
+            },
+            dir: PathBuf::from(name),
+            namespace: name.to_string(),
+        }
+    }
+
+    fn old_profile(value: bool) -> OldConfig {
+        OldConfig {
+            datanode: BTreeMap::from([(
+                "region_engine.metric.sparse_primary_key_encoding".to_string(),
+                value,
+            )]),
+        }
+    }
+
+    #[test]
+    fn test_group_cases_by_full_normalized_config_profile() {
+        let profiles = group_cases_by_profile(vec![
+            test_case("baseline_a", None),
+            test_case("same_a", Some(old_profile(false))),
+            test_case("baseline_b", None),
+            test_case("same_b", Some(old_profile(false))),
+            test_case("distinct", Some(old_profile(true))),
+        ]);
+
+        assert_eq!(profiles.len(), 3);
+        assert!(profiles[0].old_config.is_none());
+        assert_eq!(profiles[0].cases.len(), 2);
+        assert_eq!(profiles[1].cases.len(), 2);
+        assert_eq!(profiles[2].cases.len(), 1);
+        assert_eq!(
+            profiles[0]
+                .cases
+                .iter()
+                .map(|case| case.metadata.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["baseline_a", "baseline_b"]
+        );
+        assert_eq!(
+            profiles[1]
+                .cases
+                .iter()
+                .map(|case| case.metadata.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["same_a", "same_b"]
+        );
+        assert_ne!(profiles[1].old_config, profiles[2].old_config);
+    }
+
+    #[test]
+    fn test_setup_failure_in_middle_verifies_other_successful_cases() {
+        let mut progress = SetupProgress::default();
+        for (index, succeeded) in [true, false, true].into_iter().enumerate() {
+            assert!(progress.record(index, succeeded, false));
+        }
+
+        assert_eq!(progress.successful, vec![0, 2]);
+        assert_eq!(progress.failed, vec![1]);
+        assert!(progress.should_transition(false));
+    }
+
+    #[test]
+    fn test_fail_fast_stops_setup_without_marking_unattempted_cases() {
+        let mut progress = SetupProgress::default();
+        assert!(progress.record(0, true, true));
+        assert!(!progress.record(1, false, true));
+
+        assert_eq!(progress.successful, vec![0]);
+        assert_eq!(progress.failed, vec![1]);
+        assert!(!progress.should_transition(true));
     }
 }
