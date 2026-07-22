@@ -30,7 +30,7 @@ use datatypes::schema::Schema;
 use mito_codec::row_converter::PrimaryKeyCodec;
 use parquet::arrow::arrow_reader::RowSelection;
 use parquet::file::metadata::ParquetMetaData;
-use snafu::{OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{ColumnId, TimeSeriesRowSelector};
@@ -232,6 +232,11 @@ impl FileRange {
     }
 
     /// Creates a reader that returns only the encoded primary-key column.
+    ///
+    /// This returns the primary key as persisted in the SST and does not apply
+    /// [`FlatCompatBatch`]. Callers must not use it when the primary key needs
+    /// compatibility conversion and must interpret the key using the file's
+    /// metadata. The PK-only path currently supports sparse encoding only.
     pub(crate) async fn primary_key_reader(
         &self,
         fetch_metrics: Option<&ParquetFetchMetrics>,
@@ -239,6 +244,18 @@ impl FileRange {
         if !self.in_dynamic_filter_range() {
             return Ok(None);
         }
+
+        let file_encoding = self.context.read_format().metadata().primary_key_encoding;
+        ensure!(
+            file_encoding == PrimaryKeyEncoding::Sparse,
+            UnexpectedSnafu {
+                reason: format!(
+                    "Primary-key-only SST reads require sparse encoding, file {} uses {} encoding",
+                    self.file_handle().file_id(),
+                    file_encoding,
+                ),
+            }
+        );
 
         let stream = self
             .context
