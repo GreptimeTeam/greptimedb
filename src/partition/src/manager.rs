@@ -74,6 +74,14 @@ impl PartitionRuleManager {
         &self,
         table_id: TableId,
     ) -> Result<Arc<PhysicalTableRouteValue>> {
+        Ok(self.find_physical_table_route_with_id(table_id).await?.1)
+    }
+
+    /// Returns the resolved physical table id and its route.
+    pub async fn find_physical_table_route_with_id(
+        &self,
+        table_id: TableId,
+    ) -> Result<(TableId, Arc<PhysicalTableRouteValue>)> {
         match self
             .table_route_cache
             .get(table_id)
@@ -82,7 +90,9 @@ impl PartitionRuleManager {
             .context(error::TableRouteNotFoundSnafu { table_id })?
             .as_ref()
         {
-            TableRoute::Physical(physical_table_route) => Ok(physical_table_route.clone()),
+            TableRoute::Physical(physical_table_route) => {
+                Ok((table_id, physical_table_route.clone()))
+            }
             TableRoute::Logical(logical_table_route) => {
                 let physical_table_id = logical_table_route.physical_table_id();
                 let physical_table_route = self
@@ -90,17 +100,19 @@ impl PartitionRuleManager {
                     .get(physical_table_id)
                     .await
                     .context(error::TableRouteManagerSnafu)?
-                    .context(error::TableRouteNotFoundSnafu { table_id })?;
+                    .context(error::TableRouteNotFoundSnafu {
+                        table_id: physical_table_id,
+                    })?;
 
                 let physical_table_route = physical_table_route
                     .as_physical_table_route_ref()
                     .context(error::UnexpectedSnafu{
                         err_msg: format!(
-                            "Expected the physical table route, but got logical table route, table: {table_id}"
+                            "Expected the physical table route, but got logical table route, table: {physical_table_id}"
                         ),
                     })?;
 
-                Ok(physical_table_route.clone())
+                Ok((physical_table_id, physical_table_route.clone()))
             }
         }
     }
