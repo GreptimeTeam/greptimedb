@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use common_error::ext::BoxedError;
 use common_query::error;
-use common_time::{Date, Timestamp};
+use common_time::{Date, Timestamp, Timezone};
 use datafusion_common::DataFusionError;
 use datafusion_common::arrow::array::{Array, AsArray, StringViewBuilder};
 use datafusion_common::arrow::datatypes::{
@@ -102,6 +102,9 @@ impl Function for DateFormatFunction {
                 })?;
             }
             DataType::Date32 => {
+                let utc_timezone = Timezone::from_tz_string("UTC")
+                    .map_err(BoxedError::new)
+                    .context(error::ExecuteSnafu)?;
                 let left = left.as_primitive::<Date32Type>();
                 for i in 0..size {
                     let date = left.is_valid(i).then(|| Date::from(left.value(i)));
@@ -109,7 +112,7 @@ impl Function for DateFormatFunction {
 
                     let result = match (date, format) {
                         (Some(date), Some(fmt)) => date
-                            .as_formatted_string(fmt, Some(timezone))
+                            .as_formatted_string(fmt, Some(&utc_timezone))
                             .map_err(BoxedError::new)
                             .context(error::ExecuteSnafu)?,
                         _ => None,
@@ -160,17 +163,22 @@ impl fmt::Display for DateFormatFunction {
 
 #[cfg(test)]
 mod tests {
+    use std::process::Command;
     use std::sync::Arc;
 
     use arrow_schema::Field;
+    use common_time::Timezone;
     use datafusion_common::arrow::array::{
         Date32Array, Date64Array, StringArray, TimestampSecondArray,
     };
     use datafusion_common::config::ConfigOptions;
     use datafusion_expr::{TypeSignature, Volatility};
+    use session::context::QueryContextBuilder;
 
     use super::{DateFormatFunction, *};
     use crate::function::FunctionContext;
+
+    const DEFAULT_TIMEZONE_CHILD_ENV: &str = "GREPTIME_DATE_FORMAT_DEFAULT_TIMEZONE_CHILD";
 
     #[test]
     fn test_date_format_misc() {
@@ -328,5 +336,140 @@ mod tests {
         for (actual, expect) in vector.iter().zip(results) {
             assert_eq!(actual, expect);
         }
+    }
+
+    #[test]
+    fn test_date32_date_format_ignores_session_timezone() {
+        let output = Command::new(std::env::current_exe().unwrap())
+            .arg(
+                "scalars::date::date_format::tests::test_date32_date_format_ignores_default_timezone_child",
+            )
+            .arg("--exact")
+            .arg("--ignored")
+            .env(DEFAULT_TIMEZONE_CHILD_ENV, "1")
+            .output()
+            .unwrap();
+
+        assert!(
+            output.status.success(),
+            "child Date32 timezone test failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("1 passed"),
+            "child Date32 timezone test did not run\nstdout:\n{stdout}"
+        );
+    }
+
+    #[test]
+    #[ignore = "spawned by test_date32_date_format_ignores_session_timezone"]
+    fn test_date32_date_format_ignores_default_timezone_child() {
+        assert_eq!(
+            Some("1"),
+            std::env::var(DEFAULT_TIMEZONE_CHILD_ENV).ok().as_deref()
+        );
+        common_time::timezone::set_default_timezone(Some("-08:00")).unwrap();
+
+        fn format_with_timezone(
+            f: &DateFormatFunction,
+            value: ColumnarValue,
+            timezone: &str,
+            format: &str,
+            number_rows: usize,
+        ) -> Vec<Option<String>> {
+            let query_ctx = QueryContextBuilder::default()
+                .timezone(Timezone::from_tz_string(timezone).unwrap())
+                .build()
+                .into();
+            let mut config_options = ConfigOptions::default();
+            config_options.extensions.insert(FunctionContext {
+                query_ctx,
+                ..Default::default()
+            });
+
+            let args = ScalarFunctionArgs {
+                args: vec![
+                    value,
+                    ColumnarValue::Array(Arc::new(StringArray::from_iter_values(
+                        std::iter::repeat_n(format, number_rows),
+                    ))),
+                ],
+                arg_fields: vec![],
+                number_rows,
+                return_field: Arc::new(Field::new("x", DataType::Utf8View, false)),
+                config_options: Arc::new(config_options),
+            };
+            let result = f
+                .invoke_with_args(args)
+                .and_then(|value| value.to_array(number_rows))
+                .unwrap();
+
+            result
+                .as_string_view()
+                .iter()
+                .map(|value| value.map(str::to_owned))
+                .collect()
+        }
+
+        let f = DateFormatFunction::default();
+
+        assert_eq!(
+            vec![
+                Some("1969-12-31 00:00:00 +0000 UTC".to_string()),
+                Some("1970-01-01 00:00:00 +0000 UTC".to_string()),
+                Some("1970-01-02 00:00:00 +0000 UTC".to_string()),
+            ],
+            format_with_timezone(
+                &f,
+                ColumnarValue::Array(Arc::new(Date32Array::from(vec![
+                    Some(-1),
+                    Some(0),
+                    Some(1)
+                ]))),
+                "UTC",
+                "%Y-%m-%d %T %z %Z",
+                3,
+            )
+        );
+        assert_eq!(
+            vec![
+                Some("1969-12-31 00:00:00 +0000 UTC".to_string()),
+                Some("1970-01-01 00:00:00 +0000 UTC".to_string()),
+                Some("1970-01-02 00:00:00 +0000 UTC".to_string()),
+            ],
+            format_with_timezone(
+                &f,
+                ColumnarValue::Array(Arc::new(Date32Array::from(vec![
+                    Some(-1),
+                    Some(0),
+                    Some(1)
+                ]))),
+                "-08:00",
+                "%Y-%m-%d %T %z %Z",
+                3,
+            )
+        );
+        assert_eq!(
+            vec![Some("1970-01-01".to_string())],
+            format_with_timezone(
+                &f,
+                ColumnarValue::Array(Arc::new(TimestampSecondArray::from(vec![Some(0)]))),
+                "UTC",
+                "%Y-%m-%d",
+                1,
+            )
+        );
+        assert_eq!(
+            vec![Some("1969-12-31".to_string())],
+            format_with_timezone(
+                &f,
+                ColumnarValue::Array(Arc::new(TimestampSecondArray::from(vec![Some(0)]))),
+                "-08:00",
+                "%Y-%m-%d",
+                1,
+            )
+        );
     }
 }
