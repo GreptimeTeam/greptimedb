@@ -13,14 +13,17 @@
 // limitations under the License.
 
 use std::collections::{HashMap, HashSet};
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use api::v1::flow::{DirtyWindowRequest, DirtyWindowRequests};
 use api::v1::meta::Peer;
 use api::v1::region::{
     BulkInsertRequest, RegionRequest, RegionRequestHeader, bulk_insert_request, region_request,
 };
 use api::v1::{ArrowIpc, ColumnSchema, RowInsertRequests, Rows};
+use arrow::array::Array;
 use arrow::compute::{concat_batches, filter_record_batch};
 use arrow::datatypes::{DataType as ArrowDataType, Schema as ArrowSchema, TimeUnit};
 use arrow::record_batch::RecordBatch;
@@ -28,12 +31,14 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use catalog::CatalogManagerRef;
 use common_grpc::flight::{FlightEncoder, FlightMessage};
+use common_meta::cache::TableFlownodeSetCacheRef;
 use common_meta::node_manager::NodeManagerRef;
 use common_query::prelude::{GREPTIME_PHYSICAL_TABLE, greptime_timestamp, greptime_value};
 use common_telemetry::tracing_context::TracingContext;
-use common_telemetry::{debug, warn};
+use common_telemetry::{debug, error, warn};
 use dashmap::DashMap;
 use dashmap::mapref::entry::Entry;
+use futures::StreamExt;
 use metric_engine::batch_modifier::{TagColumnInfo, modify_batch_sparse};
 use partition::manager::PartitionRuleManagerRef;
 use partition::partition::PartitionRuleRef;
@@ -47,9 +52,9 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore, broadcast, mpsc, oneshot};
 use crate::error;
 use crate::error::{Error, Result};
 use crate::metrics::{
-    FLUSH_DROPPED_ROWS, FLUSH_ELAPSED, FLUSH_FAILURES, FLUSH_ROWS, FLUSH_TOTAL, PENDING_BATCHES,
-    PENDING_ROWS, PENDING_ROWS_BATCH_FLUSH_STAGE_ELAPSED, PENDING_ROWS_BATCH_INGEST_STAGE_ELAPSED,
-    PENDING_WORKERS,
+    FLOW_NOTIFICATION_DROPPED, FLUSH_DROPPED_ROWS, FLUSH_ELAPSED, FLUSH_FAILURES, FLUSH_ROWS,
+    FLUSH_TOTAL, PENDING_BATCHES, PENDING_ROWS, PENDING_ROWS_BATCH_FLUSH_STAGE_ELAPSED,
+    PENDING_ROWS_BATCH_INGEST_STAGE_ELAPSED, PENDING_WORKERS,
 };
 use crate::prom_row_builder::{
     build_prom_create_table_schema_from_proto, identify_missing_columns_from_proto,
@@ -61,7 +66,7 @@ const PHYSICAL_TABLE_KEY: &str = "physical_table";
 const PENDING_ROWS_BATCH_SYNC_ENV: &str = "PENDING_ROWS_BATCH_SYNC";
 const WORKER_IDLE_TIMEOUT_MULTIPLIER: u32 = 3;
 const PHYSICAL_REGION_ESSENTIAL_COLUMN_COUNT: usize = 3;
-
+const MAX_CONCURRENT_FLOW_NOTIFICATIONS: usize = 8;
 #[async_trait]
 pub trait PendingRowsSchemaAlterer: Send + Sync {
     /// Batch-create multiple logical tables that are missing.
@@ -205,11 +210,56 @@ struct BatchKey {
     physical_table: String,
 }
 
-#[derive(Debug)]
+/// An aligned logical record batch and its timestamp column index.
+#[derive(Debug, Clone)]
+pub struct RecordBatchWithTsIdx {
+    /// The aligned logical record batch.
+    batch: RecordBatch,
+    /// The timestamp column index in `batch`.
+    timestamp_index: usize,
+}
+
+impl RecordBatchWithTsIdx {
+    /// Creates a record batch with a validated timestamp column index.
+    pub fn try_new(batch: RecordBatch, timestamp_index: usize) -> Result<Self> {
+        let schema = batch.schema();
+        let timestamp_field = schema.fields().get(timestamp_index).with_context(|| {
+            error::InvalidPromRemoteRequestSnafu {
+                msg: format!(
+                    "Timestamp column index {} is out of bounds for record batch with {} columns",
+                    timestamp_index,
+                    batch.num_columns()
+                ),
+            }
+        })?;
+        ensure!(
+            matches!(timestamp_field.data_type(), ArrowDataType::Timestamp(_, _)),
+            error::InvalidPromRemoteRequestSnafu {
+                msg: format!(
+                    "Column at index {} is not a timestamp column: {:?}",
+                    timestamp_index,
+                    timestamp_field.data_type()
+                ),
+            }
+        );
+
+        Ok(Self {
+            batch,
+            timestamp_index,
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn into_parts(self) -> (RecordBatch, usize) {
+        (self.batch, self.timestamp_index)
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct TableBatch {
     pub table_name: String,
     pub table_id: TableId,
-    pub batches: Vec<RecordBatch>,
+    pub batches: Vec<RecordBatchWithTsIdx>,
     pub row_count: usize,
 }
 
@@ -225,7 +275,7 @@ struct TableResolutionPlan {
 }
 
 struct PendingBatch {
-    tables: HashMap<String, TableBatch>,
+    tables: HashMap<TableId, TableBatch>,
     created_at: Instant,
     total_row_count: usize,
     db_string: String,
@@ -253,7 +303,7 @@ struct PendingWorker {
 
 enum WorkerCommand {
     Submit {
-        table_batches: Vec<(String, u32, RecordBatch)>,
+        table_batches: Vec<(String, u32, RecordBatchWithTsIdx)>,
         total_rows: usize,
         ctx: QueryContextRef,
         response_tx: oneshot::Sender<std::result::Result<(), Arc<Error>>>,
@@ -283,6 +333,7 @@ pub struct PendingRowsBatcher {
     partition_manager: PartitionRuleManagerRef,
     node_manager: NodeManagerRef,
     catalog_manager: CatalogManagerRef,
+    flow_notification_tx: mpsc::Sender<FlowNotification>,
     flush_semaphore: Arc<Semaphore>,
     inflight_semaphore: Arc<Semaphore>,
     worker_channel_capacity: usize,
@@ -298,6 +349,7 @@ impl PendingRowsBatcher {
         partition_manager: PartitionRuleManagerRef,
         node_manager: NodeManagerRef,
         catalog_manager: CatalogManagerRef,
+        table_flownode_set_cache: TableFlownodeSetCacheRef,
         prom_store_with_metric_engine: bool,
         schema_alterer: PendingRowsSchemaAltererRef,
         flush_interval: Duration,
@@ -305,6 +357,7 @@ impl PendingRowsBatcher {
         max_concurrent_flushes: usize,
         worker_channel_capacity: usize,
         max_inflight_requests: usize,
+        flow_notification_queue_capacity: NonZeroUsize,
     ) -> Option<Arc<Self>> {
         // Disable the batcher if flush is disabled or configuration is invalid.
         // Zero values for these knobs either cause panics (e.g., zero-capacity channels)
@@ -326,6 +379,13 @@ impl PendingRowsBatcher {
             .unwrap_or(true);
         let workers = Arc::new(DashMap::new());
         PENDING_WORKERS.set(workers.len() as i64);
+        let (flow_notification_tx, flow_notification_rx) =
+            mpsc::channel(flow_notification_queue_capacity.get());
+        start_flow_notification_worker(
+            flow_notification_rx,
+            table_flownode_set_cache,
+            node_manager.clone(),
+        );
 
         Some(Arc::new(Self {
             workers,
@@ -334,6 +394,7 @@ impl PendingRowsBatcher {
             partition_manager,
             node_manager,
             catalog_manager,
+            flow_notification_tx,
             prom_store_with_metric_engine,
             schema_alterer,
             flush_semaphore: Arc::new(Semaphore::new(max_concurrent_flushes)),
@@ -431,7 +492,7 @@ impl PendingRowsBatcher {
         &self,
         requests: RowInsertRequests,
         ctx: &QueryContextRef,
-    ) -> Result<(Vec<(String, u32, RecordBatch)>, usize)> {
+    ) -> Result<(Vec<(String, u32, RecordBatchWithTsIdx)>, usize)> {
         let catalog = ctx.current_catalog().to_string();
         let schema = ctx.current_schema();
 
@@ -737,7 +798,7 @@ impl PendingRowsBatcher {
     fn build_aligned_batches(
         table_rows: &[(String, Rows)],
         region_schemas: &HashMap<String, (Arc<ArrowSchema>, u32)>,
-    ) -> Result<Vec<(String, u32, RecordBatch)>> {
+    ) -> Result<Vec<(String, u32, RecordBatchWithTsIdx)>> {
         let mut aligned_batches = Vec::with_capacity(table_rows.len());
         for (table_name, rows) in table_rows {
             let (region_schema, table_id) =
@@ -805,6 +866,7 @@ impl PendingRowsBatcher {
             self.partition_manager.clone(),
             self.node_manager.clone(),
             self.catalog_manager.clone(),
+            self.flow_notification_tx.clone(),
             self.flush_interval,
             worker_idle_timeout,
             self.max_batch_rows,
@@ -833,6 +895,22 @@ impl PendingBatch {
             waiters: Vec::new(),
         }
     }
+
+    fn add_table_batch(
+        &mut self,
+        table_name: String,
+        table_id: TableId,
+        record_batch: RecordBatchWithTsIdx,
+    ) {
+        let entry = self.tables.entry(table_id).or_insert_with(|| TableBatch {
+            table_name,
+            table_id,
+            batches: Vec::new(),
+            row_count: 0,
+        });
+        entry.row_count += record_batch.batch.num_rows();
+        entry.batches.push(record_batch);
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -845,6 +923,7 @@ fn start_worker(
     partition_manager: PartitionRuleManagerRef,
     node_manager: NodeManagerRef,
     catalog_manager: CatalogManagerRef,
+    flow_notification_tx: mpsc::Sender<FlowNotification>,
     flush_interval: Duration,
     worker_idle_timeout: Duration,
     max_batch_rows: usize,
@@ -873,14 +952,7 @@ fn start_worker(
                             pending_batch.waiters.push(FlushWaiter { response_tx, _permit });
 
                             for (table_name, table_id, record_batch) in table_batches {
-                                let entry = pending_batch.tables.entry(table_name.clone()).or_insert_with(|| TableBatch {
-                                    table_name,
-                                    table_id,
-                                    batches: Vec::new(),
-                                    row_count: 0,
-                                });
-                                entry.row_count += record_batch.num_rows();
-                                entry.batches.push(record_batch);
+                                pending_batch.add_table_batch(table_name, table_id, record_batch);
                             }
 
                             pending_batch.total_row_count += total_rows;
@@ -893,17 +965,19 @@ fn start_worker(
                                         partition_manager.clone(),
                                         node_manager.clone(),
                                         catalog_manager.clone(),
+                                        flow_notification_tx.clone(),
                                         flush_semaphore.clone(),
                                     ).await;
                             }
                         }
                         None => {
                             if let Some(flush) = drain_batch(&mut batch) {
-                                flush_batch(
+                                flush_batch_with_managers(
                                     flush,
                                     partition_manager.clone(),
                                     node_manager.clone(),
                                     catalog_manager.clone(),
+                                    flow_notification_tx.clone(),
                                 ).await;
                             }
                             break;
@@ -939,17 +1013,19 @@ fn start_worker(
                                 partition_manager.clone(),
                                 node_manager.clone(),
                                 catalog_manager.clone(),
+                                flow_notification_tx.clone(),
                                 flush_semaphore.clone(),
                             ).await;
                     }
                 }
                 _ = shutdown_rx.recv() => {
                     if let Some(flush) = drain_batch(&mut batch) {
-                        flush_batch(
+                        flush_batch_with_managers(
                             flush,
                             partition_manager.clone(),
                             node_manager.clone(),
                             catalog_manager.clone(),
+                            flow_notification_tx.clone(),
                         ).await;
                     }
                     break;
@@ -1010,18 +1086,33 @@ async fn spawn_flush(
     partition_manager: PartitionRuleManagerRef,
     node_manager: NodeManagerRef,
     catalog_manager: CatalogManagerRef,
+    flow_notification_tx: mpsc::Sender<FlowNotification>,
     semaphore: Arc<Semaphore>,
 ) {
     match semaphore.acquire_owned().await {
         Ok(permit) => {
             tokio::spawn(async move {
                 let _permit = permit;
-                flush_batch(flush, partition_manager, node_manager, catalog_manager).await;
+                flush_batch_with_managers(
+                    flush,
+                    partition_manager,
+                    node_manager,
+                    catalog_manager,
+                    flow_notification_tx,
+                )
+                .await;
             });
         }
         Err(err) => {
             warn!(err; "Flush semaphore closed, flushing inline");
-            flush_batch(flush, partition_manager, node_manager, catalog_manager).await;
+            flush_batch_with_managers(
+                flush,
+                partition_manager,
+                node_manager,
+                catalog_manager,
+                flow_notification_tx,
+            )
+            .await;
         }
     }
 }
@@ -1206,11 +1297,34 @@ async fn flush_region_writes_concurrently(
     Ok(affected_rows)
 }
 
-async fn flush_batch(
+async fn flush_batch_with_managers(
     flush: FlushBatch,
     partition_manager: PartitionRuleManagerRef,
     node_manager: NodeManagerRef,
     catalog_manager: CatalogManagerRef,
+    flow_notification_tx: mpsc::Sender<FlowNotification>,
+) {
+    let partition_provider = PartitionManagerPhysicalFlushAdapter { partition_manager };
+    let node_requester = NodeManagerPhysicalFlushAdapter {
+        node_manager: node_manager.clone(),
+    };
+    let catalog_provider = CatalogManagerPhysicalFlushAdapter { catalog_manager };
+    flush_batch(
+        flush,
+        &partition_provider,
+        &node_requester,
+        &catalog_provider,
+        flow_notification_tx,
+    )
+    .await;
+}
+
+async fn flush_batch(
+    flush: FlushBatch,
+    partition_manager: &(impl PhysicalFlushPartitionProvider + ?Sized),
+    node_manager: &(impl PhysicalFlushNodeRequester + ?Sized),
+    catalog_manager: &(impl PhysicalFlushCatalogProvider + ?Sized),
+    flow_notification_tx: mpsc::Sender<FlowNotification>,
 ) {
     let FlushBatch {
         table_batches,
@@ -1227,39 +1341,181 @@ async fn flush_batch(
         .extension(PHYSICAL_TABLE_KEY)
         .unwrap_or(GREPTIME_PHYSICAL_TABLE)
         .to_string();
-    let partition_provider = PartitionManagerPhysicalFlushAdapter { partition_manager };
-    let node_requester = NodeManagerPhysicalFlushAdapter { node_manager };
-    let catalog_provider = CatalogManagerPhysicalFlushAdapter { catalog_manager };
     let result = flush_batch_physical(
         &table_batches,
         &physical_table_name,
         &ctx,
-        &partition_provider,
-        &node_requester,
-        &catalog_provider,
+        partition_manager,
+        node_manager,
+        catalog_manager,
     )
     .await;
 
     let elapsed = start.elapsed().as_secs_f64();
     FLUSH_ELAPSED.observe(elapsed);
 
-    if result.is_err() {
-        FLUSH_FAILURES.inc();
-        FLUSH_DROPPED_ROWS.inc_by(total_row_count as u64);
-    } else if let Ok(affected_rows) = &result {
-        FLUSH_TOTAL.inc();
-        FLUSH_ROWS.observe(total_row_count as f64);
-        operator::metrics::DIST_INGEST_ROW_COUNT
-            .with_label_values(&[db_string.as_str()])
-            .inc_by(*affected_rows as u64);
-    }
-
     debug!(
         "Pending rows batch flushed, total rows: {}, elapsed time: {}s",
         total_row_count, elapsed
     );
 
-    notify_waiters(waiters, result.map(|_| ()));
+    match result {
+        Ok(affected_rows) => {
+            FLUSH_TOTAL.inc();
+            FLUSH_ROWS.observe(total_row_count as f64);
+            operator::metrics::DIST_INGEST_ROW_COUNT
+                .with_label_values(&[db_string.as_str()])
+                .inc_by(affected_rows as u64);
+
+            notify_waiters(waiters, Ok(()));
+            enqueue_flow_notifications(table_batches, &flow_notification_tx);
+        }
+        Err(err) => {
+            FLUSH_FAILURES.inc();
+            FLUSH_DROPPED_ROWS.inc_by(total_row_count as u64);
+            notify_waiters(waiters, Err(err));
+        }
+    }
+}
+
+fn extract_timestamps(table_batch: &TableBatch) -> Vec<i64> {
+    let mut timestamps = Vec::with_capacity(table_batch.row_count);
+    for batch in &table_batch.batches {
+        let timestamp_column = batch.batch.column(batch.timestamp_index);
+        let Some((timestamp_values, _)) =
+            datatypes::timestamp::timestamp_array_to_primitive(timestamp_column)
+        else {
+            error!(
+                "Failed to extract timestamps from record batch, table_id: {}, timestamp_index: {}",
+                table_batch.table_id, batch.timestamp_index
+            );
+            continue;
+        };
+
+        if timestamp_values.null_count() == 0 {
+            timestamps.extend_from_slice(timestamp_values.values());
+        } else {
+            timestamps.extend(timestamp_values.iter().flatten());
+        }
+    }
+    timestamps
+}
+
+struct FlowNotification {
+    table_id: TableId,
+    timestamps: Vec<i64>,
+}
+
+fn try_enqueue_flow_notification(
+    tx: &mpsc::Sender<FlowNotification>,
+    notification: FlowNotification,
+) -> bool {
+    match tx.try_send(notification) {
+        Ok(()) => true,
+        Err(mpsc::error::TrySendError::Full(notification)) => {
+            FLOW_NOTIFICATION_DROPPED.with_label_values(&["full"]).inc();
+            warn!(
+                "Dropping flow notification because queue is full, table_id: {}, queue_capacity: {}",
+                notification.table_id,
+                tx.max_capacity()
+            );
+            false
+        }
+        Err(mpsc::error::TrySendError::Closed(notification)) => {
+            FLOW_NOTIFICATION_DROPPED
+                .with_label_values(&["closed"])
+                .inc();
+            error!(
+                "Dropping flow notification because queue is closed, table_id: {}, queue_capacity: {}",
+                notification.table_id,
+                tx.max_capacity()
+            );
+            false
+        }
+    }
+}
+
+fn enqueue_flow_notifications(table_batches: Vec<TableBatch>, tx: &mpsc::Sender<FlowNotification>) {
+    for table_batch in table_batches {
+        let timestamps = extract_timestamps(&table_batch);
+        if timestamps.is_empty() {
+            continue;
+        }
+        try_enqueue_flow_notification(
+            tx,
+            FlowNotification {
+                table_id: table_batch.table_id,
+                timestamps,
+            },
+        );
+    }
+}
+
+async fn handle_flow_notification(
+    notification: FlowNotification,
+    table_flownode_set_cache: TableFlownodeSetCacheRef,
+    node_manager: NodeManagerRef,
+) {
+    let table_id = notification.table_id;
+    let flownodes = match table_flownode_set_cache.get(table_id).await {
+        Ok(Some(flownodes)) => flownodes,
+        Ok(None) => return,
+        Err(e) => {
+            error!(e; "Failed to get flownodes for table id: {}", table_id);
+            return;
+        }
+    };
+    let peers = flownodes.values().cloned().collect::<HashSet<_>>();
+
+    for peer in peers {
+        if let Err(e) = node_manager
+            .flownode(&peer)
+            .await
+            .handle_mark_window_dirty(DirtyWindowRequests {
+                requests: vec![DirtyWindowRequest {
+                    table_id,
+                    timestamps: notification.timestamps.clone(),
+                    time_ranges: Vec::new(),
+                }],
+            })
+            .await
+        {
+            error!(
+                e;
+                "Failed to mark timestamps as dirty, table_id: {}, peer_id: {}, peer_addr: {}",
+                table_id,
+                peer.id,
+                peer.addr
+            );
+        }
+    }
+}
+
+fn start_flow_notification_worker(
+    notification_rx: mpsc::Receiver<FlowNotification>,
+    table_flownode_set_cache: TableFlownodeSetCacheRef,
+    node_manager: NodeManagerRef,
+) {
+    common_runtime::spawn_global(async move {
+        tokio_stream::wrappers::ReceiverStream::new(notification_rx)
+            .for_each_concurrent(MAX_CONCURRENT_FLOW_NOTIFICATIONS, |notification| {
+                let table_flownode_set_cache = table_flownode_set_cache.clone();
+                let node_manager = node_manager.clone();
+                handle_flow_notification(notification, table_flownode_set_cache, node_manager)
+            })
+            .await;
+    });
+}
+
+#[cfg(test)]
+fn notify_flow_dirty_windows_after_flush(
+    table_batches: Vec<TableBatch>,
+    table_flownode_set_cache: TableFlownodeSetCacheRef,
+    node_manager: NodeManagerRef,
+) {
+    let (tx, rx) = mpsc::channel(table_batches.len().max(1));
+    start_flow_notification_worker(rx, table_flownode_set_cache, node_manager);
+    enqueue_flow_notifications(table_batches, &tx);
 }
 
 /// Flushes a batch of logical table rows by transforming them into the physical table format
@@ -1364,6 +1620,7 @@ fn transform_logical_batches_to_physical(
         let table_id = table_batch.table_id;
 
         for batch in &table_batch.batches {
+            let batch = &batch.batch;
             let batch_schema = batch.schema();
             let start = Instant::now();
             let (tag_columns, essential_col_indices) = columns_taxonomy(
@@ -1593,29 +1850,45 @@ fn record_batch_to_ipc(record_batch: RecordBatch) -> Result<(Bytes, Bytes, Bytes
 
 #[cfg(test)]
 mod tests {
+    use std::any::Any;
     use std::collections::{HashMap, HashSet};
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
     use api::region::RegionResponse;
     use api::v1::flow::{DirtyWindowRequests, FlowRequest, FlowResponse};
     use api::v1::meta::Peer;
     use api::v1::region::{InsertRequests, RegionRequest, region_request};
-    use api::v1::{ColumnSchema, Row, RowInsertRequest, RowInsertRequests, Rows};
+    use api::v1::value::ValueData;
+    use api::v1::{
+        ColumnDataType, ColumnSchema, Row, RowInsertRequest, RowInsertRequests, Rows, SemanticType,
+        Value,
+    };
     use arrow::array::{BinaryArray, BooleanArray, StringArray, TimestampMillisecondArray};
     use arrow::datatypes::{DataType as ArrowDataType, Field, Schema as ArrowSchema};
     use arrow::record_batch::RecordBatch;
     use async_trait::async_trait;
     use catalog::error::Result as CatalogResult;
+    use common_meta::cache::{TableFlownodeSetCacheRef, new_table_flownode_set_cache};
     use common_meta::error::Result as MetaResult;
+    use common_meta::instruction::{CacheIdent, CreateFlow};
+    use common_meta::kv_backend::memory::MemoryKvBackend;
+    use common_meta::kv_backend::{KvBackend, TxnService};
     use common_meta::node_manager::{
         Datanode, DatanodeManager, DatanodeRef, Flownode, FlownodeManager, FlownodeRef,
+        NodeManagerRef,
+    };
+    use common_meta::rpc::store::{
+        BatchDeleteRequest, BatchDeleteResponse, BatchGetRequest, BatchGetResponse,
+        BatchPutRequest, BatchPutResponse, DeleteRangeRequest, DeleteRangeResponse, PutRequest,
+        PutResponse, RangeRequest, RangeResponse,
     };
     use common_query::request::QueryRequest;
     use common_recordbatch::SendableRecordBatchStream;
     use dashmap::DashMap;
     use datatypes::schema::{ColumnSchema as DtColumnSchema, Schema as DtSchema};
+    use moka::future::CacheBuilder;
     use partition::error::Result as PartitionResult;
     use partition::partition::{PartitionRule, PartitionRuleRef, RegionMask};
     use smallvec::SmallVec;
@@ -1623,20 +1896,24 @@ mod tests {
     use store_api::storage::RegionId;
     use table::metadata::TableId;
     use table::test_util::table_info::test_table_info;
-    use tokio::sync::{Semaphore, mpsc, oneshot};
+    use tokio::sync::{Notify, Semaphore, mpsc, oneshot};
     use tokio::time::sleep;
 
     use super::{
-        BatchKey, Error, FlushRegionWrite, FlushWaiter, PendingBatch, PendingRowsBatcher,
-        PendingWorker, PhysicalFlushCatalogProvider, PhysicalFlushNodeRequester,
-        PhysicalFlushPartitionProvider, PhysicalTableMetadata, PlannedRegionBatch,
-        ResolvedRegionBatch, TableBatch, WorkerCommand, columns_taxonomy, drain_batch,
-        encode_region_write_requests, flush_batch_physical, flush_region_writes_concurrently,
-        plan_region_batches, remove_worker_if_same_channel, should_close_worker_on_idle_timeout,
-        should_dispatch_concurrently, strip_partition_columns_from_batch,
-        transform_logical_batches_to_physical,
+        BatchKey, Error, FlushBatch, FlushRegionWrite, FlushWaiter, PendingBatch,
+        PendingRowsBatcher, PendingWorker, PhysicalFlushCatalogProvider,
+        PhysicalFlushNodeRequester, PhysicalFlushPartitionProvider, PhysicalTableMetadata,
+        PlannedRegionBatch, RecordBatchWithTsIdx, ResolvedRegionBatch, TableBatch, WorkerCommand,
+        columns_taxonomy, drain_batch, encode_region_write_requests, extract_timestamps,
+        flush_batch, flush_batch_physical, flush_region_writes_concurrently, greptime_timestamp,
+        notify_flow_dirty_windows_after_flush, plan_region_batches, remove_worker_if_same_channel,
+        should_close_worker_on_idle_timeout, should_dispatch_concurrently,
+        start_flow_notification_worker, strip_partition_columns_from_batch,
+        transform_logical_batches_to_physical, try_enqueue_flow_notification,
     };
     use crate::error;
+    use crate::metrics::FLOW_NOTIFICATION_DROPPED;
+    use crate::prom_row_builder::rows_to_aligned_record_batch;
 
     fn mock_rows(row_count: usize, schema_name: &str) -> Rows {
         Rows {
@@ -1668,6 +1945,210 @@ mod tests {
             ],
         )
         .unwrap()
+    }
+
+    fn mock_aligned_tag_batch(
+        tag_name: &str,
+        tag_value: &str,
+        ts: i64,
+        val: f64,
+    ) -> RecordBatchWithTsIdx {
+        RecordBatchWithTsIdx::try_new(mock_tag_batch(tag_name, tag_value, ts, val), 0).unwrap()
+    }
+
+    fn mock_timestamp_batch(timestamps: Vec<Option<i64>>) -> RecordBatchWithTsIdx {
+        let batch = RecordBatch::try_new(
+            Arc::new(ArrowSchema::new(vec![Field::new(
+                greptime_timestamp(),
+                ArrowDataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None),
+                true,
+            )])),
+            vec![Arc::new(TimestampMillisecondArray::from(timestamps))],
+        )
+        .unwrap();
+        RecordBatchWithTsIdx::try_new(batch, 0).unwrap()
+    }
+
+    #[test]
+    fn test_extract_timestamps_appends_non_null_batches_in_order() {
+        let table_batch = TableBatch {
+            table_name: "cpu".to_string(),
+            table_id: 42,
+            batches: vec![
+                mock_aligned_tag_batch("tag1", "host-1", 1000, 1.0),
+                mock_aligned_tag_batch("tag1", "host-1", 2000, 2.0),
+            ],
+            row_count: 2,
+        };
+
+        assert_eq!(vec![1000, 2000], extract_timestamps(&table_batch));
+    }
+
+    #[test]
+    fn test_extract_timestamps_omits_nulls_and_retains_order() {
+        let table_batch = TableBatch {
+            table_name: "cpu".to_string(),
+            table_id: 42,
+            batches: vec![
+                mock_timestamp_batch(vec![Some(1000), None, Some(3000)]),
+                mock_timestamp_batch(vec![None, Some(5000)]),
+            ],
+            row_count: 5,
+        };
+
+        assert_eq!(vec![1000, 3000, 5000], extract_timestamps(&table_batch));
+    }
+
+    #[test]
+    fn test_record_batch_with_ts_idx_rejects_out_of_bounds_index() {
+        let batch = mock_tag_batch("tag1", "host-1", 1000, 1.0);
+
+        assert!(RecordBatchWithTsIdx::try_new(batch, 3).is_err());
+    }
+
+    #[test]
+    fn test_record_batch_with_ts_idx_rejects_non_timestamp_column() {
+        let batch = mock_tag_batch("tag1", "host-1", 1000, 1.0);
+
+        assert!(RecordBatchWithTsIdx::try_new(batch, 1).is_err());
+    }
+
+    #[test]
+    fn test_extract_timestamps_supports_per_batch_timestamp_indices() {
+        let timestamp_first = RecordBatch::try_new(
+            Arc::new(ArrowSchema::new(vec![
+                Field::new(
+                    "ts",
+                    ArrowDataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None),
+                    false,
+                ),
+                Field::new("host", ArrowDataType::Utf8, true),
+            ])),
+            vec![
+                Arc::new(TimestampMillisecondArray::from(vec![1000, 2000])),
+                Arc::new(StringArray::from(vec!["host-1", "host-2"])),
+            ],
+        )
+        .unwrap();
+        let timestamp_second = RecordBatch::try_new(
+            Arc::new(ArrowSchema::new(vec![
+                Field::new("host", ArrowDataType::Utf8, true),
+                Field::new(
+                    "timestamp",
+                    ArrowDataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None),
+                    false,
+                ),
+            ])),
+            vec![
+                Arc::new(StringArray::from(vec!["host-3", "host-4"])),
+                Arc::new(TimestampMillisecondArray::from(vec![3000, 4000])),
+            ],
+        )
+        .unwrap();
+        let table_batch = TableBatch {
+            table_name: "cpu".to_string(),
+            table_id: 42,
+            batches: vec![
+                RecordBatchWithTsIdx::try_new(timestamp_first, 0).unwrap(),
+                RecordBatchWithTsIdx::try_new(timestamp_second, 1).unwrap(),
+            ],
+            row_count: 4,
+        };
+
+        assert_eq!(
+            vec![1000, 2000, 3000, 4000],
+            extract_timestamps(&table_batch)
+        );
+    }
+
+    #[test]
+    fn test_extract_timestamps_uses_aligned_custom_timestamp_index() {
+        let rows = Rows {
+            schema: vec![
+                ColumnSchema {
+                    column_name: greptime_timestamp().to_string(),
+                    datatype: ColumnDataType::TimestampMillisecond as i32,
+                    semantic_type: SemanticType::Timestamp as i32,
+                    ..Default::default()
+                },
+                ColumnSchema {
+                    column_name: "host".to_string(),
+                    datatype: ColumnDataType::String as i32,
+                    semantic_type: SemanticType::Tag as i32,
+                    ..Default::default()
+                },
+                ColumnSchema {
+                    column_name: "greptime_value".to_string(),
+                    datatype: ColumnDataType::Float64 as i32,
+                    semantic_type: SemanticType::Field as i32,
+                    ..Default::default()
+                },
+            ],
+            rows: vec![
+                Row {
+                    values: vec![
+                        Value {
+                            value_data: Some(ValueData::TimestampMillisecondValue(1000)),
+                        },
+                        Value {
+                            value_data: Some(ValueData::StringValue("host-1".to_string())),
+                        },
+                        Value {
+                            value_data: Some(ValueData::F64Value(1.0)),
+                        },
+                    ],
+                },
+                Row {
+                    values: vec![
+                        Value {
+                            value_data: Some(ValueData::TimestampMillisecondValue(2000)),
+                        },
+                        Value {
+                            value_data: Some(ValueData::StringValue("host-2".to_string())),
+                        },
+                        Value {
+                            value_data: Some(ValueData::F64Value(2.0)),
+                        },
+                    ],
+                },
+            ],
+        };
+        let target_schema = ArrowSchema::new(vec![
+            Field::new("host", ArrowDataType::Utf8, true),
+            Field::new(
+                "timestamp",
+                ArrowDataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new("greptime_value", ArrowDataType::Float64, true),
+        ]);
+        let batch = rows_to_aligned_record_batch(&rows, &target_schema).unwrap();
+        assert_eq!(1, batch.timestamp_index);
+        let table_batch = TableBatch {
+            table_name: "cpu".to_string(),
+            table_id: 42,
+            row_count: batch.batch.num_rows(),
+            batches: vec![batch],
+        };
+
+        assert_eq!(vec![1000, 2000], extract_timestamps(&table_batch));
+    }
+
+    #[test]
+    fn test_flow_notification_queue_drops_when_full() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let notification = |table_id| super::FlowNotification {
+            table_id,
+            timestamps: vec![table_id as i64],
+        };
+        let dropped = FLOW_NOTIFICATION_DROPPED.with_label_values(&["full"]);
+        let dropped_before = dropped.get();
+
+        assert!(try_enqueue_flow_notification(&tx, notification(1)));
+        assert!(!try_enqueue_flow_notification(&tx, notification(2)));
+
+        assert_eq!(1, rx.try_recv().unwrap().table_id);
+        assert_eq!(dropped_before + 1, dropped.get());
     }
 
     fn mock_physical_table_metadata(table_id: TableId) -> PhysicalTableMetadata {
@@ -1818,6 +2299,7 @@ mod tests {
     #[derive(Default)]
     struct MockFlushNodeRequester {
         writes: Arc<AtomicUsize>,
+        fail: bool,
     }
 
     #[async_trait]
@@ -1828,6 +2310,11 @@ mod tests {
             _request: RegionRequest,
         ) -> error::Result<RegionResponse> {
             self.writes.fetch_add(1, Ordering::SeqCst);
+            if self.fail {
+                return Err(Error::Internal {
+                    err_msg: "physical write failed".to_string(),
+                });
+            }
             Ok(RegionResponse::new(0))
         }
     }
@@ -1866,11 +2353,11 @@ mod tests {
         let permit = Arc::new(Semaphore::new(1)).try_acquire_owned().unwrap();
         let mut batch = Some(PendingBatch {
             tables: HashMap::from([(
-                "cpu".to_string(),
+                42,
                 TableBatch {
                     table_name: "cpu".to_string(),
                     table_id: 42,
-                    batches: vec![mock_tag_batch("tag1", "host-1", 1000, 1.0)],
+                    batches: vec![mock_aligned_tag_batch("tag1", "host-1", 1000, 1.0)],
                     row_count: 1,
                 },
             )]),
@@ -1891,6 +2378,29 @@ mod tests {
         assert_eq!(1, flush.table_batches.len());
         assert_eq!(ctx.get_db_string(), flush.db_string);
         assert_eq!(ctx.current_catalog(), flush.ctx.current_catalog());
+    }
+
+    #[test]
+    fn test_pending_batch_keeps_same_name_batches_with_distinct_table_ids() {
+        let ctx = session::context::QueryContext::arc();
+        let mut pending_batch = PendingBatch::new(ctx);
+
+        pending_batch.add_table_batch(
+            "cpu".to_string(),
+            42,
+            mock_aligned_tag_batch("tag1", "host-1", 1000, 1.0),
+        );
+        pending_batch.add_table_batch(
+            "cpu".to_string(),
+            43,
+            mock_aligned_tag_batch("tag1", "host-1", 2000, 2.0),
+        );
+
+        assert_eq!(2, pending_batch.tables.len());
+        assert_eq!(42, pending_batch.tables[&42].table_id);
+        assert_eq!(43, pending_batch.tables[&43].table_id);
+        assert_eq!("cpu", pending_batch.tables[&42].table_name);
+        assert_eq!("cpu", pending_batch.tables[&43].table_name);
     }
 
     #[derive(Clone)]
@@ -1971,6 +2481,385 @@ mod tests {
         async fn flownode(&self, _node: &Peer) -> FlownodeRef {
             Arc::new(NoopFlownode)
         }
+    }
+
+    struct RecordingFlownode {
+        requests_tx: mpsc::UnboundedSender<DirtyWindowRequests>,
+    }
+
+    #[async_trait]
+    impl Flownode for RecordingFlownode {
+        async fn handle(&self, _request: FlowRequest) -> MetaResult<FlowResponse> {
+            unimplemented!()
+        }
+
+        async fn handle_inserts(&self, _request: InsertRequests) -> MetaResult<FlowResponse> {
+            unimplemented!()
+        }
+
+        async fn handle_mark_window_dirty(
+            &self,
+            req: DirtyWindowRequests,
+        ) -> MetaResult<FlowResponse> {
+            self.requests_tx.send(req).unwrap();
+            Ok(FlowResponse::default())
+        }
+    }
+
+    struct FlowNotificationMockNodeManager {
+        flownode: FlownodeRef,
+    }
+
+    #[async_trait]
+    impl DatanodeManager for FlowNotificationMockNodeManager {
+        async fn datanode(&self, _node: &Peer) -> DatanodeRef {
+            unimplemented!()
+        }
+    }
+
+    #[async_trait]
+    impl FlownodeManager for FlowNotificationMockNodeManager {
+        async fn flownode(&self, _node: &Peer) -> FlownodeRef {
+            self.flownode.clone()
+        }
+    }
+
+    async fn mock_table_flownode_cache(table_id: TableId, peer: Peer) -> TableFlownodeSetCacheRef {
+        let cache = Arc::new(new_table_flownode_set_cache(
+            "test".to_string(),
+            CacheBuilder::new(1).build(),
+            Arc::new(MemoryKvBackend::default()),
+        ));
+        cache
+            .invalidate(&[CacheIdent::CreateFlow(CreateFlow {
+                flow_id: 1,
+                source_table_ids: vec![table_id],
+                partition_to_peer_mapping: vec![(0, peer.clone()), (1, peer)],
+            })])
+            .await
+            .unwrap();
+        cache
+    }
+
+    fn mock_flow_notification_sender(
+        cache: TableFlownodeSetCacheRef,
+        node_manager: NodeManagerRef,
+    ) -> mpsc::Sender<super::FlowNotification> {
+        let (tx, rx) = mpsc::channel(16);
+        start_flow_notification_worker(rx, cache, node_manager);
+        tx
+    }
+
+    struct BlockingRangeKvBackend {
+        range_started: Mutex<Option<oneshot::Sender<()>>>,
+        range_release: Arc<Notify>,
+    }
+
+    impl TxnService for BlockingRangeKvBackend {
+        type Error = common_meta::error::Error;
+    }
+
+    #[async_trait]
+    impl KvBackend for BlockingRangeKvBackend {
+        fn name(&self) -> &str {
+            "blocking_range"
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+
+        async fn range(&self, _req: RangeRequest) -> MetaResult<RangeResponse> {
+            let range_started = self.range_started.lock().unwrap().take();
+            if let Some(range_started) = range_started {
+                let _ = range_started.send(());
+                self.range_release.notified().await;
+            }
+            Ok(RangeResponse {
+                kvs: Vec::new(),
+                more: false,
+            })
+        }
+
+        async fn put(&self, _req: PutRequest) -> MetaResult<PutResponse> {
+            unimplemented!()
+        }
+
+        async fn batch_put(&self, _req: BatchPutRequest) -> MetaResult<BatchPutResponse> {
+            unimplemented!()
+        }
+
+        async fn batch_get(&self, _req: BatchGetRequest) -> MetaResult<BatchGetResponse> {
+            unimplemented!()
+        }
+
+        async fn delete_range(&self, _req: DeleteRangeRequest) -> MetaResult<DeleteRangeResponse> {
+            unimplemented!()
+        }
+
+        async fn batch_delete(&self, _req: BatchDeleteRequest) -> MetaResult<BatchDeleteResponse> {
+            unimplemented!()
+        }
+    }
+
+    #[tokio::test]
+    async fn test_flow_notifications_do_not_block_on_previous_table_cache_lookup() {
+        let blocked_table_id = 41;
+        let cached_table_id = 42;
+        let peer = Peer {
+            id: 7,
+            addr: "flow-7".to_string(),
+        };
+        let (range_started_tx, range_started_rx) = oneshot::channel();
+        let range_release = Arc::new(Notify::new());
+        let cache = Arc::new(new_table_flownode_set_cache(
+            "test".to_string(),
+            CacheBuilder::new(2).build(),
+            Arc::new(BlockingRangeKvBackend {
+                range_started: Mutex::new(Some(range_started_tx)),
+                range_release: range_release.clone(),
+            }),
+        ));
+        cache
+            .invalidate(&[CacheIdent::CreateFlow(CreateFlow {
+                flow_id: 1,
+                source_table_ids: vec![cached_table_id],
+                partition_to_peer_mapping: vec![(0, peer)],
+            })])
+            .await
+            .unwrap();
+        let (requests_tx, mut requests_rx) = mpsc::unbounded_channel();
+        let _requests_tx = requests_tx.clone();
+        let node_manager: NodeManagerRef = Arc::new(FlowNotificationMockNodeManager {
+            flownode: Arc::new(RecordingFlownode { requests_tx }),
+        });
+        let table_batches = vec![
+            TableBatch {
+                table_name: "blocked".to_string(),
+                table_id: blocked_table_id,
+                batches: vec![mock_aligned_tag_batch("tag1", "host-1", 1000, 1.0)],
+                row_count: 1,
+            },
+            TableBatch {
+                table_name: "cached".to_string(),
+                table_id: cached_table_id,
+                batches: vec![mock_aligned_tag_batch("tag1", "host-2", 2000, 2.0)],
+                row_count: 1,
+            },
+        ];
+
+        notify_flow_dirty_windows_after_flush(table_batches, cache, node_manager);
+
+        tokio::time::timeout(Duration::from_secs(1), range_started_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        let requests = tokio::time::timeout(Duration::from_secs(1), requests_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(cached_table_id, requests.requests[0].table_id);
+        range_release.notify_one();
+    }
+
+    #[tokio::test]
+    async fn test_successful_flush_notifies_flownode_with_logical_table_timestamps() {
+        let table_id = 42;
+        let peer = Peer {
+            id: 7,
+            addr: "flow-7".to_string(),
+        };
+        let cache = mock_table_flownode_cache(table_id, peer).await;
+        let (requests_tx, mut requests_rx) = mpsc::unbounded_channel();
+        let _requests_tx = requests_tx.clone();
+        let node_manager: NodeManagerRef = Arc::new(FlowNotificationMockNodeManager {
+            flownode: Arc::new(RecordingFlownode { requests_tx }),
+        });
+        let table_batches = vec![TableBatch {
+            table_name: "cpu".to_string(),
+            table_id,
+            batches: vec![mock_aligned_tag_batch("tag1", "host-1", 1000, 1.0)],
+            row_count: 1,
+        }];
+
+        notify_flow_dirty_windows_after_flush(table_batches, cache, node_manager);
+
+        let requests = tokio::time::timeout(Duration::from_secs(1), requests_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            vec![api::v1::flow::DirtyWindowRequest {
+                table_id,
+                timestamps: vec![1000],
+                time_ranges: Vec::new(),
+            }],
+            requests.requests
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), requests_rx.recv())
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_successful_flush_coalesces_logical_batches_per_flownode() {
+        let table_id = 42;
+        let peer = Peer {
+            id: 7,
+            addr: "flow-7".to_string(),
+        };
+        let cache = mock_table_flownode_cache(table_id, peer).await;
+        let (requests_tx, mut requests_rx) = mpsc::unbounded_channel();
+        let _requests_tx = requests_tx.clone();
+        let node_manager: NodeManagerRef = Arc::new(FlowNotificationMockNodeManager {
+            flownode: Arc::new(RecordingFlownode { requests_tx }),
+        });
+        let table_batches = vec![TableBatch {
+            table_name: "cpu".to_string(),
+            table_id,
+            batches: vec![
+                mock_aligned_tag_batch("tag1", "host-1", 1000, 1.0),
+                mock_aligned_tag_batch("tag1", "host-1", 2000, 2.0),
+            ],
+            row_count: 2,
+        }];
+
+        notify_flow_dirty_windows_after_flush(table_batches, cache, node_manager);
+
+        let requests = tokio::time::timeout(Duration::from_secs(1), requests_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            vec![api::v1::flow::DirtyWindowRequest {
+                table_id,
+                timestamps: vec![1000, 2000],
+                time_ranges: Vec::new(),
+            }],
+            requests.requests
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), requests_rx.recv())
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_flush_batch_notifies_flownode_after_successful_physical_write() {
+        let table_id = 42;
+        let peer = Peer {
+            id: 7,
+            addr: "flow-7".to_string(),
+        };
+        let cache = mock_table_flownode_cache(table_id, peer).await;
+        let (requests_tx, mut requests_rx) = mpsc::unbounded_channel();
+        let _requests_tx = requests_tx.clone();
+        let flow_node_manager: NodeManagerRef = Arc::new(FlowNotificationMockNodeManager {
+            flownode: Arc::new(RecordingFlownode { requests_tx }),
+        });
+        let flow_notification_tx = mock_flow_notification_sender(cache, flow_node_manager.clone());
+        let ctx = session::context::QueryContext::arc();
+        let table_batches = vec![TableBatch {
+            table_name: "cpu".to_string(),
+            table_id,
+            batches: vec![mock_aligned_tag_batch("tag1", "host-1", 1000, 1.0)],
+            row_count: 1,
+        }];
+        let writes = Arc::new(AtomicUsize::new(0));
+
+        flush_batch(
+            FlushBatch {
+                table_batches,
+                total_row_count: 1,
+                db_string: ctx.get_db_string(),
+                ctx,
+                waiters: Vec::new(),
+            },
+            &MockFlushPartitionProvider {
+                partition_rule_calls: Arc::new(AtomicUsize::new(0)),
+                region_leader_calls: Arc::new(AtomicUsize::new(0)),
+            },
+            &MockFlushNodeRequester {
+                writes: writes.clone(),
+                fail: false,
+            },
+            &MockFlushCatalogProvider {
+                table: Some(mock_physical_table_metadata(1024)),
+            },
+            flow_notification_tx,
+        )
+        .await;
+
+        assert_eq!(1, writes.load(Ordering::SeqCst));
+        let requests = tokio::time::timeout(Duration::from_secs(1), requests_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            vec![api::v1::flow::DirtyWindowRequest {
+                table_id,
+                timestamps: vec![1000],
+                time_ranges: Vec::new(),
+            }],
+            requests.requests
+        );
+    }
+
+    #[tokio::test]
+    async fn test_flush_batch_does_not_notify_flownode_after_physical_write_error() {
+        let table_id = 42;
+        let peer = Peer {
+            id: 7,
+            addr: "flow-7".to_string(),
+        };
+        let cache = mock_table_flownode_cache(table_id, peer).await;
+        let (requests_tx, mut requests_rx) = mpsc::unbounded_channel();
+        let _requests_tx = requests_tx.clone();
+        let flow_node_manager: NodeManagerRef = Arc::new(FlowNotificationMockNodeManager {
+            flownode: Arc::new(RecordingFlownode { requests_tx }),
+        });
+        let flow_notification_tx = mock_flow_notification_sender(cache, flow_node_manager.clone());
+        let ctx = session::context::QueryContext::arc();
+        let table_batches = vec![TableBatch {
+            table_name: "cpu".to_string(),
+            table_id,
+            batches: vec![mock_aligned_tag_batch("tag1", "host-1", 1000, 1.0)],
+            row_count: 1,
+        }];
+        let writes = Arc::new(AtomicUsize::new(0));
+
+        flush_batch(
+            FlushBatch {
+                table_batches,
+                total_row_count: 1,
+                db_string: ctx.get_db_string(),
+                ctx,
+                waiters: Vec::new(),
+            },
+            &MockFlushPartitionProvider {
+                partition_rule_calls: Arc::new(AtomicUsize::new(0)),
+                region_leader_calls: Arc::new(AtomicUsize::new(0)),
+            },
+            &MockFlushNodeRequester {
+                writes: writes.clone(),
+                fail: true,
+            },
+            &MockFlushCatalogProvider {
+                table: Some(mock_physical_table_metadata(1024)),
+            },
+            flow_notification_tx,
+        )
+        .await;
+
+        assert_eq!(1, writes.load(Ordering::SeqCst));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), requests_rx.recv())
+                .await
+                .is_err()
+        );
     }
 
     #[async_trait]
@@ -2363,7 +3252,7 @@ mod tests {
 
     #[test]
     fn test_transform_logical_batches_to_physical_success() {
-        let batch = mock_tag_batch("tag1", "v1", 1000, 1.0);
+        let batch = mock_aligned_tag_batch("tag1", "v1", 1000, 1.0);
 
         let table_batches = vec![TableBatch {
             table_name: "t1".to_string(),
@@ -2387,7 +3276,7 @@ mod tests {
 
     #[test]
     fn test_transform_logical_batches_to_physical_taxonomy_failure() {
-        let batch = mock_tag_batch("tag1", "v1", 1000, 1.0);
+        let batch = mock_aligned_tag_batch("tag1", "v1", 1000, 1.0);
 
         let table_batches = vec![TableBatch {
             table_name: "t1".to_string(),
@@ -2411,8 +3300,8 @@ mod tests {
 
     #[test]
     fn test_transform_logical_batches_to_physical_multiple_batches() {
-        let batch1 = mock_tag_batch("tag1", "v1", 1000, 1.0);
-        let batch2 = mock_tag_batch("tag2", "v2", 2000, 2.0);
+        let batch1 = mock_aligned_tag_batch("tag1", "v1", 1000, 1.0);
+        let batch2 = mock_aligned_tag_batch("tag2", "v2", 2000, 2.0);
 
         let table_batches = vec![
             TableBatch {
@@ -2440,8 +3329,8 @@ mod tests {
 
     #[test]
     fn test_transform_logical_batches_to_physical_mixed_success_failure() {
-        let batch1 = mock_tag_batch("tag1", "v1", 1000, 1.0);
-        let batch2 = mock_tag_batch("tag2", "v2", 2000, 2.0);
+        let batch1 = mock_aligned_tag_batch("tag1", "v1", 1000, 1.0);
+        let batch2 = mock_aligned_tag_batch("tag2", "v2", 2000, 2.0);
 
         let table_batches = vec![
             TableBatch {
@@ -2473,7 +3362,7 @@ mod tests {
         let table_batches = vec![TableBatch {
             table_name: "t1".to_string(),
             table_id: 11,
-            batches: vec![mock_tag_batch("tag1", "host-1", 1000, 1.0)],
+            batches: vec![mock_aligned_tag_batch("tag1", "host-1", 1000, 1.0)],
             row_count: 1,
         }];
         let partition_calls = Arc::new(AtomicUsize::new(0));
@@ -2523,7 +3412,7 @@ mod tests {
         let table_batches = vec![TableBatch {
             table_name: "t1".to_string(),
             table_id: 11,
-            batches: vec![mock_tag_batch("tag1", "host-1", 1000, 1.0)],
+            batches: vec![mock_aligned_tag_batch("tag1", "host-1", 1000, 1.0)],
             row_count: 1,
         }];
         let ctx = session::context::QueryContext::arc();
@@ -2552,7 +3441,7 @@ mod tests {
         let table_batches = vec![TableBatch {
             table_name: "t1".to_string(),
             table_id: 11,
-            batches: vec![mock_tag_batch("tag1", "host-1", 1000, 1.0)],
+            batches: vec![mock_aligned_tag_batch("tag1", "host-1", 1000, 1.0)],
             row_count: 1,
         }];
         let partition_calls = Arc::new(AtomicUsize::new(0));
@@ -2589,13 +3478,13 @@ mod tests {
             TableBatch {
                 table_name: "broken".to_string(),
                 table_id: 11,
-                batches: vec![mock_tag_batch("unknown_tag", "host-1", 1000, 1.0)],
+                batches: vec![mock_aligned_tag_batch("unknown_tag", "host-1", 1000, 1.0)],
                 row_count: 1,
             },
             TableBatch {
                 table_name: "healthy".to_string(),
                 table_id: 12,
-                batches: vec![mock_tag_batch("tag1", "host-2", 2000, 2.0)],
+                batches: vec![mock_aligned_tag_batch("tag1", "host-2", 2000, 2.0)],
                 row_count: 1,
             },
         ];

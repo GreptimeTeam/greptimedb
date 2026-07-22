@@ -13229,6 +13229,7 @@ dependencies = [
  "loki-proto",
  "metric-engine",
  "mime_guess",
+ "moka",
  "mysql_async",
  "mysql_common 0.34.1",
  "notify",
