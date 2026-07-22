@@ -43,7 +43,7 @@ use query::parser::QueryLanguageParser;
 use session::context::{QueryContextBuilder, QueryContextRef};
 use store_api::storage::ScanRequest;
 use table::metadata::TableInfo;
-use table::requests::{SEMANTIC_ENTITY_PREFIX, SEMANTIC_PIPELINE, TABLE_DATA_MODEL_TRACE_V1};
+use table::requests::{SEMANTIC_ENTITY_PREFIX, TABLE_DATA_MODEL, TABLE_DATA_MODEL_TRACE_V1};
 
 /// The live [`EntityGraphProvider`], backed by the query engine.
 pub struct EntityGraphProviderImpl {
@@ -119,12 +119,16 @@ impl EntityGraphProviderImpl {
             .collect()
     }
 
+    /// Keyed off the engine-native `table_data_model` option (same check as the
+    /// Jaeger query path) so pre-existing trace tables without the newer
+    /// `greptime.semantic.*` stamps are recognized too. The v1 model is required
+    /// because the derivation SQL relies on its fixed column names.
     fn is_trace_table(table_info: &TableInfo) -> bool {
         table_info
             .meta
             .options
             .extra_options
-            .get(SEMANTIC_PIPELINE)
+            .get(TABLE_DATA_MODEL)
             .map(|v| v == TABLE_DATA_MODEL_TRACE_V1)
             .unwrap_or(false)
     }
@@ -181,6 +185,11 @@ impl EntityGraphProviderImpl {
     }
 
     /// Plans and executes a derivation SQL statement, collecting its rows.
+    ///
+    /// TODO(entity-graph): the QueryContext must come from the outer query
+    /// instead of being built here, so the derivation inherits the caller's
+    /// permissions, cancellation and deadline. Requires threading the context
+    /// through the computed-table scan path (planned next PR).
     async fn run_sql(&self, catalog: &str, sql: &str) -> Result<Vec<RecordBatch>, BoxedError> {
         let query_ctx: QueryContextRef = QueryContextBuilder::default()
             .current_catalog(catalog.to_string())
