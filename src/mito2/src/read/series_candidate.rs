@@ -162,6 +162,8 @@ impl SeriesCandidateScanner {
             range_streams.push(task.await.context(JoinSnafu)??);
         }
 
+        // Keep scanner-level merge metrics in the same synthetic partition as
+        // SeriesDistributor. Output partitions occupy 0..self.partitions.len().
         let merged = merge_primary_key_streams(
             range_streams,
             self.memory_pool.clone(),
@@ -477,6 +479,8 @@ fn merge_primary_key_streams(
             nulls_first: false,
         },
     }])
+    // Safe to unwrap because `LexOrdering::new` returns `None` only for empty
+    // input, and this array always contains one sort expression.
     .unwrap();
     let reservation = MemoryConsumer::new(consumer_name).register(&memory_pool);
     let mut merged = StreamingMergeBuilder::new()
