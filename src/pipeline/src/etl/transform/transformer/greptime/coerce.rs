@@ -23,7 +23,7 @@ use vrl::value::Value as VrlValue;
 
 use crate::error::{
     CoerceIncompatibleTypesSnafu, CoerceJsonTypeToSnafu, CoerceStringToTypeSnafu,
-    CoerceTypeToJsonSnafu, CoerceUnsupportedEpochTypeSnafu, ColumnOptionsSnafu,
+    CoerceTypeToJsonSnafu, CoerceUnsupportedEpochTypeSnafu, ColumnOptionsSnafu, Error,
     InvalidTimestampSnafu, Result, TransformIndexStateMismatchSnafu,
     UnsupportedTypeInPipelineSnafu, VrlRegexValueSnafu,
 };
@@ -223,17 +223,65 @@ fn coerce_bool_value(b: bool, transform: &Transform) -> Result<Option<ValueData>
     Ok(Some(val))
 }
 
+fn handle_coercion_failure(transform: &Transform, error: Error) -> Result<Option<ValueData>> {
+    match transform.on_failure {
+        Some(OnFailure::Ignore) => Ok(None),
+        Some(OnFailure::Default) => match transform.get_default() {
+            Some(default) => Ok(Some(default.clone())),
+            None => transform.get_type_matched_default_val().map(Some),
+        },
+        None => Err(error),
+    }
+}
+
+fn integer_out_of_range<T: std::fmt::Display>(
+    value: T,
+    transform: &Transform,
+) -> Result<Option<ValueData>> {
+    handle_coercion_failure(
+        transform,
+        CoerceIncompatibleTypesSnafu {
+            msg: format!(
+                "integer value `{value}` is out of range for {}",
+                transform.type_.as_str_name()
+            ),
+        }
+        .build(),
+    )
+}
+
 fn coerce_i64_value(n: i64, transform: &Transform) -> Result<Option<ValueData>> {
-    let val = match &transform.type_ {
-        ColumnDataType::Int8 => ValueData::I8Value(n as i32),
-        ColumnDataType::Int16 => ValueData::I16Value(n as i32),
-        ColumnDataType::Int32 => ValueData::I32Value(n as i32),
+    let val = match transform.type_ {
+        ColumnDataType::Int8 => match i8::try_from(n) {
+            Ok(value) => ValueData::I8Value(value.into()),
+            Err(_) => return integer_out_of_range(n, transform),
+        },
+        ColumnDataType::Int16 => match i16::try_from(n) {
+            Ok(value) => ValueData::I16Value(value.into()),
+            Err(_) => return integer_out_of_range(n, transform),
+        },
+        ColumnDataType::Int32 => match i32::try_from(n) {
+            Ok(value) => ValueData::I32Value(value),
+            Err(_) => return integer_out_of_range(n, transform),
+        },
         ColumnDataType::Int64 => ValueData::I64Value(n),
 
-        ColumnDataType::Uint8 => ValueData::U8Value(n as u32),
-        ColumnDataType::Uint16 => ValueData::U16Value(n as u32),
-        ColumnDataType::Uint32 => ValueData::U32Value(n as u32),
-        ColumnDataType::Uint64 => ValueData::U64Value(n as u64),
+        ColumnDataType::Uint8 => match u8::try_from(n) {
+            Ok(value) => ValueData::U8Value(value.into()),
+            Err(_) => return integer_out_of_range(n, transform),
+        },
+        ColumnDataType::Uint16 => match u16::try_from(n) {
+            Ok(value) => ValueData::U16Value(value.into()),
+            Err(_) => return integer_out_of_range(n, transform),
+        },
+        ColumnDataType::Uint32 => match u32::try_from(n) {
+            Ok(value) => ValueData::U32Value(value),
+            Err(_) => return integer_out_of_range(n, transform),
+        },
+        ColumnDataType::Uint64 => match u64::try_from(n) {
+            Ok(value) => ValueData::U64Value(value),
+            Err(_) => return integer_out_of_range(n, transform),
+        },
 
         ColumnDataType::Float32 => ValueData::F32Value(n as f32),
         ColumnDataType::Float64 => ValueData::F64Value(n as f64),
@@ -260,15 +308,36 @@ fn coerce_i64_value(n: i64, transform: &Transform) -> Result<Option<ValueData>> 
 }
 
 fn coerce_u64_value(n: u64, transform: &Transform) -> Result<Option<ValueData>> {
-    let val = match &transform.type_ {
-        ColumnDataType::Int8 => ValueData::I8Value(n as i32),
-        ColumnDataType::Int16 => ValueData::I16Value(n as i32),
-        ColumnDataType::Int32 => ValueData::I32Value(n as i32),
-        ColumnDataType::Int64 => ValueData::I64Value(n as i64),
+    let val = match transform.type_ {
+        ColumnDataType::Int8 => match i8::try_from(n) {
+            Ok(value) => ValueData::I8Value(value.into()),
+            Err(_) => return integer_out_of_range(n, transform),
+        },
+        ColumnDataType::Int16 => match i16::try_from(n) {
+            Ok(value) => ValueData::I16Value(value.into()),
+            Err(_) => return integer_out_of_range(n, transform),
+        },
+        ColumnDataType::Int32 => match i32::try_from(n) {
+            Ok(value) => ValueData::I32Value(value),
+            Err(_) => return integer_out_of_range(n, transform),
+        },
+        ColumnDataType::Int64 => match i64::try_from(n) {
+            Ok(value) => ValueData::I64Value(value),
+            Err(_) => return integer_out_of_range(n, transform),
+        },
 
-        ColumnDataType::Uint8 => ValueData::U8Value(n as u32),
-        ColumnDataType::Uint16 => ValueData::U16Value(n as u32),
-        ColumnDataType::Uint32 => ValueData::U32Value(n as u32),
+        ColumnDataType::Uint8 => match u8::try_from(n) {
+            Ok(value) => ValueData::U8Value(value.into()),
+            Err(_) => return integer_out_of_range(n, transform),
+        },
+        ColumnDataType::Uint16 => match u16::try_from(n) {
+            Ok(value) => ValueData::U16Value(value.into()),
+            Err(_) => return integer_out_of_range(n, transform),
+        },
+        ColumnDataType::Uint32 => match u32::try_from(n) {
+            Ok(value) => ValueData::U32Value(value),
+            Err(_) => return integer_out_of_range(n, transform),
+        },
         ColumnDataType::Uint64 => ValueData::U64Value(n),
 
         ColumnDataType::Float32 => ValueData::F32Value(n as f32),
@@ -277,10 +346,22 @@ fn coerce_u64_value(n: u64, transform: &Transform) -> Result<Option<ValueData>> 
         ColumnDataType::Boolean => ValueData::BoolValue(n != 0),
         ColumnDataType::String => ValueData::StringValue(n.to_string()),
 
-        ColumnDataType::TimestampNanosecond => ValueData::TimestampNanosecondValue(n as i64),
-        ColumnDataType::TimestampMicrosecond => ValueData::TimestampMicrosecondValue(n as i64),
-        ColumnDataType::TimestampMillisecond => ValueData::TimestampMillisecondValue(n as i64),
-        ColumnDataType::TimestampSecond => ValueData::TimestampSecondValue(n as i64),
+        ColumnDataType::TimestampNanosecond => match i64::try_from(n) {
+            Ok(value) => ValueData::TimestampNanosecondValue(value),
+            Err(_) => return integer_out_of_range(n, transform),
+        },
+        ColumnDataType::TimestampMicrosecond => match i64::try_from(n) {
+            Ok(value) => ValueData::TimestampMicrosecondValue(value),
+            Err(_) => return integer_out_of_range(n, transform),
+        },
+        ColumnDataType::TimestampMillisecond => match i64::try_from(n) {
+            Ok(value) => ValueData::TimestampMillisecondValue(value),
+            Err(_) => return integer_out_of_range(n, transform),
+        },
+        ColumnDataType::TimestampSecond => match i64::try_from(n) {
+            Ok(value) => ValueData::TimestampSecondValue(value),
+            Err(_) => return integer_out_of_range(n, transform),
+        },
 
         ColumnDataType::Binary => {
             return CoerceJsonTypeToSnafu {
@@ -342,19 +423,15 @@ fn coerce_f64_value(n: f64, transform: &Transform) -> Result<Option<ValueData>> 
 macro_rules! coerce_string_value {
     ($s:expr, $transform:expr, $type:ident, $parse:ident) => {
         match $s.parse::<$type>() {
-            Ok(v) => Ok(Some(ValueData::$parse(v))),
-            Err(_) => match $transform.on_failure {
-                Some(OnFailure::Ignore) => Ok(None),
-                Some(OnFailure::Default) => match $transform.get_default() {
-                    Some(default) => Ok(Some(default.clone())),
-                    None => $transform.get_type_matched_default_val().map(Some),
-                },
-                None => CoerceStringToTypeSnafu {
+            Ok(v) => Ok(Some(ValueData::$parse(v.into()))),
+            Err(_) => handle_coercion_failure(
+                $transform,
+                CoerceStringToTypeSnafu {
                     s: $s,
                     ty: $transform.type_.as_str_name(),
                 }
-                .fail(),
-            },
+                .build(),
+            ),
         }
     };
 }
@@ -362,10 +439,10 @@ macro_rules! coerce_string_value {
 fn coerce_string_value(s: &str, transform: &Transform) -> Result<Option<ValueData>> {
     match transform.type_ {
         ColumnDataType::Int8 => {
-            coerce_string_value!(s, transform, i32, I8Value)
+            coerce_string_value!(s, transform, i8, I8Value)
         }
         ColumnDataType::Int16 => {
-            coerce_string_value!(s, transform, i32, I16Value)
+            coerce_string_value!(s, transform, i16, I16Value)
         }
         ColumnDataType::Int32 => {
             coerce_string_value!(s, transform, i32, I32Value)
@@ -375,10 +452,10 @@ fn coerce_string_value(s: &str, transform: &Transform) -> Result<Option<ValueDat
         }
 
         ColumnDataType::Uint8 => {
-            coerce_string_value!(s, transform, u32, U8Value)
+            coerce_string_value!(s, transform, u8, U8Value)
         }
         ColumnDataType::Uint16 => {
-            coerce_string_value!(s, transform, u32, U16Value)
+            coerce_string_value!(s, transform, u16, U16Value)
         }
         ColumnDataType::Uint32 => {
             coerce_string_value!(s, transform, u32, U32Value)
@@ -441,6 +518,148 @@ mod tests {
 
     use super::*;
     use crate::etl::field::Fields;
+
+    fn transform(type_: ColumnDataType) -> Transform {
+        Transform {
+            fields: Fields::default(),
+            type_,
+            default: None,
+            index: None,
+            index_options: None,
+            on_failure: None,
+            tag: false,
+        }
+    }
+
+    fn narrow_i64_value(type_: ColumnDataType, value: i64) -> ValueData {
+        match type_ {
+            ColumnDataType::Int8 => ValueData::I8Value(value as i32),
+            ColumnDataType::Int16 => ValueData::I16Value(value as i32),
+            ColumnDataType::Int32 => ValueData::I32Value(value as i32),
+            ColumnDataType::Uint8 => ValueData::U8Value(value as u32),
+            ColumnDataType::Uint16 => ValueData::U16Value(value as u32),
+            ColumnDataType::Uint32 => ValueData::U32Value(value as u32),
+            _ => unreachable!("narrow integer type required"),
+        }
+    }
+
+    fn checked_u64_value(type_: ColumnDataType, value: u64) -> ValueData {
+        match type_ {
+            ColumnDataType::Int8 => ValueData::I8Value(value as i32),
+            ColumnDataType::Int16 => ValueData::I16Value(value as i32),
+            ColumnDataType::Int32 => ValueData::I32Value(value as i32),
+            ColumnDataType::Int64 => ValueData::I64Value(value as i64),
+            ColumnDataType::Uint8 => ValueData::U8Value(value as u32),
+            ColumnDataType::Uint16 => ValueData::U16Value(value as u32),
+            ColumnDataType::Uint32 => ValueData::U32Value(value as u32),
+            ColumnDataType::TimestampNanosecond => {
+                ValueData::TimestampNanosecondValue(value as i64)
+            }
+            ColumnDataType::TimestampMicrosecond => {
+                ValueData::TimestampMicrosecondValue(value as i64)
+            }
+            ColumnDataType::TimestampMillisecond => {
+                ValueData::TimestampMillisecondValue(value as i64)
+            }
+            ColumnDataType::TimestampSecond => ValueData::TimestampSecondValue(value as i64),
+            _ => unreachable!("checked u64 target type required"),
+        }
+    }
+
+    fn assert_out_of_range(
+        result: crate::error::Result<Option<ValueData>>,
+        value: impl std::fmt::Display,
+        type_: ColumnDataType,
+    ) {
+        let error = result.unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "Failed to coerce value: integer value `{value}` is out of range for {}",
+                type_.as_str_name()
+            )
+        );
+        assert!(matches!(
+            error,
+            crate::error::Error::CoerceIncompatibleTypes { .. }
+        ));
+    }
+
+    #[test]
+    fn test_coerce_i64_narrowing_boundaries_and_overflows() {
+        // target type, inclusive minimum, inclusive maximum
+        let cases = [
+            (ColumnDataType::Int8, i8::MIN as i64, i8::MAX as i64),
+            (ColumnDataType::Int16, i16::MIN as i64, i16::MAX as i64),
+            (ColumnDataType::Int32, i32::MIN as i64, i32::MAX as i64),
+            (ColumnDataType::Uint8, u8::MIN as i64, u8::MAX as i64),
+            (ColumnDataType::Uint16, u16::MIN as i64, u16::MAX as i64),
+            (ColumnDataType::Uint32, u32::MIN as i64, u32::MAX as i64),
+        ];
+
+        for (type_, min, max) in cases {
+            let transform = transform(type_);
+            assert_eq!(
+                coerce_i64_value(min, &transform).unwrap(),
+                Some(narrow_i64_value(type_, min)),
+                "{type_:?} minimum"
+            );
+            assert_eq!(
+                coerce_i64_value(max, &transform).unwrap(),
+                Some(narrow_i64_value(type_, max)),
+                "{type_:?} maximum"
+            );
+            assert_out_of_range(coerce_i64_value(min - 1, &transform), min - 1, type_);
+            assert_out_of_range(coerce_i64_value(max + 1, &transform), max + 1, type_);
+        }
+    }
+
+    #[test]
+    fn test_coerce_i64_to_u64_rejects_negative_value() {
+        assert_out_of_range(
+            coerce_i64_value(-1, &transform(ColumnDataType::Uint64)),
+            -1,
+            ColumnDataType::Uint64,
+        );
+    }
+
+    #[test]
+    fn test_coerce_u64_checked_conversions() {
+        // target type, inclusive maximum
+        let cases = [
+            (ColumnDataType::Int8, i8::MAX as u64),
+            (ColumnDataType::Int16, i16::MAX as u64),
+            (ColumnDataType::Int32, i32::MAX as u64),
+            (ColumnDataType::Int64, i64::MAX as u64),
+            (ColumnDataType::Uint8, u8::MAX as u64),
+            (ColumnDataType::Uint16, u16::MAX as u64),
+            (ColumnDataType::Uint32, u32::MAX as u64),
+            (ColumnDataType::TimestampNanosecond, i64::MAX as u64),
+            (ColumnDataType::TimestampMicrosecond, i64::MAX as u64),
+            (ColumnDataType::TimestampMillisecond, i64::MAX as u64),
+            (ColumnDataType::TimestampSecond, i64::MAX as u64),
+        ];
+
+        for (type_, max) in cases {
+            let transform = transform(type_);
+            assert_eq!(
+                coerce_u64_value(max, &transform).unwrap(),
+                Some(checked_u64_value(type_, max)),
+                "{type_:?} maximum"
+            );
+            assert_out_of_range(coerce_u64_value(max + 1, &transform), max + 1, type_);
+        }
+
+        assert_eq!(
+            coerce_u64_value(u64::MAX, &transform(ColumnDataType::Uint64)).unwrap(),
+            Some(ValueData::U64Value(u64::MAX))
+        );
+        assert_out_of_range(
+            coerce_u64_value(u64::MAX, &transform(ColumnDataType::TimestampNanosecond)),
+            u64::MAX,
+            ColumnDataType::TimestampNanosecond,
+        );
+    }
 
     #[test]
     fn test_coerce_string_without_on_failure() {
