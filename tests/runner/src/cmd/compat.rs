@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use clap::Parser;
@@ -92,6 +92,16 @@ impl SetupProgress {
             self.failed.push(index);
             !fail_fast
         }
+    }
+
+    /// Records a setup or old-stage assertion result as one setup outcome.
+    fn record_result(
+        &mut self,
+        index: usize,
+        result: &Result<(), String>,
+        fail_fast: bool,
+    ) -> bool {
+        self.record(index, result.is_ok(), fail_fast)
     }
 
     /// Returns whether successful setup cases may advance to the current stage.
@@ -458,8 +468,8 @@ impl CompatCommand {
         index: usize,
         profile: CompatProfile,
         interceptor_registry: &Registry,
-        from_bins_dir: &PathBuf,
-        to_bins_dir: &PathBuf,
+        from_bins_dir: &Path,
+        to_bins_dir: &Path,
     ) -> ProfileOutcome {
         let profile_name = profile.name(index);
         let temp_dir = tempfile::Builder::new()
@@ -488,7 +498,7 @@ impl CompatCommand {
             ServerAddr::default(),
             WalConfig::RaftEngine,
             self.pull_version_on_need,
-            Some(from_bins_dir.clone()),
+            Some(from_bins_dir.to_path_buf()),
             store_config,
             vec![],
         );
@@ -507,14 +517,36 @@ impl CompatCommand {
 
         println!("Running setup phase for profile '{profile_name}'...");
         for (case_index, case) in profile.cases.iter().enumerate() {
-            match run_compat_phase(&db, case, interceptor_registry, CompatPhase::Setup).await {
+            let setup_result = if let Some(assertion) = &case.metadata.old_assert {
+                match env.compat_snapshot_datanode_logs(0) {
+                    Ok(snapshots) => {
+                        match run_compat_phase(&db, case, interceptor_registry, CompatPhase::Setup)
+                            .await
+                        {
+                            Ok(()) => {
+                                env.compat_assert_metric_primary_key_encoding(
+                                    &snapshots,
+                                    assertion.metric_primary_key_encoding,
+                                )
+                                .await
+                            }
+                            Err(error) => Err(error),
+                        }
+                    }
+                    Err(error) => Err(error),
+                }
+            } else {
+                run_compat_phase(&db, case, interceptor_registry, CompatPhase::Setup).await
+            };
+
+            match &setup_result {
                 Ok(()) => {
-                    setup_progress.record(case_index, true, self.fail_fast);
+                    setup_progress.record_result(case_index, &setup_result, self.fail_fast);
                     println!("  Setup: {} - OK", case.metadata.name);
                 }
                 Err(e) => {
                     println!("  Setup: {} - FAILED: {e}", case.metadata.name);
-                    if !setup_progress.record(case_index, false, self.fail_fast) {
+                    if !setup_progress.record_result(case_index, &setup_result, self.fail_fast) {
                         break;
                     }
                 }
@@ -534,7 +566,7 @@ impl CompatCommand {
                 env.compat_activate_current_profile();
             }
             println!("Restarting profile '{profile_name}' with new-version binary...");
-            env.compat_restart_all(&db, to_bins_dir.clone()).await;
+            env.compat_restart_all(&db, to_bins_dir.to_path_buf()).await;
 
             println!("Running verify phase for profile '{profile_name}'...");
             for case_index in setup_progress.successful {
@@ -1019,7 +1051,9 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
-    use crate::cmd::compat_case::CaseMetadata;
+    use crate::cmd::compat_case::{
+        CaseMetadata, ExpectedMetricPrimaryKeyEncoding, OldStageAssertions,
+    };
 
     #[test]
     fn test_trim_trailing_blank_lines_preserves_single_final_newline() {
@@ -1042,6 +1076,7 @@ mod tests {
                 owner: "test".to_string(),
                 namespace: None,
                 old_config,
+                old_assert: None,
             },
             dir: PathBuf::from(name),
             namespace: name.to_string(),
@@ -1092,6 +1127,22 @@ mod tests {
     }
 
     #[test]
+    fn test_old_stage_assertions_do_not_split_config_profiles() {
+        let mut dense = test_case("dense", Some(old_profile(false)));
+        dense.metadata.old_assert = Some(OldStageAssertions {
+            metric_primary_key_encoding: ExpectedMetricPrimaryKeyEncoding::Dense,
+        });
+        let mut sparse = test_case("sparse", Some(old_profile(false)));
+        sparse.metadata.old_assert = Some(OldStageAssertions {
+            metric_primary_key_encoding: ExpectedMetricPrimaryKeyEncoding::Sparse,
+        });
+
+        let profiles = group_cases_by_profile(vec![dense, sparse]);
+        assert_eq!(profiles.len(), 1);
+        assert_eq!(profiles[0].cases.len(), 2);
+    }
+
+    #[test]
     fn test_setup_failure_in_middle_verifies_other_successful_cases() {
         let mut progress = SetupProgress::default();
         for (index, succeeded) in [true, false, true].into_iter().enumerate() {
@@ -1112,5 +1163,16 @@ mod tests {
         assert_eq!(progress.successful, vec![0]);
         assert_eq!(progress.failed, vec![1]);
         assert!(!progress.should_transition(true));
+    }
+
+    #[test]
+    fn test_old_stage_assertion_failure_is_a_setup_failure() {
+        let mut progress = SetupProgress::default();
+        let assertion_failure = Err("expected dense metric encoding".to_string());
+
+        assert!(progress.record_result(0, &assertion_failure, false));
+        assert!(progress.successful.is_empty());
+        assert_eq!(progress.failed, vec![0]);
+        assert!(!progress.should_transition(false));
     }
 }

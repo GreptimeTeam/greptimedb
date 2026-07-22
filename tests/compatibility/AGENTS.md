@@ -55,6 +55,16 @@ This file is intended for AI agents editing compat cases or the compat runner. F
   and distinct profiles run sequentially with independent SQLNESS_HOME/data/WAL
   state and a fresh etcd start/stop/remove lifecycle. `--preserve-state` lists
   every retained profile directory.
+- A case that depends on an old-stage metric encoding may couple that fixture to
+  a typed log assertion:
+  ```toml
+  [old_assert]
+  metric_primary_key_encoding = "dense"
+  ```
+  Only lowercase `dense` and `sparse` are accepted. The runner snapshots old
+  datanode logs immediately before that case's setup, then requires stable,
+  matching region-creation events before the current-stage restart. Assertions
+  do not affect profile grouping.
 
 ## PostgreSQL Protocol Cases
 

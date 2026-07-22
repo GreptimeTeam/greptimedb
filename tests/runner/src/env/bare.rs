@@ -12,16 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::fmt::Display;
-use std::fs::OpenOptions;
+use std::fs::{self, OpenOptions};
 use std::io;
-use std::io::Write;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use common_error::ext::ErrorExt;
@@ -30,7 +30,7 @@ use tokio::sync::Mutex as TokioMutex;
 
 use crate::client::MultiProtocolClient;
 use crate::cmd::bare::ServerAddr;
-use crate::cmd::compat_case::{OldConfig, try_infer_version};
+use crate::cmd::compat_case::{ExpectedMetricPrimaryKeyEncoding, OldConfig, try_infer_version};
 use crate::formatter::{ErrorFormatter, MysqlFormatter, OutputFormatter, PostgresqlFormatter};
 use crate::protocol_interceptor::{MYSQL, PROTOCOL_KEY};
 use crate::server_mode::{CompatConfigStage, GrpcArgStyle, ServerMode};
@@ -46,6 +46,193 @@ const SERVER_MODE_FRONTEND_IDX: usize = 4;
 const SERVER_MODE_FLOWNODE_IDX: usize = 5;
 // Number of datanodes in distributed mode
 const DISTRIBUTED_DATANODE_COUNT: usize = 3;
+const OLD_ASSERT_POLL_INTERVAL: Duration = Duration::from_millis(50);
+const OLD_ASSERT_POLL_DEADLINE: Duration = Duration::from_secs(5);
+const OLD_ASSERT_QUIET_WINDOW: Duration = Duration::from_millis(225);
+
+/// Byte offset captured for one old datanode log before a case's setup phase.
+#[derive(Debug, Clone)]
+pub(crate) struct DatanodeLogSnapshot {
+    path: PathBuf,
+    offset: u64,
+    ends_with_newline: bool,
+}
+
+#[derive(Clone, Copy)]
+struct AssertionTiming {
+    poll_interval: Duration,
+    deadline: Duration,
+    quiet_window: Duration,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MetricEncodingEvent {
+    region: String,
+    encoding: ExpectedMetricPrimaryKeyEncoding,
+}
+
+fn datanode_log_file_name(id: usize, node_id: u32) -> String {
+    format!("greptime-{id}-sqlness-datanode-{node_id}.log")
+}
+
+/// Parses complete metric-region creation records from a datanode log fragment.
+fn parse_metric_encoding_events(records: &str) -> Result<Vec<MetricEncodingEvent>, String> {
+    const PREFIX: &str = "Created physical metric region ";
+    const MARKER: &str = ", primary key encoding=";
+
+    records
+        .lines()
+        .map(|line| {
+            let line = strip_ansi_csi(line);
+            if !line.contains(PREFIX) {
+                return Ok(None);
+            }
+            let (_, remainder) = line.split_once(PREFIX).expect("prefix checked");
+            let (region, encoding) = match remainder.split_once(MARKER) {
+                Some(parts) => parts,
+                None => {
+                    return Err(
+                        "metric region candidate lacks primary-key encoding marker".to_string()
+                    );
+                }
+            };
+            let (encoding, _) = match encoding.split_once(',') {
+                Some(parts) => parts,
+                None => {
+                    return Err("metric region candidate lacks trailing encoding comma".to_string());
+                }
+            };
+            let encoding = match encoding {
+                "Dense" => ExpectedMetricPrimaryKeyEncoding::Dense,
+                "Sparse" => ExpectedMetricPrimaryKeyEncoding::Sparse,
+                _ => {
+                    return Err(format!(
+                        "metric region candidate has unknown encoding '{encoding}'"
+                    ));
+                }
+            };
+            Ok(Some(MetricEncodingEvent {
+                region: region.to_string(),
+                encoding,
+            }))
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map(|events| events.into_iter().flatten().collect())
+}
+
+fn matched_metric_regions(
+    events: &[MetricEncodingEvent],
+    expected: ExpectedMetricPrimaryKeyEncoding,
+) -> Result<BTreeSet<String>, String> {
+    let mut regions = BTreeSet::new();
+    for event in events {
+        if event.encoding != expected {
+            return Err(format!(
+                "region '{}' reported {:?} primary-key encoding, expected {:?}",
+                event.region, event.encoding, expected
+            ));
+        }
+        regions.insert(event.region.clone());
+    }
+    Ok(regions)
+}
+
+fn strip_ansi_csi(input: &str) -> String {
+    let mut stripped = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\u{1b}' && chars.next_if_eq(&'[').is_some() {
+            for csi in chars.by_ref() {
+                if ('@'..='~').contains(&csi) {
+                    break;
+                }
+            }
+        } else {
+            stripped.push(ch);
+        }
+    }
+    stripped
+}
+
+fn post_snapshot_records<'a>(snapshot: &DatanodeLogSnapshot, appended: &'a str) -> (&'a str, bool) {
+    let appended = if snapshot.ends_with_newline {
+        appended
+    } else {
+        match appended.find('\n') {
+            Some(index) => &appended[index + 1..],
+            None => "",
+        }
+    };
+    match appended.rfind('\n') {
+        Some(index) => (&appended[..=index], index + 1 != appended.len()),
+        None => ("", !appended.is_empty()),
+    }
+}
+
+fn read_appended_log(snapshot: &DatanodeLogSnapshot) -> Result<(String, u64), String> {
+    let metadata = fs::metadata(&snapshot.path).map_err(|error| {
+        format!(
+            "Failed to read old datanode log {} after setup: {error}",
+            snapshot.path.display()
+        )
+    })?;
+    if metadata.len() < snapshot.offset {
+        return Err(format!(
+            "Old datanode log {} was truncated after setup snapshot ({} < {})",
+            snapshot.path.display(),
+            metadata.len(),
+            snapshot.offset
+        ));
+    }
+    let mut file = OpenOptions::new()
+        .read(true)
+        .open(&snapshot.path)
+        .map_err(|error| {
+            format!(
+                "Failed to read old datanode log {} after setup: {error}",
+                snapshot.path.display()
+            )
+        })?;
+    file.seek(SeekFrom::Start(snapshot.offset))
+        .map_err(|error| {
+            format!(
+                "Failed to seek old datanode log {}: {error}",
+                snapshot.path.display()
+            )
+        })?;
+    let mut appended = Vec::new();
+    file.read_to_end(&mut appended).map_err(|error| {
+        format!(
+            "Failed to read old datanode log {} after setup: {error}",
+            snapshot.path.display()
+        )
+    })?;
+    let appended_len = u64::try_from(appended.len()).map_err(|_| {
+        format!(
+            "Old datanode log {} appended byte count does not fit in u64",
+            snapshot.path.display()
+        )
+    })?;
+    let observed_length = snapshot.offset.checked_add(appended_len).ok_or_else(|| {
+        format!(
+            "Old datanode log {} observed length overflowed",
+            snapshot.path.display()
+        )
+    })?;
+    Ok((
+        String::from_utf8_lossy(&appended).into_owned(),
+        observed_length,
+    ))
+}
+
+fn truncate_diagnostic(value: &str) -> &str {
+    const MAX_DIAGNOSTIC_BYTES: usize = 4096;
+    if value.len() <= MAX_DIAGNOSTIC_BYTES {
+        value
+    } else {
+        value.get(..MAX_DIAGNOSTIC_BYTES).unwrap_or(value)
+    }
+}
 
 #[derive(Clone)]
 pub enum WalConfig {
@@ -331,7 +518,7 @@ impl Env {
         let log_file_name = match mode {
             ServerMode::Datanode { node_id, .. } => {
                 db_ctx.incr_datanode_id();
-                format!("greptime-{}-sqlness-datanode-{}.log", id, node_id)
+                datanode_log_file_name(id, node_id)
             }
             ServerMode::Flownode { .. } => format!("greptime-{}-sqlness-flownode.log", id),
             ServerMode::Frontend { .. } => format!("greptime-{}-sqlness-frontend.log", id),
@@ -669,6 +856,130 @@ impl Env {
     /// Returns the stage that a subsequent server spawn or restart will render.
     pub(crate) fn compat_stage_for_start(&self) -> CompatConfigStage {
         self.compat_config_stage.lock().unwrap().clone()
+    }
+
+    /// Captures byte offsets for all distributed datanode logs before one setup case.
+    pub(crate) fn compat_snapshot_datanode_logs(
+        &self,
+        id: usize,
+    ) -> Result<Vec<DatanodeLogSnapshot>, String> {
+        (0..DISTRIBUTED_DATANODE_COUNT)
+            .map(|node_id| {
+                let path = self
+                    .sqlness_home
+                    .join(datanode_log_file_name(id, node_id as u32));
+                let mut file = OpenOptions::new().read(true).open(&path).map_err(|error| {
+                    format!(
+                        "Failed to snapshot old datanode log {}: {error}",
+                        path.display()
+                    )
+                })?;
+                let metadata = file.metadata().map_err(|error| {
+                    format!(
+                        "Failed to snapshot old datanode log {}: {error}",
+                        path.display()
+                    )
+                })?;
+                let offset = metadata.len();
+                let ends_with_newline = if offset == 0 {
+                    true
+                } else {
+                    file.seek(SeekFrom::Start(offset - 1)).map_err(|error| {
+                        format!(
+                            "Failed to inspect old datanode log {}: {error}",
+                            path.display()
+                        )
+                    })?;
+                    let mut byte = [0];
+                    file.read_exact(&mut byte).map_err(|error| {
+                        format!(
+                            "Failed to inspect old datanode log {}: {error}",
+                            path.display()
+                        )
+                    })?;
+                    byte[0] == b'\n'
+                };
+                Ok(DatanodeLogSnapshot {
+                    path,
+                    offset,
+                    ends_with_newline,
+                })
+            })
+            .collect()
+    }
+
+    /// Waits for stable metric primary-key encoding events appended after snapshots.
+    pub(crate) async fn compat_assert_metric_primary_key_encoding(
+        &self,
+        snapshots: &[DatanodeLogSnapshot],
+        expected: ExpectedMetricPrimaryKeyEncoding,
+    ) -> Result<(), String> {
+        self.compat_assert_metric_primary_key_encoding_with_timing(
+            snapshots,
+            expected,
+            AssertionTiming {
+                poll_interval: OLD_ASSERT_POLL_INTERVAL,
+                deadline: OLD_ASSERT_POLL_DEADLINE,
+                quiet_window: OLD_ASSERT_QUIET_WINDOW,
+            },
+        )
+        .await
+    }
+
+    async fn compat_assert_metric_primary_key_encoding_with_timing(
+        &self,
+        snapshots: &[DatanodeLogSnapshot],
+        expected: ExpectedMetricPrimaryKeyEncoding,
+        timing: AssertionTiming,
+    ) -> Result<(), String> {
+        let deadline = Instant::now() + timing.deadline;
+        let mut previous_lengths = None;
+        let mut quiet_since = Instant::now();
+        let mut diagnostics = Vec::new();
+
+        loop {
+            let mut regions = BTreeSet::new();
+            let mut lengths = Vec::with_capacity(snapshots.len());
+            let mut has_incomplete = false;
+            diagnostics.clear();
+            for snapshot in snapshots {
+                let (appended, length) = read_appended_log(snapshot)?;
+                lengths.push(length);
+                diagnostics.push(format!(
+                    "{}: {}",
+                    snapshot.path.display(),
+                    truncate_diagnostic(&appended)
+                ));
+                let (records, incomplete) = post_snapshot_records(snapshot, &appended);
+                has_incomplete |= incomplete;
+                let events = parse_metric_encoding_events(records)?;
+                let matched = matched_metric_regions(&events, expected).map_err(|error| {
+                    format!("Old datanode log {} {error}", snapshot.path.display())
+                })?;
+                regions.extend(matched);
+            }
+
+            if previous_lengths.as_ref() != Some(&lengths) {
+                previous_lengths = Some(lengths);
+                quiet_since = Instant::now();
+            }
+
+            if !regions.is_empty()
+                && !has_incomplete
+                && quiet_since.elapsed() >= timing.quiet_window
+            {
+                return Ok(());
+            }
+
+            if Instant::now() >= deadline {
+                return Err(format!(
+                    "No stable old metric primary-key encoding event for expected {:?}; appended log diagnostics: {}",
+                    expected,
+                    diagnostics.join(" | ")
+                ));
+            }
+            tokio::time::sleep(timing.poll_interval).await;
+        }
     }
 
     /// Full restart of all distributed processes with a new binary directory,
@@ -1047,5 +1358,442 @@ mod tests {
             env.compat_stage_for_start(),
             CompatConfigStage::Current
         ));
+    }
+
+    fn event(region: &str, encoding: &str) -> String {
+        format!(
+            "Created physical metric region {region}, primary key encoding={encoding}, created\n"
+        )
+    }
+
+    #[test]
+    fn test_metric_encoding_parser_accepts_dense_duplicates_and_multiple_regions() {
+        let records = format!(
+            "{}{}{}",
+            event("a,1", "Dense"),
+            event("a,1", "Dense"),
+            event("b", "Dense")
+        );
+        let events = parse_metric_encoding_events(&records).unwrap();
+        assert_eq!(events.len(), 3);
+        assert_eq!(
+            matched_metric_regions(&events, ExpectedMetricPrimaryKeyEncoding::Dense).unwrap(),
+            BTreeSet::from(["a,1".to_string(), "b".to_string()])
+        );
+    }
+
+    #[test]
+    fn test_metric_encoding_parser_rejects_mixed_or_opposite_encodings() {
+        let sparse = parse_metric_encoding_events(&event("region", "Sparse")).unwrap();
+        assert!(matched_metric_regions(&sparse, ExpectedMetricPrimaryKeyEncoding::Dense).is_err());
+
+        let mixed = parse_metric_encoding_events(&format!(
+            "{}{}",
+            event("dense", "Dense"),
+            event("sparse", "Sparse")
+        ))
+        .unwrap();
+        assert!(matched_metric_regions(&mixed, ExpectedMetricPrimaryKeyEncoding::Dense).is_err());
+        assert!(
+            matched_metric_regions(&[], ExpectedMetricPrimaryKeyEncoding::Dense)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn test_metric_encoding_parser_handles_ansi_prefixes_and_partial_records() {
+        let prefixed = format!(
+            "{{\"msg\":\"\u{1b}[32m{}\u{1b}[0m\"}}\n",
+            event("ansi", "Dense").trim()
+        );
+        let events = parse_metric_encoding_events(&prefixed).unwrap();
+        assert_eq!(events.len(), 1);
+
+        let partial = "Created physical metric region split, primary key encoding=Dense,";
+        assert!(parse_metric_encoding_events("").unwrap().is_empty());
+        assert_eq!(
+            parse_metric_encoding_events(&format!("{partial}\n"))
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn test_metric_encoding_parser_rejects_malformed_candidates() {
+        for line in [
+            "Created physical metric region r",
+            "Created physical metric region r, primary key encoding=Dense",
+            "Created physical metric region r, primary key encoding=Unknown,",
+        ] {
+            assert!(parse_metric_encoding_events(line).is_err(), "{line}");
+        }
+    }
+
+    #[test]
+    fn test_pre_snapshot_partial_line_is_discarded_through_its_boundary() {
+        let snapshot = DatanodeLogSnapshot {
+            path: PathBuf::from("unused"),
+            offset: 1,
+            ends_with_newline: false,
+        };
+        let appended = format!(
+            "old suffix, primary key encoding=Dense,\n{}",
+            event("new", "Dense")
+        );
+        let (records, incomplete) = post_snapshot_records(&snapshot, &appended);
+        assert!(!incomplete);
+        let events = parse_metric_encoding_events(records).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].region, "new");
+    }
+
+    #[test]
+    fn test_real_snapshot_discards_a_pre_snapshot_partial_line() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let env = Env::new(
+            temp_dir.path().to_path_buf(),
+            ServerAddr::default(),
+            WalConfig::RaftEngine,
+            false,
+            Some(PathBuf::from(".")),
+            StoreConfig {
+                store_addrs: vec![],
+                setup_etcd: false,
+                setup_pg: None,
+                setup_mysql: None,
+                enable_flat_format: false,
+                enable_gc: false,
+            },
+            vec![],
+        );
+        for node_id in 0..DISTRIBUTED_DATANODE_COUNT {
+            let content = if node_id == 0 { "old partial" } else { "" };
+            std::fs::write(
+                temp_dir
+                    .path()
+                    .join(datanode_log_file_name(0, node_id as u32)),
+                content,
+            )
+            .unwrap();
+        }
+        let snapshots = env.compat_snapshot_datanode_logs(0).unwrap();
+        assert!(!snapshots[0].ends_with_newline);
+        OpenOptions::new()
+            .append(true)
+            .open(&snapshots[0].path)
+            .unwrap()
+            .write_all(
+                format!(", primary key encoding=Sparse,\n{}", event("new", "Dense")).as_bytes(),
+            )
+            .unwrap();
+
+        let (appended, _) = read_appended_log(&snapshots[0]).unwrap();
+        let (records, incomplete) = post_snapshot_records(&snapshots[0], &appended);
+        assert!(!incomplete);
+        let events = parse_metric_encoding_events(records).unwrap();
+        assert_eq!(
+            events,
+            vec![MetricEncodingEvent {
+                region: "new".to_string(),
+                encoding: ExpectedMetricPrimaryKeyEncoding::Dense
+            }]
+        );
+    }
+
+    #[test]
+    fn test_completed_dense_then_completed_sparse_fails_after_partial_sparse_waits() {
+        let snapshot = DatanodeLogSnapshot {
+            path: PathBuf::from("unused"),
+            offset: 0,
+            ends_with_newline: true,
+        };
+        let partial = format!(
+            "{}Created physical metric region sparse, primary",
+            event("dense", "Dense")
+        );
+        let (records, incomplete) = post_snapshot_records(&snapshot, &partial);
+        assert!(incomplete);
+        assert!(
+            matched_metric_regions(
+                &parse_metric_encoding_events(records).unwrap(),
+                ExpectedMetricPrimaryKeyEncoding::Dense
+            )
+            .is_ok()
+        );
+
+        let completed = format!("{} key encoding=Sparse,\n", partial);
+        let (records, incomplete) = post_snapshot_records(&snapshot, &completed);
+        assert!(!incomplete);
+        assert!(
+            matched_metric_regions(
+                &parse_metric_encoding_events(records).unwrap(),
+                ExpectedMetricPrimaryKeyEncoding::Dense
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn test_datanode_log_snapshots_use_independent_offsets_and_ignore_previous_content() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let env = Env::new(
+            temp_dir.path().to_path_buf(),
+            ServerAddr::default(),
+            WalConfig::RaftEngine,
+            false,
+            Some(PathBuf::from(".")),
+            StoreConfig {
+                store_addrs: vec![],
+                setup_etcd: false,
+                setup_pg: None,
+                setup_mysql: None,
+                enable_flat_format: false,
+                enable_gc: false,
+            },
+            vec![],
+        );
+        for node_id in 0..DISTRIBUTED_DATANODE_COUNT {
+            std::fs::write(
+                temp_dir
+                    .path()
+                    .join(datanode_log_file_name(0, node_id as u32)),
+                event(&format!("old-{node_id}"), "Sparse"),
+            )
+            .unwrap();
+        }
+        let snapshots = env.compat_snapshot_datanode_logs(0).unwrap();
+        for (node_id, snapshot) in snapshots.iter().enumerate() {
+            std::fs::write(
+                &snapshot.path,
+                format!(
+                    "{}{}",
+                    event(&format!("old-{node_id}"), "Sparse"),
+                    event(&format!("new-{node_id}"), "Dense")
+                ),
+            )
+            .unwrap();
+        }
+
+        for (node_id, snapshot) in snapshots.iter().enumerate() {
+            let (appended, _) = read_appended_log(snapshot).unwrap();
+            assert_eq!(appended, event(&format!("new-{node_id}"), "Dense"));
+        }
+    }
+
+    #[test]
+    fn test_snapshot_rejects_missing_datanode_log() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let env = Env::new(
+            temp_dir.path().to_path_buf(),
+            ServerAddr::default(),
+            WalConfig::RaftEngine,
+            false,
+            Some(PathBuf::from(".")),
+            StoreConfig {
+                store_addrs: vec![],
+                setup_etcd: false,
+                setup_pg: None,
+                setup_mysql: None,
+                enable_flat_format: false,
+                enable_gc: false,
+            },
+            vec![],
+        );
+        std::fs::write(temp_dir.path().join(datanode_log_file_name(0, 0)), "").unwrap();
+        std::fs::write(temp_dir.path().join(datanode_log_file_name(0, 1)), "").unwrap();
+        assert!(env.compat_snapshot_datanode_logs(0).is_err());
+    }
+
+    #[test]
+    fn test_datanode_log_reader_rejects_truncation_and_read_errors() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("datanode.log");
+        std::fs::write(&path, "before\n").unwrap();
+        let snapshot = DatanodeLogSnapshot {
+            path: path.clone(),
+            offset: 7,
+            ends_with_newline: true,
+        };
+        std::fs::write(&path, "x\n").unwrap();
+        assert!(
+            read_appended_log(&snapshot)
+                .unwrap_err()
+                .contains("truncated")
+        );
+
+        let missing = DatanodeLogSnapshot {
+            path: temp_dir.path().join("missing.log"),
+            offset: 0,
+            ends_with_newline: true,
+        };
+        assert!(read_appended_log(&missing).is_err());
+    }
+
+    #[tokio::test]
+    async fn test_metric_assertion_waits_for_completed_stable_records() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let env = Env::new(
+            temp_dir.path().to_path_buf(),
+            ServerAddr::default(),
+            WalConfig::RaftEngine,
+            false,
+            Some(PathBuf::from(".")),
+            StoreConfig {
+                store_addrs: vec![],
+                setup_etcd: false,
+                setup_pg: None,
+                setup_mysql: None,
+                enable_flat_format: false,
+                enable_gc: false,
+            },
+            vec![],
+        );
+        for node_id in 0..DISTRIBUTED_DATANODE_COUNT {
+            std::fs::write(
+                temp_dir
+                    .path()
+                    .join(datanode_log_file_name(0, node_id as u32)),
+                "",
+            )
+            .unwrap();
+        }
+        let snapshots = env.compat_snapshot_datanode_logs(0).unwrap();
+        let event = event("split", "Dense");
+        let split_at = event.len() / 2;
+        std::fs::write(&snapshots[0].path, &event[..split_at]).unwrap();
+        let path = snapshots[0].path.clone();
+        let remainder = event[split_at..].to_string();
+        let writer = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(75)).await;
+            OpenOptions::new()
+                .append(true)
+                .open(path)
+                .unwrap()
+                .write_all(remainder.as_bytes())
+                .unwrap();
+        });
+
+        env.compat_assert_metric_primary_key_encoding(
+            &snapshots,
+            ExpectedMetricPrimaryKeyEncoding::Dense,
+        )
+        .await
+        .unwrap();
+        writer.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_polling_waits_for_incomplete_sparse_then_rejects_it_when_completed() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let env = Env::new(
+            temp_dir.path().to_path_buf(),
+            ServerAddr::default(),
+            WalConfig::RaftEngine,
+            false,
+            Some(PathBuf::from(".")),
+            StoreConfig {
+                store_addrs: vec![],
+                setup_etcd: false,
+                setup_pg: None,
+                setup_mysql: None,
+                enable_flat_format: false,
+                enable_gc: false,
+            },
+            vec![],
+        );
+        for node_id in 0..DISTRIBUTED_DATANODE_COUNT {
+            std::fs::write(
+                temp_dir
+                    .path()
+                    .join(datanode_log_file_name(0, node_id as u32)),
+                "",
+            )
+            .unwrap();
+        }
+        let snapshots = env.compat_snapshot_datanode_logs(0).unwrap();
+        OpenOptions::new()
+            .append(true)
+            .open(&snapshots[0].path)
+            .unwrap()
+            .write_all(
+                format!(
+                    "{}Created physical metric region sparse, primary",
+                    event("dense", "Dense")
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+        let assertion_env = env.clone();
+        let assertion_snapshots = snapshots.clone();
+        let assertion = tokio::spawn(async move {
+            assertion_env
+                .compat_assert_metric_primary_key_encoding_with_timing(
+                    &assertion_snapshots,
+                    ExpectedMetricPrimaryKeyEncoding::Dense,
+                    AssertionTiming {
+                        poll_interval: Duration::from_millis(5),
+                        deadline: Duration::from_millis(500),
+                        quiet_window: Duration::from_millis(20),
+                    },
+                )
+                .await
+        });
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        assert!(!assertion.is_finished());
+        OpenOptions::new()
+            .append(true)
+            .open(&snapshots[0].path)
+            .unwrap()
+            .write_all(b" key encoding=Sparse,\n")
+            .unwrap();
+        let error = assertion.await.unwrap().unwrap_err();
+        assert!(error.contains("Sparse"));
+    }
+
+    #[tokio::test]
+    async fn test_metric_assertion_rejects_zero_events() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let env = Env::new(
+            temp_dir.path().to_path_buf(),
+            ServerAddr::default(),
+            WalConfig::RaftEngine,
+            false,
+            Some(PathBuf::from(".")),
+            StoreConfig {
+                store_addrs: vec![],
+                setup_etcd: false,
+                setup_pg: None,
+                setup_mysql: None,
+                enable_flat_format: false,
+                enable_gc: false,
+            },
+            vec![],
+        );
+        for node_id in 0..DISTRIBUTED_DATANODE_COUNT {
+            std::fs::write(
+                temp_dir
+                    .path()
+                    .join(datanode_log_file_name(0, node_id as u32)),
+                "unrelated old datanode log\n",
+            )
+            .unwrap();
+        }
+        let snapshots = env.compat_snapshot_datanode_logs(0).unwrap();
+
+        let error = env
+            .compat_assert_metric_primary_key_encoding_with_timing(
+                &snapshots,
+                ExpectedMetricPrimaryKeyEncoding::Dense,
+                AssertionTiming {
+                    poll_interval: Duration::from_millis(1),
+                    deadline: Duration::from_millis(20),
+                    quiet_window: Duration::from_millis(5),
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(error.contains("No stable old metric primary-key encoding event"));
     }
 }

@@ -46,6 +46,27 @@ pub struct CaseMetadata {
     /// Optional old-stage-only configuration overlay.
     #[serde(default)]
     pub old_config: Option<OldConfig>,
+    /// Optional assertion evaluated against old-stage datanode logs after setup.
+    #[serde(default)]
+    pub old_assert: Option<OldStageAssertions>,
+}
+
+/// Typed assertions over behavior observed while the old binary runs.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OldStageAssertions {
+    /// Expected encoding reported when an old datanode creates a metric region.
+    pub metric_primary_key_encoding: ExpectedMetricPrimaryKeyEncoding,
+}
+
+/// Expected primary-key encoding reported by the metric region creation log.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ExpectedMetricPrimaryKeyEncoding {
+    /// Dense primary-key encoding.
+    Dense,
+    /// Sparse primary-key encoding.
+    Sparse,
 }
 
 /// Typed, role-scoped configuration applied only while the old binary runs.
@@ -549,6 +570,7 @@ mod tests {
                 owner: "team".to_string(),
                 namespace: None,
                 old_config: None,
+                old_assert: None,
             },
             dir: PathBuf::from("case"),
             namespace: "case".to_string(),
@@ -571,6 +593,7 @@ mod tests {
                 owner: "test".to_string(),
                 namespace: None,
                 old_config: None,
+                old_assert: None,
             },
             dir: PathBuf::from("bad_constraint"),
             namespace: "bad_constraint".to_string(),
@@ -593,6 +616,7 @@ mod tests {
                 owner: "test".to_string(),
                 namespace: None,
                 old_config: None,
+                old_assert: None,
             },
             dir: PathBuf::from("case_a"),
             namespace: "shared_name".to_string(),
@@ -609,6 +633,7 @@ mod tests {
                 owner: "test".to_string(),
                 namespace: None,
                 old_config: None,
+                old_assert: None,
             },
             dir: PathBuf::from("case_b"),
             namespace: "shared_name".to_string(),
@@ -634,6 +659,7 @@ mod tests {
                 owner: "test".to_string(),
                 namespace: Some("shared_name".to_string()),
                 old_config: None,
+                old_assert: None,
             },
             dir: PathBuf::from("case_a"),
             namespace: "shared_name".to_string(),
@@ -650,6 +676,7 @@ mod tests {
                 owner: "test".to_string(),
                 namespace: Some("shared_name".to_string()),
                 old_config: None,
+                old_assert: None,
             },
             dir: PathBuf::from("case_b"),
             namespace: "shared_name".to_string(),
@@ -672,6 +699,7 @@ mod tests {
                 owner: "team".to_string(),
                 namespace: None,
                 old_config: None,
+                old_assert: None,
             },
             dir: PathBuf::from("case"),
             namespace: "case".to_string(),
@@ -787,6 +815,63 @@ owner = "test"
 "#;
 
         assert!(toml::from_str::<CaseMetadata>(metadata).is_err());
+    }
+
+    #[test]
+    fn test_metadata_parses_typed_old_stage_assertions() {
+        let base = r#"
+name = "test_case"
+reason = "test"
+introduced_by = "test"
+topologies = ["distributed"]
+from_range = ["*"]
+to_range = ["*"]
+features = ["table"]
+owner = "test"
+
+[old_assert]
+metric_primary_key_encoding = VALUE
+"#;
+
+        for (value, expected) in [
+            ("\"dense\"", ExpectedMetricPrimaryKeyEncoding::Dense),
+            ("\"sparse\"", ExpectedMetricPrimaryKeyEncoding::Sparse),
+        ] {
+            let metadata: CaseMetadata = toml::from_str(&base.replace("VALUE", value)).unwrap();
+            assert_eq!(
+                metadata.old_assert.unwrap().metric_primary_key_encoding,
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn test_metadata_rejects_invalid_old_stage_assertions() {
+        let base = r#"
+name = "test_case"
+reason = "test"
+introduced_by = "test"
+topologies = ["distributed"]
+from_range = ["*"]
+to_range = ["*"]
+features = ["table"]
+owner = "test"
+
+[old_assert]
+ASSERTION
+"#;
+
+        for assertion in [
+            "",
+            "metric_primary_key_encoding = \"Dense\"",
+            "metric_primary_key_encoding = \"other\"",
+            "unknown = \"dense\"",
+        ] {
+            assert!(
+                toml::from_str::<CaseMetadata>(&base.replace("ASSERTION", assertion)).is_err(),
+                "assertion should fail: {assertion:?}"
+            );
+        }
     }
 
     #[test]
