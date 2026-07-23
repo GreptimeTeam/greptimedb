@@ -78,7 +78,7 @@ Each layer is independently useful. Layer 1 alone makes entity identity machine-
 
 # Design
 
-The design distils a survey of OpenTelemetry and the entity/topology models of Datadog, New Relic, Backstage, ServiceNow CSDM, Grafana Asserts/Tempo, eBPF tools (Hubble/Pixie), and SQL/PGQ implementations (DuckPGQ, Spanner Graph). Four facts shaped it. OTel settles entity identity (the *Minimally Sufficient Id* rule) but explicitly defers relationships; the de-facto mechanism today is join by shared identifying attribute, which maps cleanly onto a relational model. No vendor treats derived topology as permanent: edges TTL out (New Relic ~75 min), so for a TSDB the natural form is edges as time-ranged facts. The service graph is span pairing (`client`/`server` on `trace_id`+`parent_span_id`, RED aggregation; the OTel Collector `servicegraph` connector), and a database holding the whole trace table gets the required trace-locality for free as a self-join. And SQL/PGQ adds graph query without a graph store: property graphs are view-like objects over existing tables and `MATCH` compiles to joins, as DuckPGQ proves inside an analytical columnar engine; Apache AGE (own per-label storage) is the model this RFC rejects.
+The design distils a survey of OpenTelemetry and the entity/topology models of Datadog, New Relic, Backstage, ServiceNow CSDM, Grafana Asserts/Tempo, eBPF tools (Hubble/Pixie), and SQL/PGQ implementations (DuckPGQ, Spanner Graph). Four facts shaped it. OTel settles entity identity (the *Minimally Sufficient Id* rule) but explicitly defers relationships; the de-facto mechanism today is join by shared identifying attribute, which maps cleanly onto a relational model. No vendor treats derived topology as permanent: edges TTL out (New Relic ~75 min), so for a TSDB the natural form is edges as time-ranged facts. The service graph is span pairing (`client`/`server` on `trace_id`+`parent_span_id`, RED aggregation; the OTel Collector `service_graph` connector), and a database holding the whole trace table gets the required trace-locality for free as a self-join. And SQL/PGQ adds graph query without a graph store: property graphs are view-like objects over existing tables and `MATCH` compiles to joins, as DuckPGQ proves inside an analytical columnar engine; Apache AGE (own per-label storage) is the model this RFC rejects.
 
 ## Declaring entity identity
 
@@ -148,7 +148,7 @@ The decisions behind the shape:
 - **Edges are time-ranged facts.** A row asserts an edge *existed in a window*, with RED metrics for that window — the TSDB-native answer to "edges expire". "The topology now" is `WHERE fresh_until >= now() - INTERVAL '5m'`.
 - **`provenance` is part of edge identity**, so a declared edge and a derived edge between the same pair coexist, and a user-declared edge survives when derivation is off.
 - **`confidence` expresses derivation certainty, not statistical completeness**: `1.0` for a successfully paired or declared edge, `< 1.0` for virtual-node or agent-inferred edges. It does not correct for trace sampling.
-- **RED metrics describe the observed span-pair population** — the servicegraph-connector semantics. Under sampling, counts understate true traffic, and ratios (error rate, mean duration) are representative only when sampling is unbiased with respect to status and latency — tail sampling that keeps errors and slow traces skews both.
+- **RED metrics describe the observed span-pair population** — the `service_graph` connector semantics. Under sampling, counts understate true traffic, and ratios (error rate, mean duration) are representative only when sampling is unbiased with respect to status and latency — tail sampling that keeps errors and slow traces skews both.
 - **Endpoint encoding (v1).** A single-attribute identity is the value verbatim; a composite identity is the attributes sorted by key, rendered `k1=v1,k2=v2` — a human-readable traversal key, not a collision-free canonical encoding. Nodes carry the structured `entity_id_attrs`; edges carry only the string key. Known v1 limitation: composite components containing unescaped `,` or `=` are not guaranteed to be distinguished.
 - **Hand-declared edges** (`provenance = 'declared'`) live in a physical table of the same shape (plus a business validity window) in `greptime_private` and are unioned into the computed `semantic_relationships`.
 
@@ -163,13 +163,13 @@ The relationship vocabulary is small, typed, and inverse-paired; stored directio
 | `depends_on` | logical/declared dependency | declared | `dependency_of` |
 | `owns` | team/service owns dst | declared | `owned_by` |
 
-`calls` lives at the *logical* `service` layer; `runs_on`/`contains` live at the *runtime* `service.instance`/`process`/`k8s.pod` layer, with `part_of` linking the two; this avoids "one logical service runs_on five hosts". A custom `rel_type` is just a string; only derivation rules and inverse names are built-in. The trace-derived `calls` edge is qualified by `attributes` (`connection_type` ∈ {`database`, `messaging`, `virtual_node`}, ...) rather than exploded into many edge types.
+`calls` lives at the *logical* `service` layer; `runs_on`/`contains` live at the *runtime* `service.instance`/`process`/`k8s.pod` layer, with `part_of` linking the two; this avoids "one logical service runs_on five hosts". A custom `rel_type` is just a string; only derivation rules and inverse names are built-in. The trace-derived `calls` edge is qualified by attributes such as `connection_type` (`database`, `messaging_system`, or `virtual_node`) rather than exploded into many edge types.
 
 ## Read-time derivation
 
 Scanning a computed table enumerates the entity declarations from table options, builds a derivation plan per source table, and executes it. The plans are **typed DataFusion `Expr`/`DataFrame` plans, not SQL text**: user-controlled identifiers are plain values with no quoting or injection surface, and the window predicates push down into the source table scans, where file/partition pruning applies. A PoC over 90k–1.8M rows of real telemetry confirmed this runs comfortably at read time: an edge aggregate over ~54k rows takes ~31 ms.
 
-**The service call graph.** The main derivation is a self-join of each `greptime_trace_v1` table (recognised by its `table_data_model` option): pair each client span with its child server span, project to the service identity, aggregate RED metrics per 60s window, the SQL form of the Tempo servicegraph connector. The defining query, shown in its simplified form for the default single-column `service_name` declaration (in general every `service_name` reference stands for the declaration-derived id expression):
+**The service call graph.** The main derivation is a self-join of each `greptime_trace_v1` table (recognised by its `table_data_model` option): pair each client span with its child server span, project to the service identity, aggregate RED metrics per 60s window, the SQL form of the Tempo service graph processor and OTel Collector `service_graph` connector. The defining query, shown in its simplified form for the default single-column `service_name` declaration (in general every `service_name` reference stands for the declaration-derived id expression):
 
 ```sql
 SELECT
@@ -277,7 +277,7 @@ Benefits:
 
 - **Zero configuration for the common cases.** The graph is derived from data already stored (OTLP traces and standard Prometheus/Kubernetes metrics) without a single declaration.
 - **No second store, no second engine, no staleness.** The graph is a view over the telemetry tables; an entity appears the instant its first row lands.
-- **Builds on established models and query standards.** OTel entity model for identity, servicegraph-connector semantics for call edges, SQL/PGQ for the query direction; the graph tables and vocabulary are GreptimeDB's own design on top of them.
+- **Builds on established models and query standards.** OTel entity model for identity, `service_graph` connector semantics for call edges, SQL/PGQ for the query direction; the graph tables and vocabulary are GreptimeDB's own design on top of them.
 - **Every layer optional and additive.** Undeclared tables are untouched.
 
 Drawbacks:
@@ -334,7 +334,7 @@ OpenTelemetry / Prometheus:
 - [Prometheus and OpenMetrics compatibility](https://opentelemetry.io/docs/specs/otel/compatibility/prometheus_and_openmetrics/)
 - [Prometheus Remote Write 2.0](https://prometheus.io/docs/specs/prw/remote_write_spec_2_0/)
 - [Tempo service graphs](https://grafana.com/docs/tempo/latest/metrics-from-traces/service_graphs/)
-- [servicegraph connector](https://github.com/open-telemetry/opentelemetry-collector-contrib/blob/main/connector/servicegraphconnector/README.md)
+- [`service_graph` connector](https://github.com/open-telemetry/opentelemetry-collector-contrib/blob/main/connector/servicegraphconnector/README.md)
 
 Vendor entity/relationship models:
 - [Backstage well-known relations](https://backstage.io/docs/features/software-catalog/well-known-relations/)
