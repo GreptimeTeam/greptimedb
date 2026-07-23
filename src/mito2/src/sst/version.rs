@@ -45,6 +45,22 @@ impl SstVersion {
         &self.levels
     }
 
+    /// Returns the unique current handle matching the selected file's identity and level.
+    pub(crate) fn file_for_compaction(&self, selected: &FileHandle) -> Option<&FileHandle> {
+        let mut files = self
+            .levels
+            .iter()
+            .filter_map(|level| level.files.get(&selected.file_id().file_id()));
+        let current = files.next()?;
+        if files.next().is_some()
+            || current.file_id() != selected.file_id()
+            || current.level() != selected.level()
+        {
+            return None;
+        }
+        Some(current)
+    }
+
     /// Add files to the version. If a file with the same `file_id` already exists,
     /// it will be overwritten with the new file.
     ///
@@ -268,6 +284,38 @@ mod tests {
         files.iter().for_each(|f| {
             assert!(added_files.contains_key(&f.file_id));
         });
+    }
+
+    #[test]
+    fn test_file_for_compaction_returns_unambiguous_matching_level() {
+        let purger = new_noop_file_purger();
+        let file_id = FileId::random();
+        let file = FileMeta {
+            file_id,
+            level: 1,
+            ..Default::default()
+        };
+        let selected = FileHandle::new(file.clone(), purger.clone());
+        let mut version = SstVersion::new();
+        version.add_files(purger, std::iter::once(file));
+
+        assert_eq!(
+            version
+                .file_for_compaction(&selected)
+                .unwrap()
+                .file_id()
+                .file_id(),
+            file_id
+        );
+        let missing = FileHandle::new(
+            FileMeta {
+                file_id: FileId::random(),
+                level: 1,
+                ..Default::default()
+            },
+            new_noop_file_purger(),
+        );
+        assert!(version.file_for_compaction(&missing).is_none());
     }
 
     #[test]

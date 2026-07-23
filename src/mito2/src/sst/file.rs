@@ -538,6 +538,14 @@ impl FileHandle {
         self.inner.compacting.store(compacting, Ordering::Relaxed);
     }
 
+    /// Atomically marks this file as compacting if it is currently available.
+    pub fn try_set_compacting(&self) -> bool {
+        self.inner
+            .compacting
+            .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+    }
+
     pub fn index_outdated(&self) -> bool {
         self.inner.index_outdated.load(Ordering::Relaxed)
     }
@@ -828,6 +836,19 @@ mod tests {
             num_series: 0,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn test_try_set_compacting() {
+        let file = FileHandle::new(
+            create_file_meta(FileId::random(), 0),
+            crate::test_util::new_noop_file_purger(),
+        );
+
+        assert!(file.try_set_compacting());
+        assert!(!file.try_set_compacting());
+        file.set_compacting(false);
+        assert!(file.try_set_compacting());
     }
 
     #[test]

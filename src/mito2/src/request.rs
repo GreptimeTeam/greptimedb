@@ -46,6 +46,7 @@ use store_api::region_request::{
 use store_api::storage::{FileId, RegionId};
 use tokio::sync::oneshot::{self, Receiver, Sender};
 
+use crate::compaction::{CompactionExecution, CompactionPickFinished};
 use crate::error::{
     CompactRegionSnafu, CompactionCancelledSnafu, ConvertColumnDataTypeSnafu, CreateDefaultSnafu,
     Error, FillDefaultSnafu, FlushRegionSnafu, InvalidPartitionExprSnafu, InvalidRequestSnafu,
@@ -895,6 +896,8 @@ pub(crate) struct SenderDdlRequest {
 /// Notification from a background job.
 #[derive(Debug)]
 pub(crate) enum BackgroundNotify {
+    /// Compaction planning has finished.
+    CompactionPickFinished(CompactionPickFinished),
     /// Flush has finished.
     FlushFinished(FlushFinished),
     /// Flush has failed.
@@ -997,6 +1000,8 @@ pub(crate) struct IndexBuildFailed {
 pub(crate) struct CompactionFinished {
     /// Region id.
     pub(crate) region_id: RegionId,
+    /// Identity and reservation lease of the accepted execution.
+    pub(crate) execution: CompactionExecution,
     /// Compaction result senders.
     pub(crate) senders: Vec<OutputTx>,
     /// Start time of compaction task.
@@ -1010,6 +1015,8 @@ pub(crate) struct CompactionFinished {
 pub(crate) struct CompactionCancelled {
     /// Region id.
     pub(crate) region_id: RegionId,
+    /// Identity and reservation lease of the accepted execution.
+    pub(crate) execution: CompactionExecution,
     /// Waiters to wake once the cancellation has been observed by the worker.
     pub(crate) senders: Vec<OutputTx>,
 }
@@ -1051,6 +1058,8 @@ impl OnFailure for CompactionFinished {
 #[derive(Debug)]
 pub(crate) struct CompactionFailed {
     pub(crate) region_id: RegionId,
+    /// Identity and reservation lease of the accepted execution.
+    pub(crate) execution: CompactionExecution,
     /// The error source of the failure.
     pub(crate) err: Arc<Error>,
 }
@@ -1341,9 +1350,15 @@ mod tests {
 
     #[test]
     fn test_compaction_cancelled_sends_cancelled_error() {
+        let version_control =
+            Arc::new(crate::test_util::version_util::VersionControlBuilder::new().build());
         let (tx, rx) = oneshot::channel();
         let request = CompactionCancelled {
             region_id: RegionId::new(1, 1),
+            execution: crate::compaction::CompactionExecution::for_test(
+                version_control,
+                crate::compaction::CompactionExecutionKind::Local,
+            ),
             senders: vec![OutputTx::new(tx)],
         };
 

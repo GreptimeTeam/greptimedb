@@ -17,6 +17,7 @@ use std::ops::Range;
 use std::sync::Arc;
 use std::time::Duration;
 
+use api::v1::region::{StrictWindow, compact_request};
 use api::v1::{ColumnSchema, Rows};
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
@@ -26,8 +27,8 @@ use datatypes::arrow::datatypes::TimestampMillisecondType;
 use store_api::region_engine::{RegionEngine, RegionRole};
 use store_api::region_request::AlterKind::SetRegionOptions;
 use store_api::region_request::{
-    EnterStagingRequest, PathType, RegionAlterRequest, RegionCompactRequest, RegionDeleteRequest,
-    RegionFlushRequest, RegionOpenRequest, RegionRequest, SetRegionOption,
+    EnterStagingRequest, PathType, RegionAlterRequest, RegionCloseRequest, RegionCompactRequest,
+    RegionDeleteRequest, RegionFlushRequest, RegionOpenRequest, RegionRequest, SetRegionOption,
     StagingPartitionDirective,
 };
 use store_api::storage::{RegionId, ScanRequest};
@@ -35,7 +36,7 @@ use tokio::sync::Notify;
 
 use crate::config::MitoConfig;
 use crate::engine::MitoEngine;
-use crate::engine::listener::CompactionListener;
+use crate::engine::listener::{CompactionListener, CompactionPlanningGate};
 use crate::test_util::{
     CreateRequestBuilder, TestEnv, build_rows_for_key, column_metadata_to_column_schema, put_rows,
 };
@@ -130,6 +131,656 @@ async fn collect_stream_ts(stream: SendableRecordBatchStream) -> Vec<i64> {
         res.extend((0..ts_col.len()).map(|i| ts_col.value(i)));
     }
     res
+}
+
+struct CompactionListenerGuard(Option<Arc<CompactionListener>>);
+
+impl CompactionListenerGuard {
+    fn new(listener: Arc<CompactionListener>) -> Self {
+        Self(Some(listener))
+    }
+
+    fn release(mut self) {
+        self.0.take().unwrap().wake();
+    }
+}
+
+impl Drop for CompactionListenerGuard {
+    fn drop(&mut self) {
+        if let Some(listener) = self.0.take() {
+            listener.wake();
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_region_b_progresses_while_same_worker_region_a_is_picking() {
+    common_telemetry::init_default_ut_logging();
+    let mut env = TestEnv::new().await;
+    let region_a = RegionId::new(1, 1);
+    let region_b = RegionId::new(2, 1);
+    let gate = Arc::new(CompactionPlanningGate::new(region_a));
+    let engine = env
+        .create_engine_with(
+            MitoConfig {
+                num_workers: 1,
+                min_compaction_interval: Duration::ZERO,
+                ..Default::default()
+            },
+            None,
+            Some(gate.clone()),
+            None,
+        )
+        .await;
+
+    for (region_id, table_name) in [(region_a, "region_a"), (region_b, "region_b")] {
+        env.get_schema_metadata_manager()
+            .register_region_table_info(
+                region_id.table_id(),
+                table_name,
+                "test_catalog",
+                "test_schema",
+                None,
+                env.get_kv_backend(),
+            )
+            .await;
+        engine
+            .handle_request(
+                region_id,
+                RegionRequest::Create(
+                    CreateRequestBuilder::new()
+                        .insert_option("compaction.type", "twcs")
+                        .build(),
+                ),
+            )
+            .await
+            .unwrap();
+    }
+
+    let request = CreateRequestBuilder::new().build();
+    let column_schemas = request
+        .column_metadatas
+        .iter()
+        .map(column_metadata_to_column_schema)
+        .collect::<Vec<_>>();
+    let gate_guard = gate.arm();
+    let engine_for_compaction = engine.clone();
+    let region_a_compaction = tokio::spawn(async move {
+        engine_for_compaction
+            .handle_request(
+                region_a,
+                RegionRequest::Compact(RegionCompactRequest::default()),
+            )
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(5), gate.wait_until_entered())
+        .await
+        .expect("region A planning did not reach the gate");
+
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        put_and_flush(&engine, region_a, &column_schemas, 10..20),
+    )
+    .await
+    .expect("region A automatic compaction trigger did not finish");
+    tokio::time::timeout(Duration::from_secs(5), gate.wait_until_schedule_attempts(2))
+        .await
+        .expect("region A automatic trigger did not reach the scheduler");
+    assert_eq!(2, gate.schedule_attempt_count());
+    assert_eq!(1, gate.invocation_count());
+
+    let engine_for_region_b = engine.clone();
+    let mut region_b_work = tokio::spawn(async move {
+        put_and_flush(&engine_for_region_b, region_b, &column_schemas, 0..10).await;
+    });
+    tokio::time::timeout(Duration::from_secs(5), &mut region_b_work)
+        .await
+        .expect("region B was blocked by region A compaction planning")
+        .expect("region B work task panicked");
+    let followup_guard = gate.arm();
+    gate_guard.release();
+    tokio::time::timeout(Duration::from_secs(5), gate.wait_until_entered())
+        .await
+        .expect("coalesced region A trigger did not start its follow-up plan");
+    tokio::time::timeout(Duration::from_secs(5), region_a_compaction)
+        .await
+        .expect("region A compaction task did not finish after gate release")
+        .expect("region A compaction task panicked")
+        .expect("region A compaction failed");
+    assert_eq!(2, gate.invocation_count());
+    followup_guard.release();
+}
+
+#[tokio::test]
+async fn test_regular_trigger_while_picking_replans_after_no_plan() {
+    common_telemetry::init_default_ut_logging();
+    let mut env = TestEnv::new().await;
+    let region_id = RegionId::new(7, 1);
+    let gate = Arc::new(CompactionPlanningGate::new(region_id));
+    let engine = env
+        .create_engine_with(
+            MitoConfig {
+                min_compaction_interval: Duration::ZERO,
+                ..Default::default()
+            },
+            None,
+            Some(gate.clone()),
+            None,
+        )
+        .await;
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            region_id.table_id(),
+            "replan_after_no_plan",
+            "test_catalog",
+            "test_schema",
+            None,
+            env.get_kv_backend(),
+        )
+        .await;
+    let create = CreateRequestBuilder::new()
+        .insert_option("compaction.type", "twcs")
+        .build();
+    let column_schemas = create
+        .column_metadatas
+        .iter()
+        .map(column_metadata_to_column_schema)
+        .collect::<Vec<_>>();
+    engine
+        .handle_request(region_id, RegionRequest::Create(create))
+        .await
+        .unwrap();
+
+    let first_plan_guard = gate.arm();
+    put_and_flush(&engine, region_id, &column_schemas, 0..10).await;
+    tokio::time::timeout(Duration::from_secs(5), gate.wait_until_entered())
+        .await
+        .expect("first automatic compaction did not reach the planning gate");
+
+    put_and_flush(&engine, region_id, &column_schemas, 5..20).await;
+    tokio::time::timeout(Duration::from_secs(5), gate.wait_until_schedule_attempts(2))
+        .await
+        .expect("second flush did not trigger automatic compaction");
+    assert_eq!(1, gate.invocation_count());
+
+    let second_plan_guard = gate.arm();
+    first_plan_guard.release();
+    tokio::time::timeout(Duration::from_secs(5), gate.wait_until_entered())
+        .await
+        .expect("coalesced regular trigger was lost after the first plan returned no plan");
+    assert_eq!(2, gate.invocation_count());
+    second_plan_guard.release();
+}
+
+#[tokio::test]
+async fn test_regular_trigger_while_picking_replans_after_prepared_execution() {
+    common_telemetry::init_default_ut_logging();
+    let mut env = TestEnv::new().await;
+    let region_id = RegionId::new(8, 1);
+    let gate = Arc::new(CompactionPlanningGate::new(region_id));
+    let engine = env
+        .create_engine_with(
+            MitoConfig {
+                min_compaction_interval: Duration::from_secs(60 * 60),
+                ..Default::default()
+            },
+            None,
+            Some(gate.clone()),
+            None,
+        )
+        .await;
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            region_id.table_id(),
+            "replan_after_prepared",
+            "test_catalog",
+            "test_schema",
+            None,
+            env.get_kv_backend(),
+        )
+        .await;
+    let create = CreateRequestBuilder::new()
+        .insert_option("compaction.type", "twcs")
+        .build();
+    let column_schemas = create
+        .column_metadatas
+        .iter()
+        .map(column_metadata_to_column_schema)
+        .collect::<Vec<_>>();
+    engine
+        .handle_request(region_id, RegionRequest::Create(create))
+        .await
+        .unwrap();
+    put_and_flush(&engine, region_id, &column_schemas, 0..10).await;
+    put_and_flush(&engine, region_id, &column_schemas, 5..20).await;
+
+    let first_plan_guard = gate.arm();
+    let first_engine = engine.clone();
+    let first = tokio::spawn(async move {
+        first_engine
+            .handle_request(
+                region_id,
+                RegionRequest::Compact(RegionCompactRequest::default()),
+            )
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(5), gate.wait_until_entered())
+        .await
+        .expect("first regular compaction did not reach the planning gate");
+
+    let expected_attempts = gate.schedule_attempt_count() + 1;
+    let second_engine = engine.clone();
+    let second = tokio::spawn(async move {
+        second_engine
+            .handle_request(
+                region_id,
+                RegionRequest::Compact(RegionCompactRequest::default()),
+            )
+            .await
+    });
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        gate.wait_until_schedule_attempts(expected_attempts),
+    )
+    .await
+    .expect("second regular compaction did not reach the scheduler");
+
+    let commit_guard = gate.arm_commit();
+    first_plan_guard.release();
+    tokio::time::timeout(Duration::from_secs(5), gate.wait_until_commit_entered())
+        .await
+        .expect("first regular compaction did not produce a prepared execution");
+
+    let followup_plan_guard = gate.arm();
+    commit_guard.release();
+    tokio::time::timeout(Duration::from_secs(5), gate.wait_until_entered())
+        .await
+        .expect("prepared execution did not immediately admit the retained regular follow-up");
+    tokio::time::timeout(Duration::from_secs(5), first)
+        .await
+        .expect("first regular compaction waiter was not notified")
+        .expect("first regular compaction task panicked")
+        .expect("first regular compaction failed");
+    assert!(!second.is_finished());
+
+    followup_plan_guard.release();
+    tokio::time::timeout(Duration::from_secs(5), second)
+        .await
+        .expect("retained regular compaction waiter was not notified")
+        .expect("retained regular compaction task panicked")
+        .expect("retained regular compaction failed");
+}
+
+#[tokio::test]
+async fn test_pending_manual_compaction_finishes_before_queued_ddl() {
+    common_telemetry::init_default_ut_logging();
+    let mut env = TestEnv::new().await;
+    let region_id = RegionId::new(6, 1);
+    let gate = Arc::new(CompactionPlanningGate::new(region_id));
+    let engine = env
+        .create_engine_with(
+            MitoConfig {
+                num_workers: 1,
+                min_compaction_interval: Duration::from_secs(60 * 60),
+                ..Default::default()
+            },
+            None,
+            Some(gate.clone()),
+            None,
+        )
+        .await;
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            region_id.table_id(),
+            "pending_manual_before_ddl",
+            "test_catalog",
+            "test_schema",
+            None,
+            env.get_kv_backend(),
+        )
+        .await;
+    let create = CreateRequestBuilder::new()
+        .insert_option("compaction.type", "twcs")
+        .build();
+    let column_schemas = create
+        .column_metadatas
+        .iter()
+        .map(column_metadata_to_column_schema)
+        .collect::<Vec<_>>();
+    engine
+        .handle_request(region_id, RegionRequest::Create(create))
+        .await
+        .unwrap();
+    put_and_flush(&engine, region_id, &column_schemas, 0..10).await;
+    put_and_flush(&engine, region_id, &column_schemas, 5..20).await;
+
+    let commit_guard = gate.arm_commit();
+    let regular_engine = engine.clone();
+    let regular_task = tokio::spawn(async move {
+        regular_engine
+            .handle_request(
+                region_id,
+                RegionRequest::Compact(RegionCompactRequest::default()),
+            )
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(5), gate.wait_until_commit_entered())
+        .await
+        .expect("regular compaction did not reach its non-cancellable commit gate");
+
+    let manual_plan_guard = gate.arm();
+    let manual_engine = engine.clone();
+    let manual_task = tokio::spawn(async move {
+        manual_engine
+            .handle_request(
+                region_id,
+                RegionRequest::Compact(RegionCompactRequest {
+                    options: compact_request::Options::StrictWindow(StrictWindow {
+                        window_seconds: 60,
+                    }),
+                    ..Default::default()
+                }),
+            )
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(5), gate.wait_until_schedule_attempts(2))
+        .await
+        .expect("manual compaction did not reach the scheduler");
+    assert!(!manual_task.is_finished());
+
+    let ddl_engine = engine.clone();
+    let ddl_task = tokio::spawn(async move {
+        ddl_engine
+            .handle_request(
+                region_id,
+                RegionRequest::EnterStaging(EnterStagingRequest {
+                    partition_directive: StagingPartitionDirective::RejectAllWrites,
+                }),
+            )
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(5), gate.wait_until_cancel_requested())
+        .await
+        .expect("enter-staging DDL was not queued behind regular compaction");
+    assert!(!ddl_task.is_finished());
+
+    commit_guard.release();
+    tokio::time::timeout(Duration::from_secs(5), gate.wait_until_entered())
+        .await
+        .expect("pending manual compaction was not planned after regular completion");
+    assert_eq!(2, gate.invocation_count());
+    assert!(!manual_task.is_finished());
+    assert!(!ddl_task.is_finished());
+
+    let pending_ddl_guard = gate.arm_pending_ddl_dispatch();
+    manual_plan_guard.release();
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        gate.wait_until_pending_ddl_dispatch(),
+    )
+    .await
+    .expect("manual result was not notified before pending DDL dispatch");
+    tokio::time::timeout(Duration::from_secs(5), manual_task)
+        .await
+        .expect("manual compaction did not notify its waiter")
+        .expect("manual compaction task panicked")
+        .expect("manual compaction failed");
+    assert!(!ddl_task.is_finished());
+
+    pending_ddl_guard.release();
+    tokio::time::timeout(Duration::from_secs(5), regular_task)
+        .await
+        .expect("regular compaction did not finish after commit release")
+        .expect("regular compaction task panicked")
+        .expect("regular compaction failed");
+    tokio::time::timeout(Duration::from_secs(5), ddl_task)
+        .await
+        .expect("queued DDL did not finish after manual compaction")
+        .expect("queued DDL task panicked")
+        .expect("queued DDL failed");
+    assert!(engine.get_region(region_id).unwrap().is_staging());
+}
+
+#[tokio::test]
+async fn test_picking_close_reopen_ignores_old_plan() {
+    common_telemetry::init_default_ut_logging();
+    let mut env = TestEnv::new().await;
+    let region_id = RegionId::new(3, 1);
+    let gate = Arc::new(CompactionPlanningGate::new(region_id));
+    let engine = env
+        .create_engine_with(
+            MitoConfig {
+                num_workers: 1,
+                ..Default::default()
+            },
+            None,
+            Some(gate.clone()),
+            None,
+        )
+        .await;
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            region_id.table_id(),
+            "close_reopen",
+            "test_catalog",
+            "test_schema",
+            None,
+            env.get_kv_backend(),
+        )
+        .await;
+    let create = CreateRequestBuilder::new()
+        .insert_option("compaction.type", "twcs")
+        .build();
+    let table_dir = create.table_dir.clone();
+    let options = create.options.clone();
+    engine
+        .handle_request(region_id, RegionRequest::Create(create))
+        .await
+        .unwrap();
+
+    let gate_guard = gate.arm();
+    let compact_engine = engine.clone();
+    let compact_task = tokio::spawn(async move {
+        compact_engine
+            .handle_request(
+                region_id,
+                RegionRequest::Compact(RegionCompactRequest::default()),
+            )
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(5), gate.wait_until_entered())
+        .await
+        .expect("planning did not reach the gate");
+
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Close(RegionCloseRequest::default()),
+        )
+        .await
+        .unwrap();
+    let compact_err = tokio::time::timeout(Duration::from_secs(5), compact_task)
+        .await
+        .expect("closed region compaction waiter was not released")
+        .expect("closed region compaction task panicked")
+        .unwrap_err();
+    assert_eq!(compact_err.status_code(), StatusCode::Cancelled);
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Open(RegionOpenRequest {
+                engine: String::new(),
+                table_dir,
+                path_type: PathType::Bare,
+                options,
+                skip_wal_replay: false,
+                checkpoint: None,
+                requirements: Default::default(),
+            }),
+        )
+        .await
+        .unwrap();
+    engine
+        .set_region_role(region_id, RegionRole::Leader)
+        .unwrap();
+
+    gate_guard.release();
+    tokio::time::timeout(Duration::from_secs(5), compact(&engine, region_id))
+        .await
+        .expect("replacement compaction was blocked by the stale plan");
+    assert!(engine.is_region_exists(region_id));
+    assert_eq!(2, gate.invocation_count());
+}
+
+#[tokio::test]
+async fn test_enter_staging_waits_for_picking_logical_cancellation_ack() {
+    common_telemetry::init_default_ut_logging();
+    let mut env = TestEnv::new().await;
+    let region_id = RegionId::new(4, 1);
+    let gate = Arc::new(CompactionPlanningGate::new(region_id));
+    let engine = env
+        .create_engine_with(
+            MitoConfig {
+                num_workers: 1,
+                ..Default::default()
+            },
+            None,
+            Some(gate.clone()),
+            None,
+        )
+        .await;
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            region_id.table_id(),
+            "enter_staging",
+            "test_catalog",
+            "test_schema",
+            None,
+            env.get_kv_backend(),
+        )
+        .await;
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Create(
+                CreateRequestBuilder::new()
+                    .insert_option("compaction.type", "twcs")
+                    .build(),
+            ),
+        )
+        .await
+        .unwrap();
+
+    let gate_guard = gate.arm();
+    let compact_engine = engine.clone();
+    let compact_task = tokio::spawn(async move {
+        compact_engine
+            .handle_request(
+                region_id,
+                RegionRequest::Compact(RegionCompactRequest::default()),
+            )
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(5), gate.wait_until_entered())
+        .await
+        .expect("planning did not reach the gate");
+    let staging_engine = engine.clone();
+    let staging_task = tokio::spawn(async move {
+        staging_engine
+            .handle_request(
+                region_id,
+                RegionRequest::EnterStaging(EnterStagingRequest {
+                    partition_directive: StagingPartitionDirective::RejectAllWrites,
+                }),
+            )
+            .await
+    });
+
+    tokio::time::timeout(Duration::from_secs(5), gate.wait_until_cancel_requested())
+        .await
+        .expect("enter-staging did not request picking cancellation");
+    assert!(!compact_task.is_finished());
+    assert!(!staging_task.is_finished());
+
+    gate_guard.release();
+    let compact_err = tokio::time::timeout(Duration::from_secs(5), compact_task)
+        .await
+        .expect("cancelled compaction waiter was not released")
+        .expect("cancelled compaction task panicked")
+        .unwrap_err();
+    assert_eq!(compact_err.status_code(), StatusCode::Cancelled);
+    tokio::time::timeout(Duration::from_secs(5), staging_task)
+        .await
+        .expect("enter-staging did not finish after cancellation acknowledgment")
+        .expect("enter-staging task panicked")
+        .expect("enter-staging request failed");
+    assert!(engine.get_region(region_id).unwrap().is_staging());
+}
+
+#[tokio::test]
+async fn test_worker_shutdown_fails_picking_waiter() {
+    common_telemetry::init_default_ut_logging();
+    let mut env = TestEnv::new().await;
+    let region_id = RegionId::new(5, 1);
+    let gate = Arc::new(CompactionPlanningGate::new(region_id));
+    let engine = env
+        .create_engine_with(
+            MitoConfig {
+                num_workers: 1,
+                ..Default::default()
+            },
+            None,
+            Some(gate.clone()),
+            None,
+        )
+        .await;
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            region_id.table_id(),
+            "worker_shutdown",
+            "test_catalog",
+            "test_schema",
+            None,
+            env.get_kv_backend(),
+        )
+        .await;
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Create(
+                CreateRequestBuilder::new()
+                    .insert_option("compaction.type", "twcs")
+                    .build(),
+            ),
+        )
+        .await
+        .unwrap();
+
+    let gate_guard = gate.arm();
+    let compact_engine = engine.clone();
+    let compact_task = tokio::spawn(async move {
+        compact_engine
+            .handle_request(
+                region_id,
+                RegionRequest::Compact(RegionCompactRequest::default()),
+            )
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(5), gate.wait_until_entered())
+        .await
+        .expect("planning did not reach the gate");
+
+    tokio::time::timeout(Duration::from_secs(5), engine.stop())
+        .await
+        .expect("worker shutdown blocked on picking")
+        .unwrap();
+    let compact_err = tokio::time::timeout(Duration::from_secs(5), compact_task)
+        .await
+        .expect("worker shutdown did not release the compaction waiter")
+        .expect("compaction task panicked during worker shutdown")
+        .unwrap_err();
+    assert_eq!(compact_err.status_code(), StatusCode::Cancelled);
+    gate_guard.release();
 }
 
 #[tokio::test]
@@ -603,6 +1254,7 @@ async fn test_readonly_during_compaction_with_format(flat_format: bool) {
         .handle_request(region_id, RegionRequest::Create(request))
         .await
         .unwrap();
+    let listener_guard = CompactionListenerGuard::new(listener.clone());
     // Flush 2 SSTs for compaction.
     put_and_flush(&engine, region_id, &column_schemas, 0..10).await;
     put_and_flush(&engine, region_id, &column_schemas, 5..20).await;
@@ -615,7 +1267,7 @@ async fn test_readonly_during_compaction_with_format(flat_format: bool) {
         .set_region_role(region_id, RegionRole::Follower)
         .unwrap();
     // Wakes up the listener.
-    listener.wake();
+    listener_guard.release();
 
     let notify = Arc::new(Notify::new());
     // We already sets max background purges to 1, so we can submit a task to the
@@ -686,28 +1338,28 @@ async fn test_enter_staging_cancels_inflight_local_compaction_before_commit() {
         .handle_request(region_id, RegionRequest::Create(request))
         .await
         .unwrap();
+    let _listener_guard = CompactionListenerGuard::new(listener.clone());
 
     put_and_flush(&engine, region_id, &column_schemas, 0..10).await;
     put_and_flush(&engine, region_id, &column_schemas, 5..20).await;
 
-    listener.wait_handle_finished().await;
+    tokio::time::timeout(Duration::from_secs(5), listener.wait_handle_finished())
+        .await
+        .expect("local compaction did not reach its pre-commit gate");
 
-    let engine_cloned = engine.clone();
-    let enter_staging = tokio::spawn(async move {
-        engine_cloned
-            .handle_request(
-                region_id,
-                RegionRequest::EnterStaging(EnterStagingRequest {
-                    partition_directive: StagingPartitionDirective::RejectAllWrites,
-                }),
-            )
-            .await
-    });
-
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    // The enter staging should finished, and the compaction should be cancelled.
-    assert!(enter_staging.is_finished());
-    let _ = enter_staging.await.unwrap().unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        engine.handle_request(
+            region_id,
+            RegionRequest::EnterStaging(EnterStagingRequest {
+                partition_directive: StagingPartitionDirective::RejectAllWrites,
+            }),
+        ),
+    )
+    .await
+    .expect("enter-staging waited for the blocked local compaction")
+    .expect("enter-staging request failed");
+    assert!(engine.get_region(region_id).unwrap().is_staging());
 }
 
 #[tokio::test]
@@ -751,6 +1403,7 @@ async fn test_manual_compaction_returns_cancelled_when_enter_staging_cancels_it(
         .handle_request(region_id, RegionRequest::Create(request))
         .await
         .unwrap();
+    let _listener_guard = CompactionListenerGuard::new(listener.clone());
 
     put_and_flush(&engine, region_id, &column_schemas, 0..10).await;
     put_and_flush(&engine, region_id, &column_schemas, 5..20).await;
@@ -765,28 +1418,29 @@ async fn test_manual_compaction_returns_cancelled_when_enter_staging_cancels_it(
             .await
     });
 
-    listener.wait_handle_finished().await;
+    tokio::time::timeout(Duration::from_secs(5), listener.wait_handle_finished())
+        .await
+        .expect("manual compaction did not reach its pre-commit gate");
 
-    let engine_cloned = engine.clone();
-    let enter_staging = tokio::spawn(async move {
-        engine_cloned
-            .handle_request(
-                region_id,
-                RegionRequest::EnterStaging(EnterStagingRequest {
-                    partition_directive: StagingPartitionDirective::RejectAllWrites,
-                }),
-            )
-            .await
-    });
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        engine.handle_request(
+            region_id,
+            RegionRequest::EnterStaging(EnterStagingRequest {
+                partition_directive: StagingPartitionDirective::RejectAllWrites,
+            }),
+        ),
+    )
+    .await
+    .expect("enter-staging waited for the blocked manual compaction")
+    .expect("enter-staging request failed");
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    assert!(compact.is_finished());
-    assert!(enter_staging.is_finished());
-
-    let err = compact.await.unwrap().unwrap_err();
+    let err = tokio::time::timeout(Duration::from_secs(5), compact)
+        .await
+        .expect("cancelled manual compaction waiter was not released")
+        .expect("manual compaction task panicked")
+        .unwrap_err();
     assert_eq!(err.status_code(), StatusCode::Cancelled);
-
-    let _ = enter_staging.await.unwrap();
 }
 
 #[tokio::test]

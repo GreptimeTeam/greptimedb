@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use common_telemetry::error;
@@ -24,6 +24,7 @@ use store_api::storage::RegionId;
 use tokio::sync::mpsc::Sender;
 use uuid::Uuid;
 
+use crate::compaction::CompactionExecution;
 use crate::compaction::compactor::CompactionRegion;
 use crate::compaction::picker::PickerOutput;
 use crate::error::{CompactRegionSnafu, Error, ParseJobIdSnafu, Result};
@@ -134,9 +135,20 @@ pub struct CompactionJobResult {
 pub(crate) struct DefaultNotifier {
     /// The sender to send WorkerRequest to the mito engine. This is used to notify the mito engine when a remote job is completed.
     pub(crate) request_sender: Sender<WorkerRequestWithTime>,
+    execution: Mutex<Option<CompactionExecution>>,
 }
 
 impl DefaultNotifier {
+    pub(crate) fn new(
+        request_sender: Sender<WorkerRequestWithTime>,
+        execution: CompactionExecution,
+    ) -> Self {
+        Self {
+            request_sender,
+            execution: Mutex::new(Some(execution)),
+        }
+    }
+
     fn on_failure(&self, err: Arc<Error>, region_id: RegionId, mut waiters: Vec<OutputTx>) {
         COMPACTION_FAILURE_COUNT.inc();
         for waiter in waiters.drain(..) {
@@ -149,12 +161,22 @@ impl DefaultNotifier {
 impl Notifier for DefaultNotifier {
     async fn notify(&self, result: RemoteJobResult, waiters: Vec<OutputTx>) {
         INFLIGHT_COMPACTION_COUNT.dec();
+        let Some(execution) = self
+            .execution
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+        else {
+            error!("Remote compaction notifier invoked more than once");
+            return;
+        };
         match result {
             RemoteJobResult::CompactionJobResult(result) => {
                 let notify = {
                     match result.region_edit {
                         Ok(edit) => BackgroundNotify::CompactionFinished(CompactionFinished {
                             region_id: result.region_id,
+                            execution,
                             senders: waiters,
                             start_time: result.start_time,
                             edit,
@@ -168,6 +190,7 @@ impl Notifier for DefaultNotifier {
                             self.on_failure(err.clone(), result.region_id, waiters);
                             BackgroundNotify::CompactionFailed(CompactionFailed {
                                 region_id: result.region_id,
+                                execution,
                                 err,
                             })
                         }
@@ -195,11 +218,90 @@ impl Notifier for DefaultNotifier {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::compaction::{CompactionExecution, CompactionExecutionKind};
+    use crate::error::InvalidSchedulerStateSnafu;
+    use crate::test_util::version_util::VersionControlBuilder;
 
     #[test]
     fn test_job_id() {
         let id = Uuid::new_v4().to_string();
         let job_id = JobId::parse_str(&id).unwrap();
         assert_eq!(job_id.to_string(), id);
+    }
+
+    #[tokio::test]
+    async fn test_default_notifier_carries_remote_execution_on_success() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let execution = CompactionExecution::for_test(
+            Arc::new(VersionControlBuilder::new().build()),
+            CompactionExecutionKind::Remote,
+        );
+        let expected = execution.clone();
+        let notifier = DefaultNotifier::new(tx, execution);
+        let region_id = RegionId::new(1, 1);
+
+        notifier
+            .notify(
+                RemoteJobResult::CompactionJobResult(CompactionJobResult {
+                    job_id: JobId::parse_str("00000000-0000-0000-0000-000000000003").unwrap(),
+                    region_id,
+                    start_time: Instant::now(),
+                    region_edit: Ok(RegionEdit {
+                        files_to_add: Vec::new(),
+                        files_to_remove: Vec::new(),
+                        timestamp_ms: None,
+                        compaction_time_window: None,
+                        flushed_entry_id: None,
+                        flushed_sequence: None,
+                        committed_sequence: None,
+                    }),
+                }),
+                Vec::new(),
+            )
+            .await;
+
+        let request = rx.recv().await.unwrap();
+        let WorkerRequest::Background {
+            notify: BackgroundNotify::CompactionFinished(finished),
+            ..
+        } = request.request
+        else {
+            panic!("expected remote compaction success notification");
+        };
+        assert!(finished.execution.matches(&expected));
+    }
+
+    #[tokio::test]
+    async fn test_default_notifier_carries_remote_execution_on_failure() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let execution = CompactionExecution::for_test(
+            Arc::new(VersionControlBuilder::new().build()),
+            CompactionExecutionKind::Remote,
+        );
+        let expected = execution.clone();
+        let notifier = DefaultNotifier::new(tx, execution);
+        let region_id = RegionId::new(1, 1);
+
+        notifier
+            .notify(
+                RemoteJobResult::CompactionJobResult(CompactionJobResult {
+                    job_id: JobId::parse_str("00000000-0000-0000-0000-000000000004").unwrap(),
+                    region_id,
+                    start_time: Instant::now(),
+                    region_edit: Err(InvalidSchedulerStateSnafu.build()),
+                }),
+                Vec::new(),
+            )
+            .await;
+
+        let request = rx.recv().await.unwrap();
+        let WorkerRequest::Background {
+            notify: BackgroundNotify::CompactionFailed(failed),
+            ..
+        } = request.request
+        else {
+            panic!("expected remote compaction failure notification");
+        };
+        assert!(failed.execution.matches(&expected));
     }
 }

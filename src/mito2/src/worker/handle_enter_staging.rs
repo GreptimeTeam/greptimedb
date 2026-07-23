@@ -113,6 +113,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                             partition_directive,
                         }),
                     });
+                self.listener.on_compaction_cancel_requested(region_id);
 
                 return;
             }
