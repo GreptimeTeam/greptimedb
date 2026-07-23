@@ -34,7 +34,7 @@ default = [
 enterprise = ["common-meta/enterprise", "frontend/enterprise", "meta-srv/enterprise"]
 # Developer-only helper binary gate for `query_perf_fixture`.
 # Kept out of `default` so normal/release builds don't compile them.
-dev-tools = ["dep:sha2", "dep:url"]
+dev-tools = ["dep:fs2", "dep:nix", "dep:sha2", "dep:url"]
 mysql-object-store = ["object-store/mysql-object-store"]
 tokio-console = ["common-telemetry/tokio-console"]
 vector_index = ["mito2/vector_index", "query/vector_index"]
@@ -83,6 +83,7 @@ either = "1.15"
 etcd-client.workspace = true
 flow.workspace = true
 frontend = { workspace = true, default-features = false }
+fs2 = { workspace = true, optional = true }
 futures.workspace = true
 hex.workspace = true
 human-panic = "2.0"
@@ -95,6 +96,7 @@ metric-engine.workspace = true
 mito-codec.workspace = true
 mito2.workspace = true
 moka = { workspace = true, features = ["future"] }
+nix = { workspace = true, features = ["signal"], optional = true }
 object-store.workspace = true
 parquet = { workspace = true, features = ["object_store"] }
 plugins.workspace = true
