@@ -55,6 +55,9 @@ impl Sha256Digest {
             Err(Error::new("SHA-256 digest does not match content"))
         }
     }
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 impl<'de> Deserialize<'de> for Sha256Digest {
@@ -86,6 +89,9 @@ impl EndpointUrl {
             ));
         }
         Ok(Self(value))
+    }
+    pub fn as_str(&self) -> &str {
+        &self.0
     }
 }
 
@@ -150,7 +156,7 @@ pub struct TargetBinding {
     pub remote_write_endpoint: Option<EndpointUrl>,
     pub namespace: String,
     pub topology: String,
-    pub fixture_binding: Option<TargetFixtureBinding>,
+    pub fixture_bindings: Vec<TargetFixtureBinding>,
 }
 
 /// Target-local fixture identity. It must agree with the controller fixture
@@ -159,8 +165,15 @@ pub struct TargetBinding {
 #[serde(deny_unknown_fields)]
 pub struct TargetFixtureBinding {
     pub fixture_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catalog: Option<String>,
     pub database: String,
-    pub table: String,
+    /// The table exposed to SQL/TQL queries. For Prometheus API writes this is
+    /// the logical metric table, never the storage table.
+    pub logical_table: String,
+    /// The physical Prometheus storage table. It is present only for ApiWrite.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub physical_table: Option<String>,
     pub region: String,
 }
 
@@ -229,10 +242,37 @@ pub struct FixtureFile {
 pub struct FixtureTargetBinding {
     pub role: TargetRole,
     pub target_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catalog: Option<String>,
     pub database: String,
-    pub table: String,
+    pub logical_table: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub physical_table: Option<String>,
     pub region: String,
     pub file_ids: Vec<String>,
+    #[serde(default)]
+    pub external: Option<ExternalPreparedTargetBinding>,
+}
+
+/// Server-visible identity needed to verify an externally prepared fixture over SQL.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExternalPreparedTargetBinding {
+    pub catalog: String,
+    /// This is the SQL schema/database; `FixtureTargetBinding.database` remains the
+    /// single canonical database field and must match it exactly.
+    pub schema: String,
+    pub table_id: u64,
+    pub region_id: u64,
+    pub time_index: String,
+    pub time_unit: TimestampUnit,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum TimestampUnit {
+    Nanosecond,
+    Millisecond,
 }
 
 /// Exact query identity resolved from the validated case plan.
@@ -283,6 +323,75 @@ pub struct MeasurementManifest {
     pub target_id: String,
     pub fixture_id: String,
     pub queries: Vec<QueryMeasurement>,
+    pub completion_digest: Sha256Digest,
+}
+
+/// One immutable pair of target measurements produced by `measure`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct MeasurementBundle {
+    pub version: u32,
+    pub run_id: String,
+    pub fixture_id: String,
+    pub case_digest: Sha256Digest,
+    pub target_manifest_digest: Sha256Digest,
+    pub fixture_manifest_digest: Sha256Digest,
+    pub measurements: Vec<MeasurementManifest>,
+    pub observation_request: ArtifactReference,
+    pub completion_digest: Sha256Digest,
+}
+
+/// Sealed failed endpoint attempt. It deliberately has no successful bundle.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct FailedMeasurementAttempt {
+    pub version: u32,
+    pub run_id: String,
+    pub fixture_id: String,
+    pub case_digest: Sha256Digest,
+    pub target_manifest_digest: Sha256Digest,
+    pub fixture_manifest_digest: Sha256Digest,
+    pub failure_detail: String,
+    pub completion_digest: Sha256Digest,
+}
+
+/// Controller work requested by an endpoint measurement run.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, Eq, PartialEq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum ObservationKind {
+    Footer,
+    ReadBench,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ObservationRequest {
+    pub role: TargetRole,
+    pub target_id: String,
+    pub kind: ObservationKind,
+    #[serde(default)]
+    pub read_bench: Option<ReadBenchRequest>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ReadBenchRequest {
+    pub parquetbench: bool,
+    pub scanbench: bool,
+}
+
+/// Sealed observation request emitted together with a measurement bundle.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ObservationRequestManifest {
+    pub version: u32,
+    pub run_id: String,
+    pub request_id: String,
+    pub fixture_id: String,
+    pub case_digest: Sha256Digest,
+    pub target_manifest_digest: Sha256Digest,
+    pub fixture_manifest_digest: Sha256Digest,
+    pub requests: Vec<ObservationRequest>,
     pub completion_digest: Sha256Digest,
 }
 
@@ -339,6 +448,20 @@ pub struct ObservationManifest {
     pub completion_digest: Sha256Digest,
 }
 
+/// Sealed controller output for exactly the observations requested by measure.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ObservationBundle {
+    pub version: u32,
+    pub run_id: String,
+    pub fixture_id: String,
+    pub request: ArtifactReference,
+    pub target_manifest_digest: Sha256Digest,
+    pub fixture_manifest_digest: Sha256Digest,
+    pub observations: Vec<ObservationManifest>,
+    pub completion_digest: Sha256Digest,
+}
+
 /// Result of a configured query threshold.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -347,6 +470,82 @@ pub struct ThresholdResult {
     pub threshold: QueryThresholds,
     pub passed: bool,
     pub detail: String,
+}
+
+/// Typed threshold category, shared by query and controller observations.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum ThresholdKind {
+    QueryLatency,
+    Footer,
+    ReadBench,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ThresholdOutcome {
+    pub key: ThresholdOutcomeKey,
+    pub passed: bool,
+    pub evidence: ThresholdEvidence,
+}
+
+/// Stable identity for one configured threshold evaluation.
+#[derive(Debug, Clone, Deserialize, Serialize, Eq, PartialEq, Hash)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ThresholdOutcomeKey {
+    QueryLatency {
+        query_name: String,
+    },
+    FooterTarget {
+        rule: FooterRule,
+        role: TargetRole,
+        target_id: String,
+        encoding: Option<String>,
+    },
+    FooterComparison {
+        rule: FooterRule,
+        base_target_id: String,
+        candidate_target_id: String,
+    },
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, Eq, PartialEq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum FooterRule {
+    MinFiles,
+    MinFilesWithColumn,
+    RequiredEncoding,
+    ForbiddenEncoding,
+    MaxTotalFileSizeBytes,
+    MaxColumnCompressedSizeBytes,
+    MaxColumnUncompressedSizeBytes,
+    MaxCandidateTotalFileSizeRegressionPct,
+    MaxCandidateColumnCompressedSizeRegressionPct,
+    MaxCandidateColumnUncompressedSizeRegressionPct,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ThresholdEvidence {
+    QueryLatency {
+        base_milliseconds: f64,
+        candidate_milliseconds: f64,
+        limit_pct: f64,
+        regression_pct: f64,
+    },
+    FooterValue {
+        actual: u64,
+        limit: u64,
+    },
+    FooterEncoding {
+        encoding_present: bool,
+    },
+    FooterComparison {
+        base_actual: u64,
+        candidate_actual: u64,
+        limit_pct: f64,
+        regression_pct: f64,
+    },
 }
 
 /// Artifact reference embedded in a final report.
@@ -368,11 +567,70 @@ pub struct ReportManifest {
     pub fixture_id: String,
     pub queries: Vec<ResolvedQueryIdentity>,
     pub threshold_results: Vec<ThresholdResult>,
+    #[serde(default)]
+    pub threshold_outcomes: Vec<ThresholdOutcome>,
+    /// Sealed finalization progress. It prevents an evaluation error from being
+    /// mistaken for a completed threshold evaluation with an empty outcome set.
+    pub evaluation_state: EvaluationState,
+    #[serde(default)]
+    pub outcome: ReportOutcome,
     pub failures: Vec<String>,
+    #[serde(default)]
+    pub failure_details: Vec<ReportFailure>,
     pub measurements: Vec<ArtifactReference>,
     pub observations: Vec<ArtifactReference>,
+    /// A sealed bundle is only claimed when its seal and all cross-references were trusted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub measurement_bundle: Option<ArtifactReference>,
+    /// A sealed bundle is only claimed when its seal and all cross-references were trusted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observation_bundle: Option<ArtifactReference>,
+    pub target_manifest_digest: Sha256Digest,
+    pub fixture_manifest_digest: Sha256Digest,
     pub provenance: Sha256Digest,
+    pub summary_digest: Sha256Digest,
     pub completion_digest: Sha256Digest,
+}
+
+/// A final report is structurally either successful or failed.
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReportOutcome {
+    Success,
+    #[default]
+    Failed,
+}
+
+/// Whether threshold evaluation did not start, stopped with a trusted error, or
+/// completed the full configured outcome set.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum EvaluationState {
+    NotStarted,
+    Incomplete,
+    Complete,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReportFailure {
+    pub stage: ReportFailureStage,
+    pub detail: String,
+}
+
+/// The trusted finalization boundary at which a failed report was produced.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReportFailureStage {
+    MeasurementArtifact,
+    MeasurementAttempt,
+    ObservationRequest,
+    MeasurementBundle,
+    ObservationArtifact,
+    ObservationBundle,
+    Threshold,
+    Evaluation,
+    ReportInvariant,
 }
 
 macro_rules! sealed_manifest {
@@ -395,7 +653,11 @@ macro_rules! sealed_manifest {
 sealed_manifest!(TargetEnvironmentManifest);
 sealed_manifest!(FixtureManifest);
 sealed_manifest!(MeasurementManifest);
+sealed_manifest!(MeasurementBundle);
+sealed_manifest!(FailedMeasurementAttempt);
+sealed_manifest!(ObservationRequestManifest);
 sealed_manifest!(ObservationManifest);
+sealed_manifest!(ObservationBundle);
 sealed_manifest!(ReportManifest);
 
 impl TargetEnvironmentManifest {
@@ -420,17 +682,34 @@ impl TargetEnvironmentManifest {
             for value in [&target.target_id, &target.namespace, &target.topology] {
                 nonempty("target binding value", value)?;
             }
-            let fixture = target
-                .fixture_binding
-                .as_ref()
-                .ok_or_else(|| Error::new("target fixture_binding must be present"))?;
-            for value in [
-                &fixture.fixture_id,
-                &fixture.database,
-                &fixture.table,
-                &fixture.region,
-            ] {
-                nonempty("target fixture binding value", value)?;
+            if target.fixture_bindings.is_empty() {
+                return Err(Error::new("target fixture_bindings must be non-empty"));
+            }
+            let mut fixture_tables = HashSet::new();
+            for fixture in &target.fixture_bindings {
+                for value in [
+                    &fixture.fixture_id,
+                    &fixture.database,
+                    &fixture.logical_table,
+                    &fixture.region,
+                ] {
+                    nonempty("target fixture binding value", value)?;
+                }
+                if let Some(catalog) = &fixture.catalog {
+                    nonempty("target fixture binding catalog", catalog)?;
+                }
+                if let Some(physical_table) = &fixture.physical_table {
+                    nonempty("target fixture binding physical table", physical_table)?;
+                }
+                if !fixture_tables.insert((
+                    fixture.fixture_id.as_str(),
+                    fixture.database.as_str(),
+                    fixture.logical_table.as_str(),
+                )) {
+                    return Err(Error::new(
+                        "target fixture bindings must be uniquely keyed by table",
+                    ));
+                }
             }
             valid_digest(&target.identity)?;
             valid_digest(&target.git_identity)?;
@@ -466,9 +745,23 @@ impl FixtureManifest {
             .iter()
             .map(|target| (target.role, target))
             .collect();
-        if self.target_bindings.len() != 2 {
+        let required: HashSet<_> = targets
+            .targets
+            .iter()
+            .flat_map(|target| {
+                target.fixture_bindings.iter().map(move |fixture| {
+                    (
+                        target.role,
+                        target.target_id.as_str(),
+                        fixture.database.as_str(),
+                        fixture.logical_table.as_str(),
+                    )
+                })
+            })
+            .collect();
+        if required.is_empty() || self.target_bindings.len() != required.len() {
             return Err(Error::new(
-                "fixture bindings must be exactly base and candidate",
+                "fixture bindings do not cover target table bindings",
             ));
         }
         let file_ids: HashSet<_> = self
@@ -476,9 +769,8 @@ impl FixtureManifest {
             .iter()
             .map(|file| file.file_id.as_str())
             .collect();
-        let mut roles = HashSet::new();
+        let mut present = HashSet::new();
         for binding in &self.target_bindings {
-            roles.insert(binding.role);
             let target = target_by_role
                 .get(&binding.role)
                 .ok_or_else(|| Error::new("missing target role"))?;
@@ -487,34 +779,74 @@ impl FixtureManifest {
                     "fixture role-to-target mapping differs from target manifest",
                 ));
             }
-            for value in [&binding.database, &binding.table, &binding.region] {
+            for value in [&binding.database, &binding.logical_table, &binding.region] {
                 nonempty("fixture binding", value)?;
             }
-            let target_fixture = target
-                .fixture_binding
-                .as_ref()
-                .ok_or_else(|| Error::new("target fixture_binding must be present"))?;
-            if target_fixture.fixture_id != self.fixture_id
-                || target_fixture.database != binding.database
-                || target_fixture.table != binding.table
-                || target_fixture.region != binding.region
-            {
+            if let Some(catalog) = &binding.catalog {
+                nonempty("fixture binding catalog", catalog)?;
+            }
+            if let Some(physical_table) = &binding.physical_table {
+                nonempty("fixture binding physical table", physical_table)?;
+            }
+            let target_fixture = target.fixture_bindings.iter().find(|target_fixture| {
+                target_fixture.fixture_id == self.fixture_id
+                    && target_fixture.database == binding.database
+                    && target_fixture.logical_table == binding.logical_table
+            });
+            if target_fixture.is_none_or(|target_fixture| {
+                target_fixture.catalog != binding.catalog
+                    || target_fixture.physical_table != binding.physical_table
+                    || target_fixture.region != binding.region
+            }) {
                 return Err(Error::new(
-                    "target fixture_binding does not match fixture target binding",
+                    "target fixture_bindings do not match fixture target binding",
+                ));
+            }
+            if !present.insert((
+                binding.role,
+                binding.target_id.as_str(),
+                binding.database.as_str(),
+                binding.logical_table.as_str(),
+            )) {
+                return Err(Error::new(
+                    "fixture bindings must be uniquely keyed by target and table",
                 ));
             }
             match self.provider {
-                RunnerFixtureProvider::ApiWrite if !binding.file_ids.is_empty() => {
+                RunnerFixtureProvider::ApiWrite
+                    if !binding.file_ids.is_empty()
+                        || binding.external.is_some()
+                        || binding.catalog.is_some()
+                        || binding.physical_table.is_none() =>
+                {
                     return Err(Error::new(
-                        "api_write fixture binding must not contain file_ids",
+                        "api_write fixture binding must not contain files or external evidence",
                     ));
                 }
-                RunnerFixtureProvider::ExternalPrepared if binding.file_ids.is_empty() => {
+                RunnerFixtureProvider::ExternalPrepared
+                    if binding.file_ids.is_empty()
+                        || binding.external.is_none()
+                        || binding.catalog.is_none()
+                        || binding.physical_table.is_some() =>
+                {
                     return Err(Error::new(
-                        "external_prepared fixture binding requires file_ids",
+                        "external_prepared fixture binding requires file_ids and external evidence",
                     ));
                 }
                 _ => {}
+            }
+            if let Some(external) = &binding.external {
+                for value in [&external.catalog, &external.schema, &external.time_index] {
+                    nonempty("external fixture binding", value)?;
+                }
+                if binding.catalog.as_deref() != Some(external.catalog.as_str())
+                    || external.schema != binding.database
+                    || external.region_id.to_string() != binding.region
+                {
+                    return Err(Error::new(
+                        "external fixture binding schema or region does not match target binding",
+                    ));
+                }
             }
             if binding
                 .file_ids
@@ -523,8 +855,88 @@ impl FixtureManifest {
             {
                 return Err(Error::new("fixture binding must reference existing files"));
             }
+            if binding.file_ids.iter().collect::<HashSet<_>>().len() != binding.file_ids.len() {
+                return Err(Error::new("fixture binding file IDs must be unique"));
+            }
         }
-        exact_roles(&roles)
+        if present == required {
+            Ok(())
+        } else {
+            Err(Error::new(
+                "fixture bindings do not exactly match target table bindings",
+            ))
+        }
+    }
+
+    /// Adds case-derived provider constraints that cannot be safely supplied by
+    /// a resealed fixture manifest.
+    pub fn validate_against_case(
+        &self,
+        targets: &TargetEnvironmentManifest,
+        case: &crate::query_perf::case::ValidatedCase,
+    ) -> Result<()> {
+        self.validate_against(targets)?;
+        match self.provider {
+            RunnerFixtureProvider::ApiWrite => {
+                let expected = case.remote_write_fixture_expectation()?;
+                if self.logical_summary.rows != expected.logical_summary().rows()
+                    || self.logical_summary.series != expected.logical_summary().series()
+                    || self.logical_summary.time_start_unix_nanos
+                        != expected.logical_summary().time_start_unix_nanos()
+                    || self.logical_summary.time_end_unix_nanos
+                        != expected.logical_summary().time_end_unix_nanos()
+                {
+                    return Err(Error::new(
+                        "api_write logical summary differs from remote-write case",
+                    ));
+                }
+                for binding in &self.target_bindings {
+                    if binding.database != expected.database()
+                        || binding.logical_table != expected.logical_metric_table()
+                        || binding.physical_table.as_deref() != Some(expected.physical_table())
+                    {
+                        return Err(Error::new(
+                            "api_write fixture binding differs from remote-write case",
+                        ));
+                    }
+                }
+                let expected_roles = [TargetRole::Base, TargetRole::Candidate];
+                if self
+                    .target_bindings
+                    .iter()
+                    .map(|binding| binding.role)
+                    .ne(expected_roles)
+                    || targets.targets.iter().any(|target| {
+                        target.fixture_bindings.len() != 1
+                            || target.fixture_bindings[0].database != expected.database()
+                            || target.fixture_bindings[0].logical_table
+                                != expected.logical_metric_table()
+                            || target.fixture_bindings[0].physical_table.as_deref()
+                                != Some(expected.physical_table())
+                    })
+                {
+                    return Err(Error::new(
+                        "api_write fixture bindings must be deterministically ordered and unique per target",
+                    ));
+                }
+            }
+            RunnerFixtureProvider::ExternalPrepared => {
+                let expected = case.direct_fixture_logical_summary().map_err(|_| {
+                    Error::new("external_prepared requires a direct-SST case table contract")
+                })?;
+                if self.logical_summary.rows != expected.rows()
+                    || self.logical_summary.series != expected.series()
+                    || self.logical_summary.time_start_unix_nanos
+                        != expected.time_start_unix_nanos()
+                    || self.logical_summary.time_end_unix_nanos != expected.time_end_unix_nanos()
+                {
+                    return Err(Error::new(
+                        "external_prepared logical summary differs from per-table direct-SST layout",
+                    ));
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Validates fixture-local fields and canonical seal.
@@ -604,13 +1016,116 @@ impl MeasurementManifest {
         }
         for query in &self.queries {
             valid_digest(&query.result_digest)?;
-            if query.samples.len() != query.identity.iterations as usize
+            if query.status != QueryStatus::Passed
+                || query.samples.len() != query.identity.iterations as usize
                 || query
                     .samples
                     .iter()
                     .any(|sample| !sample.milliseconds.is_finite() || sample.milliseconds < 0.0)
             {
                 return Err(Error::new("measurement sample count or latency is invalid"));
+            }
+        }
+        Ok(())
+    }
+}
+
+impl FailedMeasurementAttempt {
+    pub fn validate(&self) -> Result<()> {
+        version(self.version)?;
+        nonempty("failed measurement detail", &self.failure_detail)?;
+        self.verify_seal()
+    }
+}
+
+impl MeasurementBundle {
+    pub fn validate_against(
+        &self,
+        expected: &[ResolvedQueryIdentity],
+        case_digest: &Sha256Digest,
+        targets: &TargetEnvironmentManifest,
+        fixture: &FixtureManifest,
+        request: &ObservationRequestManifest,
+    ) -> Result<()> {
+        version(self.version)?;
+        self.verify_seal()?;
+        if self.run_id != targets.run_id
+            || self.fixture_id != fixture.fixture_id
+            || &self.case_digest != case_digest
+            || self.target_manifest_digest != targets.completion_digest
+            || self.fixture_manifest_digest != fixture.completion_digest
+            || self.observation_request.id != request.request_id
+            || self.observation_request.digest != request.completion_digest
+        {
+            return Err(Error::new("measurement bundle identity mismatch"));
+        }
+        request.validate_against(case_digest, targets, fixture)?;
+        if self.measurements.len() != 2 {
+            return Err(Error::new(
+                "measurement bundle requires base and candidate measurements",
+            ));
+        }
+        let mut roles = HashSet::new();
+        for measurement in &self.measurements {
+            measurement.validate_against(expected, targets, fixture)?;
+            let role = targets
+                .targets
+                .iter()
+                .find(|target| target.target_id == measurement.target_id)
+                .ok_or_else(|| Error::new("measurement target is unknown"))?
+                .role;
+            if !roles.insert(role) {
+                return Err(Error::new("measurement bundle has duplicate target role"));
+            }
+        }
+        exact_roles(&roles)
+    }
+}
+
+impl ObservationRequestManifest {
+    pub fn validate_against(
+        &self,
+        case_digest: &Sha256Digest,
+        targets: &TargetEnvironmentManifest,
+        fixture: &FixtureManifest,
+    ) -> Result<()> {
+        version(self.version)?;
+        nonempty("observation request ID", &self.request_id)?;
+        self.verify_seal()?;
+        fixture.validate_against(targets)?;
+        if self.run_id != targets.run_id
+            || self.fixture_id != fixture.fixture_id
+            || &self.case_digest != case_digest
+            || self.target_manifest_digest != targets.completion_digest
+            || self.fixture_manifest_digest != fixture.completion_digest
+        {
+            return Err(Error::new("observation request identity mismatch"));
+        }
+        let mut entries = HashSet::new();
+        for request in &self.requests {
+            if !targets
+                .targets
+                .iter()
+                .any(|target| target.role == request.role && target.target_id == request.target_id)
+                || !entries.insert((request.role, request.target_id.as_str(), request.kind))
+            {
+                return Err(Error::new("observation request target coverage is invalid"));
+            }
+            match (request.kind, &request.read_bench) {
+                (ObservationKind::Footer, None)
+                | (
+                    ObservationKind::ReadBench,
+                    Some(ReadBenchRequest {
+                        parquetbench: true, ..
+                    }),
+                )
+                | (
+                    ObservationKind::ReadBench,
+                    Some(ReadBenchRequest {
+                        scanbench: true, ..
+                    }),
+                ) => {}
+                _ => return Err(Error::new("observation request payload is invalid")),
             }
         }
         Ok(())
@@ -643,6 +1158,9 @@ impl ObservationManifest {
             (ObservationStatus::Passed, Some(_)) | (ObservationStatus::Failed, None) => {
                 return Err(Error::new("observation status and failure detail disagree"));
             }
+            (ObservationStatus::Failed, Some(detail)) if detail.trim().is_empty() => {
+                return Err(Error::new("observation status and failure detail disagree"));
+            }
             _ => {}
         }
         match &self.payload {
@@ -671,7 +1189,125 @@ impl ObservationManifest {
     }
 }
 
+impl ObservationBundle {
+    pub fn validate_against(
+        &self,
+        case_digest: &Sha256Digest,
+        targets: &TargetEnvironmentManifest,
+        fixture: &FixtureManifest,
+        request: &ObservationRequestManifest,
+    ) -> Result<()> {
+        version(self.version)?;
+        self.verify_seal()?;
+        request.validate_against(case_digest, targets, fixture)?;
+        if self.run_id != targets.run_id
+            || self.fixture_id != fixture.fixture_id
+            || self.request.id != request.request_id
+            || self.request.digest != request.completion_digest
+            || self.target_manifest_digest != targets.completion_digest
+            || self.fixture_manifest_digest != fixture.completion_digest
+        {
+            return Err(Error::new("observation bundle identity mismatch"));
+        }
+        let requested: HashSet<_> = request
+            .requests
+            .iter()
+            .map(|value| (value.target_id.as_str(), value.kind))
+            .collect();
+        let mut present = HashSet::new();
+        for observation in &self.observations {
+            observation.validate_against(targets, fixture)?;
+            if observation.status != ObservationStatus::Passed {
+                return Err(Error::new(
+                    "successful finalization cannot consume failed observation",
+                ));
+            }
+            let kind = match &observation.payload {
+                ObservationPayload::Footer(_) => ObservationKind::Footer,
+                ObservationPayload::ReadBench(_) => ObservationKind::ReadBench,
+                ObservationPayload::Visibility { .. } => {
+                    return Err(Error::new(
+                        "observation bundle contains unrequested visibility payload",
+                    ));
+                }
+            };
+            if !requested.contains(&(observation.target_id.as_str(), kind))
+                || !present.insert((observation.target_id.as_str(), kind))
+            {
+                return Err(Error::new("observation bundle coverage is invalid"));
+            }
+            if let ObservationPayload::ReadBench(value) = &observation.payload {
+                let request = request
+                    .requests
+                    .iter()
+                    .find(|request| {
+                        request.target_id == observation.target_id
+                            && request.kind == ObservationKind::ReadBench
+                    })
+                    .ok_or_else(|| Error::new("read-bench observation was not requested"))?;
+                let modes = request
+                    .read_bench
+                    .as_ref()
+                    .ok_or_else(|| Error::new("read-bench request lacks modes"))?;
+                if (modes.parquetbench != value.parquet_median_milliseconds.is_some())
+                    || (modes.scanbench != value.scan_median_milliseconds.is_some())
+                    || [
+                        value.parquet_median_milliseconds,
+                        value.scan_median_milliseconds,
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .any(|value| !value.is_finite() || value < 0.0)
+                {
+                    return Err(Error::new(
+                        "read-bench observation modes are incomplete or invalid",
+                    ));
+                }
+            }
+        }
+        if present != requested {
+            return Err(Error::new(
+                "observation bundle is missing requested observations",
+            ));
+        }
+        Ok(())
+    }
+}
+
 impl ReportManifest {
+    /// Verifies the report is bound to the already validated executable case.
+    pub fn validate_provenance(&self, case_digest: &Sha256Digest) -> Result<()> {
+        if &self.provenance != case_digest {
+            return Err(Error::new("report provenance does not match case digest"));
+        }
+        Ok(())
+    }
+
+    pub fn validate_summary(&self, bytes: impl AsRef<[u8]>) -> Result<()> {
+        self.summary_digest.verify(bytes)
+    }
+    pub fn validate_bundle_references(
+        &self,
+        bundle: Option<&MeasurementBundle>,
+        observations: Option<&ObservationBundle>,
+    ) -> Result<()> {
+        let measurement_bundle = bundle.map(|bundle| ArtifactReference {
+            id: "measurement_bundle".to_string(),
+            digest: bundle.completion_digest.clone(),
+        });
+        let observation_bundle = observations.map(|bundle| ArtifactReference {
+            id: "observation_bundle".to_string(),
+            digest: bundle.completion_digest.clone(),
+        });
+        if self.measurement_bundle != measurement_bundle
+            || self.observation_bundle != observation_bundle
+        {
+            return Err(Error::new(
+                "report bundle references do not match sealed inputs",
+            ));
+        }
+        Ok(())
+    }
     /// Validates every input artifact reference, target/query set, and report seal.
     pub fn validate_against(
         &self,
@@ -687,6 +1323,11 @@ impl ReportManifest {
         fixture.validate_against(targets)?;
         if self.run_id != targets.run_id || self.fixture_id != fixture.fixture_id {
             return Err(Error::new("report run/fixture identity mismatch"));
+        }
+        if self.target_manifest_digest != targets.completion_digest
+            || self.fixture_manifest_digest != fixture.completion_digest
+        {
+            return Err(Error::new("report target or fixture seal mismatch"));
         }
         let expected_targets: BTreeSet<_> = targets
             .targets
@@ -732,7 +1373,9 @@ impl ReportManifest {
                 ));
             }
         }
-        if measurement_roles != HashSet::from([TargetRole::Base, TargetRole::Candidate]) {
+        if self.outcome == ReportOutcome::Success
+            && measurement_roles != HashSet::from([TargetRole::Base, TargetRole::Candidate])
+        {
             return Err(Error::new(
                 "measurements must contain exactly one base and candidate entry",
             ));
@@ -761,18 +1404,337 @@ impl ReportManifest {
                 "report has missing or extra artifact references",
             ));
         }
+        let mut threshold_queries = HashSet::new();
         for threshold in &self.threshold_results {
             nonempty("threshold query", &threshold.query_name)?;
             nonempty("threshold detail", &threshold.detail)?;
-            if !expected
+            let query = expected
                 .iter()
-                .any(|query| query.name == threshold.query_name)
-            {
+                .find(|query| query.name == threshold.query_name);
+            if query.is_none() || !threshold_queries.insert(threshold.query_name.as_str()) {
                 return Err(Error::new("threshold references unknown query"));
             }
         }
+        for outcome in &self.threshold_outcomes {
+            validate_threshold_outcome(outcome)?;
+        }
+        for failure in &self.failure_details {
+            nonempty("report failure detail", &failure.detail)?;
+        }
+        match self.evaluation_state {
+            EvaluationState::NotStarted
+                if self.outcome != ReportOutcome::Failed
+                    || !self.threshold_results.is_empty()
+                    || !self.threshold_outcomes.is_empty() =>
+            {
+                return Err(Error::new(
+                    "not-started evaluation must be a failed report without threshold results",
+                ));
+            }
+            EvaluationState::Incomplete
+                if self.outcome != ReportOutcome::Failed
+                    || self.measurement_bundle.is_none()
+                    || self.observation_bundle.is_none()
+                    || !self
+                        .failure_details
+                        .iter()
+                        .any(|failure| failure.stage == ReportFailureStage::Evaluation) =>
+            {
+                return Err(Error::new(
+                    "incomplete evaluation requires trusted bundles and a typed evaluation failure",
+                ));
+            }
+            EvaluationState::Complete => {}
+            _ => {}
+        }
+        match self.outcome {
+            ReportOutcome::Success
+                if !self.failures.is_empty()
+                    || !self.failure_details.is_empty()
+                    || self.evaluation_state != EvaluationState::Complete
+                    || self.measurement_bundle.is_none()
+                    || self.observation_bundle.is_none()
+                    || self
+                        .threshold_outcomes
+                        .iter()
+                        .any(|outcome| !outcome.passed)
+                    || self.threshold_results.iter().any(|outcome| !outcome.passed)
+                    || observations
+                        .iter()
+                        .any(|observation| observation.status != ObservationStatus::Passed) =>
+            {
+                return Err(Error::new("successful report contains failures"));
+            }
+            ReportOutcome::Failed if self.failure_details.is_empty() => {
+                return Err(Error::new("failed report requires failure details"));
+            }
+            _ => {}
+        }
         valid_digest(&self.provenance)
     }
+
+    /// Requires all and only the threshold outcomes configured by a complete case.
+    pub fn validate_threshold_coverage(
+        &self,
+        case: &crate::query_perf::case::ValidatedCase,
+        targets: &TargetEnvironmentManifest,
+    ) -> Result<()> {
+        let expected = expected_threshold_keys(case, targets)?;
+        let actual: HashSet<_> = self
+            .threshold_outcomes
+            .iter()
+            .map(|outcome| outcome.key.clone())
+            .collect();
+        let expected_queries: HashSet<_> = case
+            .queries()
+            .iter()
+            .filter_map(|query| {
+                query
+                    .max_candidate_latency_regression_pct()
+                    .map(|_| query.resolved_identity().name().to_string())
+            })
+            .collect();
+        let actual_queries: HashSet<_> = self
+            .threshold_results
+            .iter()
+            .map(|result| result.query_name.clone())
+            .collect();
+        let unique_outcomes = actual.len() == self.threshold_outcomes.len();
+        let unique_results = actual_queries.len() == self.threshold_results.len();
+        match self.evaluation_state {
+            EvaluationState::Complete
+                if !unique_outcomes
+                    || actual != expected
+                    || !unique_results
+                    || actual_queries != expected_queries =>
+            {
+                return Err(Error::new(
+                    "completed evaluation threshold coverage is not exact",
+                ));
+            }
+            EvaluationState::Incomplete
+                if !unique_outcomes
+                    || !actual.is_subset(&expected)
+                    || !unique_results
+                    || !actual_queries.is_subset(&expected_queries) =>
+            {
+                return Err(Error::new(
+                    "incomplete evaluation contains duplicate or unconfigured threshold outcomes",
+                ));
+            }
+            EvaluationState::NotStarted
+                if !self.threshold_outcomes.is_empty() || !self.threshold_results.is_empty() =>
+            {
+                return Err(Error::new(
+                    "not-started evaluation cannot contain threshold outcomes",
+                ));
+            }
+            _ => {}
+        }
+        for result in &self.threshold_results {
+            let limit = case
+                .queries()
+                .iter()
+                .find(|query| query.resolved_identity().name() == result.query_name)
+                .and_then(|query| query.max_candidate_latency_regression_pct());
+            if result.threshold.max_candidate_latency_regression_pct != limit {
+                return Err(Error::new(
+                    "query threshold result limit does not match configured threshold",
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+fn validate_threshold_outcome(outcome: &ThresholdOutcome) -> Result<()> {
+    match (&outcome.key, &outcome.evidence) {
+        (
+            ThresholdOutcomeKey::QueryLatency { query_name },
+            ThresholdEvidence::QueryLatency {
+                base_milliseconds,
+                candidate_milliseconds,
+                limit_pct,
+                regression_pct,
+            },
+        ) if !query_name.trim().is_empty()
+            && [
+                base_milliseconds,
+                candidate_milliseconds,
+                limit_pct,
+                regression_pct,
+            ]
+            .into_iter()
+            .all(|value| value.is_finite())
+            && *base_milliseconds > 0.0
+            && *limit_pct >= 0.0 =>
+        {
+            Ok(())
+        }
+        (
+            ThresholdOutcomeKey::FooterTarget {
+                target_id,
+                encoding,
+                rule,
+                ..
+            },
+            ThresholdEvidence::FooterValue { .. },
+        ) if !target_id.trim().is_empty()
+            && encoding.is_none()
+            && !matches!(
+                rule,
+                FooterRule::RequiredEncoding | FooterRule::ForbiddenEncoding
+            ) =>
+        {
+            Ok(())
+        }
+        (
+            ThresholdOutcomeKey::FooterTarget {
+                target_id,
+                encoding: Some(encoding),
+                rule: FooterRule::RequiredEncoding | FooterRule::ForbiddenEncoding,
+                ..
+            },
+            ThresholdEvidence::FooterEncoding { .. },
+        ) if !target_id.trim().is_empty() && !encoding.trim().is_empty() => Ok(()),
+        (
+            ThresholdOutcomeKey::FooterComparison {
+                base_target_id,
+                candidate_target_id,
+                rule,
+            },
+            ThresholdEvidence::FooterComparison {
+                base_actual,
+                limit_pct,
+                regression_pct,
+                ..
+            },
+        ) if !base_target_id.trim().is_empty()
+            && !candidate_target_id.trim().is_empty()
+            && *base_actual > 0
+            && *limit_pct >= 0.0
+            && limit_pct.is_finite()
+            && regression_pct.is_finite()
+            && matches!(
+                rule,
+                FooterRule::MaxCandidateTotalFileSizeRegressionPct
+                    | FooterRule::MaxCandidateColumnCompressedSizeRegressionPct
+                    | FooterRule::MaxCandidateColumnUncompressedSizeRegressionPct
+            ) =>
+        {
+            Ok(())
+        }
+        _ => Err(Error::new("threshold outcome key and evidence disagree")),
+    }
+}
+
+fn expected_threshold_keys(
+    case: &crate::query_perf::case::ValidatedCase,
+    targets: &TargetEnvironmentManifest,
+) -> Result<HashSet<ThresholdOutcomeKey>> {
+    let mut keys: HashSet<_> = case
+        .queries()
+        .iter()
+        .filter_map(|query| {
+            query.max_candidate_latency_regression_pct().map(|_| {
+                ThresholdOutcomeKey::QueryLatency {
+                    query_name: query.resolved_identity().name().to_string(),
+                }
+            })
+        })
+        .collect();
+    let Some(thresholds) = case.storage_thresholds() else {
+        return Ok(keys);
+    };
+    for target in &targets.targets {
+        for rule in [FooterRule::MinFiles, FooterRule::MinFilesWithColumn] {
+            keys.insert(ThresholdOutcomeKey::FooterTarget {
+                rule,
+                role: target.role,
+                target_id: target.target_id.clone(),
+                encoding: None,
+            });
+        }
+        for (rule, enabled) in [
+            (
+                FooterRule::MaxTotalFileSizeBytes,
+                thresholds.max_total_file_size_bytes().is_some(),
+            ),
+            (
+                FooterRule::MaxColumnCompressedSizeBytes,
+                thresholds.max_column_compressed_size_bytes().is_some(),
+            ),
+            (
+                FooterRule::MaxColumnUncompressedSizeBytes,
+                thresholds.max_column_uncompressed_size_bytes().is_some(),
+            ),
+        ] {
+            if enabled {
+                keys.insert(ThresholdOutcomeKey::FooterTarget {
+                    rule,
+                    role: target.role,
+                    target_id: target.target_id.clone(),
+                    encoding: None,
+                });
+            }
+        }
+        for encoding in thresholds.require_encodings() {
+            keys.insert(ThresholdOutcomeKey::FooterTarget {
+                rule: FooterRule::RequiredEncoding,
+                role: target.role,
+                target_id: target.target_id.clone(),
+                encoding: Some(encoding.clone()),
+            });
+        }
+        for encoding in thresholds.forbid_encodings() {
+            keys.insert(ThresholdOutcomeKey::FooterTarget {
+                rule: FooterRule::ForbiddenEncoding,
+                role: target.role,
+                target_id: target.target_id.clone(),
+                encoding: Some(encoding.clone()),
+            });
+        }
+    }
+    let targets = targets
+        .targets
+        .iter()
+        .map(|target| (target.role, target.target_id.clone()))
+        .collect::<HashMap<_, _>>();
+    let base = targets
+        .get(&TargetRole::Base)
+        .ok_or_else(|| Error::new("base target missing"))?;
+    let candidate = targets
+        .get(&TargetRole::Candidate)
+        .ok_or_else(|| Error::new("candidate target missing"))?;
+    for (rule, enabled) in [
+        (
+            FooterRule::MaxCandidateTotalFileSizeRegressionPct,
+            thresholds
+                .max_candidate_total_file_size_regression_pct()
+                .is_some(),
+        ),
+        (
+            FooterRule::MaxCandidateColumnCompressedSizeRegressionPct,
+            thresholds
+                .max_candidate_column_compressed_size_regression_pct()
+                .is_some(),
+        ),
+        (
+            FooterRule::MaxCandidateColumnUncompressedSizeRegressionPct,
+            thresholds
+                .max_candidate_column_uncompressed_size_regression_pct()
+                .is_some(),
+        ),
+    ] {
+        if enabled {
+            keys.insert(ThresholdOutcomeKey::FooterComparison {
+                rule,
+                base_target_id: base.clone(),
+                candidate_target_id: candidate.clone(),
+            });
+        }
+    }
+    Ok(keys)
 }
 
 fn canonical_body<T: Serialize>(value: &T) -> Result<Vec<u8>> {
@@ -857,12 +1819,14 @@ mod tests {
             remote_write_endpoint: None,
             namespace: "ns".into(),
             topology: "single".into(),
-            fixture_binding: Some(TargetFixtureBinding {
+            fixture_bindings: vec![TargetFixtureBinding {
                 fixture_id: "fixture".into(),
+                catalog: Some("greptime".into()),
                 database: "public".into(),
-                table: "t".into(),
+                logical_table: "t".into(),
+                physical_table: None,
                 region: "0".into(),
-            }),
+            }],
         }
     }
     fn targets() -> TargetEnvironmentManifest {
@@ -914,18 +1878,38 @@ mod tests {
                 FixtureTargetBinding {
                     role: TargetRole::Base,
                     target_id: "base".into(),
+                    catalog: Some("greptime".into()),
                     database: "public".into(),
-                    table: "t".into(),
+                    logical_table: "t".into(),
+                    physical_table: None,
                     region: "0".into(),
                     file_ids: vec!["file".into()],
+                    external: Some(ExternalPreparedTargetBinding {
+                        catalog: "greptime".into(),
+                        schema: "public".into(),
+                        table_id: 1,
+                        region_id: 0,
+                        time_index: "ts".into(),
+                        time_unit: TimestampUnit::Nanosecond,
+                    }),
                 },
                 FixtureTargetBinding {
                     role: TargetRole::Candidate,
                     target_id: "candidate".into(),
+                    catalog: Some("greptime".into()),
                     database: "public".into(),
-                    table: "t".into(),
+                    logical_table: "t".into(),
+                    physical_table: None,
                     region: "0".into(),
                     file_ids: vec!["file".into()],
+                    external: Some(ExternalPreparedTargetBinding {
+                        catalog: "greptime".into(),
+                        schema: "public".into(),
+                        table_id: 1,
+                        region_id: 0,
+                        time_index: "ts".into(),
+                        time_unit: TimestampUnit::Nanosecond,
+                    }),
                 },
             ],
             completion_digest: digest("placeholder"),
@@ -986,11 +1970,90 @@ mod tests {
         value.seal().unwrap_or_else(|err| panic!("seal: {err}"));
         value
     }
+    fn read_bench_observation(
+        id: &str,
+        target_id: &str,
+        parquet: Option<f64>,
+        scan: Option<f64>,
+    ) -> ObservationManifest {
+        let mut value = ObservationManifest {
+            version: MANIFEST_VERSION,
+            run_id: "run".into(),
+            observation_id: id.into(),
+            target_id: target_id.into(),
+            fixture_id: "fixture".into(),
+            status: ObservationStatus::Passed,
+            payload: ObservationPayload::ReadBench(ReadBenchObservation {
+                parquet_median_milliseconds: parquet,
+                scan_median_milliseconds: scan,
+            }),
+            failure_detail: None,
+            completion_digest: digest("placeholder"),
+        };
+        value.seal().unwrap_or_else(|err| panic!("seal: {err}"));
+        value
+    }
+    fn request(
+        targets: &TargetEnvironmentManifest,
+        requests: Vec<ObservationRequest>,
+    ) -> ObservationRequestManifest {
+        let fixture = fixture(targets);
+        let mut value = ObservationRequestManifest {
+            version: MANIFEST_VERSION,
+            run_id: "run".into(),
+            request_id: "request".into(),
+            fixture_id: "fixture".into(),
+            case_digest: digest("case"),
+            target_manifest_digest: targets.completion_digest.clone(),
+            fixture_manifest_digest: fixture.completion_digest,
+            requests,
+            completion_digest: digest("placeholder"),
+        };
+        value.seal().unwrap_or_else(|err| panic!("seal: {err}"));
+        value
+    }
+    fn observation_bundle(
+        targets: &TargetEnvironmentManifest,
+        request: &ObservationRequestManifest,
+        observations: Vec<ObservationManifest>,
+    ) -> ObservationBundle {
+        let fixture = fixture(targets);
+        let mut value = ObservationBundle {
+            version: MANIFEST_VERSION,
+            run_id: "run".into(),
+            fixture_id: "fixture".into(),
+            request: ArtifactReference {
+                id: request.request_id.clone(),
+                digest: request.completion_digest.clone(),
+            },
+            target_manifest_digest: targets.completion_digest.clone(),
+            fixture_manifest_digest: fixture.completion_digest,
+            observations,
+            completion_digest: digest("placeholder"),
+        };
+        value.seal().unwrap_or_else(|err| panic!("seal: {err}"));
+        value
+    }
+    fn request_entry(
+        role: TargetRole,
+        target_id: &str,
+        kind: ObservationKind,
+        read_bench: Option<ReadBenchRequest>,
+    ) -> ObservationRequest {
+        ObservationRequest {
+            role,
+            target_id: target_id.into(),
+            kind,
+            read_bench,
+        }
+    }
     fn report(
         query: &[ResolvedQueryIdentity],
         measurements: &[MeasurementManifest],
         observations: &[ObservationManifest],
     ) -> ReportManifest {
+        let expected_targets = targets();
+        let expected_fixture = fixture(&expected_targets);
         let mut value = ReportManifest {
             version: MANIFEST_VERSION,
             run_id: "run".into(),
@@ -999,7 +2062,11 @@ mod tests {
             fixture_id: "fixture".into(),
             queries: query.to_vec(),
             threshold_results: vec![],
+            threshold_outcomes: vec![],
+            evaluation_state: EvaluationState::Complete,
+            outcome: ReportOutcome::Success,
             failures: vec![],
+            failure_details: vec![],
             measurements: measurements
                 .iter()
                 .map(|value| ArtifactReference {
@@ -1014,7 +2081,18 @@ mod tests {
                     digest: value.completion_digest.clone(),
                 })
                 .collect(),
+            measurement_bundle: Some(ArtifactReference {
+                id: "bundle".into(),
+                digest: digest("bundle"),
+            }),
+            observation_bundle: Some(ArtifactReference {
+                id: "observations".into(),
+                digest: digest("observations"),
+            }),
+            target_manifest_digest: expected_targets.completion_digest,
+            fixture_manifest_digest: expected_fixture.completion_digest,
             provenance: digest("provenance"),
+            summary_digest: digest("summary"),
             completion_digest: digest("placeholder"),
         };
         value.seal().unwrap_or_else(|err| panic!("seal: {err}"));
@@ -1048,12 +2126,22 @@ mod tests {
 
     #[test]
     fn api_write_fixture_allows_empty_files_and_file_ids() {
-        let targets = targets();
+        let mut targets = targets();
         let mut value = fixture(&targets);
+        for target in &mut targets.targets {
+            target.fixture_bindings[0].catalog = None;
+            target.fixture_bindings[0].physical_table = Some("p".into());
+        }
+        targets
+            .seal()
+            .unwrap_or_else(|err| panic!("seal targets: {err}"));
         value.provider = RunnerFixtureProvider::ApiWrite;
         value.files.clear();
         for binding in &mut value.target_bindings {
             binding.file_ids.clear();
+            binding.external = None;
+            binding.catalog = None;
+            binding.physical_table = Some("p".into());
         }
         value.seal().unwrap_or_else(|err| panic!("seal: {err}"));
         value
@@ -1085,8 +2173,8 @@ mod tests {
         let mut crossed_targets = targets();
         let sealed_fixture = fixture(&crossed_targets);
         crossed_targets.targets[1]
-            .fixture_binding
-            .as_mut()
+            .fixture_bindings
+            .first_mut()
             .unwrap_or_else(|| panic!("fixture binding"))
             .region = "other".into();
         crossed_targets
@@ -1229,5 +2317,593 @@ mod tests {
                     .is_err()
             );
         }
+    }
+
+    #[test]
+    fn failed_report_requires_detail_and_success_requires_complete_evidence() {
+        let targets = targets();
+        let fixture = fixture(&targets);
+        let query = queries();
+        let measurements = vec![
+            measurement("base-measurement", "base", &query),
+            measurement("candidate-measurement", "candidate", &query),
+        ];
+        let observations = vec![observation("base-observation", "base")];
+        let mut failed = report(&query, &measurements, &observations);
+        failed.outcome = ReportOutcome::Failed;
+        failed.failures.clear();
+        failed.failure_details.clear();
+        failed.seal().unwrap_or_else(|err| panic!("seal: {err}"));
+        assert!(
+            failed
+                .validate_against(&query, &targets, &fixture, &measurements, &observations)
+                .is_err()
+        );
+
+        let mut successful = report(&query, &measurements, &observations);
+        successful.failures.push("unexpected".into());
+        successful
+            .seal()
+            .unwrap_or_else(|err| panic!("seal: {err}"));
+        assert!(
+            successful
+                .validate_against(&query, &targets, &fixture, &measurements, &observations)
+                .is_err()
+        );
+
+        let mut missing_bundle = report(&query, &measurements, &observations);
+        missing_bundle.measurement_bundle = None;
+        missing_bundle
+            .seal()
+            .unwrap_or_else(|err| panic!("seal: {err}"));
+        assert!(
+            missing_bundle
+                .validate_against(&query, &targets, &fixture, &measurements, &observations)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn threshold_keys_are_typed_and_encoding_specific() {
+        let required = ThresholdOutcomeKey::FooterTarget {
+            rule: FooterRule::RequiredEncoding,
+            role: TargetRole::Base,
+            target_id: "base".into(),
+            encoding: Some("PLAIN".into()),
+        };
+        let forbidden = ThresholdOutcomeKey::FooterTarget {
+            rule: FooterRule::ForbiddenEncoding,
+            role: TargetRole::Base,
+            target_id: "base".into(),
+            encoding: Some("PLAIN".into()),
+        };
+        assert_ne!(required, forbidden);
+        assert!(
+            validate_threshold_outcome(&ThresholdOutcome {
+                key: required,
+                passed: true,
+                evidence: ThresholdEvidence::FooterEncoding {
+                    encoding_present: true
+                },
+            })
+            .is_ok()
+        );
+        assert!(
+            validate_threshold_outcome(&ThresholdOutcome {
+                key: forbidden,
+                passed: true,
+                evidence: ThresholdEvidence::FooterValue {
+                    actual: 1,
+                    limit: 1
+                },
+            })
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn identity_and_seal_mutations_reject_stale_or_crossed_artifacts() {
+        let targets = targets();
+        let fixture = fixture(&targets);
+        let query = queries();
+        let request = request(&targets, vec![]);
+        let measurements = vec![
+            measurement("base-measurement", "base", &query),
+            measurement("candidate-measurement", "candidate", &query),
+        ];
+        let mut bundle = MeasurementBundle {
+            version: MANIFEST_VERSION,
+            run_id: "run".into(),
+            fixture_id: "fixture".into(),
+            case_digest: digest("case"),
+            target_manifest_digest: targets.completion_digest.clone(),
+            fixture_manifest_digest: fixture.completion_digest.clone(),
+            measurements: measurements.clone(),
+            observation_request: ArtifactReference {
+                id: request.request_id.clone(),
+                digest: request.completion_digest.clone(),
+            },
+            completion_digest: digest("placeholder"),
+        };
+        bundle.seal().unwrap_or_else(|err| panic!("seal: {err}"));
+        bundle
+            .validate_against(&query, &digest("case"), &targets, &fixture, &request)
+            .unwrap_or_else(|err| panic!("bundle: {err}"));
+
+        let mut stale_target = targets.clone();
+        stale_target.targets[0].identity = digest("other identity");
+        assert!(stale_target.validate().is_err());
+        let mut crossed_target = targets.clone();
+        crossed_target.targets[0].target_id = "candidate".into();
+        crossed_target
+            .seal()
+            .unwrap_or_else(|err| panic!("seal: {err}"));
+        assert!(crossed_target.validate().is_err());
+
+        let mutations: [(&str, fn(&mut MeasurementBundle)); 5] = [
+            ("case", |value: &mut MeasurementBundle| {
+                value.case_digest = digest("other")
+            }),
+            ("target seal", |value: &mut MeasurementBundle| {
+                value.target_manifest_digest = digest("other")
+            }),
+            ("fixture seal", |value: &mut MeasurementBundle| {
+                value.fixture_manifest_digest = digest("other")
+            }),
+            ("request ID", |value: &mut MeasurementBundle| {
+                value.observation_request.id = "other".into()
+            }),
+            ("request seal", |value: &mut MeasurementBundle| {
+                value.observation_request.digest = digest("other")
+            }),
+        ];
+        for (name, mutate) in mutations {
+            let mut changed = bundle.clone();
+            mutate(&mut changed);
+            changed.seal().unwrap_or_else(|err| panic!("{name}: {err}"));
+            assert!(
+                changed
+                    .validate_against(&query, &digest("case"), &targets, &fixture, &request)
+                    .is_err(),
+                "{name} cross-reference must fail"
+            );
+        }
+
+        let mut duplicate_file = fixture.clone();
+        duplicate_file.target_bindings[0]
+            .file_ids
+            .push("file".into());
+        duplicate_file
+            .seal()
+            .unwrap_or_else(|err| panic!("seal: {err}"));
+        assert!(duplicate_file.validate_against(&targets).is_err());
+    }
+
+    #[test]
+    fn observation_request_and_read_bench_matrix_is_exact() {
+        let targets = targets();
+        let fixture = fixture(&targets);
+        let case_digest = digest("case");
+        for (name, entries) in [
+            (
+                "footer has read-bench payload",
+                vec![request_entry(
+                    TargetRole::Base,
+                    "base",
+                    ObservationKind::Footer,
+                    Some(ReadBenchRequest {
+                        parquetbench: true,
+                        scanbench: false,
+                    }),
+                )],
+            ),
+            (
+                "read-bench lacks modes",
+                vec![request_entry(
+                    TargetRole::Base,
+                    "base",
+                    ObservationKind::ReadBench,
+                    None,
+                )],
+            ),
+            (
+                "read-bench enables neither mode",
+                vec![request_entry(
+                    TargetRole::Base,
+                    "base",
+                    ObservationKind::ReadBench,
+                    Some(ReadBenchRequest {
+                        parquetbench: false,
+                        scanbench: false,
+                    }),
+                )],
+            ),
+            (
+                "duplicate request",
+                vec![
+                    request_entry(TargetRole::Base, "base", ObservationKind::Footer, None),
+                    request_entry(TargetRole::Base, "base", ObservationKind::Footer, None),
+                ],
+            ),
+            (
+                "wrong role target",
+                vec![request_entry(
+                    TargetRole::Base,
+                    "candidate",
+                    ObservationKind::Footer,
+                    None,
+                )],
+            ),
+        ] {
+            let value = request(&targets, entries);
+            assert!(
+                value
+                    .validate_against(&case_digest, &targets, &fixture)
+                    .is_err(),
+                "{name} must fail"
+            );
+        }
+
+        for (name, parquet, scan) in [
+            ("parquet only", true, false),
+            ("scan only", false, true),
+            ("both", true, true),
+        ] {
+            let request = request(
+                &targets,
+                vec![request_entry(
+                    TargetRole::Base,
+                    "base",
+                    ObservationKind::ReadBench,
+                    Some(ReadBenchRequest {
+                        parquetbench: parquet,
+                        scanbench: scan,
+                    }),
+                )],
+            );
+            let bundle = observation_bundle(
+                &targets,
+                &request,
+                vec![read_bench_observation(
+                    name,
+                    "base",
+                    parquet.then_some(1.0),
+                    scan.then_some(2.0),
+                )],
+            );
+            bundle
+                .validate_against(&case_digest, &targets, &fixture, &request)
+                .unwrap_or_else(|err| panic!("{name}: {err}"));
+        }
+
+        let footer_request = request(
+            &targets,
+            vec![request_entry(
+                TargetRole::Base,
+                "base",
+                ObservationKind::Footer,
+                None,
+            )],
+        );
+        for (name, observation) in [
+            ("visibility", {
+                let mut value = observation("visible", "base");
+                value.payload = ObservationPayload::Visibility { visible_rows: 1 };
+                value.seal().unwrap_or_else(|err| panic!("seal: {err}"));
+                value
+            }),
+            ("failed", {
+                let mut value = observation("failed", "base");
+                value.status = ObservationStatus::Failed;
+                value.failure_detail = Some("controller failed".into());
+                value.seal().unwrap_or_else(|err| panic!("seal: {err}"));
+                value
+            }),
+        ] {
+            let bundle = observation_bundle(&targets, &footer_request, vec![observation]);
+            assert!(
+                bundle
+                    .validate_against(&case_digest, &targets, &fixture, &footer_request)
+                    .is_err(),
+                "{name} observation must fail"
+            );
+        }
+
+        let read_request = request(
+            &targets,
+            vec![request_entry(
+                TargetRole::Base,
+                "base",
+                ObservationKind::ReadBench,
+                Some(ReadBenchRequest {
+                    parquetbench: true,
+                    scanbench: false,
+                }),
+            )],
+        );
+        for (name, observations) in [
+            ("missing", vec![]),
+            (
+                "wrong payload kind",
+                vec![observation("footer-extra", "base")],
+            ),
+            (
+                "duplicate",
+                vec![
+                    read_bench_observation("read-one", "base", Some(1.0), None),
+                    read_bench_observation("read-two", "base", Some(1.0), None),
+                ],
+            ),
+        ] {
+            let bundle = observation_bundle(&targets, &read_request, observations);
+            assert!(
+                bundle
+                    .validate_against(&case_digest, &targets, &fixture, &read_request)
+                    .is_err(),
+                "{name} observation coverage must fail"
+            );
+        }
+    }
+
+    #[test]
+    fn report_status_requires_typed_failures_and_successful_evidence() {
+        let targets = targets();
+        let fixture = fixture(&targets);
+        let query = queries();
+        let measurements = vec![
+            measurement("base-measurement", "base", &query),
+            measurement("candidate-measurement", "candidate", &query),
+        ];
+        let mut failed_measurement = measurements[0].clone();
+        failed_measurement.queries[0].status = QueryStatus::Failed;
+        failed_measurement
+            .seal()
+            .unwrap_or_else(|err| panic!("seal: {err}"));
+        assert!(
+            failed_measurement
+                .validate_against(&query, &targets, &fixture)
+                .is_err()
+        );
+
+        let mut failed_observation = observation("failed-observation", "base");
+        failed_observation.status = ObservationStatus::Failed;
+        failed_observation.failure_detail = Some("controller failure".into());
+        failed_observation
+            .seal()
+            .unwrap_or_else(|err| panic!("seal: {err}"));
+        let failed_observations = [failed_observation.clone()];
+        let mut success = report(&query, &measurements, &failed_observations);
+        success.seal().unwrap_or_else(|err| panic!("seal: {err}"));
+        assert!(
+            success
+                .validate_against(
+                    &query,
+                    &targets,
+                    &fixture,
+                    &measurements,
+                    &failed_observations,
+                )
+                .is_err()
+        );
+
+        let mut failed = report(&query, &measurements, &[]);
+        failed.outcome = ReportOutcome::Failed;
+        failed.failures = vec!["untyped failure".into()];
+        failed.failure_details.clear();
+        failed.measurements.clear();
+        failed.observations.clear();
+        failed.seal().unwrap_or_else(|err| panic!("seal: {err}"));
+        assert!(
+            failed
+                .validate_against(&query, &targets, &fixture, &[], &[])
+                .is_err()
+        );
+
+        let mut blank_failure = failed_observation;
+        blank_failure.failure_detail = Some(" ".into());
+        blank_failure
+            .seal()
+            .unwrap_or_else(|err| panic!("seal: {err}"));
+        assert!(blank_failure.validate_against(&targets, &fixture).is_err());
+    }
+
+    #[test]
+    fn threshold_coverage_rejects_every_non_exact_key_set() {
+        let targets = targets();
+        let case = crate::query_perf::case::load_case(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../tests/perf/query_cases/prom_remote_write_mixed_every/case.toml"),
+        )
+        .unwrap_or_else(|err| panic!("case: {err}"));
+        let query = case
+            .manifest_queries()
+            .unwrap_or_else(|err| panic!("queries: {err}"));
+        let measurements = vec![
+            measurement("base-measurement", "base", &query),
+            measurement("candidate-measurement", "candidate", &query),
+        ];
+        let mut value = report(&query, &measurements, &[]);
+        let keys =
+            expected_threshold_keys(&case, &targets).unwrap_or_else(|err| panic!("keys: {err}"));
+        value.threshold_outcomes = keys
+            .iter()
+            .cloned()
+            .map(|key| ThresholdOutcome {
+                evidence: match &key {
+                    ThresholdOutcomeKey::QueryLatency { .. } => ThresholdEvidence::QueryLatency {
+                        base_milliseconds: 1.0,
+                        candidate_milliseconds: 1.0,
+                        limit_pct: 75.0,
+                        regression_pct: 0.0,
+                    },
+                    ThresholdOutcomeKey::FooterTarget {
+                        rule: FooterRule::RequiredEncoding | FooterRule::ForbiddenEncoding,
+                        ..
+                    } => ThresholdEvidence::FooterEncoding {
+                        encoding_present: true,
+                    },
+                    ThresholdOutcomeKey::FooterTarget { .. } => ThresholdEvidence::FooterValue {
+                        actual: 1,
+                        limit: 1,
+                    },
+                    ThresholdOutcomeKey::FooterComparison { .. } => {
+                        ThresholdEvidence::FooterComparison {
+                            base_actual: 1,
+                            candidate_actual: 1,
+                            limit_pct: 75.0,
+                            regression_pct: 0.0,
+                        }
+                    }
+                },
+                key,
+                passed: true,
+            })
+            .collect();
+        value.threshold_results = case
+            .queries()
+            .iter()
+            .filter_map(|query| {
+                query
+                    .max_candidate_latency_regression_pct()
+                    .map(|limit| ThresholdResult {
+                        query_name: query.resolved_identity().name().into(),
+                        threshold: QueryThresholds {
+                            max_candidate_latency_regression_pct: Some(limit),
+                        },
+                        passed: true,
+                        detail: "pass".into(),
+                    })
+            })
+            .collect();
+        value
+            .validate_threshold_coverage(&case, &targets)
+            .unwrap_or_else(|err| panic!("coverage: {err}"));
+
+        let mutations: [(&str, fn(&mut Vec<ThresholdOutcome>)); 4] = [
+            ("missing", |outcomes: &mut Vec<ThresholdOutcome>| {
+                outcomes.pop();
+            }),
+            ("duplicate", |outcomes: &mut Vec<ThresholdOutcome>| {
+                outcomes.push(outcomes[0].clone());
+            }),
+            ("extra", |outcomes: &mut Vec<ThresholdOutcome>| {
+                outcomes.push(ThresholdOutcome {
+                    key: ThresholdOutcomeKey::QueryLatency {
+                        query_name: "extra".into(),
+                    },
+                    passed: true,
+                    evidence: ThresholdEvidence::QueryLatency {
+                        base_milliseconds: 1.0,
+                        candidate_milliseconds: 1.0,
+                        limit_pct: 1.0,
+                        regression_pct: 0.0,
+                    },
+                });
+            }),
+            ("wrong target", |outcomes: &mut Vec<ThresholdOutcome>| {
+                if let Some(ThresholdOutcome {
+                    key: ThresholdOutcomeKey::FooterTarget { target_id, .. },
+                    ..
+                }) = outcomes.iter_mut().find(|outcome| {
+                    matches!(&outcome.key, ThresholdOutcomeKey::FooterTarget { .. })
+                }) {
+                    *target_id = "wrong".into();
+                }
+            }),
+        ];
+        for (name, mutate) in mutations {
+            for outcome in [ReportOutcome::Success, ReportOutcome::Failed] {
+                let mut changed = value.clone();
+                changed.outcome = outcome;
+                if outcome == ReportOutcome::Failed {
+                    changed.failures = vec!["threshold failed".into()];
+                    changed.failure_details = vec![ReportFailure {
+                        stage: ReportFailureStage::Threshold,
+                        detail: "threshold failed".into(),
+                    }];
+                }
+                mutate(&mut changed.threshold_outcomes);
+                assert!(
+                    changed
+                        .validate_threshold_coverage(&case, &targets)
+                        .is_err(),
+                    "{outcome:?} {name} threshold keys must fail"
+                );
+            }
+        }
+
+        let query_mutations: [(&str, fn(&mut ReportManifest)); 3] = [
+            ("missing query", |report: &mut ReportManifest| {
+                report.threshold_results.clear();
+            }),
+            ("duplicate query", |report: &mut ReportManifest| {
+                report
+                    .threshold_results
+                    .push(report.threshold_results[0].clone());
+            }),
+            ("wrong query limit", |report: &mut ReportManifest| {
+                report.threshold_results[0]
+                    .threshold
+                    .max_candidate_latency_regression_pct = Some(1.0);
+            }),
+        ];
+        for (name, mutate) in query_mutations {
+            let mut changed = value.clone();
+            mutate(&mut changed);
+            assert!(
+                changed
+                    .validate_threshold_coverage(&case, &targets)
+                    .is_err(),
+                "{name} query threshold must fail"
+            );
+        }
+
+        let mut early_failed = value.clone();
+        early_failed.outcome = ReportOutcome::Failed;
+        early_failed.evaluation_state = EvaluationState::NotStarted;
+        early_failed.measurement_bundle = None;
+        early_failed.threshold_outcomes.clear();
+        early_failed.threshold_results.clear();
+        early_failed
+            .validate_threshold_coverage(&case, &targets)
+            .unwrap_or_else(|err| panic!("early failure: {err}"));
+    }
+
+    #[test]
+    fn evaluation_state_rejects_successful_or_untyped_incomplete_reports() {
+        let targets = targets();
+        let fixture = fixture(&targets);
+        let query = queries();
+        let measurements = vec![
+            measurement("base-measurement", "base", &query),
+            measurement("candidate-measurement", "candidate", &query),
+        ];
+        let mut successful_incomplete = report(&query, &measurements, &[]);
+        successful_incomplete.evaluation_state = EvaluationState::Incomplete;
+        successful_incomplete
+            .seal()
+            .unwrap_or_else(|err| panic!("seal: {err}"));
+        assert!(
+            successful_incomplete
+                .validate_against(&query, &targets, &fixture, &measurements, &[])
+                .is_err()
+        );
+
+        let mut missing_evaluation_detail = report(&query, &measurements, &[]);
+        missing_evaluation_detail.outcome = ReportOutcome::Failed;
+        missing_evaluation_detail.evaluation_state = EvaluationState::Incomplete;
+        missing_evaluation_detail.failures = vec!["failed".into()];
+        missing_evaluation_detail.failure_details = vec![ReportFailure {
+            stage: ReportFailureStage::Threshold,
+            detail: "not an evaluation failure".into(),
+        }];
+        missing_evaluation_detail
+            .seal()
+            .unwrap_or_else(|err| panic!("seal: {err}"));
+        assert!(
+            missing_evaluation_detail
+                .validate_against(&query, &targets, &fixture, &measurements, &[])
+                .is_err()
+        );
     }
 }

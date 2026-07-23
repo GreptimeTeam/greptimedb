@@ -16,3 +16,4 @@ pub mod case;
 pub mod error;
 pub mod fixture;
 pub mod manifest;
+pub mod runner;

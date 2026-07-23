@@ -25,6 +25,7 @@ pub async fn run_prom_remote_write(args: RemoteWriteRequest) -> Result<RemoteWri
     validate_args(&args)?;
     let started = std::time::Instant::now();
     let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
         .timeout(std::time::Duration::from_secs(args.timeout_seconds))
         .build()
         .map_err(|err| Error::new(format!("failed to build remote-write client: {err}")))?;
@@ -256,6 +257,9 @@ fn splitmix64(mut value: u64) -> u64 {
 mod tests {
     use std::collections::HashSet;
 
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
     use super::*;
 
     fn args(pattern: ValuePattern) -> RemoteWriteRequest {
@@ -408,5 +412,110 @@ mod tests {
         request.start_unix_millis = i64::MAX;
         request.samples_per_series = 2;
         assert!(validate_args(&request).is_err());
+    }
+
+    #[tokio::test]
+    async fn remote_write_redirect_is_not_followed() {
+        let location = TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap_or_else(|err| panic!("bind redirect location: {err}"));
+        let location_url = format!(
+            "http://{}/must-not-be-requested",
+            location
+                .local_addr()
+                .unwrap_or_else(|err| panic!("redirect location address: {err}"))
+        );
+        let redirect = TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap_or_else(|err| panic!("bind redirect server: {err}"));
+        let redirect_url = format!(
+            "http://{}/declared/write",
+            redirect
+                .local_addr()
+                .unwrap_or_else(|err| panic!("redirect server address: {err}"))
+        );
+        let redirect_task = tokio::spawn(async move {
+            let (mut stream, _) = redirect
+                .accept()
+                .await
+                .unwrap_or_else(|err| panic!("accept redirect request: {err}"));
+            let mut bytes = [0; 1024];
+            assert!(
+                stream
+                    .read(&mut bytes)
+                    .await
+                    .unwrap_or_else(|err| panic!("read redirect request: {err}"))
+                    > 0
+            );
+            let response = format!(
+                "HTTP/1.1 302 Found\r\nLocation: {location_url}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            );
+            stream
+                .write_all(response.as_bytes())
+                .await
+                .unwrap_or_else(|err| panic!("write redirect response: {err}"));
+        });
+        let mut request = args(ValuePattern::Linear);
+        request.endpoint = redirect_url;
+        request.series_count = 1;
+        request.samples_per_series = 1;
+        request.chunk_series_count = 1;
+        let error = run_prom_remote_write(request)
+            .await
+            .expect_err("redirect must fail remote write");
+        assert!(error.to_string().contains("302"));
+        redirect_task
+            .await
+            .unwrap_or_else(|err| panic!("redirect task: {err}"));
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), location.accept())
+                .await
+                .is_err(),
+            "redirect Location endpoint received a request"
+        );
+    }
+
+    #[tokio::test]
+    async fn remote_write_retains_any_2xx_success_semantics() {
+        let server = TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap_or_else(|err| panic!("bind success server: {err}"));
+        let endpoint = format!(
+            "http://{}/declared/write",
+            server
+                .local_addr()
+                .unwrap_or_else(|err| panic!("success server address: {err}"))
+        );
+        let task = tokio::spawn(async move {
+            let (mut stream, _) = server
+                .accept()
+                .await
+                .unwrap_or_else(|err| panic!("accept success request: {err}"));
+            let mut bytes = [0; 1024];
+            assert!(
+                stream
+                    .read(&mut bytes)
+                    .await
+                    .unwrap_or_else(|err| panic!("read success request: {err}"))
+                    > 0
+            );
+            stream
+                .write_all(
+                    b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .await
+                .unwrap_or_else(|err| panic!("write success response: {err}"));
+        });
+        let mut request = args(ValuePattern::Linear);
+        request.endpoint = endpoint;
+        request.series_count = 1;
+        request.samples_per_series = 1;
+        request.chunk_series_count = 1;
+        let summary = run_prom_remote_write(request)
+            .await
+            .unwrap_or_else(|err| panic!("2xx remote write: {err}"));
+        assert_eq!(summary.http_statuses, vec![204]);
+        task.await
+            .unwrap_or_else(|err| panic!("success task: {err}"));
     }
 }

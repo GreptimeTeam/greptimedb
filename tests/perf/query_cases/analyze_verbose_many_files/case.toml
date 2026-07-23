@@ -72,6 +72,7 @@ series_layout = "round_robin"
 [[scenario.queries]]
 name = "explain_analyze_verbose_full_scan"
 kind = "sql"
+database = "public"
 query = "EXPLAIN ANALYZE VERBOSE SELECT service, avg(cpu) AS avg_cpu, max(mem) AS max_mem FROM analyze_verbose_many_files GROUP BY service ORDER BY avg_cpu DESC LIMIT 10"
 warmup = 1
 iterations = 3
