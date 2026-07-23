@@ -60,7 +60,8 @@ use crate::dist_plan::analyzer::AliasMapping;
 use crate::dist_plan::analyzer::utils::patch_batch_timezone;
 use crate::dist_plan::dyn_filter_bridge::{
     CapturedDynFilter, capture_remote_dyn_filters_for_pushdown,
-    query_context_with_initial_dyn_filter_regs, register_dyn_filters_for_region,
+    query_context_with_initial_dyn_filter_regs, register_dyn_filter_subscribers_for_region,
+    register_remote_dyn_filters,
 };
 use crate::dist_plan::{RemoteDynFilterProducerId, RemoteDynFilterRegistryLease};
 use crate::metrics::{MERGE_SCAN_ERRORS_TOTAL, MERGE_SCAN_POLL_ELAPSED, MERGE_SCAN_REGIONS};
@@ -102,9 +103,8 @@ fn query_context_for_remote_dyn_filter_region(
     captured_dyn_filters: &[CapturedDynFilter],
 ) -> session::context::QueryContext {
     if let Some(remote_dyn_filter_registry_lease) = remote_dyn_filter_registry_lease {
-        register_dyn_filters_for_region(
+        register_remote_dyn_filters(
             remote_dyn_filter_registry_lease.registry(),
-            region_id,
             captured_dyn_filters,
         );
     }
@@ -427,19 +427,26 @@ impl MergeScanExec {
                     );
                 }
 
-                let mut stream = region_query_handler
-                    .do_get(read_preference, request)
-                    .instrument(region_span.clone())
-                    .await
-                    .map_err(|e| {
-                        MERGE_SCAN_ERRORS_TOTAL.inc();
-                        DataFusionError::External(Box::new(e))
-                    })?;
+                let crate::region_query::RoutedRegionQueryStream { mut stream, target } =
+                    region_query_handler
+                        .do_get(read_preference, request)
+                        .instrument(region_span.clone())
+                        .await
+                        .map_err(|e| {
+                            MERGE_SCAN_ERRORS_TOTAL.inc();
+                            DataFusionError::External(Box::new(e))
+                        })?;
                 let do_get_cost = do_get_start.elapsed();
 
                 if let Some(remote_dyn_filter_registry_lease) =
                     remote_dyn_filter_registry_lease.as_ref()
                 {
+                    register_dyn_filter_subscribers_for_region(
+                        remote_dyn_filter_registry_lease.registry(),
+                        region_id,
+                        target,
+                        &captured_remote_dyn_filters,
+                    );
                     remote_dyn_filter_registry_lease
                         .ensure_fanout_task(region_query_handler.clone());
                 }
@@ -1060,8 +1067,10 @@ impl MergeScanMetric {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use async_trait::async_trait;
+    use common_base::Plugins;
     use common_query::request::INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY;
     use common_recordbatch::adapter::{PlanMetrics, RecordBatchMetrics};
     use datafusion::config::ConfigOptions;
@@ -1081,7 +1090,9 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
-    use crate::dist_plan::{DynFilterRegistryManager, Subscriber};
+    use crate::dist_plan::DynFilterRegistryManager;
+    use crate::options::QueryOptions;
+    use crate::query_engine::{QueryEngineContext, QueryEngineState};
     use crate::region_query::RegionQueryHandler;
 
     fn test_query_id(value: u128) -> QueryId {
@@ -1121,6 +1132,15 @@ mod tests {
             false,
         )
         .unwrap()
+    }
+
+    fn task_context_with_engine_state(
+        state: Arc<QueryEngineState>,
+        query_ctx: QueryContextRef,
+    ) -> Arc<TaskContext> {
+        let mut session_state = state.session_state();
+        session_state.config_mut().set_extension(state);
+        QueryEngineContext::new(session_state, query_ctx).build_task_ctx()
     }
 
     #[test]
@@ -1186,7 +1206,7 @@ mod tests {
     }
 
     #[test]
-    fn remote_dyn_filter_region_query_context_registers_before_do_get() {
+    fn remote_dyn_filter_region_query_context_defers_subscriber_registration() {
         let registry_manager = Arc::new(DynFilterRegistryManager::default());
         let query_ctx = QueryContext::arc();
         let query_id = query_ctx
@@ -1213,7 +1233,7 @@ mod tests {
 
         let entries = lease.registry().entries();
         assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].subscribers(), vec![Subscriber::new(region_id)]);
+        assert!(entries[0].subscribers().is_empty());
         assert!(
             !entries[0].fanout_started_for_test(),
             "fanout must start only after do_get succeeds"
@@ -1224,6 +1244,72 @@ mod tests {
                 .is_some(),
             "initial RDF registrations must be present in the do_get query context"
         );
+    }
+
+    #[tokio::test]
+    async fn failed_do_get_does_not_register_subscriber_or_start_fanout() {
+        let handler = Arc::new(FailingRegionQueryHandler::default());
+        let query_ctx = QueryContext::arc();
+        let state = Arc::new(QueryEngineState::new(
+            catalog::memory::new_memory_catalog_manager().unwrap(),
+            None,
+            Some(handler.clone()),
+            None,
+            None,
+            None,
+            false,
+            Plugins::default(),
+            QueryOptions::default(),
+        ));
+        let lease = state
+            .acquire_remote_dyn_filter_registry_lease(&query_ctx)
+            .unwrap();
+        let task_ctx = task_context_with_engine_state(state, query_ctx.clone());
+        let plan = LogicalPlanBuilder::empty(true)
+            .project(vec![lit(1i32).alias("col1")])
+            .unwrap()
+            .build()
+            .unwrap();
+        let schema = plan.schema().as_arrow().clone();
+        let exec = MergeScanExec::new(
+            &SessionStateBuilder::new().build(),
+            TableName::new("catalog", "schema", "table"),
+            vec![RegionId::new(1024, 1)],
+            plan,
+            &schema,
+            handler.clone(),
+            query_ctx,
+            1,
+            AliasMapping::new(),
+            Some(RemoteDynFilterProducerId::new(42)),
+            false,
+        )
+        .unwrap();
+        let dyn_filter = Arc::new(DynamicFilterPhysicalExpr::new(
+            vec![Arc::new(Column::new("host", 0)) as Arc<_>],
+            physical_lit(true) as _,
+        )) as Arc<dyn datafusion_physical_expr::PhysicalExpr>;
+        exec.handle_child_pushdown_result(
+            FilterPushdownPhase::Post,
+            ChildPushdownResult {
+                parent_filters: vec![ChildFilterPushdownResult {
+                    filter: dyn_filter,
+                    child_results: vec![PushedDown::Yes],
+                }],
+                self_filters: Vec::new(),
+            },
+            &ConfigOptions::new(),
+        )
+        .unwrap();
+
+        let mut stream = exec.to_stream(task_ctx, 0).unwrap();
+        assert!(stream.next().await.unwrap().is_err());
+        assert_eq!(handler.do_get_calls.load(Ordering::SeqCst), 1);
+
+        let entries = lease.registry().entries();
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].subscribers().is_empty());
+        assert!(!entries[0].fanout_started_for_test());
     }
 
     #[test]
@@ -1258,19 +1344,28 @@ mod tests {
 
     struct TestRegionQueryHandler;
 
+    #[derive(Default)]
+    struct FailingRegionQueryHandler {
+        do_get_calls: AtomicUsize,
+    }
+
     #[async_trait]
-    impl RegionQueryHandler for TestRegionQueryHandler {
+    impl RegionQueryHandler for FailingRegionQueryHandler {
         async fn do_get(
             &self,
             _read_preference: ReadPreference,
             _request: common_query::request::QueryRequest,
-        ) -> crate::error::Result<common_recordbatch::SendableRecordBatchStream> {
-            unimplemented!("test only")
+        ) -> crate::error::Result<crate::region_query::RoutedRegionQueryStream> {
+            self.do_get_calls.fetch_add(1, Ordering::SeqCst);
+            crate::error::UnimplementedSnafu {
+                operation: "test do_get failure",
+            }
+            .fail()
         }
 
         async fn handle_remote_dyn_filter_update(
             &self,
-            _region_id: RegionId,
+            _target: &crate::region_query::RegionQueryTarget,
             _query_id: String,
             _update: api::v1::region::RemoteDynFilterUpdate,
         ) -> crate::error::Result<()> {
@@ -1279,7 +1374,36 @@ mod tests {
 
         async fn handle_remote_dyn_filter_unregister(
             &self,
-            _region_id: RegionId,
+            _target: &crate::region_query::RegionQueryTarget,
+            _query_id: String,
+            _unregister: api::v1::region::RemoteDynFilterUnregister,
+        ) -> crate::error::Result<()> {
+            unimplemented!("test only")
+        }
+    }
+
+    #[async_trait]
+    impl RegionQueryHandler for TestRegionQueryHandler {
+        async fn do_get(
+            &self,
+            _read_preference: ReadPreference,
+            _request: common_query::request::QueryRequest,
+        ) -> crate::error::Result<crate::region_query::RoutedRegionQueryStream> {
+            unimplemented!("test only")
+        }
+
+        async fn handle_remote_dyn_filter_update(
+            &self,
+            _target: &crate::region_query::RegionQueryTarget,
+            _query_id: String,
+            _update: api::v1::region::RemoteDynFilterUpdate,
+        ) -> crate::error::Result<()> {
+            unimplemented!("test only")
+        }
+
+        async fn handle_remote_dyn_filter_unregister(
+            &self,
+            _target: &crate::region_query::RegionQueryTarget,
             _query_id: String,
             _unregister: api::v1::region::RemoteDynFilterUnregister,
         ) -> crate::error::Result<()> {
