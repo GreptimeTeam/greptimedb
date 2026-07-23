@@ -2644,6 +2644,7 @@ dependencies = [
  "tonic 0.14.2",
  "tracing",
  "typetag",
+ "url",
  "uuid",
 ]
 
