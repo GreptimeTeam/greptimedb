@@ -18,7 +18,7 @@ use std::collections::HashMap;
 use std::num::NonZeroU64;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use common_telemetry::{debug, error, info};
@@ -559,8 +559,10 @@ impl RegionFlushTask {
                 mem_stats.bytes_allocated() as u64,
             )]);
             // Sets `for_flush` flag and propagates the reader batch size.
+            let start = Instant::now();
             let mem_ranges =
                 mem.ranges(None, RangesOptions::for_flush().with_batch_size(batch_size))?;
+            flush_metrics.build_ranges += start.elapsed();
             let num_mem_ranges = mem_ranges.ranges.len();
 
             // Aggregate stats from all ranges
@@ -576,9 +578,11 @@ impl RegionFlushTask {
                 num_encoded,
                 num_sources,
                 results,
+                prepare_source,
             } = self
                 .flush_flat_mem_ranges(version, &write_opts, mem_ranges)
                 .await?;
+            flush_metrics.prepare_source += prepare_source;
             encoded_part_count += num_encoded;
             for (source_idx, result) in results.into_iter().enumerate() {
                 let (max_sequence, ssts_written, metrics) = result?;
@@ -598,6 +602,7 @@ impl RegionFlushTask {
 
                 flush_metrics = flush_metrics.merge(metrics);
 
+                let start = Instant::now();
                 for sst_info in &ssts_written {
                     flushed_bytes += sst_info.file_size;
                     let pk_range = sst_info
@@ -615,6 +620,7 @@ impl RegionFlushTask {
                 if hook.is_some() {
                     all_sst_infos.extend(ssts_written);
                 }
+                flush_metrics.build_file_meta += start.elapsed();
             }
 
             common_telemetry::debug!(
@@ -646,6 +652,7 @@ impl RegionFlushTask {
         write_opts: &WriteOptions,
         mem_ranges: MemtableRanges,
     ) -> Result<FlushFlatMemResult> {
+        let start = Instant::now();
         let batch_schema = to_flat_sst_arrow_schema(
             &version.metadata,
             &FlatSchemaOptions::from_encoding(version.metadata.primary_key_encoding),
@@ -658,6 +665,7 @@ impl RegionFlushTask {
             &version.options,
             field_column_start,
         )?;
+        let prepare_source = start.elapsed();
         let mut tasks = Vec::with_capacity(flat_sources.encoded.len() + flat_sources.sources.len());
         let num_encoded = flat_sources.encoded.len();
         for (source, max_sequence) in flat_sources.sources {
@@ -666,8 +674,10 @@ impl RegionFlushTask {
             let write_opts = write_opts.clone();
             let semaphore = self.flush_semaphore.clone();
             let task = common_runtime::spawn_global(async move {
+                let start = Instant::now();
                 let _permit = semaphore.acquire().await.unwrap();
                 let mut metrics = Metrics::new(WriteType::Flush);
+                metrics.wait_flush_permit = start.elapsed();
                 let ssts = access_layer
                     .write_sst(write_request, &write_opts, &mut metrics)
                     .await?;
@@ -682,10 +692,13 @@ impl RegionFlushTask {
             let region_id = version.metadata.region_id;
             let semaphore = self.flush_semaphore.clone();
             let task = common_runtime::spawn_global(async move {
+                let start = Instant::now();
                 let _permit = semaphore.acquire().await.unwrap();
-                let metrics = access_layer
+                let wait_flush_permit = start.elapsed();
+                let mut metrics = access_layer
                     .put_sst(&encoded.data, region_id, &encoded.sst_info, &cache_manager)
                     .await?;
+                metrics.wait_flush_permit = wait_flush_permit;
                 FLUSH_FILE_TOTAL.inc();
                 Ok((max_sequence, smallvec![encoded.sst_info], metrics))
             });
@@ -699,6 +712,7 @@ impl RegionFlushTask {
             num_encoded,
             num_sources,
             results,
+            prepare_source,
         })
     }
 
@@ -806,6 +820,7 @@ struct FlushFlatMemResult {
     num_encoded: usize,
     num_sources: usize,
     results: Vec<Result<(SequenceNumber, SstInfoArray, Metrics)>>,
+    prepare_source: Duration,
 }
 
 struct DoFlushMemtablesResult {

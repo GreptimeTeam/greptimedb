@@ -177,7 +177,9 @@ where
         metrics: &'a mut Metrics,
     ) -> ParquetWriter<'a, F, I, P> {
         let init_file = FileId::random();
+        let start = Instant::now();
         let indexer = indexer_builder.build(init_file, 0, None).await;
+        metrics.init_writer += start.elapsed();
 
         ParquetWriter {
             path_provider,
@@ -218,7 +220,9 @@ where
             let mut index_output = IndexOutput::default();
             match self.index_config.build_mode {
                 IndexBuildMode::Sync => {
+                    let start = Instant::now();
                     index_output = self.current_indexer.as_mut().unwrap().finish().await;
+                    self.metrics.finish_index += start.elapsed();
                 }
                 IndexBuildMode::Async => {
                     debug!(
@@ -227,11 +231,16 @@ where
                     );
                 }
             }
+            let start = Instant::now();
             current_writer.flush().await.context(WriteParquetSnafu)?;
+            self.metrics.flush_writer += start.elapsed();
 
+            let start = Instant::now();
             let parquet_metadata = current_writer.close().await.context(WriteParquetSnafu)?;
+            self.metrics.close_writer += start.elapsed();
             let file_size = self.bytes_written.load(Ordering::Relaxed) as u64;
 
+            let start = Instant::now();
             // Safety: num rows > 0 so we must have min/max.
             let time_range = stats.time_range.unwrap();
 
@@ -258,6 +267,7 @@ where
                 index_metadata: index_output,
                 num_series,
             });
+            self.metrics.build_sst_info += start.elapsed();
             self.current_file = FileId::random();
             self.bytes_written.store(0, Ordering::Relaxed)
         };
@@ -346,7 +356,9 @@ where
         {
             match record_batch {
                 Ok(batch) => {
+                    let start = Instant::now();
                     stats.update_flat(&batch)?;
+                    self.metrics.update_stats += start.elapsed();
                     if matches!(self.index_config.build_mode, IndexBuildMode::Sync) {
                         let start = Instant::now();
                         // safety: self.current_indexer must be set when first batch has been written.
@@ -413,7 +425,9 @@ where
         };
         self.metrics.iter_source += start.elapsed();
 
+        let start = Instant::now();
         let arrow_batch = converter.convert_batch(&record_batch)?;
+        self.metrics.convert_batch += start.elapsed();
 
         let start = Instant::now();
         self.maybe_init_writer(arrow_batch.schema_ref(), opts)

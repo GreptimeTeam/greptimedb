@@ -63,14 +63,44 @@ pub enum WriteType {
     Compaction,
 }
 
+/// Timings for SST write stages.
 #[derive(Debug)]
 pub struct Metrics {
+    /// SST write operation type.
     pub(crate) write_type: WriteType,
+    /// Time spent waiting for a flush concurrency permit.
+    pub(crate) wait_flush_permit: Duration,
+    /// Time spent building memtable ranges.
+    pub(crate) build_ranges: Duration,
+    /// Time spent preparing flat sources.
+    pub(crate) prepare_source: Duration,
+    /// Time spent initializing the Parquet writer.
+    pub(crate) init_writer: Duration,
+    /// Time spent fetching source batches.
     pub(crate) iter_source: Duration,
+    /// Time spent converting source batches to the write schema.
+    pub(crate) convert_batch: Duration,
+    /// Time spent writing batches to the Parquet writer.
     pub(crate) write_batch: Duration,
+    /// Time spent updating SST statistics.
+    pub(crate) update_stats: Duration,
+    /// Time spent updating indexes with source batches.
     pub(crate) update_index: Duration,
+    /// Time spent finishing indexes.
+    pub(crate) finish_index: Duration,
+    /// Time spent flushing the final Parquet row group.
+    pub(crate) flush_writer: Duration,
+    /// Time spent closing the Parquet writer and completing the object write.
+    pub(crate) close_writer: Duration,
+    /// Time spent building SST information from Parquet metadata.
+    pub(crate) build_sst_info: Duration,
+    /// Time spent converting SST information to file metadata.
+    pub(crate) build_file_meta: Duration,
+    /// Time spent uploading Parquet files when using the write cache.
     pub(crate) upload_parquet: Duration,
+    /// Time spent uploading Puffin files.
     pub(crate) upload_puffin: Duration,
+    /// Time spent compacting memtables before flush.
     pub(crate) compact_memtable: Duration,
 }
 
@@ -78,9 +108,20 @@ impl Metrics {
     pub fn new(write_type: WriteType) -> Self {
         Self {
             write_type,
+            wait_flush_permit: Default::default(),
+            build_ranges: Default::default(),
+            prepare_source: Default::default(),
+            init_writer: Default::default(),
             iter_source: Default::default(),
+            convert_batch: Default::default(),
             write_batch: Default::default(),
+            update_stats: Default::default(),
             update_index: Default::default(),
+            finish_index: Default::default(),
+            flush_writer: Default::default(),
+            close_writer: Default::default(),
+            build_sst_info: Default::default(),
+            build_file_meta: Default::default(),
             upload_parquet: Default::default(),
             upload_puffin: Default::default(),
             compact_memtable: Default::default(),
@@ -89,9 +130,20 @@ impl Metrics {
 
     pub(crate) fn merge(mut self, other: Self) -> Self {
         assert_eq!(self.write_type, other.write_type);
+        self.wait_flush_permit += other.wait_flush_permit;
+        self.build_ranges += other.build_ranges;
+        self.prepare_source += other.prepare_source;
+        self.init_writer += other.init_writer;
         self.iter_source += other.iter_source;
+        self.convert_batch += other.convert_batch;
         self.write_batch += other.write_batch;
+        self.update_stats += other.update_stats;
         self.update_index += other.update_index;
+        self.finish_index += other.finish_index;
+        self.flush_writer += other.flush_writer;
+        self.close_writer += other.close_writer;
+        self.build_sst_info += other.build_sst_info;
+        self.build_file_meta += other.build_file_meta;
         self.upload_parquet += other.upload_parquet;
         self.upload_puffin += other.upload_puffin;
         self.compact_memtable += other.compact_memtable;
@@ -119,7 +171,7 @@ impl Metrics {
                 if !self.compact_memtable.is_zero() {
                     FLUSH_ELAPSED
                         .with_label_values(&["compact_memtable"])
-                        .observe(self.upload_puffin.as_secs_f64());
+                        .observe(self.compact_memtable.as_secs_f64());
                 }
             }
             WriteType::Compaction => {
