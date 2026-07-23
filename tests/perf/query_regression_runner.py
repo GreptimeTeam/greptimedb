@@ -1517,6 +1517,7 @@ def run_otlp_trace_load_scenario(args: argparse.Namespace, case: dict[str, Any],
             write_json(target.report_path, tr)
             report["targets"].append(tr)
             metrics_results.append(metrics)
+            cluster.stop_all()
         report["thresholds"] = planned_otlp_thresholds(load) if args.dry_run else enforce_otlp_thresholds(load, metrics_results[0], metrics_results[1])
         report["status"] = "planned" if args.dry_run else ("failed" if any(t["status"] == "failed" for t in report["thresholds"]) or any(t["status"] == "failed" for t in report["targets"]) else "ok")
     finally:

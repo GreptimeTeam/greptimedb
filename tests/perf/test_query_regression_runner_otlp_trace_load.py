@@ -33,6 +33,58 @@ SPEC.loader.exec_module(runner)
 
 
 class OtlpTraceLoadTest(unittest.TestCase):
+    def test_stops_base_cluster_before_creating_candidate_cluster(self) -> None:
+        events = []
+
+        class FakeCluster:
+            def __init__(self, target):
+                self.target = target
+                self.stopped = False
+                events.append(f"create:{target.name}")
+
+            def component_report(self):
+                return {}
+
+            def stop_all(self):
+                if not self.stopped:
+                    self.stopped = True
+                    events.append(f"stop:{self.target.name}")
+
+        load = {
+            "database": "public",
+            "table": "opentelemetry_traces",
+            "pipeline": "greptime_trace_v1",
+            "duration_seconds": 120,
+            "warmup_seconds": 60,
+            "rate": 50_000,
+            "workers": 4,
+            "workload": "microservices",
+            "exporter_shards": 4,
+            "visibility_timeout_seconds": 1,
+            "thresholds": {
+                "max_candidate_throughput_regression_pct": 20,
+                "max_candidate_mean_latency_regression_pct": 20,
+                "max_failure_count": 0,
+            },
+        }
+        args = runner.argparse.Namespace(fixture_only=False, otelgen_bin=None, dry_run=True, http_timeout=1.0)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            targets = [
+                runner.make_target("base", Path("/bin/true"), root, list(range(10_000, 10_008))),
+                runner.make_target("candidate", Path("/bin/true"), root, list(range(10_008, 10_016))),
+            ]
+            with patch.object(runner, "DistributedCluster", FakeCluster):
+                runner.run_otlp_trace_load_scenario(
+                    args,
+                    {"scenario": {"kind": "otlp_trace_load", "load": load}},
+                    targets,
+                    {"targets": []},
+                )
+
+        self.assertEqual(events, ["create:base", "stop:base", "create:candidate", "stop:candidate"])
+
     def test_warmup_lifecycle_and_labeled_metric_deltas(self) -> None:
         class FakeProcess:
             def __init__(self, *_args, **_kwargs):
