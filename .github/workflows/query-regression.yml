@@ -326,8 +326,8 @@ jobs:
           readonly EXPECTED_CACHE_META="/home/runner/query-regression-cache-meta"
           readonly EXPECTED_SCCACHE_DIR="/home/runner/.cache/sccache"
           readonly EXPECTED_RUSTC_WRAPPER="/usr/local/bin/sccache"
-          readonly RUNNER_IMAGE_DIGEST="sha256:2436278bf0756700c718927907cdbedac64d55c593f80b515acb44dec8b02cc1"
-          readonly RUNNER_IMAGE_EPOCH="4"
+          readonly RUNNER_IMAGE_DIGEST="sha256:e713b294e23b7e15184e558866c90025e59930033e72c97650dbc7f1ca022d11"
+          readonly RUNNER_IMAGE_EPOCH="5"
 
           require_expected_root() {
             local name="$1"
