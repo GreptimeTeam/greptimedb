@@ -14,8 +14,6 @@
 
 //! Parquet reader.
 
-mod stream;
-
 #[cfg(feature = "vector_index")]
 use std::collections::BTreeSet;
 use std::collections::HashSet;
@@ -50,7 +48,6 @@ use store_api::region_request::PathType;
 use store_api::storage::{ColumnId, FileId};
 use table::predicate::Predicate;
 
-use self::stream::{NestedSchemaAligner, ProjectedRecordBatchStream};
 use crate::cache::index::result_cache::PredicateKey;
 use crate::cache::{CacheStrategy, CachedSstMeta, SstMetaPreparation, prepare_sst_meta};
 #[cfg(feature = "vector_index")]
@@ -83,6 +80,7 @@ use crate::sst::parquet::file_range::{
 };
 use crate::sst::parquet::flat_format::{FlatReadFormat, primary_key_column_index};
 use crate::sst::parquet::format::{INTERNAL_COLUMN_NUM, need_override_sequence};
+use crate::sst::parquet::json_align::{NestedSchemaAligner, ProjectedRecordBatchStream};
 use crate::sst::parquet::metadata::MetadataLoader;
 use crate::sst::parquet::prefilter::{
     PrefilterContextBuilder, build_reader_filter_plan, execute_prefilter,

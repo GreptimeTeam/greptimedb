@@ -1128,6 +1128,10 @@ impl Inserter {
     pub fn partition_manager(&self) -> &PartitionRuleManagerRef {
         &self.partition_manager
     }
+
+    pub fn table_flownode_set_cache(&self) -> &TableFlownodeSetCacheRef {
+        &self.table_flownode_set_cache
+    }
 }
 
 fn request_is_native_histogram(request_schema: &[ColumnSchema]) -> bool {

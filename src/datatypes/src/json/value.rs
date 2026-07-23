@@ -42,7 +42,7 @@ pub enum JsonNumber {
 }
 
 impl JsonNumber {
-    fn as_u64(&self) -> Option<u64> {
+    pub(crate) fn as_u64(&self) -> Option<u64> {
         match self {
             JsonNumber::PosInt(n) => Some(*n),
             JsonNumber::NegInt(n) => (*n >= 0).then_some(*n as u64),

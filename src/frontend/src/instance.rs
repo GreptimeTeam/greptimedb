@@ -47,6 +47,7 @@ use common_base::Plugins;
 use common_base::cancellation::CancellableFuture;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_event_recorder::EventRecorderRef;
+use common_meta::cache::TableFlownodeSetCacheRef;
 use common_meta::cache_invalidator::CacheInvalidatorRef;
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::key::table_name::TableNameKey;
@@ -180,6 +181,10 @@ impl Instance {
 
     pub fn partition_manager(&self) -> &PartitionRuleManagerRef {
         self.inserter.partition_manager()
+    }
+
+    pub fn table_flownode_set_cache(&self) -> &TableFlownodeSetCacheRef {
+        self.inserter.table_flownode_set_cache()
     }
 
     pub fn cache_invalidator(&self) -> &CacheInvalidatorRef {
