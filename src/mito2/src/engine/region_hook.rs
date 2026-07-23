@@ -421,10 +421,30 @@ pub trait RegionHook: Send + Sync + Debug {
     /// same `removed_files`; treat live cleanup as opportunistic.
     ///
     /// `region_metadata` is `None` for dropped regions; use `region_id` +
-    /// `access_layer`. Idempotent; runs on the background GC task (the offline
-    /// cleanup path runs it inline on the worker loop and propagates `Err` so
-    /// the caller retries the cleanup — the whole offline-cleanup handler is
-    /// idempotent).
+    /// `access_layer`. Idempotent.
+    ///
+    /// # Execution context
+    ///
+    /// On the global-GC path this runs on the background GC task, outside the
+    /// region worker loop. The offline cleanup path
+    /// (`handle_offline_cleanup_request`, reached by soft-drop PURGE) instead
+    /// runs it **inline in the region worker loop** and propagates `Err` so the
+    /// caller retries the (idempotent) cleanup. So — like `on_region_closed` /
+    /// `on_region_dropped` — implementations **must be fast and must not block
+    /// indefinitely** while awaited there: while the callback is pending, every
+    /// subsequent DDL request for every region on that worker is blocked.
+    /// Extension authors who wrote their hook against the "background GC task"
+    /// contract must account for this second, latency-sensitive trigger.
+    ///
+    /// The offline cleanup path fires this callback once the region directory is
+    /// confirmed **absent** — including no-op purges where nothing was actually
+    /// removed this call (a retry after the directory was already gone, or a
+    /// region that never had files on this datanode, since
+    /// `remove_region_dir_for_full_drop` returns `Ok` for an absent/empty
+    /// prefix). `RegionGcInfo::removed_files` is empty in that case; do **not**
+    /// interpret the call as "files were deleted in this call". This is
+    /// asymmetric with the GC path, which fires only when files were deleted or
+    /// a full listing was performed.
     async fn on_region_gc(
         &self,
         region_id: RegionId,
