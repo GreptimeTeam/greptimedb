@@ -16,10 +16,14 @@ use std::assert_matches;
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use api::v1::value::ValueData;
 use api::v1::{CreateViewExpr, TableName};
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
-use common_procedure::{Context as ProcedureContext, Procedure, ProcedureId, Status};
+use common_procedure::{
+    ChildSubmissionOutcome, Context as ProcedureContext, EventContext, EventTrigger, Procedure,
+    ProcedureId, ProcedureState, RetryPhase, Status,
+};
 use common_procedure_test::MockContextProvider;
 use table::metadata;
 use table::metadata::{TableInfo, TableMeta, TableType};
@@ -28,6 +32,7 @@ use crate::ddl::create_table::CreateTableProcedure;
 use crate::ddl::create_view::CreateViewProcedure;
 use crate::ddl::test_util::datanode_handler::NaiveDatanodeHandler;
 use crate::ddl::tests::create_table::test_create_table_task;
+use crate::ddl::view_event::CREATE_VIEW_EVENT_TYPE;
 use crate::error::Error;
 use crate::rpc::ddl::CreateViewTask;
 use crate::test_util::{MockDatanodeManager, new_ddl_context};
@@ -91,6 +96,191 @@ pub(crate) fn test_create_view_task(name: &str) -> CreateViewTask {
         create_view: expr,
         view_info,
     }
+}
+
+#[test]
+fn test_create_view_event_submitted() {
+    let node_manager = Arc::new(MockDatanodeManager::new(()));
+    let ddl_context = new_ddl_context(node_manager);
+    let mut task = test_create_view_task("v_metrics");
+    task.create_view.or_replace = true;
+    task.create_view.create_if_not_exists = true;
+    task.view_info.ident.table_id = 42;
+    let procedure = CreateViewProcedure::new(task, ddl_context);
+    let state = ProcedureState::Running;
+
+    let event = procedure
+        .event(&EventContext {
+            procedure_id: ProcedureId::random(),
+            lifecycle_state: &state,
+            trigger: EventTrigger::Submitted,
+        })
+        .unwrap();
+
+    assert_eq!(event.event_type(), CREATE_VIEW_EVENT_TYPE);
+    assert_eq!(
+        event.json_payload().unwrap(),
+        serde_json::json!({
+            "version": 1,
+            "or_replace": true,
+            "create_if_not_exists": true,
+            "referenced_table_count": 2,
+            "column_count": 1,
+        })
+    );
+    let payload = event.json_payload().unwrap().to_string();
+    assert!(!payload.contains("CREATE VIEW"));
+    assert!(!payload.contains("SELECT"));
+    assert!(!payload.contains("a_table"));
+    assert!(!payload.contains("b_table"));
+
+    let values = event.extra_rows().unwrap().remove(0).values;
+    assert_eq!(
+        values[..3],
+        [
+            ValueData::StringValue("greptime".to_string()).into(),
+            ValueData::StringValue("public".to_string()).into(),
+            ValueData::StringValue("v_metrics".to_string()).into(),
+        ]
+    );
+    assert!(values[3].value_data.is_none());
+}
+
+#[test]
+fn test_create_view_event_lifecycle_rows_have_fixed_schema() {
+    let node_manager = Arc::new(MockDatanodeManager::new(()));
+    let ddl_context = new_ddl_context(node_manager);
+    let mut task = test_create_view_task("v_metrics");
+    task.view_info.ident.table_id = 42;
+    let procedure = CreateViewProcedure::new(task, ddl_context);
+    let state = ProcedureState::Running;
+    let submitted = procedure
+        .event(&EventContext {
+            procedure_id: ProcedureId::random(),
+            lifecycle_state: &state,
+            trigger: EventTrigger::Submitted,
+        })
+        .unwrap();
+    let expected_schema = submitted.extra_schema();
+    let submitted_values = submitted.extra_rows().unwrap().remove(0).values;
+    assert!(
+        submitted_values[..3]
+            .iter()
+            .all(|value| value.value_data.is_some())
+    );
+    assert!(submitted_values[3].value_data.is_none());
+
+    let lightweight_triggers = [
+        EventTrigger::Recovered,
+        EventTrigger::ChildSubmitted {
+            procedure_id: ProcedureId::random(),
+            outcome: ChildSubmissionOutcome::Accepted,
+        },
+        EventTrigger::Retrying {
+            phase: RetryPhase::Execute,
+            attempt: 1,
+        },
+        EventTrigger::RollingBack,
+        EventTrigger::Failed,
+        EventTrigger::Poisoned,
+    ];
+
+    for trigger in lightweight_triggers {
+        let event = procedure
+            .event(&EventContext {
+                procedure_id: ProcedureId::random(),
+                lifecycle_state: &state,
+                trigger,
+            })
+            .unwrap();
+        assert_eq!(event.extra_schema(), expected_schema);
+        assert_eq!(event.json_payload().unwrap(), serde_json::Value::Null);
+        assert!(
+            event
+                .extra_rows()
+                .unwrap()
+                .remove(0)
+                .values
+                .iter()
+                .all(|value| value.value_data.is_none())
+        );
+    }
+
+    let succeeded_state = ProcedureState::Done {
+        output: Some(Arc::new(84_u32)),
+    };
+    let succeeded = procedure
+        .event(&EventContext {
+            procedure_id: ProcedureId::random(),
+            lifecycle_state: &succeeded_state,
+            trigger: EventTrigger::Succeeded,
+        })
+        .unwrap();
+    assert_eq!(succeeded.extra_schema(), expected_schema);
+    assert_eq!(succeeded.json_payload().unwrap(), serde_json::Value::Null);
+    let values = succeeded.extra_rows().unwrap().remove(0).values;
+    assert!(values[..3].iter().all(|value| value.value_data.is_none()));
+    assert_eq!(values[3].value_data, Some(ValueData::U32Value(84)));
+}
+
+#[test]
+fn test_create_view_event_succeeded_without_output_is_lifecycle() {
+    let node_manager = Arc::new(MockDatanodeManager::new(()));
+    let mut task = test_create_view_task("v_metrics");
+    task.view_info.ident.table_id = 42;
+    let procedure = CreateViewProcedure::new(task, new_ddl_context(node_manager));
+    let state = ProcedureState::Done { output: None };
+
+    let event = procedure
+        .event(&EventContext {
+            procedure_id: ProcedureId::random(),
+            lifecycle_state: &state,
+            trigger: EventTrigger::Succeeded,
+        })
+        .unwrap();
+
+    assert_eq!(event.event_type(), CREATE_VIEW_EVENT_TYPE);
+    assert_eq!(event.json_payload().unwrap(), serde_json::Value::Null);
+    assert!(
+        event
+            .extra_rows()
+            .unwrap()
+            .remove(0)
+            .values
+            .iter()
+            .all(|value| value.value_data.is_none())
+    );
+}
+
+#[test]
+fn test_create_view_event_succeeded_with_wrong_output_type_is_lifecycle() {
+    let node_manager = Arc::new(MockDatanodeManager::new(()));
+    let mut task = test_create_view_task("v_metrics");
+    task.view_info.ident.table_id = 42;
+    let procedure = CreateViewProcedure::new(task, new_ddl_context(node_manager));
+    let state = ProcedureState::Done {
+        output: Some(Arc::new("not a table id".to_string())),
+    };
+
+    let event = procedure
+        .event(&EventContext {
+            procedure_id: ProcedureId::random(),
+            lifecycle_state: &state,
+            trigger: EventTrigger::Succeeded,
+        })
+        .unwrap();
+
+    assert_eq!(event.event_type(), CREATE_VIEW_EVENT_TYPE);
+    assert_eq!(event.json_payload().unwrap(), serde_json::Value::Null);
+    assert!(
+        event
+            .extra_rows()
+            .unwrap()
+            .remove(0)
+            .values
+            .iter()
+            .all(|value| value.value_data.is_none())
+    );
 }
 
 #[tokio::test]

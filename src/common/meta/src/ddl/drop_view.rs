@@ -13,9 +13,11 @@
 // limitations under the License.
 
 use async_trait::async_trait;
+use common_event_recorder::Event;
 use common_procedure::error::{FromJsonSnafu, ToJsonSnafu};
 use common_procedure::{
-    Context as ProcedureContext, LockKey, Procedure, Result as ProcedureResult, Status,
+    Context as ProcedureContext, EventContext, EventTrigger, LockKey, Procedure,
+    Result as ProcedureResult, Status,
 };
 use common_telemetry::info;
 use serde::{Deserialize, Serialize};
@@ -27,6 +29,7 @@ use table::table_reference::TableReference;
 use crate::cache_invalidator::Context;
 use crate::ddl::DdlContext;
 use crate::ddl::utils::map_to_procedure_error;
+use crate::ddl::view_event::ViewDdlEvent;
 use crate::error::{self, Result};
 use crate::instruction::CacheIdent;
 use crate::key::table_name::TableNameKey;
@@ -208,6 +211,25 @@ impl Procedure for DropViewProcedure {
         ];
 
         LockKey::new(lock_key)
+    }
+
+    fn event(&self, ctx: &EventContext<'_>) -> Option<Box<dyn Event>> {
+        let event = match &ctx.trigger {
+            EventTrigger::Submitted => {
+                let table_ref = self.data.table_ref();
+                ViewDdlEvent::drop_submitted(
+                    table_ref.catalog,
+                    table_ref.schema,
+                    table_ref.table,
+                    self.data.view_id(),
+                    self.data.task.drop_if_exists,
+                )
+            }
+            EventTrigger::Succeeded => ViewDdlEvent::drop_succeeded(),
+            _ => ViewDdlEvent::drop_lifecycle(),
+        };
+
+        Some(Box::new(event))
     }
 }
 

@@ -13,8 +13,12 @@
 // limitations under the License.
 
 use async_trait::async_trait;
+use common_event_recorder::Event;
 use common_procedure::error::{FromJsonSnafu, Result as ProcedureResult, ToJsonSnafu};
-use common_procedure::{Context as ProcedureContext, LockKey, Procedure, Status};
+use common_procedure::{
+    Context as ProcedureContext, EventContext, EventTrigger, LockKey, Procedure, ProcedureState,
+    Status,
+};
 use common_telemetry::info;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt, ensure};
@@ -24,6 +28,7 @@ use table::table_reference::TableReference;
 
 use crate::cache_invalidator::Context;
 use crate::ddl::utils::map_to_procedure_error;
+use crate::ddl::view_event::ViewDdlEvent;
 use crate::ddl::{DdlContext, TableMetadata};
 use crate::error::{self, Result};
 use crate::instruction::CacheIdent;
@@ -264,6 +269,35 @@ impl Procedure for CreateViewProcedure {
             SchemaLock::read(table_ref.catalog, table_ref.schema).into(),
             TableNameLock::new(table_ref.catalog, table_ref.schema, table_ref.table).into(),
         ])
+    }
+
+    fn event(&self, ctx: &EventContext<'_>) -> Option<Box<dyn Event>> {
+        let event = match &ctx.trigger {
+            EventTrigger::Submitted => {
+                let expr = &self.data.task.create_view;
+                ViewDdlEvent::create_submitted(
+                    &expr.catalog_name,
+                    &expr.schema_name,
+                    &expr.view_name,
+                    expr.or_replace,
+                    expr.create_if_not_exists,
+                    self.data.task.table_names().len(),
+                    self.data.task.columns().len(),
+                )
+            }
+            EventTrigger::Succeeded => match ctx.lifecycle_state {
+                ProcedureState::Done {
+                    output: Some(output),
+                } => output.downcast_ref::<TableId>().copied().map_or_else(
+                    ViewDdlEvent::create_lifecycle,
+                    ViewDdlEvent::create_succeeded,
+                ),
+                _ => ViewDdlEvent::create_lifecycle(),
+            },
+            _ => ViewDdlEvent::create_lifecycle(),
+        };
+
+        Some(Box::new(event))
     }
 }
 
