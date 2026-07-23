@@ -301,6 +301,9 @@ pub struct MetasrvOptions {
     pub stats_persistence: StatsPersistenceOptions,
     /// The GC scheduler options.
     pub gc: GcSchedulerOptions,
+    /// Whether DDL soft drop is enabled by internal test plumbing.
+    #[serde(skip)]
+    pub ddl_soft_drop_enabled: bool,
 }
 
 impl fmt::Debug for MetasrvOptions {
@@ -401,6 +404,7 @@ impl Default for MetasrvOptions {
             event_recorder: EventRecorderOptions::default(),
             stats_persistence: StatsPersistenceOptions::default(),
             gc: GcSchedulerOptions::default(),
+            ddl_soft_drop_enabled: false,
             backend_client: BackendClientOptions::default(),
         }
     }

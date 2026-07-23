@@ -19,10 +19,11 @@ use std::collections::HashMap;
 
 use async_trait::async_trait;
 use common_error::ext::BoxedError;
+use common_event_recorder::Event;
 use common_procedure::error::{ExternalSnafu, FromJsonSnafu, ToJsonSnafu};
 use common_procedure::{
-    Context as ProcedureContext, Error as ProcedureError, LockKey, Procedure,
-    Result as ProcedureResult, Status,
+    Context as ProcedureContext, Error as ProcedureError, EventContext, EventTrigger, LockKey,
+    Procedure, Result as ProcedureResult, Status,
 };
 use common_telemetry::info;
 use common_telemetry::tracing::warn;
@@ -36,6 +37,9 @@ use table::table_reference::TableReference;
 
 use self::executor::DropTableExecutor;
 use crate::ddl::DdlContext;
+use crate::ddl::table_ddl_event::{
+    TableDdlEvent, TableDdlEventType, TableDdlLocator, versioned_table_ddl_payload_or_error,
+};
 use crate::ddl::utils::{convert_region_routes_to_detecting_regions, map_to_procedure_error};
 use crate::error::{self, Result};
 use crate::key::table_route::TableRouteValue;
@@ -290,6 +294,21 @@ impl Procedure for DropTableProcedure {
         ];
 
         LockKey::new(lock_key)
+    }
+
+    fn event(&self, ctx: &EventContext<'_>) -> Option<Box<dyn Event>> {
+        let event = match &ctx.trigger {
+            EventTrigger::Submitted => {
+                let task = &self.data.task;
+                let locator = TableDdlLocator::new(&task.catalog, &task.schema, &task.table)
+                    .with_table_id(task.table_id);
+                let payload = versioned_table_ddl_payload_or_error(task);
+                TableDdlEvent::submitted(TableDdlEventType::DropTable, locator, payload)
+            }
+            _ => TableDdlEvent::lifecycle(TableDdlEventType::DropTable),
+        };
+
+        Some(Box::new(event))
     }
 
     fn rollback_supported(&self) -> bool {

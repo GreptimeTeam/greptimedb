@@ -16,12 +16,17 @@ use std::assert_matches;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use api::v1::Value;
 use api::v1::region::{RegionRequest, region_request};
+use api::v1::value::ValueData;
 use async_trait::async_trait;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, FILE_ENGINE};
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
-use common_procedure::{Procedure, StringKey};
+use common_procedure::{
+    ChildSubmissionOutcome, EventContext, EventTrigger, Procedure, ProcedureId, ProcedureState,
+    RetryPhase, StringKey,
+};
 use common_procedure_test::{
     execute_procedure_until, execute_procedure_until_done, new_test_procedure_context,
 };
@@ -50,6 +55,88 @@ use crate::peer::Peer;
 use crate::rpc::ddl::{DropTableTask, PurgeDroppedTableTask, UndropTableTask};
 use crate::rpc::router::{Region, RegionRoute};
 use crate::test_util::{MockDatanodeManager, new_ddl_context, new_ddl_context_with_kv_backend};
+
+#[test]
+fn test_drop_table_submitted_event_has_locator_and_full_versioned_task() {
+    let task = new_drop_table_task("foo", 1024, true);
+    let procedure = DropTableProcedure::new(
+        task,
+        new_ddl_context(Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler))),
+    );
+    let state = ProcedureState::Running;
+    let event = procedure
+        .event(&EventContext {
+            procedure_id: ProcedureId::random(),
+            lifecycle_state: &state,
+            trigger: EventTrigger::Submitted,
+        })
+        .unwrap();
+
+    assert_eq!(event.event_type(), "drop_table");
+    assert_eq!(
+        event.json_payload().unwrap(),
+        serde_json::json!({
+            "version": 1,
+            "data": {
+                "catalog": DEFAULT_CATALOG_NAME,
+                "schema": DEFAULT_SCHEMA_NAME,
+                "table": "foo",
+                "table_id": 1024,
+                "drop_if_exists": true,
+            },
+        })
+    );
+    assert_eq!(
+        event.extra_rows().unwrap()[0].values,
+        vec![
+            ValueData::StringValue(DEFAULT_CATALOG_NAME.to_string()).into(),
+            ValueData::StringValue(DEFAULT_SCHEMA_NAME.to_string()).into(),
+            ValueData::StringValue("foo".to_string()).into(),
+            ValueData::U32Value(1024).into(),
+        ]
+    );
+}
+
+#[test]
+fn test_drop_table_lifecycle_events_are_lightweight_without_success_id() {
+    let procedure = DropTableProcedure::new(
+        new_drop_table_task("foo", 1024, false),
+        new_ddl_context(Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler))),
+    );
+    let state = ProcedureState::Running;
+    let triggers = [
+        EventTrigger::Recovered,
+        EventTrigger::ChildSubmitted {
+            procedure_id: ProcedureId::random(),
+            outcome: ChildSubmissionOutcome::Accepted,
+        },
+        EventTrigger::Retrying {
+            phase: RetryPhase::Execute,
+            attempt: 1,
+        },
+        EventTrigger::RollingBack,
+        EventTrigger::Succeeded,
+        EventTrigger::Failed,
+        EventTrigger::Poisoned,
+    ];
+
+    for trigger in triggers {
+        let event = procedure
+            .event(&EventContext {
+                procedure_id: ProcedureId::random(),
+                lifecycle_state: &state,
+                trigger,
+            })
+            .unwrap();
+
+        assert_eq!(event.event_type(), "drop_table");
+        assert_eq!(event.json_payload().unwrap(), serde_json::Value::Null);
+        assert_eq!(
+            event.extra_rows().unwrap()[0].values,
+            vec![Value::default(); 4]
+        );
+    }
+}
 
 #[tokio::test]
 async fn test_on_prepare_table_not_exists_err() {

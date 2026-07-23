@@ -687,10 +687,8 @@ fn build_procedure_manager(
 }
 
 /// Resolves if soft-drop is enabled from metasrv options.
-fn ddl_soft_drop_enabled(_options: &MetasrvOptions) -> bool {
-    // TODO(hl): add a dedicated soft-drop cluster config
-    // when wiring the user-facing option.
-    false
+fn ddl_soft_drop_enabled(options: &MetasrvOptions) -> bool {
+    options.ddl_soft_drop_enabled
 }
 
 impl Default for MetasrvBuilder {

@@ -22,7 +22,10 @@ use common_procedure::error::{
     ExternalSnafu, FromJsonSnafu, Result as ProcedureResult, ToJsonSnafu,
 };
 use common_procedure::local::DynamicKeyLockGuard;
-use common_procedure::{Context as ProcedureContext, LockKey, Procedure, ProcedureId, Status};
+use common_procedure::{
+    Context as ProcedureContext, EventContext, EventTrigger, LockKey, Procedure, ProcedureId,
+    ProcedureState, Status,
+};
 use common_telemetry::info;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt};
@@ -35,6 +38,9 @@ pub(crate) use template::{CreateRequestBuilder, build_template_from_raw_table_in
 
 use crate::ddl::create_table::executor::CreateTableExecutor;
 use crate::ddl::create_table::template::build_template;
+use crate::ddl::table_ddl_event::{
+    TableDdlEvent, TableDdlEventType, TableDdlLocator, versioned_table_ddl_payload_or_error,
+};
 use crate::ddl::utils::map_to_procedure_error;
 use crate::ddl::{DdlContext, TableMetadata};
 use crate::error::{self, Result};
@@ -393,6 +399,51 @@ impl Procedure for CreateTableProcedure {
             SchemaLock::read(table_ref.catalog, table_ref.schema).into(),
             TableNameLock::new(table_ref.catalog, table_ref.schema, table_ref.table).into(),
         ])
+    }
+
+    fn event(&self, ctx: &EventContext<'_>) -> Option<Box<dyn common_event_recorder::Event>> {
+        #[derive(Serialize)]
+        struct CreateTableEventPayload<'a> {
+            kind: &'static str,
+            task: &'a CreateTableTask,
+            table_info: &'a TableInfo,
+            region_wal_options: &'a Option<RegionWalOptions>,
+            table_options: &'a table::requests::TableOptions,
+        }
+
+        let event = match &ctx.trigger {
+            EventTrigger::Submitted => {
+                let table_ref = self.data.table_ref();
+                let locator =
+                    TableDdlLocator::new(table_ref.catalog, table_ref.schema, table_ref.table);
+                let payload = CreateTableEventPayload {
+                    kind: "create_table",
+                    task: &self.data.task,
+                    table_info: self.table_info(),
+                    region_wal_options: &self.data.region_wal_options,
+                    table_options: &self.table_info().meta.options,
+                };
+
+                TableDdlEvent::submitted(
+                    TableDdlEventType::CreateTable,
+                    locator,
+                    versioned_table_ddl_payload_or_error(payload),
+                )
+            }
+            EventTrigger::Succeeded => match ctx.lifecycle_state {
+                ProcedureState::Done {
+                    output: Some(output),
+                } => output
+                    .downcast_ref::<TableId>()
+                    .copied()
+                    .map(TableDdlEvent::create_table_succeeded)
+                    .unwrap_or_else(|| TableDdlEvent::lifecycle(TableDdlEventType::CreateTable)),
+                _ => TableDdlEvent::lifecycle(TableDdlEventType::CreateTable),
+            },
+            _ => TableDdlEvent::lifecycle(TableDdlEventType::CreateTable),
+        };
+
+        Some(Box::new(event))
     }
 }
 

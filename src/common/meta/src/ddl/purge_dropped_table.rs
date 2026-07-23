@@ -17,7 +17,8 @@ use std::collections::HashMap;
 use async_trait::async_trait;
 use common_procedure::error::{FromJsonSnafu, ToJsonSnafu};
 use common_procedure::{
-    Context as ProcedureContext, LockKey, Procedure, Result as ProcedureResult, Status,
+    Context as ProcedureContext, EventContext, EventTrigger, LockKey, Procedure,
+    Result as ProcedureResult, Status,
 };
 use common_wal::options::WalOptions;
 use serde::{Deserialize, Serialize};
@@ -29,6 +30,9 @@ use table::table_name::TableName;
 
 use crate::ddl::DdlContext;
 use crate::ddl::drop_table::executor::DropTableExecutor;
+use crate::ddl::table_ddl_event::{
+    TableDdlEvent, TableDdlEventType, TableDdlLocator, versioned_table_ddl_payload_or_error,
+};
 use crate::ddl::utils::{
     convert_region_routes_to_detecting_regions, is_metric_engine_logical_table,
     map_to_procedure_error,
@@ -151,6 +155,19 @@ impl Procedure for PurgeDroppedTableProcedure {
 
     fn lock_key(&self) -> LockKey {
         LockKey::new(vec![TableLock::Write(self.data.task.table_id).into()])
+    }
+
+    fn event(&self, ctx: &EventContext<'_>) -> Option<Box<dyn common_event_recorder::Event>> {
+        let event = match &ctx.trigger {
+            EventTrigger::Submitted => {
+                let locator = TableDdlLocator::from_table_id(self.data.task.table_id);
+                let payload = versioned_table_ddl_payload_or_error(&self.data.task);
+                TableDdlEvent::submitted(TableDdlEventType::PurgeDroppedTable, locator, payload)
+            }
+            _ => TableDdlEvent::lifecycle(TableDdlEventType::PurgeDroppedTable),
+        };
+
+        Some(Box::new(event))
     }
 }
 

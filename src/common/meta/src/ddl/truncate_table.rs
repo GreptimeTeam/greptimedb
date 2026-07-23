@@ -20,7 +20,8 @@ use api::v1::region::{
 use async_trait::async_trait;
 use common_procedure::error::{FromJsonSnafu, ToJsonSnafu};
 use common_procedure::{
-    Context as ProcedureContext, LockKey, Procedure, Result as ProcedureResult, Status,
+    Context as ProcedureContext, EventContext, EventTrigger, LockKey, Procedure,
+    Result as ProcedureResult, Status,
 };
 use common_telemetry::debug;
 use common_telemetry::tracing_context::TracingContext;
@@ -34,6 +35,9 @@ use table::table_name::TableName;
 use table::table_reference::TableReference;
 
 use crate::ddl::DdlContext;
+use crate::ddl::table_ddl_event::{
+    TableDdlEvent, TableDdlEventType, TableDdlLocator, versioned_table_ddl_payload_or_error,
+};
 use crate::ddl::utils::{add_peer_context_if_needed, map_to_procedure_error};
 use crate::error::{ConvertTimeRangesSnafu, Result, TableNotFoundSnafu};
 use crate::key::DeserializedValueWithBytes;
@@ -85,6 +89,21 @@ impl Procedure for TruncateTableProcedure {
         ];
 
         LockKey::new(lock_key)
+    }
+
+    fn event(&self, ctx: &EventContext<'_>) -> Option<Box<dyn common_event_recorder::Event>> {
+        let event = match &ctx.trigger {
+            EventTrigger::Submitted => {
+                let task = &self.data.task;
+                let locator = TableDdlLocator::new(&task.catalog, &task.schema, &task.table)
+                    .with_table_id(task.table_id);
+                let payload = versioned_table_ddl_payload_or_error(task);
+                TableDdlEvent::submitted(TableDdlEventType::TruncateTable, locator, payload)
+            }
+            _ => TableDdlEvent::lifecycle(TableDdlEventType::TruncateTable),
+        };
+
+        Some(Box::new(event))
     }
 }
 

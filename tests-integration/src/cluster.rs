@@ -170,6 +170,7 @@ pub struct GreptimeDbClusterBuilder {
     metasrv_gc_config: GcSchedulerOptions,
     shared_home_dir: Option<Arc<TempDir>>,
     meta_selector: Option<SelectorRef>,
+    ddl_soft_drop_enabled: bool,
 }
 
 impl GreptimeDbClusterBuilder {
@@ -203,6 +204,7 @@ impl GreptimeDbClusterBuilder {
             metasrv_gc_config: GcSchedulerOptions::default(),
             shared_home_dir: None,
             meta_selector: None,
+            ddl_soft_drop_enabled: false,
         }
     }
 
@@ -259,6 +261,12 @@ impl GreptimeDbClusterBuilder {
         self
     }
 
+    #[must_use]
+    pub fn with_ddl_soft_drop_enabled(mut self, enabled: bool) -> Self {
+        self.ddl_soft_drop_enabled = enabled;
+        self
+    }
+
     pub async fn build_with(
         &self,
         datanode_options: Vec<DatanodeOptions>,
@@ -284,6 +292,7 @@ impl GreptimeDbClusterBuilder {
                 ..Default::default()
             },
             gc: self.metasrv_gc_config.clone(),
+            ddl_soft_drop_enabled: self.ddl_soft_drop_enabled,
             ..Default::default()
         };
 

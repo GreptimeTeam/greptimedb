@@ -21,8 +21,12 @@ use api::region::RegionResponse;
 use api::v1::CreateTableExpr;
 use async_trait::async_trait;
 use common_catalog::consts::METRIC_ENGINE;
+use common_event_recorder::Event;
 use common_procedure::error::{FromJsonSnafu, Result as ProcedureResult, ToJsonSnafu};
-use common_procedure::{Context as ProcedureContext, LockKey, Procedure, Status};
+use common_procedure::{
+    Context as ProcedureContext, EventContext, EventTrigger, LockKey, Procedure, ProcedureState,
+    Status,
+};
 use common_telemetry::{debug, error, warn};
 use futures::future;
 pub use region_request::create_region_request_builder;
@@ -35,6 +39,9 @@ use strum::AsRefStr;
 use table::metadata::{TableId, TableInfo};
 
 use crate::ddl::DdlContext;
+use crate::ddl::table_ddl_event::{
+    TableDdlEvent, TableDdlEventType, TableDdlLocator, versioned_table_ddl_payload_or_error,
+};
 use crate::ddl::utils::{
     add_peer_context_if_needed, extract_column_metadatas, map_to_procedure_error,
     sync_follower_regions,
@@ -251,6 +258,70 @@ impl Procedure for CreateLogicalTablesProcedure {
             );
         }
         LockKey::new(lock_key)
+    }
+
+    fn event(&self, ctx: &EventContext<'_>) -> Option<Box<dyn Event>> {
+        let event = match &ctx.trigger {
+            EventTrigger::Submitted => {
+                #[derive(Serialize)]
+                struct LogicalTablePayload<'a> {
+                    task: &'a CreateTableTask,
+                    table_info: &'a TableInfo,
+                }
+
+                #[derive(Serialize)]
+                struct CreateLogicalTablesPayload<'a> {
+                    kind: &'static str,
+                    physical_table_id: TableId,
+                    tables: Vec<LogicalTablePayload<'a>>,
+                }
+
+                let locators = self.data.tasks.iter().map(|task| {
+                    TableDdlLocator::new(
+                        &task.create_table.catalog_name,
+                        &task.create_table.schema_name,
+                        &task.create_table.table_name,
+                    )
+                    .with_physical_table_id(self.data.physical_table_id)
+                });
+                let tables = self
+                    .data
+                    .tasks
+                    .iter()
+                    .map(|task| LogicalTablePayload {
+                        task,
+                        table_info: &task.table_info,
+                    })
+                    .collect();
+                let payload = versioned_table_ddl_payload_or_error(CreateLogicalTablesPayload {
+                    kind: "create_logical_tables",
+                    physical_table_id: self.data.physical_table_id,
+                    tables,
+                });
+
+                TableDdlEvent::submitted_for_tables(
+                    TableDdlEventType::CreateLogicalTables,
+                    locators,
+                    payload,
+                )
+            }
+            EventTrigger::Succeeded => match ctx.lifecycle_state {
+                ProcedureState::Done {
+                    output: Some(output),
+                } => output
+                    .downcast_ref::<Vec<TableId>>()
+                    .map(|table_ids| {
+                        TableDdlEvent::create_logical_tables_succeeded(table_ids.iter().copied())
+                    })
+                    .unwrap_or_else(|| {
+                        TableDdlEvent::lifecycle(TableDdlEventType::CreateLogicalTables)
+                    }),
+                _ => TableDdlEvent::lifecycle(TableDdlEventType::CreateLogicalTables),
+            },
+            _ => TableDdlEvent::lifecycle(TableDdlEventType::CreateLogicalTables),
+        };
+
+        Some(Box::new(event))
     }
 }
 

@@ -19,9 +19,13 @@ use api::region::RegionResponse;
 use api::v1::meta::Peer;
 use api::v1::region::sync_request::ManifestInfo;
 use api::v1::region::{MetricManifestInfo, RegionRequest, SyncRequest, region_request};
-use api::v1::{ColumnDataType, SemanticType};
+use api::v1::value::ValueData;
+use api::v1::{ColumnDataType, SemanticType, Value};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
-use common_procedure::{Procedure, ProcedureId, Status};
+use common_procedure::{
+    ChildSubmissionOutcome, EventContext, EventTrigger, Procedure, ProcedureId, ProcedureState,
+    RetryPhase, Status,
+};
 use common_procedure_test::MockContextProvider;
 use store_api::metadata::ColumnMetadata;
 use store_api::metric_engine_consts::{ALTER_PHYSICAL_EXTENSION_KEY, MANIFEST_INFO_EXTENSION_KEY};
@@ -31,6 +35,7 @@ use store_api::storage::consts::ReservedColumnId;
 use tokio::sync::mpsc;
 
 use crate::ddl::alter_logical_tables::AlterLogicalTablesProcedure;
+use crate::ddl::table_ddl_event::TABLE_DDL_PAYLOAD_VERSION;
 use crate::ddl::test_util::alter_table::TestAlterTableExprBuilder;
 use crate::ddl::test_util::columns::TestColumnDefBuilder;
 use crate::ddl::test_util::datanode_handler::DatanodeWatcher;
@@ -141,6 +146,120 @@ fn assert_alters_request(
             *region_id,
             "actual region id: {}",
             RegionId::from_u64(req.requests[i].region_id)
+        );
+    }
+}
+
+#[test]
+fn test_submitted_event_has_one_row_per_logical_table_and_full_payload() {
+    let node_manager = Arc::new(MockDatanodeManager::new(()));
+    let ddl_context = new_ddl_context(node_manager);
+    let tasks = vec![
+        make_alter_logical_table_add_column_task(
+            Some(DEFAULT_SCHEMA_NAME),
+            "table1",
+            vec!["column1".to_string()],
+        ),
+        make_alter_logical_table_add_column_task(
+            Some(DEFAULT_SCHEMA_NAME),
+            "table2",
+            vec!["column2".to_string()],
+        ),
+    ];
+    let expected_tasks = serde_json::to_value(&tasks).unwrap();
+    let physical_table_id = 1024;
+    let procedure = AlterLogicalTablesProcedure::new(tasks, physical_table_id, ddl_context);
+    let lifecycle_state = ProcedureState::Running;
+    let event = procedure
+        .event(&EventContext {
+            procedure_id: ProcedureId::random(),
+            lifecycle_state: &lifecycle_state,
+            trigger: EventTrigger::Submitted,
+        })
+        .unwrap();
+
+    assert_eq!(event.event_type(), "alter_logical_tables");
+    assert_eq!(
+        event.json_payload().unwrap(),
+        serde_json::json!({
+            "version": TABLE_DDL_PAYLOAD_VERSION,
+            "data": {
+                "kind": "alter_logical_tables",
+                "physical_table_id": physical_table_id,
+                "tasks": expected_tasks,
+            },
+        })
+    );
+    assert_eq!(
+        event
+            .extra_rows()
+            .unwrap()
+            .into_iter()
+            .map(|row| row.values)
+            .collect::<Vec<_>>(),
+        vec![
+            vec![
+                ValueData::StringValue(DEFAULT_CATALOG_NAME.to_string()).into(),
+                ValueData::StringValue(DEFAULT_SCHEMA_NAME.to_string()).into(),
+                ValueData::StringValue("table1".to_string()).into(),
+                Value::default(),
+                ValueData::U32Value(physical_table_id).into(),
+            ],
+            vec![
+                ValueData::StringValue(DEFAULT_CATALOG_NAME.to_string()).into(),
+                ValueData::StringValue(DEFAULT_SCHEMA_NAME.to_string()).into(),
+                ValueData::StringValue("table2".to_string()).into(),
+                Value::default(),
+                ValueData::U32Value(physical_table_id).into(),
+            ],
+        ]
+    );
+}
+
+#[test]
+fn test_later_events_are_lightweight_without_dynamic_success_id() {
+    let node_manager = Arc::new(MockDatanodeManager::new(()));
+    let ddl_context = new_ddl_context(node_manager);
+    let procedure = AlterLogicalTablesProcedure::new(
+        vec![make_alter_logical_table_add_column_task(
+            Some(DEFAULT_SCHEMA_NAME),
+            "table1",
+            vec!["column1".to_string()],
+        )],
+        1024,
+        ddl_context,
+    );
+    let lifecycle_state = ProcedureState::Running;
+    let child_id = ProcedureId::random();
+    let triggers = vec![
+        EventTrigger::Recovered,
+        EventTrigger::ChildSubmitted {
+            procedure_id: child_id,
+            outcome: ChildSubmissionOutcome::Accepted,
+        },
+        EventTrigger::Retrying {
+            phase: RetryPhase::Execute,
+            attempt: 1,
+        },
+        EventTrigger::RollingBack,
+        EventTrigger::Succeeded,
+        EventTrigger::Failed,
+        EventTrigger::Poisoned,
+    ];
+
+    for trigger in triggers {
+        let event = procedure
+            .event(&EventContext {
+                procedure_id: ProcedureId::random(),
+                lifecycle_state: &lifecycle_state,
+                trigger,
+            })
+            .unwrap();
+        assert_eq!(event.event_type(), "alter_logical_tables");
+        assert_eq!(event.json_payload().unwrap(), serde_json::Value::Null);
+        assert_eq!(
+            event.extra_rows().unwrap()[0].values,
+            vec![Value::default(); 5]
         );
     }
 }

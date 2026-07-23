@@ -45,6 +45,7 @@ pub mod drop_table;
 pub mod drop_view;
 pub mod flow_meta;
 pub mod purge_dropped_table;
+pub mod table_ddl_event;
 pub mod table_meta;
 #[cfg(any(test, feature = "testing"))]
 pub mod test_util;

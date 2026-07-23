@@ -480,19 +480,7 @@ impl DdlManager {
         undrop_table_task: UndropTableTask,
     ) -> Result<(ProcedureId, Option<Output>)> {
         let context = self.create_context();
-        let original_table_name = context
-            .table_metadata_manager
-            .get_dropped_table_by_id(undrop_table_task.table_id)
-            .await?
-            .with_context(|| TableNotFoundSnafu {
-                table_name: undrop_table_task.table_id.to_string(),
-            })?
-            .table_name;
-        let procedure = UndropTableProcedure::new_with_original_table_name(
-            undrop_table_task,
-            context,
-            Some(original_table_name),
-        );
+        let procedure = UndropTableProcedure::new(undrop_table_task, context);
         let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
 
         self.execute_procedure_and_wait(procedure_with_id).await
@@ -1220,7 +1208,7 @@ mod tests {
     use common_error::status_code::StatusCode;
     use common_procedure::local::LocalManager;
     use common_procedure::test_util::InMemoryPoisonStore;
-    use common_procedure::{BoxedProcedure, ProcedureManagerRef};
+    use common_procedure::{BoxedProcedure, ProcedureManager, ProcedureManagerRef};
     use store_api::storage::TableId;
     use table::table_name::TableName;
 
@@ -1342,7 +1330,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_submit_undrop_missing_tombstone_returns_table_not_found_directly() {
+    async fn test_submit_undrop_missing_tombstone_returns_table_not_found_from_procedure() {
         let kv_backend = Arc::new(MemoryKvBackend::new());
         let table_metadata_manager = Arc::new(TableMetadataManager::new(kv_backend.clone()));
         let table_metadata_allocator = Arc::new(TableMetadataAllocator::new(
@@ -1377,11 +1365,12 @@ mod tests {
                 region_failure_detector_controller: Arc::new(NoopRegionFailureDetectorControl),
                 soft_drop_enabled: true,
             },
-            procedure_manager,
+            procedure_manager.clone(),
             Arc::new(DummyRepartitionProcedureFactory),
             true,
         )
         .unwrap();
+        procedure_manager.start().await.unwrap();
 
         let err = ddl_manager
             .submit_undrop_table_task(UndropTableTask { table_id: 1024 })
@@ -1389,6 +1378,8 @@ mod tests {
             .unwrap_err();
 
         assert_eq!(err.status_code(), StatusCode::TableNotFound);
-        assert!(matches!(err, crate::error::Error::TableNotFound { .. }));
+        assert!(matches!(err, crate::error::Error::WaitProcedure { .. }));
+
+        procedure_manager.stop().await.unwrap();
     }
 }

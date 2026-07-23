@@ -16,12 +16,17 @@ use std::assert_matches;
 use std::sync::Arc;
 
 use api::region::RegionResponse;
+use api::v1::Value;
 use api::v1::meta::Peer;
 use api::v1::region::sync_request::ManifestInfo;
 use api::v1::region::{MetricManifestInfo, RegionRequest, SyncRequest, region_request};
+use api::v1::value::ValueData;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
-use common_procedure::{Context as ProcedureContext, Procedure, ProcedureId, Status};
+use common_procedure::{
+    Context as ProcedureContext, EventContext, EventTrigger, Procedure, ProcedureId,
+    ProcedureState, Status,
+};
 use common_procedure_test::MockContextProvider;
 use store_api::metadata::ColumnMetadata;
 use store_api::metric_engine_consts::{ALTER_PHYSICAL_EXTENSION_KEY, MANIFEST_INFO_EXTENSION_KEY};
@@ -88,6 +93,123 @@ fn assert_creates_request(
             RegionId::from_u64(req.requests[i].region_id)
         );
     }
+}
+
+#[test]
+fn test_submitted_event_has_one_rich_row_per_logical_table() {
+    let node_manager = Arc::new(MockDatanodeManager::new(()));
+    let ddl_context = new_ddl_context(node_manager);
+    let mut foo = test_create_logical_table_task("foo");
+    foo.set_table_id(7);
+    let mut bar = test_create_logical_table_task("bar");
+    bar.set_table_id(8);
+    let expected_foo_task = serde_json::to_value(&foo).unwrap();
+    let expected_bar_task = serde_json::to_value(&bar).unwrap();
+    let procedure = CreateLogicalTablesProcedure::new(vec![foo, bar], 1024, ddl_context);
+    let lifecycle_state = ProcedureState::Running;
+
+    let event = procedure
+        .event(&EventContext {
+            procedure_id: ProcedureId::random(),
+            lifecycle_state: &lifecycle_state,
+            trigger: EventTrigger::Submitted,
+        })
+        .unwrap();
+
+    assert_eq!(event.event_type(), "create_logical_tables");
+    let rows = event.extra_rows().unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(
+        rows[0].values,
+        vec![
+            ValueData::StringValue("greptime".to_string()).into(),
+            ValueData::StringValue("public".to_string()).into(),
+            ValueData::StringValue("foo".to_string()).into(),
+            Value::default(),
+            ValueData::U32Value(1024).into(),
+        ]
+    );
+    assert_eq!(
+        rows[1].values[2],
+        ValueData::StringValue("bar".to_string()).into()
+    );
+    assert_eq!(rows[1].values[3], Value::default());
+    assert_eq!(rows[1].values[4], ValueData::U32Value(1024).into());
+
+    let payload = event.json_payload().unwrap();
+    assert_eq!(payload["version"], 1);
+    assert_eq!(payload["data"]["kind"], "create_logical_tables");
+    assert_eq!(payload["data"]["physical_table_id"], 1024);
+    let tables = payload["data"]["tables"].as_array().unwrap();
+    assert_eq!(tables.len(), 2);
+    assert_eq!(tables[0]["task"], expected_foo_task);
+    assert_eq!(tables[1]["task"], expected_bar_task);
+    assert!(tables[0]["table_info"].is_object());
+}
+
+#[test]
+fn test_later_event_is_lightweight() {
+    let node_manager = Arc::new(MockDatanodeManager::new(()));
+    let ddl_context = new_ddl_context(node_manager);
+    let procedure = CreateLogicalTablesProcedure::new(
+        vec![test_create_logical_table_task("foo")],
+        1024,
+        ddl_context,
+    );
+    let lifecycle_state = ProcedureState::Running;
+
+    let event = procedure
+        .event(&EventContext {
+            procedure_id: ProcedureId::random(),
+            lifecycle_state: &lifecycle_state,
+            trigger: EventTrigger::Recovered,
+        })
+        .unwrap();
+
+    assert_eq!(event.event_type(), "create_logical_tables");
+    assert_eq!(event.json_payload().unwrap(), serde_json::Value::Null);
+    assert_eq!(
+        event.extra_rows().unwrap()[0].values,
+        vec![Value::default(); 5]
+    );
+}
+
+#[test]
+fn test_succeeded_event_has_one_id_only_row_per_logical_table() {
+    let node_manager = Arc::new(MockDatanodeManager::new(()));
+    let ddl_context = new_ddl_context(node_manager);
+    let mut foo = test_create_logical_table_task("foo");
+    foo.set_table_id(7);
+    let mut bar = test_create_logical_table_task("bar");
+    bar.set_table_id(8);
+    let procedure = CreateLogicalTablesProcedure::new(vec![foo, bar], 1024, ddl_context);
+    let lifecycle_state = ProcedureState::Done {
+        output: Some(Arc::new(vec![1025_u32, 1026_u32])),
+    };
+
+    let event = procedure
+        .event(&EventContext {
+            procedure_id: ProcedureId::random(),
+            lifecycle_state: &lifecycle_state,
+            trigger: EventTrigger::Succeeded,
+        })
+        .unwrap();
+
+    assert_eq!(event.json_payload().unwrap(), serde_json::Value::Null);
+    let rows = event.extra_rows().unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(
+        rows[0].values,
+        vec![
+            Value::default(),
+            Value::default(),
+            Value::default(),
+            ValueData::U32Value(1025).into(),
+            Value::default(),
+        ]
+    );
+    assert_eq!(rows[1].values[3], ValueData::U32Value(1026).into());
+    assert_eq!(rows[1].values[4], Value::default());
 }
 
 #[tokio::test]

@@ -20,7 +20,8 @@ use api::v1::region::{
 use async_trait::async_trait;
 use common_procedure::error::{FromJsonSnafu, ToJsonSnafu};
 use common_procedure::{
-    Context as ProcedureContext, LockKey, Procedure, Result as ProcedureResult, Status,
+    Context as ProcedureContext, EventContext, EventTrigger, LockKey, Procedure,
+    Result as ProcedureResult, Status,
 };
 use common_telemetry::tracing_context::TracingContext;
 use common_telemetry::warn;
@@ -34,6 +35,9 @@ use table::metadata::TableId;
 use table::table_name::TableName;
 
 use crate::ddl::drop_table::executor::DropTableExecutor;
+use crate::ddl::table_ddl_event::{
+    TableDdlEvent, TableDdlEventType, TableDdlLocator, versioned_table_ddl_payload_or_error,
+};
 use crate::ddl::utils::{
     add_peer_context_if_needed, convert_region_routes_to_detecting_regions,
     is_metric_engine_logical_table, map_to_procedure_error, region_storage_path,
@@ -308,6 +312,31 @@ impl Procedure for UndropTableProcedure {
         }
         lock_key.push(TableLock::Write(self.data.task.table_id).into());
         LockKey::new(lock_key)
+    }
+
+    fn event(&self, ctx: &EventContext<'_>) -> Option<Box<dyn common_event_recorder::Event>> {
+        let event = match &ctx.trigger {
+            EventTrigger::Submitted => {
+                let locator = self
+                    .data
+                    .table_name
+                    .as_ref()
+                    .map(|table_name| {
+                        TableDdlLocator::new(
+                            &table_name.catalog_name,
+                            &table_name.schema_name,
+                            &table_name.table_name,
+                        )
+                    })
+                    .unwrap_or_default()
+                    .with_table_id(self.data.task.table_id);
+                let payload = versioned_table_ddl_payload_or_error(&self.data.task);
+                TableDdlEvent::submitted(TableDdlEventType::UndropTable, locator, payload)
+            }
+            _ => TableDdlEvent::lifecycle(TableDdlEventType::UndropTable),
+        };
+
+        Some(Box::new(event))
     }
 }
 
