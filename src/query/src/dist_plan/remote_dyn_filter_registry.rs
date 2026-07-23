@@ -32,25 +32,30 @@ use crate::metrics::{
     REMOTE_DYN_FILTER_ENCODE_TOTAL, REMOTE_DYN_FILTER_PAYLOAD_BYTES,
     REMOTE_DYN_FILTER_UPDATE_RPC_TOTAL,
 };
-use crate::region_query::RegionQueryHandlerRef;
+use crate::region_query::{RegionQueryHandlerRef, RegionQueryTarget};
 
 const REMOTE_DYN_FILTER_RECONCILE_INTERVAL: Duration = Duration::from_secs(1);
 /// Bound best-effort RDF control RPCs so one bad subscriber cannot stall fanout.
 const REMOTE_DYN_FILTER_CONTROL_RPC_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Region subscribed to a remote dynamic filter.
+/// Region and target subscribed to a remote dynamic filter.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Subscriber {
     region_id: RegionId,
+    target: RegionQueryTarget,
 }
 
 impl Subscriber {
-    pub fn new(region_id: RegionId) -> Self {
-        Self { region_id }
+    pub fn new(region_id: RegionId, target: RegionQueryTarget) -> Self {
+        Self { region_id, target }
     }
 
     pub fn region_id(&self) -> RegionId {
         self.region_id
+    }
+
+    pub fn target(&self) -> &RegionQueryTarget {
+        &self.target
     }
 }
 
@@ -460,7 +465,7 @@ async fn fanout_update_for_query(
                 subscriber.region_id()
             ),
             region_query_handler.handle_remote_dyn_filter_update(
-                subscriber.region_id(),
+                subscriber.target(),
                 query_id.clone(),
                 update,
             ),
@@ -528,7 +533,7 @@ async fn unregister_entry_once_for_query(
                 subscriber.region_id()
             ),
             region_query_handler.handle_remote_dyn_filter_unregister(
-                subscriber.region_id(),
+                subscriber.target(),
                 query_id.clone(),
                 unregister,
             ),
@@ -798,6 +803,7 @@ impl DynFilterRegistryManager {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Barrier, Mutex};
     use std::thread;
@@ -805,6 +811,7 @@ mod tests {
 
     use api::v1::region::{RemoteDynFilterUnregister, RemoteDynFilterUpdate};
     use async_trait::async_trait;
+    use common_meta::peer::Peer;
     use common_query::request::QueryRequest;
     use datafusion_physical_expr::expressions::{Column, lit};
     use session::ReadPreference;
@@ -813,11 +820,11 @@ mod tests {
     use super::*;
     use crate::dist_plan::{FilterFingerprint, RemoteDynFilterProducerId};
     use crate::error::Result as QueryResult;
-    use crate::region_query::RegionQueryHandler;
+    use crate::region_query::{RegionQueryHandler, RegionQueryTarget};
 
     #[derive(Debug, Clone, PartialEq, Eq)]
     struct RecordedUpdate {
-        region_id: RegionId,
+        target: RegionQueryTarget,
         query_id: String,
         filter_id: String,
         generation: u64,
@@ -827,7 +834,7 @@ mod tests {
 
     #[derive(Debug, Clone, PartialEq, Eq)]
     struct RecordedUnregister {
-        region_id: RegionId,
+        target: RegionQueryTarget,
         query_id: String,
         filter_id: String,
     }
@@ -872,6 +879,16 @@ mod tests {
             panic!("timed out waiting for {expected} remote dyn filter updates");
         }
 
+        async fn wait_for_complete_update(&self) {
+            for _ in 0..300 {
+                if self.updates().iter().any(|update| update.is_complete) {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            panic!("timed out waiting for completed remote dyn filter update");
+        }
+
         async fn wait_for_unregister_count(&self, expected: usize) {
             for _ in 0..300 {
                 if self.unregisters().len() >= expected {
@@ -899,19 +916,19 @@ mod tests {
             &self,
             _read_preference: ReadPreference,
             _request: QueryRequest,
-        ) -> QueryResult<common_recordbatch::SendableRecordBatchStream> {
+        ) -> QueryResult<crate::region_query::RoutedRegionQueryStream> {
             unreachable!("remote dyn filter registry tests should not execute remote queries")
         }
 
         async fn handle_remote_dyn_filter_update(
             &self,
-            region_id: RegionId,
+            target: &RegionQueryTarget,
             query_id: String,
             update: RemoteDynFilterUpdate,
         ) -> QueryResult<()> {
             let should_block = self.block_next_update.swap(false, Ordering::SeqCst);
             self.updates.lock().unwrap().push(RecordedUpdate {
-                region_id,
+                target: target.clone(),
                 query_id,
                 filter_id: update.filter_id,
                 generation: update.generation,
@@ -927,12 +944,12 @@ mod tests {
 
         async fn handle_remote_dyn_filter_unregister(
             &self,
-            region_id: RegionId,
+            target: &RegionQueryTarget,
             query_id: String,
             unregister: RemoteDynFilterUnregister,
         ) -> QueryResult<()> {
             self.unregisters.lock().unwrap().push(RecordedUnregister {
-                region_id,
+                target: target.clone(),
                 query_id,
                 filter_id: unregister.filter_id,
             });
@@ -942,6 +959,13 @@ mod tests {
 
     fn test_query_id(value: u128) -> QueryId {
         QueryId::from(Uuid::from_u128(value))
+    }
+
+    fn test_target(id: u64) -> RegionQueryTarget {
+        RegionQueryTarget::new(Peer {
+            id,
+            addr: format!("127.0.0.1:{id}"),
+        })
     }
 
     fn test_filter_id(producer_ordinal: u32) -> FilterId {
@@ -1169,7 +1193,7 @@ mod tests {
         assert_eq!(entry.filter_id(), &filter_id);
         assert_eq!(registry.entry_count(), 1);
 
-        let subscriber = Subscriber::new(RegionId::new(1024, 1));
+        let subscriber = Subscriber::new(RegionId::new(1024, 1), test_target(1));
         assert_eq!(
             registry.register_subscriber(&filter_id, subscriber.clone()),
             SubscriberRegistration::Added
@@ -1179,6 +1203,22 @@ mod tests {
             SubscriberRegistration::Duplicate
         );
         assert_eq!(entry.subscribers().len(), 1);
+    }
+
+    #[test]
+    fn subscriber_identity_includes_region_and_target() {
+        let first_region = RegionId::new(1024, 1);
+        let second_region = RegionId::new(1024, 2);
+        let first_target = test_target(1);
+        let second_target = test_target(2);
+        let first = Subscriber::new(first_region, first_target.clone());
+
+        let mut subscribers = HashSet::new();
+        assert!(subscribers.insert(first.clone()));
+        assert!(!subscribers.insert(first));
+        assert!(subscribers.insert(Subscriber::new(first_region, second_target)));
+        assert!(subscribers.insert(Subscriber::new(second_region, first_target)));
+        assert_eq!(subscribers.len(), 3);
     }
 
     #[tokio::test]
@@ -1191,7 +1231,7 @@ mod tests {
             EntryRegistration::Inserted(entry) => entry,
             other => panic!("unexpected registration result: {other:?}"),
         };
-        let subscriber = Subscriber::new(RegionId::new(1024, 7));
+        let subscriber = Subscriber::new(RegionId::new(1024, 7), test_target(1));
         assert_eq!(
             registry.register_subscriber(&filter_id, subscriber.clone()),
             SubscriberRegistration::Added
@@ -1205,7 +1245,7 @@ mod tests {
             .await;
         let updates = handler.updates();
         assert_eq!(updates.len(), 1);
-        assert_eq!(updates[0].region_id, subscriber.region_id());
+        assert_eq!(&updates[0].target, subscriber.target());
         assert_eq!(updates[0].query_id, query_id.to_string());
         assert_eq!(updates[0].filter_id, filter_id.to_string());
         assert_eq!(updates[0].generation, filter.snapshot_generation());
@@ -1225,7 +1265,7 @@ mod tests {
         assert_eq!(updates.len(), 2);
         assert_eq!(updates[1].generation, filter.snapshot_generation());
 
-        let second_subscriber = Subscriber::new(RegionId::new(1024, 8));
+        let second_subscriber = Subscriber::new(RegionId::new(1024, 8), test_target(2));
         assert_eq!(
             registry.register_subscriber(&filter_id, second_subscriber.clone()),
             SubscriberRegistration::Added
@@ -1238,12 +1278,12 @@ mod tests {
         assert!(
             updates[2..]
                 .iter()
-                .any(|update| update.region_id == subscriber.region_id())
+                .any(|update| update.target == subscriber.target().clone())
         );
         assert!(
             updates[2..]
                 .iter()
-                .any(|update| update.region_id == second_subscriber.region_id())
+                .any(|update| update.target == second_subscriber.target().clone())
         );
         assert_eq!(entry.subscribers().len(), 2);
     }
@@ -1259,7 +1299,7 @@ mod tests {
         let _ = lease
             .registry()
             .register_remote_dyn_filter(filter_id.clone(), filter.clone());
-        let subscriber = Subscriber::new(RegionId::new(1024, 7));
+        let subscriber = Subscriber::new(RegionId::new(1024, 7), test_target(1));
         assert_eq!(
             lease
                 .registry()
@@ -1277,7 +1317,7 @@ mod tests {
         handler.wait_for_update_count(2).await;
         let updates = handler.updates();
         assert!(updates[1].generation > initial_generation);
-        assert_eq!(updates[1].region_id, subscriber.region_id());
+        assert_eq!(&updates[1].target, subscriber.target());
         assert_eq!(updates[1].filter_id, filter_id.to_string());
 
         filter.mark_complete();
@@ -1288,10 +1328,46 @@ mod tests {
         drop(lease);
         handler.wait_for_unregister_count(1).await;
         let unregisters = handler.unregisters();
-        assert_eq!(unregisters[0].region_id, subscriber.region_id());
+        assert_eq!(&unregisters[0].target, subscriber.target());
+        assert_eq!(unregisters[0].target, updates[0].target);
         assert_eq!(unregisters[0].filter_id, filter_id.to_string());
 
         wait_for_registry_drop(registry_weak).await;
+    }
+
+    #[tokio::test]
+    async fn late_subscriber_receives_completed_snapshot_at_its_target() {
+        let query_id = test_query_id(10);
+        let manager = Arc::new(DynFilterRegistryManager::default());
+        let lease = manager.acquire_lease(query_id);
+        let filter = test_dyn_filter(&["host"]);
+        let filter_id = test_filter_id(1);
+        let _ = lease
+            .registry()
+            .register_remote_dyn_filter(filter_id.clone(), filter.clone());
+
+        // Model the period while do_get is awaiting the selected target: the producer may
+        // advance and complete before a subscriber is registered.
+        filter.update(lit(false) as _).unwrap();
+        filter.mark_complete();
+
+        let subscriber = Subscriber::new(RegionId::new(1024, 7), test_target(7));
+        assert_eq!(
+            lease
+                .registry()
+                .register_subscriber(&filter_id, subscriber.clone()),
+            SubscriberRegistration::Added
+        );
+
+        let handler = Arc::new(RecordingRegionQueryHandler::default());
+        lease.ensure_fanout_task(handler.clone() as RegionQueryHandlerRef);
+        handler.wait_for_complete_update().await;
+
+        let updates = handler.updates();
+        let latest = updates.last().unwrap();
+        assert_eq!(&latest.target, subscriber.target());
+        assert_eq!(latest.generation, filter.snapshot_generation());
+        assert!(latest.is_complete);
     }
 
     #[tokio::test]
@@ -1309,7 +1385,7 @@ mod tests {
             EntryRegistration::Inserted(entry) => entry,
             other => panic!("unexpected registration result: {other:?}"),
         };
-        let subscriber = Subscriber::new(RegionId::new(1024, 7));
+        let subscriber = Subscriber::new(RegionId::new(1024, 7), test_target(1));
         assert_eq!(
             lease
                 .registry()
@@ -1347,7 +1423,7 @@ mod tests {
         let _ = lease
             .registry()
             .register_remote_dyn_filter(filter_id.clone(), filter.clone());
-        let first_subscriber = Subscriber::new(RegionId::new(1024, 7));
+        let first_subscriber = Subscriber::new(RegionId::new(1024, 7), test_target(1));
         assert_eq!(
             lease
                 .registry()
@@ -1363,7 +1439,7 @@ mod tests {
         handler.wait_for_update_count(2).await;
         assert!(handler.updates()[1].is_complete);
 
-        let late_subscriber = Subscriber::new(RegionId::new(1024, 8));
+        let late_subscriber = Subscriber::new(RegionId::new(1024, 8), test_target(1));
         assert_eq!(
             lease
                 .registry()
@@ -1374,14 +1450,15 @@ mod tests {
         handler.wait_for_update_count(4).await;
         let updates = handler.updates();
         assert!(
-            updates[2..].iter().any(
-                |update| update.region_id == first_subscriber.region_id() && update.is_complete
-            )
+            updates[2..]
+                .iter()
+                .any(|update| update.target == first_subscriber.target().clone()
+                    && update.is_complete)
         );
         assert!(
             updates[2..]
                 .iter()
-                .any(|update| update.region_id == late_subscriber.region_id()
+                .any(|update| update.target == late_subscriber.target().clone()
                     && update.is_complete)
         );
 
@@ -1401,7 +1478,7 @@ mod tests {
         let _ = lease
             .registry()
             .register_remote_dyn_filter(filter_id.clone(), filter.clone());
-        let subscriber = Subscriber::new(RegionId::new(1024, 7));
+        let subscriber = Subscriber::new(RegionId::new(1024, 7), test_target(1));
         assert_eq!(
             lease
                 .registry()
@@ -1416,7 +1493,7 @@ mod tests {
         drop(filter);
         handler.wait_for_unregister_count(1).await;
         let unregisters = handler.unregisters();
-        assert_eq!(unregisters[0].region_id, subscriber.region_id());
+        assert_eq!(&unregisters[0].target, subscriber.target());
         assert_eq!(unregisters[0].filter_id, filter_id.to_string());
 
         drop(lease);
@@ -1434,7 +1511,7 @@ mod tests {
         let _ = lease
             .registry()
             .register_remote_dyn_filter(filter_id.clone(), filter.clone());
-        let subscriber = Subscriber::new(RegionId::new(1024, 7));
+        let subscriber = Subscriber::new(RegionId::new(1024, 7), test_target(1));
         assert_eq!(
             lease
                 .registry()
@@ -1456,7 +1533,7 @@ mod tests {
         handler.wait_for_update_count(2).await;
         let updates = handler.updates();
         assert!(updates[1].generation > initial_generation);
-        assert_eq!(updates[1].region_id, subscriber.region_id());
+        assert_eq!(&updates[1].target, subscriber.target());
         assert_eq!(updates[1].filter_id, filter_id.to_string());
 
         drop(lease);
@@ -1475,7 +1552,7 @@ mod tests {
         let _ = lease
             .registry()
             .register_remote_dyn_filter(filter_id.clone(), filter.clone());
-        let subscriber = Subscriber::new(RegionId::new(1024, 7));
+        let subscriber = Subscriber::new(RegionId::new(1024, 7), test_target(1));
         assert_eq!(
             lease
                 .registry()
@@ -1492,7 +1569,7 @@ mod tests {
 
         handler.wait_for_unregister_count(1).await;
         let unregisters = handler.unregisters();
-        assert_eq!(unregisters[0].region_id, subscriber.region_id());
+        assert_eq!(&unregisters[0].target, subscriber.target());
         assert_eq!(unregisters[0].filter_id, filter_id.to_string());
         wait_for_registry_drop(registry_weak).await;
     }
@@ -1507,8 +1584,8 @@ mod tests {
             EntryRegistration::Inserted(entry) => entry,
             other => panic!("unexpected registration result: {other:?}"),
         };
-        let first_subscriber = Subscriber::new(RegionId::new(1024, 7));
-        let second_subscriber = Subscriber::new(RegionId::new(1024, 8));
+        let first_subscriber = Subscriber::new(RegionId::new(1024, 7), test_target(1));
+        let second_subscriber = Subscriber::new(RegionId::new(1024, 8), test_target(2));
         assert_eq!(
             registry.register_subscriber(&filter_id, first_subscriber.clone()),
             SubscriberRegistration::Added
@@ -1549,12 +1626,12 @@ mod tests {
         assert!(
             initial_updates
                 .iter()
-                .any(|update| update.region_id == first_subscriber.region_id())
+                .any(|update| update.target == first_subscriber.target().clone())
         );
         assert!(
             initial_updates
                 .iter()
-                .any(|update| update.region_id == second_subscriber.region_id())
+                .any(|update| update.target == second_subscriber.target().clone())
         );
 
         filter.update(lit(false) as _).unwrap();
@@ -1575,12 +1652,12 @@ mod tests {
         assert!(
             updates[2..]
                 .iter()
-                .any(|update| update.region_id == first_subscriber.region_id())
+                .any(|update| update.target == first_subscriber.target().clone())
         );
         assert!(
             updates[2..]
                 .iter()
-                .any(|update| update.region_id == second_subscriber.region_id())
+                .any(|update| update.target == second_subscriber.target().clone())
         );
 
         registry.unregister_all_once(&handler_ref).await;
@@ -1594,7 +1671,7 @@ mod tests {
         let filter = test_dyn_filter(&["host"]);
         let filter_id = test_filter_id(1);
         let _ = registry.register_remote_dyn_filter(filter_id.clone(), filter);
-        let subscriber = Subscriber::new(RegionId::new(1024, 7));
+        let subscriber = Subscriber::new(RegionId::new(1024, 7), test_target(1));
         assert_eq!(
             registry.register_subscriber(&filter_id, subscriber.clone()),
             SubscriberRegistration::Added
@@ -1608,7 +1685,7 @@ mod tests {
 
         let unregisters = handler.unregisters();
         assert_eq!(unregisters.len(), 1);
-        assert_eq!(unregisters[0].region_id, subscriber.region_id());
+        assert_eq!(&unregisters[0].target, subscriber.target());
         assert_eq!(unregisters[0].query_id, query_id.to_string());
         assert_eq!(unregisters[0].filter_id, filter_id.to_string());
     }

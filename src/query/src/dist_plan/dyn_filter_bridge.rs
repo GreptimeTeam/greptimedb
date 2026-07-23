@@ -27,6 +27,7 @@ use store_api::storage::RegionId;
 
 use crate::dist_plan::filter_id::build_remote_dyn_filter_id;
 use crate::dist_plan::{FilterId, QueryDynFilterRegistry, RemoteDynFilterProducerId, Subscriber};
+use crate::region_query::RegionQueryTarget;
 
 #[derive(Debug, Clone)]
 pub(crate) struct CapturedDynFilter {
@@ -93,9 +94,8 @@ fn downcast_dynamic_filter(
         .ok()
 }
 
-pub(crate) fn register_dyn_filters_for_region(
+pub(crate) fn register_remote_dyn_filters(
     registry: &QueryDynFilterRegistry,
-    region_id: RegionId,
     captured_dyn_filters: &[CapturedDynFilter],
 ) {
     for captured_dyn_filter in captured_dyn_filters {
@@ -103,8 +103,20 @@ pub(crate) fn register_dyn_filters_for_region(
             captured_dyn_filter.filter_id.clone(),
             captured_dyn_filter.alive_dyn_filter.clone(),
         );
-        let _ = registry
-            .register_subscriber(&captured_dyn_filter.filter_id, Subscriber::new(region_id));
+    }
+}
+
+pub(crate) fn register_dyn_filter_subscribers_for_region(
+    registry: &QueryDynFilterRegistry,
+    region_id: RegionId,
+    target: RegionQueryTarget,
+    captured_dyn_filters: &[CapturedDynFilter],
+) {
+    for captured_dyn_filter in captured_dyn_filters {
+        let _ = registry.register_subscriber(
+            &captured_dyn_filter.filter_id,
+            Subscriber::new(region_id, target.clone()),
+        );
     }
 }
 
@@ -231,6 +243,7 @@ mod tests {
     use std::fmt;
     use std::hash::{Hash, Hasher};
 
+    use common_meta::peer::Peer;
     use datafusion::execution::TaskContext;
     use datafusion_common::ScalarValue;
     use datafusion_expr::ColumnarValue;
@@ -239,6 +252,7 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
+    use crate::region_query::RegionQueryTarget;
 
     #[derive(Debug)]
     struct UnserializableExpr;
@@ -311,6 +325,13 @@ mod tests {
 
     fn test_remote_dyn_filter_producer_id(value: u64) -> RemoteDynFilterProducerId {
         RemoteDynFilterProducerId::new(value)
+    }
+
+    fn test_target(id: u64) -> RegionQueryTarget {
+        RegionQueryTarget::new(Peer {
+            id,
+            addr: format!("127.0.0.1:{id}"),
+        })
     }
 
     fn test_captured_dyn_filter(
@@ -544,7 +565,7 @@ mod tests {
     }
 
     #[test]
-    fn register_dyn_filters_for_region_reuses_existing_entry() {
+    fn register_dyn_filter_subscribers_for_region_reuses_existing_entry() {
         let registry = QueryDynFilterRegistry::new(test_query_id(1));
         let captured_dyn_filters = vec![test_captured_dyn_filter(
             test_remote_dyn_filter_producer_id(42),
@@ -555,8 +576,19 @@ mod tests {
         let first_region_id = RegionId::new(1024, 7);
         let second_region_id = RegionId::new(1024, 8);
 
-        register_dyn_filters_for_region(&registry, first_region_id, &captured_dyn_filters);
-        register_dyn_filters_for_region(&registry, second_region_id, &captured_dyn_filters);
+        register_remote_dyn_filters(&registry, &captured_dyn_filters);
+        register_dyn_filter_subscribers_for_region(
+            &registry,
+            first_region_id,
+            test_target(1),
+            &captured_dyn_filters,
+        );
+        register_dyn_filter_subscribers_for_region(
+            &registry,
+            second_region_id,
+            test_target(2),
+            &captured_dyn_filters,
+        );
 
         assert_eq!(registry.entry_count(), 1);
         let entry = registry.entries().pop().unwrap();
@@ -580,21 +612,18 @@ mod tests {
     }
 
     #[test]
-    fn register_dyn_filters_for_region_keeps_independent_producer_ids_distinct() {
+    fn register_remote_dyn_filters_keeps_independent_producer_ids_distinct() {
         let registry = QueryDynFilterRegistry::new(test_query_id(1));
-        let region_id = RegionId::new(1024, 7);
         let make_filter = |remote_dyn_filter_producer_id| {
             test_captured_dyn_filter(remote_dyn_filter_producer_id, 2, "host", 0)
         };
 
-        register_dyn_filters_for_region(
+        register_remote_dyn_filters(
             &registry,
-            region_id,
             &[make_filter(test_remote_dyn_filter_producer_id(42))],
         );
-        register_dyn_filters_for_region(
+        register_remote_dyn_filters(
             &registry,
-            region_id,
             &[make_filter(test_remote_dyn_filter_producer_id(43))],
         );
 
