@@ -30,10 +30,13 @@ use snafu::ResultExt;
 
 use crate::data_type::ConcreteDataType;
 use crate::error::{self, Result, UnsupportedJsonTypeSnafu};
-use crate::json::value::{JsonValue, JsonVariant};
+use crate::json::value::{JsonValue, JsonVariant, encode_serde_json_as_jsonb};
 use crate::schema::ColumnDefaultConstraint;
 use crate::types::json_type::JsonNativeType;
 use crate::value::{ListValue, StructValue, Value};
+
+/// Maximum number of JSON container levels represented as nested Arrow types.
+const JSON2_MAX_STRUCTURED_DEPTH: usize = 50;
 
 /// JSON2 settings stored in column schema metadata and represented through
 /// Arrow extension metadata.
@@ -341,6 +344,14 @@ fn encode_json_array_with_context<'a>(
 
 /// Helper function to encode a JSON value to a Value and determine its ConcreteDataType with context
 fn encode_json_value_with_context(json: Json, context: &mut JsonContext) -> Result<JsonValue> {
+    if context.path.len() >= JSON2_MAX_STRUCTURED_DEPTH
+        && matches!(&json, Json::Object(_) | Json::Array(_))
+    {
+        return Ok(JsonValue::new(JsonVariant::Variant(
+            encode_serde_json_as_jsonb(json),
+        )));
+    }
+
     match json {
         Json::Null => Ok(JsonValue::null()),
         Json::Bool(b) => Ok(b.into()),

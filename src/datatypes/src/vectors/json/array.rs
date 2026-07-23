@@ -199,6 +199,23 @@ impl JsonArray<'_> {
             return Ok(self.inner.clone());
         }
 
+        if to_type == &DataType::Utf8View {
+            let values = (0..self.inner.len())
+                .map(|i| {
+                    if self.inner.is_null(i) {
+                        return Ok(None);
+                    }
+                    let value = self.try_get_value(i)?;
+                    let value = match value {
+                        Value::String(value) => value,
+                        value => value.to_string(),
+                    };
+                    Ok(Some(value))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            return Ok(Arc::new(StringViewArray::from(values)) as ArrayRef);
+        }
+
         if from_type.is_binary() && !to_type.is_binary() {
             return self.decode_variant(to_type);
         }
