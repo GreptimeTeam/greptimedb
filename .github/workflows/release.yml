@@ -597,6 +597,15 @@ jobs:
         with:
           version: ${{ needs.allocate-runners.outputs.version }}
 
+  update-compat-versions:
+    name: Update compatibility versions
+    needs: [allocate-runners, publish-github-release]
+    if: ${{ needs.publish-github-release.result == 'success' }}
+    uses: ./.github/workflows/update-compat-versions.yml
+    with:
+      release_tag: ${{ needs.allocate-runners.outputs.version }}
+    secrets: inherit
+
   ### Stop runners ###
   # It's very necessary to split the job of releasing runners into 'stop-linux-amd64-runner' and 'stop-linux-arm64-runner'.
   # Because we can terminate the specified EC2 instance immediately after the job is finished without unnecessary waiting.
