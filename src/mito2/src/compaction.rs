@@ -23,7 +23,6 @@ mod test_util;
 mod twcs;
 mod window;
 
-use std::any::Any;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::future::Future;
@@ -464,6 +463,23 @@ impl CompactionScheduler {
             .get(&region_id)
             .map(CompactionStatus::is_busy)
             .unwrap_or(false)
+    }
+
+    /// Removes the region status if it has no running task.
+    ///
+    /// A finished compaction leaves an idle status (phase = None) behind when
+    /// there is nothing more to schedule. If the caller decides not to chain
+    /// the next compaction, it must remove the idle status; otherwise the
+    /// status becomes a zombie that makes `schedule_compaction` swallow all
+    /// future compaction triggers of the region.
+    pub(crate) fn remove_idle_status(&mut self, region_id: RegionId) {
+        if self
+            .region_status
+            .get(&region_id)
+            .is_some_and(|status| !status.is_busy())
+        {
+            self.region_status.remove(&region_id);
+        }
     }
 
     /// Schedules next compaction upon a finished compaction.
@@ -4280,6 +4296,139 @@ mod tests {
                 .waiters
                 .is_empty()
         );
+    }
+
+    #[tokio::test]
+    async fn test_remove_idle_status_keeps_busy_status() {
+        let env = SchedulerEnv::new().await;
+        let (tx, _rx) = mpsc::channel(4);
+        let mut scheduler = env.mock_compaction_scheduler(tx);
+        let builder = VersionControlBuilder::new();
+        let region_id = builder.region_id();
+        let version_control = Arc::new(builder.build());
+
+        // Busy (picking) status is kept.
+        let mut status =
+            CompactionStatus::new(region_id, version_control.clone(), env.access_layer.clone());
+        status.start_picking(7);
+        scheduler.region_status.insert(region_id, status);
+        scheduler.remove_idle_status(region_id);
+        assert!(scheduler.region_status.contains_key(&region_id));
+
+        // Idle status is removed.
+        scheduler
+            .region_status
+            .get_mut(&region_id)
+            .unwrap()
+            .clear_running_task();
+        scheduler.remove_idle_status(region_id);
+        assert!(!scheduler.region_status.contains_key(&region_id));
+    }
+
+    #[tokio::test]
+    async fn test_finished_compaction_idle_status_blocks_scheduling_until_removed() {
+        let job_scheduler = Arc::new(VecScheduler::default());
+        let env = SchedulerEnv::new().await.scheduler(job_scheduler.clone());
+        let (tx, mut rx) = mpsc::channel(4);
+        let mut scheduler = env.mock_compaction_scheduler(tx);
+        let mut builder = VersionControlBuilder::new();
+        let region_id = builder.region_id();
+
+        let (schema_metadata_manager, kv_backend) = mock_schema_metadata_manager();
+        schema_metadata_manager
+            .register_region_table_info(
+                builder.region_id().table_id(),
+                "test_table",
+                "test_catalog",
+                "test_schema",
+                None,
+                kv_backend,
+            )
+            .await;
+
+        let end = 1000 * 1000;
+        let version_control = Arc::new(
+            builder
+                .push_l0_file(0, end)
+                .push_l0_file(10, end)
+                .push_l0_file(50, end)
+                .push_l0_file(80, end)
+                .push_l0_file(90, end)
+                .build(),
+        );
+        let manifest_ctx = env
+            .mock_manifest_context(version_control.current().version.metadata.clone())
+            .await;
+
+        // Schedules a compaction.
+        let scheduled = scheduler
+            .schedule_compaction(
+                region_id,
+                compact_request::Options::Regular(Default::default()),
+                &version_control,
+                &env.access_layer,
+                OptionOutputTx::none(),
+                &manifest_ctx,
+                schema_metadata_manager.clone(),
+                1,
+            )
+            .await
+            .unwrap();
+        assert!(scheduled);
+
+        // Picks a plan and submits the job.
+        let finished = recv_compaction_pick_finished(&mut rx).await;
+        scheduler
+            .handle_compaction_pick_finished(
+                finished,
+                &manifest_ctx,
+                schema_metadata_manager.clone(),
+            )
+            .await;
+        assert_eq!(1, job_scheduler.num_jobs());
+
+        // The compaction finishes with no pending requests, leaving an idle
+        // status behind.
+        let pending_ddls = scheduler
+            .on_compaction_finished(region_id, &manifest_ctx, schema_metadata_manager.clone())
+            .await;
+        assert!(pending_ddls.is_empty());
+        assert!(scheduler.region_status.contains_key(&region_id));
+        assert!(!scheduler.is_compacting(region_id));
+
+        // The idle status swallows future compaction triggers.
+        let scheduled = scheduler
+            .schedule_compaction(
+                region_id,
+                compact_request::Options::Regular(Default::default()),
+                &version_control,
+                &env.access_layer,
+                OptionOutputTx::none(),
+                &manifest_ctx,
+                schema_metadata_manager.clone(),
+                1,
+            )
+            .await
+            .unwrap();
+        assert!(!scheduled);
+        assert_eq!(1, job_scheduler.num_jobs());
+
+        // Removing the idle status lets the region schedule compactions again.
+        scheduler.remove_idle_status(region_id);
+        let scheduled = scheduler
+            .schedule_compaction(
+                region_id,
+                compact_request::Options::Regular(Default::default()),
+                &version_control,
+                &env.access_layer,
+                OptionOutputTx::none(),
+                &manifest_ctx,
+                schema_metadata_manager.clone(),
+                1,
+            )
+            .await
+            .unwrap();
+        assert!(scheduled);
     }
 
     #[tokio::test]

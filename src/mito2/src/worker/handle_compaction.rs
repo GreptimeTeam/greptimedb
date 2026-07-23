@@ -187,6 +187,13 @@ impl<S> RegionWorkerLoop<S> {
             {
                 region.update_schedule_compaction_millis();
             }
+        } else {
+            // The compaction finished within the minimal interval, so the
+            // chained planning is skipped. The finished compaction left an
+            // idle status (no running task) behind; remove it, otherwise it
+            // becomes a zombie that blocks all future compaction scheduling
+            // of the region.
+            self.compaction_scheduler.remove_idle_status(region_id);
         }
     }
 
