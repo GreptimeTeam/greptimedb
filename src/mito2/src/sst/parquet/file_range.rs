@@ -27,10 +27,11 @@ use datatypes::arrow::array::{Array as _, ArrayRef, BooleanArray};
 use datatypes::arrow::buffer::BooleanBuffer;
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::schema::Schema;
+use futures::StreamExt;
 use mito_codec::row_converter::PrimaryKeyCodec;
 use parquet::arrow::arrow_reader::RowSelection;
 use parquet::file::metadata::ParquetMetaData;
-use snafu::{OptionExt, ResultExt, ensure};
+use snafu::{OptionExt, ResultExt};
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{ColumnId, TimeSeriesRowSelector};
@@ -233,10 +234,7 @@ impl FileRange {
 
     /// Creates a reader that returns only the encoded primary-key column.
     ///
-    /// This returns the primary key as persisted in the SST and does not apply
-    /// [`FlatCompatBatch`]. Callers must not use it when the primary key needs
-    /// compatibility conversion and must interpret the key using the file's
-    /// metadata. The PK-only path currently supports sparse encoding only.
+    /// The returned primary keys are compatible with the expected region metadata.
     pub(crate) async fn primary_key_reader(
         &self,
         fetch_metrics: Option<&ParquetFetchMetrics>,
@@ -244,18 +242,6 @@ impl FileRange {
         if !self.in_dynamic_filter_range() {
             return Ok(None);
         }
-
-        let file_encoding = self.context.read_format().metadata().primary_key_encoding;
-        ensure!(
-            file_encoding == PrimaryKeyEncoding::Sparse,
-            UnexpectedSnafu {
-                reason: format!(
-                    "Primary-key-only SST reads require sparse encoding, file {} uses {} encoding",
-                    self.file_handle().file_id(),
-                    file_encoding,
-                ),
-            }
-        );
 
         let stream = self
             .context
@@ -266,6 +252,21 @@ impl FileRange {
                 fetch_metrics,
             ))
             .await?;
+        if self.context.compat_batch().is_none() {
+            return Ok(Some(stream));
+        }
+
+        let context = self.context.clone();
+        let stream = stream
+            .map(move |batch| {
+                let batch = batch?;
+                let compat = context.compat_batch().context(UnexpectedSnafu {
+                    reason: "Primary-key compatibility helper is missing",
+                })?;
+                let primary_key = compat.compat_primary_key(batch.column(0))?;
+                RecordBatch::try_new(batch.schema(), vec![primary_key]).context(NewRecordBatchSnafu)
+            })
+            .boxed();
         Ok(Some(stream))
     }
 
