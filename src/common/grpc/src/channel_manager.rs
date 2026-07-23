@@ -392,7 +392,7 @@ macro_rules! configure_tonic_client {
         $client
             .accept_compressed(::tonic::codec::CompressionEncoding::Gzip)
             .accept_compressed(::tonic::codec::CompressionEncoding::Zstd)
-            .send_compressed(::tonic::codec::CompressionEncoding::Gzip)
+            .send_compressed(::tonic::codec::CompressionEncoding::Zstd)
             .max_decoding_message_size(config.max_recv_message_size.as_bytes() as usize)
             .max_encoding_message_size(config.max_send_message_size.as_bytes() as usize)
     }};
@@ -782,8 +782,8 @@ mod tests {
 
         assert!(client.accepted_gzip);
         assert!(client.accepted_zstd);
-        assert!(client.sent_gzip);
-        assert!(!client.sent_zstd);
+        assert!(!client.sent_gzip);
+        assert!(client.sent_zstd);
         assert_eq!(
             recv_message_size.as_bytes() as usize,
             client.max_decoding_message_size
