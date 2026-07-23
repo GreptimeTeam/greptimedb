@@ -18,13 +18,17 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_procedure::error::{FromJsonSnafu, Result as ProcedureResult, ToJsonSnafu};
-use common_procedure::{Context as ProcedureContext, LockKey, Procedure, ProcedureId, Status};
+use common_procedure::{
+    Context as ProcedureContext, EventContext, EventTrigger, LockKey, Procedure, ProcedureId,
+    Status,
+};
 use serde::{Deserialize, Serialize};
 use serde_with::{DefaultOnNull, serde_as};
 use snafu::{ResultExt, ensure};
 use strum::AsRefStr;
 
 use crate::ddl::DdlContext;
+use crate::ddl::event::DatabaseDdlEvent;
 use crate::ddl::utils::map_to_procedure_error;
 use crate::error::{self, Result};
 use crate::instruction::{CacheIdent, UserCacheIdent};
@@ -272,6 +276,20 @@ impl Procedure for CreateDatabaseProcedure {
         ];
 
         LockKey::new(lock_key)
+    }
+
+    fn event(&self, ctx: &EventContext<'_>) -> Option<Box<dyn common_event_recorder::Event>> {
+        let event = if matches!(&ctx.trigger, EventTrigger::Submitted) {
+            DatabaseDdlEvent::create_submitted(
+                &self.data.catalog,
+                &self.data.schema,
+                self.data.create_if_not_exists,
+                &self.data.options,
+            )
+        } else {
+            DatabaseDdlEvent::create_lifecycle()
+        };
+        Some(Box::new(event))
     }
 }
 
