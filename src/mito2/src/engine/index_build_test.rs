@@ -16,13 +16,18 @@
 //!
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use api::v1::Rows;
-use store_api::region_engine::RegionEngine;
+use datatypes::value::Value;
+use partition::expr::{PartitionExpr, col};
+use store_api::region_engine::{RegionEngine, RemapManifestsRequest, SettableRegionRoleState};
 use store_api::region_request::{
-    AlterKind, RegionAlterRequest, RegionBuildIndexRequest, RegionRequest, SetIndexOption,
+    AlterKind, ApplyStagingManifestRequest, EnterStagingRequest, RegionAlterRequest,
+    RegionBuildIndexRequest, RegionRequest, SetIndexOption, StagingPartitionDirective,
 };
 use store_api::storage::{RegionId, ScanRequest};
+use tokio::time::timeout;
 
 use crate::config::{IndexBuildMode, MitoConfig, Mode};
 use crate::engine::MitoEngine;
@@ -43,6 +48,12 @@ fn async_build_mode_config(is_create_on_flush: bool) -> MitoConfig {
         config.bloom_filter_index.create_on_flush = Mode::Disable;
     }
     config
+}
+
+fn range_expr(col_name: &str, start: i64, end: i64) -> PartitionExpr {
+    col(col_name)
+        .gt_eq(Value::Int64(start))
+        .and(col(col_name).lt(Value::Int64(end)))
 }
 
 /// Get the number of generated index files for existed sst files in the scanner.
@@ -556,6 +567,665 @@ async fn test_index_build_type_manual_consistency() {
 }
 
 #[tokio::test]
+async fn test_rebuild_index_after_remap_uses_origin_region_path() {
+    let mut env =
+        TestEnv::with_prefix("test_rebuild_index_after_remap_uses_origin_region_path_").await;
+    let engine = env.create_engine(async_build_mode_config(false)).await;
+
+    let source_region_id = RegionId::new(1, 1);
+    let target_region_id = RegionId::new(1, 2);
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            source_region_id.table_id(),
+            "test_table",
+            "test_catalog",
+            "test_schema",
+            None,
+            env.get_kv_backend(),
+        )
+        .await;
+
+    let source_create_request = CreateRequestBuilder::new()
+        .partition_expr_json(Some(range_expr("tag_0", 0, 100).as_json_str().unwrap()))
+        .build_with_index();
+    let column_schemas = rows_schema(&source_create_request);
+    engine
+        .handle_request(
+            source_region_id,
+            RegionRequest::Create(source_create_request),
+        )
+        .await
+        .unwrap();
+
+    put_and_flush(&engine, source_region_id, &column_schemas, 10..20).await;
+
+    let target_create_request = CreateRequestBuilder::new()
+        .partition_expr_json(Some(range_expr("tag_0", 0, 100).as_json_str().unwrap()))
+        .build_with_index();
+    engine
+        .handle_request(
+            target_region_id,
+            RegionRequest::Create(target_create_request),
+        )
+        .await
+        .unwrap();
+    engine
+        .handle_request(
+            target_region_id,
+            RegionRequest::EnterStaging(EnterStagingRequest {
+                partition_directive: StagingPartitionDirective::UpdatePartitionExpr(
+                    range_expr("tag_0", 0, 100).as_json_str().unwrap(),
+                ),
+            }),
+        )
+        .await
+        .unwrap();
+
+    engine
+        .set_region_role_state_gracefully(source_region_id, SettableRegionRoleState::StagingLeader)
+        .await
+        .unwrap();
+    let remap_result = engine
+        .remap_manifests(RemapManifestsRequest {
+            region_id: source_region_id,
+            input_regions: vec![source_region_id],
+            region_mapping: [(source_region_id, vec![target_region_id])]
+                .into_iter()
+                .collect(),
+            new_partition_exprs: [(
+                target_region_id,
+                range_expr("tag_0", 0, 100).as_json_str().unwrap(),
+            )]
+            .into_iter()
+            .collect(),
+        })
+        .await
+        .unwrap();
+
+    engine
+        .handle_request(
+            target_region_id,
+            RegionRequest::ApplyStagingManifest(ApplyStagingManifestRequest {
+                partition_expr: range_expr("tag_0", 0, 100).as_json_str().unwrap(),
+                central_region_id: source_region_id,
+                manifest_path: remap_result.manifest_paths[&target_region_id].clone(),
+            }),
+        )
+        .await
+        .unwrap();
+
+    let target_region = engine.get_region(target_region_id).unwrap();
+    let manifest = target_region.manifest_ctx.manifest().await;
+    let meta = manifest.files.values().next().unwrap();
+    assert_eq!(source_region_id, meta.region_id);
+    assert_eq!(0, meta.index_file_size);
+    assert!(meta.available_indexes.is_empty());
+    drop(manifest);
+
+    timeout(Duration::from_secs(5), async {
+        engine
+            .handle_request(
+                target_region_id,
+                RegionRequest::BuildIndex(RegionBuildIndexRequest {}),
+            )
+            .await
+    })
+    .await
+    .expect("BuildIndex should not hang")
+    .unwrap();
+
+    let target_region = engine.get_region(target_region_id).unwrap();
+    let access_layer = target_region.access_layer.clone();
+    let manifest = target_region.manifest_ctx.manifest().await;
+    let meta = manifest.files.values().next().unwrap();
+    assert_eq!(source_region_id, meta.region_id);
+    assert!(meta.index_file_size > 0);
+    assert!(!meta.available_indexes.is_empty());
+
+    let origin_path = location::index_file_path(
+        access_layer.table_dir(),
+        meta.index_id(),
+        access_layer.path_type(),
+    );
+    assert!(
+        access_layer
+            .object_store()
+            .exists(&origin_path)
+            .await
+            .unwrap(),
+        "origin-derived index path should exist: {origin_path}"
+    );
+}
+
+#[tokio::test]
+async fn test_rebuild_index_after_remap_singleflights_across_workers() {
+    let mut env = TestEnv::with_prefix("test_rebuild_index_after_remap_singleflight_").await;
+    let listener = Arc::new(GateIndexBuildListener::default());
+    let mut config = async_build_mode_config(false);
+    config.num_workers = 2;
+    config.max_background_index_builds = 2;
+    let engine = env
+        .create_engine_with(config, None, Some(listener.clone()), None)
+        .await;
+
+    let source_region_id = RegionId::new(1, 1);
+    let target_region_id_1 = RegionId::new(1, 2);
+    let target_region_id_2 = RegionId::new(1, 3);
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            source_region_id.table_id(),
+            "test_table",
+            "test_catalog",
+            "test_schema",
+            None,
+            env.get_kv_backend(),
+        )
+        .await;
+
+    let source_create_request = CreateRequestBuilder::new()
+        .partition_expr_json(Some(range_expr("tag_0", 0, 100).as_json_str().unwrap()))
+        .build_with_index();
+    let source_table_dir = source_create_request.table_dir.clone();
+    let column_schemas = rows_schema(&source_create_request);
+    engine
+        .handle_request(
+            source_region_id,
+            RegionRequest::Create(source_create_request),
+        )
+        .await
+        .unwrap();
+    put_and_flush(&engine, source_region_id, &column_schemas, 10..20).await;
+    timeout(Duration::from_secs(5), listener.wait_begin(1))
+        .await
+        .unwrap();
+    listener.release_begin();
+    reopen_region(
+        &engine,
+        source_region_id,
+        source_table_dir,
+        true,
+        HashMap::new(),
+    )
+    .await;
+
+    for target_region_id in [target_region_id_1, target_region_id_2] {
+        let target_create_request = CreateRequestBuilder::new()
+            .partition_expr_json(Some(range_expr("tag_0", 0, 100).as_json_str().unwrap()))
+            .build_with_index();
+        engine
+            .handle_request(
+                target_region_id,
+                RegionRequest::Create(target_create_request),
+            )
+            .await
+            .unwrap();
+        engine
+            .handle_request(
+                target_region_id,
+                RegionRequest::EnterStaging(EnterStagingRequest {
+                    partition_directive: StagingPartitionDirective::UpdatePartitionExpr(
+                        range_expr("tag_0", 0, 100).as_json_str().unwrap(),
+                    ),
+                }),
+            )
+            .await
+            .unwrap();
+    }
+
+    engine
+        .set_region_role_state_gracefully(source_region_id, SettableRegionRoleState::StagingLeader)
+        .await
+        .unwrap();
+    let remap_result = engine
+        .remap_manifests(RemapManifestsRequest {
+            region_id: source_region_id,
+            input_regions: vec![source_region_id],
+            region_mapping: [(
+                source_region_id,
+                vec![target_region_id_1, target_region_id_2],
+            )]
+            .into_iter()
+            .collect(),
+            new_partition_exprs: [
+                (
+                    target_region_id_1,
+                    range_expr("tag_0", 0, 100).as_json_str().unwrap(),
+                ),
+                (
+                    target_region_id_2,
+                    range_expr("tag_0", 0, 100).as_json_str().unwrap(),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        })
+        .await
+        .unwrap();
+
+    for target_region_id in [target_region_id_1, target_region_id_2] {
+        engine
+            .handle_request(
+                target_region_id,
+                RegionRequest::ApplyStagingManifest(ApplyStagingManifestRequest {
+                    partition_expr: range_expr("tag_0", 0, 100).as_json_str().unwrap(),
+                    central_region_id: source_region_id,
+                    manifest_path: remap_result.manifest_paths[&target_region_id].clone(),
+                }),
+            )
+            .await
+            .unwrap();
+    }
+
+    let engine_1 = engine.clone();
+    let first = tokio::spawn(async move {
+        engine_1
+            .handle_request(
+                target_region_id_1,
+                RegionRequest::BuildIndex(RegionBuildIndexRequest {}),
+            )
+            .await
+    });
+    timeout(Duration::from_secs(5), listener.wait_begin(2))
+        .await
+        .unwrap();
+
+    let engine_2 = engine.clone();
+    let second = tokio::spawn(async move {
+        engine_2
+            .handle_request(
+                target_region_id_2,
+                RegionRequest::BuildIndex(RegionBuildIndexRequest {}),
+            )
+            .await
+    });
+    assert!(
+        timeout(Duration::from_millis(200), listener.wait_begin(3))
+            .await
+            .is_err()
+    );
+    assert_eq!(2, listener.begin_count());
+    listener.release_begin();
+
+    timeout(Duration::from_secs(5), first)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    timeout(Duration::from_secs(5), second)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+
+    let region_1 = engine.get_region(target_region_id_1).unwrap();
+    let access_layer = region_1.access_layer.clone();
+    let manifest_1 = region_1.manifest_ctx.manifest().await;
+    let meta_1 = manifest_1.files.values().next().unwrap().clone();
+    drop(manifest_1);
+    let region_2 = engine.get_region(target_region_id_2).unwrap();
+    let manifest_2 = region_2.manifest_ctx.manifest().await;
+    let meta_2 = manifest_2.files.values().next().unwrap().clone();
+
+    assert_eq!(source_region_id, meta_1.region_id);
+    assert_eq!(source_region_id, meta_2.region_id);
+    assert_eq!(meta_1.file_id, meta_2.file_id);
+    assert_eq!(meta_1.index_version, meta_2.index_version);
+    assert_eq!(meta_1.index_file_size, meta_2.index_file_size);
+    assert!(meta_1.index_file_size > 0);
+    assert!(!meta_1.available_indexes.is_empty());
+    assert!(!meta_2.available_indexes.is_empty());
+
+    let origin_path = location::index_file_path(
+        access_layer.table_dir(),
+        meta_1.index_id(),
+        access_layer.path_type(),
+    );
+    assert!(
+        access_layer
+            .object_store()
+            .exists(&origin_path)
+            .await
+            .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn test_rebuild_index_after_remap_reuses_completed_physical_patch() {
+    let mut env =
+        TestEnv::with_prefix("test_rebuild_index_after_remap_reuses_completed_patch_").await;
+    let listener = Arc::new(GateIndexBuildListener::default());
+    let mut config = async_build_mode_config(false);
+    config.num_workers = 2;
+    config.max_background_index_builds = 2;
+    let engine = env
+        .create_engine_with(config, None, Some(listener.clone()), None)
+        .await;
+
+    let source_region_id = RegionId::new(1, 1);
+    let target_region_id_1 = RegionId::new(1, 2);
+    let target_region_id_2 = RegionId::new(1, 3);
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            source_region_id.table_id(),
+            "test_table",
+            "test_catalog",
+            "test_schema",
+            None,
+            env.get_kv_backend(),
+        )
+        .await;
+
+    let source_create_request = CreateRequestBuilder::new()
+        .partition_expr_json(Some(range_expr("tag_0", 0, 100).as_json_str().unwrap()))
+        .build_with_index();
+    let source_table_dir = source_create_request.table_dir.clone();
+    let column_schemas = rows_schema(&source_create_request);
+    engine
+        .handle_request(
+            source_region_id,
+            RegionRequest::Create(source_create_request),
+        )
+        .await
+        .unwrap();
+    put_and_flush(&engine, source_region_id, &column_schemas, 10..20).await;
+    timeout(Duration::from_secs(5), listener.wait_begin(1))
+        .await
+        .unwrap();
+    listener.release_begin();
+    reopen_region(
+        &engine,
+        source_region_id,
+        source_table_dir,
+        true,
+        HashMap::new(),
+    )
+    .await;
+
+    for target_region_id in [target_region_id_1, target_region_id_2] {
+        let target_create_request = CreateRequestBuilder::new()
+            .partition_expr_json(Some(range_expr("tag_0", 0, 100).as_json_str().unwrap()))
+            .build_with_index();
+        engine
+            .handle_request(
+                target_region_id,
+                RegionRequest::Create(target_create_request),
+            )
+            .await
+            .unwrap();
+        engine
+            .handle_request(
+                target_region_id,
+                RegionRequest::EnterStaging(EnterStagingRequest {
+                    partition_directive: StagingPartitionDirective::UpdatePartitionExpr(
+                        range_expr("tag_0", 0, 100).as_json_str().unwrap(),
+                    ),
+                }),
+            )
+            .await
+            .unwrap();
+    }
+
+    engine
+        .set_region_role_state_gracefully(source_region_id, SettableRegionRoleState::StagingLeader)
+        .await
+        .unwrap();
+    let remap_result = engine
+        .remap_manifests(RemapManifestsRequest {
+            region_id: source_region_id,
+            input_regions: vec![source_region_id],
+            region_mapping: [(
+                source_region_id,
+                vec![target_region_id_1, target_region_id_2],
+            )]
+            .into_iter()
+            .collect(),
+            new_partition_exprs: [
+                (
+                    target_region_id_1,
+                    range_expr("tag_0", 0, 100).as_json_str().unwrap(),
+                ),
+                (
+                    target_region_id_2,
+                    range_expr("tag_0", 0, 100).as_json_str().unwrap(),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        })
+        .await
+        .unwrap();
+
+    for target_region_id in [target_region_id_1, target_region_id_2] {
+        engine
+            .handle_request(
+                target_region_id,
+                RegionRequest::ApplyStagingManifest(ApplyStagingManifestRequest {
+                    partition_expr: range_expr("tag_0", 0, 100).as_json_str().unwrap(),
+                    central_region_id: source_region_id,
+                    manifest_path: remap_result.manifest_paths[&target_region_id].clone(),
+                }),
+            )
+            .await
+            .unwrap();
+    }
+
+    let engine_1 = engine.clone();
+    let first = tokio::spawn(async move {
+        engine_1
+            .handle_request(
+                target_region_id_1,
+                RegionRequest::BuildIndex(RegionBuildIndexRequest {}),
+            )
+            .await
+    });
+    timeout(Duration::from_secs(5), listener.wait_begin(2))
+        .await
+        .unwrap();
+    listener.release_begin();
+    timeout(Duration::from_secs(5), first)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+
+    timeout(
+        Duration::from_secs(5),
+        engine.handle_request(
+            target_region_id_2,
+            RegionRequest::BuildIndex(RegionBuildIndexRequest {}),
+        ),
+    )
+    .await
+    .expect("second BuildIndex should reuse completed physical patch")
+    .unwrap();
+    assert!(
+        timeout(Duration::from_millis(200), listener.wait_begin(3))
+            .await
+            .is_err()
+    );
+    assert_eq!(2, listener.begin_count());
+
+    let region_1 = engine.get_region(target_region_id_1).unwrap();
+    let access_layer = region_1.access_layer.clone();
+    let manifest_1 = region_1.manifest_ctx.manifest().await;
+    let meta_1 = manifest_1.files.values().next().unwrap().clone();
+    drop(manifest_1);
+    let region_2 = engine.get_region(target_region_id_2).unwrap();
+    let manifest_2 = region_2.manifest_ctx.manifest().await;
+    let meta_2 = manifest_2.files.values().next().unwrap().clone();
+
+    assert_eq!(source_region_id, meta_1.region_id);
+    assert_eq!(source_region_id, meta_2.region_id);
+    assert_eq!(meta_1.file_id, meta_2.file_id);
+    assert_eq!(meta_1.index_version, meta_2.index_version);
+    assert_eq!(meta_1.index_file_size, meta_2.index_file_size);
+    assert!(meta_1.index_file_size > 0);
+    assert!(!meta_1.available_indexes.is_empty());
+    assert!(!meta_2.available_indexes.is_empty());
+
+    let origin_path = location::index_file_path(
+        access_layer.table_dir(),
+        meta_1.index_id(),
+        access_layer.path_type(),
+    );
+    assert!(
+        access_layer
+            .object_store()
+            .exists(&origin_path)
+            .await
+            .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn test_rebuild_index_after_remap_reuses_source_async_completed_patch() {
+    let mut env = TestEnv::with_prefix("test_rebuild_index_after_remap_reuses_source_patch_").await;
+    let listener = Arc::new(GateIndexBuildListener::default());
+    let mut config = async_build_mode_config(true);
+    config.num_workers = 2;
+    config.max_background_index_builds = 2;
+    let engine = env
+        .create_engine_with(config, None, Some(listener.clone()), None)
+        .await;
+
+    let source_region_id = RegionId::new(1, 1);
+    let target_region_id = RegionId::new(1, 2);
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            source_region_id.table_id(),
+            "test_table",
+            "test_catalog",
+            "test_schema",
+            None,
+            env.get_kv_backend(),
+        )
+        .await;
+
+    let source_create_request = CreateRequestBuilder::new()
+        .partition_expr_json(Some(range_expr("tag_0", 0, 100).as_json_str().unwrap()))
+        .build_with_index();
+    let column_schemas = rows_schema(&source_create_request);
+    engine
+        .handle_request(
+            source_region_id,
+            RegionRequest::Create(source_create_request),
+        )
+        .await
+        .unwrap();
+    put_and_flush(&engine, source_region_id, &column_schemas, 10..20).await;
+    timeout(Duration::from_secs(5), listener.wait_begin(1))
+        .await
+        .unwrap();
+
+    let target_create_request = CreateRequestBuilder::new()
+        .partition_expr_json(Some(range_expr("tag_0", 0, 100).as_json_str().unwrap()))
+        .build_with_index();
+    engine
+        .handle_request(
+            target_region_id,
+            RegionRequest::Create(target_create_request),
+        )
+        .await
+        .unwrap();
+    engine
+        .handle_request(
+            target_region_id,
+            RegionRequest::EnterStaging(EnterStagingRequest {
+                partition_directive: StagingPartitionDirective::UpdatePartitionExpr(
+                    range_expr("tag_0", 0, 100).as_json_str().unwrap(),
+                ),
+            }),
+        )
+        .await
+        .unwrap();
+
+    engine
+        .set_region_role_state_gracefully(source_region_id, SettableRegionRoleState::StagingLeader)
+        .await
+        .unwrap();
+    let remap_result = engine
+        .remap_manifests(RemapManifestsRequest {
+            region_id: source_region_id,
+            input_regions: vec![source_region_id],
+            region_mapping: [(source_region_id, vec![target_region_id])]
+                .into_iter()
+                .collect(),
+            new_partition_exprs: [(
+                target_region_id,
+                range_expr("tag_0", 0, 100).as_json_str().unwrap(),
+            )]
+            .into_iter()
+            .collect(),
+        })
+        .await
+        .unwrap();
+    engine
+        .handle_request(
+            target_region_id,
+            RegionRequest::ApplyStagingManifest(ApplyStagingManifestRequest {
+                partition_expr: range_expr("tag_0", 0, 100).as_json_str().unwrap(),
+                central_region_id: source_region_id,
+                manifest_path: remap_result.manifest_paths[&target_region_id].clone(),
+            }),
+        )
+        .await
+        .unwrap();
+    let target_region = engine.get_region(target_region_id).unwrap();
+    let target_manifest = target_region.manifest_ctx.manifest().await;
+    let stale_meta = target_manifest.files.values().next().unwrap();
+    assert_eq!(source_region_id, stale_meta.region_id);
+    assert_eq!(0, stale_meta.index_file_size);
+    drop(target_manifest);
+
+    engine
+        .set_region_role_state_gracefully(source_region_id, SettableRegionRoleState::Leader)
+        .await
+        .unwrap();
+    listener.release_begin();
+    timeout(Duration::from_secs(5), listener.wait_finish(1))
+        .await
+        .unwrap();
+
+    timeout(
+        Duration::from_secs(5),
+        engine.handle_request(
+            target_region_id,
+            RegionRequest::BuildIndex(RegionBuildIndexRequest {}),
+        ),
+    )
+    .await
+    .expect("target BuildIndex should reuse source completed patch")
+    .unwrap();
+    assert!(
+        timeout(Duration::from_millis(200), listener.wait_begin(2))
+            .await
+            .is_err()
+    );
+    assert_eq!(1, listener.begin_count());
+
+    let target_region = engine.get_region(target_region_id).unwrap();
+    let access_layer = target_region.access_layer.clone();
+    let target_manifest = target_region.manifest_ctx.manifest().await;
+    let meta = target_manifest.files.values().next().unwrap().clone();
+    assert_eq!(source_region_id, meta.region_id);
+    assert!(meta.index_file_size > 0);
+    assert!(!meta.available_indexes.is_empty());
+
+    let origin_path = location::index_file_path(
+        access_layer.table_dir(),
+        meta.index_id(),
+        access_layer.path_type(),
+    );
+    assert!(
+        access_layer
+            .object_store()
+            .exists(&origin_path)
+            .await
+            .unwrap()
+    );
+}
+
+#[tokio::test]
 async fn test_gate_index_build_listener_smoke() {
     use store_api::storage::{FileId, RegionId};
 
@@ -599,14 +1269,14 @@ async fn test_gate_index_build_listener_smoke() {
 async fn test_index_build_type_manual_duplicate_in_flight() {
     let mut env = TestEnv::with_prefix("test_index_build_type_manual_duplicate_in_flight_").await;
     let gate = Arc::new(GateIndexBuildListener::default());
+    let mut config = async_build_mode_config(false);
+    // Avoid a flush-triggered async no-op index task in this test. An old
+    // `IndexBuildStopped` from that task can race with the manual duplicate
+    // build below and clear scheduler state for the same file.
+    config.index.build_mode = IndexBuildMode::Sync;
     let engine = Arc::new(
-        env.create_engine_with(
-            async_build_mode_config(false), // Disable index file creation on flush.
-            None,
-            Some(gate.clone()),
-            None,
-        )
-        .await,
+        env.create_engine_with(config, None, Some(gate.clone()), None)
+            .await,
     );
 
     let region_id = RegionId::new(1, 1);
@@ -621,34 +1291,33 @@ async fn test_index_build_type_manual_duplicate_in_flight() {
         )
         .await;
 
-    // Create a region with index metadata.
-    let request = CreateRequestBuilder::new().build_with_index();
-    let table_dir = request.table_dir.clone();
+    // Create a region without index metadata, so the flush below creates an SST
+    // but no index file and no background index build task.
+    let request = CreateRequestBuilder::new().build();
     let column_schemas = rows_schema(&request);
+    let mut altered_metadata = request.column_metadatas.clone();
     engine
         .handle_request(region_id, RegionRequest::Create(request))
         .await
         .unwrap();
 
-    // Flush: the flush-triggered index build begins but is blocked by the gate.
     put_and_flush(&engine, region_id, &column_schemas, 10..20).await;
 
-    // Wait for the flush-triggered build to begin (blocked by gate).
-    tokio::time::timeout(std::time::Duration::from_secs(5), gate.wait_begin(1))
+    // Add index metadata without triggering a schema-change rebuild.
+    altered_metadata[1].column_schema.set_inverted_index(true);
+    let sync_columns_request = RegionAlterRequest {
+        kind: AlterKind::SyncColumns {
+            column_metadatas: altered_metadata,
+        },
+    };
+    engine
+        .handle_request(region_id, RegionRequest::Alter(sync_columns_request))
         .await
         .unwrap();
-    assert_eq!(gate.begin_count(), 1);
+
+    assert_eq!(gate.begin_count(), 0);
     assert_eq!(gate.finish_count(), 0);
     assert_eq!(gate.abort_count(), 0);
-
-    // Release the gate so the flush-triggered build can complete.
-    // With create_on_flush=false the build produces no index file (file_size=0),
-    // so on_index_build_finish is NOT called.
-    gate.release_begin();
-
-    // Reset scheduler state via reopen_region. This ensures the flush-triggered
-    // build's entry is removed from building_files and the scheduler is clean.
-    reopen_region(&engine, region_id, table_dir.clone(), true, HashMap::new()).await;
 
     // Verify no index file exists after flush (create_on_flush=false).
     let scanner = engine
@@ -669,10 +1338,10 @@ async fn test_index_build_type_manual_duplicate_in_flight() {
     });
 
     // Wait for the first manual build to begin (blocked by gate).
-    tokio::time::timeout(std::time::Duration::from_secs(5), gate.wait_begin(2))
+    tokio::time::timeout(std::time::Duration::from_secs(5), gate.wait_begin(1))
         .await
-        .unwrap(); // begin 1 = flush, begin 2 = first manual
-    assert_eq!(gate.begin_count(), 2);
+        .unwrap();
+    assert_eq!(gate.begin_count(), 1);
     assert_eq!(gate.finish_count(), 0);
     assert_eq!(gate.abort_count(), 0);
 
@@ -684,7 +1353,7 @@ async fn test_index_build_type_manual_duplicate_in_flight() {
 
     // The second request should have been aborted as duplicate.
     assert_eq!(gate.abort_count(), 1, "duplicate request should be aborted");
-    assert_eq!(gate.begin_count(), 2, "no new begin for duplicate");
+    assert_eq!(gate.begin_count(), 1, "no new begin for duplicate");
     assert_eq!(gate.finish_count(), 0, "first build hasn't finished yet");
 
     // Release the gate to let the first manual build proceed.
@@ -694,7 +1363,7 @@ async fn test_index_build_type_manual_duplicate_in_flight() {
         .unwrap(); // first manual build completes
 
     // Final counts: only one successful build, one aborted duplicate.
-    assert_eq!(gate.begin_count(), 2); // flush + first manual
+    assert_eq!(gate.begin_count(), 1); // first manual only
     assert_eq!(gate.finish_count(), 1); // first manual only
     assert_eq!(gate.abort_count(), 1); // second manual duplicate abort
 

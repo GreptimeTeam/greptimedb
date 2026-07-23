@@ -904,6 +904,7 @@ pub(crate) enum BackgroundNotify {
     /// Index build has been stopped (aborted or succeeded).
     IndexBuildStopped(IndexBuildStopped),
     /// Index build has failed.
+    #[allow(dead_code)]
     IndexBuildFailed(IndexBuildFailed),
     /// Compaction has finished.
     CompactionFinished(CompactionFinished),
@@ -983,6 +984,8 @@ pub(crate) struct IndexBuildFinished {
 pub(crate) struct IndexBuildStopped {
     #[allow(dead_code)]
     pub(crate) region_id: RegionId,
+    /// Physical/origin region id of the rebuilt file.
+    pub(crate) physical_region_id: RegionId,
     pub(crate) file_id: FileId,
 }
 

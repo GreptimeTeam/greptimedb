@@ -74,6 +74,7 @@ impl<S> RegionWorkerLoop<S> {
         });
 
         IndexBuildTask {
+            region_id: region.region_id(),
             file: file.clone(),
             file_meta: file.meta_ref().clone(),
             reason: build_type,
@@ -85,6 +86,7 @@ impl<S> RegionWorkerLoop<S> {
             request_sender: self.sender.clone(),
             indexer_builder: indexer_builder_ref.clone(),
             result_sender,
+            physical_coordinator: self.index_build_scheduler.physical_coordinator(),
         }
     }
 
@@ -219,7 +221,7 @@ impl<S> RegionWorkerLoop<S> {
         // Clean old puffin-related cache for all rebuilt files.
         let cache_strategy = CacheStrategy::EnableAll(self.cache_manager.clone());
         for file_meta in &request.edit.files_to_add {
-            let region_file_id = RegionFileId::new(region_id, file_meta.file_id);
+            let region_file_id = RegionFileId::new(file_meta.region_id, file_meta.file_id);
             let index_id = RegionIndexId::new(region_file_id, file_meta.index_version);
             cache_strategy.evict_puffin_cache(index_id).await;
         }
@@ -232,7 +234,7 @@ impl<S> RegionWorkerLoop<S> {
 
         for file_meta in &request.edit.files_to_add {
             self.listener
-                .on_index_build_finish(RegionFileId::new(region_id, file_meta.file_id))
+                .on_index_build_finish(RegionFileId::new(file_meta.region_id, file_meta.file_id))
                 .await;
         }
     }
@@ -253,17 +255,16 @@ impl<S> RegionWorkerLoop<S> {
         region_id: RegionId,
         request: IndexBuildStopped,
     ) {
-        let Some(region) = self.regions.get_region(region_id) else {
+        if self.regions.get_region(region_id).is_none() {
             warn!(
                 "Region not found for index build stopped, region_id: {}",
                 region_id
             );
-            return;
-        };
+        }
         self.index_build_scheduler.on_task_stopped(
             region_id,
+            request.physical_region_id,
             request.file_id,
-            &region.version_control,
         );
     }
 }
