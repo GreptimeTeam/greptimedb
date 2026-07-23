@@ -180,7 +180,6 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 change_result.new_meta,
                 change_result.new_options,
                 &self.memtable_builder_provider,
-                region.path_type(),
             );
         }
 
@@ -251,7 +250,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             // Format changed, also needs to replace the memtable builder.
             Some(
                 self.memtable_builder_provider
-                    .builder_for_options(&region_options, region.path_type()),
+                    .builder_for_options(&region_options),
             )
         } else {
             None
@@ -566,15 +565,13 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         new_meta: RegionMetadataRef,
         new_options: Option<RegionOptions>,
         memtable_builder_provider: &MemtableBuilderProvider,
-        path_type: store_api::region_request::PathType,
     ) {
         let options_changed = new_options.is_some();
         let region_id = new_meta.region_id;
         if let Some(new_options) = new_options {
             // Needs to update the region with new format and memtables.
             // Creates a new memtable builder for the new options as it may change the memtable type.
-            let new_memtable_builder =
-                memtable_builder_provider.builder_for_options(&new_options, path_type);
+            let new_memtable_builder = memtable_builder_provider.builder_for_options(&new_options);
             version_control.alter_schema_and_format(new_meta, new_options, new_memtable_builder);
         } else {
             // Only changes the schema.

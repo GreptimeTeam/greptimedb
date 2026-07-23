@@ -55,8 +55,9 @@ use crate::metric_engine_consts::PHYSICAL_TABLE_METADATA_KEY;
 use crate::metrics;
 use crate::mito_engine_options::{
     APPEND_MODE_KEY, AUTO_FLUSH_INTERVAL_KEY, MAX_ROW_GROUP_ROW_COUNT,
-    MAX_ROW_GROUP_ROW_COUNT_LIMIT, SST_FORMAT_KEY, TTL_KEY, TWCS_MAX_OUTPUT_FILE_SIZE,
-    TWCS_TIME_WINDOW, TWCS_TRIGGER_FILE_NUM, WRITE_BUFFER_SIZE_KEY,
+    MAX_ROW_GROUP_ROW_COUNT_LIMIT, EXPERIMENTAL_SST_FLOAT_FIELD_ENCODING_KEY, SST_FORMAT_KEY,
+    TTL_KEY, TWCS_MAX_OUTPUT_FILE_SIZE, TWCS_TIME_WINDOW, TWCS_TRIGGER_FILE_NUM,
+    WRITE_BUFFER_SIZE_KEY,
 };
 use crate::path_utils::table_dir;
 use crate::storage::{ColumnId, RegionId, ScanRequest};
@@ -1413,6 +1414,8 @@ pub enum SetRegionOption {
     Twsc(String, String),
     // Modifying the SST format.
     Format(String),
+    // Modifying the experimental SST float field encoding policy.
+    FloatFieldEncoding(String),
     // Modifying the append mode.
     AppendMode(bool),
     // Modifying the per-region auto flush interval override.
@@ -1443,6 +1446,14 @@ impl TryFrom<&PbOption> for SetRegionOption {
                 Ok(Self::Twsc(key.clone(), value.clone()))
             }
             SST_FORMAT_KEY => Ok(Self::Format(value.clone())),
+            EXPERIMENTAL_SST_FLOAT_FIELD_ENCODING_KEY
+                if matches!(value.as_str(), "default" | "byte_stream_split") =>
+            {
+                Ok(Self::FloatFieldEncoding(value.clone()))
+            }
+            EXPERIMENTAL_SST_FLOAT_FIELD_ENCODING_KEY => {
+                InvalidSetRegionOptionRequestSnafu { key, value }.fail()
+            }
             APPEND_MODE_KEY => {
                 let append_mode = value
                     .parse::<bool>()
@@ -1842,6 +1853,69 @@ mod tests {
         assert_eq!(
             UnsetRegionOption::MaxRowGroupRowCount,
             UnsetRegionOption::try_from(MAX_ROW_GROUP_ROW_COUNT).unwrap()
+        );
+    }
+
+    #[test]
+    fn test_float_field_encoding_region_options() {
+        for (value, expected) in [
+            (
+                "default",
+                SetRegionOption::FloatFieldEncoding("default".to_string()),
+            ),
+            (
+                "byte_stream_split",
+                SetRegionOption::FloatFieldEncoding("byte_stream_split".to_string()),
+            ),
+        ] {
+            let option = PbOption {
+                key: EXPERIMENTAL_SST_FLOAT_FIELD_ENCODING_KEY.to_string(),
+                value: value.to_string(),
+            };
+            assert_eq!(expected, SetRegionOption::try_from(&option).unwrap());
+        }
+
+        for value in ["", "Default", "BYTE_STREAM_SPLIT", "plain"] {
+            let option = PbOption {
+                key: EXPERIMENTAL_SST_FLOAT_FIELD_ENCODING_KEY.to_string(),
+                value: value.to_string(),
+            };
+            assert!(SetRegionOption::try_from(&option).is_err());
+        }
+
+        let unknown = PbOption {
+            key: "unknown_option".to_string(),
+            value: "default".to_string(),
+        };
+        assert!(SetRegionOption::try_from(&unknown).is_err());
+
+        assert!(UnsetRegionOption::try_from(EXPERIMENTAL_SST_FLOAT_FIELD_ENCODING_KEY).is_err());
+    }
+
+    #[test]
+    fn test_set_region_options_with_float_field_encoding() {
+        let kind = AlterKind::try_from(alter_request::Kind::SetTableOptions(v1::SetTableOptions {
+            table_options: vec![
+                PbOption {
+                    key: SST_FORMAT_KEY.to_string(),
+                    value: "flat".to_string(),
+                },
+                PbOption {
+                    key: EXPERIMENTAL_SST_FLOAT_FIELD_ENCODING_KEY.to_string(),
+                    value: "byte_stream_split".to_string(),
+                },
+            ],
+        }))
+        .unwrap();
+
+        assert_eq!(
+            AlterKind::SetRegionOptions {
+                options: vec![
+                    SetRegionOption::Format("flat".to_string()),
+                    SetRegionOption::FloatFieldEncoding("byte_stream_split".to_string()),
+                ],
+            },
+            kind
         );
     }
 

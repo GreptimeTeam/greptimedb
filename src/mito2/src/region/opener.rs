@@ -346,9 +346,7 @@ impl RegionOpener {
         )
         .await?;
 
-        let memtable_builder = self
-            .memtable_builder_provider
-            .builder_for_options(&options, self.path_type);
+        let memtable_builder = self.memtable_builder_provider.builder_for_options(&options);
         let part_duration = options.compaction.time_window();
         // Initial memtable id is 0.
         let mutable = Arc::new(TimePartitions::new(
@@ -511,7 +509,7 @@ impl RegionOpener {
         // We should sanitize the region options before creating a new memtable.
         let memtable_builder = self
             .memtable_builder_provider
-            .builder_for_options(&region_options, self.path_type);
+            .builder_for_options(&region_options);
         // Use compaction time window in the manifest if region doesn't provide
         // the time window option.
         let part_duration = region_options

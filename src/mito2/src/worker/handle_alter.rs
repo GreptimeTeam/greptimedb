@@ -37,7 +37,7 @@ use crate::flush::FlushReason;
 use crate::manifest::action::RegionChange;
 use crate::region::MitoRegionRef;
 use crate::region::options::CompactionOptions::Twcs;
-use crate::region::options::{RegionOptions, TwcsOptions};
+use crate::region::options::{FloatFieldEncodingPolicy, RegionOptions, TwcsOptions};
 use crate::region::version::VersionRef;
 use crate::request::{DdlRequest, OptionOutputTx, SenderDdlRequest};
 use crate::sst::FormatType;
@@ -144,8 +144,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         self.handle_alter_region_with_empty_memtable(region, version, request, new_options, sender);
     }
 
-    // TODO(yingwen): Optional new options and sst format.
-    /// Handles region metadata and format changes when the region memtable is empty.
+    /// Handles metadata and flush-sensitive option changes when the region memtable is empty.
+    /// This includes SST format, append mode, and float field encoding.
     fn handle_alter_region_with_empty_memtable(
         &mut self,
         region: MitoRegionRef,
@@ -188,6 +188,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
         let mut all_options_altered = true;
         let mut current_options = version.options.clone();
+        let mut new_float_field_encoding = None;
         for option in options.iter().cloned() {
             match option {
                 SetRegionOption::WriteBufferSize(new_write_buffer_size) => {
@@ -279,10 +280,31 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                         all_options_altered = false;
                     }
                 }
+                SetRegionOption::FloatFieldEncoding(encoding) => {
+                    let encoding = encoding.parse::<FloatFieldEncodingPolicy>().map_err(|_| {
+                        store_api::metadata::InvalidRegionRequestSnafu {
+                            region_id: region.region_id,
+                            err: format!("Invalid float field encoding: {encoding}"),
+                        }
+                        .build()
+                    })?;
+                    new_float_field_encoding = Some(encoding);
+                }
             }
         }
-        if all_options_altered {
+
+        // Keep the current writer policy until all existing memtables have been
+        // flushed. A float encoding change must not make an old memtable flush
+        // with the new policy.
+        if new_float_field_encoding
+            .is_some_and(|encoding| encoding != current_options.float_field_encoding)
+        {
+            all_options_altered = false;
+        }
+        if current_options != version.options {
             region.version_control.alter_options(current_options);
+        }
+        if all_options_altered {
             Ok(None)
         } else {
             let kind = AlterKind::SetRegionOptions { options };
@@ -331,6 +353,10 @@ fn new_region_options_on_empty_memtable(
             }
             SetRegionOption::MaxRowGroupRowCount(new_row_count) => {
                 current_options.max_row_group_row_count = *new_row_count;
+            }
+            SetRegionOption::FloatFieldEncoding(encoding) => {
+                // Safety: handle_alter_region_options_fast() has validated this.
+                current_options.float_field_encoding = encoding.parse().unwrap();
             }
         }
     }

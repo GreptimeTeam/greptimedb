@@ -447,4 +447,49 @@ impl MetricEngineInner {
     }
 }
 
-// Unit tests in engine.rs
+#[cfg(test)]
+mod test {
+    use std::collections::HashMap;
+
+    use store_api::mito_engine_options::EXPERIMENTAL_SST_FLOAT_FIELD_ENCODING_KEY;
+
+    use super::*;
+    use crate::config::EngineConfig;
+    use crate::engine::MetricEngine;
+    use crate::test_util::TestEnv;
+
+    #[tokio::test]
+    async fn test_transform_open_request_routes_float_field_encoding_to_data_region() {
+        let env = TestEnv::new().await;
+        let engine = MetricEngine::try_new(env.mito(), EngineConfig::default()).unwrap();
+        let request = RegionOpenRequest {
+            table_dir: TestEnv::default_table_dir(),
+            path_type: PathType::Bare,
+            options: [(
+                EXPERIMENTAL_SST_FLOAT_FIELD_ENCODING_KEY.to_string(),
+                "byte_stream_split".to_string(),
+            )]
+            .into_iter()
+            .collect::<HashMap<_, _>>(),
+            engine: MITO_ENGINE_NAME.to_string(),
+            skip_wal_replay: false,
+            checkpoint: None,
+            requirements: Default::default(),
+        };
+
+        let (metadata_request, data_request) =
+            engine.inner.transform_open_physical_region_request(request);
+
+        assert!(
+            !metadata_request
+                .options
+                .contains_key(EXPERIMENTAL_SST_FLOAT_FIELD_ENCODING_KEY)
+        );
+        assert_eq!(
+            data_request
+                .options
+                .get(EXPERIMENTAL_SST_FLOAT_FIELD_ENCODING_KEY),
+            Some(&"byte_stream_split".to_string())
+        );
+    }
+}
