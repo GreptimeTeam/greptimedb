@@ -17,8 +17,8 @@ use url::Url;
 /// Placeholder substituted for any password found in a connection string.
 const REDACTED: &str = "***";
 
-/// Substituted for a whole URI-shaped connection string that no parser accepted.
-const REDACTED_URI: &str = "<redacted connection string>";
+/// Substituted for a whole connection string that cannot be safely sanitized.
+const REDACTED_CONNECTION_STRING: &str = "<redacted connection string>";
 
 /// Removes sensitive information (passwords) from a connection string before it
 /// is logged.
@@ -47,6 +47,9 @@ pub fn sanitize_connection_string(conn_str: &str) -> String {
         if redacted != conn_str {
             return redacted;
         }
+        if contains_password_assignment(conn_str) {
+            return REDACTED_CONNECTION_STRING.to_string();
+        }
     }
 
     #[cfg(feature = "pg_kvbackend")]
@@ -60,7 +63,7 @@ pub fn sanitize_connection_string(conn_str: &str) -> String {
     }
 
     if is_uri_like(conn_str) {
-        return REDACTED_URI.to_string();
+        return REDACTED_CONNECTION_STRING.to_string();
     }
 
     redact_keyword_password(conn_str)
@@ -128,6 +131,21 @@ fn redact_keyword_password(s: &str) -> String {
         i += ch.len_utf8();
     }
     out
+}
+
+/// Returns true if `s` contains a `password` assignment that is not embedded in
+/// an identifier. This is a fail-closed fallback for malformed keyword strings
+/// where the backend parser may otherwise treat the assignment as another
+/// option's value.
+fn contains_password_assignment(s: &str) -> bool {
+    const KEY: &str = "password";
+    s.match_indices(KEY).any(|(i, _)| {
+        let embedded_in_identifier = s[..i]
+            .chars()
+            .next_back()
+            .is_some_and(|c| c.is_alphanumeric() || c == '_');
+        !embedded_in_identifier && s[skip_ws(s, i + KEY.len())..].starts_with('=')
+    })
 }
 
 fn skip_ws(s: &str, mut i: usize) -> usize {
@@ -240,12 +258,19 @@ mod tests {
         }
 
         for dsn in [
-            "notpassword=LEAK_CANARY",
+            "host=localhost,password=LEAK_CANARY",
+            "host=localhost/password=LEAK_CANARY",
+            "host=localhost?password=LEAK_CANARY",
+            "host=localhost#password=LEAK_CANARY",
+            "host=localhost:password=LEAK_CANARY",
             "application_name=password=LEAK_CANARY",
         ] {
             let s = sanitize_connection_string(dsn);
-            assert!(s.contains("LEAK_CANARY"), "over-redacted for {dsn:?}: {s}");
+            assert_eq!(REDACTED_CONNECTION_STRING, s, "for {dsn:?}");
         }
+
+        let s = sanitize_connection_string("notpassword=LEAK_CANARY");
+        assert!(s.contains("LEAK_CANARY"), "over-redacted: {s}");
     }
 
     // Keyword redaction must handle libpq quoting and Unicode whitespace without
