@@ -23,9 +23,9 @@ use parquet::file::metadata::ParquetMetaData;
 use parquet::file::properties::WriterPropertiesBuilder;
 use parquet::schema::types::ColumnPath;
 use store_api::metadata::RegionMetadataRef;
-use store_api::region_request::PathType;
 use store_api::storage::FileId;
 
+use crate::region::options::FloatFieldEncodingPolicy;
 use crate::sst::DEFAULT_WRITE_BUFFER_SIZE;
 use crate::sst::file::FileTimeRange;
 use crate::sst::index::IndexOutput;
@@ -60,30 +60,13 @@ pub(crate) const DEFAULT_READ_BATCH_SIZE: usize = 8 * 1024;
 /// batching without changing the row group layout of newly written SSTs.
 pub const DEFAULT_ROW_GROUP_SIZE: usize = 100 * 1024;
 
-/// Internal policy for Parquet encoding of direct floating-point field columns.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) enum FloatFieldEncoding {
-    #[default]
-    Default,
-    ByteStreamSplit,
-}
-
-impl FloatFieldEncoding {
-    pub(crate) fn from_path_type(path_type: PathType) -> Self {
-        match path_type {
-            PathType::Data => Self::ByteStreamSplit,
-            PathType::Bare | PathType::Metadata => Self::Default,
-        }
-    }
-}
-
 /// Applies BYTE_STREAM_SPLIT to direct floating-point field columns when enabled.
 pub(crate) fn apply_float_field_encoding(
     builder: WriterPropertiesBuilder,
     region_metadata: &RegionMetadataRef,
-    float_field_encoding: FloatFieldEncoding,
+    float_field_encoding: FloatFieldEncodingPolicy,
 ) -> WriterPropertiesBuilder {
-    if float_field_encoding != FloatFieldEncoding::ByteStreamSplit {
+    if float_field_encoding != FloatFieldEncodingPolicy::ByteStreamSplit {
         return builder;
     }
 
@@ -341,24 +324,11 @@ mod tests {
 
     #[test]
     fn test_float_field_encoding_policy_and_properties() {
-        assert_eq!(
-            FloatFieldEncoding::ByteStreamSplit,
-            FloatFieldEncoding::from_path_type(PathType::Data)
-        );
-        assert_eq!(
-            FloatFieldEncoding::Default,
-            FloatFieldEncoding::from_path_type(PathType::Bare)
-        );
-        assert_eq!(
-            FloatFieldEncoding::Default,
-            FloatFieldEncoding::from_path_type(PathType::Metadata)
-        );
-
         let metadata = float_property_test_metadata();
         let props = apply_float_field_encoding(
             WriterProperties::builder().set_encoding(Encoding::PLAIN),
             &metadata,
-            FloatFieldEncoding::ByteStreamSplit,
+            FloatFieldEncodingPolicy::ByteStreamSplit,
         )
         .build();
         for name in ["f32", "f64"] {
@@ -381,7 +351,7 @@ mod tests {
         let default_props = apply_float_field_encoding(
             WriterProperties::builder().set_encoding(Encoding::PLAIN),
             &metadata,
-            FloatFieldEncoding::Default,
+            FloatFieldEncodingPolicy::Default,
         )
         .build();
         let f64_path = parquet::schema::types::ColumnPath::new(vec!["f64".to_string()]);
@@ -390,7 +360,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_parquet_writer_uses_bss_for_data_float32_field() {
+    async fn test_parquet_writer_uses_explicit_byte_stream_split_for_float32_field() {
         let mut env = TestEnv::new().await;
         let object_store = env.init_object_store_manager();
         let handle = sst_file_handle(0, 3);
@@ -408,7 +378,7 @@ mod tests {
             &mut metrics,
         )
         .await
-        .with_float_field_encoding(FloatFieldEncoding::from_path_type(PathType::Data));
+        .with_float_field_encoding(FloatFieldEncodingPolicy::ByteStreamSplit);
         let info = writer
             .write_all_flat_as_primary_key(source, None, &WriteOptions::default())
             .await

@@ -37,7 +37,7 @@ use crate::error::{
 };
 use crate::metrics::{COMPACTION_STAGE_ELAPSED, FLUSH_ELAPSED};
 use crate::read::FlatSource;
-use crate::region::options::IndexOptions;
+use crate::region::options::{FloatFieldEncodingPolicy, IndexOptions};
 use crate::sst::file::{FileHandle, RegionFileId, RegionIndexId};
 use crate::sst::index::IndexerBuilderImpl;
 use crate::sst::index::intermediate::IntermediateManager;
@@ -45,7 +45,7 @@ use crate::sst::index::puffin_manager::{PuffinManagerFactory, SstPuffinManager};
 use crate::sst::location::{self, region_dir_from_table_dir};
 use crate::sst::parquet::reader::ParquetReaderBuilder;
 use crate::sst::parquet::writer::ParquetWriter;
-use crate::sst::parquet::{FloatFieldEncoding, SstInfo, WriteOptions};
+use crate::sst::parquet::{SstInfo, WriteOptions};
 use crate::sst::{DEFAULT_WRITE_BUFFER_SIZE, DEFAULT_WRITE_CONCURRENCY, FormatType};
 
 pub type AccessLayerRef = Arc<AccessLayer>;
@@ -355,7 +355,6 @@ impl AccessLayer {
                     },
                     write_opts,
                     metrics,
-                    FloatFieldEncoding::from_path_type(self.path_type),
                 )
                 .await?
         } else {
@@ -391,7 +390,7 @@ impl AccessLayer {
                 metrics,
             )
             .await
-            .with_float_field_encoding(FloatFieldEncoding::from_path_type(self.path_type))
+            .with_float_field_encoding(request.float_field_encoding)
             .with_file_cleaner(cleaner);
             match request.sst_write_format {
                 FormatType::PrimaryKey => {
@@ -533,6 +532,7 @@ pub struct SstWriteRequest {
     pub storage: Option<String>,
     pub max_sequence: Option<SequenceNumber>,
     pub sst_write_format: FormatType,
+    pub float_field_encoding: FloatFieldEncodingPolicy,
 
     /// Configs for index
     pub index_options: IndexOptions,
@@ -733,6 +733,7 @@ mod tests {
     use crate::cache::CacheManager;
     use crate::cache::test_util::new_fs_store;
     use crate::memtable::bulk::part::BulkPartConverter;
+    use crate::region::options::FloatFieldEncodingPolicy;
     use crate::sst::{FlatSchemaOptions, to_flat_sst_arrow_schema};
     use crate::test_util::TestEnv;
     use crate::test_util::memtable_util::build_key_values_with_ts_seq_values;
@@ -764,15 +765,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_write_sst_uses_bss_only_for_data_path() {
+    async fn test_write_sst_uses_request_float_field_encoding_policy() {
         let mut env = TestEnv::new().await;
         let object_store = env.init_object_store_manager();
         let metadata = crate::test_util::memtable_util::metadata_for_test();
 
-        for (path_type, expect_bss) in [
-            (PathType::Data, true),
-            (PathType::Bare, false),
-            (PathType::Metadata, false),
+        for (path_type, float_field_encoding, expect_bss) in [
+            (PathType::Data, FloatFieldEncodingPolicy::Default, false),
+            (
+                PathType::Bare,
+                FloatFieldEncodingPolicy::ByteStreamSplit,
+                true,
+            ),
+            (PathType::Metadata, FloatFieldEncodingPolicy::Default, false),
         ] {
             let access_layer = AccessLayer::new(
                 "test",
@@ -789,6 +794,7 @@ mod tests {
                 storage: None,
                 max_sequence: None,
                 sst_write_format: FormatType::Flat,
+                float_field_encoding,
                 index_options: Default::default(),
                 index_config: Default::default(),
                 inverted_index_config: Default::default(),
@@ -820,7 +826,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_write_sst_uses_bss_for_data_path_with_write_cache() {
+    async fn test_write_sst_uses_request_float_field_encoding_policy_with_write_cache() {
         let mut env = TestEnv::new().await;
         let object_store = env.init_object_store_manager();
         let local_dir = create_temp_dir("");
@@ -838,7 +844,7 @@ mod tests {
         let metadata = crate::test_util::memtable_util::metadata_for_test();
         let access_layer = AccessLayer::new(
             "test",
-            PathType::Data,
+            PathType::Bare,
             object_store,
             env.get_puffin_manager(),
             env.get_intermediate_manager(),
@@ -851,6 +857,7 @@ mod tests {
             storage: None,
             max_sequence: None,
             sst_write_format: FormatType::Flat,
+            float_field_encoding: FloatFieldEncodingPolicy::ByteStreamSplit,
             index_options: Default::default(),
             index_config: Default::default(),
             inverted_index_config: Default::default(),

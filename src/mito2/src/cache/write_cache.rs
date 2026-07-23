@@ -39,7 +39,7 @@ use crate::sst::index::IndexerBuilderImpl;
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::{PuffinManagerFactory, SstPuffinManager};
 use crate::sst::parquet::writer::ParquetWriter;
-use crate::sst::parquet::{FloatFieldEncoding, SstInfo, WriteOptions};
+use crate::sst::parquet::{SstInfo, WriteOptions};
 use crate::sst::{DEFAULT_WRITE_BUFFER_SIZE, DEFAULT_WRITE_CONCURRENCY};
 
 /// A cache for uploading files to remote object stores.
@@ -209,7 +209,6 @@ impl WriteCache {
         upload_request: SstUploadRequest,
         write_opts: &WriteOptions,
         metrics: &mut Metrics,
-        float_field_encoding: FloatFieldEncoding,
     ) -> Result<SstInfoArray> {
         let region_id = write_request.metadata.region_id;
 
@@ -243,7 +242,7 @@ impl WriteCache {
             metrics,
         )
         .await
-        .with_float_field_encoding(float_field_encoding)
+        .with_float_field_encoding(write_request.float_field_encoding)
         .with_file_cleaner(cleaner);
 
         let sst_info = match write_request.sst_write_format {
@@ -520,7 +519,7 @@ mod tests {
     use crate::error::InvalidBatchSnafu;
     use crate::memtable::bulk::part::BulkPartConverter;
     use crate::read::FlatSource;
-    use crate::region::options::IndexOptions;
+    use crate::region::options::{FloatFieldEncodingPolicy, IndexOptions};
     use crate::sst::parquet::reader::ParquetReaderBuilder;
     use crate::sst::{FlatSchemaOptions, to_flat_sst_arrow_schema};
     use crate::test_util::TestEnv;
@@ -547,7 +546,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_write_cache_uses_bss_for_data_path() {
+    async fn test_write_cache_uses_request_float_field_encoding_policy() {
         let mut env = TestEnv::new().await;
         let remote_store = env.init_object_store_manager();
         let local_dir = create_temp_dir("");
@@ -566,6 +565,7 @@ mod tests {
             storage: None,
             max_sequence: None,
             sst_write_format: Default::default(),
+            float_field_encoding: FloatFieldEncodingPolicy::ByteStreamSplit,
             index_options: IndexOptions::default(),
             index_config: Default::default(),
             inverted_index_config: Default::default(),
@@ -585,7 +585,6 @@ mod tests {
                 upload_request,
                 &WriteOptions::default(),
                 &mut metrics,
-                FloatFieldEncoding::from_path_type(PathType::Data),
             )
             .await
             .unwrap()
@@ -635,6 +634,7 @@ mod tests {
             storage: None,
             max_sequence: None,
             sst_write_format: Default::default(),
+            float_field_encoding: Default::default(),
             cache_manager: Default::default(),
             index_options: IndexOptions::default(),
             index_config: Default::default(),
@@ -658,13 +658,7 @@ mod tests {
         // Write to cache and upload sst to mock remote store
         let mut metrics = Metrics::new(WriteType::Flush);
         let mut sst_infos = write_cache
-            .write_and_upload_sst(
-                write_request,
-                upload_request,
-                &write_opts,
-                &mut metrics,
-                FloatFieldEncoding::Default,
-            )
+            .write_and_upload_sst(write_request, upload_request, &write_opts, &mut metrics)
             .await
             .unwrap();
         let sst_info = sst_infos.remove(0);
@@ -744,6 +738,7 @@ mod tests {
             storage: None,
             max_sequence: None,
             sst_write_format: Default::default(),
+            float_field_encoding: Default::default(),
             cache_manager: cache_manager.clone(),
             index_options: IndexOptions::default(),
             index_config: Default::default(),
@@ -764,13 +759,7 @@ mod tests {
 
         let mut metrics = Metrics::new(WriteType::Flush);
         let mut sst_infos = write_cache
-            .write_and_upload_sst(
-                write_request,
-                upload_request,
-                &write_opts,
-                &mut metrics,
-                FloatFieldEncoding::Default,
-            )
+            .write_and_upload_sst(write_request, upload_request, &write_opts, &mut metrics)
             .await
             .unwrap();
         let sst_info = sst_infos.remove(0);
@@ -844,6 +833,7 @@ mod tests {
             storage: None,
             max_sequence: None,
             sst_write_format: Default::default(),
+            float_field_encoding: Default::default(),
             cache_manager: cache_manager.clone(),
             index_options: IndexOptions::default(),
             index_config: Default::default(),
@@ -864,13 +854,7 @@ mod tests {
 
         let mut metrics = Metrics::new(WriteType::Flush);
         write_cache
-            .write_and_upload_sst(
-                write_request,
-                upload_request,
-                &write_opts,
-                &mut metrics,
-                FloatFieldEncoding::Default,
-            )
+            .write_and_upload_sst(write_request, upload_request, &write_opts, &mut metrics)
             .await
             .unwrap_err();
         let atomic_write_dir = write_cache_dir.path().join(ATOMIC_WRITE_DIR);

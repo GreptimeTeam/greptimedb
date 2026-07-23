@@ -662,7 +662,9 @@ mod test {
     use common_meta::ddl::utils::{parse_column_metadatas, parse_manifest_infos_from_extensions};
     use common_query::native_histogram::{NATIVE_HISTOGRAM_FIELD, native_histogram_value_type};
     use common_query::prelude::{greptime_timestamp, greptime_value};
+    use mito2::region::options::{FloatFieldEncodingPolicy, RegionOptions};
     use store_api::metric_engine_consts::{METRIC_ENGINE_NAME, PHYSICAL_TABLE_METADATA_KEY};
+    use store_api::mito_engine_options::EXPERIMENTAL_SST_FLOAT_FIELD_ENCODING_KEY;
     use store_api::region_request::{BatchRegionDdlRequest, RegionRequirements};
 
     use super::*;
@@ -854,6 +856,26 @@ mod test {
     }
 
     #[test]
+    fn test_region_options_for_metadata_region_excludes_float_field_encoding() {
+        let original = [(
+            EXPERIMENTAL_SST_FLOAT_FIELD_ENCODING_KEY.to_string(),
+            "byte_stream_split".to_string(),
+        )]
+        .into_iter()
+        .collect();
+
+        let metadata_options = region_options_for_metadata_region(&original);
+
+        assert!(!metadata_options.contains_key(EXPERIMENTAL_SST_FLOAT_FIELD_ENCODING_KEY));
+        assert_eq!(
+            RegionOptions::try_from_options(RegionId::new(1, 1), &metadata_options)
+                .unwrap()
+                .float_field_encoding,
+            FloatFieldEncodingPolicy::Default
+        );
+    }
+
+    #[test]
     fn test_verify_region_create_request_native_histogram_fields() {
         let native_histogram_columns = vec![
             ColumnMetadata {
@@ -949,6 +971,10 @@ mod test {
         let options: HashMap<_, _> = [
             ("ttl".to_string(), "60m".to_string()),
             ("skip_wal".to_string(), "true".to_string()),
+            (
+                EXPERIMENTAL_SST_FLOAT_FIELD_ENCODING_KEY.to_string(),
+                "byte_stream_split".to_string(),
+            ),
         ]
         .into_iter()
         .collect();
@@ -998,6 +1024,12 @@ mod test {
         );
         assert!(data_region_request.options.contains_key("ttl"));
         assert_eq!(
+            data_region_request
+                .options
+                .get(EXPERIMENTAL_SST_FLOAT_FIELD_ENCODING_KEY),
+            Some(&"byte_stream_split".to_string())
+        );
+        assert_eq!(
             data_region_request.requirements,
             RegionRequirements::object_storage()
         );
@@ -1011,6 +1043,11 @@ mod test {
             "forever"
         );
         assert!(!metadata_region_request.options.contains_key("skip_wal"));
+        assert!(
+            !metadata_region_request
+                .options
+                .contains_key(EXPERIMENTAL_SST_FLOAT_FIELD_ENCODING_KEY)
+        );
         assert_eq!(
             metadata_region_request.requirements,
             RegionRequirements::object_storage()

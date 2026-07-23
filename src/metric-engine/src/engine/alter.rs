@@ -288,6 +288,7 @@ mod test {
     use store_api::storage::consts::ReservedColumnId;
 
     use crate::test_util::{TestEnv, alter_logical_region_request, create_logical_region_request};
+    use crate::utils::{to_data_region_id, to_metadata_region_id};
 
     #[tokio::test]
     async fn test_alter_region() {
@@ -368,6 +369,136 @@ mod test {
                 ("tag1", 3),
             ],
         );
+    }
+
+    #[tokio::test]
+    async fn test_alter_physical_region_options_route_to_data_region() {
+        let env = TestEnv::new().await;
+        env.init_metric_region().await;
+        let engine = env.metric();
+        let mito = env.mito();
+        let physical_region_id = env.default_physical_region_id();
+        let data_region_id = to_data_region_id(physical_region_id);
+        let metadata_region_id = to_metadata_region_id(physical_region_id);
+
+        assert_eq!(data_region_id, RegionId::with_group_and_seq(1, 0, 2));
+        assert_eq!(metadata_region_id, RegionId::with_group_and_seq(1, 1, 2));
+        let mut data_manifest_version = mito
+            .get_region_statistic(data_region_id)
+            .unwrap()
+            .manifest
+            .data_manifest_version();
+        let metadata_statistic_before = mito.get_region_statistic(metadata_region_id).unwrap();
+        let metadata_metadata_before = mito.get_metadata(metadata_region_id).await.unwrap();
+
+        for encoding in ["byte_stream_split", "default"] {
+            let request = RegionAlterRequest {
+                kind: AlterKind::SetRegionOptions {
+                    options: vec![SetRegionOption::FloatFieldEncoding(encoding.to_string())],
+                },
+            };
+
+            engine
+                .handle_batch_ddl_requests(BatchRegionDdlRequest::Alter(vec![(
+                    physical_region_id,
+                    request.clone(),
+                )]))
+                .await
+                .unwrap();
+
+            assert_eq!(
+                request,
+                RegionAlterRequest {
+                    kind: AlterKind::SetRegionOptions {
+                        options: vec![SetRegionOption::FloatFieldEncoding(encoding.to_string())],
+                    },
+                }
+            );
+            let data_manifest_version_after = mito
+                .get_region_statistic(data_region_id)
+                .unwrap()
+                .manifest
+                .data_manifest_version();
+            assert!(data_manifest_version_after > data_manifest_version);
+            data_manifest_version = data_manifest_version_after;
+            assert_eq!(
+                metadata_statistic_before.manifest,
+                mito.get_region_statistic(metadata_region_id)
+                    .unwrap()
+                    .manifest
+            );
+            assert_eq!(
+                metadata_metadata_before,
+                mito.get_metadata(metadata_region_id).await.unwrap()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_alter_logical_region_options_are_unsupported() {
+        let env = TestEnv::new().await;
+        env.init_metric_region().await;
+        let engine = env.metric();
+        let mito = env.mito();
+        let physical_region_id = env.default_physical_region_id();
+        let logical_region_id = env.default_logical_region_id();
+        let data_region_id = to_data_region_id(physical_region_id);
+        let metadata_region_id = to_metadata_region_id(physical_region_id);
+        let data_statistic_before = mito.get_region_statistic(data_region_id).unwrap();
+        let metadata_statistic_before = mito.get_region_statistic(metadata_region_id).unwrap();
+        let data_metadata_before = mito.get_metadata(data_region_id).await.unwrap();
+        let metadata_metadata_before = mito.get_metadata(metadata_region_id).await.unwrap();
+        let logical_columns_before = env
+            .metadata_region()
+            .column_semantic_type(physical_region_id, logical_region_id, "job")
+            .await
+            .unwrap();
+
+        for encoding in ["byte_stream_split", "default"] {
+            let error = engine
+                .handle_batch_ddl_requests(BatchRegionDdlRequest::Alter(vec![(
+                    logical_region_id,
+                    RegionAlterRequest {
+                        kind: AlterKind::SetRegionOptions {
+                            options: vec![SetRegionOption::FloatFieldEncoding(
+                                encoding.to_string(),
+                            )],
+                        },
+                    },
+                )]))
+                .await
+                .unwrap_err();
+
+            assert_eq!(
+                error.to_string(),
+                "Unsupported alter kind: SetRegionOptions"
+            );
+            assert_eq!(
+                data_statistic_before.manifest,
+                mito.get_region_statistic(data_region_id).unwrap().manifest
+            );
+            assert_eq!(
+                metadata_statistic_before.manifest,
+                mito.get_region_statistic(metadata_region_id)
+                    .unwrap()
+                    .manifest
+            );
+            assert_eq!(
+                data_metadata_before,
+                mito.get_metadata(data_region_id).await.unwrap()
+            );
+            assert_eq!(
+                metadata_metadata_before,
+                mito.get_metadata(metadata_region_id).await.unwrap()
+            );
+            assert_eq!(
+                logical_columns_before,
+                env.metadata_region()
+                    .column_semantic_type(physical_region_id, logical_region_id, "job")
+                    .await
+                    .unwrap()
+            );
+        }
     }
 
     #[tokio::test]

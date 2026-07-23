@@ -37,7 +37,7 @@ use object_store::{FuturesAsyncWriter, ObjectStore};
 use parquet::arrow::AsyncArrowWriter;
 use parquet::basic::{Compression, Encoding, ZstdLevel};
 use parquet::file::metadata::KeyValue;
-use parquet::file::properties::WriterProperties;
+use parquet::file::properties::{WriterProperties, WriterPropertiesBuilder};
 use parquet::schema::types::ColumnPath;
 use smallvec::smallvec;
 use snafu::ResultExt;
@@ -53,12 +53,13 @@ use crate::error::{
     InvalidMetadataSnafu, OpenDalSnafu, Result, UnexpectedSnafu, WriteParquetSnafu,
 };
 use crate::read::FlatSource;
+use crate::region::options::FloatFieldEncodingPolicy;
 use crate::sst::file::RegionFileId;
 use crate::sst::index::{IndexOutput, Indexer, IndexerBuilder};
 use crate::sst::parquet::flat_format::{FlatWriteFormat, time_index_column_index};
 use crate::sst::parquet::format::PrimaryKeyWriteFormat;
 use crate::sst::parquet::{
-    FloatFieldEncoding, PARQUET_METADATA_KEY, SstInfo, WriteOptions, apply_float_field_encoding,
+    PARQUET_METADATA_KEY, SstInfo, WriteOptions, apply_float_field_encoding,
 };
 use crate::sst::{
     DEFAULT_WRITE_BUFFER_SIZE, DEFAULT_WRITE_CONCURRENCY, FlatSchemaOptions, SeriesEstimator,
@@ -107,7 +108,7 @@ pub struct ParquetWriter<'a, F: WriterFactory, I: IndexerBuilder, P: FilePathPro
     file_cleaner: Option<TempFileCleaner>,
     /// Write metrics
     metrics: &'a mut Metrics,
-    float_field_encoding: FloatFieldEncoding,
+    float_field_encoding: FloatFieldEncodingPolicy,
 }
 
 pub trait WriterFactory {
@@ -164,7 +165,7 @@ where
 
     pub(crate) fn with_float_field_encoding(
         mut self,
-        float_field_encoding: FloatFieldEncoding,
+        float_field_encoding: FloatFieldEncodingPolicy,
     ) -> Self {
         self.float_field_encoding = float_field_encoding;
         self
@@ -201,7 +202,7 @@ where
             bytes_written: Arc::new(AtomicUsize::new(0)),
             file_cleaner: None,
             metrics,
-            float_field_encoding: FloatFieldEncoding::Default,
+            float_field_encoding: FloatFieldEncodingPolicy::Default,
         }
     }
 
@@ -416,9 +417,9 @@ where
 
     /// Applies the standard Parquet properties for Mito SST internal columns.
     fn customize_column_config(
-        builder: parquet::file::properties::WriterPropertiesBuilder,
+        builder: WriterPropertiesBuilder,
         region_metadata: &RegionMetadataRef,
-    ) -> parquet::file::properties::WriterPropertiesBuilder {
+    ) -> WriterPropertiesBuilder {
         let ts_col = ColumnPath::new(vec![
             region_metadata
                 .time_index_column()

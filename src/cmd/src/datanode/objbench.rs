@@ -27,6 +27,7 @@ use mito2::access_layer::{
 use mito2::cache::{CacheManager, CacheManagerRef};
 use mito2::config::{FulltextIndexConfig, MitoConfig, Mode};
 use mito2::read::FlatSource;
+use mito2::region::options::FloatFieldEncodingPolicy;
 use mito2::sst::FormatType;
 use mito2::sst::file::{FileHandle, FileMeta};
 use mito2::sst::file_purger::{FilePurger, FilePurgerRef};
@@ -259,6 +260,7 @@ impl ObjbenchCommand {
             inverted_index_config: MitoConfig::default().inverted_index,
             fulltext_index_config,
             bloom_filter_index_config: MitoConfig::default().bloom_filter_index,
+            float_field_encoding: FloatFieldEncodingPolicy::Default,
             #[cfg(feature = "vector_index")]
             vector_index_config: Default::default(),
         };

@@ -32,7 +32,9 @@ use store_api::codec::PrimaryKeyEncoding;
 use store_api::metric_engine_consts::{
     MEMTABLE_PARTITION_TREE_PRIMARY_KEY_ENCODING, PRIMARY_KEY_ENCODING,
 };
-use store_api::mito_engine_options::COMPACTION_OVERRIDE;
+use store_api::mito_engine_options::{
+    COMPACTION_OVERRIDE, EXPERIMENTAL_SST_FLOAT_FIELD_ENCODING_KEY,
+};
 use store_api::storage::{ColumnId, RegionId};
 use strum::EnumString;
 
@@ -72,11 +74,24 @@ pub enum MergeMode {
     LastNonNull,
 }
 
+/// Policy for encoding floating-point fields in SST files.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, EnumString)]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
+pub enum FloatFieldEncodingPolicy {
+    /// Preserve the writer's default dictionary-capable encoding behavior.
+    #[default]
+    Default,
+    /// Use Parquet byte-stream-split encoding for floating-point fields.
+    ByteStreamSplit,
+}
+
 // Note: We need to update [store_api::mito_engine_options::is_mito_engine_option_key()]
 // if we want expose the option to table options.
 /// Options that affect the entire region.
 ///
-/// Users need to specify the options while creating/opening a region.
+/// Users specify options when creating/opening a region. Selected options can be altered at
+/// runtime, while caller/table options remain authoritative on open.
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RegionOptions {
@@ -112,6 +127,9 @@ pub struct RegionOptions {
     /// the configured size; zero disables both limits.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub write_buffer_size: Option<ReadableSize>,
+    /// Experimental policy for encoding floating-point fields in SST files.
+    #[serde(default, rename = "experimental_sst_float_field_encoding")]
+    pub float_field_encoding: FloatFieldEncodingPolicy,
 }
 
 impl RegionOptions {
@@ -247,6 +265,18 @@ impl RegionOptions {
                 .build()),
             })
             .transpose()?;
+        let float_field_encoding = options_map
+            .get(EXPERIMENTAL_SST_FLOAT_FIELD_ENCODING_KEY)
+            .map(|v| match v.as_str() {
+                "default" => Ok(FloatFieldEncodingPolicy::Default),
+                "byte_stream_split" => Ok(FloatFieldEncodingPolicy::ByteStreamSplit),
+                _ => Err(InvalidRegionOptionsSnafu {
+                    reason: format!("Invalid float field encoding policy: {v}"),
+                }
+                .build()),
+            })
+            .transpose()?
+            .unwrap_or_default();
 
         let opts = RegionOptions {
             ttl: options.ttl,
@@ -262,6 +292,7 @@ impl RegionOptions {
             sst_format,
             primary_key_encoding,
             write_buffer_size: options.write_buffer_size,
+            float_field_encoding,
         };
         opts.validate()?;
 
@@ -544,6 +575,49 @@ mod tests {
         let map = make_map(&[]);
         let options = RegionOptions::try_from_options(RegionId::new(0, 0), &map).unwrap();
         assert_eq!(RegionOptions::default(), options);
+    }
+
+    #[test]
+    fn test_region_options_float_field_encoding() {
+        let missing = RegionOptions::try_from_options(RegionId::new(0, 0), &make_map(&[])).unwrap();
+        assert_eq!(
+            FloatFieldEncodingPolicy::Default,
+            missing.float_field_encoding
+        );
+
+        let default = RegionOptions::try_from_options(
+            RegionId::new(0, 0),
+            &make_map(&[(EXPERIMENTAL_SST_FLOAT_FIELD_ENCODING_KEY, "default")]),
+        )
+        .unwrap();
+        assert_eq!(
+            FloatFieldEncodingPolicy::Default,
+            default.float_field_encoding
+        );
+
+        let byte_stream_split = RegionOptions::try_from_options(
+            RegionId::new(0, 0),
+            &make_map(&[(
+                EXPERIMENTAL_SST_FLOAT_FIELD_ENCODING_KEY,
+                "byte_stream_split",
+            )]),
+        )
+        .unwrap();
+        assert_eq!(
+            FloatFieldEncodingPolicy::ByteStreamSplit,
+            byte_stream_split.float_field_encoding
+        );
+
+        let err = RegionOptions::try_from_options(
+            RegionId::new(0, 0),
+            &make_map(&[(EXPERIMENTAL_SST_FLOAT_FIELD_ENCODING_KEY, "plain")]),
+        )
+        .unwrap_err();
+        assert_eq!(StatusCode::InvalidArguments, err.status_code());
+        assert!(
+            err.to_string()
+                .contains("Invalid float field encoding policy")
+        );
     }
 
     #[test]
@@ -930,6 +1004,7 @@ mod tests {
             sst_format: Some(FormatType::Flat),
             primary_key_encoding: None,
             write_buffer_size: None,
+            float_field_encoding: FloatFieldEncodingPolicy::Default,
         };
         assert_eq!(expect, options);
     }
@@ -961,14 +1036,17 @@ mod tests {
             sst_format: None,
             primary_key_encoding: None,
             write_buffer_size: Some(ReadableSize::mb(128)),
+            float_field_encoding: FloatFieldEncodingPolicy::ByteStreamSplit,
         };
         let region_options_json_str = serde_json::to_string(&options).unwrap();
+        assert!(region_options_json_str.contains(EXPERIMENTAL_SST_FLOAT_FIELD_ENCODING_KEY));
         let got: RegionOptions = serde_json::from_str(&region_options_json_str).unwrap();
         assert_eq!(options, got);
 
         let old_region_options_json_str = r#"{"ttl":null}"#;
         let got: RegionOptions = serde_json::from_str(old_region_options_json_str).unwrap();
         assert_eq!(None, got.write_buffer_size);
+        assert_eq!(FloatFieldEncodingPolicy::Default, got.float_field_encoding);
 
         let default_json = serde_json::to_value(RegionOptions::default()).unwrap();
         assert!(default_json.get(WRITE_BUFFER_SIZE_KEY).is_none());
@@ -1026,6 +1104,7 @@ mod tests {
             sst_format: None,
             primary_key_encoding: None,
             write_buffer_size: None,
+            float_field_encoding: FloatFieldEncodingPolicy::Default,
         };
         assert_eq!(options, got);
     }

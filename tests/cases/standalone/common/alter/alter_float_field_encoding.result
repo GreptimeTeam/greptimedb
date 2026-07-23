@@ -1,0 +1,318 @@
+CREATE TABLE alter_float_field_encoding (
+  ts TIMESTAMP TIME INDEX,
+  host STRING PRIMARY KEY,
+  val DOUBLE
+);
+
+Affected Rows: 0
+
+SHOW CREATE TABLE alter_float_field_encoding;
+
++----------------------------+-----------------------------------------------------------+
+| Table                      | Create Table                                              |
++----------------------------+-----------------------------------------------------------+
+| alter_float_field_encoding | CREATE TABLE IF NOT EXISTS "alter_float_field_encoding" ( |
+|                            |   "ts" TIMESTAMP(3) NOT NULL,                             |
+|                            |   "host" STRING NULL,                                     |
+|                            |   "val" DOUBLE NULL,                                      |
+|                            |   TIME INDEX ("ts"),                                      |
+|                            |   PRIMARY KEY ("host")                                    |
+|                            | )                                                         |
+|                            |                                                           |
+|                            | ENGINE=mito                                               |
+|                            |                                                           |
++----------------------------+-----------------------------------------------------------+
+
+INSERT INTO alter_float_field_encoding VALUES
+  (0, 'host-a', 1.25),
+  (1, 'host-b', 2.5);
+
+Affected Rows: 2
+
+ALTER TABLE alter_float_field_encoding SET 'experimental_sst_float_field_encoding' = 'byte_stream_split';
+
+Affected Rows: 0
+
+SHOW CREATE TABLE alter_float_field_encoding;
+
++----------------------------+---------------------------------------------------------------+
+| Table                      | Create Table                                                  |
++----------------------------+---------------------------------------------------------------+
+| alter_float_field_encoding | CREATE TABLE IF NOT EXISTS "alter_float_field_encoding" (     |
+|                            |   "ts" TIMESTAMP(3) NOT NULL,                                 |
+|                            |   "host" STRING NULL,                                         |
+|                            |   "val" DOUBLE NULL,                                          |
+|                            |   TIME INDEX ("ts"),                                          |
+|                            |   PRIMARY KEY ("host")                                        |
+|                            | )                                                             |
+|                            |                                                               |
+|                            | ENGINE=mito                                                   |
+|                            | WITH(                                                         |
+|                            |   experimental_sst_float_field_encoding = 'byte_stream_split' |
+|                            | )                                                             |
++----------------------------+---------------------------------------------------------------+
+
+ADMIN flush_table('alter_float_field_encoding');
+
++-------------------------------------------------+
+| ADMIN flush_table('alter_float_field_encoding') |
++-------------------------------------------------+
+| 0                                               |
++-------------------------------------------------+
+
+SELECT * FROM alter_float_field_encoding ORDER BY ts;
+
++-------------------------+--------+------+
+| ts                      | host   | val  |
++-------------------------+--------+------+
+| 1970-01-01T00:00:00     | host-a | 1.25 |
+| 1970-01-01T00:00:00.001 | host-b | 2.5  |
++-------------------------+--------+------+
+
+INSERT INTO alter_float_field_encoding VALUES
+  (2, 'host-a', 3.75),
+  (3, 'host-b', 5.0);
+
+Affected Rows: 2
+
+ALTER TABLE alter_float_field_encoding SET 'experimental_sst_float_field_encoding' = 'default';
+
+Affected Rows: 0
+
+SHOW CREATE TABLE alter_float_field_encoding;
+
++----------------------------+-----------------------------------------------------------+
+| Table                      | Create Table                                              |
++----------------------------+-----------------------------------------------------------+
+| alter_float_field_encoding | CREATE TABLE IF NOT EXISTS "alter_float_field_encoding" ( |
+|                            |   "ts" TIMESTAMP(3) NOT NULL,                             |
+|                            |   "host" STRING NULL,                                     |
+|                            |   "val" DOUBLE NULL,                                      |
+|                            |   TIME INDEX ("ts"),                                      |
+|                            |   PRIMARY KEY ("host")                                    |
+|                            | )                                                         |
+|                            |                                                           |
+|                            | ENGINE=mito                                               |
+|                            | WITH(                                                     |
+|                            |   experimental_sst_float_field_encoding = 'default'       |
+|                            | )                                                         |
++----------------------------+-----------------------------------------------------------+
+
+ADMIN flush_table('alter_float_field_encoding');
+
++-------------------------------------------------+
+| ADMIN flush_table('alter_float_field_encoding') |
++-------------------------------------------------+
+| 0                                               |
++-------------------------------------------------+
+
+SELECT * FROM alter_float_field_encoding ORDER BY ts;
+
++-------------------------+--------+------+
+| ts                      | host   | val  |
++-------------------------+--------+------+
+| 1970-01-01T00:00:00     | host-a | 1.25 |
+| 1970-01-01T00:00:00.001 | host-b | 2.5  |
+| 1970-01-01T00:00:00.002 | host-a | 3.75 |
+| 1970-01-01T00:00:00.003 | host-b | 5.0  |
++-------------------------+--------+------+
+
+ALTER TABLE alter_float_field_encoding SET 'experimental_sst_float_field_encoding' = 'Byte_Stream_Split';
+
+Error: 1004(InvalidArguments), Invalid set table option request: Invalid set region option request, key: experimental_sst_float_field_encoding, value: Byte_Stream_Split
+
+ALTER TABLE alter_float_field_encoding SET 'experimental_sst_float_field_encoding' = 'unsupported';
+
+Error: 1004(InvalidArguments), Invalid set table option request: Invalid set region option request, key: experimental_sst_float_field_encoding, value: unsupported
+
+SHOW CREATE TABLE alter_float_field_encoding;
+
++----------------------------+-----------------------------------------------------------+
+| Table                      | Create Table                                              |
++----------------------------+-----------------------------------------------------------+
+| alter_float_field_encoding | CREATE TABLE IF NOT EXISTS "alter_float_field_encoding" ( |
+|                            |   "ts" TIMESTAMP(3) NOT NULL,                             |
+|                            |   "host" STRING NULL,                                     |
+|                            |   "val" DOUBLE NULL,                                      |
+|                            |   TIME INDEX ("ts"),                                      |
+|                            |   PRIMARY KEY ("host")                                    |
+|                            | )                                                         |
+|                            |                                                           |
+|                            | ENGINE=mito                                               |
+|                            | WITH(                                                     |
+|                            |   experimental_sst_float_field_encoding = 'default'       |
+|                            | )                                                         |
++----------------------------+-----------------------------------------------------------+
+
+DROP TABLE alter_float_field_encoding;
+
+Affected Rows: 0
+
+CREATE TABLE alter_float_field_encoding_phy (
+  ts TIMESTAMP TIME INDEX,
+  val DOUBLE
+) ENGINE = metric WITH ("physical_metric_table" = "");
+
+Affected Rows: 0
+
+SHOW CREATE TABLE alter_float_field_encoding_phy;
+
++--------------------------------+---------------------------------------------------------------+
+| Table                          | Create Table                                                  |
++--------------------------------+---------------------------------------------------------------+
+| alter_float_field_encoding_phy | CREATE TABLE IF NOT EXISTS "alter_float_field_encoding_phy" ( |
+|                                |   "ts" TIMESTAMP(3) NOT NULL,                                 |
+|                                |   "val" DOUBLE NULL,                                          |
+|                                |   TIME INDEX ("ts")                                           |
+|                                | )                                                             |
+|                                |                                                               |
+|                                | ENGINE=metric                                                 |
+|                                | WITH(                                                         |
+|                                |   physical_metric_table = ''                                  |
+|                                | )                                                             |
++--------------------------------+---------------------------------------------------------------+
+
+CREATE TABLE alter_float_field_encoding_logical (
+  ts TIMESTAMP TIME INDEX,
+  val DOUBLE,
+  host STRING PRIMARY KEY
+) ENGINE = metric WITH ("on_physical_table" = "alter_float_field_encoding_phy");
+
+Affected Rows: 0
+
+INSERT INTO alter_float_field_encoding_logical (ts, val, host) VALUES
+  ('2022-01-01 00:00:00', 1.25, 'host-a'),
+  ('2022-01-01 00:00:01', 2.5, 'host-b');
+
+Affected Rows: 2
+
+ALTER TABLE alter_float_field_encoding_phy SET 'experimental_sst_float_field_encoding' = 'byte_stream_split';
+
+Affected Rows: 0
+
+SHOW CREATE TABLE alter_float_field_encoding_phy;
+
++--------------------------------+----------------------------------------------------------------+
+| Table                          | Create Table                                                   |
++--------------------------------+----------------------------------------------------------------+
+| alter_float_field_encoding_phy | CREATE TABLE IF NOT EXISTS "alter_float_field_encoding_phy" (  |
+|                                |   "ts" TIMESTAMP(3) NOT NULL,                                  |
+|                                |   "val" DOUBLE NULL,                                           |
+|                                |   "host" STRING NULL,                                          |
+|                                |   TIME INDEX ("ts"),                                           |
+|                                |   PRIMARY KEY ("host")                                         |
+|                                | )                                                              |
+|                                |                                                                |
+|                                | ENGINE=metric                                                  |
+|                                | WITH(                                                          |
+|                                |   experimental_sst_float_field_encoding = 'byte_stream_split', |
+|                                |   physical_metric_table = ''                                   |
+|                                | )                                                              |
++--------------------------------+----------------------------------------------------------------+
+
+ALTER TABLE alter_float_field_encoding_logical SET 'experimental_sst_float_field_encoding' = 'byte_stream_split';
+
+Error: 1004(InvalidArguments), Alter logical tables invalid arguments: Only support add columns operation
+
+SHOW CREATE TABLE alter_float_field_encoding_phy;
+
++--------------------------------+----------------------------------------------------------------+
+| Table                          | Create Table                                                   |
++--------------------------------+----------------------------------------------------------------+
+| alter_float_field_encoding_phy | CREATE TABLE IF NOT EXISTS "alter_float_field_encoding_phy" (  |
+|                                |   "ts" TIMESTAMP(3) NOT NULL,                                  |
+|                                |   "val" DOUBLE NULL,                                           |
+|                                |   "host" STRING NULL,                                          |
+|                                |   TIME INDEX ("ts"),                                           |
+|                                |   PRIMARY KEY ("host")                                         |
+|                                | )                                                              |
+|                                |                                                                |
+|                                | ENGINE=metric                                                  |
+|                                | WITH(                                                          |
+|                                |   experimental_sst_float_field_encoding = 'byte_stream_split', |
+|                                |   physical_metric_table = ''                                   |
+|                                | )                                                              |
++--------------------------------+----------------------------------------------------------------+
+
+SELECT * FROM alter_float_field_encoding_logical ORDER BY ts;
+
++--------+---------------------+------+
+| host   | ts                  | val  |
++--------+---------------------+------+
+| host-a | 2022-01-01T00:00:00 | 1.25 |
+| host-b | 2022-01-01T00:00:01 | 2.5  |
++--------+---------------------+------+
+
+ALTER TABLE alter_float_field_encoding_phy SET 'experimental_sst_float_field_encoding' = 'default';
+
+Affected Rows: 0
+
+SHOW CREATE TABLE alter_float_field_encoding_phy;
+
++--------------------------------+---------------------------------------------------------------+
+| Table                          | Create Table                                                  |
++--------------------------------+---------------------------------------------------------------+
+| alter_float_field_encoding_phy | CREATE TABLE IF NOT EXISTS "alter_float_field_encoding_phy" ( |
+|                                |   "ts" TIMESTAMP(3) NOT NULL,                                 |
+|                                |   "val" DOUBLE NULL,                                          |
+|                                |   "host" STRING NULL,                                         |
+|                                |   TIME INDEX ("ts"),                                          |
+|                                |   PRIMARY KEY ("host")                                        |
+|                                | )                                                             |
+|                                |                                                               |
+|                                | ENGINE=metric                                                 |
+|                                | WITH(                                                         |
+|                                |   experimental_sst_float_field_encoding = 'default',          |
+|                                |   physical_metric_table = ''                                  |
+|                                | )                                                             |
++--------------------------------+---------------------------------------------------------------+
+
+ALTER TABLE alter_float_field_encoding_logical SET 'experimental_sst_float_field_encoding' = 'default';
+
+Error: 1004(InvalidArguments), Alter logical tables invalid arguments: Only support add columns operation
+
+SHOW CREATE TABLE alter_float_field_encoding_phy;
+
++--------------------------------+---------------------------------------------------------------+
+| Table                          | Create Table                                                  |
++--------------------------------+---------------------------------------------------------------+
+| alter_float_field_encoding_phy | CREATE TABLE IF NOT EXISTS "alter_float_field_encoding_phy" ( |
+|                                |   "ts" TIMESTAMP(3) NOT NULL,                                 |
+|                                |   "val" DOUBLE NULL,                                          |
+|                                |   "host" STRING NULL,                                         |
+|                                |   TIME INDEX ("ts"),                                          |
+|                                |   PRIMARY KEY ("host")                                        |
+|                                | )                                                             |
+|                                |                                                               |
+|                                | ENGINE=metric                                                 |
+|                                | WITH(                                                         |
+|                                |   experimental_sst_float_field_encoding = 'default',          |
+|                                |   physical_metric_table = ''                                  |
+|                                | )                                                             |
++--------------------------------+---------------------------------------------------------------+
+
+INSERT INTO alter_float_field_encoding_logical (ts, val, host) VALUES
+  ('2022-01-01 00:00:02', 3.75, 'host-a'),
+  ('2022-01-01 00:00:03', 5.0, 'host-b');
+
+Affected Rows: 2
+
+SELECT * FROM alter_float_field_encoding_logical ORDER BY ts;
+
++--------+---------------------+------+
+| host   | ts                  | val  |
++--------+---------------------+------+
+| host-a | 2022-01-01T00:00:00 | 1.25 |
+| host-b | 2022-01-01T00:00:01 | 2.5  |
+| host-a | 2022-01-01T00:00:02 | 3.75 |
+| host-b | 2022-01-01T00:00:03 | 5.0  |
++--------+---------------------+------+
+
+DROP TABLE alter_float_field_encoding_logical;
+
+Affected Rows: 0
+
+DROP TABLE alter_float_field_encoding_phy;
+
+Affected Rows: 0
+

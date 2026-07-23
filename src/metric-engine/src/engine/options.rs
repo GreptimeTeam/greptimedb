@@ -224,10 +224,12 @@ mod tests {
     fn test_set_data_region_options_default_compaction_time_window() {
         // Test that default time window is set when not specified
         let mut options = HashMap::new();
+        options.insert("unrelated_option".to_string(), "value".to_string());
         set_data_region_options(&mut options);
 
         assert_eq!(options.get("memtable.type"), Some(&"bulk".to_string()));
         assert_eq!(options.get("sst_format"), Some(&"flat".to_string()));
+        assert_eq!(options.get("unrelated_option"), Some(&"value".to_string()));
         assert_eq!(
             options.get(COMPACTION_TYPE),
             Some(&COMPACTION_TYPE_TWCS.to_string())
@@ -247,6 +249,28 @@ mod tests {
             Some(&"sparse".to_string())
         );
         assert!(!options.contains_key(MEMTABLE_PARTITION_TREE_PRIMARY_KEY_ENCODING));
+    }
+
+    #[test]
+    fn test_set_data_region_options_preserves_float_field_encoding() {
+        use store_api::mito_engine_options::EXPERIMENTAL_SST_FLOAT_FIELD_ENCODING_KEY;
+
+        for encoding in ["default", "byte_stream_split"] {
+            let mut options = HashMap::new();
+            options.insert(
+                EXPERIMENTAL_SST_FLOAT_FIELD_ENCODING_KEY.to_string(),
+                encoding.to_string(),
+            );
+
+            set_data_region_options(&mut options);
+
+            assert_eq!(
+                options.get(EXPERIMENTAL_SST_FLOAT_FIELD_ENCODING_KEY),
+                Some(&encoding.to_string())
+            );
+            assert_eq!(options.get("memtable.type"), Some(&"bulk".to_string()));
+            assert_eq!(options.get("sst_format"), Some(&"flat".to_string()));
+        }
     }
 
     #[test]

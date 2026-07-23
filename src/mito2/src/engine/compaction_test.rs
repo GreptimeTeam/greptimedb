@@ -17,12 +17,15 @@ use std::ops::Range;
 use std::sync::Arc;
 use std::time::Duration;
 
+use api::v1::region::{StrictWindow, compact_request};
 use api::v1::{ColumnSchema, Rows};
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_recordbatch::{RecordBatches, SendableRecordBatchStream};
 use datatypes::arrow::array::AsArray;
 use datatypes::arrow::datatypes::TimestampMillisecondType;
+use parquet::basic::Encoding;
+use parquet::file::metadata::PageIndexPolicy;
 use store_api::region_engine::{RegionEngine, RegionRole};
 use store_api::region_request::AlterKind::SetRegionOptions;
 use store_api::region_request::{
@@ -36,8 +39,11 @@ use tokio::sync::Notify;
 use crate::config::MitoConfig;
 use crate::engine::MitoEngine;
 use crate::engine::listener::CompactionListener;
+use crate::region::options::FloatFieldEncodingPolicy;
+use crate::sst::parquet::reader::MetadataCacheMetrics;
 use crate::test_util::{
     CreateRequestBuilder, TestEnv, build_rows_for_key, column_metadata_to_column_schema, put_rows,
+    rows_schema,
 };
 
 pub(crate) async fn put_and_flush(
@@ -130,6 +136,213 @@ async fn collect_stream_ts(stream: SendableRecordBatchStream) -> Vec<i64> {
         res.extend((0..ts_col.len()).map(|i| ts_col.value(i)));
     }
     res
+}
+
+fn alter_float_field_encoding(encoding: &str) -> RegionAlterRequest {
+    RegionAlterRequest {
+        kind: SetRegionOptions {
+            options: vec![SetRegionOption::FloatFieldEncoding(encoding.to_string())],
+        },
+    }
+}
+
+async fn sst_float_field_encodings(engine: &MitoEngine, region_id: RegionId) -> Vec<bool> {
+    let region = engine.get_region(region_id).unwrap();
+    let version = region.version();
+    let files = version
+        .ssts
+        .levels()
+        .iter()
+        .flat_map(|level| level.files.values())
+        .cloned()
+        .collect::<Vec<_>>();
+
+    let mut encodings = Vec::with_capacity(files.len());
+    for file in files {
+        let file_path = file.file_path(
+            region.access_layer.table_dir(),
+            region.access_layer.path_type(),
+        );
+        let (metadata, _) = region
+            .access_layer
+            .read_sst(file.clone())
+            .read_parquet_metadata(
+                &file_path,
+                file.meta_ref().file_size,
+                &mut MetadataCacheMetrics::default(),
+                PageIndexPolicy::default(),
+            )
+            .await
+            .unwrap();
+        let parquet_metadata = metadata.parquet_metadata();
+        let float_column = parquet_metadata
+            .row_group(0)
+            .columns()
+            .iter()
+            .find(|column| column.column_path().string() == "field_0")
+            .unwrap();
+        encodings.push(
+            float_column
+                .encodings()
+                .any(|encoding| encoding == Encoding::BYTE_STREAM_SPLIT),
+        );
+    }
+
+    encodings
+}
+
+#[tokio::test]
+async fn test_compaction_mixed_float_field_encodings() {
+    test_compaction_mixed_float_field_encodings_with_final_policy(
+        "default",
+        FloatFieldEncodingPolicy::Default,
+        false,
+    )
+    .await;
+    test_compaction_mixed_float_field_encodings_with_final_policy(
+        "byte_stream_split",
+        FloatFieldEncodingPolicy::ByteStreamSplit,
+        true,
+    )
+    .await;
+}
+
+async fn test_compaction_mixed_float_field_encodings_with_final_policy(
+    final_encoding: &str,
+    final_policy: FloatFieldEncodingPolicy,
+    expect_bss: bool,
+) {
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let region_id = RegionId::new(1024, 1);
+    // Keep automatic TWCS compaction inactive while making manual compaction select
+    // both overlapping files from this one-hour window.
+    let request = CreateRequestBuilder::new()
+        .insert_option("compaction.type", "twcs")
+        .insert_option("compaction.twcs.time_window", "1h")
+        .insert_option("compaction.twcs.trigger_file_num", "3")
+        .build();
+    let column_schemas = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: column_schemas.clone(),
+            rows: build_rows_for_key("a", 0, 3, 0),
+        },
+    )
+    .await;
+    flush(&engine, region_id).await;
+
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Alter(alter_float_field_encoding("byte_stream_split")),
+        )
+        .await
+        .unwrap();
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: column_schemas,
+            rows: build_rows_for_key("a", 2, 5, 20),
+        },
+    )
+    .await;
+    flush(&engine, region_id).await;
+
+    let expected_rows = "\
++-------+---------+---------------------+
+| tag_0 | field_0 | ts                  |
++-------+---------+---------------------+
+| a     | 0.0     | 1970-01-01T00:00:00 |
+| a     | 1.0     | 1970-01-01T00:00:01 |
+| a     | 20.0    | 1970-01-01T00:00:02 |
+| a     | 21.0    | 1970-01-01T00:00:03 |
+| a     | 22.0    | 1970-01-01T00:00:04 |
++-------+---------+---------------------+";
+    let scanner = engine
+        .scanner(region_id, ScanRequest::default())
+        .await
+        .unwrap();
+    assert_eq!(2, scanner.num_files());
+    assert_eq!(0, scanner.num_memtables());
+    let input_file_ids = scanner.file_ids();
+    let input_rows = RecordBatches::try_collect(scanner.scan().await.unwrap())
+        .await
+        .unwrap();
+    assert_eq!(expected_rows, input_rows.pretty_print().unwrap());
+
+    let input_encodings = sst_float_field_encodings(&engine, region_id).await;
+    assert_eq!(2, input_encodings.len());
+    assert_eq!(1, input_encodings.iter().filter(|&&bss| bss).count());
+
+    let mut expected_options = engine
+        .get_region(region_id)
+        .unwrap()
+        .version()
+        .options
+        .clone();
+    expected_options.float_field_encoding = final_policy;
+    if !expect_bss {
+        engine
+            .handle_request(
+                region_id,
+                RegionRequest::Alter(alter_float_field_encoding(final_encoding)),
+            )
+            .await
+            .unwrap();
+    }
+
+    let result = engine
+        .handle_request(
+            region_id,
+            RegionRequest::Compact(RegionCompactRequest {
+                options: compact_request::Options::StrictWindow(StrictWindow {
+                    window_seconds: 3600,
+                }),
+                parallelism: None,
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(0, result.affected_rows);
+
+    let scanner = engine
+        .scanner(region_id, ScanRequest::default())
+        .await
+        .unwrap();
+    assert_eq!(1, scanner.num_files());
+    assert_eq!(0, scanner.num_memtables());
+    let output_file_ids = scanner.file_ids();
+    assert!(
+        output_file_ids
+            .iter()
+            .all(|file_id| !input_file_ids.contains(file_id)),
+        "compaction should replace both mixed-encoding inputs"
+    );
+    let output_rows = RecordBatches::try_collect(scanner.scan().await.unwrap())
+        .await
+        .unwrap();
+    assert_eq!(expected_rows, output_rows.pretty_print().unwrap());
+
+    let output_encodings = sst_float_field_encodings(&engine, region_id).await;
+    assert_eq!(output_file_ids.len(), output_encodings.len());
+    assert!(
+        output_encodings.iter().all(|&bss| bss == expect_bss),
+        "output footers must use the final float-field encoding policy"
+    );
+    assert_eq!(
+        expected_options,
+        engine.get_region(region_id).unwrap().version().options,
+        "compaction must preserve region options other than the requested encoding policy"
+    );
 }
 
 #[tokio::test]

@@ -751,6 +751,7 @@ impl RegionFlushTask {
             } else {
                 FormatType::PrimaryKey
             },
+            float_field_encoding: version.options.float_field_encoding,
             index_options: self.index_options.clone(),
             index_config: self.engine_config.index.clone(),
             inverted_index_config: self.engine_config.inverted_index.clone(),

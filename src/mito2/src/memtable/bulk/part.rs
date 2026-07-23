@@ -64,13 +64,12 @@ use crate::memtable::bulk::json_align::Json2Aligner;
 use crate::memtable::bulk::part_reader::EncodedBulkPartIter;
 use crate::memtable::time_series::{ValueBuilder, Values};
 use crate::memtable::{BoxedRecordBatchIterator, MemScanMetrics, MemtableStats};
+use crate::region::options::FloatFieldEncodingPolicy;
 use crate::sst::SeriesEstimator;
 use crate::sst::index::IndexOutput;
 use crate::sst::parquet::flat_format::primary_key_column_index;
 use crate::sst::parquet::format::{PrimaryKeyArray, PrimaryKeyArrayBuilder};
-use crate::sst::parquet::{
-    FloatFieldEncoding, PARQUET_METADATA_KEY, SstInfo, apply_float_field_encoding,
-};
+use crate::sst::parquet::{PARQUET_METADATA_KEY, SstInfo, apply_float_field_encoding};
 
 const INIT_DICT_VALUE_CAPACITY: usize = 8;
 
@@ -1140,14 +1139,20 @@ pub struct BulkPartEncoder {
 }
 
 impl BulkPartEncoder {
+    /// Creates a legacy encoder with the default float-field encoding policy.
+    /// Runtime merges use [`Self::new_with_float_field_encoding`] to apply the configured policy.
     pub fn new(metadata: RegionMetadataRef, row_group_size: usize) -> Result<BulkPartEncoder> {
-        Self::new_with_float_field_encoding(metadata, row_group_size, FloatFieldEncoding::Default)
+        Self::new_with_float_field_encoding(
+            metadata,
+            row_group_size,
+            FloatFieldEncodingPolicy::Default,
+        )
     }
 
     pub(crate) fn new_with_float_field_encoding(
         metadata: RegionMetadataRef,
         row_group_size: usize,
-        float_field_encoding: FloatFieldEncoding,
+        float_field_encoding: FloatFieldEncodingPolicy,
     ) -> Result<BulkPartEncoder> {
         // TODO(yingwen): Skip arrow schema if needed.
         let json = metadata.to_json().context(InvalidMetadataSnafu)?;
@@ -1750,7 +1755,7 @@ mod tests {
         let encoded = BulkPartEncoder::new_with_float_field_encoding(
             metadata.clone(),
             1024,
-            FloatFieldEncoding::ByteStreamSplit,
+            FloatFieldEncodingPolicy::ByteStreamSplit,
         )
         .unwrap()
         .encode_part(&part)
@@ -1803,6 +1808,21 @@ mod tests {
             .map(|value| value.map(f64::to_bits))
             .collect::<Vec<_>>();
         assert_eq!(expected, actual);
+    }
+
+    #[test]
+    fn test_bulk_part_encoder_default_keeps_float_dictionary_enabled() {
+        let metadata = metadata_for_test();
+        let encoder = BulkPartEncoder::new(metadata, 1024).unwrap();
+        let value_path = parquet::schema::types::ColumnPath::new(vec!["v1".to_string()]);
+
+        assert!(
+            encoder
+                .writer_props
+                .as_ref()
+                .unwrap()
+                .dictionary_enabled(&value_path)
+        );
     }
 
     #[test]

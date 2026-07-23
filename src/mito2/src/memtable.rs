@@ -31,7 +31,6 @@ use mito_codec::row_converter::{PrimaryKeyCodec, build_primary_key_codec};
 use snafu::ensure;
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::RegionMetadataRef;
-use store_api::region_request::PathType;
 use store_api::storage::{ColumnId, SequenceNumber, SequenceRange};
 
 use crate::config::MitoConfig;
@@ -47,8 +46,8 @@ use crate::read::scan_region::PredicateGroup;
 use crate::region::options::{MemtableOptions, MergeMode, RegionOptions};
 use crate::sst::FormatType;
 use crate::sst::file::FileTimeRange;
+use crate::sst::parquet::SstInfo;
 use crate::sst::parquet::file_range::PreFilterMode;
-use crate::sst::parquet::{FloatFieldEncoding, SstInfo};
 
 mod builder;
 pub mod bulk;
@@ -406,11 +405,7 @@ impl MemtableBuilderProvider {
         }
     }
 
-    pub(crate) fn builder_for_options(
-        &self,
-        options: &RegionOptions,
-        path_type: PathType,
-    ) -> MemtableBuilderRef {
+    pub(crate) fn builder_for_options(&self, options: &RegionOptions) -> MemtableBuilderRef {
         let dedup = options.need_dedup();
         let merge_mode = options.merge_mode();
         let primary_key_encoding = options.primary_key_encoding();
@@ -427,7 +422,7 @@ impl MemtableBuilderProvider {
                 );
             }
 
-            return Arc::new(self.bulk_memtable_builder(dedup, merge_mode, options, path_type));
+            return Arc::new(self.bulk_memtable_builder(dedup, merge_mode, options));
         }
 
         if primary_key_encoding == PrimaryKeyEncoding::Sparse {
@@ -438,7 +433,7 @@ impl MemtableBuilderProvider {
                     "Overriding memtable config, use BulkMemtable for sparse primary key encoding"
                 );
             }
-            return Arc::new(self.bulk_memtable_builder(dedup, merge_mode, options, path_type));
+            return Arc::new(self.bulk_memtable_builder(dedup, merge_mode, options));
         }
 
         // The format is not flat.
@@ -447,7 +442,7 @@ impl MemtableBuilderProvider {
                 BulkMemtableBuilder::new(self.write_buffer_manager.clone(), !dedup, merge_mode)
                     .with_config(config.clone())
                     .with_compact_dispatcher(self.compact_dispatcher.clone())
-                    .with_float_field_encoding(FloatFieldEncoding::from_path_type(path_type)),
+                    .with_float_field_encoding(options.float_field_encoding),
             ),
             Some(MemtableOptions::TimeSeries) => Arc::new(TimeSeriesMemtableBuilder::new(
                 self.write_buffer_manager.clone(),
@@ -463,7 +458,6 @@ impl MemtableBuilderProvider {
         dedup: bool,
         merge_mode: MergeMode,
         options: &RegionOptions,
-        path_type: PathType,
     ) -> BulkMemtableBuilder {
         let mut builder = BulkMemtableBuilder::new(
             self.write_buffer_manager.clone(),
@@ -471,7 +465,7 @@ impl MemtableBuilderProvider {
             merge_mode,
         )
         .with_compact_dispatcher(self.compact_dispatcher.clone())
-        .with_float_field_encoding(FloatFieldEncoding::from_path_type(path_type));
+        .with_float_field_encoding(options.float_field_encoding);
 
         if let Some(MemtableOptions::Bulk(config)) = &options.memtable {
             builder = builder.with_config(config.clone());
@@ -770,6 +764,7 @@ mod tests {
     use super::*;
     use crate::flush::{WriteBufferManager, WriteBufferManagerImpl};
     use crate::memtable::bulk::BulkMemtableConfig;
+    use crate::region::options::FloatFieldEncodingPolicy;
 
     #[test]
     fn test_alloc_tracker_without_manager() {
@@ -838,13 +833,26 @@ mod tests {
             ..Default::default()
         };
 
-        let builder = provider.bulk_memtable_builder(
-            options.need_dedup(),
-            options.merge_mode(),
-            &options,
-            PathType::Bare,
-        );
+        let builder =
+            provider.bulk_memtable_builder(options.need_dedup(), options.merge_mode(), &options);
 
         assert_eq!(&config, builder.config());
+    }
+
+    #[test]
+    fn test_bulk_memtable_builder_uses_region_float_field_encoding_policy() {
+        let provider = MemtableBuilderProvider::new(None, Arc::new(MitoConfig::default()));
+        let options = RegionOptions {
+            float_field_encoding: FloatFieldEncodingPolicy::ByteStreamSplit,
+            ..Default::default()
+        };
+
+        let builder =
+            provider.bulk_memtable_builder(options.need_dedup(), options.merge_mode(), &options);
+
+        assert_eq!(
+            FloatFieldEncodingPolicy::ByteStreamSplit,
+            builder.float_field_encoding()
+        );
     }
 }
