@@ -351,27 +351,22 @@ impl CompactionScheduler {
             max_parallelism,
         } = pending_request;
 
-        let request = {
-            status.new_compaction_request(
-                self.request_sender.clone(),
-                self.engine_config.clone(),
-                self.cache_manager.clone(),
-                manifest_ctx,
-                self.listener.clone(),
-                schema_metadata_manager,
-                max_parallelism,
-            )
-        };
-        self.region_status
-            .get_mut(&region_id)
-            .unwrap()
-            .merge_waiter(waiter);
-        let version_control = self.region_status[&region_id].version_control.clone();
+        let request = status.new_compaction_request(
+            self.request_sender.clone(),
+            self.engine_config.clone(),
+            self.cache_manager.clone(),
+            manifest_ctx,
+            self.listener.clone(),
+            schema_metadata_manager,
+            max_parallelism,
+        );
+        status.merge_waiter(waiter);
+        let version_control = status.version_control.clone();
         let plan_id = self.next_plan_id();
-        self.region_status
-            .get_mut(&region_id)
-            .unwrap()
-            .start_picking(plan_id);
+        let Some(status) = self.region_status.get_mut(&region_id) else {
+            return true;
+        };
+        status.start_picking(plan_id);
         self.dispatch_compaction_planning(plan_id, version_control, request, options);
         debug!(
             "Successfully scheduled manual compaction planning for region id: {}",
@@ -508,12 +503,12 @@ impl CompactionScheduler {
             schema_metadata_manager,
             MAX_PARALLEL_COMPACTION,
         );
-        let version_control = self.region_status[&region_id].version_control.clone();
+        let version_control = status.version_control.clone();
         let plan_id = self.next_plan_id();
-        self.region_status
-            .get_mut(&region_id)
-            .unwrap()
-            .start_regular_picking(plan_id);
+        let Some(status) = self.region_status.get_mut(&region_id) else {
+            return false;
+        };
+        status.start_regular_picking(plan_id);
         self.dispatch_compaction_planning(
             plan_id,
             version_control,
@@ -810,10 +805,7 @@ impl CompactionScheduler {
 
         match finished.result {
             CompactionPlanningResult::Prepared(mut prepared) => {
-                let current = self.region_status[&region_id]
-                    .version_control
-                    .current()
-                    .version;
+                let current = status.version_control.current().version;
                 let Some(picker_output) =
                     refresh_picker_output(prepared.picker_output, &current.ssts)
                 else {
@@ -931,7 +923,11 @@ impl CompactionScheduler {
             return Vec::new();
         }
 
-        if self.region_status[&region_id].regular_replan_pending {
+        if self
+            .region_status
+            .get(&region_id)
+            .is_some_and(|status| status.regular_replan_pending)
+        {
             self.schedule_next_compaction(region_id, manifest_ctx, schema_metadata_manager);
             return Vec::new();
         }
