@@ -286,8 +286,15 @@ jobs:
           mold_version="$(mold --version)"
           [[ "${mold_version}" =~ ^mold[[:space:]]2\.30\.0([[:space:]]|$) ]]
           [[ "$(python3 --version)" == "Python 3.12.3" ]]
-          [[ "$(command -v otelgen)" == "/usr/local/bin/otelgen" ]]
-          [[ "$(otelgen --version)" == *"863a3f395d062c7322cc1de08a38774b7fdaa6c8"* ]]
+          otelgen_path="$(command -v otelgen || true)"
+          otelgen_version="<unavailable>"
+          if [[ -n "${otelgen_path}" ]]; then
+            otelgen_version="$("${otelgen_path}" --version 2>&1 || true)"
+          fi
+          printf 'otelgen path: %s\n' "${otelgen_path:-<missing>}"
+          printf 'otelgen version: %s\n' "${otelgen_version}"
+          [[ "${otelgen_path}" == "/usr/local/bin/otelgen" ]]
+          [[ "${otelgen_version}" == *"863a3f395d062c7322cc1de08a38774b7fdaa6c8"* ]]
           sccache_version="$(sccache --version)"
           [[ "${sccache_version}" =~ ^sccache[[:space:]]0\.16\.0([[:space:]]|$) ]]
           [[ "$(command -v rustup)" == "/opt/cargo/bin/rustup" ]]
