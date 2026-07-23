@@ -186,10 +186,13 @@ impl AskLeader {
     }
 
     fn create_asker(&self, addr: impl AsRef<str>) -> Result<HeartbeatClient<Channel>> {
-        Ok(HeartbeatClient::new(
-            self.channel_manager
-                .get(addr)
-                .context(error::CreateChannelSnafu)?,
+        Ok(common_grpc::configure_tonic_client!(
+            HeartbeatClient::new(
+                self.channel_manager
+                    .get(addr)
+                    .context(error::CreateChannelSnafu)?,
+            ),
+            self.channel_manager,
         ))
     }
 

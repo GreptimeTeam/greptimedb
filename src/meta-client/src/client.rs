@@ -891,9 +891,11 @@ impl MetaClient {
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
 
     use api::v1::meta::{HeartbeatRequest, Peer};
-    use common_meta::kv_backend::{KvBackendRef, ResettableKvBackendRef};
+    use common_base::readable_size::ReadableSize;
+    use common_meta::kv_backend::{KvBackend, KvBackendRef, ResettableKvBackendRef, TxnService};
     use rand::Rng;
 
     use super::*;
@@ -912,6 +914,27 @@ mod tests {
         async fn new(ns: impl Into<String>) -> Self {
             // can also test with etcd: mocks::mock_client_with_etcdstore("127.0.0.1:2379").await;
             let (client, meta_ctx) = mocks::mock_client_with_memstore().await;
+            Self {
+                ns: ns.into(),
+                client,
+                meta_ctx,
+            }
+        }
+
+        async fn new_with_grpc_message_sizes(
+            ns: impl Into<String>,
+            server_max_recv_message_size: ReadableSize,
+            server_max_send_message_size: ReadableSize,
+            client_max_recv_message_size: ReadableSize,
+            client_max_send_message_size: ReadableSize,
+        ) -> Self {
+            let (client, meta_ctx) = mocks::mock_client_with_memstore_and_grpc_message_sizes(
+                server_max_recv_message_size,
+                server_max_send_message_size,
+                client_max_recv_message_size,
+                client_max_send_message_size,
+            )
+            .await;
             Self {
                 ns: ns.into(),
                 client,
@@ -1331,20 +1354,77 @@ mod tests {
         }
     }
 
-    fn mock_decoder(_kv: KeyValue) -> MetaResult<()> {
-        Ok(())
+    fn mock_decoder(kv: KeyValue) -> MetaResult<Vec<u8>> {
+        Ok(kv.value)
     }
 
-    #[tokio::test]
-    async fn test_cluster_client_adaptive_range() {
-        let tx = new_client("test_cluster_client").await;
+    struct RecordingKvBackend {
+        inner: KvBackendRef,
+        limits: Arc<Mutex<Vec<i64>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl TxnService for RecordingKvBackend {
+        type Error = meta_error::Error;
+    }
+
+    #[async_trait::async_trait]
+    impl KvBackend for RecordingKvBackend {
+        fn name(&self) -> &str {
+            "RecordingKvBackend"
+        }
+
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+
+        async fn range(&self, req: RangeRequest) -> MetaResult<RangeResponse> {
+            self.limits.lock().unwrap().push(req.limit);
+            self.inner.range(req).await
+        }
+
+        async fn put(&self, req: PutRequest) -> MetaResult<PutResponse> {
+            self.inner.put(req).await
+        }
+
+        async fn batch_put(&self, req: BatchPutRequest) -> MetaResult<BatchPutResponse> {
+            self.inner.batch_put(req).await
+        }
+
+        async fn batch_get(&self, req: BatchGetRequest) -> MetaResult<BatchGetResponse> {
+            self.inner.batch_get(req).await
+        }
+
+        async fn delete_range(&self, req: DeleteRangeRequest) -> MetaResult<DeleteRangeResponse> {
+            self.inner.delete_range(req).await
+        }
+
+        async fn batch_delete(&self, req: BatchDeleteRequest) -> MetaResult<BatchDeleteResponse> {
+            self.inner.batch_delete(req).await
+        }
+    }
+
+    async fn adaptive_range_with_message_sizes(
+        server_max_recv_message_size: ReadableSize,
+        server_max_send_message_size: ReadableSize,
+        client_max_recv_message_size: ReadableSize,
+        client_max_send_message_size: ReadableSize,
+    ) -> (Vec<Vec<u8>>, Vec<Vec<u8>>, Vec<i64>) {
+        let tx = TestClient::new_with_grpc_message_sizes(
+            "test_cluster_client",
+            server_max_recv_message_size,
+            server_max_send_message_size,
+            client_max_recv_message_size,
+            client_max_send_message_size,
+        )
+        .await;
         let in_memory = tx.in_memory().unwrap();
         let cluster_client = tx.client.cluster_client().unwrap();
         let mut rng = rand::rng();
 
-        // Generates rough 10MB data, which is larger than the default grpc message size limit.
-        for i in 0..10 {
-            let data: Vec<u8> = (0..1024 * 1024).map(|_| rng.random::<u8>()).collect();
+        let mut expected = Vec::new();
+        for i in 0..4 {
+            let data: Vec<u8> = (0..256 * 1024).map(|_| rng.random::<u8>()).collect();
             in_memory
                 .put(
                     PutRequest::new()
@@ -1353,13 +1433,48 @@ mod tests {
                 )
                 .await
                 .unwrap();
+            expected.push(data);
         }
 
         let req = RangeRequest::new().with_prefix(b"__prefix/");
+        let limits = Arc::new(Mutex::new(Vec::new()));
+        let recording_backend = RecordingKvBackend {
+            inner: Arc::new(cluster_client),
+            limits: limits.clone(),
+        };
         let stream =
-            PaginationStream::new(Arc::new(cluster_client), req, 10, mock_decoder).into_stream();
+            PaginationStream::new(Arc::new(recording_backend), req, 4, mock_decoder).into_stream();
 
         let res = stream.try_collect::<Vec<_>>().await.unwrap();
-        assert_eq!(10, res.len());
+        let limits = limits.lock().unwrap().clone();
+        (expected, res, limits)
+    }
+
+    #[tokio::test]
+    async fn test_cluster_client_adaptive_range() {
+        let (expected, res, limits) = adaptive_range_with_message_sizes(
+            ReadableSize::mb(2),
+            ReadableSize::mb(16),
+            ReadableSize::mb(1),
+            ReadableSize::mb(2),
+        )
+        .await;
+
+        assert_eq!(expected, res);
+        assert_eq!(vec![4, 2, 2], limits);
+    }
+
+    #[tokio::test]
+    async fn test_cluster_client_adaptive_range_server_limit() {
+        let (expected, res, limits) = adaptive_range_with_message_sizes(
+            ReadableSize::mb(2),
+            ReadableSize::mb(1),
+            ReadableSize::mb(16),
+            ReadableSize::mb(2),
+        )
+        .await;
+
+        assert_eq!(expected, res);
+        assert_eq!(vec![4, 2, 2], limits);
     }
 }
