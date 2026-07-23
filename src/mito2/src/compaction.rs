@@ -278,15 +278,23 @@ impl CompactionScheduler {
                 }
                 options @ Options::StrictWindow(_) => {
                     // Incoming compaction request is manually triggered.
-                    status.set_pending_request(PendingCompaction {
-                        options,
-                        waiter,
-                        max_parallelism,
-                    });
-                    info!(
-                        "Region {} is compacting, manually compaction will be re-scheduled.",
-                        region_id
-                    );
+                    if status.pending_ddl_requests.is_empty() {
+                        status.set_pending_request(PendingCompaction {
+                            options,
+                            waiter,
+                            max_parallelism,
+                        });
+                        info!(
+                            "Region {} is compacting, manually compaction will be re-scheduled.",
+                            region_id
+                        );
+                    } else {
+                        waiter.send(CompactionCancelledSnafu.fail());
+                        info!(
+                            "Region {} has pending DDL requests, cancelling manual compaction.",
+                            region_id
+                        );
+                    }
                 }
             }
             return Ok(false);
@@ -4674,6 +4682,88 @@ mod tests {
         });
 
         assert!(scheduler.has_pending_ddls(region_id));
+    }
+
+    #[tokio::test]
+    async fn test_pending_ddl_rejects_later_manual_compaction() {
+        let env = SchedulerEnv::new().await;
+        let (tx, _rx) = mpsc::channel(4);
+        let mut scheduler = env.mock_compaction_scheduler(tx);
+        let builder = VersionControlBuilder::new();
+        let version_control = Arc::new(builder.build());
+        let region_id = builder.region_id();
+        let manifest_ctx = env
+            .mock_manifest_context(version_control.current().version.metadata.clone())
+            .await;
+        let (schema_metadata_manager, _kv_backend) = mock_schema_metadata_manager();
+
+        let mut status =
+            CompactionStatus::new(region_id, version_control.clone(), env.access_layer.clone());
+        status.start_local_task();
+        scheduler.region_status.insert(region_id, status);
+
+        let (first_manual_tx, mut first_manual_rx) = oneshot::channel();
+        assert!(
+            !scheduler
+                .schedule_compaction(
+                    region_id,
+                    compact_request::Options::StrictWindow(StrictWindow { window_seconds: 60 }),
+                    &version_control,
+                    &env.access_layer,
+                    OptionOutputTx::from(first_manual_tx),
+                    &manifest_ctx,
+                    schema_metadata_manager.clone(),
+                    1,
+                )
+                .unwrap()
+        );
+
+        let (ddl_tx, _ddl_rx) = oneshot::channel();
+        scheduler.add_ddl_request_to_pending(SenderDdlRequest {
+            region_id,
+            sender: OptionOutputTx::from(ddl_tx),
+            request: crate::request::DdlRequest::EnterStaging(
+                store_api::region_request::EnterStagingRequest {
+                    partition_directive:
+                        store_api::region_request::StagingPartitionDirective::RejectAllWrites,
+                },
+            ),
+        });
+
+        let (later_manual_tx, mut later_manual_rx) = oneshot::channel();
+        assert!(
+            !scheduler
+                .schedule_compaction(
+                    region_id,
+                    compact_request::Options::StrictWindow(StrictWindow {
+                        window_seconds: 120,
+                    }),
+                    &version_control,
+                    &env.access_layer,
+                    OptionOutputTx::from(later_manual_tx),
+                    &manifest_ctx,
+                    schema_metadata_manager,
+                    1,
+                )
+                .unwrap()
+        );
+
+        let later_result = later_manual_rx
+            .try_recv()
+            .expect("manual compaction queued after DDL was not rejected");
+        assert_matches!(later_result.unwrap_err(), Error::CompactionCancelled { .. });
+        assert_matches!(
+            first_manual_rx.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        );
+        let pending_request = scheduler.region_status[&region_id]
+            .pending_request
+            .as_ref()
+            .expect("manual compaction queued before DDL was removed");
+        assert_matches!(
+            &pending_request.options,
+            compact_request::Options::StrictWindow(StrictWindow { window_seconds: 60 })
+        );
     }
 
     #[tokio::test]
