@@ -41,7 +41,7 @@ use store_api::storage::ColumnId;
 
 use crate::error::{
     CompatReaderSnafu, ComputeArrowSnafu, ConvertValueSnafu, CreateDefaultSnafu, DecodeSnafu,
-    EncodeSnafu, NewRecordBatchSnafu, Result, UnsupportedOperationSnafu,
+    EncodeSnafu, NewRecordBatchSnafu, Result, UnexpectedSnafu, UnsupportedOperationSnafu,
 };
 use crate::read::flat_projection::{FlatProjectionMapper, flat_projected_columns};
 use crate::sst::parquet::flat_format::{FlatReadFormat, primary_key_column_index};
@@ -117,7 +117,10 @@ impl FlatCompatBatch {
         }
 
         let expect_schema = mapper.batch_schema();
-        if expect_schema == actual_schema {
+        if expect_schema == actual_schema
+            && actual.primary_key == mapper.metadata().primary_key
+            && actual.primary_key_encoding == mapper.metadata().primary_key_encoding
+        {
             // Although the SST has a different schema, but the schema after projection is the same
             // as expected schema.
             return Ok(None);
@@ -295,11 +298,16 @@ impl FlatCompatBatch {
             )
             .collect::<Result<Vec<_>>>()?;
 
-        let compat_batch = RecordBatch::try_new(self.arrow_schema.clone(), columns)
-            .context(NewRecordBatchSnafu)?;
+        let mut columns = columns;
+        let primary_key_index = primary_key_column_index(columns.len());
+        columns[primary_key_index] = self.compat_primary_key(&columns[primary_key_index])?;
 
-        // Handles primary keys.
-        self.compat_pk.compat(compat_batch)
+        RecordBatch::try_new(self.arrow_schema.clone(), columns).context(NewRecordBatchSnafu)
+    }
+
+    /// Makes an encoded primary-key array compatible with the expected metadata.
+    pub(crate) fn compat_primary_key(&self, primary_key: &ArrayRef) -> Result<ArrayRef> {
+        self.compat_pk.compat(primary_key)
     }
 }
 
@@ -408,18 +416,44 @@ impl FlatRewritePrimaryKey {
     fn rewrite_key(
         &self,
         append_values: &[(ColumnId, Value)],
-        batch: RecordBatch,
-    ) -> Result<RecordBatch> {
-        let old_pk_dict_array = batch
-            .column(primary_key_column_index(batch.num_columns()))
-            .as_any()
-            .downcast_ref::<PrimaryKeyArray>()
-            .unwrap();
-        let old_pk_values_array = old_pk_dict_array
-            .values()
-            .as_any()
-            .downcast_ref::<BinaryArray>()
-            .unwrap();
+        primary_key: &ArrayRef,
+    ) -> Result<ArrayRef> {
+        if let Some(old_pk_dict_array) = primary_key.as_any().downcast_ref::<PrimaryKeyArray>() {
+            let old_pk_values_array = old_pk_dict_array
+                .values()
+                .as_any()
+                .downcast_ref::<BinaryArray>()
+                .context(UnexpectedSnafu {
+                    reason: "Primary-key dictionary values are not binary",
+                })?;
+            let new_pk_values_array =
+                Arc::new(self.rewrite_values(append_values, old_pk_values_array)?);
+            return Ok(Arc::new(PrimaryKeyArray::new(
+                old_pk_dict_array.keys().clone(),
+                new_pk_values_array,
+            )));
+        }
+
+        let old_pk_values_array =
+            primary_key
+                .as_any()
+                .downcast_ref::<BinaryArray>()
+                .context(UnexpectedSnafu {
+                    reason: format!(
+                        "Primary-key column is neither binary nor dictionary, got {:?}",
+                        primary_key.data_type()
+                    ),
+                })?;
+        Ok(Arc::new(
+            self.rewrite_values(append_values, old_pk_values_array)?,
+        ))
+    }
+
+    fn rewrite_values(
+        &self,
+        append_values: &[(ColumnId, Value)],
+        old_pk_values_array: &BinaryArray,
+    ) -> Result<BinaryArray> {
         let mut builder = BinaryBuilder::with_capacity(
             old_pk_values_array.len(),
             old_pk_values_array.value_data().len(),
@@ -461,14 +495,7 @@ impl FlatRewritePrimaryKey {
             }
             builder.append_value(&buffer);
         }
-        let new_pk_values_array = Arc::new(builder.finish());
-        let new_pk_dict_array =
-            PrimaryKeyArray::new(old_pk_dict_array.keys().clone(), new_pk_values_array);
-
-        let mut columns = batch.columns().to_vec();
-        columns[primary_key_column_index(batch.num_columns())] = Arc::new(new_pk_dict_array);
-
-        RecordBatch::try_new(batch.schema(), columns).context(NewRecordBatchSnafu)
+        Ok(builder.finish())
     }
 }
 
@@ -538,34 +565,58 @@ impl FlatCompatPrimaryKey {
         })
     }
 
-    /// Makes primary key of the `batch` compatible.
-    ///
-    /// Callers must ensure other columns except the `__primary_key` column is compatible.
-    fn compat(&self, batch: RecordBatch) -> Result<RecordBatch> {
+    /// Makes an encoded primary-key array compatible.
+    fn compat(&self, primary_key: &ArrayRef) -> Result<ArrayRef> {
         if let Some(rewriter) = &self.rewriter {
             // If we have different encoding, rewrite the whole primary key.
-            return rewriter.rewrite_key(&self.values, batch);
+            return rewriter.rewrite_key(&self.values, primary_key);
         }
 
-        self.append_key(batch)
+        self.append_key(primary_key)
     }
 
-    /// Appends values to the primary key of the `batch`.
-    fn append_key(&self, batch: RecordBatch) -> Result<RecordBatch> {
+    /// Appends values to the primary key array.
+    fn append_key(&self, primary_key: &ArrayRef) -> Result<ArrayRef> {
         let Some(converter) = &self.converter else {
-            return Ok(batch);
+            return Ok(primary_key.clone());
         };
 
-        let old_pk_dict_array = batch
-            .column(primary_key_column_index(batch.num_columns()))
-            .as_any()
-            .downcast_ref::<PrimaryKeyArray>()
-            .unwrap();
-        let old_pk_values_array = old_pk_dict_array
-            .values()
-            .as_any()
-            .downcast_ref::<BinaryArray>()
-            .unwrap();
+        if let Some(old_pk_dict_array) = primary_key.as_any().downcast_ref::<PrimaryKeyArray>() {
+            let old_pk_values_array = old_pk_dict_array
+                .values()
+                .as_any()
+                .downcast_ref::<BinaryArray>()
+                .context(UnexpectedSnafu {
+                    reason: "Primary-key dictionary values are not binary",
+                })?;
+            let new_pk_values_array =
+                Arc::new(self.append_values(old_pk_values_array, converter.as_ref())?);
+            return Ok(Arc::new(PrimaryKeyArray::new(
+                old_pk_dict_array.keys().clone(),
+                new_pk_values_array,
+            )));
+        }
+
+        let old_pk_values_array =
+            primary_key
+                .as_any()
+                .downcast_ref::<BinaryArray>()
+                .context(UnexpectedSnafu {
+                    reason: format!(
+                        "Primary-key column is neither binary nor dictionary, got {:?}",
+                        primary_key.data_type()
+                    ),
+                })?;
+        Ok(Arc::new(
+            self.append_values(old_pk_values_array, converter.as_ref())?,
+        ))
+    }
+
+    fn append_values(
+        &self,
+        old_pk_values_array: &BinaryArray,
+        converter: &dyn PrimaryKeyCodec,
+    ) -> Result<BinaryArray> {
         let mut builder = BinaryBuilder::with_capacity(
             old_pk_values_array.len(),
             old_pk_values_array.value_data().len()
@@ -594,15 +645,7 @@ impl FlatCompatPrimaryKey {
             builder.append_value(&buffer);
         }
 
-        let new_pk_values_array = Arc::new(builder.finish());
-        let new_pk_dict_array =
-            PrimaryKeyArray::new(old_pk_dict_array.keys().clone(), new_pk_values_array);
-
-        // Overrides the primary key column.
-        let mut columns = batch.columns().to_vec();
-        columns[primary_key_column_index(batch.num_columns())] = Arc::new(new_pk_dict_array);
-
-        RecordBatch::try_new(batch.schema(), columns).context(NewRecordBatchSnafu)
+        Ok(builder.finish())
     }
 }
 
@@ -612,7 +655,7 @@ mod tests {
 
     use api::v1::{OpType, SemanticType};
     use datatypes::arrow::array::{
-        ArrayRef, BinaryDictionaryBuilder, Int64Array, StringDictionaryBuilder,
+        ArrayRef, BinaryArray, BinaryDictionaryBuilder, Int64Array, StringDictionaryBuilder,
         TimestampMillisecondArray, UInt8Array, UInt64Array,
     };
     use datatypes::arrow::datatypes::UInt32Type;
@@ -972,6 +1015,64 @@ mod tests {
         let expected_batch = RecordBatch::try_new(output_schema, expected_columns).unwrap();
 
         assert_eq!(expected_batch, result);
+    }
+
+    #[test]
+    fn test_compat_primary_key_with_different_encoding_only() {
+        let mut actual_metadata = new_metadata(
+            &[
+                (
+                    0,
+                    SemanticType::Timestamp,
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                ),
+                (1, SemanticType::Tag, ConcreteDataType::string_datatype()),
+                (2, SemanticType::Field, ConcreteDataType::int64_datatype()),
+            ],
+            &[1],
+        );
+        actual_metadata.primary_key_encoding = PrimaryKeyEncoding::Dense;
+        let actual_metadata = Arc::new(actual_metadata);
+
+        let mut expected_metadata = (*actual_metadata).clone();
+        expected_metadata.primary_key_encoding = PrimaryKeyEncoding::Sparse;
+        let expected_metadata = Arc::new(expected_metadata);
+
+        let mapper = FlatProjectionMapper::all(&expected_metadata).unwrap();
+        let read_format = FlatReadFormat::new(
+            actual_metadata,
+            ReadColumns::from_deduped_column_ids([0, 1, 2]),
+            None,
+            "test",
+            false,
+        )
+        .unwrap();
+        let compat = FlatCompatBatch::try_new(&mapper, &read_format, false)
+            .unwrap()
+            .unwrap();
+
+        let dense_key = encode_key(&[Some("tag1")]);
+        let sparse_key = encode_sparse_key(&[(1, Some("tag1"))]);
+
+        let dictionary_key = build_flat_test_pk_array(&[&dense_key, &dense_key]);
+        let result = compat.compat_primary_key(&dictionary_key).unwrap();
+        let result = result.as_any().downcast_ref::<PrimaryKeyArray>().unwrap();
+        let values = result
+            .values()
+            .as_any()
+            .downcast_ref::<BinaryArray>()
+            .unwrap();
+        assert_eq!(values.value(result.keys().value(0) as usize), sparse_key);
+        assert_eq!(values.value(result.keys().value(1) as usize), sparse_key);
+
+        let binary_key: ArrayRef = Arc::new(BinaryArray::from(vec![
+            Some(dense_key.as_slice()),
+            Some(dense_key.as_slice()),
+        ]));
+        let result = compat.compat_primary_key(&binary_key).unwrap();
+        let result = result.as_any().downcast_ref::<BinaryArray>().unwrap();
+        assert_eq!(result.value(0), sparse_key);
+        assert_eq!(result.value(1), sparse_key);
     }
 
     #[test]
