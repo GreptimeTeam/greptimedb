@@ -725,12 +725,50 @@ pub struct ValidatedRemoteWritePlan {
     sample_chunk_size: Option<u64>,
     flush_every_sample_chunks: u64,
     visibility_timeout_seconds: u64,
+    prom_store: PromStoreExecutionPlan,
     value: ValidatedRemoteWriteValue,
     storage_requested: bool,
     read_bench_requested: bool,
     read_bench_parquet: bool,
     read_bench_scan: bool,
     storage_thresholds: Option<StorageThresholds>,
+    storage: Option<StorageExecutionPlan>,
+    read_bench: Option<ReadBenchExecutionPlan>,
+}
+
+/// Complete normalized Prom-store tuning used by the local controller.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct PromStoreExecutionPlan {
+    pending_rows_flush_interval: String,
+    max_batch_rows: u64,
+    max_concurrent_flushes: u64,
+    worker_channel_capacity: u64,
+    max_inflight_requests: u64,
+}
+
+/// Complete normalized storage-observation plan. This is controller input, not
+/// a filesystem inspection result.
+#[derive(Debug, Clone)]
+pub struct StorageExecutionPlan {
+    inspect: bool,
+    column: String,
+    root_suffix: Option<String>,
+    include_metadata_files: bool,
+    thresholds: StorageThresholds,
+}
+
+/// Complete normalized read-benchmark execution plan for the local controller.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct ReadBenchExecutionPlan {
+    enabled: bool,
+    parquetbench: bool,
+    scanbench: bool,
+    iterations: u64,
+    projection: Vec<String>,
+    parquet_reader: String,
+    scan_scanner: String,
+    parallelism: u64,
+    max_files: Option<usize>,
 }
 
 /// Server-visible fixture identity derived exclusively from a validated
@@ -1227,6 +1265,13 @@ impl ValidatedRemoteWritePlan {
             sample_chunk_size: raw.sample_chunk_size,
             flush_every_sample_chunks: raw.flush_every_sample_chunks,
             visibility_timeout_seconds: raw.visibility_timeout_seconds,
+            prom_store: PromStoreExecutionPlan {
+                pending_rows_flush_interval: raw.prom_store.pending_rows_flush_interval.clone(),
+                max_batch_rows: raw.prom_store.max_batch_rows,
+                max_concurrent_flushes: raw.prom_store.max_concurrent_flushes,
+                worker_channel_capacity: raw.prom_store.worker_channel_capacity,
+                max_inflight_requests: raw.prom_store.max_inflight_requests,
+            },
             value: ValidatedRemoteWriteValue {
                 pattern: raw.value.pattern,
                 base: raw.value.base,
@@ -1263,6 +1308,11 @@ impl ValidatedRemoteWritePlan {
                 max_candidate_column_uncompressed_size_regression_pct: storage
                     .max_candidate_column_uncompressed_size_regression_pct,
             }),
+            storage: raw.storage.as_ref().map(StorageExecutionPlan::from_raw),
+            read_bench: raw
+                .read_bench
+                .as_ref()
+                .map(ReadBenchExecutionPlan::from_raw),
         }
     }
     pub fn database(&self) -> &str {
@@ -1318,6 +1368,15 @@ impl ValidatedRemoteWritePlan {
     }
     pub fn storage_thresholds(&self) -> Option<&StorageThresholds> {
         self.storage_thresholds.as_ref()
+    }
+    pub fn prom_store(&self) -> &PromStoreExecutionPlan {
+        &self.prom_store
+    }
+    pub fn storage(&self) -> Option<&StorageExecutionPlan> {
+        self.storage.as_ref()
+    }
+    pub fn read_bench(&self) -> Option<&ReadBenchExecutionPlan> {
+        self.read_bench.as_ref()
     }
     /// The time bounds are inclusive: the final sample is at
     /// `start + (samples_per_series - 1) * step`.
@@ -1409,6 +1468,105 @@ impl ValidatedRemoteWriteValue {
     }
     pub fn mixed_every(&self) -> u64 {
         self.mixed_every
+    }
+}
+impl PromStoreExecutionPlan {
+    pub fn pending_rows_flush_interval(&self) -> &str {
+        &self.pending_rows_flush_interval
+    }
+    pub fn max_batch_rows(&self) -> u64 {
+        self.max_batch_rows
+    }
+    pub fn max_concurrent_flushes(&self) -> u64 {
+        self.max_concurrent_flushes
+    }
+    pub fn worker_channel_capacity(&self) -> u64 {
+        self.worker_channel_capacity
+    }
+    pub fn max_inflight_requests(&self) -> u64 {
+        self.max_inflight_requests
+    }
+}
+impl StorageExecutionPlan {
+    fn from_raw(raw: &StorageConfig) -> Self {
+        Self {
+            inspect: raw.inspect,
+            column: raw.column.clone(),
+            root_suffix: raw.root_suffix.clone(),
+            include_metadata_files: raw.include_metadata_files,
+            thresholds: StorageThresholds {
+                min_files: raw.min_files,
+                min_files_with_column: raw.min_files_with_column,
+                require_encodings: raw.require_encodings.clone(),
+                forbid_encodings: raw.forbid_encodings.clone(),
+                max_total_file_size_bytes: raw.max_total_file_size_bytes,
+                max_column_compressed_size_bytes: raw.max_column_compressed_size_bytes,
+                max_column_uncompressed_size_bytes: raw.max_column_uncompressed_size_bytes,
+                max_candidate_total_file_size_regression_pct: raw
+                    .max_candidate_total_file_size_regression_pct,
+                max_candidate_column_compressed_size_regression_pct: raw
+                    .max_candidate_column_compressed_size_regression_pct,
+                max_candidate_column_uncompressed_size_regression_pct: raw
+                    .max_candidate_column_uncompressed_size_regression_pct,
+            },
+        }
+    }
+    pub fn inspect(&self) -> bool {
+        self.inspect
+    }
+    pub fn column(&self) -> &str {
+        &self.column
+    }
+    pub fn root_suffix(&self) -> Option<&str> {
+        self.root_suffix.as_deref()
+    }
+    pub fn include_metadata_files(&self) -> bool {
+        self.include_metadata_files
+    }
+    pub fn thresholds(&self) -> &StorageThresholds {
+        &self.thresholds
+    }
+}
+impl ReadBenchExecutionPlan {
+    fn from_raw(raw: &ReadBenchConfig) -> Self {
+        Self {
+            enabled: raw.enabled,
+            parquetbench: raw.parquetbench,
+            scanbench: raw.scanbench,
+            iterations: raw.iterations,
+            projection: raw.projection.clone(),
+            parquet_reader: raw.parquet_reader.clone(),
+            scan_scanner: raw.scan_scanner.clone(),
+            parallelism: raw.parallelism,
+            max_files: raw.max_files,
+        }
+    }
+    pub fn enabled(&self) -> bool {
+        self.enabled
+    }
+    pub fn parquetbench(&self) -> bool {
+        self.parquetbench
+    }
+    pub fn scanbench(&self) -> bool {
+        self.scanbench
+    }
+    pub fn iterations(&self) -> u64 {
+        self.iterations
+    }
+    pub fn projection(&self) -> &[String] {
+        &self.projection
+    }
+    pub fn parquet_reader(&self) -> &str {
+        &self.parquet_reader
+    }
+    pub fn scan_scanner(&self) -> &str {
+        &self.scan_scanner
+    }
+    pub fn parallelism(&self) -> u64 {
+        self.parallelism
+    }
+    pub fn max_files(&self) -> Option<usize> {
+        self.max_files
     }
 }
 impl StorageThresholds {
@@ -1860,7 +2018,7 @@ fn validate_storage(storage: &mut StorageConfig) -> Result<()> {
             "storage.inspect = false is not a storage contract",
         ));
     }
-    nonempty("storage.column", &storage.column)?;
+    validate_identifier("storage.column", &storage.column)?;
     positive("storage.min_files", storage.min_files)?;
     positive(
         "storage.min_files_with_column",
@@ -1930,14 +2088,14 @@ fn validate_read_bench(bench: &mut ReadBenchConfig, column: &str) -> Result<()> 
             return Err(Error::new("read_bench.max_files must be positive"));
         }
     }
-    nonempty("read_bench.parquet_reader", &bench.parquet_reader)?;
-    nonempty("read_bench.scan_scanner", &bench.scan_scanner)?;
+    validate_identifier("read_bench.parquet_reader", &bench.parquet_reader)?;
+    validate_identifier("read_bench.scan_scanner", &bench.scan_scanner)?;
     if bench.projection.is_empty() {
         bench.projection.push(column.to_string());
     }
     let mut names = HashSet::new();
     for value in &bench.projection {
-        nonempty("read_bench.projection", value)?;
+        validate_identifier("read_bench.projection", value)?;
         if !names.insert(value.as_str()) {
             return Err(Error::new(format!(
                 "duplicate read_bench projection {value}"
@@ -2392,6 +2550,74 @@ enabled = true
             1_704_067_200_002_000_000,
             "the end is the final included sample, not an exclusive bound"
         );
+    }
+
+    #[test]
+    fn controller_execution_accessors_preserve_normalized_defaults_and_reject_unsafe_inputs() {
+        let case = validated(REMOTE).unwrap_or_else(|err| panic!("case: {err}"));
+        let remote = case.remote_write().unwrap_or_else(|| panic!("remote plan"));
+        assert_eq!(remote.prom_store().pending_rows_flush_interval(), "1s");
+        assert_eq!(remote.prom_store().max_batch_rows(), 100_000);
+        assert_eq!(remote.prom_store().max_concurrent_flushes(), 256);
+        assert_eq!(remote.prom_store().worker_channel_capacity(), 65_526);
+        assert_eq!(remote.prom_store().max_inflight_requests(), 3_000);
+        let storage = remote.storage().unwrap_or_else(|| panic!("storage"));
+        assert!(storage.inspect());
+        assert_eq!(storage.column(), "greptime_value");
+        assert!(!storage.include_metadata_files());
+        assert_eq!(storage.thresholds().min_files(), 1);
+        let bench = remote.read_bench().unwrap_or_else(|| panic!("read bench"));
+        assert!(bench.enabled() && bench.parquetbench() && bench.scanbench());
+        assert_eq!(bench.iterations(), 1);
+        assert_eq!(bench.projection(), ["greptime_value"]);
+        assert_eq!(bench.parquet_reader(), "direct");
+        assert_eq!(bench.scan_scanner(), "seq");
+        assert_eq!(bench.parallelism(), 1);
+        assert_eq!(bench.max_files(), None);
+
+        for (name, source) in [
+            (
+                "unsafe root",
+                REMOTE.replacen(
+                    "column = \"greptime_value\"",
+                    "column = \"greptime_value\"\nroot_suffix = \"../escape\"",
+                    1,
+                ),
+            ),
+            (
+                "invalid reader",
+                REMOTE.replacen(
+                    "parallelism = 1",
+                    "parallelism = 1\nparquet_reader = \"bad reader\"",
+                    1,
+                ),
+            ),
+            (
+                "invalid projection",
+                REMOTE.replacen(
+                    "parallelism = 1",
+                    "parallelism = 1\nprojection = [\"bad projection\"]",
+                    1,
+                ),
+            ),
+            (
+                "disabled modes",
+                REMOTE.replacen(
+                    "parquetbench = true\nscanbench = true",
+                    "parquetbench = false\nscanbench = false",
+                    1,
+                ),
+            ),
+            (
+                "unknown threshold",
+                REMOTE.replacen("max_total_file_size_bytes = 10", "unknown_threshold = 1", 1),
+            ),
+        ] {
+            assert!(
+                normalized(&source).is_err(),
+                "{name} must fail normalization"
+            );
+        }
     }
 
     #[test]

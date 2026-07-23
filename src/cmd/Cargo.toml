@@ -19,6 +19,11 @@ name = "query_regression_runner"
 path = "src/bin/query_regression_runner.rs"
 required-features = ["dev-tools"]
 
+[[bin]]
+name = "query_regression_local_controller"
+path = "src/bin/query_regression_local_controller.rs"
+required-features = ["dev-tools"]
+
 [features]
 default = [
     "servers/pprof",

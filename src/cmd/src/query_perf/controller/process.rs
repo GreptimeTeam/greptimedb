@@ -12,9 +12,4 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub mod case;
-pub mod controller;
-pub mod error;
-pub mod fixture;
-pub mod manifest;
-pub mod runner;
+//! Reserved for the controller local-process lifecycle implementation.
