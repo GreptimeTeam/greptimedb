@@ -32,7 +32,6 @@ use common_telemetry::tracing_context::TracingContext;
 use common_telemetry::{error, info, warn};
 use snafu::{ResultExt, ensure};
 use tokio::sync::RwLock;
-use tonic::codec::CompressionEncoding;
 use tonic::transport::Channel;
 use tonic::{Request, Status};
 
@@ -151,10 +150,10 @@ impl Inner {
             .get(addr)
             .context(error::CreateChannelSnafu)?;
 
-        Ok(ProcedureServiceClient::new(channel)
-            .accept_compressed(CompressionEncoding::Gzip)
-            .accept_compressed(CompressionEncoding::Zstd)
-            .send_compressed(CompressionEncoding::Zstd))
+        Ok(common_grpc::configure_tonic_client!(
+            ProcedureServiceClient::new(channel),
+            self.channel_manager,
+        ))
     }
 
     #[inline]
@@ -576,10 +575,14 @@ mod tests {
 
         let server = tonic::transport::Server::builder()
             .add_service(
-                HeartbeatServer::new(heartbeat).accept_compressed(CompressionEncoding::Zstd),
+                HeartbeatServer::new(heartbeat)
+                    .accept_compressed(CompressionEncoding::Gzip)
+                    .accept_compressed(CompressionEncoding::Zstd),
             )
             .add_service(
-                ProcedureServiceServer::new(procedure).accept_compressed(CompressionEncoding::Zstd),
+                ProcedureServiceServer::new(procedure)
+                    .accept_compressed(CompressionEncoding::Gzip)
+                    .accept_compressed(CompressionEncoding::Zstd),
             )
             .serve_with_incoming(TcpListenerStream::new(listener));
         let server_handle = tokio::spawn(server);
