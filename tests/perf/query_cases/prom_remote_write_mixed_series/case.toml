@@ -1,0 +1,71 @@
+[case]
+name = "prom_remote_write_mixed_series"
+description = "Manual end-to-end Prometheus remote-write regression with 95% integer counters and 5% fractional gauges"
+
+[scenario]
+kind = "prom_remote_write_then_query"
+
+[scenario.remote_write]
+database = "public"
+metric = "prom_remote_write_mixed_series"
+physical_table = "greptime_physical_table"
+series_count = 2000
+samples_per_series = 14400
+sample_chunk_size = 1440
+flush_every_sample_chunks = 1
+start_unix_millis = 1704067200000
+step_millis = 60000
+chunk_series_count = 256
+timeout_seconds = 600
+visibility_timeout_seconds = 300
+
+[scenario.remote_write.value]
+pattern = "mixed_series"
+series_mix_every = 20
+gauge_residue = 19
+fractional_step = 0.125
+
+[scenario.remote_write.prom_store]
+pending_rows_flush_interval = "1s"
+max_batch_rows = 100000
+
+[scenario.remote_write.physical_table_setup]
+columns = [
+  { name = "greptime_timestamp", type = "TIMESTAMP(3)" },
+  { name = "greptime_value", type = "DOUBLE" },
+]
+time_index = "greptime_timestamp"
+engine = "metric"
+options = { physical_metric_table = "", sst_format = "flat" }
+target_options = { base = { experimental_sst_float_field_encoding = "default" }, candidate = { experimental_sst_float_field_encoding = "byte_stream_split" } }
+
+[scenario.remote_write.logical_stream_verification]
+labels = ["host", "instance"]
+timestamp_column = "greptime_timestamp"
+value_column = "greptime_value"
+
+[scenario.remote_write.storage]
+column = "greptime_value"
+min_files = 2
+min_files_with_column = 2
+
+[scenario.remote_write.read_bench]
+iterations = 8
+rounds = 8
+max_files = 4
+parquet_reader = "direct"
+scan_scanner = "seq"
+projections = [
+  { name = "target", columns = ["greptime_value"] },
+  { name = "all" },
+]
+
+[[scenario.queries]]
+name = "selector_10d_mixed_series"
+kind = "tql"
+query = "TQL ANALYZE VERBOSE (1704067200, 1704931200, '1h') prom_remote_write_mixed_series{host=~'host.*'}"
+warmup = 2
+iterations = 15
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 75
