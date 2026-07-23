@@ -160,7 +160,6 @@ impl DefaultNotifier {
 #[async_trait::async_trait]
 impl Notifier for DefaultNotifier {
     async fn notify(&self, result: RemoteJobResult, waiters: Vec<OutputTx>) {
-        INFLIGHT_COMPACTION_COUNT.dec();
         let Some(execution) = self
             .execution
             .lock()
@@ -170,6 +169,7 @@ impl Notifier for DefaultNotifier {
             error!("Remote compaction notifier invoked more than once");
             return;
         };
+        INFLIGHT_COMPACTION_COUNT.dec();
         match result {
             RemoteJobResult::CompactionJobResult(result) => {
                 let notify = {
