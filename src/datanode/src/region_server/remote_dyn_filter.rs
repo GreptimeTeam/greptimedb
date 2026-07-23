@@ -225,8 +225,7 @@ impl RegionServer {
     ) {
         if matches!(
             outcome,
-            RemoteDynFilterUpdateOutcome::MissingRegistration
-                | RemoteDynFilterUpdateOutcome::AlreadyComplete
+            RemoteDynFilterUpdateOutcome::AlreadyComplete
                 | RemoteDynFilterUpdateOutcome::PayloadTooLarge
                 | RemoteDynFilterUpdateOutcome::DecodeFailed
         ) {
