@@ -14,5 +14,6 @@
 
 mod database;
 mod flow;
+mod table;
 mod test_util;
 mod view;
