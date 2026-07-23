@@ -14,8 +14,6 @@
 
 //! Parquet reader.
 
-mod stream;
-
 #[cfg(feature = "vector_index")]
 use std::collections::BTreeSet;
 use std::collections::HashSet;
@@ -43,20 +41,21 @@ use parquet::arrow::{ProjectionMask, parquet_to_arrow_schema};
 use parquet::file::metadata::{PageIndexPolicy, ParquetMetaData};
 use parquet::file::properties::DEFAULT_DICTIONARY_PAGE_SIZE_LIMIT;
 use partition::expr::PartitionExpr;
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataRef};
 use store_api::region_request::PathType;
+use store_api::storage::consts::PRIMARY_KEY_COLUMN_NAME;
 use store_api::storage::{ColumnId, FileId};
 use table::predicate::Predicate;
 
-use self::stream::{NestedSchemaAligner, ProjectedRecordBatchStream};
 use crate::cache::index::result_cache::PredicateKey;
 use crate::cache::{CacheStrategy, CachedSstMeta, SstMetaPreparation, prepare_sst_meta};
 #[cfg(feature = "vector_index")]
 use crate::error::ApplyVectorIndexSnafu;
 use crate::error::{
     ParquetToArrowSchemaSnafu, ReadDataPartSnafu, Result, SerializePartitionExprSnafu,
+    UnexpectedSnafu,
 };
 use crate::metrics::{
     PRECISE_FILTER_ROWS_TOTAL, READ_ROW_GROUPS_TOTAL, READ_ROWS_IN_ROW_GROUP_TOTAL,
@@ -83,9 +82,10 @@ use crate::sst::parquet::file_range::{
 };
 use crate::sst::parquet::flat_format::{FlatReadFormat, primary_key_column_index};
 use crate::sst::parquet::format::{INTERNAL_COLUMN_NUM, need_override_sequence};
+use crate::sst::parquet::json_align::{NestedSchemaAligner, ProjectedRecordBatchStream};
 use crate::sst::parquet::metadata::MetadataLoader;
 use crate::sst::parquet::prefilter::{
-    PrefilterContextBuilder, build_reader_filter_plan, execute_prefilter,
+    CachedPrimaryKeyFilter, PrefilterContextBuilder, build_reader_filter_plan, execute_prefilter,
 };
 use crate::sst::parquet::push_decoder::{
     SstParquetRangeFetcher, build_sst_parquet_record_batch_stream,
@@ -800,7 +800,7 @@ impl ParquetReaderBuilder {
         self.prune_row_groups_by_inverted_index(
             read_format.metadata(),
             row_group_size,
-            num_row_groups,
+            parquet_meta,
             &mut output,
             metrics,
             skip_fields,
@@ -928,7 +928,7 @@ impl ParquetReaderBuilder {
         &self,
         sst_metadata: &RegionMetadataRef,
         row_group_size: usize,
-        num_row_groups: usize,
+        parquet_meta: &ParquetMetaData,
         output: &mut RowGroupSelection,
         metrics: &mut ReaderFilterMetrics,
         skip_fields: bool,
@@ -937,6 +937,8 @@ impl ParquetReaderBuilder {
             return false;
         }
 
+        let num_row_groups = parquet_meta.num_row_groups();
+        let total_row_count = parquet_meta.file_metadata().num_rows() as usize;
         let mut pruned = false;
         // If skip_fields is true, only apply the first applier (for tags).
         let appliers = if skip_fields {
@@ -980,11 +982,24 @@ impl ParquetReaderBuilder {
                 .await;
 
             let selection = match apply_res {
-                Ok(apply_output) => RowGroupSelection::from_inverted_index_apply_output(
-                    row_group_size,
-                    num_row_groups,
-                    apply_output,
-                ),
+                Ok(apply_output) => {
+                    let index_row_count = apply_output.total_row_count;
+                    let Some(selection) = RowGroupSelection::from_inverted_index_apply_output(
+                        row_group_size,
+                        num_row_groups,
+                        total_row_count,
+                        apply_output,
+                    ) else {
+                        warn!(
+                            "Ignore inverted index with mismatched row count, file_id: {:?}, index_row_count: {}, parquet_row_count: {}",
+                            self.file_handle.file_id(),
+                            index_row_count,
+                            total_row_count,
+                        );
+                        continue;
+                    };
+                    selection
+                }
                 Err(err) => {
                     handle_index_error!(err, self.file_handle, INDEX_TYPE_INVERTED);
                     continue;
@@ -1823,6 +1838,13 @@ impl RowGroupReaderBuilder {
         self.prefilter_builder.is_some()
     }
 
+    /// Builds the encoded-primary-key filter selected by the reader filter plan.
+    pub(crate) fn primary_key_filter(&self) -> Option<CachedPrimaryKeyFilter> {
+        self.prefilter_builder
+            .as_ref()
+            .and_then(PrefilterContextBuilder::build_primary_key_filter)
+    }
+
     /// Builds a parquet record batch stream to read the row group at `row_group_idx`.
     ///
     /// If prefiltering is applicable (based on `build_ctx`), this performs a two-phase read:
@@ -1879,6 +1901,34 @@ impl RowGroupReaderBuilder {
             )
             .await?;
         self.make_projected_stream(stream)
+    }
+
+    /// Builds a stream that reads only the encoded primary-key column.
+    ///
+    /// It preserves the normal reader's binary-or-dictionary decision. This path deliberately
+    /// skips the normal prefilter pass: the caller reads `__primary_key` once and applies all
+    /// encoded-primary-key filters to the returned batches.
+    pub(crate) async fn build_primary_key(
+        &self,
+        build_ctx: RowGroupBuildContext<'_>,
+    ) -> Result<ProjectedRecordBatchStream> {
+        let parquet_schema = self.parquet_meta.file_metadata().schema_descr();
+        let primary_key_index = parquet_schema
+            .columns()
+            .iter()
+            .position(|column| column.name() == PRIMARY_KEY_COLUMN_NAME)
+            .context(UnexpectedSnafu {
+                reason: "SST does not contain __primary_key",
+            })?;
+        let projection = ProjectionMask::leaves(parquet_schema, [primary_key_index]);
+
+        self.build_with_projection(
+            build_ctx.row_group_idx,
+            build_ctx.row_selection,
+            projection,
+            build_ctx.fetch_metrics,
+        )
+        .await
     }
 
     fn make_projected_stream(

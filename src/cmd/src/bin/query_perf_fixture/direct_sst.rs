@@ -56,7 +56,12 @@ struct NoopIndexBuilder;
 
 #[async_trait]
 impl IndexerBuilder for NoopIndexBuilder {
-    async fn build(&self, _file_id: FileId, _index_version: u64) -> Indexer {
+    async fn build(
+        &self,
+        _file_id: FileId,
+        _index_version: u64,
+        _row_group_size: Option<usize>,
+    ) -> Indexer {
         Indexer::default()
     }
 }

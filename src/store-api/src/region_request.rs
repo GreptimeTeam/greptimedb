@@ -54,7 +54,8 @@ use crate::metadata::{
 use crate::metric_engine_consts::PHYSICAL_TABLE_METADATA_KEY;
 use crate::metrics;
 use crate::mito_engine_options::{
-    APPEND_MODE_KEY, AUTO_FLUSH_INTERVAL_KEY, SST_FORMAT_KEY, TTL_KEY, TWCS_MAX_OUTPUT_FILE_SIZE,
+    APPEND_MODE_KEY, AUTO_FLUSH_INTERVAL_KEY, MAX_ROW_GROUP_ROW_COUNT,
+    MAX_ROW_GROUP_ROW_COUNT_LIMIT, SST_FORMAT_KEY, TTL_KEY, TWCS_MAX_OUTPUT_FILE_SIZE,
     TWCS_TIME_WINDOW, TWCS_TRIGGER_FILE_NUM, WRITE_BUFFER_SIZE_KEY,
 };
 use crate::path_utils::table_dir;
@@ -1416,6 +1417,8 @@ pub enum SetRegionOption {
     AppendMode(bool),
     // Modifying the per-region auto flush interval override.
     AutoFlushInterval(Option<Duration>),
+    // Modifying the max number of rows in a parquet row group.
+    MaxRowGroupRowCount(Option<usize>),
 }
 
 impl TryFrom<&PbOption> for SetRegionOption {
@@ -1460,6 +1463,19 @@ impl TryFrom<&PbOption> for SetRegionOption {
                 }
                 Ok(Self::AutoFlushInterval(Some(interval)))
             }
+            MAX_ROW_GROUP_ROW_COUNT => {
+                if value.is_empty() {
+                    return Ok(Self::MaxRowGroupRowCount(None));
+                }
+                let row_count = value
+                    .parse::<usize>()
+                    .ok()
+                    .filter(|row_count| {
+                        *row_count > 0 && *row_count <= MAX_ROW_GROUP_ROW_COUNT_LIMIT
+                    })
+                    .ok_or_else(|| InvalidSetRegionOptionRequestSnafu { key, value }.build())?;
+                Ok(Self::MaxRowGroupRowCount(Some(row_count)))
+            }
             _ => InvalidSetRegionOptionRequestSnafu { key, value }.fail(),
         }
     }
@@ -1478,6 +1494,7 @@ impl From<&UnsetRegionOption> for SetRegionOption {
                 SetRegionOption::Twsc(unset_option.to_string(), String::new())
             }
             UnsetRegionOption::Ttl => SetRegionOption::Ttl(Default::default()),
+            UnsetRegionOption::MaxRowGroupRowCount => SetRegionOption::MaxRowGroupRowCount(None),
             UnsetRegionOption::WriteBufferSize => SetRegionOption::WriteBufferSize(None),
         }
     }
@@ -1493,6 +1510,7 @@ impl TryFrom<&str> for UnsetRegionOption {
             TWCS_TRIGGER_FILE_NUM => Ok(Self::TwcsTriggerFileNum),
             TWCS_MAX_OUTPUT_FILE_SIZE => Ok(Self::TwcsMaxOutputFileSize),
             TWCS_TIME_WINDOW => Ok(Self::TwcsTimeWindow),
+            MAX_ROW_GROUP_ROW_COUNT => Ok(Self::MaxRowGroupRowCount),
             _ => InvalidUnsetRegionOptionRequestSnafu { key }.fail(),
         }
     }
@@ -1504,6 +1522,7 @@ pub enum UnsetRegionOption {
     TwcsMaxOutputFileSize,
     TwcsTimeWindow,
     Ttl,
+    MaxRowGroupRowCount,
     WriteBufferSize,
 }
 
@@ -1515,6 +1534,7 @@ impl UnsetRegionOption {
             Self::TwcsTriggerFileNum => TWCS_TRIGGER_FILE_NUM,
             Self::TwcsMaxOutputFileSize => TWCS_MAX_OUTPUT_FILE_SIZE,
             Self::TwcsTimeWindow => TWCS_TIME_WINDOW,
+            Self::MaxRowGroupRowCount => MAX_ROW_GROUP_ROW_COUNT,
         }
     }
 }
@@ -1785,6 +1805,44 @@ mod tests {
             value: "not_a_duration".to_string(),
         };
         assert!(SetRegionOption::try_from(&pb).is_err());
+    }
+
+    #[test]
+    fn test_set_region_option_max_row_group_row_count_try_from() {
+        let pb = PbOption {
+            key: MAX_ROW_GROUP_ROW_COUNT.to_string(),
+            value: "512".to_string(),
+        };
+        assert_eq!(
+            SetRegionOption::MaxRowGroupRowCount(Some(512)),
+            SetRegionOption::try_from(&pb).unwrap()
+        );
+
+        let pb = PbOption {
+            key: MAX_ROW_GROUP_ROW_COUNT.to_string(),
+            value: String::new(),
+        };
+        assert_eq!(
+            SetRegionOption::MaxRowGroupRowCount(None),
+            SetRegionOption::try_from(&pb).unwrap()
+        );
+
+        for value in [
+            "0".to_string(),
+            (MAX_ROW_GROUP_ROW_COUNT_LIMIT + 1).to_string(),
+            "invalid".to_string(),
+        ] {
+            let pb = PbOption {
+                key: MAX_ROW_GROUP_ROW_COUNT.to_string(),
+                value,
+            };
+            assert!(SetRegionOption::try_from(&pb).is_err());
+        }
+
+        assert_eq!(
+            UnsetRegionOption::MaxRowGroupRowCount,
+            UnsetRegionOption::try_from(MAX_ROW_GROUP_ROW_COUNT).unwrap()
+        );
     }
 
     #[test]

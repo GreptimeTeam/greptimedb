@@ -73,6 +73,33 @@ select j.d from json2_table order by ts;
 
 drop table json2_table;
 
+-- A JSON null in a dynamically typed field must remain SQL NULL when the
+-- field is projected to the default string type, rather than becoming "null".
+create table json2_variant_null (
+    ts timestamp time index,
+    j json2
+) with (
+    'append_mode' = 'true',
+    'sst_format' = 'flat'
+);
+
+insert into json2_variant_null values
+    (1, '{"payload":{"value":1}}'),
+    (2, '{"payload":"text"}'),
+    (3, '{"payload":null}');
+
+select ts, j.payload, j.payload is null as payload_is_null
+from json2_variant_null
+order by ts;
+
+admin flush_table('json2_variant_null');
+
+select ts, j.payload, j.payload is null as payload_is_null
+from json2_variant_null
+order by ts;
+
+drop table json2_variant_null;
+
 create table json2_without_append_mode (
     ts timestamp time index,
     j json2

@@ -29,7 +29,7 @@ use datatypes::arrow::buffer::BooleanBuffer;
 use datatypes::arrow::datatypes::SchemaRef;
 use datatypes::arrow::record_batch::RecordBatch;
 use futures::StreamExt;
-use mito_codec::row_converter::{PrimaryKeyCodec, PrimaryKeyFilter};
+use mito_codec::row_converter::{PrimaryKeyCodec, PrimaryKeyFilter, build_primary_key_codec};
 use parquet::arrow::ProjectionMask;
 use parquet::arrow::arrow_reader::RowSelection;
 use parquet::schema::types::SchemaDescriptor;
@@ -260,6 +260,34 @@ pub(crate) struct BulkFilterPlan {
     /// Tag predicates lowered to encoded-PK filters. `None` when the batch
     /// already exposes raw tag columns or there are no tag predicates.
     pub(crate) pk_filters: Option<Arc<Vec<SimpleFilterEvaluator>>>,
+}
+
+/// Builds an encoded-primary-key filter from the supported tag predicates.
+///
+/// Predicates on fields, timestamps, or unsupported expression shapes are intentionally
+/// omitted. Callers use this as a pruning filter and must preserve the full predicate for
+/// authoritative filtering later in the scan.
+pub(crate) fn build_primary_key_filter(
+    metadata: &RegionMetadataRef,
+    predicate: Option<&Predicate>,
+) -> Option<CachedPrimaryKeyFilter> {
+    let filters = predicate
+        .into_iter()
+        .flat_map(|predicate| predicate.exprs())
+        .filter_map(|expr| SimpleFilterContext::new_opt(metadata, None, expr))
+        .filter_map(|filter_ctx| {
+            (filter_ctx.semantic_type() == SemanticType::Tag)
+                .then(|| filter_ctx.filter().as_filter().cloned())
+                .flatten()
+        })
+        .collect::<Vec<_>>();
+    if filters.is_empty() {
+        return None;
+    }
+
+    let codec = build_primary_key_codec(metadata.as_ref());
+    let filter = codec.primary_key_filter(metadata, Arc::new(filters));
+    Some(CachedPrimaryKeyFilter::new(filter))
 }
 
 /// How the parquet reader should apply each predicate.
@@ -584,12 +612,9 @@ impl PrefilterContextBuilder {
 
     /// Builds a [PrefilterContext] for a specific row group.
     pub(crate) fn build(&self) -> PrefilterContext {
-        let pk_filter = self.pk_filters.as_ref().map(|pk_filters| {
-            let pk_filter = self
-                .codec
-                .primary_key_filter(&self.metadata, Arc::clone(pk_filters));
-            Box::new(CachedPrimaryKeyFilter::new(pk_filter)) as Box<dyn PrimaryKeyFilter>
-        });
+        let pk_filter = self
+            .build_primary_key_filter()
+            .map(|filter| Box::new(filter) as Box<dyn PrimaryKeyFilter>);
         PrefilterContext {
             pk_filter,
             filters: self.filters.clone(),
@@ -598,6 +623,16 @@ impl PrefilterContextBuilder {
             pk_filter_expr_strs: self.pk_filter_expr_strs.clone(),
             arrow_schema: self.arrow_schema.clone(),
         }
+    }
+
+    /// Builds a fresh encoded-primary-key filter selected by this plan.
+    pub(crate) fn build_primary_key_filter(&self) -> Option<CachedPrimaryKeyFilter> {
+        self.pk_filters.as_ref().map(|pk_filters| {
+            let filter = self
+                .codec
+                .primary_key_filter(&self.metadata, Arc::clone(pk_filters));
+            CachedPrimaryKeyFilter::new(filter)
+        })
     }
 }
 
@@ -1530,24 +1565,36 @@ mod tests {
             vec!["field_0"]
         );
 
-        let field_0 = metadata.column_by_name("field_0").unwrap().column_id;
-        let ts = metadata.time_index_column().column_id;
+        let metric_metadata: RegionMetadataRef = Arc::new(sst_region_metadata_with_encoding(
+            PrimaryKeyEncoding::Sparse,
+        ));
+        let field_0 = metric_metadata.column_by_name("field_0").unwrap().column_id;
+        let ts = metric_metadata.time_index_column().column_id;
         let projected_read_format = FlatReadFormat::new(
-            metadata.clone(),
+            metric_metadata.clone(),
             ReadColumns::from_deduped_column_ids([field_0, ts]),
             None,
             "test",
             true,
         )
         .unwrap();
+        let metric_codec = build_primary_key_codec(metric_metadata.as_ref());
         let pk_prefilter_plan = build_reader_filter_plan(
             Some(&Predicate::new(vec![col("tag_0").eq(lit("a"))])),
             None,
             PreFilterMode::All,
             &projected_read_format,
-            &codec,
+            &metric_codec,
         );
         assert!(pk_prefilter_plan.prefilter_builder.is_some());
+        assert!(
+            pk_prefilter_plan
+                .prefilter_builder
+                .as_ref()
+                .unwrap()
+                .build_primary_key_filter()
+                .is_some()
+        );
         assert!(pk_prefilter_plan.remaining_simple_filters.is_empty());
     }
 
