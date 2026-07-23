@@ -1,0 +1,128 @@
+name: Update compatibility versions
+
+on:
+  workflow_call:
+    inputs:
+      release_tag:
+        description: Stable release tag that triggered the caller.
+        required: true
+        type: string
+  release:
+    types: [published]
+  schedule:
+    # Release events created with GITHUB_TOKEN do not trigger workflows.
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: update-compat-versions
+  cancel-in-progress: false
+
+jobs:
+  validate-release:
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
+    runs-on: ubuntu-latest
+    outputs:
+      should-run: ${{ steps.gate.outputs.should-run }}
+    steps:
+      - id: gate
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          RELEASE_DRAFT: ${{ github.event.release.draft }}
+          RELEASE_PRERELEASE: ${{ github.event.release.prerelease }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          WORKFLOW_RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          should_run=true
+          stable_tag_re='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
+          if [[ -n "${WORKFLOW_RELEASE_TAG}" ]]; then
+            if [[ ! "${WORKFLOW_RELEASE_TAG}" =~ ${stable_tag_re} ]]; then
+              should_run=false
+            fi
+          elif [[ "${EVENT_NAME}" == "release" ]]; then
+            if [[ "${RELEASE_DRAFT}" == "true" || "${RELEASE_PRERELEASE}" == "true" || ! "${RELEASE_TAG}" =~ ${stable_tag_re} ]]; then
+              should_run=false
+            fi
+          elif [[ "${EVENT_NAME}" == "workflow_call" ]]; then
+            should_run=false
+          fi
+          echo "should-run=${should_run}" >> "${GITHUB_OUTPUT}"
+
+  update:
+    needs: validate-release
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && needs.validate-release.outputs.should-run == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    env:
+      BRANCH: ci/update-compat-versions
+    steps:
+      # Always use main: release events otherwise provide the release-tag revision.
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
+
+      - name: Validate updater on main
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m unittest discover -s .github/scripts/tests -p 'test_*.py'
+          python3 -m py_compile .github/scripts/update-compat-versions.py
+
+      - name: Prepare updater branch
+        id: prepare
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git config user.name "greptimedb-ci"
+          git config user.email "greptimedb-ci@users.noreply.github.com"
+          remote_oid="$(git ls-remote --heads origin "refs/heads/${BRANCH}" | cut -f1)"
+          if [[ -n "${remote_oid}" ]]; then
+            git fetch origin "refs/heads/${BRANCH}:refs/remotes/origin/${BRANCH}"
+          fi
+          git checkout -B "${BRANCH}" origin/main
+          git reset --hard origin/main
+          python3 .github/scripts/update-compat-versions.py --update
+          if git diff --quiet -- tests/compatibility/ci.toml; then
+            echo "Compatibility version window is already current."
+            exit 0
+          fi
+          desired_blob="$(git hash-object tests/compatibility/ci.toml)"
+          if [[ -n "${remote_oid}" ]]; then
+            remote_blob="$(git rev-parse "${remote_oid}:tests/compatibility/ci.toml" 2>/dev/null || true)"
+            if [[ "${desired_blob}" == "${remote_blob}" ]]; then
+              echo "Remote updater branch already has the desired compatibility window."
+              echo "branch-ready=true" >> "${GITHUB_OUTPUT}"
+              exit 0
+            fi
+          fi
+          git add tests/compatibility/ci.toml
+          git commit -s -m "chore(ci): update compatibility versions"
+          git push --force-with-lease="refs/heads/${BRANCH}:${remote_oid}" origin "HEAD:refs/heads/${BRANCH}"
+          echo "branch-ready=true" >> "${GITHUB_OUTPUT}"
+
+      - name: Create compatibility version PR
+        if: ${{ steps.prepare.outputs.branch-ready == 'true' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
+        run: |
+          set -euo pipefail
+          open_prs="$(gh pr list --head "${BRANCH}" --base main --state open --json number --jq 'length')"
+          if [[ "${open_prs}" != "0" ]]; then
+            echo "An open compatibility updater PR already exists."
+            exit 0
+          fi
+          gh pr create \
+            --base main \
+            --head "${BRANCH}" \
+            --title "chore(ci): update compatibility versions" \
+            --reviewer "GreptimeTeam/db-approver" \
+            --body $'I hereby agree to the terms of the [GreptimeDB CLA](https://github.com/GreptimeTeam/.github/blob/main/CLA.md).\n\n## Refer to a related PR or issue link (optional)\n\nAutomated after a stable release or the daily fallback.\n\n## What\047s changed and what\047s your intention?\n\nUpdates `tests/compatibility/ci.toml` from checked-out `main` tags and exact compatibility-case anchors.\n\n## PR Checklist\n\n- [ ] I have written the necessary rustdoc comments.\n- [ ] I have added the necessary unit tests and integration tests.\n- [ ] This PR requires documentation updates.\n- [x] API changes are backward compatible.\n- [x] Schema or data changes are backward compatible.'
