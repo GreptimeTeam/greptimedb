@@ -653,21 +653,6 @@ dependencies = [
  "arrow-schema 58.3.0",
  "bytes",
  "chrono",
- "futures",
- "pg_interval",
- "pgwire",
- "postgres-types",
- "rust_decimal",
-]
-
-[[package]]
-name = "arrow-pg"
-version = "0.15.0"
-source = "git+https://github.com/GreptimeTeam/datafusion-postgres.git?rev=a3bf682e8b5c0587d50a29366761b6fd76ad19d2#a3bf682e8b5c0587d50a29366761b6fd76ad19d2"
-dependencies = [
- "arrow-schema 58.3.0",
- "bytes",
- "chrono",
  "datafusion",
  "futures",
  "pg_interval",
@@ -2228,7 +2213,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "117725a109d387c937a1533ce01b450cbde6b88abceea8473c4d7a85853cda3c"
 dependencies = [
  "lazy_static",
- "windows-sys 0.48.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -4156,10 +4141,11 @@ dependencies = [
 
 [[package]]
 name = "datafusion-pg-catalog"
-version = "0.18.1"
-source = "git+https://github.com/GreptimeTeam/datafusion-postgres.git?rev=a3bf682e8b5c0587d50a29366761b6fd76ad19d2#a3bf682e8b5c0587d50a29366761b6fd76ad19d2"
+version = "0.18.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d2896323a1a10b6ca6c69f6ddfab3e6d9a400ded1a6134d8d1e74bd6178beaa3"
 dependencies = [
- "arrow-pg 0.15.0 (git+https://github.com/GreptimeTeam/datafusion-postgres.git?rev=a3bf682e8b5c0587d50a29366761b6fd76ad19d2)",
+ "arrow-pg",
  "async-trait",
  "datafusion",
  "futures",
@@ -6567,7 +6553,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.57.0",
+ "windows-core 0.61.2",
 ]
 
 [[package]]
@@ -7714,7 +7700,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "07033963ba89ebaf1584d767badaa2e8fcec21aedea6b8c0346d487d49c28667"
 dependencies = [
  "cfg-if",
- "windows-targets 0.48.5",
+ "windows-targets 0.53.5",
 ]
 
 [[package]]
@@ -13092,7 +13078,7 @@ dependencies = [
  "arrow 58.3.0",
  "arrow-flight",
  "arrow-ipc 58.3.0",
- "arrow-pg 0.15.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "arrow-pg",
  "arrow-schema 58.3.0",
  "async-trait",
  "auth",
@@ -16270,7 +16256,7 @@ version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf221c93e13a30d793f7645a0e7762c55d169dbb0a49671918a2319d289b10bb"
 dependencies = [
- "windows-sys 0.48.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

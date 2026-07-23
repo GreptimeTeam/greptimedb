@@ -343,7 +343,6 @@ rev = "5618e779cf2bb4755b499c630fba4c35e91898cb"
 
 [patch.crates-io]
 sqlparser = { git = "https://github.com/GreptimeTeam/sqlparser-rs.git", rev = "9e9019bb1c7040ed956f654e39378dd42ab17884" }
-datafusion-pg-catalog = { git = "https://github.com/GreptimeTeam/datafusion-postgres.git", rev = "a3bf682e8b5c0587d50a29366761b6fd76ad19d2" }
 datafusion = { git = "https://github.com/discord9/arrow-datafusion.git", rev = "cee35d94c03300f1b9a21090828826e61cb67b11" }
 datafusion-common = { git = "https://github.com/discord9/arrow-datafusion.git", rev = "cee35d94c03300f1b9a21090828826e61cb67b11" }
 datafusion-datasource = { git = "https://github.com/discord9/arrow-datafusion.git", rev = "cee35d94c03300f1b9a21090828826e61cb67b11" }
