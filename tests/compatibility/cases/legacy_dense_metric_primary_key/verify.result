@@ -24,9 +24,9 @@ DESC TABLE legacy_dense_phy;
 +------------+----------------------+-----+------+---------+---------------+
 | ts         | TimestampMillisecond | PRI | NO   |         | TIMESTAMP     |
 | val        | Float64              |     | YES  |         | FIELD         |
+| host       | String               | PRI | YES  |         | TAG           |
 | __table_id | UInt32               | PRI | NO   |         | TAG           |
 | __tsid     | UInt64               | PRI | NO   |         | TAG           |
-| host       | String               | PRI | YES  |         | TAG           |
 +------------+----------------------+-----+------+---------+---------------+
 
 SELECT host, ts, val FROM legacy_dense_logical ORDER BY ts;
@@ -80,7 +80,7 @@ DESC TABLE legacy_dense_phy;
 +------------+----------------------+-----+------+---------+---------------+
 | ts         | TimestampMillisecond | PRI | NO   |         | TIMESTAMP     |
 | val        | Float64              |     | YES  |         | FIELD         |
+| host       | String               | PRI | YES  |         | TAG           |
 | __table_id | UInt32               | PRI | NO   |         | TAG           |
 | __tsid     | UInt64               | PRI | NO   |         | TAG           |
-| host       | String               | PRI | YES  |         | TAG           |
 +------------+----------------------+-----+------+---------+---------------+
