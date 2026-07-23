@@ -205,8 +205,10 @@ experiment matrix for those policy comparisons.
 `tests/perf/query_cases/prom_remote_write_7913/case.toml` is a larger manual
 case for issue #7913. It writes 8192 series × 20160 samples through remote-write
 in 1440-sample daily time chunks, flushing after each chunk before running 1d/7d/14d
-TQL selectors. It is not included in the default case set because ingestion cost
-dominates routine CI validation.
+TQL selectors. It is not included in the default `all` case set because ingestion
+cost dominates routine CI validation. Adding the `heavy-regression` PR label runs
+only this case; `query-regression` runs the five routine default cases. Manual
+workflow dispatch accepts the `heavy` token to select this case.
 
 ## Generator contract
 
@@ -408,11 +410,13 @@ binaries. Candidate `query_perf_fixture` is the extra head-side helper binary;
 the runner uses candidate `greptime datanode parquetbench/scanbench` as the
 read-bench tool against each target's data directory.
 
-The workflow runs automatically only when `query-regression` is added to a
-non-draft PR; it does not rerun on pushes, ready-for-review, or reopen events.
-PR runs build base/candidate once and then run the default case set with
-`--allow-large-fixture`. Manual `workflow_dispatch` runs can pass `all`, one case
-path, or a comma/whitespace-separated list of case paths, and can override refs.
+The workflow runs automatically only when `query-regression` or `heavy-regression`
+is added to a non-draft PR; it does not rerun on pushes, ready-for-review, or
+reopen events. `query-regression` runs the five routine default cases, while
+`heavy-regression` runs only the high-cardinality remote-write #7913 case. PR runs
+build base/candidate once and use `--allow-large-fixture`. Manual
+`workflow_dispatch` runs can pass `all`, `heavy`, one case path, or a
+comma/whitespace-separated list of case paths, and can override refs.
 The main report artifact uploads only aggregate/per-target JSON reports,
 component logs, and `query-regression-summary.md` with seven-day retention;
 fixture data, SSTs, and cluster state are excluded. PR runs also upload a

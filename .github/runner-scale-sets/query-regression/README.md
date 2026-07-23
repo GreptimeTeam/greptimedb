@@ -30,21 +30,24 @@ kubectl -n arc-runners create secret generic greptimedb-arc-github-app \
 
 The values files here reference that secret by name.
 
-A maintainer applying the `query-regression` label is **trust admission for
-that exact PR revision**. The admitted job may use this scale set's dedicated,
-writable persistent cache. `pull_request: labeled` is the only PR trigger: the
-label event snapshots its merge, head, and base SHAs. A queued job fetches that
-immutable event merge SHA directly, verifies it is a two-parent merge whose
-parents include the snapshotted head exactly once, and uses its other parent as
-the actual base build revision. The snapshotted event base is retained for audit
-only, so a difference from the merge's non-head parent is not a failure. The job
-never follows a newer mutable PR merge ref. An unavailable event merge, or one
-that does not contain exactly one snapshotted head parent, fails closed. A later
-PR head change does not retarget an already queued run: it may execute only its
-previously trusted event revision if that revision remains fetchable. To run the
-new revision, the maintainer must review it, remove the label, and re-add
-`query-regression`; cancel the old run if it is no longer wanted. An existing
-label does not automatically rerun the benchmark.
+A maintainer applying the `query-regression` or `heavy-regression` label is
+**trust admission for that exact PR revision**. `query-regression` runs the five
+routine default cases; `heavy-regression` runs only the high-cardinality
+`prom_remote_write_7913` remote-write case. The admitted job may use this scale
+set's dedicated, writable persistent cache. `pull_request: labeled` is the only
+PR trigger: the label event snapshots its merge, head, and base SHAs. A queued
+job fetches that immutable event merge SHA directly, verifies it is a two-parent
+merge whose parents include the snapshotted head exactly once, and uses its
+other parent as the actual base build revision. The snapshotted event base is
+retained for audit only, so a difference from the merge's non-head parent is
+not a failure. The job never follows a newer mutable PR merge ref. An
+unavailable event merge, or one that does not contain exactly one snapshotted
+head parent, fails closed. A later PR head change does not retarget an already
+queued run: it may execute only its previously trusted event revision if that
+revision remains fetchable. To run the new revision, the maintainer must review
+it, remove the label, and re-add the desired regression label; cancel the old
+run if it is no longer wanted. An existing label does not automatically rerun
+the benchmark.
 
 Admission does not relax runner hardening or GitHub permissions. Keep
 service-account token mounting disabled; do not mount host paths, the Docker
