@@ -28,7 +28,7 @@ use auth::{
     PermissionTableTargets,
 };
 use client::OutputData;
-use common_catalog::format_full_table_name;
+use common_catalog::{format_full_table_name, parse_optional_catalog_and_schema_from_db_string};
 use common_error::ext::BoxedError;
 use common_query::Output;
 use common_query::prelude::GREPTIME_PHYSICAL_TABLE;
@@ -39,6 +39,7 @@ use operator::insert::{
 };
 use operator::statement::StatementExecutor;
 use prost::Message;
+use query::query_engine::options::{QueryOptions, validate_catalog_and_schema};
 use servers::error::{self, AuthSnafu, Result as ServerResult};
 use servers::http::header::{CONTENT_ENCODING_SNAPPY, CONTENT_TYPE_PROTOBUF, collect_plan_metrics};
 use servers::http::prom_store::PHYSICAL_TABLE_PARAM;
@@ -120,6 +121,24 @@ fn negotiate_response_type(accepted_response_types: &[i32]) -> ServerResult<Resp
     Ok(ResponseType::try_from(*response_type).unwrap())
 }
 
+fn resolve_remote_query_target(
+    ctx: &QueryContextRef,
+    query: &Query,
+    table_name: &str,
+) -> PermissionTableTarget {
+    match prom_store::extract_schema_from_query(query) {
+        Some(database) => {
+            let (catalog, schema) = parse_optional_catalog_and_schema_from_db_string(&database);
+            PermissionTableTarget::new(
+                catalog.unwrap_or_else(|| ctx.current_catalog().to_string()),
+                schema,
+                table_name,
+            )
+        }
+        None => PermissionTableTarget::new(ctx.current_catalog(), ctx.current_schema(), table_name),
+    }
+}
+
 #[instrument(skip_all, fields(table_name))]
 async fn to_query_result(table_name: &str, output: Output) -> ServerResult<QueryResult> {
     let OutputData::Stream(stream) = output.data else {
@@ -179,21 +198,18 @@ impl Instance {
         &self,
         ctx: QueryContextRef,
         queries: &[Query],
-        table_names: &[String],
+        query_targets: &[PermissionTableTarget],
     ) -> ServerResult<Vec<(String, Output)>> {
         let mut results = Vec::with_capacity(queries.len());
 
-        let catalog_name = ctx.current_catalog();
-        let schema_name = ctx.current_schema();
-
-        for (query, table_name) in queries.iter().zip(table_names) {
+        for (query, target) in queries.iter().zip(query_targets) {
             let output = self
-                .handle_remote_query(&ctx, catalog_name, &schema_name, table_name, query)
+                .handle_remote_query(&ctx, &target.catalog, &target.schema, &target.table, query)
                 .await
                 .map_err(BoxedError::new)
                 .context(error::ExecuteQuerySnafu)?;
 
-            results.push((table_name.clone(), output));
+            results.push((target.table.clone(), output));
         }
         Ok(results)
     }
@@ -472,16 +488,27 @@ impl PromStoreProtocolHandler for Instance {
             .iter()
             .map(prom_store::table_name)
             .collect::<ServerResult<Vec<_>>>()?;
-        let catalog = ctx.current_catalog();
-        let schema = ctx.current_schema();
+        let query_targets = request
+            .queries
+            .iter()
+            .zip(&table_names)
+            .map(|(query, table_name)| resolve_remote_query_target(&ctx, query, table_name))
+            .collect::<Vec<_>>();
+        let disallow_cross_catalog_query = self
+            .plugins
+            .get::<QueryOptions>()
+            .map(|opts| opts.disallow_cross_catalog_query)
+            .unwrap_or_default();
+        if disallow_cross_catalog_query {
+            for target in &query_targets {
+                validate_catalog_and_schema(&target.catalog, &target.schema, &ctx)
+                    .map_err(BoxedError::new)
+                    .context(error::ExecuteQuerySnafu)?;
+            }
+        }
         let targets = self
             .resolve_query_permission_targets(
-                PermissionTableTargets::resolved(
-                    table_names
-                        .iter()
-                        .map(|table| PermissionTableTarget::new(catalog, &schema, table))
-                        .collect(),
-                ),
+                PermissionTableTargets::resolved(query_targets.clone()),
                 &ctx,
             )
             .await?;
@@ -492,7 +519,7 @@ impl PromStoreProtocolHandler for Instance {
 
         // TODO(dennis): use read_hints to speedup query if possible
         let results = self
-            .handle_remote_queries(ctx, &request.queries, &table_names)
+            .handle_remote_queries(ctx, &request.queries, &query_targets)
             .await?;
 
         match response_type {
@@ -683,6 +710,7 @@ impl PromStoreProtocolHandler for ExportMetricHandler {
 mod tests {
     use std::sync::Arc;
 
+    use api::prom_store::remote::LabelMatcher;
     use session::context::QueryContext;
 
     use super::*;
@@ -745,5 +773,56 @@ mod tests {
                 .get(PHYSICAL_TABLE_METADATA_KEY)
                 .map(String::as_str)
         );
+    }
+
+    fn query_with_database(database: &str) -> Query {
+        Query {
+            matchers: vec![LabelMatcher {
+                name: servers::prom_store::DATABASE_LABEL.to_string(),
+                value: database.to_string(),
+                r#type: api::prom_store::remote::label_matcher::Type::Eq as i32,
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_resolve_remote_query_target() {
+        let ctx = Arc::new(QueryContext::with("request_catalog", "request_schema"));
+
+        assert_eq!(
+            PermissionTableTarget::new("request_catalog", "request_schema", "fallback_metric"),
+            resolve_remote_query_target(&ctx, &Query::default(), "fallback_metric")
+        );
+        assert_eq!(
+            PermissionTableTarget::new("request_catalog", "selected_schema", "schema_metric"),
+            resolve_remote_query_target(
+                &ctx,
+                &query_with_database("selected_schema"),
+                "schema_metric"
+            )
+        );
+        assert_eq!(
+            PermissionTableTarget::new("selected_catalog", "selected_schema", "catalog_metric"),
+            resolve_remote_query_target(
+                &ctx,
+                &query_with_database("selected_catalog-selected_schema"),
+                "catalog_metric"
+            )
+        );
+    }
+
+    #[test]
+    fn test_resolve_remote_query_target_preserves_context() {
+        let ctx = Arc::new(QueryContext::with("request_catalog", "request_schema"));
+
+        resolve_remote_query_target(
+            &ctx,
+            &query_with_database("selected_catalog-selected_schema"),
+            "metric",
+        );
+
+        assert_eq!("request_catalog", ctx.current_catalog());
+        assert_eq!("request_schema", ctx.current_schema());
     }
 }

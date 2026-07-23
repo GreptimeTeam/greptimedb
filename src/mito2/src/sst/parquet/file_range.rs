@@ -49,8 +49,8 @@ use crate::sst::file::FileHandle;
 use crate::sst::parquet::flat_format::{
     DecodedPrimaryKeys, FlatReadFormat, decode_primary_keys, time_index_column_index,
 };
+use crate::sst::parquet::json_align::ProjectedRecordBatchStream;
 use crate::sst::parquet::prefilter::CachedPrimaryKeyFilter;
-use crate::sst::parquet::reader::stream::ProjectedRecordBatchStream;
 use crate::sst::parquet::reader::{
     FlatRowGroupReader, MaybeFilter, RowGroupBuildContext, RowGroupReaderBuilder,
     SimpleFilterContext,

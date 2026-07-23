@@ -15,10 +15,11 @@
 use std::collections::{HashMap, HashSet};
 
 use api::v1::column_data_type_extension::TypeExt;
+use api::v1::helper::time_index_column_schema;
 use api::v1::value::ValueData;
 use api::v1::{
     ColumnDataType, ColumnDataTypeExtension, ColumnSchema, JsonTypeExtension, RowInsertRequests,
-    Value,
+    SemanticType, Value,
 };
 use common_catalog::consts::{trace_operations_table_name, trace_services_table_name};
 use common_grpc::precision::Precision;
@@ -35,7 +36,7 @@ use crate::otlp::trace::{
     SPAN_KIND_COLUMN, SPAN_NAME_COLUMN, SPAN_STATUS_CODE, SPAN_STATUS_MESSAGE_COLUMN,
     TIMESTAMP_COLUMN, TRACE_ID_COLUMN, TRACE_STATE_COLUMN, TraceAuxData,
 };
-use crate::otlp::utils::{any_value_to_jsonb, make_column_data, make_string_column_data};
+use crate::otlp::utils::any_value_to_jsonb;
 use crate::query_handler::PipelineHandlerRef;
 use crate::row_writer::{self, MultiTableData, TableData};
 
@@ -43,6 +44,55 @@ const APPROXIMATE_COLUMN_COUNT: usize = 30;
 
 // Use a timestamp(2100-01-01 00:00:00) as large as possible.
 const MAX_TIMESTAMP: i64 = 4102444800000000000;
+
+struct FixedTraceColumnIndexes {
+    timestamp: usize,
+    timestamp_end: usize,
+    duration_nano: usize,
+    parent_span_id: usize,
+    trace_id: usize,
+    span_id: usize,
+    span_kind: usize,
+    span_name: usize,
+    span_status_code: usize,
+    span_status_message: usize,
+    trace_state: usize,
+    scope_name: usize,
+    scope_version: usize,
+}
+
+impl FixedTraceColumnIndexes {
+    fn resolve(writer: &mut TableData) -> Result<Self> {
+        let timestamp = writer.ensure_column(time_index_column_schema(
+            TIMESTAMP_COLUMN,
+            ColumnDataType::TimestampNanosecond,
+        ))?;
+        let mut field = |name: &str, datatype: ColumnDataType| {
+            writer.ensure_column(ColumnSchema {
+                column_name: name.to_string(),
+                datatype: datatype as i32,
+                semantic_type: SemanticType::Field as i32,
+                ..Default::default()
+            })
+        };
+
+        Ok(Self {
+            timestamp,
+            timestamp_end: field("timestamp_end", ColumnDataType::TimestampNanosecond)?,
+            duration_nano: field(DURATION_NANO_COLUMN, ColumnDataType::Uint64)?,
+            parent_span_id: field(PARENT_SPAN_ID_COLUMN, ColumnDataType::String)?,
+            trace_id: field(TRACE_ID_COLUMN, ColumnDataType::String)?,
+            span_id: field(SPAN_ID_COLUMN, ColumnDataType::String)?,
+            span_kind: field(SPAN_KIND_COLUMN, ColumnDataType::String)?,
+            span_name: field(SPAN_NAME_COLUMN, ColumnDataType::String)?,
+            span_status_code: field(SPAN_STATUS_CODE, ColumnDataType::String)?,
+            span_status_message: field(SPAN_STATUS_MESSAGE_COLUMN, ColumnDataType::String)?,
+            trace_state: field(TRACE_STATE_COLUMN, ColumnDataType::String)?,
+            scope_name: field(SCOPE_NAME_COLUMN, ColumnDataType::String)?,
+            scope_version: field(SCOPE_VERSION_COLUMN, ColumnDataType::String)?,
+        })
+    }
+}
 
 /// Distinguishes raw bytes from JSONB values that both use a binary protobuf value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -248,12 +298,17 @@ fn build_trace_table_data_from_iter(
     mut batch_schema: Option<&mut TraceBatchSchema>,
 ) -> Result<TableData> {
     let mut trace_writer = TableData::new(APPROXIMATE_COLUMN_COUNT, spans.len());
+    if spans.len() == 0 {
+        return Ok(trace_writer);
+    }
+    let fixed_columns = FixedTraceColumnIndexes::resolve(&mut trace_writer)?;
     for span in spans {
         let row_index = trace_writer.num_rows();
         write_span_to_row_inner(
             &mut trace_writer,
             span,
             row_index,
+            &fixed_columns,
             batch_schema.as_deref_mut(),
         )?;
     }
@@ -283,7 +338,8 @@ pub fn build_aux_table_requests(
 
 pub fn write_span_to_row(writer: &mut TableData, span: TraceSpan) -> Result<()> {
     let row_index = writer.num_rows();
-    write_span_to_row_inner(writer, span, row_index, None)
+    let fixed_columns = FixedTraceColumnIndexes::resolve(writer)?;
+    write_span_to_row_inner(writer, span, row_index, &fixed_columns, None)
 }
 
 /// Writes one span and optionally records its dynamic columns for reconciliation.
@@ -291,47 +347,73 @@ fn write_span_to_row_inner(
     writer: &mut TableData,
     span: TraceSpan,
     row_index: usize,
+    fixed_columns: &FixedTraceColumnIndexes,
     mut batch_schema: Option<&mut TraceBatchSchema>,
 ) -> Result<()> {
     let mut row = writer.alloc_one_row();
 
-    // write ts
-    row_writer::write_ts_to_nanos(
-        writer,
-        TIMESTAMP_COLUMN,
-        Some(span.start_in_nanosecond as i64),
-        Precision::Nanosecond,
-        &mut row,
-    )?;
-
-    // write fields
-    let fields = vec![
-        make_column_data(
-            "timestamp_end",
-            ColumnDataType::TimestampNanosecond,
+    for (index, value) in [
+        (
+            fixed_columns.timestamp,
+            Some(ValueData::TimestampNanosecondValue(
+                span.start_in_nanosecond as i64,
+            )),
+        ),
+        (
+            fixed_columns.timestamp_end,
             Some(ValueData::TimestampNanosecondValue(
                 span.end_in_nanosecond as i64,
             )),
         ),
-        make_column_data(
-            DURATION_NANO_COLUMN,
-            ColumnDataType::Uint64,
+        (
+            fixed_columns.duration_nano,
             Some(ValueData::U64Value(
                 span.end_in_nanosecond - span.start_in_nanosecond,
             )),
         ),
-        make_string_column_data(PARENT_SPAN_ID_COLUMN, span.parent_span_id),
-        make_string_column_data(TRACE_ID_COLUMN, Some(span.trace_id)),
-        make_string_column_data(SPAN_ID_COLUMN, Some(span.span_id)),
-        make_string_column_data(SPAN_KIND_COLUMN, Some(span.span_kind)),
-        make_string_column_data(SPAN_NAME_COLUMN, Some(span.span_name)),
-        make_string_column_data(SPAN_STATUS_CODE, Some(span.span_status_code)),
-        make_string_column_data(SPAN_STATUS_MESSAGE_COLUMN, Some(span.span_status_message)),
-        make_string_column_data(TRACE_STATE_COLUMN, Some(span.trace_state)),
-        make_string_column_data(SCOPE_NAME_COLUMN, Some(span.scope_name)),
-        make_string_column_data(SCOPE_VERSION_COLUMN, Some(span.scope_version)),
-    ];
-    row_writer::write_fields(writer, fields.into_iter(), &mut row)?;
+        (
+            fixed_columns.parent_span_id,
+            span.parent_span_id.map(ValueData::StringValue),
+        ),
+        (
+            fixed_columns.trace_id,
+            Some(ValueData::StringValue(span.trace_id)),
+        ),
+        (
+            fixed_columns.span_id,
+            Some(ValueData::StringValue(span.span_id)),
+        ),
+        (
+            fixed_columns.span_kind,
+            Some(ValueData::StringValue(span.span_kind)),
+        ),
+        (
+            fixed_columns.span_name,
+            Some(ValueData::StringValue(span.span_name)),
+        ),
+        (
+            fixed_columns.span_status_code,
+            Some(ValueData::StringValue(span.span_status_code)),
+        ),
+        (
+            fixed_columns.span_status_message,
+            Some(ValueData::StringValue(span.span_status_message)),
+        ),
+        (
+            fixed_columns.trace_state,
+            Some(ValueData::StringValue(span.trace_state)),
+        ),
+        (
+            fixed_columns.scope_name,
+            Some(ValueData::StringValue(span.scope_name)),
+        ),
+        (
+            fixed_columns.scope_version,
+            Some(ValueData::StringValue(span.scope_version)),
+        ),
+    ] {
+        row[index].value_data = value;
+    }
 
     if let Some(service_name) = span.service_name {
         if let Some(batch_schema) = batch_schema.as_deref_mut() {
@@ -597,6 +679,65 @@ mod tests {
             span_links: SpanLinks::from(vec![]),
             start_in_nanosecond: 1,
             end_in_nanosecond: 2,
+        }
+    }
+
+    #[test]
+    fn test_fixed_trace_columns_keep_schema_and_values_aligned() {
+        let table_data = build_trace_table_data(&[make_span("svc", "trace", "span")]).unwrap();
+        let (schema, rows) = table_data.into_schema_and_rows();
+        let expected = [
+            (
+                TIMESTAMP_COLUMN,
+                Some(ValueData::TimestampNanosecondValue(1)),
+            ),
+            (
+                "timestamp_end",
+                Some(ValueData::TimestampNanosecondValue(2)),
+            ),
+            (DURATION_NANO_COLUMN, Some(ValueData::U64Value(1))),
+            (PARENT_SPAN_ID_COLUMN, None),
+            (
+                TRACE_ID_COLUMN,
+                Some(ValueData::StringValue("trace".to_string())),
+            ),
+            (
+                SPAN_ID_COLUMN,
+                Some(ValueData::StringValue("span".to_string())),
+            ),
+            (
+                SPAN_KIND_COLUMN,
+                Some(ValueData::StringValue("SPAN_KIND_SERVER".to_string())),
+            ),
+            (
+                SPAN_NAME_COLUMN,
+                Some(ValueData::StringValue("op".to_string())),
+            ),
+            (
+                SPAN_STATUS_CODE,
+                Some(ValueData::StringValue("STATUS_CODE_UNSET".to_string())),
+            ),
+            (
+                SPAN_STATUS_MESSAGE_COLUMN,
+                Some(ValueData::StringValue(String::new())),
+            ),
+            (
+                TRACE_STATE_COLUMN,
+                Some(ValueData::StringValue(String::new())),
+            ),
+            (
+                SCOPE_NAME_COLUMN,
+                Some(ValueData::StringValue("scope".to_string())),
+            ),
+            (
+                SCOPE_VERSION_COLUMN,
+                Some(ValueData::StringValue("v1".to_string())),
+            ),
+        ];
+
+        for (index, (name, value)) in expected.into_iter().enumerate() {
+            assert_eq!(schema[index].column_name, name);
+            assert_eq!(rows[0].values[index].value_data, value);
         }
     }
 

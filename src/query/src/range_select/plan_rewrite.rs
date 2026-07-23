@@ -112,7 +112,20 @@ fn parse_expr_to_string(args: &[Expr], i: usize) -> DFResult<String> {
     }
 }
 
-/// Parse a duraion expr:
+fn time_millisecond_overflow(expr: &Expr) -> DataFusionError {
+    DataFusionError::Plan(format!(
+        "overflow converting `{}` to milliseconds in range select query",
+        expr.schema_name()
+    ))
+}
+
+fn seconds_to_millisecond(seconds: i64, expr: &Expr) -> DFResult<i64> {
+    seconds
+        .checked_mul(1_000)
+        .ok_or_else(|| time_millisecond_overflow(expr))
+}
+
+/// Parse a duration expr:
 /// 1. duration string (e.g. `'1h'`)
 /// 2. Interval expr (e.g. `INTERVAL '1 year 3 hours 20 minutes'`)
 /// 3. An interval expr can be evaluated at the logical plan stage (e.g. `INTERVAL '2' day - INTERVAL '1' day`)
@@ -157,18 +170,24 @@ fn evaluate_expr_to_millisecond(
     };
     let simplify_expr = ExprSimplifier::new(info).simplify(expr.clone())?;
     match simplify_expr {
-        Expr::Literal(ScalarValue::TimestampNanosecond(ts_nanos, _), _)
-        | Expr::Literal(ScalarValue::DurationNanosecond(ts_nanos), _) => {
-            ts_nanos.map(|v| v / 1_000_000)
+        Expr::Literal(ScalarValue::TimestampNanosecond(ts_nanos, _), _) => {
+            ts_nanos.map(|v| v.div_euclid(NANOS_PER_MILLI))
         }
-        Expr::Literal(ScalarValue::TimestampMicrosecond(ts_micros, _), _)
-        | Expr::Literal(ScalarValue::DurationMicrosecond(ts_micros), _) => {
+        Expr::Literal(ScalarValue::DurationNanosecond(ts_nanos), _) => {
+            ts_nanos.map(|v| v / NANOS_PER_MILLI)
+        }
+        Expr::Literal(ScalarValue::TimestampMicrosecond(ts_micros, _), _) => {
+            ts_micros.map(|v| v.div_euclid(1_000))
+        }
+        Expr::Literal(ScalarValue::DurationMicrosecond(ts_micros), _) => {
             ts_micros.map(|v| v / 1_000)
         }
         Expr::Literal(ScalarValue::TimestampMillisecond(ts_millis, _), _)
         | Expr::Literal(ScalarValue::DurationMillisecond(ts_millis), _) => ts_millis,
         Expr::Literal(ScalarValue::TimestampSecond(ts_secs, _), _)
-        | Expr::Literal(ScalarValue::DurationSecond(ts_secs), _) => ts_secs.map(|v| v * 1_000),
+        | Expr::Literal(ScalarValue::DurationSecond(ts_secs), _) => ts_secs
+            .map(|v| seconds_to_millisecond(v, expr))
+            .transpose()?,
         // We don't support interval with months as days in a month is unclear.
         Expr::Literal(ScalarValue::IntervalYearMonth(interval), _) => interval
             .map(|v| {
@@ -197,7 +216,13 @@ fn evaluate_expr_to_millisecond(
                     )));
                 }
 
-                Ok(interval.days as i64 * MS_PER_DAY + interval.nanoseconds / NANOS_PER_MILLI)
+                let day_millis = (interval.days as i64)
+                    .checked_mul(MS_PER_DAY)
+                    .ok_or_else(|| time_millisecond_overflow(expr))?;
+                let nanosecond_millis = interval.nanoseconds.div_euclid(NANOS_PER_MILLI);
+                day_millis
+                    .checked_add(nanosecond_millis)
+                    .ok_or_else(|| time_millisecond_overflow(expr))
             })
             .transpose()?,
         _ => None,
@@ -1053,6 +1078,154 @@ mod test {
     }
 
     #[test]
+    fn qbs_timestamp_submillisecond_uses_floor() {
+        let assert_timestamp_millis = |timestamp: ScalarValue, expected: i64| {
+            let args = vec![timestamp.lit()];
+            assert_eq!(
+                evaluate_expr_to_millisecond(&args, 0, false, None).unwrap(),
+                expected
+            );
+            assert_eq!(parse_align_to(&args, 0, None, None).unwrap(), expected);
+        };
+
+        assert_timestamp_millis(ScalarValue::TimestampNanosecond(Some(-1), None), -1);
+        assert_timestamp_millis(ScalarValue::TimestampMicrosecond(Some(-1), None), -1);
+        assert_timestamp_millis(ScalarValue::TimestampNanosecond(Some(999_999), None), 0);
+        assert_timestamp_millis(ScalarValue::TimestampMicrosecond(Some(999), None), 0);
+        assert_timestamp_millis(
+            ScalarValue::TimestampNanosecond(Some(-NANOS_PER_MILLI), None),
+            -1,
+        );
+        assert_timestamp_millis(ScalarValue::TimestampMicrosecond(Some(-1_000), None), -1);
+    }
+
+    #[test]
+    fn qbs_second_to_millisecond_safe_thresholds() {
+        let max_safe_seconds = i64::MAX / 1_000;
+        let min_safe_seconds = i64::MIN / 1_000;
+
+        for seconds in [min_safe_seconds, max_safe_seconds] {
+            let expected = seconds * 1_000;
+            let args = vec![ScalarValue::TimestampSecond(Some(seconds), None).lit()];
+            assert_eq!(
+                evaluate_expr_to_millisecond(&args, 0, false, None).unwrap(),
+                expected
+            );
+
+            let args = vec![ScalarValue::DurationSecond(Some(seconds)).lit()];
+            assert_eq!(
+                evaluate_expr_to_millisecond(&args, 0, false, None).unwrap(),
+                expected
+            );
+        }
+    }
+
+    fn assert_millisecond_overflow(result: DFResult<i64>, source_expr: &Expr) {
+        let error = result.unwrap_err();
+        let DataFusionError::Plan(message) = error else {
+            panic!("expected a plan error");
+        };
+        assert!(message.contains("overflow"));
+        let source_expr_name = source_expr.schema_name().to_string();
+        assert!(message.contains(&source_expr_name));
+    }
+
+    #[test]
+    fn qbs_second_to_millisecond_timestamp_positive_overflow_is_error() {
+        let args = vec![ScalarValue::TimestampSecond(Some(i64::MAX / 1_000 + 1), None).lit()];
+        assert_millisecond_overflow(
+            evaluate_expr_to_millisecond(&args, 0, false, None),
+            &args[0],
+        );
+    }
+
+    #[test]
+    fn qbs_second_to_millisecond_timestamp_negative_overflow_is_error() {
+        let args = vec![ScalarValue::TimestampSecond(Some(i64::MIN / 1_000 - 1), None).lit()];
+        assert_millisecond_overflow(
+            evaluate_expr_to_millisecond(&args, 0, false, None),
+            &args[0],
+        );
+    }
+
+    #[test]
+    fn qbs_second_to_millisecond_duration_positive_overflow_is_error() {
+        let args = vec![ScalarValue::DurationSecond(Some(i64::MAX / 1_000 + 1)).lit()];
+        assert_millisecond_overflow(
+            evaluate_expr_to_millisecond(&args, 0, false, None),
+            &args[0],
+        );
+    }
+
+    #[test]
+    fn qbs_second_to_millisecond_duration_negative_overflow_is_error() {
+        let args = vec![ScalarValue::DurationSecond(Some(i64::MIN / 1_000 - 1)).lit()];
+        assert_millisecond_overflow(
+            evaluate_expr_to_millisecond(&args, 0, false, None),
+            &args[0],
+        );
+    }
+
+    #[test]
+    fn qbs_duration_submillisecond_contract() {
+        // Arrow Duration literals are not accepted by the public interval-only parser.
+        let args = vec![ScalarValue::DurationNanosecond(Some(-1)).lit()];
+        assert!(parse_duration_expr(&args, 0).is_err());
+        let args = vec![ScalarValue::DurationNanosecond(Some(999_999)).lit()];
+        assert!(parse_duration_expr(&args, 0).is_err());
+        let args = vec![ScalarValue::DurationNanosecond(Some(NANOS_PER_MILLI)).lit()];
+        assert!(parse_duration_expr(&args, 0).is_err());
+
+        let args = vec!["1ms".lit()];
+        assert_eq!(
+            parse_duration_expr(&args, 0).unwrap(),
+            Duration::from_millis(1)
+        );
+
+        let args = vec![
+            ScalarValue::IntervalMonthDayNano(Some(IntervalMonthDayNano::new(0, 0, -1).into()))
+                .lit(),
+        ];
+        assert!(parse_duration_expr(&args, 0).is_err());
+        let args = vec![
+            ScalarValue::IntervalMonthDayNano(Some(
+                IntervalMonthDayNano::new(0, 0, 999_999).into(),
+            ))
+            .lit(),
+        ];
+        assert!(parse_duration_expr(&args, 0).is_err());
+        let args = vec![
+            ScalarValue::IntervalMonthDayNano(Some(
+                IntervalMonthDayNano::new(0, 0, NANOS_PER_MILLI).into(),
+            ))
+            .lit(),
+        ];
+        assert_eq!(
+            parse_duration_expr(&args, 0).unwrap(),
+            Duration::from_millis(1)
+        );
+
+        let args = vec![
+            ScalarValue::IntervalMonthDayNano(Some(IntervalMonthDayNano::new(0, 1, -1).into()))
+                .lit(),
+        ];
+        assert_eq!(
+            parse_duration_expr(&args, 0).unwrap(),
+            Duration::from_millis(MS_PER_DAY as u64 - 1)
+        );
+        let args = vec![
+            ScalarValue::IntervalMonthDayNano(Some(
+                IntervalMonthDayNano::new(0, 1, 999_999).into(),
+            ))
+            .lit(),
+        ];
+        assert_eq!(
+            parse_duration_expr(&args, 0).unwrap(),
+            Duration::from_millis(MS_PER_DAY as u64)
+        );
+    }
+
+    #[test]
     fn test_parse_duration_expr() {
         // test IntervalYearMonth
         let interval = IntervalYearMonth::new(10);
@@ -1070,7 +1243,7 @@ mod test {
         let args = vec![ScalarValue::IntervalMonthDayNano(Some(interval.into())).lit()];
         assert_eq!(
             parse_duration_expr(&args, 0).unwrap().as_millis() as i64,
-            interval.days as i64 * MS_PER_DAY + interval.nanoseconds / NANOS_PER_MILLI,
+            interval.days as i64 * MS_PER_DAY + interval.nanoseconds.div_euclid(NANOS_PER_MILLI),
         );
         // test Duration
         let args = vec!["1y4w".lit()];

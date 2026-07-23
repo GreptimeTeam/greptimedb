@@ -130,6 +130,7 @@ where
                     self.instance.partition_manager().clone(),
                     self.instance.node_manager().clone(),
                     self.instance.catalog_manager().clone(),
+                    self.instance.table_flownode_set_cache().clone(),
                     opts.prom_store.with_metric_engine,
                     self.instance.clone(),
                     opts.prom_store.pending_rows_flush_interval,
@@ -137,6 +138,7 @@ where
                     opts.prom_store.max_concurrent_flushes,
                     opts.prom_store.worker_channel_capacity,
                     opts.prom_store.max_inflight_requests,
+                    opts.prom_store.flow_notification_queue_capacity,
                 )
             } else {
                 None

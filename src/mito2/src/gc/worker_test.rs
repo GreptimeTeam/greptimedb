@@ -18,6 +18,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use api::v1::Rows;
 use async_trait::async_trait;
+use bytes::Bytes;
 use common_base::Plugins;
 use common_telemetry::init_default_ut_logging;
 use futures::TryStreamExt;
@@ -35,10 +36,12 @@ use crate::engine::region_hook::{RegionGcInfo, RegionHook, RegionHookRef};
 use crate::error::UnexpectedSnafu;
 use crate::gc::{GcConfig, LocalGcWorker, should_delete_file};
 use crate::manifest::action::RemovedFile;
+use crate::metrics::GC_SKIPPED_UNPARSABLE_FILES;
 use crate::region::MitoRegionRef;
 use crate::test_util::{
     CreateRequestBuilder, TestEnv, build_rows, flush_region, put_rows, rows_schema,
 };
+use crate::worker::DROPPING_MARKER_FILE;
 
 async fn create_gc_worker(
     mito_engine: &MitoEngine,
@@ -69,6 +72,77 @@ async fn create_gc_worker(
     )
     .await
     .unwrap()
+}
+
+#[tokio::test]
+async fn test_gc_worker_ignores_dropping_marker_file() {
+    init_default_ut_logging();
+
+    let mut env = TestEnv::new().await;
+    env.log_store = Some(env.create_log_store().await);
+    env.object_store_manager = Some(Arc::new(env.create_in_memory_object_store_manager()));
+
+    let engine = env
+        .new_mito_engine(MitoConfig {
+            gc: GcConfig {
+                enable: true,
+                lingering_time: None,
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+        .await;
+
+    let region_id = RegionId::new(1, 1);
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            region_id.table_id(),
+            "test_table",
+            "test_catalog",
+            "test_schema",
+            None,
+            env.get_kv_backend(),
+        )
+        .await;
+
+    let request = CreateRequestBuilder::new().build();
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    let region = engine.get_region(region_id).unwrap();
+    let manifest = region.manifest_ctx.manifest().await;
+    let marker_path = object_store::util::join_path(
+        &region.access_layer.build_region_dir(region_id),
+        DROPPING_MARKER_FILE,
+    );
+    region
+        .access_layer
+        .object_store()
+        .write(&marker_path, Bytes::new())
+        .await
+        .unwrap();
+
+    let before = GC_SKIPPED_UNPARSABLE_FILES.get();
+    let regions = BTreeMap::from([(region_id, Some(region.clone()))]);
+    let file_ref_manifest = FileRefsManifest {
+        file_refs: Default::default(),
+        manifest_version: [(region_id, manifest.manifest_version)].into(),
+        cross_region_refs: HashMap::new(),
+    };
+
+    let gc_worker = create_gc_worker(&engine, regions, &file_ref_manifest, true).await;
+    let report = gc_worker.run().await.unwrap();
+
+    assert!(
+        report
+            .deleted_files
+            .get(&region_id)
+            .is_none_or(|files| files.is_empty())
+    );
+    assert!(report.need_retry_regions.is_empty());
+    assert_eq!(GC_SKIPPED_UNPARSABLE_FILES.get(), before);
 }
 
 /// Test insert/flush then truncate can allow gc worker to delete files

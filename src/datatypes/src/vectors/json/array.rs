@@ -17,10 +17,6 @@ use std::sync::Arc;
 
 use arrow::compute;
 use arrow::util::display::{ArrayFormatter, FormatOptions};
-use arrow_array::builder::{
-    ArrayBuilder, BooleanBuilder, Float64Builder, Int64Builder, NullBuilder, StringViewBuilder,
-    make_builder,
-};
 use arrow_array::cast::AsArray;
 use arrow_array::types::{Float64Type, Int64Type, UInt64Type};
 use arrow_array::{Array, ArrayRef, GenericListArray, ListArray, StructArray, new_null_array};
@@ -31,11 +27,15 @@ use snafu::{OptionExt, ResultExt};
 use crate::arrow_array::{
     MutableBinaryArray, StringViewArray, binary_array_value, string_array_value,
 };
+use crate::data_type::ConcreteDataType;
 use crate::error::{
-    AlignJsonArraySnafu, ArrowComputeSnafu, CastTypeSnafu, InvalidJsonSnafu, InvalidJsonbSnafu,
-    Result,
+    AlignJsonArraySnafu, ArrowComputeSnafu, InvalidJsonSnafu, InvalidJsonbSnafu, Result,
 };
-use crate::json::value::{decode_json_variant, encode_serde_json_as_jsonb};
+use crate::json::value::{JsonVariant, decode_json_variant, encode_serde_json_as_jsonb};
+use crate::prelude::DataType as _;
+use crate::vectors::json::builder::{
+    json_variant_into_projected_value, null_on_json_type_mismatch,
+};
 
 pub struct JsonArray<'a> {
     inner: &'a ArrayRef,
@@ -112,6 +112,10 @@ impl JsonArray<'_> {
             self.inner.data_type(),
             expect
         );
+
+        if self.inner.data_type().is_binary() && matches!(expect, DataType::Struct(_)) {
+            return self.decode_variant(expect);
+        }
 
         let struct_array = self.inner.as_struct_opt().context(AlignJsonArraySnafu {
             reason: "expect struct array",
@@ -243,65 +247,24 @@ impl JsonArray<'_> {
     }
 
     fn decode_variant(&self, to_type: &DataType) -> Result<ArrayRef> {
-        fn downcast_builder<'a, T: ArrayBuilder>(
-            builder: &'a mut dyn ArrayBuilder,
-            to_type: &DataType,
-        ) -> Result<&'a mut T> {
-            builder
-                .as_any_mut()
-                .downcast_mut::<T>()
-                .with_context(|| CastTypeSnafu {
-                    msg: format!("Expect ArrayBuilder is of type {to_type}"),
-                })
-        }
-
-        let mut builder = make_builder(to_type, self.inner.len());
-        if to_type.is_null() {
-            downcast_builder::<NullBuilder>(builder.as_mut(), to_type)?
-                .append_nulls(self.inner.len());
-        } else {
-            match to_type {
-                DataType::Boolean => {
-                    let b = downcast_builder::<BooleanBuilder>(builder.as_mut(), to_type)?;
-                    for i in 0..self.inner.len() {
-                        b.append_option(self.try_get_value(i)?.as_bool());
-                    }
-                }
-                DataType::Int64 => {
-                    let b = downcast_builder::<Int64Builder>(builder.as_mut(), to_type)?;
-                    for i in 0..self.inner.len() {
-                        b.append_option(self.try_get_value(i)?.as_i64());
-                    }
-                }
-                DataType::Float64 => {
-                    let b = downcast_builder::<Float64Builder>(builder.as_mut(), to_type)?;
-                    for i in 0..self.inner.len() {
-                        b.append_option(self.try_get_value(i)?.as_f64());
-                    }
-                }
-                DataType::Utf8View => {
-                    let b = downcast_builder::<StringViewBuilder>(builder.as_mut(), to_type)?;
-                    for i in 0..self.inner.len() {
-                        let v = self.try_get_value(i)?;
-                        if v.is_null() {
-                            b.append_null();
-                        } else if let Some(s) = v.as_str() {
-                            b.append_value(s);
-                        } else {
-                            b.append_value(v.to_string());
-                        }
-                    }
-                }
-                _ => {
-                    return CastTypeSnafu {
-                        msg: format!("Cannot cast JSON value to {to_type}"),
-                    }
-                    .fail();
-                }
-            }
-        }
-        Ok(builder.finish())
+        let values = (0..self.inner.len())
+            .map(|i| self.try_get_value(i))
+            .collect::<Result<Vec<_>>>()?;
+        decode_json_values(values, to_type)
     }
+}
+
+fn decode_json_values(values: Vec<Value>, to_type: &DataType) -> Result<ArrayRef> {
+    let concrete_type = ConcreteDataType::from_arrow_type(to_type);
+    let mut builder = concrete_type.create_mutable_vector(values.len());
+    for value in values {
+        let value = null_on_json_type_mismatch(json_variant_into_projected_value(
+            JsonVariant::from(value),
+            &concrete_type,
+        ))?;
+        builder.try_push_value_ref(&value.as_value_ref())?;
+    }
+    Ok(builder.to_vector().to_arrow_array())
 }
 
 fn try_align_list(
@@ -568,6 +531,82 @@ mod test {
             ]),
         )
         .test()?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_align_variant_to_struct() -> Result<()> {
+        let encode = |json: &[u8]| jsonb::parse_value(json).unwrap().to_vec();
+        let object =
+            encode(br#"{"nested":{"flag":true,"items":[1,2],"raw":{"x":1},"text":42,"value":42}}"#);
+        let scalar = encode(b"1");
+        let variants: ArrayRef = Arc::new(BinaryArray::from(vec![
+            Some(object.as_slice()),
+            None,
+            Some(scalar.as_slice()),
+        ]));
+        let expected_type = DataType::Struct(Fields::from(vec![Field::new_struct(
+            "nested",
+            vec![
+                Field::new("flag", DataType::Boolean, true),
+                Field::new_list("items", Field::new_list_field(DataType::UInt64, true), true),
+                Field::new("raw", DataType::Binary, true),
+                Field::new("text", DataType::Utf8View, true),
+                Field::new("value", DataType::UInt64, true),
+            ],
+            true,
+        )]));
+
+        let aligned = JsonArray::from(&variants).try_align(&expected_type)?;
+        assert_eq!(&expected_type, aligned.data_type());
+        assert_eq!(
+            json!({
+                "nested": {
+                    "flag": true,
+                    "items": [1, 2],
+                    "raw": {"x": 1},
+                    "text": "42",
+                    "value": 42
+                }
+            }),
+            JsonArray::from(&aligned).try_get_value(0)?
+        );
+        assert!(aligned.is_null(1));
+        assert!(aligned.is_null(2));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_align_nested_variant_to_struct() -> Result<()> {
+        let object = jsonb::parse_value(br#"{"flag":true,"value":42}"#)
+            .unwrap()
+            .to_vec();
+        let variants: ArrayRef = Arc::new(BinaryArray::from(vec![Some(object.as_slice()), None]));
+        let input: ArrayRef = Arc::new(StructArray::from(vec![(
+            Arc::new(Field::new("nested", DataType::Binary, true)),
+            variants,
+        )]));
+        let expected_type = DataType::Struct(Fields::from(vec![Field::new_struct(
+            "nested",
+            vec![
+                Field::new("flag", DataType::Boolean, true),
+                Field::new("value", DataType::UInt64, true),
+            ],
+            true,
+        )]));
+
+        let aligned = JsonArray::from(&input).try_align(&expected_type)?;
+        assert_eq!(&expected_type, aligned.data_type());
+        assert_eq!(
+            json!({"nested": {"flag": true, "value": 42}}),
+            JsonArray::from(&aligned).try_get_value(0)?
+        );
+        assert_eq!(
+            json!({"nested": null}),
+            JsonArray::from(&aligned).try_get_value(1)?
+        );
 
         Ok(())
     }
