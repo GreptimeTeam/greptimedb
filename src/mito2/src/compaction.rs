@@ -23,8 +23,10 @@ mod test_util;
 mod twcs;
 mod window;
 
+use std::any::Any;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
+use std::future::Future;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -42,6 +44,7 @@ use datafusion_common::ScalarValue;
 use datafusion_expr::Expr;
 use datatypes::extension::json::is_structured_json_field;
 use datatypes::types::json_type::JsonNativeType;
+use futures::FutureExt;
 use parquet::arrow::parquet_to_arrow_schema;
 use parquet::file::metadata::{PageIndexPolicy, ParquetMetaData};
 use serde::{Deserialize, Serialize};
@@ -62,7 +65,7 @@ use crate::error::{
     CompactRegionSnafu, CompactionCancelledSnafu, DataTypeMismatchSnafu, Error,
     GetSchemaMetadataSnafu, JoinSnafu, ManualCompactionOverrideSnafu, ParquetToArrowSchemaSnafu,
     RegionClosedSnafu, RegionDroppedSnafu, RegionTruncatedSnafu, RemoteCompactionSnafu, Result,
-    TimeRangePredicateOverflowSnafu, TimeoutSnafu,
+    TimeRangePredicateOverflowSnafu, TimeoutSnafu, UnexpectedSnafu,
 };
 use crate::metrics::{
     COMPACTION_MEMORY_REJECTED, COMPACTION_STAGE_ELAPSED, INFLIGHT_COMPACTION_COUNT,
@@ -606,25 +609,67 @@ impl CompactionScheduler {
         common_runtime::spawn_compact(async move {
             let region_id = request.region_id();
             let request_sender = request.request_sender.clone();
-            let result =
-                Self::prepare_compaction(request, options, plugins, max_background_compactions)
-                    .await;
-            if let CompactionPlanningResult::Error(err) = &result {
-                error!(err; "Compaction planning failed for region {}, plan_id: {}", region_id, plan_id);
-            }
-            let request = WorkerRequestWithTime::new(WorkerRequest::Background {
+            let planning =
+                Self::prepare_compaction(request, options, plugins, max_background_compactions);
+            Self::notify_planning_result(
                 region_id,
-                notify: BackgroundNotify::CompactionPickFinished(CompactionPickFinished {
-                    region_id,
-                    plan_id,
-                    version_control,
-                    result,
-                }),
-            });
-            if request_sender.send(request).await.is_err() {
-                warn!("Failed to send compaction planning result for region {region_id}");
-            }
+                plan_id,
+                version_control,
+                request_sender,
+                planning,
+            )
+            .await;
         });
+    }
+
+    /// Runs the planning future and always sends the planning result back to
+    /// the worker, even if the planning panics.
+    ///
+    /// The worker only leaves the picking phase after it receives the
+    /// `CompactionPickFinished` notification. If a panicked planning task
+    /// swallowed the notification, the region would be stuck in the picking
+    /// phase forever, blocking all future compactions and pending DDLs (e.g.
+    /// entering staging) of the region.
+    async fn notify_planning_result(
+        region_id: RegionId,
+        plan_id: u64,
+        version_control: VersionControlRef,
+        request_sender: Sender<WorkerRequestWithTime>,
+        planning: impl Future<Output = CompactionPlanningResult> + Send,
+    ) {
+        // The idiomatic way to handle a panic result.
+        let result = std::panic::AssertUnwindSafe(planning).catch_unwind().await.unwrap_or_else(|payload| {
+            let reason = if let Some(message) = payload.as_ref().downcast_ref::<&str>() {
+                message.to_string()
+            } else if let Some(message) = payload.as_ref().downcast_ref::<String>() {
+                message.clone()
+            } else {
+                "unknown panic".to_string()
+            };
+            CompactionPlanningResult::Error(Arc::new(
+                UnexpectedSnafu {
+                    reason: format!(
+                        "Compaction planning panicked for region {region_id}, plan_id {plan_id}: {reason}"
+                    ),
+                }
+                    .build(),
+            ))
+        });
+        if let CompactionPlanningResult::Error(err) = &result {
+            error!(err; "Compaction planning failed for region {}, plan_id: {}", region_id, plan_id);
+        }
+        let request = WorkerRequestWithTime::new(WorkerRequest::Background {
+            region_id,
+            notify: BackgroundNotify::CompactionPickFinished(CompactionPickFinished {
+                region_id,
+                plan_id,
+                version_control,
+                result,
+            }),
+        });
+        if request_sender.send(request).await.is_err() {
+            warn!("Failed to send compaction planning result for region {region_id}");
+        }
     }
 
     async fn prepare_compaction(
@@ -2748,6 +2793,30 @@ mod tests {
         assert!(pending_ddls.is_empty());
         assert!(waiter_rx.await.unwrap().is_err());
         assert!(!scheduler.region_status.contains_key(&region_id));
+    }
+
+    #[tokio::test]
+    async fn test_planning_panic_still_sends_pick_finished() {
+        let builder = VersionControlBuilder::new();
+        let region_id = builder.region_id();
+        let version_control = Arc::new(builder.build());
+        let (tx, mut rx) = mpsc::channel(4);
+
+        CompactionScheduler::notify_planning_result(region_id, 7, version_control, tx, async {
+            panic!("planning boom")
+        })
+        .await;
+
+        let finished = recv_compaction_pick_finished(&mut rx).await;
+        assert_eq!(region_id, finished.region_id);
+        assert_eq!(7, finished.plan_id);
+        let CompactionPlanningResult::Error(err) = finished.result else {
+            panic!("expected planning error, got {:?}", finished.result);
+        };
+        assert!(
+            err.to_string().contains("planning boom"),
+            "unexpected error: {err}"
+        );
     }
 
     #[tokio::test]
