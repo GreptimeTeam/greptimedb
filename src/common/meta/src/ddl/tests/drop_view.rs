@@ -122,7 +122,7 @@ fn test_drop_view_event_lifecycle_rows_have_fixed_schema_and_nulls() {
         EventTrigger::Poisoned,
     ];
 
-    let expected_schema = vec![
+    let expected_schema = [
         (CATALOG_NAME_COLUMN, api::v1::ColumnDataType::String),
         (SCHEMA_NAME_COLUMN, api::v1::ColumnDataType::String),
         (VIEW_NAME_COLUMN, api::v1::ColumnDataType::String),
