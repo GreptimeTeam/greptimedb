@@ -343,6 +343,32 @@ impl CompactionScheduler {
             .unwrap_or(false)
     }
 
+    /// Removes the compaction status of the region if it has no active compaction.
+    ///
+    /// The worker calls this when it decides not to schedule the next compaction
+    /// after a compaction finishes (e.g. throttled by `min_compaction_interval`).
+    /// Otherwise a stale status without an active compaction would remain in the
+    /// map and all subsequent compaction requests would be swallowed as if the
+    /// region were still compacting.
+    ///
+    /// Returns whether the status is removed.
+    pub(crate) fn remove_inactive_status(&mut self, region_id: RegionId) -> bool {
+        let Some(status) = self.region_status.get(&region_id) else {
+            return false;
+        };
+        if status.active_compaction.is_some() {
+            return false;
+        }
+        // A status without an active compaction must have been drained by
+        // `on_compaction_finished`: no waiters, pending requests or DDLs can be
+        // enqueued while no compaction is running.
+        debug_assert!(status.waiters.is_empty());
+        debug_assert!(status.pending_request.is_none());
+        debug_assert!(status.pending_ddl_requests.is_empty());
+        self.region_status.remove(&region_id);
+        true
+    }
+
     /// Schedules next compaction upon a finished compaction.
     /// Returns whether the compaction is scheduled.
     pub(crate) async fn schedule_next_compaction(
@@ -2521,6 +2547,115 @@ mod tests {
             .await;
         assert!(!scheduled);
         assert!(!scheduler.region_status.contains_key(&region_id));
+    }
+
+    #[tokio::test]
+    async fn test_remove_inactive_status_keeps_running_compaction() {
+        let env = SchedulerEnv::new().await;
+        let (tx, _rx) = mpsc::channel(4);
+        let mut scheduler = env.mock_compaction_scheduler(tx);
+        let builder = VersionControlBuilder::new();
+        let version_control = Arc::new(builder.build());
+        let region_id = builder.region_id();
+
+        // No status at all.
+        assert!(!scheduler.remove_inactive_status(region_id));
+
+        scheduler.region_status.insert(
+            region_id,
+            CompactionStatus::new(region_id, version_control, env.access_layer.clone()),
+        );
+        scheduler
+            .region_status
+            .get_mut(&region_id)
+            .unwrap()
+            .start_local_task();
+
+        // A status with an active compaction must not be removed.
+        assert!(!scheduler.remove_inactive_status(region_id));
+        assert!(scheduler.region_status.contains_key(&region_id));
+    }
+
+    #[tokio::test]
+    async fn test_compaction_reschedulable_when_next_compaction_throttled() {
+        let job_scheduler = Arc::new(VecScheduler::default());
+        let env = SchedulerEnv::new().await.scheduler(job_scheduler.clone());
+        let (tx, _rx) = mpsc::channel(4);
+        let mut scheduler = env.mock_compaction_scheduler(tx);
+        let mut builder = VersionControlBuilder::new();
+        let region_id = builder.region_id();
+        let end = 1000 * 1000;
+        // Five overlapping L0 files are enough for the regular picker to create a task.
+        let version_control = Arc::new(
+            builder
+                .push_l0_file(0, end)
+                .push_l0_file(10, end)
+                .push_l0_file(50, end)
+                .push_l0_file(80, end)
+                .push_l0_file(90, end)
+                .build(),
+        );
+        let manifest_ctx = env
+            .mock_manifest_context(version_control.current().version.metadata.clone())
+            .await;
+        let (schema_metadata_manager, kv_backend) = mock_schema_metadata_manager();
+        schema_metadata_manager
+            .register_region_table_info(
+                region_id.table_id(),
+                "test_table",
+                "test_catalog",
+                "test_schema",
+                None,
+                kv_backend,
+            )
+            .await;
+
+        let scheduled = scheduler
+            .schedule_compaction(
+                region_id,
+                Options::Regular(Default::default()),
+                &version_control,
+                &env.access_layer,
+                OptionOutputTx::none(),
+                &manifest_ctx,
+                schema_metadata_manager.clone(),
+                1,
+            )
+            .await
+            .unwrap();
+        assert!(scheduled);
+        assert_eq!(1, job_scheduler.num_jobs());
+
+        // The compaction finishes with no pending request/DDL. The status remains
+        // in the map with no active compaction; the worker then skips
+        // `schedule_next_compaction` because `min_compaction_interval` has not
+        // passed and must remove the stale status instead.
+        let pending_ddls = scheduler
+            .on_compaction_finished(region_id, &manifest_ctx, schema_metadata_manager.clone())
+            .await;
+        assert!(pending_ddls.is_empty());
+        assert!(!scheduler.is_compacting(region_id));
+        assert!(scheduler.region_status.contains_key(&region_id));
+
+        assert!(scheduler.remove_inactive_status(region_id));
+        assert!(!scheduler.region_status.contains_key(&region_id));
+
+        // The region can be scheduled for compaction again.
+        let scheduled = scheduler
+            .schedule_compaction(
+                region_id,
+                Options::Regular(Default::default()),
+                &version_control,
+                &env.access_layer,
+                OptionOutputTx::none(),
+                &manifest_ctx,
+                schema_metadata_manager,
+                1,
+            )
+            .await
+            .unwrap();
+        assert!(scheduled);
+        assert_eq!(2, job_scheduler.num_jobs());
     }
 
     #[tokio::test]

@@ -141,6 +141,13 @@ impl<S> RegionWorkerLoop<S> {
             {
                 region.update_schedule_compaction_millis();
             }
+        } else {
+            // The minimal compaction interval has not passed, so the next compaction
+            // is not scheduled now and the region has no running compaction. Removes
+            // its compaction status, otherwise the stale status would make the
+            // scheduler swallow all subsequent compaction requests and the region
+            // would never compact again.
+            self.compaction_scheduler.remove_inactive_status(region_id);
         }
     }
 
