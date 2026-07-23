@@ -261,7 +261,9 @@ impl MetaPeerClient {
             ..Default::default()
         });
 
-        let response: PbRangeResponse = ClusterClient::new(channel)
+        let mut client =
+            common_grpc::configure_tonic_client!(ClusterClient::new(channel), self.channel_manager);
+        let response: PbRangeResponse = client
             .range(request)
             .await
             .context(error::RangeSnafu)?
@@ -291,7 +293,9 @@ impl MetaPeerClient {
             ..Default::default()
         });
 
-        let response: PbBatchGetResponse = ClusterClient::new(channel)
+        let mut client =
+            common_grpc::configure_tonic_client!(ClusterClient::new(channel), self.channel_manager);
+        let response: PbBatchGetResponse = client
             .batch_get(request)
             .await
             .context(error::BatchGetSnafu)?

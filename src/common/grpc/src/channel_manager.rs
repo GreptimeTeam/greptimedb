@@ -383,6 +383,21 @@ pub struct ChannelConfig {
     pub accept_compression: bool,
 }
 
+/// Configures a generated tonic client with compression and message size limits.
+#[macro_export]
+macro_rules! configure_tonic_client {
+    ($client:expr, $channel_manager:expr $(,)?) => {{
+        let channel_manager = &$channel_manager;
+        let config = channel_manager.config();
+        $client
+            .accept_compressed(::tonic::codec::CompressionEncoding::Gzip)
+            .accept_compressed(::tonic::codec::CompressionEncoding::Zstd)
+            .send_compressed(::tonic::codec::CompressionEncoding::Gzip)
+            .max_decoding_message_size(config.max_recv_message_size.as_bytes() as usize)
+            .max_encoding_message_size(config.max_send_message_size.as_bytes() as usize)
+    }};
+}
+
 impl Default for ChannelConfig {
     fn default() -> Self {
         Self {
@@ -707,6 +722,75 @@ mod tests {
                 accept_compression: false,
             },
             cfg
+        );
+    }
+
+    #[derive(Default)]
+    struct FakeTonicClient {
+        accepted_gzip: bool,
+        accepted_zstd: bool,
+        sent_gzip: bool,
+        sent_zstd: bool,
+        max_decoding_message_size: usize,
+        max_encoding_message_size: usize,
+    }
+
+    impl FakeTonicClient {
+        fn accept_compressed(mut self, encoding: ::tonic::codec::CompressionEncoding) -> Self {
+            match encoding {
+                ::tonic::codec::CompressionEncoding::Gzip => self.accepted_gzip = true,
+                ::tonic::codec::CompressionEncoding::Zstd => self.accepted_zstd = true,
+                _ => unreachable!(),
+            }
+            self
+        }
+
+        fn send_compressed(mut self, encoding: ::tonic::codec::CompressionEncoding) -> Self {
+            match encoding {
+                ::tonic::codec::CompressionEncoding::Gzip => self.sent_gzip = true,
+                ::tonic::codec::CompressionEncoding::Zstd => self.sent_zstd = true,
+                _ => unreachable!(),
+            }
+            self
+        }
+
+        fn max_decoding_message_size(mut self, size: usize) -> Self {
+            self.max_decoding_message_size = size;
+            self
+        }
+
+        fn max_encoding_message_size(mut self, size: usize) -> Self {
+            self.max_encoding_message_size = size;
+            self
+        }
+    }
+
+    #[test]
+    fn test_configure_tonic_client() {
+        let recv_message_size = ReadableSize::mb(2);
+        let send_message_size = ReadableSize::mb(3);
+        let channel_manager = ChannelManager::with_config(
+            ChannelConfig {
+                max_recv_message_size: recv_message_size,
+                max_send_message_size: send_message_size,
+                ..ChannelConfig::new()
+            },
+            None,
+        );
+
+        let client = crate::configure_tonic_client!(FakeTonicClient::default(), channel_manager,);
+
+        assert!(client.accepted_gzip);
+        assert!(client.accepted_zstd);
+        assert!(client.sent_gzip);
+        assert!(!client.sent_zstd);
+        assert_eq!(
+            recv_message_size.as_bytes() as usize,
+            client.max_decoding_message_size
+        );
+        assert_eq!(
+            send_message_size.as_bytes() as usize,
+            client.max_encoding_message_size
         );
     }
 

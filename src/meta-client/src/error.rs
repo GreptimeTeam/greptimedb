@@ -176,7 +176,7 @@ impl Error {
         matches!(
             self,
             Error::MetaServer {
-                tonic_code: tonic::Code::OutOfRange,
+                tonic_code: tonic::Code::OutOfRange | tonic::Code::ResourceExhausted,
                 ..
             }
         )
@@ -241,5 +241,29 @@ mod tests {
         let err: Error = status.into();
 
         assert_eq!(err.retry_hint(), RetryHint::Retryable);
+    }
+
+    #[test]
+    fn test_is_exceeded_size_limit_for_out_of_range() {
+        let err = Error::from(tonic::Status::new(tonic::Code::OutOfRange, "any message"));
+
+        assert!(err.is_exceeded_size_limit());
+    }
+
+    #[test]
+    fn test_is_exceeded_size_limit_for_resource_exhausted() {
+        let err = Error::from(tonic::Status::new(
+            tonic::Code::ResourceExhausted,
+            "arbitrary message",
+        ));
+
+        assert!(err.is_exceeded_size_limit());
+    }
+
+    #[test]
+    fn test_is_exceeded_size_limit_for_non_size_code() {
+        let err = Error::from(tonic::Status::new(tonic::Code::Internal, "message"));
+
+        assert!(!err.is_exceeded_size_limit());
     }
 }
