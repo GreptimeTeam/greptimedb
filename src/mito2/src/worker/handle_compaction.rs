@@ -20,7 +20,7 @@ use store_api::storage::RegionId;
 
 use crate::compaction::{CompactionExecution, CompactionPickFinished};
 use crate::config::IndexBuildMode;
-use crate::error::{RegionClosedSnafu, RegionNotFoundSnafu};
+use crate::error::{RegionNotFoundSnafu, StaleCompactionExecutionSnafu};
 use crate::metrics::COMPACTION_REQUEST_COUNT;
 use crate::region::MitoRegionRef;
 use crate::request::{
@@ -116,7 +116,7 @@ impl<S> RegionWorkerLoop<S> {
             }
         };
         if !self.is_current_compaction_execution(&region, &request.execution) {
-            request.on_failure(RegionClosedSnafu { region_id }.build());
+            request.on_failure(StaleCompactionExecutionSnafu { region_id }.build());
             return;
         }
         let execution = request.execution.clone();
