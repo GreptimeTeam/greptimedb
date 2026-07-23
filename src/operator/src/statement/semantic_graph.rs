@@ -34,6 +34,7 @@ use datafusion::arrow::datatypes::{DataType, TimeUnit};
 use datafusion::dataframe::DataFrame;
 use datafusion::functions::{core as core_fns, datetime as datetime_fns, string as string_fns};
 use datafusion::functions_aggregate::expr_fn::{count, sum};
+use datafusion::functions_nested::expr_fn::make_array;
 use datafusion_common::{Column, Result as DfResult, ScalarValue};
 use datafusion_expr::{Expr, ExprFunctionExt, JoinType, LogicalPlan, ScalarUDF, cast, ident, lit};
 
@@ -229,87 +230,132 @@ fn sorted_kv_expr_with(sorted_cols: &[String], nullable: bool, col: &dyn Fn(&str
     concat_expr(parts)
 }
 
-/// One `DISTINCT` branch projecting a declaring table's rows into the registry
-/// shape: one row per observed `(window, entity)`.
-fn registry_branch(
-    decl: &EntityDeclaration,
+const REGISTRY_COLUMNS: [&str; 10] = [
+    "observed_at",
+    "window_start",
+    "window_end",
+    "fresh_until",
+    "entity_type",
+    "entity_id",
+    "entity_id_attrs",
+    "scope",
+    "descriptive",
+    "source_tables",
+];
+
+const REGISTRY_VALID_COLUMN: &str = "__entity_valid";
+
+/// Projects all entity declarations of one source table with one source scan.
+///
+/// Each output field is first built as an array whose entries correspond to the
+/// table's declarations. Unnesting the arrays expands one source row into one
+/// row per declared entity without cloning the table scan under `UNION ALL`.
+fn registry_source(
+    first: &EntityDeclaration,
+    rest: &[EntityDeclaration],
     df: DataFrame,
     window: &GraphWindow,
 ) -> DfResult<DataFrame> {
-    let ts = ident(&decl.time_index);
+    let ts = ident(&first.time_index);
     let bin = bin_ms(ts.clone());
-
-    // CAST even a single-column id: id columns must be tags but not necessarily
-    // strings, and the computed table declares entity_id STRING. Composite ids
-    // additionally carry a JSON object of the id columns in entity_id_attrs.
-    let entity_id = entity_id_expr(&decl.id_columns, &|c| ident(c));
-    let entity_id_attrs = if decl.id_columns.len() == 1 {
-        null_json()
-    } else {
-        let mut cols = decl.id_columns.clone();
-        cols.sort();
-        json_object_expr(&cols)
-    };
-
-    let scope = match decl.scope_columns.as_slice() {
-        [] => lit(""),
-        // Scope columns are not required to be tags, so guard against NULL.
-        [single] => cast_string_or_empty(single),
-        _ => {
-            let mut cols = decl.scope_columns.clone();
-            cols.sort();
-            sorted_kv_expr_with(&cols, true, &|c| ident(c))
-        }
-    };
-
-    let descriptive = if decl.descriptive_columns.is_empty() {
-        null_json()
-    } else {
-        json_object_expr(&decl.descriptive_columns)
-    };
-
-    let source_tables = parse_json_expr(lit(format!(
-        "[{}]",
-        json_quote(&format!("{}.{}", decl.schema, decl.table))
-    )));
-
-    let mut predicate = ts
+    let window_predicate = ts
         .clone()
         .gt_eq(window.start.clone())
         .and(ts.lt(window.end.clone()));
-    // Tag columns may still be nullable; a NULL identity component would
-    // violate the computed table's non-null `entity_id`.
-    for id in &decl.id_columns {
-        predicate = predicate.and(ident(id).is_not_null());
+
+    let mut arrays = vec![Vec::new(); REGISTRY_COLUMNS.len() + 1];
+    for decl in std::iter::once(first).chain(rest) {
+        // CAST even a single-column id: id columns must be tags but not
+        // necessarily strings, and the computed table declares entity_id
+        // STRING. Composite ids additionally carry a JSON object of the id
+        // columns in entity_id_attrs.
+        let entity_id = entity_id_expr(&decl.id_columns, &|c| ident(c));
+        let entity_id_attrs = if decl.id_columns.len() == 1 {
+            null_json()
+        } else {
+            let mut cols = decl.id_columns.clone();
+            cols.sort();
+            json_object_expr(&cols)
+        };
+
+        let scope = match decl.scope_columns.as_slice() {
+            [] => lit(""),
+            // Scope columns are not required to be tags, so guard against NULL.
+            [single] => cast_string_or_empty(single),
+            _ => {
+                let mut cols = decl.scope_columns.clone();
+                cols.sort();
+                sorted_kv_expr_with(&cols, true, &|c| ident(c))
+            }
+        };
+
+        let descriptive = if decl.descriptive_columns.is_empty() {
+            null_json()
+        } else {
+            json_object_expr(&decl.descriptive_columns)
+        };
+
+        let source_tables = parse_json_expr(lit(format!(
+            "[{}]",
+            json_quote(&format!("{}.{}", decl.schema, decl.table))
+        )));
+
+        // Tag columns may still be nullable; a NULL identity component
+        // identifies nothing. Keep this predicate per declaration so a NULL
+        // identity for one entity does not remove other entities on the row.
+        let valid = decl.id_columns.iter().fold(lit(true), |predicate, id| {
+            predicate.and(ident(id).is_not_null())
+        });
+
+        let row = [
+            valid,
+            bin.clone(),
+            bin.clone(),
+            bin.clone() + bin_interval(),
+            bin.clone() + bin_interval(),
+            lit(decl.entity_type.as_str()),
+            entity_id,
+            entity_id_attrs,
+            scope,
+            descriptive,
+            source_tables,
+        ];
+        for (array, value) in arrays.iter_mut().zip(row) {
+            array.push(value);
+        }
     }
 
-    df.filter(predicate)?
-        .select(vec![
-            bin.clone().alias("observed_at"),
-            bin.clone().alias("window_start"),
-            (bin.clone() + bin_interval()).alias("window_end"),
-            (bin + bin_interval()).alias("fresh_until"),
-            lit(decl.entity_type.as_str()).alias("entity_type"),
-            entity_id.alias("entity_id"),
-            entity_id_attrs.alias("entity_id_attrs"),
-            scope.alias("scope"),
-            descriptive.alias("descriptive"),
-            source_tables.alias("source_tables"),
-        ])?
+    let array_names = std::iter::once(REGISTRY_VALID_COLUMN)
+        .chain(REGISTRY_COLUMNS)
+        .collect::<Vec<_>>();
+    let array_projection = array_names
+        .iter()
+        .zip(arrays)
+        .map(|(name, values)| make_array(values).alias(*name))
+        .collect::<Vec<_>>();
+
+    df.filter(window_predicate)?
+        .select(array_projection)?
+        .unnest_columns(&array_names)?
+        .filter(ident(REGISTRY_VALID_COLUMN))?
+        .select(REGISTRY_COLUMNS.into_iter().map(ident).collect::<Vec<_>>())?
         .distinct()
 }
 
-/// Builds the `semantic_entities` registry plan: a `UNION ALL` of one branch per
-/// declaring table, filtered to `window`. Each [`DataFrame`] is the declaring
-/// table's scan (from `QueryEngine::read_table`). Returns `None` when nothing
-/// declared an entity, so the computed table streams empty.
+/// Builds the `semantic_entities` registry plan: one branch and source scan per
+/// declaring table, filtered to `window`, then `UNION ALL` across source tables.
+/// Returns `None` when nothing declared an entity, so the computed table streams
+/// empty.
 pub fn build_registry_plan(
-    branches: Vec<(EntityDeclaration, DataFrame)>,
+    sources: Vec<(Vec<EntityDeclaration>, DataFrame)>,
     window: &GraphWindow,
 ) -> DfResult<Option<LogicalPlan>> {
     let mut union_df: Option<DataFrame> = None;
-    for (decl, df) in branches {
-        union_df = union_all(union_df, registry_branch(&decl, df, window)?)?;
+    for (declarations, df) in sources {
+        let Some((first, rest)) = declarations.split_first() else {
+            continue;
+        };
+        union_df = union_all(union_df, registry_source(first, rest, df, window)?)?;
     }
     Ok(union_df.map(DataFrame::into_unoptimized_plan))
 }
@@ -320,7 +366,7 @@ pub fn build_registry_plan(
 /// `valid_from`/`valid_until`, which are applied as a filter, not projected.)
 /// Test-only until the declared-edge union branch lands and enforces it in code.
 #[cfg(test)]
-const RELATIONSHIP_COLUMNS: [&str; 17] = [
+const RELATIONSHIP_COLUMNS: [&str; 16] = [
     "observed_at",
     "window_start",
     "window_end",
@@ -332,7 +378,6 @@ const RELATIONSHIP_COLUMNS: [&str; 17] = [
     "rel_type",
     "provenance",
     "confidence",
-    "generation_id",
     "request_count",
     "error_count",
     "duration_sum",
@@ -394,7 +439,6 @@ pub fn build_calls_plan(
             lit("calls").alias("rel_type"),
             lit("trace").alias("provenance"),
             lit(1.0_f64).alias("confidence"),
-            lit("").alias("generation_id"),
             ident("request_count"),
             ident("error_count"),
             // duration_nano sums in nanoseconds; the contract column is seconds.
@@ -581,7 +625,7 @@ mod tests {
         let ctx = metric_table_ctx();
         let df = ctx.table("app_latency").await.unwrap();
         let plan = build_registry_plan(
-            vec![(decl("service", &["service_name"]), df)],
+            vec![(vec![decl("service", &["service_name"])], df)],
             &test_window(),
         )
         .unwrap()
@@ -631,7 +675,7 @@ mod tests {
         let df = ctx.table("app_latency").await.unwrap();
         let mut declaration = decl("process", &["service_name", "pid"]);
         declaration.descriptive_columns = vec!["host".to_string()];
-        let plan = build_registry_plan(vec![(declaration, df)], &test_window())
+        let plan = build_registry_plan(vec![(vec![declaration], df)], &test_window())
             .unwrap()
             .unwrap();
 
@@ -683,7 +727,7 @@ mod tests {
         let mut single = decl("service", &["service_name"]);
         single.scope_columns = vec!["host".to_string()];
         let df = ctx.table("app_latency").await.unwrap();
-        let plan = build_registry_plan(vec![(single, df)], &test_window())
+        let plan = build_registry_plan(vec![(vec![single], df)], &test_window())
             .unwrap()
             .unwrap();
         let batches = collect(&ctx, plan).await;
@@ -695,7 +739,7 @@ mod tests {
         let mut multi = decl("service", &["service_name"]);
         multi.scope_columns = vec!["pid".to_string(), "host".to_string()];
         let df = ctx.table("app_latency").await.unwrap();
-        let plan = build_registry_plan(vec![(multi, df)], &test_window())
+        let plan = build_registry_plan(vec![(vec![multi], df)], &test_window())
             .unwrap()
             .unwrap();
         let batches = collect(&ctx, plan).await;
@@ -715,7 +759,7 @@ mod tests {
     async fn registry_skips_null_identity_rows() {
         let ctx = metric_table_ctx();
         let df = ctx.table("app_latency").await.unwrap();
-        let plan = build_registry_plan(vec![(decl("host", &["host"]), df)], &test_window())
+        let plan = build_registry_plan(vec![(vec![decl("host", &["host"])], df)], &test_window())
             .unwrap()
             .unwrap();
         let batches = collect(&ctx, plan).await;
@@ -725,20 +769,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn registry_unions_declarations() {
+    async fn registry_expands_declarations_with_one_source_scan() {
         let ctx = metric_table_ctx();
-        let df1 = ctx.table("app_latency").await.unwrap();
-        let df2 = ctx.table("app_latency").await.unwrap();
+        let df = ctx.table("app_latency").await.unwrap();
         let plan = build_registry_plan(
-            vec![
-                (decl("service", &["service_name"]), df1),
-                (decl("host", &["pid"]), df2),
-            ],
+            vec![(
+                vec![decl("service", &["service_name"]), decl("host", &["pid"])],
+                df,
+            )],
             &test_window(),
         )
         .unwrap()
         .unwrap();
 
+        assert_eq!(
+            plan.display_indent()
+                .to_string()
+                .matches("TableScan: app_latency")
+                .count(),
+            1
+        );
         let batches = collect(&ctx, plan).await;
         let mut types: Vec<String> = batches.iter().flat_map(|b| strings(b, 4)).collect();
         types.sort();
@@ -890,31 +940,31 @@ mod tests {
         assert_eq!(strings(batch, 9), vec!["trace"]);
 
         let request_count = batch
-            .column(12)
+            .column(11)
             .as_any()
             .downcast_ref::<Int64Array>()
             .unwrap();
         assert_eq!(request_count.value(0), 2);
         let error_count = batch
-            .column(13)
+            .column(12)
             .as_any()
             .downcast_ref::<Int64Array>()
             .unwrap();
         assert_eq!(error_count.value(0), 1);
         let duration_sum = batch
-            .column(14)
+            .column(13)
             .as_any()
             .downcast_ref::<Float64Array>()
             .unwrap();
         assert!((duration_sum.value(0) - 2.0).abs() < 1e-9);
         let duration_count = batch
-            .column(15)
+            .column(14)
             .as_any()
             .downcast_ref::<Int64Array>()
             .unwrap();
         assert_eq!(duration_count.value(0), 2);
         // Derived calls edges carry no attributes: a typed-JSON NULL.
-        assert!(json_texts(batch, 16)[0].is_none());
+        assert!(json_texts(batch, 15)[0].is_none());
     }
 
     #[tokio::test]
@@ -939,19 +989,19 @@ mod tests {
         assert_eq!(total, 1);
         let batch = &batches[0];
         let request_count = batch
-            .column(12)
+            .column(11)
             .as_any()
             .downcast_ref::<Int64Array>()
             .unwrap();
         assert_eq!(request_count.value(0), 4);
         let error_count = batch
-            .column(13)
+            .column(12)
             .as_any()
             .downcast_ref::<Int64Array>()
             .unwrap();
         assert_eq!(error_count.value(0), 2);
         let duration_sum = batch
-            .column(14)
+            .column(13)
             .as_any()
             .downcast_ref::<Float64Array>()
             .unwrap();

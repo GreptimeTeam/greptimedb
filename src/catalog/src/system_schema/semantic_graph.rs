@@ -41,13 +41,14 @@ use common_catalog::consts::{
     SEMANTIC_RELATIONSHIPS_TABLE_NAME as SEMANTIC_RELATIONSHIPS,
 };
 use common_error::ext::BoxedError;
-use common_recordbatch::adapter::RecordBatchStreamAdapter;
-use common_recordbatch::{DfRecordBatch, RecordBatch, SendableRecordBatchStream};
-use datafusion::error::DataFusionError;
-use datafusion::physical_plan::stream::RecordBatchStreamAdapter as DfRecordBatchStreamAdapter;
+use common_recordbatch::adapter::AsyncRecordBatchStreamAdapter;
+use common_recordbatch::{
+    DfRecordBatch, EmptyRecordBatchStream, RecordBatch, RecordBatchStreamWrapper,
+    SendableRecordBatchStream,
+};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
-use futures::TryStreamExt;
+use futures::StreamExt;
 use snafu::ResultExt;
 use store_api::storage::{ScanRequest, TableId};
 use table::TableRef;
@@ -71,22 +72,20 @@ pub type EntityGraphProviderRef = Arc<dyn EntityGraphProvider>;
 /// `operator`). See `docs/rfcs/2026-06-25-entity-relationships-and-graph-query.md`.
 #[async_trait::async_trait]
 pub trait EntityGraphProvider: Send + Sync {
-    /// Produces the entity registry (`semantic_entities`) rows for `catalog`. The
-    /// graph is small relative to raw telemetry, so the provider collects the
-    /// derivation into batches (rather than a live stream), keeping the forwarding
-    /// table trivial.
+    /// Produces the entity registry (`semantic_entities`) rows for `catalog`.
+    /// `None` means no source table declared an entity.
     async fn scan_entities(
         &self,
         catalog: &str,
         request: ScanRequest,
-    ) -> std::result::Result<Vec<RecordBatch>, BoxedError>;
+    ) -> std::result::Result<Option<SendableRecordBatchStream>, BoxedError>;
 
     /// Produces the relationship set (`semantic_relationships`) rows for `catalog`.
     async fn scan_relationships(
         &self,
         catalog: &str,
         request: ScanRequest,
-    ) -> std::result::Result<Vec<RecordBatch>, BoxedError>;
+    ) -> std::result::Result<Option<SendableRecordBatchStream>, BoxedError>;
 }
 
 /// Serves the computed graph tables under `greptime_private`, overlaid on the
@@ -179,7 +178,7 @@ fn json() -> ConcreteDataType {
 /// - `source_tables` — JSON array of the telemetry tables that contributed this entity.
 static ENTITIES_SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
     Arc::new(Schema::new(vec![
-        ColumnSchema::new("observed_at", ts(), false),
+        ColumnSchema::new("observed_at", ts(), false).with_time_index(true),
         ColumnSchema::new("window_start", ts(), true),
         ColumnSchema::new("window_end", ts(), true),
         ColumnSchema::new("fresh_until", ts(), true),
@@ -193,7 +192,7 @@ static ENTITIES_SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
 });
 
 /// Schema of `semantic_relationships` — the edge set of the graph, one row per
-/// edge observed in a time window. This is the 17-column contract every derived
+/// edge observed in a time window. This is the 16-column contract every derived
 /// branch and the declared-edge table must project for the top-level `UNION ALL`.
 ///
 /// Columns:
@@ -212,9 +211,6 @@ static ENTITIES_SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
 /// - `confidence`    — derivation certainty in `[0, 1]`: `1.0` for paired or
 ///   declared edges, lower for virtual-node or agent-inferred edges. It does
 ///   not correct for trace sampling.
-/// - `generation_id` — deterministic key of the producing (window, run) that makes
-///   re-derivation idempotent; empty for read-time derived rows (load-bearing only
-///   for a future maintained/materialised graph).
 /// - `request_count` — RED: number of requests over the window (`calls` edges).
 /// - `error_count`   — RED: number of errored requests over the window.
 /// - `duration_sum`  — RED: sum of request durations, in seconds, over the window.
@@ -224,7 +220,7 @@ static ENTITIES_SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
 ///   `db.system`, `peer.service`.
 static RELATIONSHIPS_SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
     Arc::new(Schema::new(vec![
-        ColumnSchema::new("observed_at", ts(), false),
+        ColumnSchema::new("observed_at", ts(), false).with_time_index(true),
         ColumnSchema::new("window_start", ts(), true),
         ColumnSchema::new("window_end", ts(), true),
         ColumnSchema::new("fresh_until", ts(), true),
@@ -235,7 +231,6 @@ static RELATIONSHIPS_SCHEMA: LazyLock<SchemaRef> = LazyLock::new(|| {
         ColumnSchema::new("rel_type", string(), false),
         ColumnSchema::new("provenance", string(), false),
         ColumnSchema::new("confidence", ConcreteDataType::float64_datatype(), true),
-        ColumnSchema::new("generation_id", string(), true),
         ColumnSchema::new("request_count", ConcreteDataType::int64_datatype(), true),
         ColumnSchema::new("error_count", ConcreteDataType::int64_datatype(), true),
         ColumnSchema::new("duration_sum", ConcreteDataType::float64_datatype(), true),
@@ -282,17 +277,40 @@ impl SemanticGraphTable {
         catalog: String,
         catalog_manager: Weak<dyn CatalogManager>,
         request: ScanRequest,
-    ) -> Result<Vec<RecordBatch>> {
+    ) -> Result<Option<SendableRecordBatchStream>> {
         let provider = utils::entity_graph_provider(&catalog_manager)?;
         // No provider (engine not up / non-frontend node): stream empty.
         let Some(provider) = provider else {
-            return Ok(vec![]);
+            return Ok(None);
         };
         match kind {
             GraphTableKind::Entities => provider.scan_entities(&catalog, request).await,
             GraphTableKind::Relationships => provider.scan_relationships(&catalog, request).await,
         }
         .context(InternalSnafu)
+    }
+
+    fn align_schema(
+        stream: SendableRecordBatchStream,
+        schema: SchemaRef,
+    ) -> SendableRecordBatchStream {
+        let batch_schema = schema.clone();
+        let arrow_schema = schema.arrow_schema().clone();
+        let batches = stream.map(move |batch| {
+            let batch = batch?;
+            // The derivation output is structurally identical, but its JSON
+            // fields are plain Binary without the declared extension metadata.
+            let batch = DfRecordBatch::try_new(
+                arrow_schema.clone(),
+                batch.into_df_record_batch().columns().to_vec(),
+            )
+            .context(common_recordbatch::error::NewDfRecordBatchSnafu)?;
+            Ok(RecordBatch::from_df_record_batch(
+                batch_schema.clone(),
+                batch,
+            ))
+        });
+        Box::pin(RecordBatchStreamWrapper::new(schema, Box::pin(batches)))
     }
 }
 
@@ -316,37 +334,50 @@ impl SystemTable for SemanticGraphTable {
     }
 
     fn to_stream(&self, request: ScanRequest) -> Result<SendableRecordBatchStream> {
-        let arrow_schema = self.schema.arrow_schema().clone();
+        let schema = self.schema.clone();
         let kind = self.kind;
         let catalog = self.catalog_name.clone();
         let catalog_manager = self.catalog_manager.clone();
 
-        let batch_schema = arrow_schema.clone();
-        let batches = futures::stream::once(async move {
-            Self::derive(kind, catalog, catalog_manager, request)
+        let stream_schema = schema.clone();
+        let stream = async move {
+            let stream = Self::derive(kind, catalog, catalog_manager, request)
                 .await
-                .map(move |batches| {
-                    futures::stream::iter(batches.into_iter().map(move |rb| {
-                        // Rebuild against the declared Arrow schema: the derived
-                        // batches are structurally identical, but their fields
-                        // lack the `json` extension metadata (JSON columns are
-                        // plain `Binary` in the derivation output).
-                        DfRecordBatch::try_new(
-                            batch_schema.clone(),
-                            rb.into_df_record_batch().columns().to_vec(),
-                        )
-                        .map_err(DataFusionError::from)
-                    }))
-                })
-                .map_err(|err| DataFusionError::External(Box::new(err)))
-        })
-        .try_flatten();
-
-        let stream = Box::pin(DfRecordBatchStreamAdapter::new(arrow_schema, batches));
-        Ok(Box::pin(
-            RecordBatchStreamAdapter::try_new(stream)
                 .map_err(BoxedError::new)
-                .context(InternalSnafu)?,
-        ))
+                .context(common_recordbatch::error::ExternalSnafu)?;
+            Ok(match stream {
+                Some(stream) => Self::align_schema(stream, stream_schema.clone()),
+                None => Box::pin(EmptyRecordBatchStream::new(stream_schema.clone())),
+            })
+        };
+
+        Ok(Box::pin(AsyncRecordBatchStreamAdapter::new(
+            schema,
+            Box::pin(stream),
+        )))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn graph_tables_use_observed_at_as_time_index() {
+        for schema in [&*ENTITIES_SCHEMA, &*RELATIONSHIPS_SCHEMA] {
+            assert_eq!(
+                schema.timestamp_column().map(|column| column.name.as_str()),
+                Some("observed_at")
+            );
+        }
+    }
+
+    #[test]
+    fn relationship_schema_does_not_expose_generation_id() {
+        assert!(
+            RELATIONSHIPS_SCHEMA
+                .column_schema_by_name("generation_id")
+                .is_none()
+        );
     }
 }

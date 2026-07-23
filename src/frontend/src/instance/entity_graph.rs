@@ -35,7 +35,7 @@ use common_catalog::consts::{
 };
 use common_error::ext::BoxedError;
 use common_query::OutputData;
-use common_recordbatch::{RecordBatch, util as record_util};
+use common_recordbatch::SendableRecordBatchStream;
 use common_telemetry::warn;
 use datafusion::dataframe::DataFrame;
 use datafusion_expr::LogicalPlan;
@@ -59,6 +59,11 @@ use crate::error;
 pub struct EntityGraphProviderImpl {
     query_engine: QueryEngineRef,
     catalog_manager: Weak<dyn CatalogManager>,
+}
+
+struct EntitySource {
+    declarations: Vec<EntityDeclaration>,
+    table: TableRef,
 }
 
 impl EntityGraphProviderImpl {
@@ -176,13 +181,7 @@ impl EntityGraphProviderImpl {
     async fn enumerate(
         &self,
         catalog: &str,
-    ) -> Result<
-        (
-            Vec<(EntityDeclaration, TableRef)>,
-            Vec<(EntityDeclaration, TableRef)>,
-        ),
-        BoxedError,
-    > {
+    ) -> Result<(Vec<EntitySource>, Vec<(EntityDeclaration, TableRef)>), BoxedError> {
         let Some(catalog_manager) = self.catalog_manager.upgrade() else {
             return Ok((vec![], vec![]));
         };
@@ -207,6 +206,10 @@ impl EntityGraphProviderImpl {
                 let table_info = table.table_info();
                 let table_declarations = Self::declarations_for(&table_info);
                 if is_trace_v1_table(&table_info) {
+                    // TODO(entity-graph): validate the complete fixed trace-v1
+                    // schema before adding the table to calls derivation, and
+                    // skip malformed/stale tables instead of letting one poison
+                    // the whole relationship scan.
                     match table_declarations
                         .iter()
                         .find(|d| d.entity_type == "service")
@@ -220,11 +223,12 @@ impl EntityGraphProviderImpl {
                         ),
                     }
                 }
-                declarations.extend(
-                    table_declarations
-                        .into_iter()
-                        .map(|decl| (decl, table.clone())),
-                );
+                if !table_declarations.is_empty() {
+                    declarations.push(EntitySource {
+                        declarations: table_declarations,
+                        table,
+                    });
+                }
             }
         }
         Ok((declarations, traces))
@@ -245,7 +249,7 @@ impl EntityGraphProviderImpl {
         self.query_engine.read_table(table).map_err(BoxedError::new)
     }
 
-    /// Executes a derivation plan, collecting its rows.
+    /// Executes a derivation plan and returns its live result stream.
     ///
     /// TODO(entity-graph): the QueryContext must come from the outer query
     /// instead of being built here, so the derivation inherits the caller's
@@ -255,7 +259,7 @@ impl EntityGraphProviderImpl {
         &self,
         catalog: &str,
         plan: LogicalPlan,
-    ) -> Result<Vec<RecordBatch>, BoxedError> {
+    ) -> Result<Option<SendableRecordBatchStream>, BoxedError> {
         let query_ctx: QueryContextRef = QueryContextBuilder::default()
             .current_catalog(catalog.to_string())
             .current_schema(DEFAULT_SCHEMA_NAME.to_string())
@@ -269,9 +273,9 @@ impl EntityGraphProviderImpl {
         let stream = match output.data {
             OutputData::Stream(stream) => stream,
             OutputData::RecordBatches(batches) => batches.as_stream(),
-            OutputData::AffectedRows(_) => return Ok(vec![]),
+            OutputData::AffectedRows(_) => return Ok(None),
         };
-        record_util::collect(stream).await.map_err(BoxedError::new)
+        Ok(Some(stream))
     }
 }
 
@@ -281,18 +285,18 @@ impl EntityGraphProvider for EntityGraphProviderImpl {
         &self,
         catalog: &str,
         request: ScanRequest,
-    ) -> Result<Vec<RecordBatch>, BoxedError> {
-        let (declarations, _) = self.enumerate(catalog).await?;
-        let mut branches = Vec::with_capacity(declarations.len());
-        for (decl, table) in declarations {
-            branches.push((decl, self.read_table(table)?));
+    ) -> Result<Option<SendableRecordBatchStream>, BoxedError> {
+        let (sources, _) = self.enumerate(catalog).await?;
+        let mut plans = Vec::with_capacity(sources.len());
+        for source in sources {
+            plans.push((source.declarations, self.read_table(source.table)?));
         }
         let window = Self::query_window(&request);
-        let Some(plan) = build_registry_plan(branches, &window)
+        let Some(plan) = build_registry_plan(plans, &window)
             .context(error::DataFusionSnafu)
             .map_err(BoxedError::new)?
         else {
-            return Ok(vec![]);
+            return Ok(None);
         };
         self.execute_plan(catalog, plan).await
     }
@@ -301,7 +305,7 @@ impl EntityGraphProvider for EntityGraphProviderImpl {
         &self,
         catalog: &str,
         request: ScanRequest,
-    ) -> Result<Vec<RecordBatch>, BoxedError> {
+    ) -> Result<Option<SendableRecordBatchStream>, BoxedError> {
         let (_, traces) = self.enumerate(catalog).await?;
         let mut scans = Vec::with_capacity(traces.len());
         for (service, trace) in traces {
@@ -312,7 +316,7 @@ impl EntityGraphProvider for EntityGraphProviderImpl {
             .context(error::DataFusionSnafu)
             .map_err(BoxedError::new)?
         else {
-            return Ok(vec![]);
+            return Ok(None);
         };
         self.execute_plan(catalog, plan).await
     }
