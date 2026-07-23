@@ -230,6 +230,7 @@ impl JsonArray<'_> {
 
         let formatter = ArrayFormatter::try_new(&self.inner, &FormatOptions::default())
             .context(ArrowComputeSnafu)?;
+
         let values = (0..self.inner.len())
             .map(|i| {
                 self.inner
