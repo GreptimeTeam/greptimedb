@@ -249,7 +249,7 @@ impl CompactionScheduler {
     /// Schedules a compaction for the region.
     /// Returns whether a compaction is scheduled.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn schedule_compaction(
+    pub(crate) fn schedule_compaction(
         &mut self,
         region_id: RegionId,
         compact_options: compact_request::Options,
@@ -321,7 +321,7 @@ impl CompactionScheduler {
     // Handle pending manual compaction request for the region.
     //
     // Returns true if should early return, false otherwise.
-    pub(crate) async fn handle_pending_compaction_request(
+    pub(crate) fn handle_pending_compaction_request(
         &mut self,
         region_id: RegionId,
         manifest_ctx: &ManifestContextRef,
@@ -386,14 +386,11 @@ impl CompactionScheduler {
 
         // If there a pending compaction request, handle it first
         // and defer returning the pending DDL requests to the caller.
-        if self
-            .handle_pending_compaction_request(
-                region_id,
-                manifest_ctx,
-                schema_metadata_manager.clone(),
-            )
-            .await
-        {
+        if self.handle_pending_compaction_request(
+            region_id,
+            manifest_ctx,
+            schema_metadata_manager.clone(),
+        ) {
             return Vec::new();
         }
 
@@ -408,8 +405,7 @@ impl CompactionScheduler {
         }
 
         if status.regular_replan_pending {
-            self.schedule_next_compaction(region_id, manifest_ctx, schema_metadata_manager)
-                .await;
+            self.schedule_next_compaction(region_id, manifest_ctx, schema_metadata_manager);
             return Vec::new();
         }
 
@@ -484,7 +480,7 @@ impl CompactionScheduler {
 
     /// Schedules next compaction upon a finished compaction.
     /// Returns whether the compaction is scheduled.
-    pub(crate) async fn schedule_next_compaction(
+    pub(crate) fn schedule_next_compaction(
         &mut self,
         region_id: RegionId,
         manifest_ctx: &ManifestContextRef,
@@ -919,20 +915,16 @@ impl CompactionScheduler {
             }
         }
 
-        if self
-            .handle_pending_compaction_request(
-                region_id,
-                manifest_ctx,
-                schema_metadata_manager.clone(),
-            )
-            .await
-        {
+        if self.handle_pending_compaction_request(
+            region_id,
+            manifest_ctx,
+            schema_metadata_manager.clone(),
+        ) {
             return Vec::new();
         }
 
         if self.region_status[&region_id].regular_replan_pending {
-            self.schedule_next_compaction(region_id, manifest_ctx, schema_metadata_manager)
-                .await;
+            self.schedule_next_compaction(region_id, manifest_ctx, schema_metadata_manager);
             return Vec::new();
         }
 
@@ -2055,7 +2047,6 @@ mod tests {
                     schema_metadata_manager.clone(),
                     1,
                 )
-                .await
                 .unwrap()
         );
         let finished = recv_compaction_pick_finished(rx).await;
@@ -2202,7 +2193,6 @@ mod tests {
                     schema_metadata_manager.clone(),
                     1,
                 )
-                .await
                 .unwrap()
         );
         let (manual_tx, _manual_rx) = oneshot::channel();
@@ -2218,7 +2208,6 @@ mod tests {
                     schema_metadata_manager,
                     1,
                 )
-                .await
                 .unwrap()
         );
 
@@ -2500,7 +2489,6 @@ mod tests {
                 schema_metadata_manager.clone(),
                 1,
             )
-            .await
             .unwrap();
         assert!(scheduled);
         let finished = recv_compaction_pick_finished(&mut rx).await;
@@ -2531,7 +2519,6 @@ mod tests {
                 schema_metadata_manager.clone(),
                 1,
             )
-            .await
             .unwrap();
         assert!(scheduled);
         let finished = recv_compaction_pick_finished(&mut rx).await;
@@ -2589,7 +2576,6 @@ mod tests {
                 schema_metadata_manager.clone(),
                 1,
             )
-            .await
             .unwrap();
 
         // The boolean result is what the worker uses to decide whether to update
@@ -2658,7 +2644,6 @@ mod tests {
                         schema_metadata_manager,
                         1,
                     )
-                    .await
                     .unwrap();
                 (scheduled, scheduler)
             }
@@ -2694,7 +2679,6 @@ mod tests {
                     schema_metadata_manager.clone(),
                     1,
                 )
-                .await
                 .unwrap()
         );
         let (manual_tx, _manual_rx) = oneshot::channel();
@@ -2710,7 +2694,6 @@ mod tests {
                     schema_metadata_manager,
                     1,
                 )
-                .await
                 .unwrap()
         );
         let status = scheduler.region_status.get(&region_id).unwrap();
@@ -3050,7 +3033,6 @@ mod tests {
                     schema_metadata_manager.clone(),
                     1,
                 )
-                .await
                 .unwrap()
         );
         assert!(
@@ -3065,7 +3047,6 @@ mod tests {
                     schema_metadata_manager.clone(),
                     1,
                 )
-                .await
                 .unwrap()
         );
         let (ddl_tx, mut ddl_rx) = oneshot::channel();
@@ -3198,7 +3179,6 @@ mod tests {
                     schema_metadata_manager.clone(),
                     1,
                 )
-                .await
                 .unwrap()
         );
         let (ddl_tx, mut ddl_rx) = oneshot::channel();
@@ -3251,7 +3231,6 @@ mod tests {
                         schema_metadata_manager.clone(),
                         1,
                     )
-                    .await
                     .unwrap()
             );
             postfence_waiters.push(waiter_rx);
@@ -3268,7 +3247,6 @@ mod tests {
                     schema_metadata_manager.clone(),
                     1,
                 )
-                .await
                 .unwrap()
         );
 
@@ -4124,7 +4102,6 @@ mod tests {
                 schema_metadata_manager.clone(),
                 1,
             )
-            .await
             .unwrap();
 
         assert!(scheduled);
@@ -4188,7 +4165,6 @@ mod tests {
                 schema_metadata_manager.clone(),
                 1,
             )
-            .await
             .unwrap();
         // Should schedule 1 compaction.
         assert!(scheduled);
@@ -4230,7 +4206,6 @@ mod tests {
                 schema_metadata_manager.clone(),
                 1,
             )
-            .await
             .unwrap();
         assert!(!scheduled);
         assert_eq!(1, scheduler.region_status.len());
@@ -4248,9 +4223,11 @@ mod tests {
         scheduler
             .on_compaction_finished(region_id, &manifest_ctx, schema_metadata_manager.clone())
             .await;
-        let scheduled = scheduler
-            .schedule_next_compaction(region_id, &manifest_ctx, schema_metadata_manager.clone())
-            .await;
+        let scheduled = scheduler.schedule_next_compaction(
+            region_id,
+            &manifest_ctx,
+            schema_metadata_manager.clone(),
+        );
         assert!(scheduled);
         assert_eq!(1, scheduler.region_status.len());
         assert_eq!(1, job_scheduler.num_jobs());
@@ -4284,7 +4261,6 @@ mod tests {
                 schema_metadata_manager,
                 1,
             )
-            .await
             .unwrap();
         assert!(!scheduled);
         assert_eq!(2, job_scheduler.num_jobs());
@@ -4372,7 +4348,6 @@ mod tests {
                 schema_metadata_manager.clone(),
                 1,
             )
-            .await
             .unwrap();
         assert!(scheduled);
 
@@ -4408,7 +4383,6 @@ mod tests {
                 schema_metadata_manager.clone(),
                 1,
             )
-            .await
             .unwrap();
         assert!(!scheduled);
         assert_eq!(1, job_scheduler.num_jobs());
@@ -4426,7 +4400,6 @@ mod tests {
                 schema_metadata_manager.clone(),
                 1,
             )
-            .await
             .unwrap();
         assert!(scheduled);
     }
@@ -4466,18 +4439,16 @@ mod tests {
             )
             .await;
 
-        let result = scheduler
-            .schedule_compaction(
-                region_id,
-                compact_request::Options::Regular(Default::default()),
-                &version_control,
-                &env.access_layer,
-                OptionOutputTx::none(),
-                &manifest_ctx,
-                schema_metadata_manager.clone(),
-                1,
-            )
-            .await;
+        let result = scheduler.schedule_compaction(
+            region_id,
+            compact_request::Options::Regular(Default::default()),
+            &version_control,
+            &env.access_layer,
+            OptionOutputTx::none(),
+            &manifest_ctx,
+            schema_metadata_manager.clone(),
+            1,
+        );
 
         assert!(result.unwrap());
         assert!(scheduler.region_status.contains_key(&region_id));
@@ -4551,7 +4522,6 @@ mod tests {
                 schema_metadata_manager.clone(),
                 1,
             )
-            .await
             .unwrap();
         // Should schedule 1 compaction.
         assert_eq!(1, scheduler.region_status.len());
@@ -4587,7 +4557,6 @@ mod tests {
                 schema_metadata_manager.clone(),
                 1,
             )
-            .await
             .unwrap();
         assert_eq!(1, scheduler.region_status.len());
         // Current job num should be 1 since compaction is in progress.
@@ -4666,7 +4635,6 @@ mod tests {
                 schema_metadata_manager,
                 1,
             )
-            .await
             .unwrap();
 
         let result = rx.await.unwrap();
@@ -5196,9 +5164,11 @@ mod tests {
         let (schema_metadata_manager, _kv_backend) = mock_schema_metadata_manager();
         // With no compactable files, next scheduling returns false and removes
         // the status without creating a background task.
-        let scheduled = scheduler
-            .schedule_next_compaction(region_id, &manifest_ctx, schema_metadata_manager.clone())
-            .await;
+        let scheduled = scheduler.schedule_next_compaction(
+            region_id,
+            &manifest_ctx,
+            schema_metadata_manager.clone(),
+        );
         assert!(scheduled);
         let finished = recv_compaction_pick_finished(&mut rx).await;
         scheduler
@@ -5250,9 +5220,11 @@ mod tests {
 
         let (schema_metadata_manager, _kv_backend) = mock_schema_metadata_manager();
         // The failing scheduler simulates a submit error; callers must see false.
-        let scheduled = scheduler
-            .schedule_next_compaction(region_id, &manifest_ctx, schema_metadata_manager.clone())
-            .await;
+        let scheduled = scheduler.schedule_next_compaction(
+            region_id,
+            &manifest_ctx,
+            schema_metadata_manager.clone(),
+        );
         assert!(scheduled);
         let finished = recv_compaction_pick_finished(&mut rx).await;
         scheduler

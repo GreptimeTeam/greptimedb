@@ -81,20 +81,16 @@ impl<S> RegionWorkerLoop<S> {
         COMPACTION_REQUEST_COUNT.inc();
         let parallelism = req.parallelism.unwrap_or(1) as usize;
         self.listener.on_compaction_schedule_attempt(region_id);
-        if let Err(e) = self
-            .compaction_scheduler
-            .schedule_compaction(
-                region.region_id,
-                req.options,
-                &region.version_control,
-                &region.access_layer,
-                sender,
-                &region.manifest_ctx,
-                self.schema_metadata_manager.clone(),
-                parallelism,
-            )
-            .await
-        {
+        if let Err(e) = self.compaction_scheduler.schedule_compaction(
+            region.region_id,
+            req.options,
+            &region.version_control,
+            &region.access_layer,
+            sender,
+            &region.manifest_ctx,
+            self.schema_metadata_manager.clone(),
+            parallelism,
+        ) {
             error!(e; "Failed to schedule compaction task for region: {}", region_id);
         } else {
             info!(
@@ -176,15 +172,11 @@ impl<S> RegionWorkerLoop<S> {
                 "minimal compaction interval time {:?} has passed, scheduling next compaction",
                 self.config.min_compaction_interval
             );
-            if self
-                .compaction_scheduler
-                .schedule_next_compaction(
-                    region_id,
-                    &region.manifest_ctx,
-                    self.schema_metadata_manager.clone(),
-                )
-                .await
-            {
+            if self.compaction_scheduler.schedule_next_compaction(
+                region_id,
+                &region.manifest_ctx,
+                self.schema_metadata_manager.clone(),
+            ) {
                 region.update_schedule_compaction_millis();
             }
         } else {
@@ -257,20 +249,16 @@ impl<S> RegionWorkerLoop<S> {
             );
             self.listener
                 .on_compaction_schedule_attempt(region.region_id);
-            match self
-                .compaction_scheduler
-                .schedule_compaction(
-                    region.region_id,
-                    compact_request::Options::Regular(Default::default()),
-                    &region.version_control,
-                    &region.access_layer,
-                    OptionOutputTx::none(),
-                    &region.manifest_ctx,
-                    self.schema_metadata_manager.clone(),
-                    1, // Default for automatic compaction
-                )
-                .await
-            {
+            match self.compaction_scheduler.schedule_compaction(
+                region.region_id,
+                compact_request::Options::Regular(Default::default()),
+                &region.version_control,
+                &region.access_layer,
+                OptionOutputTx::none(),
+                &region.manifest_ctx,
+                self.schema_metadata_manager.clone(),
+                1, // Default for automatic compaction
+            ) {
                 Ok(true) => region.update_schedule_compaction_millis(),
                 Ok(false) => {}
                 Err(e) => {
