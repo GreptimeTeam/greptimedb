@@ -199,6 +199,23 @@ impl JsonArray<'_> {
             return Ok(self.inner.clone());
         }
 
+        if to_type == &DataType::Utf8View {
+            let values = (0..self.inner.len())
+                .map(|i| {
+                    if self.inner.is_null(i) {
+                        return Ok(None);
+                    }
+                    let value = match self.try_get_value(i)? {
+                        Value::Null => return Ok(None),
+                        Value::String(value) => value,
+                        value => value.to_string(),
+                    };
+                    Ok(Some(value))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            return Ok(Arc::new(StringViewArray::from(values)) as ArrayRef);
+        }
+
         if from_type.is_binary() && !to_type.is_binary() {
             return self.decode_variant(to_type);
         }
@@ -213,6 +230,7 @@ impl JsonArray<'_> {
 
         let formatter = ArrayFormatter::try_new(&self.inner, &FormatOptions::default())
             .context(ArrowComputeSnafu)?;
+
         let values = (0..self.inner.len())
             .map(|i| {
                 self.inner
@@ -386,6 +404,29 @@ mod test {
                 .to_string(),
             "Invalid JSON: unknown JSON type Int32"
         );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_cast_variant_to_utf8_view_preserves_json_null() -> Result<()> {
+        let encode = |json: &[u8]| jsonb::parse_value(json).unwrap().to_vec();
+        let json_null = encode(b"null");
+        let object = encode(br#"{"value":1}"#);
+        let string = encode(br#""text""#);
+        let variants: ArrayRef = Arc::new(BinaryArray::from(vec![
+            Some(json_null.as_slice()),
+            Some(object.as_slice()),
+            Some(string.as_slice()),
+            None,
+        ]));
+
+        let casted = JsonArray::from(&variants).try_cast(&DataType::Utf8View)?;
+        let casted = casted.as_string_view();
+        assert!(casted.is_null(0));
+        assert_eq!(casted.value(1), r#"{"value":1}"#);
+        assert_eq!(casted.value(2), "text");
+        assert!(casted.is_null(3));
 
         Ok(())
     }
