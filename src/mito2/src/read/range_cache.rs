@@ -62,9 +62,16 @@ pub(crate) struct ScanRequestFingerprint {
     append_mode: bool,
     filter_deleted: bool,
     merge_mode: MergeMode,
+    stage: RangeScanStage,
     /// We keep the partition expr version to ensure we won't reuse the fingerprint after we change the partition expr.
     /// We store the version instead of the whole partition expr or partition expr filters.
     partition_expr_version: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum RangeScanStage {
+    Data,
+    CandidateSeries,
 }
 
 #[derive(Debug)]
@@ -105,6 +112,7 @@ impl ScanRequestFingerprintBuilder {
             append_mode,
             filter_deleted,
             merge_mode,
+            stage: RangeScanStage::Data,
             partition_expr_version,
         }
     }
@@ -154,6 +162,20 @@ impl ScanRequestFingerprint {
             append_mode: self.append_mode,
             filter_deleted: self.filter_deleted,
             merge_mode: self.merge_mode,
+            stage: self.stage,
+            partition_expr_version: self.partition_expr_version,
+        }
+    }
+
+    fn for_candidate_series(&self) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+            time_filters: self.time_filters.clone(),
+            series_row_selector: self.series_row_selector,
+            append_mode: self.append_mode,
+            filter_deleted: self.filter_deleted,
+            merge_mode: self.merge_mode,
+            stage: RangeScanStage::CandidateSeries,
             partition_expr_version: self.partition_expr_version,
         }
     }
@@ -448,6 +470,22 @@ pub(crate) fn build_range_cache_key(
     stream_ctx: &StreamContext,
     part_range: &PartitionRange,
 ) -> Option<RangeScanCacheKey> {
+    build_range_cache_key_inner(stream_ctx, part_range, false)
+}
+
+/// Builds a cache key for a candidate-series partition-range result.
+pub(crate) fn build_candidate_range_cache_key(
+    stream_ctx: &StreamContext,
+    part_range: &PartitionRange,
+) -> Option<RangeScanCacheKey> {
+    build_range_cache_key_inner(stream_ctx, part_range, true)
+}
+
+fn build_range_cache_key_inner(
+    stream_ctx: &StreamContext,
+    part_range: &PartitionRange,
+    candidate_series: bool,
+) -> Option<RangeScanCacheKey> {
     if !stream_ctx.input.cache_strategy.has_range_result_cache() {
         return None;
     }
@@ -498,6 +536,11 @@ pub(crate) fn build_range_cache_key(
         fingerprint.without_time_filters()
     } else {
         fingerprint.clone()
+    };
+    let scan = if candidate_series {
+        scan.for_candidate_series()
+    } else {
+        scan
     };
 
     Some(RangeScanCacheKey {
@@ -1088,6 +1131,22 @@ mod tests {
         let key_b = build_range_cache_key(&ctx_b, &part_b).unwrap();
         assert_eq!(key_a.scan, key_b.scan);
         assert!(key_a.scan.time_filters().is_empty());
+    }
+
+    #[tokio::test]
+    async fn candidate_series_cache_key_is_separate_from_data() {
+        let partition_range = (
+            Timestamp::new_millisecond(1000),
+            Timestamp::new_millisecond(2000),
+        );
+        let (ctx, part_range) =
+            new_stream_context(vec![col("k0").eq(lit("foo"))], None, partition_range).await;
+
+        let data_key = build_range_cache_key(&ctx, &part_range).unwrap();
+        let candidate_key = build_candidate_range_cache_key(&ctx, &part_range).unwrap();
+
+        assert_ne!(data_key.scan, candidate_key.scan);
+        assert_eq!(data_key.row_groups, candidate_key.row_groups);
     }
 
     #[tokio::test]
