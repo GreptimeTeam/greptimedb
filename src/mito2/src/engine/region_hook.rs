@@ -89,7 +89,7 @@
 //! | Close | [`on_region_closed`] | A close request (or a close-after-flush) removes the region from the active set. Data files, manifest and WAL state are **preserved**; the region may be reopened. |
 //! | Logical drop | [`on_region_dropped`] | A drop request has been handled: the region leaves the active set and its WAL entries are marked obsolete. Data files are **not yet deleted**. |
 //! | Physical file removal | [`on_region_files_removed`] | The drop GC worker has deleted the region directory. Terminal file-lifecycle event. |
-//! | Global GC pass | [`on_region_gc`] | The datanode's global GC worker finished a GC pass for a region — both periodic GC for live regions and the global reclamation of dropped/repartitioned regions (`is_region_dropped`). |
+//! | Global GC pass | [`on_region_gc`] | The datanode's global GC worker finished a GC pass for a region — both periodic GC for live regions and the global reclamation of dropped/repartitioned regions (`is_region_dropped`). Also fired by the offline cleanup path (`handle_offline_cleanup_request`, i.e. soft-drop PURGE) once the region directory is removed, with `is_region_dropped = true` and `full_file_listing = true`. |
 //!
 //! Notes:
 //! - `on_region_closed` / `on_region_dropped` run **inline in the region worker loop**,
@@ -104,6 +104,12 @@
 //! - When global GC is enabled and a normal table region is dropped with `partial_drop`, its
 //!   directory is left for global reclamation and `on_region_files_removed` is **not** fired
 //!   by the drop worker (observe it via the global GC path instead).
+//! - The offline cleanup path (`handle_offline_cleanup_request`, reached by a soft-drop
+//!   `PURGE`) force-removes the region directory but has no `RegionMetadataRef` for the
+//!   offline region, so it cannot fire `on_region_files_removed`. It fires `on_region_gc`
+//!   instead — with `is_region_dropped = true` and `full_file_listing = true` — so
+//!   extensions can reclaim sidecar state for the now-removed region. A hook `Err` is
+//!   propagated so the caller retries the (idempotent) cleanup.
 //! - Logical file removal (compaction, region edit, truncate) is already observable via
 //!   [`on_manifest_updated`] (`Edit.files_to_remove` / `Truncate` action); only the drop
 //!   worker's physical directory deletion needs a dedicated file hook.
@@ -128,8 +134,9 @@
 //! ## Future work
 //!
 //! `on_region_files_removed` currently covers only the **drop** GC worker's physical
-//! directory removal. A broader per-file `on_files_removed` hook covering compaction
-//! removal and truncate is not yet implemented
+//! directory removal. The global-GC reclamation path and the offline-cleanup path
+//! (soft-drop PURGE) are covered by `on_region_gc` instead. A broader per-file
+//! `on_files_removed` hook covering compaction removal and truncate is not yet implemented
 //! (though logical file removal is already observable via `on_manifest_updated`,
 //! and the global GC reclamation path is covered by `on_region_gc`).
 //! Role/leadership transitions (`on_region_role_changed`) are also not hooked.
@@ -390,7 +397,9 @@ pub trait RegionHook: Send + Sync + Debug {
 
     /// Called after the datanode's global GC worker (`LocalGcWorker`) finishes a
     /// GC pass for a region — live regions (periodic GC) or dropped/repartitioned
-    /// regions (the global reclamation path). Lets extensions with sidecar files
+    /// regions (the global reclamation path). Also fired by the offline cleanup
+    /// path (`handle_offline_cleanup_request`, i.e. soft-drop PURGE) once the
+    /// region directory has been removed. Lets extensions with sidecar files
     /// outside mito2's region dir clean up residual files.
     ///
     /// Always scoped to [`RegionGcInfo::removed_files`]: clean only sidecar
@@ -412,7 +421,30 @@ pub trait RegionHook: Send + Sync + Debug {
     /// same `removed_files`; treat live cleanup as opportunistic.
     ///
     /// `region_metadata` is `None` for dropped regions; use `region_id` +
-    /// `access_layer`. Idempotent; runs on the background GC task.
+    /// `access_layer`. Idempotent.
+    ///
+    /// # Execution context
+    ///
+    /// On the global-GC path this runs on the background GC task, outside the
+    /// region worker loop. The offline cleanup path
+    /// (`handle_offline_cleanup_request`, reached by soft-drop PURGE) instead
+    /// runs it **inline in the region worker loop** and propagates `Err` so the
+    /// caller retries the (idempotent) cleanup. So — like `on_region_closed` /
+    /// `on_region_dropped` — implementations **must be fast and must not block
+    /// indefinitely** while awaited there: while the callback is pending, every
+    /// subsequent DDL request for every region on that worker is blocked.
+    /// Extension authors who wrote their hook against the "background GC task"
+    /// contract must account for this second, latency-sensitive trigger.
+    ///
+    /// The offline cleanup path fires this callback once the region directory is
+    /// confirmed **absent** — including no-op purges where nothing was actually
+    /// removed this call (a retry after the directory was already gone, or a
+    /// region that never had files on this datanode, since
+    /// `remove_region_dir_for_full_drop` returns `Ok` for an absent/empty
+    /// prefix). `RegionGcInfo::removed_files` is empty in that case; do **not**
+    /// interpret the call as "files were deleted in this call". This is
+    /// asymmetric with the GC path, which fires only when files were deleted or
+    /// a full listing was performed.
     async fn on_region_gc(
         &self,
         region_id: RegionId,

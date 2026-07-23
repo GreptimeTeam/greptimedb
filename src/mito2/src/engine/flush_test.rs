@@ -17,7 +17,7 @@
 use std::assert_matches;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use api::v1::Rows;
@@ -41,10 +41,11 @@ use store_api::region_request::{
 use store_api::storage::{RegionId, ScanRequest};
 use tokio::sync::Notify;
 
+use crate::access_layer::AccessLayerRef;
 use crate::config::MitoConfig;
 use crate::engine::MitoEngine;
 use crate::engine::listener::{EventListener, FlushListener, StallListener};
-use crate::engine::region_hook::{RegionHook, RegionHookRef, SstFileInfo};
+use crate::engine::region_hook::{RegionGcInfo, RegionHook, RegionHookRef, SstFileInfo};
 use crate::error::Error;
 use crate::manifest::action::RegionMetaActionList;
 use crate::test_util::{
@@ -1606,6 +1607,12 @@ pub(super) struct MockRegionHook {
     pub(super) closed_count: AtomicUsize,
     pub(super) dropped_count: AtomicUsize,
     pub(super) files_removed_count: AtomicUsize,
+    pub(super) gc_count: AtomicUsize,
+    pub(super) last_gc_is_region_dropped: AtomicBool,
+    pub(super) last_gc_full_file_listing: AtomicBool,
+    /// When set, `on_region_gc` returns `Err` (after recording the call), to
+    /// exercise the callers' retry/propagation behavior.
+    pub(super) gc_should_fail: AtomicBool,
     notify: Notify,
     dropped_notify: Notify,
     files_removed_notify: Notify,
@@ -1620,6 +1627,10 @@ impl MockRegionHook {
             closed_count: AtomicUsize::new(0),
             dropped_count: AtomicUsize::new(0),
             files_removed_count: AtomicUsize::new(0),
+            gc_count: AtomicUsize::new(0),
+            last_gc_is_region_dropped: AtomicBool::new(false),
+            last_gc_full_file_listing: AtomicBool::new(false),
+            gc_should_fail: AtomicBool::new(false),
             notify: Notify::new(),
             dropped_notify: Notify::new(),
             files_removed_notify: Notify::new(),
@@ -1720,6 +1731,33 @@ impl RegionHook for MockRegionHook {
             region_id
         );
         self.files_removed_notify.notify_one();
+    }
+
+    async fn on_region_gc(
+        &self,
+        region_id: RegionId,
+        _region_metadata: Option<&RegionMetadataRef>,
+        _access_layer: &AccessLayerRef,
+        info: &RegionGcInfo<'_>,
+    ) -> Result<(), Error> {
+        self.gc_count.fetch_add(1, Ordering::Relaxed);
+        self.last_gc_is_region_dropped
+            .store(info.is_region_dropped, Ordering::Relaxed);
+        self.last_gc_full_file_listing
+            .store(info.full_file_listing, Ordering::Relaxed);
+        common_telemetry::info!(
+            "MockRegionHook::on_region_gc: region={}, is_region_dropped={}, full_file_listing={}",
+            region_id,
+            info.is_region_dropped,
+            info.full_file_listing
+        );
+        if self.gc_should_fail.load(Ordering::Relaxed) {
+            return crate::error::UnexpectedSnafu {
+                reason: "simulated offline-cleanup hook failure".to_string(),
+            }
+            .fail();
+        }
+        Ok(())
     }
 }
 
