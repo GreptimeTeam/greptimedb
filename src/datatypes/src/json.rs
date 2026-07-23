@@ -36,7 +36,7 @@ use crate::types::json_type::JsonNativeType;
 use crate::value::{ListValue, StructValue, Value};
 
 /// Maximum number of JSON container levels represented as nested Arrow types.
-const JSON2_MAX_STRUCTURED_DEPTH: usize = 50;
+pub const JSON2_MAX_STRUCTURED_DEPTH: usize = 50;
 
 /// JSON2 settings stored in column schema metadata and represented through
 /// Arrow extension metadata.
