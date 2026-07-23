@@ -32,13 +32,14 @@ use store_api::codec::PrimaryKeyEncoding;
 use store_api::metric_engine_consts::{
     MEMTABLE_PARTITION_TREE_PRIMARY_KEY_ENCODING, PRIMARY_KEY_ENCODING,
 };
-use store_api::mito_engine_options::COMPACTION_OVERRIDE;
+use store_api::mito_engine_options::{COMPACTION_OVERRIDE, MAX_ROW_GROUP_ROW_COUNT_LIMIT};
 use store_api::storage::{ColumnId, RegionId};
 use strum::EnumString;
 
 use crate::error::{InvalidRegionOptionsSnafu, JsonOptionsSnafu, Result};
 use crate::memtable::bulk::BulkMemtableConfig;
 use crate::sst::FormatType;
+use crate::sst::parquet::DEFAULT_ROW_GROUP_SIZE;
 
 const DEFAULT_INDEX_SEGMENT_ROW_COUNT: usize = 1024;
 const COMPACTION_TWCS_PREFIX: &str = "compaction.twcs.";
@@ -104,6 +105,9 @@ pub struct RegionOptions {
     pub merge_mode: Option<MergeMode>,
     /// SST format type.
     pub sst_format: Option<FormatType>,
+    /// Max number of rows in a parquet row group. Uses [DEFAULT_ROW_GROUP_SIZE] if `None`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_row_group_row_count: Option<usize>,
     /// Internal primary key encoding override used by metric-engine.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub primary_key_encoding: Option<PrimaryKeyEncoding>,
@@ -134,7 +138,23 @@ impl RegionOptions {
                 }
             );
         }
+        if let Some(row_count) = self.max_row_group_row_count {
+            ensure!(
+                row_count > 0 && row_count <= MAX_ROW_GROUP_ROW_COUNT_LIMIT,
+                InvalidRegionOptionsSnafu {
+                    reason: format!(
+                        "max_row_group_row_count must be in (0, {MAX_ROW_GROUP_ROW_COUNT_LIMIT}], got {row_count}",
+                    ),
+                }
+            );
+        }
         Ok(())
+    }
+
+    /// Returns the configured row group size, falling back to [DEFAULT_ROW_GROUP_SIZE].
+    pub fn row_group_size(&self) -> usize {
+        self.max_row_group_row_count
+            .unwrap_or(DEFAULT_ROW_GROUP_SIZE)
     }
 
     /// Returns `true` if deduplication is needed.
@@ -260,6 +280,7 @@ impl RegionOptions {
             memtable,
             merge_mode: options.merge_mode,
             sst_format,
+            max_row_group_row_count: options.max_row_group_row_count,
             primary_key_encoding,
             write_buffer_size: options.write_buffer_size,
         };
@@ -372,6 +393,8 @@ struct RegionOptionsWithoutEnum {
     merge_mode: Option<MergeMode>,
     #[serde_as(as = "NoneAsEmptyString")]
     sst_format: Option<FormatType>,
+    #[serde_as(as = "NoneAsEmptyString")]
+    max_row_group_row_count: Option<usize>,
 }
 
 impl Default for RegionOptionsWithoutEnum {
@@ -385,6 +408,7 @@ impl Default for RegionOptionsWithoutEnum {
             append_mode: options.append_mode,
             merge_mode: options.merge_mode,
             sst_format: options.sst_format,
+            max_row_group_row_count: options.max_row_group_row_count,
         }
     }
 }
@@ -928,6 +952,7 @@ mod tests {
             })),
             merge_mode: Some(MergeMode::LastNonNull),
             sst_format: Some(FormatType::Flat),
+            max_row_group_row_count: None,
             primary_key_encoding: None,
             write_buffer_size: None,
         };
@@ -959,6 +984,7 @@ mod tests {
             memtable: Some(MemtableOptions::Bulk(BulkMemtableConfig::default())),
             merge_mode: Some(MergeMode::LastNonNull),
             sst_format: None,
+            max_row_group_row_count: None,
             primary_key_encoding: None,
             write_buffer_size: Some(ReadableSize::mb(128)),
         };
@@ -1024,9 +1050,30 @@ mod tests {
             memtable: Some(MemtableOptions::Bulk(BulkMemtableConfig::default())),
             merge_mode: Some(MergeMode::LastNonNull),
             sst_format: None,
+            max_row_group_row_count: None,
             primary_key_encoding: None,
             write_buffer_size: None,
         };
         assert_eq!(options, got);
+    }
+
+    #[test]
+    fn test_max_row_group_row_count() {
+        // Default falls back to DEFAULT_ROW_GROUP_SIZE.
+        assert_eq!(None, RegionOptions::default().max_row_group_row_count);
+        assert_eq!(
+            DEFAULT_ROW_GROUP_SIZE,
+            RegionOptions::default().row_group_size()
+        );
+
+        // A configured value is parsed and used as the row group size.
+        let map = make_map(&[("max_row_group_row_count", "51200")]);
+        let options = RegionOptions::try_from_options(RegionId::new(0, 0), &map).unwrap();
+        assert_eq!(Some(51200), options.max_row_group_row_count);
+        assert_eq!(51200, options.row_group_size());
+
+        // Zero is rejected.
+        let map = make_map(&[("max_row_group_row_count", "0")]);
+        assert!(RegionOptions::try_from_options(RegionId::new(0, 0), &map).is_err());
     }
 }

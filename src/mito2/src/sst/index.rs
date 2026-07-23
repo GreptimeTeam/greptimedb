@@ -305,13 +305,17 @@ impl Indexer {
 #[async_trait::async_trait]
 pub trait IndexerBuilder {
     /// Builds indexer of given file id to [index_file_path].
-    async fn build(&self, file_id: FileId, index_version: u64) -> Indexer;
+    async fn build(
+        &self,
+        file_id: FileId,
+        index_version: u64,
+        row_group_size: Option<usize>,
+    ) -> Indexer;
 }
 #[derive(Clone)]
 pub(crate) struct IndexerBuilderImpl {
     pub(crate) build_type: IndexBuildType,
     pub(crate) metadata: RegionMetadataRef,
-    pub(crate) row_group_size: usize,
     pub(crate) puffin_manager: SstPuffinManager,
     pub(crate) write_cache_enabled: bool,
     pub(crate) intermediate_manager: IntermediateManager,
@@ -326,7 +330,12 @@ pub(crate) struct IndexerBuilderImpl {
 #[async_trait::async_trait]
 impl IndexerBuilder for IndexerBuilderImpl {
     /// Sanity check for arguments and create a new [Indexer] if arguments are valid.
-    async fn build(&self, file_id: FileId, index_version: u64) -> Indexer {
+    async fn build(
+        &self,
+        file_id: FileId,
+        index_version: u64,
+        row_group_size: Option<usize>,
+    ) -> Indexer {
         let mut indexer = Indexer {
             file_id,
             region_id: self.metadata.region_id,
@@ -335,7 +344,7 @@ impl IndexerBuilder for IndexerBuilderImpl {
             ..Default::default()
         };
 
-        indexer.inverted_indexer = self.build_inverted_indexer(file_id);
+        indexer.inverted_indexer = self.build_inverted_indexer(file_id, row_group_size);
         indexer.fulltext_indexer = self.build_fulltext_indexer(file_id).await;
         indexer.bloom_filter_indexer = self.build_bloom_filter_indexer(file_id);
         #[cfg(feature = "vector_index")]
@@ -365,7 +374,11 @@ impl IndexerBuilder for IndexerBuilderImpl {
 }
 
 impl IndexerBuilderImpl {
-    fn build_inverted_indexer(&self, file_id: FileId) -> Option<InvertedIndexer> {
+    fn build_inverted_indexer(
+        &self,
+        file_id: FileId,
+        row_group_size: Option<usize>,
+    ) -> Option<InvertedIndexer> {
         let create = match self.build_type {
             IndexBuildType::Flush => self.inverted_index_config.create_on_flush.auto(),
             IndexBuildType::Compact => self.inverted_index_config.create_on_compaction.auto(),
@@ -401,16 +414,10 @@ impl IndexerBuilderImpl {
             return None;
         };
 
-        let Some(row_group_size) = NonZeroUsize::new(self.row_group_size) else {
-            warn!(
-                "Row group size is 0, skip creating index, region_id: {}, file_id: {}",
-                self.metadata.region_id, file_id,
-            );
-            return None;
-        };
-
         // if segment row count not aligned with row group size, adjust it to be aligned.
-        if row_group_size.get() % segment_row_count.get() != 0 {
+        if let Some(row_group_size) = row_group_size.and_then(NonZeroUsize::new)
+            && row_group_size.get() % segment_row_count.get() != 0
+        {
             segment_row_count = row_group_size;
         }
 
@@ -770,17 +777,8 @@ impl IndexBuildTask {
             0 // Default version for new index files
         };
 
-        // Use the same file_id but with new version for index file
-        let index_file_id = self.file_meta.file_id;
-        let mut indexer = self
-            .indexer_builder
-            .build(index_file_id, new_index_version)
-            .await;
-
         // Check SST file existence before building index to avoid failure of parquet reader.
         if !self.check_sst_file_exists(&version_control).await {
-            // Calls abort to clean up index files.
-            indexer.abort().await;
             self.listener
                 .on_index_build_abort(RegionFileId::new(
                     self.file_meta.region_id,
@@ -793,13 +791,29 @@ impl IndexBuildTask {
             )));
         }
 
-        let parquet_reader = self
+        let mut parquet_reader = self
             .access_layer
             .read_sst(self.file.clone()) // use the latest file handle instead of creating a new one
             .build()
             .await?;
 
-        if let Some(mut parquet_reader) = parquet_reader {
+        let row_group_size = parquet_reader.as_ref().and_then(|reader| {
+            reader
+                .parquet_metadata()
+                .row_groups()
+                .first()
+                .map(|row_group| row_group.num_rows() as usize)
+                .filter(|size| *size > 0)
+        });
+
+        // Use the same file_id but with new version for index file.
+        let index_file_id = self.file_meta.file_id;
+        let mut indexer = self
+            .indexer_builder
+            .build(index_file_id, new_index_version, row_group_size)
+            .await;
+
+        if let Some(mut parquet_reader) = parquet_reader.take() {
             // TODO(SNC123): optimize index batch
             loop {
                 match parquet_reader.next_record_batch().await {
@@ -1424,7 +1438,6 @@ mod tests {
         Arc::new(IndexerBuilderImpl {
             build_type: IndexBuildType::Flush,
             metadata,
-            row_group_size: 1024,
             puffin_manager,
             write_cache_enabled: false,
             intermediate_manager: intm_manager,
@@ -1453,7 +1466,6 @@ mod tests {
         let indexer = IndexerBuilderImpl {
             build_type: IndexBuildType::Flush,
             metadata,
-            row_group_size: 1024,
             puffin_manager: factory.build(mock_object_store(), NoopPathProvider),
             write_cache_enabled: false,
             intermediate_manager: intm_manager,
@@ -1464,7 +1476,7 @@ mod tests {
             #[cfg(feature = "vector_index")]
             vector_index_config: Default::default(),
         }
-        .build(FileId::random(), 0)
+        .build(FileId::random(), 0, Some(1024))
         .await;
 
         assert!(indexer.inverted_indexer.is_some());
@@ -1488,7 +1500,6 @@ mod tests {
         let indexer = IndexerBuilderImpl {
             build_type: IndexBuildType::Flush,
             metadata: metadata.clone(),
-            row_group_size: 1024,
             puffin_manager: factory.build(mock_object_store(), NoopPathProvider),
             write_cache_enabled: false,
             intermediate_manager: intm_manager.clone(),
@@ -1502,7 +1513,7 @@ mod tests {
             #[cfg(feature = "vector_index")]
             vector_index_config: Default::default(),
         }
-        .build(FileId::random(), 0)
+        .build(FileId::random(), 0, Some(1024))
         .await;
 
         assert!(indexer.inverted_indexer.is_none());
@@ -1512,7 +1523,6 @@ mod tests {
         let indexer = IndexerBuilderImpl {
             build_type: IndexBuildType::Compact,
             metadata: metadata.clone(),
-            row_group_size: 1024,
             puffin_manager: factory.build(mock_object_store(), NoopPathProvider),
             write_cache_enabled: false,
             intermediate_manager: intm_manager.clone(),
@@ -1526,7 +1536,7 @@ mod tests {
             #[cfg(feature = "vector_index")]
             vector_index_config: Default::default(),
         }
-        .build(FileId::random(), 0)
+        .build(FileId::random(), 0, Some(1024))
         .await;
 
         assert!(indexer.inverted_indexer.is_some());
@@ -1536,7 +1546,6 @@ mod tests {
         let indexer = IndexerBuilderImpl {
             build_type: IndexBuildType::Compact,
             metadata,
-            row_group_size: 1024,
             puffin_manager: factory.build(mock_object_store(), NoopPathProvider),
             write_cache_enabled: false,
             intermediate_manager: intm_manager,
@@ -1550,7 +1559,7 @@ mod tests {
             #[cfg(feature = "vector_index")]
             vector_index_config: Default::default(),
         }
-        .build(FileId::random(), 0)
+        .build(FileId::random(), 0, Some(1024))
         .await;
 
         assert!(indexer.inverted_indexer.is_some());
@@ -1574,7 +1583,6 @@ mod tests {
         let indexer = IndexerBuilderImpl {
             build_type: IndexBuildType::Flush,
             metadata: metadata.clone(),
-            row_group_size: 1024,
             puffin_manager: factory.build(mock_object_store(), NoopPathProvider),
             write_cache_enabled: false,
             intermediate_manager: intm_manager.clone(),
@@ -1585,7 +1593,7 @@ mod tests {
             #[cfg(feature = "vector_index")]
             vector_index_config: Default::default(),
         }
-        .build(FileId::random(), 0)
+        .build(FileId::random(), 0, Some(1024))
         .await;
 
         assert!(indexer.inverted_indexer.is_none());
@@ -1602,7 +1610,6 @@ mod tests {
         let indexer = IndexerBuilderImpl {
             build_type: IndexBuildType::Flush,
             metadata: metadata.clone(),
-            row_group_size: 1024,
             puffin_manager: factory.build(mock_object_store(), NoopPathProvider),
             write_cache_enabled: false,
             intermediate_manager: intm_manager.clone(),
@@ -1613,7 +1620,7 @@ mod tests {
             #[cfg(feature = "vector_index")]
             vector_index_config: Default::default(),
         }
-        .build(FileId::random(), 0)
+        .build(FileId::random(), 0, Some(1024))
         .await;
 
         assert!(indexer.inverted_indexer.is_some());
@@ -1630,7 +1637,6 @@ mod tests {
         let indexer = IndexerBuilderImpl {
             build_type: IndexBuildType::Flush,
             metadata: metadata.clone(),
-            row_group_size: 1024,
             puffin_manager: factory.build(mock_object_store(), NoopPathProvider),
             write_cache_enabled: false,
             intermediate_manager: intm_manager,
@@ -1641,7 +1647,7 @@ mod tests {
             #[cfg(feature = "vector_index")]
             vector_index_config: Default::default(),
         }
-        .build(FileId::random(), 0)
+        .build(FileId::random(), 0, Some(1024))
         .await;
 
         assert!(indexer.inverted_indexer.is_some());
@@ -1650,7 +1656,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_build_indexer_zero_row_group() {
+    async fn test_build_indexer_zero_row_group_hint() {
         let (dir, factory) =
             PuffinManagerFactory::new_for_test_async("test_build_indexer_zero_row_group_").await;
         let intm_manager = mock_intm_mgr(dir.path().to_string_lossy()).await;
@@ -1665,7 +1671,6 @@ mod tests {
         let indexer = IndexerBuilderImpl {
             build_type: IndexBuildType::Flush,
             metadata,
-            row_group_size: 0,
             puffin_manager: factory.build(mock_object_store(), NoopPathProvider),
             write_cache_enabled: false,
             intermediate_manager: intm_manager,
@@ -1676,10 +1681,10 @@ mod tests {
             #[cfg(feature = "vector_index")]
             vector_index_config: Default::default(),
         }
-        .build(FileId::random(), 0)
+        .build(FileId::random(), 0, Some(0))
         .await;
 
-        assert!(indexer.inverted_indexer.is_none());
+        assert!(indexer.inverted_indexer.is_some());
     }
 
     #[cfg(feature = "vector_index")]
@@ -1726,7 +1731,6 @@ mod tests {
         let mut indexer = IndexerBuilderImpl {
             build_type: IndexBuildType::Flush,
             metadata,
-            row_group_size: 1024,
             puffin_manager: factory.build(mock_object_store(), TestPathProvider),
             write_cache_enabled: false,
             intermediate_manager: intm_manager,
@@ -1736,7 +1740,7 @@ mod tests {
             bloom_filter_index_config: BloomFilterConfig::default(),
             vector_index_config: Default::default(),
         }
-        .build(FileId::random(), 0)
+        .build(FileId::random(), 0, Some(1024))
         .await;
 
         assert!(indexer.vector_indexer.is_some());
@@ -2082,7 +2086,6 @@ mod tests {
         let indexer_builder = Arc::new(IndexerBuilderImpl {
             build_type: IndexBuildType::Flush,
             metadata: metadata.clone(),
-            row_group_size: 1024,
             puffin_manager: write_cache.build_puffin_manager().clone(),
             write_cache_enabled: true,
             intermediate_manager: write_cache.intermediate_manager().clone(),

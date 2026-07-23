@@ -36,6 +36,7 @@ use store_api::region_engine::{RegionEngine, RegionRole};
 use store_api::region_request::{
     AlterKind, PathType, RegionAlterRequest, RegionCloseRequest, RegionFlushRequest,
     RegionOpenRequest, RegionPutRequest, RegionRequest, ReplayCheckpoint, SetRegionOption,
+    UnsetRegionOption,
 };
 use store_api::storage::{RegionId, ScanRequest};
 use tokio::sync::Notify;
@@ -126,6 +127,134 @@ impl EventListener for RegionFlushGate {
 async fn test_manual_flush() {
     test_manual_flush_with_format(false).await;
     test_manual_flush_with_format(true).await;
+}
+
+fn set_max_row_group_row_count(row_count: usize) -> RegionRequest {
+    RegionRequest::Alter(RegionAlterRequest {
+        kind: AlterKind::SetRegionOptions {
+            options: vec![SetRegionOption::MaxRowGroupRowCount(Some(row_count))],
+        },
+    })
+}
+
+#[tokio::test]
+async fn test_flush_and_alter_max_row_group_row_count() {
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+
+    let region_id = RegionId::new(1, 1);
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            region_id.table_id(),
+            "test_table",
+            "test_catalog",
+            "test_schema",
+            None,
+            env.get_kv_backend(),
+        )
+        .await;
+
+    let request = CreateRequestBuilder::new()
+        .insert_option("max_row_group_row_count", "10")
+        .build();
+    let column_schemas = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: column_schemas.clone(),
+            rows: build_rows(0, 15),
+        },
+    )
+    .await;
+
+    // Setting the same value is a no-op and must not flush pending data.
+    engine
+        .handle_request(region_id, set_max_row_group_row_count(10))
+        .await
+        .unwrap();
+    let version = engine.get_region(region_id).unwrap().version();
+    assert!(!version.memtables.is_empty());
+    assert!(version.ssts.levels()[0].files.is_empty());
+
+    // Altering a builder-affecting option flushes pending rows with the old size.
+    engine
+        .handle_request(region_id, set_max_row_group_row_count(5))
+        .await
+        .unwrap();
+    assert_eq!(
+        Some(5),
+        engine
+            .get_region(region_id)
+            .unwrap()
+            .version()
+            .options
+            .max_row_group_row_count
+    );
+
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: column_schemas.clone(),
+            rows: build_rows(15, 30),
+        },
+    )
+    .await;
+    flush_region(&engine, region_id, None).await;
+
+    let mut row_group_counts = engine
+        .get_region(region_id)
+        .unwrap()
+        .version()
+        .ssts
+        .levels()[0]
+        .files
+        .values()
+        .map(|file| file.meta_ref().num_row_groups)
+        .collect::<Vec<_>>();
+    row_group_counts.sort_unstable();
+    assert_eq!(vec![2, 3], row_group_counts);
+
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Alter(RegionAlterRequest {
+                kind: AlterKind::UnsetRegionOptions {
+                    keys: vec![UnsetRegionOption::MaxRowGroupRowCount],
+                },
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        None,
+        engine
+            .get_region(region_id)
+            .unwrap()
+            .version()
+            .options
+            .max_row_group_row_count
+    );
+
+    engine
+        .handle_request(region_id, set_max_row_group_row_count(0))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        None,
+        engine
+            .get_region(region_id)
+            .unwrap()
+            .version()
+            .options
+            .max_row_group_row_count
+    );
 }
 
 async fn test_manual_flush_with_format(flat_format: bool) {
