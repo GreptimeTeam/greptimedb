@@ -492,6 +492,11 @@ impl CompactionScheduler {
         let Some(status) = self.region_status.get_mut(&region_id) else {
             return false;
         };
+        // A plan is already in flight; treat it as scheduled instead of
+        // overwriting the current phase and orphaning the in-flight planning.
+        if status.is_busy() {
+            return true;
+        }
 
         // We should always try to compact the region until picker returns None.
         let request = status.new_compaction_request(
