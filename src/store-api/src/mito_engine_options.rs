@@ -68,6 +68,10 @@ pub const MEMTABLE_PARTITION_TREE_FORK_DICTIONARY_BYTES: &str =
 pub const SKIP_WAL_KEY: &str = "skip_wal";
 /// Option key for sst format.
 pub const SST_FORMAT_KEY: &str = "sst_format";
+/// Option key for the max number of rows in a parquet row group.
+pub const MAX_ROW_GROUP_ROW_COUNT: &str = "max_row_group_row_count";
+/// Upper bound for [`MAX_ROW_GROUP_ROW_COUNT`].
+pub const MAX_ROW_GROUP_ROW_COUNT_LIMIT: usize = 10 * 1024 * 1024;
 // Note: Adding new options here should also check if this option should be removed in [metric_engine::engine::create::region_options_for_metadata_region].
 
 /// Returns true if the `key` is a valid option key for the mito engine.
@@ -99,6 +103,7 @@ pub fn is_mito_engine_option_key(key: &str) -> bool {
         APPEND_MODE_KEY,
         MERGE_MODE_KEY,
         SST_FORMAT_KEY,
+        MAX_ROW_GROUP_ROW_COUNT,
     ]
     .contains(&key)
 }
@@ -145,6 +150,7 @@ mod tests {
             "memtable.partition_tree.fork_dictionary_bytes"
         ));
         assert!(is_mito_engine_option_key("append_mode"));
+        assert!(is_mito_engine_option_key("max_row_group_row_count"));
         assert!(!is_mito_engine_option_key("foo"));
     }
 }

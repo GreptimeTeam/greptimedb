@@ -798,7 +798,7 @@ impl ParquetReaderBuilder {
         self.prune_row_groups_by_inverted_index(
             read_format.metadata(),
             row_group_size,
-            num_row_groups,
+            parquet_meta,
             &mut output,
             metrics,
             skip_fields,
@@ -926,7 +926,7 @@ impl ParquetReaderBuilder {
         &self,
         sst_metadata: &RegionMetadataRef,
         row_group_size: usize,
-        num_row_groups: usize,
+        parquet_meta: &ParquetMetaData,
         output: &mut RowGroupSelection,
         metrics: &mut ReaderFilterMetrics,
         skip_fields: bool,
@@ -935,6 +935,8 @@ impl ParquetReaderBuilder {
             return false;
         }
 
+        let num_row_groups = parquet_meta.num_row_groups();
+        let total_row_count = parquet_meta.file_metadata().num_rows() as usize;
         let mut pruned = false;
         // If skip_fields is true, only apply the first applier (for tags).
         let appliers = if skip_fields {
@@ -978,11 +980,24 @@ impl ParquetReaderBuilder {
                 .await;
 
             let selection = match apply_res {
-                Ok(apply_output) => RowGroupSelection::from_inverted_index_apply_output(
-                    row_group_size,
-                    num_row_groups,
-                    apply_output,
-                ),
+                Ok(apply_output) => {
+                    let index_row_count = apply_output.total_row_count;
+                    let Some(selection) = RowGroupSelection::from_inverted_index_apply_output(
+                        row_group_size,
+                        num_row_groups,
+                        total_row_count,
+                        apply_output,
+                    ) else {
+                        warn!(
+                            "Ignore inverted index with mismatched row count, file_id: {:?}, index_row_count: {}, parquet_row_count: {}",
+                            self.file_handle.file_id(),
+                            index_row_count,
+                            total_row_count,
+                        );
+                        continue;
+                    };
+                    selection
+                }
                 Err(err) => {
                     handle_index_error!(err, self.file_handle, INDEX_TYPE_INVERTED);
                     continue;

@@ -192,7 +192,12 @@ mod tests {
 
     #[async_trait::async_trait]
     impl IndexerBuilder for NoopIndexBuilder {
-        async fn build(&self, _file_id: FileId, _index_version: u64) -> Indexer {
+        async fn build(
+            &self,
+            _file_id: FileId,
+            _index_version: u64,
+            _row_group_size: Option<usize>,
+        ) -> Indexer {
             Indexer::default()
         }
     }
@@ -769,7 +774,6 @@ mod tests {
         let indexer_builder = IndexerBuilderImpl {
             build_type: IndexBuildType::Flush,
             metadata: metadata.clone(),
-            row_group_size,
             puffin_manager,
             write_cache_enabled: false,
             intermediate_manager,
@@ -1227,7 +1231,6 @@ mod tests {
         object_store: ObjectStore,
         file_path: RegionFilePathFactory,
         metadata: Arc<RegionMetadata>,
-        row_group_size: usize,
     ) -> IndexerBuilderImpl {
         let puffin_manager = env.get_puffin_manager().build(object_store, file_path);
         let intermediate_manager = env.get_intermediate_manager();
@@ -1235,7 +1238,6 @@ mod tests {
         IndexerBuilderImpl {
             build_type: IndexBuildType::Flush,
             metadata,
-            row_group_size,
             puffin_manager,
             write_cache_enabled: false,
             intermediate_manager,
@@ -1357,7 +1359,6 @@ mod tests {
         let indexer_builder = IndexerBuilderImpl {
             build_type: IndexBuildType::Flush,
             metadata: metadata.clone(),
-            row_group_size,
             puffin_manager,
             write_cache_enabled: false,
             intermediate_manager,
@@ -1534,7 +1535,6 @@ mod tests {
             object_store.clone(),
             file_path.clone(),
             metadata.clone(),
-            row_group_size,
         );
 
         let info = write_flat_sst(
@@ -1633,7 +1633,6 @@ mod tests {
             object_store.clone(),
             file_path.clone(),
             metadata.clone(),
-            row_group_size,
         );
 
         let info = write_flat_sst(
@@ -1723,7 +1722,6 @@ mod tests {
             object_store.clone(),
             file_path.clone(),
             metadata.clone(),
-            row_group_size,
         );
         let info = write_flat_sst(
             object_store.clone(),
@@ -1784,7 +1782,6 @@ mod tests {
             object_store.clone(),
             file_path.clone(),
             metadata.clone(),
-            row_group_size,
         );
         let info = write_flat_sst(
             object_store.clone(),
@@ -1865,7 +1862,6 @@ mod tests {
             object_store.clone(),
             file_path.clone(),
             metadata.clone(),
-            row_group_size,
         );
 
         let info = write_flat_sst(
@@ -1968,7 +1964,6 @@ mod tests {
             object_store.clone(),
             file_path.clone(),
             metadata.clone(),
-            row_group_size,
         );
 
         let info = write_flat_sst(
@@ -2199,7 +2194,6 @@ mod tests {
             object_store.clone(),
             file_path.clone(),
             metadata.clone(),
-            row_group_size,
         );
 
         let mut info = write_flat_sst(

@@ -32,7 +32,6 @@ use crate::sst::file::{FileHandle, RegionFileId, RegionIndexId};
 use crate::sst::index::{
     IndexBuildOutcome, IndexBuildTask, IndexBuildType, IndexerBuilderImpl, ResultMpscSender,
 };
-use crate::sst::parquet::WriteOptions;
 use crate::worker::RegionWorkerLoop;
 
 impl<S> RegionWorkerLoop<S> {
@@ -67,7 +66,6 @@ impl<S> RegionWorkerLoop<S> {
             #[cfg(feature = "vector_index")]
             vector_index_config: self.config.vector_index.clone(),
             index_options: version.options.index_options.clone(),
-            row_group_size: WriteOptions::default().row_group_size,
             intermediate_manager,
             puffin_manager,
             write_cache_enabled: self.cache_manager.write_cache().is_some(),

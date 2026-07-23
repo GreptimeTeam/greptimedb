@@ -230,7 +230,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             access_layer: region.access_layer.clone(),
             listener: self.listener.clone(),
             engine_config,
-            row_group_size,
+            // The request-provided size (e.g. manual flush) takes precedence over the
+            // region option.
+            row_group_size: row_group_size.or(region.version().options.max_row_group_row_count),
             cache_manager: self.cache_manager.clone(),
             manifest_ctx: region.manifest_ctx.clone(),
             index_options: region.version().options.index_options.clone(),
