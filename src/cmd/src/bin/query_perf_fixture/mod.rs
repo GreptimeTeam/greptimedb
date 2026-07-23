@@ -105,6 +105,14 @@ pub async fn run() {
 
 fn run_plan(args: PlanArgs) -> Result<(), Box<dyn std::error::Error>> {
     let case_text = fs::read_to_string(&args.case)?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&normalize_plan(&case_text)?)?
+    );
+    Ok(())
+}
+
+fn normalize_plan(case_text: &str) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
     let mut case: CaseFile = toml::from_str(&case_text)?;
     if let Scenario::PromRemoteWriteThenQuery(s) = &mut case.scenario
         && let Some(storage) = &mut s.remote_write.storage
@@ -125,9 +133,136 @@ fn run_plan(args: PlanArgs) -> Result<(), Box<dyn std::error::Error>> {
             return Err("scenario.remote_write.read_bench requires scenario.remote_write.storage.inspect = true".into());
         }
     }
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&json!({"schema_version": 1, "scenario": case.scenario}))?
-    );
-    Ok(())
+    Ok(json!({"schema_version": 1, "scenario": case.scenario}))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn case_full_physical_table_setup_is_normalized() {
+        let plan = normalize_plan(
+            r#"
+[scenario]
+kind = "prom_remote_write_then_query"
+
+[scenario.remote_write]
+metric = "mixed_metric"
+
+[scenario.remote_write.physical_table_setup]
+columns = [
+  { name = "host", type = "STRING" },
+  { name = "ts", type = "TIMESTAMP(3)" },
+  { name = "value", type = "DOUBLE" },
+]
+time_index = "ts"
+engine = "mito"
+options = { compression = "zstd", append_mode = "false" }
+target_options = { base = { compression = "plain" }, candidate = { compression = "zstd" } }
+
+[scenario.remote_write.logical_stream_verification]
+labels = ["host", "instance"]
+timestamp_column = "greptime_timestamp"
+value_column = "greptime_value"
+
+[scenario.remote_write.read_bench]
+iterations = 7
+rounds = 3
+projections = [{ name = "all_columns" }, { name = "value_only", columns = ["value"] }]
+"#,
+        )
+        .unwrap();
+
+        let remote = &plan["scenario"]["remote_write"];
+        assert_eq!(remote["physical_table_setup"]["columns"][0]["name"], "host");
+        assert_eq!(remote["physical_table_setup"]["time_index"], "ts");
+        assert_eq!(
+            remote["physical_table_setup"]["target_options"]["base"]["compression"],
+            "plain"
+        );
+        assert_eq!(
+            remote["logical_stream_verification"],
+            serde_json::json!({
+                "labels": ["host", "instance"],
+                "timestamp_column": "greptime_timestamp",
+                "value_column": "greptime_value",
+            })
+        );
+        assert_eq!(remote["read_bench"]["rounds"], 3);
+        assert!(remote["read_bench"]["projections"][0]["columns"].is_null());
+        assert_eq!(
+            remote["read_bench"]["projections"][1]["columns"],
+            serde_json::json!(["value"])
+        );
+    }
+
+    #[test]
+    fn legacy_remote_write_case_keeps_legacy_read_bench_behavior_without_setup() {
+        let plan = normalize_plan(include_str!(
+            "../../../../../tests/perf/query_cases/prom_remote_write_seeded_random/case.toml"
+        ))
+        .unwrap();
+
+        let remote = &plan["scenario"]["remote_write"];
+        assert!(remote["physical_table_setup"].is_null());
+        assert!(remote["logical_stream_verification"].is_null());
+        assert_eq!(
+            remote["read_bench"]["projection"],
+            serde_json::json!(["greptime_value"])
+        );
+        assert_eq!(remote["read_bench"]["projections"], serde_json::json!([]));
+        assert_eq!(remote["read_bench"]["rounds"], 1);
+        assert_eq!(plan["schema_version"], 1);
+    }
+
+    #[test]
+    fn mixed_series_case_normalizes_physical_setup_and_read_bench_matrix() {
+        let plan = normalize_plan(include_str!(
+            "../../../../../tests/perf/query_cases/prom_remote_write_mixed_series/case.toml"
+        ))
+        .unwrap();
+
+        let remote = &plan["scenario"]["remote_write"];
+        assert_eq!(remote["series_count"], 2_000);
+        assert_eq!(remote["value"]["series_mix_every"], 20);
+        assert_eq!(remote["value"]["gauge_residue"], 19);
+        assert_eq!(
+            remote["physical_table_setup"]["columns"],
+            serde_json::json!([
+                { "name": "greptime_timestamp", "type": "TIMESTAMP(3)" },
+                { "name": "greptime_value", "type": "DOUBLE" },
+            ])
+        );
+        assert_eq!(
+            remote["physical_table_setup"]["options"],
+            serde_json::json!({
+                "physical_metric_table": "",
+                "sst_format": "flat",
+            })
+        );
+        assert_eq!(
+            remote["physical_table_setup"]["target_options"],
+            serde_json::json!({
+                "base": { "experimental_sst_float_field_encoding": "default" },
+                "candidate": { "experimental_sst_float_field_encoding": "byte_stream_split" },
+            })
+        );
+        assert_eq!(
+            remote["logical_stream_verification"],
+            serde_json::json!({
+                "labels": ["host", "instance"],
+                "timestamp_column": "greptime_timestamp",
+                "value_column": "greptime_value",
+            })
+        );
+        assert_eq!(remote["read_bench"]["rounds"], 8);
+        assert_eq!(remote["read_bench"]["iterations"], 8);
+        assert_eq!(
+            remote["read_bench"]["projections"][0],
+            serde_json::json!({ "name": "target", "columns": ["greptime_value"] })
+        );
+        assert_eq!(remote["read_bench"]["projections"][1]["name"], "all");
+        assert!(remote["read_bench"]["projections"][1]["columns"].is_null());
+    }
 }

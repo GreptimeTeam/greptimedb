@@ -17,7 +17,9 @@ use prost::Message;
 use serde_json::json;
 use servers::prom_store::snappy_compress;
 
-use crate::query_perf_fixture::case::ValuePattern;
+use crate::query_perf_fixture::case::{ValuePattern, validate_mixed_series_selector};
+
+const MAX_EXACT_F64_INTEGER: u64 = 1 << 53;
 
 #[derive(Debug, ClapArgs)]
 pub(super) struct PromRemoteWriteArgs {
@@ -59,6 +61,12 @@ pub(super) struct PromRemoteWriteArgs {
     value_stall_length: u64,
     #[arg(long, default_value_t = 5)]
     value_mixed_every: u64,
+    #[arg(long, default_value_t = 20)]
+    value_series_mix_every: u64,
+    #[arg(long, default_value_t = 19)]
+    value_gauge_residue: u64,
+    #[arg(long, default_value_t = 0.125)]
+    value_fractional_step: f64,
     #[arg(long, default_value_t = 0)]
     value_sample_offset: u64,
     #[arg(long)]
@@ -69,6 +77,7 @@ pub(super) async fn run_prom_remote_write(
     args: PromRemoteWriteArgs,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use api::prom_store::remote::WriteRequest;
+    validate_prom_remote_write_args(&args)?;
     let started = std::time::Instant::now();
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(args.timeout_seconds))
@@ -111,8 +120,56 @@ pub(super) async fn run_prom_remote_write(
     }
     println!(
         "{}",
-        json!({"status":"ok","endpoint":args.endpoint,"database":args.database,"metric":args.metric,"physical_table":args.physical_table,"series_count":args.series_count,"samples_per_series":args.samples_per_series,"rows":rows,"samples_written":rows,"batches":batches,"elapsed_seconds":started.elapsed().as_secs_f64(),"http_statuses":http_statuses,"value":{"pattern":args.value_pattern.to_string(),"base":args.value_base,"step":args.value_step,"cardinality":args.value_cardinality,"seed":args.value_seed,"run_length":args.value_run_length,"stall_every":args.value_stall_every,"stall_length":args.value_stall_length,"mixed_every":args.value_mixed_every,"sample_offset":args.value_sample_offset,"total_samples_per_series":args.value_total_samples_per_series.unwrap_or(args.samples_per_series)}})
+        json!({"status":"ok","endpoint":args.endpoint,"database":args.database,"metric":args.metric,"physical_table":args.physical_table,"series_count":args.series_count,"samples_per_series":args.samples_per_series,"rows":rows,"samples_written":rows,"batches":batches,"elapsed_seconds":started.elapsed().as_secs_f64(),"http_statuses":http_statuses,"value":{"pattern":args.value_pattern.to_string(),"base":args.value_base,"step":args.value_step,"cardinality":args.value_cardinality,"seed":args.value_seed,"run_length":args.value_run_length,"stall_every":args.value_stall_every,"stall_length":args.value_stall_length,"mixed_every":args.value_mixed_every,"series_mix_every":args.value_series_mix_every,"gauge_residue":args.value_gauge_residue,"fractional_step":args.value_fractional_step,"sample_offset":args.value_sample_offset,"total_samples_per_series":args.value_total_samples_per_series.unwrap_or(args.samples_per_series)}})
     );
+    Ok(())
+}
+
+fn validate_prom_remote_write_args(args: &PromRemoteWriteArgs) -> Result<(), String> {
+    if args.value_pattern != ValuePattern::MixedSeries {
+        return Ok(());
+    }
+
+    validate_mixed_series_selector(
+        args.value_series_mix_every,
+        args.value_gauge_residue,
+        args.value_fractional_step,
+    )?;
+    let total = args.value_total_samples_per_series.ok_or_else(|| {
+        "mixed_series requires --value-total-samples-per-series for stable disjoint counter ranges"
+            .to_string()
+    })?;
+    if total == 0 {
+        return Err("mixed_series requires --value-total-samples-per-series > 0".to_string());
+    }
+    let end = args
+        .value_sample_offset
+        .checked_add(args.samples_per_series)
+        .ok_or_else(|| {
+            "mixed_series sample offset plus samples per series overflows u64".to_string()
+        })?;
+    if end > total {
+        return Err(
+            "mixed_series sample offset plus samples per series exceeds total samples per series"
+                .to_string(),
+        );
+    }
+    if total - 1 > MAX_EXACT_F64_INTEGER {
+        return Err(
+            "mixed_series total samples per series exceeds the exact f64 integer range".to_string(),
+        );
+    }
+    if args.series_count > 0 && args.samples_per_series > 0 {
+        let max_counter = (args.series_count - 1)
+            .checked_mul(total)
+            .and_then(|value| value.checked_add(end - 1))
+            .ok_or_else(|| "mixed_series counter range overflows u64".to_string())?;
+        if max_counter > MAX_EXACT_F64_INTEGER {
+            return Err(
+                "mixed_series counter range exceeds the exact f64 integer range".to_string(),
+            );
+        }
+    }
     Ok(())
 }
 
@@ -197,6 +254,20 @@ fn deterministic_prom_value(args: &PromRemoteWriteArgs, series_idx: u64, sample_
                 args.value_base + (series_idx % 97) as f64 + local as f64 * args.value_step
             }
         }
+        ValuePattern::MixedSeries => {
+            if series_idx % args.value_series_mix_every == args.value_gauge_residue {
+                (series_idx % 97) as f64 + local as f64 * args.value_fractional_step
+            } else {
+                let total = args
+                    .value_total_samples_per_series
+                    .expect("mixed series arguments are validated before generation");
+                series_idx
+                    .checked_mul(total)
+                    .and_then(|value| value.checked_add(local))
+                    .expect("mixed series counter range is validated before generation")
+                    as f64
+            }
+        }
     }
 }
 fn splitmix64(mut value: u64) -> u64 {
@@ -234,6 +305,9 @@ mod tests {
             value_stall_every: 100,
             value_stall_length: 16,
             value_mixed_every: 5,
+            value_series_mix_every: 20,
+            value_gauge_residue: 19,
+            value_fractional_step: 0.125,
             value_sample_offset: 0,
             value_total_samples_per_series: None,
         }
@@ -329,5 +403,123 @@ mod tests {
 
         assert_eq!(deterministic_prom_value(&args, 0, 15), 8.5);
         assert_eq!(deterministic_prom_value(&args, 1, 0), 9.0);
+    }
+
+    #[test]
+    fn mixed_series_has_expected_counter_and_gauge_classification() {
+        let args = mixed_series_args();
+        for (series_count, expected_gauges) in [(200, 10), (2_000, 100)] {
+            let gauges = (0..series_count)
+                .filter(|series_idx| {
+                    series_idx % args.value_series_mix_every == args.value_gauge_residue
+                })
+                .count() as u64;
+            assert_eq!(gauges, expected_gauges);
+            assert_eq!(series_count - gauges, series_count / 20 * 19);
+        }
+        assert_eq!(
+            (0..100)
+                .filter(|series_idx| series_idx % args.value_series_mix_every
+                    == args.value_gauge_residue)
+                .collect::<Vec<_>>(),
+            vec![19, 39, 59, 79, 99]
+        );
+    }
+
+    #[test]
+    fn mixed_series_counters_are_integral_increasing_and_disjoint() {
+        let args = mixed_series_args();
+        let total = args.value_total_samples_per_series.unwrap();
+        for series_idx in [0, 1, 18, 20] {
+            let values = (0..8)
+                .map(|sample_idx| deterministic_prom_value(&args, series_idx, sample_idx))
+                .collect::<Vec<_>>();
+            assert!(values.iter().all(|value| value.fract() == 0.0));
+            assert_eq!(
+                values,
+                (0..8)
+                    .map(|idx| (series_idx * total + idx) as f64)
+                    .collect::<Vec<_>>()
+            );
+        }
+        assert!(
+            deterministic_prom_value(&args, 0, total - 1) < deterministic_prom_value(&args, 1, 0)
+        );
+    }
+
+    #[test]
+    fn mixed_series_gauges_follow_fractional_formula() {
+        let args = mixed_series_args();
+        assert_eq!(deterministic_prom_value(&args, 19, 0), 19.0);
+        assert_eq!(deterministic_prom_value(&args, 19, 1), 19.125);
+        assert_eq!(deterministic_prom_value(&args, 39, 3), 39.375);
+        assert_ne!(deterministic_prom_value(&args, 19, 1).fract(), 0.0);
+    }
+
+    #[test]
+    fn mixed_series_is_deterministic_and_chunking_preserves_values() {
+        let monolithic = mixed_series_args();
+        for series_idx in [18, 19] {
+            let expected = (0..monolithic.samples_per_series)
+                .map(|sample_idx| deterministic_prom_value(&monolithic, series_idx, sample_idx))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                expected,
+                (0..monolithic.samples_per_series)
+                    .map(|sample_idx| deterministic_prom_value(&monolithic, series_idx, sample_idx))
+                    .collect::<Vec<_>>()
+            );
+            for chunk_idx in 0..10 {
+                let mut chunk = mixed_series_args();
+                chunk.samples_per_series = 1_440;
+                chunk.value_sample_offset = chunk_idx * 1_440;
+                for sample_idx in 0..chunk.samples_per_series {
+                    assert_eq!(
+                        deterministic_prom_value(&chunk, series_idx, sample_idx),
+                        expected[(chunk.value_sample_offset + sample_idx) as usize]
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn mixed_series_rejects_invalid_selector_step_and_total() {
+        let mut invalid = mixed_series_args();
+        invalid.value_series_mix_every = 0;
+        assert!(
+            validate_prom_remote_write_args(&invalid)
+                .unwrap_err()
+                .contains("series_mix_every")
+        );
+        invalid = mixed_series_args();
+        invalid.value_gauge_residue = invalid.value_series_mix_every;
+        assert!(
+            validate_prom_remote_write_args(&invalid)
+                .unwrap_err()
+                .contains("gauge_residue")
+        );
+        invalid = mixed_series_args();
+        invalid.value_fractional_step = f64::INFINITY;
+        assert!(
+            validate_prom_remote_write_args(&invalid)
+                .unwrap_err()
+                .contains("fractional_step")
+        );
+        invalid = mixed_series_args();
+        invalid.value_total_samples_per_series = None;
+        assert!(
+            validate_prom_remote_write_args(&invalid)
+                .unwrap_err()
+                .contains("total-samples")
+        );
+    }
+
+    fn mixed_series_args() -> PromRemoteWriteArgs {
+        let mut args = args(ValuePattern::MixedSeries);
+        args.series_count = 2_000;
+        args.samples_per_series = 14_400;
+        args.value_total_samples_per_series = Some(14_400);
+        args
     }
 }

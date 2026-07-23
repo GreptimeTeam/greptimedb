@@ -2156,6 +2156,7 @@ dependencies = [
  "serde_json",
  "servers",
  "session",
+ "sha2 0.10.9",
  "similar-asserts",
  "smallvec",
  "snafu 0.8.6",

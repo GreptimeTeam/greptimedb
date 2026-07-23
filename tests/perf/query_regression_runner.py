@@ -28,8 +28,11 @@ import socket
 import statistics
 import subprocess
 import sys
+import tempfile
 import time
 import tomllib
+import unittest
+from unittest.mock import patch
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -906,7 +909,7 @@ def inspection_report(inspection: dict[str, Any] | None) -> dict[str, Any]:
 
 
 def inspected_relative_path(target: RunTarget, inspection: dict[str, Any], relative_path: str) -> Path:
-    report = inspection_report(inspection)
+    report = inspection_report(inspection or {})
     root_text = report.get("root") or inspection.get("root")
     if not root_text:
         return Path(relative_path)
@@ -962,6 +965,262 @@ def parse_sst_bench_target(target: RunTarget, inspection: dict[str, Any], file: 
         "path_type": path_type,
         "file_id": Path(parts[-1]).stem,
     }
+
+
+ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+PARQUET_ITERATION_RE = re.compile(r"^\s*Iteration\s+(?P<iteration>\d+):\s+(?P<rows>\d+)\s+rows,\s+(?P<columns>\d+)\s+columns,\s+(?P<batches>\d+)\s+record batches\s+in\s+(?P<duration>\S+)")
+SCAN_ITERATION_RE = re.compile(r"^\s*\[iter\s+(?P<iteration>\d+)\]\s+(?P<rows>\d+)\s+rows\s+in\s+(?P<duration>\S+)\s+\((?P<partitions>\d+)\s+partitions\),")
+
+
+def duration_to_millis(value: str) -> float:
+    match = re.fullmatch(r"([0-9]+(?:\.[0-9]+)?)(ns|µs|us|ms|s)", value)
+    if not match:
+        raise ValueError(f"unsupported benchmark duration {value!r}")
+    scale = {"ns": 1e-6, "µs": 1e-3, "us": 1e-3, "ms": 1.0, "s": 1000.0}[match.group(2)]
+    return float(match.group(1)) * scale
+
+
+def parse_bench_iterations(stdout: str, mode: str, expected_iterations: int, expected_rows: int | None = None) -> list[dict[str, Any]]:
+    regex = PARQUET_ITERATION_RE if mode == "parquet" else SCAN_ITERATION_RE
+    lines = ANSI_ESCAPE_RE.sub("", stdout).splitlines()
+    candidates = [line for line in lines if ("Iteration" in line if mode == "parquet" else "[iter" in line)]
+    samples = []
+    for line in candidates:
+        match = regex.match(line)
+        if not match:
+            raise ValueError(f"malformed {mode} benchmark iteration line: {line!r}")
+        groups = match.groupdict()
+        samples.append({"iteration": int(groups["iteration"]), "rows": int(groups["rows"]), "duration": groups["duration"], "duration_ms": duration_to_millis(groups["duration"]), "line": line})
+    if len(samples) != expected_iterations:
+        raise ValueError(f"{mode} benchmark emitted {len(samples)} iteration samples; expected {expected_iterations}")
+    iterations = [sample["iteration"] for sample in samples]
+    if iterations != list(range(1, expected_iterations + 1)):
+        raise ValueError(f"{mode} benchmark iterations are missing, duplicated, or out of order: {iterations}")
+    rows = {sample["rows"] for sample in samples}
+    if len(rows) != 1:
+        raise ValueError(f"{mode} benchmark row-count mismatch across iterations: {sorted(rows)}")
+    if expected_rows is not None and rows != {expected_rows}:
+        raise ValueError(f"{mode} benchmark rows {sorted(rows)} do not equal expected {expected_rows}")
+    return samples
+
+
+def summarize_iteration_samples(samples: list[dict[str, Any]]) -> dict[str, Any]:
+    if len(samples) < 2:
+        raise ValueError("benchmark requires at least two internal iterations to discard the warmup")
+    kept = samples[1:]
+    return {"raw_samples": samples, "kept_samples": kept, "median_ms": statistics.median(sample["duration_ms"] for sample in kept), "row_count": samples[0]["rows"]}
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as f:
+        for block in iter(lambda: f.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def artifact_layout_evidence(inspection: dict[str, Any] | None, *, dry_run: bool) -> dict[str, Any]:
+    if dry_run:
+        return {"status": "planned", "files": [], "stability": {"status": "planned", "stable": None}}
+    inspection = inspection or {}
+    report = inspection_report(inspection)
+    root = Path(str(report.get("root") or inspection.get("root") or ""))
+    layout = [dict(item) for item in report.get("files") or []]
+    layout.sort(key=lambda item: str(item.get("relative_path") or ""))
+    layout_hash = hashlib.sha256(json.dumps(layout, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    hashed_files = []
+    for item in layout:
+        relative_path = str(item.get("relative_path") or "")
+        path = root / relative_path
+        if not relative_path or not path.is_file():
+            raise RuntimeError(f"inspected SST is unavailable for artifact hashing: {path}")
+        hashed_files.append({"relative_path": relative_path, "content_hash": sha256_file(path), "layout": item})
+    artifact_hash = hashlib.sha256(json.dumps([(item["relative_path"], item["content_hash"]) for item in hashed_files], separators=(",", ":")).encode()).hexdigest()
+    return {"status": "observed", "layout_hash": layout_hash, "artifact_hash": artifact_hash, "files": hashed_files}
+
+
+def named_projection_schedule(read_bench: dict[str, Any]) -> list[dict[str, Any]]:
+    projections = read_bench.get("projections") or []
+    if projections:
+        return list(projections)
+    return [{"name": "legacy", "columns": list(read_bench["projection"])}]
+
+
+def b4_enabled(read_bench: dict[str, Any] | None) -> bool:
+    return bool(read_bench and ((read_bench.get("projections") or []) or int(read_bench.get("rounds", 1)) != 1))
+
+
+def paired_target_order(targets: list[RunTarget], round_index: int) -> list[RunTarget]:
+    return list(targets if round_index % 2 == 0 else reversed(targets))
+
+
+LOGICAL_DIGEST_PREFIX = "LOGICAL_ROW_DIGEST_JSON="
+
+
+def logical_digest_command(bench_binary: Path, target: RunTarget, inspection: dict[str, Any], config: dict[str, Any]) -> list[str]:
+    files = inspection_report(inspection).get("files") or []
+    parsed = next((parse_sst_bench_target(target, inspection, item, dry_run=False) for item in files if item.get("relative_path", "").endswith(".parquet")), None)
+    if parsed is None:
+        if inspection.get("status") == "dry-run":
+            parsed = {"region_id": "<table-id>:<region-seq>", "table_dir": "<table-dir>/", "path_type": "data"}
+        else:
+            raise RuntimeError("logical stream digest requires a frozen data SST")
+    cmd = [str(bench_binary), "datanode", "scanbench", "--config", str(target.work_dir / "read_bench" / "bench.toml"), "--region-id", parsed["region_id"], "--table-dir", parsed["table_dir"], "--path-type", parsed["path_type"], "--scanner", "series", "--parallelism", "1", "--iterations", "1", "--logical-row-digest"]
+    for label in config["labels"]:
+        cmd.extend(["--digest-label", str(label)])
+    cmd.extend(["--digest-timestamp-column", str(config["timestamp_column"]), "--digest-value-column", str(config["value_column"])])
+    return cmd
+
+
+def parse_logical_digest(stdout: str, config: dict[str, Any], expected_rows: int) -> dict[str, Any]:
+    lines = [line[len(LOGICAL_DIGEST_PREFIX):] for line in ANSI_ESCAPE_RE.sub("", stdout).splitlines() if line.startswith(LOGICAL_DIGEST_PREFIX)]
+    if len(lines) != 1:
+        raise ValueError(f"expected exactly one {LOGICAL_DIGEST_PREFIX} line, got {len(lines)}")
+    try:
+        report = json.loads(lines[0])
+    except json.JSONDecodeError as e:
+        raise ValueError(f"invalid logical digest JSON: {e}") from e
+    required = {"status": "ok", "schema_version": 1, "algorithm": "sha256", "canonicalization": "logical-metric-row-v1", "scanner": "series", "parallelism": 1}
+    for key, value in required.items():
+        if report.get(key) != value:
+            raise ValueError(f"logical digest {key} mismatch: {report.get(key)!r} != {value!r}")
+    labels = report.get("labels")
+    if not isinstance(labels, list) or len(labels) != len(config["labels"]) or not all(isinstance(item, dict) for item in labels) or [item.get("name") for item in labels] != config["labels"] or any(item.get("type") != "string" or not isinstance(item.get("column_id"), int) for item in labels):
+        raise ValueError(f"logical digest labels mismatch: {labels!r} != {config['labels']!r}")
+    timestamp = report.get("timestamp")
+    if not isinstance(timestamp, dict) or timestamp.get("name") != config["timestamp_column"] or timestamp.get("unit") != "millisecond" or not isinstance(timestamp.get("column_id"), int):
+        raise ValueError(f"logical digest timestamp metadata mismatch: {timestamp!r}")
+    value = report.get("value")
+    if not isinstance(value, dict) or value.get("name") != config["value_column"] or value.get("type") != "float64" or value.get("encoding") != "ieee754-bits" or not isinstance(value.get("column_id"), int):
+        raise ValueError(f"logical digest value metadata mismatch: {value!r}")
+    if report.get("rows") != expected_rows:
+        raise ValueError(f"logical digest rows {report.get('rows')!r} != expected {expected_rows}")
+    if not isinstance(report.get("digest"), str) or not re.fullmatch(r"[0-9a-f]{64}", report["digest"]):
+        raise ValueError("logical digest must be lowercase 64-hex sha256")
+    return report
+
+
+def run_logical_digests(bench_binary: Path, targets: list[RunTarget], inspections: dict[str, dict[str, Any]], planned_rows: int, config: dict[str, Any], *, dry_run: bool) -> dict[str, Any]:
+    reports: dict[str, Any] = {}
+    for target in targets:
+        cmd = logical_digest_command(bench_binary, target, inspections[target.name], config)
+        expected_rows = planned_rows
+        evidence: dict[str, Any] = {"target": target.name, "cmd": cmd, "expected_rows": expected_rows}
+        if dry_run:
+            reports[target.name] = {**evidence, "status": "planned", "report": None}
+            continue
+        bench_dir = target.work_dir / "read_bench"
+        bench_dir.mkdir(parents=True, exist_ok=True)
+        (bench_dir / "bench.toml").write_text(f'[storage]\ndata_home = "{target.datanode_data_dir}"\ntype = "File"\n\n[[region_engine]]\n[region_engine.mito]\n')
+        result = run_command(cmd)
+        evidence.update(result)
+        if result["returncode"] != 0:
+            reports[target.name] = {**evidence, "status": "failed", "error": "logical digest command failed", "report": None}
+            continue
+        try:
+            reports[target.name] = {**evidence, "status": "observed", "report": parse_logical_digest(result["stdout"], config, int(expected_rows))}
+        except ValueError as e:
+            reports[target.name] = {**evidence, "status": "failed", "error": str(e), "report": None}
+    return reports
+
+
+def logical_digest_equality(reports: dict[str, Any], targets: list[RunTarget]) -> dict[str, Any]:
+    left, right = (reports[target.name] for target in targets)
+    if left["status"] != "observed" or right["status"] != "observed":
+        return {"status": "failed", "reports": reports, "checks": {"row_count_equal": False, "expected_rows_equal": False, "canonicalization_equal": False, "digest_equal": False}}
+    a, b = left["report"], right["report"]
+    checks = {"row_count_equal": a["rows"] == b["rows"], "expected_rows_equal": left["expected_rows"] == right["expected_rows"], "canonicalization_equal": all(a.get(key) == b.get(key) for key in ("schema_version", "algorithm", "canonicalization", "scanner", "parallelism", "labels", "timestamp", "value")), "digest_equal": a["digest"] == b["digest"]}
+    return {"status": "ok" if all(checks.values()) else "failed", "reports": reports, "checks": checks}
+
+
+def aggregate_query_rounds(rounds: list[dict[str, Any]]) -> dict[str, Any]:
+    by_name: dict[str, list[dict[str, Any]]] = {}
+    failed = False
+    for round_data in rounds:
+        if round_data["result"]["status"] != "ok":
+            failed = True
+        for measurement in round_data["result"].get("measurements", []):
+            by_name.setdefault(str(measurement["name"]), []).append(measurement)
+            failed = failed or measurement.get("status") != "ok"
+    measurements = []
+    for name, samples in by_name.items():
+        medians = [sample["latency_ms_median"] for sample in samples if sample.get("latency_ms_median") is not None]
+        measurements.append({"name": name, "status": "ok" if len(medians) == len(samples) else "failed", "sample_unit": "round_median", "round_medians_ms": medians, "latency_ms_median": statistics.median(medians) if medians else None, "latency_ms_p95": percentile(medians, 95) if medians else None, "rounds": samples})
+    return {"status": "failed" if failed or any(m["status"] == "failed" for m in measurements) else "ok", "measurements": measurements}
+
+
+def build_b4_commands(bench_binary: Path, target: RunTarget, read_bench: dict[str, Any], storage_inspection: dict[str, Any], projection: dict[str, Any], *, dry_run: bool, expected_region_rows: int | None = None) -> list[dict[str, Any]]:
+    files = inspection_report(storage_inspection).get("files") or []
+    ssts = [item for item in files if item.get("relative_path", "").endswith(".parquet") and item.get("columns")]
+    if dry_run and not ssts:
+        ssts = [{"relative_path": "<landed-sst>.parquet"}]
+    if read_bench["max_files"] is not None:
+        ssts = ssts[: int(read_bench["max_files"])]
+    bench_targets = [{**parsed, "expected_rows": item.get("num_rows")} for item in ssts if (parsed := parse_sst_bench_target(target, storage_inspection, item, dry_run=dry_run)) is not None]
+    if not bench_targets:
+        raise RuntimeError("no inspected data SST files available for paired read_bench")
+    bench_dir = target.work_dir / "read_bench"
+    config_path = bench_dir / "bench.toml"
+    projection_name = str(projection["name"])
+    scan_config_path = bench_dir / f"{projection_name}.scan.json"
+    projection_columns = projection.get("columns")
+    scan_config = {} if projection_columns is None else {"projection_names": projection_columns}
+    common = {"config_path": str(config_path), "scan_config_path": str(scan_config_path), "scan_config": scan_config, "projection": projection_name, "projection_columns": projection_columns}
+    specs = []
+    iterations = str(int(read_bench["iterations"]))
+    if read_bench["parquetbench"]:
+        for bench_target in bench_targets:
+            cmd = [str(bench_binary), "datanode", "parquetbench", "--config", str(config_path), "--region-id", bench_target["region_id"], "--table-dir", bench_target["table_dir"], "--file-id", bench_target["file_id"], "--scan-config", str(scan_config_path), "--path-type", bench_target["path_type"], "--iterations", iterations, "--reader", str(read_bench["parquet_reader"])]
+            expected_rows = bench_target.get("expected_rows")
+            if not dry_run and expected_rows is None:
+                raise RuntimeError(f"inspected SST lacks num_rows for parquet benchmark: {bench_target.get('relative_path')}")
+            specs.append({**common, **bench_target, "mode": "parquet", "expected_rows": int(expected_rows) if expected_rows is not None else None, "cmd": cmd})
+    regions: dict[tuple[str, str, str], list[str]] = {}
+    if read_bench["scanbench"]:
+        for bench_target in bench_targets:
+            regions.setdefault((bench_target["table_dir"], bench_target["region_id"], bench_target["path_type"]), []).append(bench_target["relative_path"])
+    for (table_dir, region_id, path_type), region_files in regions.items():
+        cmd = [str(bench_binary), "datanode", "scanbench", "--config", str(config_path), "--region-id", region_id, "--table-dir", table_dir, "--scan-config", str(scan_config_path), "--path-type", path_type, "--scanner", str(read_bench["scan_scanner"]), "--parallelism", str(int(read_bench["parallelism"])), "--iterations", iterations]
+        specs.append({**common, "mode": "sequential", "table_dir": table_dir, "region_id": region_id, "path_type": path_type, "files": region_files, "expected_rows": expected_region_rows, "cmd": cmd})
+    return specs
+
+
+def run_paired_read_bench(bench_binary: Path, targets: list[RunTarget], read_bench: dict[str, Any], inspections: dict[str, dict[str, Any]], visibility_rows: dict[str, int | None], *, dry_run: bool) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]]]:
+    projections = named_projection_schedule(read_bench)
+    commands = {target.name: [spec for projection in projections for spec in build_b4_commands(bench_binary, target, read_bench, inspections[target.name], projection, dry_run=dry_run, expected_region_rows=visibility_rows.get(target.name))] for target in targets}
+    results = {target.name: {"status": "planned" if dry_run else "ok", "rounds": [], "commands": commands[target.name]} for target in targets}
+    schedule = []
+    for round_index in range(int(read_bench["rounds"])):
+        order = paired_target_order(targets, round_index)
+        round_schedule = {"round": round_index + 1, "target_order": [target.name for target in order], "invocations": []}
+        schedule.append(round_schedule)
+        for target in order:
+            round_runs = []
+            for spec in commands[target.name]:
+                run = {**spec, "round": round_index + 1, "target": target.name, "status": "planned" if dry_run else "running"}
+                round_schedule["invocations"].append({"target": target.name, "projection": spec["projection"], "mode": spec["mode"], "cmd": spec["cmd"]})
+                if not dry_run:
+                    bench_dir = Path(spec["config_path"]).parent
+                    bench_dir.mkdir(parents=True, exist_ok=True)
+                    Path(spec["config_path"]).write_text(f'[storage]\ndata_home = "{target.datanode_data_dir}"\ntype = "File"\n\n[[region_engine]]\n[region_engine.mito]\n')
+                    Path(spec["scan_config_path"]).write_text(json.dumps(spec["scan_config"], indent=2) + "\n")
+                    command_result = run_command(spec["cmd"])
+                    run.update(command_result)
+                    if command_result["returncode"] != 0:
+                        run["status"] = "failed"
+                    else:
+                        try:
+                            run.update(summarize_iteration_samples(parse_bench_iterations(command_result["stdout"], str(spec["mode"]), int(read_bench["iterations"]), spec.get("expected_rows"))))
+                            run["status"] = "ok"
+                        except ValueError as e:
+                            run["status"] = "failed"
+                            run["parse_error"] = str(e)
+                round_runs.append(run)
+            results[target.name]["rounds"].append({"round": round_index + 1, "target_order": [item.name for item in order], "runs": round_runs, "medians": [{"projection": run["projection"], "mode": run["mode"], "median_ms": run.get("median_ms"), "row_count": run.get("row_count")} for run in round_runs]})
+    if not dry_run:
+        for result in results.values():
+            result["status"] = "ok" if all(run["status"] == "ok" for round_data in result["rounds"] for run in round_data["runs"]) else "failed"
+    return results, schedule
 
 
 def run_read_bench(bench_binary: Path, target: RunTarget, read_bench: dict[str, Any] | None, storage_inspection: dict[str, Any] | None, *, dry_run: bool) -> dict[str, Any]:
@@ -1053,6 +1312,97 @@ def write_frontend_prom_config(target: RunTarget, remote: dict[str, Any]) -> Pat
     return path
 
 
+def merge_physical_table_options(setup: dict[str, Any], target_name: str) -> dict[str, str]:
+    """Apply a target overlay without allowing it to remove common options."""
+    common = setup.get("options") or {}
+    overlays = setup.get("target_options") or {}
+    overlay = overlays.get(target_name) or {}
+    return {str(key): str(value) for key, value in sorted({**common, **overlay}.items())}
+
+
+def create_physical_table_sql(table_name: str, setup: dict[str, Any], options: dict[str, str]) -> str:
+    columns = ", ".join(f"{sql_ident(str(column['name']))} {column['type']}" for column in setup["columns"])
+    option_sql = ""
+    if options:
+        option_sql = " WITH (" + ", ".join(f"{sql_string(key)}={sql_string(value)}" for key, value in sorted(options.items())) + ")"
+    return f"CREATE TABLE {sql_ident(table_name)} ({columns}, TIME INDEX ({sql_ident(str(setup['time_index']))})) ENGINE={setup['engine']}{option_sql};"
+
+
+def extract_show_create_statement(result: dict[str, Any]) -> str | None:
+    def visit(value: Any) -> str | None:
+        if isinstance(value, dict):
+            for key, nested in value.items():
+                if "create" in key.lower() and "table" in key.lower() and isinstance(nested, str):
+                    return nested
+            for nested in value.values():
+                found = visit(nested)
+                if found:
+                    return found
+        elif isinstance(value, list):
+            for nested in value:
+                found = visit(nested)
+                if found:
+                    return found
+        elif isinstance(value, str) and re.search(r"\bCREATE\s+TABLE\b", value, re.I):
+            return value
+        return None
+    return visit(result.get("response"))
+
+
+def _unquote_sql_value(value: str) -> str:
+    value = value.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"`":
+        quote = value[0]
+        return value[1:-1].replace(quote * 2, quote)
+    return value
+
+
+def verify_show_create_setup(statement: str | None, engine: str, options: dict[str, str]) -> dict[str, Any]:
+    if not statement:
+        return {"status": "failed", "reason": "SHOW CREATE response did not contain a CREATE TABLE statement"}
+    engine_match = re.search(r"\bENGINE\s*=\s*([`\"']?[A-Za-z_][A-Za-z0-9_]*[`\"']?)", statement, re.I)
+    if not engine_match or _unquote_sql_value(engine_match.group(1)).lower() != engine.lower():
+        return {"status": "failed", "reason": f"SHOW CREATE engine does not equal {engine}", "statement": statement}
+    missing = []
+    for key, expected in sorted(options.items()):
+        matches = re.finditer(rf'''(?i)(?<![A-Za-z0-9_])[`"']?{re.escape(key)}[`"']?\s*=\s*('(?:''|[^'])*'|"(?:""|[^"])*"|`(?:``|[^`])*`|[^,\)\s]+)''', statement)
+        values = [_unquote_sql_value(match.group(1)) for match in matches]
+        if expected not in values:
+            missing.append({"option": key, "expected": expected, "observed": values})
+    if missing:
+        return {"status": "failed", "reason": "SHOW CREATE options differ", "missing_or_wrong": missing, "statement": statement}
+    return {"status": "observed", "statement": statement, "engine": engine, "options": options}
+
+
+def setup_physical_table(target: RunTarget, remote: dict[str, Any], http_timeout: float, *, dry_run: bool) -> dict[str, Any] | None:
+    setup = remote.get("physical_table_setup")
+    if not isinstance(setup, dict):
+        return None
+    options = merge_physical_table_options(setup, target.name)
+    ddl = create_physical_table_sql(str(remote["physical_table"]), setup, options)
+    show_sql = f"SHOW CREATE TABLE {sql_ident(str(remote['physical_table']))}"
+    evidence: dict[str, Any] = {
+        "target": target.name,
+        "ddl": ddl,
+        "resolved_options": options,
+        "show_create_sql": show_sql,
+    }
+    if dry_run:
+        return {**evidence, "status": "planned", "show_create_response": None, "parsed_create_statement": None, "verification": {"status": "planned"}}
+    ddl_result = http_post_sql(target.http_port, ddl, str(remote["database"]), http_timeout)
+    evidence["ddl_result"] = ddl_result
+    if not ddl_result.get("ok"):
+        return {**evidence, "status": "failed", "show_create_response": None, "parsed_create_statement": None, "verification": {"status": "failed"}, "error": f"physical table DDL failed: {ddl_result}"}
+    show_result = http_post_sql(target.http_port, show_sql, str(remote["database"]), http_timeout)
+    statement = extract_show_create_statement(show_result)
+    verification = verify_show_create_setup(statement, str(setup["engine"]), options)
+    evidence.update({"status": "observed", "show_create_response": show_result, "parsed_create_statement": statement, "verification": verification})
+    if not show_result.get("ok") or verification["status"] == "failed":
+        evidence["status"] = "failed"
+        evidence["error"] = f"physical table SHOW CREATE verification failed: {show_result}"
+    return evidence
+
+
 def run_remote_write(generator: Path | None, target: RunTarget, remote: dict[str, Any], *, dry_run: bool) -> dict[str, Any]:
     if generator is None:
         if not dry_run:
@@ -1084,6 +1434,9 @@ def run_remote_write(generator: Path | None, target: RunTarget, remote: dict[str
     cmd.extend(["--value-stall-every", str(int(value["stall_every"]))])
     cmd.extend(["--value-stall-length", str(int(value["stall_length"]))])
     cmd.extend(["--value-mixed-every", str(int(value["mixed_every"]))])
+    cmd.extend(["--value-series-mix-every", str(int(value["series_mix_every"]))])
+    cmd.extend(["--value-gauge-residue", str(int(value["gauge_residue"]))])
+    cmd.extend(["--value-fractional-step", str(value["fractional_step"])])
     if "sample_offset" in remote:
         cmd.extend(["--value-sample-offset", str(int(remote["sample_offset"]))])
     if "total_samples_per_series" in remote:
@@ -1231,6 +1584,9 @@ def poll_expected_count(target: RunTarget, table_name: str, db: str, expected_ro
 def run_remote_write_scenario(args: argparse.Namespace, case: dict[str, Any], case_path: Path, targets: list[RunTarget], report: dict[str, Any]) -> None:
     remote = scenario(case)["remote_write"]
     tables = case_tables(case)
+    if getattr(args, "reuse_work_dir", False) and (isinstance(remote.get("physical_table_setup"), dict) or b4_enabled(remote.get("read_bench"))):
+        report["setup_failure"] = {"status": "failed", "phase": "preparation", "reason": "--reuse-work-dir is not allowed with physical_table_setup or paired B4 benchmarking"}
+        raise ValueError(report["setup_failure"]["reason"])
     if args.fixture_only:
         raise ValueError("--fixture-only is not supported for prom_remote_write_then_query; use --dry-run for planning")
     helper = args.fixture_generator or args.remote_write_generator
@@ -1242,8 +1598,10 @@ def run_remote_write_scenario(args: argparse.Namespace, case: dict[str, Any], ca
     if storage and helper is None and not args.dry_run:
         raise ValueError("--fixture-generator is required when scenario.remote_write.storage.inspect is enabled")
     clusters: list[DistributedCluster] = []
-    target_results = []
+    target_results: dict[str, dict[str, Any]] = {}
     storage_results = []
+    use_b4 = b4_enabled(remote.get("read_bench"))
+    inspections_by_target: dict[str, dict[str, Any]] = {}
     try:
         for target in targets:
             target.work_dir.mkdir(parents=True, exist_ok=True)
@@ -1256,34 +1614,136 @@ def run_remote_write_scenario(args: argparse.Namespace, case: dict[str, Any], ca
             create_database = {"status": "dry-run", "database": db}
             if not args.dry_run:
                 create_database = http_post_sql(target.http_port, f"CREATE DATABASE IF NOT EXISTS {sql_ident(db)}", "public", args.http_timeout)
+            tr: dict[str, Any] = {"name": target.name, "binary": str(target.binary), "work_dir": str(target.work_dir), "components": cluster.component_report(), "frontend_config": str(config_path), "create_database": create_database, "validation_errors": [], "phase_order": ["create_database"]}
+            report["targets"].append(tr)
+            physical_setup = setup_physical_table(target, remote, args.http_timeout, dry_run=args.dry_run)
+            if physical_setup is not None:
+                tr["physical_table_setup"] = physical_setup
+                tr["phase_order"].extend(["physical_table_ddl", "show_create"])
+                if physical_setup.get("status") == "failed":
+                    tr.update({"remote_write": {"status": "skipped", "reason": "physical_table_setup failed"}, "read_bench": {"status": "skipped"}, "status": "failed"})
+                    tr["validation_errors"].append({"phase": "physical_table_setup", "evidence": physical_setup})
+                    write_json(target.report_path, tr)
+                    continue
             rw, flushes = run_remote_write_ingestion(helper, target, remote, args, dry_run=args.dry_run)
+            tr["phase_order"].extend(["remote_write", "flush"])
             visibility = {"status": "dry-run"}
             query_result = {"validation": [], "validation_errors": [], "measurements": [], "status": "planned"}
             if not args.dry_run:
                 visibility = poll_expected_count(target, tables[0]["name"], db, expected_remote_write_rows(remote), float(remote["visibility_timeout_seconds"]), args.http_timeout)
-                query_result = run_queries(target, case, tables, args.http_timeout)
+                if not use_b4:
+                    query_result = run_queries(target, case, tables, args.http_timeout)
                 cluster.stop_component("datanode")
+            tr["phase_order"].append("visibility")
             storage_inspection = None
             if storage:
                 storage_inspection = run_storage_inspection(helper or args.storage_inspector, target, storage, dry_run=args.dry_run)
                 storage_results.append(storage_inspection)
-            read_bench_result = run_read_bench(args.candidate_bin, target, remote["read_bench"], storage_inspection, dry_run=args.dry_run)
-            tr = {"name": target.name, "binary": str(target.binary), "work_dir": str(target.work_dir), "components": cluster.component_report(), "frontend_config": str(config_path), "create_database": create_database, "remote_write": rw, "flushes": flushes, "flush": flushes[-1] if flushes else None, "visibility": visibility, **query_result}
+            tr["phase_order"].append("storage_inspection")
+            if use_b4:
+                if storage_inspection is None:
+                    raise ValueError("named projections or outer rounds require storage inspection")
+                inspections_by_target[target.name] = storage_inspection
+                read_bench_result = {"status": "planned", "phase": "awaiting_paired_measurement"}
+                tr["phase_order"].append("artifact_freeze")
+            else:
+                read_bench_result = run_read_bench(args.candidate_bin, target, remote["read_bench"], storage_inspection, dry_run=args.dry_run)
+            tr.update({"remote_write": rw, "flushes": flushes, "flush": flushes[-1] if flushes else None, "visibility": visibility, **query_result})
             if storage_inspection is not None:
                 tr["storage_inspection"] = storage_inspection
+            if use_b4:
+                tr["artifact"] = {"before_measurement": artifact_layout_evidence(storage_inspection, dry_run=args.dry_run)}
             tr["read_bench"] = read_bench_result
-            flushes_ok = all(flush.get("ok") for flush in flushes)
+            target_results[target.name] = query_result
+        if use_b4 and not any(tr.get("status") == "failed" for tr in report["targets"]):
+            assert storage is not None
+            digest_config = remote.get("logical_stream_verification")
+            planned_rows = int(remote["series_count"]) * int(remote["samples_per_series"])
+            visibility_failures = [] if args.dry_run else [tr for tr in report["targets"] if tr["visibility"].get("ok") is not True or tr["visibility"].get("row_count_ok") is not True or not isinstance(tr["visibility"].get("observed_rows"), int) or tr["visibility"]["observed_rows"] != planned_rows]
+            if visibility_failures:
+                for tr in report["targets"]:
+                    tr["status"] = "failed"
+                    tr.setdefault("validation_errors", []).append({"phase": "planned_row_visibility", "planned_rows": planned_rows, "visibility": tr["visibility"]})
+                report["logical_artifact_equality"] = {"status": "failed", "reason": "planned row visibility gate failed", "planned_rows": planned_rows}
+            if isinstance(digest_config, dict) and not visibility_failures:
+                digest_reports = run_logical_digests(args.candidate_bin, targets, inspections_by_target, planned_rows, digest_config, dry_run=args.dry_run)
+                equality = {"status": "planned", "reports": digest_reports, "checks": {"row_count_equal": None, "expected_rows_equal": None, "canonicalization_equal": None, "digest_equal": None}} if args.dry_run else logical_digest_equality(digest_reports, targets)
+                report["logical_artifact_equality"] = equality
+                for tr in report["targets"]:
+                    tr["logical_stream_digest"] = digest_reports[tr["name"]]
+                    tr["phase_order"].append("logical_stream_digest")
+                if equality["status"] == "failed":
+                    for tr in report["targets"]:
+                        tr["status"] = "failed"
+                        tr.setdefault("validation_errors", []).append({"phase": "logical_artifact_equality", "evidence": equality})
+            if not any(tr.get("status") == "failed" for tr in report["targets"]):
+                query_schedule = []
+                round_results: dict[str, list[dict[str, Any]]] = {target.name: [] for target in targets}
+                for round_index in range(int(remote["read_bench"]["rounds"])):
+                    order = paired_target_order(targets, round_index)
+                    query_schedule.append({"round": round_index + 1, "target_order": [target.name for target in order]})
+                    for position, target in enumerate(order, start=1):
+                        tr = next(item for item in report["targets"] if item["name"] == target.name)
+                        if args.dry_run:
+                            result = {"validation": [], "validation_errors": [], "measurements": [], "status": "planned"}
+                        else:
+                            cluster = next(cluster for cluster in clusters if cluster.target.name == target.name)
+                            cluster.start_datanode()
+                            result = run_queries(target, case, tables, args.http_timeout)
+                            cluster.stop_component("datanode")
+                        round_results[target.name].append({"round": round_index + 1, "order_position": position, "result": result})
+                report["query_round_schedule"] = {"status": "planned" if args.dry_run else "observed", "rounds": query_schedule}
+                for target, tr in zip(targets, report["targets"]):
+                    tr["query_rounds"] = round_results[target.name]
+                    query_result = aggregate_query_rounds(round_results[target.name]) if not args.dry_run else {"validation": [], "validation_errors": [], "measurements": [], "status": "planned"}
+                    tr.update(query_result)
+                    target_results[target.name] = query_result
+                    tr["phase_order"].append("query")
+                    if not args.dry_run:
+                        refreshed = run_storage_inspection(helper or args.storage_inspector, target, storage, dry_run=False)
+                        after_tql = artifact_layout_evidence(refreshed, dry_run=False)
+                        before = tr["artifact"]["before_measurement"]
+                        stable = before["layout_hash"] == after_tql["layout_hash"] and before["artifact_hash"] == after_tql["artifact_hash"] and before["files"] == after_tql["files"]
+                        tr["artifact"]["after_tql"] = {**after_tql, "stability": {"status": "observed", "stable": stable}}
+                        if not stable:
+                            tr["status"] = "failed"
+                            tr.setdefault("validation_errors", []).append({"phase": "post_tql_artifact_stability", "before": before, "after": after_tql})
+                    tr["phase_order"].append("post_tql_stability")
+            if any(tr.get("status") == "failed" for tr in report["targets"]):
+                paired_results, schedule = ({target.name: {"status": "skipped", "reason": "post-TQL mutation, logical digest, or query phase failed"} for target in targets}, [])
+            else:
+                paired_results, schedule = run_paired_read_bench(args.candidate_bin, targets, remote["read_bench"], inspections_by_target, {tr["name"]: tr["visibility"].get("observed_rows") for tr in report["targets"]}, dry_run=args.dry_run)
+            report["read_bench_schedule"] = {"status": "planned" if args.dry_run else "observed", "artifact_phase": [target.name for target in targets], "rounds": schedule}
+            for target, tr in zip(targets, report["targets"]):
+                tr["read_bench"] = paired_results[target.name]
+                tr["phase_order"].append("paired_read_bench")
+                after = artifact_layout_evidence(None, dry_run=True) if args.dry_run else artifact_layout_evidence(run_storage_inspection(helper or args.storage_inspector, target, storage, dry_run=False), dry_run=False)
+                tr["artifact"]["after_measurement"] = after
+                before = tr["artifact"]["before_measurement"]
+                stable = None if args.dry_run else (before["layout_hash"] == after["layout_hash"] and before["artifact_hash"] == after["artifact_hash"] and before["files"] == after["files"])
+                tr["artifact"]["stability"] = {"status": "planned" if args.dry_run else "observed", "stable": stable}
+                tr["phase_order"].append("final_stability")
+                if stable is False:
+                    tr["status"] = "failed"
+                    if tr["read_bench"].get("status") != "skipped":
+                        tr["read_bench"]["status"] = "failed"
+                    tr.setdefault("validation_errors", []).append({"phase": "artifact_stability", "before": before, "after": after})
+        for target, tr in zip(targets, report["targets"]):
+            if tr.get("status") == "failed" and "flushes" not in tr:
+                write_json(target.report_path, tr)
+                continue
+            flushes_ok = all(flush.get("ok") for flush in tr["flushes"])
+            storage_inspection = tr.get("storage_inspection")
             storage_ok = storage_inspection is None or args.dry_run or storage_inspection.get("status") == "ok"
-            read_bench_ok = args.dry_run or read_bench_result.get("status") in ("ok", "skipped")
-            remote_checks_ok = args.dry_run or (create_database.get("ok") and flushes_ok and visibility.get("ok") and visibility.get("row_count_ok") and storage_ok and read_bench_ok)
+            read_bench_ok = args.dry_run or tr["read_bench"].get("status") in ("ok", "skipped")
+            setup_ok = tr.get("physical_table_setup", {}).get("status") != "failed"
+            remote_checks_ok = args.dry_run or (setup_ok and tr["create_database"].get("ok") and flushes_ok and tr["visibility"].get("ok") and tr["visibility"].get("row_count_ok") and storage_ok and read_bench_ok)
             if not remote_checks_ok:
-                tr.setdefault("validation_errors", []).append({"phase": "remote_write_visibility_storage", "create_database_ok": create_database.get("ok"), "flushes_ok": flushes_ok, "visibility_ok": visibility.get("ok"), "row_count_ok": visibility.get("row_count_ok"), "storage_ok": storage_ok, "read_bench_ok": read_bench_ok, "create_database": create_database, "flushes": flushes, "visibility": visibility, "read_bench": read_bench_result})
-            tr["status"] = "planned" if args.dry_run else ("measured" if remote_checks_ok and query_result["status"] == "ok" else "failed")
+                tr.setdefault("validation_errors", []).append({"phase": "remote_write_visibility_storage", "physical_setup_ok": setup_ok, "create_database_ok": tr["create_database"].get("ok"), "flushes_ok": flushes_ok, "visibility_ok": tr["visibility"].get("ok"), "row_count_ok": tr["visibility"].get("row_count_ok"), "storage_ok": storage_ok, "read_bench_ok": read_bench_ok, "create_database": tr["create_database"], "flushes": tr["flushes"], "visibility": tr["visibility"], "read_bench": tr["read_bench"]})
+            tr["status"] = "planned" if args.dry_run else ("measured" if remote_checks_ok and tr.get("status") == "ok" else "failed")
             write_json(target.report_path, tr)
-            report["targets"].append(tr)
-            target_results.append(query_result)
         if not args.dry_run:
-            report["thresholds"] = enforce_thresholds(case, target_results[0], target_results[1]) + enforce_storage_thresholds(storage, storage_results[0] if storage_results else None, storage_results[1] if len(storage_results) > 1 else None)
+            report["thresholds"] = enforce_thresholds(case, target_results.get(targets[0].name, {}), target_results.get(targets[1].name, {})) + enforce_storage_thresholds(storage, storage_results[0] if storage_results else None, storage_results[1] if len(storage_results) > 1 else None)
         elif storage:
             report["thresholds"] = planned_storage_thresholds(storage)
         report["status"] = "planned" if args.dry_run else ("failed" if any(t["status"] == "failed" for t in report["thresholds"]) or any(t.get("status") == "failed" for t in report["targets"]) else "ok")
@@ -1410,3 +1870,128 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+
+
+class QueryRegressionRunnerUnitTests(unittest.TestCase):
+    def test_logical_digest_command_and_validation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = make_target("base", Path("/bin/true"), Path(tmpdir), list(range(10000, 10008)))
+            inspection = {"status": "dry-run"}
+            config = {"labels": ["host", "instance"], "timestamp_column": "ts", "value_column": "value"}
+            cmd = logical_digest_command(Path("/bin/true"), target, inspection, config)
+            self.assertEqual([cmd[cmd.index("--digest-label") + 1], cmd[cmd.index("--digest-label", cmd.index("--digest-label") + 1) + 1]], ["host", "instance"])
+            self.assertNotIn("--scan-config", cmd)
+            payload = {"status": "ok", "schema_version": 1, "algorithm": "sha256", "canonicalization": "logical-metric-row-v1", "scanner": "series", "parallelism": 1, "labels": [{"name": "host", "column_id": 2, "type": "string"}, {"name": "instance", "column_id": 3, "type": "string"}], "timestamp": {"name": "ts", "column_id": 0, "unit": "millisecond"}, "value": {"name": "value", "column_id": 1, "type": "float64", "encoding": "ieee754-bits"}, "rows": 2, "digest": "a" * 64}
+            self.assertEqual(parse_logical_digest(LOGICAL_DIGEST_PREFIX + json.dumps(payload), config, 2)["digest"], "a" * 64)
+            with self.assertRaises(ValueError):
+                parse_logical_digest("", config, 2)
+            with self.assertRaises(ValueError):
+                parse_logical_digest((LOGICAL_DIGEST_PREFIX + json.dumps(payload)) * 2, config, 2)
+            invalid = json.loads(json.dumps(payload))
+            invalid["labels"][0]["type"] = "binary"
+            with self.assertRaises(ValueError):
+                parse_logical_digest(LOGICAL_DIGEST_PREFIX + json.dumps(invalid), config, 2)
+            invalid = json.loads(json.dumps(payload))
+            invalid["timestamp"]["unit"] = "nanosecond"
+            with self.assertRaises(ValueError):
+                parse_logical_digest(LOGICAL_DIGEST_PREFIX + json.dumps(invalid), config, 2)
+
+    def test_finalized_b4_query_results_drive_thresholds(self) -> None:
+        case = {"scenario": {"kind": "prom_remote_write_then_query", "queries": [{"name": "q", "thresholds": {"max_candidate_latency_regression_pct": 10}}]}}
+        base = {"measurements": [{"name": "q", "latency_ms_median": 10.0}]}
+        candidate = {"measurements": [{"name": "q", "latency_ms_median": 12.0}]}
+        threshold = enforce_thresholds(case, base, candidate)
+        self.assertEqual(threshold[0]["status"], "failed")
+        candidate["measurements"][0]["latency_ms_median"] = 11.0
+        self.assertEqual(enforce_thresholds(case, base, candidate)[0]["status"], "passed")
+
+    def test_option_merge_and_deterministic_ddl(self) -> None:
+        setup = {
+            "columns": [{"name": "host", "type": "STRING"}, {"name": "ts", "type": "TIMESTAMP(3)"}],
+            "time_index": "ts",
+            "engine": "mito",
+            "options": {"z_option": "common", "a_option": "keep"},
+            "target_options": {"candidate": {"z_option": "override"}},
+        }
+        options = merge_physical_table_options(setup, "candidate")
+        self.assertEqual(options, {"a_option": "keep", "z_option": "override"})
+        ddl = create_physical_table_sql("physical", setup, options)
+        self.assertIn('CREATE TABLE "physical"', ddl)
+        self.assertLess(ddl.index("'a_option'"), ddl.index("'z_option'"))
+        self.assertNotIn("IF NOT EXISTS", ddl)
+
+    def test_show_create_requires_exact_engine_and_options(self) -> None:
+        statement = 'CREATE TABLE "physical" ("ts" TIMESTAMP TIME INDEX ("ts")) ENGINE=MITO WITH ("compression" = "zstd", \'append_mode\'=\'false\')'
+        verified = verify_show_create_setup(statement, "mito", {"append_mode": "false", "compression": "zstd"})
+        self.assertEqual(verified["status"], "observed")
+        self.assertEqual(verify_show_create_setup(statement, "mito", {"compression": "plain"})["status"], "failed")
+        self.assertEqual(verify_show_create_setup(statement, "metric", {})["status"], "failed")
+
+    def test_named_projection_null_and_explicit_command_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = make_target("base", Path("/bin/true"), Path(tmpdir), list(range(10000, 10008)))
+            read_bench = {"iterations": 8, "max_files": None, "parquetbench": True, "scanbench": True, "parquet_reader": "direct", "scan_scanner": "seq", "parallelism": 1, "projection": ["legacy"], "projections": [{"name": "all", "columns": None}, {"name": "value", "columns": ["greptime_value"]}], "rounds": 2}
+            inspection = {"status": "dry-run"}
+            all_specs = build_b4_commands(Path("/bin/true"), target, read_bench, inspection, read_bench["projections"][0], dry_run=True)
+            value_specs = build_b4_commands(Path("/bin/true"), target, read_bench, inspection, read_bench["projections"][1], dry_run=True)
+            self.assertTrue(all(spec["scan_config"] == {} for spec in all_specs))
+            self.assertTrue(all(spec["scan_config"] == {"projection_names": ["greptime_value"]} for spec in value_specs))
+            self.assertFalse(any("projection_names" in spec["cmd"] for spec in all_specs))
+
+    def test_parses_current_parquet_and_scan_iteration_lines(self) -> None:
+        parquet = "\n".join([f"  Iteration {index}: 42 rows, 3 columns, 1 record batches in {index}.0ms (42/s, 1 B/s)" for index in range(1, 4)])
+        scan = "\n".join([f"  [iter {index}] 42 rows in {index}.0ms (1 partitions), array_mem_size: 1 B, estimated_size: 1 B" for index in range(1, 4)])
+        self.assertEqual(parse_bench_iterations(parquet, "parquet", 3)[2]["duration_ms"], 3.0)
+        self.assertEqual(parse_bench_iterations(scan, "sequential", 3)[1]["rows"], 42)
+        with self.assertRaises(ValueError):
+            parse_bench_iterations("  Iteration 1: malformed", "parquet", 1)
+        with self.assertRaises(ValueError):
+            parse_bench_iterations(parquet, "parquet", 3, expected_rows=99)
+        with self.assertRaises(ValueError):
+            parse_bench_iterations(scan, "sequential", 3, expected_rows=0)
+
+    def test_artifact_content_hash_detects_same_size_mutation_and_setup_failures(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            sst = root / "one.parquet"
+            sst.write_bytes(b"abcd")
+            inspection = {"summary": {"root": str(root), "files": [{"relative_path": "one.parquet", "num_rows": 4}]}}
+            before = artifact_layout_evidence(inspection, dry_run=False)
+            sst.write_bytes(b"wxyz")
+            after = artifact_layout_evidence(inspection, dry_run=False)
+            self.assertEqual(before["layout_hash"], after["layout_hash"])
+            self.assertNotEqual(before["artifact_hash"], after["artifact_hash"])
+            target = make_target("base", Path("/bin/true"), root, list(range(10000, 10008)))
+            remote = {"database": "public", "physical_table": "p", "physical_table_setup": {"columns": [{"name": "ts", "type": "TIMESTAMP"}], "time_index": "ts", "engine": "mito", "options": {"quoted": "a'b", "empty": ""}, "target_options": {}}}
+            with patch(__name__ + ".http_post_sql", return_value={"ok": False, "response": {"error": "no"}}):
+                evidence = setup_physical_table(target, remote, 1.0, dry_run=False)
+                assert evidence is not None
+                self.assertEqual(evidence["status"], "failed")
+            self.assertIn("a''b", create_physical_table_sql("p", remote["physical_table_setup"], merge_physical_table_options(remote["physical_table_setup"], "base")))
+
+    def test_warmup_discard_median_and_alternating_order(self) -> None:
+        samples = [{"iteration": index, "rows": 9, "duration_ms": value} for index, value in enumerate([99.0, 1.0, 3.0, 2.0], start=1)]
+        summary = summarize_iteration_samples(samples)
+        self.assertEqual([sample["duration_ms"] for sample in summary["kept_samples"]], [1.0, 3.0, 2.0])
+        self.assertEqual(summary["median_ms"], 2.0)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            targets = [make_target("base", Path("/bin/true"), root, list(range(10000, 10008))), make_target("candidate", Path("/bin/true"), root, list(range(10008, 10016)))]
+            self.assertEqual([target.name for target in paired_target_order(targets, 0)], ["base", "candidate"])
+            self.assertEqual([target.name for target in paired_target_order(targets, 1)], ["candidate", "base"])
+
+    def test_dry_run_b4_phase_order_and_legacy_path(self) -> None:
+        remote = {"database": "public", "metric": "metric", "physical_table": "physical", "physical_table_setup": {"columns": [{"name": "ts", "type": "TIMESTAMP"}], "time_index": "ts", "engine": "mito", "options": {"compression": "zstd"}, "target_options": {}}, "read_bench": {"enabled": True, "iterations": 2, "rounds": 2, "projection": [], "projections": [{"name": "all", "columns": None}], "max_files": None, "parquetbench": True, "scanbench": True, "parquet_reader": "direct", "scan_scanner": "seq", "parallelism": 1}, "storage": {"inspect": True, "column": "greptime_value", "include_metadata_files": False, "root_suffix": None, "planned_thresholds": []}, "prom_store": {"pending_rows_flush_interval": "1s", "max_batch_rows": 1, "max_concurrent_flushes": 1, "worker_channel_capacity": 1, "max_inflight_requests": 1}, "series_count": 1, "samples_per_series": 1, "sample_chunk_size": None, "visibility_timeout_seconds": 1}
+        case = {"scenario": {"kind": "prom_remote_write_then_query", "remote_write": remote, "queries": []}}
+        args = argparse.Namespace(fixture_only=False, fixture_generator=Path("/bin/true"), remote_write_generator=None, storage_inspector=None, candidate_bin=Path("/bin/true"), dry_run=True, http_timeout=1.0)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            targets = [make_target("base", Path("/bin/true"), root, list(range(10000, 10008))), make_target("candidate", Path("/bin/true"), root, list(range(10008, 10016)))]
+            report: dict[str, Any] = {"targets": [], "thresholds": []}
+            with patch(__name__ + ".run_remote_write_ingestion", return_value=({"status": "dry-run"}, [{"status": "dry-run"}])):
+                run_remote_write_scenario(args, case, root / "case.toml", targets, report)
+            self.assertEqual(report["read_bench_schedule"]["artifact_phase"], ["base", "candidate"])
+            self.assertEqual(report["read_bench_schedule"]["rounds"][1]["target_order"], ["candidate", "base"])
+            self.assertEqual(report["targets"][0]["physical_table_setup"]["status"], "planned")
+            self.assertLess(report["targets"][0]["phase_order"].index("show_create"), report["targets"][0]["phase_order"].index("remote_write"))
+        self.assertFalse(b4_enabled({"rounds": 1, "projections": []}))

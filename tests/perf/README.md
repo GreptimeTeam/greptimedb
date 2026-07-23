@@ -79,6 +79,46 @@ pending_rows_flush_interval = "1s"
 max_batch_rows = 100000
 ```
 
+Cases that require a controlled physical metric table can add
+`[scenario.remote_write.physical_table_setup]`. `columns`, `time_index`, and
+`engine` describe the common DDL; `options` apply to both targets.
+`target_options` is a map keyed by the runner targets, `base` and `candidate`,
+and overlays only that target's common options. The runner must retain the
+resolved DDL and its `SHOW CREATE TABLE` result as evidence, and reject a target
+when the created table does not match the planned setup. Freeze the normalized
+plan and DDL evidence in the run artifacts and record their hashes before
+comparing results.
+
+```toml
+[scenario.remote_write.physical_table_setup]
+columns = [
+  { name = "greptime_timestamp", type = "TIMESTAMP(3)" },
+  { name = "greptime_value", type = "DOUBLE" },
+]
+time_index = "greptime_timestamp"
+engine = "metric"
+options = { physical_metric_table = "", sst_format = "flat" }
+target_options = { base = { experimental_sst_float_field_encoding = "default" }, candidate = { experimental_sst_float_field_encoding = "byte_stream_split" } }
+```
+
+Physical SST byte/layout stability is distinct from equality of the decoded
+logical stream. Cases can opt into logical-stream verification after ingestion:
+
+```toml
+[scenario.remote_write.logical_stream_verification]
+labels = ["host", "instance"]
+timestamp_column = "greptime_timestamp"
+value_column = "greptime_value"
+```
+
+The scanner owns the canonical SHA-256 v1 algorithm; this contract contains no
+algorithm or policy knobs. It performs a sequential Mito merge with deduplication
+and delete awareness, then digests the configured label, timestamp, and value
+columns in the declared label order. The mixed-series representative verifies
+`host`, `instance`, `greptime_timestamp`, and `greptime_value` across its expected
+28.8M logical rows. A missing row, duplicate survivor, delete-handling error, or
+digest mismatch fails before query measurement begins.
+
 Cases can optionally add `[scenario.remote_write.value]` to control the generated
 sample values without changing label cardinality or the runner lifecycle:
 
@@ -118,9 +158,10 @@ subcommands; the old direct invocation (`query_perf_fixture --case ... --out-dir
 ...`) remains compatible.
 
 Remote-write cases that need to validate storage output can add
-`[scenario.remote_write.storage]`. When present, the scenario body becomes:
-remote-write → flush → visibility check → query measurement → stop and await
-datanode → Parquet footer/size/encoding inspection → optional read-bench. Footer
+`[scenario.remote_write.storage]`. The legacy single-round path measures queries
+before stopping the datanode for inspection. Controlled named-projection or
+multi-round cases instead prepare, flush, stop, inspect, and freeze both targets
+before logical-stream verification or any timed query/read round. Footer
 inspection is handled by `query_perf_fixture inspect-footer`, which reads local
 Parquet footers directly; it does not require Python `pyarrow`.
 
@@ -162,6 +203,17 @@ to enabled with both datanode `parquetbench` and `scanbench`. Disable it with
 measures region scan cost, and query measurements still exercise the SQL/TQL
 frontend path. Treat all performance conclusions as release-only; debug builds
 are suitable only for command wiring and correctness checks.
+
+`read_bench.projections` names projection variants. Omitting `columns` means all
+columns and normalizes to JSON `null`; supplying `columns` selects that explicit,
+nonempty list, so `columns = []` is invalid. Offline read-bench comparisons use
+eight outer rounds with alternating target order and eight internal iterations per
+measurement; discard the first iteration and report the median of the remaining
+seven. The TQL schedule is separate: each of eight alternating paired outer
+rounds runs two warmups and fifteen measured queries per target. Only the eight
+per-round medians are observations; do not pool the 120 measured requests per
+target as independent samples. The mixed-series representative uses these settings and is
+manual only; it is intentionally absent from the default CI case set.
 
 The runner creates the configured database if needed, writes a per-target
 frontend config enabling `[prom_store]` with metric engine storage and a non-zero
@@ -205,6 +257,16 @@ TQL selector with two warmups and 15 iterations:
 These cases record normal storage/footer and read-bench results but do not gate
 specific value encodings or storage-size outcomes. Use the controlled encoding
 experiment matrix for those policy comparisons.
+
+`tests/perf/query_cases/prom_remote_write_mixed_series/case.toml` is a
+representative manual case for mixed metric value types. It writes 2,000 series
+× 14,400 samples (28.8M rows) in ten 1,440-sample chunks with the usual flush
+cadence: 1,900 counter series use disjoint integral ranges and 100 gauge series
+use fractional values. Its physical table contains only the timestamp and value;
+the tagged remote-write logical table owns `host` and `instance`. It intentionally
+has no encoding, size, or performance threshold/assertion, but does configure and
+verify the exact per-target storage-policy option values and the decoded logical
+stream. It is manual only and absent from default CI registration.
 
 `tests/perf/query_cases/prom_remote_write_7913/case.toml` is a larger manual
 case for issue #7913. It writes 8192 series × 20160 samples through remote-write
