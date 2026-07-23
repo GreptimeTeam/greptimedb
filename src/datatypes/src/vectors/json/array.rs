@@ -205,8 +205,8 @@ impl JsonArray<'_> {
                     if self.inner.is_null(i) {
                         return Ok(None);
                     }
-                    let value = self.try_get_value(i)?;
-                    let value = match value {
+                    let value = match self.try_get_value(i)? {
+                        Value::Null => return Ok(None),
                         Value::String(value) => value,
                         value => value.to_string(),
                     };
@@ -403,6 +403,29 @@ mod test {
                 .to_string(),
             "Invalid JSON: unknown JSON type Int32"
         );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_cast_variant_to_utf8_view_preserves_json_null() -> Result<()> {
+        let encode = |json: &[u8]| jsonb::parse_value(json).unwrap().to_vec();
+        let json_null = encode(b"null");
+        let object = encode(br#"{"value":1}"#);
+        let string = encode(br#""text""#);
+        let variants: ArrayRef = Arc::new(BinaryArray::from(vec![
+            Some(json_null.as_slice()),
+            Some(object.as_slice()),
+            Some(string.as_slice()),
+            None,
+        ]));
+
+        let casted = JsonArray::from(&variants).try_cast(&DataType::Utf8View)?;
+        let casted = casted.as_string_view();
+        assert!(casted.is_null(0));
+        assert_eq!(casted.value(1), r#"{"value":1}"#);
+        assert_eq!(casted.value(2), "text");
+        assert!(casted.is_null(3));
 
         Ok(())
     }
