@@ -240,9 +240,13 @@ impl CompactionScheduler {
         }
     }
 
-    fn next_plan_id(&mut self) -> u64 {
-        let plan_id = self.next_plan_id;
-        self.next_plan_id = self.next_plan_id.wrapping_add(1);
+    /// Returns the current plan id and advances the counter.
+    ///
+    /// Takes the counter instead of `&mut self` so callers can bump it while
+    /// holding a mutable borrow of a region status.
+    fn next_plan_id(counter: &mut u64) -> u64 {
+        let plan_id = *counter;
+        *counter = counter.wrapping_add(1);
         plan_id
     }
 
@@ -313,7 +317,7 @@ impl CompactionScheduler {
             schema_metadata_manager,
             max_parallelism,
         );
-        let plan_id = self.next_plan_id();
+        let plan_id = Self::next_plan_id(&mut self.next_plan_id);
         status.start_picking(plan_id);
         self.region_status.insert(region_id, status);
         self.dispatch_compaction_planning(
@@ -362,10 +366,10 @@ impl CompactionScheduler {
         );
         status.merge_waiter(waiter);
         let version_control = status.version_control.clone();
-        let plan_id = self.next_plan_id();
-        let Some(status) = self.region_status.get_mut(&region_id) else {
-            return true;
-        };
+        // Bump the counter through a disjoint field borrow so the `status`
+        // borrow stays alive; nothing could have removed the status since it
+        // was fetched above.
+        let plan_id = Self::next_plan_id(&mut self.next_plan_id);
         status.start_picking(plan_id);
         self.dispatch_compaction_planning(plan_id, version_control, request, options);
         debug!(
@@ -509,10 +513,10 @@ impl CompactionScheduler {
             MAX_PARALLEL_COMPACTION,
         );
         let version_control = status.version_control.clone();
-        let plan_id = self.next_plan_id();
-        let Some(status) = self.region_status.get_mut(&region_id) else {
-            return false;
-        };
+        // Bump the counter through a disjoint field borrow so the `status`
+        // borrow stays alive; nothing could have removed the status since it
+        // was fetched above.
+        let plan_id = Self::next_plan_id(&mut self.next_plan_id);
         status.start_regular_picking(plan_id);
         self.dispatch_compaction_planning(
             plan_id,
