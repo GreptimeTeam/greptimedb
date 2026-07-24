@@ -2137,8 +2137,6 @@ mod tests {
         assert!(conflicting.compacting());
     }
 
-
-
     #[test]
     fn test_pick_result_rejects_ambiguous_file_id_across_levels() {
         let purger = crate::test_util::new_noop_file_purger();
@@ -2415,8 +2413,6 @@ mod tests {
         assert!(scheduler.region_status.contains_key(&region_id));
     }
 
-
-
     #[tokio::test]
     async fn test_planning_error_completion_clears_picking_and_notifies_waiter_once() {
         let env = SchedulerEnv::new().await;
@@ -2542,9 +2538,6 @@ mod tests {
             assert!(!scheduler.region_status.contains_key(&region_id));
         }
     }
-
-
-
 
     #[tokio::test]
     async fn test_ddl_fence_prevents_repeated_regular_followups() {
@@ -2714,7 +2707,6 @@ mod tests {
         }
     }
 
-
     #[tokio::test]
     async fn test_pick_result_mismatched_token_keeps_status_and_waiter_untouched() {
         let job_scheduler = Arc::new(VecScheduler::default());
@@ -2745,8 +2737,6 @@ mod tests {
             Err(oneshot::error::TryRecvError::Empty)
         );
     }
-
-
 
     #[tokio::test]
     async fn test_pick_result_accepts_unrelated_concurrent_flush() {
@@ -2909,9 +2899,6 @@ mod tests {
         assert!(!scheduler.region_status.contains_key(&region_id));
     }
 
-
-
-
     #[tokio::test]
     async fn test_pick_result_remote_submission_failure_releases_and_notifies_once() {
         let env = SchedulerEnv::new().await;
@@ -3067,7 +3054,6 @@ mod tests {
         );
     }
 
-
     #[tokio::test]
     async fn test_stale_local_failure_does_not_remove_replacement_status_or_waiter() {
         let env = SchedulerEnv::new().await;
@@ -3173,7 +3159,6 @@ mod tests {
             files_before
         );
     }
-
 
     #[tokio::test]
     async fn test_schedule_compaction_skips_task_exceeding_memory_limit() {
@@ -3396,7 +3381,6 @@ mod tests {
         );
     }
 
-
     #[tokio::test]
     async fn test_finished_compaction_idle_status_blocks_scheduling_until_removed() {
         let job_scheduler = Arc::new(VecScheduler::default());
@@ -3499,7 +3483,6 @@ mod tests {
             .unwrap();
         assert!(scheduled);
     }
-
 
     #[tokio::test]
     async fn test_manual_compaction_when_compaction_in_progress() {
