@@ -211,8 +211,6 @@ impl<S> RegionWorkerLoop<S> {
 
     /// When compaction fails, we simply log the error.
     pub(crate) async fn handle_compaction_failure(&mut self, req: CompactionFailed) {
-        error!(req.err; "Failed to compact region: {}", req.region_id);
-
         if self.regions.get_region(req.region_id).is_none() {
             return;
         }
@@ -220,8 +218,14 @@ impl<S> RegionWorkerLoop<S> {
             .compaction_scheduler
             .is_current_execution(req.region_id, &req.execution)
         {
+            debug!(
+                "Ignores stale compaction failure for region {}: {:?}",
+                req.region_id, req.err
+            );
             return;
         }
+
+        error!(req.err; "Failed to compact region: {}", req.region_id);
         self.compaction_scheduler
             .on_execution_failed(req.region_id, &req.execution, req.err);
     }
