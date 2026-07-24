@@ -509,6 +509,7 @@ impl SeriesEstimator {
 mod tests {
     use std::sync::Arc;
 
+    use common_query::prelude::greptime_native_histogram;
     use datatypes::arrow::array::{
         BinaryArray, DictionaryArray, TimestampMillisecondArray, UInt8Array, UInt32Array,
         UInt64Array,
@@ -750,20 +751,18 @@ mod tests {
 
     #[test]
     fn test_maybe_wrap_schema_native_histogram() {
-        use common_query::native_histogram::NATIVE_HISTOGRAM_FIELD;
-
         let schema = Arc::new(Schema::new(vec![
             Field::new(
                 "greptime_timestamp",
                 ArrowDataType::Timestamp(TimeUnit::Millisecond, None),
                 false,
             ),
-            histogram_field(NATIVE_HISTOGRAM_FIELD, 1),
+            histogram_field(greptime_native_histogram(), 1),
         ]));
 
         let wrapped = maybe_wrap_schema(&schema).unwrap();
         let hist = wrapped
-            .field_with_name(NATIVE_HISTOGRAM_FIELD)
+            .field_with_name(greptime_native_histogram())
             .expect("histogram field present");
         // The struct has 18 sub-fields.
         let ArrowDataType::Struct(children) = hist.data_type() else {
@@ -778,13 +777,11 @@ mod tests {
         // Two histogram columns with distinct parent column ids get disjoint
         // sub-field ids (defensive: the metric engine yields at most one
         // histogram column, but the scheme must stay correct if more appear).
-        use common_query::native_histogram::{
-            NATIVE_HISTOGRAM_FIELD, native_histogram_subfield_id,
-        };
+        use common_query::native_histogram::native_histogram_subfield_id;
 
         let schema = Arc::new(Schema::new(vec![
-            histogram_field(NATIVE_HISTOGRAM_FIELD, 1),
-            histogram_field(NATIVE_HISTOGRAM_FIELD, 7),
+            histogram_field(greptime_native_histogram(), 1),
+            histogram_field(greptime_native_histogram(), 7),
         ]));
         let wrapped = maybe_wrap_schema(&schema).unwrap();
         let h1 = &wrapped.fields()[0];
@@ -911,20 +908,18 @@ mod tests {
         // On-disk contract: after writing through the parquet writer path, the
         // footer still carries the greptime.histogram extension and every
         // nested (sub-field + list-element) PARQUET:field_id.
-        use common_query::native_histogram::NATIVE_HISTOGRAM_FIELD;
-
         let schema = Arc::new(Schema::new(vec![
             Field::new(
                 "greptime_timestamp",
                 ArrowDataType::Timestamp(TimeUnit::Millisecond, None),
                 false,
             ),
-            histogram_field(NATIVE_HISTOGRAM_FIELD, 3),
+            histogram_field(greptime_native_histogram(), 3),
         ]));
 
         let on_disk = parquet_footer_arrow_schema(&schema);
         let hist = on_disk
-            .field_with_name(NATIVE_HISTOGRAM_FIELD)
+            .field_with_name(greptime_native_histogram())
             .expect("histogram field present");
         assert_histogram_stamped(hist, 3);
     }
@@ -968,8 +963,6 @@ mod tests {
 
     #[test]
     fn test_maybe_wrap_schema_overflows_return_error() {
-        use common_query::native_histogram::NATIVE_HISTOGRAM_FIELD;
-
         // A column id of 12_582_912 makes the derived sub-field id overflow
         // i32 (BASE + column_id*64 == i32::MAX + 1). The write path must
         // surface this as an error rather than silently dropping the field
@@ -980,7 +973,7 @@ mod tests {
                 ArrowDataType::Timestamp(TimeUnit::Millisecond, None),
                 false,
             ),
-            histogram_field(NATIVE_HISTOGRAM_FIELD, 12_582_912),
+            histogram_field(greptime_native_histogram(), 12_582_912),
         ]));
         let err = maybe_wrap_schema(&schema).unwrap_err();
         assert!(
@@ -1000,11 +993,11 @@ mod tests {
         // without the write path's stamping), the writer must fail loudly
         // rather than silently namespace under column 0, which would collide
         // with that column's nested ids.
-        use common_query::native_histogram::{NATIVE_HISTOGRAM_FIELD, native_histogram_value_type};
+        use common_query::native_histogram::native_histogram_value_type;
         use datatypes::data_type::DataType;
 
         let field = Field::new(
-            NATIVE_HISTOGRAM_FIELD,
+            greptime_native_histogram(),
             native_histogram_value_type().as_arrow_type(),
             true,
         );
@@ -1030,15 +1023,13 @@ mod tests {
         // above i32::MAX (e.g. u32::MAX) must not be silently parsed as a
         // failed i32 and collapsed onto column 0's nested ids. It must
         // surface a checked-conversion error instead.
-        use common_query::native_histogram::NATIVE_HISTOGRAM_FIELD;
-
         let schema = Arc::new(Schema::new(vec![
             Field::new(
                 "greptime_timestamp",
                 ArrowDataType::Timestamp(TimeUnit::Millisecond, None),
                 false,
             ),
-            histogram_field(NATIVE_HISTOGRAM_FIELD, u32::MAX),
+            histogram_field(greptime_native_histogram(), u32::MAX),
         ]));
         let err = maybe_wrap_schema(&schema).unwrap_err();
         assert!(

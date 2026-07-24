@@ -5874,6 +5874,7 @@ mod test {
         let mut planner = PromPlanner {
             table_provider,
             ctx: PromPlannerContext::default(),
+            promql_annotations: None,
         };
         planner
             .or_operator(
@@ -9750,6 +9751,7 @@ Projection: count(prometheus_tsdb_head_series.greptime_value) AS my_series, prom
         let mut planner = PromPlanner {
             table_provider: provider,
             ctx: PromPlannerContext::default(),
+            promql_annotations: None,
         };
         let left_context = direct_or_context("lhs", &["job"], "v");
         let right_context = direct_or_context("rhs", &["job"], "v");

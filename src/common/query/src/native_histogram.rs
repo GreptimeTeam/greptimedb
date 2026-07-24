@@ -1628,7 +1628,7 @@ fn subfield_index(name: &str) -> Option<i32> {
 }
 
 #[cfg(test)]
-mod tests {
+mod subfield_id_tests {
     use super::*;
 
     #[test]

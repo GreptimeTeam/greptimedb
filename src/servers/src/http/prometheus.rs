@@ -64,9 +64,9 @@ use snafu::{Location, OptionExt, ResultExt};
 use store_api::metric_engine_consts::{
     DATA_SCHEMA_TABLE_ID_COLUMN_NAME, DATA_SCHEMA_TSID_COLUMN_NAME, LOGICAL_TABLE_METADATA_KEY,
 };
+use table::TableRef;
 use table::metadata::TableInfo;
 use table::requests::{SEMANTIC_METRIC_TYPE, SEMANTIC_METRIC_UNIT};
-use table::TableRef;
 
 pub use super::result::prometheus_resp::PrometheusJsonResponse;
 use crate::error::{
