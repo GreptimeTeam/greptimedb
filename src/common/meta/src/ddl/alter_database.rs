@@ -14,7 +14,9 @@
 
 use async_trait::async_trait;
 use common_procedure::error::{FromJsonSnafu, Result as ProcedureResult, ToJsonSnafu};
-use common_procedure::{Context as ProcedureContext, LockKey, Procedure, Status};
+use common_procedure::{
+    Context as ProcedureContext, EventContext, EventTrigger, LockKey, Procedure, Status,
+};
 use common_telemetry::tracing::info;
 use serde::{Deserialize, Serialize};
 use snafu::{ResultExt, ensure};
@@ -22,6 +24,7 @@ use strum::AsRefStr;
 
 use crate::cache_invalidator::Context;
 use crate::ddl::DdlContext;
+use crate::ddl::event::DatabaseDdlEvent;
 use crate::ddl::utils::map_to_procedure_error;
 use crate::error::{Result, SchemaNotFoundSnafu};
 use crate::instruction::CacheIdent;
@@ -171,6 +174,19 @@ impl Procedure for AlterDatabaseProcedure {
         ];
 
         LockKey::new(lock_key)
+    }
+
+    fn event(&self, ctx: &EventContext<'_>) -> Option<Box<dyn common_event_recorder::Event>> {
+        let event = if matches!(&ctx.trigger, EventTrigger::Submitted) {
+            DatabaseDdlEvent::alter_submitted(
+                self.data.catalog(),
+                self.data.schema(),
+                &self.data.kind,
+            )
+        } else {
+            DatabaseDdlEvent::alter_lifecycle()
+        };
+        Some(Box::new(event))
     }
 }
 
