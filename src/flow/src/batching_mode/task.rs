@@ -616,7 +616,7 @@ impl BatchingTask {
         };
         let incremental_safe = incremental_plan.is_some();
         if coverage.is_incremental_delta() && !incremental_safe {
-            warn!(
+            debug!(
                 "Flow {flow_id} skipped unsafe incremental delta fallback; \
                  restored dirty signal instead of executing an unfiltered full snapshot"
             );
