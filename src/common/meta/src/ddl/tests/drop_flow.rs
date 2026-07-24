@@ -17,6 +17,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use common_procedure::{
+    ChildSubmissionOutcome, EventContext, EventTrigger, Procedure, ProcedureId, ProcedureState,
+    RetryPhase,
+};
 use common_procedure_test::execute_procedure_until_done;
 use table::table_name::TableName;
 
@@ -35,6 +39,81 @@ fn test_drop_flow_task(flow_name: &str, flow_id: u32, drop_if_exists: bool) -> D
         flow_name: flow_name.to_string(),
         flow_id,
         drop_if_exists,
+    }
+}
+
+fn event_for(
+    procedure: &DropFlowProcedure,
+    trigger: EventTrigger,
+) -> Box<dyn common_event_recorder::Event> {
+    procedure
+        .event(&EventContext {
+            procedure_id: ProcedureId::random(),
+            lifecycle_state: &ProcedureState::Running,
+            trigger,
+        })
+        .unwrap()
+}
+
+#[test]
+fn test_drop_flow_submitted_event_contains_only_typed_intent() {
+    let node_manager = Arc::new(MockFlownodeManager::new(NaiveFlownodeHandler));
+    let ddl_context = new_ddl_context(node_manager);
+    let procedure =
+        DropFlowProcedure::new(test_drop_flow_task("event_flow", 42, true), ddl_context);
+
+    let event = event_for(&procedure, EventTrigger::Submitted);
+
+    assert_eq!(event.event_type(), "ddl_drop_flow");
+    assert_eq!(
+        event.json_payload().unwrap(),
+        serde_json::json!({"version": 1, "drop_if_exists": true})
+    );
+    assert_eq!(
+        event.extra_rows().unwrap()[0].values,
+        vec![
+            api::v1::value::ValueData::StringValue(DEFAULT_CATALOG_NAME.to_string()).into(),
+            api::v1::Value { value_data: None },
+            api::v1::value::ValueData::StringValue("event_flow".to_string()).into(),
+            api::v1::value::ValueData::U32Value(42).into(),
+        ]
+    );
+}
+
+#[test]
+fn test_drop_flow_lifecycle_events_are_lightweight() {
+    let node_manager = Arc::new(MockFlownodeManager::new(NaiveFlownodeHandler));
+    let ddl_context = new_ddl_context(node_manager);
+    let procedure =
+        DropFlowProcedure::new(test_drop_flow_task("event_flow", 42, false), ddl_context);
+    let submitted = event_for(&procedure, EventTrigger::Submitted);
+    let triggers = [
+        EventTrigger::Recovered,
+        EventTrigger::ChildSubmitted {
+            procedure_id: ProcedureId::random(),
+            outcome: ChildSubmissionOutcome::Accepted,
+        },
+        EventTrigger::Retrying {
+            phase: RetryPhase::Execute,
+            attempt: 1,
+        },
+        EventTrigger::RollingBack,
+        EventTrigger::Succeeded,
+        EventTrigger::Failed,
+        EventTrigger::Poisoned,
+    ];
+
+    for trigger in triggers {
+        let event = event_for(&procedure, trigger);
+        assert_eq!(event.event_type(), "ddl_drop_flow");
+        assert_eq!(event.extra_schema(), submitted.extra_schema());
+        assert_eq!(event.json_payload().unwrap(), serde_json::Value::Null);
+        assert!(
+            event.extra_rows().unwrap()[0]
+                .values
+                .iter()
+                .all(|value| value.value_data.is_none())
+        );
     }
 }
 

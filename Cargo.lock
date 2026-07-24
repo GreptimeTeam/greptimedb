@@ -2592,6 +2592,7 @@ dependencies = [
  "common-base",
  "common-catalog",
  "common-error",
+ "common-event-recorder",
  "common-grpc-expr",
  "common-macro",
  "common-procedure",

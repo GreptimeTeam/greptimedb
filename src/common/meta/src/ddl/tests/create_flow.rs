@@ -17,8 +17,12 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use api::v1::flow::CreateRequest;
+use api::v1::value::ValueData;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
-use common_procedure::{Procedure, Status};
+use common_procedure::{
+    ChildSubmissionOutcome, EventContext, EventTrigger, Procedure, ProcedureId, ProcedureState,
+    RetryPhase, Status,
+};
 use common_procedure_test::execute_procedure_until_done;
 use table::table_name::TableName;
 
@@ -50,6 +54,176 @@ fn test_query_context() -> QueryContext {
         snapshot_seqs: HashMap::new(),
         sst_min_sequences: HashMap::new(),
     }
+}
+
+fn event_for(
+    procedure: &CreateFlowProcedure,
+    trigger: EventTrigger,
+    lifecycle_state: &ProcedureState,
+) -> Box<dyn common_event_recorder::Event> {
+    procedure
+        .event(&EventContext {
+            procedure_id: ProcedureId::random(),
+            lifecycle_state,
+            trigger,
+        })
+        .unwrap()
+}
+
+#[test]
+fn test_create_flow_submitted_event_is_bounded() {
+    let node_manager = Arc::new(MockFlownodeManager::new(NaiveFlownodeHandler));
+    let ddl_context = new_ddl_context(node_manager);
+    let mut task = test_create_flow_task(
+        "event_flow",
+        vec![TableName::new(
+            "secret_catalog",
+            "secret_schema",
+            "secret_source",
+        )],
+        TableName::new("secret_catalog", "secret_schema", "secret_sink"),
+        true,
+    );
+    task.or_replace = true;
+    task.eval_interval_secs = Some(60);
+    task.comment = "secret comment".to_string();
+    task.sql = "SELECT secret FROM private_table".to_string();
+    task.flow_options
+        .insert("secret_option".to_string(), "secret_value".to_string());
+    let mut query_context = test_query_context();
+    query_context.current_schema = "event_schema".to_string();
+    query_context
+        .extensions
+        .insert("secret_extension".to_string(), "secret_value".to_string());
+    let procedure = CreateFlowProcedure::new(task, query_context, ddl_context);
+
+    let event = event_for(
+        &procedure,
+        EventTrigger::Submitted,
+        &ProcedureState::Running,
+    );
+
+    assert_eq!(event.event_type(), "ddl_create_flow");
+    assert_eq!(
+        event.json_payload().unwrap(),
+        serde_json::json!({
+            "version": 1,
+            "or_replace": true,
+            "create_if_not_exists": true,
+            "expire_after": 300,
+            "eval_interval_secs": 60,
+        })
+    );
+    let payload = event.json_payload().unwrap().to_string();
+    for sensitive in [
+        "SELECT",
+        "secret comment",
+        "secret_source",
+        "secret_sink",
+        "secret_option",
+        "secret_extension",
+    ] {
+        assert!(!payload.contains(sensitive));
+    }
+    assert_eq!(
+        event.extra_rows().unwrap()[0].values,
+        vec![
+            ValueData::StringValue(DEFAULT_CATALOG_NAME.to_string()).into(),
+            ValueData::StringValue("event_schema".to_string()).into(),
+            ValueData::StringValue("event_flow".to_string()).into(),
+            api::v1::Value { value_data: None },
+        ]
+    );
+}
+
+#[test]
+fn test_create_flow_lifecycle_events_are_lightweight() {
+    let node_manager = Arc::new(MockFlownodeManager::new(NaiveFlownodeHandler));
+    let ddl_context = new_ddl_context(node_manager);
+    let procedure = CreateFlowProcedure::new(
+        test_create_flow_task(
+            "event_flow",
+            vec![],
+            TableName::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "sink"),
+            false,
+        ),
+        test_query_context(),
+        ddl_context,
+    );
+    let submitted = event_for(
+        &procedure,
+        EventTrigger::Submitted,
+        &ProcedureState::Running,
+    );
+    let triggers = [
+        EventTrigger::Recovered,
+        EventTrigger::ChildSubmitted {
+            procedure_id: ProcedureId::random(),
+            outcome: ChildSubmissionOutcome::Accepted,
+        },
+        EventTrigger::Retrying {
+            phase: RetryPhase::Execute,
+            attempt: 1,
+        },
+        EventTrigger::RollingBack,
+        EventTrigger::Failed,
+        EventTrigger::Poisoned,
+    ];
+
+    for trigger in triggers {
+        let event = event_for(&procedure, trigger, &ProcedureState::Running);
+        assert_eq!(event.extra_schema(), submitted.extra_schema());
+        assert_eq!(event.json_payload().unwrap(), serde_json::Value::Null);
+        assert!(
+            event.extra_rows().unwrap()[0]
+                .values
+                .iter()
+                .all(|value| value.value_data.is_none())
+        );
+    }
+}
+
+#[test]
+fn test_create_flow_succeeded_event_uses_resolved_output_id() {
+    let node_manager = Arc::new(MockFlownodeManager::new(NaiveFlownodeHandler));
+    let ddl_context = new_ddl_context(node_manager);
+    let mut procedure = CreateFlowProcedure::new(
+        test_create_flow_task(
+            "event_flow",
+            vec![],
+            TableName::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "sink"),
+            false,
+        ),
+        test_query_context(),
+        ddl_context,
+    );
+    for (persisted_flow_id, flow_id) in [(Some(11_u32), 11), (Some(12), 12), (None, 13)] {
+        procedure.data.flow_id = persisted_flow_id;
+        let state = ProcedureState::Done {
+            output: Some(Arc::new(flow_id)),
+        };
+        let event = event_for(&procedure, EventTrigger::Succeeded, &state);
+        let row = event.extra_rows().unwrap().remove(0);
+
+        assert_eq!(event.json_payload().unwrap(), serde_json::Value::Null);
+        assert!(
+            row.values[..3]
+                .iter()
+                .all(|value| value.value_data.is_none())
+        );
+        assert_eq!(row.values[3].value_data, Some(ValueData::U32Value(flow_id)));
+    }
+
+    procedure.data.flow_id = Some(7);
+    let event = event_for(
+        &procedure,
+        EventTrigger::Succeeded,
+        &ProcedureState::Done { output: None },
+    );
+    assert_eq!(
+        event.extra_rows().unwrap()[0].values[3].value_data,
+        Some(ValueData::U32Value(7))
+    );
 }
 
 pub(crate) fn test_create_flow_task(
