@@ -27,7 +27,7 @@ template:
           claimName: query-regression-build-cache
     initContainers:
       - name: initialize-build-cache
-        image: greptime-registry.cn-hangzhou.cr.aliyuncs.com/greptime/greptimedb-query-regression-runner@sha256:2436278bf0756700c718927907cdbedac64d55c593f80b515acb44dec8b02cc1
+        image: greptime-registry.cn-hangzhou.cr.aliyuncs.com/greptime/greptimedb-query-regression-runner@sha256:e713b294e23b7e15184e558866c90025e59930033e72c97650dbc7f1ca022d11
         imagePullPolicy: IfNotPresent
         command:
           - /bin/sh
@@ -65,7 +65,7 @@ template:
             mountPath: /cache
     containers:
       - name: runner
-        image: greptime-registry.cn-hangzhou.cr.aliyuncs.com/greptime/greptimedb-query-regression-runner@sha256:2436278bf0756700c718927907cdbedac64d55c593f80b515acb44dec8b02cc1
+        image: greptime-registry.cn-hangzhou.cr.aliyuncs.com/greptime/greptimedb-query-regression-runner@sha256:e713b294e23b7e15184e558866c90025e59930033e72c97650dbc7f1ca022d11
         imagePullPolicy: IfNotPresent
         command: ["/home/runner/run.sh"]
         env:

@@ -21,6 +21,7 @@ import argparse
 import fcntl
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -39,6 +40,13 @@ from typing import Any
 
 
 FICLONE = 0x40049409
+OTLP_TRACE_METRICS = {
+    "greptime_frontend_otlp_traces_rows",
+    "greptime_frontend_otlp_traces_failure_count",
+    "greptime_servers_http_otlp_traces_elapsed_sum",
+    "greptime_servers_http_otlp_traces_elapsed_count",
+}
+PROMETHEUS_SAMPLE_RE = re.compile(r"^([A-Za-z_:][A-Za-z0-9_:]*)(?:\{.*\})?\s+([^\s]+)(?:\s+.*)?$")
 
 
 @dataclass(frozen=True)
@@ -66,9 +74,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--base-bin", required=True, type=Path)
     p.add_argument("--candidate-bin", required=True, type=Path)
     p.add_argument("--fixture-generator", type=Path)
+    p.add_argument("--otelgen-bin", type=Path)
     p.add_argument("--remote-write-generator", type=Path, help="deprecated: use --fixture-generator query_perf_fixture")
     p.add_argument("--storage-inspector", type=Path, help="deprecated: use --fixture-generator query_perf_fixture")
     p.add_argument("--work-dir", required=True, type=Path)
+    p.add_argument("--output", type=Path, help="write the final JSON report to this file instead of stdout")
     p.add_argument("--fixture-cache-dir", type=Path, help="persistent directory for generated fixtures, keyed by case content")
     p.add_argument("--reuse-fixture", action="store_true")
     p.add_argument("--allow-large-fixture", action="store_true")
@@ -158,15 +168,19 @@ def column_sql(col: dict[str, Any]) -> str:
 def scenario(case: dict[str, Any]) -> dict[str, Any]:
     value = case.get("scenario")
     if not isinstance(value, dict):
-        raise ValueError("case requires [scenario] with kind = 'direct_readable_sst' or 'prom_remote_write_then_query'")
+        raise ValueError("case requires [scenario] with a supported kind")
     kind = value.get("kind")
-    if kind not in ("direct_readable_sst", "prom_remote_write_then_query"):
-        raise ValueError(f"unsupported scenario kind {kind!r}; supported: 'direct_readable_sst', 'prom_remote_write_then_query'")
+    supported = ("direct_readable_sst", "prom_remote_write_then_query", "otlp_trace_load")
+    if kind not in supported:
+        raise ValueError(f"unsupported scenario kind {kind!r}; supported: {', '.join(supported)}")
     return value
 
 
 def case_tables(case: dict[str, Any]) -> list[dict[str, Any]]:
     value = scenario(case)
+    if value.get("kind") == "otlp_trace_load":
+        load = value["load"]
+        return [{"database": load["database"], "name": load["table"], "engine": "trace", "validate_show_create_engine": False}]
     if value.get("kind") == "prom_remote_write_then_query":
         remote = value["remote_write"]
         metric = remote["metric"]
@@ -1028,6 +1042,171 @@ def write_json(path: Path, payload: dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
 
 
+def output_report(report: dict[str, Any], output: Path | None) -> None:
+    if output is None:
+        print(json.dumps(report, indent=2, sort_keys=True))
+    else:
+        write_json(output, report)
+
+
+def parse_prometheus_metrics(text: str, names: set[str] = OTLP_TRACE_METRICS) -> dict[str, float]:
+    values: dict[str, float] = {}
+    for line in text.splitlines():
+        match = PROMETHEUS_SAMPLE_RE.match(line.strip())
+        if not match or match.group(1) not in names:
+            continue
+        value = float(match.group(2))
+        if not math.isfinite(value):
+            raise ValueError(f"non-finite Prometheus sample for {match.group(1)}")
+        values[match.group(1)] = values.get(match.group(1), 0.0) + value
+    return values
+
+
+def fetch_otlp_metrics(target: RunTarget, http_timeout: float) -> dict[str, Any]:
+    with urllib.request.urlopen(f"http://127.0.0.1:{target.http_port}/metrics", timeout=http_timeout) as response:
+        text = response.read().decode()
+    return {"captured_monotonic_seconds": time.monotonic(), "values": parse_prometheus_metrics(text)}
+
+
+def metric_delta(after: dict[str, Any], before: dict[str, Any], name: str) -> float:
+    delta = float(after["values"].get(name, 0.0)) - float(before["values"].get(name, 0.0))
+    if delta < 0:
+        raise RuntimeError(f"metric {name} decreased by {-delta}")
+    return delta
+
+
+def otelgen_command(otelgen_bin: Path, target: RunTarget, load: dict[str, Any]) -> list[str]:
+    return [
+        str(otelgen_bin),
+        "--protocol", "http",
+        "--otel-exporter-otlp-endpoint", f"127.0.0.1:{target.http_port}",
+        "--otel-exporter-otlp-url-path", "/v1/otlp/v1/traces",
+        "--header", f"x-greptime-pipeline-name={load['pipeline']}",
+        "--header", f"x-greptime-db-name={load['database']}",
+        "--header", f"x-greptime-trace-table-name={load['table']}",
+        "--log-level", "error",
+        "--insecure",
+        "--duration", str(int(load["duration_seconds"])),
+        "--rate", str(int(load["rate"])),
+        "traces", "multi",
+        "--workers", str(int(load["workers"])),
+        "--scenarios", str(load["workload"]),
+        "--exporter-shards", str(int(load["exporter_shards"])),
+    ]
+
+
+def run_otelgen_load(otelgen_bin: Path | None, target: RunTarget, load: dict[str, Any], http_timeout: float, *, dry_run: bool) -> dict[str, Any]:
+    binary = otelgen_bin or Path("otelgen")
+    cmd = otelgen_command(binary, target, load)
+    if dry_run:
+        return {"status": "dry-run", "cmd": cmd}
+
+    initial = fetch_otlp_metrics(target, http_timeout)
+    log_dir = target.work_dir / "otelgen"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    stdout_path = log_dir / "stdout.log"
+    stderr_path = log_dir / "stderr.log"
+    duration = int(load["duration_seconds"])
+    warmup = int(load["warmup_seconds"])
+    timed_out = False
+    started = time.monotonic()
+    with stdout_path.open("wb") as stdout, stderr_path.open("wb") as stderr:
+        proc = subprocess.Popen(cmd, stdout=stdout, stderr=stderr)
+        try:
+            if warmup:
+                try:
+                    proc.wait(timeout=warmup)
+                except subprocess.TimeoutExpired:
+                    pass
+            warmed = fetch_otlp_metrics(target, http_timeout)
+            if proc.poll() is None:
+                try:
+                    proc.wait(timeout=max(60, duration - warmup + 60))
+                except subprocess.TimeoutExpired:
+                    timed_out = True
+                    proc.kill()
+                    proc.wait(timeout=20)
+            final = fetch_otlp_metrics(target, http_timeout)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait(timeout=20)
+    elapsed = time.monotonic() - started
+    return {
+        "status": "ok" if proc.returncode == 0 and not timed_out and elapsed + 1 >= duration else "failed",
+        "cmd": cmd,
+        "returncode": proc.returncode,
+        "timed_out": timed_out,
+        "elapsed_seconds": elapsed,
+        "stdout_path": str(stdout_path),
+        "stderr_path": str(stderr_path),
+        "snapshots": {"initial": initial, "warmup": warmed, "final": final},
+    }
+
+
+def summarize_otlp_metrics(run: dict[str, Any]) -> dict[str, Any]:
+    initial = run["snapshots"]["initial"]
+    warmed = run["snapshots"]["warmup"]
+    final = run["snapshots"]["final"]
+    rows = "greptime_frontend_otlp_traces_rows"
+    failures = "greptime_frontend_otlp_traces_failure_count"
+    elapsed_sum = "greptime_servers_http_otlp_traces_elapsed_sum"
+    elapsed_count = "greptime_servers_http_otlp_traces_elapsed_count"
+    missing = sorted(name for name in (rows, elapsed_sum, elapsed_count) if name not in final["values"])
+    accepted_spans = int(round(metric_delta(final, initial, rows)))
+    measurement_accepted_spans = int(round(metric_delta(final, warmed, rows)))
+    http_requests = int(round(metric_delta(final, warmed, elapsed_count)))
+    latency_seconds = metric_delta(final, warmed, elapsed_sum)
+    measurement_seconds = final["captured_monotonic_seconds"] - warmed["captured_monotonic_seconds"]
+    return {
+        "accepted_spans": accepted_spans,
+        "measurement_accepted_spans": measurement_accepted_spans,
+        "accepted_spans_per_second": measurement_accepted_spans / measurement_seconds if measurement_seconds > 0 else None,
+        "http_requests": http_requests,
+        "mean_http_latency_ms": latency_seconds / http_requests * 1000.0 if http_requests else None,
+        "failure_count": int(round(metric_delta(final, initial, failures))),
+        "measurement_seconds": measurement_seconds,
+        "missing_metrics": missing,
+    }
+
+
+def planned_otlp_thresholds(load: dict[str, Any]) -> list[dict[str, Any]]:
+    thresholds = load["thresholds"]
+    return [
+        {"threshold": "max_candidate_throughput_regression_pct", "status": "planned", "limit_pct": thresholds["max_candidate_throughput_regression_pct"]},
+        {"threshold": "max_candidate_mean_latency_regression_pct", "status": "planned", "limit_pct": thresholds["max_candidate_mean_latency_regression_pct"]},
+        {"target": "each", "threshold": "max_failure_count", "status": "planned", "limit": thresholds["max_failure_count"]},
+    ]
+
+
+def enforce_otlp_thresholds(load: dict[str, Any], base: dict[str, Any], candidate: dict[str, Any]) -> list[dict[str, Any]]:
+    thresholds = load["thresholds"]
+    results: list[dict[str, Any]] = []
+    for target_name, metrics in (("base", base), ("candidate", candidate)):
+        failures = metrics.get("failure_count")
+        limit = int(thresholds["max_failure_count"])
+        results.append({"target": target_name, "threshold": "max_failure_count", "status": "passed" if failures is not None and failures <= limit else "failed", "actual": failures, "limit": limit})
+
+    base_rate = base.get("accepted_spans_per_second")
+    candidate_rate = candidate.get("accepted_spans_per_second")
+    throughput_limit = float(thresholds["max_candidate_throughput_regression_pct"])
+    if base_rate in (None, 0) or candidate_rate is None:
+        results.append({"threshold": "max_candidate_throughput_regression_pct", "status": "failed", "reason": "missing or zero throughput", "base": base_rate, "candidate": candidate_rate})
+    else:
+        actual = (base_rate - candidate_rate) / base_rate * 100.0
+        results.append({"threshold": "max_candidate_throughput_regression_pct", "status": "passed" if actual <= throughput_limit else "failed", "actual_pct": actual, "limit_pct": throughput_limit, "base": base_rate, "candidate": candidate_rate})
+
+    base_latency = base.get("mean_http_latency_ms")
+    candidate_latency = candidate.get("mean_http_latency_ms")
+    latency_limit = float(thresholds["max_candidate_mean_latency_regression_pct"])
+    if base_latency in (None, 0) or candidate_latency is None:
+        results.append({"threshold": "max_candidate_mean_latency_regression_pct", "status": "failed", "reason": "missing or zero mean latency", "base": base_latency, "candidate": candidate_latency})
+    else:
+        actual = (candidate_latency - base_latency) / base_latency * 100.0
+        results.append({"threshold": "max_candidate_mean_latency_regression_pct", "status": "passed" if actual <= latency_limit else "failed", "actual_pct": actual, "limit_pct": latency_limit, "base": base_latency, "candidate": candidate_latency})
+    return results
+
+
 def require_fresh_work_dirs(targets: list[RunTarget], *, reuse_work_dir: bool, dry_run: bool, fixture_only: bool) -> None:
     if dry_run or reuse_work_dir or fixture_only:
         return
@@ -1292,6 +1471,68 @@ def run_remote_write_scenario(args: argparse.Namespace, case: dict[str, Any], ca
             cluster.stop_all()
 
 
+def run_otlp_trace_load_scenario(args: argparse.Namespace, case: dict[str, Any], targets: list[RunTarget], report: dict[str, Any]) -> None:
+    load = scenario(case)["load"]
+    if args.fixture_only:
+        raise ValueError("--fixture-only is not supported for otlp_trace_load; use --dry-run for planning")
+    if args.otelgen_bin is not None:
+        require_binary(args.otelgen_bin, "otelgen", dry_run=args.dry_run)
+    elif not args.dry_run:
+        raise ValueError("--otelgen-bin is required for otlp_trace_load")
+
+    clusters: list[DistributedCluster] = []
+    metrics_results: list[dict[str, Any]] = []
+    try:
+        for target in targets:
+            target.work_dir.mkdir(parents=True, exist_ok=True)
+            cluster = DistributedCluster(target)
+            clusters.append(cluster)
+            if not args.dry_run:
+                cluster.start_all()
+            create_database: dict[str, Any] = {"status": "dry-run", "database": load["database"]}
+            if not args.dry_run:
+                create_database = http_post_sql(target.http_port, f"CREATE DATABASE IF NOT EXISTS {sql_ident(load['database'])}", "public", args.http_timeout)
+            otelgen = run_otelgen_load(args.otelgen_bin, target, load, args.http_timeout, dry_run=args.dry_run)
+            metrics: dict[str, Any] = {"status": "dry-run"}
+            flush: dict[str, Any] = {"status": "dry-run", "table": load["table"]}
+            visibility: dict[str, Any] = {"status": "dry-run"}
+            if not args.dry_run:
+                metrics = summarize_otlp_metrics(otelgen)
+                flush = http_post_sql(target.http_port, f"ADMIN FLUSH_TABLE({sql_string(load['table'])})", load["database"], args.http_timeout)
+                visibility = poll_expected_count(target, load["table"], load["database"], int(metrics["accepted_spans"]), float(load["visibility_timeout_seconds"]), args.http_timeout)
+            tr = {
+                "name": target.name,
+                "binary": str(target.binary),
+                "work_dir": str(target.work_dir),
+                "components": cluster.component_report(),
+                "create_database": create_database,
+                "otelgen": otelgen,
+                "metrics": metrics,
+                "flush": flush,
+                "visibility": visibility,
+            }
+            checks_ok = args.dry_run or (
+                create_database.get("ok")
+                and otelgen.get("status") == "ok"
+                and not metrics.get("missing_metrics")
+                and metrics.get("accepted_spans", 0) > 0
+                and metrics.get("http_requests", 0) > 0
+                and flush.get("ok")
+                and visibility.get("ok")
+                and visibility.get("row_count_ok")
+            )
+            tr["status"] = "planned" if args.dry_run else ("measured" if checks_ok else "failed")
+            write_json(target.report_path, tr)
+            report["targets"].append(tr)
+            metrics_results.append(metrics)
+            cluster.stop_all()
+        report["thresholds"] = planned_otlp_thresholds(load) if args.dry_run else enforce_otlp_thresholds(load, metrics_results[0], metrics_results[1])
+        report["status"] = "planned" if args.dry_run else ("failed" if any(t["status"] == "failed" for t in report["thresholds"]) or any(t["status"] == "failed" for t in report["targets"]) else "ok")
+    finally:
+        for cluster in reversed(clusters):
+            cluster.stop_all()
+
+
 def main() -> int:
     args = parse_args()
     case_path = args.case.resolve()
@@ -1314,6 +1555,16 @@ def main() -> int:
     reuse_fixture = args.reuse_fixture or args.fixture_cache_dir is not None
     report: dict[str, Any] = {"case_path": str(case_path), "case": case.get("case", {}), "scenario": scenario_config, "queries": planned_queries(case), "dry_run": args.dry_run, "fixture_only": args.fixture_only, "query_mode": "fixture-only" if args.fixture_only else "distributed", "reuse_work_dir": args.reuse_work_dir, "reuse_fixture": reuse_fixture, "fixture_cache_dir": str(args.fixture_cache_dir.resolve()) if args.fixture_cache_dir is not None else None, "fixture_dir": str(fixture_dir), "http_timeout": args.http_timeout, "targets": [], "thresholds": [], "status": "planned" if args.dry_run else "running"}
 
+    if scenario_kind == "otlp_trace_load":
+        try:
+            run_otlp_trace_load_scenario(args, case, targets, report)
+        except Exception as e:  # noqa: BLE001 - write machine-readable failure report
+            report["status"] = "failed"
+            report["error"] = repr(e)
+        write_json(work_root / "query-regression-report.json", report)
+        output_report(report, args.output)
+        return 1 if report["status"] == "failed" else 0
+
     if scenario_kind == "prom_remote_write_then_query":
         try:
             run_remote_write_scenario(args, case, case_path, targets, report)
@@ -1321,7 +1572,7 @@ def main() -> int:
             report["status"] = "failed"
             report["error"] = repr(e)
         write_json(work_root / "query-regression-report.json", report)
-        print(json.dumps(report, indent=2, sort_keys=True))
+        output_report(report, args.output)
         return 1 if report["status"] == "failed" else 0
 
     if args.fixture_only or args.dry_run:
@@ -1341,7 +1592,7 @@ def main() -> int:
             report["targets"].append(tr)
         report["status"] = "planned" if args.dry_run else "fixture-ready"
         write_json(work_root / "query-regression-report.json", report)
-        print(json.dumps(report, indent=2, sort_keys=True))
+        output_report(report, args.output)
         return 0
 
     clusters: list[DistributedCluster] = []
@@ -1404,7 +1655,7 @@ def main() -> int:
         for cluster in reversed(clusters):
             cluster.stop_all()
     write_json(work_root / "query-regression-report.json", report)
-    print(json.dumps(report, indent=2, sort_keys=True))
+    output_report(report, args.output)
     return 1 if report["status"] == "failed" else 0
 
 
