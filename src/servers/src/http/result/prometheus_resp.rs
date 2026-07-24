@@ -56,6 +56,8 @@ pub struct PrometheusJsonResponse {
     pub error_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub warnings: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub infos: Option<Vec<String>>,
 
     #[serde(skip)]
     pub status_code: Option<StatusCode>,
@@ -100,6 +102,7 @@ impl PrometheusJsonResponse {
             error: Some(reason.into()),
             error_type: Some(error_type.to_string()),
             warnings: None,
+            infos: None,
             resp_metrics: Default::default(),
             status_code: Some(error_type),
         }
@@ -112,6 +115,7 @@ impl PrometheusJsonResponse {
             error: None,
             error_type: None,
             warnings: None,
+            infos: None,
             resp_metrics: Default::default(),
             status_code: None,
         }
@@ -125,6 +129,7 @@ impl PrometheusJsonResponse {
     ) -> Self {
         let response: Result<Self> = try {
             let result = result?;
+            let mut meta = result.meta;
             let mut resp =
                 match result.data {
                     OutputData::RecordBatches(batches) => Self::success(
@@ -145,8 +150,16 @@ impl PrometheusJsonResponse {
                         "expected data result, but got affected rows",
                     ),
                 };
+            meta.collect_promql_annotations();
 
-            if let Some(physical_plan) = result.meta.plan {
+            if !meta.warnings.is_empty() {
+                resp.warnings = Some(meta.warnings);
+            }
+            if !meta.infos.is_empty() {
+                resp.infos = Some(meta.infos);
+            }
+
+            if let Some(physical_plan) = meta.plan {
                 let mut result_map = HashMap::new();
                 let mut tmp = vec![&mut result_map];
                 collect_plan_metrics(&physical_plan, &mut tmp);
@@ -356,6 +369,7 @@ impl PrometheusJsonResponse {
 mod tests {
     use std::sync::Arc;
 
+    use common_query::{Output, OutputData, OutputMeta};
     use common_recordbatch::{RecordBatch, RecordBatches};
     use datatypes::data_type::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, Schema};
@@ -405,5 +419,22 @@ mod tests {
             series[0].values,
             vec![(1.0, "1".to_string()), (2.0, "NaN".to_string())]
         );
+    }
+
+    #[tokio::test]
+    async fn from_query_result_preserves_warnings_and_infos() {
+        let recordbatches = RecordBatches::empty();
+        let mut meta = OutputMeta::default();
+        meta.warnings.push("warn".to_string());
+        meta.infos.push("info".to_string());
+        let response = PrometheusJsonResponse::from_query_result(
+            Ok(Output::new(OutputData::RecordBatches(recordbatches), meta)),
+            None,
+            ValueType::Vector,
+        )
+        .await;
+
+        assert_eq!(response.warnings, Some(vec!["warn".to_string()]));
+        assert_eq!(response.infos, Some(vec!["info".to_string()]));
     }
 }
