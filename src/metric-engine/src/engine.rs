@@ -474,12 +474,14 @@ impl MetricEngine {
         let state = Arc::new(RwLock::default());
         config.sanitize();
         let flush_interval = config.flush_metadata_region_interval;
+        let enable_metric_value_split = config.experimental_enable_metric_value_split;
         let inner = Arc::new(MetricEngineInner {
             mito: mito.clone(),
             metadata_region,
             data_region,
             state: state.clone(),
             row_modifier: RowModifier::default(),
+            enable_metric_value_split,
             flush_task: RepeatedTask::new(
                 flush_interval,
                 Box::new(FlushMetadataRegionTask {
@@ -566,6 +568,7 @@ struct MetricEngineInner {
     data_region: DataRegion,
     state: Arc<RwLock<MetricEngineState>>,
     row_modifier: RowModifier,
+    enable_metric_value_split: bool,
     flush_task: RepeatedTask<Error>,
 }
 

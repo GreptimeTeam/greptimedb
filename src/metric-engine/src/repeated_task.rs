@@ -97,6 +97,7 @@ mod tests {
             "test_flush_metadata_region_task",
             EngineConfig {
                 flush_metadata_region_interval: Duration::from_millis(10),
+                ..Default::default()
             },
         )
         .await;
@@ -123,6 +124,7 @@ mod tests {
             "test_flush_metadata_region_task_with_long_interval",
             EngineConfig {
                 flush_metadata_region_interval: Duration::from_secs(60),
+                ..Default::default()
             },
         )
         .await;
@@ -147,6 +149,7 @@ mod tests {
     fn test_flush_metadata_region_sanitize() {
         let mut config = EngineConfig {
             flush_metadata_region_interval: Duration::from_secs(0),
+            ..Default::default()
         };
         config.sanitize();
         assert_eq!(

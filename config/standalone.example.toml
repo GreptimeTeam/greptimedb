@@ -820,6 +820,8 @@ mem_threshold_on_create = "auto"
 [[region_engine]]
 ## Metric engine options.
 [region_engine.metric]
+## Whether to store exact integral metric values in internal Int64 columns.
+experimental_enable_metric_value_split = false
 
 ## The logging options.
 [logging]

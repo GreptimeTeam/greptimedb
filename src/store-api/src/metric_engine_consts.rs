@@ -33,6 +33,7 @@ pub const METADATA_SCHEMA_VALUE_COLUMN_INDEX: usize = 2;
 /// Column name of internal column `__metric` that stores the original metric name
 pub const DATA_SCHEMA_TABLE_ID_COLUMN_NAME: &str = "__table_id";
 pub const DATA_SCHEMA_TSID_COLUMN_NAME: &str = "__tsid";
+pub const DATA_SCHEMA_VALUE_INT_COLUMN_PREFIX: &str = "__metric_int_";
 
 pub const METADATA_REGION_SUBDIR: &str = "metadata";
 pub const DATA_REGION_SUBDIR: &str = "data";
@@ -83,7 +84,9 @@ pub const MANIFEST_INFO_EXTENSION_KEY: &str = "MANIFEST_INFO";
 
 /// Returns true if it's a internal column of the metric engine.
 pub fn is_metric_engine_internal_column(name: &str) -> bool {
-    name == DATA_SCHEMA_TABLE_ID_COLUMN_NAME || name == DATA_SCHEMA_TSID_COLUMN_NAME
+    name == DATA_SCHEMA_TABLE_ID_COLUMN_NAME
+        || name == DATA_SCHEMA_TSID_COLUMN_NAME
+        || name.starts_with(DATA_SCHEMA_VALUE_INT_COLUMN_PREFIX)
 }
 
 /// Returns true if it's metric engine

@@ -23,6 +23,9 @@ pub(crate) const DEFAULT_FLUSH_METADATA_REGION_INTERVAL: Duration = Duration::fr
 /// Configuration for the metric engine.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EngineConfig {
+    /// Whether to store exact integral metric values in internal Int64 columns.
+    #[serde(default)]
+    pub experimental_enable_metric_value_split: bool,
     /// The flush interval of the metadata region.
     #[serde(
         with = "humantime_serde",
@@ -35,6 +38,7 @@ impl Default for EngineConfig {
     fn default() -> Self {
         Self {
             flush_metadata_region_interval: DEFAULT_FLUSH_METADATA_REGION_INTERVAL,
+            experimental_enable_metric_value_split: false,
         }
     }
 }

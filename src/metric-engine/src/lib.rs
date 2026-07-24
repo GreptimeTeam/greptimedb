@@ -64,3 +64,7 @@ pub mod row_modifier;
 #[cfg(test)]
 mod test_util;
 mod utils;
+mod value_split;
+
+#[cfg(feature = "test")]
+pub use value_split::{benchmark_split_metric_values, benchmark_value_split};

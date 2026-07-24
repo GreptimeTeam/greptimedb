@@ -32,13 +32,15 @@ use store_api::metric_engine_consts::{
     METADATA_SCHEMA_KEY_COLUMN_INDEX, METADATA_SCHEMA_KEY_COLUMN_NAME,
     METADATA_SCHEMA_TIMESTAMP_COLUMN_INDEX, METADATA_SCHEMA_TIMESTAMP_COLUMN_NAME,
     METADATA_SCHEMA_VALUE_COLUMN_INDEX, METADATA_SCHEMA_VALUE_COLUMN_NAME,
-    is_metric_engine_internal_column,
+    TABLE_COLUMN_METADATA_EXTENSION_KEY, is_metric_engine_internal_column,
 };
-use store_api::mito_engine_options::{TTL_KEY, WAL_OPTIONS_KEY};
+use store_api::mito_engine_options::{MERGE_MODE_KEY, TTL_KEY, WAL_OPTIONS_KEY};
 use store_api::region_engine::RegionEngine;
 use store_api::region_request::{AffectedRows, PathType, RegionCreateRequest, RegionRequest};
 use store_api::storage::RegionId;
-use store_api::storage::consts::ReservedColumnId;
+use store_api::storage::consts::{
+    COLUMN_PARQUET_ENCODING_KEY, PARQUET_ENCODING_DELTA_BINARY_PACKED, ReservedColumnId,
+};
 
 use crate::engine::MetricEngineInner;
 use crate::engine::create::extract_new_columns::extract_new_columns;
@@ -53,6 +55,10 @@ use crate::metrics::PHYSICAL_REGION_COUNT;
 use crate::utils::{
     self, append_manifest_info, encode_manifest_info_to_extensions, to_data_region_id,
     to_metadata_region_id,
+};
+use crate::value_split::{
+    is_metric_value_int_column, metric_value_int_column_id, metric_value_int_column_name,
+    visible_column_metadatas,
 };
 
 const DEFAULT_TABLE_ID_SKIPPING_INDEX_GRANULARITY: u32 = 1024;
@@ -143,6 +149,8 @@ impl MetricEngineInner {
 
         // create data region
         let create_data_region_request = self.create_request_for_data_region(&request);
+        let visible_columns =
+            visible_column_metadatas(&create_data_region_request.column_metadatas);
         let physical_columns = create_data_region_request
             .column_metadatas
             .iter()
@@ -181,6 +189,10 @@ impl MetricEngineInner {
             },
         )?;
         extension_return_value.extend(response.extensions);
+        extension_return_value.insert(
+            TABLE_COLUMN_METADATA_EXTENSION_KEY.to_string(),
+            ColumnMetadata::encode_list(&visible_columns).context(SerializeColumnMetadataSnafu)?,
+        );
 
         info!(
             "Created physical metric region {region_id}, primary key encoding={primary_key_encoding}, physical_region_options={physical_region_options:?}"
@@ -305,17 +317,19 @@ impl MetricEngineInner {
         let logical_region_columns = requests.iter().map(|(region_id, request)| {
             (
                 *region_id,
-                request
-                    .column_metadatas
-                    .iter()
-                    .map(|metadata| {
-                        // Safety: previous steps ensure the physical region exist
-                        let column_metadata = *physical_schema_map
-                            .get(metadata.column_schema.name.as_str())
-                            .unwrap();
-                        (metadata.column_schema.name.as_str(), column_metadata)
-                    })
-                    .collect::<HashMap<_, _>>(),
+                request.column_metadatas.iter().map(|metadata| {
+                    // Safety: previous steps ensure the physical region exist.
+                    let mut column_metadata = (*physical_schema_map
+                        .get(metadata.column_schema.name.as_str())
+                        .unwrap())
+                    .clone();
+                    if metadata.semantic_type == SemanticType::Field {
+                        // Physical split-value fields are nullable because each row uses only one
+                        // half. Preserve the user-facing field schema in logical metadata.
+                        column_metadata.column_schema = metadata.column_schema.clone();
+                    }
+                    column_metadata
+                }),
             )
         });
 
@@ -327,7 +341,8 @@ impl MetricEngineInner {
 
         extension_return_value.insert(
             ALTER_PHYSICAL_EXTENSION_KEY.to_string(),
-            ColumnMetadata::encode_list(&physical_columns).context(SerializeColumnMetadataSnafu)?,
+            ColumnMetadata::encode_list(&visible_column_metadatas(&physical_columns))
+                .context(SerializeColumnMetadataSnafu)?,
         );
 
         // Writes logical regions metadata to metadata region
@@ -338,7 +353,7 @@ impl MetricEngineInner {
         {
             let mut state = self.state.write().unwrap();
             state.add_physical_columns(data_region_id, new_add_columns);
-            state.add_logical_regions(physical_region_id, logical_regions.clone());
+            state.add_logical_regions(physical_region_id, logical_regions.iter().copied());
         }
         for logical_region_id in logical_regions {
             self.metadata_region
@@ -379,6 +394,13 @@ impl MetricEngineInner {
                 column: DATA_SCHEMA_TSID_COLUMN_NAME,
             }
         );
+        for column in &request.column_metadatas {
+            let name = &column.column_schema.name;
+            ensure!(
+                !is_metric_value_int_column(name),
+                InternalColumnOccupiedSnafu { column: name }
+            );
+        }
 
         // check if required table option is present
         ensure!(
@@ -529,6 +551,15 @@ impl MetricEngineInner {
 
         let table_id_col_def = request.column_metadatas.iter().any(is_metric_name_col);
         let tsid_col_def = request.column_metadatas.iter().any(is_tsid_col);
+        let value_split_enabled = self.enable_metric_value_split
+            && request
+                .options
+                .get(MERGE_MODE_KEY)
+                .is_none_or(|mode| mode != "last_non_null");
+        configure_metric_value_int_columns(
+            &mut data_region_request.column_metadatas,
+            value_split_enabled,
+        );
 
         // change nullability for tag columns
         data_region_request
@@ -558,6 +589,44 @@ impl MetricEngineInner {
 
         data_region_request
     }
+}
+
+fn configure_metric_value_int_columns(
+    column_metadatas: &mut Vec<ColumnMetadata>,
+    value_split_enabled: bool,
+) {
+    if !value_split_enabled {
+        return;
+    }
+
+    let int_columns = column_metadatas
+        .iter_mut()
+        .filter(|metadata| {
+            metadata.semantic_type == SemanticType::Field
+                && metadata.column_schema.data_type == ConcreteDataType::float64_datatype()
+        })
+        .map(|metadata| {
+            // Every split row leaves either the float or integer half null. Logical metadata
+            // retains the original nullability constraint.
+            metadata.column_schema.set_nullable();
+            let mut column_schema = ColumnSchema::new(
+                metric_value_int_column_name(&metadata.column_schema.name),
+                ConcreteDataType::int64_datatype(),
+                true,
+            );
+            column_schema.mut_metadata().insert(
+                COLUMN_PARQUET_ENCODING_KEY.to_string(),
+                PARQUET_ENCODING_DELTA_BINARY_PACKED.to_string(),
+            );
+            ColumnMetadata {
+                column_id: metric_value_int_column_id(metadata.column_id),
+                semantic_type: SemanticType::Field,
+                column_schema,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    column_metadatas.extend(int_columns);
 }
 
 fn table_id_col() -> ColumnMetadata {
@@ -761,6 +830,17 @@ mod test {
             requirements: Default::default(),
         };
         MetricEngineInner::verify_region_create_request(&request).unwrap();
+        let mut internal_request = request.clone();
+        internal_request.column_metadatas.push(ColumnMetadata {
+            column_id: metric_value_int_column_id(2),
+            semantic_type: SemanticType::Field,
+            column_schema: ColumnSchema::new(
+                metric_value_int_column_name("column2"),
+                ConcreteDataType::int64_datatype(),
+                true,
+            ),
+        });
+        assert!(MetricEngineInner::verify_region_create_request(&internal_request).is_err());
 
         // valid request
         let request = RegionCreateRequest {
@@ -1067,11 +1147,39 @@ mod test {
         };
 
         let env = TestEnv::new().await;
-        let engine = MetricEngine::try_new(env.mito(), EngineConfig::default()).unwrap();
+        let disabled_engine = MetricEngine::try_new(env.mito(), EngineConfig::default()).unwrap();
+        let disabled_request = disabled_engine
+            .inner
+            .create_request_for_data_region(&request);
+        assert_eq!(disabled_request.column_metadatas.len(), 5);
+        assert!(
+            disabled_request
+                .column_metadatas
+                .iter()
+                .all(|metadata| !is_metric_value_int_column(&metadata.column_schema.name))
+        );
+        assert!(
+            !disabled_request
+                .column_metadatas
+                .iter()
+                .find(|metadata| metadata.column_schema.name == "value")
+                .unwrap()
+                .column_schema
+                .is_nullable()
+        );
+
+        let engine = MetricEngine::try_new(
+            env.mito(),
+            EngineConfig {
+                experimental_enable_metric_value_split: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
         let engine_inner = engine.inner;
 
         let data_region_request = engine_inner.create_request_for_data_region(&request);
-        assert_eq!(data_region_request.column_metadatas.len(), 5);
+        assert_eq!(data_region_request.column_metadatas.len(), 6);
         assert_eq!(
             data_region_request.primary_key,
             vec![ReservedColumnId::table_id(), ReservedColumnId::tsid(), 1]
@@ -1096,6 +1204,59 @@ mod test {
             .find(|metadata| metadata.column_schema.name == "tag")
             .unwrap();
         assert!(tag_metadata.column_schema.is_nullable());
+
+        let value_metadata = data_region_request
+            .column_metadatas
+            .iter()
+            .find(|metadata| metadata.column_schema.name == "value")
+            .unwrap();
+        assert!(value_metadata.column_schema.is_nullable());
+
+        let value_int_name = metric_value_int_column_name("value");
+        let value_int_metadata = data_region_request
+            .column_metadatas
+            .iter()
+            .find(|metadata| metadata.column_schema.name == value_int_name)
+            .unwrap();
+        assert_eq!(
+            value_int_metadata.column_id,
+            metric_value_int_column_id(value_metadata.column_id)
+        );
+        assert_eq!(
+            value_int_metadata.column_schema.data_type,
+            ConcreteDataType::int64_datatype()
+        );
+        assert!(value_int_metadata.column_schema.is_nullable());
+        assert_eq!(
+            value_int_metadata
+                .column_schema
+                .metadata()
+                .get(COLUMN_PARQUET_ENCODING_KEY)
+                .map(String::as_str),
+            Some(PARQUET_ENCODING_DELTA_BINARY_PACKED)
+        );
+
+        let mut last_non_null_request = request.clone();
+        last_non_null_request
+            .options
+            .insert(MERGE_MODE_KEY.to_string(), "last_non_null".to_string());
+        let last_non_null_data_region_request =
+            engine_inner.create_request_for_data_region(&last_non_null_request);
+        assert!(
+            last_non_null_data_region_request
+                .column_metadatas
+                .iter()
+                .all(|metadata| !is_metric_value_int_column(&metadata.column_schema.name))
+        );
+        assert!(
+            !last_non_null_data_region_request
+                .column_metadatas
+                .iter()
+                .find(|metadata| metadata.column_schema.name == "value")
+                .unwrap()
+                .column_schema
+                .is_nullable()
+        );
 
         let table_id_metadata = data_region_request
             .column_metadatas

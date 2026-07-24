@@ -42,7 +42,10 @@ use parquet::schema::types::ColumnPath;
 use smallvec::smallvec;
 use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
-use store_api::storage::consts::{OP_TYPE_COLUMN_NAME, SEQUENCE_COLUMN_NAME};
+use store_api::storage::consts::{
+    COLUMN_PARQUET_ENCODING_KEY, OP_TYPE_COLUMN_NAME, PARQUET_ENCODING_DELTA_BINARY_PACKED,
+    SEQUENCE_COLUMN_NAME,
+};
 use store_api::storage::{FileId, SequenceNumber};
 use tokio::io::AsyncWrite;
 use tokio_util::compat::{Compat, FuturesAsyncWriteCompatExt};
@@ -72,6 +75,44 @@ enum FlatBatchConverter {
         format: PrimaryKeyWriteFormat,
         num_fields: usize,
     },
+}
+
+fn customize_column_config(
+    builder: WriterPropertiesBuilder,
+    region_metadata: &RegionMetadataRef,
+) -> WriterPropertiesBuilder {
+    let ts_col = ColumnPath::new(vec![
+        region_metadata
+            .time_index_column()
+            .column_schema
+            .name
+            .clone(),
+    ]);
+    let seq_col = ColumnPath::new(vec![SEQUENCE_COLUMN_NAME.to_string()]);
+    let op_type_col = ColumnPath::new(vec![OP_TYPE_COLUMN_NAME.to_string()]);
+
+    let builder = builder
+        .set_column_encoding(seq_col.clone(), Encoding::DELTA_BINARY_PACKED)
+        .set_column_dictionary_enabled(seq_col, false)
+        .set_column_encoding(ts_col.clone(), Encoding::DELTA_BINARY_PACKED)
+        .set_column_dictionary_enabled(ts_col, false)
+        .set_column_compression(op_type_col, Compression::UNCOMPRESSED);
+
+    region_metadata
+        .field_columns()
+        .filter(|column| {
+            column
+                .column_schema
+                .metadata()
+                .get(COLUMN_PARQUET_ENCODING_KEY)
+                .is_some_and(|encoding| encoding == PARQUET_ENCODING_DELTA_BINARY_PACKED)
+        })
+        .fold(builder, |builder, column| {
+            let path = ColumnPath::new(vec![column.column_schema.name.clone()]);
+            builder
+                .set_column_encoding(path.clone(), Encoding::DELTA_BINARY_PACKED)
+                .set_column_dictionary_enabled(path, false)
+        })
 }
 
 impl FlatBatchConverter {
@@ -378,29 +419,6 @@ where
         Ok(results)
     }
 
-    /// Customizes per-column config according to schema and maybe column cardinality.
-    fn customize_column_config(
-        builder: WriterPropertiesBuilder,
-        region_metadata: &RegionMetadataRef,
-    ) -> WriterPropertiesBuilder {
-        let ts_col = ColumnPath::new(vec![
-            region_metadata
-                .time_index_column()
-                .column_schema
-                .name
-                .clone(),
-        ]);
-        let seq_col = ColumnPath::new(vec![SEQUENCE_COLUMN_NAME.to_string()]);
-        let op_type_col = ColumnPath::new(vec![OP_TYPE_COLUMN_NAME.to_string()]);
-
-        builder
-            .set_column_encoding(seq_col.clone(), Encoding::DELTA_BINARY_PACKED)
-            .set_column_dictionary_enabled(seq_col, false)
-            .set_column_encoding(ts_col.clone(), Encoding::DELTA_BINARY_PACKED)
-            .set_column_dictionary_enabled(ts_col, false)
-            .set_column_compression(op_type_col, Compression::UNCOMPRESSED)
-    }
-
     async fn write_next_flat_batch(
         &mut self,
         source: &mut FlatSource,
@@ -446,7 +464,7 @@ where
                 .set_column_index_truncate_length(None)
                 .set_statistics_truncate_length(None);
 
-            let props_builder = Self::customize_column_config(props_builder, &self.metadata);
+            let props_builder = customize_column_config(props_builder, &self.metadata);
             let writer_props = props_builder.build();
 
             let sst_file_path = self.path_provider.build_sst_file_path(RegionFileId::new(
@@ -614,5 +632,40 @@ where
         cx: &mut Context<'_>,
     ) -> Poll<std::result::Result<(), std::io::Error>> {
         Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_util::sst_util::sst_region_metadata;
+
+    #[test]
+    fn test_column_parquet_encoding_hint() {
+        let mut metadata = sst_region_metadata();
+        metadata
+            .column_metadatas
+            .iter_mut()
+            .find(|column| column.column_schema.name == "field_0")
+            .unwrap()
+            .column_schema
+            .mut_metadata()
+            .insert(
+                COLUMN_PARQUET_ENCODING_KEY.to_string(),
+                PARQUET_ENCODING_DELTA_BINARY_PACKED.to_string(),
+            );
+        let metadata = Arc::new(metadata);
+        let properties = customize_column_config(
+            WriterProperties::builder().set_encoding(Encoding::PLAIN),
+            &metadata,
+        )
+        .build();
+        let field = ColumnPath::new(vec!["field_0".to_string()]);
+
+        assert_eq!(
+            properties.encoding(&field),
+            Some(Encoding::DELTA_BINARY_PACKED)
+        );
+        assert!(!properties.dictionary_enabled(&field));
     }
 }

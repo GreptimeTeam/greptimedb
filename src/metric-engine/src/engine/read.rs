@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use api::v1::SemanticType;
 use common_telemetry::{debug, error, tracing};
-use datafusion::logical_expr::{self, Expr};
+use datafusion::logical_expr;
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::{RegionMetadataBuilder, RegionMetadataRef};
 use store_api::metric_engine_consts::DATA_SCHEMA_TABLE_ID_COLUMN_NAME;
@@ -25,10 +25,12 @@ use store_api::storage::{RegionId, ScanRequest, SequenceNumber};
 
 use crate::engine::MetricEngineInner;
 use crate::error::{
-    InvalidMetadataSnafu, LogicalRegionNotFoundSnafu, MitoReadOperationSnafu, Result,
+    InvalidMetadataSnafu, InvalidRequestSnafu, LogicalRegionNotFoundSnafu, MitoReadOperationSnafu,
+    Result,
 };
 use crate::metrics::MITO_OPERATION_ELAPSED;
 use crate::utils;
+use crate::value_split::{MetricRegionScanner, prepare_value_split_scan, visible_region_metadata};
 
 impl MetricEngineInner {
     #[tracing::instrument(skip_all)]
@@ -53,16 +55,38 @@ impl MetricEngineInner {
     async fn read_physical_region(
         &self,
         region_id: RegionId,
-        request: ScanRequest,
+        mut request: ScanRequest,
     ) -> Result<RegionScannerRef> {
         let _timer = MITO_OPERATION_ELAPSED
             .with_label_values(&["read_physical"])
             .start_timer();
 
-        self.mito
+        let physical_metadata = self
+            .mito
+            .get_metadata(region_id)
+            .await
+            .context(MitoReadOperationSnafu)?;
+        let visible_metadata = visible_region_metadata(&physical_metadata)?;
+        let mapper = prepare_value_split_scan(
+            region_id,
+            &mut request,
+            &physical_metadata,
+            &visible_metadata,
+        )?;
+        let scanner = self
+            .mito
             .handle_query(region_id, request)
             .await
-            .context(MitoReadOperationSnafu)
+            .context(MitoReadOperationSnafu)?;
+
+        Ok(match mapper {
+            Some(mapper) => Box::new(MetricRegionScanner::new(
+                scanner,
+                Some(mapper),
+                visible_metadata,
+            )),
+            None => scanner,
+        })
     }
 
     async fn read_logical_region(
@@ -76,14 +100,33 @@ impl MetricEngineInner {
 
         let physical_region_id = self.get_physical_region_id(logical_region_id).await?;
         let data_region_id = utils::to_data_region_id(physical_region_id);
-        let request = self
-            .transform_request(physical_region_id, logical_region_id, request)
+        let logical_metadata = self
+            .logical_region_metadata(physical_region_id, logical_region_id)
             .await?;
+        let physical_metadata = self
+            .mito
+            .get_metadata(data_region_id)
+            .await
+            .context(MitoReadOperationSnafu)?;
+        let visible_metadata = visible_region_metadata(&physical_metadata)?;
+        let mut request = Self::transform_request_with_metadata(
+            logical_region_id,
+            request,
+            &logical_metadata,
+            &visible_metadata,
+        )?;
+        let mapper = prepare_value_split_scan(
+            data_region_id,
+            &mut request,
+            &physical_metadata,
+            &visible_metadata,
+        )?;
         let mut scanner = self
             .mito
             .handle_query(data_region_id, request)
             .await
             .context(MitoReadOperationSnafu)?;
+        scanner = Box::new(MetricRegionScanner::new(scanner, mapper, logical_metadata));
         scanner.set_logical_region(true);
         scanner.set_query_load_region_id(data_region_id);
 
@@ -108,10 +151,12 @@ impl MetricEngineInner {
             self.state.read().unwrap().exist_physical_region(region_id);
 
         if is_reading_physical_region {
-            self.mito
+            let metadata = self
+                .mito
                 .get_metadata(region_id)
                 .await
-                .context(MitoReadOperationSnafu)
+                .context(MitoReadOperationSnafu)?;
+            visible_region_metadata(&metadata)
         } else {
             let physical_region_id = self.get_physical_region_id(region_id).await?;
             self.logical_region_metadata(physical_region_id, region_id)
@@ -137,103 +182,74 @@ impl MetricEngineInner {
     }
 
     /// Transform the [ScanRequest] from logical region to physical data region.
+    #[cfg(test)]
     async fn transform_request(
         &self,
         physical_region_id: RegionId,
         logical_region_id: RegionId,
-        mut request: ScanRequest,
+        request: ScanRequest,
     ) -> Result<ScanRequest> {
-        // transform projection
-        let physical_projection = match request.projection_input.as_ref() {
-            Some(projection_input) => {
-                self.transform_projection(
-                    physical_region_id,
-                    logical_region_id,
-                    &projection_input.projection,
-                )
-                .await?
-            }
-            None => {
-                self.default_projection(physical_region_id, logical_region_id)
-                    .await?
-            }
-        };
-
-        // Rewrite the top-level projection from logical-region schema indices to
-        // physical-region schema indices. `nested_paths` are left unchanged because
-        // they are expressed by column name rather than schema index.
-        request.projection_input.get_or_insert_default().projection = physical_projection;
-
-        request
-            .filters
-            .push(self.table_id_filter(logical_region_id));
-
+        let logical_metadata = self
+            .logical_region_metadata(physical_region_id, logical_region_id)
+            .await?;
+        let physical_metadata = self
+            .mito
+            .get_metadata(utils::to_data_region_id(physical_region_id))
+            .await
+            .context(MitoReadOperationSnafu)?;
+        let visible_metadata = visible_region_metadata(&physical_metadata)?;
+        let mut request = Self::transform_request_with_metadata(
+            logical_region_id,
+            request,
+            &logical_metadata,
+            &visible_metadata,
+        )?;
+        prepare_value_split_scan(
+            physical_region_id,
+            &mut request,
+            &physical_metadata,
+            &visible_metadata,
+        )?;
         Ok(request)
     }
 
-    /// Generate a filter on the table id column.
-    fn table_id_filter(&self, logical_region_id: RegionId) -> Expr {
-        logical_expr::col(DATA_SCHEMA_TABLE_ID_COLUMN_NAME)
-            .eq(logical_expr::lit(logical_region_id.table_id()))
-    }
-
-    /// Transform the projection from logical region to physical region.
-    ///
-    /// This method will not preserve internal columns.
-    pub async fn transform_projection(
-        &self,
-        physical_region_id: RegionId,
+    fn transform_request_with_metadata(
         logical_region_id: RegionId,
-        origin_projection: &[usize],
-    ) -> Result<Vec<usize>> {
-        // project on logical columns
-        let all_logical_columns = self
-            .load_logical_column_names(physical_region_id, logical_region_id)
-            .await?;
-        let projected_logical_names = origin_projection
-            .iter()
-            .map(|i| all_logical_columns[*i].clone())
-            .collect::<Vec<_>>();
-
-        // generate physical projection
-        let mut physical_projection = Vec::with_capacity(origin_projection.len());
-        let data_region_id = utils::to_data_region_id(physical_region_id);
-        let physical_metadata = self
-            .mito
-            .get_metadata(data_region_id)
-            .await
-            .context(MitoReadOperationSnafu)?;
-
-        for name in projected_logical_names {
-            // Safety: logical columns is a strict subset of physical columns
-            physical_projection.push(physical_metadata.column_index_by_name(&name).unwrap());
+        mut request: ScanRequest,
+        logical_metadata: &RegionMetadataRef,
+        physical_metadata: &RegionMetadataRef,
+    ) -> Result<ScanRequest> {
+        let logical_projection = match request.projection_input.as_ref() {
+            Some(projection_input) => projection_input.projection.clone(),
+            None => (0..logical_metadata.column_metadatas.len()).collect(),
+        };
+        let mut physical_projection = Vec::with_capacity(logical_projection.len());
+        for logical_index in logical_projection {
+            let logical_column = logical_metadata
+                .column_metadatas
+                .get(logical_index)
+                .with_context(|| InvalidRequestSnafu {
+                    region_id: logical_region_id,
+                    reason: format!("projection index {logical_index} is out of bound"),
+                })?;
+            let name = &logical_column.column_schema.name;
+            let physical_index =
+                physical_metadata
+                    .column_index_by_name(name)
+                    .with_context(|| InvalidRequestSnafu {
+                        region_id: logical_region_id,
+                        reason: format!("column {name} is missing from physical metadata"),
+                    })?;
+            physical_projection.push(physical_index);
         }
 
-        Ok(physical_projection)
-    }
-
-    /// Default projection for a logical region. Includes non-internal columns
-    pub async fn default_projection(
-        &self,
-        physical_region_id: RegionId,
-        logical_region_id: RegionId,
-    ) -> Result<Vec<usize>> {
-        let logical_columns = self
-            .load_logical_column_names(physical_region_id, logical_region_id)
-            .await?;
-        let mut projection = Vec::with_capacity(logical_columns.len());
-        let data_region_id = utils::to_data_region_id(physical_region_id);
-        let physical_metadata = self
-            .mito
-            .get_metadata(data_region_id)
-            .await
-            .context(MitoReadOperationSnafu)?;
-        for name in logical_columns {
-            // Safety: logical columns is a strict subset of physical columns
-            projection.push(physical_metadata.column_index_by_name(&name).unwrap());
-        }
-
-        Ok(projection)
+        // Top-level projections are indices; nested paths are column names.
+        request.projection_input.get_or_insert_default().projection = physical_projection;
+        request.filters.push(
+            logical_expr::col(DATA_SCHEMA_TABLE_ID_COLUMN_NAME)
+                .eq(logical_expr::lit(logical_region_id.table_id())),
+        );
+        Ok(request)
     }
 
     pub async fn logical_region_metadata(
@@ -276,27 +292,23 @@ impl MetricEngineInner {
         region_id: RegionId,
         request: ScanRequest,
     ) -> Result<common_recordbatch::SendableRecordBatchStream, common_error::ext::BoxedError> {
-        let is_reading_physical_region = self.is_physical_region(region_id);
-
-        if is_reading_physical_region {
-            self.mito
-                .scan_to_stream(region_id, request)
-                .await
-                .map_err(common_error::ext::BoxedError::new)
-        } else {
-            let physical_region_id = self
-                .get_physical_region_id(region_id)
-                .await
-                .map_err(common_error::ext::BoxedError::new)?;
-            let request = self
-                .transform_request(physical_region_id, region_id, request)
-                .await
-                .map_err(common_error::ext::BoxedError::new)?;
-            self.mito
-                .scan_to_stream(physical_region_id, request)
-                .await
-                .map_err(common_error::ext::BoxedError::new)
-        }
+        let scanner = self
+            .read_region(region_id, request)
+            .await
+            .map_err(common_error::ext::BoxedError::new)?;
+        let metrics_set = datafusion::physical_plan::metrics::ExecutionPlanMetricsSet::new();
+        let streams = (0..scanner.properties().num_partitions())
+            .map(|partition| {
+                scanner.scan_partition(
+                    &store_api::region_engine::QueryScanContext::default(),
+                    &metrics_set,
+                    partition,
+                )
+            })
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        common_recordbatch::util::ChainedRecordBatchStream::new(streams)
+            .map(|stream| Box::pin(stream) as _)
+            .map_err(common_error::ext::BoxedError::new)
     }
 }
 

@@ -33,6 +33,7 @@ use crate::error::{
     SerializeColumnMetadataSnafu, UnexpectedRequestSnafu,
 };
 use crate::utils::{append_manifest_info, encode_manifest_info_to_extensions, to_data_region_id};
+use crate::value_split::visible_column_metadatas;
 
 impl MetricEngineInner {
     pub async fn alter_regions(
@@ -179,14 +180,10 @@ impl MetricEngineInner {
             };
             (
                 *region_id,
-                columns
-                    .iter()
-                    .map(|col| {
-                        let column_name = col.column_metadata.column_schema.name.as_str();
-                        let column_metadata = *physical_schema_map.get(column_name).unwrap();
-                        (column_name, column_metadata)
-                    })
-                    .collect::<HashMap<_, _>>(),
+                columns.iter().map(|col| {
+                    let column_name = col.column_metadata.column_schema.name.as_str();
+                    (*physical_schema_map.get(column_name).unwrap()).clone()
+                }),
             )
         });
 
@@ -203,7 +200,8 @@ impl MetricEngineInner {
 
         extension_return_value.insert(
             ALTER_PHYSICAL_EXTENSION_KEY.to_string(),
-            ColumnMetadata::encode_list(&physical_columns).context(SerializeColumnMetadataSnafu)?,
+            ColumnMetadata::encode_list(&visible_column_metadatas(&physical_columns))
+                .context(SerializeColumnMetadataSnafu)?,
         );
 
         let mut state = self.state.write().unwrap();
