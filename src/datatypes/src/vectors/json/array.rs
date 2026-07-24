@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::cmp::Ordering;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use arrow::compute;
@@ -39,6 +40,30 @@ use crate::vectors::json::builder::{
 
 pub struct JsonArray<'a> {
     inner: &'a ArrayRef,
+}
+
+struct NullArrayCache {
+    len: usize,
+    arrays: HashMap<DataType, ArrayRef>,
+}
+
+impl NullArrayCache {
+    fn new(len: usize) -> Self {
+        Self {
+            len,
+            arrays: HashMap::new(),
+        }
+    }
+
+    fn get(&mut self, data_type: &DataType) -> ArrayRef {
+        if let Some(array) = self.arrays.get(data_type) {
+            array.clone()
+        } else {
+            let array = new_null_array(data_type, self.len);
+            self.arrays.insert(data_type.clone(), array.clone());
+            array
+        }
+    }
 }
 
 impl JsonArray<'_> {
@@ -129,6 +154,7 @@ impl JsonArray<'_> {
             .fail();
         };
         let mut aligned = Vec::with_capacity(expect_fields.len());
+        let mut null_arrays = NullArrayCache::new(struct_array.len());
 
         // Compare the fields in the JSON array and the to-be-aligned schema, amending with null
         // arrays on the way. It's very important to note that fields in the JSON array and those
@@ -165,7 +191,7 @@ impl JsonArray<'_> {
                     j += 1;
                 }
                 Ordering::Less => {
-                    aligned.push(new_null_array(expect_field.data_type(), struct_array.len()));
+                    aligned.push(null_arrays.get(expect_field.data_type()));
                     i += 1;
                 }
                 Ordering::Greater => {
@@ -175,7 +201,7 @@ impl JsonArray<'_> {
         }
         if i < expect_fields.len() {
             for field in &expect_fields[i..] {
-                aligned.push(new_null_array(field.data_type(), struct_array.len()));
+                aligned.push(null_arrays.get(field.data_type()));
             }
         }
 
@@ -319,6 +345,7 @@ impl<'a> From<&'a ArrayRef> for JsonArray<'a> {
 
 #[cfg(test)]
 mod test {
+    use arrow::buffer::OffsetBuffer;
     use arrow_array::types::Int64Type;
     use arrow_array::{
         BinaryArray, BooleanArray, Float64Array, Int32Array, Int64Array, ListArray, StringArray,
@@ -570,6 +597,61 @@ mod test {
                 ])),
                 Arc::new(StringArray::from(vec!["a", "b", "c"])),
             ]),
+        )
+        .test()?;
+
+        // Test list item alignment. The outer struct has 3 rows, while the list values
+        // contain 4 struct items. Missing item fields must use the values length.
+        let input_item_fields = Fields::from(vec![Field::new("id", DataType::Int64, true)]);
+        let expected_item_fields = Fields::from(vec![
+            Field::new("id", DataType::Int64, true),
+            Field::new("name", DataType::Utf8, true),
+        ]);
+        let input_item_type = DataType::Struct(input_item_fields.clone());
+        let expected_item_type = DataType::Struct(expected_item_fields.clone());
+        let offsets = OffsetBuffer::from_lengths([2, 0, 2]);
+        TestCase::new(
+            StructArray::from(vec![(
+                Arc::new(Field::new_list(
+                    "items",
+                    Field::new_list_field(input_item_type.clone(), true),
+                    true,
+                )),
+                Arc::new(
+                    ListArray::try_new(
+                        Arc::new(Field::new_list_field(input_item_type, true)),
+                        offsets.clone(),
+                        Arc::new(StructArray::new(
+                            input_item_fields,
+                            vec![Arc::new(Int64Array::from(vec![1, 2, 3, 4])) as ArrayRef],
+                            None,
+                        )),
+                        None,
+                    )
+                    .unwrap(),
+                ) as ArrayRef,
+            )]),
+            Fields::from(vec![Field::new_list(
+                "items",
+                Field::new_list_field(expected_item_type.clone(), true),
+                true,
+            )]),
+            Ok(vec![Arc::new(
+                ListArray::try_new(
+                    Arc::new(Field::new_list_field(expected_item_type, true)),
+                    offsets,
+                    Arc::new(StructArray::new(
+                        expected_item_fields,
+                        vec![
+                            Arc::new(Int64Array::from(vec![1, 2, 3, 4])) as ArrayRef,
+                            Arc::new(StringArray::new_null(4)),
+                        ],
+                        None,
+                    )),
+                    None,
+                )
+                .unwrap(),
+            )]),
         )
         .test()?;
 
