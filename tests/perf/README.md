@@ -222,31 +222,23 @@ candidate `query_perf_fixture`, then run the case explicitly:
 
 ```bash
 WORK_DIR="$(mktemp -d /tmp/query-perf-otlp.XXXXXX)"
+REPORT="$WORK_DIR/trace-report.json"
 python3 tests/perf/query_regression_runner.py \
   --case tests/perf/query_cases/otlp_trace_load/case.toml \
   --base-bin /path/to/base/target/nightly/greptime \
   --candidate-bin /path/to/candidate/target/nightly/greptime \
   --fixture-generator /path/to/candidate/target/nightly/query_perf_fixture \
   --otelgen-bin /path/to/otelgen \
-  --work-dir "$WORK_DIR"
+  --work-dir "$WORK_DIR" \
+  --output "$REPORT"
 ```
 
-After the run, print the relevant result fields with `jq`:
+Install [YouPlot](https://github.com/red-data-tools/YouPlot) once, then render
+all comparison metrics and threshold results in the terminal:
 
 ```bash
-REPORT="$WORK_DIR/query-regression-report.json"
-jq '{
-  status,
-  targets: [.targets[] | {
-    target: .name,
-    accepted_spans: .metrics.accepted_spans,
-    table_rows: .visibility.observed_rows,
-    spans_per_second: .metrics.accepted_spans_per_second,
-    mean_latency_ms: .metrics.mean_http_latency_ms,
-    failures: .metrics.failure_count
-  }],
-  thresholds
-}' "$REPORT"
+brew install youplot
+tests/perf/plot_otlp_trace_report.sh "$REPORT"
 ```
 
 For each target, `accepted_spans` should equal `table_rows`, and `failures`

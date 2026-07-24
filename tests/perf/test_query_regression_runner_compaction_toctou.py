@@ -17,6 +17,7 @@
 
 import argparse
 import importlib.util
+import json
 import sys
 import tempfile
 import unittest
@@ -30,6 +31,23 @@ assert SPEC is not None and SPEC.loader is not None
 runner = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = runner
 SPEC.loader.exec_module(runner)
+
+
+class ReportOutputTest(unittest.TestCase):
+    def test_final_report_output_defaults_to_stdout_or_writes_to_file(self) -> None:
+        report = {"status": "ok"}
+        expected = json.dumps(report, indent=2, sort_keys=True)
+
+        with patch("builtins.print") as print_mock:
+            runner.output_report(report, None)
+        print_mock.assert_called_once_with(expected)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = Path(tmpdir) / "nested" / "report.json"
+            with patch("builtins.print") as print_mock:
+                runner.output_report(report, output)
+            print_mock.assert_not_called()
+            self.assertEqual(output.read_text(), expected + "\n")
 
 
 class RemoteWriteCompactionToctouTest(unittest.TestCase):

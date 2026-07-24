@@ -78,6 +78,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--remote-write-generator", type=Path, help="deprecated: use --fixture-generator query_perf_fixture")
     p.add_argument("--storage-inspector", type=Path, help="deprecated: use --fixture-generator query_perf_fixture")
     p.add_argument("--work-dir", required=True, type=Path)
+    p.add_argument("--output", type=Path, help="write the final JSON report to this file instead of stdout")
     p.add_argument("--fixture-cache-dir", type=Path, help="persistent directory for generated fixtures, keyed by case content")
     p.add_argument("--reuse-fixture", action="store_true")
     p.add_argument("--allow-large-fixture", action="store_true")
@@ -1041,6 +1042,13 @@ def write_json(path: Path, payload: dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
 
 
+def output_report(report: dict[str, Any], output: Path | None) -> None:
+    if output is None:
+        print(json.dumps(report, indent=2, sort_keys=True))
+    else:
+        write_json(output, report)
+
+
 def parse_prometheus_metrics(text: str, names: set[str] = OTLP_TRACE_METRICS) -> dict[str, float]:
     values: dict[str, float] = {}
     for line in text.splitlines():
@@ -1554,7 +1562,7 @@ def main() -> int:
             report["status"] = "failed"
             report["error"] = repr(e)
         write_json(work_root / "query-regression-report.json", report)
-        print(json.dumps(report, indent=2, sort_keys=True))
+        output_report(report, args.output)
         return 1 if report["status"] == "failed" else 0
 
     if scenario_kind == "prom_remote_write_then_query":
@@ -1564,7 +1572,7 @@ def main() -> int:
             report["status"] = "failed"
             report["error"] = repr(e)
         write_json(work_root / "query-regression-report.json", report)
-        print(json.dumps(report, indent=2, sort_keys=True))
+        output_report(report, args.output)
         return 1 if report["status"] == "failed" else 0
 
     if args.fixture_only or args.dry_run:
@@ -1584,7 +1592,7 @@ def main() -> int:
             report["targets"].append(tr)
         report["status"] = "planned" if args.dry_run else "fixture-ready"
         write_json(work_root / "query-regression-report.json", report)
-        print(json.dumps(report, indent=2, sort_keys=True))
+        output_report(report, args.output)
         return 0
 
     clusters: list[DistributedCluster] = []
@@ -1647,7 +1655,7 @@ def main() -> int:
         for cluster in reversed(clusters):
             cluster.stop_all()
     write_json(work_root / "query-regression-report.json", report)
-    print(json.dumps(report, indent=2, sort_keys=True))
+    output_report(report, args.output)
     return 1 if report["status"] == "failed" else 0
 
 

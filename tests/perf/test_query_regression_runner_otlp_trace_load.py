@@ -16,6 +16,8 @@
 """Regression coverage for the local OTLP trace load lifecycle and metrics."""
 
 import importlib.util
+import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -25,11 +27,76 @@ from unittest.mock import patch
 
 
 RUNNER_PATH = Path(__file__).with_name("query_regression_runner.py")
+PLOTTER_PATH = Path(__file__).with_name("plot_otlp_trace_report.sh")
 SPEC = importlib.util.spec_from_file_location("query_regression_runner_otlp_under_test", RUNNER_PATH)
 assert SPEC is not None and SPEC.loader is not None
 runner = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = runner
 SPEC.loader.exec_module(runner)
+
+
+class OtlpTraceReportPlotTest(unittest.TestCase):
+    def test_plots_all_comparison_metrics_and_thresholds(self) -> None:
+        report = {
+            "status": "ok",
+            "targets": [
+                {
+                    "name": name,
+                    "metrics": {
+                        "accepted_spans": spans,
+                        "accepted_spans_per_second": rate,
+                        "mean_http_latency_ms": latency,
+                        "failure_count": 0,
+                    },
+                    "visibility": {"observed_rows": spans},
+                }
+                for name, spans, rate, latency in (("base", 100, 10.0, 3.0), ("candidate", 120, 12.0, 2.5))
+            ],
+            "thresholds": [
+                {"target": "base", "threshold": "max_failure_count", "status": "passed", "actual": 0, "limit": 0},
+                {
+                    "threshold": "max_candidate_throughput_regression_pct",
+                    "status": "passed",
+                    "actual_pct": -20.0,
+                    "limit_pct": 20.0,
+                    "base": 10.0,
+                    "candidate": 12.0,
+                },
+            ],
+        }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            report_path = root / "report.json"
+            report_path.write_text(json.dumps(report))
+            fake_bin = root / "bin"
+            fake_bin.mkdir()
+            uplot = fake_bin / "uplot"
+            uplot.write_text('#!/usr/bin/env bash\nprintf "CALL %s\\n" "$*" >>"$UPLOT_LOG"\ncat >>"$UPLOT_LOG"\n')
+            uplot.chmod(0o755)
+            log_path = root / "uplot.log"
+            env = os.environ.copy()
+            env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
+            env["UPLOT_LOG"] = str(log_path)
+
+            result = subprocess.run([str(PLOTTER_PATH), str(report_path)], env=env, text=True, capture_output=True, check=False)
+            log = log_path.read_text()
+            report["targets"][1]["visibility"]["observed_rows"] = 119
+            report_path.write_text(json.dumps(report))
+            mismatch = subprocess.run([str(PLOTTER_PATH), str(report_path)], env=env, text=True, capture_output=True, check=False)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(log.count("CALL "), 5)
+        for metric in ("Accepted spans", "Visible table rows", "Throughput", "Mean HTTP latency", "Failures"):
+            self.assertIn(metric, log)
+        self.assertIn("base\t100", log)
+        self.assertIn("candidate\t12", log)
+        self.assertIn("Status: ok", result.stdout)
+        self.assertIn("[passed] candidate: accepted=120, visible=120", result.stdout)
+        self.assertIn("max_failure_count", result.stdout)
+        self.assertIn("max_candidate_throughput_regression_pct", result.stdout)
+        self.assertEqual(mismatch.returncode, 1, mismatch.stderr)
+        self.assertIn("[failed] candidate: accepted=120, visible=119", mismatch.stdout)
 
 
 class OtlpTraceLoadTest(unittest.TestCase):
