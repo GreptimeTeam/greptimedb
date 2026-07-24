@@ -1235,6 +1235,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
     /// Handles region background request
     async fn handle_background_notify(&mut self, region_id: RegionId, notify: BackgroundNotify) {
         match notify {
+            BackgroundNotify::CompactionPickFinished(req) => {
+                self.handle_compaction_pick_finished(region_id, req).await
+            }
             BackgroundNotify::FlushFinished(req) => {
                 self.handle_flush_finished(region_id, req).await
             }
@@ -1412,6 +1415,34 @@ impl WorkerListener {
         #[cfg(any(test, feature = "test"))]
         if let Some(listener) = &self.listener {
             listener.on_compaction_scheduled(_region_id);
+        }
+    }
+
+    pub(crate) async fn on_compaction_pick_begin(&self, _region_id: RegionId) {
+        #[cfg(any(test, feature = "test"))]
+        if let Some(listener) = &self.listener {
+            listener.on_compaction_pick_begin(_region_id).await;
+        }
+    }
+
+    pub(crate) async fn on_compaction_commit_begin(&self, _region_id: RegionId) {
+        #[cfg(any(test, feature = "test"))]
+        if let Some(listener) = &self.listener {
+            listener.on_compaction_commit_begin(_region_id).await;
+        }
+    }
+
+    pub(crate) async fn on_compaction_result_notified(&self, _region_id: RegionId) {
+        #[cfg(any(test, feature = "test"))]
+        if let Some(listener) = &self.listener {
+            listener.on_compaction_result_notified(_region_id).await;
+        }
+    }
+
+    pub(crate) fn on_compaction_cancel_requested(&self, _region_id: RegionId) {
+        #[cfg(any(test, feature = "test"))]
+        if let Some(listener) = &self.listener {
+            listener.on_compaction_cancel_requested(_region_id);
         }
     }
 

@@ -23,7 +23,9 @@ mod test_util;
 mod twcs;
 mod window;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::fmt;
+use std::future::Future;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -41,6 +43,7 @@ use datafusion_common::ScalarValue;
 use datafusion_expr::Expr;
 use datatypes::extension::json::is_structured_json_field;
 use datatypes::types::json_type::JsonNativeType;
+use futures::FutureExt;
 use parquet::arrow::parquet_to_arrow_schema;
 use parquet::file::metadata::{PageIndexPolicy, ParquetMetaData};
 use serde::{Deserialize, Serialize};
@@ -59,9 +62,9 @@ use crate::compaction::task::CompactionTaskImpl;
 use crate::config::MitoConfig;
 use crate::error::{
     CompactRegionSnafu, CompactionCancelledSnafu, DataTypeMismatchSnafu, Error,
-    GetSchemaMetadataSnafu, ManualCompactionOverrideSnafu, ParquetToArrowSchemaSnafu,
+    GetSchemaMetadataSnafu, JoinSnafu, ManualCompactionOverrideSnafu, ParquetToArrowSchemaSnafu,
     RegionClosedSnafu, RegionDroppedSnafu, RegionTruncatedSnafu, RemoteCompactionSnafu, Result,
-    TimeRangePredicateOverflowSnafu, TimeoutSnafu,
+    TimeRangePredicateOverflowSnafu, TimeoutSnafu, UnexpectedSnafu,
 };
 use crate::metrics::{
     COMPACTION_MEMORY_REJECTED, COMPACTION_STAGE_ELAPSED, INFLIGHT_COMPACTION_COUNT,
@@ -74,14 +77,17 @@ use crate::read::seq_scan::SeqScan;
 use crate::region::options::{MergeMode, RegionOptions};
 use crate::region::version::VersionControlRef;
 use crate::region::{ManifestContextRef, RegionLeaderState, RegionRoleState};
-use crate::request::{OptionOutputTx, OutputTx, SenderDdlRequest, WorkerRequestWithTime};
+use crate::request::{
+    BackgroundNotify, OptionOutputTx, OutputTx, SenderDdlRequest, WorkerRequest,
+    WorkerRequestWithTime,
+};
 use crate::schedule::remote_job_scheduler::{
     CompactionJob, DefaultNotifier, RemoteJob, RemoteJobSchedulerRef,
 };
 use crate::schedule::scheduler::SchedulerRef;
 use crate::sst::file::{FileHandle, FileMeta, Level};
 use crate::sst::parquet::reader::MetadataCacheMetrics;
-use crate::sst::version::LevelMeta;
+use crate::sst::version::{LevelMeta, SstVersion};
 use crate::worker::WorkerListener;
 
 /// Region compaction request.
@@ -91,8 +97,6 @@ pub struct CompactionRequest {
     pub(crate) access_layer: AccessLayerRef,
     /// Sender to send notification to the region worker.
     pub(crate) request_sender: mpsc::Sender<WorkerRequestWithTime>,
-    /// Waiters of the compaction request.
-    pub(crate) waiters: Vec<OutputTx>,
     /// Start time of compaction task.
     pub(crate) start_time: Instant,
     pub(crate) cache_manager: CacheManagerRef,
@@ -105,6 +109,67 @@ pub struct CompactionRequest {
 impl CompactionRequest {
     pub(crate) fn region_id(&self) -> RegionId {
         self.current_version.metadata.region_id
+    }
+}
+
+/// Result returned to the worker after background compaction planning.
+pub(crate) enum CompactionPlanningResult {
+    Prepared(PreparedCompaction),
+    NoPlan,
+    Error(Arc<Error>),
+}
+
+impl fmt::Debug for CompactionPlanningResult {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Prepared(prepared) => f
+                .debug_tuple("Prepared")
+                .field(&prepared.compaction_region.region_id)
+                .finish(),
+            Self::NoPlan => f.write_str("NoPlan"),
+            Self::Error(err) => f.debug_tuple("Error").field(err).finish(),
+        }
+    }
+}
+
+/// Pure planning completion sent back to the owning region worker.
+#[derive(Debug)]
+pub(crate) struct CompactionPickFinished {
+    pub(crate) region_id: RegionId,
+    pub(crate) plan_id: u64,
+    pub(crate) result: CompactionPlanningResult,
+}
+
+pub(crate) struct PreparedCompaction {
+    compaction_region: CompactionRegion,
+    picker_output: PickerOutput,
+    start_time: Instant,
+    ttl: TimeToLive,
+}
+
+/// Identifies an accepted compaction attempt and keeps its SST reservations alive.
+/// The plan id fences terminal notifications from superseded attempts.
+#[derive(Debug, Clone)]
+pub(crate) struct CompactionExecution {
+    plan_id: u64,
+    _files: CompactingFiles,
+}
+
+impl CompactionExecution {
+    fn new(plan_id: u64, files: CompactingFiles) -> Self {
+        Self {
+            plan_id,
+            _files: files,
+        }
+    }
+
+    pub(crate) fn matches(&self, other: &Self) -> bool {
+        self.plan_id == other.plan_id
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(plan_id: u64) -> Self {
+        Self::new(plan_id, CompactingFiles::empty())
     }
 }
 
@@ -122,6 +187,9 @@ pub(crate) struct CompactionScheduler {
     listener: WorkerListener,
     /// Plugins for the compaction scheduler.
     plugins: Plugins,
+    /// Scheduler-wide generation counter for compaction plans and executions.
+    /// It outlives region statuses so close/reopen cannot reuse an old identity.
+    next_plan_id: u64,
 }
 
 impl CompactionScheduler {
@@ -146,13 +214,24 @@ impl CompactionScheduler {
             memory_policy,
             listener,
             plugins,
+            next_plan_id: 0,
         }
+    }
+
+    /// Returns the current plan id and advances the counter.
+    ///
+    /// Takes the counter instead of `&mut self` so callers can bump it while
+    /// holding a mutable borrow of a region status.
+    fn next_plan_id(counter: &mut u64) -> u64 {
+        let plan_id = *counter;
+        *counter = counter.wrapping_add(1);
+        plan_id
     }
 
     /// Schedules a compaction for the region.
     /// Returns whether a compaction is scheduled.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn schedule_compaction(
+    pub(crate) fn schedule_compaction(
         &mut self,
         region_id: RegionId,
         compact_options: compact_request::Options,
@@ -177,31 +256,38 @@ impl CompactionScheduler {
         if let Some(status) = self.region_status.get_mut(&region_id) {
             match compact_options {
                 Options::Regular(_) => {
-                    // Region is compacting. Add the waiter to pending list.
-                    status.merge_waiter(waiter);
+                    status.merge_regular_trigger(waiter);
                 }
                 options @ Options::StrictWindow(_) => {
                     // Incoming compaction request is manually triggered.
-                    status.set_pending_request(PendingCompaction {
-                        options,
-                        waiter,
-                        max_parallelism,
-                    });
-                    info!(
-                        "Region {} is compacting, manually compaction will be re-scheduled.",
-                        region_id
-                    );
+                    if status.pending_ddl_requests.is_empty() {
+                        status.set_pending_request(PendingCompaction {
+                            options,
+                            waiter,
+                            max_parallelism,
+                        });
+                        info!(
+                            "Region {} is compacting, manually compaction will be re-scheduled.",
+                            region_id
+                        );
+                    } else {
+                        waiter.send(CompactionCancelledSnafu.fail());
+                        info!(
+                            "Region {} has pending DDL requests, cancelling manual compaction.",
+                            region_id
+                        );
+                    }
                 }
             }
             return Ok(false);
         }
 
-        // The region can compact directly.
+        // Publish the picking phase before dispatching background planning.
         let mut status =
             CompactionStatus::new(region_id, version_control.clone(), access_layer.clone());
+        status.merge_waiter(waiter);
         let request = status.new_compaction_request(
             self.request_sender.clone(),
-            waiter,
             self.engine_config.clone(),
             self.cache_manager.clone(),
             manifest_ctx,
@@ -209,30 +295,18 @@ impl CompactionScheduler {
             schema_metadata_manager,
             max_parallelism,
         );
-
-        match self
-            .schedule_compaction_request(request, compact_options)
-            .await
-        {
-            Ok(Some(active_compaction)) => {
-                // Publish CompactionStatus only after a task has been accepted by the scheduler.
-                // This avoids exposing a half-initialized region status that could collect pending
-                // DDL/compaction state even though no compaction is actually running.
-                status.active_compaction = Some(active_compaction);
-                self.region_status.insert(region_id, status);
-
-                self.listener.on_compaction_scheduled(region_id);
-                Ok(true)
-            }
-            Ok(None) => Ok(false),
-            Err(e) => Err(e),
-        }
+        let plan_id = Self::next_plan_id(&mut self.next_plan_id);
+        status.start_picking(plan_id);
+        self.region_status.insert(region_id, status);
+        self.dispatch_compaction_planning(plan_id, request, compact_options);
+        self.listener.on_compaction_scheduled(region_id);
+        Ok(true)
     }
 
     // Handle pending manual compaction request for the region.
     //
     // Returns true if should early return, false otherwise.
-    pub(crate) async fn handle_pending_compaction_request(
+    pub(crate) fn handle_pending_compaction_request(
         &mut self,
         region_id: RegionId,
         manifest_ctx: &ManifestContextRef,
@@ -254,44 +328,31 @@ impl CompactionScheduler {
             max_parallelism,
         } = pending_request;
 
-        let request = {
-            status.new_compaction_request(
-                self.request_sender.clone(),
-                waiter,
-                self.engine_config.clone(),
-                self.cache_manager.clone(),
-                manifest_ctx,
-                self.listener.clone(),
-                schema_metadata_manager,
-                max_parallelism,
-            )
-        };
-
-        match self.schedule_compaction_request(request, options).await {
-            Ok(Some(active_compaction)) => {
-                let status = self.region_status.get_mut(&region_id).unwrap();
-                status.active_compaction = Some(active_compaction);
-                debug!(
-                    "Successfully scheduled manual compaction for region id: {}",
-                    region_id
-                );
-                true
-            }
-            Ok(None) => {
-                // We still need to handle the pending DDL requests.
-                // So we can't return early here.
-                false
-            }
-            Err(e) => {
-                error!(e; "Failed to continue pending manual compaction for region id: {}", region_id);
-                self.remove_region_on_failure(region_id, Arc::new(e));
-                true
-            }
-        }
+        let request = status.new_compaction_request(
+            self.request_sender.clone(),
+            self.engine_config.clone(),
+            self.cache_manager.clone(),
+            manifest_ctx,
+            self.listener.clone(),
+            schema_metadata_manager,
+            max_parallelism,
+        );
+        status.merge_waiter(waiter);
+        // Bump the counter through a disjoint field borrow so the `status`
+        // borrow stays alive; nothing could have removed the status since it
+        // was fetched above.
+        let plan_id = Self::next_plan_id(&mut self.next_plan_id);
+        status.start_picking(plan_id);
+        self.dispatch_compaction_planning(plan_id, request, options);
+        debug!(
+            "Successfully scheduled manual compaction planning for region id: {}",
+            region_id
+        );
+        true
     }
 
     /// Notifies the scheduler that the compaction job is finished successfully.
-    pub(crate) async fn on_compaction_finished(
+    async fn on_compaction_finished(
         &mut self,
         region_id: RegionId,
         manifest_ctx: &ManifestContextRef,
@@ -304,14 +365,11 @@ impl CompactionScheduler {
 
         // If there a pending compaction request, handle it first
         // and defer returning the pending DDL requests to the caller.
-        if self
-            .handle_pending_compaction_request(
-                region_id,
-                manifest_ctx,
-                schema_metadata_manager.clone(),
-            )
-            .await
-        {
+        if self.handle_pending_compaction_request(
+            region_id,
+            manifest_ctx,
+            schema_metadata_manager.clone(),
+        ) {
             return Vec::new();
         }
 
@@ -325,6 +383,11 @@ impl CompactionScheduler {
             waiter.send(Ok(0));
         }
 
+        if status.pending_regular.is_some() {
+            self.schedule_next_compaction(region_id, manifest_ctx, schema_metadata_manager);
+            return Vec::new();
+        }
+
         // If there are pending DDL requests, run them.
         let pending_ddl_requests = std::mem::take(&mut status.pending_ddl_requests);
         if !pending_ddl_requests.is_empty() {
@@ -336,42 +399,61 @@ impl CompactionScheduler {
         Vec::new()
     }
 
+    /// Returns whether a terminal notification belongs to the installed execution.
+    /// Background work may finish after its region status has been replaced, so
+    /// matching the region id alone is insufficient.
+    pub(crate) fn is_current_execution(
+        &self,
+        region_id: RegionId,
+        execution: &CompactionExecution,
+    ) -> bool {
+        self.region_status
+            .get(&region_id)
+            .is_some_and(|status| status.matches_execution(execution))
+    }
+
+    pub(crate) async fn on_execution_finished(
+        &mut self,
+        region_id: RegionId,
+        execution: &CompactionExecution,
+        manifest_ctx: &ManifestContextRef,
+        schema_metadata_manager: SchemaMetadataManagerRef,
+    ) -> Vec<SenderDdlRequest> {
+        // A stale finish must not clear the replacement phase or notify its waiters and DDLs.
+        if !self.is_current_execution(region_id, execution) {
+            return Vec::new();
+        }
+        self.on_compaction_finished(region_id, manifest_ctx, schema_metadata_manager)
+            .await
+    }
+
     pub(crate) fn is_compacting(&self, region_id: RegionId) -> bool {
         self.region_status
             .get(&region_id)
-            .map(|status| status.active_compaction.is_some())
+            .map(CompactionStatus::is_busy)
             .unwrap_or(false)
     }
 
-    /// Removes the compaction status of the region if it has no active compaction.
+    /// Removes the region status if it has no running task.
     ///
-    /// The worker calls this when it decides not to schedule the next compaction
-    /// after a compaction finishes (e.g. throttled by `min_compaction_interval`).
-    /// Otherwise a stale status without an active compaction would remain in the
-    /// map and all subsequent compaction requests would be swallowed as if the
-    /// region were still compacting.
-    ///
-    /// Returns whether the status is removed.
-    pub(crate) fn remove_inactive_status(&mut self, region_id: RegionId) -> bool {
-        let Some(status) = self.region_status.get(&region_id) else {
-            return false;
-        };
-        if status.active_compaction.is_some() {
-            return false;
+    /// A finished compaction leaves an idle status (phase = None) behind when
+    /// there is nothing more to schedule. If the caller decides not to chain
+    /// the next compaction, it must remove the idle status; otherwise the
+    /// status becomes a zombie that makes `schedule_compaction` swallow all
+    /// future compaction triggers of the region.
+    pub(crate) fn remove_idle_status(&mut self, region_id: RegionId) {
+        if self
+            .region_status
+            .get(&region_id)
+            .is_some_and(|status| !status.is_busy())
+        {
+            self.region_status.remove(&region_id);
         }
-        // A status without an active compaction must have been drained by
-        // `on_compaction_finished`: no waiters, pending requests or DDLs can be
-        // enqueued while no compaction is running.
-        debug_assert!(status.waiters.is_empty());
-        debug_assert!(status.pending_request.is_none());
-        debug_assert!(status.pending_ddl_requests.is_empty());
-        self.region_status.remove(&region_id);
-        true
     }
 
     /// Schedules next compaction upon a finished compaction.
     /// Returns whether the compaction is scheduled.
-    pub(crate) async fn schedule_next_compaction(
+    pub(crate) fn schedule_next_compaction(
         &mut self,
         region_id: RegionId,
         manifest_ctx: &ManifestContextRef,
@@ -380,11 +462,15 @@ impl CompactionScheduler {
         let Some(status) = self.region_status.get_mut(&region_id) else {
             return false;
         };
+        // A plan is already in flight; treat it as scheduled instead of
+        // overwriting the current phase and orphaning the in-flight planning.
+        if status.is_busy() {
+            return true;
+        }
 
         // We should always try to compact the region until picker returns None.
         let request = status.new_compaction_request(
             self.request_sender.clone(),
-            OptionOutputTx::none(),
             self.engine_config.clone(),
             self.cache_manager.clone(),
             manifest_ctx,
@@ -392,53 +478,57 @@ impl CompactionScheduler {
             schema_metadata_manager,
             MAX_PARALLEL_COMPACTION,
         );
-
-        // Try to schedule next compaction task for this region.
-        match self
-            .schedule_compaction_request(
-                request,
-                compact_request::Options::Regular(Default::default()),
-            )
-            .await
-        {
-            Ok(Some(active_compaction)) => {
-                self.region_status
-                    .get_mut(&region_id)
-                    .unwrap()
-                    .active_compaction = Some(active_compaction);
-                debug!(
-                    "Successfully scheduled next compaction for region id: {}",
-                    region_id
-                );
-                true
-            }
-            Ok(None) => {
-                // No further compaction tasks can be scheduled; cleanup the `CompactionStatus` for this region.
-                // All DDL requests and pending compaction requests have already been processed.
-                // Safe to remove the region from status tracking.
-                self.region_status.remove(&region_id);
-                false
-            }
-            Err(e) => {
-                error!(e; "Failed to schedule next compaction for region {}", region_id);
-                self.remove_region_on_failure(region_id, Arc::new(e));
-                false
-            }
-        }
+        // Bump the counter through a disjoint field borrow so the `status`
+        // borrow stays alive; nothing could have removed the status since it
+        // was fetched above.
+        let plan_id = Self::next_plan_id(&mut self.next_plan_id);
+        status.start_regular_picking(plan_id);
+        self.dispatch_compaction_planning(
+            plan_id,
+            request,
+            compact_request::Options::Regular(Default::default()),
+        );
+        debug!(
+            "Successfully scheduled next compaction planning for region id: {}",
+            region_id
+        );
+        true
     }
 
     /// Notifies the scheduler that the compaction job is cancelled cooperatively.
-    pub(crate) async fn on_compaction_cancelled(
-        &mut self,
-        region_id: RegionId,
-    ) -> Vec<SenderDdlRequest> {
+    async fn on_compaction_cancelled(&mut self, region_id: RegionId) -> Vec<SenderDdlRequest> {
         self.remove_region_on_cancel(region_id)
     }
 
+    pub(crate) async fn on_execution_cancelled(
+        &mut self,
+        region_id: RegionId,
+        execution: &CompactionExecution,
+    ) -> Vec<SenderDdlRequest> {
+        // A stale cancellation must not remove a replacement execution's status.
+        if !self.is_current_execution(region_id, execution) {
+            return Vec::new();
+        }
+        self.on_compaction_cancelled(region_id).await
+    }
+
     /// Notifies the scheduler that the compaction job is failed.
-    pub(crate) fn on_compaction_failed(&mut self, region_id: RegionId, err: Arc<Error>) {
+    fn on_compaction_failed(&mut self, region_id: RegionId, err: Arc<Error>) {
         error!(err; "Region {} failed to compact, cancel all pending tasks", region_id);
         self.remove_region_on_failure(region_id, err);
+    }
+
+    pub(crate) fn on_execution_failed(
+        &mut self,
+        region_id: RegionId,
+        execution: &CompactionExecution,
+        err: Arc<Error>,
+    ) {
+        // A stale failure must not tear down a replacement execution.
+        if !self.is_current_execution(region_id, execution) {
+            return;
+        }
+        self.on_compaction_failed(region_id, err);
     }
 
     /// Notifies the scheduler that the region is dropped.
@@ -472,7 +562,7 @@ impl CompactionScheduler {
             request.region_id, request.request
         );
         let status = self.region_status.get_mut(&request.region_id).unwrap();
-        status.pending_ddl_requests.push(request);
+        status.queue_ddl(request);
     }
 
     #[cfg(test)]
@@ -497,15 +587,77 @@ impl CompactionScheduler {
         status.request_cancel()
     }
 
-    /// Schedules a compaction request.
-    ///
-    /// Returns the active compaction state if the request is scheduled successfully.
-    /// Returns `None` if no compaction task can be scheduled for this region.
-    async fn schedule_compaction_request(
-        &mut self,
+    fn dispatch_compaction_planning(
+        &self,
+        plan_id: u64,
         request: CompactionRequest,
         options: compact_request::Options,
-    ) -> Result<Option<ActiveCompaction>> {
+    ) {
+        let plugins = self.plugins.clone();
+        let max_background_compactions = self.engine_config.max_background_compactions;
+        common_runtime::spawn_compact(async move {
+            let region_id = request.region_id();
+            let request_sender = request.request_sender.clone();
+            let planning =
+                Self::prepare_compaction(request, options, plugins, max_background_compactions);
+            Self::notify_planning_result(region_id, plan_id, request_sender, planning).await;
+        });
+    }
+
+    /// Runs the planning future and always sends the planning result back to
+    /// the worker, even if the planning panics.
+    ///
+    /// The worker only leaves the picking phase after it receives the
+    /// `CompactionPickFinished` notification. If a panicked planning task
+    /// swallowed the notification, the region would be stuck in the picking
+    /// phase forever, blocking all future compactions and pending DDLs (e.g.
+    /// entering staging) of the region.
+    async fn notify_planning_result(
+        region_id: RegionId,
+        plan_id: u64,
+        request_sender: Sender<WorkerRequestWithTime>,
+        planning: impl Future<Output = CompactionPlanningResult> + Send,
+    ) {
+        // The idiomatic way to handle a panic result.
+        let result = std::panic::AssertUnwindSafe(planning).catch_unwind().await.unwrap_or_else(|payload| {
+            let reason = if let Some(message) = payload.as_ref().downcast_ref::<&str>() {
+                message.to_string()
+            } else if let Some(message) = payload.as_ref().downcast_ref::<String>() {
+                message.clone()
+            } else {
+                "unknown panic".to_string()
+            };
+            CompactionPlanningResult::Error(Arc::new(
+                UnexpectedSnafu {
+                    reason: format!(
+                        "Compaction planning panicked for region {region_id}, plan_id {plan_id}: {reason}"
+                    ),
+                }
+                    .build(),
+            ))
+        });
+        if let CompactionPlanningResult::Error(err) = &result {
+            error!(err; "Compaction planning failed for region {}, plan_id: {}", region_id, plan_id);
+        }
+        let request = WorkerRequestWithTime::new(WorkerRequest::Background {
+            region_id,
+            notify: BackgroundNotify::CompactionPickFinished(CompactionPickFinished {
+                region_id,
+                plan_id,
+                result,
+            }),
+        });
+        if request_sender.send(request).await.is_err() {
+            warn!("Failed to send compaction planning result for region {region_id}");
+        }
+    }
+
+    async fn prepare_compaction(
+        request: CompactionRequest,
+        options: compact_request::Options,
+        plugins: Plugins,
+        max_background_compactions: usize,
+    ) -> CompactionPlanningResult {
         let region_id = request.region_id();
         let (dynamic_compaction_opts, ttl) = find_dynamic_options(
             region_id,
@@ -525,15 +677,14 @@ impl CompactionScheduler {
             &options,
             &dynamic_compaction_opts,
             request.current_version.options.append_mode,
-            Some(self.engine_config.max_background_compactions),
+            Some(max_background_compactions),
         );
         let region_id = request.region_id();
         let CompactionRequest {
             engine_config,
             current_version,
             access_layer,
-            request_sender,
-            waiters,
+            request_sender: _,
             start_time,
             cache_manager,
             manifest_ctx,
@@ -562,30 +713,195 @@ impl CompactionScheduler {
             file_purger: None,
             ttl: Some(ttl),
             max_parallelism,
-            plugins: self.plugins.clone(),
+            plugins,
         };
 
-        let picker_output = {
+        listener.on_compaction_pick_begin(region_id).await;
+        let picker_region = compaction_region.clone();
+        let picker_output = match common_runtime::spawn_blocking_compact(move || {
             let _pick_timer = COMPACTION_STAGE_ELAPSED
                 .with_label_values(&["pick"])
                 .start_timer();
-            picker.pick(&compaction_region)
+            picker.pick(&picker_region)
+        })
+        .await
+        .context(JoinSnafu)
+        {
+            Ok(output) => output,
+            Err(err) => return CompactionPlanningResult::Error(Arc::new(err)),
         };
 
-        let picker_output = if let Some(picker_output) = picker_output {
-            picker_output
-        } else {
-            // Nothing to compact, we are done. Notifies all waiters as we consume the compaction request.
-            for waiter in waiters {
+        let Some(picker_output) = picker_output else {
+            return CompactionPlanningResult::NoPlan;
+        };
+
+        CompactionPlanningResult::Prepared(PreparedCompaction {
+            compaction_region,
+            picker_output,
+            start_time,
+            ttl,
+        })
+    }
+
+    pub(crate) async fn handle_compaction_pick_finished(
+        &mut self,
+        finished: CompactionPickFinished,
+        manifest_ctx: &ManifestContextRef,
+        schema_metadata_manager: SchemaMetadataManagerRef,
+    ) -> Vec<SenderDdlRequest> {
+        let region_id = finished.region_id;
+        let plan_id = finished.plan_id;
+        let Some(status) = self.region_status.get(&region_id) else {
+            return Vec::new();
+        };
+        // Picking runs detached from the worker. Its result may arrive after
+        // close/reopen or replanning installed another Picking phase for this region.
+        if !status.is_picking(finished.plan_id) {
+            return Vec::new();
+        }
+        if !status.accept_plan(finished.plan_id) {
+            return self.remove_region_on_cancel(region_id);
+        }
+
+        match finished.result {
+            CompactionPlanningResult::Prepared(mut prepared) => {
+                let current = status.version_control.current().version;
+                let Some(picker_output) =
+                    refresh_picker_output(prepared.picker_output, &current.ssts)
+                else {
+                    return self
+                        .finish_compaction_planning(
+                            region_id,
+                            None,
+                            manifest_ctx,
+                            schema_metadata_manager,
+                        )
+                        .await;
+                };
+                let Some(files) = CompactingFiles::try_new(&picker_output) else {
+                    return self
+                        .finish_compaction_planning(
+                            region_id,
+                            None,
+                            manifest_ctx,
+                            schema_metadata_manager,
+                        )
+                        .await;
+                };
+                prepared.picker_output = picker_output;
+                let Some(status) = self.region_status.get_mut(&region_id) else {
+                    return Vec::new();
+                };
+                let waiters = std::mem::take(&mut status.waiters);
+                match self
+                    .submit_prepared_compaction(prepared, files, waiters, plan_id)
+                    .await
+                {
+                    Ok(Some(phase)) => {
+                        if let Some(status) = self.region_status.get_mut(&region_id) {
+                            status.phase = Some(phase);
+                        }
+                        Vec::new()
+                    }
+                    Ok(None) => {
+                        self.finish_compaction_planning(
+                            region_id,
+                            None,
+                            manifest_ctx,
+                            schema_metadata_manager,
+                        )
+                        .await
+                    }
+                    Err(err) => {
+                        self.remove_region_on_failure(region_id, Arc::new(err));
+                        Vec::new()
+                    }
+                }
+            }
+            CompactionPlanningResult::NoPlan => {
+                self.finish_compaction_planning(
+                    region_id,
+                    None,
+                    manifest_ctx,
+                    schema_metadata_manager,
+                )
+                .await
+            }
+            CompactionPlanningResult::Error(err) => {
+                self.finish_compaction_planning(
+                    region_id,
+                    Some(err),
+                    manifest_ctx,
+                    schema_metadata_manager,
+                )
+                .await
+            }
+        }
+    }
+
+    async fn finish_compaction_planning(
+        &mut self,
+        region_id: RegionId,
+        err: Option<Arc<Error>>,
+        manifest_ctx: &ManifestContextRef,
+        schema_metadata_manager: SchemaMetadataManagerRef,
+    ) -> Vec<SenderDdlRequest> {
+        let Some(status) = self.region_status.get_mut(&region_id) else {
+            return Vec::new();
+        };
+        status.clear_running_task();
+        for waiter in std::mem::take(&mut status.waiters) {
+            if let Some(err) = &err {
+                waiter.send(Err(err.clone()).context(CompactRegionSnafu { region_id }));
+            } else {
                 waiter.send(Ok(0));
             }
-            return Ok(None);
-        };
+        }
+
+        if self.handle_pending_compaction_request(
+            region_id,
+            manifest_ctx,
+            schema_metadata_manager.clone(),
+        ) {
+            return Vec::new();
+        }
+
+        if self
+            .region_status
+            .get(&region_id)
+            .is_some_and(|status| status.pending_regular.is_some())
+        {
+            self.schedule_next_compaction(region_id, manifest_ctx, schema_metadata_manager);
+            return Vec::new();
+        }
+
+        self.region_status
+            .remove(&region_id)
+            .map(|mut status| std::mem::take(&mut status.pending_ddl_requests))
+            .unwrap_or_default()
+    }
+
+    async fn submit_prepared_compaction(
+        &mut self,
+        prepared: PreparedCompaction,
+        files: CompactingFiles,
+        waiters: Vec<OutputTx>,
+        mut plan_id: u64,
+    ) -> Result<Option<CompactionPhase>> {
+        let PreparedCompaction {
+            compaction_region,
+            picker_output,
+            start_time,
+            ttl,
+        } = prepared;
+        let region_id = compaction_region.region_id;
+        let dynamic_compaction_opts = &compaction_region.region_options.compaction;
 
         // If specified to run compaction remotely, we schedule the compaction job remotely.
         // It will fall back to local compaction if there is no remote job scheduler.
         let waiters = if dynamic_compaction_opts.remote_compaction() {
             if let Some(remote_job_scheduler) = &self.plugins.get::<RemoteJobSchedulerRef>() {
+                let execution = CompactionExecution::new(plan_id, files.clone());
                 let remote_compaction_job = CompactionJob {
                     compaction_region: compaction_region.clone(),
                     picker_output: picker_output.clone(),
@@ -597,9 +913,10 @@ impl CompactionScheduler {
                 let result = remote_job_scheduler
                     .schedule(
                         RemoteJob::CompactionJob(remote_compaction_job),
-                        Box::new(DefaultNotifier {
-                            request_sender: request_sender.clone(),
-                        }),
+                        Box::new(DefaultNotifier::new(
+                            self.request_sender.clone(),
+                            execution.clone(),
+                        )),
                     )
                     .await;
 
@@ -610,11 +927,14 @@ impl CompactionScheduler {
                             job_id, region_id
                         );
                         INFLIGHT_COMPACTION_COUNT.inc();
-                        return Ok(Some(ActiveCompaction::Remote));
+                        return Ok(Some(CompactionPhase::Remote { execution }));
                     }
                     Err(e) => {
                         if !dynamic_compaction_opts.fallback_to_local() {
                             error!(e; "Failed to schedule remote compaction job for region {}", region_id);
+                            if let Some(status) = self.region_status.get_mut(&region_id) {
+                                status.waiters.extend(e.waiters);
+                            }
                             return RemoteCompactionSnafu {
                                 region_id,
                                 job_id: None,
@@ -624,8 +944,9 @@ impl CompactionScheduler {
                         }
 
                         error!(e; "Failed to schedule remote compaction job for region {}, fallback to local compaction", region_id);
-
-                        // Return the waiters back to the caller for local compaction.
+                        // An error may be ambiguous after the remote scheduler consumed
+                        // the notifier. Fence a delayed remote callback from the local fallback.
+                        plan_id = Self::next_plan_id(&mut self.next_plan_id);
                         e.waiters
                     }
                 }
@@ -658,12 +979,14 @@ impl CompactionScheduler {
 
         let cancel_handle = Arc::new(CancellationHandle::default());
         let state = LocalCompactionState::new(cancel_handle.clone());
+        let execution = CompactionExecution::new(plan_id, files);
         let local_compaction_task = Box::new(CompactionTaskImpl {
             state: state.clone(),
-            request_sender,
+            execution: execution.clone(),
+            request_sender: self.request_sender.clone(),
             waiters,
             start_time,
-            listener,
+            listener: self.listener.clone(),
             picker_output,
             compaction_region,
             compactor: Arc::new(DefaultCompactor::with_cancel_handle(cancel_handle.clone())),
@@ -672,24 +995,49 @@ impl CompactionScheduler {
             estimated_memory_bytes: estimated_bytes,
         });
 
-        self.submit_compaction_task(local_compaction_task, region_id)
-            .map(|_| Some(ActiveCompaction::Local { state }))
+        match self.submit_compaction_task(local_compaction_task, region_id) {
+            Ok(()) => Ok(Some(CompactionPhase::Local { state, execution })),
+            Err((err, task)) => {
+                if let (Some(status), Some(mut task)) =
+                    (self.region_status.get_mut(&region_id), task)
+                {
+                    status.waiters.append(&mut task.waiters);
+                }
+                Err(err)
+            }
+        }
     }
 
     fn submit_compaction_task(
         &mut self,
-        mut task: Box<CompactionTaskImpl>,
+        task: Box<CompactionTaskImpl>,
         region_id: RegionId,
-    ) -> Result<()> {
-        self.scheduler
-            .schedule(Box::pin(async move {
+    ) -> std::result::Result<(), (Error, Option<Box<CompactionTaskImpl>>)> {
+        let task = Arc::new(Mutex::new(Some(task)));
+        let task_to_run = task.clone();
+        match self.scheduler.schedule(Box::pin(async move {
+            let task = task_to_run
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .take();
+            if let Some(mut task) = task {
                 INFLIGHT_COMPACTION_COUNT.inc();
                 task.run().await;
                 INFLIGHT_COMPACTION_COUNT.dec();
-            }))
-            .inspect_err(
-                |e| error!(e; "Failed to submit compaction request for region {}", region_id),
-            )
+            } else {
+                error!("Compaction task was missing when the scheduled job started");
+            }
+        })) {
+            Ok(()) => Ok(()),
+            Err(err) => {
+                error!(err; "Failed to submit compaction request for region {}", region_id);
+                let task = task
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .take();
+                Err((err, task))
+            }
+        }
     }
 
     fn exceeds_compaction_memory_limit(&self, estimated_bytes: u64) -> Option<u64> {
@@ -727,9 +1075,82 @@ pub(crate) struct LocalCompactionState {
 }
 
 #[derive(Debug)]
-enum ActiveCompaction {
-    Local { state: LocalCompactionState },
-    Remote,
+enum CompactionPhase {
+    Picking {
+        plan_id: u64,
+        cancelled: bool,
+    },
+    Local {
+        state: LocalCompactionState,
+        execution: CompactionExecution,
+    },
+    Remote {
+        execution: CompactionExecution,
+    },
+}
+
+impl CompactionPhase {
+    fn execution(&self) -> Option<&CompactionExecution> {
+        match self {
+            Self::Picking { .. } => None,
+            Self::Local { execution, .. } | Self::Remote { execution } => Some(execution),
+        }
+    }
+}
+
+/// Owns atomic reservations for every SST selected by a compaction plan.
+#[derive(Debug, Clone)]
+struct CompactingFiles {
+    _inner: Arc<CompactingFilesInner>,
+}
+
+#[derive(Debug)]
+struct CompactingFilesInner {
+    files: Vec<FileHandle>,
+}
+
+impl CompactingFiles {
+    fn try_new(output: &PickerOutput) -> Option<Self> {
+        let mut seen = HashSet::new();
+        let mut files: Vec<FileHandle> = Vec::new();
+        let selected_files = output
+            .outputs
+            .iter()
+            .flat_map(|output| output.inputs.iter())
+            .chain(output.expired_ssts.iter());
+
+        for file in selected_files {
+            if !seen.insert(file.file_id()) {
+                continue;
+            }
+            if !file.try_set_compacting() {
+                for reserved in &files {
+                    reserved.set_compacting(false);
+                }
+                return None;
+            }
+            files.push(file.clone());
+        }
+
+        Some(Self {
+            _inner: Arc::new(CompactingFilesInner { files }),
+        })
+    }
+
+    #[cfg(test)]
+    fn empty() -> Self {
+        Self {
+            _inner: Arc::new(CompactingFilesInner { files: Vec::new() }),
+        }
+    }
+}
+
+impl Drop for CompactingFilesInner {
+    fn drop(&mut self) {
+        for file in &self.files {
+            file.set_compacting(false);
+        }
+    }
 }
 
 impl LocalCompactionState {
@@ -888,8 +1309,10 @@ struct CompactionStatus {
     pending_request: Option<PendingCompaction>,
     /// Pending DDL requests that should run when compaction is done.
     pending_ddl_requests: Vec<SenderDdlRequest>,
-    /// Active compaction state.
-    active_compaction: Option<ActiveCompaction>,
+    /// Current compaction phase.
+    phase: Option<CompactionPhase>,
+    /// Waiters owned by a retained regular follow-up; `Some(empty)` records an automatic trigger.
+    pending_regular: Option<Vec<OutputTx>>,
 }
 
 impl CompactionStatus {
@@ -906,37 +1329,111 @@ impl CompactionStatus {
             waiters: Vec::new(),
             pending_request: None,
             pending_ddl_requests: Vec::new(),
-            active_compaction: None,
+            phase: None,
+            pending_regular: None,
         }
+    }
+
+    fn start_picking(&mut self, plan_id: u64) {
+        self.phase = Some(CompactionPhase::Picking {
+            plan_id,
+            cancelled: false,
+        });
+    }
+
+    fn start_regular_picking(&mut self, plan_id: u64) {
+        self.waiters
+            .extend(self.pending_regular.take().unwrap_or_default());
+        self.start_picking(plan_id);
+    }
+
+    fn is_picking(&self, expected_plan_id: u64) -> bool {
+        matches!(
+            self.phase,
+            Some(CompactionPhase::Picking { plan_id, .. }) if plan_id == expected_plan_id
+        )
+    }
+
+    fn accept_plan(&self, expected_plan_id: u64) -> bool {
+        matches!(
+            self.phase,
+            Some(CompactionPhase::Picking {
+                plan_id,
+                cancelled: false,
+            }) if plan_id == expected_plan_id
+        )
+    }
+
+    fn is_busy(&self) -> bool {
+        self.phase.is_some()
+    }
+
+    fn matches_execution(&self, execution: &CompactionExecution) -> bool {
+        self.phase
+            .as_ref()
+            .and_then(CompactionPhase::execution)
+            .is_some_and(|current| current.matches(execution))
     }
 
     #[cfg(test)]
     fn start_local_task(&mut self) -> LocalCompactionState {
         let state = LocalCompactionState::new(Arc::new(CancellationHandle::default()));
-        self.active_compaction = Some(ActiveCompaction::Local {
+        let execution = CompactionExecution::new(0, CompactingFiles::empty());
+        self.phase = Some(CompactionPhase::Local {
             state: state.clone(),
+            execution,
         });
         state
     }
 
     #[cfg(test)]
     fn start_remote_task(&mut self) {
-        self.active_compaction = Some(ActiveCompaction::Remote);
+        let execution = CompactionExecution::new(0, CompactingFiles::empty());
+        self.phase = Some(CompactionPhase::Remote { execution });
     }
 
     fn request_cancel(&mut self) -> RequestCancelResult {
-        let Some(active_compaction) = &self.active_compaction else {
+        let Some(phase) = &mut self.phase else {
             return RequestCancelResult::NotRunning;
         };
 
-        match active_compaction {
-            ActiveCompaction::Local { state, .. } => state.request_cancel(),
-            ActiveCompaction::Remote => RequestCancelResult::TooLateToCancel,
+        match phase {
+            CompactionPhase::Picking { cancelled, .. } => {
+                if *cancelled {
+                    RequestCancelResult::AlreadyCancelling
+                } else {
+                    *cancelled = true;
+                    RequestCancelResult::CancelIssued
+                }
+            }
+            CompactionPhase::Local { state, .. } => state.request_cancel(),
+            CompactionPhase::Remote { .. } => RequestCancelResult::TooLateToCancel,
         }
     }
 
     fn clear_running_task(&mut self) -> bool {
-        self.active_compaction.take().is_some()
+        self.phase.take().is_some()
+    }
+
+    fn merge_regular_trigger(&mut self, mut waiter: OptionOutputTx) {
+        if self.can_retain_regular_followup() {
+            let pending_regular = self.pending_regular.get_or_insert_default();
+            if let Some(waiter) = waiter.take_inner() {
+                pending_regular.push(waiter);
+            }
+        } else {
+            self.merge_waiter(waiter);
+        }
+    }
+
+    fn can_retain_regular_followup(&self) -> bool {
+        matches!(self.phase, Some(CompactionPhase::Picking { .. }))
+            && self.pending_ddl_requests.is_empty()
+    }
+
+    fn queue_ddl(&mut self, request: SenderDdlRequest) {
+        // The first queued DDL fences later regular triggers from creating more follow-ups.
+        self.pending_ddl_requests.push(request);
     }
 
     /// Merge the waiter to the pending compaction.
@@ -958,7 +1455,11 @@ impl CompactionStatus {
     }
 
     fn on_failure(mut self, err: Arc<Error>) {
-        for waiter in self.waiters.drain(..) {
+        for waiter in self
+            .waiters
+            .drain(..)
+            .chain(self.pending_regular.take().unwrap_or_default())
+        {
             waiter.send(Err(err.clone()).context(CompactRegionSnafu {
                 region_id: self.region_id,
             }));
@@ -983,7 +1484,11 @@ impl CompactionStatus {
 
     #[must_use]
     fn on_cancel(mut self) -> Vec<SenderDdlRequest> {
-        for waiter in self.waiters.drain(..) {
+        for waiter in self
+            .waiters
+            .drain(..)
+            .chain(self.pending_regular.take().unwrap_or_default())
+        {
             waiter.send(CompactionCancelledSnafu.fail());
         }
 
@@ -998,14 +1503,11 @@ impl CompactionStatus {
         std::mem::take(&mut self.pending_ddl_requests)
     }
 
-    /// Creates a new compaction request for compaction picker.
-    ///
-    /// It consumes all pending compaction waiters.
+    /// Creates an immutable request for background compaction planning.
     #[allow(clippy::too_many_arguments)]
     fn new_compaction_request(
-        &mut self,
+        &self,
         request_sender: Sender<WorkerRequestWithTime>,
-        mut waiter: OptionOutputTx,
         engine_config: Arc<MitoConfig>,
         cache_manager: CacheManagerRef,
         manifest_ctx: &ManifestContextRef,
@@ -1015,19 +1517,12 @@ impl CompactionStatus {
     ) -> CompactionRequest {
         let current_version = CompactionVersion::from(self.version_control.current().version);
         let start_time = Instant::now();
-        let mut waiters = Vec::with_capacity(self.waiters.len() + 1);
-        waiters.extend(std::mem::take(&mut self.waiters));
-
-        if let Some(waiter) = waiter.take_inner() {
-            waiters.push(waiter);
-        }
 
         CompactionRequest {
             engine_config,
             current_version,
             access_layer: self.access_layer.clone(),
             request_sender: request_sender.clone(),
-            waiters,
             start_time,
             cache_manager,
             manifest_ctx: manifest_ctx.clone(),
@@ -1291,6 +1786,40 @@ fn estimate_compaction_bytes(picker_output: &PickerOutput) -> u64 {
         .sum()
 }
 
+/// Rebuilds picker output with current SST handles while preserving the picker's grouping.
+fn refresh_picker_output(output: PickerOutput, current: &SstVersion) -> Option<PickerOutput> {
+    let refresh = |file: FileHandle| {
+        current
+            .file_for_compaction(&file)
+            .filter(|current| !current.is_deleted() && !current.compacting())
+            .cloned()
+    };
+    let outputs = output
+        .outputs
+        .into_iter()
+        .map(|output| {
+            let inputs = output
+                .inputs
+                .into_iter()
+                .map(&refresh)
+                .collect::<Option<Vec<_>>>()?;
+            Some(CompactionOutput { inputs, ..output })
+        })
+        .collect::<Option<Vec<_>>>()?;
+    let expired_ssts = output
+        .expired_ssts
+        .into_iter()
+        .map(refresh)
+        .collect::<Option<Vec<_>>>()?;
+
+    Some(PickerOutput {
+        outputs,
+        expired_ssts,
+        time_window_size: output.time_window_size,
+        max_file_size: output.max_file_size,
+    })
+}
+
 /// Pending compaction request that is supposed to run after current task is finished,
 /// typically used for manual compactions.
 struct PendingCompaction {
@@ -1311,10 +1840,12 @@ mod tests {
     use common_datasource::compression::CompressionType;
     use common_meta::key::schema_name::SchemaNameValue;
     use common_time::DatabaseTimeToLive;
+    use store_api::storage::FileId;
     use tokio::sync::{Barrier, oneshot};
 
     use super::*;
     use crate::compaction::memory_manager::{CompactionMemoryGuard, new_compaction_memory_manager};
+    use crate::compaction::test_util::new_file_handle;
     use crate::error::InvalidSchedulerStateSnafu;
     use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
     use crate::region::ManifestContext;
@@ -1325,6 +1856,119 @@ mod tests {
     use crate::test_util::version_util::{VersionControlBuilder, apply_edit};
 
     struct FailingScheduler;
+
+    struct FailingRemoteScheduler;
+
+    #[async_trait::async_trait]
+    impl crate::schedule::remote_job_scheduler::RemoteJobScheduler for FailingRemoteScheduler {
+        async fn schedule(
+            &self,
+            job: RemoteJob,
+            _notifier: Box<dyn crate::schedule::remote_job_scheduler::Notifier>,
+        ) -> std::result::Result<
+            crate::schedule::remote_job_scheduler::JobId,
+            crate::schedule::remote_job_scheduler::RemoteJobSchedulerError,
+        > {
+            let RemoteJob::CompactionJob(job) = job;
+            Err(
+                crate::schedule::remote_job_scheduler::RemoteJobSchedulerError {
+                    location: snafu::location!(),
+                    reason: "remote scheduler rejected job".to_string(),
+                    waiters: job.waiters,
+                },
+            )
+        }
+    }
+
+    fn compactable_version() -> VersionControlRef {
+        let mut builder = VersionControlBuilder::new();
+        let end = 1000 * 1000;
+        Arc::new(
+            builder
+                .push_l0_file(0, end)
+                .push_l0_file(10, end)
+                .push_l0_file(50, end)
+                .push_l0_file(80, end)
+                .push_l0_file(90, end)
+                .build(),
+        )
+    }
+
+    async fn begin_pick_result(
+        env: &SchedulerEnv,
+        scheduler: &mut CompactionScheduler,
+        rx: &mut mpsc::Receiver<WorkerRequestWithTime>,
+        version_control: &VersionControlRef,
+    ) -> (
+        CompactionPickFinished,
+        ManifestContextRef,
+        SchemaMetadataManagerRef,
+    ) {
+        let region_id = version_control.current().version.metadata.region_id;
+        let manifest_ctx = env
+            .mock_manifest_context(version_control.current().version.metadata.clone())
+            .await;
+        let (schema_metadata_manager, _kv_backend) = mock_schema_metadata_manager();
+        assert!(
+            scheduler
+                .schedule_compaction(
+                    region_id,
+                    Options::Regular(Default::default()),
+                    version_control,
+                    &env.access_layer,
+                    OptionOutputTx::none(),
+                    &manifest_ctx,
+                    schema_metadata_manager.clone(),
+                    1,
+                )
+                .unwrap()
+        );
+        let finished = recv_compaction_pick_finished(rx).await;
+        assert!(matches!(
+            &finished.result,
+            CompactionPlanningResult::Prepared(_)
+        ));
+        (finished, manifest_ctx, schema_metadata_manager)
+    }
+
+    fn selected_files(finished: &CompactionPickFinished) -> Vec<FileHandle> {
+        let CompactionPlanningResult::Prepared(prepared) = &finished.result else {
+            panic!("expected prepared compaction");
+        };
+        prepared
+            .picker_output
+            .outputs
+            .iter()
+            .flat_map(|output| output.inputs.iter().cloned())
+            .chain(prepared.picker_output.expired_ssts.iter().cloned())
+            .collect()
+    }
+
+    fn use_remote_compaction(finished: &mut CompactionPickFinished, fallback_to_local: bool) {
+        let CompactionPlanningResult::Prepared(prepared) = &mut finished.result else {
+            panic!("expected prepared compaction");
+        };
+        let crate::region::options::CompactionOptions::Twcs(options) =
+            &mut prepared.compaction_region.region_options.compaction;
+        options.remote_compaction = true;
+        options.fallback_to_local = fallback_to_local;
+    }
+
+    fn picker_output_with_files(
+        output_files: Vec<FileHandle>,
+        expired_ssts: Vec<FileHandle>,
+    ) -> PickerOutput {
+        PickerOutput {
+            outputs: vec![CompactionOutput {
+                output_level: 1,
+                inputs: output_files,
+                filter_deleted: false,
+                output_time_range: None,
+            }],
+            expired_ssts,
+            ..Default::default()
+        }
+    }
 
     #[async_trait::async_trait]
     impl Scheduler for FailingScheduler {
@@ -1337,9 +1981,33 @@ mod tests {
         }
     }
 
+    async fn recv_compaction_pick_finished(
+        rx: &mut mpsc::Receiver<WorkerRequestWithTime>,
+    ) -> CompactionPickFinished {
+        let request = rx.recv().await.expect("worker request channel closed");
+        match request.request {
+            WorkerRequest::Background {
+                notify: BackgroundNotify::CompactionPickFinished(finished),
+                ..
+            } => finished,
+            other => panic!("unexpected worker request: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_picking_compacting_files_rolls_back_on_conflict() {
+        let first = new_file_handle(FileId::random(), 0, 10, 0);
+        let conflicting = new_file_handle(FileId::random(), 0, 10, 0);
+        conflicting.set_compacting(true);
+        let output = picker_output_with_files(vec![first.clone(), conflicting.clone()], vec![]);
+
+        assert!(CompactingFiles::try_new(&output).is_none());
+        assert!(!first.compacting());
+        assert!(conflicting.compacting());
+    }
+
     #[tokio::test]
     async fn test_find_compaction_options_db_level() {
-        let env = SchedulerEnv::new().await;
         let builder = VersionControlBuilder::new();
         let (schema_metadata_manager, kv_backend) = mock_schema_metadata_manager();
         let region_id = builder.region_id();
@@ -1376,39 +2044,6 @@ mod tests {
                 assert_eq!(t.time_window_seconds(), Some(2 * 3600));
             }
         }
-        let manifest_ctx = env
-            .mock_manifest_context(version_control.current().version.metadata.clone())
-            .await;
-        let (tx, _rx) = mpsc::channel(4);
-        let mut scheduler = env.mock_compaction_scheduler(tx);
-        let (otx, _orx) = oneshot::channel();
-        let request = scheduler
-            .region_status
-            .entry(region_id)
-            .or_insert_with(|| {
-                crate::compaction::CompactionStatus::new(
-                    region_id,
-                    version_control.clone(),
-                    env.access_layer.clone(),
-                )
-            })
-            .new_compaction_request(
-                scheduler.request_sender.clone(),
-                OptionOutputTx::new(Some(OutputTx::new(otx))),
-                scheduler.engine_config.clone(),
-                scheduler.cache_manager.clone(),
-                &manifest_ctx,
-                scheduler.listener.clone(),
-                schema_metadata_manager.clone(),
-                1,
-            );
-        scheduler
-            .schedule_compaction_request(
-                request,
-                compact_request::Options::Regular(Default::default()),
-            )
-            .await
-            .unwrap();
     }
 
     #[tokio::test]
@@ -1498,7 +2133,7 @@ mod tests {
     #[tokio::test]
     async fn test_schedule_empty() {
         let env = SchedulerEnv::new().await;
-        let (tx, _rx) = mpsc::channel(4);
+        let (tx, mut rx) = mpsc::channel(4);
         let mut scheduler = env.mock_compaction_scheduler(tx);
         let mut builder = VersionControlBuilder::new();
         let (schema_metadata_manager, kv_backend) = mock_schema_metadata_manager();
@@ -1530,9 +2165,17 @@ mod tests {
                 schema_metadata_manager.clone(),
                 1,
             )
-            .await
             .unwrap();
-        assert!(!scheduled);
+        assert!(scheduled);
+        let finished = recv_compaction_pick_finished(&mut rx).await;
+        assert!(matches!(&finished.result, CompactionPlanningResult::NoPlan));
+        scheduler
+            .handle_compaction_pick_finished(
+                finished,
+                &manifest_ctx,
+                schema_metadata_manager.clone(),
+            )
+            .await;
         let output = output_rx.await.unwrap().unwrap();
         assert_eq!(output, 0);
         assert!(scheduler.region_status.is_empty());
@@ -1549,12 +2192,16 @@ mod tests {
                 &env.access_layer,
                 waiter,
                 &manifest_ctx,
-                schema_metadata_manager,
+                schema_metadata_manager.clone(),
                 1,
             )
-            .await
             .unwrap();
-        assert!(!scheduled);
+        assert!(scheduled);
+        let finished = recv_compaction_pick_finished(&mut rx).await;
+        assert!(matches!(&finished.result, CompactionPlanningResult::NoPlan));
+        scheduler
+            .handle_compaction_pick_finished(finished, &manifest_ctx, schema_metadata_manager)
+            .await;
         let output = output_rx.await.unwrap().unwrap();
         assert_eq!(output, 0);
         assert!(scheduler.region_status.is_empty());
@@ -1564,7 +2211,7 @@ mod tests {
     async fn test_schedule_compaction_returns_true_when_task_scheduled() {
         let job_scheduler = Arc::new(VecScheduler::default());
         let env = SchedulerEnv::new().await.scheduler(job_scheduler.clone());
-        let (tx, _rx) = mpsc::channel(4);
+        let (tx, mut rx) = mpsc::channel(4);
         let mut scheduler = env.mock_compaction_scheduler(tx);
         let mut builder = VersionControlBuilder::new();
         let region_id = builder.region_id();
@@ -1602,24 +2249,404 @@ mod tests {
                 &env.access_layer,
                 OptionOutputTx::none(),
                 &manifest_ctx,
-                schema_metadata_manager,
+                schema_metadata_manager.clone(),
                 1,
             )
-            .await
             .unwrap();
 
         // The boolean result is what the worker uses to decide whether to update
         // last_schedule_compaction_millis.
         assert!(scheduled);
+        assert_eq!(0, job_scheduler.num_jobs());
+        let finished = recv_compaction_pick_finished(&mut rx).await;
+        scheduler
+            .handle_compaction_pick_finished(finished, &manifest_ctx, schema_metadata_manager)
+            .await;
         assert_eq!(1, job_scheduler.num_jobs());
         assert!(scheduler.region_status.contains_key(&region_id));
+    }
+
+    #[tokio::test]
+    async fn test_planning_panic_notifies_and_clears_status() {
+        let env = SchedulerEnv::new().await;
+        let (tx, mut rx) = mpsc::channel(4);
+        let mut scheduler = env.mock_compaction_scheduler(tx.clone());
+        let builder = VersionControlBuilder::new();
+        let region_id = builder.region_id();
+        let version_control = Arc::new(builder.build());
+        let manifest_ctx = env
+            .mock_manifest_context(version_control.current().version.metadata.clone())
+            .await;
+        let (schema_metadata_manager, _kv_backend) = mock_schema_metadata_manager();
+        let (waiter_tx, waiter_rx) = oneshot::channel();
+        let mut status =
+            CompactionStatus::new(region_id, version_control.clone(), env.access_layer.clone());
+        status.merge_waiter(OptionOutputTx::from(waiter_tx));
+        status.start_picking(7);
+        scheduler.region_status.insert(region_id, status);
+
+        CompactionScheduler::notify_planning_result(region_id, 7, tx, async {
+            panic!("planning boom")
+        })
+        .await;
+
+        let finished = recv_compaction_pick_finished(&mut rx).await;
+        let CompactionPlanningResult::Error(err) = &finished.result else {
+            panic!("expected planning error, got {:?}", &finished.result);
+        };
+        assert!(err.to_string().contains("planning boom"));
+        let pending_ddls = scheduler
+            .handle_compaction_pick_finished(finished, &manifest_ctx, schema_metadata_manager)
+            .await;
+
+        assert!(pending_ddls.is_empty());
+        assert!(waiter_rx.await.unwrap().is_err());
+        assert!(!scheduler.region_status.contains_key(&region_id));
+    }
+
+    #[tokio::test]
+    async fn test_ddl_fence_prevents_repeated_regular_followups() {
+        let env = SchedulerEnv::new().await;
+        let (tx, mut rx) = mpsc::channel(8);
+        let mut scheduler = env.mock_compaction_scheduler(tx);
+        let builder = VersionControlBuilder::new();
+        let region_id = builder.region_id();
+        let version_control = Arc::new(builder.build());
+        let manifest_ctx = env
+            .mock_manifest_context(version_control.current().version.metadata.clone())
+            .await;
+        let (schema_metadata_manager, _kv_backend) = mock_schema_metadata_manager();
+        let mut status =
+            CompactionStatus::new(region_id, version_control.clone(), env.access_layer.clone());
+        status.start_picking(7);
+        scheduler.region_status.insert(region_id, status);
+
+        let (pre_fence_tx, pre_fence_rx) = oneshot::channel();
+        assert!(
+            !scheduler
+                .schedule_compaction(
+                    region_id,
+                    compact_request::Options::Regular(Default::default()),
+                    &version_control,
+                    &env.access_layer,
+                    OptionOutputTx::from(pre_fence_tx),
+                    &manifest_ctx,
+                    schema_metadata_manager.clone(),
+                    1,
+                )
+                .unwrap()
+        );
+        let (ddl_tx, _ddl_rx) = oneshot::channel();
+        scheduler.add_ddl_request_to_pending(SenderDdlRequest {
+            region_id,
+            sender: OptionOutputTx::from(ddl_tx),
+            request: crate::request::DdlRequest::EnterStaging(
+                store_api::region_request::EnterStagingRequest {
+                    partition_directive:
+                        store_api::region_request::StagingPartitionDirective::RejectAllWrites,
+                },
+            ),
+        });
+
+        let pending_ddls = scheduler
+            .handle_compaction_pick_finished(
+                CompactionPickFinished {
+                    region_id,
+                    plan_id: 7,
+                    result: CompactionPlanningResult::NoPlan,
+                },
+                &manifest_ctx,
+                schema_metadata_manager.clone(),
+            )
+            .await;
+        assert!(pending_ddls.is_empty());
+
+        let mut followup_finished = tokio::time::timeout(
+            Duration::from_secs(5),
+            recv_compaction_pick_finished(&mut rx),
+        )
+        .await
+        .expect("pre-fence regular follow-up was not planned");
+        let (post_fence_tx, post_fence_rx) = oneshot::channel();
+        assert!(
+            !scheduler
+                .schedule_compaction(
+                    region_id,
+                    compact_request::Options::Regular(Default::default()),
+                    &version_control,
+                    &env.access_layer,
+                    OptionOutputTx::from(post_fence_tx),
+                    &manifest_ctx,
+                    schema_metadata_manager.clone(),
+                    1,
+                )
+                .unwrap()
+        );
+
+        followup_finished.result = CompactionPlanningResult::NoPlan;
+        let pending_ddls = scheduler
+            .handle_compaction_pick_finished(
+                followup_finished,
+                &manifest_ctx,
+                schema_metadata_manager,
+            )
+            .await;
+        assert_eq!(pending_ddls.len(), 1);
+        assert_eq!(pre_fence_rx.await.unwrap().unwrap(), 0);
+        assert_eq!(post_fence_rx.await.unwrap().unwrap(), 0);
+        assert!(!scheduler.region_status.contains_key(&region_id));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn test_pick_result_mismatched_token_keeps_status_and_waiter_untouched() {
+        let job_scheduler = Arc::new(VecScheduler::default());
+        let env = SchedulerEnv::new().await.scheduler(job_scheduler.clone());
+        let (tx, mut rx) = mpsc::channel(4);
+        let mut scheduler = env.mock_compaction_scheduler(tx);
+        let version_control = compactable_version();
+        let region_id = version_control.current().version.metadata.region_id;
+        let (mut finished, manifest_ctx, schema_metadata_manager) =
+            begin_pick_result(&env, &mut scheduler, &mut rx, &version_control).await;
+        let (waiter_tx, mut waiter_rx) = oneshot::channel();
+        scheduler
+            .region_status
+            .get_mut(&region_id)
+            .unwrap()
+            .merge_waiter(OptionOutputTx::from(waiter_tx));
+        finished.plan_id += 1;
+
+        scheduler
+            .handle_compaction_pick_finished(finished, &manifest_ctx, schema_metadata_manager)
+            .await;
+
+        assert_eq!(job_scheduler.num_jobs(), 0);
+        assert!(scheduler.region_status[&region_id].is_busy());
+        assert_eq!(scheduler.region_status[&region_id].waiters.len(), 1);
+        assert_matches!(
+            waiter_rx.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_pick_result_accepts_unrelated_concurrent_flush() {
+        let job_scheduler = Arc::new(VecScheduler::default());
+        let env = SchedulerEnv::new().await.scheduler(job_scheduler.clone());
+        let (tx, mut rx) = mpsc::channel(4);
+        let mut scheduler = env.mock_compaction_scheduler(tx);
+        let version_control = compactable_version();
+        let (finished, manifest_ctx, schema_metadata_manager) =
+            begin_pick_result(&env, &mut scheduler, &mut rx, &version_control).await;
+        let selected = selected_files(&finished);
+        apply_edit(
+            &version_control,
+            &[(2_000_000, 3_000_000)],
+            &[],
+            selected[0].file_purger(),
+        );
+
+        scheduler
+            .handle_compaction_pick_finished(finished, &manifest_ctx, schema_metadata_manager)
+            .await;
+
+        assert_eq!(job_scheduler.num_jobs(), 1);
+        assert!(selected.iter().all(FileHandle::compacting));
+    }
+
+    #[tokio::test]
+    async fn test_pick_result_refreshes_replaced_selected_file() {
+        let job_scheduler = Arc::new(VecScheduler::default());
+        let env = SchedulerEnv::new().await.scheduler(job_scheduler.clone());
+        let (tx, mut rx) = mpsc::channel(4);
+        let mut scheduler = env.mock_compaction_scheduler(tx);
+        let version_control = compactable_version();
+        let (finished, manifest_ctx, schema_metadata_manager) =
+            begin_pick_result(&env, &mut scheduler, &mut rx, &version_control).await;
+        let selected = selected_files(&finished);
+        let stale = selected[0].clone();
+        let mut replacement = stale.meta_ref().clone();
+        replacement.index_version = 1;
+        replacement.index_file_size = 128;
+        version_control.apply_edit(
+            Some(crate::manifest::action::RegionEdit {
+                files_to_add: vec![replacement],
+                files_to_remove: Vec::new(),
+                timestamp_ms: None,
+                compaction_time_window: None,
+                flushed_entry_id: None,
+                flushed_sequence: None,
+                committed_sequence: None,
+            }),
+            &[],
+            stale.file_purger(),
+        );
+        let current = version_control
+            .current()
+            .version
+            .ssts
+            .file_for_compaction(&stale)
+            .unwrap()
+            .clone();
+
+        scheduler
+            .handle_compaction_pick_finished(finished, &manifest_ctx, schema_metadata_manager)
+            .await;
+
+        assert_eq!(job_scheduler.num_jobs(), 1);
+        assert!(!stale.compacting());
+        assert!(current.compacting());
+        assert_eq!(current.meta_ref().index_version, 1);
+    }
+
+    #[tokio::test]
+    async fn test_pick_result_local_submission_failure_releases_and_notifies_once() {
+        let env = SchedulerEnv::new()
+            .await
+            .scheduler(Arc::new(FailingScheduler));
+        let (tx, mut rx) = mpsc::channel(4);
+        let mut scheduler = env.mock_compaction_scheduler(tx);
+        let version_control = compactable_version();
+        let region_id = version_control.current().version.metadata.region_id;
+        let (finished, manifest_ctx, schema_metadata_manager) =
+            begin_pick_result(&env, &mut scheduler, &mut rx, &version_control).await;
+        let selected = selected_files(&finished);
+        let (waiter_tx, waiter_rx) = oneshot::channel();
+        scheduler
+            .region_status
+            .get_mut(&region_id)
+            .unwrap()
+            .merge_waiter(OptionOutputTx::from(waiter_tx));
+
+        scheduler
+            .handle_compaction_pick_finished(finished, &manifest_ctx, schema_metadata_manager)
+            .await;
+
+        assert!(waiter_rx.await.unwrap().is_err());
+        assert!(selected.iter().all(|file| !file.compacting()));
+        assert!(!scheduler.region_status.contains_key(&region_id));
+    }
+
+    #[tokio::test]
+    async fn test_pick_result_remote_submission_failure_releases_and_notifies_once() {
+        let env = SchedulerEnv::new().await;
+        let (tx, mut rx) = mpsc::channel(4);
+        let mut scheduler = env.mock_compaction_scheduler(tx);
+        scheduler
+            .plugins
+            .insert::<RemoteJobSchedulerRef>(Arc::new(FailingRemoteScheduler));
+        let version_control = compactable_version();
+        let region_id = version_control.current().version.metadata.region_id;
+        let (mut finished, manifest_ctx, schema_metadata_manager) =
+            begin_pick_result(&env, &mut scheduler, &mut rx, &version_control).await;
+        use_remote_compaction(&mut finished, false);
+        let selected = selected_files(&finished);
+        let (waiter_tx, waiter_rx) = oneshot::channel();
+        scheduler
+            .region_status
+            .get_mut(&region_id)
+            .unwrap()
+            .merge_waiter(OptionOutputTx::from(waiter_tx));
+
+        scheduler
+            .handle_compaction_pick_finished(finished, &manifest_ctx, schema_metadata_manager)
+            .await;
+
+        assert!(waiter_rx.await.unwrap().is_err());
+        assert!(selected.iter().all(|file| !file.compacting()));
+        assert!(!scheduler.region_status.contains_key(&region_id));
+    }
+
+    #[tokio::test]
+    async fn test_remote_fallback_uses_new_execution_plan_id() {
+        let job_scheduler = Arc::new(VecScheduler::default());
+        let env = SchedulerEnv::new().await.scheduler(job_scheduler.clone());
+        let (tx, mut rx) = mpsc::channel(4);
+        let mut scheduler = env.mock_compaction_scheduler(tx);
+        scheduler
+            .plugins
+            .insert::<RemoteJobSchedulerRef>(Arc::new(FailingRemoteScheduler));
+        let version_control = compactable_version();
+        let region_id = version_control.current().version.metadata.region_id;
+        let (mut finished, manifest_ctx, schema_metadata_manager) =
+            begin_pick_result(&env, &mut scheduler, &mut rx, &version_control).await;
+        let remote_plan_id = finished.plan_id;
+        use_remote_compaction(&mut finished, true);
+
+        scheduler
+            .handle_compaction_pick_finished(finished, &manifest_ctx, schema_metadata_manager)
+            .await;
+
+        assert_eq!(job_scheduler.num_jobs(), 1);
+        assert!(matches!(
+            scheduler.region_status[&region_id].phase.as_ref(),
+            Some(CompactionPhase::Local { .. })
+        ));
+        assert!(
+            !scheduler.region_status[&region_id]
+                .matches_execution(&CompactionExecution::for_test(remote_plan_id))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_stale_plan_execution_does_not_affect_replacement_status() {
+        let env = SchedulerEnv::new().await;
+        let (tx, _rx) = mpsc::channel(4);
+        let mut scheduler = env.mock_compaction_scheduler(tx);
+        let stale_execution = CompactionExecution::for_test(1);
+        let replacement_version_control = compactable_version();
+        let region_id = replacement_version_control
+            .current()
+            .version
+            .metadata
+            .region_id;
+        let manifest_ctx = env
+            .mock_manifest_context(
+                replacement_version_control
+                    .current()
+                    .version
+                    .metadata
+                    .clone(),
+            )
+            .await;
+        let (schema_metadata_manager, _kv_backend) = mock_schema_metadata_manager();
+        let (waiter_tx, mut waiter_rx) = oneshot::channel();
+        let mut status = CompactionStatus::new(
+            region_id,
+            replacement_version_control,
+            env.access_layer.clone(),
+        );
+        status.start_local_task();
+        status.merge_waiter(OptionOutputTx::from(waiter_tx));
+        scheduler.region_status.insert(region_id, status);
+
+        let pending_ddls = scheduler
+            .on_execution_finished(
+                region_id,
+                &stale_execution,
+                &manifest_ctx,
+                schema_metadata_manager,
+            )
+            .await;
+        assert!(pending_ddls.is_empty());
+        assert!(scheduler.region_status[&region_id].is_busy());
+        scheduler.on_execution_failed(
+            region_id,
+            &stale_execution,
+            Arc::new(InvalidSchedulerStateSnafu.build()),
+        );
+        assert!(scheduler.region_status[&region_id].is_busy());
+        assert_matches!(
+            waiter_rx.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        );
     }
 
     #[tokio::test]
     async fn test_schedule_compaction_skips_task_exceeding_memory_limit() {
         let job_scheduler = Arc::new(VecScheduler::default());
         let env = SchedulerEnv::new().await.scheduler(job_scheduler.clone());
-        let (tx, _rx) = mpsc::channel(4);
+        let (tx, mut rx) = mpsc::channel(4);
         let mut scheduler = env.mock_compaction_scheduler(tx);
         scheduler.memory_manager = Arc::new(new_compaction_memory_manager(1024 * 1024));
 
@@ -1661,17 +2688,22 @@ mod tests {
                 &env.access_layer,
                 OptionOutputTx::from(output_tx),
                 &manifest_ctx,
-                schema_metadata_manager,
+                schema_metadata_manager.clone(),
                 1,
             )
-            .await
             .unwrap();
 
-        assert!(!scheduled);
+        assert!(scheduled);
+        let finished = recv_compaction_pick_finished(&mut rx).await;
+        let selected = selected_files(&finished);
+        scheduler
+            .handle_compaction_pick_finished(finished, &manifest_ctx, schema_metadata_manager)
+            .await;
         assert_eq!(output_rx.await.unwrap().unwrap(), 0);
         assert_eq!(rejected_before + 1, rejected.get());
         assert_eq!(0, job_scheduler.num_jobs());
         assert!(!scheduler.region_status.contains_key(&region_id));
+        assert!(selected.iter().all(|file| !file.compacting()));
     }
 
     #[tokio::test]
@@ -1679,7 +2711,7 @@ mod tests {
         common_telemetry::init_default_ut_logging();
         let job_scheduler = Arc::new(VecScheduler::default());
         let env = SchedulerEnv::new().await.scheduler(job_scheduler.clone());
-        let (tx, _rx) = mpsc::channel(4);
+        let (tx, mut rx) = mpsc::channel(4);
         let mut scheduler = env.mock_compaction_scheduler(tx);
         let mut builder = VersionControlBuilder::new();
         let purger = builder.file_purger();
@@ -1722,11 +2754,19 @@ mod tests {
                 schema_metadata_manager.clone(),
                 1,
             )
-            .await
             .unwrap();
         // Should schedule 1 compaction.
         assert!(scheduled);
         assert_eq!(1, scheduler.region_status.len());
+        assert_eq!(0, job_scheduler.num_jobs());
+        let finished = recv_compaction_pick_finished(&mut rx).await;
+        scheduler
+            .handle_compaction_pick_finished(
+                finished,
+                &manifest_ctx,
+                schema_metadata_manager.clone(),
+            )
+            .await;
         assert_eq!(1, job_scheduler.num_jobs());
         let data = version_control.current();
         let file_metas: Vec<_> = data.version.ssts.levels()[0]
@@ -1755,7 +2795,6 @@ mod tests {
                 schema_metadata_manager.clone(),
                 1,
             )
-            .await
             .unwrap();
         assert!(!scheduled);
         assert_eq!(1, scheduler.region_status.len());
@@ -1773,11 +2812,22 @@ mod tests {
         scheduler
             .on_compaction_finished(region_id, &manifest_ctx, schema_metadata_manager.clone())
             .await;
-        let scheduled = scheduler
-            .schedule_next_compaction(region_id, &manifest_ctx, schema_metadata_manager.clone())
-            .await;
+        let scheduled = scheduler.schedule_next_compaction(
+            region_id,
+            &manifest_ctx,
+            schema_metadata_manager.clone(),
+        );
         assert!(scheduled);
         assert_eq!(1, scheduler.region_status.len());
+        assert_eq!(1, job_scheduler.num_jobs());
+        let finished = recv_compaction_pick_finished(&mut rx).await;
+        scheduler
+            .handle_compaction_pick_finished(
+                finished,
+                &manifest_ctx,
+                schema_metadata_manager.clone(),
+            )
+            .await;
         assert_eq!(2, job_scheduler.num_jobs());
 
         // 5 files for next compaction.
@@ -1800,7 +2850,6 @@ mod tests {
                 schema_metadata_manager,
                 1,
             )
-            .await
             .unwrap();
         assert!(!scheduled);
         assert_eq!(2, job_scheduler.num_jobs());
@@ -1815,55 +2864,51 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_schedule_compaction_does_not_publish_status_when_schedule_fails() {
-        common_telemetry::init_default_ut_logging();
-        let env = SchedulerEnv::new()
-            .await
-            .scheduler(Arc::new(FailingScheduler));
+    async fn test_remove_idle_status_allows_rescheduling() {
+        let env = SchedulerEnv::new().await;
         let (tx, _rx) = mpsc::channel(4);
         let mut scheduler = env.mock_compaction_scheduler(tx);
-        let mut builder = VersionControlBuilder::new();
-        let end = 1000 * 1000;
-        let version_control = Arc::new(
-            builder
-                .push_l0_file(0, end)
-                .push_l0_file(10, end)
-                .push_l0_file(50, end)
-                .push_l0_file(80, end)
-                .push_l0_file(90, end)
-                .build(),
-        );
+        let builder = VersionControlBuilder::new();
         let region_id = builder.region_id();
+        let version_control = Arc::new(builder.build());
         let manifest_ctx = env
             .mock_manifest_context(version_control.current().version.metadata.clone())
             .await;
-        let (schema_metadata_manager, kv_backend) = mock_schema_metadata_manager();
-        schema_metadata_manager
-            .register_region_table_info(
-                builder.region_id().table_id(),
-                "test_table",
-                "test_catalog",
-                "test_schema",
-                None,
-                kv_backend,
-            )
-            .await;
+        let (schema_metadata_manager, _kv_backend) = mock_schema_metadata_manager();
+        scheduler.region_status.insert(
+            region_id,
+            CompactionStatus::new(region_id, version_control.clone(), env.access_layer.clone()),
+        );
 
-        let result = scheduler
-            .schedule_compaction(
-                region_id,
-                compact_request::Options::Regular(Default::default()),
-                &version_control,
-                &env.access_layer,
-                OptionOutputTx::none(),
-                &manifest_ctx,
-                schema_metadata_manager,
-                1,
-            )
-            .await;
-
-        assert!(result.is_err());
-        assert!(!scheduler.region_status.contains_key(&region_id));
+        assert!(
+            !scheduler
+                .schedule_compaction(
+                    region_id,
+                    compact_request::Options::Regular(Default::default()),
+                    &version_control,
+                    &env.access_layer,
+                    OptionOutputTx::none(),
+                    &manifest_ctx,
+                    schema_metadata_manager.clone(),
+                    1,
+                )
+                .unwrap()
+        );
+        scheduler.remove_idle_status(region_id);
+        assert!(
+            scheduler
+                .schedule_compaction(
+                    region_id,
+                    compact_request::Options::Regular(Default::default()),
+                    &version_control,
+                    &env.access_layer,
+                    OptionOutputTx::none(),
+                    &manifest_ctx,
+                    schema_metadata_manager,
+                    1,
+                )
+                .unwrap()
+        );
     }
 
     #[tokio::test]
@@ -1871,7 +2916,7 @@ mod tests {
         common_telemetry::init_default_ut_logging();
         let job_scheduler = Arc::new(VecScheduler::default());
         let env = SchedulerEnv::new().await.scheduler(job_scheduler.clone());
-        let (tx, _rx) = mpsc::channel(4);
+        let (tx, mut rx) = mpsc::channel(4);
         let mut scheduler = env.mock_compaction_scheduler(tx);
         let mut builder = VersionControlBuilder::new();
         let purger = builder.file_purger();
@@ -1929,10 +2974,18 @@ mod tests {
                 schema_metadata_manager.clone(),
                 1,
             )
-            .await
             .unwrap();
         // Should schedule 1 compaction.
         assert_eq!(1, scheduler.region_status.len());
+        assert_eq!(0, job_scheduler.num_jobs());
+        let finished = recv_compaction_pick_finished(&mut rx).await;
+        scheduler
+            .handle_compaction_pick_finished(
+                finished,
+                &manifest_ctx,
+                schema_metadata_manager.clone(),
+            )
+            .await;
         assert_eq!(1, job_scheduler.num_jobs());
         assert!(
             scheduler
@@ -1956,7 +3009,6 @@ mod tests {
                 schema_metadata_manager.clone(),
                 1,
             )
-            .await
             .unwrap();
         assert_eq!(1, scheduler.region_status.len());
         // Current job num should be 1 since compaction is in progress.
@@ -1969,6 +3021,15 @@ mod tests {
             .on_compaction_finished(region_id, &manifest_ctx, schema_metadata_manager.clone())
             .await;
         assert_eq!(1, scheduler.region_status.len());
+        assert_eq!(1, job_scheduler.num_jobs());
+        let finished = recv_compaction_pick_finished(&mut rx).await;
+        scheduler
+            .handle_compaction_pick_finished(
+                finished,
+                &manifest_ctx,
+                schema_metadata_manager.clone(),
+            )
+            .await;
         assert_eq!(2, job_scheduler.num_jobs());
 
         let status = scheduler.region_status.get(&builder.region_id()).unwrap();
@@ -2026,7 +3087,6 @@ mod tests {
                 schema_metadata_manager,
                 1,
             )
-            .await
             .unwrap();
 
         let result = rx.await.unwrap();
@@ -2066,6 +3126,78 @@ mod tests {
         });
 
         assert!(scheduler.has_pending_ddls(region_id));
+    }
+
+    #[tokio::test]
+    async fn test_pending_ddl_rejects_later_manual_compaction() {
+        let env = SchedulerEnv::new().await;
+        let (tx, _rx) = mpsc::channel(4);
+        let mut scheduler = env.mock_compaction_scheduler(tx);
+        let builder = VersionControlBuilder::new();
+        let version_control = Arc::new(builder.build());
+        let region_id = builder.region_id();
+        let manifest_ctx = env
+            .mock_manifest_context(version_control.current().version.metadata.clone())
+            .await;
+        let (schema_metadata_manager, _kv_backend) = mock_schema_metadata_manager();
+
+        let (first_manual_tx, mut first_manual_rx) = oneshot::channel();
+        let mut status =
+            CompactionStatus::new(region_id, version_control.clone(), env.access_layer.clone());
+        status.start_local_task();
+        status.set_pending_request(PendingCompaction {
+            options: compact_request::Options::StrictWindow(StrictWindow { window_seconds: 60 }),
+            waiter: OptionOutputTx::from(first_manual_tx),
+            max_parallelism: 1,
+        });
+        scheduler.region_status.insert(region_id, status);
+
+        let (ddl_tx, _ddl_rx) = oneshot::channel();
+        scheduler.add_ddl_request_to_pending(SenderDdlRequest {
+            region_id,
+            sender: OptionOutputTx::from(ddl_tx),
+            request: crate::request::DdlRequest::EnterStaging(
+                store_api::region_request::EnterStagingRequest {
+                    partition_directive:
+                        store_api::region_request::StagingPartitionDirective::RejectAllWrites,
+                },
+            ),
+        });
+
+        let (later_manual_tx, mut later_manual_rx) = oneshot::channel();
+        assert!(
+            !scheduler
+                .schedule_compaction(
+                    region_id,
+                    compact_request::Options::StrictWindow(StrictWindow {
+                        window_seconds: 120,
+                    }),
+                    &version_control,
+                    &env.access_layer,
+                    OptionOutputTx::from(later_manual_tx),
+                    &manifest_ctx,
+                    schema_metadata_manager,
+                    1,
+                )
+                .unwrap()
+        );
+
+        let later_result = later_manual_rx
+            .try_recv()
+            .expect("manual compaction queued after DDL was not rejected");
+        assert_matches!(later_result.unwrap_err(), Error::CompactionCancelled { .. });
+        assert_matches!(
+            first_manual_rx.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        );
+        let pending_request = scheduler.region_status[&region_id]
+            .pending_request
+            .as_ref()
+            .expect("manual compaction queued before DDL was removed");
+        assert_matches!(
+            &pending_request.options,
+            compact_request::Options::StrictWindow(StrictWindow { window_seconds: 60 })
+        );
     }
 
     #[tokio::test]
@@ -2110,7 +3242,7 @@ mod tests {
             status.request_cancel(),
             RequestCancelResult::TooLateToCancel
         );
-        assert!(status.active_compaction.is_some());
+        assert!(status.is_busy());
     }
 
     #[tokio::test]
@@ -2127,15 +3259,13 @@ mod tests {
             .await;
         let (_schema_metadata_manager, _kv_backend) = mock_schema_metadata_manager();
 
-        scheduler.region_status.insert(
-            region_id,
-            CompactionStatus::new(region_id, version_control, env.access_layer.clone()),
-        );
-        scheduler
-            .region_status
-            .get_mut(&region_id)
-            .unwrap()
-            .start_local_task();
+        let (regular_tx, regular_rx) = oneshot::channel();
+        let mut status =
+            CompactionStatus::new(region_id, version_control, env.access_layer.clone());
+        status.start_picking(7);
+        status.merge_regular_trigger(OptionOutputTx::from(regular_tx));
+        status.start_local_task();
+        scheduler.region_status.insert(region_id, status);
 
         let (output_tx, _output_rx) = oneshot::channel();
         scheduler.add_ddl_request_to_pending(SenderDdlRequest {
@@ -2155,6 +3285,7 @@ mod tests {
         assert!(!scheduler.has_pending_ddls(region_id));
         assert!(!scheduler.region_status.contains_key(&region_id));
         assert_eq!(job_scheduler.num_jobs(), 0);
+        assert!(regular_rx.await.unwrap().is_err());
     }
 
     #[tokio::test]
@@ -2207,16 +3338,19 @@ mod tests {
     #[tokio::test]
     async fn test_pending_ddl_request_failed_on_compaction_failed() {
         let env = SchedulerEnv::new().await;
-        let (tx, _rx) = mpsc::channel(4);
+        let (tx, mut rx) = mpsc::channel(4);
         let mut scheduler = env.mock_compaction_scheduler(tx);
         let builder = VersionControlBuilder::new();
         let version_control = Arc::new(builder.build());
         let region_id = builder.region_id();
 
-        scheduler.region_status.insert(
-            region_id,
-            CompactionStatus::new(region_id, version_control, env.access_layer.clone()),
-        );
+        let (regular_tx, regular_rx) = oneshot::channel();
+        let mut status =
+            CompactionStatus::new(region_id, version_control, env.access_layer.clone());
+        status.start_picking(7);
+        status.merge_regular_trigger(OptionOutputTx::from(regular_tx));
+        status.start_local_task();
+        scheduler.region_status.insert(region_id, status);
 
         let (output_tx, output_rx) = oneshot::channel();
         scheduler.add_ddl_request_to_pending(SenderDdlRequest {
@@ -2237,6 +3371,8 @@ mod tests {
         assert!(!scheduler.has_pending_ddls(region_id));
         let result = output_rx.await.unwrap();
         assert_matches!(result, Err(_));
+        assert!(regular_rx.await.unwrap().is_err());
+        assert!(rx.try_recv().is_err());
     }
 
     #[tokio::test]
@@ -2390,7 +3526,7 @@ mod tests {
     #[tokio::test]
     async fn test_on_compaction_finished_replays_pending_ddl_after_manual_noop() {
         let env = SchedulerEnv::new().await;
-        let (tx, _rx) = mpsc::channel(4);
+        let (tx, mut rx) = mpsc::channel(4);
         let mut scheduler = env.mock_compaction_scheduler(tx);
         let builder = VersionControlBuilder::new();
         let version_control = Arc::new(builder.build());
@@ -2424,9 +3560,14 @@ mod tests {
         });
 
         let pending_ddls = scheduler
-            .on_compaction_finished(region_id, &manifest_ctx, schema_metadata_manager)
+            .on_compaction_finished(region_id, &manifest_ctx, schema_metadata_manager.clone())
             .await;
 
+        assert!(pending_ddls.is_empty());
+        let finished = recv_compaction_pick_finished(&mut rx).await;
+        let pending_ddls = scheduler
+            .handle_compaction_pick_finished(finished, &manifest_ctx, schema_metadata_manager)
+            .await;
         assert_eq!(pending_ddls.len(), 1);
         assert!(!scheduler.region_status.contains_key(&region_id));
         assert_eq!(manual_rx.await.unwrap().unwrap(), 0);
@@ -2457,7 +3598,7 @@ mod tests {
         let env = SchedulerEnv::new()
             .await
             .scheduler(Arc::new(FailingScheduler));
-        let (tx, _rx) = mpsc::channel(4);
+        let (tx, mut rx) = mpsc::channel(4);
         let mut scheduler = env.mock_compaction_scheduler(tx);
         let mut builder = VersionControlBuilder::new();
         let end = 1000 * 1000;
@@ -2500,19 +3641,24 @@ mod tests {
         });
 
         let pending_ddls = scheduler
-            .on_compaction_finished(region_id, &manifest_ctx, schema_metadata_manager)
+            .on_compaction_finished(region_id, &manifest_ctx, schema_metadata_manager.clone())
             .await;
 
         assert!(pending_ddls.is_empty());
+        let finished = recv_compaction_pick_finished(&mut rx).await;
+        let pending_ddls = scheduler
+            .handle_compaction_pick_finished(finished, &manifest_ctx, schema_metadata_manager)
+            .await;
+        assert!(pending_ddls.is_empty());
         assert!(!scheduler.region_status.contains_key(&region_id));
-        assert!(manual_rx.await.is_err());
+        assert_matches!(manual_rx.await.unwrap(), Err(_));
         assert_matches!(ddl_rx.await.unwrap(), Err(_));
     }
 
     #[tokio::test]
     async fn test_on_compaction_finished_next_schedule_noop_removes_status() {
         let env = SchedulerEnv::new().await;
-        let (tx, _rx) = mpsc::channel(4);
+        let (tx, mut rx) = mpsc::channel(4);
         let mut scheduler = env.mock_compaction_scheduler(tx);
         let builder = VersionControlBuilder::new();
         let version_control = Arc::new(builder.build());
@@ -2542,120 +3688,17 @@ mod tests {
         let (schema_metadata_manager, _kv_backend) = mock_schema_metadata_manager();
         // With no compactable files, next scheduling returns false and removes
         // the status without creating a background task.
-        let scheduled = scheduler
-            .schedule_next_compaction(region_id, &manifest_ctx, schema_metadata_manager)
-            .await;
-        assert!(!scheduled);
-        assert!(!scheduler.region_status.contains_key(&region_id));
-    }
-
-    #[tokio::test]
-    async fn test_remove_inactive_status_keeps_running_compaction() {
-        let env = SchedulerEnv::new().await;
-        let (tx, _rx) = mpsc::channel(4);
-        let mut scheduler = env.mock_compaction_scheduler(tx);
-        let builder = VersionControlBuilder::new();
-        let version_control = Arc::new(builder.build());
-        let region_id = builder.region_id();
-
-        // No status at all.
-        assert!(!scheduler.remove_inactive_status(region_id));
-
-        scheduler.region_status.insert(
+        let scheduled = scheduler.schedule_next_compaction(
             region_id,
-            CompactionStatus::new(region_id, version_control, env.access_layer.clone()),
+            &manifest_ctx,
+            schema_metadata_manager.clone(),
         );
+        assert!(scheduled);
+        let finished = recv_compaction_pick_finished(&mut rx).await;
         scheduler
-            .region_status
-            .get_mut(&region_id)
-            .unwrap()
-            .start_local_task();
-
-        // A status with an active compaction must not be removed.
-        assert!(!scheduler.remove_inactive_status(region_id));
-        assert!(scheduler.region_status.contains_key(&region_id));
-    }
-
-    #[tokio::test]
-    async fn test_compaction_reschedulable_when_next_compaction_throttled() {
-        let job_scheduler = Arc::new(VecScheduler::default());
-        let env = SchedulerEnv::new().await.scheduler(job_scheduler.clone());
-        let (tx, _rx) = mpsc::channel(4);
-        let mut scheduler = env.mock_compaction_scheduler(tx);
-        let mut builder = VersionControlBuilder::new();
-        let region_id = builder.region_id();
-        let end = 1000 * 1000;
-        // Five overlapping L0 files are enough for the regular picker to create a task.
-        let version_control = Arc::new(
-            builder
-                .push_l0_file(0, end)
-                .push_l0_file(10, end)
-                .push_l0_file(50, end)
-                .push_l0_file(80, end)
-                .push_l0_file(90, end)
-                .build(),
-        );
-        let manifest_ctx = env
-            .mock_manifest_context(version_control.current().version.metadata.clone())
+            .handle_compaction_pick_finished(finished, &manifest_ctx, schema_metadata_manager)
             .await;
-        let (schema_metadata_manager, kv_backend) = mock_schema_metadata_manager();
-        schema_metadata_manager
-            .register_region_table_info(
-                region_id.table_id(),
-                "test_table",
-                "test_catalog",
-                "test_schema",
-                None,
-                kv_backend,
-            )
-            .await;
-
-        let scheduled = scheduler
-            .schedule_compaction(
-                region_id,
-                Options::Regular(Default::default()),
-                &version_control,
-                &env.access_layer,
-                OptionOutputTx::none(),
-                &manifest_ctx,
-                schema_metadata_manager.clone(),
-                1,
-            )
-            .await
-            .unwrap();
-        assert!(scheduled);
-        assert_eq!(1, job_scheduler.num_jobs());
-
-        // The compaction finishes with no pending request/DDL. The status remains
-        // in the map with no active compaction; the worker then skips
-        // `schedule_next_compaction` because `min_compaction_interval` has not
-        // passed and must remove the stale status instead.
-        let pending_ddls = scheduler
-            .on_compaction_finished(region_id, &manifest_ctx, schema_metadata_manager.clone())
-            .await;
-        assert!(pending_ddls.is_empty());
-        assert!(!scheduler.is_compacting(region_id));
-        assert!(scheduler.region_status.contains_key(&region_id));
-
-        assert!(scheduler.remove_inactive_status(region_id));
         assert!(!scheduler.region_status.contains_key(&region_id));
-
-        // The region can be scheduled for compaction again.
-        let scheduled = scheduler
-            .schedule_compaction(
-                region_id,
-                Options::Regular(Default::default()),
-                &version_control,
-                &env.access_layer,
-                OptionOutputTx::none(),
-                &manifest_ctx,
-                schema_metadata_manager,
-                1,
-            )
-            .await
-            .unwrap();
-        assert!(scheduled);
-        assert_eq!(2, job_scheduler.num_jobs());
     }
 
     #[tokio::test]
@@ -2663,7 +3706,7 @@ mod tests {
         let env = SchedulerEnv::new()
             .await
             .scheduler(Arc::new(FailingScheduler));
-        let (tx, _rx) = mpsc::channel(4);
+        let (tx, mut rx) = mpsc::channel(4);
         let mut scheduler = env.mock_compaction_scheduler(tx);
         let mut builder = VersionControlBuilder::new();
         let end = 1000 * 1000;
@@ -2701,10 +3744,16 @@ mod tests {
 
         let (schema_metadata_manager, _kv_backend) = mock_schema_metadata_manager();
         // The failing scheduler simulates a submit error; callers must see false.
-        let scheduled = scheduler
-            .schedule_next_compaction(region_id, &manifest_ctx, schema_metadata_manager)
+        let scheduled = scheduler.schedule_next_compaction(
+            region_id,
+            &manifest_ctx,
+            schema_metadata_manager.clone(),
+        );
+        assert!(scheduled);
+        let finished = recv_compaction_pick_finished(&mut rx).await;
+        scheduler
+            .handle_compaction_pick_finished(finished, &manifest_ctx, schema_metadata_manager)
             .await;
-        assert!(!scheduled);
         assert!(!scheduler.region_status.contains_key(&region_id));
     }
 

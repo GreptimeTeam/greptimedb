@@ -45,6 +45,22 @@ impl SstVersion {
         &self.levels
     }
 
+    /// Returns the unique current handle matching the selected file's identity and level.
+    pub(crate) fn file_for_compaction(&self, selected: &FileHandle) -> Option<&FileHandle> {
+        let mut files = self
+            .levels
+            .iter()
+            .filter_map(|level| level.files.get(&selected.file_id().file_id()));
+        let current = files.next()?;
+        if files.next().is_some()
+            || current.file_id() != selected.file_id()
+            || current.level() != selected.level()
+        {
+            return None;
+        }
+        Some(current)
+    }
+
     /// Add files to the version. If a file with the same `file_id` already exists,
     /// it will be overwritten with the new file.
     ///

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::fmt::Debug;
 
 use common_telemetry::info;
@@ -86,9 +86,11 @@ impl WindowedCompactionPicker {
         );
         if !expired_ssts.is_empty() {
             info!("Expired SSTs in region {}: {:?}", region_id, expired_ssts);
-            // here we mark expired SSTs as compacting to avoid them being picked.
-            expired_ssts.iter().for_each(|f| f.set_compacting(true));
         }
+        let expired_file_ids = expired_ssts
+            .iter()
+            .map(|file| file.file_id())
+            .collect::<HashSet<_>>();
 
         let windows = assign_files_to_time_windows(
             time_window,
@@ -96,7 +98,8 @@ impl WindowedCompactionPicker {
                 .ssts
                 .levels()
                 .iter()
-                .flat_map(|level| level.files.values()),
+                .flat_map(|level| level.files.values())
+                .filter(|file| !expired_file_ids.contains(&file.file_id())),
         );
 
         (build_output(windows), expired_ssts, time_window)
@@ -262,18 +265,19 @@ mod tests {
     }
 
     #[test]
-    fn test_pick_expired() {
+    fn test_pick_expired_ssts_without_marking_compacting() {
         let picker = WindowedCompactionPicker::new(None);
         let files = vec![(FileId::random(), 0, 10, 0)];
-
         let version = build_version(&files, Some(Duration::from_millis(1)));
-        let (outputs, expired_ssts, _window) = picker.pick_inner(
+        let (outputs, expired_ssts, _) = picker.pick_inner(
             RegionId::new(0, 0),
             &version,
             Timestamp::new_millisecond(12),
         );
+
         assert!(outputs.is_empty());
         assert_eq!(1, expired_ssts.len());
+        assert!(expired_ssts.iter().all(|file| !file.compacting()));
     }
 
     const HOUR: i64 = 60 * 60 * 1000;

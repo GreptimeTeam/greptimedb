@@ -15,7 +15,7 @@
 //! Engine event listener for tests.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -71,6 +71,18 @@ pub trait EventListener: Send + Sync {
     /// Notifies the listener that the compaction is scheduled.
     fn on_compaction_scheduled(&self, _region_id: RegionId) {}
 
+    /// Notifies the listener immediately before compaction planning invokes the picker.
+    async fn on_compaction_pick_begin(&self, _region_id: RegionId) {}
+
+    /// Notifies the listener after local compaction becomes non-cancellable and before commit.
+    async fn on_compaction_commit_begin(&self, _region_id: RegionId) {}
+
+    /// Notifies the listener after compaction results are sent and before pending DDL dispatch.
+    async fn on_compaction_result_notified(&self, _region_id: RegionId) {}
+
+    /// Notifies the listener after compaction cancellation is requested and its DDL is queued.
+    fn on_compaction_cancel_requested(&self, _region_id: RegionId) {}
+
     /// Notifies the listener that region starts to send a region change result to worker.
     async fn on_notify_region_change_result_begin(&self, _region_id: RegionId) {}
 
@@ -88,6 +100,234 @@ pub trait EventListener: Send + Sync {
 }
 
 pub type EventListenerRef = Arc<dyn EventListener>;
+
+/// Test gate that blocks selected compaction lifecycle phases for one region.
+pub struct CompactionPlanningGate {
+    region_id: RegionId,
+    armed: AtomicBool,
+    entered: Notify,
+    cancel_requested: Notify,
+    permits: Semaphore,
+    merge_armed: AtomicBool,
+    merge_entered: Notify,
+    merge_permits: Semaphore,
+    commit_armed: AtomicBool,
+    commit_entered: Notify,
+    commit_permits: Semaphore,
+    pending_ddl_armed: AtomicBool,
+    pending_ddl_entered: Notify,
+    pending_ddl_permits: Semaphore,
+}
+
+/// Releases an armed [`CompactionPlanningGate`] when a test exits unexpectedly.
+pub struct CompactionPlanningGateGuard {
+    gate: Option<Arc<CompactionPlanningGate>>,
+}
+
+impl CompactionPlanningGateGuard {
+    pub fn release(mut self) {
+        self.gate.take().unwrap().release();
+    }
+}
+
+impl Drop for CompactionPlanningGateGuard {
+    fn drop(&mut self) {
+        if let Some(gate) = self.gate.take() {
+            gate.release();
+        }
+    }
+}
+
+/// Releases an armed merge gate when a test exits unexpectedly.
+pub struct CompactionMergeGateGuard {
+    gate: Option<Arc<CompactionPlanningGate>>,
+}
+
+impl CompactionMergeGateGuard {
+    pub fn release(mut self) {
+        self.gate.take().unwrap().release_merge();
+    }
+}
+
+impl Drop for CompactionMergeGateGuard {
+    fn drop(&mut self) {
+        if let Some(gate) = self.gate.take() {
+            gate.release_merge();
+        }
+    }
+}
+
+/// Releases an armed commit gate when a test exits unexpectedly.
+pub struct CompactionCommitGateGuard {
+    gate: Option<Arc<CompactionPlanningGate>>,
+}
+
+impl CompactionCommitGateGuard {
+    pub fn release(mut self) {
+        self.gate.take().unwrap().release_commit();
+    }
+}
+
+impl Drop for CompactionCommitGateGuard {
+    fn drop(&mut self) {
+        if let Some(gate) = self.gate.take() {
+            gate.release_commit();
+        }
+    }
+}
+
+/// Releases an armed pending-DDL dispatch gate when a test exits unexpectedly.
+pub struct CompactionPendingDdlGateGuard {
+    gate: Option<Arc<CompactionPlanningGate>>,
+}
+
+impl CompactionPendingDdlGateGuard {
+    pub fn release(mut self) {
+        self.gate.take().unwrap().release_pending_ddl_dispatch();
+    }
+}
+
+impl Drop for CompactionPendingDdlGateGuard {
+    fn drop(&mut self) {
+        if let Some(gate) = self.gate.take() {
+            gate.release_pending_ddl_dispatch();
+        }
+    }
+}
+
+impl CompactionPlanningGate {
+    pub fn new(region_id: RegionId) -> Self {
+        Self {
+            region_id,
+            armed: AtomicBool::new(false),
+            entered: Notify::new(),
+            cancel_requested: Notify::new(),
+            permits: Semaphore::new(0),
+            merge_armed: AtomicBool::new(false),
+            merge_entered: Notify::new(),
+            merge_permits: Semaphore::new(0),
+            commit_armed: AtomicBool::new(false),
+            commit_entered: Notify::new(),
+            commit_permits: Semaphore::new(0),
+            pending_ddl_armed: AtomicBool::new(false),
+            pending_ddl_entered: Notify::new(),
+            pending_ddl_permits: Semaphore::new(0),
+        }
+    }
+
+    pub fn arm(self: &Arc<Self>) -> CompactionPlanningGateGuard {
+        self.armed.store(true, Ordering::Relaxed);
+        CompactionPlanningGateGuard {
+            gate: Some(self.clone()),
+        }
+    }
+
+    pub async fn wait_until_entered(&self) {
+        self.entered.notified().await;
+    }
+
+    pub async fn wait_until_cancel_requested(&self) {
+        self.cancel_requested.notified().await;
+    }
+
+    pub fn arm_merge(self: &Arc<Self>) -> CompactionMergeGateGuard {
+        self.merge_armed.store(true, Ordering::Relaxed);
+        CompactionMergeGateGuard {
+            gate: Some(self.clone()),
+        }
+    }
+
+    pub async fn wait_until_merge_entered(&self) {
+        self.merge_entered.notified().await;
+    }
+
+    pub fn arm_commit(self: &Arc<Self>) -> CompactionCommitGateGuard {
+        self.commit_armed.store(true, Ordering::Relaxed);
+        CompactionCommitGateGuard {
+            gate: Some(self.clone()),
+        }
+    }
+
+    pub async fn wait_until_commit_entered(&self) {
+        self.commit_entered.notified().await;
+    }
+
+    pub fn arm_pending_ddl_dispatch(self: &Arc<Self>) -> CompactionPendingDdlGateGuard {
+        self.pending_ddl_armed.store(true, Ordering::Relaxed);
+        CompactionPendingDdlGateGuard {
+            gate: Some(self.clone()),
+        }
+    }
+
+    pub async fn wait_until_pending_ddl_dispatch(&self) {
+        self.pending_ddl_entered.notified().await;
+    }
+
+    pub fn release(&self) {
+        self.permits.add_permits(1);
+    }
+
+    fn release_merge(&self) {
+        self.merge_permits.add_permits(1);
+    }
+
+    fn release_commit(&self) {
+        self.commit_permits.add_permits(1);
+    }
+
+    fn release_pending_ddl_dispatch(&self) {
+        self.pending_ddl_permits.add_permits(1);
+    }
+}
+
+#[async_trait]
+impl EventListener for CompactionPlanningGate {
+    async fn on_compaction_pick_begin(&self, region_id: RegionId) {
+        if region_id != self.region_id {
+            return;
+        }
+
+        if !self.armed.swap(false, Ordering::Relaxed) {
+            return;
+        }
+
+        self.entered.notify_one();
+        self.permits.acquire().await.unwrap().forget();
+    }
+
+    async fn on_merge_ssts_finished(&self, region_id: RegionId) {
+        if region_id != self.region_id || !self.merge_armed.swap(false, Ordering::Relaxed) {
+            return;
+        }
+
+        self.merge_entered.notify_one();
+        self.merge_permits.acquire().await.unwrap().forget();
+    }
+
+    async fn on_compaction_commit_begin(&self, region_id: RegionId) {
+        if region_id != self.region_id || !self.commit_armed.swap(false, Ordering::Relaxed) {
+            return;
+        }
+
+        self.commit_entered.notify_one();
+        self.commit_permits.acquire().await.unwrap().forget();
+    }
+
+    async fn on_compaction_result_notified(&self, region_id: RegionId) {
+        if region_id != self.region_id || !self.pending_ddl_armed.swap(false, Ordering::Relaxed) {
+            return;
+        }
+
+        self.pending_ddl_entered.notify_one();
+        self.pending_ddl_permits.acquire().await.unwrap().forget();
+    }
+
+    fn on_compaction_cancel_requested(&self, region_id: RegionId) {
+        if region_id == self.region_id {
+            self.cancel_requested.notify_one();
+        }
+    }
+}
 
 /// Listener to watch flush events.
 #[derive(Default)]

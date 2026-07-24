@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::collections::hash_map::Entry;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Debug;
 use std::num::NonZeroU64;
 
@@ -246,9 +246,11 @@ impl Picker for TwcsPicker {
             get_expired_ssts(levels, compaction_region.ttl, Timestamp::current_millis());
         if !expired_ssts.is_empty() {
             info!("Expired SSTs in region {}: {:?}", region_id, expired_ssts);
-            // here we mark expired SSTs as compacting to avoid them being picked.
-            expired_ssts.iter().for_each(|f| f.set_compacting(true));
         }
+        let expired_file_ids = expired_ssts
+            .iter()
+            .map(|file| file.file_id())
+            .collect::<HashSet<_>>();
 
         let compaction_time_window = compaction_region
             .current_version
@@ -268,8 +270,13 @@ impl Picker for TwcsPicker {
         // Find active window from files in level 0.
         let active_window = find_latest_window_in_seconds(levels[0].files(), time_window_size);
         // Assign files to windows
-        let mut windows =
-            assign_to_windows(levels.iter().flat_map(LevelMeta::files), time_window_size);
+        let mut windows = assign_to_windows(
+            levels
+                .iter()
+                .flat_map(LevelMeta::files)
+                .filter(|file| !expired_file_ids.contains(&file.file_id())),
+            time_window_size,
+        );
         let outputs = self.build_output(region_id, &mut windows, active_window);
 
         if outputs.is_empty() && expired_ssts.is_empty() {
@@ -411,16 +418,85 @@ fn find_latest_window_in_seconds<'a>(
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
+    use std::num::NonZeroU64;
+    use std::sync::Arc;
+    use std::time::Duration;
 
     use bytes::Bytes;
+    use common_base::Plugins;
     use store_api::storage::FileId;
 
     use super::*;
+    use crate::cache::CacheManager;
+    use crate::compaction::compactor::CompactionVersion;
     use crate::compaction::test_util::{
         new_file_handle, new_file_handle_with_sequence, new_file_handle_with_size_and_sequence,
         new_file_handle_with_size_sequence_and_primary_key_range,
     };
-    use crate::sst::file::Level;
+    use crate::config::MitoConfig;
+    use crate::region::options::RegionOptions;
+    use crate::sst::file::{FileMeta, Level};
+    use crate::sst::version::SstVersion;
+    use crate::test_util::memtable_util::metadata_for_test;
+    use crate::test_util::scheduler_util::SchedulerEnv;
+
+    async fn compaction_region_with_expired_sst() -> CompactionRegion {
+        let env = SchedulerEnv::new().await;
+        let metadata = metadata_for_test();
+        let manifest_ctx = env.mock_manifest_context(metadata.clone()).await;
+        let mut ssts = SstVersion::new();
+        ssts.add_files(
+            Arc::new(crate::sst::file_purger::NoopFilePurger),
+            (1..=4).map(|sequence| FileMeta {
+                file_id: FileId::random(),
+                time_range: (
+                    Timestamp::new_millisecond(0),
+                    Timestamp::new_millisecond(10),
+                ),
+                level: 0,
+                sequence: NonZeroU64::new(sequence),
+                ..Default::default()
+            }),
+        );
+
+        CompactionRegion {
+            region_id: metadata.region_id,
+            region_options: RegionOptions::default(),
+            engine_config: Arc::new(MitoConfig::default()),
+            region_metadata: metadata.clone(),
+            cache_manager: Arc::new(CacheManager::default()),
+            access_layer: env.access_layer,
+            manifest_ctx,
+            current_version: CompactionVersion {
+                metadata,
+                options: RegionOptions::default(),
+                ssts: Arc::new(ssts),
+                compaction_time_window: None,
+            },
+            file_purger: None,
+            ttl: Some(Duration::from_millis(1).into()),
+            max_parallelism: 1,
+            plugins: Plugins::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_pick_expired_ssts_without_marking_compacting() {
+        let picker = TwcsPicker {
+            trigger_file_num: 4,
+            time_window_seconds: Some(3),
+            max_output_file_size: None,
+            append_mode: false,
+            max_background_tasks: None,
+        };
+        let compaction_region = compaction_region_with_expired_sst().await;
+
+        let output = picker.pick(&compaction_region).unwrap();
+
+        assert!(output.outputs.is_empty());
+        assert!(!output.expired_ssts.is_empty());
+        assert!(output.expired_ssts.iter().all(|file| !file.compacting()));
+    }
 
     #[test]
     fn test_get_latest_window_in_seconds() {
