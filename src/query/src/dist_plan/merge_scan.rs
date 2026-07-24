@@ -358,6 +358,7 @@ impl MergeScanExec {
         let current_channel = self.query_ctx.channel();
         let read_preference = self.query_ctx.read_preference();
         let explain_verbose = self.query_ctx.explain_verbose();
+        let live_analyze_metrics = explain_verbose && self.query_ctx.live_analyze_metrics_enabled();
         let remote_dyn_filter_registry_lease = acquire_remote_dyn_filter_registry_lease(
             context.as_ref(),
             &query_ctx,
@@ -398,7 +399,7 @@ impl MergeScanExec {
                     remote_dyn_filter_registry_lease.as_ref(),
                     &captured_remote_dyn_filters,
                 );
-                if explain_verbose {
+                if live_analyze_metrics {
                     let remote_query_id = region_query_ctx.remote_query_id().map(str::to_string);
                     if let Some(remote_query_id) = remote_query_id {
                         region_query_ctx.set_extension(
@@ -452,7 +453,7 @@ impl MergeScanExec {
                 let mut poll_duration = Duration::ZERO;
                 let mut poll_timer = Instant::now();
                 loop {
-                    let batch = if explain_verbose {
+                    let batch = if live_analyze_metrics {
                         match time::timeout(
                             FLIGHT_METRICS_HEARTBEAT_INTERVAL,
                             stream.next().instrument(region_span.clone()),

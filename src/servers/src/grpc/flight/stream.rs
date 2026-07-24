@@ -142,10 +142,12 @@ impl FlightRecordBatchStream {
         query_ctx: QueryContextRef,
     ) -> Self {
         let should_send_partial_metrics = query_ctx.explain_verbose();
-        let can_send_metrics_before_batch = query_ctx
-            .remote_query_id()
-            .zip(query_ctx.extension(SUPPORT_FLIGHT_METRICS_BEFORE_BATCH_EXTENSION_KEY))
-            .is_some_and(|(remote_query_id, capability)| capability == remote_query_id);
+        let can_send_metrics_before_batch = query_ctx.explain_verbose()
+            && query_ctx.live_analyze_metrics_enabled()
+            && query_ctx
+                .remote_query_id()
+                .zip(query_ctx.extension(SUPPORT_FLIGHT_METRICS_BEFORE_BATCH_EXTENSION_KEY))
+                .is_some_and(|(remote_query_id, capability)| capability == remote_query_id);
         let (tx, rx) = mpsc::channel::<TonicResult<FlightMessage>>(1);
         let join_handle = common_runtime::spawn_global(async move {
             Self::flight_data_stream(
@@ -335,7 +337,10 @@ mod test {
     use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
     use datatypes::vectors::Int32Vector;
     use futures::StreamExt;
-    use session::context::{QueryContext, SUPPORT_FLIGHT_METRICS_BEFORE_BATCH_EXTENSION_KEY};
+    use session::context::{
+        LIVE_ANALYZE_METRICS_EXTENSION_KEY, QueryContext,
+        SUPPORT_FLIGHT_METRICS_BEFORE_BATCH_EXTENSION_KEY,
+    };
 
     use super::*;
 
@@ -364,12 +369,9 @@ mod test {
         Arc::new(query_ctx)
     }
 
-    fn query_context_with_capability(capability: &str) -> Arc<QueryContext> {
-        let mut query_ctx = (*QueryContext::arc()).clone();
-        query_ctx.set_extension(
-            SUPPORT_FLIGHT_METRICS_BEFORE_BATCH_EXTENSION_KEY,
-            capability,
-        );
+    fn query_context_with_live_metrics_and_matching_capability() -> Arc<QueryContext> {
+        let mut query_ctx = (*query_context_with_matching_capability()).clone();
+        query_ctx.enable_live_analyze_metrics();
         Arc::new(query_ctx)
     }
 
@@ -481,7 +483,7 @@ mod test {
             schema: schema.clone(),
             metrics,
         });
-        let query_ctx = query_context_with_matching_capability();
+        let query_ctx = query_context_with_live_metrics_and_matching_capability();
         query_ctx.set_explain_verbose(true);
         let mut stream = FlightRecordBatchStream::new(
             recordbatches,
@@ -536,7 +538,7 @@ mod test {
             metrics,
             rx,
         });
-        let query_ctx = query_context_with_matching_capability();
+        let query_ctx = query_context_with_live_metrics_and_matching_capability();
         query_ctx.set_explain_verbose(true);
         let mut stream = FlightRecordBatchStream::new(
             recordbatches,
@@ -577,7 +579,7 @@ mod test {
     }
 
     #[tokio::test]
-    async fn test_flight_record_batch_stream_requires_capability_for_pre_batch_metrics() {
+    async fn test_flight_record_batch_stream_requires_live_metrics_for_pre_batch_metrics() {
         let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
             "a",
             ConcreteDataType::int32_datatype(),
@@ -590,7 +592,7 @@ mod test {
                 ..Default::default()
             },
         });
-        let query_ctx = QueryContext::arc();
+        let query_ctx = query_context_with_matching_capability();
         query_ctx.set_explain_verbose(true);
         let mut stream = FlightRecordBatchStream::new(
             recordbatches,
@@ -612,12 +614,12 @@ mod test {
             )
             .await
             .is_err(),
-            "pre-batch Metrics must be gated by client capability"
+            "pre-batch Metrics must be gated by live analyze metrics"
         );
     }
 
     #[tokio::test]
-    async fn test_flight_record_batch_stream_rejects_spoofed_capability_for_pre_batch_metrics() {
+    async fn test_flight_record_batch_stream_rejects_spoofed_live_metrics_for_pre_batch_metrics() {
         let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
             "a",
             ConcreteDataType::int32_datatype(),
@@ -630,7 +632,10 @@ mod test {
                 ..Default::default()
             },
         });
-        let query_ctx = query_context_with_capability("true");
+        let query_ctx = query_context_with_live_metrics_and_matching_capability();
+        let mut query_ctx = (*query_ctx).clone();
+        query_ctx.set_extension(LIVE_ANALYZE_METRICS_EXTENSION_KEY, "true");
+        let query_ctx = Arc::new(query_ctx);
         query_ctx.set_explain_verbose(true);
         let mut stream = FlightRecordBatchStream::new(
             recordbatches,
@@ -652,7 +657,7 @@ mod test {
             )
             .await
             .is_err(),
-            "pre-batch Metrics must reject a spoofed capability"
+            "pre-batch Metrics must reject spoofed live analyze metrics"
         );
     }
 
