@@ -229,7 +229,7 @@
 | `tracing.tokio_console_addr` | String | Unset | The tokio console address. |
 | `event_recorder` | -- | -- | Configuration options for the event recorder. |
 | `event_recorder.ttl` | String | `90d` | TTL for the events table that will be used to store the events. Default is `90d`. |
-| `event_recorder.event_types` | Array | -- | Event types to record. Current available event types: `region_migration`,<br/>`create_database`, `alter_database`, `drop_database`.<br/>When omitted, all current and future event types are recorded.<br/>Set to an empty array to disable event recording. |
+| `event_recorder.event_types` | Array | -- | Event types to record. Current available event types: `region_migration`,<br/>`create_database`, `alter_database`, `drop_database`, `create_flow`,<br/>`drop_flow`.<br/>When omitted, all current and future event types are recorded.<br/>Set to an empty array to disable event recording. |
 | `memory` | -- | -- | The memory options. |
 | `memory.enable_heap_profiling` | Bool | `true` | Whether to enable heap profiling activation during startup.<br/>When enabled, heap profiling will be activated if the `MALLOC_CONF` environment variable<br/>is set to "prof:true,prof_active:false". The official image adds this env variable.<br/>Default is true. |
 
@@ -436,7 +436,7 @@
 | `wal.create_topic_timeout` | String | `30s` | The timeout for creating a Kafka topic.<br/>**It's only used when the provider is `kafka`**. |
 | `event_recorder` | -- | -- | Configuration options for the event recorder. |
 | `event_recorder.ttl` | String | `90d` | TTL for the events table that will be used to store the events. Default is `90d`. |
-| `event_recorder.event_types` | Array | -- | Event types to record. Current available event types: `region_migration`,<br/>`create_database`, `alter_database`, `drop_database`.<br/>When omitted, all current and future event types are recorded.<br/>Set to an empty array to disable event recording. |
+| `event_recorder.event_types` | Array | -- | Event types to record. Current available event types: `region_migration`,<br/>`create_database`, `alter_database`, `drop_database`, `create_flow`,<br/>`drop_flow`.<br/>When omitted, all current and future event types are recorded.<br/>Set to an empty array to disable event recording. |
 | `stats_persistence` | -- | -- | Configuration options for the stats persistence. |
 | `stats_persistence.ttl` | String | `0s` | TTL for the stats table that will be used to store the stats.<br/>Set to `0s` to disable stats persistence.<br/>Default is `0s`.<br/>If you want to enable stats persistence, set the TTL to a value greater than 0.<br/>It is recommended to set a small value, e.g., `3h`. |
 | `stats_persistence.interval` | String | `10m` | The interval to persist the stats. Default is `10m`.<br/>The minimum value is `10m`, if the value is less than `10m`, it will be overridden to `10m`. |

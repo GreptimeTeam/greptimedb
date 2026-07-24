@@ -13,16 +13,16 @@
 // limitations under the License.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use client::OutputData;
-use common_recordbatch::RecordBatches;
 use common_test_util::temp_dir::create_temp_dir;
 use servers::query_handler::sql::SqlQueryHandler;
 use session::context::QueryContext;
 use tests_integration::cluster::GreptimeDbClusterBuilder;
 use tests_integration::standalone::GreptimeDbStandaloneBuilder;
 use tests_integration::test_util::{StorageType, get_test_store_config};
+
+use crate::event_recorder_test_util::assert_single_event;
 
 const DATABASE_NAME: &str = "database_ddl_events";
 
@@ -134,42 +134,4 @@ WHERE type = '{event_type}'
   AND json_is_null(payload)"#
     );
     assert_single_event(instance, &lifecycle).await;
-}
-
-async fn assert_single_event(instance: &Arc<frontend::instance::Instance>, query: &str) {
-    for _ in 0..60 {
-        if event_count_is_one(instance, query).await {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(250)).await;
-    }
-
-    panic!("timed out waiting for database DDL event: {query}");
-}
-
-async fn event_count_is_one(instance: &Arc<frontend::instance::Instance>, query: &str) -> bool {
-    let Ok(output) = instance
-        .do_query(query, QueryContext::arc())
-        .await
-        .remove(0)
-    else {
-        return false;
-    };
-    let OutputData::Stream(stream) = output.data else {
-        unreachable!("event-count query must return a stream");
-    };
-    let Ok(batches) = RecordBatches::try_collect(stream).await else {
-        return false;
-    };
-    let Ok(actual) = batches.pretty_print() else {
-        return false;
-    };
-
-    actual
-        == "\
-+-------------+
-| event_count |
-+-------------+
-| 1           |
-+-------------+"
 }

@@ -14,11 +14,13 @@
 
 #![recursion_limit = "256"]
 
-mod database_ddl_events;
+mod database_ddl_event;
+mod event_recorder_test_util;
 #[macro_use]
 mod grpc;
 #[macro_use]
 mod http;
+mod flow_ddl_event;
 mod json2;
 mod jsonbench;
 #[macro_use]
